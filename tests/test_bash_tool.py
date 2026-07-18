@@ -37,3 +37,22 @@ def test_bash_simple_echo():
     result = _run(tool.execute({"command": "echo hello"}))
     assert not result.error
     assert "hello" in result.content
+
+
+def test_bash_command_not_found():
+    """Shell reports 'command not found' on stderr."""
+    tool = BashTool()
+    result = _run(tool.execute({"command": "nonexistent_cmd_xyzzy_42"}))
+    # The /bin/sh itself is found, so FileNotFoundError not raised;
+    # instead the shell prints to stderr. Check stderr content.
+    assert "not found" in result.content.lower()
+
+
+def test_bash_nonexistent_workdir():
+    """Invalid workdir should trigger OSError path."""
+    tool = BashTool()
+    result = _run(tool.execute({
+        "command": "echo test",
+        "workdir": "/nonexistent/path/xyzzy",
+    }))
+    assert result.error
