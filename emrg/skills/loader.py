@@ -65,7 +65,7 @@ def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
     """Parse a single skill .md file. Returns None if parsing fails."""
     try:
         text = file_path.read_text(encoding="utf-8")
-    except Exception:
+    except (OSError, UnicodeDecodeError):
         logger.debug("skill: cannot read %s", file_path)
         return None
 
