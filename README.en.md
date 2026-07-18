@@ -8,6 +8,7 @@
   <img alt="Python" src="https://img.shields.io/badge/python-3.10+-blue.svg">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
   <img alt="Status" src="https://img.shields.io/badge/status-evolving-orange.svg">
+  <img alt="Tests" src="https://github.com/argszero/emrg/actions/workflows/test.yml/badge.svg">
   <img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-by%20AI%20%2B%20human-brightgreen.svg">
 </p>
 
@@ -206,9 +207,11 @@ EMRG doesn't just keep up — it catches up on its own.
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # install deps
-uv run pytest tests/ -v   # run tests
+uv run pytest tests/ -v   # run tests (currently 159 items)
 uv run python -m emrg     # launch
 ```
+
+CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 ### Project structure
 
@@ -221,6 +224,7 @@ emrg/
 │   ├── skills/             # Dynamically loadable modules
 │   └── __main__.py         # CLI entry point
 ├── tests/
+├── .github/workflows/      # CI pipeline (pytest + conflict marker check)
 ├── MANIFESTO.md            # Design constitution
 └── pyproject.toml
 ```
