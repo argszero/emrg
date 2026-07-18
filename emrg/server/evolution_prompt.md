@@ -73,9 +73,10 @@ cd {source_dir} && git pull origin master
 > - `/resume` ✅ | `/rename` ✅ | `/memory` ✅ | `/sessions` ✅ | `/help` ✅ | `/version` ✅
 > - Ctrl+A/E/W/K/U 快捷键 ✅ | bracketed paste 优化 ✅
 > - 渲染节流 (60fps) ✅ | 动态视口 ✅ | 自动 compact ✅
-> - ANSI 颜色高亮修复 (style_to_sgr) ✅ | 安装/卸载 ✅ | Windows/WSL 指导 ✅
+> - ANSI 样式渲染 (style_to_sgr, buffer cascade) ✅ | 安装/卸载 ✅ | Windows/WSL 指导 ✅
 > - `/rant` 交互式项目选择器 ✅ | 并行演化协程 (asyncio.gather) ✅
 > - CI workflow (pytest + 冲突标记检查) ✅ | CI badge ✅
+> - projects.jsonl→projects.yml 迁移 ✅ | prompt 变量替换验证 ✅
 
 #### 1.2 GitHub
 
