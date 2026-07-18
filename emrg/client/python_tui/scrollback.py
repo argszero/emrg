@@ -39,7 +39,7 @@ def _span_style_to_sgr(style: RichStyle | str) -> str:
         try:
             rs = Style.parse(style)
             return style_to_sgr(rs)
-        except Exception:
+        except (ValueError, TypeError):
             return ""
     if isinstance(style, RichStyle):
         return style_to_sgr(style)
