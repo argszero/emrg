@@ -71,7 +71,7 @@ SYSTEM_PROMPT = (
     "- **glob for file discovery**: use glob with patterns like '**/*.py' to find "
     "files by name. Use `workdir` to search in a specific directory.\n"
     "- **edit for targeted changes**: prefer edit over write for existing files — "
-    "it's safer and shows diffs\n"
+    "it's safer and shows diffs. Set `replace_all` for multiple occurrences\n"
     "- **write for new files**: use write for creating new files or full rewrites\n"
     "- **parallel calls**: when tools are independent, invoke them in parallel "
     "for speed"
