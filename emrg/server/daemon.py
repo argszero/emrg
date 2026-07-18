@@ -151,7 +151,7 @@ class BackgroundThread:
     async def run(self) -> None:
         """Run evolution cycles at configured interval (default 30 min).
 
-        Iterates over auto_evolve projects round-robin, one per tick.
+        Runs all auto_evolve projects concurrently in each tick.
         Falls back to emrg self-evolution if no projects configured.
         """
         self._running = True
@@ -166,21 +166,29 @@ class BackgroundThread:
             seq += 1
             logger.debug("background tick #%d", seq)
 
-            # Load auto_evolve projects and pick one round-robin
+            # Load auto_evolve projects and run all concurrently
             projects = self._get_auto_evolve_projects()
             if projects:
-                project = projects[(seq - 1) % len(projects)]
                 logger.debug(
-                    "evolution #%d: project=%s path=%s",
-                    seq, project.get("name"), project.get("path"),
+                    "evolution #%d: running %d project(s) concurrently",
+                    seq, len(projects),
                 )
+                # Fire all projects concurrently, isolated failures
+                tasks = []
+                for i, project in enumerate(projects):
+                    sub_seq = seq * 1000 + i  # unique seq per project
+                    tasks.append(
+                        self._run_evolution_cycle(sub_seq, project=project)
+                    )
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for r in results:
+                    if isinstance(r, Exception):
+                        logger.warning("evolution #%d: project failed: %s", seq, r)
             else:
-                project = None
-
-            try:
-                await self._run_evolution_cycle(seq, project=project)
-            except Exception:
-                logger.warning("evolution #%d crashed", seq, exc_info=True)
+                try:
+                    await self._run_evolution_cycle(seq, project=None)
+                except Exception:
+                    logger.warning("evolution #%d crashed", seq, exc_info=True)
 
         await self._write_final_summary()
         logger.info("background thread stopped — the heartbeat is still")
