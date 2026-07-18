@@ -1138,7 +1138,7 @@ class EmrgServer:
             # Fire-and-forget: reflect on whether to save memories
             self._maybe_reflect_memory(session, req.prompt, content or "")
         except Exception as e:
-            logger.error("LLM error: %s", e)
+            logger.exception("LLM error")
             await self._send(writer, {
                 "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
             })
@@ -1269,7 +1269,7 @@ class EmrgServer:
                     if usage:
                         final_usage = usage
             except Exception as e:
-                logger.error("LLM stream error in round %d: %s", round_num, e)
+                logger.exception("LLM stream error in round %d", round_num)
                 await self._send(writer, {
                     "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
                 })
