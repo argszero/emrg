@@ -75,7 +75,7 @@ class GlobTool(ToolExecutor):
                 p for p in cwd.glob(pattern)
                 if not self._is_hidden_or_ignored(p, cwd)
             )
-        except Exception as e:
+        except (OSError, ValueError) as e:
             return ToolResult(
                 name="glob", content=f"Error: invalid pattern: {e}", error=True
             )

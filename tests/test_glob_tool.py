@@ -74,3 +74,11 @@ def test_definition():
     assert d.name == "glob"
     assert "pattern" in d.parameters.get("properties", {})
     assert d.parameters.get("required") == ["pattern"]
+
+
+def test_glob_invalid_workdir():
+    """Non-existent workdir should return error."""
+    tool = GlobTool()
+    result = _run(tool.execute({"pattern": "**/*.py", "workdir": "/nonexistent"}))
+    assert result.error
+    assert "not found" in result.content.lower()
