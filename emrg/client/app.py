@@ -287,6 +287,72 @@ class SessionSelector(Widget):
         return lines
 
 
+class ProjectSelector(Widget):
+    """Interactive project picker — arrow-key navigation with highlight.
+
+    Renders a list of projects from projects.yml with the selected one in
+    reverse video. Used by /rant when invoked without @project.
+    """
+
+    def __init__(self, projects: list[dict] | None = None):
+        self.projects: list[dict] = projects or []
+        self.selected_index: int = 0
+        self._dirty: bool = True
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    @dirty.setter
+    def dirty(self, value: bool) -> None:
+        self._dirty = value
+
+    def move_up(self) -> None:
+        if self.selected_index > 0:
+            self.selected_index -= 1
+            self._dirty = True
+
+    def move_down(self) -> None:
+        if self.selected_index < len(self.projects) - 1:
+            self.selected_index += 1
+            self._dirty = True
+
+    @property
+    def selected_project_name(self) -> str | None:
+        if 0 <= self.selected_index < len(self.projects):
+            return self.projects[self.selected_index].get("name", "")
+        return None
+
+    def render(self, ctx):
+        from rich.style import Style
+        lines: list[Line] = []
+        pstyle = Style.parse("bold cyan")
+        lines.append(Line(
+            spans=[Span("○ ", style="dim"), Span("Select a project (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+            style=ctx.style,
+        ))
+        for i, p in enumerate(self.projects):
+            name = p.get("name", "?")
+            repo = p.get("repo", "")
+            auto = "🔄" if p.get("auto_evolve") else "💬"
+            label = f"  {auto}  {name}"
+            if repo:
+                label += f"  ({repo})"
+            if i == self.selected_index:
+                spans = [
+                    Span("> ", style=pstyle),
+                    Span(label, style=Style(reverse=True)),
+                ]
+            else:
+                spans = [
+                    Span("  ", style=ctx.style),
+                    Span(label, style=ctx.style),
+                ]
+            lines.append(Line(spans=spans, style=ctx.style))
+        self._dirty = False
+        return lines
+
+
 # Command help text for autocomplete dropdown
 _COMMAND_HELP: dict[str, str] = {
     "/resume":  "Switch to a session by [id] or interactively (↑↓/j/k to pick)",
@@ -295,7 +361,7 @@ _COMMAND_HELP: dict[str, str] = {
     "/memory":   "Browse and search memories [session|project|<id>]",
     "/rename":   "Rename current session [title]",
     "/clear":    "Clear current session history and start fresh",
-    "/rant":     "Send feedback to the evolution system [@<project>]",
+    "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
     "/version":  "Show EMRG version and instance info",
     "/help":     "Show keyboard shortcuts and commands",
 }
@@ -619,6 +685,12 @@ async def interactive():
     selector_widget: SessionSelector | None = None
     _pending_resume_select = False  # True when /resume typed without args, waiting for sessions_list
 
+    # Project selector state (interactive /rant project picker)
+    project_selector_active = False
+    project_selector_widget: ProjectSelector | None = None
+    _pending_rant_project = False  # True when /rant typed without args, waiting for projects_list
+    _rant_project: str | None = None  # Set after project selection, used on next Enter
+
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
     _autocomplete_widget: CommandDropdown | None = None
@@ -823,6 +895,32 @@ async def interactive():
                             status.update(center="select session: ↑↓ Enter Esc  (j/k vim)")
                         else:
                             chat.add("system", "No saved sessions yet. Start chatting to create one.")
+                    term.render()
+                    continue
+
+                # Projects list
+                if data.get("type") == "projects_list":
+                    nonlocal project_selector_active, project_selector_widget, _pending_rant_project
+                    projects = data.get("projects", [])
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Error: {err}")
+                        _pending_rant_project = False
+                    elif _pending_rant_project and projects:
+                        _pending_rant_project = False
+                        project_selector_widget = ProjectSelector(projects)
+                        project_selector_active = True
+                        chat.add(project_selector_widget)
+                        status.update(center="select project: ↑↓ Enter Esc  (j/k vim)")
+                    else:
+                        _pending_rant_project = False
+                        if projects:
+                            project_selector_widget = ProjectSelector(projects)
+                            project_selector_active = True
+                            chat.add(project_selector_widget)
+                            status.update(center="select project: ↑↓ Enter Esc  (j/k vim)")
+                        else:
+                            chat.add("system", "No projects configured. Use emrg in a git repo to auto-register.")
                     term.render()
                     continue
 
@@ -1050,6 +1148,51 @@ async def interactive():
             # Ignore other keys when in selector mode
             return True
 
+        # ── Project selector mode ──────────────────────────
+        if project_selector_active and project_selector_widget:
+            if data == b"\x1b":  # Esc — cancel selection
+                project_selector_active = False
+                chat.add("system", "Project selection cancelled.")
+                project_selector_widget = None
+                status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if data == b"\r" or data == b"\n":  # Enter — confirm
+                pname = project_selector_widget.selected_project_name
+                project_selector_active = False
+                project_selector_widget = None
+                if pname:
+                    nonlocal _rant_project
+                    _rant_project = pname
+                    chat.add("system", f"Rant to project '@{pname}' — type your message and press Enter:")
+                    status.update(center=f"rant to @{pname}")
+                else:
+                    chat.add("system", "No project selected.")
+                    status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
+                c = data[2]
+                if c == 0x41:  # Up
+                    project_selector_widget.move_up()
+                    chat.dirty = True; term.render()
+                    return True
+                elif c == 0x42:  # Down
+                    project_selector_widget.move_down()
+                    chat.dirty = True; term.render()
+                    return True
+            # j/k for vim-style navigation
+            if data == b"j":
+                project_selector_widget.move_down()
+                chat.dirty = True; term.render()
+                return True
+            if data == b"k":
+                project_selector_widget.move_up()
+                chat.dirty = True; term.render()
+                return True
+            # Ignore other keys when in project selector mode
+            return True
+
         # ── Command autocomplete: recompute on every keystroke ──
         if not selector_active and not busy:
             text_stripped = inp.text.lstrip()
@@ -1220,6 +1363,22 @@ async def interactive():
             if text:
                 if text.lower() in ("quit", "exit"): return False
 
+                # If a rant project was selected, use this message as the rant
+                if _rant_project:
+                    payload = {
+                        "type": "rant",
+                        "message": text,
+                        "project": _rant_project,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    writer.write(json.dumps(payload).encode() + b"\n")
+                    await writer.drain()
+                    chat.add("system", f"Rant recorded (@{_rant_project}). The evolution system will review it.")
+                    _rant_project = None
+                    status.update(center=server_id or "emrg")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
                 # Handle /memory command
                 if text.lower().startswith("/memory"):
                     parts = text.split(None, 1)
@@ -1349,6 +1508,7 @@ Commands
   /rename [title]     Rename current session
   /rant <msg>         Send feedback to evolution system
   /rant @<project> <msg>  Rant to a specific project
+  /rant               Interactive project picker, then type message
   quit / exit         Exit EMRG
 
 Streaming
@@ -1385,8 +1545,16 @@ Streaming
                     if not message:
                         if project:
                             chat.add("system", "Usage: /rant @<project> <message>")
-                        else:
-                            chat.add("system", "Usage: /rant <message>  or  /rant @<project> <message>")
+                            inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                            return True
+                        # /rant without args → interactive project selector
+                        nonlocal _pending_rant_project
+                        _pending_rant_project = True
+                        writer.write(json.dumps({
+                            "type": "list_projects",
+                        }).encode() + b"\n")
+                        await writer.drain()
+                        status.update(center="loading projects...")
                         inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                         return True
                     payload = {

@@ -1024,6 +1024,9 @@ class EmrgServer:
                 count, f" project={project}" if project else "", rant_message[:100])
             await self._send(writer, {"ok": True, "count": count})
 
+        elif msg_type == "list_projects":
+            await self._handle_list_projects(writer)
+
         elif msg_type == "clear_session":
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
@@ -1785,6 +1788,27 @@ class EmrgServer:
         await self._send(writer, {
             "type": "sessions_list",
             "sessions": sessions,
+        })
+
+    async def _handle_list_projects(
+        self, writer: asyncio.StreamWriter
+    ) -> None:
+        """Read projects.yml and return all project entries."""
+        projects: list[dict] = []
+        try:
+            if self._projects_log.exists():
+                data = yaml.safe_load(self._projects_log.read_text())
+                if isinstance(data, list):
+                    projects = [
+                        {"name": p.get("name", ""), "repo": p.get("repo", ""),
+                         "path": p.get("path", ""), "auto_evolve": p.get("auto_evolve", False)}
+                        for p in data if isinstance(p, dict)
+                    ]
+        except (yaml.YAMLError, OSError) as e:
+            logger.warning("Failed to read projects.yml: %s", e)
+        await self._send(writer, {
+            "type": "projects_list",
+            "projects": projects,
         })
 
     async def _handle_resume_session(
