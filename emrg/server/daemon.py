@@ -451,7 +451,7 @@ class EmrgServer:
                 if pid_file.exists() and pid_file.read_text().strip() == str(os.getpid()):
                     pid_file.unlink()
                     logger.debug("pid file removed: %s", pid_file)
-            except Exception:
+            except OSError:
                 pass
 
     async def _handle_client(

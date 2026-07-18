@@ -218,7 +218,7 @@ def _send_rant(message: str) -> None:
     async def _do() -> None:
         try:
             reader, writer = await asyncio.wait_for(connect_to_server(), timeout=3)
-        except Exception:
+        except (ConnectionError, FileNotFoundError, OSError, asyncio.TimeoutError):
             print("daemon not running. Start it first with: emrg")
             return
 
