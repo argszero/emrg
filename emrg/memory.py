@@ -445,7 +445,7 @@ class MemoryStore:
             try:
                 mem = MemoryFile.from_file(path)
                 idx.add_entry(mem)
-            except Exception:
+            except (OSError, ValueError):
                 logger.debug("Skipping unparseable memory: %s", path, exc_info=True)
         return idx
 
@@ -460,7 +460,7 @@ class MemoryStore:
                 mem = MemoryFile.from_file(path)
                 if mem.id == mem_id:
                     return path
-            except Exception:
+            except (OSError, ValueError):
                 logger.debug("Skipping unparseable memory: %s", path, exc_info=True)
         return None
 
@@ -481,7 +481,7 @@ class MemoryStore:
                 existing = MemoryFile.from_file(self.directory / candidate)
                 if existing.id == mem.id:
                     return candidate  # same memory, overwrite
-            except Exception:
+            except (OSError, ValueError):
                 pass
             counter += 1
             candidate = f"{stem}-{counter}.md"
@@ -592,7 +592,7 @@ class MemoryStore:
                 if status_filter and mem.status != status_filter:
                     continue
                 memories.append(mem)
-            except Exception:
+            except (OSError, ValueError):
                 logger.debug("Skipping unparseable memory: %s", path, exc_info=True)
         return memories
 
