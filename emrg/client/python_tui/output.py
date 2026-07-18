@@ -107,8 +107,6 @@ def style_to_sgr(style: object) -> str:
     Used by StylePool to compute transition strings between styles.
     """
     from rich.style import Style as RichStyle
-    from rich.color import Color as RichColor
-    from rich.color_triplet import ColorTriplet
 
     codes: list[int] = []
 
