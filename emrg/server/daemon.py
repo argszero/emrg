@@ -327,6 +327,7 @@ class BackgroundThread:
         # Derive source_dir and owner/repo from project if available
         if project:
             source_dir = project.get("path", self.SOURCE_DIR)
+            local_source = source_dir  # project path is already absolute
             repo_spec = project.get("repo", "")
             if repo_spec and "/" in repo_spec:
                 owner, repo = repo_spec.split("/", 1)
@@ -334,6 +335,7 @@ class BackgroundThread:
                 owner, repo = self.OWNER, self.REPO
         else:
             source_dir = self.SOURCE_DIR
+            local_source = str(self.EVOLUTION_CWD / self.SOURCE_DIR)
             owner, repo = self.OWNER, self.REPO
 
         return template.format(
@@ -344,6 +346,7 @@ class BackgroundThread:
             evolution_count=len(self.evolutions),
             emrg_repo_url=self.EMRG_REPO_URL,
             evolution_cwd=str(self.EVOLUTION_CWD),
+            local_source=local_source,
             owner=owner,
             repo=repo,
             source_dir=source_dir,
