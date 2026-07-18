@@ -1,8 +1,9 @@
-"""Tests for skills.loader — frontmatter parser and context builder."""
+"""Tests for skills.loader — frontmatter parser, file parser, and context builder."""
 
+import os
 from pathlib import Path
 
-from emrg.skills.loader import Skill, _parse_frontmatter, build_skills_context
+from emrg.skills.loader import Skill, _parse_frontmatter, _parse_skill_file, build_skills_context
 
 
 class TestParseFrontmatter:
@@ -57,6 +58,118 @@ class TestParseFrontmatter:
         """Unquoted values with spaces are kept as-is."""
         result = _parse_frontmatter("description: A multi word description")
         assert result["description"] == "A multi word description"
+
+
+class TestParseSkillFile:
+    """Tests for _parse_skill_file — skill .md file parsing with frontmatter."""
+
+    def test_valid_skill_file(self, tmp_path):
+        """A well-formed skill file returns a Skill with correct fields."""
+        md = tmp_path / "my-skill.md"
+        md.write_text(
+            "---\n"
+            "name: my-skill\n"
+            "description: Does useful things\n"
+            "---\n"
+            "# Instructions\n"
+            "Follow these steps.\n"
+        )
+        result = _parse_skill_file(md, "user")
+        assert result is not None
+        assert result.name == "my-skill"
+        assert result.description == "Does useful things"
+        assert result.source == "user"
+        assert result.path == md
+        assert "Instructions" in result.body
+        assert "Follow these steps" in result.body
+
+    def test_name_from_stem_fallback(self, tmp_path):
+        """When frontmatter has no name, falls back to filename stem."""
+        md = tmp_path / "fallback-skill.md"
+        md.write_text(
+            "---\n"
+            "description: A skill without explicit name\n"
+            "---\n"
+            "# Body\n"
+        )
+        result = _parse_skill_file(md, "project")
+        assert result is not None
+        assert result.name == "fallback-skill"
+
+    def test_no_frontmatter(self, tmp_path):
+        """File without --- delimiters returns None."""
+        md = tmp_path / "no-fm.md"
+        md.write_text("# Just a markdown file\n\nNo frontmatter here.\n")
+        result = _parse_skill_file(md, "user")
+        assert result is None
+
+    def test_malformed_frontmatter_single_delimiter(self, tmp_path):
+        """File with only one --- returns None (malformed)."""
+        md = tmp_path / "bad.md"
+        md.write_text("---\nname: s\n# no closing ---\n")
+        result = _parse_skill_file(md, "user")
+        assert result is None
+
+    def test_empty_frontmatter(self, tmp_path):
+        """Empty frontmatter (nothing between --- and ---) returns None."""
+        md = tmp_path / "empty-fm.md"
+        md.write_text("---\n---\n# Body after empty frontmatter\n")
+        result = _parse_skill_file(md, "user")
+        assert result is None
+
+    def test_missing_description(self, tmp_path):
+        """Frontmatter without description returns None."""
+        md = tmp_path / "no-desc.md"
+        md.write_text(
+            "---\n"
+            "name: nameless\n"
+            "---\n"
+            "# Body\n"
+        )
+        result = _parse_skill_file(md, "user")
+        assert result is None
+
+    def test_file_not_found(self, tmp_path):
+        """Non-existent file returns None."""
+        md = tmp_path / "does-not-exist.md"
+        result = _parse_skill_file(md, "user")
+        assert result is None
+
+    def test_source_flag(self, tmp_path):
+        """Source is correctly propagated ('user' or 'project')."""
+        md = tmp_path / "src-test.md"
+        md.write_text(
+            "---\n"
+            "name: src-test\n"
+            "description: Testing source propagation\n"
+            "---\n"
+            "# Body\n"
+        )
+        assert _parse_skill_file(md, "user").source == "user"
+        assert _parse_skill_file(md, "project").source == "project"
+
+    def test_body_stripped(self, tmp_path):
+        """Leading/trailing whitespace in body is stripped."""
+        md = tmp_path / "body-test.md"
+        md.write_text(
+            "---\n"
+            "name: body-test\n"
+            "description: Testing body trimming\n"
+            "---\n"
+            "\n"
+            "  # Instructions with surrounding whitespace  \n"
+            "\n"
+        )
+        result = _parse_skill_file(md, "user")
+        assert result is not None
+        assert result.body == "# Instructions with surrounding whitespace"
+
+    def test_unicode_decode_error(self, tmp_path):
+        """Binary file content returns None (UnicodeDecodeError)."""
+        md = tmp_path / "binary.md"
+        md.write_bytes(b"\xff\xfe\x00\x00")
+        result = _parse_skill_file(md, "user")
+        assert result is None
 
 
 class TestBuildSkillsContext:
