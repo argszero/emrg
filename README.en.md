@@ -81,6 +81,39 @@ emrg
 
 Type `/help` to see all commands, or just start talking — EMRG reads files, runs commands, and makes edits.
 
+### 🪟 Windows Users
+
+EMRG's daemon (`emrgd`) uses Unix sockets. On Windows, we recommend running via **WSL2**:
+
+```powershell
+# 1. Install WSL2 (skip if already installed)
+wsl --install
+
+# 2. Enter WSL, then install using Option 1 above
+wsl
+curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash
+```
+
+> ⚠️ Native Windows support is planned (migrating to TCP/IP sockets). Use WSL2 for now.
+
+### 🧹 Uninstall
+
+```bash
+# Uninstall CLI only (keep source and data)
+./install.sh uninstall
+
+# Full purge (removes source repo and ~/.emrg data)
+./install.sh purge
+```
+
+If you've already deleted the source directory, uninstall manually:
+
+```bash
+uv tool uninstall emrg                   # remove CLI
+rm -rf ~/scm/github.com/argszero/emrg    # remove source (optional)
+rm -rf ~/.emrg                           # remove all data (careful!)
+```
+
 ---
 
 ## 🎮 Commands
