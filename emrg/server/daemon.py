@@ -68,7 +68,7 @@ SYSTEM_PROMPT = (
     "Use `ignore_case`, `context_before`/`context_after`, and `glob` "
     "filtering to narrow results.\n"
     "- **glob for file discovery**: use glob with patterns like '**/*.py' to find "
-    "files by name\n"
+    "files by name. Use `workdir` to search in a specific directory.\n"
     "- **edit for targeted changes**: prefer edit over write for existing files — "
     "it's safer and shows diffs\n"
     "- **write for new files**: use write for creating new files or full rewrites\n"
