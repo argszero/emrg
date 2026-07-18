@@ -136,7 +136,7 @@ async def _send_shutdown() -> bool:
         if line:
             data = json.loads(line.decode().strip())
             return data.get("type") == "shutdown_ack"
-    except Exception:
+    except (OSError, asyncio.TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
         return False
     return False
 
@@ -173,7 +173,7 @@ def _stop_daemon() -> None:
             print("daemon stopped.")
         else:
             print("daemon not running (no pid from ping).")
-    except Exception:
+    except (OSError, asyncio.TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
         print("daemon not running.")
 
 
