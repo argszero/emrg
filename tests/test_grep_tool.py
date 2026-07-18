@@ -107,3 +107,14 @@ def test_skips_hidden_dirs(temp_cwd):
     tool = GrepTool()
     result = _run(tool.execute({"pattern": "binary", "path": str(temp_cwd)}))
     assert "No matches" in result.content
+
+
+def test_grep_nonexistent_path():
+    """Searching a non-existent path should return an error."""
+    tool = GrepTool()
+    result = _run(tool.execute({
+        "pattern": "import",
+        "path": "/nonexistent/path/xyzzy",
+    }))
+    assert result.error
+    assert "not found" in result.content.lower()
