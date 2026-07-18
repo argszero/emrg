@@ -6,6 +6,7 @@ Manages TTY raw mode, queries terminal capabilities, provides draw/flush cycle.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import termios
@@ -76,6 +77,7 @@ def _probe_terminal() -> TerminalCapabilities:
 
     return caps
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Terminal:
@@ -211,8 +213,7 @@ class Terminal:
                     self._rendered_cache[name] = lines
                     return lines
                 except Exception:
-                    import traceback
-                    traceback.print_exc()
+                    logger.exception("widget render failed: %s", name)
                     return self._rendered_cache.get(name, [])
             return self._rendered_cache.get(name, [])
 
@@ -404,8 +405,7 @@ class Terminal:
             except KeyboardInterrupt:
                 break
             except Exception:
-                import traceback
-                traceback.print_exc()
+                logger.exception("TUI event loop crashed")
                 break
 
     def shutdown(self) -> None:
