@@ -89,3 +89,17 @@ def test_write_large_content_ok(temp_dir):
     assert not result.error
     assert "Created" in result.content
     assert len(filepath.read_text()) == 100_000
+
+
+def test_write_content_too_large(temp_dir, monkeypatch):
+    """Content exceeding MAX_WRITE_SIZE must return an error."""
+    monkeypatch.setattr("emrg.tools.write_tool.MAX_WRITE_SIZE", 100)
+    tool = WriteTool()
+    filepath = temp_dir / "test.txt"
+    result = _run(tool.execute({
+        "file_path": str(filepath),
+        "content": "x" * 200,
+    }))
+    assert result.error
+    assert "too large" in result.content
+    assert not filepath.exists()
