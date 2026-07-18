@@ -10,8 +10,10 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from emrg.config import LlmConfig
 from emrg.protocol import InstanceIdentity
-from emrg.server.daemon import BackgroundThread
+from emrg.server.daemon import BackgroundThread, EmrgServer
+from emrg.session import Session
 
 
 # ── _get_auto_evolve_projects ──────────────────────────────────
@@ -196,3 +198,65 @@ def test_build_prompt_all_variables_substituted():
     p3 = bt._build_evolution_prompt(seq=3, project=project_no_repo)
     braces = re.findall(r"\{[a-z_]+\}", p3)
     assert not braces, f"Unsubstituted placeholders in no-repo prompt: {braces}"
+
+
+# ── _build_project_context_section ─────────────────────────────
+
+
+def _make_server() -> EmrgServer:
+    """Create a minimal EmrgServer for testing."""
+    return EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+
+
+def test_context_section_no_files(tmp_path):
+    """No context files found → returns empty string."""
+    server = _make_server()
+    session = Session.create_with_id("ctx-test", tmp_path)
+    result = server._build_project_context_section(session)
+    assert result == ""
+
+
+def test_context_section_single_file(tmp_path):
+    """When CLAUDE.md exists, it's included in the context section."""
+    server = _make_server()
+    (tmp_path / "CLAUDE.md").write_text("# Project Rules\n- Use tabs\n")
+    session = Session.create_with_id("ctx-test", tmp_path)
+    result = server._build_project_context_section(session)
+    assert "## Project Context" in result
+    assert "### CLAUDE.md" in result
+    assert "- Use tabs" in result
+    assert "# Project Rules" in result
+
+
+def test_context_section_multiple_files(tmp_path):
+    """All matching context files are included."""
+    server = _make_server()
+    (tmp_path / "CLAUDE.md").write_text("claude content")
+    (tmp_path / "AGENTS.md").write_text("agents content")
+    session = Session.create_with_id("ctx-test", tmp_path)
+    result = server._build_project_context_section(session)
+    assert "### CLAUDE.md" in result
+    assert "### AGENTS.md" in result
+    assert "claude content" in result
+    assert "agents content" in result
+
+
+def test_context_section_truncation(tmp_path):
+    """Files over 8000 chars are truncated with a notice."""
+    server = _make_server()
+    big = "x" * 9000
+    (tmp_path / "CLAUDE.md").write_text(big)
+    session = Session.create_with_id("ctx-test", tmp_path)
+    result = server._build_project_context_section(session)
+    assert "truncated" in result
+    assert "1000 chars" in result  # 9000 - 8000 = 1000
+
+
+def test_context_section_manifesto(tmp_path):
+    """MANIFESTO.md is also read as a context file."""
+    server = _make_server()
+    (tmp_path / "MANIFESTO.md").write_text("# Design\nKeep it simple.\n")
+    session = Session.create_with_id("ctx-test", tmp_path)
+    result = server._build_project_context_section(session)
+    assert "### MANIFESTO.md" in result
+    assert "Keep it simple" in result
