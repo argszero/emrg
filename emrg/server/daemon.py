@@ -26,7 +26,7 @@ from emrg.config import LlmConfig, config_dir
 from emrg.connect import connect_to_server, start_server, cleanup_server
 from emrg.server.llm import LlmClient
 from emrg.server.tool_types import ToolResult
-from emrg.memory import ProjectMemoryStore
+from emrg.memory import ProjectMemoryStore, SessionMemoryStore
 from emrg.protocol import (
     EvolutionLog,
     InstanceIdentity,
@@ -1733,7 +1733,6 @@ class EmrgServer:
                     "error": f"Session {session_id} not found",
                 })
                 return
-            from emrg.memory import SessionMemoryStore
             store = SessionMemoryStore(session_dir)
             index_path = store.index_path
 
@@ -1777,7 +1776,6 @@ class EmrgServer:
                     "error": f"Session {session_id} not found",
                 })
                 return
-            from emrg.memory import SessionMemoryStore
             store = SessionMemoryStore(session_dir)
 
         mem = store.get(memory_id)
@@ -2002,7 +2000,6 @@ class EmrgServer:
         if not session_dir.exists():
             return
 
-        from emrg.memory import SessionMemoryStore, ProjectMemoryStore
         store = SessionMemoryStore(session_dir)
 
         if store.count < 3:
