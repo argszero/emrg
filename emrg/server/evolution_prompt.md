@@ -8,7 +8,7 @@
 - 已完成演化: {evolution_count} 次
 - 源码仓库: {emrg_repo_url}
 - Owner/Repo: {owner}/{repo}
-- 本地源码: `{evolution_cwd}/{source_dir}/`
+- 本地源码: `{local_source}`
 - 会话 ID: `{session_id}`
 - 记忆: `{evolution_cwd}/.emrg/memory/`
 - 历史: `{evolution_cwd}/.emrg/sessions/{session_id}/`
