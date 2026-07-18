@@ -9,6 +9,9 @@
 - 源码仓库: {emrg_repo_url}
 - Owner/Repo: {owner}/{repo}
 - 本地源码: `{evolution_cwd}/{source_dir}/`
+- 会话 ID: `{session_id}`
+- 记忆: `{evolution_cwd}/.emrg/memory/`
+- 历史: `{evolution_cwd}/.emrg/sessions/{session_id}/`
 
 ---
 
@@ -79,11 +82,7 @@ cd {source_dir} && git pull origin master
 **PR 管理**：
 
 ```bash
-<<<<<<< HEAD
-cd source/emrg && gh pr list -R {owner}/{repo} --limit 20
-=======
-cd {source_dir} && gh pr list --limit 20
->>>>>>> master
+cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 ```
 
 - Review 每个 open PR（不论谁提的，一视同仁。checkout → 读代码）：
@@ -97,11 +96,7 @@ cd {source_dir} && gh pr list --limit 20
 **Issue 管理**：
 
 ```bash
-<<<<<<< HEAD
-cd source/emrg && gh issue list -R {owner}/{repo} --limit 20
-=======
-cd {source_dir} && gh issue list --limit 20
->>>>>>> master
+cd {source_dir} && gh issue list -R {owner}/{repo} --limit 20
 ```
 
 - 新 issue 需要回复或分类？过期的 issue 可以关闭？
@@ -126,11 +121,7 @@ gh pr list -R {owner}/{repo} --author "@me" --limit 10
 **参与 Issue 讨论**：
 
 ```bash
-<<<<<<< HEAD
-cd source/emrg && gh issue list -R {owner}/{repo} --limit 20
-=======
-cd {source_dir} && gh issue list --limit 20
->>>>>>> master
+cd {source_dir} && gh issue list -R {owner}/{repo} --limit 20
 ```
 
 - 浏览 issue 列表，找到感兴趣的或自己能贡献的 issue
@@ -140,11 +131,7 @@ cd {source_dir} && gh issue list --limit 20
 **参与 PR 讨论**：
 
 ```bash
-<<<<<<< HEAD
-cd source/emrg && gh pr list -R {owner}/{repo} --limit 20
-=======
-cd {source_dir} && gh pr list --limit 20
->>>>>>> master
+cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 ```
 
 - 查看非自己提交的 PR（已在 1.2.1 中 review），参与 technical discussion
@@ -199,11 +186,7 @@ cat ~/.emrg/projects.yml
 >
 > 则**跳过完整回顾（1.1~1.5）**，仅执行：
 > ```bash
-<<<<<<< HEAD
-> cd source/emrg && git pull origin master && gh pr list -R {owner}/{repo} --limit 5 && gh issue list -R {owner}/{repo} --limit 5
-=======
-> cd {source_dir} && git pull origin master && gh pr list --limit 5 && gh issue list --limit 5
->>>>>>> master
+> cd {source_dir} && git pull origin master && gh pr list -R {owner}/{repo} --limit 5 && gh issue list -R {owner}/{repo} --limit 5
 > ```
 > 确认无变化后直接记录。无需重新跑测试、读 memory、检查其他项目、外部搜索。
 

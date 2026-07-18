@@ -124,6 +124,8 @@ class Terminal:
             style_pool=self._style_pool,
             hyperlink_pool=self._hyperlink_pool,
         )
+        self._rendered_cache: dict[str, list[object]] = {}
+        self._scrollback_lines_pushed: int = 0
 
     @property
     def viewport_height(self) -> int:
@@ -176,11 +178,9 @@ class Terminal:
             self._back_buffer.resize(w, h)
             self._back_buffer.clear()
         # Clear render cache so all widgets re-render at new dimensions
-        if hasattr(self, '_rendered_cache'):
-            self._rendered_cache.clear()
+        self._rendered_cache.clear()
         # Clear scrollback counter — viewport changed, recount needed
-        if hasattr(self, '_scrollback_lines_pushed'):
-            self._scrollback_lines_pushed = 0
+        self._scrollback_lines_pushed = 0
         self.emit('resize', self.caps.width, self.caps.height)
         self.render(full=True)
 
@@ -200,8 +200,6 @@ class Terminal:
         ctx = RenderContext(width=width)
 
         # Cache last rendered output per widget so dirty=False doesn't blank it
-        if not hasattr(self, "_rendered_cache"):
-            self._rendered_cache: dict[str, list[object]] = {}
 
         def _get_lines(name: str) -> list[object]:
             w = self._widgets.get(name)

@@ -145,10 +145,15 @@ class BackgroundThread:
         self._running = False
         self._start_time: float | None = None
         self._logs_dir = config_dir() / "logs"
+        self._projects_log = config_dir() / "projects.yml"
         self.EVOLUTION_CWD.mkdir(parents=True, exist_ok=True)
 
     async def run(self) -> None:
-        """Run evolution cycles at configured interval (default 30 min)."""
+        """Run evolution cycles at configured interval (default 30 min).
+
+        Iterates over auto_evolve projects round-robin, one per tick.
+        Falls back to emrg self-evolution if no projects configured.
+        """
         self._running = True
         self._start_time = time.time()
         seq = 0
@@ -160,8 +165,20 @@ class BackgroundThread:
             await asyncio.sleep(self.interval)
             seq += 1
             logger.debug("background tick #%d", seq)
+
+            # Load auto_evolve projects and pick one round-robin
+            projects = self._get_auto_evolve_projects()
+            if projects:
+                project = projects[(seq - 1) % len(projects)]
+                logger.debug(
+                    "evolution #%d: project=%s path=%s",
+                    seq, project.get("name"), project.get("path"),
+                )
+            else:
+                project = None
+
             try:
-                await self._run_evolution_cycle(seq)
+                await self._run_evolution_cycle(seq, project=project)
             except Exception:
                 logger.warning("evolution #%d crashed", seq, exc_info=True)
 
@@ -173,13 +190,24 @@ class BackgroundThread:
 
     # ── Evolution cycle ──────────────────────────────────────
 
-    async def _run_evolution_cycle(self, seq: int) -> None:
+    async def _run_evolution_cycle(self, seq: int, project: dict | None = None) -> None:
         """Send evolution task to the server, read streaming response.
 
         Connects to the server as an internal client, sends a task
         with the evolution prompt, and reads responses until done.
+
+        If project is provided, uses project-specific session_id and cwd;
+        otherwise falls back to emrg self-evolution defaults.
         """
-        prompt = self._build_evolution_prompt(seq)
+        prompt = self._build_evolution_prompt(seq, project=project)
+
+        # Derive session_id and cwd from project config
+        if project:
+            session_id = f"emrg-evolution-{project.get('name', 'unknown')}"
+            cwd = project.get("path", str(self.EVOLUTION_CWD))
+        else:
+            session_id = self.SESSION_ID
+            cwd = str(self.EVOLUTION_CWD)
         logger.info(
             "evolution #%d: prompt built (%d chars), connecting to server ...",
             seq, len(prompt),
@@ -197,8 +225,8 @@ class BackgroundThread:
         task_msg = json.dumps({
             "type": "task",
             "id": f"evolution-{seq}",
-            "session_id": self.SESSION_ID,
-            "cwd": str(self.EVOLUTION_CWD),
+            "session_id": session_id,
+            "cwd": cwd,
             "prompt": prompt,
             "stream": True,
             "timestamp": start_time.isoformat(),
@@ -278,17 +306,16 @@ class BackgroundThread:
 
     # ── Prompt building ──────────────────────────────────────
 
-    def _build_evolution_prompt(self, seq: int) -> str:
+    def _build_evolution_prompt(self, seq: int, project: dict | None = None) -> str:
         """Read evolution prompt template from source dir.
 
         Template: emrg/server/evolution_prompt.md
         Variables: {seq}, {instance_id}, {host_name}, {uptime},
                    {evolution_count}, {emrg_repo_url}, {evolution_cwd},
-<<<<<<< HEAD
-                   {owner}, {repo}
-=======
-                   {source_dir}
->>>>>>> master
+                   {owner}, {repo}, {source_dir}, {session_id}
+
+        If project is provided, derives source_dir from the project path
+        and owner/repo from the project's repo field.
         """
         template = self._TEMPLATE_PATH.read_text()
         if self._start_time is not None:
@@ -296,6 +323,18 @@ class BackgroundThread:
         else:
             uptime_seconds = 0
         uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
+
+        # Derive source_dir and owner/repo from project if available
+        if project:
+            source_dir = project.get("path", self.SOURCE_DIR)
+            repo_spec = project.get("repo", "")
+            if repo_spec and "/" in repo_spec:
+                owner, repo = repo_spec.split("/", 1)
+            else:
+                owner, repo = self.OWNER, self.REPO
+        else:
+            source_dir = self.SOURCE_DIR
+            owner, repo = self.OWNER, self.REPO
 
         return template.format(
             seq=seq,
@@ -305,13 +344,34 @@ class BackgroundThread:
             evolution_count=len(self.evolutions),
             emrg_repo_url=self.EMRG_REPO_URL,
             evolution_cwd=str(self.EVOLUTION_CWD),
-<<<<<<< HEAD
-            owner=self.OWNER,
-            repo=self.REPO,
-=======
-            source_dir=self.SOURCE_DIR,
->>>>>>> master
+            owner=owner,
+            repo=repo,
+            source_dir=source_dir,
+            session_id=self.SESSION_ID,
         )
+
+    # ── Project discovery ─────────────────────────────────────
+
+    def _get_auto_evolve_projects(self) -> list[dict]:
+        """Read projects.yml, return list of auto_evolve-enabled projects.
+
+        Returns empty list if the file doesn't exist or is unreadable.
+        """
+        if not self._projects_log.exists():
+            return []
+        try:
+            data = yaml.safe_load(self._projects_log.read_text())
+        except (yaml.YAMLError, OSError):
+            logger.warning(
+                "Failed to parse %s", self._projects_log, exc_info=True
+            )
+            return []
+        if not isinstance(data, list):
+            return []
+        return [
+            entry for entry in data
+            if isinstance(entry, dict) and entry.get("auto_evolve")
+        ]
 
     # ── Log persistence ──────────────────────────────────────
 
