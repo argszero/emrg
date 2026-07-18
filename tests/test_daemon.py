@@ -138,7 +138,8 @@ def test_build_prompt_with_project():
     # Project-specific values should flow through
     assert "owner/repo" not in prompt.lower().replace("/", " ")  # not the literal placeholder
     assert "/home/user/src/myproject" in prompt  # source_dir from project.path
-    assert "emrg-evolution" in prompt  # session_id still uses SESSION_ID constant
+    # session_id should be project-specific (PR #54)
+    assert "emrg-evolution-myproject" in prompt
     # Post-#42: repo_url derived from project repo field
     assert "https://github.com/user/myproject.git" in prompt
     assert "argszero/emrg" not in prompt  # not the default owner/repo
