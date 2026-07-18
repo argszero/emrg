@@ -61,7 +61,7 @@ def test_read_file_not_found():
 def test_read_missing_file_path():
     tool = ReadTool()
     result = _run(tool.execute({}))
-    # Note: error=True will be added in PR #9
+    assert result.error
     assert "no file_path" in result.content
 
 
