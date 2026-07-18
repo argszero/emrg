@@ -191,13 +191,12 @@ class GrepTool(ToolExecutor):
     @staticmethod
     def _collect_files(root: Path, file_glob: str | None) -> list[Path]:
         """Collect files recursively, skipping hidden/ignored dirs."""
-        files: list[Path] = []
-
         skip_dirs = {"__pycache__", "node_modules", ".git", ".venv"}
         glob_pattern = file_glob or "*"
 
-        for path in sorted(root.rglob(glob_pattern)):
-            # Skip hidden dirs
+        # Filter first (cheap), then sort (expensive on large repos)
+        files: list[Path] = []
+        for path in root.rglob(glob_pattern):
             parts = path.relative_to(root).parts
             if any(p.startswith(".") and p not in (".emrg",) for p in parts):
                 continue
@@ -206,4 +205,5 @@ class GrepTool(ToolExecutor):
             if path.is_file():
                 files.append(path)
 
+        files.sort()
         return files
