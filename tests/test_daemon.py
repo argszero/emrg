@@ -159,3 +159,32 @@ def test_build_prompt_increments_seq():
 
     assert "演化周期 #5" in p1
     assert "演化周期 #99" in p2
+
+
+def test_build_prompt_all_variables_substituted():
+    """No raw template placeholders ({var}) should remain in output."""
+    import re
+
+    bt = BackgroundThread(InstanceIdentity(instance_id="test-id", host_name="testhost"))
+
+    # Self-evolution (no project)
+    p1 = bt._build_evolution_prompt(seq=1, project=None)
+    braces = re.findall(r"\{[a-z_]+\}", p1)
+    assert not braces, f"Unsubstituted placeholders in self prompt: {braces}"
+
+    # Project-based evolution
+    project = {
+        "name": "myproj",
+        "path": "/home/user/src/myproj",
+        "repo": "user/myproj",
+        "auto_evolve": True,
+    }
+    p2 = bt._build_evolution_prompt(seq=2, project=project)
+    braces = re.findall(r"\{[a-z_]+\}", p2)
+    assert not braces, f"Unsubstituted placeholders in project prompt: {braces}"
+
+    # Project without repo field
+    project_no_repo = {"name": "x", "path": "/tmp/x", "auto_evolve": True}
+    p3 = bt._build_evolution_prompt(seq=3, project=project_no_repo)
+    braces = re.findall(r"\{[a-z_]+\}", p3)
+    assert not braces, f"Unsubstituted placeholders in no-repo prompt: {braces}"
