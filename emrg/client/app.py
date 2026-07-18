@@ -1658,7 +1658,7 @@ Streaming
                     for seq in parser.feed(more):
                         if not await handle_key(seq): return
                 except TimeoutError: break
-    except Exception: traceback.print_exc()
+    except Exception: logger.exception("TUI main loop crashed")
     finally:
         read_task.cancel()
         try: await read_task
