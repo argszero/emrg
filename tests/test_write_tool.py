@@ -62,7 +62,7 @@ def test_write_missing_file_path():
     result = _run(tool.execute({
         "content": "bar",
     }))
-    # Note: error=True will be added in PR #9
+    assert result.error
     assert "no file_path" in result.content
 
 
