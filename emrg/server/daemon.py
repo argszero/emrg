@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import yaml
+
 from emrg.config import LlmConfig, config_dir
 from emrg.connect import connect_to_server, start_server, cleanup_server
 from emrg.server.llm import LlmClient
@@ -353,7 +355,7 @@ class EmrgServer:
         self._running = False
         self._bg: Optional[BackgroundThread] = None
         self._max_tool_rounds = llm_config.max_tool_rounds
-        self._projects_log = runtime_dir / "projects.jsonl"
+        self._projects_log = runtime_dir / "projects.yml"
         self._rants_log = runtime_dir / "rants.jsonl"
 
         # Build tool registry
@@ -540,40 +542,58 @@ class EmrgServer:
     # ── Project tracking ─────────────────────────────────────
 
     def _touch_project(self, cwd: str) -> None:
-        """Record a project as active in ~/.emrg/projects.jsonl.
+        """Record a project as active in ~/.emrg/projects.yml.
 
         Used by the evolution cycle to discover which projects have
         recent user activity and analyze their sessions for improvement ideas.
 
         Normalizes the path via realpath() so symlinked directories don't
         cause duplicate entries.
+
+        New projects default to auto_evolve=False. Users can edit the YAML
+        to set auto_evolve=True and fill in repo (owner/repo) for projects
+        they want automatically evolved.
         """
         cwd = os.path.realpath(cwd)
         self._projects_log.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now().isoformat()
 
-        # Read existing entries (normalize keys to avoid duplicates
-        # from older EMRG versions that stored non-realpath'd paths).
-        entries: dict[str, str] = {}
+        # Read existing entries (normalize by realpath to avoid duplicates)
+        projects: dict[str, dict] = {}
         if self._projects_log.exists():
-            for line in self._projects_log.read_text().splitlines():
-                line = line.strip()
-                if line:
-                    try:
-                        entry = json.loads(line)
-                        key = os.path.realpath(entry["cwd"])
-                        # Keep the most recent timestamp across duplicates
-                        existing = entries.get(key, "")
-                        if entry["last_active"] > existing:
-                            entries[key] = entry["last_active"]
-                    except (json.JSONDecodeError, KeyError):
-                        pass
+            try:
+                data = yaml.safe_load(self._projects_log.read_text())
+                if isinstance(data, list):
+                    for entry in data:
+                        if isinstance(entry, dict) and entry.get("path"):
+                            key = os.path.realpath(entry["path"])
+                            projects[key] = entry
+            except (yaml.YAMLError, TypeError, OSError):
+                logger.warning(
+                    "_touch_project: failed to parse %s, rebuilding",
+                    self._projects_log,
+                    exc_info=True,
+                )
 
-        # Update or add
-        entries[cwd] = now
+        # Update or add entry
+        if cwd in projects:
+            projects[cwd]["last_active"] = now
+        else:
+            name = os.path.basename(cwd.rstrip("/"))
+            projects[cwd] = {
+                "name": name,
+                "path": cwd,
+                "repo": "",
+                "auto_evolve": False,
+                "interval": 1800,
+                "last_active": now,
+            }
+            logger.info("new project tracked: %s (auto_evolve=false)", name)
+
+        # Build sorted YAML list
+        entries = sorted(projects.values(), key=lambda e: e.get("path", ""))
 
         # Atomic write: write to temp file then rename to avoid corruption
-        # if the write is interrupted mid-way (e.g. disk full, power loss).
         fd, tmp_path = tempfile.mkstemp(
             dir=str(self._projects_log.parent),
             prefix=".projects_",
@@ -581,16 +601,17 @@ class EmrgServer:
         )
         try:
             with os.fdopen(fd, "w") as f:
-                f.write(
-                    "\n".join(
-                        json.dumps({"cwd": k, "last_active": v}, ensure_ascii=False)
-                        for k, v in sorted(entries.items())
-                    )
-                    + "\n"
+                yaml.safe_dump(
+                    entries, f,
+                    allow_unicode=True,
+                    default_flow_style=False,
+                    sort_keys=False,
                 )
             os.replace(tmp_path, self._projects_log)
         except OSError:
-            logger.warning("_touch_project: atomic write failed for %s", cwd, exc_info=True)
+            logger.warning(
+                "_touch_project: atomic write failed for %s", cwd, exc_info=True
+            )
             try:
                 os.unlink(tmp_path)
             except OSError:
