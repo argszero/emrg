@@ -280,7 +280,7 @@ class BackgroundThread:
         Template: emrg/server/evolution_prompt.md
         Variables: {seq}, {instance_id}, {host_name}, {uptime},
                    {evolution_count}, {emrg_repo_url}, {evolution_cwd},
-                   {source_dir}
+                   {source_dir}, {session_id}
         """
         template = self._TEMPLATE_PATH.read_text()
         if self._start_time is not None:
@@ -298,6 +298,7 @@ class BackgroundThread:
             emrg_repo_url=self.EMRG_REPO_URL,
             evolution_cwd=str(self.EVOLUTION_CWD),
             source_dir=self.SOURCE_DIR,
+            session_id=self.SESSION_ID,
         )
 
     # ── Log persistence ──────────────────────────────────────
