@@ -144,6 +144,6 @@ class BashTool(ToolExecutor):
                 content=f"Command not found: {cmd[:100]}",
                 error=True,
             )
-        except Exception as e:
+        except OSError as e:
             logger.warning("bash error: %s", e)
             return ToolResult(name="bash", content=f"Error: {e}", error=True)
