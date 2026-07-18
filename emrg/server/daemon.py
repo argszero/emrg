@@ -1231,8 +1231,8 @@ class EmrgServer:
                             *history_messages,
                             {"role": "user", "content": req.prompt},
                         ]
-                    except Exception as e:
-                        logger.warning("auto-compact failed: %s", e)
+                    except Exception:
+                        logger.exception("auto-compact failed")
 
             # Streaming call to LLM
             content_parts: list[str] = []
