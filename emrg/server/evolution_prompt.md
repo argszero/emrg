@@ -7,7 +7,7 @@
 - 已运行: {uptime}
 - 已完成演化: {evolution_count} 次
 - 源码仓库: {emrg_repo_url}
-- 本地源码: `{evolution_cwd}/source/emrg/`
+- 本地源码: `{evolution_cwd}/{source_dir}/`
 
 ---
 
@@ -24,8 +24,8 @@ gh auth status 2>&1  # 未认证则提示用户执行 gh auth login
 **确认 GitHub 身份**（首次执行，之后从 `identity-github-role.md` 读取）：
 
 ```bash
-cd source/emrg && git config user.name && git config user.email
-cd source/emrg && git push origin master --dry-run 2>&1
+cd {source_dir} && git config user.name && git config user.email
+cd {source_dir} && git push origin master --dry-run 2>&1
 ```
 
 - **Committer**（有 write 权限）：执行 1.2.1 仓库管理 + 1.2.2 + 1.2.3
@@ -36,7 +36,7 @@ cd source/emrg && git push origin master --dry-run 2>&1
 **同步源码**：
 
 ```bash
-cd source/emrg && git pull origin master
+cd {source_dir} && git pull origin master
 # 不存在则 clone，clone 失败则从本地路径复制
 ```
 
@@ -78,7 +78,7 @@ cd source/emrg && git pull origin master
 **PR 管理**：
 
 ```bash
-cd source/emrg && gh pr list --limit 20
+cd {source_dir} && gh pr list --limit 20
 ```
 
 - Review 每个 open PR（不论谁提的，一视同仁。checkout → 读代码）：
@@ -92,7 +92,7 @@ cd source/emrg && gh pr list --limit 20
 **Issue 管理**：
 
 ```bash
-cd source/emrg && gh issue list --limit 20
+cd {source_dir} && gh issue list --limit 20
 ```
 
 - 新 issue 需要回复或分类？过期的 issue 可以关闭？
@@ -117,7 +117,7 @@ gh pr list --author "@me" --limit 10
 **参与 Issue 讨论**：
 
 ```bash
-cd source/emrg && gh issue list --limit 20
+cd {source_dir} && gh issue list --limit 20
 ```
 
 - 浏览 issue 列表，找到感兴趣的或自己能贡献的 issue
@@ -127,7 +127,7 @@ cd source/emrg && gh issue list --limit 20
 **参与 PR 讨论**：
 
 ```bash
-cd source/emrg && gh pr list --limit 20
+cd {source_dir} && gh pr list --limit 20
 ```
 
 - 查看非自己提交的 PR（已在 1.2.1 中 review），参与 technical discussion
@@ -137,7 +137,7 @@ cd source/emrg && gh pr list --limit 20
 #### 1.3 GitHub 最新代码改动
 
 ```bash
-cd source/emrg && git fetch origin master && git log origin/master --oneline -10
+cd {source_dir} && git fetch origin master && git log origin/master --oneline -10
 ```
 
 拉取并理解 master 上最新的 commit（可能是其他 Committer 提交的），分析改了什么、为什么改、有没有需要跟进的问题。
@@ -182,7 +182,7 @@ cat ~/.emrg/projects.jsonl
 >
 > 则**跳过完整回顾（1.1~1.5）**，仅执行：
 > ```bash
-> cd source/emrg && git pull origin master && gh pr list --limit 5 && gh issue list --limit 5
+> cd {source_dir} && git pull origin master && gh pr list --limit 5 && gh issue list --limit 5
 > ```
 > 确认无变化后直接记录。无需重新跑测试、读 memory、检查其他项目、外部搜索。
 
@@ -193,9 +193,9 @@ cat ~/.emrg/projects.jsonl
 - 验证（两步都必须通过，失败则 `git checkout -- .`）：
 
 ```bash
-cd source/emrg && uv run pytest tests/ -v
-cd source/emrg && uv run python -c "from emrg.client.app import run_client"
-cd source/emrg && uv run python -m emrg --help
+cd {source_dir} && uv run pytest tests/ -v
+cd {source_dir} && uv run python -c "from emrg.client.app import run_client"
+cd {source_dir} && uv run python -m emrg --help
 ```
 
 ### 4. 提交
@@ -203,7 +203,7 @@ cd source/emrg && uv run python -m emrg --help
 创建 PR（**不自行合并**，由后续演化 review 决定）：
 
 ```bash
-cd source/emrg
+cd {source_dir}
 git checkout -b feature/<简述>
 git add -A
 git commit -m "emrg: <简述>"
@@ -233,5 +233,5 @@ gh pr create --title "emrg: <简述>" --body "简述改动内容和原因"
 
 - 不修改 `~/.emrg/config.toml`
 - 不修改 `max_tool_rounds`
-- 不修改 `{evolution_cwd}` 下非 `source/emrg/` 的文件
+- 不修改 `{evolution_cwd}` 下非 `{source_dir}/` 的文件
 - 必须 push
