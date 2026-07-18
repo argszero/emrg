@@ -311,7 +311,7 @@ class BackgroundThread:
 
         Template: emrg/server/evolution_prompt.md
         Variables: {seq}, {instance_id}, {host_name}, {uptime},
-                   {evolution_count}, {emrg_repo_url}, {evolution_cwd},
+                   {evolution_count}, {repo_url}, {evolution_cwd},
                    {owner}, {repo}, {source_dir}, {session_id}
 
         If project is provided, derives source_dir from the project path
@@ -324,17 +324,20 @@ class BackgroundThread:
             uptime_seconds = 0
         uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
 
-        # Derive source_dir and owner/repo from project if available
+        # Derive source_dir, owner/repo, and repo_url from project if available
         if project:
             source_dir = project.get("path", self.SOURCE_DIR)
             repo_spec = project.get("repo", "")
             if repo_spec and "/" in repo_spec:
                 owner, repo = repo_spec.split("/", 1)
+                repo_url = f"https://github.com/{owner}/{repo}.git"
             else:
                 owner, repo = self.OWNER, self.REPO
+                repo_url = self.EMRG_REPO_URL
         else:
             source_dir = self.SOURCE_DIR
             owner, repo = self.OWNER, self.REPO
+            repo_url = self.EMRG_REPO_URL
 
         return template.format(
             seq=seq,
@@ -342,7 +345,7 @@ class BackgroundThread:
             host_name=self.identity.host_name,
             uptime=uptime,
             evolution_count=len(self.evolutions),
-            emrg_repo_url=self.EMRG_REPO_URL,
+            repo_url=repo_url,
             evolution_cwd=str(self.EVOLUTION_CWD),
             owner=owner,
             repo=repo,

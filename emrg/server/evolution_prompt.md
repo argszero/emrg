@@ -6,7 +6,7 @@
 - 实例: {instance_id} @ {host_name}
 - 已运行: {uptime}
 - 已完成演化: {evolution_count} 次
-- 源码仓库: {emrg_repo_url}
+- 源码仓库: {repo_url}
 - Owner/Repo: {owner}/{repo}
 - 本地源码: `{evolution_cwd}/{source_dir}/`
 - 会话 ID: `{session_id}`
