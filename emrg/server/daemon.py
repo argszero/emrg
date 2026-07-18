@@ -60,7 +60,7 @@ SYSTEM_PROMPT = (
     "## Tool Usage\n"
     "- **read before edit**: always read a file before editing it to get exact content\n"
     "- **read with offset/limit**: use `offset` and `limit` parameters to read "
-    "large files in chunks (default limit: 2000 lines)\n"
+    "large files in chunks (default limit: 1000 lines)\n"
     "- **bash for exploration**: use bash to list files, run tests, check git status, "
     "and execute shell commands\n"
     "- **grep for content search**: use grep with regex patterns to find text "
