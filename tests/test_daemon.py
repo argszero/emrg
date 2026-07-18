@@ -113,6 +113,10 @@ def test_build_prompt_emrg_self():
     assert "testhost" in prompt
     assert "argszero/emrg" in prompt
     assert "emrg-evolution" in prompt
+    # Post-#41/#42 variables
+    assert "repo_url" not in prompt  # substituted, not literal
+    assert "local_source" not in prompt  # substituted, not literal
+    assert "https://github.com/argszero/emrg.git" in prompt
     # Conflict markers must NOT be present
     assert "<<<<<<<" not in prompt
     assert ">>>>>>>" not in prompt
@@ -135,6 +139,9 @@ def test_build_prompt_with_project():
     assert "owner/repo" not in prompt.lower().replace("/", " ")  # not the literal placeholder
     assert "/home/user/src/myproject" in prompt  # source_dir from project.path
     assert "emrg-evolution" in prompt  # session_id still uses SESSION_ID constant
+    # Post-#42: repo_url derived from project repo field
+    assert "https://github.com/user/myproject.git" in prompt
+    assert "argszero/emrg" not in prompt  # not the default owner/repo
     assert "<<<<<<<" not in prompt
     assert ">>>>>>>" not in prompt
 
