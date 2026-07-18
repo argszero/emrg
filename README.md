@@ -75,6 +75,39 @@ emrg
 
 输入 `/help` 查看所有命令，或者直接开始说话——EMRG 会读文件、跑命令、做编辑。
 
+### 🪟 Windows 用户
+
+EMRG 的守护进程 (`emrgd`) 使用 Unix socket，在 Windows 上推荐通过 **WSL2** 运行：
+
+```powershell
+# 1. 安装 WSL2（如已安装可跳过）
+wsl --install
+
+# 2. 进入 WSL，然后按上方方式一安装
+wsl
+curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash
+```
+
+> ⚠️ 原生 Windows 支持计划中（迁移到 TCP/IP socket），当前请使用 WSL2。
+
+### 🧹 卸载
+
+```bash
+# 仅卸载 CLI（保留源码和数据）
+./install.sh uninstall
+
+# 彻底清除（包括源码和 ~/.emrg 数据目录）
+./install.sh purge
+```
+
+若已删除源码目录，也可手动卸载：
+
+```bash
+uv tool uninstall emrg          # 卸载 CLI
+rm -rf ~/scm/github.com/argszero/emrg   # 删除源码（可选）
+rm -rf ~/.emrg                  # 删除所有数据（谨慎！）
+```
+
 ---
 
 ## 🎮 命令一览

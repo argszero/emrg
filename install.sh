@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Install/update EMRG with uv editable mode.
+# Install/update/uninstall EMRG with uv editable mode.
 #
 # Usage:
-#   ./install.sh          # clone (if needed) + install/update
-#   ./install.sh update   # same as above
+#   ./install.sh            # clone (if needed) + install/update
+#   ./install.sh update     # same as above
+#   ./install.sh uninstall  # remove emrg CLI, stop daemon, (keep source & data)
+#   ./install.sh purge      # uninstall + remove source repo & ~/.emrg data
 #
 # Prerequisites: git, python >=3.11, uv
 set -euo pipefail
@@ -111,14 +113,47 @@ uv_install() {
     fi
 }
 
+# ── Uninstall ──────────────────────────────────────────────
+
+do_uninstall() {
+    log "uninstalling emrg CLI ..."
+    uv tool uninstall emrg 2>/dev/null || warn "emrg was not installed as a uv tool"
+    stop_daemon
+    log "emrg uninstalled (source repo and data kept)"
+    echo "  To reinstall: ./install.sh"
+    echo "  To purge everything: ./install.sh purge"
+}
+
+do_purge() {
+    log "purging emrg ..."
+    uv tool uninstall emrg 2>/dev/null || true
+    stop_daemon
+    if [[ -d "$REPO_DIR" ]]; then
+        log "removing source repo: $REPO_DIR"
+        rm -rf "$REPO_DIR"
+    fi
+    if [[ -d "$HOME/.emrg" ]]; then
+        log "removing data directory: $HOME/.emrg"
+        rm -rf "$HOME/.emrg"
+    fi
+    log "emrg fully purged"
+    echo "  To reinstall: curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash"
+}
+
 # ── Main ───────────────────────────────────────────────────
 
 main() {
-    check_prereqs
-    ensure_repo
-    stop_daemon
-    git_pull
-    uv_install
+    case "${1:-}" in
+        uninstall) do_uninstall ;;
+        purge) do_purge ;;
+        *) 
+            check_prereqs
+            ensure_repo
+            stop_daemon
+            git_pull
+            uv_install
+            ;;
+    esac
 }
 
-main
+main "${1:-}"
