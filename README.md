@@ -8,6 +8,7 @@
   <img alt="Python" src="https://img.shields.io/badge/python-3.10+-blue.svg">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
   <img alt="Status" src="https://img.shields.io/badge/status-evolving-orange.svg">
+  <img alt="Tests" src="https://github.com/argszero/emrg/actions/workflows/test.yml/badge.svg">
   <img alt="PRs Welcome" src="https://img.shields.io/badge/PRs-by%20AI%20%2B%20human-brightgreen.svg">
 </p>
 
@@ -202,9 +203,11 @@ EMRG 不只是追赶——它自己追上来。
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # 安装依赖
-uv run pytest tests/ -v   # 跑测试
+uv run pytest tests/ -v   # 跑测试（当前 159 项）
 uv run python -m emrg     # 启动
 ```
+
+CI 通过 GitHub Actions 自动运行测试并检查冲突标记（`.github/workflows/test.yml`）。
 
 ### 项目结构
 
@@ -217,6 +220,7 @@ emrg/
 │   ├── skills/             # 动态加载模块
 │   └── __main__.py         # CLI 入口
 ├── tests/
+├── .github/workflows/      # CI 流水线（pytest + 冲突标记检查）
 ├── MANIFESTO.md            # 设计宪章
 └── pyproject.toml
 ```
