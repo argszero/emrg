@@ -495,7 +495,7 @@ async def _check_and_restart_if_stale():
         line = await asyncio.wait_for(reader.readline(), timeout=3)
         writer.close()
         try: await writer.wait_closed()
-        except Exception: pass
+        except (ConnectionError, OSError): pass
 
         if not line:
             return
@@ -1478,7 +1478,8 @@ Streaming
             if _needs_resize:
                 _needs_resize = False
                 try: term.handle_resize()
-                except Exception: pass
+                except Exception:
+                    logger.debug("resize handler failed", exc_info=True)
 
             for seq in parser.feed(data):
                 if not await handle_key(seq): return
@@ -1496,7 +1497,7 @@ Streaming
         except (asyncio.CancelledError, Exception): pass
         writer.close()
         try: await writer.wait_closed()
-        except Exception: pass
+        except (ConnectionError, OSError): pass
         term.shutdown(); sys.stdout.write("\n"); sys.stdout.flush()
 
 
