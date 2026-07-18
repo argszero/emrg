@@ -26,7 +26,7 @@ class BashTool(ToolExecutor):
                 "Execute a shell command and return stdout and stderr. "
                 "Use for running tests, git commands, listing files, "
                 "installing packages, and other shell operations. "
-                "Commands run in the project working directory by default; "
+                "Commands run in the working directory by default; "
                 "use the `workdir` parameter to override."
             ),
             parameters={
