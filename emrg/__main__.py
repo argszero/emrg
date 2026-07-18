@@ -131,7 +131,7 @@ async def _send_shutdown() -> bool:
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:
+        except (ConnectionError, OSError):
             pass
         if line:
             data = json.loads(line.decode().strip())
@@ -233,7 +233,7 @@ def _send_rant(message: str) -> None:
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:
+        except (ConnectionError, OSError):
             pass
 
         if line:

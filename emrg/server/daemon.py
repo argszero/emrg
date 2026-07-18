@@ -251,7 +251,7 @@ class BackgroundThread:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
+            except (ConnectionError, OSError):
                 pass
 
         # Write evolution log entry
@@ -494,7 +494,7 @@ class EmrgServer:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
+            except (ConnectionError, OSError):
                 pass
 
             # Consolidate session memories on disconnect
@@ -947,7 +947,7 @@ class EmrgServer:
             writer.close()
             try:
                 await writer.wait_closed()
-            except Exception:
+            except (ConnectionError, OSError):
                 pass
             self._server.close()
 
