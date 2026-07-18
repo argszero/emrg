@@ -28,7 +28,7 @@ def _absorb_learnings(self, summary: str) -> str:
 **已完成 (commit f5d1702)**：
 - `BackgroundThread._run_evolution_cycle()` — 通过 `connect_to_server()` 发送 `stream: true` 的 task 到 server，LLM 可调用完整工具链
 - `BackgroundThread._build_evolution_prompt()` — 从 `emrg/server/evolution_prompt.md` 读取模板，Python 字符串模板替换变量
-- `EmrgServer._touch_project(cwd)` — 每次用户交互后记录 `~/.emrg/logs/projects.jsonl`
+- `EmrgServer._touch_project(cwd)` — 每次用户交互后记录 `~/.emrg/projects.yml`
 - `emrg/server/evolution_prompt.md` — 独立的 prompt 模板文件，源码的一部分
 
 **待实现**：
@@ -120,23 +120,31 @@ Prompt 模板存储在源码目录 `emrg/server/evolution_prompt.md`，是源码
 ### 可用资源
 - **emrg 源码仓库**: `{emrg_repo_url}` — 如果 `source/emrg/` 不存在，用 `git clone` 下载；已存在则 `git pull` 更新
 - **本地源码路径**: `~/.emrg/evolution/source/emrg/` — clone 后在此处读取和修改代码
-- **用户活跃项目**: `~/.emrg/logs/projects.jsonl` — 每个 cwd 及其最后活跃时间
+- **用户活跃项目**: `~/.emrg/projects.yml` — 每个项目及其配置（name, path, repo, auto_evolve 等）
 - **config**: `~/.emrg/config.toml` — 当前的配置文件
 - **本 session 历史**: 上面的消息中包含了之前的演化对话
 
 ### 如何发现改进点
 
-Server 会在每次用户交互后自动记录活跃项目：
+Server 会在每次用户交互后自动记录活跃项目到 `~/.emrg/projects.yml`：
 
-```
-~/.emrg/logs/projects.jsonl
-{"cwd": "/Users/argszero/scm/github.com/argszero/emrg", "last_active": "2026-07-15T10:35:00Z"}
-{"cwd": "/Users/argszero/scm/work/other-project", "last_active": "2026-07-14T08:00:00Z"}
+```yaml
+# ~/.emrg/projects.yml
+- name: emrg
+  path: /Users/argszero/scm/github.com/argszero/emrg
+  repo: argszero/emrg
+  auto_evolve: true
+  last_active: "2026-07-15T10:35:00Z"
+- name: other-project
+  path: /Users/argszero/scm/work/other-project
+  repo: ""
+  auto_evolve: false
+  last_active: "2026-07-14T08:00:00Z"
 ```
 
 演化时按以下步骤分析：
 
-1. 读 `projects.jsonl`，按 `last_active` 排序，重点关注最近活跃的项目
+1. 读 `projects.yml`，按 `auto_evolve` 筛选，按 `last_active` 排序
 2. 对每个 cwd，深入分析：
    - `.emrg/sessions/*/history.jsonl` — 最近的对话内容
    - `.emrg/sessions/*/llm.jsonl` — LLM 调用记录（是否有频繁错误）
@@ -147,7 +155,7 @@ Server 会在每次用户交互后自动记录活跃项目：
    - 用户是否重复问相同的类型的问题，暗示缺了某个工具？
    - 系统提示词是否限制了 LLM 的发挥？
 
-Server 端改动很小：`_handle_client` 收到 task 时写 `projects.jsonl`。（见下方实现方案。）
+Server 端改动很小：`_handle_client` 收到 task 时通过 `_touch_project` 更新 `projects.yml`。（见下方实现方案。）
 
 ### 首次运行的准备工作
 如果 `source/emrg/` 目录还不存在：
@@ -161,7 +169,7 @@ cd source/emrg && git pull
 ```
 
 ### 你可以做的事情
-1. **分析用户交互**: 读 `~/.emrg/logs/projects.jsonl`，找出最近活跃的项目 cwd，去对应的 `.emrg/sessions/` 下读对话历史，发现改进机会
+1. **分析用户交互**: 读 `~/.emrg/projects.yml`，找出项目，去对应的 `.emrg/sessions/` 下读对话历史，发现改进机会
 2. **反思**: 回顾之前的演化记录，看上次的改进是否有持续性效果
 3. **改进**: 修改 emrg 源代码（在 `source/emrg/` 下）
 4. **记录**: 在 `~/.emrg/evolution/.emrg/memory/` 下创建/更新 memory 文件，记录这次演化发现了什么、改了什么、效果预期
