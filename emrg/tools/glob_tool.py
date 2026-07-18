@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
@@ -63,7 +62,11 @@ class GlobTool(ToolExecutor):
 
         cwd = Path(workdir).expanduser().resolve()
         if not cwd.is_dir():
-            cwd = Path.cwd()
+            return ToolResult(
+                name="glob",
+                content=f"Error: workdir not found or not a directory: {workdir}",
+                error=True,
+            )
 
         logger.debug("glob: pattern=%r in %s", pattern, cwd)
 

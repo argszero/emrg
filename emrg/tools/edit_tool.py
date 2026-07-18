@@ -113,7 +113,12 @@ class EditTool(ToolExecutor):
             )
 
         new_content = content.replace(old, new) if replace_all else content.replace(old, new, 1)
-        path.write_text(new_content, encoding="utf-8")
+        try:
+            path.write_text(new_content, encoding="utf-8")
+        except OSError as e:
+            return ToolResult(
+                name="edit", content=f"Error writing file: {e}", error=True
+            )
 
         desc = f"{count} replacements" if replace_all else "1 replacement"
         return ToolResult(name="edit", content=f"Made {desc} in {path}")
