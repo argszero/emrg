@@ -1,0 +1,30 @@
+[project]
+name = "emrg"
+version = "0.1.0"
+description = "EMRG — a self-evolving AI agent architecture"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "argszero" }]
+
+dependencies = [
+    "rich>=13.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+emrg = "emrg.__main__:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build]
+include = ["emrg/**/*.py", "emrg/**/*.md"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

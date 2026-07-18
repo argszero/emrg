@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.emrg/emrg-client.log
+.emrg/logs/
+.emrg/decisions/
+.here-claude/
+.emrg
+.claude
+.pytest_cache/
