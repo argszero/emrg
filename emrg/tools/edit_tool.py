@@ -66,9 +66,9 @@ class EditTool(ToolExecutor):
         replace_all = arguments.get("replace_all", False)
 
         if not file_path:
-            return ToolResult(name="edit", content="Error: no file_path provided")
+            return ToolResult(name="edit", content="Error: no file_path provided", error=True)
         if not old:
-            return ToolResult(name="edit", content="Error: old_string is empty")
+            return ToolResult(name="edit", content="Error: old_string is empty", error=True)
 
         path = Path(file_path).expanduser().resolve()
 

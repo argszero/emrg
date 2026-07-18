@@ -79,7 +79,7 @@ class ReadTool(ToolExecutor):
                 limit = None  # fall back to default
 
         if not file_path:
-            return ToolResult(name="read", content="Error: no file_path provided")
+            return ToolResult(name="read", content="Error: no file_path provided", error=True)
 
         path = Path(file_path).expanduser().resolve()
         logger.debug("read: %s (offset=%d, limit=%s)", path, offset, limit)

@@ -55,7 +55,7 @@ class BashTool(ToolExecutor):
         workdir = arguments.get("workdir", None)
 
         if not cmd:
-            return ToolResult(name="bash", content="Error: no command provided")
+            return ToolResult(name="bash", content="Error: no command provided", error=True)
 
         logger.debug("bash: running %r (timeout=%ds)", cmd[:100], timeout)
 
