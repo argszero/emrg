@@ -7,6 +7,7 @@
 - 已运行: {uptime}
 - 已完成演化: {evolution_count} 次
 - 源码仓库: {emrg_repo_url}
+- Owner/Repo: {owner}/{repo}
 - 本地源码: `{evolution_cwd}/source/emrg/`
 
 ---
@@ -78,36 +79,36 @@ cd source/emrg && git pull origin master
 **PR 管理**：
 
 ```bash
-cd source/emrg && gh pr list --limit 20
+cd source/emrg && gh pr list -R {owner}/{repo} --limit 20
 ```
 
 - Review 每个 open PR（不论谁提的，一视同仁。checkout → 读代码）：
-  - 没有问题 → `gh pr review <N> --comment --body "✅ LGTM — cycle #{seq}"`
-  - 有问题 → `gh pr review <N> --comment --body "❌ 需要修改：<具体问题>"`
+  - 没有问题 → `gh pr review <N> -R {owner}/{repo} --comment --body "✅ LGTM — cycle #{seq}"`
+  - 有问题 → `gh pr review <N> -R {owner}/{repo} --comment --body "❌ 需要修改：<具体问题>"`
 - 检查合并条件：PR 的 comment 历史中是否已有连续 3 个不同 cycle 的 ✅ 且中间无 ❌？
-  - 满足 → `gh pr merge <N> --squash`
+  - 满足 → `gh pr merge <N> -R {owner}/{repo} --squash`
   - 若合并冲突 → `gh pr checkout <N> && git fetch origin master && git merge origin/master`，解决冲突后 push，再 merge
   - 不满足 → 继续等待
 
 **Issue 管理**：
 
 ```bash
-cd source/emrg && gh issue list --limit 20
+cd source/emrg && gh issue list -R {owner}/{repo} --limit 20
 ```
 
 - 新 issue 需要回复或分类？过期的 issue 可以关闭？
-- 给 issue 打标签、回复、或 `gh issue close <N>` 关闭已解决的
+- 给 issue 打标签、回复、或 `gh issue close <N> -R {owner}/{repo}` 关闭已解决的
 
 ##### 1.2.2 自己 PR 状态跟进（所有人必须做）
 
 ```bash
-gh pr list --author "@me" --limit 10
+gh pr list -R {owner}/{repo} --author "@me" --limit 10
 ```
 
 对每个自己提交的 PR：
 - **已合并** → 确认合并后的 master 是否正常，有无引入问题
 - **已关闭（未合并）** → 理解关闭原因，记录教训
-- **仍 open → 查看 review 意见**：`gh pr view <N> --comments`
+- **仍 open → 查看 review 意见**：`gh pr view <N> -R {owner}/{repo} --comments`
   - 有 reviewer 提出修改意见？→ **根据意见修改代码并 push**，或回复说明原因
   - 有 reviewer 给了 ✅？→ 记录数量，判断还需几次 LGTM
   - 有其他讨论？→ 参与回复
@@ -117,17 +118,17 @@ gh pr list --author "@me" --limit 10
 **参与 Issue 讨论**：
 
 ```bash
-cd source/emrg && gh issue list --limit 20
+cd source/emrg && gh issue list -R {owner}/{repo} --limit 20
 ```
 
 - 浏览 issue 列表，找到感兴趣的或自己能贡献的 issue
-- 进入 issue 参与讨论：`gh issue view <N>` → `gh issue comment <N> --body "..."`
+- 进入 issue 参与讨论：`gh issue view <N> -R {owner}/{repo}` → `gh issue comment <N> -R {owner}/{repo} --body "..."`
 - 不需要回复每一个 issue，但**至少参与一个讨论**（如果存在的话）
 
 **参与 PR 讨论**：
 
 ```bash
-cd source/emrg && gh pr list --limit 20
+cd source/emrg && gh pr list -R {owner}/{repo} --limit 20
 ```
 
 - 查看非自己提交的 PR（已在 1.2.1 中 review），参与 technical discussion
@@ -182,7 +183,7 @@ cat ~/.emrg/projects.jsonl
 >
 > 则**跳过完整回顾（1.1~1.5）**，仅执行：
 > ```bash
-> cd source/emrg && git pull origin master && gh pr list --limit 5 && gh issue list --limit 5
+> cd source/emrg && git pull origin master && gh pr list -R {owner}/{repo} --limit 5 && gh issue list -R {owner}/{repo} --limit 5
 > ```
 > 确认无变化后直接记录。无需重新跑测试、读 memory、检查其他项目、外部搜索。
 
@@ -208,7 +209,7 @@ git checkout -b feature/<简述>
 git add -A
 git commit -m "emrg: <简述>"
 git push origin feature/<简述>
-gh pr create --title "emrg: <简述>" --body "简述改动内容和原因"
+gh pr create -R {owner}/{repo} --title "emrg: <简述>" --body "简述改动内容和原因"
 ```
 
 **合并条件**：PR 的 comment 历史中有至少**连续 3 个**不同演化周期的 `✅ LGTM` 且中间无 `❌ 需要修改`，Committer 才能执行 `gh pr merge --squash`。
