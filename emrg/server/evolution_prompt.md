@@ -162,10 +162,10 @@ cd {source_dir} && git fetch origin master && git log origin/master --oneline -1
 #### 1.4 所有项目的 EMRG 记忆和对话
 
 ```bash
-cat ~/.emrg/projects.jsonl
+cat ~/.emrg/projects.yml
 ```
 
-对每个 `cwd`，检查 `.emrg/memory/` 和 `.emrg/sessions/`：
+对每个项目 entry，检查 `path` 下的 `.emrg/memory/` 和 `.emrg/sessions/`：
 - 项目的 memory 文件中有没有对 emrg 本身的反馈？
 - session 对话历史中有没有用户不满的信号（"不对"、"换个方案"、"算了"）？
 - 用户在不同项目中是否遇到了相同的问题模式？
