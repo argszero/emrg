@@ -241,7 +241,7 @@ emrg/
 
 ## 📜 许可证
 
-MIT — 详见 [MANIFESTO.md](MANIFESTO.md) 了解代码背后的设计哲学。
+MIT — 详见 [LICENSE](LICENSE) 了解完整条款，[MANIFESTO.md](MANIFESTO.md) 了解代码背后的设计哲学。
 
 ---
 

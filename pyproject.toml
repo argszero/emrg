@@ -3,7 +3,7 @@ name = "emrg"
 version = "0.1.0"
 description = "EMRG — a self-evolving AI agent architecture"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "argszero" }]
 
 dependencies = [
@@ -18,7 +18,7 @@ emrg = "emrg.__main__:main"
 allow-direct-references = true
 
 [tool.hatch.build]
-include = ["emrg/**/*.py", "emrg/**/*.md"]
+include = ["emrg/**/*.py", "emrg/**/*.md", "LICENSE", "README.md", "README.en.md"]
 
 [build-system]
 requires = ["hatchling"]

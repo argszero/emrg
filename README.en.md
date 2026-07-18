@@ -245,7 +245,7 @@ They're products. EMRG is an experiment in *closing the loop* — the AI improve
 
 ## 📜 License
 
-MIT — see [MANIFESTO.md](MANIFESTO.md) for the philosophy behind the code.
+MIT — see [LICENSE](LICENSE) for the full terms and [MANIFESTO.md](MANIFESTO.md) for the philosophy behind the code.
 
 ---
 
