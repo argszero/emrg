@@ -46,7 +46,7 @@ class WriteTool(ToolExecutor):
         content = arguments.get("content", "")
 
         if not file_path:
-            return ToolResult(name="write", content="Error: no file_path provided")
+            return ToolResult(name="write", content="Error: no file_path provided", error=True)
 
         if len(content) > MAX_WRITE_SIZE:
             return ToolResult(
