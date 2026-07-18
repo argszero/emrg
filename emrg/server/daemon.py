@@ -589,7 +589,7 @@ class EmrgServer:
                     + "\n"
                 )
             os.replace(tmp_path, self._projects_log)
-        except Exception:
+        except OSError:
             logger.warning("_touch_project: atomic write failed for %s", cwd, exc_info=True)
             try:
                 os.unlink(tmp_path)
@@ -650,7 +650,7 @@ class EmrgServer:
                             f"\n\n... [truncated {len(content) - max_chars} chars]"
                         )
                     found.append(f"### {name}\n\n{content}")
-                except Exception:
+                except (OSError, UnicodeDecodeError):
                     logger.debug("failed to read %s", path, exc_info=True)
 
         if not found:
