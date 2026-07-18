@@ -159,6 +159,10 @@ def style_to_sgr(style: object) -> str:
         from rich.color import ColorType
         if s.color.type == ColorType.DEFAULT:
             codes.append(39)
+        elif s.color.number is not None:
+            codes.append(38)
+            codes.append(5)
+            codes.append(s.color.number)
         elif s.color.type is not None:
             color = s.color.get_truecolor()
             if color is not None:
@@ -167,16 +171,16 @@ def style_to_sgr(style: object) -> str:
                 codes.append(color.red)
                 codes.append(color.green)
                 codes.append(color.blue)
-        elif s.color.number is not None:
-            codes.append(38)
-            codes.append(5)
-            codes.append(s.color.number)
 
     # Background color
     if s.bgcolor is not None:
         from rich.color import ColorType
         if s.bgcolor.type == ColorType.DEFAULT:
             codes.append(49)
+        elif s.bgcolor.number is not None:
+            codes.append(48)
+            codes.append(5)
+            codes.append(s.bgcolor.number)
         elif s.bgcolor.type is not None:
             color = s.bgcolor.get_truecolor()
             if color is not None:
@@ -185,10 +189,6 @@ def style_to_sgr(style: object) -> str:
                 codes.append(color.red)
                 codes.append(color.green)
                 codes.append(color.blue)
-        elif s.bgcolor.number is not None:
-            codes.append(48)
-            codes.append(5)
-            codes.append(s.bgcolor.number)
 
     if not codes:
         return "\x1b[0m"

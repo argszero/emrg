@@ -31,3 +31,23 @@ def test_glob_tool_import():
     """emrg.tools.glob_tool (PR #15) should import cleanly."""
     from emrg.tools.glob_tool import GlobTool
     assert GlobTool is not None
+
+
+def test_style_to_sgr_256color():
+    """256-color paths must be reachable (not shadowed by truecolor fallback)."""
+    from rich.style import Style
+    from rich.color import Color
+    from emrg.client.python_tui.output import style_to_sgr
+
+    # Default empty style → reset
+    assert style_to_sgr(Style()) == "\x1b[0m"
+
+    # Named ANSI color (STANDARD type, number=1) → 38;5;1
+    sgr = style_to_sgr(Style.parse("red"))
+    assert "\x1b[38;5;1m" in sgr or "\x1b[1;" in sgr  # bold red can combine
+
+    # Explicit 256-color → 38;5;N (must not be truecolor 38;2)
+    c = Color.parse("color(100)")
+    sgr = style_to_sgr(Style(color=c))
+    assert "38;5;100" in sgr, f"expected 256-color, got {sgr!r}"
+    assert "38;2;" not in sgr, f"should not use truecolor, got {sgr!r}"
