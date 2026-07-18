@@ -69,6 +69,7 @@ cd source/emrg && git pull origin master
 > - `/resume` ✅ | `/rename` ✅ | `/memory` ✅ | `/sessions` ✅ | `/help` ✅ | `/version` ✅
 > - Ctrl+A/E/W/K/U 快捷键 ✅ | bracketed paste 优化 ✅
 > - 渲染节流 (60fps) ✅ | 动态视口 ✅ | 自动 compact ✅
+> - ANSI 颜色高亮修复 (style_to_sgr) ✅ | 安装/卸载 ✅ | Windows/WSL 指导 ✅
 
 #### 1.2 GitHub
 
