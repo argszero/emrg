@@ -71,18 +71,11 @@ class ReadTool(ToolExecutor):
             offset = max(1, int(raw_offset))
         except (TypeError, ValueError):
             offset = 1
-        limit = arguments.get("limit")  # None → use default MAX_LINES
-        if limit is not None:
-            try:
-                limit = int(limit)
-            except (TypeError, ValueError):
-                limit = None  # fall back to default
-
         if not file_path:
             return ToolResult(name="read", content="Error: no file_path provided", error=True)
 
         path = Path(file_path).expanduser().resolve()
-        logger.debug("read: %s (offset=%d, limit=%s)", path, offset, limit)
+        logger.debug("read: %s (offset=%d)", path, offset)
 
         if not path.exists():
             return ToolResult(
