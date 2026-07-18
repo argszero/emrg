@@ -332,7 +332,7 @@ class BackgroundThread:
             uptime_seconds = 0
         uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
 
-        # Derive source_dir, owner/repo, and repo_url from project if available
+        # Derive source_dir, owner/repo, repo_url, and session_id from project
         if project:
             source_dir = project.get("path", self.SOURCE_DIR)
             local_source = source_dir  # project path is already absolute
@@ -343,11 +343,13 @@ class BackgroundThread:
             else:
                 owner, repo = self.OWNER, self.REPO
                 repo_url = self.EMRG_REPO_URL
+            session_id = f"emrg-evolution-{project.get('name', 'unknown')}"
         else:
             source_dir = self.SOURCE_DIR
             local_source = str(self.EVOLUTION_CWD / self.SOURCE_DIR)
             owner, repo = self.OWNER, self.REPO
             repo_url = self.EMRG_REPO_URL
+            session_id = self.SESSION_ID
 
         return template.format(
             seq=seq,
@@ -361,7 +363,7 @@ class BackgroundThread:
             owner=owner,
             repo=repo,
             source_dir=source_dir,
-            session_id=self.SESSION_ID,
+            session_id=session_id,
         )
 
     # ── Project discovery ─────────────────────────────────────
