@@ -19,6 +19,8 @@ import secrets
 from datetime import datetime
 from pathlib import Path
 
+from emrg.memory import SessionMemoryStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,7 +62,7 @@ class Session:
         self._updated_at: str = ""
         self._last_compact_at: str | None = None
 
-        # Lazy memory store (import here to avoid circular imports)
+        # Lazy-initialized memory store
         self._memory_store = None
 
     # ── Factory methods ───────────────────────────────────────
@@ -116,7 +118,6 @@ class Session:
     def memory_store(self):
         """Lazy-initialized SessionMemoryStore for this session's memory."""
         if self._memory_store is None:
-            from emrg.memory import SessionMemoryStore
             self._memory_store = SessionMemoryStore(self._dir)
         return self._memory_store
 
