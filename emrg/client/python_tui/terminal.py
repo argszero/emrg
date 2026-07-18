@@ -342,6 +342,7 @@ class Terminal:
         try:
             lines = widget.render(ctx)
         except Exception:
+            logger.exception("scrollback push render failed")
             return
 
         if lines:
