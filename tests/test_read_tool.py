@@ -106,3 +106,28 @@ def test_read_truncation_message(temp_file):
     assert not result.error
     # Should show truncation message since 1500 > 1000
     assert "truncated" in result.content or "lines" in result.content
+
+
+def test_read_explicit_limit_above_default(temp_file):
+    """Explicit limit between NDJSON_SAFE_MAX_LINES (1000) and MAX_LINES (2000)
+    should be honored — returns up to the requested number of lines."""
+    tool = ReadTool()
+    _, d = temp_file
+    big = d / "big2.txt"
+    big.write_text("\n".join(f"line {i}" for i in range(1, 1501)) + "\n")
+    result = _run(tool.execute({"file_path": str(big), "limit": 1200}))
+    assert not result.error
+    # With explicit limit=1200, we should get more than 1000 lines
+    assert "truncated" in result.content  # 1500 > 1200
+
+
+def test_read_explicit_limit_capped_at_max(temp_file):
+    """Explicit limit above MAX_LINES (2000) should be capped at MAX_LINES."""
+    tool = ReadTool()
+    _, d = temp_file
+    big = d / "big3.txt"
+    big.write_text("\n".join(f"line {i}" for i in range(1, 2501)) + "\n")
+    result = _run(tool.execute({"file_path": str(big), "limit": 2500}))
+    assert not result.error
+    # Should be capped at MAX_LINES=2000, so 2500 lines should show truncation
+    assert "truncated" in result.content
