@@ -56,7 +56,7 @@ class ReadTool(ToolExecutor):
                         "description": (
                             f"The number of lines to read. "
                             f"Only provide if the file is too large to read at once "
-                            f"(default: {MAX_LINES}, max: {MAX_LINES} for explicit calls)."
+                            f"(default: {NDJSON_SAFE_MAX_LINES}, max: {MAX_LINES} for explicit calls)."
                         ),
                     },
                 },
