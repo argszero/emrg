@@ -243,6 +243,21 @@ class LlmClient:
                     if finish:
                         return
 
+                # Stream ended without finish_reason (e.g. connection drop
+                # mid-stream). Treat as transient error — retry if attempts remain.
+                last_error = RuntimeError(
+                    "LLM stream ended without finish_reason"
+                )
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        "LLM stream ended prematurely, retrying in %.1fs "
+                        "(attempt %d/%d)",
+                        delay, attempt + 1, MAX_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
         raise last_error  # type: ignore[misc]
 
     async def close(self) -> None:
