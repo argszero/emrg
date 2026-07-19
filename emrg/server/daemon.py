@@ -1625,7 +1625,7 @@ class EmrgServer:
                 try:
                     summary = await self._chunked_compact(records)
                 except Exception as e2:
-                    logger.error("chunked compact also failed: %s", e2)
+                    logger.exception("chunked compact also failed")
                     await self._send(writer, {
                         "type": "compact_result",
                         "session_id": session.session_id,
@@ -1818,7 +1818,7 @@ class EmrgServer:
                         for p in data if isinstance(p, dict)
                     ]
         except (yaml.YAMLError, OSError) as e:
-            logger.warning("Failed to read projects.yml: %s", e)
+            logger.exception("Failed to read projects.yml")
         await self._send(writer, {
             "type": "projects_list",
             "projects": projects,
@@ -1981,7 +1981,7 @@ class EmrgServer:
             logger.info("auto-generated title for %s: %s", session.session_id, title)
             return title
         except Exception as e:
-            logger.warning("title generation failed: %s", e)
+            logger.exception("title generation failed")
             return session.session_id
 
     # ── Memory reflection & consolidation ─────────────────────
