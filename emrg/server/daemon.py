@@ -648,6 +648,10 @@ class EmrgServer:
         they want automatically evolved.
         """
         cwd = os.path.realpath(cwd)
+        # Don't track the evolution engine's own workspace as a project
+        evolution_cwd = str(self.EVOLUTION_CWD.resolve())
+        if cwd == evolution_cwd or cwd.startswith(evolution_cwd + os.sep):
+            return
         self._projects_log.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now().isoformat()
 
@@ -676,7 +680,7 @@ class EmrgServer:
             projects[cwd] = {
                 "name": name,
                 "path": cwd,
-                "repo": "",
+                "repo": "TODO: fill in owner/repo",
                 "auto_evolve": False,
                 "interval": 1800,
                 "last_active": now,
