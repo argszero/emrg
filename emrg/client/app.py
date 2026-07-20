@@ -713,7 +713,7 @@ async def interactive():
             try: line = await asyncio.wait_for(reader.readline(), timeout=0.1)
             except asyncio.TimeoutError: continue
             except Exception as e:
-                logger.error("server connection lost: %s", e)
+                logger.exception("server connection lost: %s", e)
                 chat.add("system", "server connection lost"); break
             if not line: chat.add("system", "server disconnected"); break
             text = line.decode().strip()

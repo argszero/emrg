@@ -289,7 +289,7 @@ class BackgroundThread:
                     logger.warning("evolution #%d server error: %s", seq, error)
                     break
         except Exception as e:
-            logger.warning("evolution #%d error: %s", seq, e)
+            logger.exception("evolution #%d error", seq)
             error = str(e)
         finally:
             writer.close()
