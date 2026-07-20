@@ -43,29 +43,57 @@ EMRG is an experiment in *autonomous self-improvement*. It's an AI agent that he
 
 ## 🚀 Quick Start
 
-**Option 1: One-liner install script (recommended)**
+### 🍎 macOS
+
+**Install:**
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash
 ```
 
-This clones the repo, installs `emrg` globally with `uv`, and keeps it updated.
-
-**Option 2: Install from source**
+**Uninstall:**
 
 ```bash
-git clone https://github.com/argszero/emrg.git
-cd emrg
-./install.sh
+curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
 ```
 
-**Option 3: Install from PyPI** (coming soon)
+### 🐧 Linux
+
+**Install:**
 
 ```bash
-pip install emrg
+curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash
 ```
 
-**Configure your LLM** — tell EMRG which model to use:
+**Uninstall:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
+```
+
+### 🪟 Windows (WSL2)
+
+**Install:**
+
+```powershell
+# Install WSL2 (skip if already installed)
+wsl --install
+
+# Enter WSL, then install
+wsl
+curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash
+```
+
+**Uninstall:**
+
+```bash
+# Run inside WSL
+curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
+```
+
+> Prerequisites (install.sh auto-detects and prompts): git, python 3.10+, uv. gh CLI recommended.
+
+After installing, configure your LLM:
 
 ```bash
 mkdir -p ~/.emrg
@@ -76,44 +104,10 @@ api_key = "sk-your-api-key"
 model = "deepseek-chat"
 EOF
 
-# That's it — launch and start chatting
 emrg
 ```
 
 Type `/help` to see all commands, or just start talking — EMRG reads files, runs commands, and makes edits.
-
-### 🪟 Windows Users
-
-EMRG's daemon (`emrgd`) uses Unix sockets. On Windows, we recommend running via **WSL2**:
-
-```powershell
-# 1. Install WSL2 (skip if already installed)
-wsl --install
-
-# 2. Enter WSL, then install using Option 1 above
-wsl
-curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash
-```
-
-> ⚠️ Native Windows support is planned (migrating to TCP/IP sockets). Use WSL2 for now.
-
-### 🧹 Uninstall
-
-```bash
-# Uninstall CLI only (keep source and data)
-./install.sh uninstall
-
-# Full purge (removes source repo and ~/.emrg data)
-./install.sh purge
-```
-
-If you've already deleted the source directory, uninstall manually:
-
-```bash
-uv tool uninstall emrg                   # remove CLI
-rm -rf ~/scm/github.com/argszero/emrg    # remove source (optional)
-rm -rf ~/.emrg                           # remove all data (careful!)
-```
 
 ---
 
