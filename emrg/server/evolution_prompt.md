@@ -77,6 +77,8 @@ cd {source_dir} && git pull origin master
 > - `/rant` 交互式项目选择器 ✅ | 并行演化协程 (asyncio.gather) ✅
 > - CI workflow (pytest + 冲突标记检查) ✅ | CI badge ✅
 > - projects.jsonl→projects.yml 迁移 ✅ | prompt 变量替换验证 ✅
+> - `emrg rant -p/--project` CLI 标志 ✅ | install.sh 标准路径+gh检查+python版本验证 ✅
+> - ProjectSelector nonlocal 变量修复 ✅
 
 #### 1.2 GitHub
 
