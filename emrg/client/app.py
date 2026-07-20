@@ -1077,6 +1077,7 @@ async def interactive():
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, writer, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
         nonlocal selector_active, selector_widget, _pending_resume_select
+        nonlocal project_selector_active, project_selector_widget
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task
