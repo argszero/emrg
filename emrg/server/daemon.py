@@ -648,6 +648,10 @@ class EmrgServer:
         they want automatically evolved.
         """
         cwd = os.path.realpath(cwd)
+        # Don't track the evolution engine's own workspace as a project
+        evolution_cwd = str(self.EVOLUTION_CWD.resolve())
+        if cwd == evolution_cwd or cwd.startswith(evolution_cwd + os.sep):
+            return
         self._projects_log.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now().isoformat()
 
@@ -676,7 +680,7 @@ class EmrgServer:
             projects[cwd] = {
                 "name": name,
                 "path": cwd,
-                "repo": "",
+                "repo": "TODO: fill in owner/repo",
                 "auto_evolve": False,
                 "interval": 1800,
                 "last_active": now,
@@ -1807,6 +1811,7 @@ class EmrgServer:
         self, writer: asyncio.StreamWriter
     ) -> None:
         """Read projects.yml and return all project entries."""
+        evolution_cwd = str(self.EVOLUTION_CWD.resolve())
         projects: list[dict] = []
         try:
             if self._projects_log.exists():
@@ -1815,7 +1820,9 @@ class EmrgServer:
                     projects = [
                         {"name": p.get("name", ""), "repo": p.get("repo", ""),
                          "path": p.get("path", ""), "auto_evolve": p.get("auto_evolve", False)}
-                        for p in data if isinstance(p, dict)
+                        for p in data
+                        if isinstance(p, dict)
+                        and not str(p.get("path", "")).startswith(evolution_cwd)
                     ]
         except (yaml.YAMLError, OSError) as e:
             logger.exception("Failed to read projects.yml")
