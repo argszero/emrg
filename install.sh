@@ -110,6 +110,33 @@ git_pull() {
     echo "$output"
 }
 
+# ── Config template ────────────────────────────────────────
+
+generate_config_template() {
+    local cfg="$HOME/.emrg/config.toml"
+    if [[ -f "$cfg" ]]; then
+        log "config already exists: $cfg"
+        return
+    fi
+    log "generating config template: $cfg"
+    mkdir -p "$HOME/.emrg"
+    cat > "$cfg" <<'EMRGCONF'
+[llm]
+# OpenAI-compatible API endpoint
+base_url = "https://api.deepseek.com"
+# Replace with your API key
+api_key = "sk-..."
+# Change to your preferred model
+model = "deepseek-chat"
+max_tokens = 4096
+temperature = 0.7
+context_window = 131072
+auto_compact_threshold = 0.0
+evolution_interval = 1800
+EMRGCONF
+    log "config template created — edit $cfg to set your api_key and model"
+}
+
 # ── Install ────────────────────────────────────────────────
 
 uv_install() {
@@ -182,6 +209,7 @@ main() {
             stop_daemon
             git_pull
             uv_install
+            generate_config_template
             ;;
     esac
 }
