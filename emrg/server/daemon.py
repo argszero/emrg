@@ -1830,9 +1830,15 @@ class EmrgServer:
                     projects = [
                         {"name": p.get("name", ""), "repo": p.get("repo", ""),
                          "path": p.get("path", ""), "auto_evolve": p.get("auto_evolve", False)}
-                        for p in data
-                        if isinstance(p, dict)
-                        and not str(p.get("path", "")).startswith(evolution_cwd)
+                        for p in data if isinstance(p, dict)
+                    ]
+                    # Filter out evolution workspace (exact match + subdirs)
+                    projects = [
+                        p for p in projects
+                        if not (
+                            p["path"] == evolution_cwd
+                            or p["path"].startswith(evolution_cwd + os.sep)
+                        )
                     ]
         except (yaml.YAMLError, OSError) as e:
             logger.exception("Failed to read projects.yml")
