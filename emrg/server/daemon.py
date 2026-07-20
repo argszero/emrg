@@ -16,6 +16,7 @@ import logging
 import os
 import platform
 import signal
+import subprocess
 import tempfile
 import time
 from datetime import datetime
@@ -375,45 +376,15 @@ class BackgroundThread:
 
     # ── Project discovery ─────────────────────────────────────
 
-    def _bootstrap_projects_yml(self) -> None:
-        """Create ~/.emrg/projects.yml with emrg self-project pre-configured.
-
-        Called when projects.yml doesn't exist yet, so new users get
-        self-evolution out of the box without manually editing YAML.
-        """
-        emrg_source = config_dir() / "source"
-        if not emrg_source.exists():
-            emrg_source.mkdir(parents=True, exist_ok=True)
-
-        entry = {
-            "name": "emrg",
-            "path": str(emrg_source),
-            "repo": "argszero/emrg",
-            "auto_evolve": True,
-            "interval": 600,
-            "last_active": datetime.now().isoformat(),
-        }
-        self._projects_log.parent.mkdir(parents=True, exist_ok=True)
-        yaml.safe_dump(
-            [entry], self._projects_log,
-            allow_unicode=True, default_flow_style=False, sort_keys=False,
-        )
-        logger.info("bootstrapped projects.yml with emrg self-project")
-
     def _get_auto_evolve_projects(self) -> list[dict]:
         """Read projects.yml, return list of auto_evolve-enabled projects.
 
-        Auto-creates projects.yml with emrg self-project on first run
-        so self-evolution works out of the box.
+        If projects.yml doesn't exist, returns empty list.
+        Projects are added via _touch_project on client connect.
+        Use 'emrg --init-auto-evolve' to enable auto-evolution for a project.
         """
         if not self._projects_log.exists():
-            try:
-                self._bootstrap_projects_yml()
-            except OSError:
-                logger.warning(
-                    "failed to bootstrap projects.yml", exc_info=True
-                )
-                return []
+            return []
         try:
             data = yaml.safe_load(self._projects_log.read_text())
         except (yaml.YAMLError, OSError):
@@ -670,7 +641,7 @@ class EmrgServer:
 
     # ── Project tracking ─────────────────────────────────────
 
-    def _touch_project(self, cwd: str) -> None:
+    def _touch_project(self, cwd: str, *, init_auto_evolve: bool = False) -> None:
         """Record a project as active in ~/.emrg/projects.yml.
 
         Used by the evolution cycle to discover which projects have
@@ -682,6 +653,10 @@ class EmrgServer:
         New projects default to auto_evolve=False. Users can edit the YAML
         to set auto_evolve=True and fill in repo (owner/repo) for projects
         they want automatically evolved.
+
+        When init_auto_evolve=True (emitted by 'emrg --init-auto-evolve'),
+        the entry is created with auto_evolve=True and the git remote is
+        auto-detected for the repo field.
         """
         cwd = os.path.realpath(cwd)
         # Don't track the evolution engine's own workspace as a project
@@ -711,6 +686,12 @@ class EmrgServer:
         # Update or add entry
         if cwd in projects:
             projects[cwd]["last_active"] = now
+            if init_auto_evolve:
+                projects[cwd]["auto_evolve"] = True
+                if projects[cwd].get("repo", "").startswith("TODO"):
+                    projects[cwd]["repo"] = self._detect_git_remote(cwd)
+                projects[cwd]["interval"] = 600
+                logger.info("init-auto-evolve: enabled for %s", projects[cwd]["name"])
         else:
             # Check if cwd is a subdirectory of an existing project.
             # Prefer the longest matching parent path (most specific).
@@ -721,17 +702,21 @@ class EmrgServer:
                         parent = known_path
             if parent:
                 projects[parent]["last_active"] = now
+                if init_auto_evolve:
+                    projects[parent]["auto_evolve"] = True
+                    logger.info("init-auto-evolve: enabled for parent %s", projects[parent]["name"])
             else:
                 name = os.path.basename(cwd.rstrip("/"))
+                repo = self._detect_git_remote(cwd) if init_auto_evolve else "TODO: fill in owner/repo"
                 projects[cwd] = {
                     "name": name,
                     "path": cwd,
-                    "repo": "TODO: fill in owner/repo",
-                    "auto_evolve": False,
-                    "interval": 1800,
+                    "repo": repo,
+                    "auto_evolve": init_auto_evolve,
+                    "interval": 600 if init_auto_evolve else 1800,
                     "last_active": now,
                 }
-                logger.info("new project tracked: %s (auto_evolve=false)", name)
+                logger.info("new project tracked: %s (auto_evolve=%s)", name, init_auto_evolve)
 
         # Build sorted YAML list
         entries = sorted(projects.values(), key=lambda e: e.get("path", ""))
@@ -759,6 +744,36 @@ class EmrgServer:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+    @staticmethod
+    def _detect_git_remote(cwd: str) -> str:
+        """Detect the origin remote (owner/repo) from a git repository.
+
+        Returns 'TODO: fill in owner/repo' if detection fails.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                cwd=cwd, capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                url = result.stdout.strip()
+                # Extract owner/repo from various URL formats:
+                #   git@github.com:owner/repo.git
+                #   https://github.com/owner/repo.git
+                #   https://github.com/owner/repo
+                if ":" in url and "@" in url:
+                    # SSH: git@github.com:owner/repo.git
+                    parts = url.split(":")[-1]
+                elif "github.com/" in url:
+                    # HTTPS: https://github.com/owner/repo
+                    parts = url.split("github.com/")[-1]
+                else:
+                    return "TODO: fill in owner/repo"
+                return parts.removesuffix(".git")
+        except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+            pass
+        return "TODO: fill in owner/repo"
 
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt, including skill context, memory, and history."""
@@ -926,6 +941,21 @@ class EmrgServer:
                 "started_at": self.start_time.isoformat(),
                 "pid": os.getpid(),
             })
+            return
+
+        elif msg_type == "init_auto_evolve":
+            cwd = msg.get("cwd", "")
+            if cwd:
+                self._touch_project(cwd, init_auto_evolve=True)
+                await self._send(writer, {
+                    "ok": True,
+                    "message": f"auto_evolve enabled for {cwd}",
+                })
+            else:
+                await self._send(writer, {
+                    "ok": False,
+                    "error": "init_auto_evolve requires cwd",
+                })
             return
 
         elif msg_type == "task":
