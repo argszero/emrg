@@ -252,13 +252,26 @@ class BackgroundThread:
         error = None
 
         try:
-            writer.write(task_msg.encode())
+            task_bytes = task_msg.encode()
+            logger.info("evolution #%d: task sent (%d bytes), waiting for LLM response ...",
+                        seq, len(task_bytes))
+            writer.write(task_bytes)
             await writer.drain()
-            logger.info("evolution #%d: task sent, waiting for LLM response ...", seq)
 
             # Read streaming responses until done
             while True:
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except asyncio.LimitOverrunError as loe:
+                    logger.error(
+                        "evolution #%d: asyncio.LimitOverrunError in readline "
+                        "(consumed=%d bytes). The response line exceeded the "
+                        "64KB asyncio buffer limit. Task msg was %d bytes.",
+                        seq, loe.consumed, len(task_bytes),
+                        exc_info=True,
+                    )
+                    error = f"LimitOverrunError: line exceeded 64KB buffer (consumed={loe.consumed})"
+                    break
                 if not line:
                     logger.info("evolution #%d: server closed connection", seq)
                     break
@@ -566,7 +579,17 @@ class EmrgServer:
         last_cwd: str | None = None
         try:
             while True:
-                line = await reader.readline()
+                try:
+                    line = await reader.readline()
+                except asyncio.LimitOverrunError as loe:
+                    logger.error(
+                        "client readline LimitOverrunError "
+                        "(consumed=%d bytes). The client message exceeded "
+                        "the 64KB asyncio buffer limit.",
+                        loe.consumed,
+                        exc_info=True,
+                    )
+                    break
                 if not line:
                     break
 
@@ -615,6 +638,13 @@ class EmrgServer:
         try:
             encoded = (json.dumps(data, ensure_ascii=False) + "\n").encode()
             if len(encoded) > self._MAX_LINE_BYTES:
+                logger.warning(
+                    "_send truncating line: %d bytes → target %d bytes, "
+                    "fields: %s",
+                    len(encoded), self._MAX_LINE_BYTES,
+                    {k: len(v) if isinstance(v, str) else type(v).__name__
+                     for k, v in data.items() if isinstance(v, str)},
+                )
                 # Truncate large string fields to fit within NDJSON 64KB safety limit.
                 # Priority: content > summary > index (most common large fields).
                 for field in ("content", "summary", "index"):
