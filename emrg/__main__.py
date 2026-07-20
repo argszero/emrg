@@ -68,12 +68,17 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Update emrg by pulling latest source and reinstalling.",
     )
 
-    # emrg rant <message>
+    # emrg rant [--project <name>] <message>
     rant_parser = sub.add_parser(
         "rant",
         help="Send feedback/complaint to EMRG for evolution analysis",
         description="Send a rant (feedback, complaint, suggestion) that the "
         "evolution system will use to discover improvement opportunities.",
+    )
+    rant_parser.add_argument(
+        "-p", "--project",
+        help="Target project (from projects.yml). Omit for emrg itself.",
+        default=None,
     )
     rant_parser.add_argument(
         "message", nargs="+", help="Your rant/feedback/suggestion",
@@ -94,7 +99,7 @@ def main() -> None:
         else:
             _run_daemon()
     elif parsed.command == "rant":
-        _send_rant(" ".join(parsed.message))
+        _send_rant(" ".join(parsed.message), project=parsed.project)
     elif parsed.command == "update":
         _run_update()
     else:
@@ -213,7 +218,7 @@ def _run_daemon() -> None:
 
 # ── Rant ──────────────────────────────────────────────────────
 
-def _send_rant(message: str) -> None:
+def _send_rant(message: str, project: str | None = None) -> None:
     """Send a rant/feedback message to the daemon for evolution analysis."""
     async def _do() -> None:
         try:
@@ -222,11 +227,15 @@ def _send_rant(message: str) -> None:
             print("daemon not running. Start it first with: emrg")
             return
 
-        writer.write(json.dumps({
+        payload: dict = {
             "type": "rant",
             "message": message,
             "timestamp": datetime.now().isoformat(),
-        }).encode() + b"\n")
+        }
+        if project:
+            payload["project"] = project
+
+        writer.write(json.dumps(payload).encode() + b"\n")
         await writer.drain()
 
         line = await asyncio.wait_for(reader.readline(), timeout=5)
