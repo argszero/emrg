@@ -375,13 +375,45 @@ class BackgroundThread:
 
     # ── Project discovery ─────────────────────────────────────
 
+    def _bootstrap_projects_yml(self) -> None:
+        """Create ~/.emrg/projects.yml with emrg self-project pre-configured.
+
+        Called when projects.yml doesn't exist yet, so new users get
+        self-evolution out of the box without manually editing YAML.
+        """
+        emrg_source = config_dir() / "source"
+        if not emrg_source.exists():
+            emrg_source.mkdir(parents=True, exist_ok=True)
+
+        entry = {
+            "name": "emrg",
+            "path": str(emrg_source),
+            "repo": "argszero/emrg",
+            "auto_evolve": True,
+            "interval": 600,
+            "last_active": datetime.now().isoformat(),
+        }
+        self._projects_log.parent.mkdir(parents=True, exist_ok=True)
+        yaml.safe_dump(
+            [entry], self._projects_log,
+            allow_unicode=True, default_flow_style=False, sort_keys=False,
+        )
+        logger.info("bootstrapped projects.yml with emrg self-project")
+
     def _get_auto_evolve_projects(self) -> list[dict]:
         """Read projects.yml, return list of auto_evolve-enabled projects.
 
-        Returns empty list if the file doesn't exist or is unreadable.
+        Auto-creates projects.yml with emrg self-project on first run
+        so self-evolution works out of the box.
         """
         if not self._projects_log.exists():
-            return []
+            try:
+                self._bootstrap_projects_yml()
+            except OSError:
+                logger.warning(
+                    "failed to bootstrap projects.yml", exc_info=True
+                )
+                return []
         try:
             data = yaml.safe_load(self._projects_log.read_text())
         except (yaml.YAMLError, OSError):
