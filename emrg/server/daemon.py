@@ -130,6 +130,36 @@ MEMORY_MANAGEMENT_PROMPT = (
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
 
+def _detect_git_remote(cwd: str) -> str:
+    """Detect the origin remote (owner/repo) from a git repository.
+
+    Returns '' if detection fails.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            # Extract owner/repo from various URL formats:
+            #   git@github.com:owner/repo.git
+            #   https://github.com/owner/repo.git
+            #   https://github.com/owner/repo
+            if ":" in url and "@" in url:
+                # SSH: git@github.com:owner/repo.git
+                parts = url.split(":")[-1]
+            elif "github.com/" in url:
+                # HTTPS: https://github.com/owner/repo
+                parts = url.split("github.com/")[-1]
+            else:
+                return ""
+            return parts.removesuffix(".git")
+    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
+        pass
+    return ""
+
+
 class BackgroundThread:
     """Background evolution thread: heartbeat of EMRG life.
 
@@ -344,7 +374,7 @@ class BackgroundThread:
                    {owner}, {repo}, {source_dir}, {session_id}
 
         If project is provided, derives source_dir from the project path
-        and owner/repo from the project's repo field.
+        and owner/repo detected from git remote at runtime.
         """
         template = self._TEMPLATE_PATH.read_text()
         if self._start_time is not None:
@@ -357,7 +387,7 @@ class BackgroundThread:
         if project:
             source_dir = project.get("path", self.SOURCE_DIR)
             local_source = source_dir  # project path is already absolute
-            repo_spec = project.get("repo", "")
+            repo_spec = _detect_git_remote(source_dir)
             if repo_spec and "/" in repo_spec:
                 owner, repo = repo_spec.split("/", 1)
                 repo_url = f"https://github.com/{owner}/{repo}.git"
@@ -681,12 +711,11 @@ class EmrgServer:
         cause duplicate entries.
 
         New projects default to auto_evolve=False. Users can edit the YAML
-        to set auto_evolve=True and fill in repo (owner/repo) for projects
-        they want automatically evolved.
+        to set auto_evolve=True for projects they want automatically evolved.
+        owner/repo is detected at runtime from git remote, not stored.
 
         When init_auto_evolve=True (emitted by 'emrg --init-auto-evolve'),
-        the entry is created with auto_evolve=True and the git remote is
-        auto-detected for the repo field.
+        the entry is created with auto_evolve=True.
         """
         cwd = os.path.realpath(cwd)
         # Don't track the evolution engine's own workspace as a project
@@ -718,8 +747,6 @@ class EmrgServer:
             projects[cwd]["last_active"] = now
             if init_auto_evolve:
                 projects[cwd]["auto_evolve"] = True
-                if projects[cwd].get("repo", "").startswith("TODO"):
-                    projects[cwd]["repo"] = self._detect_git_remote(cwd)
                 projects[cwd]["interval"] = 600
                 logger.info("init-auto-evolve: enabled for %s", projects[cwd]["name"])
         else:
@@ -737,11 +764,9 @@ class EmrgServer:
                     logger.info("init-auto-evolve: enabled for parent %s", projects[parent]["name"])
             else:
                 name = os.path.basename(cwd.rstrip("/"))
-                repo = self._detect_git_remote(cwd) if init_auto_evolve else "TODO: fill in owner/repo"
                 projects[cwd] = {
                     "name": name,
                     "path": cwd,
-                    "repo": repo,
                     "auto_evolve": init_auto_evolve,
                     "interval": 600 if init_auto_evolve else 1800,
                     "last_active": now,
@@ -779,31 +804,9 @@ class EmrgServer:
     def _detect_git_remote(cwd: str) -> str:
         """Detect the origin remote (owner/repo) from a git repository.
 
-        Returns 'TODO: fill in owner/repo' if detection fails.
+        Returns '' if detection fails.
         """
-        try:
-            result = subprocess.run(
-                ["git", "remote", "get-url", "origin"],
-                cwd=cwd, capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0:
-                url = result.stdout.strip()
-                # Extract owner/repo from various URL formats:
-                #   git@github.com:owner/repo.git
-                #   https://github.com/owner/repo.git
-                #   https://github.com/owner/repo
-                if ":" in url and "@" in url:
-                    # SSH: git@github.com:owner/repo.git
-                    parts = url.split(":")[-1]
-                elif "github.com/" in url:
-                    # HTTPS: https://github.com/owner/repo
-                    parts = url.split("github.com/")[-1]
-                else:
-                    return "TODO: fill in owner/repo"
-                return parts.removesuffix(".git")
-        except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
-            pass
-        return "TODO: fill in owner/repo"
+        return _detect_git_remote(cwd)
 
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt, including skill context, memory, and history."""
@@ -1924,7 +1927,8 @@ class EmrgServer:
                 data = yaml.safe_load(self._projects_log.read_text())
                 if isinstance(data, list):
                     projects = [
-                        {"name": p.get("name", ""), "repo": p.get("repo", ""),
+                        {"name": p.get("name", ""),
+                         "repo": _detect_git_remote(p.get("path", "")),
                          "path": p.get("path", ""), "auto_evolve": p.get("auto_evolve", False)}
                         for p in data if isinstance(p, dict)
                     ]

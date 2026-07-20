@@ -125,24 +125,26 @@ def test_build_prompt_emrg_self():
 
 
 def test_build_prompt_with_project():
-    """Builds prompt for a custom project — derives owner/repo/source_dir."""
+    """Builds prompt for a custom project — derives owner/repo via git remote."""
+    from unittest.mock import patch
+
     bt = BackgroundThread(
         InstanceIdentity(instance_id="test-id", host_name="testhost")
     )
     project = {
         "name": "myproject",
         "path": "/home/user/src/myproject",
-        "repo": "user/myproject",
         "auto_evolve": True,
     }
-    prompt = bt._build_evolution_prompt(seq=2, project=project)
+    with patch("emrg.server.daemon._detect_git_remote", return_value="user/myproject"):
+        prompt = bt._build_evolution_prompt(seq=2, project=project)
 
     # Project-specific values should flow through
     assert "owner/repo" not in prompt.lower().replace("/", " ")  # not the literal placeholder
     assert "/home/user/src/myproject" in prompt  # source_dir from project.path
     # session_id should be project-specific (PR #54)
     assert "emrg-evolution-myproject" in prompt
-    # Post-#42: repo_url derived from project repo field
+    # repo_url derived from git remote detection
     assert "https://github.com/user/myproject.git" in prompt
     assert "argszero/emrg" not in prompt  # not the default owner/repo
     assert "<<<<<<<" not in prompt
@@ -150,12 +152,12 @@ def test_build_prompt_with_project():
 
 
 def test_build_prompt_project_no_repo_field():
-    """Falls back to defaults when project has no repo field."""
+    """Falls back to defaults when git remote cannot be detected."""
     bt = BackgroundThread(InstanceIdentity(instance_id="i", host_name="h"))
     project = {"name": "mine", "path": "/tmp/mine", "auto_evolve": True}
     prompt = bt._build_evolution_prompt(seq=3, project=project)
 
-    # Falls back to default owner/repo
+    # Falls back to default owner/repo when git remote detection fails
     assert "argszero/emrg" in prompt
     assert "/tmp/mine" in prompt
     assert "<<<<<<<" not in prompt
