@@ -1811,6 +1811,7 @@ class EmrgServer:
         self, writer: asyncio.StreamWriter
     ) -> None:
         """Read projects.yml and return all project entries."""
+        evolution_cwd = str(self.EVOLUTION_CWD.resolve())
         projects: list[dict] = []
         try:
             if self._projects_log.exists():
@@ -1819,7 +1820,9 @@ class EmrgServer:
                     projects = [
                         {"name": p.get("name", ""), "repo": p.get("repo", ""),
                          "path": p.get("path", ""), "auto_evolve": p.get("auto_evolve", False)}
-                        for p in data if isinstance(p, dict)
+                        for p in data
+                        if isinstance(p, dict)
+                        and not str(p.get("path", "")).startswith(evolution_cwd)
                     ]
         except (yaml.YAMLError, OSError) as e:
             logger.exception("Failed to read projects.yml")
