@@ -125,6 +125,10 @@ MEMORY_MANAGEMENT_PROMPT = (
 )
 
 
+# ── Module-level constants (shared between EmrgServer and BackgroundThread) ──
+EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
+
+
 class BackgroundThread:
     """Background evolution thread: heartbeat of EMRG life.
 
@@ -133,7 +137,7 @@ class BackgroundThread:
     """
 
     # ── Fixed constants ──────────────────────────────────────
-    EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
+    EVOLUTION_CWD = EVOLUTION_CWD  # alias module-level constant
     EMRG_REPO_URL = "https://github.com/argszero/emrg.git"
     OWNER = "argszero"
     REPO = "emrg"
@@ -649,7 +653,7 @@ class EmrgServer:
         """
         cwd = os.path.realpath(cwd)
         # Don't track the evolution engine's own workspace as a project
-        evolution_cwd = str(self.EVOLUTION_CWD.resolve())
+        evolution_cwd = str(EVOLUTION_CWD.resolve())
         if cwd == evolution_cwd or cwd.startswith(evolution_cwd + os.sep):
             return
         self._projects_log.parent.mkdir(parents=True, exist_ok=True)
@@ -1821,7 +1825,7 @@ class EmrgServer:
         self, writer: asyncio.StreamWriter
     ) -> None:
         """Read projects.yml and return all project entries."""
-        evolution_cwd = str(self.EVOLUTION_CWD.resolve())
+        evolution_cwd = str(EVOLUTION_CWD.resolve())
         projects: list[dict] = []
         try:
             if self._projects_log.exists():
