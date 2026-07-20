@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
 # Install/update/uninstall EMRG with uv editable mode.
 #
-# Usage:
+# One-liner install:
+#   curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash
+# One-liner uninstall (keep source & data):
+#   curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- uninstall
+# One-liner purge (remove everything):
+#   curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
+#
+# Local usage:
 #   ./install.sh            # clone (if needed) + install/update
 #   ./install.sh update     # same as above
 #   ./install.sh uninstall  # remove emrg CLI, stop daemon, (keep source & data)
 #   ./install.sh purge      # uninstall + remove source repo & ~/.emrg data
 #
-# Prerequisites: git, python >=3.11, uv
+# Prerequisites: git, python >=3.10, uv, gh (recommended)
 set -euo pipefail
 
 REPO_URL="https://github.com/argszero/emrg.git"
-REPO_DIR="$HOME/scm/github.com/argszero/emrg"
+REPO_DIR="${EMRG_SOURCE:-$HOME/.emrg/source}"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -27,18 +34,34 @@ check_prereqs() {
     local missing=0
 
     if ! command -v git &>/dev/null; then
-        err "git not found — install it first: brew install git"
+        err "git not found — install it: brew install git (macOS) / apt install git (Linux)"
         missing=1
     fi
 
     if ! command -v python3 &>/dev/null; then
-        err "python3 not found"
+        err "python3 not found — install Python 3.10+"
         missing=1
+    else
+        local py_ver
+        py_ver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+        if [[ "$(python3 -c 'import sys; print(sys.version_info >= (3,10))')" != "True" ]]; then
+            err "python3 $py_ver is too old — Python 3.10+ required"
+            missing=1
+        fi
     fi
 
     if ! command -v uv &>/dev/null; then
-        err "uv not found — install it first: curl -LsSf https://astral.sh/uv/install.sh | sh"
+        err "uv not found — install it: curl -LsSf https://astral.sh/uv/install.sh | sh"
         missing=1
+    fi
+
+    if ! command -v gh &>/dev/null; then
+        warn "gh CLI not found — install it: brew install gh (macOS) / apt install gh (Linux)"
+        warn "  After install, run: gh auth login"
+    else
+        if ! gh auth status &>/dev/null 2>&1; then
+            warn "gh is installed but not authenticated — run: gh auth login"
+        fi
     fi
 
     if [[ $missing -ne 0 ]]; then
