@@ -93,16 +93,11 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 
 > Prerequisites (install.sh auto-detects and prompts): git, python 3.10+, uv. gh CLI recommended.
 
-After installing, configure your LLM:
+After installing, edit the auto-generated config template:
 
 ```bash
-mkdir -p ~/.emrg
-cat > ~/.emrg/config.toml << 'EOF'
-[llm]
-base_url = "https://api.deepseek.com"    # OpenAI, Anthropic, or local
-api_key = "sk-your-api-key"
-model = "deepseek-chat"
-EOF
+# install.sh already creates ~/.emrg/config.toml template — just set your api_key and model:
+vim ~/.emrg/config.toml
 
 emrg
 ```
