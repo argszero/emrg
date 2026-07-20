@@ -93,16 +93,11 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 
 > 前置依赖（install.sh 会自动检测提示）：git、python 3.10+、uv。gh CLI 推荐安装。
 
-安装完成后，配置 LLM 即可使用：
+安装完成后，编辑自动生成的配置文件即可使用：
 
 ```bash
-mkdir -p ~/.emrg
-cat > ~/.emrg/config.toml << 'EOF'
-[llm]
-base_url = "https://api.deepseek.com"    # 支持 OpenAI、Anthropic 或本地模型
-api_key = "sk-your-api-key"
-model = "deepseek-chat"
-EOF
+# 安装脚本已自动生成 ~/.emrg/config.toml 模板，只需修改 api_key 和 model：
+vim ~/.emrg/config.toml
 
 emrg
 ```
