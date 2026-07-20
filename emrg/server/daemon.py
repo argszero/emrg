@@ -676,16 +676,26 @@ class EmrgServer:
         if cwd in projects:
             projects[cwd]["last_active"] = now
         else:
-            name = os.path.basename(cwd.rstrip("/"))
-            projects[cwd] = {
-                "name": name,
-                "path": cwd,
-                "repo": "TODO: fill in owner/repo",
-                "auto_evolve": False,
-                "interval": 1800,
-                "last_active": now,
-            }
-            logger.info("new project tracked: %s (auto_evolve=false)", name)
+            # Check if cwd is a subdirectory of an existing project.
+            # Prefer the longest matching parent path (most specific).
+            parent = ""
+            for known_path in projects:
+                if cwd.startswith(known_path + os.sep):
+                    if len(known_path) > len(parent):
+                        parent = known_path
+            if parent:
+                projects[parent]["last_active"] = now
+            else:
+                name = os.path.basename(cwd.rstrip("/"))
+                projects[cwd] = {
+                    "name": name,
+                    "path": cwd,
+                    "repo": "TODO: fill in owner/repo",
+                    "auto_evolve": False,
+                    "interval": 1800,
+                    "last_active": now,
+                }
+                logger.info("new project tracked: %s (auto_evolve=false)", name)
 
         # Build sorted YAML list
         entries = sorted(projects.values(), key=lambda e: e.get("path", ""))
