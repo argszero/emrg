@@ -14,7 +14,7 @@
 #   ./install.sh uninstall  # remove emrg CLI, stop daemon, (keep source & data)
 #   ./install.sh purge      # uninstall + remove source repo & ~/.emrg data
 #
-# Prerequisites: git, python >=3.10, uv, gh (recommended)
+# Dependencies (git, python >=3.10, uv, gh) are auto-installed if missing.
 set -euo pipefail
 
 REPO_URL="https://github.com/argszero/emrg.git"
@@ -30,42 +30,82 @@ err()  { echo -e "${RED}✗${NC} $*" >&2; }
 
 # ── Prerequisites ──────────────────────────────────────────
 
-check_prereqs() {
-    local missing=0
+install_prereqs() {
+    local os
+    os="$(uname -s)"
 
+    # ── macOS: ensure Homebrew ──────────────────────────────
+    if [[ "$os" == "Darwin" ]] && ! command -v brew &>/dev/null; then
+        log "installing Homebrew ..."
+        if ! /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"; then
+            err "Homebrew install failed — install it manually: https://brew.sh"
+            exit 1
+        fi
+        # Add brew to PATH for this session (Apple Silicon vs Intel)
+        if [[ -f /opt/homebrew/bin/brew ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+        elif [[ -f /usr/local/bin/brew ]]; then
+            eval "$(/usr/local/bin/brew shellenv)"
+        fi
+    fi
+
+    # ── git ─────────────────────────────────────────────────
     if ! command -v git &>/dev/null; then
-        err "git not found — install it: brew install git (macOS) / apt install git (Linux)"
-        missing=1
+        log "installing git ..."
+        case "$os" in
+            Darwin) brew install git || { err "brew install git failed"; exit 1; } ;;
+            Linux)  sudo apt-get update -qq && sudo apt-get install -y git || { err "apt install git failed"; exit 1; } ;;
+        esac
     fi
 
+    # ── python3 ─────────────────────────────────────────────
     if ! command -v python3 &>/dev/null; then
-        err "python3 not found — install Python 3.10+"
-        missing=1
-    else
-        local py_ver
-        py_ver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+        log "installing python3 ..."
+        case "$os" in
+            Darwin) brew install python@3.12 || { err "brew install python failed"; exit 1; } ;;
+            Linux)  sudo apt-get update -qq && sudo apt-get install -y python3 || { err "apt install python3 failed"; exit 1; } ;;
+        esac
+    fi
+    # Version check (warn, don't auto-upgrade existing installs)
+    if command -v python3 &>/dev/null; then
         if [[ "$(python3 -c 'import sys; print(sys.version_info >= (3,10))')" != "True" ]]; then
+            local py_ver
+            py_ver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
             err "python3 $py_ver is too old — Python 3.10+ required"
-            missing=1
+            exit 1
         fi
     fi
 
+    # ── uv ──────────────────────────────────────────────────
     if ! command -v uv &>/dev/null; then
-        err "uv not found — install it: curl -LsSf https://astral.sh/uv/install.sh | sh"
-        missing=1
+        log "installing uv ..."
+        curl -LsSf https://astral.sh/uv/install.sh | sh || { err "uv install failed"; exit 1; }
+        export PATH="$HOME/.local/bin:$PATH"
     fi
 
+    # ── gh (recommended) ────────────────────────────────────
     if ! command -v gh &>/dev/null; then
-        warn "gh CLI not found — install it: brew install gh (macOS) / apt install gh (Linux)"
-        warn "  After install, run: gh auth login"
-    else
-        if ! gh auth status &>/dev/null 2>&1; then
-            warn "gh is installed but not authenticated — run: gh auth login"
-        fi
+        log "installing gh CLI ..."
+        case "$os" in
+            Darwin)
+                brew install gh || { err "brew install gh failed"; exit 1; }
+                ;;
+            Linux)
+                (type -p wget >/dev/null || sudo apt-get install -y wget) \
+                    && sudo mkdir -p -m 755 /etc/apt/keyrings \
+                    && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+                        | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+                    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+                        | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+                    && sudo apt-get update -qq \
+                    && sudo apt-get install -y gh \
+                    || { err "gh install failed"; exit 1; }
+                ;;
+        esac
     fi
 
-    if [[ $missing -ne 0 ]]; then
-        exit 1
+    if command -v gh &>/dev/null && ! gh auth status &>/dev/null 2>&1; then
+        warn "gh is installed but not authenticated — run: gh auth login"
     fi
 
     log "prerequisites: git=$(git --version | awk '{print $NF}') python=$(python3 --version | awk '{print $NF}') uv=$(uv --version | awk '{print $NF}')"
@@ -204,7 +244,7 @@ main() {
         uninstall) do_uninstall ;;
         purge) do_purge ;;
         *) 
-            check_prereqs
+            install_prereqs
             ensure_repo
             stop_daemon
             git_pull
