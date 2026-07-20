@@ -618,7 +618,7 @@ async def client_connect_to_server():
     return await connect_to_server()
 
 
-async def interactive():
+async def interactive(init_auto_evolve: bool = False):
     if not sys.stdin.isatty():
         print("This client requires a real terminal (TTY).", file=sys.stderr); return
 
@@ -629,6 +629,20 @@ async def interactive():
     # Session setup
     cwd = os.getcwd()
     session_id = generate_session_id(Path(cwd))
+
+    # Send init_auto_evolve if requested (before ping, so daemon
+    # processes it before any user interaction starts)
+    if init_auto_evolve:
+        writer.write(json.dumps({
+            "type": "init_auto_evolve",
+            "cwd": cwd,
+        }).encode() + b"\n")
+        await writer.drain()
+        # Read the response to consume it
+        try:
+            line = await asyncio.wait_for(reader.readline(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
 
     writer.write(json.dumps({"type": "ping"}).encode() + b"\n")
     term = Terminal(); stdin_fd = sys.stdin.fileno()
@@ -1737,4 +1751,4 @@ def _format_args(args: dict, tool_name: str = "") -> str:
     return arg_str
 
 
-def run_client(): asyncio.run(interactive())
+def run_client(init_auto_evolve: bool = False): asyncio.run(interactive(init_auto_evolve=init_auto_evolve))

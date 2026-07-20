@@ -40,6 +40,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-v", "--version", action="version", version=f"emrg {__version__}"
     )
+    parser.add_argument(
+        "--init-auto-evolve",
+        action="store_true",
+        help="Enable auto-evolution for the current project on connect.",
+    )
 
     sub = parser.add_subparsers(dest="command", metavar="[command]")
 
@@ -91,6 +96,8 @@ def main() -> None:
     parser = _build_parser()
     parsed = parser.parse_args()
 
+    init_auto_evolve = getattr(parsed, "init_auto_evolve", False)
+
     if parsed.command == "server":
         if parsed.server_action == "stop":
             _stop_daemon()
@@ -103,7 +110,7 @@ def main() -> None:
     elif parsed.command == "update":
         _run_update()
     else:
-        _run_client()
+        _run_client(init_auto_evolve=init_auto_evolve)
 
 
 # ── Daemon lifecycle ────────────────────────────────────────────
@@ -259,7 +266,7 @@ def _send_rant(message: str, project: str | None = None) -> None:
 
 # ── Client ────────────────────────────────────────────────────
 
-def _run_client() -> None:
+def _run_client(init_auto_evolve: bool = False) -> None:
     # Client logs go to ./.emrg/emrg-client.log
     log_dir = Path.cwd() / ".emrg"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -277,7 +284,7 @@ def _run_client() -> None:
     from emrg.client.app import run_client
 
     ensure_config()
-    run_client()
+    run_client(init_auto_evolve=init_auto_evolve)
 
 
 # ── Update ────────────────────────────────────────────────────

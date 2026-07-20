@@ -134,6 +134,13 @@ uv_install() {
         warn "emrg CLI not on PATH — ensure \$HOME/.local/bin is in your PATH"
         echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
     fi
+
+    # Enable auto-evolution for the emrg source project
+    if [[ -n "$emrg_bin" ]] && [[ -d "$REPO_DIR/.git" ]]; then
+        log "enabling auto-evolution for emrg source project ..."
+        cd "$REPO_DIR"
+        "$emrg_bin" --init-auto-evolve || warn "init-auto-evolve failed; run 'emrg --init-auto-evolve' in $REPO_DIR manually"
+    fi
 }
 
 # ── Uninstall ──────────────────────────────────────────────
