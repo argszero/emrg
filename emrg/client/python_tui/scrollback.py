@@ -35,9 +35,8 @@ def _span_style_to_sgr(style: RichStyle | str) -> str:
     """
     if isinstance(style, str):
         # Convert string-based styles to Rich Style for unified SGR output
-        from rich.style import Style
         try:
-            rs = Style.parse(style)
+            rs = RichStyle.parse(style)
             return style_to_sgr(rs)
         except (ValueError, TypeError):
             return ""
