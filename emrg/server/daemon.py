@@ -620,7 +620,7 @@ class EmrgServer:
                 if self._scheduler:
                     self._scheduler.create_task(
                         name=name, task_type="evolution",
-                        path=cwd, interval=600,
+                        config={"project": name}, interval=600,
                     )
                 await self._send(writer, {
                     "ok": True,

@@ -23,7 +23,7 @@ from emrg.session import Session
 def test_build_prompt_emrg_self():
     """Builds prompt for emrg self-evolution."""
     handler = EvolutionHandler(
-        name="emrg", path="/tmp/emrg", interval=1800,
+        name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
     prompt = handler._build_evolution_prompt(seq=1)
@@ -43,7 +43,7 @@ def test_build_prompt_emrg_self():
 def test_build_prompt_with_project():
     """Builds prompt for a custom project — derives owner/repo via git remote."""
     handler = EvolutionHandler(
-        name="myproject", path="/home/user/src/myproject", interval=1800,
+        name="myproject", config={"path": "/home/user/src/myproject"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
     # Override owner/repo for project testing
@@ -62,7 +62,7 @@ def test_build_prompt_with_project():
 def test_build_prompt_increments_seq():
     """seq number is per-cycle and should appear in the prompt."""
     handler = EvolutionHandler(
-        name="emrg", path="/tmp/emrg", interval=1800,
+        name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="i", host_name="h"),
     )
     p1 = handler._build_evolution_prompt(seq=5)
@@ -77,7 +77,7 @@ def test_build_prompt_all_variables_substituted():
     import re
 
     handler = EvolutionHandler(
-        name="emrg", path="/tmp/emrg", interval=1800,
+        name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
     p1 = handler._build_evolution_prompt(seq=1)
