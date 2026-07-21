@@ -877,17 +877,10 @@ class EmrgServer:
             + "\n\n".join(found)
         )
 
-    # Maximum bytes of MEMORY.md content to include in system prompt.
-    # MEMORY.md indices can grow large (observed: 9MB with 79K ghost entries),
-    # which would blow up the context window.  Truncate with a clear note.
-    _MAX_MEMORY_INDEX_BYTES = 8192
-
     def _build_memory_section(self, session: Session) -> str:
         """Build the memory section: project + session MEMORY.md indexes.
 
         Goal: LLM knows WHAT memories exist and WHERE to read them.
-        Content is truncated if the index file exceeds _MAX_MEMORY_INDEX_BYTES
-        to prevent context-window blow-up from oversized MEMORY.md files.
         """
         lines = ["## Memory"]
 
@@ -895,15 +888,10 @@ class EmrgServer:
         project_dir = session.cwd / ".emrg" / "memory"
         pindex_path = project_dir / "MEMORY.md"
         if pindex_path.exists():
-            pindex_raw = pindex_path.read_text(encoding="utf-8")
-            pindex, truncated = self._truncate_index(pindex_raw, pindex_path)
+            pindex = pindex_path.read_text(encoding="utf-8")
             lines.append("### Project Memory (long-term, cross-session)")
             lines.append(f"Directory: `{project_dir}/`")
             lines.append(f"Index: `{pindex_path}`")
-            if truncated:
-                lines.append(f"*(truncated from {len(pindex_raw)} bytes to "
-                             f"{self._MAX_MEMORY_INDEX_BYTES} bytes — use "
-                             f"`read` tool for full index)*")
             lines.append("")
             lines.append(pindex)
             lines.append("")
@@ -912,15 +900,10 @@ class EmrgServer:
         smem_dir = session.memory_dir
         sindex_path = smem_dir / "MEMORY.md"
         if sindex_path.exists():
-            sindex_raw = sindex_path.read_text(encoding="utf-8")
-            sindex, truncated = self._truncate_index(sindex_raw, sindex_path)
+            sindex = sindex_path.read_text(encoding="utf-8")
             lines.append("### Session Memory (this session only)")
             lines.append(f"Directory: `{smem_dir}/`")
             lines.append(f"Index: `{sindex_path}`")
-            if truncated:
-                lines.append(f"*(truncated from {len(sindex_raw)} bytes to "
-                             f"{self._MAX_MEMORY_INDEX_BYTES} bytes — use "
-                             f"`read` tool for full index)*")
             lines.append("")
             lines.append(sindex)
             lines.append("")
@@ -940,28 +923,6 @@ class EmrgServer:
             )
 
         return "\n".join(lines)
-
-    @classmethod
-    def _truncate_index(cls, raw: str, path: Path) -> tuple[str, bool]:
-        """Truncate oversized MEMORY.md content for system prompt inclusion.
-
-        Returns (content, was_truncated).  When truncated the last complete
-        index table line is preserved so the index stays parseable.
-        """
-        if len(raw) <= cls._MAX_MEMORY_INDEX_BYTES:
-            return raw, False
-
-        logger.warning(
-            "memory index too large for system prompt: %s (%d bytes, limit %d)",
-            path, len(raw), cls._MAX_MEMORY_INDEX_BYTES,
-        )
-        truncated = raw[: cls._MAX_MEMORY_INDEX_BYTES]
-        # Try to break at the last newline to keep a clean line boundary
-        last_nl = truncated.rfind("\n")
-        if last_nl > cls._MAX_MEMORY_INDEX_BYTES // 2:
-            truncated = truncated[:last_nl]
-        truncated += "\n\n...[truncated — use `read` tool for full index]\n"
-        return truncated, True
 
     def _build_history_section(self, session: Session) -> str:
         """Build the session history section of the system prompt.
