@@ -386,6 +386,9 @@ class EmrgServer:
                     for entry in data:
                         if isinstance(entry, dict) and entry.get("path"):
                             key = os.path.realpath(entry["path"])
+                            # Strip dead fields from pre-task-scheduler era
+                            entry.pop("auto_evolve", None)
+                            entry.pop("interval", None)
                             projects[key] = entry
             except (yaml.YAMLError, TypeError, OSError):
                 logger.warning(
