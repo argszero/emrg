@@ -4,7 +4,7 @@ Keeps interactive_demo.py's input handling, renders chat in viewport.
 
 from __future__ import annotations
 
-import asyncio, json, logging, os, signal, subprocess, sys, time, traceback
+import asyncio, json, logging, os, signal, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path, PurePath
 from rich.cells import cell_len

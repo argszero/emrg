@@ -22,7 +22,7 @@ from emrg.client.python_tui.output import (
     insert_lines,
     style_to_sgr,
 )
-from emrg.client.python_tui.widgets.base import Line, Span
+from emrg.client.python_tui.widgets.base import Line
 
 _SGR_RESET = "\x1b[0m"
 
