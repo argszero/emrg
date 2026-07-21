@@ -1,7 +1,7 @@
 """EMRG server daemon.
 
 Mirrors the Rust emrg-server. Listens for IPC connections, processes tasks,
-runs the tool-calling loop, and drives a background evolution thread.
+runs the tool-calling loop, and drives background evolution tasks via the scheduler.
 
 IPC transport is abstracted by emrg.connect:
   - Unix Domain Socket on macOS/Linux

@@ -117,7 +117,7 @@ class ServerPong:
 
 @dataclass
 class EvolutionLog:
-    """Evolution log entry written by the background thread."""
+    """Evolution log entry written by the task scheduler's evolution handler."""
     timestamp: str = ""
     trigger: str = ""
     impact: list[str] = field(default_factory=list)
