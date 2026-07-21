@@ -359,7 +359,7 @@ class EmrgServer:
 
     # ── Project tracking ─────────────────────────────────────
 
-    def _touch_project(self, cwd: str, *, init_auto_evolve: bool = False) -> None:
+    def _touch_project(self, cwd: str) -> None:
         """Record a project as active in ~/.emrg/projects.yml.
 
         Used by the evolution cycle to discover which projects have
@@ -367,13 +367,7 @@ class EmrgServer:
 
         Normalizes the path via realpath() so symlinked directories don't
         cause duplicate entries.
-
-        New projects default to auto_evolve=False. Users can edit the YAML
-        to set auto_evolve=True for projects they want automatically evolved.
         owner/repo is detected at runtime from git remote, not stored.
-
-        When init_auto_evolve=True (emitted by 'emrg --init-auto-evolve'),
-        the entry is created with auto_evolve=True.
         """
         cwd = os.path.realpath(cwd)
         # Don't track the evolution engine's own workspace as a project
@@ -403,10 +397,6 @@ class EmrgServer:
         # Update or add entry
         if cwd in projects:
             projects[cwd]["last_active"] = now
-            if init_auto_evolve:
-                projects[cwd]["auto_evolve"] = True
-                projects[cwd]["interval"] = 600
-                logger.info("init-auto-evolve: enabled for %s", projects[cwd]["name"])
         else:
             # Check if cwd is a subdirectory of an existing project.
             # Prefer the longest matching parent path (most specific).
@@ -417,19 +407,14 @@ class EmrgServer:
                         parent = known_path
             if parent:
                 projects[parent]["last_active"] = now
-                if init_auto_evolve:
-                    projects[parent]["auto_evolve"] = True
-                    logger.info("init-auto-evolve: enabled for parent %s", projects[parent]["name"])
             else:
                 name = os.path.basename(cwd.rstrip("/"))
                 projects[cwd] = {
                     "name": name,
                     "path": cwd,
-                    "auto_evolve": init_auto_evolve,
-                    "interval": 600 if init_auto_evolve else 1800,
                     "last_active": now,
                 }
-                logger.info("new project tracked: %s (auto_evolve=%s)", name, init_auto_evolve)
+                logger.info("new project tracked: %s", name)
 
         # Build sorted YAML list
         entries = sorted(projects.values(), key=lambda e: e.get("path", ""))
@@ -629,8 +614,8 @@ class EmrgServer:
         elif msg_type == "init_auto_evolve":
             cwd = msg.get("cwd", "")
             if cwd:
-                self._touch_project(cwd, init_auto_evolve=True)
-                # Also create a task entry in tasks.yml
+                self._touch_project(cwd)
+                # Create a task entry in tasks.yml
                 name = os.path.basename(cwd.rstrip("/"))
                 if self._scheduler:
                     self._scheduler.create_task(
@@ -1599,7 +1584,7 @@ class EmrgServer:
                     projects = [
                         {"name": p.get("name", ""),
                          "repo": _detect_git_remote(p.get("path", "")),
-                         "path": p.get("path", ""), "auto_evolve": p.get("auto_evolve", False)}
+                         "path": p.get("path", "")}
                         for p in data if isinstance(p, dict)
                     ]
                     # Filter out evolution workspace (exact match + subdirs)
