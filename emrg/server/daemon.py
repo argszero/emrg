@@ -18,7 +18,6 @@ import platform
 import signal
 import subprocess
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -26,7 +25,7 @@ from typing import Optional
 import yaml
 
 from emrg.config import LlmConfig, config_dir
-from emrg.connect import connect_to_server, start_server, cleanup_server
+from emrg.connect import start_server, cleanup_server
 from emrg.server.llm import LlmClient
 from emrg.server.tool_types import ToolResult
 from emrg.memory import ProjectMemoryStore, SessionMemoryStore
@@ -46,6 +45,7 @@ from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
 from emrg.skills.loader import build_skills_context, load_skills
+from emrg.server.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ MEMORY_MANAGEMENT_PROMPT = (
 )
 
 
-# ── Module-level constants (shared between EmrgServer and BackgroundThread) ──
+# ── Module-level constants ──
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
 
@@ -160,316 +160,6 @@ def _detect_git_remote(cwd: str) -> str:
     return ""
 
 
-class BackgroundThread:
-    """Background evolution thread: heartbeat of EMRG life.
-
-    Evolution cycles connect to the server via connect_to_server()
-    (platform-adaptive IPC), acting as an internal client.
-    """
-
-    # ── Fixed constants ──────────────────────────────────────
-    EVOLUTION_CWD = EVOLUTION_CWD  # alias module-level constant
-    EMRG_REPO_URL = "https://github.com/argszero/emrg.git"
-    OWNER = "argszero"
-    REPO = "emrg"
-    SOURCE_DIR = "source/emrg"  # relative to EVOLUTION_CWD
-    SESSION_ID = "emrg-evolution"
-    _TEMPLATE_PATH = Path(__file__).parent / "evolution_prompt.md"
-
-    def __init__(self, identity: InstanceIdentity, interval: int = 1800) -> None:
-        self.identity = identity
-        self.interval = interval
-        self.evolutions: list[EvolutionLog] = []
-        self._running = False
-        self._start_time: float | None = None
-        self._logs_dir = config_dir() / "logs"
-        self._projects_log = config_dir() / "projects.yml"
-        self.EVOLUTION_CWD.mkdir(parents=True, exist_ok=True)
-
-    async def run(self) -> None:
-        """Run evolution cycles at configured interval (default 30 min).
-
-        Runs all auto_evolve projects concurrently in each tick.
-        Falls back to emrg self-evolution if no projects configured.
-        """
-        self._running = True
-        self._start_time = time.time()
-        seq = 0
-        logger.info(
-            "background thread started — evolution cycle every %ds", self.interval
-        )
-
-        while self._running:
-            await asyncio.sleep(self.interval)
-            seq += 1
-            logger.debug("background tick #%d", seq)
-
-            # Load auto_evolve projects and run all concurrently
-            projects = self._get_auto_evolve_projects()
-            if projects:
-                logger.debug(
-                    "evolution #%d: running %d project(s) concurrently",
-                    seq, len(projects),
-                )
-                # Fire all projects concurrently, isolated failures
-                tasks = []
-                for i, project in enumerate(projects):
-                    sub_seq = seq * 1000 + i  # unique seq per project
-                    tasks.append(
-                        self._run_evolution_cycle(sub_seq, project=project)
-                    )
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for r in results:
-                    if isinstance(r, Exception):
-                        logger.warning("evolution #%d: project failed: %s", seq, r)
-            else:
-                try:
-                    await self._run_evolution_cycle(seq, project=None)
-                except Exception:
-                    logger.warning("evolution #%d crashed", seq, exc_info=True)
-
-        await self._write_final_summary()
-        logger.info("background thread stopped — the heartbeat is still")
-
-    def stop(self) -> None:
-        self._running = False
-
-    # ── Evolution cycle ──────────────────────────────────────
-
-    async def _run_evolution_cycle(self, seq: int, project: dict | None = None) -> None:
-        """Send evolution task to the server, read streaming response.
-
-        Connects to the server as an internal client, sends a task
-        with the evolution prompt, and reads responses until done.
-
-        If project is provided, uses project-specific session_id and cwd;
-        otherwise falls back to emrg self-evolution defaults.
-        """
-        prompt = self._build_evolution_prompt(seq, project=project)
-
-        # Derive session_id and cwd from project config
-        if project:
-            session_id = f"emrg-evolution-{project.get('name', 'unknown')}"
-            cwd = project.get("path", str(self.EVOLUTION_CWD))
-        else:
-            session_id = self.SESSION_ID
-            cwd = str(self.EVOLUTION_CWD)
-        logger.info(
-            "evolution #%d: prompt built (%d chars), connecting to server ...",
-            seq, len(prompt),
-        )
-
-        start_time = datetime.now()
-
-        try:
-            reader, writer = await connect_to_server()
-            logger.info("evolution #%d: connected, sending task ...", seq)
-        except (ConnectionRefusedError, FileNotFoundError) as e:
-            logger.warning("evolution #%d: cannot connect to server: %s", seq, e)
-            return
-
-        task_msg = json.dumps({
-            "type": "task",
-            "id": f"evolution-{seq}",
-            "session_id": session_id,
-            "cwd": cwd,
-            "prompt": prompt,
-            "stream": True,
-            "timestamp": start_time.isoformat(),
-        }) + "\n"
-
-        tool_count = 0
-        error = None
-
-        try:
-            task_bytes = task_msg.encode()
-            logger.info("evolution #%d: task sent (%d bytes), waiting for LLM response ...",
-                        seq, len(task_bytes))
-            writer.write(task_bytes)
-            await writer.drain()
-
-            # Read streaming responses until done
-            while True:
-                try:
-                    line = await reader.readline()
-                except asyncio.LimitOverrunError as loe:
-                    logger.error(
-                        "evolution #%d: asyncio.LimitOverrunError in readline "
-                        "(consumed=%d bytes). The response line exceeded the "
-                        "64KB asyncio buffer limit. Task msg was %d bytes.",
-                        seq, loe.consumed, len(task_bytes),
-                        exc_info=True,
-                    )
-                    error = f"LimitOverrunError: line exceeded 64KB buffer (consumed={loe.consumed})"
-                    break
-                if not line:
-                    logger.info("evolution #%d: server closed connection", seq)
-                    break
-                resp = json.loads(line.strip())
-
-                if resp.get("done"):
-                    duration = int(
-                        (datetime.now() - start_time).total_seconds()
-                    )
-                    logger.info(
-                        "evolution #%d complete (tools=%d, duration=%ds)",
-                        seq, tool_count, duration,
-                    )
-                    break
-
-                # Log tool calls for observability
-                if "tool_name" in resp:
-                    tool_count += 1
-                    logger.info(
-                        "evolution #%d tool #%d: %s (err=%s)",
-                        seq, tool_count,
-                        resp.get("tool_name"), resp.get("error"),
-                    )
-
-                # Capture errors from the response stream.
-                # error can be a boolean (tool_end.error=True = tool failed,
-                # which is normal and handled by the tool loop) or a string
-                # (explicit fatal error from the server, e.g. LLM unavailable).
-                # Only break on string errors — boolean tool errors are fine.
-                resp_error = resp.get("error")
-                if isinstance(resp_error, str):
-                    error = str(resp_error)
-                    logger.warning("evolution #%d server error: %s", seq, error)
-                    break
-        except Exception as e:
-            logger.exception("evolution #%d error", seq)
-            error = str(e)
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except (ConnectionError, OSError):
-                pass
-
-        # Write evolution log entry
-        impact = [
-            f"evolution-cycle-#{seq}-complete",
-            f"tools-executed={tool_count}",
-        ]
-        if error:
-            impact.append(f"error={error[:200]}")
-
-        log = EvolutionLog(
-            timestamp=start_time.isoformat(),
-            trigger=f"background-cycle-#{seq}",
-            impact=impact,
-            operations=["llm-reflection", "tool-execution", "self-improvement"],
-        )
-        await self._write_evolution_log(seq, log)
-        self.evolutions.append(log)
-
-    # ── Prompt building ──────────────────────────────────────
-
-    def _build_evolution_prompt(self, seq: int, project: dict | None = None) -> str:
-        """Read evolution prompt template from source dir.
-
-        Template: emrg/server/evolution_prompt.md
-        Variables: {seq}, {instance_id}, {host_name}, {uptime},
-                   {evolution_count}, {repo_url}, {evolution_cwd},
-                   {owner}, {repo}, {source_dir}, {session_id}
-
-        If project is provided, derives source_dir from the project path
-        and owner/repo detected from git remote at runtime.
-        """
-        template = self._TEMPLATE_PATH.read_text()
-        if self._start_time is not None:
-            uptime_seconds = int(time.time() - self._start_time)
-        else:
-            uptime_seconds = 0
-        uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
-
-        # Derive source_dir, owner/repo, repo_url, and session_id from project
-        if project:
-            source_dir = project.get("path", self.SOURCE_DIR)
-            local_source = source_dir  # project path is already absolute
-            repo_spec = _detect_git_remote(source_dir)
-            if repo_spec and "/" in repo_spec:
-                owner, repo = repo_spec.split("/", 1)
-                repo_url = f"https://github.com/{owner}/{repo}.git"
-            else:
-                owner, repo = self.OWNER, self.REPO
-                repo_url = self.EMRG_REPO_URL
-            session_id = f"emrg-evolution-{project.get('name', 'unknown')}"
-        else:
-            source_dir = self.SOURCE_DIR
-            local_source = str(self.EVOLUTION_CWD / self.SOURCE_DIR)
-            owner, repo = self.OWNER, self.REPO
-            repo_url = self.EMRG_REPO_URL
-            session_id = self.SESSION_ID
-
-        return template.format(
-            seq=seq,
-            instance_id=self.identity.instance_id,
-            host_name=self.identity.host_name,
-            uptime=uptime,
-            evolution_count=len(self.evolutions),
-            repo_url=repo_url,
-            evolution_cwd=str(self.EVOLUTION_CWD),
-            local_source=local_source,
-            owner=owner,
-            repo=repo,
-            source_dir=source_dir,
-            session_id=session_id,
-        )
-
-    # ── Project discovery ─────────────────────────────────────
-
-    def _get_auto_evolve_projects(self) -> list[dict]:
-        """Read projects.yml, return list of auto_evolve-enabled projects.
-
-        If projects.yml doesn't exist, returns empty list.
-        Projects are added via _touch_project on client connect.
-        Use 'emrg --init-auto-evolve' to enable auto-evolution for a project.
-        """
-        if not self._projects_log.exists():
-            return []
-        try:
-            data = yaml.safe_load(self._projects_log.read_text())
-        except (yaml.YAMLError, OSError):
-            logger.warning(
-                "Failed to parse %s", self._projects_log, exc_info=True
-            )
-            return []
-        if not isinstance(data, list):
-            return []
-        return [
-            entry for entry in data
-            if isinstance(entry, dict) and entry.get("auto_evolve")
-        ]
-
-    # ── Log persistence ──────────────────────────────────────
-
-    async def _write_evolution_log(self, seq: int, entry: EvolutionLog) -> None:
-        self._logs_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"evolution-{entry.timestamp.replace(':', '-')}-{seq}.json"
-        path = self._logs_dir / filename
-        data = {
-            "timestamp": entry.timestamp,
-            "trigger": entry.trigger,
-            "impact": entry.impact,
-            "operations": entry.operations,
-        }
-        path.write_text(json.dumps(data, indent=2))
-        logger.debug("evolution log written: %s", path)
-
-    async def _write_final_summary(self) -> None:
-        if not self.evolutions:
-            return
-        summary = {
-            "shutdown_at": datetime.now().isoformat(),
-            "total_evolutions": len(self.evolutions),
-            "first_evolution": self.evolutions[0].timestamp,
-            "last_evolution": self.evolutions[-1].timestamp,
-        }
-        path = self._logs_dir / "summary.json"
-        path.write_text(json.dumps(summary, indent=2))
-        logger.info("final summary written: %s", path)
-
 
 class EmrgServer:
     """EMRG daemon — listens on Unix socket, processes tasks with tool calling."""
@@ -496,7 +186,7 @@ class EmrgServer:
         self.evolutions: list[EvolutionLog] = []
         self.llm = LlmClient(llm_config)
         self._running = False
-        self._bg: Optional[BackgroundThread] = None
+        self._scheduler: Optional[TaskScheduler] = None
         self._max_tool_rounds = llm_config.max_tool_rounds
         self._projects_log = runtime_dir / "projects.yml"
         self._rants_log = runtime_dir / "rants.jsonl"
@@ -575,20 +265,16 @@ class EmrgServer:
             self.identity.instance_id[:8],
         )
 
-        self._bg = BackgroundThread(self.identity, self.llm.config.evolution_interval)
-        bg_task = asyncio.create_task(self._bg.run())
+        self._scheduler = TaskScheduler(self.identity)
+        sched_tasks = self._scheduler.load_and_start()
 
         try:
             await self._server.serve_forever()
         except asyncio.CancelledError:
             pass
         finally:
-            self._bg.stop()
-            bg_task.cancel()
-            try:
-                await bg_task
-            except asyncio.CancelledError:
-                pass
+            self._scheduler.stop_all()
+            await self._scheduler.wait_all()
             await self.llm.close()
             cleanup_server()
             # Remove PID file
@@ -800,14 +486,6 @@ class EmrgServer:
             except OSError:
                 pass
 
-    @staticmethod
-    def _detect_git_remote(cwd: str) -> str:
-        """Detect the origin remote (owner/repo) from a git repository.
-
-        Returns '' if detection fails.
-        """
-        return _detect_git_remote(cwd)
-
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt, including skill context, memory, and history."""
         parts = [SYSTEM_PROMPT]
@@ -965,7 +643,7 @@ class EmrgServer:
                     "branch_id": self.identity.branch_id,
                 },
                 uptime_seconds=max(0, elapsed),
-                evolution_count=len(self._bg.evolutions) if self._bg else len(self.evolutions),
+                evolution_count=len(self.evolutions),
             )
             await self._send(writer, {
                 "identity": pong.identity,
@@ -980,6 +658,13 @@ class EmrgServer:
             cwd = msg.get("cwd", "")
             if cwd:
                 self._touch_project(cwd, init_auto_evolve=True)
+                # Also create a task entry in tasks.yml
+                name = os.path.basename(cwd.rstrip("/"))
+                if self._scheduler:
+                    self._scheduler.create_task(
+                        name=name, task_type="evolution",
+                        path=cwd, interval=600,
+                    )
                 await self._send(writer, {
                     "ok": True,
                     "message": f"auto_evolve enabled for {cwd}",
