@@ -343,13 +343,24 @@ class InputParser:
                 elif self._buf[1] == 0x5B and len(self._buf) >= 6:
                     if self._buf[2:6] == b"200~" or self._buf[2:6] == b"201~":
                         consumed = 6
+                elif self._buf[1] == 0x5B:
+                    # CSI sequence: ESC [ ... final(0x40-0x7E)
+                    # Search for the final byte. If not found, wait for more data
+                    # to avoid consuming ESC prematurely (fixes bracketed paste
+                    # [201~ leak when sequence arrives in multiple reads).
+                    for i in range(2, len(self._buf)):
+                        if 0x40 <= self._buf[i] <= 0x7E:
+                            consumed = i + 1
+                            break
+                    # else: final byte not found — wait for more bytes
                 elif len(self._buf) >= 3:
+                    # Non-CSI ESC sequences
                     # Arrow keys, home, end: ESC [ X (3 bytes)
                     csi_arrows = (0x41, 0x42, 0x43, 0x44, 0x48, 0x46)
-                    if self._buf[1] == 0x5B and self._buf[2] in csi_arrows:
+                    if self._buf[2] in csi_arrows:
                         consumed = 3
                     # Delete: ESC [ 3 ~ (4 bytes)
-                    elif (self._buf[1] == 0x5B and len(self._buf) >= 4
+                    elif (len(self._buf) >= 4
                           and self._buf[2] == 0x33 and self._buf[3] == 0x7E):
                         consumed = 4
                     else:
