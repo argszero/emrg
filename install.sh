@@ -91,15 +91,21 @@ install_prereqs() {
                 brew install gh || { err "brew install gh failed"; exit 1; }
                 ;;
             Linux)
-                (type -p wget >/dev/null || sudo apt-get install -y wget) \
-                    && sudo mkdir -p -m 755 /etc/apt/keyrings \
-                    && wget -qO- https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-                        | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
-                    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-                        | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
-                    && sudo apt-get update -qq \
-                    && sudo apt-get install -y gh \
-                    || { err "gh install failed"; exit 1; }
+                # Install gh CLI to user directory (~/.local/bin), no sudo needed.
+                # Same approach as uv install above.
+                mkdir -p "$HOME/.local/bin"
+                local gh_ver arch
+                arch="amd64"
+                [[ "$(uname -m)" == "aarch64" ]] && arch="arm64"
+                gh_ver=$(curl -s https://api.github.com/repos/cli/cli/releases/latest \
+                    | grep '"tag_name"' | cut -d'"' -f4)
+                curl -sSL "https://github.com/cli/cli/releases/download/${gh_ver}/gh_${gh_ver#v}_linux_${arch}.tar.gz" \
+                    | tar xz -C /tmp \
+                    || { err "gh download failed"; exit 1; }
+                find /tmp/gh_* -name gh -type f -exec cp {} "$HOME/.local/bin/gh" \; 2>/dev/null
+                chmod +x "$HOME/.local/bin/gh"
+                rm -rf /tmp/gh_*/
+                export PATH="$HOME/.local/bin:$PATH"
                 ;;
         esac
     fi
