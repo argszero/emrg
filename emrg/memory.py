@@ -337,7 +337,14 @@ class MemoryIndex:
     def save(self, path: Path) -> None:
         """Write the index to disk."""
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(self.to_markdown(), encoding="utf-8")
+        old_size = path.stat().st_size if path.exists() else 0
+        content = self.to_markdown()
+        path.write_text(content, encoding="utf-8")
+        new_size = len(content.encode("utf-8"))
+        logger.info(
+            "memory index saved: %s (%d entries, %d → %d bytes)",
+            path, len(self.entries), old_size, new_size,
+        )
 
     # ── Parsing ────────────────────────────────────────────────
 
@@ -433,7 +440,9 @@ class MemoryStore:
     def _load_index(self) -> MemoryIndex:
         return MemoryIndex.from_file(self.index_path)
 
-    def _save_index(self, index: MemoryIndex) -> None:
+    def _save_index(self, index: MemoryIndex, source: str = "") -> None:
+        if source:
+            logger.debug("memory index write from: %s", source)
         index.save(self.index_path)
 
     def _rebuild_index(self) -> MemoryIndex:
@@ -550,14 +559,15 @@ class MemoryStore:
         # Update index
         index = self._load_index()
         index.add_entry(mem)
-        self._save_index(index)
+        self._save_index(index, "create")
 
         logger.info(
-            "memory created: id=%s type=%s title=%r in %s",
+            "memory created: id=%s type=%s title=%r in %s (%d total entries)",
             mem.id,
             mem.type,
             mem.title,
             self.directory,
+            len(index.entries),
         )
         return mem
 
@@ -627,7 +637,7 @@ class MemoryStore:
         # Update index
         index = self._load_index()
         index.add_entry(mem)
-        self._save_index(index)
+        self._save_index(index, "update")
 
         logger.info("memory updated: id=%s title=%r", mem.id, mem.title)
         return mem
@@ -664,7 +674,7 @@ class MemoryStore:
         Useful if the index gets out of sync or corrupted.
         """
         index = self._rebuild_index()
-        self._save_index(index)
+        self._save_index(index, "rebuild_index")
         logger.info(
             "index rebuilt: %d entries in %s", len(index.entries), self.index_path
         )
@@ -714,7 +724,7 @@ class MemoryStore:
         # Update project index
         pindex = project_store._load_index()
         pindex.add_entry(mem)
-        project_store._save_index(pindex)
+        project_store._save_index(pindex, "promote_to_project")
 
         # Mark original as merged + write marker
         mem_original = MemoryFile.from_file(path)
@@ -736,7 +746,7 @@ class MemoryStore:
         # Update session index (remove the entry since it's now merged)
         sindex = self._load_index()
         sindex.remove_entry(path.name)
-        self._save_index(sindex)
+        self._save_index(sindex, "promote_to_project_remove")
 
         logger.info("memory promoted to project: id=%s → %s", mem.id, new_path)
         return MemoryFile.from_file(new_path)
