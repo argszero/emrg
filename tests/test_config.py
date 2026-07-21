@@ -38,7 +38,6 @@ def test_llm_config_defaults():
     assert cfg.max_tool_rounds == 270
     assert cfg.context_window == 131072
     assert cfg.auto_compact_threshold == 0.0
-    assert cfg.evolution_interval == 1800
 
 
 def test_emrg_config_defaults():

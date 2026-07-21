@@ -27,7 +27,6 @@ class LlmConfig:
     max_tool_rounds: int = 270
     context_window: int = 131072
     auto_compact_threshold: float = 0.0
-    evolution_interval: int = 1800
 
 
 @dataclass
@@ -68,7 +67,6 @@ def load_config() -> EmrgConfig:
         max_tool_rounds=llm_data.get("max_tool_rounds", 270),
         context_window=llm_data.get("context_window", 131072),
         auto_compact_threshold=llm_data.get("auto_compact_threshold", 0.0),
-        evolution_interval=llm_data.get("evolution_interval", 1800),
     )
 
     # Resolve ${ENV_VAR} placeholders in the API key
@@ -95,7 +93,6 @@ max_tokens = 4096
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
-evolution_interval = 1800
 """)
     print(f"Default config created at {cfg_path}", file=sys.stderr)
     print("Edit it to set your API key and model.", file=sys.stderr)
