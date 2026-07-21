@@ -334,8 +334,7 @@ class ProjectSelector(Widget):
         for i, p in enumerate(self.projects):
             name = p.get("name", "?")
             repo = p.get("repo", "")
-            auto = "🔄" if p.get("auto_evolve") else "💬"
-            label = f"  {auto}  {name}"
+            label = f"  {name}"
             if repo:
                 label += f"  ({repo})"
             if i == self.selected_index:
