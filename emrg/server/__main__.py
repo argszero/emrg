@@ -1,6 +1,7 @@
 """Entry point for EMRG daemon: python -m emrg.server"""
 import asyncio
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 # Write daemon logs to ~/.emrg/emrgd.log so they survive stderr=DEVNULL
@@ -13,7 +14,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
     handlers=[
-        logging.FileHandler(str(_log_file)),
+        RotatingFileHandler(
+            str(_log_file), maxBytes=10 * 1024 * 1024, backupCount=3
+        ),
         logging.StreamHandler(),  # also to stderr (visible when run directly)
     ],
 )
