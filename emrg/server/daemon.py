@@ -27,6 +27,7 @@ import yaml
 from emrg.config import LlmConfig, config_dir
 from emrg.connect import start_server, cleanup_server
 from emrg.server.llm import LlmClient
+from emrg.server.git_utils import _detect_git_remote
 from emrg.server.tool_types import ToolResult
 from emrg.memory import ProjectMemoryStore, SessionMemoryStore
 from emrg.protocol import (
@@ -129,35 +130,6 @@ MEMORY_MANAGEMENT_PROMPT = (
 # ── Module-level constants ──
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
-
-def _detect_git_remote(cwd: str) -> str:
-    """Detect the origin remote (owner/repo) from a git repository.
-
-    Returns '' if detection fails.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            url = result.stdout.strip()
-            # Extract owner/repo from various URL formats:
-            #   git@github.com:owner/repo.git
-            #   https://github.com/owner/repo.git
-            #   https://github.com/owner/repo
-            if ":" in url and "@" in url:
-                # SSH: git@github.com:owner/repo.git
-                parts = url.split(":")[-1]
-            elif "github.com/" in url:
-                # HTTPS: https://github.com/owner/repo
-                parts = url.split("github.com/")[-1]
-            else:
-                return ""
-            return parts.removesuffix(".git")
-    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
-        pass
-    return ""
 
 
 
