@@ -25,37 +25,12 @@ import yaml
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
 from emrg.protocol import EvolutionLog, InstanceIdentity
+from emrg.server.git_utils import _detect_git_remote
 
 logger = logging.getLogger("emrg.server.scheduler")
 
 # ── Module-level constants (shared with daemon) ──────────────────
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
-
-
-def _detect_git_remote(cwd: str) -> str:
-    """Detect the origin remote (owner/repo) from a git repository."""
-    import subprocess
-
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            url = result.stdout.strip()
-            if ":" in url and "@" in url:
-                parts = url.split(":")[-1]
-            elif "github.com/" in url:
-                parts = url.split("github.com/")[-1]
-            else:
-                return ""
-            return parts.removesuffix(".git")
-    except (subprocess.TimeoutExpired, OSError, FileNotFoundError):
-        pass
-    return ""
 
 
 # ── EvolutionHandler ────────────────────────────────────────────
