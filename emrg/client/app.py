@@ -254,7 +254,6 @@ class SessionSelector(Widget):
         return None
 
     def render(self, ctx):
-        from rich.style import Style
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
         lines.append(Line(
@@ -324,7 +323,6 @@ class ProjectSelector(Widget):
         return None
 
     def render(self, ctx):
-        from rich.style import Style
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
         lines.append(Line(
@@ -412,7 +410,6 @@ class CommandDropdown(Widget):
     def render(self, ctx):
         if not self.visible:
             return []
-        from rich.style import Style
         lines: list[Line] = []
         sel_style = Style(reverse=True)
         dim_style = Style.parse("dim")
