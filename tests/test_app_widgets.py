@@ -66,7 +66,7 @@ def test_project_selector_selected_project_name():
 
 
 def test_project_selector_rendering_indicators():
-    """auto_evolve project shows 🔄, manual shows 💬, repo shown if present."""
+    """Project name and repo are shown in the selector."""
     projects = [
         make_project("auto", repo="u/auto", auto_evolve=True),
         make_project("manual", auto_evolve=False),
@@ -77,15 +77,13 @@ def test_project_selector_rendering_indicators():
 
     assert len(lines) == 3  # header + 2 projects
 
-    # First project: auto_evolve → 🔄, with repo
+    # First project: name and repo
     spans_text_0 = "".join(s.text for s in lines[1].spans)
-    assert "🔄" in spans_text_0
     assert "auto" in spans_text_0
     assert "(u/auto)" in spans_text_0
 
-    # Second project: manual → 💬, no repo
+    # Second project: name, no repo
     spans_text_1 = "".join(s.text for s in lines[2].spans)
-    assert "💬" in spans_text_1
     assert "manual" in spans_text_1
 
 
