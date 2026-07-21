@@ -5,6 +5,10 @@ The scheduler only manages lifecycle (start/stop/monitor); handlers are self-con
 
 projects.yml remains for project tracking (_touch_project only).
 tasks.yml controls what gets auto-evolved.
+
+Task config schema:
+  name, type, enabled, interval, last_run — common base fields.
+  config — type-specific config. For evolution: config.project links to projects.yml name.
 """
 
 from __future__ import annotations
@@ -33,6 +37,23 @@ logger = logging.getLogger("emrg.server.scheduler")
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
 
+def _resolve_project_path(name: str) -> str | None:
+    """Resolve a project name to its path from projects.yml."""
+    projects_file = config_dir() / "projects.yml"
+    if not projects_file.exists():
+        return None
+    try:
+        data = yaml.safe_load(projects_file.read_text())
+    except (yaml.YAMLError, OSError):
+        return None
+    if not isinstance(data, list):
+        return None
+    for entry in data:
+        if isinstance(entry, dict) and entry.get("name") == name:
+            return entry.get("path")
+    return None
+
+
 # ── EvolutionHandler ────────────────────────────────────────────
 
 
@@ -51,12 +72,12 @@ class EvolutionHandler:
     def __init__(
         self,
         name: str,
-        path: str,
+        config: dict,
         interval: int,
         identity: InstanceIdentity,
     ) -> None:
         self.name = name
-        self.project_path = path
+        self._config = config
         self.interval = interval
         self.identity = identity
         self._running = False
@@ -65,8 +86,14 @@ class EvolutionHandler:
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         self.evolutions: list[EvolutionLog] = []
 
+        # Resolve project path from config (new schema) or fall back to
+        # config.path for backward-compat with old tasks.yml entries.
+        project_name = config.get("project", "")
+        path = _resolve_project_path(project_name) if project_name else config.get("path", "")
+        self.project_path = path or name  # default to name for emrg itself
+
         # Derive owner/repo/git from path
-        repo_spec = _detect_git_remote(path)
+        repo_spec = _detect_git_remote(path) if path else ""
         if repo_spec and "/" in repo_spec:
             self._owner, self._repo = repo_spec.split("/", 1)
             self._repo_url = f"https://github.com/{self._owner}/{self._repo}.git"
@@ -75,7 +102,7 @@ class EvolutionHandler:
             self._repo = self.REPO
             self._repo_url = self.EMRG_REPO_URL
         self._session_id = f"emrg-evolution-{name}"
-        self._source_dir = path
+        self._source_dir = path or name
 
     async def run(self) -> None:
         """Run evolution cycles at configured interval."""
@@ -292,7 +319,7 @@ class TaskScheduler:
                 continue
             handler = handler_cls(
                 name=cfg["name"],
-                path=cfg["path"],
+                config=cfg.get("config", {}),
                 interval=cfg.get("interval", 1800),
                 identity=self.identity,
             )
@@ -375,10 +402,11 @@ class TaskScheduler:
             if not isinstance(entry, dict):
                 continue
             if entry.get("auto_evolve"):
+                project_name = entry.get("name", "unknown")
                 new_tasks.append({
-                    "name": entry.get("name", "unknown"),
+                    "name": project_name,
                     "type": "evolution",
-                    "path": entry.get("path", ""),
+                    "config": {"project": project_name},
                     "interval": entry.get("interval", 1800),
                     "enabled": True,
                     "last_run": None,
@@ -394,16 +422,20 @@ class TaskScheduler:
                 len(new_tasks),
             )
 
-    def create_task(self, name: str, task_type: str, path: str, interval: int) -> None:
-        """Add a new task entry (used by init_auto_evolve)."""
+    def create_task(self, name: str, task_type: str, config: dict, interval: int) -> None:
+        """Add a new task entry (used by init_auto_evolve).
+
+        config is a dict of type-specific settings (e.g. {'project': 'emrg'}).
+        """
         tasks = self._load_tasks()
 
-        # Update existing or append new
+        # Update existing or append new — match by name
         for t in tasks:
-            if t.get("path") == path:
+            if t.get("name") == name:
                 t["enabled"] = True
                 t["interval"] = interval
                 t["type"] = task_type
+                t["config"] = config
                 self._save_tasks(tasks)
                 logger.info("TaskScheduler: updated task %s", name)
                 return
@@ -411,7 +443,7 @@ class TaskScheduler:
         tasks.append({
             "name": name,
             "type": task_type,
-            "path": path,
+            "config": config,
             "interval": interval,
             "enabled": True,
             "last_run": None,
