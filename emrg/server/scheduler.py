@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import os
-import platform
 import tempfile
 import time
 from datetime import datetime
