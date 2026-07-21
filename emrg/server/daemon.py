@@ -877,10 +877,17 @@ class EmrgServer:
             + "\n\n".join(found)
         )
 
+    # Maximum bytes of MEMORY.md content to include in system prompt.
+    # MEMORY.md indices can grow large (observed: 9MB with 79K ghost entries),
+    # which would blow up the context window.  Truncate with a clear note.
+    _MAX_MEMORY_INDEX_BYTES = 8192
+
     def _build_memory_section(self, session: Session) -> str:
         """Build the memory section: project + session MEMORY.md indexes.
 
         Goal: LLM knows WHAT memories exist and WHERE to read them.
+        Content is truncated if the index file exceeds _MAX_MEMORY_INDEX_BYTES
+        to prevent context-window blow-up from oversized MEMORY.md files.
         """
         lines = ["## Memory"]
 
@@ -888,10 +895,15 @@ class EmrgServer:
         project_dir = session.cwd / ".emrg" / "memory"
         pindex_path = project_dir / "MEMORY.md"
         if pindex_path.exists():
-            pindex = pindex_path.read_text(encoding="utf-8")
+            pindex_raw = pindex_path.read_text(encoding="utf-8")
+            pindex, truncated = self._truncate_index(pindex_raw, pindex_path)
             lines.append("### Project Memory (long-term, cross-session)")
             lines.append(f"Directory: `{project_dir}/`")
             lines.append(f"Index: `{pindex_path}`")
+            if truncated:
+                lines.append(f"*(truncated from {len(pindex_raw)} bytes to "
+                             f"{self._MAX_MEMORY_INDEX_BYTES} bytes — use "
+                             f"`read` tool for full index)*")
             lines.append("")
             lines.append(pindex)
             lines.append("")
@@ -900,10 +912,15 @@ class EmrgServer:
         smem_dir = session.memory_dir
         sindex_path = smem_dir / "MEMORY.md"
         if sindex_path.exists():
-            sindex = sindex_path.read_text(encoding="utf-8")
+            sindex_raw = sindex_path.read_text(encoding="utf-8")
+            sindex, truncated = self._truncate_index(sindex_raw, sindex_path)
             lines.append("### Session Memory (this session only)")
             lines.append(f"Directory: `{smem_dir}/`")
             lines.append(f"Index: `{sindex_path}`")
+            if truncated:
+                lines.append(f"*(truncated from {len(sindex_raw)} bytes to "
+                             f"{self._MAX_MEMORY_INDEX_BYTES} bytes — use "
+                             f"`read` tool for full index)*")
             lines.append("")
             lines.append(sindex)
             lines.append("")
@@ -923,6 +940,28 @@ class EmrgServer:
             )
 
         return "\n".join(lines)
+
+    @classmethod
+    def _truncate_index(cls, raw: str, path: Path) -> tuple[str, bool]:
+        """Truncate oversized MEMORY.md content for system prompt inclusion.
+
+        Returns (content, was_truncated).  When truncated the last complete
+        index table line is preserved so the index stays parseable.
+        """
+        if len(raw) <= cls._MAX_MEMORY_INDEX_BYTES:
+            return raw, False
+
+        logger.warning(
+            "memory index too large for system prompt: %s (%d bytes, limit %d)",
+            path, len(raw), cls._MAX_MEMORY_INDEX_BYTES,
+        )
+        truncated = raw[: cls._MAX_MEMORY_INDEX_BYTES]
+        # Try to break at the last newline to keep a clean line boundary
+        last_nl = truncated.rfind("\n")
+        if last_nl > cls._MAX_MEMORY_INDEX_BYTES // 2:
+            truncated = truncated[:last_nl]
+        truncated += "\n\n...[truncated — use `read` tool for full index]\n"
+        return truncated, True
 
     def _build_history_section(self, session: Session) -> str:
         """Build the session history section of the system prompt.
@@ -1295,7 +1334,7 @@ class EmrgServer:
                          round_num, len(messages), len(tools_openai))
 
             # Auto-compact: if token count exceeds threshold, compact before this round
-            if round_num > 1 and self.llm.config.auto_compact_threshold > 0.0:
+            if self.llm.config.auto_compact_threshold > 0.0:
                 estimated = self._estimate_tokens(messages)
                 trigger_at = int(
                     self.llm.config.context_window
@@ -1801,66 +1840,79 @@ class EmrgServer:
     async def _chunked_compact(
         self, records: list[dict], keep_recent: int = 5
     ) -> str:
-        """Token-aware chunked compact for over-context-window histories.
+        """Adaptive chunked compact: split on LLM feedback, not estimates.
 
-        Uses greedy bin-packing by estimated token count to shard records
-        into chunks that each fit within the LLM context window, then
-        recursively merges the per-chunk summaries.
+        Instead of pre-estimating token counts, tries to summarize chunks
+        and binary-splits on "maximum context length" errors.  This is
+        inherently accurate — if a chunk fits, it fits; if it doesn't,
+        we split and retry each half independently.
         """
-        ctx_window = self.llm.config.context_window
-        max_tokens = self.llm.config.max_tokens
-        max_per_chunk = ctx_window - max_tokens - 2000  # room for prompt + output
-        merge_batch = max_per_chunk
-
         to_compact = records[:-keep_recent]
-        total_tokens = sum(self._estimate_single(r) for r in to_compact)
         logger.info(
-            "chunked compact: %d records, ~%d tokens, max_per_chunk=%d",
-            len(to_compact), total_tokens, max_per_chunk,
+            "chunked compact: %d records to summarize via adaptive splitting",
+            len(to_compact),
         )
+        return await self._adaptive_chunk_summarize(to_compact, 0)
 
-        # Step 1: Greedy token-aware sharding
-        chunks: list[list[dict]] = []
-        current_chunk: list[dict] = []
-        current_tokens = 0
+    async def _adaptive_chunk_summarize(
+        self, records: list[dict], depth: int, max_depth: int = 8
+    ) -> str:
+        """Summarize records, binary-splitting on context-limit errors."""
+        if not records:
+            return ""
 
-        for record in to_compact:
-            rec_tokens = self._estimate_single(record)
-            # Single record too large → truncate
-            if rec_tokens > max_per_chunk:
-                record = self._truncate_record(record, max_per_chunk)
-                rec_tokens = self._estimate_single(record)
-            if current_tokens + rec_tokens > max_per_chunk and current_chunk:
-                chunks.append(current_chunk)
-                current_chunk = []
-                current_tokens = 0
-            current_chunk.append(record)
-            current_tokens += rec_tokens
-        if current_chunk:
-            chunks.append(current_chunk)
+        # Single record that's too large → truncate and recurse
+        if len(records) == 1:
+            try:
+                text = self._records_to_text(records)
+                msg = await self.llm.chat([{
+                    "role": "user",
+                    "content": f"Summarize this conversation segment:\n\n{text}",
+                }], tools=None)
+                return msg.get("content", "")
+            except RuntimeError as e:
+                err = str(e)
+                if ("context length" in err or "length limit" in err) and depth < max_depth:
+                    record = self._truncate_record(
+                        records[0],
+                        self.llm.config.context_window // 2,
+                    )
+                    return await self._adaptive_chunk_summarize([record], depth + 1, max_depth)
+                raise
 
-        logger.info("chunked compact: %d chunks created", len(chunks))
-
-        # Step 2: Summarize each chunk
-        summaries: list[str] = []
-        for idx, chunk in enumerate(chunks):
-            chunk_text = self._records_to_text(chunk)
+        chunk_text = self._records_to_text(records)
+        try:
             msg = await self.llm.chat([{
                 "role": "user",
-                "content": (
-                    f"Summarize this conversation segment ({idx + 1}/{len(chunks)}). "
-                    "Include key decisions, context, and unresolved items:\n\n"
-                    f"{chunk_text}"
-                ),
+                "content": f"Summarize this conversation segment:\n\n{chunk_text}",
             }], tools=None)
-            summaries.append(msg.get("content", ""))
-            logger.debug("chunked compact: chunk %d/%d done", idx + 1, len(chunks))
-
-        if len(summaries) == 1:
-            return summaries[0]
-
-        # Step 3: Recursively merge summaries
-        return await self._merge_summaries(summaries, max_per_chunk, merge_batch)
+            return msg.get("content", "")
+        except RuntimeError as e:
+            err = str(e)
+            if ("context length" in err or "length limit" in err) and depth < max_depth:
+                mid = len(records) // 2
+                if mid == 0:
+                    mid = 1
+                summary_a = await self._adaptive_chunk_summarize(
+                    records[:mid], depth + 1, max_depth,
+                )
+                summary_b = await self._adaptive_chunk_summarize(
+                    records[mid:], depth + 1, max_depth,
+                )
+                combined = f"{summary_a}\n---\n{summary_b}"
+                # Merge sub-summaries
+                try:
+                    msg = await self.llm.chat([{
+                        "role": "user",
+                        "content": (
+                            "Merge these two conversation summaries into one "
+                            f"coherent summary:\n\n{combined}"
+                        ),
+                    }], tools=None)
+                    return msg.get("content", "")
+                except RuntimeError:
+                    return combined  # can't merge — return raw combined
+            raise
 
     async def _merge_summaries(
         self, summaries: list[str], max_per_chunk: int, merge_batch: int
