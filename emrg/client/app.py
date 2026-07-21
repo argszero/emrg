@@ -584,7 +584,6 @@ async def _check_and_restart_if_stale():
                 )
                 # Kill old server: SIGTERM first, SIGKILL if still alive
                 try:
-                    import signal
                     os.kill(server_pid, signal.SIGTERM)
                 except (ProcessLookupError, OSError):
                     pass
