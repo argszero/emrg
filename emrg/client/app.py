@@ -687,6 +687,20 @@ async def client_connect_to_server():
     return await connect_to_server()
 
 
+class SelectorState:
+    """Unified state for interactive selectors (session, project, model).
+
+    Consolidates 9 separate variables into 3 typed instances to eliminate
+    nonlocal declaration errors (rant #31).
+    """
+    __slots__ = ('active', 'widget', 'pending')
+
+    def __init__(self) -> None:
+        self.active: bool = False
+        self.widget: 'SessionSelector | ProjectSelector | ModelSelector | None' = None
+        self.pending: bool = False
+
+
 async def interactive(init_auto_evolve: bool = False):
     if not sys.stdin.isatty():
         print("This client requires a real terminal (TTY).", file=sys.stderr); return
@@ -760,21 +774,11 @@ async def interactive(init_auto_evolve: bool = False):
 
     tool_args: dict[str, dict] = {}  # track tool arguments by tool_call_id for diff rendering
 
-    # Session selector state (interactive /resume without args)
-    selector_active = False
-    selector_widget: SessionSelector | None = None
-    _pending_resume_select = False  # True when /resume typed without args, waiting for sessions_list
-
-    # Project selector state (interactive /rant project picker)
-    project_selector_active = False
-    project_selector_widget: ProjectSelector | None = None
-    _pending_rant_project = False  # True when /rant typed without args, waiting for projects_list
+    # Selector state — each selector has an active flag, widget ref, and pending flag.
+    session_sel = SelectorState()
+    project_sel = SelectorState()
+    model_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
-
-    # Model selector state (interactive /model picker)
-    model_selector_active = False
-    model_selector_widget: ModelSelector | None = None
-    _pending_model_list = False  # True when /model typed without args
 
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
@@ -962,26 +966,26 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Sessions list
                 if data.get("type") == "sessions_list":
-                    nonlocal selector_active, selector_widget, _pending_resume_select
+                    nonlocal session_sel
                     sessions = data.get("sessions", [])
                     err = data.get("error", "")
                     if err:
                         chat.add("system", f"Error: {err}")
-                        _pending_resume_select = False
-                    elif _pending_resume_select and sessions:
+                        session_sel.pending = False
+                    elif session_sel.pending and sessions:
                         # Enter interactive selection mode
-                        _pending_resume_select = False
-                        selector_widget = SessionSelector(sessions)
-                        selector_active = True
-                        chat.add(selector_widget)
+                        session_sel.pending = False
+                        session_sel.widget = SessionSelector(sessions)
+                        session_sel.active = True
+                        chat.add(session_sel.widget)
                         status.update(center="select session: ↑↓ Enter Esc  (j/k vim)")
                     else:
-                        _pending_resume_select = False
+                        session_sel.pending = False
                         if sessions:
                             # /sessions also enters interactive selection mode
-                            selector_widget = SessionSelector(sessions)
-                            selector_active = True
-                            chat.add(selector_widget)
+                            session_sel.widget = SessionSelector(sessions)
+                            session_sel.active = True
+                            chat.add(session_sel.widget)
                             status.update(center="select session: ↑↓ Enter Esc  (j/k vim)")
                         else:
                             chat.add("system", "No saved sessions yet. Start chatting to create one.")
@@ -990,24 +994,24 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Projects list
                 if data.get("type") == "projects_list":
-                    nonlocal project_selector_active, project_selector_widget, _pending_rant_project
+                    nonlocal project_sel
                     projects = data.get("projects", [])
                     err = data.get("error", "")
                     if err:
                         chat.add("system", f"Error: {err}")
-                        _pending_rant_project = False
-                    elif _pending_rant_project and projects:
-                        _pending_rant_project = False
-                        project_selector_widget = ProjectSelector(projects)
-                        project_selector_active = True
-                        chat.add(project_selector_widget)
+                        project_sel.pending = False
+                    elif project_sel.pending and projects:
+                        project_sel.pending = False
+                        project_sel.widget = ProjectSelector(projects)
+                        project_sel.active = True
+                        chat.add(project_sel.widget)
                         status.update(center="select project: ↑↓ Enter Esc  (j/k vim)")
                     else:
-                        _pending_rant_project = False
+                        project_sel.pending = False
                         if projects:
-                            project_selector_widget = ProjectSelector(projects)
-                            project_selector_active = True
-                            chat.add(project_selector_widget)
+                            project_sel.widget = ProjectSelector(projects)
+                            project_sel.active = True
+                            chat.add(project_sel.widget)
                             status.update(center="select project: ↑↓ Enter Esc  (j/k vim)")
                         else:
                             chat.add("system", "No projects configured. Use emrg in a git repo to auto-register.")
@@ -1016,21 +1020,21 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Models list response (for /model interactive picker)
                 if data.get("type") == "models_list":
-                    nonlocal model_selector_active, model_selector_widget, _pending_model_list
+                    nonlocal model_sel
                     models = data.get("models", [])
                     current = data.get("current", "")
                     err = data.get("error", "")
                     if err:
                         chat.add("system", f"Error: {err}")
-                        _pending_model_list = False
+                        model_sel.pending = False
                     elif models:
-                        _pending_model_list = False
-                        model_selector_widget = ModelSelector(models, current)
-                        model_selector_active = True
-                        chat.add(model_selector_widget)
+                        model_sel.pending = False
+                        model_sel.widget = ModelSelector(models, current)
+                        model_sel.active = True
+                        chat.add(model_sel.widget)
                         status.update(center="select model: ↑↓ Enter Esc  (j/k vim)")
                     else:
-                        _pending_model_list = False
+                        model_sel.pending = False
                         chat.add("system", "No models configured. Add [[llm.models]] to ~/.emrg/config.toml.")
                     term.render()
                     continue
@@ -1208,8 +1212,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, writer, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
-        nonlocal selector_active, selector_widget, _pending_resume_select
-        nonlocal project_selector_active, project_selector_widget
+        nonlocal session_sel, project_sel, model_sel
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task
@@ -1234,18 +1237,18 @@ async def interactive(init_auto_evolve: bool = False):
             return True
 
         # ── Session selector mode ──────────────────────────
-        if selector_active and selector_widget:
+        if session_sel.active and session_sel.widget:
             if data == b"\x1b":  # Esc — cancel selection
-                selector_active = False
+                session_sel.active = False
                 chat.add("system", "Session selection cancelled.")
-                selector_widget = None
+                session_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
                 return True
             if data == b"\r" or data == b"\n":  # Enter — confirm
-                sid = selector_widget.selected_session_id
-                selector_active = False
-                selector_widget = None
+                sid = session_sel.widget.selected_session_id
+                session_sel.active = False
+                session_sel.widget = None
                 if sid:
                     writer.write(json.dumps({
                         "type": "resume_session",
@@ -1263,38 +1266,38 @@ async def interactive(init_auto_evolve: bool = False):
             if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
                 c = data[2]
                 if c == 0x41:  # Up
-                    selector_widget.move_up()
+                    session_sel.widget.move_up()
                     chat.dirty = True; term.render()
                     return True
                 elif c == 0x42:  # Down
-                    selector_widget.move_down()
+                    session_sel.widget.move_down()
                     chat.dirty = True; term.render()
                     return True
             # j/k for vim-style navigation
             if data == b"j":
-                selector_widget.move_down()
+                session_sel.widget.move_down()
                 chat.dirty = True; term.render()
                 return True
             if data == b"k":
-                selector_widget.move_up()
+                session_sel.widget.move_up()
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in selector mode
             return True
 
         # ── Project selector mode ──────────────────────────
-        if project_selector_active and project_selector_widget:
+        if project_sel.active and project_sel.widget:
             if data == b"\x1b":  # Esc — cancel selection
-                project_selector_active = False
+                project_sel.active = False
                 chat.add("system", "Project selection cancelled.")
-                project_selector_widget = None
+                project_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
                 return True
             if data == b"\r" or data == b"\n":  # Enter — confirm
-                pname = project_selector_widget.selected_project_name
-                project_selector_active = False
-                project_selector_widget = None
+                pname = project_sel.widget.selected_project_name
+                project_sel.active = False
+                project_sel.widget = None
                 if pname:
                     nonlocal _rant_project
                     _rant_project = pname
@@ -1308,38 +1311,38 @@ async def interactive(init_auto_evolve: bool = False):
             if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
                 c = data[2]
                 if c == 0x41:  # Up
-                    project_selector_widget.move_up()
+                    project_sel.widget.move_up()
                     chat.dirty = True; term.render()
                     return True
                 elif c == 0x42:  # Down
-                    project_selector_widget.move_down()
+                    project_sel.widget.move_down()
                     chat.dirty = True; term.render()
                     return True
             # j/k for vim-style navigation
             if data == b"j":
-                project_selector_widget.move_down()
+                project_sel.widget.move_down()
                 chat.dirty = True; term.render()
                 return True
             if data == b"k":
-                project_selector_widget.move_up()
+                project_sel.widget.move_up()
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in project selector mode
             return True
 
         # ── Model selector mode ──────────────────────────
-        if model_selector_active and model_selector_widget:
+        if model_sel.active and model_sel.widget:
             if data == b"\x1b":  # Esc — cancel selection
-                model_selector_active = False
+                model_sel.active = False
                 chat.add("system", "Model selection cancelled.")
-                model_selector_widget = None
+                model_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
                 return True
             if data == b"\r" or data == b"\n":  # Enter — confirm
-                mname = model_selector_widget.selected_model_name
-                model_selector_active = False
-                model_selector_widget = None
+                mname = model_sel.widget.selected_model_name
+                model_sel.active = False
+                model_sel.widget = None
                 if mname:
                     writer.write(json.dumps({
                         "type": "set_model",
@@ -1354,27 +1357,27 @@ async def interactive(init_auto_evolve: bool = False):
             if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
                 c = data[2]
                 if c == 0x41:  # Up
-                    model_selector_widget.move_up()
+                    model_sel.widget.move_up()
                     chat.dirty = True; term.render()
                     return True
                 elif c == 0x42:  # Down
-                    model_selector_widget.move_down()
+                    model_sel.widget.move_down()
                     chat.dirty = True; term.render()
                     return True
             # j/k for vim-style navigation
             if data == b"j":
-                model_selector_widget.move_down()
+                model_sel.widget.move_down()
                 chat.dirty = True; term.render()
                 return True
             if data == b"k":
-                model_selector_widget.move_up()
+                model_sel.widget.move_up()
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in model selector mode
             return True
 
         # ── Command autocomplete: recompute on every keystroke ──
-        if not selector_active and not busy:
+        if not session_sel.active and not busy:
             text_stripped = inp.text.lstrip()
             if text_stripped.startswith("/"):
                 cmd_prefix = text_stripped.split(None, 1)[0]
@@ -1729,8 +1732,7 @@ Streaming
                             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                             return True
                         # /rant without args → interactive project selector
-                        nonlocal _pending_rant_project
-                        _pending_rant_project = True
+                        project_sel.pending = True
                         writer.write(json.dumps({
                             "type": "list_projects",
                         }).encode() + b"\n")
@@ -1766,8 +1768,7 @@ Streaming
                         status.update(center=f"switching model to {model_arg}...")
                     else:
                         # /model without args → interactive picker
-                        nonlocal _pending_model_list
-                        _pending_model_list = True
+                        model_sel.pending = True
                         writer.write(json.dumps({
                             "type": "list_models",
                         }).encode() + b"\n")
@@ -1781,7 +1782,7 @@ Streaming
                     parts = text.split(None, 1)
                     if len(parts) < 2:
                         # No argument: enter interactive session selection
-                        _pending_resume_select = True
+                        session_sel.pending = True
                         writer.write(json.dumps({
                             "type": "list_sessions",
                             "cwd": cwd,
@@ -1791,9 +1792,9 @@ Streaming
                     else:
                         target_sid = parts[1].strip()
                         # Deactivate selector if active
-                        selector_active = False
-                        selector_widget = None
-                        _pending_resume_select = False
+                        session_sel.active = False
+                        session_sel.widget = None
+                        session_sel.pending = False
                         writer.write(json.dumps({
                             "type": "resume_session",
                             "session_id": target_sid,
