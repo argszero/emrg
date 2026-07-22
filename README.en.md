@@ -109,6 +109,7 @@ model = "deepseek-chat"
 max_tokens = 8192
 temperature = 0.7
 context_window = 131072
+auto_compact_threshold = 0.0
 
 # Multi-model support — use /model to switch between models
 [[llm.models]]
