@@ -20,6 +20,7 @@ from typing import AsyncIterator, Optional
 
 import httpx
 
+from emrg import __version__
 from emrg.config import LlmConfig
 
 logger = logging.getLogger(__name__)
@@ -70,7 +71,7 @@ class LlmClient:
         return {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
-            "User-Agent": "emrg/0.1",
+            "User-Agent": f"emrg/{__version__}",
         }
 
     async def chat(
