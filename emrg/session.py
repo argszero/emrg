@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +23,10 @@ from pathlib import Path
 from emrg.memory import SessionMemoryStore
 
 logger = logging.getLogger(__name__)
+
+# ── llm.jsonl rotation ────────────────────────────────────────
+_LLM_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
+_LLM_LOG_BACKUP_COUNT = 2
 
 
 def generate_session_id(cwd: Path) -> str:
@@ -181,7 +186,11 @@ class Session:
         self._save_meta()
 
     def append_llm(self, record: dict) -> None:
-        """Append an LLM request/response record to llm.jsonl."""
+        """Append an LLM request/response record to llm.jsonl.
+
+        Automatically rotates the file when it exceeds 50 MB, keeping
+        up to 2 backup files (llm.jsonl.1, llm.jsonl.2).
+        """
         if "timestamp" not in record:
             record["timestamp"] = datetime.now().isoformat()
 
@@ -189,8 +198,36 @@ class Session:
         entry.update(record)
 
         line = json.dumps(entry, ensure_ascii=False) + "\n"
+
+        # Rotate if file exceeds max size
+        self._rotate_llm_log()
+
         with open(self._llm_path, "a") as f:
             f.write(line)
+
+    def _rotate_llm_log(self) -> None:
+        """Rotate llm.jsonl if it exceeds _LLM_LOG_MAX_BYTES."""
+        if not self._llm_path.exists():
+            return
+        try:
+            size = os.path.getsize(self._llm_path)
+        except OSError:
+            return
+        if size < _LLM_LOG_MAX_BYTES:
+            return
+
+        # Shift existing backups: .2 → .3 (delete), .1 → .2, main → .1
+        for i in range(_LLM_LOG_BACKUP_COUNT, 0, -1):
+            old = Path(str(self._llm_path) + f".{i}")
+            new = Path(str(self._llm_path) + f".{i + 1}")
+            if i == _LLM_LOG_BACKUP_COUNT and new.exists():
+                new.unlink()
+            if old.exists():
+                old.rename(new)
+
+        # Rename current to .1
+        backup_path = Path(str(self._llm_path) + ".1")
+        self._llm_path.rename(backup_path)
 
     # ── History reading ───────────────────────────────────────
 

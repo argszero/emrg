@@ -58,7 +58,8 @@ class LlmClient:
             payload["tools"] = tools
         if stream:
             payload["stream"] = True
-            payload["stream_options"] = {"include_usage": False}
+            if self.config.stream_options is not None:
+                payload["stream_options"] = self.config.stream_options
         return payload
 
     def _headers(self) -> dict:
@@ -110,8 +111,11 @@ class LlmClient:
                 )
                 continue
 
-            logger.error("LLM error: %s %s", resp.status_code, text)
-            raise RuntimeError(f"LLM request failed: {resp.status_code} - {text}")
+            hdr = dict(resp.headers)
+            logger.error("LLM error: %s headers=%s body=%s", resp.status_code, hdr, text)
+            raise RuntimeError(
+                f"LLM request failed: {resp.status_code} headers={hdr} body={text}"
+            )
 
         raise last_error  # type: ignore[misc]
 
@@ -173,8 +177,10 @@ class LlmClient:
                         )
                         continue
                     logger.error("LLM stream error: %s %s", resp.status_code, text[:500])
+                    hdr = dict(resp.headers)
                     raise RuntimeError(
-                        f"LLM stream request failed: {resp.status_code}"
+                        f"LLM stream request failed: {resp.status_code} "
+                        f"headers={hdr} body={text[:1000]}"
                     )
 
                 async for line in resp.aiter_lines():
