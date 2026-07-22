@@ -118,6 +118,7 @@ emrg
 | `/compact` | 压缩长对话以节省上下文 |
 | `/memory` | 浏览项目和会话记忆 |
 | `/rename [标题]` | 给当前会话起个好记的名字 |
+| `/model [name]` | 切换 LLM 模型——不带参数进入交互式选择器 |
 | `/rant <反馈> [@<project>]` | 吐槽、建议、夸奖——演化系统会听，`@project` 定向到特定项目 |
 | `/help` | 查看所有键盘快捷键和命令帮助 |
 | `/version` | 显示 EMRG 版本和实例信息 |
@@ -198,7 +199,7 @@ EMRG 不只是追赶——它自己追上来。
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # 安装依赖
-uv run pytest tests/ -v   # 跑测试（当前 159 项）
+uv run pytest tests/ -v   # 跑测试（当前 389 项）
 uv run python -m emrg     # 启动
 ```
 
