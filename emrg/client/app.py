@@ -1124,6 +1124,7 @@ async def interactive(init_auto_evolve: bool = False):
                         f"({meta.get('message_count', record_count)} messages, "
                         f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
                     status.update(left=session_title or session_id, center=server_id or "emrg")
+                    term.set_title(session_title or session_id)
                     # Set message count from loaded session
                     msg_count = meta.get("message_count", record_count)
                     _update_right()
@@ -1140,6 +1141,7 @@ async def interactive(init_auto_evolve: bool = False):
                         session_title = new_title
                         chat.add("system", f"Session renamed to: {new_title}")
                         status.update(left=session_title, center=server_id or "emrg")
+                        term.set_title(session_title)
                     term.render()
                     continue
 

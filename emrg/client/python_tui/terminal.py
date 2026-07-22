@@ -409,8 +409,19 @@ class Terminal:
                 logger.exception("TUI event loop crashed")
                 break
 
+    def set_title(self, title: str) -> None:
+        """Set the terminal window title (OSC 2)."""
+        sys.stdout.write(f"\x1b]2;{title}\x07")
+        sys.stdout.flush()
+
+    def restore_title(self) -> None:
+        """Clear the terminal window title."""
+        sys.stdout.write("\x1b]2;\x07")
+        sys.stdout.flush()
+
     def shutdown(self) -> None:
         """Restore terminal and exit raw mode."""
+        self.restore_title()
         if self._raw_mode:
             self._exit_raw_mode()
         sys.stdout.write(CURSOR_SHOW)
@@ -437,6 +448,7 @@ class Terminal:
 
     def _exit_raw_mode(self) -> None:
         """Restore original terminal settings."""
+        self.restore_title()
         if self._original_termios is not None:
             try:
                 termios.tcsetattr(
