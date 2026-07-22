@@ -886,12 +886,15 @@ class EmrgServer:
                 "model": self.llm.config.model,
                 "messages": messages,
                 "tools": tools,
+                "payload": self.llm.last_payload,
             })
             session.append_llm({
                 "type": "response",
                 "content": content,
                 "tool_calls": msg.get("tool_calls"),
                 "finish_reason": msg.get("finish_reason", "stop"),
+                "http_status": self.llm.last_response_status,
+                "response_headers": self.llm.last_response_headers,
             })
 
             # Persist assistant message
@@ -1068,12 +1071,15 @@ class EmrgServer:
                     "model": self.llm.config.model,
                     "messages": [dict(m) for m in messages],
                     "tools": tools_openai,
+                    "payload": self.llm.last_payload,
                 })
                 session.append_llm({
                     "type": "response",
                     "content": full_content,
                     "finish_reason": final_finish,
                     "usage": final_usage,
+                    "http_status": self.llm.last_response_status,
+                    "response_headers": self.llm.last_response_headers,
                 })
 
                 # Persist assistant message
@@ -1106,6 +1112,7 @@ class EmrgServer:
                     "model": self.llm.config.model,
                     "messages": [dict(m) for m in messages],
                     "tools": tools_openai,
+                    "payload": self.llm.last_payload,
                 })
                 session.append_llm({
                     "type": "response",
@@ -1118,6 +1125,8 @@ class EmrgServer:
                     ],
                     "finish_reason": final_finish,
                     "usage": final_usage,
+                    "http_status": self.llm.last_response_status,
+                    "response_headers": self.llm.last_response_headers,
                 })
 
                 # Build the assistant message with tool_calls
@@ -1245,12 +1254,15 @@ class EmrgServer:
                 "model": self.llm.config.model,
                 "messages": messages,
                 "tools": tools_openai,
+                "payload": self.llm.last_payload,
             })
             session.append_llm({
                 "type": "response",
                 "content": full_content,
                 "finish_reason": final_finish,
                 "usage": final_usage,
+                "http_status": self.llm.last_response_status,
+                "response_headers": self.llm.last_response_headers,
             })
 
             session.append_message({
@@ -1458,11 +1470,14 @@ class EmrgServer:
             "messages": compact_messages,
             "tools": None,
             "compact": True,
+            "payload": self.llm.last_payload,
         })
         session.append_llm({
             "type": "response",
             "content": summary,
             "compact": True,
+            "http_status": self.llm.last_response_status,
+            "response_headers": self.llm.last_response_headers,
         })
         return summary
 

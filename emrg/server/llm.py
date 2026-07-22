@@ -36,6 +36,10 @@ class LlmClient:
     def __init__(self, config: LlmConfig) -> None:
         self.config = config
         self._client: Optional[httpx.AsyncClient] = None
+        # Last request/response metadata for llm.jsonl logging
+        self.last_payload: dict = {}
+        self.last_response_status: int = 0
+        self.last_response_headers: dict = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -86,6 +90,11 @@ class LlmClient:
         payload = self._make_payload(messages, tools, stream=False)
         headers = self._headers()
 
+        # Store for llm.jsonl logging
+        self.last_payload = dict(payload)
+        self.last_response_status = 0
+        self.last_response_headers = {}
+
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
             logger.debug("LLM request: url=%s model=%s (attempt %d/%d)",
@@ -94,6 +103,8 @@ class LlmClient:
             resp = await client.post(url, headers=headers, json=payload)
 
             if resp.status_code == 200:
+                self.last_response_status = resp.status_code
+                self.last_response_headers = dict(resp.headers)
                 data = resp.json()
                 choice = data["choices"][0]
                 return choice.get("message", {})
@@ -147,6 +158,11 @@ class LlmClient:
         payload = self._make_payload(messages, tools, stream=True)
         headers = {**self._headers(), "Accept": "text/event-stream"}
 
+        # Store for llm.jsonl logging
+        self.last_payload = dict(payload)
+        self.last_response_status = 0
+        self.last_response_headers = {}
+
         logger.debug("LLM stream: url=%s model=%s", url, self.config.model)
 
         # Accumulated state across chunks (reset on retry)
@@ -182,6 +198,10 @@ class LlmClient:
                         f"LLM stream request failed: {resp.status_code} "
                         f"headers={hdr} body={text[:1000]}"
                     )
+
+                # Capture response metadata for llm.jsonl logging
+                self.last_response_status = resp.status_code
+                self.last_response_headers = dict(resp.headers)
 
                 async for line in resp.aiter_lines():
                     line = line.strip()
