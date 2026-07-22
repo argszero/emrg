@@ -366,7 +366,9 @@ class InputParser:
                     else:
                         consumed = 1  # Unknown ESC — consume just ESC
                 else:
-                    pass  # wait for more bytes
+                    # 2-byte unrecognised ESC sequence (e.g. \x1bZ) —
+                    # consume it, don't wait for more bytes
+                    consumed = len(self._buf)
             elif self._buf[0] >= 0x80:
                 # Multi-byte UTF-8 — wait for complete sequence
                 need = _utf8_len(self._buf[0])

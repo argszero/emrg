@@ -1828,6 +1828,15 @@ Streaming
             inp.insert(chr(b))
             if not paste_mode: term.render()
             return True
+        # Multi-byte UTF-8 (CJK, emoji, etc.) — decode the full sequence
+        if b >= 0x80:
+            try:
+                char = data.decode("utf-8")
+                inp.insert(char)
+            except UnicodeDecodeError:
+                pass
+            if not paste_mode: term.render()
+            return True
         if b == 0x0A:
             if paste_mode:
                 if not inp.text.endswith("\n"): inp.insert("\n")
