@@ -1077,13 +1077,12 @@ async def interactive(init_auto_evolve: bool = False):
     read_task = asyncio.create_task(read_server())
 
     # ── SIGWINCH (terminal resize) handler ─────────────────
-    _needs_resize = False
+    _resize_event = asyncio.Event()
 
-    def _on_sigwinch(signum: int, frame: object) -> None:
-        nonlocal _needs_resize
-        _needs_resize = True
+    def _on_sigwinch() -> None:
+        _resize_event.set()
 
-    signal.signal(signal.SIGWINCH, _on_sigwinch)
+    loop.add_signal_handler(signal.SIGWINCH, _on_sigwinch)
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, writer, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
@@ -1651,15 +1650,32 @@ Streaming
     parser = InputParser()
     try:
         while True:
-            data = await loop.run_in_executor(None, os.read, stdin_fd, 16)
-            if not data: break
+            # Race stdin read against SIGWINCH resize event
+            read_ft = loop.run_in_executor(None, os.read, stdin_fd, 16)
+            resize_ft = asyncio.ensure_future(_resize_event.wait())
+            done, pending = await asyncio.wait(
+                [read_ft, resize_ft], return_when=asyncio.FIRST_COMPLETED)
 
-            # Handle pending terminal resize (SIGWINCH)
-            if _needs_resize:
-                _needs_resize = False
+            # Cancel the asyncio future that didn't fire (resize_ft is cheap to cancel)
+            for ft in pending:
+                if ft is resize_ft:
+                    ft.cancel()
+                    try: await ft
+                    except (asyncio.CancelledError, Exception): pass
+
+            # Process resize immediately (real-time, no keypress needed)
+            if _resize_event.is_set():
+                _resize_event.clear()
                 try: term.handle_resize()
                 except Exception:
                     logger.debug("resize handler failed", exc_info=True)
+
+            # Skip data processing if stdin read didn't complete
+            if read_ft not in done:
+                continue
+
+            data = read_ft.result()
+            if not data: break
 
             for seq in parser.feed(data):
                 if not await handle_key(seq): return
