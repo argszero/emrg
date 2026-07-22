@@ -153,6 +153,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - stream_options per-model (None = Kimi) ✅ | README/Agent.md 多模型配置示例 ✅
 > - [[llm.models]] 支持 model 字段 (name ≠ API model) ✅ | auto_compact_threshold 全文件一致 ✅
 > - TUI 输入框上下分隔线 (dim ─) ✅
+> - httpcore/httpx daemon 日志抑制 (rant #24) ✅
 
 #### 2.2 GitHub 最新代码改动
 
