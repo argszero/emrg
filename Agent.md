@@ -66,6 +66,6 @@ pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.sock; python -m emrg
 base_url = "https://api.deepseek.com"
 api_key = "sk-..."
 model = "deepseek-chat"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 ```

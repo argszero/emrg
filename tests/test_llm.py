@@ -127,11 +127,11 @@ def test_payload_preserves_messages_identity(client):
 
 
 def test_payload_max_tokens_default():
-    """Default max_tokens from LlmConfig is 4096."""
+    """Default max_tokens from LlmConfig is 8192."""
     default_cfg = LlmConfig()
     c = LlmClient(default_cfg)
     p = c._make_payload([{"role": "user", "content": "x"}])
-    assert p["max_tokens"] == 4096
+    assert p["max_tokens"] == 8192
 
 
 def test_payload_temperature_default():
