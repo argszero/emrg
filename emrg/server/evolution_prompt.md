@@ -184,17 +184,6 @@ cat ~/.emrg/projects.yml
 
 找不到改进点则说 **"nothing to evolve"**。
 
-> **稳态快速通道**：如果最近 5+ 个周期均为 "nothing to evolve"，且：
-> - rants.jsonl 无新增条目（行数未变）
-> - gh pr list + gh issue list 均空
-> - 上次已确认测试全过
->
-> 则**跳过完整回顾（1.1~1.5）**，仅执行：
-> ```bash
-> cd {source_dir} && git pull origin master && gh pr list -R {owner}/{repo} --limit 5 && gh issue list -R {owner}/{repo} --limit 5
-> ```
-> 确认无变化后直接记录。无需重新跑测试、读 memory、检查其他项目、外部搜索。
-
 ### 3. 改进
 
 - 每次 1-3 件小事，不搞大规模重构
