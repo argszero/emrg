@@ -1686,20 +1686,23 @@ class EmrgServer:
         old_model = self.llm.config.model
         old_ctx = self.llm.config.context_window
 
-        # Find context_window from [[llm.models]] if defined
+        # Find the matching [[llm.models]] entry (if any) to resolve
+        # context_window and optional model name override.
         new_ctx: int | None = None
+        api_model: str = model_name  # default: use display name as API model
         for m in (self.llm.config.models or []):
             if m.get("name") == model_name:
                 new_ctx = m.get("context_window")
+                api_model = m.get("model", model_name)
                 break
 
-        self.llm.config.model = model_name
+        self.llm.config.model = api_model
         if new_ctx is not None:
             self.llm.config.context_window = new_ctx
 
         logger.info(
-            "model switched: %s → %s (context_window: %d → %d)",
-            old_model, model_name, old_ctx, self.llm.config.context_window,
+            "model switched: %s → %s (api=%s, context_window: %d → %d)",
+            old_model, model_name, api_model, old_ctx, self.llm.config.context_window,
         )
 
         await self._send(writer, {

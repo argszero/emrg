@@ -108,13 +108,16 @@ context_window = 131072
 auto_compact_threshold = 0.0
 
 # Additional models for /model switching (optional — add or remove as needed)
+# model: API model name (optional — defaults to name if not set)
 [[llm.models]]
 name = "deepseek-v3"
+model = "deepseek-chat"
 context_window = 131072
 
 [[llm.models]]
 name = "deepseek-r1"
-context_window = 131072
+model = "deepseek-reasoner"
+context_window = 65536
 """)
     print(f"Default config created at {cfg_path}", file=sys.stderr)
     print("Edit it to set your API key and model.", file=sys.stderr)
