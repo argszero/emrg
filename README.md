@@ -96,9 +96,33 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 安装完成后，编辑自动生成的配置文件即可使用：
 
 ```bash
-# 安装脚本已自动生成 ~/.emrg/config.toml 模板，只需修改 api_key 和 model：
 vim ~/.emrg/config.toml
+```
 
+`~/.emrg/config.toml` 模板示例：
+
+```toml
+[llm]
+base_url = "https://api.deepseek.com"
+api_key = "sk-..."
+model = "deepseek-chat"
+max_tokens = 8192
+temperature = 0.7
+context_window = 131072
+
+# 多模型支持 — 使用 /model 指令在模型间切换
+[[llm.models]]
+name = "deepseek-v3"
+model = "deepseek-chat"
+context_window = 131072
+
+[[llm.models]]
+name = "deepseek-r1"
+model = "deepseek-reasoner"
+context_window = 65536
+```
+
+```bash
 emrg
 ```
 
