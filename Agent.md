@@ -78,7 +78,8 @@ temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
 
-# Additional models for /model switching (optional)
+# Additional models for /model switching (optional — add or remove as needed)
+# model: API model name (optional — defaults to name if not set)
 [[llm.models]]
 name = "deepseek-v3"
 model = "deepseek-chat"
