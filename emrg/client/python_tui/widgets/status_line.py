@@ -33,6 +33,16 @@ class StatusLine(Widget):
         self.right = right
         self._model = model
         self._tokens = tokens
+        self._elapsed: str = ""
+        self._dirty = True
+
+    @property
+    def elapsed(self) -> str:
+        return self._elapsed
+
+    @elapsed.setter
+    def elapsed(self, value: str) -> None:
+        self._elapsed = value
         self._dirty = True
 
     @property
@@ -91,6 +101,10 @@ class StatusLine(Widget):
 
         left_text = f" {self.left}" if self.left else ""
         center_text = self.center or self._model or ""
+        if center_text and self._elapsed:
+            center_text = f"{center_text}  {self._elapsed}"
+        elif self._elapsed:
+            center_text = self._elapsed
 
         # Layout: left fixed → center fills remaining → right fixed, right-aligned
         width = ctx.width
