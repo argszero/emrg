@@ -676,16 +676,13 @@ async def interactive(init_auto_evolve: bool = False):
     _last_center: str = ""  # last center text set via status.update, for timer overlay
 
     async def _run_elapsed_timer() -> None:
-        """Background task: update status line with elapsed time every second while busy."""
-        nonlocal _request_start, _last_center
+        """Background task: update status line elapsed time every second while busy."""
+        nonlocal _request_start
         while busy:
             elapsed = int(time.time() - _request_start)
             mins, secs = divmod(elapsed, 60)
-            timer = f"{mins}:{secs:02d}" if mins > 0 else f"{secs}s"
-            if _last_center:
-                status.update(center=f"{_last_center}  ⏱{timer}")
-            else:
-                status.update(center=f"⏱{timer}")
+            timer = f"⏱{mins}:{secs:02d}" if mins > 0 else f"⏱{secs}s"
+            status.elapsed = timer
             term.render()
             await asyncio.sleep(1)
 
@@ -826,6 +823,7 @@ async def interactive(init_auto_evolve: bool = False):
                     if _elapsed_task:
                         _elapsed_task.cancel()
                         _elapsed_task = None
+                    status.elapsed = ""
                     if stream_buffer:
                         # Final flush: if streaming markdown, it already has content;
                         # if plain text fallback, update the ChatRow
@@ -878,6 +876,7 @@ async def interactive(init_auto_evolve: bool = False):
                     busy = False
                     msg_count = max(0, msg_count - compacted)
                     _update_right()
+                    status.elapsed = ""
                     status.update(center=server_id or "emrg"); term.render()
                     continue
 
@@ -1107,6 +1106,7 @@ async def interactive(init_auto_evolve: bool = False):
             if _elapsed_task:
                 _elapsed_task.cancel()
                 _elapsed_task = None
+            status.elapsed = ""
             chat.add("system", "⏸ Interrupted — response stopped. You can continue.")
             _last_center = server_id or "emrg"
             status.update(center=_last_center)
