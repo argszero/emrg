@@ -614,6 +614,7 @@ class EmrgServer:
                 "evolution_count": pong.evolution_count,
                 "started_at": self.start_time.isoformat(),
                 "pid": os.getpid(),
+                "model": self.llm.config.model,
             })
             return
 

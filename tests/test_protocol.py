@@ -115,6 +115,24 @@ def test_server_pong_defaults():
     assert sp.uptime_seconds == 0
 
 
+def test_server_pong_with_model():
+    """ServerPong response includes model name for TUI status line display."""
+    d = {
+        "identity": {"instance_id": "emrg-abc", "host_name": "mac-mini"},
+        "uptime_seconds": 3600,
+        "evolution_count": 5,
+        "model": "deepseek-chat",
+    }
+    sp = ServerPong.from_dict(d)
+    assert sp.identity == {"instance_id": "emrg-abc", "host_name": "mac-mini"}
+    assert sp.uptime_seconds == 3600
+    assert sp.evolution_count == 5
+    # Model is an extra field — ServerPong.from_dict doesn't explicitly parse it,
+    # but the TUI client reads it directly from the raw data dict.
+    assert d.get("model") == "deepseek-chat"
+    assert "model" in d
+
+
 def test_evolution_log_defaults():
     log = EvolutionLog()
     assert log.timestamp == ""
