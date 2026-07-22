@@ -146,6 +146,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - projects.jsonl→projects.yml 迁移 ✅ | prompt 变量替换验证 ✅
 > - `emrg rant -p/--project` CLI 标志 ✅ | install.sh 标准路径+gh检查+python版本验证 ✅
 > - ProjectSelector nonlocal 变量修复 ✅
+> - `/model` 模型切换 ✅ | CJK/UTF-8 输入修复 ✅ | 启动显示模型名 ✅
 
 #### 2.2 GitHub 最新代码改动
 
