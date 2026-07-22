@@ -449,6 +449,10 @@ class EmrgServer:
         """Build the system prompt, including skill context, memory, and history."""
         parts = [SYSTEM_PROMPT]
 
+        # ── Working Directory ──
+        if session:
+            parts.append(f"**Working directory**: `{session.cwd}`")
+
         # ── Project Context Files (CLAUDE.md / AGENTS.md / Agent.md / MANIFESTO.md) ──
         if session:
             ctx_section = self._build_project_context_section(session)
@@ -1160,6 +1164,12 @@ class EmrgServer:
                         "arguments": args,
                     }):
                         return  # client disconnected
+
+                    # Inject session cwd as default for filesystem tools
+                    if tc_name in ("bash", "glob") and "workdir" not in args:
+                        args["workdir"] = str(session.cwd)
+                    elif tc_name == "grep" and "path" not in args:
+                        args["path"] = str(session.cwd)
 
                     # Execute
                     tool = self.tools.get(tc_name)
