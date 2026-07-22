@@ -118,6 +118,7 @@ Type `/help` to see all commands, or just start talking — EMRG reads files, ru
 | `/compact` | Compress long conversations to save context |
 | `/memory` | Browse project & session memories |
 | `/rename [title]` | Give your session a memorable name |
+| `/model [name]` | Switch LLM model — no args for interactive picker |
 | `/rant <feedback> [@<project>]` | Complain, suggest, praise — evolution listens; `@project` targets a specific project |
 | `/help` | Show keyboard shortcuts and command help |
 | `/version` | Show EMRG version and instance info |
@@ -196,7 +197,7 @@ EMRG doesn't just keep up — it catches up on its own.
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # install deps
-uv run pytest tests/ -v   # run tests (currently 159 items)
+uv run pytest tests/ -v   # run tests (currently 389 items)
 uv run python -m emrg     # launch
 ```
 
