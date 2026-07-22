@@ -19,7 +19,7 @@ class LlmConfig:
     base_url: str = "https://api.openai.com/v1"
     api_key: str = ""
     model: str = "gpt-4o-mini"
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.7
     # 更大的轮数允许 LLM 完成更复杂的多步骤任务（如大规模重构、深度分析）。
     # 30 轮在复杂任务中经常不够用，导致任务被截断。270 轮给予充足空间。
@@ -62,7 +62,7 @@ def load_config() -> EmrgConfig:
         base_url=llm_data.get("base_url", "https://api.openai.com/v1"),
         api_key=llm_data.get("api_key", ""),
         model=llm_data.get("model", "gpt-4o-mini"),
-        max_tokens=llm_data.get("max_tokens", 4096),
+        max_tokens=llm_data.get("max_tokens", 8192),
         temperature=llm_data.get("temperature", 0.7),
         max_tool_rounds=llm_data.get("max_tool_rounds", 270),
         context_window=llm_data.get("context_window", 131072),
@@ -89,7 +89,7 @@ def ensure_config() -> None:
 base_url = "https://api.deepseek.com"
 api_key = "sk-..."
 model = "deepseek-chat"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0

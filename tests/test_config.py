@@ -33,7 +33,7 @@ def test_llm_config_defaults():
     assert cfg.base_url == "https://api.openai.com/v1"
     assert cfg.api_key == ""
     assert cfg.model == "gpt-4o-mini"
-    assert cfg.max_tokens == 4096
+    assert cfg.max_tokens == 8192
     assert cfg.temperature == 0.7
     assert cfg.max_tool_rounds == 270
     assert cfg.context_window == 131072
@@ -57,7 +57,7 @@ model = "gpt-4"
     cfg = load_config()
     assert cfg.llm.api_key == "sk-test-123"
     assert cfg.llm.model == "gpt-4"
-    assert cfg.llm.max_tokens == 4096  # default
+    assert cfg.llm.max_tokens == 8192  # default
 
 
 def test_load_config_resolves_env_var(monkeypatch, tmp_path):
