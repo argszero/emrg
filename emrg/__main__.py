@@ -209,6 +209,9 @@ def _run_daemon() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Suppress noisy httpcore/httpx DEBUG logs (rant #24)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     from emrg.config import load_config
 
