@@ -147,6 +147,8 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - `emrg rant -p/--project` CLI 标志 ✅ | install.sh 标准路径+gh检查+python版本验证 ✅
 > - ProjectSelector nonlocal 变量修复 ✅
 > - `/model` 模型切换 ✅ | CJK/UTF-8 输入修复 ✅ | 启动显示模型名 ✅
+> - Terminal 标题同步 ✅ | llm.jsonl 完整日志 + 轮转 ✅ | Chat 渲染顺序修复 ✅
+> - Selector 状态收敛 (SelectorState) ✅ | nonlocal CI 检查 ✅ | install.sh config 模板 ✅
 
 #### 2.2 GitHub 最新代码改动
 
