@@ -808,7 +808,10 @@ async def interactive(init_auto_evolve: bool = False):
                 if "uptime_seconds" in data:
                     ident = data.get("identity", {}); hid = ident.get("instance_id", "?")[:8]
                     host = ident.get("host_name", "?")
+                    model = data.get("model", "")
                     server_id = f"{hid} @ {host}"
+                    if model:
+                        server_id += f" [{model}]"
                     if not _welcomed:
                         _welcomed = True
                         import emrg
