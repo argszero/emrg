@@ -106,6 +106,15 @@ max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
+
+# Additional models for /model switching (optional — add or remove as needed)
+[[llm.models]]
+name = "deepseek-v3"
+context_window = 131072
+
+[[llm.models]]
+name = "deepseek-r1"
+context_window = 131072
 """)
     print(f"Default config created at {cfg_path}", file=sys.stderr)
     print("Edit it to set your API key and model.", file=sys.stderr)
