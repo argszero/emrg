@@ -174,11 +174,10 @@ base_url = "https://api.deepseek.com"
 api_key = "sk-..."
 # Change to your preferred model
 model = "deepseek-chat"
-max_tokens = 4096
+max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
-evolution_interval = 1800
 EMRGCONF
     log "config template created — edit $cfg to set your api_key and model"
 }
