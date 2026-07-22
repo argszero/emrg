@@ -152,6 +152,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - dynamic __version__ in User-Agent ✅ | llm.jsonl 完整 HTTP request/response ✅
 > - stream_options per-model (None = Kimi) ✅ | README/Agent.md 多模型配置示例 ✅
 > - [[llm.models]] 支持 model 字段 (name ≠ API model) ✅ | auto_compact_threshold 全文件一致 ✅
+> - TUI 输入框上下分隔线 (dim ─) ✅
 
 #### 2.2 GitHub 最新代码改动
 
