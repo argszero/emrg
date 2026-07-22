@@ -115,3 +115,39 @@ def test_ensure_config_noop_when_exists(tmp_path, monkeypatch):
     monkeypatch.setattr("emrg.config.config_path", lambda: config_file)
     ensure_config()
     assert config_file.read_text() == "custom"  # unchanged
+
+
+def test_load_config_with_models(tmp_path, monkeypatch):
+    """load_config parses [[llm.models]] list for /model switching."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""[llm]
+api_key = "sk-test-123"
+model = "deepseek-chat"
+
+[[llm.models]]
+name = "deepseek-chat"
+context_window = 131072
+
+[[llm.models]]
+name = "deepseek-reasoner"
+context_window = 131072
+""")
+    monkeypatch.setattr("emrg.config.config_path", lambda: config_file)
+    cfg = load_config()
+    assert cfg.llm.model == "deepseek-chat"
+    assert len(cfg.llm.models) == 2
+    assert cfg.llm.models[0]["name"] == "deepseek-chat"
+    assert cfg.llm.models[0]["context_window"] == 131072
+    assert cfg.llm.models[1]["name"] == "deepseek-reasoner"
+
+
+def test_load_config_no_models_is_empty(tmp_path, monkeypatch):
+    """When [[llm.models]] is absent, models list is empty."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""[llm]
+api_key = "sk-test-123"
+model = "gpt-4"
+""")
+    monkeypatch.setattr("emrg.config.config_path", lambda: config_file)
+    cfg = load_config()
+    assert cfg.llm.models == []

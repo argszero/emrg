@@ -798,6 +798,19 @@ class EmrgServer:
                 count, f" project={project}" if project else "", rant_message[:100])
             await self._send(writer, {"ok": True, "count": count})
 
+        elif msg_type == "list_models":
+            await self._handle_list_models(writer)
+
+        elif msg_type == "set_model":
+            model_name = msg.get("model", "").strip()
+            if not model_name:
+                await self._send(writer, {
+                    "type": "model_set",
+                    "error": "set_model requires model name",
+                })
+                return
+            await self._handle_set_model(model_name, writer)
+
         elif msg_type == "list_projects":
             await self._handle_list_projects(writer)
 
@@ -1612,6 +1625,72 @@ class EmrgServer:
         await self._send(writer, {
             "type": "projects_list",
             "projects": projects,
+        })
+
+    async def _handle_list_models(
+        self, writer: asyncio.StreamWriter
+    ) -> None:
+        """Return available models for /model switching.
+
+        Builds a merged list: the current default model from [llm] config,
+        plus any additional models from [[llm.models]]. The default model
+        always appears first.
+        """
+        default_name = self.llm.config.model
+        default_ctx = self.llm.config.context_window
+        models_config = self.llm.config.models or []
+
+        seen: set[str] = set()
+        merged: list[dict] = []
+
+        # Default model always first
+        merged.append({"name": default_name, "context_window": default_ctx})
+        seen.add(default_name)
+
+        for m in models_config:
+            if m.get("name") and m["name"] not in seen:
+                merged.append(dict(m))
+                seen.add(m["name"])
+
+        await self._send(writer, {
+            "type": "models_list",
+            "models": merged,
+            "current": default_name,
+        })
+
+    async def _handle_set_model(
+        self, model_name: str, writer: asyncio.StreamWriter
+    ) -> None:
+        """Switch the runtime LLM model and context_window.
+
+        Not persisted — on restart, reverts to config.toml defaults.
+        The model_name must be either the default model or in [[llm.models]].
+        If not found in [[llm.models]], the context_window is kept as-is.
+        """
+        old_model = self.llm.config.model
+        old_ctx = self.llm.config.context_window
+
+        # Find context_window from [[llm.models]] if defined
+        new_ctx: int | None = None
+        for m in (self.llm.config.models or []):
+            if m.get("name") == model_name:
+                new_ctx = m.get("context_window")
+                break
+
+        self.llm.config.model = model_name
+        if new_ctx is not None:
+            self.llm.config.context_window = new_ctx
+
+        logger.info(
+            "model switched: %s → %s (context_window: %d → %d)",
+            old_model, model_name, old_ctx, self.llm.config.context_window,
+        )
+
+        await self._send(writer, {
+            "type": "model_set",
+            "model": model_name,
+            "context_window": self.llm.config.context_window,
+            "previous": old_model,
         })
 
     async def _handle_resume_session(
