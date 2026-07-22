@@ -1047,8 +1047,10 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add("system",
                                  f"Model switched: {previous} → {model_name}"
                                  f" (context: {ctx_win:,})")
-                        # Update the status line to show the new model
-                        status.update(center=f"{server_id} [{model_name}]" if server_id else f"emrg [{model_name}]")
+                        # Update server_id so all subsequent status updates show the new model
+                        base_id = server_id.split(" [")[0] if " [" in server_id else server_id
+                        server_id = f"{base_id} [{model_name}]" if base_id else f"emrg [{model_name}]"
+                        status.update(center=server_id)
                     term.render()
                     continue
 
