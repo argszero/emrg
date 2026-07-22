@@ -27,6 +27,7 @@ class LlmConfig:
     max_tool_rounds: int = 270
     context_window: int = 131072
     auto_compact_threshold: float = 0.0
+    models: list[dict] = field(default_factory=list)  # [[llm.models]] for /model switching
 
 
 @dataclass
@@ -67,6 +68,7 @@ def load_config() -> EmrgConfig:
         max_tool_rounds=llm_data.get("max_tool_rounds", 270),
         context_window=llm_data.get("context_window", 131072),
         auto_compact_threshold=llm_data.get("auto_compact_threshold", 0.0),
+        models=llm_data.get("models", []),
     )
 
     # Resolve ${ENV_VAR} placeholders in the API key

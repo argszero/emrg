@@ -352,6 +352,77 @@ class ProjectSelector(Widget):
         return lines
 
 
+class ModelSelector(Widget):
+    """Interactive model picker — arrow-key navigation with highlight.
+
+    Renders a list of available LLM models with the selected one in reverse
+    video. Used by /model when invoked without arguments.
+    """
+
+    def __init__(self, models: list[dict] | None = None, current: str = ""):
+        self.models: list[dict] = models or []
+        self.current: str = current
+        self.selected_index: int = 0
+        self._dirty: bool = True
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    @dirty.setter
+    def dirty(self, value: bool) -> None:
+        self._dirty = value
+
+    def move_up(self) -> None:
+        if self.selected_index > 0:
+            self.selected_index -= 1
+            self._dirty = True
+
+    def move_down(self) -> None:
+        if self.selected_index < len(self.models) - 1:
+            self.selected_index += 1
+            self._dirty = True
+
+    @property
+    def selected_model_name(self) -> str | None:
+        if 0 <= self.selected_index < len(self.models):
+            return self.models[self.selected_index].get("name", "")
+        return None
+
+    def render(self, ctx):
+        lines: list[Line] = []
+        pstyle = Style.parse("bold cyan")
+        active_marker = Style.parse("bold green")
+        lines.append(Line(
+            spans=[Span("○ ", style="dim"),
+                   Span("Select a model (↑↓/j/k to move, Enter to confirm, Esc to cancel):",
+                        style="bold")],
+            style=ctx.style,
+        ))
+        for i, m in enumerate(self.models):
+            name = m.get("name", "?")
+            ctx_win = m.get("context_window", 0)
+            is_current = name == self.current
+            label = f"  {name}"
+            if ctx_win:
+                label += f"  (context: {ctx_win:,})"
+            if is_current:
+                label += "  ★ current"
+            if i == self.selected_index:
+                spans = [
+                    Span("> ", style=pstyle),
+                    Span(label, style=Style(reverse=True)),
+                ]
+            else:
+                spans = [
+                    Span("  ", style=ctx.style),
+                    Span(label, style=active_marker if is_current else ctx.style),
+                ]
+            lines.append(Line(spans=spans, style=ctx.style))
+        self._dirty = False
+        return lines
+
+
 # Command help text for autocomplete dropdown
 _COMMAND_HELP: dict[str, str] = {
     "/resume":  "Switch to a session by [id] or interactively (↑↓/j/k to pick)",
@@ -361,6 +432,7 @@ _COMMAND_HELP: dict[str, str] = {
     "/rename":   "Rename current session [title]",
     "/clear":    "Clear current session history and start fresh",
     "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
+    "/model":    "Switch LLM model [/model | /model <name>]",
     "/version":  "Show EMRG version and instance info",
     "/help":     "Show keyboard shortcuts and commands",
 }
@@ -699,6 +771,11 @@ async def interactive(init_auto_evolve: bool = False):
     _pending_rant_project = False  # True when /rant typed without args, waiting for projects_list
     _rant_project: str | None = None  # Set after project selection, used on next Enter
 
+    # Model selector state (interactive /model picker)
+    model_selector_active = False
+    model_selector_widget: ModelSelector | None = None
+    _pending_model_list = False  # True when /model typed without args
+
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
     _autocomplete_widget: CommandDropdown | None = None
@@ -931,6 +1008,44 @@ async def interactive(init_auto_evolve: bool = False):
                             status.update(center="select project: ↑↓ Enter Esc  (j/k vim)")
                         else:
                             chat.add("system", "No projects configured. Use emrg in a git repo to auto-register.")
+                    term.render()
+                    continue
+
+                # Models list response (for /model interactive picker)
+                if data.get("type") == "models_list":
+                    nonlocal model_selector_active, model_selector_widget, _pending_model_list
+                    models = data.get("models", [])
+                    current = data.get("current", "")
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Error: {err}")
+                        _pending_model_list = False
+                    elif models:
+                        _pending_model_list = False
+                        model_selector_widget = ModelSelector(models, current)
+                        model_selector_active = True
+                        chat.add(model_selector_widget)
+                        status.update(center="select model: ↑↓ Enter Esc  (j/k vim)")
+                    else:
+                        _pending_model_list = False
+                        chat.add("system", "No models configured. Add [[llm.models]] to ~/.emrg/config.toml.")
+                    term.render()
+                    continue
+
+                # Model set response
+                if data.get("type") == "model_set":
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Model switch failed: {err}")
+                    else:
+                        model_name = data.get("model", "")
+                        ctx_win = data.get("context_window", 0)
+                        previous = data.get("previous", "")
+                        chat.add("system",
+                                 f"Model switched: {previous} → {model_name}"
+                                 f" (context: {ctx_win:,})")
+                        # Update the status line to show the new model
+                        status.update(center=f"{server_id} [{model_name}]" if server_id else f"emrg [{model_name}]")
                     term.render()
                     continue
 
@@ -1205,6 +1320,52 @@ async def interactive(init_auto_evolve: bool = False):
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in project selector mode
+            return True
+
+        # ── Model selector mode ──────────────────────────
+        if model_selector_active and model_selector_widget:
+            if data == b"\x1b":  # Esc — cancel selection
+                model_selector_active = False
+                chat.add("system", "Model selection cancelled.")
+                model_selector_widget = None
+                status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if data == b"\r" or data == b"\n":  # Enter — confirm
+                mname = model_selector_widget.selected_model_name
+                model_selector_active = False
+                model_selector_widget = None
+                if mname:
+                    writer.write(json.dumps({
+                        "type": "set_model",
+                        "model": mname,
+                    }).encode() + b"\n")
+                    status.update(center=f"switching model to {mname}...")
+                else:
+                    chat.add("system", "No model selected.")
+                    status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
+                c = data[2]
+                if c == 0x41:  # Up
+                    model_selector_widget.move_up()
+                    chat.dirty = True; term.render()
+                    return True
+                elif c == 0x42:  # Down
+                    model_selector_widget.move_down()
+                    chat.dirty = True; term.render()
+                    return True
+            # j/k for vim-style navigation
+            if data == b"j":
+                model_selector_widget.move_down()
+                chat.dirty = True; term.render()
+                return True
+            if data == b"k":
+                model_selector_widget.move_up()
+                chat.dirty = True; term.render()
+                return True
+            # Ignore other keys when in model selector mode
             return True
 
         # ── Command autocomplete: recompute on every keystroke ──
@@ -1523,6 +1684,7 @@ Commands
   /rant <msg>         Send feedback to evolution system
   /rant @<project> <msg>  Rant to a specific project
   /rant               Interactive project picker, then type message
+  /model [name]        Switch LLM model (no args = interactive picker)
   quit / exit         Exit EMRG
 
 Streaming
@@ -1582,6 +1744,30 @@ Streaming
                     await writer.drain()
                     target = f" (@{project})" if project else ""
                     chat.add("system", f"Rant recorded{target}. The evolution system will review it.")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
+                # Handle /model command
+                if text.lower().startswith("/model"):
+                    parts = text.split(None, 1)
+                    model_arg = parts[1].strip() if len(parts) > 1 else ""
+                    if model_arg:
+                        # /model <name> → direct switch
+                        writer.write(json.dumps({
+                            "type": "set_model",
+                            "model": model_arg,
+                        }).encode() + b"\n")
+                        await writer.drain()
+                        status.update(center=f"switching model to {model_arg}...")
+                    else:
+                        # /model without args → interactive picker
+                        nonlocal _pending_model_list
+                        _pending_model_list = True
+                        writer.write(json.dumps({
+                            "type": "list_models",
+                        }).encode() + b"\n")
+                        await writer.drain()
+                        status.update(center="loading models...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
