@@ -14,7 +14,7 @@
 #   ./install.sh uninstall  # remove emrg CLI, stop daemon, (keep source & data)
 #   ./install.sh purge      # uninstall + remove source repo & ~/.emrg data
 #
-# Dependencies (git, python >=3.10, uv, gh) are auto-installed if missing.
+# Dependencies (git, python >=3.11, uv, gh) are auto-installed if missing.
 set -euo pipefail
 
 REPO_URL="https://github.com/argszero/emrg.git"
@@ -68,10 +68,10 @@ install_prereqs() {
     fi
     # Version check (warn, don't auto-upgrade existing installs)
     if command -v python3 &>/dev/null; then
-        if [[ "$(python3 -c 'import sys; print(sys.version_info >= (3,10))')" != "True" ]]; then
+        if [[ "$(python3 -c 'import sys; print(sys.version_info >= (3,11))')" != "True" ]]; then
             local py_ver
             py_ver=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-            err "python3 $py_ver is too old — Python 3.10+ required"
+            err "python3 $py_ver is too old — Python 3.11+ required"
             exit 1
         fi
     fi

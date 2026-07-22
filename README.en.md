@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img alt="Python" src="https://img.shields.io/badge/python-3.10+-blue.svg">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.11+-blue.svg">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
   <img alt="Status" src="https://img.shields.io/badge/status-evolving-orange.svg">
   <img alt="Tests" src="https://github.com/argszero/emrg/actions/workflows/test.yml/badge.svg">
@@ -91,7 +91,7 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
 ```
 
-> Prerequisites (install.sh auto-detects and prompts): git, python 3.10+, uv. gh CLI recommended.
+> Prerequisites (install.sh auto-detects and prompts): git, python 3.11+, uv. gh CLI recommended.
 
 After installing, edit the auto-generated config template:
 
