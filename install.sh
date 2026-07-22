@@ -178,6 +178,15 @@ max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
+
+# Additional models for /model switching (optional — add or remove as needed)
+[[llm.models]]
+name = "deepseek-v3"
+context_window = 131072
+
+[[llm.models]]
+name = "deepseek-r1"
+context_window = 131072
 EMRGCONF
     log "config template created — edit $cfg to set your api_key and model"
 }
