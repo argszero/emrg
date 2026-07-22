@@ -75,4 +75,17 @@ api_key = "sk-..."
 model = "deepseek-chat"
 max_tokens = 8192
 temperature = 0.7
+context_window = 131072
+auto_compact_threshold = 0.0
+
+# Additional models for /model switching (optional)
+[[llm.models]]
+name = "deepseek-v3"
+model = "deepseek-chat"
+context_window = 131072
+
+[[llm.models]]
+name = "deepseek-r1"
+model = "deepseek-reasoner"
+context_window = 65536
 ```
