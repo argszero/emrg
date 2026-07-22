@@ -20,6 +20,9 @@ logging.basicConfig(
         logging.StreamHandler(),  # also to stderr (visible when run directly)
     ],
 )
+# Suppress noisy httpcore/httpx DEBUG logs (rant #24)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 from emrg.config import load_config
 from emrg.server.daemon import run_server
 
