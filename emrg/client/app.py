@@ -148,7 +148,8 @@ class InputWidget(Widget):
     @dirty.setter
     def dirty(self, v): self._dirty = v
     def render(self, ctx):
-        pstyle = Style.parse("bold cyan"); lines = []
+        pstyle = Style.parse("bold cyan"); sep_style = Style.parse("dim")
+        lines = [Line(spans=[Span("─" * ctx.width, style=sep_style)], style=ctx.style)]
         raw = self.text.split("\n") if self.text else [""]
         prompt = "> "; prompt_w = len(prompt)
         available = max(1, ctx.width - prompt_w)
@@ -214,6 +215,7 @@ class InputWidget(Widget):
 
                 pos = end
 
+        lines.append(Line(spans=[Span("─" * ctx.width, style=sep_style)], style=ctx.style))
         self._dirty = False; return lines
 
 
