@@ -28,6 +28,9 @@ class LlmConfig:
     context_window: int = 131072
     auto_compact_threshold: float = 0.0
     models: list[dict] = field(default_factory=list)  # [[llm.models]] for /model switching
+    # stream_options: None means don't send stream_options at all (for APIs like Kimi).
+    # Default is {"include_usage": False} for OpenAI/DeepSeek compatibility.
+    stream_options: Optional[dict] = field(default_factory=lambda: {"include_usage": False})
 
 
 @dataclass
@@ -59,6 +62,13 @@ def load_config() -> EmrgConfig:
     data = tomllib.loads(content)
     llm_data = data.get("llm", {})
 
+    # stream_options: None = no stream_options sent (for Kimi etc.)
+    raw_stream_opts = llm_data.get("stream_options")
+    if raw_stream_opts is None and "stream_options" not in llm_data:
+        stream_opts: Optional[dict] = {"include_usage": False}  # default
+    else:
+        stream_opts = raw_stream_opts  # explicit None disables it
+
     llm = LlmConfig(
         base_url=llm_data.get("base_url", "https://api.openai.com/v1"),
         api_key=llm_data.get("api_key", ""),
@@ -69,6 +79,7 @@ def load_config() -> EmrgConfig:
         context_window=llm_data.get("context_window", 131072),
         auto_compact_threshold=llm_data.get("auto_compact_threshold", 0.0),
         models=llm_data.get("models", []),
+        stream_options=stream_opts,
     )
 
     # Resolve ${ENV_VAR} placeholders in the API key

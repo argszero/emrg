@@ -578,7 +578,7 @@ class EmrgServer:
             f"- **Current history** (may be compacted): `{session.dir_path}/history.jsonl`",
             f"- **Daily full history** (never compacted): `{session.dir_path}/history_{today}.jsonl`",
             f"- Daily files are named `history_YYMMDD.jsonl`",
-            f"- LLM raw log: `{session.dir_path}/llm.jsonl`",
+            f"- LLM raw log: `{session.dir_path}/llm.jsonl` (rotated at 50MB, up to 2 backups)",
             "",
             "**To read history**: use the `read` tool on `history.jsonl` for the current",
             "context, or on a specific `history_YYMMDD.jsonl` file for older messages.",
