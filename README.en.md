@@ -96,9 +96,33 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 After installing, edit the auto-generated config template:
 
 ```bash
-# install.sh already creates ~/.emrg/config.toml template — just set your api_key and model:
 vim ~/.emrg/config.toml
+```
 
+`~/.emrg/config.toml` template example:
+
+```toml
+[llm]
+base_url = "https://api.deepseek.com"
+api_key = "sk-..."
+model = "deepseek-chat"
+max_tokens = 8192
+temperature = 0.7
+context_window = 131072
+
+# Multi-model support — use /model to switch between models
+[[llm.models]]
+name = "deepseek-v3"
+model = "deepseek-chat"
+context_window = 131072
+
+[[llm.models]]
+name = "deepseek-r1"
+model = "deepseek-reasoner"
+context_window = 65536
+```
+
+```bash
 emrg
 ```
 
