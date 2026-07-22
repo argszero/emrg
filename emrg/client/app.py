@@ -1805,7 +1805,7 @@ Streaming
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
-                busy = True; need_new_assistant = False
+                busy = True; need_new_assistant = True  # rant #32: force new StreamingMarkdown per response
                 _request_start = time.time()
                 # Cancel any stale timer and start a new one
                 if _elapsed_task:
