@@ -972,7 +972,10 @@ async def interactive(init_auto_evolve: bool = False):
                                 if role == "user":
                                     chat.add("user", content)
                                 elif role == "assistant":
-                                    chat.add("assistant", content)
+                                    # Use StreamingMarkdown for color rendering (rant #28)
+                                    md = StreamingMarkdown()
+                                    md.feed(content)
+                                    chat.add(md)
                                 elif role == "system":
                                     chat.add("system", content)
                                 elif role == "tool":
