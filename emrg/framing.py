@@ -26,8 +26,9 @@ async def read_frame(reader: asyncio.StreamReader) -> bytes | None:
     Returns the raw body bytes, or None if the stream ended cleanly.
     Raises ValueError if the declared length exceeds the sanity cap.
     """
-    header = await reader.readexactly(_HEADER_SIZE)
-    if not header:
+    try:
+        header = await reader.readexactly(_HEADER_SIZE)
+    except asyncio.IncompleteReadError:
         return None
     body_len = struct.unpack(_HEADER_FMT, header)[0]
     if body_len > _MAX_FRAME_BYTES:
@@ -36,7 +37,10 @@ async def read_frame(reader: asyncio.StreamReader) -> bytes | None:
         )
     if body_len == 0:
         return b""
-    return await reader.readexactly(body_len)
+    try:
+        return await reader.readexactly(body_len)
+    except asyncio.IncompleteReadError:
+        return None
 
 
 def encode_frame(data: bytes) -> bytes:
