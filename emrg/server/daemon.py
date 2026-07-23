@@ -265,7 +265,7 @@ class EmrgServer:
             while True:
                 try:
                     frame = await read_frame(reader)
-                except (ValueError, asyncio.IncompleteReadError) as e:
+                except ValueError as e:
                     logger.error(
                         "client frame read error: %s", e, exc_info=True,
                     )
