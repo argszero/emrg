@@ -123,7 +123,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 - **有效性**：上次改动有持续效果吗？连续 "nothing to evolve" 但 rant 非空 → 重新检查
 
 **读 `~/.emrg/rants.jsonl`**：有未处理的 rant 吗？之前被跳过的？大改动可分期推进。
-条目可带 `project` 字段（`/rant @<project>` 定向吐槽），EMRG 自身演化应关注无 project 字段或 project=emrg 的 rant。
+条目可带 `project` 字段（`/rant @<project>` 定向吐槽）。每个演化任务只看 `project` 匹配自己 `config.project` 的 rant，**未标 `project` 的 rant 一律不看**。
 
 > **注意**：先检查 rant 是否已被处理，避免重复建设：
 > 1. 检查 `git log --oneline -20` 中是否有 commit 引用了 rant（格式：`(rant #N)`）
