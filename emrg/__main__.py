@@ -138,7 +138,7 @@ async def _send_shutdown() -> bool:
         return False
 
     try:
-        await write_frame(writer, json.dumps({"type": "shutdown"}).encode())
+        await write_frame(writer, json.dumps({"type": "shutdown"}, ensure_ascii=False).encode())
         frame = await asyncio.wait_for(read_frame(reader), timeout=3)
         writer.close()
         try:
@@ -164,7 +164,7 @@ def _stop_daemon() -> None:
     try:
         async def _get_pid():
             reader, writer = await asyncio.wait_for(connect_to_server(), timeout=3)
-            await write_frame(writer, json.dumps({"type": "ping"}).encode())
+            await write_frame(writer, json.dumps({"type": "ping"}, ensure_ascii=False).encode())
             frame = await asyncio.wait_for(read_frame(reader), timeout=3)
             writer.close()
             return json.loads(frame.decode()) if frame else {}
@@ -244,7 +244,7 @@ def _send_rant(message: str, project: str | None = None) -> None:
         if project:
             payload["project"] = project
 
-        await write_frame(writer, json.dumps(payload).encode())
+        await write_frame(writer, json.dumps(payload, ensure_ascii=False).encode())
 
         frame = await asyncio.wait_for(read_frame(reader), timeout=5)
         writer.close()
