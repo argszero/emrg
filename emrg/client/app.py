@@ -938,6 +938,7 @@ async def interactive(init_auto_evolve: bool = False):
                     _last_center = "streaming..."
                     status.update(center=_last_center); _render_throttled()
                 if resp.done:
+                    logger.info("response complete, %d chars", len(stream_buffer) if stream_buffer else 0)
                     logger.debug("DONE: stream_buffer=%r", stream_buffer[:80])
                     busy = False
                     # Cancel elapsed timer
@@ -1848,6 +1849,7 @@ Streaming
                 term.render()
                 req = TaskRequest(session_id=session_id, cwd=cwd, prompt=text, stream=True)
                 await write_frame(writer, json.dumps(req.to_dict(), ensure_ascii=False).encode())
+                logger.info("task sent, prompt_len=%d chars", len(text))
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):
             inp.insert("\n")
