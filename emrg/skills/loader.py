@@ -145,7 +145,9 @@ def build_skills_context(skills: list[Skill]) -> str:
     lines = [
         "## Available Skills",
         "",
-        "The following skills are available. When a skill seems relevant "
+        "The following skills are available. When the user asks what skills "
+        "you have or to list your skills, list the skills below by name "
+        "and description (do not make up tools). When a skill seems relevant "
         "to the user's request, use the read tool to read the skill file "
         "at the listed path, then follow its instructions.",
         "",
