@@ -24,7 +24,7 @@ DEFAULT_MAX_LINES = 1000
 
 
 class ReadTool(ToolExecutor):
-    """Read file contents with optional offset/limit and line numbers."""
+    """Read file contents with optional start_line/line_limit and line numbers."""
 
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
@@ -32,7 +32,7 @@ class ReadTool(ToolExecutor):
             description=(
                 "Read a file from the filesystem. Returns content with "
                 "line numbers prefixing each line (format: '  LINE_NUMBER\\tCONTENT'). "
-                "Supports offset and limit for reading large files in chunks. "
+                "Supports start_line and line_limit for reading large files in chunks. "
                 "Can read text files. For images, PDFs, and notebooks, "
                 "use the bash tool with appropriate commands instead."
             ),
@@ -43,19 +43,27 @@ class ReadTool(ToolExecutor):
                         "type": "string",
                         "description": "Absolute path to the file to read.",
                     },
-                    "offset": {
+                    "start_line": {
                         "type": "integer",
                         "description": (
-                            "Line number to start reading from. Only provide if the "
-                            "file is too large to read at once (default: 1)."
+                            "Line number to start reading from (default: 1). "
+                            "Alias: offset."
                         ),
                     },
-                    "limit": {
+                    "line_limit": {
                         "type": "integer",
                         "description": (
                             f"The number of lines to read. "
                             f"Only provide if the file is too large to read at once "
-                            f"(default: {DEFAULT_MAX_LINES}, max: {MAX_LINES} for explicit calls)."
+                            f"(default: {DEFAULT_MAX_LINES}, max: {MAX_LINES} for explicit calls). "
+                            f"Alias: limit."
+                        ),
+                    },
+                    "start_line_byte_offset": {
+                        "type": "integer",
+                        "description": (
+                            "Byte offset within the first line to begin reading "
+                            "(default: 0). Use to resume within a truncated line."
                         ),
                     },
                 },
@@ -65,16 +73,36 @@ class ReadTool(ToolExecutor):
 
     async def execute(self, arguments: dict) -> ToolResult:
         file_path = arguments.get("file_path", "")
+
+        # ── Resolve start_line: support both start_line (new) and offset (legacy alias) ──
+        raw_start = (arguments.get("start_line")
+                     or arguments.get("offset", 0) or 0)
         try:
-            raw_offset = arguments.get("offset", 0) or 0
-            offset = max(1, int(raw_offset))
+            start_line = max(1, int(raw_start))
         except (TypeError, ValueError):
-            offset = 1
+            start_line = 1
+
+        # ── Resolve line_limit: support both line_limit (new) and limit (legacy alias) ──
+        raw_limit = arguments.get("line_limit") or arguments.get("limit")
+        line_limit: int | None = None
+        if raw_limit is not None:
+            try:
+                line_limit = int(raw_limit)
+            except (TypeError, ValueError):
+                line_limit = None
+
+        # ── Resolve start_line_byte_offset ──
+        raw_byte_off = arguments.get("start_line_byte_offset", 0) or 0
+        try:
+            start_line_byte_offset = max(0, int(raw_byte_off))
+        except (TypeError, ValueError):
+            start_line_byte_offset = 0
+
         if not file_path:
             return ToolResult(name="read", content="Error: no file_path provided", error=True)
 
         path = Path(file_path).expanduser().resolve()
-        logger.debug("read: %s (offset=%d)", path, offset)
+        logger.debug("read: %s (start_line=%d, byte_offset=%d)", path, start_line, start_line_byte_offset)
 
         if not path.exists():
             return ToolResult(
@@ -93,7 +121,9 @@ class ReadTool(ToolExecutor):
             return ToolResult(name="read", content="\n".join(lines))
 
         file_size = path.stat().st_size
-        user_specified_range = arguments.get("limit") is not None or arguments.get("offset", 0) > 0
+        user_specified_range = (line_limit is not None
+                                or start_line > 1
+                                or start_line_byte_offset > 0)
 
         # File too large and user hasn't specified a range → error with guidance
         if file_size > MAX_READ_SIZE and not user_specified_range:
@@ -101,11 +131,11 @@ class ReadTool(ToolExecutor):
                 name="read",
                 content=(
                     f"File is too large ({file_size:,} bytes). "
-                    f"Use offset and limit parameters to read specific portions "
-                    f"of the file, or use the bash tool with head/tail/sed to "
-                    f"search for specific content.\n\n"
-                    f"Example: read with offset=1, limit={MAX_LINES} to read "
-                    f"the first {MAX_LINES} lines."
+                    f"Use start_line and line_limit parameters to read specific "
+                    f"portions of the file, or use the bash tool with "
+                    f"head/tail/sed to search for specific content.\n\n"
+                    f"Example: read with start_line=1, line_limit={MAX_LINES} "
+                    f"to read the first {MAX_LINES} lines."
                 ),
                 error=True,
             )
@@ -126,15 +156,20 @@ class ReadTool(ToolExecutor):
         #   Default (no limit specified): capped at DEFAULT_MAX_LINES to
         #     prevent excessive token consumption from unknown file sizes.
         #   Explicit limit: honored up to MAX_LINES (LLM knows what it asked for).
-        explicit_limit = arguments.get("limit")
-        if explicit_limit is not None:
-            effective_limit = min(explicit_limit, MAX_LINES)
+        if line_limit is not None:
+            effective_limit = min(line_limit, MAX_LINES)
         else:
             effective_limit = DEFAULT_MAX_LINES
 
-        start = offset - 1
+        start = start_line - 1
         end = min(start + effective_limit, total_lines)
         selected = all_lines[start:end]
+
+        # Apply start_line_byte_offset to the first selected line
+        if start_line_byte_offset > 0 and selected:
+            first_line = selected[0]
+            if start_line_byte_offset < len(first_line):
+                selected[0] = first_line[start_line_byte_offset:]
 
         # Format with line numbers
         result_lines: list[str] = []
@@ -149,10 +184,11 @@ class ReadTool(ToolExecutor):
 
         truncated = end < total_lines
         if truncated:
+            # Exact continuation hint so LLM can copy-paste directly
             result_lines.append(
-                f"\n... [truncated {total_lines - end} lines] "
-                f"total {total_lines} lines | "
-                f"use offset={end + 1} to read more"
+                f"\ntruncated at start_line={end + 1}, "
+                f"start_line_byte_offset=0 — "
+                f"total {total_lines} lines"
             )
 
         return ToolResult(name="read", content="\n".join(result_lines))

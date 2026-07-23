@@ -1975,12 +1975,12 @@ def _format_args(args: dict, tool_name: str = "") -> str:
                 elif content_len > 0:
                     short += f" ({content_len}B)"
             elif tool_name == "read":
-                offset = args.get("offset")
-                limit = args.get("limit")
-                if offset and limit:
-                    short += f" [{offset}:{offset + limit}]"
-                elif offset:
-                    short += f" [from L{offset}]"
+                sl = args.get("start_line") or args.get("offset")
+                ll = args.get("line_limit") or args.get("limit")
+                if sl and ll:
+                    short += f" [L{sl}:L{int(sl) + int(ll)}]"
+                elif sl:
+                    short += f" [from L{sl}]"
             return short
 
     # Fallback: JSON dump (truncated)
