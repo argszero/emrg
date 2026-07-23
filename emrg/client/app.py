@@ -1557,7 +1557,7 @@ async def interactive(init_auto_evolve: bool = False):
                         "project": _rant_project,
                         "timestamp": datetime.now().isoformat(),
                     }
-                    await write_frame(writer, json.dumps(payload).encode())
+                    await write_frame(writer, json.dumps(payload, ensure_ascii=False).encode())
 
                     chat.add("system", f"Rant recorded (@{_rant_project}). The evolution system will review it.")
                     _rant_project = None
@@ -1764,7 +1764,7 @@ Streaming
                     }
                     if project:
                         payload["project"] = project
-                    await write_frame(writer, json.dumps(payload).encode())
+                    await write_frame(writer, json.dumps(payload, ensure_ascii=False).encode())
 
                     target = f" (@{project})" if project else ""
                     chat.add("system", f"Rant recorded{target}. The evolution system will review it.")
@@ -1840,7 +1840,7 @@ Streaming
                 status.update(center=_last_center)
                 term.render()
                 req = TaskRequest(session_id=session_id, cwd=cwd, prompt=text, stream=True)
-                await write_frame(writer, json.dumps(req.to_dict()).encode())
+                await write_frame(writer, json.dumps(req.to_dict(), ensure_ascii=False).encode())
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):
             inp.insert("\n")
