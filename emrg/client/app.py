@@ -828,7 +828,7 @@ async def interactive(init_auto_evolve: bool = False):
         while True:
             try: frame = await asyncio.wait_for(read_frame(reader), timeout=0.1)
             except asyncio.TimeoutError: continue
-            except (ValueError, asyncio.IncompleteReadError) as e:
+            except ValueError as e:
                 logger.exception("server connection lost: %s", e)
                 await _reconnect()
                 continue
