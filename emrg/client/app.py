@@ -803,7 +803,7 @@ async def interactive(init_auto_evolve: bool = False):
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
-            nonlocal reader, writer
+            nonlocal reader, writer, busy, _elapsed_task
             # stop elapsed timer
             if _elapsed_task is not None:
                 _elapsed_task.cancel(); _elapsed_task = None
