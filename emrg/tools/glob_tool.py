@@ -10,7 +10,7 @@ from emrg.tools.base import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
-MAX_RESULTS = 500  # Cap to prevent NDJSON overflow
+MAX_RESULTS = 500  # Cap to prevent excessive result volume
 
 
 class GlobTool(ToolExecutor):

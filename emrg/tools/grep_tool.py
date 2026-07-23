@@ -15,7 +15,7 @@ from emrg.tools.base import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
-MAX_RESULTS = 200  # Cap matches to prevent NDJSON overflow
+MAX_RESULTS = 200  # Cap matches to prevent excessive result volume
 MAX_FILE_SIZE = 512 * 1024  # 512KB — skip files larger than this
 
 
