@@ -145,19 +145,17 @@ class EvolutionHandler:
             )
             return
 
-        task_msg = (
-            json.dumps(
-                {
-                    "type": "task",
-                    "id": f"evolution-{seq}",
-                    "session_id": self._session_id,
-                    "cwd": self._source_dir,
-                    "prompt": prompt,
-                    "stream": True,
-                    "timestamp": start_time.isoformat(),
-                }
-            )
-            + "\n"
+        task_msg = json.dumps(
+            {
+                "type": "task",
+                "id": f"evolution-{seq}",
+                "session_id": self._session_id,
+                "cwd": self._source_dir,
+                "prompt": prompt,
+                "stream": True,
+                "timestamp": start_time.isoformat(),
+            },
+            ensure_ascii=False,
         )
 
         tool_count = 0
@@ -251,7 +249,7 @@ class EvolutionHandler:
             "impact": entry.impact,
             "operations": entry.operations,
         }
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
     async def _write_final_summary(self) -> None:
         if not self.evolutions:
@@ -263,7 +261,7 @@ class EvolutionHandler:
             "last_evolution": self.evolutions[-1].timestamp,
         }
         path = self._logs_dir / "summary.json"
-        path.write_text(json.dumps(summary, indent=2))
+        path.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
 # ── TaskScheduler ────────────────────────────────────────────────
