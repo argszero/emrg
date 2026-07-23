@@ -394,7 +394,7 @@ class EmrgServer:
             suffix=".tmp",
         )
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 yaml.safe_dump(
                     entries, f,
                     allow_unicode=True,

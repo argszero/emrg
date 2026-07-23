@@ -359,7 +359,7 @@ class TaskScheduler:
             suffix=".tmp",
         )
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 yaml.safe_dump(
                     tasks, f,
                     allow_unicode=True,

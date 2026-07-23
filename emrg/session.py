@@ -401,7 +401,7 @@ class Session:
 
     def _write_history(self, records: list[dict]) -> None:
         """Overwrite history.jsonl with new records."""
-        with open(self._history_path, "w") as f:
+        with open(self._history_path, "w", encoding="utf-8") as f:
             for r in records:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
