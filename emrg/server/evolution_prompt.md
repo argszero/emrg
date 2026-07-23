@@ -177,6 +177,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - markdown_it DEBUG 日志抑制 + client lifecycle info 日志 (connect/disconnect/tool timing) #177 ✅
 > - subprocess.run encoding='utf-8' + _detect_git_remote URL 解析单测 (413 passed) #184 ✅
 > - atomic_write_yaml 单元测试 (7 tests, 420 passed) #185 ✅
+> - scheduler write_text() encoding='utf-8' 补充 #186 ✅
 
 #### 2.2 GitHub 最新代码改动
 
