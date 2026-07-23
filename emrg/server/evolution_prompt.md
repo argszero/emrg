@@ -127,6 +127,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 每次演化必须整理 `~/.emrg/rants.jsonl`：
 - **已完成的 rant**：在条目中追加 `"completed": "<ISO timestamp>"` 字段标记完成时间
 - **定期清理**：保留所有未完成的 rant；已完成的只保留最近 10 条，删掉更早的
+- **写入时务必使用 `json.dumps(..., ensure_ascii=False)`**，否则中文会变成 `\uXXXX` 转义序列
 
 读 rant 时按以下规则：
 - 有未处理的 rant 吗？之前被跳过的？大改动可分期推进
