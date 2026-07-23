@@ -740,7 +740,8 @@ class MemoryStore:
         marker.write_text(
             f"promoted_at: {now_iso()}\n"
             f"target: {new_path}\n"
-            f"memory_id: {mem.id}\n"
+            f"memory_id: {mem.id}\n",
+            encoding="utf-8",
         )
 
         # Update session index (remove the entry since it's now merged)

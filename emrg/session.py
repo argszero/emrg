@@ -174,11 +174,11 @@ class Session:
         line = json.dumps(entry, ensure_ascii=False) + "\n"
 
         # Write to main history
-        with open(self._history_path, "a") as f:
+        with open(self._history_path, "a", encoding="utf-8") as f:
             f.write(line)
 
         # Write to daily history
-        with open(self._daily_history_path(), "a") as f:
+        with open(self._daily_history_path(), "a", encoding="utf-8") as f:
             f.write(line)
 
         self._message_count += 1
@@ -202,7 +202,7 @@ class Session:
         # Rotate if file exceeds max size
         self._rotate_llm_log()
 
-        with open(self._llm_path, "a") as f:
+        with open(self._llm_path, "a", encoding="utf-8") as f:
             f.write(line)
 
     def _rotate_llm_log(self) -> None:
@@ -236,7 +236,7 @@ class Session:
         if not self._history_path.exists():
             return []
         records = []
-        with open(self._history_path) as f:
+        with open(self._history_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -401,7 +401,7 @@ class Session:
 
     def _write_history(self, records: list[dict]) -> None:
         """Overwrite history.jsonl with new records."""
-        with open(self._history_path, "w") as f:
+        with open(self._history_path, "w", encoding="utf-8") as f:
             for r in records:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
@@ -431,7 +431,7 @@ class Session:
                         meta["title"] = old["title"]
                 except (json.JSONDecodeError, OSError):
                     pass
-        self._meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+        self._meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # ── Clear ──────────────────────────────────────────────────
 
