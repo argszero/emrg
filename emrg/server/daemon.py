@@ -16,7 +16,6 @@ import logging
 import os
 import platform
 import signal
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -25,6 +24,7 @@ import yaml
 
 from emrg.config import LlmConfig, config_dir
 from emrg.connect import start_server, cleanup_server
+from emrg.server.atomic import atomic_write_yaml
 from emrg.server.llm import LlmClient
 from emrg.server.git_utils import _detect_git_remote
 from emrg.server.tool_types import ToolResult
@@ -387,29 +387,7 @@ class EmrgServer:
         # Build sorted YAML list
         entries = sorted(projects.values(), key=lambda e: e.get("path", ""))
 
-        # Atomic write: write to temp file then rename to avoid corruption
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(self._projects_log.parent),
-            prefix=".projects_",
-            suffix=".tmp",
-        )
-        try:
-            with os.fdopen(fd, "w") as f:
-                yaml.safe_dump(
-                    entries, f,
-                    allow_unicode=True,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
-            os.replace(tmp_path, self._projects_log)
-        except OSError:
-            logger.warning(
-                "_touch_project: atomic write failed for %s", cwd, exc_info=True
-            )
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+        atomic_write_yaml(entries, self._projects_log, prefix=".projects_")
 
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt, including skill context, memory, and history."""

@@ -16,8 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +25,7 @@ from emrg.config import config_dir
 from emrg.connect import connect_to_server
 from emrg.framing import read_frame, write_frame
 from emrg.protocol import EvolutionLog, InstanceIdentity
+from emrg.server.atomic import atomic_write_yaml
 from emrg.server.git_utils import _detect_git_remote
 
 logger = logging.getLogger("emrg.server.scheduler")
@@ -352,27 +351,7 @@ class TaskScheduler:
 
     def _save_tasks(self, tasks: list[dict]) -> None:
         """Atomically write tasks.yml."""
-        self._tasks_file.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(
-            dir=str(self._tasks_file.parent),
-            prefix=".tasks_",
-            suffix=".tmp",
-        )
-        try:
-            with os.fdopen(fd, "w") as f:
-                yaml.safe_dump(
-                    tasks, f,
-                    allow_unicode=True,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
-            os.replace(tmp, self._tasks_file)
-        except OSError:
-            logger.warning("TaskScheduler: atomic write failed", exc_info=True)
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+        atomic_write_yaml(tasks, self._tasks_file, prefix=".tasks_")
 
     def _migrate_from_projects(self) -> None:
         """One-time migration: auto_evolve=True entries -> tasks.yml."""
