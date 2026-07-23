@@ -322,6 +322,7 @@ def _run_update() -> None:
             cwd=source_dir,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=10,
         )
         if result.returncode != 0:
@@ -338,6 +339,7 @@ def _run_update() -> None:
         cwd=source_dir,
         capture_output=True,
         text=True,
+        encoding="utf-8",
     )
     if result.returncode != 0:
         print(f"reinstall failed:\n{result.stderr}", file=sys.stderr)
