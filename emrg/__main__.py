@@ -275,12 +275,17 @@ def _run_client(init_auto_evolve: bool = False) -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "emrg-client.log"
 
+    from logging.handlers import RotatingFileHandler
+
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
-        filename=str(log_path),
-        filemode="a",
+        handlers=[
+            RotatingFileHandler(
+                str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3
+            ),
+        ],
     )
 
     from emrg.config import ensure_config
