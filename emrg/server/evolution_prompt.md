@@ -172,6 +172,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - explicit encoding='utf-8' on read_text() (#167) ✅
 > - explicit encoding='utf-8' on write_text()/open() (#168) ✅
 > - json.dumps ensure_ascii=False (CJK-safe): __main__.py #171, client #172, scheduler #173, /rename #174 ✅
+> - read_tool 参数改名 (start_line/line_limit/start_line_byte_offset, rant #11) ✅
 
 #### 2.2 GitHub 最新代码改动
 
