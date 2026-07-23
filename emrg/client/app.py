@@ -799,14 +799,43 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
-        nonlocal _last_center, _elapsed_task
+        nonlocal _last_center, _elapsed_task, reader, writer
+
+        async def _reconnect():
+            """Attempt reconnection — blocks until successful."""
+            nonlocal reader, writer, busy, _elapsed_task
+            # stop elapsed timer
+            if _elapsed_task is not None:
+                _elapsed_task.cancel(); _elapsed_task = None
+            busy = False  # pending request is lost
+            chat.add("system", "⏸ server connection lost — reconnecting...")
+            status.update(center="reconnecting...")
+            term.render()
+            # close stale connection
+            try: writer.close(); await writer.wait_closed()
+            except Exception: pass
+            while True:
+                try:
+                    await asyncio.sleep(1)
+                    reader, writer = await client_connect_to_server()
+                    writer.write(json.dumps({"type": "ping"}).encode() + b"\n")
+                    chat.add("system", "✓ server reconnected")
+                    status.update(center=server_id or "emrg")
+                    term.render()
+                    return
+                except Exception:
+                    continue
+
         while True:
             try: line = await asyncio.wait_for(reader.readline(), timeout=0.1)
             except asyncio.TimeoutError: continue
             except Exception as e:
                 logger.exception("server connection lost: %s", e)
-                chat.add("system", "server connection lost"); break
-            if not line: chat.add("system", "server disconnected"); break
+                await _reconnect()
+                continue
+            if not line:
+                await _reconnect()
+                continue
             text = line.decode().strip()
             if not text: continue
             try:
