@@ -118,6 +118,6 @@ context_window = 131072
 name = "deepseek-r1"
 model = "deepseek-reasoner"
 context_window = 65536
-""")
+""", encoding="utf-8")
     print(f"Default config created at {cfg_path}", file=sys.stderr)
     print("Edit it to set your API key and model.", file=sys.stderr)

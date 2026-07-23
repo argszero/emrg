@@ -730,13 +730,13 @@ class EmrgServer:
                 entry["project"] = project
 
             self._rants_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._rants_log, "a") as f:
+            with open(self._rants_log, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
             # Count total rants
             count = 0
             if self._rants_log.exists():
-                with open(self._rants_log) as f:
+                with open(self._rants_log, encoding="utf-8") as f:
                     count = sum(1 for _ in f)
 
             logger.info("rant recorded (%d total)%s: %s",
