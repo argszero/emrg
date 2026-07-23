@@ -161,6 +161,11 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - [[llm.models]] 支持 model 字段 (name ≠ API model) ✅ | auto_compact_threshold 全文件一致 ✅
 > - TUI 输入框上下分隔线 (dim ─) ✅
 > - httpcore/httpx daemon 日志抑制 (rant #24) ✅
+> - 长度前缀分帧协议 (4-byte header + body, rant #13) ✅
+> - client 自动重连 (断连→重连→恢复, rant #11) ✅
+> - client 日志滚动 (RotatingFileHandler, rant #12) ✅
+> - install.sh 自动安装依赖 (uv, gh, python) ✅
+> - /skills 命令列出已加载技能 (rant #34) ✅
 
 #### 2.2 GitHub 最新代码改动
 
