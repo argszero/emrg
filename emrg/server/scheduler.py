@@ -101,6 +101,13 @@ class EvolutionHandler:
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
 
+        # Steady-state detection: skip cycles when nothing has changed.
+        # Tracks git HEAD and rant count to avoid wasting LLM tokens on
+        # NTE cycles when the repository is quiescent (MANIFESTO §4, §12).
+        self._last_git_head: str | None = None
+        self._last_rant_count: int = -1
+        self._consecutive_skips: int = 0
+
     async def run(self) -> None:
         """Run evolution cycles at configured interval."""
         self._running = True
@@ -129,6 +136,27 @@ class EvolutionHandler:
 
     async def _run_evolution_cycle(self, seq: int) -> None:
         """Connect to server, send evolution prompt, read streaming response."""
+
+        # ── Steady-state stimulus check ──────────────────────────
+        # Skip the cycle if git HEAD and rant count are unchanged
+        # since the last run — no new code, no new feedback = nothing to evolve.
+        # First cycle (seq==1) always runs.
+        if seq > 1:
+            has_stimulus, stimulus_detail = await self._stimulus_check()
+            if not has_stimulus:
+                self._consecutive_skips += 1
+                logger.info(
+                    "EvolutionHandler[%s] #%d SKIP (steady state #%d): %s",
+                    self.name, seq, self._consecutive_skips, stimulus_detail,
+                )
+                return
+            if self._consecutive_skips > 0:
+                logger.info(
+                    "EvolutionHandler[%s] #%d RESUMING after %d skips: %s",
+                    self.name, seq, self._consecutive_skips, stimulus_detail,
+                )
+                self._consecutive_skips = 0
+
         prompt = self._build_evolution_prompt(seq)
         logger.info(
             "EvolutionHandler[%s] #%d: prompt built (%d chars), connecting ...",
@@ -215,6 +243,77 @@ class EvolutionHandler:
         )
         await self._write_evolution_log(seq, log)
         self.evolutions.append(log)
+
+    async def _stimulus_check(self) -> tuple[bool, str]:
+        """Check if there are new stimuli worth running an evolution cycle for.
+
+        Returns (has_stimulus, detail_string).
+
+        A stimulus is:
+        - A new git commit (HEAD changed since last check)
+        - A new uncompleted rant for this project
+
+        If neither has changed, the repository is in steady state and
+        the evolution cycle should be skipped to conserve resources.
+        """
+        import subprocess
+
+        details: list[str] = []
+        has_stimulus = False
+
+        # ── Git HEAD check ───────────────────────────────────────
+        source_dir = self._source_dir
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "rev-parse", "HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                cwd=source_dir,
+            )
+            stdout, _ = await proc.communicate()
+            current_head = stdout.decode().strip() if stdout else ""
+        except Exception:
+            current_head = ""
+
+        if current_head and current_head != self._last_git_head:
+            has_stimulus = True
+            details.append(f"HEAD {current_head[:8]}")
+            self._last_git_head = current_head
+        elif current_head:
+            details.append("HEAD unchanged")
+        else:
+            details.append("HEAD unknown (skipping git check)")
+
+        # ── Rant check ───────────────────────────────────────────
+        rants_file = config_dir() / "rants.jsonl"
+        project_name = self._config.get("project", self.name)
+        uncompleted = 0
+        if rants_file.exists():
+            try:
+                for line in rants_file.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rant = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rant.get("project") != project_name:
+                        continue
+                    if "completed" not in rant:
+                        uncompleted += 1
+            except OSError:
+                pass
+
+        if uncompleted != self._last_rant_count:
+            has_stimulus = True
+            details.append(f"rants {self._last_rant_count}→{uncompleted}")
+            self._last_rant_count = uncompleted
+        else:
+            details.append(f"rants={uncompleted} (unchanged)")
+
+        detail = "; ".join(details)
+        return has_stimulus, detail
 
     def _build_evolution_prompt(self, seq: int) -> str:
         """Build evolution prompt from template."""
