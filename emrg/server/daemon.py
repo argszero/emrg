@@ -847,21 +847,11 @@ class EmrgServer:
             content = msg.get("content", "")
 
             # Log LLM request/response
-            session.append_llm({
-                "type": "request",
-                "model": self.llm.config.model,
-                "messages": messages,
-                "tools": tools,
-                "payload": self.llm.last_payload,
-            })
-            session.append_llm({
-                "type": "response",
-                "content": content,
-                "tool_calls": msg.get("tool_calls"),
-                "finish_reason": msg.get("finish_reason", "stop"),
-                "http_status": self.llm.last_response_status,
-                "response_headers": self.llm.last_response_headers,
-            })
+            self._log_llm_exchange(
+                session, messages, tools, content,
+                finish_reason=msg.get("finish_reason", "stop"),
+                tool_calls=msg.get("tool_calls"),
+            )
 
             # Persist assistant message
             session.append_message({
@@ -1032,21 +1022,10 @@ class EmrgServer:
             # Case 1: Final text answer — no more tool calls
             if final_finish == "stop" or (final_finish and not tc_by_index):
                 # Log LLM response
-                session.append_llm({
-                    "type": "request",
-                    "model": self.llm.config.model,
-                    "messages": [dict(m) for m in messages],
-                    "tools": tools_openai,
-                    "payload": self.llm.last_payload,
-                })
-                session.append_llm({
-                    "type": "response",
-                    "content": full_content,
-                    "finish_reason": final_finish,
-                    "usage": final_usage,
-                    "http_status": self.llm.last_response_status,
-                    "response_headers": self.llm.last_response_headers,
-                })
+                self._log_llm_exchange(
+                    session, [dict(m) for m in messages], tools_openai,
+                    full_content, final_finish, final_usage,
+                )
 
                 # Persist assistant message
                 session.append_message({
@@ -1073,27 +1052,16 @@ class EmrgServer:
                 tool_calls = [tc_by_index[i] for i in sorted(tc_by_index.keys())]
 
                 # Log LLM request/response for this tool-call round
-                session.append_llm({
-                    "type": "request",
-                    "model": self.llm.config.model,
-                    "messages": [dict(m) for m in messages],
-                    "tools": tools_openai,
-                    "payload": self.llm.last_payload,
-                })
-                session.append_llm({
-                    "type": "response",
-                    "content": full_content,
-                    "tool_calls": [
+                self._log_llm_exchange(
+                    session, [dict(m) for m in messages], tools_openai,
+                    full_content, final_finish, final_usage,
+                    tool_calls=[
                         {"id": tc.get("id", ""), "type": "function",
                          "function": {"name": tc.get("function", {}).get("name", ""),
                                       "arguments": tc.get("function", {}).get("arguments", "")}}
                         for tc in tool_calls
                     ],
-                    "finish_reason": final_finish,
-                    "usage": final_usage,
-                    "http_status": self.llm.last_response_status,
-                    "response_headers": self.llm.last_response_headers,
-                })
+                )
 
                 # Build the assistant message with tool_calls
                 assistant_msg: dict = {"role": "assistant", "content": full_content or None}
@@ -1215,21 +1183,10 @@ class EmrgServer:
                 continue
 
             # Case 3: Max tokens or other stop — done
-            session.append_llm({
-                "type": "request",
-                "model": self.llm.config.model,
-                "messages": messages,
-                "tools": tools_openai,
-                "payload": self.llm.last_payload,
-            })
-            session.append_llm({
-                "type": "response",
-                "content": full_content,
-                "finish_reason": final_finish,
-                "usage": final_usage,
-                "http_status": self.llm.last_response_status,
-                "response_headers": self.llm.last_response_headers,
-            })
+            self._log_llm_exchange(
+                session, [dict(m) for m in messages], tools_openai,
+                full_content, final_finish, final_usage,
+            )
 
             session.append_message({
                 "type": "message",
@@ -1264,6 +1221,36 @@ class EmrgServer:
 
         # Fire-and-forget: reflect on whether to save memories
         self._maybe_reflect_memory(session, req.prompt, full_content)
+
+    def _log_llm_exchange(
+        self, session: Session, messages, tools,
+        content: str, finish_reason: str = "stop",
+        usage=None, tool_calls=None,
+    ) -> None:
+        """Log a complete LLM request/response exchange to the session.
+
+        Centralizes the 4 identical append_llm patterns from _run_chat_once
+        and _run_tool_loop, ensuring consistent logging format.
+        """
+        session.append_llm({
+            "type": "request",
+            "model": self.llm.config.model,
+            "messages": messages,
+            "tools": tools,
+            "payload": self.llm.last_payload,
+        })
+        response: dict = {
+            "type": "response",
+            "content": content,
+            "finish_reason": finish_reason,
+            "http_status": self.llm.last_response_status,
+            "response_headers": self.llm.last_response_headers,
+        }
+        if usage is not None:
+            response["usage"] = usage
+        if tool_calls is not None:
+            response["tool_calls"] = tool_calls
+        session.append_llm(response)
 
     # ── Token estimation helpers ──────────────────────────────
 
