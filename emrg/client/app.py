@@ -710,6 +710,7 @@ async def interactive(init_auto_evolve: bool = False):
     try: reader, writer = await client_connect_to_server()
     except Exception as e:
         print(f"Failed to connect to emrgd: {e}", file=sys.stderr); return
+    logger.info("connected to emrgd")
 
     # Session setup
     cwd = os.getcwd()
@@ -774,6 +775,7 @@ async def interactive(init_auto_evolve: bool = False):
             await asyncio.sleep(1)
 
     tool_args: dict[str, dict] = {}  # track tool arguments by tool_call_id for diff rendering
+    _tool_start_times: dict[str, float] = {}  # track tool start time by tool_call_id for timing logs
 
     # Selector state — each selector has an active flag, widget ref, and pending flag.
     session_sel = SelectorState()
@@ -818,6 +820,7 @@ async def interactive(init_auto_evolve: bool = False):
                     await asyncio.sleep(1)
                     reader, writer = await client_connect_to_server()
                     await write_frame(writer, json.dumps({"type": "ping"}).encode())
+                    logger.info("reconnected to emrgd")
                     chat.add("system", "✓ server reconnected")
                     status.update(center=server_id or "emrg")
                     term.render()
@@ -857,6 +860,7 @@ async def interactive(init_auto_evolve: bool = False):
                 if data.get("type") == "tool_start":
                     ts = ToolStart.from_dict(data)
                     tool_args[ts.tool_call_id] = ts.arguments  # track for diff rendering
+                    _tool_start_times[ts.tool_call_id] = time.time()
                     card = ToolCard(
                         name=ts.tool_name,
                         command=_format_args(ts.arguments, ts.tool_name),
@@ -870,6 +874,9 @@ async def interactive(init_auto_evolve: bool = False):
 
                 if data.get("type") == "tool_end":
                     te = ToolEnd.from_dict(data)
+                    elapsed = time.time() - _tool_start_times.pop(te.tool_call_id, time.time())
+                    logger.info("tool %s %s in %.2fs", te.tool_name,
+                                "FAILED" if te.error else "done", elapsed)
                     # Show diff for successful edit operations
                     if te.tool_name == "edit" and not te.error and te.tool_call_id in tool_args:
                         args = tool_args.pop(te.tool_call_id)
@@ -931,6 +938,7 @@ async def interactive(init_auto_evolve: bool = False):
                     _last_center = "streaming..."
                     status.update(center=_last_center); _render_throttled()
                 if resp.done:
+                    logger.info("response complete, %d chars", len(stream_buffer) if stream_buffer else 0)
                     logger.debug("DONE: stream_buffer=%r", stream_buffer[:80])
                     busy = False
                     # Cancel elapsed timer
@@ -1841,6 +1849,7 @@ Streaming
                 term.render()
                 req = TaskRequest(session_id=session_id, cwd=cwd, prompt=text, stream=True)
                 await write_frame(writer, json.dumps(req.to_dict(), ensure_ascii=False).encode())
+                logger.info("task sent, prompt_len=%d chars", len(text))
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):
             inp.insert("\n")
@@ -1914,6 +1923,7 @@ Streaming
                     break
     except Exception: logger.exception("TUI main loop crashed")
     finally:
+        logger.info("disconnecting from emrgd")
         read_task.cancel()
         try: await read_task
         except (asyncio.CancelledError, Exception): pass

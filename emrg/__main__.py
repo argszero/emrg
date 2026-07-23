@@ -286,6 +286,9 @@ def _run_client(init_auto_evolve: bool = False) -> None:
         ],
     )
 
+    # Suppress noisy third-party DEBUG logs
+    logging.getLogger("markdown_it").setLevel(logging.WARNING)
+
     from emrg.config import ensure_config
     from emrg.client.app import run_client
 
