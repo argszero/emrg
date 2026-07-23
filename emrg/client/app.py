@@ -15,6 +15,7 @@ from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
 from emrg.connect import connect_to_server, cleanup_server, is_server_running_sync, get_server_path
 from emrg.protocol import TaskRequest, TaskResponse, ToolEnd, ToolStart
 from emrg.session import generate_session_id
+from emrg.skills.loader import load_skills
 
 logger = logging.getLogger(__name__)
 
@@ -433,6 +434,7 @@ _COMMAND_HELP: dict[str, str] = {
     "/clear":    "Clear current session history and start fresh",
     "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
     "/model":    "Switch LLM model [/model | /model <name>]",
+    "/skills":   "List loaded skills (user + project)",
     "/version":  "Show EMRG version and instance info",
     "/help":     "Show keyboard shortcuts and commands",
 }
@@ -1648,6 +1650,19 @@ async def interactive(init_auto_evolve: bool = False):
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
+                # Handle /skills command
+                if text.lower() == "/skills":
+                    skills = load_skills()
+                    if skills:
+                        lines = ["**Loaded Skills:**", ""]
+                        for s in skills:
+                            lines.append(f"- **{s.name}** ({s.source}) — {s.description}")
+                        chat.add("system", "\n".join(lines))
+                    else:
+                        chat.add("system", "No skills loaded. Add .md files to ~/.emrg/skills/ or .emrg/skills/")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
                 # Handle /version command
                 if text.lower() == "/version":
                     import emrg
@@ -1684,6 +1699,7 @@ Navigation
 
 Commands
   /help               Show this help
+  /skills             List loaded skills (user + project)
   /version            Show EMRG version and instance info
   /compact            Compress conversation history
   /clear              Clear current session and start fresh
