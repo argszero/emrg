@@ -144,7 +144,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - config.toml 热加载 ✅ | CLAUDE.md 已删除 ✅ | /project 已移除 ✅
 > - Agent.md/CLAUDE.md 读取 ✅ | README 中英双版 ✅
 > - PID 单实例锁 ✅ | `/rant @project` ✅ | `/clear` ✅
-> - `/resume` ✅ | `/rename` ✅ | `/memory` ✅ | `/sessions` ✅ | `/help` ✅ | `/version` ✅
+> - `/resume` ✅ | `/rename` ✅ | `/memory` ✅ | `/sessions` ✅ | `/help` ✅ | `/skills` ✅ | `/version` ✅
 > - Ctrl+A/E/W/K/U 快捷键 ✅ | bracketed paste 优化 ✅
 > - 渲染节流 (60fps) ✅ | 动态视口 ✅ | 自动 compact ✅
 > - ANSI 样式渲染 (style_to_sgr, buffer cascade) ✅ | 安装/卸载 ✅ | Windows/WSL 指导 ✅
