@@ -25,6 +25,7 @@ import yaml
 
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
+from emrg.framing import read_frame, write_frame
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.git_utils import _detect_git_remote
 
@@ -165,22 +166,13 @@ class EvolutionHandler:
 
         try:
             task_bytes = task_msg.encode()
-            writer.write(task_bytes)
-            await writer.drain()
+            await write_frame(writer, task_bytes)
 
             while True:
-                try:
-                    line = await reader.readline()
-                except asyncio.LimitOverrunError as loe:
-                    logger.error(
-                        "EvolutionHandler[%s] #%d: LimitOverrunError (consumed=%d)",
-                        self.name, seq, loe.consumed, exc_info=True,
-                    )
-                    error = f"LimitOverrunError: consumed={loe.consumed}"
+                frame = await read_frame(reader)
+                if frame is None:
                     break
-                if not line:
-                    break
-                resp = json.loads(line.strip())
+                resp = json.loads(frame.decode())
 
                 if resp.get("done"):
                     duration = int((datetime.now() - start_time).total_seconds())

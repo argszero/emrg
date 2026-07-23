@@ -44,6 +44,7 @@ from emrg.tools.write_tool import WriteTool
 from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
+from emrg.framing import read_frame, write_frame
 from emrg.skills.loader import build_skills_context, load_skills
 from emrg.server.scheduler import TaskScheduler
 
@@ -134,10 +135,6 @@ EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
 class EmrgServer:
     """EMRG daemon — listens on Unix socket, processes tasks with tool calling."""
-
-    # NDJSON safety: asyncio's readline() has a default 64KB buffer.
-    # Cap lines at ~60KB to stay well under the buffer.
-    _MAX_LINE_BYTES = 60 * 1024
 
     def __init__(self, llm_config: LlmConfig) -> None:
         runtime_dir = config_dir()
@@ -267,29 +264,24 @@ class EmrgServer:
         try:
             while True:
                 try:
-                    line = await reader.readline()
-                except asyncio.LimitOverrunError as loe:
+                    frame = await read_frame(reader)
+                except (ValueError, asyncio.IncompleteReadError) as e:
                     logger.error(
-                        "client readline LimitOverrunError "
-                        "(consumed=%d bytes). The client message exceeded "
-                        "the 64KB asyncio buffer limit.",
-                        loe.consumed,
-                        exc_info=True,
+                        "client frame read error: %s", e, exc_info=True,
                     )
                     break
-                if not line:
+                if frame is None:
                     break
 
-                line = line.strip()
-                if not line:
+                text = frame.decode().strip()
+                if not text:
                     continue
 
                 try:
-                    msg = json.loads(line)
+                    msg = json.loads(text)
                 except json.JSONDecodeError as e:
-                    err = json.dumps({"error": f"invalid json: {e}"}) + "\n"
-                    writer.write(err.encode())
-                    await writer.drain()
+                    err = json.dumps({"error": f"invalid json: {e}"}).encode()
+                    await write_frame(writer, err)
                     continue
 
                 # Track session for disconnect-time consolidation
@@ -317,40 +309,14 @@ class EmrgServer:
                     logger.debug("session memory consolidation failed", exc_info=True)
 
     async def _send(self, writer: asyncio.StreamWriter, data: dict) -> bool:
-        """Write a JSON line to the client.
+        """Write a length-prefixed JSON frame to the client.
 
         Returns True on success, False if the client disconnected.
         Callers should check the return value and stop if False.
         """
         try:
-            encoded = (json.dumps(data, ensure_ascii=False) + "\n").encode()
-            if len(encoded) > self._MAX_LINE_BYTES:
-                logger.warning(
-                    "_send truncating line: %d bytes → target %d bytes, "
-                    "fields: %s",
-                    len(encoded), self._MAX_LINE_BYTES,
-                    {k: len(v) if isinstance(v, str) else type(v).__name__
-                     for k, v in data.items() if isinstance(v, str)},
-                )
-                # Truncate large string fields to fit within NDJSON 64KB safety limit.
-                # Priority: content > summary > index (most common large fields).
-                for field in ("content", "summary", "index"):
-                    value = data.get(field, "")
-                    if isinstance(value, str) and len(value) > 100:
-                        # overhead = everything except this field's string content
-                        # We estimate using byte-length ratio on the field's chars
-                        field_bytes = len(value.encode("utf-8"))
-                        overhead = len(encoded) - field_bytes
-                        max_chars = self._MAX_LINE_BYTES - overhead - 100
-                        if max_chars > 200:
-                            data[field] = value[:max_chars] + (
-                                f"\n...[truncated {len(value) - max_chars} chars for NDJSON safety]"
-                            )
-                            encoded = (json.dumps(data, ensure_ascii=False) + "\n").encode()
-                            if len(encoded) <= self._MAX_LINE_BYTES:
-                                break
-            writer.write(encoded)
-            await writer.drain()
+            encoded = json.dumps(data, ensure_ascii=False).encode()
+            await write_frame(writer, encoded)
             return True
         except (ConnectionResetError, BrokenPipeError, OSError):
             logger.debug("client disconnected during send")
