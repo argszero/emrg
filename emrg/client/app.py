@@ -13,6 +13,7 @@ from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Termi
 from emrg.client.python_tui.widgets.base import Line, Span, Widget
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
 from emrg.connect import connect_to_server, cleanup_server, is_server_running_sync, get_server_path
+from emrg.framing import read_frame, write_frame, encode_frame
 from emrg.protocol import TaskRequest, TaskResponse, ToolEnd, ToolStart
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills
@@ -628,17 +629,16 @@ async def _check_and_restart_if_stale():
 
     try:
         reader, writer = await connect_to_server()
-        writer.write(json.dumps({"type": "ping"}).encode() + b"\n")
-        await writer.drain()
-        line = await asyncio.wait_for(reader.readline(), timeout=3)
+        await write_frame(writer, json.dumps({"type": "ping"}).encode())
+        frame = await asyncio.wait_for(read_frame(reader), timeout=3)
         writer.close()
         try: await writer.wait_closed()
         except (ConnectionError, OSError): pass
 
-        if not line:
+        if frame is None:
             return
 
-        data = json.loads(line.decode().strip())
+        data = json.loads(frame.decode())
         started_at = data.get("started_at", "")
         server_pid = data.get("pid", 0)
 
@@ -718,18 +718,17 @@ async def interactive(init_auto_evolve: bool = False):
     # Send init_auto_evolve if requested (before ping, so daemon
     # processes it before any user interaction starts)
     if init_auto_evolve:
-        writer.write(json.dumps({
+        await write_frame(writer, json.dumps({
             "type": "init_auto_evolve",
             "cwd": cwd,
-        }).encode() + b"\n")
-        await writer.drain()
+        }).encode())
         # Read the response to consume it
         try:
-            line = await asyncio.wait_for(reader.readline(), timeout=5)
+            await asyncio.wait_for(read_frame(reader), timeout=5)
         except asyncio.TimeoutError:
             pass
 
-    writer.write(json.dumps({"type": "ping"}).encode() + b"\n")
+    await write_frame(writer, json.dumps({"type": "ping"}).encode())
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     status = StatusLine(left=session_id, center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
@@ -818,7 +817,7 @@ async def interactive(init_auto_evolve: bool = False):
                 try:
                     await asyncio.sleep(1)
                     reader, writer = await client_connect_to_server()
-                    writer.write(json.dumps({"type": "ping"}).encode() + b"\n")
+                    await write_frame(writer, json.dumps({"type": "ping"}).encode())
                     chat.add("system", "✓ server reconnected")
                     status.update(center=server_id or "emrg")
                     term.render()
@@ -827,16 +826,16 @@ async def interactive(init_auto_evolve: bool = False):
                     continue
 
         while True:
-            try: line = await asyncio.wait_for(reader.readline(), timeout=0.1)
+            try: frame = await asyncio.wait_for(read_frame(reader), timeout=0.1)
             except asyncio.TimeoutError: continue
-            except Exception as e:
+            except (ValueError, asyncio.IncompleteReadError) as e:
                 logger.exception("server connection lost: %s", e)
                 await _reconnect()
                 continue
-            if not line:
+            if frame is None:
                 await _reconnect()
                 continue
-            text = line.decode().strip()
+            text = frame.decode().strip()
             if not text: continue
             try:
                 data = json.loads(text)
@@ -1283,12 +1282,11 @@ async def interactive(init_auto_evolve: bool = False):
                 session_sel.active = False
                 session_sel.widget = None
                 if sid:
-                    writer.write(json.dumps({
+                    await write_frame(writer, json.dumps({
                         "type": "resume_session",
                         "session_id": sid,
                         "cwd": cwd,
-                    }).encode() + b"\n")
-                    await writer.drain()
+                    }).encode())
                     status.update(center=f"resuming {sid}...")
                     term.render()
                 else:
@@ -1377,10 +1375,10 @@ async def interactive(init_auto_evolve: bool = False):
                 model_sel.active = False
                 model_sel.widget = None
                 if mname:
-                    writer.write(json.dumps({
+                    await write_frame(writer, json.dumps({
                         "type": "set_model",
                         "model": mname,
-                    }).encode() + b"\n")
+                    }).encode())
                     status.update(center=f"switching model to {mname}...")
                 else:
                     chat.add("system", "No model selected.")
@@ -1587,8 +1585,8 @@ async def interactive(init_auto_evolve: bool = False):
                         "project": _rant_project,
                         "timestamp": datetime.now().isoformat(),
                     }
-                    writer.write(json.dumps(payload).encode() + b"\n")
-                    await writer.drain()
+                    await write_frame(writer, json.dumps(payload).encode())
+
                     chat.add("system", f"Rant recorded (@{_rant_project}). The evolution system will review it.")
                     _rant_project = None
                     status.update(center=server_id or "emrg")
@@ -1611,38 +1609,38 @@ async def interactive(init_auto_evolve: bool = False):
                         else:
                             mem_id = sub
                             # Could be a read request — send as read
-                            writer.write(json.dumps({
+                            await write_frame(writer, json.dumps({
                                 "type": "read_memory",
                                 "scope": scope,
                                 "memory_id": mem_id,
                                 "session_id": session_id,
                                 "cwd": cwd,
-                            }).encode() + b"\n")
-                            await writer.drain()
+                            }).encode())
+        
                             status.update(center="reading memory...")
                             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                             return True
 
                     # List memories
-                    writer.write(json.dumps({
+                    await write_frame(writer, json.dumps({
                         "type": "list_memories",
                         "scope": scope,
                         "session_id": session_id,
                         "cwd": cwd,
-                    }).encode() + b"\n")
-                    await writer.drain()
+                    }).encode())
+
                     status.update(center=f"listing {scope} memories...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
                 # Handle /compact command
                 if text.lower() == "/compact":
-                    writer.write(json.dumps({
+                    await write_frame(writer, json.dumps({
                         "type": "compact",
                         "session_id": session_id,
                         "cwd": cwd,
-                    }).encode() + b"\n")
-                    await writer.drain()
+                    }).encode())
+
                     status.update(center="compacting...")
                     chat.add("system", "Compact requested — summarizing conversation...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1652,13 +1650,13 @@ async def interactive(init_auto_evolve: bool = False):
                 if text.lower().startswith("/rename"):
                     parts = text.split(None, 1)
                     title = parts[1].strip() if len(parts) > 1 else ""
-                    writer.write(json.dumps({
+                    await write_frame(writer, json.dumps({
                         "type": "rename_session",
                         "session_id": session_id,
                         "cwd": cwd,
                         "title": title,
-                    }).encode() + b"\n")
-                    await writer.drain()
+                    }).encode())
+
                     if title:
                         status.update(center=f"renaming to {title}...")
                         chat.add("system", f"Renaming session to: {title}")
@@ -1670,11 +1668,11 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Handle /sessions command
                 if text.lower() == "/sessions":
-                    writer.write(json.dumps({
+                    await write_frame(writer, json.dumps({
                         "type": "list_sessions",
                         "cwd": cwd,
-                    }).encode() + b"\n")
-                    await writer.drain()
+                    }).encode())
+
                     status.update(center="listing sessions...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1753,12 +1751,12 @@ Streaming
 
                 # Handle /clear command
                 if text.lower() == "/clear":
-                    writer.write(json.dumps({
+                    await write_frame(writer, json.dumps({
                         "type": "clear_session",
                         "session_id": session_id,
                         "cwd": cwd,
-                    }).encode() + b"\n")
-                    await writer.drain()
+                    }).encode())
+
                     status.update(center="clearing session...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1780,10 +1778,10 @@ Streaming
                             return True
                         # /rant without args → interactive project selector
                         project_sel.pending = True
-                        writer.write(json.dumps({
+                        await write_frame(writer, json.dumps({
                             "type": "list_projects",
-                        }).encode() + b"\n")
-                        await writer.drain()
+                        }).encode())
+    
                         status.update(center="loading projects...")
                         inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                         return True
@@ -1794,8 +1792,8 @@ Streaming
                     }
                     if project:
                         payload["project"] = project
-                    writer.write(json.dumps(payload).encode() + b"\n")
-                    await writer.drain()
+                    await write_frame(writer, json.dumps(payload).encode())
+
                     target = f" (@{project})" if project else ""
                     chat.add("system", f"Rant recorded{target}. The evolution system will review it.")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1807,19 +1805,19 @@ Streaming
                     model_arg = parts[1].strip() if len(parts) > 1 else ""
                     if model_arg:
                         # /model <name> → direct switch
-                        writer.write(json.dumps({
+                        await write_frame(writer, json.dumps({
                             "type": "set_model",
                             "model": model_arg,
-                        }).encode() + b"\n")
-                        await writer.drain()
+                        }).encode())
+    
                         status.update(center=f"switching model to {model_arg}...")
                     else:
                         # /model without args → interactive picker
                         model_sel.pending = True
-                        writer.write(json.dumps({
+                        await write_frame(writer, json.dumps({
                             "type": "list_models",
-                        }).encode() + b"\n")
-                        await writer.drain()
+                        }).encode())
+    
                         status.update(center="loading models...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1830,11 +1828,11 @@ Streaming
                     if len(parts) < 2:
                         # No argument: enter interactive session selection
                         session_sel.pending = True
-                        writer.write(json.dumps({
+                        await write_frame(writer, json.dumps({
                             "type": "list_sessions",
                             "cwd": cwd,
-                        }).encode() + b"\n")
-                        await writer.drain()
+                        }).encode())
+    
                         status.update(center="loading sessions...")
                     else:
                         target_sid = parts[1].strip()
@@ -1842,12 +1840,12 @@ Streaming
                         session_sel.active = False
                         session_sel.widget = None
                         session_sel.pending = False
-                        writer.write(json.dumps({
+                        await write_frame(writer, json.dumps({
                             "type": "resume_session",
                             "session_id": target_sid,
                             "cwd": cwd,
-                        }).encode() + b"\n")
-                        await writer.drain()
+                        }).encode())
+    
                         status.update(center=f"resuming {target_sid}...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1870,7 +1868,7 @@ Streaming
                 status.update(center=_last_center)
                 term.render()
                 req = TaskRequest(session_id=session_id, cwd=cwd, prompt=text, stream=True)
-                writer.write(json.dumps(req.to_dict()).encode() + b"\n"); await writer.drain()
+                await write_frame(writer, json.dumps(req.to_dict()).encode())
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):
             inp.insert("\n")
