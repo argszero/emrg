@@ -181,7 +181,7 @@ EMRG isn't just a tool — it's a coding partner that **listens to your complain
 ```
 ┌─────────────┐     Unix Socket IPC     ┌──────────────┐
 │   emrg TUI  │ ◄──────────────────────► │   emrgd      │
-│  (client)   │   JSON newline-delimited │  (daemon)    │
+│  (client)   │   length-prefix framing   │  (daemon)    │
 │             │                          │              │
 │  • Chat     │                          │  • LLM loop  │
 │  • Markdown │                          │  • Tools     │

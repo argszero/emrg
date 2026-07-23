@@ -1,7 +1,7 @@
 """Protocol types for EMRG client-server communication.
 
 Mirrors the Rust emrg-protocol crate. All messages are JSON over IPC
-(newline-delimited, one JSON object per line).
+(length-prefix framing: 4-byte big-endian header + body).
 
 The actual IPC transport is abstracted by emrg.connect (platform-adaptive:
 Unix domain socket on macOS/Linux, Named Pipe on Windows).
