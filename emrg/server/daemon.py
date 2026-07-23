@@ -190,7 +190,7 @@ class EmrgServer:
         except FileExistsError:
             # PID file exists — check if the old process is still alive
             try:
-                old_pid_s = pid_file.read_text().strip()
+                old_pid_s = pid_file.read_text(encoding="utf-8").strip()
                 old_pid = int(old_pid_s)
                 os.kill(old_pid, 0)
                 # Old process is alive — but is its socket still there?
@@ -247,7 +247,7 @@ class EmrgServer:
             cleanup_server()
             # Remove PID file
             try:
-                if pid_file.exists() and pid_file.read_text().strip() == str(os.getpid()):
+                if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
                     pid_file.unlink()
                     logger.debug("pid file removed: %s", pid_file)
             except OSError:
@@ -346,7 +346,7 @@ class EmrgServer:
         projects: dict[str, dict] = {}
         if self._projects_log.exists():
             try:
-                data = yaml.safe_load(self._projects_log.read_text())
+                data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                 if isinstance(data, list):
                     for entry in data:
                         if isinstance(entry, dict) and entry.get("path"):
@@ -1551,7 +1551,7 @@ class EmrgServer:
         projects: list[dict] = []
         try:
             if self._projects_log.exists():
-                data = yaml.safe_load(self._projects_log.read_text())
+                data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                 if isinstance(data, list):
                     projects = [
                         {"name": p.get("name", ""),

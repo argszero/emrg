@@ -40,7 +40,7 @@ def _resolve_project_path(name: str) -> str | None:
     if not projects_file.exists():
         return None
     try:
-        data = yaml.safe_load(projects_file.read_text())
+        data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
     except (yaml.YAMLError, OSError):
         return None
     if not isinstance(data, list):
@@ -220,7 +220,7 @@ class EvolutionHandler:
 
     def _build_evolution_prompt(self, seq: int) -> str:
         """Build evolution prompt from template."""
-        template = self._TEMPLATE_PATH.read_text()
+        template = self._TEMPLATE_PATH.read_text(encoding="utf-8")
         if self._start_time is not None:
             uptime_seconds = int(time.time() - self._start_time)
         else:
@@ -341,7 +341,7 @@ class TaskScheduler:
         if not self._tasks_file.exists():
             return []
         try:
-            data = yaml.safe_load(self._tasks_file.read_text())
+            data = yaml.safe_load(self._tasks_file.read_text(encoding="utf-8"))
         except (yaml.YAMLError, OSError):
             logger.warning("TaskScheduler: failed to parse %s", self._tasks_file)
             return []
@@ -359,7 +359,7 @@ class TaskScheduler:
         if not projects_file.exists():
             return
         try:
-            data = yaml.safe_load(projects_file.read_text())
+            data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
         except (yaml.YAMLError, OSError):
             return
         if not isinstance(data, list):
