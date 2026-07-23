@@ -1907,7 +1907,12 @@ Streaming
                         loop.run_in_executor(None, os.read, stdin_fd, 8), timeout=0.05)
                     for seq in parser.feed(more):
                         if not await handle_key(seq): return
-                except TimeoutError: break
+                except TimeoutError:
+                    # Flush standalone Escape (Claude Code style: 50ms timer for lone ESC)
+                    if parser._buf == bytearray(b'\x1b'):
+                        parser._buf.clear()
+                        if not await handle_key(b'\x1b'): return
+                    break
     except Exception: logger.exception("TUI main loop crashed")
     finally:
         read_task.cancel()
