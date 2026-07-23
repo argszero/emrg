@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import subprocess
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from emrg.server.git_utils import _detect_git_remote
 
