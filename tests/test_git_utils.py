@@ -2,15 +2,61 @@
 
 from __future__ import annotations
 
+import subprocess
+from unittest.mock import MagicMock, patch
+
 from emrg.server.git_utils import _detect_git_remote
 
 
-def test_detect_ssh_url():
-    """Parses SSH-style git@github.com:owner/repo.git URLs."""
-    # We can't actually run 'git remote get-url' in tests, but the URL parsing
-    # logic is self-contained. Test via a mock subprocess or just verify
-    # the non-git parts work. Since _detect_git_remote shells out to git,
-    # we test the string parsing via the current working directory's git remote.
+# ── URL parsing (mocked subprocess) ──────────────────────────────
+
+def _make_mock_run(stdout: str, returncode: int = 0) -> MagicMock:
+    """Helper to create a mock subprocess.run result."""
+    mock = MagicMock()
+    mock.returncode = returncode
+    mock.stdout = stdout
+    return mock
+
+
+def test_parse_ssh_url(monkeypatch):
+    """Parses SSH-style git@github.com:owner/repo.git → owner/repo."""
+    mock = _make_mock_run("git@github.com:argszero/emrg.git\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock)
+    assert _detect_git_remote("/fake") == "argszero/emrg"
+
+
+def test_parse_https_url(monkeypatch):
+    """Parses HTTPS-style https://github.com/owner/repo.git → owner/repo."""
+    mock = _make_mock_run("https://github.com/argszero/emrg.git\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock)
+    assert _detect_git_remote("/fake") == "argszero/emrg"
+
+
+def test_parse_https_url_no_dot_git(monkeypatch):
+    """Parses HTTPS without .git suffix."""
+    mock = _make_mock_run("https://github.com/argszero/emrg\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock)
+    assert _detect_git_remote("/fake") == "argszero/emrg"
+
+
+def test_parse_unknown_format(monkeypatch):
+    """Returns empty string for unknown URL format."""
+    mock = _make_mock_run("unknown-format-url\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock)
+    assert _detect_git_remote("/fake") == ""
+
+
+def test_parse_git_failure(monkeypatch):
+    """Returns empty string when git remote fails."""
+    mock = _make_mock_run("", returncode=128)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: mock)
+    assert _detect_git_remote("/fake") == ""
+
+
+# ── Real repo tests ──────────────────────────────────────────────
+
+def test_detect_real_repo():
+    """Verifies detection on the actual git repo (integration test)."""
     result = _detect_git_remote(".")
     # The current directory IS a git repo with an origin — result should be non-empty
     assert isinstance(result, str)

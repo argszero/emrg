@@ -13,7 +13,7 @@ def _detect_git_remote(cwd: str) -> str:
     try:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
+            cwd=cwd, capture_output=True, text=True, encoding="utf-8", timeout=5,
         )
         if result.returncode == 0:
             url = result.stdout.strip()
