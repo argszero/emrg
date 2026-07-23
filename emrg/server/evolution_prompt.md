@@ -130,7 +130,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 
 读 rant 时按以下规则：
 - 有未处理的 rant 吗？之前被跳过的？大改动可分期推进
-- 条目可带 `project` 字段（`/rant @<project>` 定向吐槽），EMRG 自身演化应关注无 project 字段或 project=emrg 的 rant
+- 只看 `project` 字段匹配当前任务 `config.project` 的 rant；**未标 `project` 的一律不看**
 
 > **注意**：先检查 rant 是否已被处理，避免重复建设：
 > 1. 检查 `git log --oneline -20` 中是否有 commit 引用了 rant（格式：`(rant #N)`）
