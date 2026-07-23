@@ -1,7 +1,7 @@
 """Read tool — read a file from the filesystem with line numbers.
 
-Inspired by Claude Code's FileReadTool: default limits prevent oversized
-tool results from overflowing the NDJSON transport layer.
+Inspired by Claude Code's FileReadTool. Default limits prevent oversized
+tool results from consuming excessive tokens in the LLM context.
 """
 
 from __future__ import annotations
@@ -17,11 +17,10 @@ logger = logging.getLogger(__name__)
 MAX_LINES = 2000  # Default max lines per read (matches Claude Code)
 MAX_READ_SIZE = 256 * 1024  # 256KB — file size cap (matches Claude Code)
 
-# NDJSON safe max lines: a line of JSON must not exceed 64KB (asyncio readline limit).
-# With JSON escaping and line-number prefix overhead, ~500 lines is the worst-case
-# safe limit. Two-tier: explicit limit allowed up to 50KB worth of content,
-# but default cap prevents overflow for any file.
-NDJSON_SAFE_MAX_LINES = 1000
+# Default max lines when no explicit limit is specified by the LLM.
+# This prevents oversized context consumption for unknown file sizes.
+# When the LLM explicitly requests a limit, up to MAX_LINES is honored.
+DEFAULT_MAX_LINES = 1000
 
 
 class ReadTool(ToolExecutor):
@@ -56,7 +55,7 @@ class ReadTool(ToolExecutor):
                         "description": (
                             f"The number of lines to read. "
                             f"Only provide if the file is too large to read at once "
-                            f"(default: {NDJSON_SAFE_MAX_LINES}, max: {MAX_LINES} for explicit calls)."
+                            f"(default: {DEFAULT_MAX_LINES}, max: {MAX_LINES} for explicit calls)."
                         ),
                     },
                 },
@@ -124,14 +123,14 @@ class ReadTool(ToolExecutor):
         total_lines = len(all_lines)
 
         # Compute effective limit — two tiers:
-        #   Default (no limit specified): capped at NDJSON_SAFE_MAX_LINES to
-        #     guarantee the JSON line stays under 64KB for any file content.
+        #   Default (no limit specified): capped at DEFAULT_MAX_LINES to
+        #     prevent excessive token consumption from unknown file sizes.
         #   Explicit limit: honored up to MAX_LINES (LLM knows what it asked for).
         explicit_limit = arguments.get("limit")
         if explicit_limit is not None:
             effective_limit = min(explicit_limit, MAX_LINES)
         else:
-            effective_limit = NDJSON_SAFE_MAX_LINES
+            effective_limit = DEFAULT_MAX_LINES
 
         start = offset - 1
         end = min(start + effective_limit, total_lines)

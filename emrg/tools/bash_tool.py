@@ -13,7 +13,7 @@ from emrg.tools.base import ToolExecutor
 logger = logging.getLogger(__name__)
 
 
-MAX_OUTPUT_CHARS = 50_000  # Truncate to keep NDJSON lines under 64KB
+MAX_OUTPUT_CHARS = 200_000  # Truncate large outputs (framing supports up to 16MB)
 
 
 class BashTool(ToolExecutor):

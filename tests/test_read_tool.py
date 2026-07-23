@@ -95,11 +95,11 @@ def test_read_offset_beyond_eof(temp_file):
 
 
 def test_read_truncation_message(temp_file):
-    """When a file exceeds the NDJSON safe limit and no limit is specified,
+    """When a file exceeds the default max lines limit and no limit is specified,
     the result should be truncated and include a truncation message."""
     tool = ReadTool()
     _, d = temp_file
-    # Create a file with 1500 lines (exceeds NDJSON_SAFE_MAX_LINES=1000)
+    # Create a file with 1500 lines (exceeds DEFAULT_MAX_LINES=1000)
     big = d / "big.txt"
     big.write_text("\n".join(f"line {i}" for i in range(1, 1501)) + "\n")
     result = _run(tool.execute({"file_path": str(big)}))
@@ -109,7 +109,7 @@ def test_read_truncation_message(temp_file):
 
 
 def test_read_explicit_limit_above_default(temp_file):
-    """Explicit limit between NDJSON_SAFE_MAX_LINES (1000) and MAX_LINES (2000)
+    """Explicit limit between DEFAULT_MAX_LINES (1000) and MAX_LINES (2000)
     should be honored — returns up to the requested number of lines."""
     tool = ReadTool()
     _, d = temp_file
