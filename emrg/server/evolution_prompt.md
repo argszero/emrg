@@ -175,6 +175,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - json.dumps ensure_ascii=False (CJK-safe): __main__.py #171, client #172, scheduler #173, /rename #174 ✅
 > - read_tool 参数改名 (start_line/line_limit/start_line_byte_offset, rant #11) #176 ✅
 > - markdown_it DEBUG 日志抑制 + client lifecycle info 日志 (connect/disconnect/tool timing) #177 ✅
+> - subprocess.run encoding='utf-8' + _detect_git_remote URL 解析单测 (413 passed) #184 ✅
 
 #### 2.2 GitHub 最新代码改动
 
