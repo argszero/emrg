@@ -100,7 +100,7 @@ class Session:
         """Load an existing session from disk."""
         session = cls(session_id, cwd)
         if session._meta_path.exists():
-            meta = json.loads(session._meta_path.read_text())
+            meta = json.loads(session._meta_path.read_text(encoding="utf-8"))
             session._message_count = meta.get("message_count", 0)
             session._compact_count = meta.get("compact_count", 0)
             session._created_at = meta.get("created_at", "")
@@ -140,7 +140,7 @@ class Session:
         meta = {}
         if self._meta_path.exists():
             try:
-                meta = json.loads(self._meta_path.read_text())
+                meta = json.loads(self._meta_path.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
                 pass
         return meta.get("title", self.session_id)
@@ -426,7 +426,7 @@ class Session:
             # Preserve existing title if present
             if self._meta_path.exists():
                 try:
-                    old = json.loads(self._meta_path.read_text())
+                    old = json.loads(self._meta_path.read_text(encoding="utf-8"))
                     if "title" in old:
                         meta["title"] = old["title"]
                 except (json.JSONDecodeError, OSError):
@@ -476,7 +476,7 @@ class Session:
             if not meta_path.exists():
                 continue
             try:
-                meta = json.loads(meta_path.read_text())
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
                 results.append(meta)
             except (json.JSONDecodeError, OSError):
                 logger.warning("corrupt meta.json in %s, skipping", entry.name)

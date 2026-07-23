@@ -58,7 +58,7 @@ def load_config() -> EmrgConfig:
             f"config not found at {cfg_path} — create it with [llm] section"
         )
 
-    content = cfg_path.read_text()
+    content = cfg_path.read_text(encoding="utf-8")
     data = tomllib.loads(content)
     llm_data = data.get("llm", {})
 
