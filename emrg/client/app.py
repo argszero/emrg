@@ -1627,7 +1627,7 @@ async def interactive(init_auto_evolve: bool = False):
                         "session_id": session_id,
                         "cwd": cwd,
                         "title": title,
-                    }).encode())
+                    }, ensure_ascii=False).encode())
 
                     if title:
                         status.update(center=f"renaming to {title}...")
