@@ -1242,6 +1242,26 @@ async def interactive(init_auto_evolve: bool = False):
 
     loop.add_signal_handler(signal.SIGWINCH, _on_sigwinch)
 
+    def _handle_selector_nav(data: bytes, widget) -> bool:
+        """Handle arrow key and j/k navigation for any selector widget.
+        Returns True if navigation was handled, False otherwise.
+        """
+        if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
+            c = data[2]
+            if c == 0x41:  # Up
+                widget.move_up()
+                return True
+            elif c == 0x42:  # Down
+                widget.move_down()
+                return True
+        if data == b"j":
+            widget.move_down()
+            return True
+        if data == b"k":
+            widget.move_up()
+            return True
+        return False
+
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, writer, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
         nonlocal session_sel, project_sel, model_sel
@@ -1294,23 +1314,7 @@ async def interactive(init_auto_evolve: bool = False):
                     status.update(center=server_id or "emrg")
                     term.render()
                 return True
-            if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
-                c = data[2]
-                if c == 0x41:  # Up
-                    session_sel.widget.move_up()
-                    chat.dirty = True; term.render()
-                    return True
-                elif c == 0x42:  # Down
-                    session_sel.widget.move_down()
-                    chat.dirty = True; term.render()
-                    return True
-            # j/k for vim-style navigation
-            if data == b"j":
-                session_sel.widget.move_down()
-                chat.dirty = True; term.render()
-                return True
-            if data == b"k":
-                session_sel.widget.move_up()
+            if _handle_selector_nav(data, session_sel.widget):
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in selector mode
@@ -1339,23 +1343,7 @@ async def interactive(init_auto_evolve: bool = False):
                     status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
                 return True
-            if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
-                c = data[2]
-                if c == 0x41:  # Up
-                    project_sel.widget.move_up()
-                    chat.dirty = True; term.render()
-                    return True
-                elif c == 0x42:  # Down
-                    project_sel.widget.move_down()
-                    chat.dirty = True; term.render()
-                    return True
-            # j/k for vim-style navigation
-            if data == b"j":
-                project_sel.widget.move_down()
-                chat.dirty = True; term.render()
-                return True
-            if data == b"k":
-                project_sel.widget.move_up()
+            if _handle_selector_nav(data, project_sel.widget):
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in project selector mode
@@ -1385,23 +1373,7 @@ async def interactive(init_auto_evolve: bool = False):
                     status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
                 return True
-            if len(data) >= 3 and data[0] == 0x1B and data[1] == 0x5B:
-                c = data[2]
-                if c == 0x41:  # Up
-                    model_sel.widget.move_up()
-                    chat.dirty = True; term.render()
-                    return True
-                elif c == 0x42:  # Down
-                    model_sel.widget.move_down()
-                    chat.dirty = True; term.render()
-                    return True
-            # j/k for vim-style navigation
-            if data == b"j":
-                model_sel.widget.move_down()
-                chat.dirty = True; term.render()
-                return True
-            if data == b"k":
-                model_sel.widget.move_up()
+            if _handle_selector_nav(data, model_sel.widget):
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in model selector mode
