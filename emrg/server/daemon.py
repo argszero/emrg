@@ -280,7 +280,7 @@ class EmrgServer:
                 try:
                     msg = json.loads(text)
                 except json.JSONDecodeError as e:
-                    err = json.dumps({"error": f"invalid json: {e}"}).encode()
+                    err = json.dumps({"error": f"invalid json: {e}"}, ensure_ascii=False).encode()
                     await write_frame(writer, err)
                     continue
 
