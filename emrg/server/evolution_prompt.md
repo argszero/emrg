@@ -178,6 +178,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - subprocess.run encoding='utf-8' + _detect_git_remote URL 解析单测 (413 passed) #184 ✅
 > - atomic_write_yaml 单元测试 (7 tests, 420 passed) #185 ✅
 > - scheduler write_text() encoding='utf-8' 补充 #186 ✅
+> - daemon error json.dumps ensure_ascii=False 一致性 #189 ✅
 
 #### 2.2 GitHub 最新代码改动
 
