@@ -848,6 +848,73 @@ class EmrgServer:
             })
             logger.info("session cleared: %s", session_id)
 
+        elif msg_type == "list_history":
+            session_id = msg.get("session_id", "")
+            cwd = msg.get("cwd", "")
+            if not session_id or not cwd:
+                await self._send(writer, {
+                    "type": "history_list",
+                    "error": "list_history requires session_id and cwd",
+                })
+                return
+            session = self._get_or_create_session(session_id, Path(cwd))
+            records = session._read_history()
+            # Collect user messages with their record index
+            user_messages: list[dict] = []
+            for i, r in enumerate(records):
+                if r.get("type") == "message" and r.get("role") == "user":
+                    content = r.get("content", "")
+                    # Truncate long messages for display
+                    preview = content[:80] + ("…" if len(content) > 80 else "")
+                    user_messages.append({
+                        "record_index": i,
+                        "content": content,
+                        "preview": preview,
+                        "timestamp": r.get("timestamp", ""),
+                    })
+            await self._send(writer, {
+                "type": "history_list",
+                "session_id": session_id,
+                "messages": user_messages,
+            })
+
+        elif msg_type == "rewind_session":
+            session_id = msg.get("session_id", "")
+            cwd = msg.get("cwd", "")
+            record_index = msg.get("record_index")
+            if not session_id or not cwd or record_index is None:
+                await self._send(writer, {
+                    "type": "rewind_result",
+                    "error": "rewind_session requires session_id, cwd, and record_index",
+                })
+                return
+            session = self._get_or_create_session(session_id, Path(cwd))
+            records = session._read_history()
+            if record_index < 0 or record_index >= len(records):
+                await self._send(writer, {
+                    "type": "rewind_result",
+                    "error": f"record_index {record_index} out of range (0-{len(records)-1})",
+                })
+                return
+            # Truncate: keep records up to (not including) record_index
+            truncated = records[:record_index]
+            session._write_history(truncated)
+            # Update meta
+            session._message_count = sum(
+                1 for r in truncated if r.get("type") == "message"
+            )
+            session._updated_at = datetime.now().isoformat()
+            session._save_meta()
+            await self._send(writer, {
+                "type": "rewind_result",
+                "session_id": session_id,
+                "ok": True,
+                "record_index": record_index,
+                "removed_count": len(records) - len(truncated),
+            })
+            logger.info("session rewound: %s at index %d (removed %d records)",
+                        session_id, record_index, len(records) - len(truncated))
+
         elif msg_type == "shutdown":
             logger.info("shutdown requested by client")
             await self._send(writer, {"type": "shutdown_ack"})
