@@ -261,6 +261,8 @@ class EmrgServer:
         """Handle a single client connection."""
         last_session_id: str | None = None
         last_cwd: str | None = None
+        _tool_task: asyncio.Task | None = None
+        _cancel_event: asyncio.Event | None = None
         try:
             while True:
                 try:
@@ -291,10 +293,79 @@ class EmrgServer:
                     last_cwd = msg["cwd"]
                     self._touch_project(last_cwd)
 
+                # ── Cancel: interrupt running tool loop ──────────
+                if msg.get("type") == "cancel":
+                    if _cancel_event:
+                        _cancel_event.set()
+                    if _tool_task and not _tool_task.done():
+                        _tool_task.cancel()
+                        try:
+                            await _tool_task
+                        except asyncio.CancelledError:
+                            pass
+                    await self._send(writer, {
+                        "type": "cancelled",
+                        "session_id": msg.get("session_id", ""),
+                    })
+                    _tool_task = None
+                    _cancel_event = None
+                    continue
+
+                # ── Task: run tool loop in background (non-blocking) ─
+                if msg.get("type") == "task":
+                    session_id = msg.get("session_id", "")
+                    cwd = msg.get("cwd", "")
+                    if not session_id or not cwd:
+                        await self._send(writer, {
+                            "error": "task requires session_id and cwd",
+                        })
+                        continue
+                    try:
+                        req = TaskRequest(
+                            id=msg.get("id", ""),
+                            session_id=session_id,
+                            cwd=cwd,
+                            prompt=msg.get("prompt", ""),
+                            timestamp=msg.get("timestamp", ""),
+                            stream=msg.get("stream", False),
+                        )
+                    except Exception as e:
+                        await self._send(writer, {"error": f"invalid task: {e}"})
+                        continue
+                    # Cancel previous task if still running
+                    if _tool_task and not _tool_task.done():
+                        if _cancel_event:
+                            _cancel_event.set()
+                        _tool_task.cancel()
+                    session = self._get_or_create_session(session_id, Path(cwd))
+                    logger.info(
+                        'task received: session=%s prompt="%s" → routing via LLM (stream=%s)',
+                        session_id, req.prompt[:60], req.stream,
+                    )
+                    _cancel_event = asyncio.Event()
+                    if req.stream:
+                        _tool_task = asyncio.create_task(
+                            self._run_tool_loop(req, writer, session, _cancel_event)
+                        )
+                    else:
+                        _tool_task = asyncio.create_task(
+                            self._run_chat_once(req, writer, session)
+                        )
+                    continue
+
                 await self._process_message(msg, writer)
         except Exception:
             logger.warning("client error", exc_info=True)
         finally:
+            # Cancel any running tool task on disconnect
+            if _tool_task and not _tool_task.done():
+                if _cancel_event:
+                    _cancel_event.set()
+                _tool_task.cancel()
+                try:
+                    await _tool_task
+                except asyncio.CancelledError:
+                    pass
             writer.close()
             try:
                 await writer.wait_closed()
@@ -856,7 +927,8 @@ class EmrgServer:
             })
 
     async def _run_tool_loop(
-        self, req: TaskRequest, writer: asyncio.StreamWriter, session: Session
+        self, req: TaskRequest, writer: asyncio.StreamWriter, session: Session,
+        cancel_event: asyncio.Event | None = None,
     ) -> None:
         """Run the streaming tool-calling loop with session persistence.
 
@@ -868,6 +940,9 @@ class EmrgServer:
            notify client, loop back to step 2
         5. If finish_reason == "stop": persist final answer, done
         6. Safety: max_tool_rounds prevents infinite loops
+
+        Supports cancellation via cancel_event (checked between rounds) and
+        asyncio task cancellation (interrupts streaming mid-round).
         """
         system_prompt = self._build_system_prompt(session)
         history_messages = session.get_messages_for_llm()
@@ -890,6 +965,18 @@ class EmrgServer:
         llm_request_messages = [dict(m) for m in messages]
 
         for round_num in range(1, self._max_tool_rounds + 1):
+            # Check for cancellation between rounds
+            if cancel_event and cancel_event.is_set():
+                logger.info("tool loop cancelled by client at round %d", round_num)
+                await self._send(writer, {
+                    "request_id": req.id,
+                    "content": "",
+                    "done": True,
+                    "cancelled": True,
+                    "session_id": session.session_id,
+                })
+                return
+
             logger.debug("tool loop round %d: %d messages, %d tools",
                          round_num, len(messages), len(tools_openai))
 
@@ -954,6 +1041,10 @@ class EmrgServer:
 
             try:
                 async for delta in self.llm.chat_stream(messages, tools=tools_openai):
+                    # Check for cancellation mid-stream (ESC in client)
+                    if cancel_event and cancel_event.is_set():
+                        raise asyncio.CancelledError()
+
                     c = delta.get("content")
                     if c:
                         content_parts.append(c)
@@ -980,6 +1071,16 @@ class EmrgServer:
                     usage = delta.get("usage")
                     if usage:
                         final_usage = usage
+            except asyncio.CancelledError:
+                logger.info("tool loop cancelled mid-stream in round %d", round_num)
+                await self._send(writer, {
+                    "request_id": req.id,
+                    "content": "",
+                    "done": True,
+                    "cancelled": True,
+                    "session_id": session.session_id,
+                })
+                return
             except Exception as e:
                 logger.exception("LLM stream error in round %d", round_num)
                 await self._send(writer, {

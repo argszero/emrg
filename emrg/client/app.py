@@ -1290,6 +1290,8 @@ async def interactive(init_auto_evolve: bool = False):
                 _elapsed_task.cancel()
                 _elapsed_task = None
             status.elapsed = ""
+            # Send cancel to daemon so it stops tool/LLM processing
+            await write_frame(writer, json.dumps({"type": "cancel"}).encode())
             chat.add("system", "⏸ Interrupted — response stopped. You can continue.")
             _last_center = server_id or "emrg"
             status.update(center=_last_center)
