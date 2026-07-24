@@ -221,6 +221,71 @@ class InputWidget(Widget):
         self._dirty = False; return lines
 
 
+class RewindSelector(Widget):
+    """Interactive message picker for /rewind — arrow-key navigation with highlight.
+
+    Renders a list of user messages with the selected one in reverse video.
+    Selecting a message rewinds the session to that point (truncates after it).
+    """
+
+    def __init__(self, messages: list[dict] | None = None):
+        self.messages: list[dict] = messages or []
+        self.selected_index: int = 0
+        self._dirty: bool = True
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    @dirty.setter
+    def dirty(self, value: bool) -> None:
+        self._dirty = value
+
+    def move_up(self) -> None:
+        if self.selected_index > 0:
+            self.selected_index -= 1
+            self._dirty = True
+
+    def move_down(self) -> None:
+        if self.selected_index < len(self.messages) - 1:
+            self.selected_index += 1
+            self._dirty = True
+
+    @property
+    def selected_record_index(self) -> int | None:
+        if 0 <= self.selected_index < len(self.messages):
+            return self.messages[self.selected_index].get("record_index")
+        return None
+
+    def render(self, ctx):
+        lines: list[Line] = []
+        pstyle = Style.parse("bold yellow")
+        lines.append(Line(
+            spans=[Span("↶ ", style="dim"), Span("Rewind session — select a message to rewind to (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+            style=ctx.style,
+        ))
+        lines.append(Line(
+            spans=[Span("  " + "─" * (ctx.width - 4), style="dim")],
+            style=ctx.style,
+        ))
+        for i, m in enumerate(self.messages):
+            preview = m.get("preview", m.get("content", "")[:80])
+            ts = m.get("timestamp", "")[:16].replace("T", " ")
+            label = f"  [{i+1}] {preview}"
+            if ts:
+                label += f"  ({ts})"
+            if i == self.selected_index:
+                spans = [
+                    Span("> ", style=pstyle),
+                    Span(label, style=Style(reverse=True)),
+                ]
+            else:
+                spans = [Span("  ", style="dim"), Span(label, style=ctx.style)]
+            lines.append(Line(spans=spans, style=ctx.style))
+        self._dirty = False
+        return lines
+
+
 class SessionSelector(Widget):
     """Interactive session picker — arrow-key navigation with highlight.
 
@@ -429,6 +494,7 @@ class ModelSelector(Widget):
 _COMMAND_HELP: dict[str, str] = {
     "/resume":  "Switch to a session by [id] or interactively (↑↓/j/k to pick)",
     "/sessions": "Browse and switch between saved sessions (↑↓/j/k to navigate)",
+    "/rewind":   "Rewind session — pick a user message to truncate history to",
     "/compact":  "Compress conversation history to save context",
     "/memory":   "Browse and search memories [session|project|<id>]",
     "/rename":   "Rename current session [title]",
@@ -781,6 +847,7 @@ async def interactive(init_auto_evolve: bool = False):
     session_sel = SelectorState()
     project_sel = SelectorState()
     model_sel = SelectorState()
+    rewind_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
 
     # Command autocomplete state (shows dropdown when user types /)
@@ -980,6 +1047,25 @@ async def interactive(init_auto_evolve: bool = False):
                     term.render()
                     continue
 
+                # Rewind result
+                if data.get("type") == "rewind_result":
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Rewind failed: {err}")
+                    else:
+                        # Clear the TUI chat display and reload history
+                        chat.rows.clear()
+                        chat.dirty = True
+                        removed = data.get("removed_count", 0)
+                        chat.add("system", f"↶ Session rewound — {removed} messages removed.")
+                        msg_count = 0
+                        # Reload session state from server
+                        await write_frame(writer, json.dumps({"type": "ping"}).encode())
+                        _update_right()
+                    status.update(center=server_id or "emrg")
+                    term.render()
+                    continue
+
                 # Compact result
                 if data.get("type") == "compact_result":
                     # Skip progress notifications (auto-compact "compacting..." messages)
@@ -1027,6 +1113,26 @@ async def interactive(init_auto_evolve: bool = False):
                             status.update(center="select session: ↑↓ Enter Esc  (j/k vim)")
                         else:
                             chat.add("system", "No saved sessions yet. Start chatting to create one.")
+                    term.render()
+                    continue
+
+                # History list (for /rewind)
+                if data.get("type") == "history_list":
+                    nonlocal rewind_sel
+                    messages = data.get("messages", [])
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Error: {err}")
+                        rewind_sel.pending = False
+                    elif messages:
+                        rewind_sel.pending = False
+                        rewind_sel.widget = RewindSelector(messages)
+                        rewind_sel.active = True
+                        chat.add(rewind_sel.widget)
+                        status.update(center="select message to rewind to: ↑↓ Enter Esc  (j/k vim)")
+                    else:
+                        rewind_sel.pending = False
+                        chat.add("system", "No user messages in this session to rewind to.")
                     term.render()
                     continue
 
@@ -1272,7 +1378,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, writer, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
-        nonlocal session_sel, project_sel, model_sel
+        nonlocal session_sel, project_sel, model_sel, rewind_sel
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task
@@ -1389,8 +1495,41 @@ async def interactive(init_auto_evolve: bool = False):
             # Ignore other keys when in model selector mode
             return True
 
+        # ── Rewind selector mode ──────────────────────────
+        if rewind_sel.active and rewind_sel.widget:
+            if data == b"\x1b":  # Esc — cancel selection
+                rewind_sel.active = False
+                chat.add("system", "Rewind cancelled.")
+                rewind_sel.widget = None
+                status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if data == b"\r" or data == b"\n":  # Enter — confirm
+                idx = rewind_sel.widget.selected_record_index
+                rewind_sel.active = False
+                rewind_sel.widget = None
+                if idx is not None:
+                    await write_frame(writer, json.dumps({
+                        "type": "rewind_session",
+                        "session_id": session_id,
+                        "cwd": cwd,
+                        "record_index": idx,
+                    }).encode())
+                    status.update(center=f"rewinding to message #{idx}...")
+                    term.render()
+                else:
+                    chat.add("system", "No message selected.")
+                    status.update(center=server_id or "emrg")
+                    term.render()
+                return True
+            if _handle_selector_nav(data, rewind_sel.widget):
+                chat.dirty = True; term.render()
+                return True
+            # Ignore other keys when in rewind selector mode
+            return True
+
         # ── Command autocomplete: recompute on every keystroke ──
-        if not session_sel.active and not busy:
+        if not session_sel.active and not rewind_sel.active and not busy:
             text_stripped = inp.text.lstrip()
             if text_stripped.startswith("/"):
                 cmd_prefix = text_stripped.split(None, 1)[0]
@@ -1740,6 +1879,19 @@ Streaming
                     }).encode())
 
                     status.update(center="clearing session...")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
+                # Handle /rewind command
+                if text.lower() == "/rewind":
+                    await write_frame(writer, json.dumps({
+                        "type": "list_history",
+                        "session_id": session_id,
+                        "cwd": cwd,
+                    }).encode())
+
+                    rewind_sel.pending = True
+                    status.update(center="loading session history...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
