@@ -179,6 +179,8 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - atomic_write_yaml 单元测试 (7 tests, 420 passed) #185 ✅
 > - scheduler write_text() encoding='utf-8' 补充 #186 ✅
 > - daemon error json.dumps ensure_ascii=False 一致性 #189 ✅
+> - ESC cancel 传播到 daemon 停止 tool loop #191 ✅
+> - /rewind 命令截断会话历史 #192 ✅
 
 #### 2.2 GitHub 最新代码改动
 
