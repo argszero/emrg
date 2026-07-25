@@ -655,42 +655,6 @@ class EmrgServer:
                 })
             return
 
-        elif msg_type == "task":
-            session_id = msg.get("session_id", "")
-            cwd = msg.get("cwd", "")
-
-            if not session_id or not cwd:
-                await self._send(writer, {
-                    "error": "task requires session_id and cwd",
-                })
-                return
-
-            try:
-                req = TaskRequest(
-                    id=msg.get("id", ""),
-                    session_id=session_id,
-                    cwd=cwd,
-                    prompt=msg.get("prompt", ""),
-                    timestamp=msg.get("timestamp", ""),
-                    stream=msg.get("stream", False),
-                )
-            except Exception as e:
-                await self._send(writer, {"error": f"invalid task: {e}"})
-                return
-
-            # Load or create session
-            session = self._get_or_create_session(session_id, Path(cwd))
-
-            logger.info(
-                'task received: session=%s prompt="%s" → routing via LLM (stream=%s)',
-                session_id, req.prompt[:60], req.stream,
-            )
-
-            if req.stream:
-                await self._run_tool_loop(req, writer, session)
-            else:
-                await self._run_chat_once(req, writer, session)
-
         elif msg_type == "compact":
             cwd = msg.get("cwd", "")
             session_id = msg.get("session_id", "")
