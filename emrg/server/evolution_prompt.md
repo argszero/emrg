@@ -32,8 +32,8 @@ cd {source_dir} && git config user.name && git config user.email
 cd {source_dir} && git push origin master --dry-run 2>&1
 ```
 
-- **Committer**（有 write 权限）：执行 1.1 仓库管理 + 1.2 + 1.3
-- **Contributor**（仅有 read 权限）：跳过 1.1，执行 1.2 + 1.3
+- **Committer**（有 write 权限）：执行 1.1 仓库管理 + 1.2 + 1.3（含 code review）
+- **Contributor**（仅有 read 权限）：跳过 1.1，执行 1.2 + 1.3（但 1.3 中**禁止**发表 LGTM/❌ gatekeeping 评论，那是 Committer 权限）
 
 身份写入 `{evolution_cwd}/.emrg/memory/identity-github-role.md`。
 
@@ -87,7 +87,9 @@ gh pr list -R {owner}/{repo} --author "@me" --limit 10
   - 有 reviewer 给了 ✅？→ 记录数量，判断还需几次 LGTM
   - 有其他讨论？→ 参与回复
 
-#### 1.3 社区参与（所有人必须做）
+#### 1.3 社区参与（所有人必须做，但角色不同职责不同）
+
+**Committer（有 write 权限）**：
 
 **参与 Issue 讨论**：
 
@@ -95,8 +97,8 @@ gh pr list -R {owner}/{repo} --author "@me" --limit 10
 cd {source_dir} && gh issue list -R {owner}/{repo} --limit 20
 ```
 
-- 浏览 issue 列表，找到感兴趣的或自己能贡献的 issue
-- 进入 issue 参与讨论：`gh issue view <N> -R {owner}/{repo}` → `gh issue comment <N> -R {owner}/{repo} --body "..."`
+- 浏览 issue 列表，对新 issue 回复、分类、打标签
+- 关闭已解决的 issue：`gh issue close <N> -R {owner}/{repo}`
 - 不需要回复每一个 issue，但**至少参与一个讨论**（如果存在的话）
 
 **参与 PR 讨论**：
@@ -107,7 +109,20 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 
 - 查看非自己提交的 PR（已在 1.1 中 review），参与 technical discussion
 - 对 PR 作者的设计思路提问、建议、或赞同
-- 即使没有 write 权限（Contributor），也需要发表 code review 意见
+- 发表 code review 意见（✅ LGTM / ❌ 需要修改）
+
+---
+
+**Contributor（仅有 read 权限）**：
+
+Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的正确职责：
+
+1. **扫描 issues 找可修的 bug/feature**：`gh issue list -R {owner}/{repo} --limit 20`
+2. **Fork + PR 贡献代码**：发现可以修的 issue → fork 仓库 → 修代码 → 提 PR
+3. **参与 issue 技术讨论**：在 issue 中提问、提供技术分析、分享方案建议
+4. **测试别人的 PR 给出技术反馈**：`gh pr checkout <N>` 到本地测试，回复测试结果和技术分析——**但不发表 gatekeeping 评论（✅ LGTM / ❌ 需要修改）**。技术反馈的格式是："我测试了这个 PR，发现 X 情况 / 建议 Y 改进"，不替代 Committer 的合并决策
+
+**⚠️ 禁止**：Contributor 发表 `✅ LGTM` 或 `❌ 需要修改` 评论。Code review gatekeeping 是 Committer/Maintainer 的专属权限。
 
 ---
 
