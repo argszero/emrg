@@ -188,6 +188,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - /trigger 交互式任务选择器 (↑↓/j/k, 实时过滤) #202 ✅
 > - evolution prompt quick-ref 更新 (添加 #200-#202) #203 ✅
 > - /resume busy 状态下可用 + terminal 标题同步 on session switch #204 ✅
+> - 移除未使用 import (ruff F401) + __init__.py noqa lazy import #207 ✅
 
 #### 2.2 GitHub 最新代码改动
 
