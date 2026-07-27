@@ -410,6 +410,10 @@ class EmrgServer:
         evolution_cwd = str(EVOLUTION_CWD.resolve())
         if cwd == evolution_cwd or cwd.startswith(evolution_cwd + os.sep):
             return
+        # Don't track the home directory as a project
+        home = os.path.expanduser("~")
+        if cwd == home:
+            return
         self._projects_log.parent.mkdir(parents=True, exist_ok=True)
         now = datetime.now().isoformat()
 
@@ -444,8 +448,26 @@ class EmrgServer:
                 if cwd.startswith(known_path + os.sep):
                     if len(known_path) > len(parent):
                         parent = known_path
-            if parent:
+            # Determine whether to merge into parent or create a new entry.
+            # If cwd is itself a git repo root, or if the parent is the home
+            # directory (which is not a real project), create a new entry.
+            is_git_root = os.path.isdir(os.path.join(cwd, ".git"))
+            if parent and not is_git_root and parent != home:
+                # Merge into parent: child directory with no git repo of its own
                 projects[parent]["last_active"] = now
+            elif parent == home or (parent and is_git_root):
+                # Parent is home dir or cwd is a git repo → create new entry
+                name = os.path.basename(cwd.rstrip("/"))
+                projects[cwd] = {
+                    "name": name,
+                    "path": cwd,
+                    "last_active": now,
+                }
+                logger.info("new project tracked (git root under parent): %s", name)
+                # Clean up stale home-dir entry if it exists
+                if home in projects:
+                    del projects[home]
+                    logger.info("removed stale home-dir project entry")
             else:
                 name = os.path.basename(cwd.rstrip("/"))
                 projects[cwd] = {
