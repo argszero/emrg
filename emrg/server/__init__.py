@@ -2,7 +2,7 @@
 
 def __getattr__(name):
     if name in ("EmrgServer", "run_server"):
-        from emrg.server.daemon import EmrgServer, run_server
+        from emrg.server.daemon import EmrgServer, run_server  # noqa: F401
         return locals()[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 

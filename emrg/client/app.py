@@ -15,7 +15,7 @@ from emrg.client.widgets import (
     _COMMAND_HELP,
 )
 from emrg.connect import connect_to_server, cleanup_server, is_server_running_sync, get_server_path
-from emrg.framing import read_frame, write_frame, encode_frame
+from emrg.framing import read_frame, write_frame
 from emrg.protocol import TaskRequest, TaskResponse, ToolEnd, ToolStart
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills

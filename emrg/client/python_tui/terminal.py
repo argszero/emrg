@@ -16,12 +16,10 @@ from typing import Any, Callable
 
 from emrg.client.python_tui.buffer import Buffer, CharPool, HyperlinkPool, StylePool, diff_buffers
 from emrg.client.python_tui.output import (
-    BSU,
     CURSOR_HIDE,
     CURSOR_SHOW,
     CURSOR_HOME,
     CLEAR_TO_EOL,
-    ESU,
     RESET_SCROLL_REGION,
     RESTORE_CURSOR,
     SAVE_CURSOR,
