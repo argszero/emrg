@@ -145,7 +145,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - config.toml 热加载 ✅ | CLAUDE.md 已删除 ✅ | /project 已移除 ✅
 > - Agent.md/CLAUDE.md 读取 ✅ | README 中英双版 ✅
 > - PID 单实例锁 ✅ | `/rant @project` ✅ | `/clear` ✅
-> - `/resume` ✅ | `/rename` ✅ | `/rewind` ✅ | `/memory` ✅ | `/sessions` ✅ | `/help` ✅ | `/skills` ✅ | `/version` ✅
+> - `/resume` ✅ | `/rename` ✅ | `/rewind` ✅ | `/trigger` ✅ | `/memory` ✅ | `/sessions` ✅ | `/help` ✅ | `/skills` ✅ | `/version` ✅
 > - Ctrl+A/E/W/K/U 快捷键 ✅ | bracketed paste 优化 ✅
 > - 渲染节流 (60fps) ✅ | 动态视口 ✅ | 自动 compact ✅
 > - ANSI 样式渲染 (style_to_sgr, buffer cascade) ✅ | 安装/卸载 ✅ | Windows/WSL 指导 ✅
@@ -181,6 +181,8 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - daemon error json.dumps ensure_ascii=False 一致性 #189 ✅
 > - ESC cancel 传播到 daemon 停止 tool loop #191 ✅
 > - /rewind 命令截断会话历史 #192 ✅
+> - /trigger 手动触发定时任务 (asyncio.Event interruptible sleep) #197 ✅
+> - widget 类从 app.py 提取到 widgets.py (app.py 2157→1529 行) #198 ✅
 
 #### 2.2 GitHub 最新代码改动
 
