@@ -39,7 +39,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
 
 - **TUI Client** — Rich terminal UI with Markdown rendering, syntax highlighting, diff display
   - Command autocomplete (type `/` to list commands with filtering)
-  - Slash commands: `/help`, `/clear`, `/resume`, `/rename`, `/memory`, `/sessions`, `/rant`, `/model`, `/version`
+  - Slash commands: `/help`, `/clear`, `/resume`, `/rename`, `/rewind`, `/trigger`, `/memory`, `/sessions`, `/rant`, `/model`, `/skills`, `/version`
   - `/model <name>` to switch LLM models at runtime (configured via `[[llm.models]]` in config.toml)
   - Interactive session picker (arrow keys or j/k vim-style navigation)
   - Interactive model picker (arrow keys to select from configured models)
