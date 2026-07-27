@@ -236,6 +236,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - evolution prompt quick-ref 更新 (添加 #212, #213, #214) #215 ✅
 > - evolution prompt quick-ref 更新 (标记 #214 merged + 添加 #215) #216 ✅
 > - Contributor privilege escalation 多层角色门控 (ROLE LOCK 表 + 禁止命令列表) #217 ✅
+> - evolution prompt quick-ref 更新 (添加 #216, #217) #218 ✅
 
 #### 2.2 GitHub 最新代码改动
 
