@@ -79,6 +79,9 @@ class EvolutionHandler:
         self.identity = identity
         self._running = False
         self._start_time: float | None = None
+        self._trigger_event = asyncio.Event()
+        self._cycle_running = False
+        self._next_run_at: float | None = None
         self._logs_dir = config_dir() / "logs"
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         self.evolutions: list[EvolutionLog] = []
@@ -102,7 +105,11 @@ class EvolutionHandler:
         self._source_dir = path or name
 
     async def run(self) -> None:
-        """Run evolution cycles at configured interval."""
+        """Run evolution cycles at configured interval.
+
+        Uses an asyncio.Event for interruptible sleep — manual triggers
+        via trigger() wake the coroutine immediately.
+        """
         self._running = True
         self._start_time = time.time()
         seq = 0
@@ -111,21 +118,75 @@ class EvolutionHandler:
         )
 
         while self._running:
-            await asyncio.sleep(self.interval)
+            # Wait for interval or manual trigger (interruptible)
+            self._next_run_at = time.time() + self.interval
+            try:
+                await asyncio.wait_for(
+                    self._trigger_event.wait(),
+                    timeout=self.interval,
+                )
+                # Manual trigger fired — clear and proceed
+                self._trigger_event.clear()
+                logger.debug(
+                    "EvolutionHandler[%s] manually triggered", self.name
+                )
+            except asyncio.TimeoutError:
+                # Normal scheduled run
+                pass
+
             seq += 1
             logger.debug("EvolutionHandler[%s] tick #%d", self.name, seq)
+            self._cycle_running = True
+            self._next_run_at = None  # running — no next time yet
             try:
                 await self._run_evolution_cycle(seq)
             except Exception:
                 logger.warning(
                     "EvolutionHandler[%s] #%d crashed", self.name, seq, exc_info=True
                 )
+            finally:
+                self._cycle_running = False
+                self._trigger_event.clear()  # clear any spurious set during cycle
 
         await self._write_final_summary()
         logger.info("EvolutionHandler[%s] stopped", self.name)
 
     def stop(self) -> None:
         self._running = False
+
+    def trigger(self) -> tuple[str, str | None]:
+        """Manually trigger an immediate evolution cycle.
+
+        Returns (result, detail):
+          - ("running", detail) — cycle is currently executing
+          - ("triggered", detail) — cycle will start immediately
+        """
+        if self._cycle_running:
+            return ("running", "task is currently executing")
+        if self._next_run_at is not None:
+            remaining = max(0, int(self._next_run_at - time.time()))
+            if remaining > 0:
+                detail = (
+                    f"next run moved from ~{remaining}s from now to immediately"
+                )
+            else:
+                detail = "triggered immediately"
+        else:
+            detail = "triggered immediately"
+        self._trigger_event.set()
+        return ("triggered", detail)
+
+    def status(self) -> dict:
+        """Return current handler status."""
+        remaining = None
+        if self._next_run_at is not None:
+            remaining = max(0, int(self._next_run_at - time.time()))
+        return {
+            "name": self.name,
+            "running": self._cycle_running,
+            "next_run_in_seconds": remaining,
+            "interval": self.interval,
+        }
 
     async def _run_evolution_cycle(self, seq: int) -> None:
         """Connect to server, send evolution prompt, read streaming response."""
@@ -326,6 +387,18 @@ class TaskScheduler:
             handler.stop()
         for coro in self._coros:
             coro.cancel()
+
+    def trigger_task(self, name: str) -> dict | None:
+        """Manually trigger a task by name. Returns result dict or None if not found."""
+        for handler in self._handlers:
+            if handler.name == name:
+                result, detail = handler.trigger()
+                return {"name": name, "result": result, "detail": detail}
+        return None
+
+    def list_tasks(self) -> list[dict]:
+        """Return status for all running handlers."""
+        return [handler.status() for handler in self._handlers]
 
     async def wait_all(self) -> None:
         """Wait for all handler coroutines to finish (after cancel)."""
