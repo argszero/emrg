@@ -493,6 +493,7 @@ _COMMAND_HELP: dict[str, str] = {
     "/clear":    "Clear current session history and start fresh",
     "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
     "/model":    "Switch LLM model [/model | /model <name>]",
+    "/trigger":  "List or manually trigger scheduled tasks [/trigger | /trigger <name>]",
     "/skills":   "List loaded skills (user + project)",
     "/version":  "Show EMRG version and instance info",
     "/help":     "Show keyboard shortcuts and commands",
