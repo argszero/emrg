@@ -4,7 +4,7 @@ Keeps interactive_demo.py's input handling, renders chat in viewport.
 
 from __future__ import annotations
 
-import asyncio, json, logging, os, signal, subprocess, sys, time
+import asyncio, fcntl, json, logging, os, signal, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path, PurePath
 from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Terminal, ToolCard
@@ -169,6 +169,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     await write_frame(writer, json.dumps({"type": "ping"}).encode())
     term = Terminal(); stdin_fd = sys.stdin.fileno()
+    stdin_queue: asyncio.Queue = asyncio.Queue()
     status = StatusLine(left=session_id, center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
     term.mount(status=status, composer=inp, chat=chat)
@@ -765,6 +766,20 @@ async def interactive(init_auto_evolve: bool = False):
         _resize_event.set()
 
     loop.add_signal_handler(signal.SIGWINCH, _on_sigwinch)
+
+    # ── Stdin reader (asyncio-native, no thread pool — rant #SIGWINCH-leak) ─
+    _stdin_flags = fcntl.fcntl(stdin_fd, fcntl.F_GETFL)
+    fcntl.fcntl(stdin_fd, fcntl.F_SETFL, _stdin_flags | os.O_NONBLOCK)
+
+    def _stdin_reader() -> None:
+        try:
+            data = os.read(stdin_fd, 4096)
+            if data:
+                stdin_queue.put_nowait(data)
+        except (BlockingIOError, InterruptedError):
+            pass
+
+    loop.add_reader(stdin_fd, _stdin_reader)
 
     def _handle_selector_nav(data: bytes, widget) -> bool:
         """Handle arrow key and j/k navigation for any selector widget.
@@ -1500,18 +1515,18 @@ Streaming
     parser = InputParser()
     try:
         while True:
-            # Race stdin read against SIGWINCH resize event
-            read_ft = loop.run_in_executor(None, os.read, stdin_fd, 16)
+            # Race stdin queue get against SIGWINCH resize event
+            # (add_reader + Queue — no thread pool, no leaked os.read threads)
+            stdin_ft = asyncio.ensure_future(stdin_queue.get())
             resize_ft = asyncio.ensure_future(_resize_event.wait())
             done, pending = await asyncio.wait(
-                [read_ft, resize_ft], return_when=asyncio.FIRST_COMPLETED)
+                [stdin_ft, resize_ft], return_when=asyncio.FIRST_COMPLETED)
 
-            # Cancel the asyncio future that didn't fire (resize_ft is cheap to cancel)
+            # Cancel whichever future didn't fire (both are safe to cancel)
             for ft in pending:
-                if ft is resize_ft:
-                    ft.cancel()
-                    try: await ft
-                    except (asyncio.CancelledError, Exception): pass
+                ft.cancel()
+                try: await ft
+                except (asyncio.CancelledError, Exception): pass
 
             # Process resize immediately (real-time, no keypress needed)
             if _resize_event.is_set():
@@ -1520,22 +1535,21 @@ Streaming
                 except Exception:
                     logger.debug("resize handler failed", exc_info=True)
 
-            # Skip data processing if stdin read didn't complete
-            if read_ft not in done:
+            # Skip data processing if stdin didn't fire
+            if stdin_ft not in done:
                 continue
 
-            data = read_ft.result()
+            data = stdin_ft.result()
             if not data: break
 
             for seq in parser.feed(data):
                 if not await handle_key(seq): return
             while parser.has_pending():
                 try:
-                    more = await asyncio.wait_for(
-                        loop.run_in_executor(None, os.read, stdin_fd, 8), timeout=0.05)
+                    more = await asyncio.wait_for(stdin_queue.get(), timeout=0.05)
                     for seq in parser.feed(more):
                         if not await handle_key(seq): return
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     # Flush standalone Escape (Claude Code style: 50ms timer for lone ESC)
                     if parser._buf == bytearray(b'\x1b'):
                         parser._buf.clear()
@@ -1543,6 +1557,7 @@ Streaming
                     break
     except Exception: logger.exception("TUI main loop crashed")
     finally:
+        loop.remove_reader(stdin_fd)
         logger.info("disconnecting from emrgd")
         read_task.cancel()
         try: await read_task
