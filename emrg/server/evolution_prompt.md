@@ -183,6 +183,9 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - /rewind 命令截断会话历史 #192 ✅
 > - /trigger 手动触发定时任务 (asyncio.Event interruptible sleep) #197 ✅
 > - widget 类从 app.py 提取到 widgets.py (app.py 2157→1529 行) #198 ✅
+> - Agent.md slash 命令补充 /trigger, /rewind, /skills #200 ✅
+> - /trigger 添加到命令自动补全注册表 #201 ✅
+> - /trigger 交互式任务选择器 (↑↓/j/k, 实时过滤) #202 ✅
 
 #### 2.2 GitHub 最新代码改动
 
