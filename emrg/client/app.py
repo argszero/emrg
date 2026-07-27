@@ -11,7 +11,7 @@ from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Termi
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
 from emrg.client.widgets import (
     InputWidget, RewindSelector, SessionSelector, ProjectSelector,
-    ModelSelector, CommandDropdown, ChatHistory, SelectorState,
+    TaskSelector, ModelSelector, CommandDropdown, ChatHistory, SelectorState,
     _COMMAND_HELP,
 )
 from emrg.connect import connect_to_server, cleanup_server, is_server_running_sync, get_server_path
@@ -220,6 +220,7 @@ async def interactive(init_auto_evolve: bool = False):
     project_sel = SelectorState()
     model_sel = SelectorState()
     rewind_sel = SelectorState()
+    task_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
 
     # Command autocomplete state (shows dropdown when user types /)
@@ -576,30 +577,17 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Tasks list response (for /trigger interactive mode)
                 if data.get("type") == "tasks_list":
+                    nonlocal task_sel
                     tasks = data.get("tasks", [])
                     err = data.get("error", "")
                     if err:
                         chat.add("system", f"Error: {err}")
                     elif tasks:
-                        lines = ["Scheduled Tasks", "━━━━━━━━━━━━━━━"]
-                        for t in tasks:
-                            name = t.get("name", "?")
-                            running = t.get("running", False)
-                            next_in = t.get("next_run_in_seconds")
-                            interval = t.get("interval", 0)
-                            if running:
-                                status_str = "● RUNNING"
-                            elif next_in is not None:
-                                status_str = f"◌ next in ~{next_in}s"
-                            else:
-                                status_str = "◌ idle"
-                            lines.append(
-                                f"  {name}  [{status_str}]"
-                                f"  (every {interval}s)"
-                            )
-                        lines.append("")
-                        lines.append("Usage: /trigger <task-name>")
-                        chat.add("system", "\n".join(lines))
+                        task_sel.widget = TaskSelector(tasks)
+                        task_sel.active = True
+                        task_sel.pending = False
+                        chat.add(task_sel.widget)
+                        status.update(center="select a task to trigger (↑↓/j/k, Enter, Esc)")
                     else:
                         chat.add("system", "No scheduled tasks found.")
                     term.render()
@@ -798,7 +786,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, writer, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
-        nonlocal session_sel, project_sel, model_sel, rewind_sel
+        nonlocal session_sel, project_sel, model_sel, rewind_sel, task_sel
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task
@@ -948,8 +936,41 @@ async def interactive(init_auto_evolve: bool = False):
             # Ignore other keys when in rewind selector mode
             return True
 
+        # ── Task selector mode ──────────────────────────
+        if task_sel.active and task_sel.widget:
+            if data == b"\x1b":  # Esc — cancel selection
+                task_sel.active = False
+                chat.add("system", "Task selection cancelled.")
+                task_sel.widget = None
+                status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if data in (b"\r", b"\n"):  # Enter — confirm
+                task_name = task_sel.widget.selected_task_name
+                task_sel.active = False
+                task_sel.widget = None
+                if task_name:
+                    await write_frame(writer, json.dumps({
+                        "type": "trigger_task",
+                        "name": task_name,
+                        "session_id": session_id,
+                        "cwd": cwd,
+                    }).encode())
+                    chat.add("system", f"Triggering task: {task_name}")
+                    status.update(center=f"triggering {task_name}...")
+                else:
+                    chat.add("system", "No task selected.")
+                    status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if _handle_selector_nav(data, task_sel.widget):
+                chat.dirty = True; term.render()
+                return True
+            # Ignore other keys when in task selector mode
+            return True
+
         # ── Command autocomplete: recompute on every keystroke ──
-        if not session_sel.active and not rewind_sel.active and not busy:
+        if not session_sel.active and not rewind_sel.active and not task_sel.active and not busy:
             text_stripped = inp.text.lstrip()
             if text_stripped.startswith("/"):
                 cmd_prefix = text_stripped.split(None, 1)[0]

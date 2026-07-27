@@ -411,6 +411,76 @@ class ProjectSelector(Widget):
         return lines
 
 
+class TaskSelector(Widget):
+    """Interactive task picker — arrow-key navigation with highlight.
+
+    Renders a list of scheduled tasks from the server with the selected one
+    in reverse video. Used by /trigger when invoked without arguments.
+    """
+
+    def __init__(self, tasks: list[dict] | None = None):
+        self.tasks: list[dict] = tasks or []
+        self.selected_index: int = 0
+        self._dirty: bool = True
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    @dirty.setter
+    def dirty(self, value: bool) -> None:
+        self._dirty = value
+
+    def move_up(self) -> None:
+        if self.selected_index > 0:
+            self.selected_index -= 1
+            self._dirty = True
+
+    def move_down(self) -> None:
+        if self.selected_index < len(self.tasks) - 1:
+            self.selected_index += 1
+            self._dirty = True
+
+    @property
+    def selected_task_name(self) -> str | None:
+        if 0 <= self.selected_index < len(self.tasks):
+            return self.tasks[self.selected_index].get("name", "")
+        return None
+
+    def render(self, ctx):
+        lines: list[Line] = []
+        pstyle = Style.parse("bold cyan")
+        lines.append(Line(
+            spans=[Span("○ ", style="dim"), Span("Select a task to trigger (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+            style=ctx.style,
+        ))
+        for i, t in enumerate(self.tasks):
+            name = t.get("name", "?")
+            running = t.get("running", False)
+            next_in = t.get("next_run_in_seconds")
+            interval = t.get("interval", 0)
+            if running:
+                status_str = "● RUNNING"
+            elif next_in is not None:
+                status_str = f"◌ next in ~{next_in}s"
+            else:
+                status_str = "◌ idle"
+            label = f"  {name}  [{status_str}]  (every {interval}s)"
+            if i == self.selected_index:
+                spans = [
+                    Span("> ", style=pstyle),
+                    Span(label, style=Style(reverse=True)),
+                ]
+            else:
+                spans = [
+                    Span("  ", style=ctx.style),
+                    Span(label, style=ctx.style),
+                ]
+            lines.append(Line(spans=spans, style=ctx.style))
+        self._dirty = False
+        return lines
+
+
 class ModelSelector(Widget):
     """Interactive model picker — arrow-key navigation with highlight.
 
