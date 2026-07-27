@@ -234,7 +234,7 @@ class EmrgServer:
         )
 
         self._scheduler = TaskScheduler(self.identity)
-        sched_tasks = self._scheduler.load_and_start()
+        self._scheduler.load_and_start()
 
         try:
             await self._server.serve_forever()
@@ -592,7 +592,7 @@ class EmrgServer:
             f"- Session directory: `{session.dir_path}/`",
             f"- **Current history** (may be compacted): `{session.dir_path}/history.jsonl`",
             f"- **Daily full history** (never compacted): `{session.dir_path}/history_{today}.jsonl`",
-            f"- Daily files are named `history_YYMMDD.jsonl`",
+            "- Daily files are named `history_YYMMDD.jsonl`",
             f"- LLM raw log: `{session.dir_path}/llm.jsonl` (rotated at 50MB, up to 2 backups)",
             "",
             "**To read history**: use the `read` tool on `history.jsonl` for the current",
@@ -1027,9 +1027,6 @@ class EmrgServer:
             {"role": "user", "content": req.prompt},
         ]
         tools_openai = self.tools.to_openai_tools()
-
-        # For LLM logging: collect the full message exchange
-        llm_request_messages = [dict(m) for m in messages]
 
         for round_num in range(1, self._max_tool_rounds + 1):
             # Check for cancellation between rounds
@@ -1735,7 +1732,7 @@ class EmrgServer:
                             or p["path"].startswith(evolution_cwd + os.sep)
                         )
                     ]
-        except (yaml.YAMLError, OSError) as e:
+        except (yaml.YAMLError, OSError):
             logger.exception("Failed to read projects.yml")
         await self._send(writer, {
             "type": "projects_list",
@@ -1967,7 +1964,7 @@ class EmrgServer:
                 title = session.session_id
             logger.info("auto-generated title for %s: %s", session.session_id, title)
             return title
-        except Exception as e:
+        except Exception:
             logger.exception("title generation failed")
             return session.session_id
 

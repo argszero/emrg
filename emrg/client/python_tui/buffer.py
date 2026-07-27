@@ -378,7 +378,6 @@ def write_lines_to_buffer(
 
                 style_id = pool.intern(final_style) if final_style else 0
                 is_wide = unicodedata.east_asian_width(ch) in ("W", "F")
-                w = CellWidth.WIDE if is_wide else CellWidth.NARROW
 
                 if is_wide and x + 1 < buf.width:
                     buf.set_cell(x, y, Cell(char=ch, style_id=style_id, width=CellWidth.WIDE))

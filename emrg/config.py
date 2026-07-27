@@ -10,6 +10,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import tomllib  # Python 3.11+ stdlib
 

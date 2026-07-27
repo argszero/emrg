@@ -113,7 +113,6 @@ class Diff(Widget):
 
         old_lines = self.old.splitlines()
         new_lines = self.new.splitlines()
-        max_lines = max(len(old_lines), len(new_lines))
 
         # Compute alignment using difflib (simple line-by-line matching)
         import difflib
@@ -134,8 +133,6 @@ class Diff(Widget):
         ))
 
         # Process opcodes to build aligned output
-        old_idx = 0
-        new_idx = 0
         for tag, i1, i2, j1, j2 in opcodes:
             if tag == "equal":
                 for k in range(i1, i2):
