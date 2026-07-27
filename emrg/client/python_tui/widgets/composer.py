@@ -141,7 +141,6 @@ class Composer(Widget):
 
     def render(self, ctx: RenderContext) -> list[Line]:
         """Render the composer with prompt, text, and cursor indicator."""
-        display = self._text or self.placeholder
         is_placeholder = not self._text
 
         # Show cursor position

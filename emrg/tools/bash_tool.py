@@ -112,7 +112,7 @@ class BashTool(ToolExecutor):
                 # stderr consumed most budget — truncate stderr further
                 remaining = MAX_OUTPUT_CHARS // 2
                 err = err[:remaining] + (
-                    f"\n\n... [stderr truncated to make room for stdout]"
+                    "\n\n... [stderr truncated to make room for stdout]"
                 )
 
             if out and len(out) > remaining:
