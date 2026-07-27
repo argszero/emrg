@@ -186,6 +186,8 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - Agent.md slash 命令补充 /trigger, /rewind, /skills #200 ✅
 > - /trigger 添加到命令自动补全注册表 #201 ✅
 > - /trigger 交互式任务选择器 (↑↓/j/k, 实时过滤) #202 ✅
+> - evolution prompt quick-ref 更新 (添加 #200-#202) #203 ✅
+> - /resume busy 状态下可用 + terminal 标题同步 on session switch #204 ✅
 
 #### 2.2 GitHub 最新代码改动
 
