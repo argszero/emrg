@@ -294,7 +294,9 @@ async def interactive(init_auto_evolve: bool = False):
                         import emrg
                         ver = getattr(emrg, "__version__", "dev")
                         chat.add("system", f"EMRG {ver}  |  {server_id}\nType /help for shortcuts, or just start chatting.")
-                    status.update(left=session_title or session_id, center=server_id); term.render(); continue
+                    status.update(left=session_title or session_id, center=server_id)
+                    term.set_title(session_title or session_id)
+                    term.render(); continue
 
                 # Tool lifecycle: create a ToolCard on start, update on end.
                 if data.get("type") == "tool_start":
@@ -1132,9 +1134,6 @@ async def interactive(init_auto_evolve: bool = False):
                 if not inp.text.endswith("\n"): inp.insert("\n")
                 term.render(); return True
             logger.debug("ENTER: text=%r busy=%s len=%d", inp.text, busy, len(inp.text))
-            if busy:
-                logger.debug("ENTER blocked by busy")
-                term.render(); return True
             text = inp.text.strip()
             if text:
                 if text.lower() in ("quit", "exit"): return False
@@ -1446,6 +1445,10 @@ Streaming
                         status.update(center=f"resuming {target_sid}...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
+
+                if busy:
+                    logger.debug("ENTER blocked by busy")
+                    term.render(); return True
 
                 busy = True; need_new_assistant = True  # rant #32: force new StreamingMarkdown per response
                 _request_start = time.time()
