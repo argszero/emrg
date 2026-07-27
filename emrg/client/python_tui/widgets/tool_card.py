@@ -10,7 +10,7 @@ Multiple concurrent tool cards stack naturally.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 from emrg.client.python_tui.widgets.base import Line, RenderContext, Span, Widget

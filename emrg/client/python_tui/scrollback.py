@@ -19,7 +19,6 @@ from emrg.client.python_tui.output import (
     RESTORE_CURSOR,
     cursor_to,
     scroll_region,
-    insert_lines,
     style_to_sgr,
 )
 from emrg.client.python_tui.widgets.base import Line

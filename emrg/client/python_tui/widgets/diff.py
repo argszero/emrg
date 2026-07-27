@@ -6,7 +6,6 @@ Color scheme follows Codex's conventions: green for additions, red for deletions
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from difflib import unified_diff
 from typing import Literal
 
