@@ -208,6 +208,9 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - 移除未使用 import (ruff F401) + __init__.py noqa lazy import #207 ✅
 > - 移除未使用变量 + 修复 ruff F841/F821/F541 警告 #208 ✅
 > - 修复 O_NONBLOCK 泄漏到 stdout (PR #205 stdin reader 副作用) #211 ✅
+> - evolution prompt quick-ref 更新 (添加 #208, #211) #212 ✅
+> - _touch_project git root 检测 + home dir 过滤器 (rant #7, #8) #213 ✅
+> - Contributor role 边界：gatekeeping 专属 Committer #214
 
 #### 2.2 GitHub 最新代码改动
 
