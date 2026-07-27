@@ -191,6 +191,8 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 > - SIGWINCH stdin reader 线程泄漏修复 (add_reader + Queue 替代 os.read 线程池) #205 ✅
 > - evolution prompt quick-ref 更新 (添加 #203, #204) #206 ✅
 > - 移除未使用 import (ruff F401) + __init__.py noqa lazy import #207 ✅
+> - 移除未使用变量 + 修复 ruff F841/F821/F541 警告 #208 ✅
+> - 修复 O_NONBLOCK 泄漏到 stdout (PR #205 stdin reader 副作用) #211 ✅
 
 #### 2.2 GitHub 最新代码改动
 
