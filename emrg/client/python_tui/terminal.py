@@ -6,6 +6,7 @@ Manages TTY raw mode, queries terminal capabilities, provides draw/flush cycle.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import sys
@@ -105,6 +106,14 @@ class Terminal:
 
     def __post_init__(self) -> None:
         self._enter_raw_mode()
+        # PR #205's add_reader+fcntl(stdin, O_NONBLOCK) leaks to stdout on
+        # macOS (pty fd sharing). Force stdout back to blocking write.
+        if sys.stdout.isatty():
+            try:
+                fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL,
+                            os.O_WRONLY | os.O_APPEND)
+            except OSError:
+                pass
         # SIGWINCH is handled in app.py's run_client() to avoid duplicate
         # handler registration. app.py calls term.handle_resize() directly.
         # Proportional viewport: fill most of terminal, leave 6 rows for native scrollback.
@@ -322,7 +331,15 @@ class Terminal:
                 + RESTORE_CURSOR
             )
             sys.stdout.write(output)
-            sys.stdout.flush()
+            # fcntl guard: PR #205's add_reader+fcntl(stdin) may leak
+            # O_NONBLOCK to stdout via macOS pty sharing. Restore
+            # blocking on BlockingIOError and retry the flush.
+            try:
+                sys.stdout.flush()
+            except BlockingIOError:
+                fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL,
+                            os.O_WRONLY | os.O_APPEND)
+                sys.stdout.flush()
 
         # Swap buffers
         self._front_buffer, self._back_buffer = self._back_buffer, self._front_buffer
