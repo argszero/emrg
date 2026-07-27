@@ -234,6 +234,8 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - _touch_project git root 检测 + home dir 过滤器 (rant #7, #8) #213 ✅
 > - Contributor role 边界：gatekeeping 专属 Committer #214 ✅
 > - evolution prompt quick-ref 更新 (添加 #212, #213, #214) #215 ✅
+> - evolution prompt quick-ref 更新 (标记 #214 merged + 添加 #215) #216 ✅
+> - Contributor privilege escalation 多层角色门控 (ROLE LOCK 表 + 禁止命令列表) #217 ✅
 
 #### 2.2 GitHub 最新代码改动
 
