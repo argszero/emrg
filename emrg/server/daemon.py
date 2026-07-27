@@ -655,6 +655,42 @@ class EmrgServer:
                 })
             return
 
+        elif msg_type == "list_tasks":
+            if self._scheduler:
+                tasks = self._scheduler.list_tasks()
+            else:
+                tasks = []
+            await self._send(writer, {
+                "type": "tasks_list",
+                "tasks": tasks,
+            })
+
+        elif msg_type == "trigger_task":
+            name = msg.get("name", "").strip()
+            if not name:
+                await self._send(writer, {
+                    "type": "trigger_result",
+                    "error": "trigger_task requires task name",
+                })
+                return
+            if self._scheduler:
+                result = self._scheduler.trigger_task(name)
+                if result is None:
+                    await self._send(writer, {
+                        "type": "trigger_result",
+                        "error": f"task '{name}' not found",
+                    })
+                else:
+                    await self._send(writer, {
+                        "type": "trigger_result",
+                        **result,
+                    })
+            else:
+                await self._send(writer, {
+                    "type": "trigger_result",
+                    "error": "scheduler not running",
+                })
+
         elif msg_type == "compact":
             cwd = msg.get("cwd", "")
             session_id = msg.get("session_id", "")

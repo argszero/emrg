@@ -1202,6 +1202,54 @@ async def interactive(init_auto_evolve: bool = False):
                     term.render()
                     continue
 
+                # Tasks list response (for /trigger interactive mode)
+                if data.get("type") == "tasks_list":
+                    tasks = data.get("tasks", [])
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Error: {err}")
+                    elif tasks:
+                        lines = ["Scheduled Tasks", "━━━━━━━━━━━━━━━"]
+                        for t in tasks:
+                            name = t.get("name", "?")
+                            running = t.get("running", False)
+                            next_in = t.get("next_run_in_seconds")
+                            interval = t.get("interval", 0)
+                            if running:
+                                status_str = "● RUNNING"
+                            elif next_in is not None:
+                                status_str = f"◌ next in ~{next_in}s"
+                            else:
+                                status_str = "◌ idle"
+                            lines.append(
+                                f"  {name}  [{status_str}]"
+                                f"  (every {interval}s)"
+                            )
+                        lines.append("")
+                        lines.append("Usage: /trigger <task-name>")
+                        chat.add("system", "\n".join(lines))
+                    else:
+                        chat.add("system", "No scheduled tasks found.")
+                    term.render()
+                    continue
+
+                # Trigger result response
+                if data.get("type") == "trigger_result":
+                    err = data.get("error", "")
+                    name = data.get("name", "?")
+                    result = data.get("result", "")
+                    detail = data.get("detail", "")
+                    if err:
+                        chat.add("system", f"Trigger failed: {err}")
+                    elif result == "running":
+                        chat.add("system", f"Task '{name}' is already running — {detail}")
+                    elif result == "triggered":
+                        chat.add("system", f"Task '{name}' triggered: {detail}")
+                    else:
+                        chat.add("system", f"Task '{name}': {result} — {detail}")
+                    term.render()
+                    continue
+
                 # Resume result
                 if data.get("type") == "resume_result":
                     err = data.get("error", "")
@@ -1859,6 +1907,8 @@ Commands
   /rant @<project> <msg>  Rant to a specific project
   /rant               Interactive project picker, then type message
   /model [name]        Switch LLM model (no args = interactive picker)
+  /trigger             List scheduled tasks (type name to trigger)
+  /trigger <name>      Manually trigger a scheduled task now
   quit / exit         Exit EMRG
 
 Streaming
@@ -1953,6 +2003,26 @@ Streaming
                         }).encode())
     
                         status.update(center="loading models...")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
+                # Handle /trigger command
+                if text.lower().startswith("/trigger"):
+                    parts = text.split(None, 1)
+                    task_name = parts[1].strip() if len(parts) > 1 else ""
+                    if task_name:
+                        # /trigger <name> → direct trigger
+                        await write_frame(writer, json.dumps({
+                            "type": "trigger_task",
+                            "name": task_name,
+                        }, ensure_ascii=False).encode())
+                        status.update(center=f"triggering task '{task_name}'...")
+                    else:
+                        # /trigger without args → list tasks
+                        await write_frame(writer, json.dumps({
+                            "type": "list_tasks",
+                        }).encode())
+                        status.update(center="loading tasks...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
