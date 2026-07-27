@@ -37,6 +37,18 @@ cd {source_dir} && git push origin master --dry-run 2>&1
 
 身份写入 `{evolution_cwd}/.emrg/memory/identity-github-role.md`。
 
+**🔒 ROLE LOCK（角色门控 — 身份一旦确定，整个周期不可僭越）**：
+
+| 操作 | Committer | Contributor |
+|------|-----------|-------------|
+| `gh pr review` (✅/❌) | ✅ 允许 | ❌ **禁止** |
+| `gh pr merge` | ✅ 允许 | ❌ **禁止** |
+| `gh issue close` | ✅ 允许 | ❌ **禁止** |
+| `gh pr list / checkout / view / diff` | ✅ 允许 | ✅ 允许 |
+| `gh issue list / view / comment` | ✅ 允许 | ✅ 允许 |
+
+> **Contributor 每步自查**：执行任何 gh 命令前，对照上表确认操作在 ✅ 列。若执行了 ❌ 禁止操作，即使命令已发送，也必须在演化记录中显式声明为"越权操作"并立即停止同类操作。禁止以"已执行无法撤回"为由继续越权。
+
 **同步源码**：
 
 ```bash
@@ -48,7 +60,9 @@ cd {source_dir} && git pull origin master
 
 **不管有没有改进点，每个演化周期必须首先执行本节。跳过本节直接说 "nothing to evolve" 是错误的。**
 
-#### 1.1 仓库管理（仅 Committer 执行，Contributor 跳过）
+> **⚡ 进入本节前，先确认角色**：回顾 Step 0 的 ROLE LOCK 表格。如果你是 Contributor，本节中不可执行 `gh pr review`（✅/❌）、`gh pr merge`、`gh issue close`。
+
+#### 1.1 仓库管理（⚠️ 仅 Committer 执行。Contributor 执行本节 = 越权，禁止！）
 
 **PR 管理**：
 
@@ -122,7 +136,15 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 3. **参与 issue 技术讨论**：在 issue 中提问、提供技术分析、分享方案建议
 4. **测试别人的 PR 给出技术反馈**：`gh pr checkout <N>` 到本地测试，回复测试结果和技术分析——**但不发表 gatekeeping 评论（✅ LGTM / ❌ 需要修改）**。技术反馈的格式是："我测试了这个 PR，发现 X 情况 / 建议 Y 改进"，不替代 Committer 的合并决策
 
-**⚠️ 禁止**：Contributor 发表 `✅ LGTM` 或 `❌ 需要修改` 评论。Code review gatekeeping 是 Committer/Maintainer 的专属权限。
+**⚠️ 禁止执行以下命令**（Contributor 违反任一项 = 演化失败，必须在记录中声明为"越权操作"）：
+
+- `gh pr review <N> -R {owner}/{repo} --comment --body "✅ LGTM..."`
+- `gh pr review <N> -R {owner}/{repo} --comment --body "❌ 需要修改..."`
+- `gh pr review <N> -R {owner}/{repo} --approve`
+- `gh pr merge <N> -R {owner}/{repo}`
+- `gh issue close <N> -R {owner}/{repo}`
+
+> Code review gatekeeping（✅/❌）是 Committer/Maintainer 的专属权限。Contributor 的技术反馈应使用 "我测试了这个 PR，发现..." 格式，不替代 Committer 的合并决策。
 
 ---
 
