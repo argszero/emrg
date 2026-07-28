@@ -13,10 +13,26 @@
 
 ### 1. 回顾
 
+**获取当前日期**（必须首先执行）：
+
+```bash
+date "+%Y-%m-%d %H:%M"
+```
+
 检查项目目录 `{source_dir}` 下的论文相关文件：
 - 查找 `.tex`、`.md`、`.bib`、`.pdf` 等论文相关文件
 - 读取已有的章节、摘要、参考文献
 - 分析论文的当前进度和待办事项
+
+**文献检索**（回顾步骤必须包含——向外看，不只向内看）：
+
+1. **优先使用 browser harness skill** 访问 arXiv（cs.LG, cs.CL, cs.AI），搜索近 6 个月与研究方向相关的新预印本
+2. **若 browser harness 不可用**，用 bash + curl 调 arXiv API 兜底：
+   ```bash
+   # 示例：搜索近 6 个月 cs.CL 领域与大语言模型相关的论文
+   curl -s "http://export.arxiv.org/api/query?search_query=cat:cs.CL+AND+all:large+language+model&sortBy=submittedDate&sortOrder=descending&max_results=10"
+   ```
+3. 读取摘要或全文，生成中文笔记保存到 `literature/` 目录
 
 ### 2. 规划
 
