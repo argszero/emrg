@@ -267,11 +267,11 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - emrg: add 'open-source' task type (rant) #248 ✅
 > - evolution prompt quick-ref 更新 (标记 #247/#248/#249/#250 ✅ + 添加 #251) #251 ✅
 > - emrg: add dynamic terminal title for tool/streaming state (rant #12) #252 ✅
-> - evolution prompt quick-ref 更新 (标记 #251/#252 ✅ + 添加 #253) #253 ✅
-> - emrg: add date awareness and arXiv search to paper_prompt.md #254 ✅
-> - emrg: add git push to paper_prompt.md commit step (rant) #255 ✅
-> - emrg: fix CLI rant @project parsing #257
-> - emrg: add phase awareness and Heilmeier Catechism to paper_prompt.md (rant) #258
+> - evolution prompt quick-ref 更新 (标记 #251/#252 ✅ + 添加 #253) #253 ✅ merged
+> - emrg: add date awareness and arXiv search to paper_prompt.md #254 ✅ merged
+> - emrg: add git push to paper_prompt.md commit step (rant) #255 ✅ merged
+> - emrg: parse @project from CLI rant message (rant) #257 ✅ merged
+> - emrg: add phase awareness and Heilmeier Catechism to paper_prompt.md (rant) #258 ✅ merged
 
 #### 2.2 GitHub 最新代码改动
 
