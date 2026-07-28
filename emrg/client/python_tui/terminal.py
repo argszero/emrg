@@ -425,12 +425,20 @@ class Terminal:
                 break
 
     def set_title(self, title: str) -> None:
-        """Set the terminal window title (OSC 2)."""
+        """Set the terminal window title (OSC 0 + OSC 2).
+
+        OSC 0 sets both icon name and window title (xterm style).
+        OSC 2 sets window title only. Most terminals (iTerm2, kitty,
+        WezTerm, Terminal.app) support both; VS Code's terminal uses
+        OSC 0 for its tab label.
+        """
+        sys.stdout.write(f"\x1b]0;{title}\x07")
         sys.stdout.write(f"\x1b]2;{title}\x07")
         sys.stdout.flush()
 
     def restore_title(self) -> None:
         """Clear the terminal window title."""
+        sys.stdout.write("\x1b]0;\x07")
         sys.stdout.write("\x1b]2;\x07")
         sys.stdout.flush()
 
