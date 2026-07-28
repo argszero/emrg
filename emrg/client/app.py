@@ -207,12 +207,15 @@ async def interactive(init_auto_evolve: bool = False):
         """Background task: update status line elapsed time and terminal title every second while busy."""
         nonlocal _request_start
         while busy:
-            elapsed = int(time.time() - _request_start)
-            mins, secs = divmod(elapsed, 60)
-            timer = f"⏱{mins}:{secs:02d}" if mins > 0 else f"⏱{secs}s"
-            status.elapsed = timer
-            term.set_title(f"{timer} {session_title or session_id} @ {project_name}")
-            term.render()
+            try:
+                elapsed = int(time.time() - _request_start)
+                mins, secs = divmod(elapsed, 60)
+                timer = f"⏱{mins}:{secs:02d}" if mins > 0 else f"⏱{secs}s"
+                status.elapsed = timer
+                term.set_title(f"{timer} {session_title or session_id} @ {project_name}")
+                term.render()
+            except Exception as e:
+                logger.error("elapsed timer error: %s", e)
             await asyncio.sleep(1)
 
     tool_args: dict[str, dict] = {}  # track tool arguments by tool_call_id for diff rendering
@@ -360,7 +363,7 @@ async def interactive(init_auto_evolve: bool = False):
                     need_new_assistant = True
                     _last_center = server_id or "emrg"
                     status.update(center=_last_center)
-                    term.set_title(f"{session_title or session_id} @ {project_name}")
+                    # Title managed by _run_elapsed_timer during busy — don't overwrite
                     term.render()
                     continue
 
