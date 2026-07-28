@@ -175,7 +175,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > 2. 对照下方**已实现功能快速参考**——若 rant 描述的问题与表中功能匹配，则已处理
 > 3. 已处理的 rant 无需再次关注，除非用户重复反馈（说明之前的修复不彻底）
 >
-> **已实现功能的快速参考**（避免重复建设）：
+> **已实现功能的快速参考**（避免重复建设。元条目如 "quick-ref 更新" 已移除，仅保留功能条目）：
 > - ESC 中断响应 ✅ | 命令自动补全 (/) ✅ | 响应倒计时 ✅
 > - 会话选择器 (↑↓/j/k) ✅ | 输入自动换行 ✅ | 光标渲染修复 ✅
 > - CJK 折行/光标 ✅ | SIGWINCH resize ✅ | 项目自动追踪 ✅
@@ -190,90 +190,32 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - CI workflow (pytest + 冲突标记检查) ✅ | CI badge ✅
 > - projects.jsonl→projects.yml 迁移 ✅ | prompt 变量替换验证 ✅
 > - `emrg rant -p/--project` CLI 标志 ✅ | install.sh 标准路径+gh检查+python版本验证 ✅
-> - ProjectSelector nonlocal 变量修复 ✅
 > - `/model` 模型切换 ✅ | CJK/UTF-8 输入修复 ✅ | 启动显示模型名 ✅
-> - Terminal 标题同步 ✅ | llm.jsonl 完整日志 + 轮转 ✅ | Chat 渲染顺序修复 ✅
+> - Terminal 标题同步（idle/busy 两态，rant #1） ✅ | llm.jsonl 完整日志 + 轮转 ✅
 > - Selector 状态收敛 (SelectorState) ✅ | nonlocal CI 检查 ✅ | install.sh config 模板 ✅
 > - dynamic __version__ in User-Agent ✅ | llm.jsonl 完整 HTTP request/response ✅
 > - stream_options per-model (None = Kimi) ✅ | README/Agent.md 多模型配置示例 ✅
 > - [[llm.models]] 支持 model 字段 (name ≠ API model) ✅ | auto_compact_threshold 全文件一致 ✅
-> - TUI 输入框上下分隔线 (dim ─) ✅
-> - httpcore/httpx daemon 日志抑制 (rant #24) ✅
-> - 长度前缀分帧协议 (4-byte header + body, rant #13) ✅
-> - client 自动重连 (断连→重连→恢复, rant #11) ✅
-> - client 日志滚动 (RotatingFileHandler, rant #12) ✅
-> - install.sh 自动安装依赖 (uv, gh, python) ✅
-> - /skills 命令列出已加载技能 (rant #34) ✅
-> - extract _log_llm_exchange (deduplicate append_llm patterns, #163) ✅
-> - extract _handle_selector_nav (deduplicate selector key handling, #164) ✅
-> - extract atomic_write_yaml (deduplicate mkstemp+fdopen patterns, #166) ✅
-> - explicit encoding='utf-8' on read_text() (#167) ✅
-> - explicit encoding='utf-8' on write_text()/open() (#168) ✅
-> - json.dumps ensure_ascii=False (CJK-safe): __main__.py #171, client #172, scheduler #173, /rename #174 ✅
-> - read_tool 参数改名 (start_line/line_limit/start_line_byte_offset, rant #11) #176 ✅
-> - markdown_it DEBUG 日志抑制 + client lifecycle info 日志 (connect/disconnect/tool timing) #177 ✅
-> - subprocess.run encoding='utf-8' + _detect_git_remote URL 解析单测 #184 ✅
-> - atomic_write_yaml 单元测试 (7 tests, 420 passed) #185 ✅
-> - scheduler write_text() encoding='utf-8' 补充 #186 ✅
-> - daemon error json.dumps ensure_ascii=False 一致性 #189 ✅
-> - ESC cancel 传播到 daemon 停止 tool loop #191 ✅
-> - /rewind 命令截断会话历史 #192 ✅
-> - /trigger 手动触发定时任务 (asyncio.Event interruptible sleep) #197 ✅
-> - widget 类从 app.py 提取到 widgets.py (app.py 2157→1529 行) #198 ✅
-> - Agent.md slash 命令补充 /trigger, /rewind, /skills #200 ✅
-> - /trigger 添加到命令自动补全注册表 #201 ✅
-> - /trigger 交互式任务选择器 (↑↓/j/k, 实时过滤) #202 ✅
-> - evolution prompt quick-ref 更新 (添加 #200-#202) #203 ✅
-> - /resume busy 状态下可用 + terminal 标题同步 on session switch #204 ✅
-> - SIGWINCH stdin reader 线程泄漏修复 (add_reader + Queue 替代 os.read 线程池) #205 ✅
-> - evolution prompt quick-ref 更新 (添加 #203, #204) #206 ✅
-> - 移除未使用 import (ruff F401) + __init__.py noqa lazy import #207 ✅
-> - 移除未使用变量 + 修复 ruff F841/F821/F541 警告 #208 ✅
-> - 修复 O_NONBLOCK 泄漏到 stdout (PR #205 stdin reader 副作用) #211 ✅
-> - evolution prompt quick-ref 更新 (添加 #208, #211) #212 ✅
-> - _touch_project git root 检测 + home dir 过滤器 (rant #7, #8) #213 ✅
-> - Contributor role 边界：gatekeeping 专属 Committer #214 ✅
-> - evolution prompt quick-ref 更新 (添加 #212, #213, #214) #215 ✅
-> - evolution prompt quick-ref 更新 (标记 #214 merged + 添加 #215) #216 ✅
-> - Contributor privilege escalation 多层角色门控 (ROLE LOCK 表 + 禁止命令列表) #217 ✅
-> - evolution prompt quick-ref 更新 (添加 #216, #217) #218 ✅
-> - evolution prompt quick-ref 更新 (添加 #218) #219 ✅
-> - evolution prompt quick-ref 更新 (添加 #219) #220 ✅
-> - evolution prompt quick-ref 更新 (添加 #220) #221 ✅
-> - evolution prompt quick-ref 更新 (添加 #221) #222 ✅
-> - evolution prompt quick-ref 更新 (添加 #222) #223 ✅
-> - evolution prompt quick-ref 更新 (添加 #223) #224 ✅
-> - evolution prompt quick-ref 更新 (添加 #224) #225 ✅
-> - evolution prompt quick-ref 更新 (添加 #225) #226 ✅
-> - evolution prompt quick-ref 更新 (添加 #226) #227 ✅
-> - evolution prompt quick-ref 更新 (添加 #227) #228 ✅
-> - evolution prompt quick-ref 更新 (添加 #228) #229 ✅
-> - evolution prompt quick-ref 更新 (添加 #229) #230 ✅
-> - evolution prompt quick-ref 更新 (添加 #230) #231 ✅
-> - evolution prompt quick-ref 更新 (添加 #231) #232 ✅
-> - evolution prompt quick-ref 更新 (添加 #232) #233 ✅
-> - evolution prompt quick-ref 更新 (添加 #233) #234 ✅
-> - evolution prompt quick-ref 更新 (添加 #234) #235 ✅
-> - evolution prompt quick-ref 更新 (添加 #235) #236 ✅
-> - evolution prompt quick-ref 更新 (添加 #236) #237 ✅
-> - evolution prompt quick-ref 更新 (添加 #237) #238 ✅
-> - evolution prompt quick-ref 更新 (添加 #238) #239 ✅
-> - evolution prompt quick-ref 更新 (添加 #239) #243 ✅
-> - evolution prompt quick-ref 更新 (添加 #243) #244 ✅
-> - evolution prompt quick-ref 更新 (添加 #244) #245 ✅
-> - evolution prompt quick-ref 更新 (添加 #245) #246 ✅
-> - emrg: add 'paper' task type (rant) #246 ✅
-> - evolution prompt quick-ref 更新 (标记 #246 ✅ + 添加 #247) #247 ✅
-> - emrg: add 'open-source' task type (rant) #248 ✅
-> - evolution prompt quick-ref 更新 (标记 #247/#248/#249/#250 ✅ + 添加 #251) #251 ✅
-> - emrg: add dynamic terminal title for tool/streaming state (rant #12) #252 ✅
-> - evolution prompt quick-ref 更新 (标记 #251/#252 ✅ + 添加 #253) #253 ✅ merged
-> - emrg: add date awareness and arXiv search to paper_prompt.md #254 ✅ merged
-> - emrg: add git push to paper_prompt.md commit step (rant) #255 ✅ merged
-> - emrg: parse @project from CLI rant message (rant) #257 ✅ merged
-> - emrg: add phase awareness and Heilmeier Catechism to paper_prompt.md (rant) #258 ✅ merged
-> - emrg: simplify terminal title to two states (idle/busy) (rant #1) #260 ✅ merged
-> - emrg: add experiment-first guard, state file, and 11 best practices to paper_prompt.md #261
+> - 长度前缀分帧协议 (4-byte header + body, rant #13) ✅ | client 自动重连 ✅ | client 日志滚动 ✅
+> - /skills 命令列出已加载技能 ✅ | install.sh 自动安装依赖 (uv, gh, python) ✅
+> - extract _log_llm_exchange, _handle_selector_nav, atomic_write_yaml ✅
+> - encoding='utf-8' 全面修复 (read_text, write_text, open, subprocess) ✅
+> - json.dumps ensure_ascii=False CJK 安全 (__main__, client, scheduler, daemon, rename) ✅
+> - read_tool 参数改名 (start_line/line_limit/start_line_byte_offset) ✅
+> - markdown_it DEBUG 日志抑制 ✅ | atomic_write_yaml 单元测试 (420 passed) ✅
+> - ESC cancel 传播到 daemon 停止 tool loop ✅ | /rewind 截断会话历史 ✅
+> - /trigger 交互式任务选择器 (↑↓/j/k, 实时过滤, asyncio.Event) ✅
+> - widget 类提取到 widgets.py (app.py 2157→1529 行) ✅ | Agent.md slash 命令补充 ✅
+> - /resume busy 状态下可用 ✅ | SIGWINCH stdin reader 线程泄漏修复 ✅
+> - ruff 清理 (F401/F841/F821/F541) ✅ | O_NONBLOCK 泄漏修复 ✅
+> - _touch_project git root 检测 + home dir 过滤器 (rant #7, #8) ✅
+> - Contributor/Committer 角色门控 (ROLE LOCK 表, gatekeeping 边界) ✅
+> - paper task type (rant) #246 ✅ | open-source task type (rant) #248 ✅
+> - paper_prompt.md: 日期感知 + arXiv 搜索 #254 ✅ | git push #255 ✅
+> - paper_prompt.md: 阶段感知 + Heilmeier Catechism #258 ✅
+> - paper_prompt.md: 实验优先 guard + 状态文件 + 11 最佳实践 #261
+> - emrg rant CLI @project 解析 (rant) #257 ✅
+> - Terminal 标题简化为 idle/busy 两态 #260 ✅ merged
 
 #### 2.2 GitHub 最新代码改动
 
