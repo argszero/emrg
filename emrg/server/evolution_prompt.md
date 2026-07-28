@@ -266,7 +266,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - evolution prompt quick-ref 更新 (标记 #246 ✅ + 添加 #247) #247 ✅
 > - emrg: add 'open-source' task type (rant) #248 ✅
 > - evolution prompt quick-ref 更新 (标记 #247/#248/#249/#250 ✅ + 添加 #251) #251 ✅
-> - emrg: add dynamic terminal title for tool/streaming state (rant #12) #252
+> - emrg: add dynamic terminal title for tool/streaming state (rant #12) #252 ✅
 
 #### 2.2 GitHub 最新代码改动
 
