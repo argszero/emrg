@@ -312,7 +312,9 @@ async def interactive(init_auto_evolve: bool = False):
                     )
                     chat.add(card)
                     _last_center = f"running {ts.tool_name}..."
-                    status.update(center=_last_center); _render_throttled()
+                    status.update(center=_last_center)
+                    term.set_title(f"EMRG [{ts.tool_name}] {session_title or session_id}")
+                    _render_throttled()
                     continue
 
                 if data.get("type") == "tool_end":
@@ -356,7 +358,9 @@ async def interactive(init_auto_evolve: bool = False):
                     chat.dirty = True  # ToolCard updated inside; force ChatHistory re-render
                     need_new_assistant = True
                     _last_center = server_id or "emrg"
-                    status.update(center=_last_center); term.render()
+                    status.update(center=_last_center)
+                    term.set_title(session_title or session_id)
+                    term.render()
                     continue
 
                 resp = TaskResponse.from_dict(data)
@@ -367,6 +371,7 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add(md)
                         stream_buffer = resp.content
                         need_new_assistant = False
+                        term.set_title(f"EMRG ✎ {session_title or session_id}")
                     else:
                         stream_buffer += resp.content
                         md = chat.last_markdown()
@@ -401,6 +406,7 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add("system", f"⚠ {resp.content}  Try '继续' to resume.")
                     _last_center = server_id or "emrg"
                     status.update(center=_last_center)
+                    term.set_title(session_title or session_id)
                     msg_count += 1; _update_right()
                     term.render()
                 if "error" in data:
