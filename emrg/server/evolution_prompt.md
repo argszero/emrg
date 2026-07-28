@@ -213,7 +213,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - paper task type (rant) #246 ✅ | open-source task type (rant) #248 ✅
 > - paper_prompt.md: 日期感知 + arXiv 搜索 #254 ✅ | git push #255 ✅
 > - paper_prompt.md: 阶段感知 + Heilmeier Catechism #258 ✅
-> - paper_prompt.md: 实验优先 guard + 状态文件 + 11 最佳实践 #261
+> - paper_prompt.md: 实验优先 guard + 状态文件 + 11 最佳实践 #261 ✅ merged
 > - emrg rant CLI @project 解析 (rant) #257 ✅
 > - Terminal 标题简化为 idle/busy 两态 #260 ✅ merged
 
