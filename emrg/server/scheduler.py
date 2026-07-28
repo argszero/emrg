@@ -33,6 +33,13 @@ logger = logging.getLogger("emrg.server.scheduler")
 # ── Module-level constants (shared with daemon) ──────────────────
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
+# Template files for each task type. All use the same format variables
+# ({seq}, {instance_id}, {host_name}, {uptime}, ...).
+TASK_TEMPLATES: dict[str, str] = {
+    "evolution": "evolution_prompt.md",
+    "paper": "paper_prompt.md",
+}
+
 
 def _resolve_project_path(name: str) -> str | None:
     """Resolve a project name to its path from projects.yml."""
@@ -64,7 +71,6 @@ class EvolutionHandler:
     EMRG_REPO_URL = "https://github.com/argszero/emrg.git"
     OWNER = "argszero"
     REPO = "emrg"
-    _TEMPLATE_PATH = Path(__file__).parent / "evolution_prompt.md"
 
     def __init__(
         self,
@@ -72,8 +78,10 @@ class EvolutionHandler:
         config: dict,
         interval: int,
         identity: InstanceIdentity,
+        template_path: Path | None = None,
     ) -> None:
         self.name = name
+        self._template_path = template_path or (Path(__file__).parent / "evolution_prompt.md")
         self._config = config
         self.interval = interval
         self.identity = identity
@@ -280,7 +288,7 @@ class EvolutionHandler:
 
     def _build_evolution_prompt(self, seq: int) -> str:
         """Build evolution prompt from template."""
-        template = self._TEMPLATE_PATH.read_text(encoding="utf-8")
+        template = self._template_path.read_text(encoding="utf-8")
         if self._start_time is not None:
             uptime_seconds = int(time.time() - self._start_time)
         else:
@@ -338,6 +346,7 @@ class TaskScheduler:
 
     HANDLERS: dict[str, type] = {
         "evolution": EvolutionHandler,
+        "paper": EvolutionHandler,  # same handler, different template
     }
 
     def __init__(self, identity: InstanceIdentity) -> None:
@@ -365,11 +374,14 @@ class TaskScheduler:
                     cfg["type"], cfg["name"],
                 )
                 continue
+            template_name = TASK_TEMPLATES.get(cfg["type"], "evolution_prompt.md")
+            template_path = Path(__file__).parent / template_name
             handler = handler_cls(
                 name=cfg["name"],
                 config=cfg.get("config", {}),
                 interval=cfg.get("interval", 1800),
                 identity=self.identity,
+                template_path=template_path,
             )
             self._handlers.append(handler)
             coro = asyncio.create_task(handler.run())
