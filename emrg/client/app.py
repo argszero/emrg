@@ -153,6 +153,7 @@ async def interactive(init_auto_evolve: bool = False):
     # Session setup
     cwd = os.getcwd()
     session_id = generate_session_id(Path(cwd))
+    project_name = Path(cwd).name
 
     # Send init_auto_evolve if requested (before ping, so daemon
     # processes it before any user interaction starts)
@@ -203,13 +204,14 @@ async def interactive(init_auto_evolve: bool = False):
     _last_center: str = ""  # last center text set via status.update, for timer overlay
 
     async def _run_elapsed_timer() -> None:
-        """Background task: update status line elapsed time every second while busy."""
+        """Background task: update status line elapsed time and terminal title every second while busy."""
         nonlocal _request_start
         while busy:
             elapsed = int(time.time() - _request_start)
             mins, secs = divmod(elapsed, 60)
             timer = f"⏱{mins}:{secs:02d}" if mins > 0 else f"⏱{secs}s"
             status.elapsed = timer
+            term.set_title(f"{timer} {session_title or session_id} @ {project_name}")
             term.render()
             await asyncio.sleep(1)
 
@@ -296,7 +298,7 @@ async def interactive(init_auto_evolve: bool = False):
                         ver = getattr(emrg, "__version__", "dev")
                         chat.add("system", f"EMRG {ver}  |  {server_id}\nType /help for shortcuts, or just start chatting.")
                     status.update(left=session_title or session_id, center=server_id)
-                    term.set_title(session_title or session_id)
+                    term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render(); continue
 
                 # Tool lifecycle: create a ToolCard on start, update on end.
@@ -313,7 +315,6 @@ async def interactive(init_auto_evolve: bool = False):
                     chat.add(card)
                     _last_center = f"running {ts.tool_name}..."
                     status.update(center=_last_center)
-                    term.set_title(f"EMRG [{ts.tool_name}] {session_title or session_id}")
                     _render_throttled()
                     continue
 
@@ -359,7 +360,7 @@ async def interactive(init_auto_evolve: bool = False):
                     need_new_assistant = True
                     _last_center = server_id or "emrg"
                     status.update(center=_last_center)
-                    term.set_title(session_title or session_id)
+                    term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render()
                     continue
 
@@ -371,7 +372,6 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add(md)
                         stream_buffer = resp.content
                         need_new_assistant = False
-                        term.set_title(f"EMRG ✎ {session_title or session_id}")
                     else:
                         stream_buffer += resp.content
                         md = chat.last_markdown()
@@ -406,7 +406,7 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add("system", f"⚠ {resp.content}  Try '继续' to resume.")
                     _last_center = server_id or "emrg"
                     status.update(center=_last_center)
-                    term.set_title(session_title or session_id)
+                    term.set_title(f"{session_title or session_id} @ {project_name}")
                     msg_count += 1; _update_right()
                     term.render()
                 if "error" in data:
@@ -685,7 +685,7 @@ async def interactive(init_auto_evolve: bool = False):
                         f"({meta.get('message_count', record_count)} messages, "
                         f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
                     status.update(left=session_title or session_id, center=server_id or "emrg")
-                    term.set_title(session_title or session_id)
+                    term.set_title(f"{session_title or session_id} @ {project_name}")
                     # Set message count from loaded session
                     msg_count = meta.get("message_count", record_count)
                     _update_right()
@@ -702,7 +702,7 @@ async def interactive(init_auto_evolve: bool = False):
                         session_title = new_title
                         chat.add("system", f"Session renamed to: {new_title}")
                         status.update(left=session_title, center=server_id or "emrg")
-                        term.set_title(session_title)
+                        term.set_title(f"{session_title} @ {project_name}")
                     term.render()
                     continue
 
