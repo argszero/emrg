@@ -62,8 +62,8 @@ cd {source_dir} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -2
 
 ### 5. 提交
 
-- `git add -A && git commit -m "paper: <简述改动>"`
-- 每轮至少一个 commit
+- `git add -A && git commit -m "paper: <简述改动>" && git push`
+- 每轮至少一个 commit，并立即推送
 - **不 push 等于白做**
 
 ---
