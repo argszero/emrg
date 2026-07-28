@@ -272,6 +272,8 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - emrg: add git push to paper_prompt.md commit step (rant) #255 ✅ merged
 > - emrg: parse @project from CLI rant message (rant) #257 ✅ merged
 > - emrg: add phase awareness and Heilmeier Catechism to paper_prompt.md (rant) #258 ✅ merged
+> - emrg: simplify terminal title to two states (idle/busy) (rant #1) #260 ✅ merged
+> - emrg: add experiment-first guard, state file, and 11 best practices to paper_prompt.md #261
 
 #### 2.2 GitHub 最新代码改动
 
