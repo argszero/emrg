@@ -229,6 +229,13 @@ def _run_daemon() -> None:
 
 def _send_rant(message: str, project: str | None = None) -> None:
     """Send a rant/feedback message to the daemon for evolution analysis."""
+    # Parse @project from message if -p/--project not explicitly set
+    # (matching TUI /rant @project behavior — app.py:1365-1369)
+    if project is None and message.startswith("@"):
+        parts = message.split(None, 1)
+        project = parts[0][1:]  # strip @
+        message = parts[1] if len(parts) > 1 else ""
+
     async def _do() -> None:
         try:
             reader, writer = await asyncio.wait_for(connect_to_server(), timeout=3)
