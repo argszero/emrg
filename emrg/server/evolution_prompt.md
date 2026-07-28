@@ -257,8 +257,9 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - evolution prompt quick-ref 更新 (添加 #235) #236 ✅
 > - evolution prompt quick-ref 更新 (添加 #236) #237 ✅
 > - evolution prompt quick-ref 更新 (添加 #237) #238 ✅
-> - evolution prompt quick-ref 更新 (添加 #238) #239
-> - evolution prompt quick-ref 更新 (添加 #239) #243
+> - evolution prompt quick-ref 更新 (添加 #238) #239 ✅
+> - evolution prompt quick-ref 更新 (添加 #239) #243 ✅
+> - evolution prompt quick-ref 更新 (添加 #243) #244
 
 #### 2.2 GitHub 最新代码改动
 
