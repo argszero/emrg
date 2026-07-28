@@ -263,8 +263,9 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - evolution prompt quick-ref 更新 (添加 #244) #245 ✅
 > - evolution prompt quick-ref 更新 (添加 #245) #246 ✅
 > - emrg: add 'paper' task type (rant) #246 ✅
-> - evolution prompt quick-ref 更新 (标记 #246 ✅ + 添加 #247) #247
-> - emrg: add 'open-source' task type (rant) #248
+> - evolution prompt quick-ref 更新 (标记 #246 ✅ + 添加 #247) #247 ✅
+> - emrg: add 'open-source' task type (rant) #248 ✅
+> - evolution prompt quick-ref 更新 (标记 #247/#248 ✅ + 添加 #249/#250) #251
 
 #### 2.2 GitHub 最新代码改动
 
