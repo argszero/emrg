@@ -269,7 +269,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - emrg: add dynamic terminal title for tool/streaming state (rant #12) #252 ✅
 > - evolution prompt quick-ref 更新 (标记 #251 ✅ + 添加 #252) #253 ✅ merged
 > - emrg: add date awareness and arXiv search to paper_prompt.md #254 ✅ merged
-> - emrg: add git push to paper_prompt.md commit step #255 🟡 open
+> - emrg: add git push to paper_prompt.md commit step #255 ✅ merged
 
 #### 2.2 GitHub 最新代码改动
 
