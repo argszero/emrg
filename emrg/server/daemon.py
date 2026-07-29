@@ -764,6 +764,38 @@ class EmrgServer:
             })
             logger.info("session cleared: %s", session_id)
 
+        elif msg_type == "delete_session":
+            session_id = msg.get("session_id", "")
+            cwd = msg.get("cwd", "")
+            if not session_id or not cwd:
+                await self._send(writer, {
+                    "type": "session_deleted",
+                    "error": "delete_session requires session_id and cwd",
+                })
+                return
+
+            session_dir = Path(cwd) / ".emrg" / "sessions" / session_id
+            if not session_dir.exists():
+                await self._send(writer, {
+                    "type": "session_deleted",
+                    "error": f"Session {session_id} not found",
+                })
+                return
+
+            deleted = Session.delete(session_id, Path(cwd))
+            if deleted:
+                await self._send(writer, {
+                    "type": "session_deleted",
+                    "session_id": session_id,
+                    "ok": True,
+                })
+                logger.info("session deleted: %s", session_id)
+            else:
+                await self._send(writer, {
+                    "type": "session_deleted",
+                    "error": f"Failed to delete session {session_id}",
+                })
+
         elif msg_type == "list_history":
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
