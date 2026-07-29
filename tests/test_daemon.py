@@ -26,10 +26,9 @@ def test_build_prompt_emrg_self():
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
-    prompt = handler._build_evolution_prompt(seq=1)
+    prompt = handler._build_evolution_prompt()
 
     # Core template variables must be present
-    assert "演化周期 #1" in prompt
     assert "test-id" in prompt
     assert "testhost" in prompt
     assert "argszero/emrg" in prompt
@@ -50,26 +49,13 @@ def test_build_prompt_with_project():
     handler._owner = "user"
     handler._repo = "myproject"
     handler._repo_url = "https://github.com/user/myproject.git"
-    prompt = handler._build_evolution_prompt(seq=2)
+    prompt = handler._build_evolution_prompt()
 
     assert "/home/user/src/myproject" in prompt
     assert "emrg-evolution-myproject" in prompt
     assert "https://github.com/user/myproject.git" in prompt
     assert "<<<<<<<" not in prompt
     assert ">>>>>>>" not in prompt
-
-
-def test_build_prompt_increments_seq():
-    """seq number is per-cycle and should appear in the prompt."""
-    handler = EvolutionHandler(
-        name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
-        identity=InstanceIdentity(instance_id="i", host_name="h"),
-    )
-    p1 = handler._build_evolution_prompt(seq=5)
-    p2 = handler._build_evolution_prompt(seq=99)
-
-    assert "演化周期 #5" in p1
-    assert "演化周期 #99" in p2
 
 
 def test_build_prompt_all_variables_substituted():
@@ -80,7 +66,7 @@ def test_build_prompt_all_variables_substituted():
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
-    p1 = handler._build_evolution_prompt(seq=1)
+    p1 = handler._build_evolution_prompt()
     braces = re.findall(r"\{[a-z_]+\}", p1)
     assert not braces, f"Unsubstituted placeholders: {braces}"
 

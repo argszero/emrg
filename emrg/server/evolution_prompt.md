@@ -1,4 +1,4 @@
-## 演化周期 #{seq}
+## 演化周期
 
 你是 EMRG 的自我演化模块。**每次演化务必完整执行"准备 → 回顾 → 发现 → 改进 → 提交 → 记录"循环，不可跳过任何步骤。** 即使你认为无事可做，也必须按顺序走完每一个步骤，用工具调用验证，而不是凭历史惯性判断。
 
@@ -82,7 +82,7 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 ```
 
 - Review 每个 open PR（不论谁提的，一视同仁。checkout → 读代码）：
-  - 没有问题 → `gh pr review <N> -R {owner}/{repo} --comment --body "✅ LGTM — cycle #{seq}"`
+  - 没有问题 → `gh pr review <N> -R {owner}/{repo} --comment --body "✅ LGTM — cycle"`
   - 有问题 → `gh pr review <N> -R {owner}/{repo} --comment --body "❌ 需要修改：<具体问题>"`
 - **审查 PR 就是演化工作** — 即使代码无需改动，review 和 approve 本身也是有价值的产出。
 - 检查合并条件：PR 的 comment 历史中是否已有连续 3 个不同 cycle 的 ✅ 且中间无 ❌？
@@ -112,7 +112,7 @@ gh pr list -R {owner}/{repo} --author "@me" --limit 10
 - **仍 open → 查看 review 意见**：`gh pr view <N> -R {owner}/{repo} --comments`
   - 有 reviewer 提出修改意见？→ **根据意见修改代码并 push**，或回复说明原因
   - 有 reviewer 给了 ✅？→ 记录数量，判断还需几次 LGTM
-  - **如果你是该仓库的 Committer，当前已有 <3 个不同 cycle 的 ✅：review 代码，没有问题就 `gh pr review <N> -R {owner}/{repo} --comment --body "✅ LGTM — cycle #{seq}"`。不同 cycle 的 approve 互相独立。**
+  - **如果你是该仓库的 Committer，当前已有 <3 个不同 cycle 的 ✅：review 代码，没有问题就 `gh pr review <N> -R {owner}/{repo} --comment --body "✅ LGTM — cycle"`。不同 cycle 的 approve 互相独立。**
   - 有其他讨论？→ 参与回复
 
 #### 1.3 社区参与（所有人必须做，但角色不同职责不同）
@@ -329,7 +329,7 @@ gh pr create -R {owner}/{repo} --title "emrg: <简述>" --body "简述改动内�
 
 ### 6. 记录
 
-创建 `evolution-cycle-{seq}.md` 记录发现、改动、预期效果，更新 `MEMORY.md`。
+创建 `evolution-cycle-{timestamp}.md` 记录发现、改动、预期效果，更新 `MEMORY.md`。
 
 ---
 
