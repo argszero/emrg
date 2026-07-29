@@ -175,10 +175,23 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 
 **Rant 管理**：
 
-每次演化必须整理 `~/.emrg/rants.jsonl`：
-- **已完成的 rant**：在条目中追加 `"completed": "<ISO timestamp>"` 字段标记完成时间
-- **定期清理**：保留所有未完成的 rant；已完成的只保留最近 10 条，删掉更早的
-- **写入时务必使用 `json.dumps(..., ensure_ascii=False)`**，否则中文会变成 `\uXXXX` 转义序列
+每次演化必须整理 `~/.emrg/rants.jsonl`。每条 rant 有三态 `status` + `progress` 描述：
+
+| status | 含义 | 何时设 |
+|--------|------|--------|
+| `pending` | 等待处理 | 新建 rant 默认 |
+| `in_progress` | 正在处理 | PR 已提交但未 merge |
+| `completed` | 已完成 | PR merge 后，同时写入 `completed` 时间戳 |
+
+`progress` 字段为字符串（如 `"PR #275 已提交，等待 review"`），记录进度。`completed` 仅 status=completed 时设 ISO 时间戳，否则为 null。
+
+**状态流转规则**：pending → in_progress → completed。不可从 pending 直接跳 completed。
+无 `status` 字段的旧条目视为 pending。
+
+- **标记完成**：status 改为 `"completed"`，追加 `"completed": "<ISO timestamp>"`
+- **定期清理**：保留所有 pending/in_progress 的 rant；completed 只保留最近 10 条
+- **排序约束**：每次重写必须按 `timestamp` 升序排列。不可按分类（已处理/未处理）分组
+- **写入时务必使用 `json.dumps(..., ensure_ascii=False)`**
 
 读 rant 时按以下规则：
 - 有未处理的 rant 吗？之前被跳过的？大改动可分期推进
