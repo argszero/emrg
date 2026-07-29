@@ -456,7 +456,17 @@ class EmrgServer:
             ctx["session"] = self._collect_history_data(session)
 
         template = _get_jinja_env().get_template("system.j2")
-        return template.render(**ctx)
+        rendered = template.render(**ctx)
+
+        # Debug aid: save rendered system prompt to session dir
+        if session:
+            try:
+                path = session.dir_path / "system.md"
+                path.write_text(rendered, encoding="utf-8")
+            except OSError:
+                logger.debug("failed to write system.md", exc_info=True)
+
+        return rendered
 
     def _collect_project_context(self, session: Session) -> list[dict[str, str]]:
         """Read project context files, return structured data for template."""
