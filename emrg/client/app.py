@@ -223,6 +223,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     # Selector state — each selector has an active flag, widget ref, and pending flag.
     session_sel = SelectorState()
+    delete_sel = SelectorState()
     project_sel = SelectorState()
     model_sel = SelectorState()
     rewind_sel = SelectorState()
@@ -432,6 +433,30 @@ async def interactive(init_auto_evolve: bool = False):
                     term.render()
                     continue
 
+                # Session deleted
+                if data.get("type") == "session_deleted":
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Delete failed: {err}")
+                    else:
+                        deleted_sid = data.get("session_id", "")
+                        chat.add("system", f"🗑 Session {deleted_sid} deleted.")
+                        if deleted_sid == session_id:
+                            # Deleted the current session — create a new one
+                            new_sid = generate_session_id(Path(cwd))
+                            session_id = new_sid
+                            session_title = ""
+                            chat.rows.clear()
+                            chat.dirty = True
+                            chat.add("system", f"Created new session {new_sid} — continue chatting.")
+                            status.update(left=new_sid, center=server_id or "emrg")
+                            term.set_title(f"{new_sid} @ {project_name}")
+                            msg_count = 0
+                            _update_right()
+                    status.update(center=server_id or "emrg")
+                    term.render()
+                    continue
+
                 # Rewind result
                 if data.get("type") == "rewind_result":
                     err = data.get("error", "")
@@ -475,12 +500,30 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Sessions list
                 if data.get("type") == "sessions_list":
-                    nonlocal session_sel
+                    nonlocal session_sel, delete_sel
                     sessions = data.get("sessions", [])
                     err = data.get("error", "")
                     if err:
                         chat.add("system", f"Error: {err}")
                         session_sel.pending = False
+                        delete_sel.pending = False
+                    elif delete_sel.pending and sessions:
+                        # /delete interactive mode — current session on top with (current) tag
+                        delete_sel.pending = False
+                        reordered = []
+                        if sessions:
+                            # Move current session to top
+                            for s in sessions:
+                                if s.get("session_id") == session_id:
+                                    reordered.append(s)
+                                    break
+                            for s in sessions:
+                                if s.get("session_id") != session_id:
+                                    reordered.append(s)
+                        delete_sel.widget = SessionSelector(reordered, current_session_id=session_id)
+                        delete_sel.active = True
+                        chat.add(delete_sel.widget)
+                        status.update(center="select session to delete: ↑↓ Enter Esc  (j/k vim) — no confirmation")
                     elif session_sel.pending and sessions:
                         # Enter interactive selection mode
                         session_sel.pending = False
@@ -812,7 +855,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, writer, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
-        nonlocal session_sel, project_sel, model_sel, rewind_sel, task_sel
+        nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task
@@ -868,6 +911,37 @@ async def interactive(init_auto_evolve: bool = False):
                 chat.dirty = True; term.render()
                 return True
             # Ignore other keys when in selector mode
+            return True
+
+        # ── Delete session selector mode ────────────────────
+        if delete_sel.active and delete_sel.widget:
+            if data == b"\x1b":  # Esc — cancel
+                delete_sel.active = False
+                chat.add("system", "Delete cancelled.")
+                delete_sel.widget = None
+                status.update(center=server_id or "emrg")
+                chat.dirty = True; term.render()
+                return True
+            if data == b"\r" or data == b"\n":  # Enter — delete immediately
+                sid = delete_sel.widget.selected_session_id
+                delete_sel.active = False
+                delete_sel.widget = None
+                if sid:
+                    await write_frame(writer, json.dumps({
+                        "type": "delete_session",
+                        "session_id": sid,
+                        "cwd": cwd,
+                    }).encode())
+                    status.update(center=f"deleting {sid}...")
+                    term.render()
+                else:
+                    chat.add("system", "No session selected.")
+                    status.update(center=server_id or "emrg")
+                    term.render()
+                return True
+            if _handle_selector_nav(data, delete_sel.widget):
+                chat.dirty = True; term.render()
+                return True
             return True
 
         # ── Project selector mode ──────────────────────────
@@ -1262,6 +1336,29 @@ async def interactive(init_auto_evolve: bool = False):
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
+                # Handle /delete command
+                if text.lower().startswith("/delete"):
+                    parts = text.split(None, 1)
+                    if len(parts) < 2:
+                        # No argument: fetch sessions and enter interactive delete mode
+                        delete_sel.pending = True
+                        await write_frame(writer, json.dumps({
+                            "type": "list_sessions",
+                            "cwd": cwd,
+                        }).encode())
+                        status.update(center="loading sessions for delete...")
+                    else:
+                        target_sid = parts[1].strip()
+                        # Direct delete by session ID
+                        await write_frame(writer, json.dumps({
+                            "type": "delete_session",
+                            "session_id": target_sid,
+                            "cwd": cwd,
+                        }).encode())
+                        status.update(center=f"deleting {target_sid}...")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
                 # Handle /skills command
                 if text.lower() == "/skills":
                     skills = load_skills()
@@ -1319,6 +1416,7 @@ Commands
   /sessions           Interactive session picker (↑↓/j/k to select)
   /resume [id]        Switch to session (no args = interactive picker, ↑↓/j/k)
   /rename [title]     Rename current session
+  /delete [id]        Delete session (no args = interactive picker, ↑↓/j/k)
   /rant <msg>         Send feedback to evolution system
   /rant @<project> <msg>  Rant to a specific project
   /rant               Interactive project picker, then type message

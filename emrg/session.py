@@ -454,6 +454,24 @@ class Session:
         self._save_meta()
         logger.info("session cleared: %s", self.session_id)
 
+    # ── Static: delete session ────────────────────────────────
+
+    @staticmethod
+    def delete(session_id: str, cwd: Path) -> bool:
+        """Delete a session directory and all its contents.
+
+        Returns True if the session was deleted, False if it didn't exist.
+        """
+        import shutil
+
+        session_dir = cwd / ".emrg" / "sessions" / session_id
+        if session_dir.exists():
+            shutil.rmtree(session_dir)
+            logger.info("session deleted: %s", session_id)
+            return True
+        logger.warning("session not found for deletion: %s", session_id)
+        return False
+
     # ── Static: list sessions ─────────────────────────────────
 
     @staticmethod

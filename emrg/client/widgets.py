@@ -282,12 +282,17 @@ class SessionSelector(Widget):
     """Interactive session picker — arrow-key navigation with highlight.
 
     Renders a list of sessions with the selected one in reverse video.
-    Used by /resume when invoked without arguments.
+    Used by /resume and /delete when invoked without arguments.
+
+    If current_session_id is set, that session is displayed first and
+    marked with (current) in the label.
     """
 
-    def __init__(self, sessions: list[dict] | None = None):
+    def __init__(self, sessions: list[dict] | None = None,
+                 current_session_id: str | None = None):
         self.sessions: list[dict] = sessions or []
         self.selected_index: int = 0
+        self.current_session_id = current_session_id
         self._dirty: bool = True
 
     @property
@@ -331,6 +336,8 @@ class SessionSelector(Widget):
             label = f"  {sid}"
             if title:
                 label += f"  [{title}]"
+            if self.current_session_id and sid == self.current_session_id:
+                label += "  (current)"
             label += f"  |  {created}  |  {msgs} msgs{extra}"
             if i == self.selected_index:
                 spans = [
@@ -560,6 +567,7 @@ _COMMAND_HELP: dict[str, str] = {
     "/compact":  "Compress conversation history to save context",
     "/memory":   "Browse and search memories [session|project|<id>]",
     "/rename":   "Rename current session [title]",
+    "/delete":   "Delete a session [/delete | /delete <session_id>]",
     "/clear":    "Clear current session history and start fresh",
     "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
     "/model":    "Switch LLM model [/model | /model <name>]",
