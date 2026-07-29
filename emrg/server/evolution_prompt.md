@@ -175,8 +175,6 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 
 **Rant 管理**：
 
-**Rant 管理**：
-
 每次演化必须整理 `~/.emrg/rants.jsonl`。每条 rant 有三态 `status` + `progress` 描述：
 
 | status | 含义 | 何时设 |
