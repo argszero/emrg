@@ -61,7 +61,7 @@
 
 **📋 状态文件（跨循环记忆）**：
 
-每次循环开始，必须先读 `.emrg/paper_state.md`（不存在则创建）。状态文件记录：
+每次循环开始，必须先读 `{source_dir}/.emrg/sessions/{session_id}/paper_state.md`（不存在则创建）。状态文件记录：
 
 ```markdown
 # Paper State
@@ -71,7 +71,7 @@
 - 阻塞: <什么在阻止进展？空=无阻塞>
 ```
 
-每次循环结束时更新 `.emrg/paper_state.md`。这解决跨循环记忆问题——每个新对话从状态文件获取"上次停在哪了"，而不是凭记忆推断。
+每次循环结束时更新 `{source_dir}/.emrg/sessions/{session_id}/paper_state.md`。这解决跨循环记忆问题——每个新对话从状态文件获取"上次停在哪了"，而不是凭记忆推断。
 
 ---
 
@@ -102,7 +102,7 @@ Phase 2/3 的循环逻辑：**读状态文件 → 确定当前步骤 → 执行 
 **读取状态文件**（必须首先执行）：
 
 ```bash
-cat .emrg/paper_state.md 2>/dev/null || echo "## Paper State\n- 当前阶段: Phase 1\n- 上次完成: 无\n- 下一步: 探索研究方向\n- 阻塞: 无" > .emrg/paper_state.md
+cat {source_dir}/.emrg/sessions/{session_id}/paper_state.md 2>/dev/null || echo "## Paper State\n- 当前阶段: Phase 1\n- 上次完成: 无\n- 下一步: 探索研究方向\n- 阻塞: 无" > {source_dir}/.emrg/sessions/{session_id}/paper_state.md
 ```
 
 根据当前阶段执行不同的回顾操作：
@@ -167,7 +167,7 @@ cd {source_dir} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -2
 
 ### 5. 提交
 
-- 更新 `.emrg/paper_state.md`（记录当前阶段、本次完成的操作、下一步计划）
+- 更新 `{source_dir}/.emrg/sessions/{session_id}/paper_state.md`（记录当前阶段、本次完成的操作、下一步计划）
 - `git add -A && git commit -m "paper: <简述改动>" && git push`
 - 每轮至少一个 commit，并立即推送
 - **不 push 等于白做**
@@ -178,7 +178,7 @@ cd {source_dir} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -2
 
 **每次循环末尾必须写反思，追加到 `{source_dir}/.emrg/sessions/{session_id}/reflections.md`，不可跳过。**
 
-反思是研究日记——操作层由 `paper_state.md` 跟踪，反思是战略层认知。输出格式：每条反思追加在文件末尾，以日期时间头和阶段标签开头，不修改不删除已有内容。
+反思是研究日记——操作层由 `paper_state.md`（位于 session 目录）跟踪，反思是战略层认知。输出格式：每条反思追加在文件末尾，以日期时间头和阶段标签开头，不修改不删除已有内容。
 
 每轮必须回答以下 7 个问题（不可省略）：
 
