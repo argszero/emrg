@@ -322,6 +322,20 @@ class EvolutionHandler:
         }
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
+        # Rotate: keep at most 27 evolution log files (oldest deleted).
+        # Filenames use ISO timestamps so lexical sort = chronological.
+        _MAX_LOG_FILES = 27
+        try:
+            log_files = sorted([
+                f for f in self._logs_dir.iterdir()
+                if f.is_file() and f.name.startswith("evolution-")
+            ])
+            if len(log_files) > _MAX_LOG_FILES:
+                for old in log_files[:len(log_files) - _MAX_LOG_FILES]:
+                    old.unlink(missing_ok=True)
+        except OSError:
+            pass  # best-effort cleanup
+
     async def _write_final_summary(self) -> None:
         if not self.evolutions:
             return
