@@ -201,7 +201,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 - 只看 `project` 字段匹配当前任务 `config.project` 的 rant；**未标 `project` 的一律不看**
 
 > **注意**：先检查 rant 是否已被处理，避免重复建设：
-> 1. 检查 `git log --oneline -20` 中是否有 commit 引用了 rant（格式：`(rant #N)`）
+> 1. 检查 `git log --oneline -20` 中是否有 commit 引用了 rant（搜索 rant 的 timestamp 或 message 关键词）
 > 2. 对照下方**已实现功能快速参考**——若 rant 描述的问题与表中功能匹配，则已处理
 > 3. 已处理的 rant 无需再次关注，除非用户重复反馈（说明之前的修复不彻底）
 >
@@ -221,12 +221,12 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - projects.jsonl→projects.yml 迁移 ✅ | prompt 变量替换验证 ✅
 > - `emrg rant -p/--project` CLI 标志 ✅ | install.sh 标准路径+gh检查+python版本验证 ✅
 > - `/model` 模型切换 ✅ | CJK/UTF-8 输入修复 ✅ | 启动显示模型名 ✅
-> - Terminal 标题同步（idle/busy 两态，rant #1） ✅ | llm.jsonl 完整日志 + 轮转 ✅
+> - Terminal 标题同步（idle/busy 两态） ✅ | llm.jsonl 完整日志 + 轮转 ✅
 > - Selector 状态收敛 (SelectorState) ✅ | nonlocal CI 检查 ✅ | install.sh config 模板 ✅
 > - dynamic __version__ in User-Agent ✅ | llm.jsonl 完整 HTTP request/response ✅
 > - stream_options per-model (None = Kimi) ✅ | README/Agent.md 多模型配置示例 ✅
 > - [[llm.models]] 支持 model 字段 (name ≠ API model) ✅ | auto_compact_threshold 全文件一致 ✅
-> - 长度前缀分帧协议 (4-byte header + body, rant #13) ✅ | client 自动重连 ✅ | client 日志滚动 ✅
+> - 长度前缀分帧协议 (4-byte header + body) ✅ | client 自动重连 ✅ | client 日志滚动 ✅
 > - /skills 命令列出已加载技能 ✅ | install.sh 自动安装依赖 (uv, gh, python) ✅
 > - extract _log_llm_exchange, _handle_selector_nav, atomic_write_yaml ✅
 > - encoding='utf-8' 全面修复 (read_text, write_text, open, subprocess) ✅
@@ -238,13 +238,13 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - widget 类提取到 widgets.py (app.py 2157→1529 行) ✅ | Agent.md slash 命令补充 ✅
 > - /resume busy 状态下可用 ✅ | SIGWINCH stdin reader 线程泄漏修复 ✅
 > - ruff 清理 (F401/F841/F821/F541) ✅ | O_NONBLOCK 泄漏修复 ✅
-> - _touch_project git root 检测 + home dir 过滤器 (rant #7, #8) ✅
+> - _touch_project git root 检测 + home dir 过滤器 ✅
 > - Contributor/Committer 角色门控 (ROLE LOCK 表, gatekeeping 边界) ✅
-> - paper task type (rant) #246 ✅ | open-source task type (rant) #248 ✅
+> - paper task type #246 ✅ | open-source task type #248 ✅
 > - paper_prompt.md: 日期感知 + arXiv 搜索 #254 ✅ | git push #255 ✅
 > - paper_prompt.md: 阶段感知 + Heilmeier Catechism #258 ✅
 > - paper_prompt.md: 实验优先 guard + 状态文件 + 11 最佳实践 #261 ✅ merged
-> - emrg rant CLI @project 解析 (rant) #257 ✅
+> - emrg rant CLI @project 解析 #257 ✅
 > - Terminal 标题简化为 idle/busy 两态 #260 ✅ merged
 
 #### 2.2 GitHub 最新代码改动
