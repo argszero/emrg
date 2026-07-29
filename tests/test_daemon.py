@@ -197,7 +197,7 @@ def test_migrate_auto_evolve_entries(tmp_path):
     assert sched._load_tasks() == []
 
 
-# ── _build_project_context_section ───────────────────────────────
+# ── _collect_project_context ───────────────────────────────
 
 
 def _make_server() -> EmrgServer:
@@ -206,36 +206,36 @@ def _make_server() -> EmrgServer:
 
 
 def test_context_section_no_files(tmp_path):
-    """No context files found → returns empty string."""
+    """No context files found → returns empty list."""
     server = _make_server()
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._build_project_context_section(session)
-    assert result == ""
+    result = server._collect_project_context(session)
+    assert result == []
 
 
 def test_context_section_single_file(tmp_path):
-    """When CLAUDE.md exists, it's included in the context section."""
+    """When CLAUDE.md exists, it's returned as a dict entry."""
     server = _make_server()
     (tmp_path / "CLAUDE.md").write_text("# Project Rules\n- Use tabs\n")
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._build_project_context_section(session)
-    assert "## Project Context" in result
-    assert "### CLAUDE.md" in result
-    assert "- Use tabs" in result
-    assert "# Project Rules" in result
+    result = server._collect_project_context(session)
+    assert len(result) == 1
+    assert result[0]["name"] == "CLAUDE.md"
+    assert "- Use tabs" in result[0]["content"]
+    assert "# Project Rules" in result[0]["content"]
 
 
 def test_context_section_multiple_files(tmp_path):
-    """All matching context files are included."""
+    """All matching context files are included as dict entries."""
     server = _make_server()
     (tmp_path / "CLAUDE.md").write_text("claude content")
     (tmp_path / "AGENTS.md").write_text("agents content")
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._build_project_context_section(session)
-    assert "### CLAUDE.md" in result
-    assert "### AGENTS.md" in result
-    assert "claude content" in result
-    assert "agents content" in result
+    result = server._collect_project_context(session)
+    names = {r["name"] for r in result}
+    assert names == {"CLAUDE.md", "AGENTS.md"}
+    assert any("claude content" in r["content"] for r in result)
+    assert any("agents content" in r["content"] for r in result)
 
 
 def test_context_section_truncation(tmp_path):
@@ -244,9 +244,9 @@ def test_context_section_truncation(tmp_path):
     big = "x" * 9000
     (tmp_path / "CLAUDE.md").write_text(big)
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._build_project_context_section(session)
-    assert "truncated" in result
-    assert "1000 chars" in result  # 9000 - 8000 = 1000
+    result = server._collect_project_context(session)
+    assert "truncated" in result[0]["content"]
+    assert "1000 chars" in result[0]["content"]  # 9000 - 8000 = 1000
 
 
 def test_context_section_manifesto(tmp_path):
@@ -254,9 +254,9 @@ def test_context_section_manifesto(tmp_path):
     server = _make_server()
     (tmp_path / "MANIFESTO.md").write_text("# Design\nKeep it simple.\n")
     session = Session.create_with_id("ctx-test", tmp_path)
-    result = server._build_project_context_section(session)
-    assert "### MANIFESTO.md" in result
-    assert "Keep it simple" in result
+    result = server._collect_project_context(session)
+    assert result[0]["name"] == "MANIFESTO.md"
+    assert "Keep it simple" in result[0]["content"]
 
 
 # ── _count_chars_for_tokens ───────────────────────────────────────
