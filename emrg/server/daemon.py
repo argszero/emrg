@@ -719,14 +719,26 @@ class EmrgServer:
                 entry["project"] = project
 
             self._rants_log.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._rants_log, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-            # Count total rants
-            count = 0
+            # Read existing rants, append new, sort by timestamp, rewrite sorted
+            rants: list[dict] = []
             if self._rants_log.exists():
                 with open(self._rants_log, encoding="utf-8") as f:
-                    count = sum(1 for _ in f)
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            try:
+                                rants.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                pass
+            rants.append(entry)
+            rants.sort(key=lambda r: r.get("timestamp", ""))
+
+            with open(self._rants_log, "w", encoding="utf-8") as f:
+                for r in rants:
+                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+            count = len(rants)
 
             logger.info("rant recorded (%d total)%s: %s",
                 count, f" project={project}" if project else "", rant_message[:100])

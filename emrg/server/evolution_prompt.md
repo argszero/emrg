@@ -175,6 +175,8 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 
 **Rant 管理**：
 
+**Rant 管理**：
+
 每次演化必须整理 `~/.emrg/rants.jsonl`。每条 rant 有三态 `status` + `progress` 描述：
 
 | status | 含义 | 何时设 |
@@ -190,8 +192,9 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 
 - **标记完成**：status 改为 `"completed"`，追加 `"completed": "<ISO timestamp>"`
 - **定期清理**：保留所有 pending/in_progress 的 rant；completed 只保留最近 10 条
-- **排序约束**：每次重写必须按 `timestamp` 升序排列。不可按分类（已处理/未处理）分组
+- **⚡ 排序约束**：每次重写必须按 `timestamp` 升序排列（最旧在上、最新在下）。不可按分类（已处理/未处理）分组，不可改变时间顺序。读入所有条目 → 修改（标记 completed / 删除旧条目）→ `sorted(..., key=lambda r: r.get("timestamp", ""))` → 写入
 - **写入时务必使用 `json.dumps(..., ensure_ascii=False)`**
+
 
 读 rant 时按以下规则：
 - 有未处理的 rant 吗？之前被跳过的？大改动可分期推进
