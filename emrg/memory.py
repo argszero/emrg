@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
+import yaml
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -115,7 +116,8 @@ class MemoryFile:
         """Parse memory from markdown text with YAML frontmatter.
 
         Frontmatter is delimited by --- on its own lines at the start.
-        Keys use simple ``key: value`` syntax (no nested YAML).
+        Uses yaml.safe_load with fallback to hand-written parser for invalid
+        YAML (e.g. LLM-generated files with syntax errors).
         """
         frontmatter: dict = {}
         body = ""
@@ -130,37 +132,55 @@ class MemoryFile:
                     break
 
             if end_idx is not None:
-                fm_lines = lines[1:end_idx]
-                current_key = None
-                for line in fm_lines:
-                    stripped = line.strip()
-                    if not stripped or stripped.startswith("#"):
-                        continue
-
-                    # Handle multi-line values (indented continuation)
-                    if line.startswith(" ") and current_key:
-                        value_part = stripped
-                        if value_part:
-                            existing = frontmatter.get(current_key, "")
-                            frontmatter[current_key] = existing + " " + value_part
-                        continue
-
-                    # Simple key: value
-                    match = re.match(r"^(\w[\w_]*)\s*:\s*(.*)", stripped)
-                    if match:
-                        current_key = match.group(1)
-                        value = match.group(2).strip()
-
-                        # Strip surrounding quotes
-                        if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
-                            value = value[1:-1]
-                        # Handle null sentinels
-                        if value in ("", "null", "~", "None"):
-                            frontmatter[current_key] = None
-                        else:
-                            frontmatter[current_key] = value
-
+                fm_raw = "\n".join(lines[1:end_idx])
                 body = "\n".join(lines[end_idx + 1 :]).strip()
+
+                # Try yaml.safe_load first (handles lists, nested values, etc.)
+                try:
+                    parsed = yaml.safe_load(fm_raw)
+                    if isinstance(parsed, dict):
+                        # Convert all values to string (yaml may produce int, list, None, etc.)
+                        for key, value in parsed.items():
+                            if value is None:
+                                frontmatter[key] = None
+                            elif isinstance(value, list):
+                                frontmatter[key] = " ".join(str(v) for v in value)
+                            elif isinstance(value, bool):
+                                frontmatter[key] = "true" if value else "false"
+                            else:
+                                frontmatter[key] = str(value)
+                except (yaml.YAMLError, yaml.MarkedYAMLError):
+                    # Fallback: hand-written parser for malformed YAML
+                    current_key = None
+                    for line in lines[1:end_idx]:
+                        stripped = line.strip()
+                        if not stripped or stripped.startswith("#"):
+                            continue
+
+                        # Handle multi-line values (indented continuation)
+                        if line.startswith(" ") and current_key:
+                            value_part = stripped
+                            if value_part:
+                                existing = frontmatter.get(current_key)
+                                if existing is None:
+                                    existing = ""
+                                frontmatter[current_key] = existing + " " + value_part
+                            continue
+
+                        # Simple key: value
+                        match = re.match(r"^(\w[\w_]*)\s*:\s*(.*)", stripped)
+                        if match:
+                            current_key = match.group(1)
+                            value = match.group(2).strip()
+
+                            # Strip surrounding quotes
+                            if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
+                                value = value[1:-1]
+                            # Handle null sentinels
+                            if value in ("", "null", "~", "None"):
+                                frontmatter[current_key] = None
+                            else:
+                                frontmatter[current_key] = value
         else:
             body = text.strip()
 
