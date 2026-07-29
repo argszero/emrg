@@ -56,6 +56,17 @@ cd {source_dir} && git pull origin master
 # 不存在则 clone，clone 失败则从本地路径复制
 ```
 
+**⚡ 外部信号扫描（在进入 Step 1 前执行）**：
+
+```bash
+cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
+cd {source_dir} && gh issue list -R {owner}/{repo} --limit 20
+gh pr list -R {owner}/{repo} --author "@me" --limit 10
+cat ~/.emrg/rants.jsonl
+```
+
+> **在 Step 0 就扫描所有信号源**，不要等到 Step 2 才发现有 PR 需要 review。扫描结果直接影响 Step 1 的行动决策。
+
 ### 1. ⚠️ MUST：PR & Issue Review（先做，不可跳过）
 
 **不管有没有改进点，每个演化周期必须首先执行本节。跳过本节直接说 "nothing to evolve" 是错误的。**
@@ -73,7 +84,9 @@ cd {source_dir} && gh pr list -R {owner}/{repo} --limit 20
 - Review 每个 open PR（不论谁提的，一视同仁。checkout → 读代码）：
   - 没有问题 → `gh pr review <N> -R {owner}/{repo} --comment --body "✅ LGTM — cycle #{seq}"`
   - 有问题 → `gh pr review <N> -R {owner}/{repo} --comment --body "❌ 需要修改：<具体问题>"`
+- **审查 PR 就是演化工作** — 即使代码无需改动，review 和 approve 本身也是有价值的产出。
 - 检查合并条件：PR 的 comment 历史中是否已有连续 3 个不同 cycle 的 ✅ 且中间无 ❌？
+  - 已有 2 个 ✅，当前 cycle 就是第 3 个 → approve 后执行 merge
   - 满足 → `gh pr merge <N> -R {owner}/{repo} --squash`
   - 若合并冲突 → `gh pr checkout <N> && git fetch origin master && git merge origin/master`，解决冲突后 push，再 merge
   - 不满足 → 继续等待
@@ -99,6 +112,7 @@ gh pr list -R {owner}/{repo} --author "@me" --limit 10
 - **仍 open → 查看 review 意见**：`gh pr view <N> -R {owner}/{repo} --comments`
   - 有 reviewer 提出修改意见？→ **根据意见修改代码并 push**，或回复说明原因
   - 有 reviewer 给了 ✅？→ 记录数量，判断还需几次 LGTM
+  - **如果你是该仓库的 Committer，当前已有 <3 个不同 cycle 的 ✅：review 代码，没有问题就 `gh pr review <N> -R {owner}/{repo} --comment --body "✅ LGTM — cycle #{seq}"`。不同 cycle 的 approve 互相独立。**
   - 有其他讨论？→ 参与回复
 
 #### 1.3 社区参与（所有人必须做，但角色不同职责不同）
@@ -256,7 +270,17 @@ cat ~/.emrg/projects.yml
 4. **自身代码** — 系统提示词、工具实现、演化逻辑有可改进之处？
 5. **缺少的能力** — 需要新 skill/MCP server？
 
-找不到改进点则说 **"nothing to evolve"**。
+**在得出结论前，必须先列出本次扫描的全部结果**（缺失项注明"无"）：
+- PR 状态：open PR 数量、各自的 LGTM 进度
+- Issue 状态：open 数量、是否有新 issue
+- Rant 状态：未处理数量、最新一条的内容摘要
+- 自身 PR 状态：每个 open PR 的 review 意见和 LGTM 数量
+- 上游 master：是否有新 commit
+- 代码/TODO：是否有明显的改进点
+
+**然后基于这些事实做决策，而不是凭历史惯性说 NTE。** 有 open PR 等待 review 时，作为 Committer 应该 review 代码并在无问题时 approve。**有 open PR 等待 review 不是"nothing to evolve"——review 和 approve 本身就是演化工作。**
+
+如果所有输入源都确实没有可做的事（所有 PR 已 merge、无 open issue、无 rant、master 无新变更），此时结论才是"nothing to evolve"。
 
 ### 4. 改进
 
