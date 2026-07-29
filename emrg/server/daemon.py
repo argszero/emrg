@@ -45,14 +45,26 @@ from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
 from emrg.framing import read_frame, write_frame
-from emrg.skills.loader import build_skills_context, load_skills
+from emrg.skills.loader import load_skills
 from emrg.server.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
 
-# ── System prompt base template (loaded from external file) ──
-_SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt_base.md"
-_SYSTEM_PROMPT_BASE = _SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+# ── Jinja2 template environment for system prompt ──
+_jinja_env = None
+
+def _get_jinja_env() -> "jinja2.Environment":
+    """Lazy-init the Jinja2 environment pointing at the prompts directory."""
+    global _jinja_env
+    if _jinja_env is None:
+        import jinja2  # type: ignore[import-untyped]
+        _jinja_env = jinja2.Environment(
+            loader=jinja2.FileSystemLoader(Path(__file__).parent / "prompts"),
+            autoescape=False,
+            trim_blocks=True,
+            lstrip_blocks=True,
+        )
+    return _jinja_env
 
 
 # ── Module-level constants ──
@@ -411,146 +423,91 @@ class EmrgServer:
         atomic_write_yaml(entries, self._projects_log, prefix=".projects_")
 
     def _build_system_prompt(self, session: Session | None = None) -> str:
-        """Build the system prompt, including skill context, memory, and history."""
-        parts = [_SYSTEM_PROMPT_BASE]
+        """Build the system prompt via Jinja2 template.
+
+        Data collection here; rendering delegated to prompts/system.j2.
+        """
+        ctx: dict[str, Any] = {}
 
         # ── Working Directory ──
         if session:
-            parts.append(f"**Working directory**: `{session.cwd}`")
+            ctx["working_dir"] = str(session.cwd)
 
-        # ── Project Context Files (CLAUDE.md / AGENTS.md / Agent.md / MANIFESTO.md) ──
+        # ── Project Context Files ──
         if session:
-            ctx_section = self._build_project_context_section(session)
-            if ctx_section:
-                parts.append(ctx_section)
+            ctx["project_context"] = self._collect_project_context(session)
 
+        # ── Skills ──
         if self.skills:
-            skills_ctx = build_skills_context(self.skills)
-            if skills_ctx:
-                parts.append(skills_ctx)
+            ctx["skills"] = [
+                {"name": s.name, "source": s.source, "path": s.path,
+                 "description": s.description}
+                for s in self.skills
+            ]
 
-        # ── Memory Section ──
+        # ── Memory ──
         if session:
-            memory_section = self._build_memory_section(session)
-            if memory_section:
-                parts.append(memory_section)
+            mem = self._collect_memory_data(session)
+            if mem:
+                ctx.update(mem)
 
-        # ── History Section ──
+        # ── History ──
         if session:
-            history_section = self._build_history_section(session)
-            if history_section:
-                parts.append(history_section)
+            ctx["session"] = self._collect_history_data(session)
 
-        # ── Memory Management Guidance is now in system_prompt_base.md ──
+        template = _get_jinja_env().get_template("system.j2")
+        return template.render(**ctx)
 
-        return "\n\n".join(parts)
-
-    def _build_project_context_section(self, session: Session) -> str:
-        """Read project context files from cwd.
-
-        Claude Code reads CLAUDE.md; Codex reads AGENTS.md / Agent.md.
-        EMRG also reads MANIFESTO.md — the project's design constitution.
-        Including any of them provides project-specific instructions to the LLM.
-        """
+    def _collect_project_context(self, session: Session) -> list[dict[str, str]]:
+        """Read project context files, return structured data for template."""
         candidates = ["CLAUDE.md", "AGENTS.md", "Agent.md", "MANIFESTO.md"]
-        found: list[str] = []
+        found: list[dict[str, str]] = []
 
         for name in candidates:
             path = session.cwd / name
             if path.exists():
                 try:
                     content = path.read_text(encoding="utf-8")
-                    # Trim to avoid blowing up the system prompt
                     max_chars = 8000
                     if len(content) > max_chars:
                         content = content[:max_chars] + (
                             f"\n\n... [truncated {len(content) - max_chars} chars]"
                         )
-                    found.append(f"### {name}\n\n{content}")
+                    found.append({"name": name, "content": content})
                 except (OSError, UnicodeDecodeError):
                     logger.debug("failed to read %s", path, exc_info=True)
 
-        if not found:
-            return ""
+        return found
 
-        return (
-            "## Project Context\n\n"
-            "The following project instruction files were found in the working "
-            "directory. Follow any instructions they contain. "
-            "EMRG is compatible with Claude Code's CLAUDE.md, Codex's "
-            "AGENTS.md/Agent.md, and MANIFESTO.md conventions.\n\n"
-            + "\n\n".join(found)
-        )
+    def _collect_memory_data(self, session: Session) -> dict[str, Any] | None:
+        """Read memory indexes, return structured data for template."""
+        data: dict[str, Any] = {"has_memories": False}
 
-    def _build_memory_section(self, session: Session) -> str:
-        """Build the memory section: project + session MEMORY.md indexes.
-
-        Goal: LLM knows WHAT memories exist and WHERE to read them.
-        """
-        lines = ["## Memory"]
-
-        # Project-level memories
         project_dir = session.cwd / ".emrg" / "memory"
         pindex_path = project_dir / "MEMORY.md"
         if pindex_path.exists():
-            pindex = pindex_path.read_text(encoding="utf-8")
-            lines.append("### Project Memory (long-term, cross-session)")
-            lines.append(f"Directory: `{project_dir}/`")
-            lines.append(f"Index: `{pindex_path}`")
-            lines.append("")
-            lines.append(pindex)
-            lines.append("")
+            data["project_memory_index"] = pindex_path.read_text(encoding="utf-8")
+            data["project_memory_dir"] = str(project_dir)
+            data["project_memory_index_path"] = str(pindex_path)
+            data["has_memories"] = True
 
-        # Session-level memories
         smem_dir = session.memory_dir
         sindex_path = smem_dir / "MEMORY.md"
         if sindex_path.exists():
-            sindex = sindex_path.read_text(encoding="utf-8")
-            lines.append("### Session Memory (this session only)")
-            lines.append(f"Directory: `{smem_dir}/`")
-            lines.append(f"Index: `{sindex_path}`")
-            lines.append("")
-            lines.append(sindex)
-            lines.append("")
+            data["session_memory_index"] = sindex_path.read_text(encoding="utf-8")
+            data["session_memory_dir"] = str(smem_dir)
+            data["session_memory_index_path"] = str(sindex_path)
+            data["has_memories"] = True
 
-        if pindex_path.exists() or sindex_path.exists():
-            lines.append(
-                "**To read a memory**: use the `read` tool with the full path.\n"
-                "**To create/update a memory**: use `write`/`edit` tools to write "
-                "the .md file, then update MEMORY.md index.\n"
-                "**To clean up**: mark stale memories as `status: superseded` "
-                "rather than deleting them."
-            )
-        else:
-            lines.append(
-                "*No memories yet. Create `.emrg/memory/MEMORY.md` (project) or "
-                "use this session's memory directory to start building knowledge.*"
-            )
+        return data if data["has_memories"] else None
 
-        return "\n".join(lines)
-
-    def _build_history_section(self, session: Session) -> str:
-        """Build the session history section of the system prompt.
-
-        Goal: LLM knows WHERE the conversation history lives and HOW to look back.
-        """
-        today = datetime.now().strftime("%y%m%d")
-        lines = [
-            "## Session & History",
-            f"- Session ID: `{session.session_id}`",
-            f"- Session directory: `{session.dir_path}/`",
-            f"- **Current history** (may be compacted): `{session.dir_path}/history.jsonl`",
-            f"- **Daily full history** (never compacted): `{session.dir_path}/history_{today}.jsonl`",
-            "- Daily files are named `history_YYMMDD.jsonl`",
-            f"- LLM raw log: `{session.dir_path}/llm.jsonl` (rotated at 50MB, up to 2 backups)",
-            "",
-            "**To read history**: use the `read` tool on `history.jsonl` for the current",
-            "context, or on a specific `history_YYMMDD.jsonl` file for older messages.",
-            "Each line is a JSON record with `type`, `role`, `content`, `timestamp` fields.",
-            "Message records: `type=message`, tool calls: `type=tool_call`/`tool_result`,",
-            "compacted summaries: `type=summary`.",
-        ]
-        return "\n".join(lines)
+    def _collect_history_data(self, session: Session) -> dict[str, str]:
+        """Return structured session/history data for template."""
+        return {
+            "id": session.session_id,
+            "dir_path": str(session.dir_path),
+            "date_str": datetime.now().strftime("%y%m%d"),
+        }
 
     async def _process_message(
         self, msg: dict, writer: asyncio.StreamWriter

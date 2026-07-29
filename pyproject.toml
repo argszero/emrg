@@ -10,6 +10,7 @@ dependencies = [
     "rich>=13.0.0",
     "httpx>=0.27.0",
     "pyyaml>=6.0",
+    "jinja2>=3.0",
 ]
 
 [project.scripts]
@@ -19,7 +20,7 @@ emrg = "emrg.__main__:main"
 allow-direct-references = true
 
 [tool.hatch.build]
-include = ["emrg/**/*.py", "emrg/**/*.md", "LICENSE", "README.md", "README.en.md"]
+include = ["emrg/**/*.py", "emrg/**/*.md", "emrg/**/*.j2", "LICENSE", "README.md", "README.en.md"]
 
 [build-system]
 requires = ["hatchling"]
