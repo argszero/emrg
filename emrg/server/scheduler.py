@@ -34,7 +34,7 @@ logger = logging.getLogger("emrg.server.scheduler")
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
 # Template files for each task type. All use the same format variables
-# ({seq}, {instance_id}, {host_name}, {uptime}, ...).
+# ({instance_id}, {host_name}, {uptime}, ...).
 TASK_TEMPLATES: dict[str, str] = {
     "evolution": "evolution_prompt.md",
     "paper": "paper_prompt.md",
@@ -121,7 +121,6 @@ class EvolutionHandler:
         """
         self._running = True
         self._start_time = time.time()
-        seq = 0
         logger.info(
             "EvolutionHandler[%s] started — every %ds", self.name, self.interval
         )
@@ -143,15 +142,14 @@ class EvolutionHandler:
                 # Normal scheduled run
                 pass
 
-            seq += 1
-            logger.debug("EvolutionHandler[%s] tick #%d", self.name, seq)
+            logger.debug("EvolutionHandler[%s] tick", self.name)
             self._cycle_running = True
             self._next_run_at = None  # running — no next time yet
             try:
-                await self._run_evolution_cycle(seq)
+                await self._run_evolution_cycle()
             except Exception:
                 logger.warning(
-                    "EvolutionHandler[%s] #%d crashed", self.name, seq, exc_info=True
+                    "EvolutionHandler[%s] crashed", self.name, exc_info=True
                 )
             finally:
                 self._cycle_running = False
@@ -197,34 +195,35 @@ class EvolutionHandler:
             "interval": self.interval,
         }
 
-    async def _run_evolution_cycle(self, seq: int) -> None:
+    async def _run_evolution_cycle(self) -> None:
         """Connect to server, send evolution prompt, read streaming response."""
 
-        prompt = self._build_evolution_prompt(seq)
+        cycle_time = datetime.now()
+        prompt = self._build_evolution_prompt()
         logger.info(
-            "EvolutionHandler[%s] #%d: prompt built (%d chars), connecting ...",
-            self.name, seq, len(prompt),
+            "EvolutionHandler[%s]: prompt built (%d chars), connecting ...",
+            self.name, len(prompt),
         )
-        start_time = datetime.now()
+        start_time = cycle_time
 
         try:
             reader, writer = await connect_to_server()
-            logger.info("EvolutionHandler[%s] #%d: connected", self.name, seq)
+            logger.info("EvolutionHandler[%s]: connected", self.name)
         except (ConnectionRefusedError, FileNotFoundError) as e:
             logger.warning(
-                "EvolutionHandler[%s] #%d: cannot connect: %s", self.name, seq, e
+                "EvolutionHandler[%s]: cannot connect: %s", self.name, e
             )
             return
 
         task_msg = json.dumps(
             {
                 "type": "task",
-                "id": f"evolution-{seq}",
+                "id": f"evolution-{cycle_time.isoformat()}",
                 "session_id": self._session_id,
                 "cwd": self._source_dir,
                 "prompt": prompt,
                 "stream": True,
-                "timestamp": start_time.isoformat(),
+                "timestamp": cycle_time.isoformat(),
             },
             ensure_ascii=False,
         )
@@ -243,10 +242,10 @@ class EvolutionHandler:
                 resp = json.loads(frame.decode())
 
                 if resp.get("done"):
-                    duration = int((datetime.now() - start_time).total_seconds())
+                    duration = int((datetime.now() - cycle_time).total_seconds())
                     logger.info(
-                        "EvolutionHandler[%s] #%d complete (tools=%d, duration=%ds)",
-                        self.name, seq, tool_count, duration,
+                        "EvolutionHandler[%s] complete (tools=%d, duration=%ds)",
+                        self.name, tool_count, duration,
                     )
                     break
 
@@ -257,12 +256,12 @@ class EvolutionHandler:
                 if isinstance(resp_error, str):
                     error = str(resp_error)
                     logger.warning(
-                        "EvolutionHandler[%s] #%d server error: %s",
-                        self.name, seq, error,
+                        "EvolutionHandler[%s] server error: %s",
+                        self.name, error,
                     )
                     break
         except Exception as e:
-            logger.exception("EvolutionHandler[%s] #%d error", self.name, seq)
+            logger.exception("EvolutionHandler[%s] error", self.name)
             error = str(e)
         finally:
             writer.close()
@@ -271,23 +270,24 @@ class EvolutionHandler:
             except (ConnectionError, OSError):
                 pass
 
+        cycle_ts = cycle_time.isoformat()
         impact = [
-            f"evolution-cycle-#{seq}-complete",
+            f"evolution-cycle-{cycle_ts}-complete",
             f"tools-executed={tool_count}",
         ]
         if error:
             impact.append(f"error={error[:200]}")
 
         log = EvolutionLog(
-            timestamp=start_time.isoformat(),
-            trigger=f"evolution-{self.name}-#{seq}",
+            timestamp=cycle_ts,
+            trigger=f"evolution-{self.name}-{cycle_ts}",
             impact=impact,
             operations=["llm-reflection", "tool-execution", "self-improvement"],
         )
-        await self._write_evolution_log(seq, log)
+        await self._write_evolution_log(log)
         self.evolutions.append(log)
 
-    def _build_evolution_prompt(self, seq: int) -> str:
+    def _build_evolution_prompt(self) -> str:
         """Build evolution prompt from template."""
         template = self._template_path.read_text(encoding="utf-8")
         if self._start_time is not None:
@@ -297,7 +297,6 @@ class EvolutionHandler:
         uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
 
         return template.format(
-            seq=seq,
             instance_id=self.identity.instance_id,
             host_name=self.identity.host_name,
             uptime=uptime,
@@ -309,10 +308,11 @@ class EvolutionHandler:
             repo=self._repo,
             source_dir=self._source_dir,
             session_id=self._session_id,
+            timestamp=datetime.now().strftime("%Y%m%d-%H%M%S"),
         )
 
-    async def _write_evolution_log(self, seq: int, entry: EvolutionLog) -> None:
-        filename = f"evolution-{entry.timestamp.replace(':', '-')}-{seq}.json"
+    async def _write_evolution_log(self, entry: EvolutionLog) -> None:
+        filename = f"evolution-{entry.timestamp.replace(':', '-')}.json"
         path = self._logs_dir / filename
         data = {
             "timestamp": entry.timestamp,
