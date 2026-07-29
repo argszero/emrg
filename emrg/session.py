@@ -13,6 +13,7 @@ Directory structure:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -57,6 +58,10 @@ class Session:
         self._memory_dir = self._dir / "memory"
         self._memory_dir.mkdir(exist_ok=True)
 
+        # Initialize images subdirectory
+        self.images_dir = self._dir / "images"
+        self.images_dir.mkdir(exist_ok=True)
+
         self._meta_path = self._dir / "meta.json"
         self._history_path = self._dir / "history.jsonl"
         self._llm_path = self._dir / "llm.jsonl"
@@ -69,6 +74,53 @@ class Session:
 
         # Lazy-initialized memory store
         self._memory_store = None
+
+    # ── Image support ─────────────────────────────────────────
+
+    def save_image(self, data: bytes, label: str = "") -> str:
+        """Save an image to the session images directory with dedup.
+
+        Uses BLAKE2b hash for content-based dedup — same image pasted
+        multiple times reuses the same file.
+
+        Returns the filename (relative to images_dir).
+        """
+        h = hashlib.blake2b(data, digest_size=4).hexdigest()
+        # Check for existing file with same hash
+        for existing in self.images_dir.iterdir():
+            if existing.is_file() and h in existing.name:
+                return existing.name
+
+        # Determine counter from existing images
+        counter = 1
+        for existing in self.images_dir.iterdir():
+            if existing.is_file() and existing.name.startswith("img_"):
+                try:
+                    n = int(existing.name.split("_")[1])
+                    if n >= counter:
+                        counter = n + 1
+                except (ValueError, IndexError):
+                    pass
+
+        # Use label as filename stem if provided (sanitized), else default
+        if label:
+            safe_label = "".join(c if c.isalnum() or c in "._-" else "_" for c in label)
+            safe_label = safe_label[:40].rstrip("._") or "image"
+        else:
+            safe_label = f"Image{counter}"
+
+        filename = f"{safe_label}_{h}.png"
+        filepath = self.images_dir / filename
+
+        # If filename collision (unlikely but possible), append counter
+        while filepath.exists():
+            filename = f"{safe_label}_{counter}_{h}.png"
+            filepath = self.images_dir / filename
+            counter += 1
+
+        filepath.write_bytes(data)
+        logger.info("image saved: %s (%d bytes)", filename, len(data))
+        return filename
 
     # ── Factory methods ───────────────────────────────────────
 

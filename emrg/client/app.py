@@ -4,7 +4,7 @@ Keeps interactive_demo.py's input handling, renders chat in viewport.
 
 from __future__ import annotations
 
-import asyncio, fcntl, json, logging, os, signal, subprocess, sys, time
+import asyncio, fcntl, json, logging, os, platform, signal, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path, PurePath
 from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Terminal, ToolCard
@@ -140,6 +140,151 @@ async def client_connect_to_server():
     return await connect_to_server()
 
 
+# ── Clipboard image support (platform-adaptive) ─────────────
+
+def _detect_clipboard_image() -> tuple[bool, str | None]:
+    """Check system clipboard for image data.
+    Returns (has_image, label_or_None).
+    """
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            result = subprocess.run(
+                ['osascript', '-e', 'clipboard info'],
+                capture_output=True, text=True, timeout=3,
+            )
+            out = result.stdout
+            has_image = any(tag in out for tag in (
+                '«class PNGf»', '«class TIFF»', '«class jpg»',
+                '«class GIFf»', '«class BMP »', 'picture',
+            ))
+            if not has_image:
+                return False, None
+            # Try to get filename from file reference
+            label = None
+            try:
+                r2 = subprocess.run(
+                    ['osascript', '-e',
+                     'try\n  set f to (the clipboard as «class furl»)\n'
+                     '  return POSIX path of f\nend try'],
+                    capture_output=True, text=True, timeout=2,
+                )
+                if r2.stdout.strip():
+                    label = Path(r2.stdout.strip()).name
+            except Exception:
+                pass
+            return True, label
+
+        elif system == "Linux":
+            result = subprocess.run(
+                ['xclip', '-selection', 'clipboard', '-t', 'TARGETS', '-o'],
+                capture_output=True, text=True, timeout=3,
+            )
+            out = result.stdout
+            if 'image/png' not in out:
+                return False, None
+            # Try to get filename from URI list
+            label = None
+            if 'text/uri-list' in out:
+                try:
+                    r2 = subprocess.run(
+                        ['xclip', '-selection', 'clipboard', '-t',
+                         'text/uri-list', '-o'],
+                        capture_output=True, text=True, timeout=2,
+                    )
+                    uri = r2.stdout.strip()
+                    if uri:
+                        label = Path(uri.replace('file://', '')).name
+                except Exception:
+                    pass
+            return True, label
+
+        elif system == "Windows":
+            ps_cmd = (
+                'Add-Type -AssemblyName System.Windows.Forms; '
+                '$img = [System.Windows.Forms.Clipboard]::GetImage(); '
+                'if ($img -ne $null) { Write-Output "IMAGE" } else { Write-Output "TEXT" }'
+            )
+            result = subprocess.run(
+                ['powershell', '-Command', ps_cmd],
+                capture_output=True, text=True, timeout=5,
+            )
+            if 'IMAGE' not in result.stdout:
+                return False, None
+            # Try to get filename from FileDropList
+            label = None
+            try:
+                r2 = subprocess.run(
+                    ['powershell', '-Command',
+                     'Add-Type -AssemblyName System.Windows.Forms; '
+                     '$files = [System.Windows.Forms.Clipboard]::GetFileDropList(); '
+                     'if ($files -ne $null -and $files.Count -gt 0) '
+                     '{ Write-Output $files[0] }'],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if r2.stdout.strip():
+                    label = Path(r2.stdout.strip()).name
+            except Exception:
+                pass
+            return True, label
+
+    except Exception:
+        return False, None
+    return False, None
+
+
+def _extract_clipboard_image(target_path: str) -> bool:
+    """Extract clipboard image as PNG to target_path. Returns True on success."""
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            # Use osascript to write clipboard as PNG
+            escaped = target_path.replace('"', '\\"')
+            applescript = (
+                f'set f to open for access (POSIX file "{escaped}")'
+                ' with write permission\n'
+                'set eof f to 0\n'
+                'try\n'
+                '  write (the clipboard as «class PNGf») to f\n'
+                'end try\n'
+                'close access f'
+            )
+            subprocess.run(
+                ['osascript', '-e', applescript],
+                capture_output=True, timeout=5,
+            )
+            path = Path(target_path)
+            return path.exists() and path.stat().st_size > 0
+
+        elif system == "Linux":
+            with open(target_path, 'wb') as f:
+                subprocess.run(
+                    ['xclip', '-selection', 'clipboard', '-t',
+                     'image/png', '-o'],
+                    stdout=f, timeout=5,
+                )
+            path = Path(target_path)
+            return path.exists() and path.stat().st_size > 0
+
+        elif system == "Windows":
+            ps_cmd = (
+                'Add-Type -AssemblyName System.Windows.Forms; '
+                'Add-Type -AssemblyName System.Drawing; '
+                '$img = [System.Windows.Forms.Clipboard]::GetImage(); '
+                f'$img.Save("{target_path}", '
+                '[System.Drawing.Imaging.ImageFormat]::Png)'
+            )
+            subprocess.run(
+                ['powershell', '-Command', ps_cmd],
+                capture_output=True, timeout=5,
+            )
+            path = Path(target_path)
+            return path.exists() and path.stat().st_size > 0
+
+    except Exception as e:
+        logger.debug("clipboard image extract failed: %s", e)
+    return False
+
 
 async def interactive(init_auto_evolve: bool = False):
     if not sys.stdin.isatty():
@@ -177,6 +322,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     loop = asyncio.get_event_loop()
     history, paste_mode, stream_buffer = [], False, ""
+    _pending_images: list[dict] = []  # images accumulated during current input
     history_index: int = -1  # -1 = editing, 0..len-1 = navigating history
     history_saved_input: str = ""  # saved input when navigating history
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
@@ -861,7 +1007,40 @@ async def interactive(init_auto_evolve: bool = False):
         nonlocal _request_start, _last_center, _elapsed_task
         if len(data) == 0: return True
         if data == b"\x1b[200~": paste_mode = True; return True
-        if data == b"\x1b[201~": paste_mode = False; term.render(); return True
+        if data == b"\x1b[201~":
+            paste_mode = False
+            # After paste, check clipboard for images
+            has_image, label = _detect_clipboard_image()
+            if has_image:
+                images_dir = Path(cwd) / ".emrg" / "sessions" / session_id / "images"
+                images_dir.mkdir(exist_ok=True)
+                counter = len(_pending_images) + 1
+                tmp_path = images_dir / f"_clipboard_tmp_{counter}.png"
+                if _extract_clipboard_image(str(tmp_path)):
+                    # Re-read and save with dedup via session's hash convention
+                    import hashlib
+                    data = tmp_path.read_bytes()
+                    h = hashlib.blake2b(data, digest_size=4).hexdigest()
+                    safe_label = "".join(
+                        c if c.isalnum() or c in "._-" else "_" for c in (label or f"Image{counter}")
+                    )[:40].rstrip("._") or "image"
+                    filename = f"{safe_label}_{h}.png"
+                    final_path = images_dir / filename
+                    # Dedup: check if already exists
+                    if not final_path.exists():
+                        tmp_path.rename(final_path)
+                    else:
+                        tmp_path.unlink()
+                    placeholder = f"[📷 {label or f'Image {counter}'}]"
+                    _pending_images.append({
+                        "path": str(final_path),
+                        "label": placeholder,
+                        "position": len(inp.text),
+                    })
+                    inp.insert(placeholder + "\n")
+                    logger.info("clipboard image saved: %s", filename)
+            term.render()
+            return True
 
         # ── ESC interrupt when busy ──────────────────────────
         # Mimics Claude Code: Esc stops the current response mid-turn,
@@ -1590,6 +1769,9 @@ Streaming
                 status.update(center=_last_center)
                 term.render()
                 req = TaskRequest(session_id=session_id, cwd=cwd, prompt=text, stream=True)
+                if _pending_images:
+                    req.images = _pending_images
+                    _pending_images = []
                 await write_frame(writer, json.dumps(req.to_dict(), ensure_ascii=False).encode())
                 logger.info("task sent, prompt_len=%d chars", len(text))
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True

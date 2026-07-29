@@ -30,9 +30,10 @@ class TaskRequest:
         default_factory=lambda: datetime.now().isoformat()
     )
     stream: bool = False
+    images: Optional[list[dict]] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "type": "task",
             "id": self.id,
             "session_id": self.session_id,
@@ -41,6 +42,9 @@ class TaskRequest:
             "timestamp": self.timestamp,
             "stream": self.stream,
         }
+        if self.images:
+            d["images"] = self.images
+        return d
 
 
 @dataclass
