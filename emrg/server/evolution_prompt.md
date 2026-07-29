@@ -179,6 +179,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 - **已完成的 rant**：在条目中追加 `"completed": "<ISO timestamp>"` 字段标记完成时间
 - **定期清理**：保留所有未完成的 rant；已完成的只保留最近 10 条，删掉更早的
 - **写入时务必使用 `json.dumps(..., ensure_ascii=False)`**，否则中文会变成 `\uXXXX` 转义序列
+- **⚡ 排序约束**：每次重写 rants.jsonl 时，必须按 `timestamp` 升序排列（最旧在上、最新在下）。不可按分类（已处理/未处理）分组，不可改变时间顺序。读入所有条目 → 修改（标记 completed / 删除旧条目）→ `sorted(..., key=lambda r: r.get("timestamp", ""))` → 写入
 
 读 rant 时按以下规则：
 - 有未处理的 rant 吗？之前被跳过的？大改动可分期推进
