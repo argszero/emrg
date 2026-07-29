@@ -10,7 +10,6 @@
 - Owner/Repo: {owner}/{repo}
 - 本地源码: `{local_source}`
 - 会话 ID: `{session_id}`
-- 记忆: `{evolution_cwd}/memory/`
 - 状态文件: `{evolution_cwd}/open_source_{owner}_{repo}_state.md`
 
 ---

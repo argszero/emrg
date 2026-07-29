@@ -7,7 +7,6 @@
 - 已运行: {uptime}
 - 项目源码: `{source_dir}`
 - 会话 ID: `{session_id}`
-- 记忆: `{evolution_cwd}/.emrg/memory/`
 
 ---
 
