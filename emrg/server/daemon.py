@@ -268,6 +268,7 @@ class EmrgServer:
                             prompt=msg.get("prompt", ""),
                             timestamp=msg.get("timestamp", ""),
                             stream=msg.get("stream", False),
+                            images=msg.get("images"),
                         )
                     except Exception as e:
                         await self._send(writer, {"error": f"invalid task: {e}"})
@@ -900,25 +901,68 @@ class EmrgServer:
             return Session.load(session_id, cwd)
         return Session.create_with_id(session_id, cwd)
 
+    @staticmethod
+    def _build_user_content(text: str, images: list[dict] | None) -> list[dict] | str:
+        """Build OpenAI vision content array when images are present.
+        
+        Returns plain str if no images, list[dict] for vision format.
+        """
+        if not images:
+            return text
+        import base64
+        content: list[dict] = []
+        last_pos = 0
+        for img in sorted(images, key=lambda i: i.get("position", -1)):
+            pos = img.get("position", -1)
+            # Text before this image
+            if pos >= 0 and last_pos < pos:
+                chunk = text[last_pos:pos]
+                if chunk.strip():
+                    content.append({"type": "text", "text": chunk})
+                last_pos = pos
+            # Encode image
+            try:
+                b64 = base64.b64encode(Path(img["path"]).read_bytes()).decode()
+                content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                })
+            except (OSError, FileNotFoundError) as e:
+                logger.warning("failed to read image %s: %s", img.get("path"), e)
+                content.append({"type": "text", "text": f"[Image unavailable: {img.get('label', '?')}]"})
+        # Remaining text after last image
+        if last_pos < len(text):
+            chunk = text[last_pos:]
+            if chunk.strip():
+                content.append({"type": "text", "text": chunk})
+        # OpenAI requires at least one text element
+        if not any(item.get("type") == "text" for item in content):
+            content.insert(0, {"type": "text", "text": "请分析这张图片"})
+        return content
+
     async def _run_chat_once(
         self, req: TaskRequest, writer: asyncio.StreamWriter, session: Session
     ) -> None:
         """Non-streaming single-turn chat (no tool loop)."""
         system_prompt = self._build_system_prompt(session)
         history_messages = session.get_messages_for_llm()
+        user_content = self._build_user_content(req.prompt, req.images)
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
             *history_messages,
-            {"role": "user", "content": req.prompt},
+            {"role": "user", "content": user_content},
         ]
         tools = self.tools.to_openai_tools()
 
-        # Persist user message
-        session.append_message({
+        # Persist user message (with image references if present)
+        user_record: dict = {
             "type": "message",
             "role": "user",
             "content": req.prompt,
-        })
+        }
+        if req.images:
+            user_record["images"] = req.images
+        session.append_message(user_record)
 
         try:
             msg = await self.llm.chat(messages, tools=tools)
@@ -976,17 +1020,21 @@ class EmrgServer:
         system_prompt = self._build_system_prompt(session)
         history_messages = session.get_messages_for_llm()
 
-        # Persist user message
-        session.append_message({
+        # Persist user message (with image references if present)
+        user_record: dict = {
             "type": "message",
             "role": "user",
             "content": req.prompt,
-        })
+        }
+        if req.images:
+            user_record["images"] = req.images
+        session.append_message(user_record)
 
+        user_content = self._build_user_content(req.prompt, req.images)
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
             *history_messages,
-            {"role": "user", "content": req.prompt},
+            {"role": "user", "content": user_content},
         ]
         tools_openai = self.tools.to_openai_tools()
 
@@ -1423,7 +1471,10 @@ class EmrgServer:
             ts = r.get("timestamp", "")[:19]
             rtype = r.get("type", "")
             if rtype == "message":
-                parts.append(f"[{ts}] {r['role']}: {r.get('content', '')}")
+                content = r.get("content", "")
+                if not isinstance(content, str):
+                    content = json.dumps(content, ensure_ascii=False)
+                parts.append(f"[{ts}] {r['role']}: {content}")
             elif rtype == "tool_call":
                 parts.append(
                     f"[{ts}] tool_call: {r.get('tool_name', '')}"
