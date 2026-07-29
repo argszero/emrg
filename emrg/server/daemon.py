@@ -710,6 +710,8 @@ class EmrgServer:
             entry = {
                 "timestamp": msg.get("timestamp", datetime.now().isoformat()),
                 "message": rant_message,
+                "status": "pending",
+                "progress": None,
             }
             # Optional project targeting (multi-project support)
             project = msg.get("project", "").strip()
