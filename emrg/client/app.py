@@ -331,6 +331,12 @@ async def interactive(init_auto_evolve: bool = False):
     _request_start: float = 0.0  # timestamp when current request started
     _elapsed_task: asyncio.Task | None = None  # background timer task
 
+    def _status_left(title: str, sid: str) -> str:
+        """Format left status: show both name and short ID for renamed sessions."""
+        if title:
+            return f"{title} ({sid[:8]})"
+        return sid
+
     def _short_path(p: str) -> str:
         home = os.path.expanduser("~")
         if p.startswith(home):
@@ -338,12 +344,6 @@ async def interactive(init_auto_evolve: bool = False):
         if len(p) > 30:
             p = "…" + p[-29:]
         return p
-
-    def _status_left(title: str, sid: str) -> str:
-        """Format left status: show both name and short ID for renamed sessions."""
-        if title:
-            return f"{title} ({sid[:8]})"
-        return sid
 
     def _update_right() -> None:
         if msg_count > 0:
