@@ -1004,7 +1004,7 @@ async def interactive(init_auto_evolve: bool = False):
         nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
-        nonlocal _request_start, _last_center, _elapsed_task
+        nonlocal _request_start, _last_center, _elapsed_task, _pending_images
         if len(data) == 0: return True
         if data == b"\x1b[200~": paste_mode = True; return True
         if data == b"\x1b[201~":
