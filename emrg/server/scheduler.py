@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -95,6 +96,15 @@ class EvolutionHandler:
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         self.evolutions: list[EvolutionLog] = []
 
+        # ── Saturation halt — stop burning tokens on empty cycles ───
+        # Track consecutive cycles where git HEAD didn't advance (NTE).
+        # After _IDLE_HALT_THRESHOLD empty cycles, switch to trigger-only:
+        #   - Scheduled runs are skipped
+        #   - Only manual trigger (/trigger) resumes the cycle
+        #   - Counter resets on trigger or when git HEAD advances
+        self._empty_cycles = 0
+        self._IDLE_HALT_THRESHOLD = 30
+
         # Resolve project path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
         project_name = config.get("project", "")
@@ -113,6 +123,22 @@ class EvolutionHandler:
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
 
+    def _get_git_head(self) -> str | None:
+        """Return current git HEAD hash, or None if not a git repo."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self._source_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
+
     async def run(self) -> None:
         """Run evolution cycles at configured interval.
 
@@ -128,6 +154,7 @@ class EvolutionHandler:
         while self._running:
             # Wait for interval or manual trigger (interruptible)
             self._next_run_at = time.time() + self.interval
+            manual_trigger = False
             try:
                 await asyncio.wait_for(
                     self._trigger_event.wait(),
@@ -135,12 +162,32 @@ class EvolutionHandler:
                 )
                 # Manual trigger fired — clear and proceed
                 self._trigger_event.clear()
+                manual_trigger = True
                 logger.debug(
                     "EvolutionHandler[%s] manually triggered", self.name
                 )
             except asyncio.TimeoutError:
                 # Normal scheduled run
                 pass
+
+            # Saturation halt: if too many empty cycles, skip scheduled runs.
+            # Manual triggers always bypass the halt and reset the counter.
+            if manual_trigger:
+                if self._empty_cycles >= self._IDLE_HALT_THRESHOLD:
+                    logger.info(
+                        "EvolutionHandler[%s]: resumed via manual trigger "
+                        "(was halted at %d empty cycles)",
+                        self.name, self._empty_cycles,
+                    )
+                self._empty_cycles = 0
+            elif self._empty_cycles >= self._IDLE_HALT_THRESHOLD:
+                logger.info(
+                    "EvolutionHandler[%s]: saturation halt — "
+                    "skipping scheduled run (%d empty cycles). "
+                    "Use /trigger to resume.",
+                    self.name, self._empty_cycles,
+                )
+                continue
 
             logger.debug("EvolutionHandler[%s] tick", self.name)
             self._cycle_running = True
@@ -206,6 +253,9 @@ class EvolutionHandler:
         )
         start_time = cycle_time
 
+        # Track git HEAD to detect empty (NTE) cycles
+        git_head_before = self._get_git_head()
+
         try:
             reader, writer = await connect_to_server()
             logger.info("EvolutionHandler[%s]: connected", self.name)
@@ -269,6 +319,22 @@ class EvolutionHandler:
                 await writer.wait_closed()
             except (ConnectionError, OSError):
                 pass
+
+        # Detect empty cycles: git HEAD unchanged → no work was done
+        git_head_after = self._get_git_head()
+        if git_head_before and git_head_after and git_head_before == git_head_after:
+            self._empty_cycles += 1
+            logger.debug(
+                "EvolutionHandler[%s]: empty cycle #%d (HEAD=%s)",
+                self.name, self._empty_cycles, git_head_after[:8],
+            )
+        else:
+            if self._empty_cycles > 0:
+                logger.info(
+                    "EvolutionHandler[%s]: git HEAD changed, resetting empty streak",
+                    self.name,
+                )
+            self._empty_cycles = 0
 
         cycle_ts = cycle_time.isoformat()
         impact = [
