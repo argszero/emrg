@@ -316,6 +316,14 @@ async def interactive(init_auto_evolve: bool = False):
     await write_frame(writer, json.dumps({"type": "ping"}).encode())
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
+
+    def _status_left(title: str, sid: str) -> str:
+        """Format left status: show both name and short ID for renamed sessions."""
+        if title:
+            return f"{title} ({sid[:8]})"
+        return sid
+    busy = False; server_id = ""; need_new_assistant = False; session_title = ""
+
     status = StatusLine(left=_status_left(session_title, session_id), center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
     term.mount(status=status, composer=inp, chat=chat)
@@ -325,17 +333,10 @@ async def interactive(init_auto_evolve: bool = False):
     _pending_images: list[dict] = []  # images accumulated during current input
     history_index: int = -1  # -1 = editing, 0..len-1 = navigating history
     history_saved_input: str = ""  # saved input when navigating history
-    busy = False; server_id = ""; need_new_assistant = False; session_title = ""
     msg_count = 0
     _welcomed = False  # show welcome message once on first connect
     _request_start: float = 0.0  # timestamp when current request started
     _elapsed_task: asyncio.Task | None = None  # background timer task
-
-    def _status_left(title: str, sid: str) -> str:
-        """Format left status: show both name and short ID for renamed sessions."""
-        if title:
-            return f"{title} ({sid[:8]})"
-        return sid
 
     def _short_path(p: str) -> str:
         home = os.path.expanduser("~")
