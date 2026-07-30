@@ -69,6 +69,7 @@
 - 上次完成: <上一轮做了什么>
 - 下一步: <本轮计划做什么>
 - 阻塞: <什么在阻止进展？空=无阻塞>
+- 未处理 Rant: <相关 rant 的时间戳和摘要，无则写"无">
 ```
 
 每次循环结束时更新 `{source_dir}/.emrg/sessions/{session_id}/paper_state.md`。这解决跨循环记忆问题——每个新对话从状态文件获取"上次停在哪了"，而不是凭记忆推断。
@@ -98,6 +99,17 @@ Phase 2/3 的循环逻辑：**读状态文件 → 确定当前步骤 → 执行 
 ---
 
 ### 1. 回顾
+
+**回顾 Rant**（在读取状态文件前执行）：
+
+每次循环必须先从 `~/.emrg/rants.jsonl` 读取用户反馈。Rant 是方向调整信号，不是一次性任务。
+
+处理规则：
+
+1. 对每个 pending rant，评估其与当前阶段的相关性
+2. 将相关 rant 的摘要写入 paper_state.md 的 "未处理 Rant" 字段
+3. **读完 rant 后不要跳过回顾步骤**——rant 提供方向输入，但具体的实验/文献/草稿状态需要通过回顾步骤获取
+4. Paper rant 和 evolution rant 不同：它更偏向方向指导而非 bug 修复。将 rant 要点转化为具体的写作/实验决策，而非"标记完成"
 
 **读取状态文件**（必须首先执行）：
 
@@ -168,6 +180,30 @@ cd {source_dir} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -2
 ### 5. 提交
 
 - 更新 `{source_dir}/.emrg/sessions/{session_id}/paper_state.md`（记录当前阶段、本次完成的操作、下一步计划）
+
+**Rant 标记**：若本轮的工作路线已覆盖了某个 pending rant 的反馈（例如 rant 建议降低学习率，本轮实验已采用），则标记该 rant 为 acknowledged：
+
+```python
+import json, os
+rants_file = os.path.expanduser("~/.emrg/rants.jsonl")
+rants = [json.loads(l) for l in open(rants_file) if l.strip()]
+for r in rants:
+    if r.get("status") == "pending" and "本轮已处理的 rant 的 timestamp":
+        r["status"] = "acknowledged"
+        r["completed"] = "<ISO timestamp>"
+rants.sort(key=lambda r: r.get("timestamp", ""))
+with open(rants_file, "w") as f:
+    for r in rants:
+        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+```
+
+**重要规则**：
+- 标记 rant 时必须全量读入、修改、按 timestamp 排序后写回
+- 使用 `json.dumps(..., ensure_ascii=False)`，禁止中文转义
+- 仅当 rant 的建议已真正融入工作路线时才标记 acknowledged——仅仅是"读了"不算
+- 若本轮无法覆盖（如 rant 建议 Phase 4 的写作改动但当前在 Phase 2），不标记，留给后续轮次处理
+- 标记后更新 paper_state.md 的"未处理 Rant"列表，移除已处理的 timestamp
+
 - `git add -A && git commit -m "paper: <简述改动>" && git push`
 - 每轮至少一个 commit，并立即推送
 - **不 push 等于白做**
@@ -183,6 +219,7 @@ cd {source_dir} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -2
 每轮必须回答以下 7 个问题（不可省略）：
 
 1. **本轮要求是什么？** — 原始驱动：宿主想解决什么问题？回到 Heilmeier Catechism 九问定义的研究目标，不偏离
+   **来自 rants 的反馈**：列出本轮考虑到的 rant 反馈摘要（若有）。若本轮无 pending rant，写明"无新 rant 反馈"。
 2. **理想的状态是什么？** — 如果一切按计划推进，本轮"完美结局"是什么样？
 3. **实际做了什么？** — 具体操作：读了哪些文献、跑了哪些实验、写了哪些内容、等待了什么
 4. **当前进度如何？** — 和理想状态对比，实际走了多远？什么东西还没拿到？差距在哪？
@@ -205,6 +242,15 @@ cd {source_dir} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -2
 3. **引用规范** — 使用 BibTeX/BibLaTeX 管理参考文献，引用格式统一
 4. **图表得体** — 图表有清晰的标题和标签，数据可视化准确
 5. **迭代改进** — 每次聚焦一个小目标，逐步完善
+
+### Rant 处理注意事项
+
+- Paper rant 不是 bug 修复清单，是方向指导。acknowledged 意为"反馈已纳入后续工作路线"，不等于"任务完成"
+- 标记 rant 时必须全量读入、按 timestamp 排序后写回 rants.jsonl，不可改变时间顺序
+- 必须用 `json.dumps(..., ensure_ascii=False)` 输出，禁止中文被转义为 `\uXXXX`
+- 只看 project 字段匹配当前任务 project 的 rant；未标 project 的一律不看
+- 不凭历史记忆判断 rant 状态——每轮用工具实际读取 rants.jsonl
+- Rant 管理在步骤 1（回顾）读取、步骤 5（提交）标记、步骤 6（反思）回顾——贯穿整个循环
 
 ### 禁止
 - 不修改 `~/.emrg/config.toml`

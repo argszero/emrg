@@ -316,7 +316,7 @@ async def interactive(init_auto_evolve: bool = False):
     await write_frame(writer, json.dumps({"type": "ping"}).encode())
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
-    status = StatusLine(left=session_id, center="connecting...")
+    status = StatusLine(left=_status_left(session_title, session_id), center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
     term.mount(status=status, composer=inp, chat=chat)
 
@@ -338,6 +338,12 @@ async def interactive(init_auto_evolve: bool = False):
         if len(p) > 30:
             p = "…" + p[-29:]
         return p
+
+    def _status_left(title: str, sid: str) -> str:
+        """Format left status: show both name and short ID for renamed sessions."""
+        if title:
+            return f"{title} ({sid[:8]})"
+        return sid
 
     def _update_right() -> None:
         if msg_count > 0:
@@ -447,7 +453,7 @@ async def interactive(init_auto_evolve: bool = False):
                         import emrg
                         ver = getattr(emrg, "__version__", "dev")
                         chat.add("system", f"EMRG {ver}  |  {server_id}\nType /help for shortcuts, or just start chatting.")
-                    status.update(left=session_title or session_id, center=server_id)
+                    status.update(left=_status_left(session_title, session_id), center=server_id)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render(); continue
 
@@ -595,7 +601,7 @@ async def interactive(init_auto_evolve: bool = False):
                             chat.rows.clear()
                             chat.dirty = True
                             chat.add("system", f"Created new session {new_sid} — continue chatting.")
-                            status.update(left=new_sid, center=server_id or "emrg")
+                            status.update(left=_status_left("", new_sid), center=server_id or "emrg")
                             term.set_title(f"{new_sid} @ {project_name}")
                             msg_count = 0
                             _update_right()
@@ -876,7 +882,7 @@ async def interactive(init_auto_evolve: bool = False):
                         f"Resumed session {session_id}{title_extra} "
                         f"({meta.get('message_count', record_count)} messages, "
                         f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
-                    status.update(left=session_title or session_id, center=server_id or "emrg")
+                    status.update(left=_status_left(session_title, session_id), center=server_id or "emrg")
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     # Set message count from loaded session
                     msg_count = meta.get("message_count", record_count)
@@ -893,7 +899,7 @@ async def interactive(init_auto_evolve: bool = False):
                         new_title = data.get("title", "")
                         session_title = new_title
                         chat.add("system", f"Session renamed to: {new_title}")
-                        status.update(left=session_title, center=server_id or "emrg")
+                        status.update(left=_status_left(session_title, session_id), center=server_id or "emrg")
                         term.set_title(f"{session_title} @ {project_name}")
                     term.render()
                     continue
