@@ -102,8 +102,13 @@ class EvolutionHandler:
         #   - Scheduled runs are skipped
         #   - Only manual trigger (/trigger) resumes the cycle
         #   - Counter resets on trigger or when git HEAD advances
-        self._empty_cycles = 0
+        #
+        # Counter is persisted to disk to survive daemon restarts.
         self._IDLE_HALT_THRESHOLD = 30
+        self._saturation_dir = config_dir() / "saturation"
+        self._saturation_dir.mkdir(parents=True, exist_ok=True)
+        self._saturation_file = self._saturation_dir / f"{self.name}.json"
+        self._empty_cycles = self._load_saturation_state()
 
         # Resolve project path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
@@ -138,6 +143,32 @@ class EvolutionHandler:
         except Exception:
             pass
         return None
+
+    def _load_saturation_state(self) -> int:
+        """Restore _empty_cycles counter from disk (survives daemon restarts)."""
+        try:
+            if self._saturation_file.exists():
+                data = json.loads(self._saturation_file.read_text(encoding="utf-8"))
+                count = data.get("empty_cycles", 0)
+                if count > 0:
+                    logger.debug(
+                        "EvolutionHandler[%s]: restored saturation state (%d empty cycles)",
+                        self.name, count,
+                    )
+                return count
+        except Exception:
+            pass
+        return 0
+
+    def _save_saturation_state(self) -> None:
+        """Persist _empty_cycles counter to disk."""
+        try:
+            self._saturation_file.write_text(
+                json.dumps({"empty_cycles": self._empty_cycles}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     async def run(self) -> None:
         """Run evolution cycles at configured interval.
@@ -180,6 +211,7 @@ class EvolutionHandler:
                         self.name, self._empty_cycles,
                     )
                 self._empty_cycles = 0
+                self._save_saturation_state()
             elif self._empty_cycles >= self._IDLE_HALT_THRESHOLD:
                 logger.info(
                     "EvolutionHandler[%s]: saturation halt — "
@@ -324,6 +356,7 @@ class EvolutionHandler:
         git_head_after = self._get_git_head()
         if git_head_before and git_head_after and git_head_before == git_head_after:
             self._empty_cycles += 1
+            self._save_saturation_state()
             logger.debug(
                 "EvolutionHandler[%s]: empty cycle #%d (HEAD=%s)",
                 self.name, self._empty_cycles, git_head_after[:8],
@@ -335,6 +368,7 @@ class EvolutionHandler:
                     self.name,
                 )
             self._empty_cycles = 0
+            self._save_saturation_state()
 
         cycle_ts = cycle_time.isoformat()
         impact = [
