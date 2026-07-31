@@ -27,7 +27,20 @@ which gh && gh auth status 2>&1
 - `gh` 未安装 → 安装（`brew install gh` / `sudo apt install gh`），然后提示用户执行 `gh auth login`
 - `gh` 未认证 → **停止本循环**，在状态文件中记录"等待 gh 认证"，结束
 
-#### 0.2 角色确认
+{% if task.get('role', '')|lower in ('committer', 'contributor') %}
+
+#### 0.2 角色确认（来自 tasks.yml 配置）
+
+本任务角色已在 tasks.yml 中配置为：**{{ task.role }}**
+
+- **Committer**：可 review、merge、close
+- **Contributor**：可 fork + PR、测试、参与讨论 —— **禁止 gatekeeping**
+
+无需执行 git push --dry-run 检测。
+
+{% else %}
+
+#### 0.2 角色确认（自动检测）
 
 ```bash
 cd {{ source_dir }} && git remote -v 2>&1
@@ -37,6 +50,8 @@ cd {{ source_dir }} && git push origin HEAD --dry-run 2>&1 || true
 根据 push 结果判定角色：
 - **push 成功（无 403/权限错误）→ Committer**：可 review、merge、close
 - **push 失败（403/rejected）→ Contributor**：可 fork + PR、测试、参与讨论 —— **禁止 gatekeeping**
+
+{% endif %}
 
 身份写入 `{{ evolution_cwd }}/memory/identity-github-role.md`（首次创建，后续读取）。
 
