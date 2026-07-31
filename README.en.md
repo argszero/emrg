@@ -110,17 +110,22 @@ max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
+# vision: whether the model supports the OpenAI vision API (image_url). Keep false for
+# non-vision models (e.g. DeepSeek) — pasted images degrade to text placeholders to avoid API errors.
+vision = false
 
 # Multi-model support — use /model to switch between models
 [[llm.models]]
 name = "deepseek-v3"
 model = "deepseek-chat"
 context_window = 131072
+vision = false
 
 [[llm.models]]
-name = "deepseek-r1"
-model = "deepseek-reasoner"
-context_window = 65536
+name = "gpt-4o"
+model = "gpt-4o"
+context_window = 128000
+vision = true
 ```
 
 ```bash
@@ -146,6 +151,11 @@ Type `/help` to see all commands, or just start talking — EMRG reads files, ru
 | `/model [name]` | Switch LLM model — no args for interactive picker |
 | `/rant <feedback> [@<project>]` | Complain, suggest, praise — evolution listens; `@project` targets a specific project |
 | `/help` | Show keyboard shortcuts and command help |
+| `/image` | Insert clipboard image into the input field (multiple supported, one per Enter) |
+| `/delete [id]` | Delete a session — no args for interactive picker |
+| `/rewind` | Rewind conversation — pick a history point and truncate after it |
+| `/trigger` | Trigger an evolution task — interactive picker (↑↓/j/k) |
+| `/skills` | List loaded skill modules |
 | `/version` | Show EMRG version and instance info |
 | `Esc` | Interrupt a running response mid-stream |
 | `Ctrl+C` / `exit` | Quit |
@@ -222,7 +232,7 @@ EMRG doesn't just keep up — it catches up on its own.
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # install deps
-uv run pytest tests/ -v   # run tests (currently 389 items)
+uv run pytest tests/ -v   # run tests (currently 428 items)
 uv run python -m emrg     # launch
 ```
 

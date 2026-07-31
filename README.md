@@ -110,17 +110,22 @@ max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
+# vision: 模型是否支持 OpenAI vision API（image_url）。不支持的模型（如 DeepSeek）保持 false，
+# 粘贴的图片会降级为文本占位符，避免 API 报错。
+vision = false
 
 # 多模型支持 — 使用 /model 指令在模型间切换
 [[llm.models]]
 name = "deepseek-v3"
 model = "deepseek-chat"
 context_window = 131072
+vision = false
 
 [[llm.models]]
-name = "deepseek-r1"
-model = "deepseek-reasoner"
-context_window = 65536
+name = "gpt-4o"
+model = "gpt-4o"
+context_window = 128000
+vision = true
 ```
 
 ```bash
@@ -146,6 +151,11 @@ emrg
 | `/model [name]` | 切换 LLM 模型——不带参数进入交互式选择器 |
 | `/rant <反馈> [@<project>]` | 吐槽、建议、夸奖——演化系统会听，`@project` 定向到特定项目 |
 | `/help` | 查看所有键盘快捷键和命令帮助 |
+| `/image` | 从剪贴板插入图片到输入框（支持多张，逐个 Enter 插入） |
+| `/delete [id]` | 删除会话——不带参数进入交互式选择器 |
+| `/rewind` | 回退对话——选择历史消息点，截断后续内容 |
+| `/trigger` | 触发演化任务——交互式选择器（↑↓/j/k） |
+| `/skills` | 列出已加载的技能模块 |
 | `/version` | 显示 EMRG 版本和实例信息 |
 | `Esc` | 中断正在运行的响应 |
 | `Ctrl+C` / `exit` | 退出 |
@@ -183,7 +193,7 @@ EMRG 不只是一个工具——它是一个**会听吐槽、会自我改进**�
 ```
 ┌─────────────┐     Unix Socket IPC     ┌──────────────┐
 │   emrg TUI  │ ◄──────────────────────► │   emrgd      │
-│  (客户端)   │   JSON 换行分隔           │  (守护进程)  │
+│  (客户端)   │   长度前缀分帧 (4-byte)    │  (守护进程)  │
 │             │                          │              │
 │  • 聊天     │                          │  • LLM 循环  │
 │  • Markdown │                          │  • 工具执行  │
@@ -224,7 +234,7 @@ EMRG 不只是追赶——它自己追上来。
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # 安装依赖
-uv run pytest tests/ -v   # 跑测试（当前 389 项）
+uv run pytest tests/ -v   # 跑测试（当前 428 项）
 uv run python -m emrg     # 启动
 ```
 
