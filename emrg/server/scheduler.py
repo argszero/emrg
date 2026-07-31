@@ -40,6 +40,7 @@ TASK_TEMPLATES: dict[str, str] = {
     "evolution": "evolution_prompt.md",
     "paper": "paper_prompt.md",
     "open-source": "open_source_prompt.md",
+    "promote": "promote_prompt.md",
 }
 
 
@@ -507,6 +508,7 @@ class TaskScheduler:
         "evolution": EvolutionHandler,
         "paper": EvolutionHandler,  # same handler, different template
         "open-source": EvolutionHandler,  # same handler, different template
+        "promote": EvolutionHandler,  # same handler, different template
     }
 
     def __init__(self, identity: InstanceIdentity) -> None:
