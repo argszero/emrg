@@ -1020,7 +1020,7 @@ async def interactive(init_auto_evolve: bool = False):
             has_image, label = _detect_clipboard_image()
             if has_image:
                 images_dir = Path(cwd) / ".emrg" / "sessions" / session_id / "images"
-                images_dir.mkdir(exist_ok=True)
+                images_dir.mkdir(parents=True, exist_ok=True)
                 counter = len(_pending_images) + 1
                 tmp_path = images_dir / f"_clipboard_tmp_{counter}.png"
                 if _extract_clipboard_image(str(tmp_path)):

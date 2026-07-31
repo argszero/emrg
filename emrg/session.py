@@ -60,7 +60,7 @@ class Session:
 
         # Initialize images subdirectory
         self.images_dir = self._dir / "images"
-        self.images_dir.mkdir(exist_ok=True)
+        self.images_dir.mkdir(parents=True, exist_ok=True)
 
         self._meta_path = self._dir / "meta.json"
         self._history_path = self._dir / "history.jsonl"
