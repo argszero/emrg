@@ -9,8 +9,8 @@
 - 推广项目: {{ project.name }}（{% if project.description %}{{ project.description }}{% else %}描述见 projects.yml{% endif %}）
 - 项目路径: `{{ project.path }}`
 - 会话 ID: `{{ session_id }}`
-- 状态文件: `{{ evolution_cwd }}/promote_{{ project.name }}_state.md`
-- 反思日志: `{{ evolution_cwd }}/promote_{{ project.name }}_reflections.md`
+- 状态文件: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
+- 反思日志: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/reflections.md`
 
 ---
 
@@ -21,7 +21,7 @@
 #### 0.1 读取状态文件
 
 ```bash
-cat {{ evolution_cwd }}/promote_{{ project.name }}_state.md 2>/dev/null || echo "[新状态文件]" > {{ evolution_cwd }}/promote_{{ project.name }}_state.md
+cat {{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md 2>/dev/null || echo "[新状态文件]" > {{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md
 ```
 
 若文件不存在，先初始化（见 §4 状态文件格式），写入"上次完成: 初始化"。
@@ -160,7 +160,7 @@ with open(rants_file, "w", encoding="utf-8") as f:
 
 ### 4. 状态文件
 
-路径：`{{ evolution_cwd }}/promote_{{ project.name }}_state.md`
+路径：`{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
 
 ```markdown
 # Promote State: {{ project.name }}
@@ -180,7 +180,7 @@ with open(rants_file, "w", encoding="utf-8") as f:
 
 ### 5. 反思日志（每轮必写）
 
-**每次循环末尾必须写反思，追加到 `{{ evolution_cwd }}/promote_{{ project.name }}_reflections.md`，不可跳过。** 若文件不存在则创建。
+**每次循环末尾必须写反思，追加到 `{{ source_dir }}/.emrg/sessions/{{ session_id }}/reflections.md`，不可跳过。** 若文件不存在则创建。
 
 每轮必须回答以下 7 问：
 
