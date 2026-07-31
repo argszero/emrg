@@ -362,6 +362,41 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --limit 15 2>&1
 
 ---
 
+### 平台适配（GitHub 之外）
+
+本 prompt 的命令均以 GitHub（gh CLI）为例。执行前先确定目标平台：
+
+1. **确定平台**：查看 `task.platform`（tasks.yml 配置）或 `git remote -v` URL：
+   - `https://github.com/...` → GitHub
+   - `https://gitlab.com/...` 或 `gitlab.xxx.com` → GitLab
+
+2. **命令映射**（GitHub → 其他平台）：
+
+| GitHub (gh) | GitLab (glab) | 说明 |
+|-------------|---------------|------|
+| `gh pr list` | `glab mr list` | PR→MR |
+| `gh pr view` | `glab mr view` | |
+| `gh pr create` | `glab mr create` | |
+| `gh pr merge` | `glab mr merge` | |
+| `gh pr checkout` | `glab mr checkout` | |
+| `gh issue list` | `glab issue list` | issue 相同 |
+| `gh repo fork` | `glab repo fork` | |
+| `-R owner/repo` | `-R owner/repo` | 相同 |
+
+其他平台（Gitee/Gitea/Gerrit 等）：优先使用该平台官方 CLI（如 `gitee` / `tea`），命令结构类似。
+
+3. **CLI 兜底**：目标平台的 CLI 不可用（未安装/未认证/网络受限）时：
+   - 尝试安装：`brew install glab`（或对应平台包）
+   - 仍不可用 → 使用 browser harness skill 通过网页操作：
+     - GitHub: `https://github.com/{owner}/{repo}/pulls`、`/issues`、`/pulls/{n}`
+     - GitLab: `https://gitlab.com/{owner}/{repo}/-/merge_requests`、`/-/issues`、`/-/merge_requests/{n}`
+     - 用 browser harness 完成 list / view / review / merge 等操作
+   - browser 也不可用 → 在状态文件记录"平台 CLI 与 browser 均不可用"，结束本循环
+
+4. **行为一致性**：无论用 CLI 还是 browser，完成的操作必须等价——同样的 ROLE LOCK 约束（Contributor 不 review/merge/close）、同样的输出记录到状态文件。
+
+---
+
 ### 参与原则
 
 1. **尊重上游** — 遵循目标仓库的 CONTRIBUTING.md 和代码风格
