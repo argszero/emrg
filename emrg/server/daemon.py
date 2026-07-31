@@ -710,7 +710,6 @@ class EmrgServer:
 
             entry = {
                 "timestamp": msg.get("timestamp", datetime.now().isoformat()),
-                "message": rant_message,
                 "status": "pending",
                 "progress": None,
             }
@@ -718,6 +717,8 @@ class EmrgServer:
             project = msg.get("project", "").strip()
             if project:
                 entry["project"] = project
+            # message last, so status fields stay visible when scanning the file
+            entry["message"] = rant_message
 
             self._rants_log.parent.mkdir(parents=True, exist_ok=True)
 
