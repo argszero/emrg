@@ -902,13 +902,18 @@ class EmrgServer:
         return Session.create_with_id(session_id, cwd)
 
     @staticmethod
-    def _build_user_content(text: str, images: list[dict] | None) -> list[dict] | str:
+    def _build_user_content(text: str, images: list[dict] | None, vision: bool = False) -> list[dict] | str:
         """Build OpenAI vision content array when images are present.
         
         Returns plain str if no images, list[dict] for vision format.
+        If vision=False, images are degraded to text placeholders.
         """
         if not images:
             return text
+        if not vision:
+            # Model doesn't support vision: degrade images to text placeholders
+            labels = [img.get("label", "?") for img in images]
+            return f"[用户粘贴了 {len(images)} 张图片: {', '.join(labels)}。当前模型不支持图片理解，请回复用户告知此限制。]\n\n{text}"
         import base64
         content: list[dict] = []
         last_pos = 0
@@ -946,7 +951,7 @@ class EmrgServer:
         """Non-streaming single-turn chat (no tool loop)."""
         system_prompt = self._build_system_prompt(session)
         history_messages = session.get_messages_for_llm()
-        user_content = self._build_user_content(req.prompt, req.images)
+        user_content = self._build_user_content(req.prompt, req.images, self.llm.config.vision)
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
             *history_messages,
@@ -1030,7 +1035,7 @@ class EmrgServer:
             user_record["images"] = req.images
         session.append_message(user_record)
 
-        user_content = self._build_user_content(req.prompt, req.images)
+        user_content = self._build_user_content(req.prompt, req.images, self.llm.config.vision)
         messages: list[dict] = [
             {"role": "system", "content": system_prompt},
             *history_messages,
@@ -1798,16 +1803,21 @@ class EmrgServer:
         # Find the matching [[llm.models]] entry (if any) to resolve
         # context_window and optional model name override.
         new_ctx: int | None = None
+        new_vision: bool | None = None
         api_model: str = model_name  # default: use display name as API model
         for m in (self.llm.config.models or []):
             if m.get("name") == model_name:
                 new_ctx = m.get("context_window")
                 api_model = m.get("model", model_name)
+                if "vision" in m:
+                    new_vision = m["vision"]
                 break
 
         self.llm.config.model = api_model
         if new_ctx is not None:
             self.llm.config.context_window = new_ctx
+        if new_vision is not None:
+            self.llm.config.vision = new_vision
 
         logger.info(
             "model switched: %s → %s (api=%s, context_window: %d → %d)",
