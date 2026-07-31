@@ -29,6 +29,9 @@ class LlmConfig:
     context_window: int = 131072
     auto_compact_threshold: float = 0.0
     models: list[dict] = field(default_factory=list)  # [[llm.models]] for /model switching
+    # vision: whether the model supports OpenAI vision API (image_url content type).
+    # Default false — DeepSeek and most models don't support it.
+    vision: bool = False
     # stream_options: None means don't send stream_options at all (for APIs like Kimi).
     # Default is {"include_usage": False} for OpenAI/DeepSeek compatibility.
     stream_options: Optional[dict] = field(default_factory=lambda: {"include_usage": False})
@@ -80,6 +83,7 @@ def load_config() -> EmrgConfig:
         context_window=llm_data.get("context_window", 131072),
         auto_compact_threshold=llm_data.get("auto_compact_threshold", 0.0),
         models=llm_data.get("models", []),
+        vision=llm_data.get("vision", False),
         stream_options=stream_opts,
     )
 
@@ -107,6 +111,8 @@ max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
+# vision: set to true if model supports OpenAI vision API (image_url content type)
+vision = false
 
 # Additional models for /model switching (optional — add or remove as needed)
 # model: API model name (optional — defaults to name if not set)
@@ -114,11 +120,13 @@ auto_compact_threshold = 0.0
 name = "deepseek-v3"
 model = "deepseek-chat"
 context_window = 131072
+vision = false
 
 [[llm.models]]
 name = "deepseek-r1"
 model = "deepseek-reasoner"
 context_window = 65536
+vision = false
 """, encoding="utf-8")
     print(f"Default config created at {cfg_path}", file=sys.stderr)
     print("Edit it to set your API key and model.", file=sys.stderr)
