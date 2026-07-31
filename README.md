@@ -226,6 +226,19 @@ EMRG 不只是一个工具——它是一个**会听吐槽、会自我改进**�
 
 EMRG 不只是追赶——它自己追上来。
 
+### 社区需求的差异化回应
+
+HN 社区（[讨论帖](https://news.ycombinator.com/item?id=49119274)）对 agent UI 提出的高频需求，EMRG 已原生覆盖：
+
+| 社区需求 | EMRG 的答案 |
+|---|---|
+| **可检查产物 (inspectable artifacts)** | 一切皆文件：状态文件（`open_source_*_state.md`、`promote_*_state.md`）、记忆索引（YAML frontmatter + Markdown）、演化日志（`evolution-*.json`）——`/memory` 随时可查 |
+| **git 文件夹即状态** | 项目跟踪基于 git：projects.yml 记录仓库路径，演化饱和检测以 git HEAD 为准——状态与版本控制天然同步 |
+| **工具栏专属快捷键** | 终端即工具栏：`Ctrl+A/E/W/K/U` 编辑、`j`/`k` 导航、`ESC` 中断、`/` 命令补全——零鼠标操作 |
+| **会话/项目管理** | `/sessions` 会话浏览器、`/rename`、`/resume`、`/rewind`、项目作用域会话 + 项目自动跟踪 |
+
+**定位**：终端优先、TUI 驱动、会话记忆、`git 即状态`——EMRG 不需要浏览器插件或额外面板，一切在终端内可检查、可追溯。
+
 ---
 
 ## 🧪 开发
