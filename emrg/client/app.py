@@ -1558,6 +1558,43 @@ async def interactive(init_auto_evolve: bool = False):
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
+                # Handle /image command
+                if text.lower() == "/image":
+                    has_image, label = _detect_clipboard_image()
+                    if has_image:
+                        images_dir = Path(cwd) / ".emrg" / "sessions" / session_id / "images"
+                        images_dir.mkdir(parents=True, exist_ok=True)
+                        counter = len(_pending_images) + 1
+                        tmp_path = images_dir / f"_clipboard_tmp_{counter}.png"
+                        if _extract_clipboard_image(str(tmp_path)):
+                            import hashlib
+                            data = tmp_path.read_bytes()
+                            h = hashlib.blake2b(data, digest_size=4).hexdigest()
+                            safe_label = "".join(
+                                c if c.isalnum() or c in "._-" else "_" for c in (label or f"Image{counter}")
+                            )[:40].rstrip("._") or "image"
+                            filename = f"{safe_label}_{h}.png"
+                            final_path = images_dir / filename
+                            if not final_path.exists():
+                                tmp_path.rename(final_path)
+                            else:
+                                tmp_path.unlink()
+                            placeholder = f"[📷 {label or f'Image {counter}'}]"
+                            old_parts = list(inp.text)
+                            inp.text = inp.text[:inp.cursor] + placeholder + inp.text[inp.cursor:]
+                            inp.cursor += len(placeholder)
+                            _pending_images.append({
+                                "path": str(final_path),
+                                "label": placeholder,
+                                "position": inp.cursor - len(placeholder),
+                            })
+                            inp.dirty = True
+                            logger.info("/image: clipboard image saved: %s", filename)
+                    else:
+                        chat.add("system", "剪贴板中没有图片。请先复制图片到剪贴板（CMD+C 或截图）。")
+                    term.render()
+                    return True
+
                 # Handle /version command
                 if text.lower() == "/version":
                     import emrg
@@ -1596,6 +1633,7 @@ Commands
   /help               Show this help
   /skills             List loaded skills (user + project)
   /version            Show EMRG version and instance info
+  /image              Insert clipboard image into input field
   /compact            Compress conversation history
   /clear              Clear current session and start fresh
   /memory [session|project|<id>]  Browse memories
