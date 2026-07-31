@@ -1558,42 +1558,64 @@ async def interactive(init_auto_evolve: bool = False):
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
-                # Handle /image command
-                if text.lower() == "/image":
-                    has_image, label = _detect_clipboard_image()
-                    if has_image:
-                        images_dir = Path(cwd) / ".emrg" / "sessions" / session_id / "images"
-                        images_dir.mkdir(parents=True, exist_ok=True)
-                        counter = len(_pending_images) + 1
-                        tmp_path = images_dir / f"_clipboard_tmp_{counter}.png"
-                        if _extract_clipboard_image(str(tmp_path)):
-                            import hashlib
-                            data = tmp_path.read_bytes()
-                            h = hashlib.blake2b(data, digest_size=4).hexdigest()
-                            safe_label = "".join(
-                                c if c.isalnum() or c in "._-" else "_" for c in (label or f"Image{counter}")
-                            )[:40].rstrip("._") or "image"
-                            filename = f"{safe_label}_{h}.png"
-                            final_path = images_dir / filename
-                            if not final_path.exists():
-                                tmp_path.rename(final_path)
+                # Handle /image token — detect independent /image token anywhere in input
+                if "/image" in inp.text:
+                    def _is_image_token(s, i):
+                        """Check if /image at position i is an independent token."""
+                        before_ok = i == 0 or s[i-1].isspace()
+                        after_ok = i + 6 == len(s) or s[i+6].isspace()
+                        return before_ok and after_ok
+                    pos = inp.text.find("/image")
+                    while pos != -1:
+                        if _is_image_token(inp.text, pos):
+                            has_image, label = _detect_clipboard_image()
+                            if has_image:
+                                images_dir = Path(cwd) / ".emrg" / "sessions" / session_id / "images"
+                                images_dir.mkdir(parents=True, exist_ok=True)
+                                counter = len(_pending_images) + 1
+                                tmp_path = images_dir / f"_clipboard_tmp_{counter}.png"
+                                if _extract_clipboard_image(str(tmp_path)):
+                                    import hashlib
+                                    data = tmp_path.read_bytes()
+                                    h = hashlib.blake2b(data, digest_size=4).hexdigest()
+                                    safe_label = "".join(
+                                        c if c.isalnum() or c in "._-" else "_" for c in (label or f"Image{counter}")
+                                    )[:40].rstrip("._") or "image"
+                                    filename = f"{safe_label}_{h}.png"
+                                    final_path = images_dir / filename
+                                    if not final_path.exists():
+                                        tmp_path.rename(final_path)
+                                    else:
+                                        tmp_path.unlink()
+                                    placeholder = f"[📷 {label or f'Image {counter}'}]"
+                                    inp.text = inp.text[:pos] + placeholder + inp.text[pos+6:]
+                                    # Adjust cursor if it was after the replaced token
+                                    if inp.cursor > pos:
+                                        inp.cursor += len(placeholder) - 6
+                                    _pending_images.append({
+                                        "path": str(final_path),
+                                        "label": placeholder,
+                                        "position": pos,
+                                    })
+                                    inp.dirty = True
+                                    logger.info("/image token: clipboard image saved: %s at pos %d", filename, pos)
+                                else:
+                                    # Extraction failed — remove the token
+                                    inp.text = inp.text[:pos] + inp.text[pos+6:]
+                                    if inp.cursor > pos:
+                                        inp.cursor -= 6
+                                    inp.dirty = True
+                                    chat.add("system", "无法从剪贴板提取图片。")
                             else:
-                                tmp_path.unlink()
-                            placeholder = f"[📷 {label or f'Image {counter}'}]"
-                            old_parts = list(inp.text)
-                            inp.text = inp.text[:inp.cursor] + placeholder + inp.text[inp.cursor:]
-                            inp.cursor += len(placeholder)
-                            _pending_images.append({
-                                "path": str(final_path),
-                                "label": placeholder,
-                                "position": inp.cursor - len(placeholder),
-                            })
-                            inp.dirty = True
-                            logger.info("/image: clipboard image saved: %s", filename)
-                    else:
-                        chat.add("system", "剪贴板中没有图片。请先复制图片到剪贴板（CMD+C 或截图）。")
-                    term.render()
-                    return True
+                                # No image in clipboard — remove the token
+                                inp.text = inp.text[:pos] + inp.text[pos+6:]
+                                if inp.cursor > pos:
+                                    inp.cursor -= 6
+                                inp.dirty = True
+                                chat.add("system", "剪贴板中没有图片。请先复制图片到剪贴板（CMD+C 或截图）。")
+                            term.render()
+                            return True
+                        pos = inp.text.find("/image", pos + 1)
 
                 # Handle /version command
                 if text.lower() == "/version":
