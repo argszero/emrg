@@ -187,10 +187,19 @@ cd {{ source_dir }} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tai
 import json, os
 rants_file = os.path.expanduser("~/.emrg/rants.jsonl")
 rants = [json.loads(l) for l in open(rants_file) if l.strip()]
-for r in rants:
+for i, r in enumerate(rants):
     if r.get("status") == "pending" and "本轮已处理的 rant 的 timestamp":
         r["status"] = "acknowledged"
         r["completed"] = "<ISO timestamp>"
+        # 重建字段顺序：timestamp → project → status → progress → completed → message
+        rants[i] = {
+            "timestamp": r.get("timestamp"),
+            "project": r.get("project"),
+            "status": r.get("status"),
+            "progress": r.get("progress"),
+            "completed": r.get("completed"),
+            "message": r.get("message"),
+        }
 rants.sort(key=lambda r: r.get("timestamp", ""))
 with open(rants_file, "w") as f:
     for r in rants:
@@ -247,6 +256,7 @@ with open(rants_file, "w") as f:
 
 - Paper rant 不是 bug 修复清单，是方向指导。acknowledged 意为"反馈已纳入后续工作路线"，不等于"任务完成"
 - 标记 rant 时必须全量读入、按 timestamp 排序后写回 rants.jsonl，不可改变时间顺序
+- 每行 JSON 字段顺序必须为 `timestamp → project → status → progress → completed → message`（message 最后）
 - 必须用 `json.dumps(..., ensure_ascii=False)` 输出，禁止中文被转义为 `\uXXXX`
 - 只看 project 字段匹配当前任务 project 的 rant；未标 project 的一律不看
 - 不凭历史记忆判断 rant 状态——每轮用工具实际读取 rants.jsonl
