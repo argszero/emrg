@@ -574,6 +574,7 @@ _COMMAND_HELP: dict[str, str] = {
     "/trigger":  "List or manually trigger scheduled tasks [/trigger | /trigger <name>]",
     "/skills":   "List loaded skills (user + project)",
     "/version":  "Show EMRG version and instance info",
+    "/image":    "Insert clipboard image into input field",
     "/help":     "Show keyboard shortcuts and commands",
 }
 
