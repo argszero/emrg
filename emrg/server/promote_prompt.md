@@ -89,7 +89,7 @@ curl -s "https://hn.algolia.com/api/v1/search?query=<关键词>&tags=story"
 # 或 browser harness 访问
 ```
 
-- 关键词缺省从 project 描述推断；可用 `{{ task.config.keywords }}` 自定义
+- 关键词缺省从 project 描述推断；可用 `{{ task.keywords }}` 自定义（task 即 tasks.yml 中该任务的 config 字典）
 - 判断标准：话题与项目解决的问题**直接相关**、有真实讨论、该社区允许参与（读社区规则）
 
 #### 第 2 步 参与讨论（自然提及）
