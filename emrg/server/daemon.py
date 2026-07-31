@@ -708,15 +708,17 @@ class EmrgServer:
                 await self._send(writer, {"error": "rant requires a message"})
                 return
 
+            # Optional project targeting (multi-project support)
+            project = msg.get("project", "").strip()
+
+            # Field order: timestamp → project → status → progress → message
+            # (project right after timestamp per user feedback; message last)
             entry = {
                 "timestamp": msg.get("timestamp", datetime.now().isoformat()),
+                "project": project,
                 "status": "pending",
                 "progress": None,
             }
-            # Optional project targeting (multi-project support)
-            project = msg.get("project", "").strip()
-            if project:
-                entry["project"] = project
             # message last, so status fields stay visible when scanning the file
             entry["message"] = rant_message
 

@@ -7,6 +7,7 @@ evolution infrastructure stays operational.
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -459,3 +460,50 @@ def test_truncate_record_preserves_other_fields():
     result = server._truncate_record(record, max_tokens=100)
     assert result["role"] == "assistant"
     assert result["tool_calls"] == []
+
+
+# ── rant field order (user feedback 2026-07-31T20:46) ────────────
+
+
+class _FakeWriter:
+    """Minimal StreamWriter stand-in capturing _send payloads."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self._frames: list[bytes] = []
+
+    def write(self, data: bytes) -> None:
+        self._frames.append(data)
+
+    async def drain(self) -> None:
+        pass
+
+    async def _send(self, data: dict) -> bool:
+        self.sent.append(data)
+        return True
+
+
+def test_rant_field_order(tmp_path, monkeypatch):
+    """Rant entries are written with field order:
+    timestamp → project → status → progress → message (message last)."""
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+
+    import asyncio
+    asyncio.run(server._process_message({
+        "type": "rant",
+        "message": "test rant message",
+        "project": "emrg",
+        "timestamp": "2026-07-31T20:46:59.734987",
+    }, writer))  # type: ignore[arg-type]
+
+    lines = (tmp_path / "rants.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert list(entry.keys()) == [
+        "timestamp", "project", "status", "progress", "message",
+    ]
+    assert entry["project"] == "emrg"
+    assert entry["status"] == "pending"
+    assert entry["message"] == "test rant message"
