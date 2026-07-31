@@ -191,7 +191,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 - **标记完成**：status 改为 `"completed"`，追加 `"completed": "<ISO timestamp>"`
 - **定期清理**：保留所有 pending/in_progress 的 rant；completed 只保留最近 10 条
 - **⚡ 排序约束**：每次重写必须按 `timestamp` 升序排列（最旧在上、最新在下）。不可按分类（已处理/未处理）分组，不可改变时间顺序。读入所有条目 → 修改（标记 completed / 删除旧条目）→ `sorted(..., key=lambda r: r.get("timestamp", ""))` → 写入
-- **⚡ 字段顺序约束**：每行 JSON 的字段顺序必须为 `timestamp → status → progress → project → completed → message`（**message 最后**）。构建 dict 时按此顺序，`json.dumps` 输出即保持此顺序。message 内容较长，放最后便于人工查看状态字段。
+- **⚡ 字段顺序约束**：每行 JSON 的字段顺序必须为 `timestamp → project → status → progress → completed → message`（**message 最后**）。构建 dict 时按此顺序，`json.dumps` 输出即保持此顺序。message 内容较长，放最后便于人工查看状态字段。
 - **写入时务必使用 `json.dumps(..., ensure_ascii=False)`**
 
 
