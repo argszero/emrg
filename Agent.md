@@ -61,6 +61,19 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
 - **Memory system** — Project and session memory with YAML frontmatter, indexing, merge/split
 - **Skills** — Progressive disclosure via `.emrg/skills/` directory
 
+### Differentiation (community-driven)
+
+Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
+
+| Community need | EMRG's answer |
+|---|---|
+| **Inspectable artifacts** | Everything is a file: state files (`open_source_*_state.md`, `promote_*_state.md`), memory index (YAML frontmatter + Markdown), evolution logs (`evolution-*.json`) — browse via `/memory` |
+| **Git folder as state** | Project tracking is git-based: projects.yml records repo paths, saturation detection keys off git HEAD — state stays in sync with version control |
+| **Toolbar-specific shortcuts** | The terminal is the toolbar: `Ctrl+A/E/W/K/U` editing, `j`/`k` navigation, `ESC` interrupt, `/` command completion — zero mouse |
+| **Session/project management** | `/sessions` browser, `/rename`, `/resume`, `/rewind`, project-scoped sessions + auto project tracking |
+
+**Positioning**: terminal-first, TUI-driven, session memory, git-as-state — no browser plugin or extra panel needed; everything inspectable and traceable in the terminal.
+
 ## Test Commands
 
 ```bash
