@@ -60,6 +60,33 @@ def _resolve_project_path(name: str) -> str | None:
     return None
 
 
+def _load_project_config(name: str, source_dir: str) -> dict:
+    """Return the full projects.yml entry matching the current project.
+
+    Matches by ``name`` first, then by ``path`` against ``source_dir``.
+    Returns an empty dict when no match is found. Custom fields added by
+    the user in projects.yml are preserved, so templates can reference
+    them via ``{{ project.<field> }}`` without code changes.
+    """
+    projects_file = config_dir() / "projects.yml"
+    if not projects_file.exists():
+        return {}
+    try:
+        data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError):
+        return {}
+    if not isinstance(data, list):
+        return {}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        if name and entry.get("name") == name:
+            return entry
+        if source_dir and entry.get("path") == source_dir:
+            return entry
+    return {}
+
+
 # ── EvolutionHandler ────────────────────────────────────────────
 
 
@@ -113,6 +140,7 @@ class EvolutionHandler:
         # Resolve project path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
         project_name = config.get("project", "")
+        self._project_name = project_name
         path = _resolve_project_path(project_name) if project_name else config.get("path", "")
         self.project_path = path or name  # default to name for emrg itself
 
@@ -388,28 +416,44 @@ class EvolutionHandler:
         self.evolutions.append(log)
 
     def _build_evolution_prompt(self) -> str:
-        """Build evolution prompt from template."""
-        template = self._template_path.read_text(encoding="utf-8")
+        """Build evolution prompt from a Jinja2 template.
+
+        Uses ``jinja2.Undefined`` so any ``{{ var }}`` not present in the
+        context renders as an empty string instead of raising (the old
+        ``str.format()`` crashed with KeyError on missing placeholders).
+        Templates also receive ``task`` (the tasks.yml config dict) and
+        ``project`` (the matching projects.yml entry) so users can reference
+        custom fields via ``{{ task.x }}`` / ``{{ project.x }}`` without
+        code changes.
+        """
+        import jinja2
+
         if self._start_time is not None:
             uptime_seconds = int(time.time() - self._start_time)
         else:
             uptime_seconds = 0
         uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
 
-        return template.format(
-            instance_id=self.identity.instance_id,
-            host_name=self.identity.host_name,
-            uptime=uptime,
-            evolution_count=len(self.evolutions),
-            repo_url=self._repo_url,
-            evolution_cwd=str(EVOLUTION_CWD),
-            local_source=self._source_dir,
-            owner=self._owner,
-            repo=self._repo,
-            source_dir=self._source_dir,
-            session_id=self._session_id,
-            timestamp=datetime.now().strftime("%Y%m%d-%H%M%S"),
-        )
+        context = {
+            "instance_id": self.identity.instance_id,
+            "host_name": self.identity.host_name,
+            "uptime": uptime,
+            "evolution_count": len(self.evolutions),
+            "repo_url": self._repo_url,
+            "evolution_cwd": str(EVOLUTION_CWD),
+            "local_source": str(self._source_dir),
+            "owner": self._owner,
+            "repo": self._repo,
+            "source_dir": str(self._source_dir),
+            "session_id": self._session_id,
+            "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S"),
+            "task": self._config,
+            "project": _load_project_config(self._project_name, str(self._source_dir)),
+        }
+
+        env = jinja2.Environment(undefined=jinja2.Undefined)
+        template = env.from_string(self._template_path.read_text(encoding="utf-8"))
+        return template.render(**context)
 
     async def _write_evolution_log(self, entry: EvolutionLog) -> None:
         filename = f"evolution-{entry.timestamp.replace(':', '-')}.json"
