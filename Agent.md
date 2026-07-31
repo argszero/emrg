@@ -39,8 +39,10 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
 
 - **TUI Client** — Rich terminal UI with Markdown rendering, syntax highlighting, diff display
   - Command autocomplete (type `/` to list commands with filtering)
-  - Slash commands: `/help`, `/clear`, `/resume`, `/rename`, `/rewind`, `/trigger`, `/memory`, `/sessions`, `/rant`, `/model`, `/skills`, `/version`
+  - Slash commands: `/help`, `/clear`, `/compact`, `/resume`, `/rename`, `/rewind`, `/trigger`, `/memory`, `/sessions`, `/rant`, `/model`, `/skills`, `/image`, `/delete`, `/version`
   - `/model <name>` to switch LLM models at runtime (configured via `[[llm.models]]` in config.toml)
+  - `/image` to paste a clipboard image into the input (token-based; supports multiple images, one per Enter)
+  - `vision` per-model config flag gates OpenAI vision API; non-vision models degrade images to text placeholders
   - Interactive session picker (arrow keys or j/k vim-style navigation)
   - Interactive model picker (arrow keys to select from configured models)
   - Elapsed timer during LLM responses
@@ -77,16 +79,21 @@ max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
+# vision: whether the model supports OpenAI vision API (image_url). Keep false for non-vision models.
+vision = false
 
 # Additional models for /model switching (optional — add or remove as needed)
 # model: API model name (optional — defaults to name if not set)
+# vision: per-model vision support flag (optional — defaults to false)
 [[llm.models]]
 name = "deepseek-v3"
 model = "deepseek-chat"
 context_window = 131072
+vision = false
 
 [[llm.models]]
-name = "deepseek-r1"
-model = "deepseek-reasoner"
-context_window = 65536
+name = "gpt-4o"
+model = "gpt-4o"
+context_window = 128000
+vision = true
 ```
