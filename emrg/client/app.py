@@ -1836,6 +1836,9 @@ Streaming
                 status.update(center=_last_center)
                 term.render()
                 req = TaskRequest(session_id=session_id, cwd=cwd, prompt=text, stream=True)
+                # Drop images whose placeholder was deleted from the input text
+                if _pending_images:
+                    _pending_images[:] = [img for img in _pending_images if img.get("label") in inp.text]
                 if _pending_images:
                     req.images = _pending_images
                     _pending_images = []
