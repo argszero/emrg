@@ -184,6 +184,8 @@ EMRG 不只是一个工具——它是一个**会听吐槽、会自我改进**�
 
 **真实案例**：有人 rant "TUI 需要像 Codex 那样的 `/` 自动补全"。下一个演化周期，EMRG 自己实现了——完整的前缀过滤和方向键导航。合并，部署，搞定。**你对它吐槽什么，它就改进什么。**
 
+**演化环境健壮性**：演化循环在非交互环境运行，无法执行交互式 `gh auth login`。若 `gh` 未认证，循环会自动从 git 凭据存储（osxkeychain / credential helper）提取 token 作为 `GH_TOKEN` 使用（不落盘、不打印明文）；PR 评论/LGTM 计数查询自动走 REST API（GraphQL 需额外 `read:org` scope）。宿主只需配好 git 凭据，演化即可全自动运行。
+
 > 💡 详见 [MANIFESTO.md](MANIFESTO.md) —— 这是 EMRG 的设计宪章，阐述了 AI 时代自主进化的核心理念。
 
 ---
