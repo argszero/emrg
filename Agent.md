@@ -57,6 +57,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - 60fps render throttling
 - **Auto project tracking** — Automatically detects and records working directories; project-scoped sessions
 - **Rant-driven evolution** — User feedback via `/rant` drives automatic self-improvement cycles
+- **Headless GitHub auth** — Non-interactive evolution auto-extracts `GH_TOKEN` from git credential store (osxkeychain / credential helper); PR comment/LGTM queries fall back to REST API (GraphQL needs `read:org` scope)
 - **Config hot-reload** — Detects `~/.emrg/config.toml` changes and auto-restarts server
 - **Memory system** — Project and session memory with YAML frontmatter, indexing, merge/split
 - **Skills** — Progressive disclosure via `.emrg/skills/` directory
