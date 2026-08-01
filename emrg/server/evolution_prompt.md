@@ -86,6 +86,9 @@ cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
   - 有问题 → `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "❌ 需要修改：<具体问题>"`
 - **审查 PR 就是演化工作** — 即使代码无需改动，review 和 approve 本身也是有价值的产出。
 - 检查合并条件：PR 的 comment 历史中是否已有连续 3 个不同 cycle 的 ✅ 且中间无 ❌？
+  - ⚠️ 查询评论用 REST API（GraphQL 需 `read:org` scope，token 常缺）：
+    `gh api repos/{{ owner }}/{{ repo }}/issues/<N>/comments --jq '.[] | "\(.user.login): \(.body)"'`
+    和 `gh api repos/{{ owner }}/{{ repo }}/pulls/<N>/reviews --jq '.[] | "\(.user.login) [\(.state)]: \(.body)"'`
   - 已有 2 个 ✅，当前 cycle 就是第 3 个 → approve 后执行 merge
   - 满足 → `gh pr merge <N> -R {{ owner }}/{{ repo }} --squash`
   - 若合并冲突 → `gh pr checkout <N> && git fetch origin master && git merge origin/master`，解决冲突后 push，再 merge
@@ -110,6 +113,9 @@ gh pr list -R {{ owner }}/{{ repo }} --author "@me" --limit 10
 - **已合并** → 确认合并后的 master 是否正常，有无引入问题
 - **已关闭（未合并）** → 理解关闭原因，记录教训
 - **仍 open → 查看 review 意见**：`gh pr view <N> -R {{ owner }}/{{ repo }} --comments`
+  - ⚠️ `gh pr view --comments` 使用 GraphQL，token 缺 `read:org` scope 时会失败（报 "token has not been granted the required scopes"）。失败时改用 REST API 兜底：
+    - 评论：`gh api repos/{{ owner }}/{{ repo }}/issues/<N>/comments --jq '.[] | "\(.user.login) @ \(.created_at): \(.body)"'`
+    - Reviews：`gh api repos/{{ owner }}/{{ repo }}/pulls/<N>/reviews --jq '.[] | "\(.user.login) [\(.state)]: \(.body)"'`
   - 有 reviewer 提出修改意见？→ **根据意见修改代码并 push**，或回复说明原因
   - 有 reviewer 给了 ✅？→ 记录数量，判断还需几次 LGTM
   - **如果你是该仓库的 Committer，当前已有 <3 个不同 cycle 的 ✅：review 代码，没有问题就 `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "✅ LGTM — cycle"`。不同 cycle 的 approve 互相独立。**
