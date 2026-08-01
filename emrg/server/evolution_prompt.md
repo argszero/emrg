@@ -22,7 +22,19 @@
 ```bash
 which gh 2>/dev/null || brew install gh       # macOS
 which gh 2>/dev/null || sudo apt install gh    # Linux
-gh auth status 2>&1  # 未认证则提示用户执行 gh auth login
+gh auth status 2>&1 || {
+  # gh 未认证时，从 git 凭据存储提取 token（osxkeychain / credential helper）。
+  # 演化周期是非交互环境，无法执行 gh auth login；宿主 git 凭据通常含有效
+  # GitHub token，可直接复用为 GH_TOKEN（不落盘、不打印明文）。
+  TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2-)
+  if [ -n "$TOKEN" ]; then
+    export GH_TOKEN="$TOKEN"
+    echo "gh 未认证 — 已从 git 凭据提取 token (GH_TOKEN)"
+    gh auth status 2>&1
+  else
+    echo "gh 未认证且无可用凭据 — 提示宿主执行 gh auth login"
+  fi
+}
 ```
 
 **确认 GitHub 身份**（首次执行，之后从 `identity-github-role.md` 读取）：
