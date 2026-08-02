@@ -15,16 +15,19 @@ import json
 import logging
 import os
 import platform
+import secrets
 import signal
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import yaml
+from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
 from emrg.config import LlmConfig, config_dir
-from emrg.connect import start_server, cleanup_server
-from emrg.server.atomic import atomic_write_yaml
+from emrg.connect import cleanup_server
+from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.llm import LlmClient
 from emrg.server.git_utils import _detect_git_remote
 from emrg.server.tool_types import ToolResult
@@ -44,7 +47,6 @@ from emrg.tools.write_tool import WriteTool
 from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
-from emrg.framing import read_frame, write_frame
 from emrg.skills.loader import load_skills
 from emrg.server.scheduler import TaskScheduler
 
@@ -133,12 +135,12 @@ class EmrgServer:
                 old_pid_s = pid_file.read_text(encoding="utf-8").strip()
                 old_pid = int(old_pid_s)
                 os.kill(old_pid, 0)
-                # Old process is alive — but is its socket still there?
-                sock_path = runtime_dir / "emrgd.sock"
-                if not sock_path.exists():
-                    # Socket gone → zombie daemon, force-kill and take over
+                # Old process is alive — but is its port file still there?
+                port_path = runtime_dir / "emrgd.port"
+                if not port_path.exists():
+                    # Port file gone → zombie daemon, force-kill and take over
                     logger.warning(
-                        "old daemon (pid=%d) alive but socket gone — force-killing", old_pid
+                        "old daemon (pid=%d) alive but port file gone — force-killing", old_pid
                     )
                     os.kill(old_pid, signal.SIGKILL)
                     try:
@@ -167,9 +169,22 @@ class EmrgServer:
                 os.close(fd)
                 logger.debug("pid file written: %s (pid=%d)", pid_file, os.getpid())
 
-        self._server = await start_server(self._handle_client)
+        self._server = await serve(
+            self._handle_client,
+            host="127.0.0.1",
+            port=0,
+            max_size=16 * 1024 * 1024,
+        )
+        port = self._server.sockets[0].getsockname()[1]
+        self._auth_token = secrets.token_urlsafe(32)
+        atomic_write_bytes(
+            f"{port}\n{self._auth_token}",
+            config_dir() / "emrgd.port",
+            mode=0o600,
+        )
         logger.info(
-            "emrgd listening | identity=%s",
+            "emrgd listening on 127.0.0.1:%d | identity=%s",
+            port,
             self.identity.instance_id[:8],
         )
 
@@ -193,48 +208,61 @@ class EmrgServer:
             except OSError:
                 pass
 
-    async def _handle_client(
-        self,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Handle a single client connection."""
+    async def _handle_client(self, ws) -> None:
+        """Handle a single WebSocket client connection.
+
+        First frame must be an auth message (``{"type": "auth", "token": ...}``);
+        the connection is rejected with a 10s timeout otherwise. On success an
+        ``auth_ok`` confirmation frame is sent before the normal protocol loop.
+        """
         last_session_id: str | None = None
         last_cwd: str | None = None
         _tool_task: asyncio.Task | None = None
         _cancel_event: asyncio.Event | None = None
         try:
+            # ── First-frame auth (local & remote unified) ──
+            # Timeout is mandatory: a client that connects and never sends auth
+            # would otherwise hang this coroutine forever (socket+coroutine leak).
+            try:
+                auth_msg = await asyncio.wait_for(ws.recv(), timeout=10)
+                auth = json.loads(auth_msg)
+            except (ConnectionClosed, json.JSONDecodeError, asyncio.TimeoutError):
+                await ws.close()
+                return
+            # auth must be a dict: json.loads can return list/str, .get() would raise
+            if not isinstance(auth, dict) or auth.get("type") != "auth" or not secrets.compare_digest(
+                str(auth.get("token", "")), self._auth_token
+            ):
+                logger.warning("auth failed — rejecting connection")
+                await ws.close()
+                return
+            # Confirm auth so the client can distinguish auth failure from a
+            # transient disconnect (prevents infinite reconnect loops).
+            await self._send(ws, {"type": "auth_ok"})
+
             while True:
                 try:
-                    frame = await read_frame(reader)
-                except ValueError as e:
-                    logger.error(
-                        "client frame read error: %s", e, exc_info=True,
-                    )
+                    msg = await ws.recv()
+                except ConnectionClosed:          # disconnect: exception, not None
                     break
-                if frame is None:
-                    break
-
-                text = frame.decode().strip()
-                if not text:
-                    continue
-
                 try:
-                    msg = json.loads(text)
+                    data = json.loads(msg)
+                    if not isinstance(data, dict):
+                        await self._send(ws, {"error": "message must be a JSON object"})
+                        continue
                 except json.JSONDecodeError as e:
-                    err = json.dumps({"error": f"invalid json: {e}"}, ensure_ascii=False).encode()
-                    await write_frame(writer, err)
+                    await self._send(ws, {"error": f"invalid json: {e}"})
                     continue
 
                 # Track session for disconnect-time consolidation
-                if msg.get("session_id"):
-                    last_session_id = msg["session_id"]
-                if msg.get("cwd"):
-                    last_cwd = msg["cwd"]
+                if data.get("session_id"):
+                    last_session_id = data["session_id"]
+                if data.get("cwd"):
+                    last_cwd = data["cwd"]
                     self._touch_project(last_cwd)
 
                 # ── Cancel: interrupt running tool loop ──────────
-                if msg.get("type") == "cancel":
+                if data.get("type") == "cancel":
                     if _cancel_event:
                         _cancel_event.set()
                     if _tool_task and not _tool_task.done():
@@ -243,35 +271,35 @@ class EmrgServer:
                             await _tool_task
                         except asyncio.CancelledError:
                             pass
-                    await self._send(writer, {
+                    await self._send(ws, {
                         "type": "cancelled",
-                        "session_id": msg.get("session_id", ""),
+                        "session_id": data.get("session_id", ""),
                     })
                     _tool_task = None
                     _cancel_event = None
                     continue
 
                 # ── Task: run tool loop in background (non-blocking) ─
-                if msg.get("type") == "task":
-                    session_id = msg.get("session_id", "")
-                    cwd = msg.get("cwd", "")
+                if data.get("type") == "task":
+                    session_id = data.get("session_id", "")
+                    cwd = data.get("cwd", "")
                     if not session_id or not cwd:
-                        await self._send(writer, {
+                        await self._send(ws, {
                             "error": "task requires session_id and cwd",
                         })
                         continue
                     try:
                         req = TaskRequest(
-                            id=msg.get("id", ""),
+                            id=data.get("id", ""),
                             session_id=session_id,
                             cwd=cwd,
-                            prompt=msg.get("prompt", ""),
-                            timestamp=msg.get("timestamp", ""),
-                            stream=msg.get("stream", False),
-                            images=msg.get("images"),
+                            prompt=data.get("prompt", ""),
+                            timestamp=data.get("timestamp", ""),
+                            stream=data.get("stream", False),
+                            images=data.get("images"),
                         )
                     except Exception as e:
-                        await self._send(writer, {"error": f"invalid task: {e}"})
+                        await self._send(ws, {"error": f"invalid task: {e}"})
                         continue
                     # Cancel previous task if still running
                     if _tool_task and not _tool_task.done():
@@ -286,15 +314,15 @@ class EmrgServer:
                     _cancel_event = asyncio.Event()
                     if req.stream:
                         _tool_task = asyncio.create_task(
-                            self._run_tool_loop(req, writer, session, _cancel_event)
+                            self._run_tool_loop(req, ws, session, _cancel_event)
                         )
                     else:
                         _tool_task = asyncio.create_task(
-                            self._run_chat_once(req, writer, session)
+                            self._run_chat_once(req, ws, session)
                         )
                     continue
 
-                await self._process_message(msg, writer)
+                await self._process_message(data, ws)
         except Exception:
             logger.warning("client error", exc_info=True)
         finally:
@@ -307,10 +335,9 @@ class EmrgServer:
                     await _tool_task
                 except asyncio.CancelledError:
                     pass
-            writer.close()
             try:
-                await writer.wait_closed()
-            except (ConnectionError, OSError):
+                await ws.close()
+            except Exception:
                 pass
 
             # Consolidate session memories on disconnect
@@ -320,17 +347,16 @@ class EmrgServer:
                 except Exception:
                     logger.debug("session memory consolidation failed", exc_info=True)
 
-    async def _send(self, writer: asyncio.StreamWriter, data: dict) -> bool:
-        """Write a length-prefixed JSON frame to the client.
+    async def _send(self, ws, data: dict) -> bool:
+        """Send a JSON message to the client.
 
         Returns True on success, False if the client disconnected.
         Callers should check the return value and stop if False.
         """
         try:
-            encoded = json.dumps(data, ensure_ascii=False).encode()
-            await write_frame(writer, encoded)
+            await ws.send(json.dumps(data, ensure_ascii=False))
             return True
-        except (ConnectionResetError, BrokenPipeError, OSError):
+        except (ConnectionClosed, OSError):
             logger.debug("client disconnected during send")
             return False
 
@@ -521,7 +547,7 @@ class EmrgServer:
         }
 
     async def _process_message(
-        self, msg: dict, writer: asyncio.StreamWriter
+        self, msg: dict, ws
     ) -> None:
         """Process a single message and send responses."""
         msg_type = msg.get("type", "")
@@ -540,7 +566,7 @@ class EmrgServer:
                 uptime_seconds=max(0, elapsed),
                 evolution_count=len(self.evolutions),
             )
-            await self._send(writer, {
+            await self._send(ws, {
                 "identity": pong.identity,
                 "uptime_seconds": pong.uptime_seconds,
                 "evolution_count": pong.evolution_count,
@@ -561,12 +587,12 @@ class EmrgServer:
                         name=name, task_type="evolution",
                         config={"project": name}, interval=600,
                     )
-                await self._send(writer, {
+                await self._send(ws, {
                     "ok": True,
                     "message": f"auto_evolve enabled for {cwd}",
                 })
             else:
-                await self._send(writer, {
+                await self._send(ws, {
                     "ok": False,
                     "error": "init_auto_evolve requires cwd",
                 })
@@ -577,7 +603,7 @@ class EmrgServer:
                 tasks = self._scheduler.list_tasks()
             else:
                 tasks = []
-            await self._send(writer, {
+            await self._send(ws, {
                 "type": "tasks_list",
                 "tasks": tasks,
             })
@@ -585,7 +611,7 @@ class EmrgServer:
         elif msg_type == "trigger_task":
             name = msg.get("name", "").strip()
             if not name:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "trigger_result",
                     "error": "trigger_task requires task name",
                 })
@@ -593,17 +619,17 @@ class EmrgServer:
             if self._scheduler:
                 result = self._scheduler.trigger_task(name)
                 if result is None:
-                    await self._send(writer, {
+                    await self._send(ws, {
                         "type": "trigger_result",
                         "error": f"task '{name}' not found",
                     })
                 else:
-                    await self._send(writer, {
+                    await self._send(ws, {
                         "type": "trigger_result",
                         **result,
                     })
             else:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "trigger_result",
                     "error": "scheduler not running",
                 })
@@ -613,42 +639,42 @@ class EmrgServer:
             session_id = msg.get("session_id", "")
 
             if not session_id or not cwd:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "compact_result",
                     "error": "compact requires session_id and cwd",
                 })
                 return
 
             session = self._get_or_create_session(session_id, Path(cwd))
-            await self._handle_compact(session, writer)
+            await self._handle_compact(session, ws)
 
         elif msg_type == "list_sessions":
             cwd = msg.get("cwd", "")
             if not cwd:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "sessions_list",
                     "error": "list_sessions requires cwd",
                 })
                 return
-            await self._handle_list_sessions(Path(cwd), writer)
+            await self._handle_list_sessions(Path(cwd), ws)
 
         elif msg_type == "resume_session":
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
             if not session_id or not cwd:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "resume_result",
                     "error": "resume_session requires session_id and cwd",
                 })
                 return
-            await self._handle_resume_session(session_id, Path(cwd), writer)
+            await self._handle_resume_session(session_id, Path(cwd), ws)
 
         elif msg_type == "rename_session":
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
             title = msg.get("title", "")
             if not session_id or not cwd:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "rename_result",
                     "error": "rename requires session_id and cwd",
                 })
@@ -659,7 +685,7 @@ class EmrgServer:
                 # Auto-generate title via LLM
                 title = await self._generate_session_title(session)
             session.rename(title)
-            await self._send(writer, {
+            await self._send(ws, {
                 "type": "rename_result",
                 "session_id": session_id,
                 "title": title,
@@ -671,13 +697,13 @@ class EmrgServer:
             cwd = msg.get("cwd", "")
 
             if scope == "session" and (not session_id or not cwd):
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "memories_list",
                     "error": "session scope requires session_id and cwd",
                 })
                 return
 
-            await self._handle_list_memories(scope, session_id, cwd, writer)
+            await self._handle_list_memories(scope, session_id, cwd, ws)
 
         elif msg_type == "read_memory":
             scope = msg.get("scope", "project")
@@ -686,26 +712,26 @@ class EmrgServer:
             cwd = msg.get("cwd", "")
 
             if not memory_id:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "memory_content",
                     "error": "read_memory requires memory_id",
                 })
                 return
 
             if scope == "session" and (not session_id or not cwd):
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "memory_content",
                     "error": "session scope requires session_id and cwd",
                 })
                 return
 
-            await self._handle_read_memory(scope, memory_id, session_id, cwd, writer)
+            await self._handle_read_memory(scope, memory_id, session_id, cwd, ws)
 
         elif msg_type == "rant":
             # Store user rant/feedback for evolution analysis
             rant_message = msg.get("message", "").strip()
             if not rant_message:
-                await self._send(writer, {"error": "rant requires a message"})
+                await self._send(ws, {"error": "rant requires a message"})
                 return
 
             # Optional project targeting (multi-project support)
@@ -746,36 +772,36 @@ class EmrgServer:
 
             logger.info("rant recorded (%d total)%s: %s",
                 count, f" project={project}" if project else "", rant_message[:100])
-            await self._send(writer, {"ok": True, "count": count})
+            await self._send(ws, {"ok": True, "count": count})
 
         elif msg_type == "list_models":
-            await self._handle_list_models(writer)
+            await self._handle_list_models(ws)
 
         elif msg_type == "set_model":
             model_name = msg.get("model", "").strip()
             if not model_name:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "model_set",
                     "error": "set_model requires model name",
                 })
                 return
-            await self._handle_set_model(model_name, writer)
+            await self._handle_set_model(model_name, ws)
 
         elif msg_type == "list_projects":
-            await self._handle_list_projects(writer)
+            await self._handle_list_projects(ws)
 
         elif msg_type == "clear_session":
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
             if not session_id or not cwd:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "clear_result",
                     "error": "clear_session requires session_id and cwd",
                 })
                 return
             session = self._get_or_create_session(session_id, Path(cwd))
             session.clear()
-            await self._send(writer, {
+            await self._send(ws, {
                 "type": "clear_result",
                 "session_id": session_id,
                 "ok": True,
@@ -786,7 +812,7 @@ class EmrgServer:
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
             if not session_id or not cwd:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "session_deleted",
                     "error": "delete_session requires session_id and cwd",
                 })
@@ -794,7 +820,7 @@ class EmrgServer:
 
             session_dir = Path(cwd) / ".emrg" / "sessions" / session_id
             if not session_dir.exists():
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "session_deleted",
                     "error": f"Session {session_id} not found",
                 })
@@ -802,14 +828,14 @@ class EmrgServer:
 
             deleted = Session.delete(session_id, Path(cwd))
             if deleted:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "session_deleted",
                     "session_id": session_id,
                     "ok": True,
                 })
                 logger.info("session deleted: %s", session_id)
             else:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "session_deleted",
                     "error": f"Failed to delete session {session_id}",
                 })
@@ -818,7 +844,7 @@ class EmrgServer:
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")
             if not session_id or not cwd:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "history_list",
                     "error": "list_history requires session_id and cwd",
                 })
@@ -838,7 +864,7 @@ class EmrgServer:
                         "preview": preview,
                         "timestamp": r.get("timestamp", ""),
                     })
-            await self._send(writer, {
+            await self._send(ws, {
                 "type": "history_list",
                 "session_id": session_id,
                 "messages": user_messages,
@@ -849,7 +875,7 @@ class EmrgServer:
             cwd = msg.get("cwd", "")
             record_index = msg.get("record_index")
             if not session_id or not cwd or record_index is None:
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "rewind_result",
                     "error": "rewind_session requires session_id, cwd, and record_index",
                 })
@@ -857,7 +883,7 @@ class EmrgServer:
             session = self._get_or_create_session(session_id, Path(cwd))
             records = session._read_history()
             if record_index < 0 or record_index >= len(records):
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "rewind_result",
                     "error": f"record_index {record_index} out of range (0-{len(records)-1})",
                 })
@@ -871,7 +897,7 @@ class EmrgServer:
             )
             session._updated_at = datetime.now().isoformat()
             session._save_meta()
-            await self._send(writer, {
+            await self._send(ws, {
                 "type": "rewind_result",
                 "session_id": session_id,
                 "ok": True,
@@ -883,16 +909,15 @@ class EmrgServer:
 
         elif msg_type == "shutdown":
             logger.info("shutdown requested by client")
-            await self._send(writer, {"type": "shutdown_ack"})
-            writer.close()
+            await self._send(ws, {"type": "shutdown_ack"})
             try:
-                await writer.wait_closed()
-            except (ConnectionError, OSError):
+                await ws.close()
+            except Exception:
                 pass
             self._server.close()
 
         else:
-            await self._send(writer, {
+            await self._send(ws, {
                 "error": "unknown message type",
                 "received": msg_type,
             })
@@ -949,7 +974,7 @@ class EmrgServer:
         return content
 
     async def _run_chat_once(
-        self, req: TaskRequest, writer: asyncio.StreamWriter, session: Session
+        self, req: TaskRequest, ws, session: Session
     ) -> None:
         """Non-streaming single-turn chat (no tool loop)."""
         system_prompt = self._build_system_prompt(session)
@@ -990,7 +1015,7 @@ class EmrgServer:
                 "content": content or "",
             })
 
-            if not await self._send(writer, {
+            if not await self._send(ws, {
                 "request_id": req.id,
                 "content": content or "",
                 "done": True,
@@ -1003,12 +1028,12 @@ class EmrgServer:
             self._maybe_reflect_memory(session, req.prompt, content or "")
         except Exception as e:
             logger.exception("LLM error")
-            await self._send(writer, {
+            await self._send(ws, {
                 "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
             })
 
     async def _run_tool_loop(
-        self, req: TaskRequest, writer: asyncio.StreamWriter, session: Session,
+        self, req: TaskRequest, ws, session: Session,
         cancel_event: asyncio.Event | None = None,
     ) -> None:
         """Run the streaming tool-calling loop with session persistence.
@@ -1050,7 +1075,7 @@ class EmrgServer:
             # Check for cancellation between rounds
             if cancel_event and cancel_event.is_set():
                 logger.info("tool loop cancelled by client at round %d", round_num)
-                await self._send(writer, {
+                await self._send(ws, {
                     "request_id": req.id,
                     "content": "",
                     "done": True,
@@ -1076,7 +1101,7 @@ class EmrgServer:
                         self.llm.config.auto_compact_threshold * 100,
                     )
                     # Notify client
-                    await self._send(writer, {
+                    await self._send(ws, {
                         "type": "compact_result",
                         "session_id": session.session_id,
                         "messages_compacted": 0,
@@ -1098,7 +1123,7 @@ class EmrgServer:
                                 raise
                         count = session.compact(summary, keep_recent=5)
                         logger.info("auto-compact done: %d messages compacted", count)
-                        await self._send(writer, {
+                        await self._send(ws, {
                             "type": "compact_result",
                             "session_id": session.session_id,
                             "messages_compacted": count,
@@ -1130,7 +1155,7 @@ class EmrgServer:
                     c = delta.get("content")
                     if c:
                         content_parts.append(c)
-                        if not await self._send(writer, {
+                        if not await self._send(ws, {
                             "request_id": req.id,
                             "content": c,
                             "done": False,
@@ -1155,7 +1180,7 @@ class EmrgServer:
                         final_usage = usage
             except asyncio.CancelledError:
                 logger.info("tool loop cancelled mid-stream in round %d", round_num)
-                await self._send(writer, {
+                await self._send(ws, {
                     "request_id": req.id,
                     "content": "",
                     "done": True,
@@ -1165,12 +1190,12 @@ class EmrgServer:
                 return
             except Exception as e:
                 logger.exception("LLM stream error in round %d", round_num)
-                await self._send(writer, {
+                await self._send(ws, {
                     "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
                 })
                 # Send done so the client knows the stream is over.
                 # Without this, the client stays in its read loop → deadlock.
-                await self._send(writer, {
+                await self._send(ws, {
                     "done": True,
                     "request_id": req.id,
                 })
@@ -1195,7 +1220,7 @@ class EmrgServer:
                     "content": full_content,
                 })
 
-                if not await self._send(writer, {
+                if not await self._send(ws, {
                     "request_id": req.id,
                     "content": "",
                     "done": True,
@@ -1274,7 +1299,7 @@ class EmrgServer:
                                 json.dumps(args, ensure_ascii=False)[:200])
 
                     # Notify client (best-effort — fail means client is gone)
-                    if not await self._send(writer, {
+                    if not await self._send(ws, {
                         "type": "tool_start",
                         "request_id": req.id,
                         "tool_name": tc_name,
@@ -1330,7 +1355,7 @@ class EmrgServer:
                     })
 
                     # Notify client of result (best-effort)
-                    if not await self._send(writer, {
+                    if not await self._send(ws, {
                         "type": "tool_end",
                         "request_id": req.id,
                         "tool_name": tc_name,
@@ -1355,7 +1380,7 @@ class EmrgServer:
                 "content": full_content,
             })
 
-            if not await self._send(writer, {
+            if not await self._send(ws, {
                 "request_id": req.id,
                 "content": full_content or "",
                 "done": True,
@@ -1371,7 +1396,7 @@ class EmrgServer:
         # Exceeded max tool rounds
         logger.warning("max tool rounds (%d) exceeded for task %s",
                        self._max_tool_rounds, req.id)
-        if not await self._send(writer, {
+        if not await self._send(ws, {
             "request_id": req.id,
             "content": f"Exceeded maximum tool call rounds ({self._max_tool_rounds}).",
             "done": True,
@@ -1512,12 +1537,12 @@ class EmrgServer:
     # ── Compact ──────────────────────────────────────────────
 
     async def _handle_compact(
-        self, session: Session, writer: asyncio.StreamWriter
+        self, session: Session, ws
     ) -> None:
         """Handle a compact request: summarize history via LLM and replace old messages."""
         records = session._read_history()
         if len(records) <= 5:
-            await self._send(writer, {
+            await self._send(ws, {
                 "type": "compact_result",
                 "session_id": session.session_id,
                 "messages_compacted": 0,
@@ -1536,7 +1561,7 @@ class EmrgServer:
                     summary = await self._chunked_compact(records)
                 except Exception as e2:
                     logger.exception("chunked compact also failed")
-                    await self._send(writer, {
+                    await self._send(ws, {
                         "type": "compact_result",
                         "session_id": session.session_id,
                         "messages_compacted": 0,
@@ -1549,7 +1574,7 @@ class EmrgServer:
         # Apply compact
         count = session.compact(summary, keep_recent=5)
 
-        await self._send(writer, {
+        await self._send(ws, {
             "type": "compact_result",
             "session_id": session.session_id,
             "messages_compacted": count,
@@ -1720,17 +1745,17 @@ class EmrgServer:
         return await self._merge_summaries(merged, max_per_chunk, merge_batch)
 
     async def _handle_list_sessions(
-        self, cwd: Path, writer: asyncio.StreamWriter
+        self, cwd: Path, ws
     ) -> None:
         """List all sessions for the given cwd."""
         sessions = Session.list_sessions(cwd)
-        await self._send(writer, {
+        await self._send(ws, {
             "type": "sessions_list",
             "sessions": sessions,
         })
 
     async def _handle_list_projects(
-        self, writer: asyncio.StreamWriter
+        self, ws
     ) -> None:
         """Read projects.yml and return all project entries."""
         evolution_cwd = str(EVOLUTION_CWD.resolve())
@@ -1755,13 +1780,13 @@ class EmrgServer:
                     ]
         except (yaml.YAMLError, OSError):
             logger.exception("Failed to read projects.yml")
-        await self._send(writer, {
+        await self._send(ws, {
             "type": "projects_list",
             "projects": projects,
         })
 
     async def _handle_list_models(
-        self, writer: asyncio.StreamWriter
+        self, ws
     ) -> None:
         """Return available models for /model switching.
 
@@ -1785,14 +1810,14 @@ class EmrgServer:
                 merged.append(dict(m))
                 seen.add(m["name"])
 
-        await self._send(writer, {
+        await self._send(ws, {
             "type": "models_list",
             "models": merged,
             "current": default_name,
         })
 
     async def _handle_set_model(
-        self, model_name: str, writer: asyncio.StreamWriter
+        self, model_name: str, ws
     ) -> None:
         """Switch the runtime LLM model and context_window.
 
@@ -1827,7 +1852,7 @@ class EmrgServer:
             old_model, model_name, api_model, old_ctx, self.llm.config.context_window,
         )
 
-        await self._send(writer, {
+        await self._send(ws, {
             "type": "model_set",
             "model": model_name,
             "context_window": self.llm.config.context_window,
@@ -1835,7 +1860,7 @@ class EmrgServer:
         })
 
     async def _handle_resume_session(
-        self, session_id: str, cwd: Path, writer: asyncio.StreamWriter
+        self, session_id: str, cwd: Path, ws
     ) -> None:
         """Validate a session exists and return metadata.
 
@@ -1844,7 +1869,7 @@ class EmrgServer:
         """
         session_dir = cwd / ".emrg" / "sessions" / session_id
         if not session_dir.exists():
-            await self._send(writer, {
+            await self._send(ws, {
                 "type": "resume_result",
                 "session_id": session_id,
                 "error": f"Session {session_id} not found",
@@ -1853,7 +1878,7 @@ class EmrgServer:
 
         session = Session.load(session_id, cwd)
 
-        await self._send(writer, {
+        await self._send(ws, {
             "type": "resume_result",
             "session_id": session_id,
             "meta": {
@@ -1866,7 +1891,7 @@ class EmrgServer:
         })
 
     async def _handle_list_memories(
-        self, scope: str, session_id: str, cwd: str, writer: asyncio.StreamWriter
+        self, scope: str, session_id: str, cwd: str, ws
     ) -> None:
         """List memories: return the MEMORY.md index and memory directory info."""
         if scope == "project":
@@ -1876,7 +1901,7 @@ class EmrgServer:
         else:
             session_dir = Path(cwd) / ".emrg" / "sessions" / session_id
             if not session_dir.exists():
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "memories_list",
                     "error": f"Session {session_id} not found",
                 })
@@ -1887,7 +1912,7 @@ class EmrgServer:
         memories = store.list()
         index_text = index_path.read_text(encoding="utf-8") if index_path.exists() else ""
 
-        await self._send(writer, {
+        await self._send(ws, {
             "type": "memories_list",
             "scope": scope,
             "directory": str(store.directory),
@@ -1910,7 +1935,7 @@ class EmrgServer:
 
     async def _handle_read_memory(
         self, scope: str, memory_id: str, session_id: str, cwd: str,
-        writer: asyncio.StreamWriter,
+        ws,
     ) -> None:
         """Read a specific memory file by id and return its full content."""
         if scope == "project":
@@ -1919,7 +1944,7 @@ class EmrgServer:
         else:
             session_dir = Path(cwd) / ".emrg" / "sessions" / session_id
             if not session_dir.exists():
-                await self._send(writer, {
+                await self._send(ws, {
                     "type": "memory_content",
                     "error": f"Session {session_id} not found",
                 })
@@ -1928,13 +1953,13 @@ class EmrgServer:
 
         mem = store.get(memory_id)
         if mem is None:
-            await self._send(writer, {
+            await self._send(ws, {
                 "type": "memory_content",
                 "error": f"Memory not found: {memory_id}",
             })
             return
 
-        await self._send(writer, {
+        await self._send(ws, {
             "type": "memory_content",
             "scope": scope,
             "memory_id": memory_id,

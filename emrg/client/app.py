@@ -15,7 +15,7 @@ from emrg.client.widgets import (
     _COMMAND_HELP,
 )
 from emrg.connect import connect_to_server, cleanup_server, is_server_running_sync, get_server_path
-from emrg.framing import read_frame, write_frame
+from websockets.exceptions import ConnectionClosed
 from emrg.protocol import TaskRequest, TaskResponse, ToolEnd, ToolStart
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills
@@ -70,26 +70,26 @@ async def _check_and_restart_if_stale():
     """Ping the server. If source has changed since server started, restart it."""
     server_path = get_server_path()
 
-    # Unix socket file check (not applicable on Windows)
-    if os.name != "nt":
-        if not Path(server_path).exists():
-            return  # will start fresh via connect_to_server
+    # Port file check (daemon not started yet → fresh start via connect_to_server)
+    if not Path(server_path).exists():
+        return
 
     source_mtime = _get_server_source_mtime()
     config_mtime = _get_config_mtime()
 
     try:
-        reader, writer = await connect_to_server()
-        await write_frame(writer, json.dumps({"type": "ping"}).encode())
-        frame = await asyncio.wait_for(read_frame(reader), timeout=3)
-        writer.close()
-        try: await writer.wait_closed()
-        except (ConnectionError, OSError): pass
+        writer = await connect_to_server()
+        await writer.send(json.dumps({"type": "ping"}))
+        frame = await asyncio.wait_for(writer.recv(), timeout=3)
+        try:
+            await writer.close()
+        except Exception:
+            pass
 
         if frame is None:
             return
 
-        data = json.loads(frame.decode())
+        data = json.loads(frame)
         started_at = data.get("started_at", "")
         server_pid = data.get("pid", 0)
 
@@ -290,7 +290,7 @@ async def interactive(init_auto_evolve: bool = False):
     if not sys.stdin.isatty():
         print("This client requires a real terminal (TTY).", file=sys.stderr); return
 
-    try: reader, writer = await client_connect_to_server()
+    try: writer = await client_connect_to_server()
     except Exception as e:
         print(f"Failed to connect to emrgd: {e}", file=sys.stderr); return
     logger.info("connected to emrgd")
@@ -303,17 +303,17 @@ async def interactive(init_auto_evolve: bool = False):
     # Send init_auto_evolve if requested (before ping, so daemon
     # processes it before any user interaction starts)
     if init_auto_evolve:
-        await write_frame(writer, json.dumps({
+        await writer.send(json.dumps({
             "type": "init_auto_evolve",
             "cwd": cwd,
-        }).encode())
+        }))
         # Read the response to consume it
         try:
-            await asyncio.wait_for(read_frame(reader), timeout=5)
+            await asyncio.wait_for(writer.recv(), timeout=5)
         except asyncio.TimeoutError:
             pass
 
-    await write_frame(writer, json.dumps({"type": "ping"}).encode())
+    await writer.send(json.dumps({"type": "ping"}))
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
@@ -400,11 +400,11 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
-        nonlocal _last_center, _elapsed_task, reader, writer
+        nonlocal _last_center, _elapsed_task, writer
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
-            nonlocal reader, writer, busy, _elapsed_task
+            nonlocal writer, busy, _elapsed_task
             # stop elapsed timer
             if _elapsed_task is not None:
                 _elapsed_task.cancel(); _elapsed_task = None
@@ -413,13 +413,13 @@ async def interactive(init_auto_evolve: bool = False):
             status.update(center="reconnecting...")
             term.render()
             # close stale connection
-            try: writer.close(); await writer.wait_closed()
+            try: await writer.close()
             except Exception: pass
             while True:
                 try:
                     await asyncio.sleep(1)
-                    reader, writer = await client_connect_to_server()
-                    await write_frame(writer, json.dumps({"type": "ping"}).encode())
+                    writer = await client_connect_to_server()
+                    await writer.send(json.dumps({"type": "ping"}))
                     logger.info("reconnected to emrgd")
                     chat.add("system", "✓ server reconnected")
                     status.update(center=server_id or "emrg")
@@ -429,16 +429,12 @@ async def interactive(init_auto_evolve: bool = False):
                     continue
 
         while True:
-            try: frame = await asyncio.wait_for(read_frame(reader), timeout=0.1)
+            try: frame = await asyncio.wait_for(writer.recv(), timeout=0.1)
             except asyncio.TimeoutError: continue
-            except ValueError as e:
-                logger.exception("server connection lost: %s", e)
+            except ConnectionClosed:
                 await _reconnect()
                 continue
-            if frame is None:
-                await _reconnect()
-                continue
-            text = frame.decode().strip()
+            text = frame.strip()
             if not text: continue
             try:
                 data = json.loads(text)
@@ -623,7 +619,7 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add("system", f"↶ Session rewound — {removed} messages removed.")
                         msg_count = 0
                         # Reload session state from server
-                        await write_frame(writer, json.dumps({"type": "ping"}).encode())
+                        await writer.send(json.dumps({"type": "ping"}))
                         _update_right()
                     status.update(center=server_id or "emrg")
                     term.render()
@@ -1060,7 +1056,7 @@ async def interactive(init_auto_evolve: bool = False):
                 _elapsed_task = None
             status.elapsed = ""
             # Send cancel to daemon so it stops tool/LLM processing
-            await write_frame(writer, json.dumps({"type": "cancel"}).encode())
+            await writer.send(json.dumps({"type": "cancel"}))
             chat.add("system", "⏸ Interrupted — response stopped. You can continue.")
             _last_center = server_id or "emrg"
             status.update(center=_last_center)
@@ -1081,11 +1077,11 @@ async def interactive(init_auto_evolve: bool = False):
                 session_sel.active = False
                 session_sel.widget = None
                 if sid:
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "resume_session",
                         "session_id": sid,
                         "cwd": cwd,
-                    }).encode())
+                    }))
                     status.update(center=f"resuming {sid}...")
                     term.render()
                 else:
@@ -1113,11 +1109,11 @@ async def interactive(init_auto_evolve: bool = False):
                 delete_sel.active = False
                 delete_sel.widget = None
                 if sid:
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "delete_session",
                         "session_id": sid,
                         "cwd": cwd,
-                    }).encode())
+                    }))
                     status.update(center=f"deleting {sid}...")
                     term.render()
                 else:
@@ -1173,10 +1169,10 @@ async def interactive(init_auto_evolve: bool = False):
                 model_sel.active = False
                 model_sel.widget = None
                 if mname:
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "set_model",
                         "model": mname,
-                    }).encode())
+                    }))
                     status.update(center=f"switching model to {mname}...")
                 else:
                     chat.add("system", "No model selected.")
@@ -1203,12 +1199,12 @@ async def interactive(init_auto_evolve: bool = False):
                 rewind_sel.active = False
                 rewind_sel.widget = None
                 if idx is not None:
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "rewind_session",
                         "session_id": session_id,
                         "cwd": cwd,
                         "record_index": idx,
-                    }).encode())
+                    }))
                     status.update(center=f"rewinding to message #{idx}...")
                     term.render()
                 else:
@@ -1236,12 +1232,12 @@ async def interactive(init_auto_evolve: bool = False):
                 task_sel.active = False
                 task_sel.widget = None
                 if task_name:
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "trigger_task",
                         "name": task_name,
                         "session_id": session_id,
                         "cwd": cwd,
-                    }).encode())
+                    }))
                     chat.add("system", f"Triggering task: {task_name}")
                     status.update(center=f"triggering {task_name}...")
                 else:
@@ -1430,7 +1426,7 @@ async def interactive(init_auto_evolve: bool = False):
                         "project": _rant_project,
                         "timestamp": datetime.now().isoformat(),
                     }
-                    await write_frame(writer, json.dumps(payload, ensure_ascii=False).encode())
+                    await writer.send(json.dumps(payload, ensure_ascii=False))
 
                     chat.add("system", f"Rant recorded (@{_rant_project}). The evolution system will review it.")
                     _rant_project = None
@@ -1454,25 +1450,25 @@ async def interactive(init_auto_evolve: bool = False):
                         else:
                             mem_id = sub
                             # Could be a read request — send as read
-                            await write_frame(writer, json.dumps({
+                            await writer.send(json.dumps({
                                 "type": "read_memory",
                                 "scope": scope,
                                 "memory_id": mem_id,
                                 "session_id": session_id,
                                 "cwd": cwd,
-                            }).encode())
+                            }))
         
                             status.update(center="reading memory...")
                             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                             return True
 
                     # List memories
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "list_memories",
                         "scope": scope,
                         "session_id": session_id,
                         "cwd": cwd,
-                    }).encode())
+                    }))
 
                     status.update(center=f"listing {scope} memories...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1480,11 +1476,11 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Handle /compact command
                 if text.lower() == "/compact":
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "compact",
                         "session_id": session_id,
                         "cwd": cwd,
-                    }).encode())
+                    }))
 
                     status.update(center="compacting...")
                     chat.add("system", "Compact requested — summarizing conversation...")
@@ -1495,12 +1491,12 @@ async def interactive(init_auto_evolve: bool = False):
                 if text.lower().startswith("/rename"):
                     parts = text.split(None, 1)
                     title = parts[1].strip() if len(parts) > 1 else ""
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "rename_session",
                         "session_id": session_id,
                         "cwd": cwd,
                         "title": title,
-                    }, ensure_ascii=False).encode())
+                    }, ensure_ascii=False))
 
                     if title:
                         status.update(center=f"renaming to {title}...")
@@ -1513,10 +1509,10 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Handle /sessions command
                 if text.lower() == "/sessions":
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "list_sessions",
                         "cwd": cwd,
-                    }).encode())
+                    }))
 
                     status.update(center="listing sessions...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1528,19 +1524,19 @@ async def interactive(init_auto_evolve: bool = False):
                     if len(parts) < 2:
                         # No argument: fetch sessions and enter interactive delete mode
                         delete_sel.pending = True
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "list_sessions",
                             "cwd": cwd,
-                        }).encode())
+                        }))
                         status.update(center="loading sessions for delete...")
                     else:
                         target_sid = parts[1].strip()
                         # Direct delete by session ID
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "delete_session",
                             "session_id": target_sid,
                             "cwd": cwd,
-                        }).encode())
+                        }))
                         status.update(center=f"deleting {target_sid}...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1682,11 +1678,11 @@ Streaming
 
                 # Handle /clear command
                 if text.lower() == "/clear":
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "clear_session",
                         "session_id": session_id,
                         "cwd": cwd,
-                    }).encode())
+                    }))
 
                     status.update(center="clearing session...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1694,11 +1690,11 @@ Streaming
 
                 # Handle /rewind command
                 if text.lower() == "/rewind":
-                    await write_frame(writer, json.dumps({
+                    await writer.send(json.dumps({
                         "type": "list_history",
                         "session_id": session_id,
                         "cwd": cwd,
-                    }).encode())
+                    }))
 
                     rewind_sel.pending = True
                     status.update(center="loading session history...")
@@ -1722,9 +1718,9 @@ Streaming
                             return True
                         # /rant without args → interactive project selector
                         project_sel.pending = True
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "list_projects",
-                        }).encode())
+                        }))
     
                         status.update(center="loading projects...")
                         inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1736,7 +1732,7 @@ Streaming
                     }
                     if project:
                         payload["project"] = project
-                    await write_frame(writer, json.dumps(payload, ensure_ascii=False).encode())
+                    await writer.send(json.dumps(payload, ensure_ascii=False))
 
                     target = f" (@{project})" if project else ""
                     chat.add("system", f"Rant recorded{target}. The evolution system will review it.")
@@ -1749,18 +1745,18 @@ Streaming
                     model_arg = parts[1].strip() if len(parts) > 1 else ""
                     if model_arg:
                         # /model <name> → direct switch
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "set_model",
                             "model": model_arg,
-                        }).encode())
+                        }))
     
                         status.update(center=f"switching model to {model_arg}...")
                     else:
                         # /model without args → interactive picker
                         model_sel.pending = True
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "list_models",
-                        }).encode())
+                        }))
     
                         status.update(center="loading models...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1772,16 +1768,16 @@ Streaming
                     task_name = parts[1].strip() if len(parts) > 1 else ""
                     if task_name:
                         # /trigger <name> → direct trigger
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "trigger_task",
                             "name": task_name,
-                        }, ensure_ascii=False).encode())
+                        }, ensure_ascii=False))
                         status.update(center=f"triggering task '{task_name}'...")
                     else:
                         # /trigger without args → list tasks
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "list_tasks",
-                        }).encode())
+                        }))
                         status.update(center="loading tasks...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1792,10 +1788,10 @@ Streaming
                     if len(parts) < 2:
                         # No argument: enter interactive session selection
                         session_sel.pending = True
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "list_sessions",
                             "cwd": cwd,
-                        }).encode())
+                        }))
     
                         status.update(center="loading sessions...")
                     else:
@@ -1804,11 +1800,11 @@ Streaming
                         session_sel.active = False
                         session_sel.widget = None
                         session_sel.pending = False
-                        await write_frame(writer, json.dumps({
+                        await writer.send(json.dumps({
                             "type": "resume_session",
                             "session_id": target_sid,
                             "cwd": cwd,
-                        }).encode())
+                        }))
     
                         status.update(center=f"resuming {target_sid}...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1842,7 +1838,7 @@ Streaming
                 if _pending_images:
                     req.images = _pending_images
                     _pending_images = []
-                await write_frame(writer, json.dumps(req.to_dict(), ensure_ascii=False).encode())
+                await writer.send(json.dumps(req.to_dict(), ensure_ascii=False).encode())
                 logger.info("task sent, prompt_len=%d chars", len(text))
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):
@@ -1921,9 +1917,10 @@ Streaming
         read_task.cancel()
         try: await read_task
         except (asyncio.CancelledError, Exception): pass
-        writer.close()
-        try: await writer.wait_closed()
-        except (ConnectionError, OSError): pass
+        try:
+            await writer.close()
+        except Exception:
+            pass
         term.shutdown(); sys.stdout.write("\n"); sys.stdout.flush()
 
 

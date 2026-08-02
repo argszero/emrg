@@ -24,7 +24,7 @@ from pathlib import Path
 
 from emrg import __version__
 from emrg.connect import cleanup_server, connect_to_server
-from emrg.framing import read_frame, write_frame
+from websockets.exceptions import ConnectionClosed
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -133,22 +133,20 @@ def _start_daemon_background() -> subprocess.Popen:
 async def _send_shutdown() -> bool:
     """Send a graceful shutdown message to the daemon. Returns True on success."""
     try:
-        reader, writer = await asyncio.wait_for(connect_to_server(), timeout=3)
+        ws = await asyncio.wait_for(connect_to_server(), timeout=3)
     except (ConnectionRefusedError, FileNotFoundError, OSError, asyncio.TimeoutError):
         return False
 
     try:
-        await write_frame(writer, json.dumps({"type": "shutdown"}, ensure_ascii=False).encode())
-        frame = await asyncio.wait_for(read_frame(reader), timeout=3)
-        writer.close()
+        await ws.send(json.dumps({"type": "shutdown"}, ensure_ascii=False))
+        frame = await asyncio.wait_for(ws.recv(), timeout=3)
         try:
-            await writer.wait_closed()
-        except (ConnectionError, OSError):
+            await ws.close()
+        except Exception:
             pass
-        if frame:
-            data = json.loads(frame.decode())
-            return data.get("type") == "shutdown_ack"
-    except (OSError, asyncio.TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+        data = json.loads(frame)
+        return data.get("type") == "shutdown_ack"
+    except (ConnectionClosed, OSError, asyncio.TimeoutError, json.JSONDecodeError):
         return False
     return False
 
@@ -163,11 +161,14 @@ def _stop_daemon() -> None:
     # Fallback: SIGTERM via ping PID
     try:
         async def _get_pid():
-            reader, writer = await asyncio.wait_for(connect_to_server(), timeout=3)
-            await write_frame(writer, json.dumps({"type": "ping"}, ensure_ascii=False).encode())
-            frame = await asyncio.wait_for(read_frame(reader), timeout=3)
-            writer.close()
-            return json.loads(frame.decode()) if frame else {}
+            ws = await asyncio.wait_for(connect_to_server(), timeout=3)
+            await ws.send(json.dumps({"type": "ping"}, ensure_ascii=False))
+            frame = await asyncio.wait_for(ws.recv(), timeout=3)
+            try:
+                await ws.close()
+            except Exception:
+                pass
+            return json.loads(frame) if frame else {}
 
         info = asyncio.run(_get_pid())
         pid = info.get("pid", 0)
@@ -184,7 +185,7 @@ def _stop_daemon() -> None:
             print("daemon stopped.")
         else:
             print("daemon not running (no pid from ping).")
-    except (OSError, asyncio.TimeoutError, json.JSONDecodeError, UnicodeDecodeError):
+    except (ConnectionClosed, OSError, asyncio.TimeoutError, json.JSONDecodeError):
         print("daemon not running.")
 
 
@@ -238,7 +239,7 @@ def _send_rant(message: str, project: str | None = None) -> None:
 
     async def _do() -> None:
         try:
-            reader, writer = await asyncio.wait_for(connect_to_server(), timeout=3)
+            ws = await asyncio.wait_for(connect_to_server(), timeout=3)
         except (ConnectionError, FileNotFoundError, OSError, asyncio.TimeoutError):
             print("daemon not running. Start it first with: emrg")
             return
@@ -251,23 +252,19 @@ def _send_rant(message: str, project: str | None = None) -> None:
         if project:
             payload["project"] = project
 
-        await write_frame(writer, json.dumps(payload, ensure_ascii=False).encode())
+        await ws.send(json.dumps(payload, ensure_ascii=False))
 
-        frame = await asyncio.wait_for(read_frame(reader), timeout=5)
-        writer.close()
+        frame = await asyncio.wait_for(ws.recv(), timeout=5)
         try:
-            await writer.wait_closed()
-        except (ConnectionError, OSError):
+            await ws.close()
+        except Exception:
             pass
 
-        if frame:
-            resp = json.loads(frame.decode())
-            if resp.get("ok"):
-                print(f"rant recorded ({resp.get('count', 0)} total). The evolution system will review it.")
-            else:
-                print(f"error: {resp.get('error', 'unknown')}")
+        resp = json.loads(frame)
+        if resp.get("ok"):
+            print(f"rant recorded ({resp.get('count', 0)} total). The evolution system will review it.")
         else:
-            print("rant sent (no response).")
+            print(f"error: {resp.get('error', 'unknown')}")
 
     asyncio.run(_do())
 

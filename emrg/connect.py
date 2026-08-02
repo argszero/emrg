@@ -1,133 +1,109 @@
-"""Platform-adaptive IPC connection layer for EMRG.
+"""WebSocket-based IPC connection layer for EMRG (Phase 1).
 
-Maps the Claude Code pattern to Python's asyncio API:
+Replaces the platform-adaptive Unix Domain Socket / Named Pipe transport
+with a unified TCP loopback + WebSocket transport:
 
-    Claude Code (Node.js):
-        net.connect() unified — same API, path format auto-selects UDS vs Named Pipe
-            socket.connect('/tmp/xxx.sock')       → UDS
-            socket.connect('\\\\.\\pipe\\xxx')    → Named Pipe
+    ws://127.0.0.1:<port>   (local, all platforms)
+    wss://<host>:<port>     (remote, Phase 5 — same protocol + TLS + token)
 
-    EMRG (Python):
-        asyncio does NOT unify — different functions per transport
-            await asyncio.start_unix_server(path=...)    → UDS (Unix)
-            await asyncio.open_unix_connection(...)      → UDS (Unix)
-            await asyncio.start_server(path=...)          → Named Pipe (Windows)
-            await asyncio.open_connection(...)            → Named Pipe (Windows)
-
-        This module wraps the platform dispatch so callers never touch
-        the raw functions. The pattern is the same as Claude Code:
-        platform detect → native IPC.
+The daemon writes its dynamic port and auth token to ``~/.emrg/emrgd.port``
+(``port\\n token``, mode 0o600). Clients read that file, connect, and send
+a first-frame auth message; the daemon confirms with ``auth_ok`` before the
+normal protocol loop. Auth failure raises :class:`AuthError` so callers can
+distinguish it from a transient disconnect (which should be retried).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import os
+import socket as _socket
+from pathlib import Path
+
+from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from emrg.config import config_dir
 
 logger = logging.getLogger(__name__)
 
 # ── Connection identifier ───────────────────────────────────────
-# Unix:  ~/.emrg/emrgd.sock
-# Win32: \\.\pipe\emrgd
+# Port/token file lives at ~/.emrg/emrgd.port (port\n token, mode 0o600)
 CONNECT_ID = "emrgd"
 
 
+class AuthError(Exception):
+    """Raised when the daemon rejects the auth handshake.
+
+    Distinct from transient connection failures: a token mismatch is a
+    configuration/install problem, not something reconnection can fix.
+    """
+
+
 def get_server_path() -> str:
-    """Return the server bind address, platform-adaptive."""
-    if os.name == "nt":
-        return rf"\\.\pipe\{CONNECT_ID}"
-    return str(config_dir() / f"{CONNECT_ID}.sock")
+    """Return the path of the daemon port/token file."""
+    return str(config_dir() / f"{CONNECT_ID}.port")
 
 
-async def start_server(
-    handler,
-    *,
-    host: str | None = None,
-    port: int | None = None,
-) -> asyncio.AbstractServer:
-    """Start the emrgd server, platform-adaptive.
+async def connect_to_server():
+    """Connect to the emrgd server over WebSocket.
 
-    Unix:  asyncio.start_unix_server on CONNECT_ID.sock
-    Win32: asyncio.start_server on CONNECT_ID (Named Pipe)
+    Reads ``~/.emrg/emrgd.port``, connects to ``ws://127.0.0.1:<port>``,
+    sends the first-frame auth message and waits for the ``auth_ok``
+    confirmation. Returns the connected WebSocket object (single ws — no
+    ``(reader, writer)`` tuple anymore).
+
+    Raises:
+        AuthError: auth rejected (bad/missing token, or daemon version mismatch).
+        ConnectionRefusedError / OSError / FileNotFoundError: daemon not running.
     """
-    if os.name == "nt":
-        server = await asyncio.start_server(
-            handler,
-            host=host,
-            port=port,
-            path=rf"\\.\pipe\{CONNECT_ID}",
-        )
-    else:
-        sock_path = config_dir() / f"{CONNECT_ID}.sock"
-        if sock_path.exists():
-            sock_path.unlink()
-        server = await asyncio.start_unix_server(handler, path=str(sock_path))
-    return server
-
-
-async def connect_to_server(
-    *,
-    host: str | None = None,
-    port: int | None = None,
-) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """Connect to the emrgd server, platform-adaptive.
-
-    Unix:  asyncio.open_unix_connection to CONNECT_ID.sock
-    Win32: asyncio.open_connection to CONNECT_ID (Named Pipe)
-    """
-    if os.name == "nt":
-        return await asyncio.open_connection(
-            host=host,
-            port=port,
-            path=rf"\\.\pipe\{CONNECT_ID}",
-        )
-    sock_path = config_dir() / f"{CONNECT_ID}.sock"
-    return await asyncio.open_unix_connection(str(sock_path))
+    port_path = Path(get_server_path())
+    port, token = port_path.read_text(encoding="utf-8").split()
+    ws = await connect(
+        f"ws://127.0.0.1:{port}",
+        max_size=16 * 1024 * 1024,
+    )
+    await ws.send(json.dumps({"type": "auth", "token": token}))
+    # Wait for auth_ok: received → ready; ConnectionClosed (rejected) /
+    # timeout (no response) → AuthError.
+    try:
+        ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+    except (ConnectionClosed, asyncio.TimeoutError):
+        await ws.close()
+        raise AuthError("authentication failed — check token / daemon version")
+    if ack.get("type") != "auth_ok":
+        await ws.close()
+        raise AuthError(f"unexpected auth response: {ack!r}")
+    return ws
 
 
 def cleanup_server() -> None:
-    """Cleanup server resources on shutdown.
-
-    Unix:   remove the socket file only (PID file is managed by daemon)
-    Win32:  nothing — named pipes are kernel-managed
-    """
-    if os.name == "nt":
-        return
-    sock_path = config_dir() / f"{CONNECT_ID}.sock"
-    if sock_path.exists():
-        sock_path.unlink()
-        logger.debug("removed socket file: %s", sock_path)
+    """Remove the daemon port/token file on shutdown."""
+    port_path = Path(get_server_path())
+    if port_path.exists():
+        port_path.unlink()
+        logger.debug("removed port file: %s", port_path)
 
 
 def is_server_running_sync(timeout: float = 2.0) -> bool:
     """Synchronous health-check probe (for client startup).
 
-    Uses blocking socket calls so it can be called before the asyncio
-    event loop is running.
-
-    Unix:   AF_UNIX connect to the socket file
-    Win32:  AF_INET connect to 127.0.0.1:<port> … not used for named pipe
-            (named pipe health check requires the asyncio loop; clients
-             should use connect_to_server + try/except instead)
-
-    NOTE: on Windows this function always returns False. The client
-    should fall back to an async probe via connect_to_server().
+    Uses blocking TCP connect to the port in ``emrgd.port``. Reads only the
+    first line (port), never the token — this is a low-cost liveness probe;
+    real auth happens on the first frame of a real connection.
     """
-    if os.name == "nt":
-        return False
-
-    import socket as _socket
-
-    sock_path = config_dir() / f"{CONNECT_ID}.sock"
-    sock = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
-    sock.settimeout(timeout)
+    port_path = Path(get_server_path())
     try:
-        sock.connect(str(sock_path))
+        port = int(port_path.read_text(encoding="utf-8").splitlines()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+    sock = None
+    try:
+        sock = _socket.create_connection(("127.0.0.1", port), timeout=timeout)
         return True
-    except (ConnectionRefusedError, FileNotFoundError, OSError):
+    except (ConnectionRefusedError, OSError):
         return False
     finally:
-        sock.close()
+        if sock is not None:
+            sock.close()
