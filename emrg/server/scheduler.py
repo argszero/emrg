@@ -24,7 +24,7 @@ import yaml
 
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
-from emrg.framing import read_frame, write_frame
+from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
 from emrg.server.git_utils import _detect_git_remote
@@ -318,7 +318,7 @@ class EvolutionHandler:
         git_head_before = self._get_git_head()
 
         try:
-            reader, writer = await connect_to_server()
+            ws = await connect_to_server()
             logger.info("EvolutionHandler[%s]: connected", self.name)
         except (ConnectionRefusedError, FileNotFoundError) as e:
             logger.warning(
@@ -343,15 +343,13 @@ class EvolutionHandler:
         error = None
 
         try:
-            task_bytes = task_msg.encode()
-            await write_frame(writer, task_bytes)
+            await ws.send(task_msg)
 
             while True:
-                frame = await read_frame(reader)
-                if frame is None:
+                try:
+                    resp = json.loads(await ws.recv())
+                except ConnectionClosed:
                     break
-                resp = json.loads(frame.decode())
-
                 if resp.get("done"):
                     duration = int((datetime.now() - cycle_time).total_seconds())
                     logger.info(
@@ -375,10 +373,9 @@ class EvolutionHandler:
             logger.exception("EvolutionHandler[%s] error", self.name)
             error = str(e)
         finally:
-            writer.close()
             try:
-                await writer.wait_closed()
-            except (ConnectionError, OSError):
+                await ws.close()
+            except Exception:
                 pass
 
         # Detect empty cycles: git HEAD unchanged → no work was done

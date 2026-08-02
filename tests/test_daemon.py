@@ -466,17 +466,23 @@ def test_truncate_record_preserves_other_fields():
 
 
 class _FakeWriter:
-    """Minimal StreamWriter stand-in capturing _send payloads."""
+    """Minimal WebSocket stand-in capturing _send payloads."""
 
     def __init__(self) -> None:
         self.sent: list[dict] = []
         self._frames: list[bytes] = []
 
-    def write(self, data: bytes) -> None:
-        self._frames.append(data)
+    async def send(self, data) -> None:
+        if isinstance(data, (bytes, bytearray)):
+            self._frames.append(bytes(data))
+        else:
+            self._frames.append(data.encode() if isinstance(data, str) else data)
 
-    async def drain(self) -> None:
+    async def close(self) -> None:
         pass
+
+    async def recv(self) -> str:
+        raise ConnectionError("no frames to receive in test")
 
     async def _send(self, data: dict) -> bool:
         self.sent.append(data)
