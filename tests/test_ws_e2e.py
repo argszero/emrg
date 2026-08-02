@@ -305,3 +305,25 @@ class TestWSProtocol:
                 finally:
                     await cleanup()
         asyncio.run(_test())
+
+    def test_disconnect_detected_on_server_close(self):
+        """Client recv raises ConnectionClosed when the daemon dies.
+
+        This is the protocol-level precondition for the TUI's
+        _reconnect() loop: a dead daemon must surface as an exception
+        (not None or a hang), so read_server can trigger reconnection.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                server, _, cleanup = await _boot_server(Path(tmp))
+                ws = await connect_to_server()
+                try:
+                    # Kill the daemon (server.close() stops accepting & closes conns)
+                    server._server.close()
+                    await asyncio.sleep(0.3)
+                    with pytest.raises(ConnectionClosed):
+                        await asyncio.wait_for(ws.recv(), timeout=5)
+                finally:
+                    await ws.close()
+                    await cleanup()
+        asyncio.run(_test())
