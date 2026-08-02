@@ -78,7 +78,7 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 ## Test Commands
 
 ```bash
-pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.sock; python -m emrg
+pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
 ```
 
 ## Configuration
