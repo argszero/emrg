@@ -198,15 +198,17 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 | status | 含义 | 何时设 |
 |--------|------|--------|
 | `pending` | 等待处理 | 新建 rant 默认 |
-| `in_progress` | 正在处理 | PR 已提交但未 merge |
-| `completed` | 已完成 | PR merge 后，同时写入 `completed` 时间戳 |
+| `in_progress` | 正在处理 | PR 已提交但未 merge；或分期推进中（有未满足的验收项） |
+| `completed` | 已完成 | **rant 声明的全部验收项（如 markdown `- [ ]` checkbox 清单）全部满足后**，同时写入 `completed` 时间戳 |
 
 `progress` 字段为字符串（如 `"PR #275 已提交，等待 review"`），记录进度。`completed` 仅 status=completed 时设 ISO 时间戳，否则为 null。
 
 **状态流转规则**：pending → in_progress → completed。不可从 pending 直接跳 completed。
 无 `status` 字段的旧条目视为 pending。
 
-- **标记完成**：status 改为 `"completed"`，追加 `"completed": "<ISO timestamp>"`
+- **标记完成**：**先逐项核对 rant 声明的验收项**——若 rant 含验收清单（`- [ ]` checkbox 或"验收标准"节），必须逐项核对全部满足后才可标 completed；任一未满足则保持 in_progress。status 改为 `"completed"`，追加 `"completed": "<ISO timestamp>"`
+- **分期推进规则**：大改动分期时，每期 PR merge 后 status **保持 in_progress**（不可因任一 PR merge 即标 completed），progress 记录 `"第 N 期完成（PR #xxx），剩余：<未完成验收项>"`，直到最后一期（全部验收项满足）才置 completed
+- **纠错机制**：若发现已标 completed 的 rant 实际未完成（如验收项未满足、有未合并分支），立即回退为 in_progress，progress 注明原因，继续处理剩余验收项
 - **定期清理**：保留所有 pending/in_progress 的 rant；completed 只保留最近 10 条
 - **⚡ 排序约束**：每次重写必须按 `timestamp` 升序排列（最旧在上、最新在下）。不可按分类（已处理/未处理）分组，不可改变时间顺序。读入所有条目 → 修改（标记 completed / 删除旧条目）→ `sorted(..., key=lambda r: r.get("timestamp", ""))` → 写入
 - **⚡ 字段顺序约束**：每行 JSON 的字段顺序必须为 `timestamp → project → status → progress → completed → message`（**message 最后**）。构建 dict 时按此顺序，`json.dumps` 输出即保持此顺序。message 内容较长，放最后便于人工查看状态字段。
@@ -218,7 +220,7 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 - 只看 `project` 字段匹配当前任务 `config.project` 的 rant；**未标 `project` 的一律不看**
 
 > **注意**：先检查 rant 是否已被处理，避免重复建设：
-> 1. 检查 `git log --oneline -20` 中是否有 commit 引用了 rant（搜索 rant 的 timestamp 或 message 关键词）
+> 1. 检查 `git log --oneline -20` 中是否有 commit 引用了 rant（搜索 rant 的 timestamp 或 message 关键词）——**注意：commit 引用 rant timestamp 只是"该 rant 曾被处理过"的线索，不是"已完成"的充分判据**。必须进一步核对：rant 是否还有未满足的验收项？是否还有未合并的分支？多期工程的早期 PR merge 不代表 rant 完成。
 > 2. 对照下方**已实现功能快速参考**——若 rant 描述的问题与表中功能匹配，则已处理
 > 3. 已处理的 rant 无需再次关注，除非用户重复反馈（说明之前的修复不彻底）
 >
