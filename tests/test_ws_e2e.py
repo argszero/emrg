@@ -264,3 +264,44 @@ class TestWSProtocol:
                 finally:
                     await cleanup()
         asyncio.run(_test())
+
+    def test_large_message_roundtrip(self):
+        """>1MB JSON payload round-trips without truncation (max_size=16MB)."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        # Unknown type → error frame, but proves the payload
+                        # arrived intact (no 1MB cap truncation / disconnect).
+                        big = "x" * (2 * 1024 * 1024)  # 2MB
+                        await ws.send(json.dumps({"type": "no_such_type", "payload": big}))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        data = json.loads(frame)
+                        assert data.get("error") == "unknown message type"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_cjk_message_roundtrip(self):
+        """CJK messages round-trip intact."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({"type": "no_such_type", "payload": "你好，世界！"}))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=5)
+                        data = json.loads(frame)
+                        assert data.get("error") == "unknown message type"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
