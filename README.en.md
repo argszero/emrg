@@ -189,9 +189,10 @@ EMRG isn't just a tool — it's a coding partner that **listens to your complain
 ## 🏗️ Architecture
 
 ```
-┌─────────────┐     Unix Socket IPC     ┌──────────────┐
-│   emrg TUI  │ ◄──────────────────────► │   emrgd      │
-│  (client)   │   length-prefix framing   │  (daemon)    │
+┌─────────────┐    WebSocket (ws://)    ┌──────────────┐
+│   emrg TUI  │ ◄─────────────────────► │   emrgd      │
+│  (client)   │  TCP loopback + auth    │  (daemon)    │
+│             │  token (emrgd.port)     │              │
 │             │                          │              │
 │  • Chat     │                          │  • LLM loop  │
 │  • Markdown │                          │  • Tools     │
