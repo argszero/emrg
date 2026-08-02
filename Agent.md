@@ -13,10 +13,10 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - `__main__.py` — CLI entry (`emrg`, `emrg server`, `emrg rant`, `emrg update`)
   - `protocol.py` — Communication protocol (TaskRequest, TaskResponse, ToolStart, ToolEnd, ServerPong, EvolutionLog, InstanceIdentity)
   - `config.py` — Config loading (`~/.emrg/config.toml`, Python 3.11+ tomllib)
-  - `connect.py` — IPC connection (Unix Socket / Named Pipe, platform-adaptive)
+  - `connect.py` — IPC connection (WebSocket over TCP loopback, token auth via `emrgd.port`)
   - `memory.py` — Memory system (ProjectMemoryStore, SessionMemoryStore, MemoryFile, MemoryIndex)
   - `session.py` — Session management (Session CRUD, history persistence, compact/clear)
-- `emrg/server/` — Server (Unix socket daemon, EMRG's living core)
+- `emrg/server/` — Server (WebSocket daemon, EMRG's living core)
   - `daemon.py` — EmrgServer, message processing, BackgroundThread (evolution cycle), tool loop, compact/memory integration
   - `llm.py` — LLM client (chat + chat_stream, streaming retry)
   - `tool_types.py` — Tool type definitions (ToolDefinition, ToolResult)
