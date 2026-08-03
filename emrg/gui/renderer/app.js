@@ -24,7 +24,6 @@ const state = {
 // ── 启动 ─────────────────────────────────────────────────
 
 async function boot() {
-  bindUi();
   try {
     const init = await window.emrg.init();
     state.configExists = init.config_exists;
@@ -586,4 +585,5 @@ function updateEvolutionCount(count) {
 
 // ── 启动 ─────────────────────────────────────────────────
 
+bindUi(); // 模块级只绑定一次（boot 可被 saveSettings/saveWelcome 重复调用，防重复 listener）
 boot();
