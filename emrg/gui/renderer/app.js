@@ -49,7 +49,13 @@ async function boot() {
     }
     if (init.sessions && init.sessions.length > 0) {
       renderSessions(init.sessions);
-      await switchSession(init.sessions[0].session_id, { silent: true });
+      // 保持当前会话（boot 会因 saveSettings/saveWelcome 重跑——保存设置后不应弹回最新创建会话）
+      const current = init.sessions.find((s) => s.session_id === state.sessionId);
+      if (current) {
+        highlightActiveSession(state.sessionId);
+      } else {
+        await switchSession(init.sessions[0].session_id, { silent: true });
+      }
     } else {
       await newSession();
     }
