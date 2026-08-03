@@ -227,6 +227,11 @@ function main() {
           }
           throw e;
         });
+      if (meta.error === "session_not_found") {
+        // G106：resume 失败（会话已删）→ 不更新 currentSessionId（renderer 会切到 next_session，
+        // 但 main 侧保持旧值，重连 resume 也不指向已删会话；renderer 随后 switchSession(next) 会纠正）
+        return meta;
+      }
       currentSessionId = sessionId;
       win.setTitle(`EMRG — ${sessionId}`); // G109
       return meta;
