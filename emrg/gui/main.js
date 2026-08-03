@@ -197,7 +197,14 @@ function main() {
       if (!validateText(text)) throw new Error("invalid text");
       if (!client || !client.connected) throw new Error("daemon not connected");
       ownStream = true;
-      const requestId = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true });
+      let requestId;
+      try {
+        requestId = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true });
+      } catch (e) {
+        ownStream = false; // sendTask 抛异常（ws.send 失败）→ 释放锁，防 G65 锁泄漏
+        ownStreamRequestId = null;
+        throw e;
+      }
       ownStreamRequestId = requestId; // 追踪自有流（G65 锁仅由自有 done 释放）
       return { ok: true, requestId }; // G124：回传 requestId → renderer 识别自有流
     });
