@@ -16,3 +16,11 @@ jobs:
           python-version: "3.13"
       - run: uv sync
       - run: uv run pytest tests/ -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: GUI unit tests (G55/G100)
+        working-directory: emrg/gui
+        run: |
+          npm ci --omit=dev
+          EMRG_SKIP_INTEGRATION=1 npm test
