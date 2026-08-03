@@ -112,9 +112,11 @@ async function sendMessage() {
   input.value = "";
   input.style.height = "auto";
   try {
-    await window.emrg.sendMessage({ sessionId: state.sessionId, text });
+    const res = await window.emrg.sendMessage({ sessionId: state.sessionId, text });
+    state.ownStreamRequestId = res.requestId || null; // G124：标记自有流
   } catch (e) {
     state.busy = false;
+    state.ownStreamRequestId = null;
     setComposerDisabled(false);
     addSystemMessage(`发送失败: ${e.message}（输入已恢复）`);
     input.value = text; // G49：失败恢复输入框
@@ -131,6 +133,7 @@ async function switchSession(sid, opts = {}) {
   try {
     const res = await window.emrg.switchSession({ sessionId: sid });
     state.sessionId = sid;
+    state.ownStreamRequestId = null; // G110：切会话清自有流标记
     clearChat();
     if (res.error === "session_not_found") {
       addSystemMessage("会话已被删除，已切换到最近会话。");

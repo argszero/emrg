@@ -195,8 +195,8 @@ function main() {
       if (!validateText(text)) throw new Error("invalid text");
       if (!client || !client.connected) throw new Error("daemon not connected");
       ownStream = true;
-      client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true });
-      return { ok: true };
+      const requestId = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true });
+      return { ok: true, requestId }; // G124：回传 requestId → renderer 识别自有流
     });
 
     ipcMain.handle("emrg:listSessions", async () => listSessions());
