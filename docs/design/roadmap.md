@@ -48,7 +48,7 @@
 |---|------|------|
 | 1 | **依赖驱动** | 每阶段的产物是下一阶段的输入。GUI 依赖协议与共享层；打包依赖全部功能就绪 |
 | 2 | **风险前置** | 协议改造动核心通信（TUI + server 双方），是全程最高风险——最先做，此时无 GUI/打包叠加，失败成本最低 |
-| 3 | **复用优先** | 共享客户端层在 GUI 之前提取，GUI 直接复用，杜绝"GUI 复制网络代码" |
+| 3 | **复用优先** | 共享客户端层在 GUI 之前提取（TUI 瘦身，协议客户端逻辑沉淀为 daemon_manager）；Electron GUI 以 Node 薄客户端重写相同协议逻辑，行为一致
 | 4 | **完整优先** | 安装包在功能齐备后一次打全（TUI + GUI + daemon 三入口），避免"先打包 TUI、GUI 出来再重新打包"的返工 |
 | 5 | **增强置后** | 远程连接是 WebSocket 协议的自然延伸，是锦上添花——不阻塞主线，放最后 |
 
@@ -121,7 +121,7 @@ emrg/client/
 - [x] `daemon_manager` 独立单测覆盖（不依赖 TUI 渲染）— tests/test_daemon_manager.py + tests/test_daemon_manager_e2e.py
 - [x] 提取后 `app.py` 行数显著下降（1994 → 1796，R62 核算 ≤1800 达标）
 
-**为什么在 GUI 前**：GUI 不复制网络代码是核心原则（§7.1 复用层）。协议在 Phase 1 已稳，此时提取无后顾之忧。
+**为什么在 GUI 前**：协议在 Phase 1 已稳，提取 daemon_manager 使 TUI 瘦身、协议客户端逻辑沉淀；Electron GUI 虽以 Node 重写（Python 模块不可复用），但 daemon_manager 是协议的"参考实现"，Node 客户端照它写行为一致。
 
 ---
 
@@ -130,9 +130,9 @@ emrg/client/
 **目标**：`emrg-gui` 可用，覆盖 80% 日常（聊天/会话/工具状态/设置）。
 
 **设计**（详见 `packaged-installer.md` §7.1）：
-- PySide6（仅 QtWidgets）+ qasync 单线程
-- `emrg/gui/`：main_window / daemon_client（信号桥）/ chat_view / session_panel / settings_dialog
-- 复用 `daemon_manager`（Phase 2），不复制网络代码
+- **Electron**（main 进程 Node + renderer Chromium）+ WebSocket 直连 daemon
+- `emrg/gui/`（前端 TS/React 或原生 JS）：main_window / daemon_client（Node ws 客户端）/ chat_view / session_panel / settings_dialog
+- **Node 薄客户端**（JS 重写，不复用 Python daemon_manager——Phase 2 的 TUI 瘦身收益保留，但"GUI 复用"承诺改为 Node 重写相同协议逻辑）
 - 与 TUI 平等入口，共享唯一 daemon
 
 **验收**：
@@ -180,7 +180,7 @@ emrg/client/
 |-------|------|------|------|------|
 | 1 | 协议 WebSocket 化 | — | 高（动核心通信） | 统一协议，业务改用 WS 原生 API（framing.py 删除） |
 | 2 | daemon_manager 提取 | 1 | 中（TUI 回归） | 共享客户端层 |
-| 3 | GUI v1 | 1+2 | 中（新栈） | `emrg-gui` |
+| 3 | GUI v1 | 1+2 | 中（新栈） | `emrg-gui`（Electron + Node ws 客户端） |
 | 4 | 安装文件分发 | 1+2+3 | 中（打包坑多） | .pkg/.exe/.AppImage |
 | 5 | 远程连接 | 1（协议已统一） | 中（安全敏感） | wss + TOFU + 认证 |
 

@@ -274,16 +274,16 @@ emrg update
 - IPC 协议（`protocol.py` + 长度前缀分帧）与传输（`connect.py`，Unix Socket / Named Pipe）完全平台无关，GUI 复用同一协议层；
 - 会话、记忆、演化全部由 daemon 管理，客户端只做渲染与交互——GUI 不引入第二份状态。
 
-**GUI 技术栈选型**（实施时决策，此处给出约束）：
+**GUI 技术栈选型**（已定稿：**Electron**，2026-08-03 用户决策）：
 
 | 方案 | 体积增量 | 平台自包含性 | 现代 UI 能力 | 结论 |
 |------|:---:|------|:---:|------|
-| **PySide6 (Qt)** | ~80-120MB | ✅ 全平台捆绑 Qt 库 | 强（WebEngine/原生控件） | **推荐候选**：自包含性最好，符合"安装即完整" |
-| pywebview（系统 WebView） | ~10-30MB | macOS ✅ / Windows ✅(WebView2) / Linux ⚠️(需 WebKitGTK) | 强（HTML/CSS/JS） | 备选：体积小，但 Linux 引入系统依赖，违背零依赖目标 |
+| **Electron** | ~80-200MB | ✅ 全平台捆绑 Chromium | 最强（HTML/CSS/JS 生态） | **已选**：UI 能力最强，Markdown/diff 现成生态；WebSocket 协议语言无关，Node 原生 `ws` 直连 |
+| PySide6 (Qt) | ~80-120MB | ✅ 全平台捆绑 Qt 库 | 强（WebEngine/原生控件） | 备选（被 Electron 取代） |
+| pywebview（系统 WebView） | ~10-30MB | macOS ✅ / Windows ✅(WebView2) / Linux ⚠️(需 WebKitGTK) | 强（HTML/CSS/JS） | 备选：体积小，但 Linux 引入系统依赖 |
 | Tkinter（stdlib） | ~5MB | ✅ 随 Python 捆绑 | 弱（控件老旧） | 兜底：体积最小，体验一般 |
-| Rust 原生 (egui/iced) | ~10MB | ✅ 静态链接 | 强 | 远期路线（与方案 D 合并） |
 
-> **倾向**：PySide6（详见 §7.1 已定稿：仅 QtWidgets 模块 + qasync，不用 QML/WebEngine）。GUI 是面向非开发者的主入口，体验权重高于体积；Linux 上避免 WebKitGTK 依赖是关键约束。PyInstaller 对 PySide6 支持成熟（官方文档有专门章节）。
+> **决策**：Electron（2026-08-03 用户拍板，取代此前 PySide6 定稿）。理由：① UI 能力最强（HTML/CSS/JS 渲染 Markdown/diff 有现成生态）；② WebSocket 协议语言无关，Node 原生 `ws` 库直连 daemon，无需 Python 桥；③ electron-builder 跨平台打包成熟（.dmg/.exe/.AppImage）。代价：体积 ~80-200MB（含 Chromium）、内存 ~200-500MB/实例——GUI 作为非开发者主入口，接受。Phase 2 的 daemon_manager.py 保留为**协议参考实现**，Node 薄客户端（daemon_client.js）照它写，行为一致。
 
 **GUI 与打包的相互作用**：
 
@@ -296,8 +296,8 @@ emrg update
 4. **多客户端会话协调**：TUI 与 GUI 同时操作同一 session 时，历史文件以 daemon 为唯一写者（现状即如此），客户端只读历史、写操作经 IPC 提交——无竞争风险。
 
 **对打包的影响**：
-- PyInstaller spec 增加第三个入口 `emrg-gui`；
-- GUI 技术栈（若 PySide6）体积增大 80-120MB，风险表更新；
+- electron-builder 打包 `emrg-gui`（替代 PyInstaller 的 GUI 入口；TUI/daemon 仍用 PyInstaller）；
+- GUI 技术栈（Electron）体积增大 80-200MB，风险表更新；
 - 冒烟测试增加"GUI 启动 → 连接 daemon → 发消息 → 收到流式回复"用例。
 
 ### 7.1 极简 GUI 设计（最佳实践基准 + 功能极简）
@@ -322,60 +322,67 @@ emrg update
 
 | 项 | 选型 | 理由 |
 |----|------|------|
-| GUI 框架 | **PySide6 (Qt Widgets, 仅 QtWidgets 模块)** | 不用 QML（v1 无复杂动效）、不用 WebEngine（省 ~50MB + 免 Chromium 安全面）；Qt Widgets 足以承载聊天窗口 |
-| 事件循环 | **qasync**（asyncio 跑在 Qt 事件循环内） | 单线程模型，无锁；daemon 的 asyncio 客户端代码直接复用 |
-| 渲染 | QTextEdit（append 流式增量）+ QListWidget（会话列表） | 原生控件，零额外依赖 |
-| 配置 | 直接读写 `~/.emrg/config.toml` | 与 daemon 共享同一配置；改后 daemon 靠现有 mtime 检测自动重启 |
+| GUI 框架 | **Electron**（main 进程 Node + renderer Chromium） | UI 能力最强（HTML/CSS/JS 生态）；协议是 WebSocket，Node 原生 `ws` 库直连 daemon，语言无关 |
+| 事件循环 | Node 事件循环（main）+ 浏览器事件循环（renderer） | main 进程 Node ws 客户端异步连 daemon；renderer 只渲染，经 IPC 通信 |
+| 渲染 | React 或原生 JS + marked（Markdown）+ highlight.js（代码高亮） | 现成生态，Markdown/diff 渲染质量远超 QtWidgets |
+| 配置 | renderer 读 `~/.emrg/config.toml`（main 代理 fs 访问） | 与 daemon 共享同一配置；改后 daemon 靠现有 mtime 检测自动重启 |
 
-#### 代码结构（`emrg/gui/`，约 6 个文件）
+#### 代码结构（`emrg/gui/`，约 8 个文件）
 
 ```
 emrg/gui/
-├── __main__.py          # 入口：QApplication + MainWindow（sys.frozen 兼容）
-├── main_window.py       # 主窗口组装：左侧会话栏 + 右侧聊天区 + 底部输入条 + 状态栏
-├── daemon_client.py     # 复用层：封装 client/app.py 的 daemon 管理与协议读写
-├── chat_view.py         # QTextEdit 子类：流式增量追加、工具调用一行状态
-├── session_panel.py     # QListWidget 子类：会话列表（list_sessions / resume_session / delete_session）
-└── settings_dialog.py   # QDialog：config.toml 读写（api_key/base_url/model）
+├── package.json          # Electron 入口 + 依赖（ws / marked / highlight.js）
+├── main.js               # main 进程：创建窗口、拉起 emrgd（sys.frozen 分支）、daemon 连接管理
+├── preload.js            # contextBridge：renderer ↔ main 的 IPC 桥（安全沙箱）
+├── renderer/
+│   ├── index.html        # 主布局：左侧会话栏 + 右侧聊天区 + 底部输入条 + 状态栏
+│   ├── app.js            # UI 逻辑：聊天渲染、会话列表、工具状态
+│   ├── markdown.js       # marked + highlight.js 封装（流式增量渲染）
+│   └── settings.js       # 设置对话框（config.toml 读写，经 preload IPC）
+└── daemon_client.js      # Node ws 客户端：读 port 文件 + auth + 消息收发（协议参考 daemon_manager.py）
 ```
 
-#### 复用层（关键设计：不与 TUI 重复造轮子）
+#### 复用层（关键设计：协议一致，Node 薄客户端）
 
-`daemon_client.py` 是唯一与 daemon 通信的模块，**从 TUI 提取共享逻辑**，TUI/GUI 双端引用同一份：
-
-```
-emrg/client/daemon_manager.py   # ← 从 client/app.py 提取（TUI 改造后共用）
-  ├── start_server_daemon()      # 启动 emrgd（sys.frozen 分支：启动同目录 emrgd 二进制）
-  ├── check_and_restart_if_stale()# config/source mtime 变更 → 重启（复用现有逻辑）
-  ├── connect_to_server()        # 建连（复用 emrg.connect）
-  └── read_stream()              # 读流：yield (delta|tool_start|tool_end|done)
-
-emrg/gui/daemon_client.py        # GUI 侧薄封装：
-  ├── send_task(session_id, prompt, stream=True)
-  └── 信号桥：asyncio 协程 → Qt Signal（message_delta / tool_started / tool_finished / done）
-```
-
-> **为什么 TUI 也要改**：现状 `client/app.py`（1997 行）把 daemon 管理、协议读写、TUI 渲染全部揉在一起。提取 `daemon_manager.py` 后 TUI 瘦身、GUI 白拿一套经过生产验证的通信逻辑。这是"最佳实践"的核心——**GUI 不复制 TUI 的网络代码**。
-
-#### 线程模型（单线程，零锁）
+`daemon_client.js` 是唯一与 daemon 通信的模块（main 进程内）。**Python 的 `daemon_manager.py` 不可被 Electron 直接 import**——但它是协议的**参考实现**，Node 客户端照它写，行为一致：
 
 ```
-QThread (主线程) = Qt 事件循环 + qasync 桥接的 asyncio 事件循环
-  ├── UI 事件（点击、输入）→ 直接调用 asyncio 协程
-  ├── daemon 流式响应 → asyncio Task → 通过 Qt Signal 投递到 UI 槽
-  └── 无第二线程 → 无共享状态 → 无锁（规避 QThread + asyncio 混用的经典死锁）
+emrg/client/daemon_manager.py   # Python 参考实现（Phase 2 已实施，TUI 用）
+  ├── ensure_connected()         # 拉起 + 建连 + auth（协议：读 port 文件 → ws://127.0.0.1:port → auth 首帧 → auth_ok）
+  ├── send_task / send_command   # 消息封装（JSON type + params，ensure_ascii=False）
+  ├── recv / read_stream         # 读流：yield (delta|tool_start|tool_end|done)
+  └── ConnectionClosed 传播       # 断连检测（同 R11 语义）
+
+emrg/gui/daemon_client.js       # Node 薄客户端（main 进程）：
+  ├── ensureDaemon()              # 拉起 emrgd（spawn python -m emrg.server，sys.frozen 分支启动同目录二进制）
+  ├── connect()                   # 读 ~/.emrg/emrgd.port → ws 连接 → auth 首帧 → auth_ok
+  ├── sendTask(sessionId, prompt, images?)   # type="task"
+  ├── sendCommand(type, params)   # ping/list_*/set_*/rant/...
+  └── onEvent(cb)                 # 事件回调 → IPC 转发 renderer（message_delta / tool_started / tool_finished / done）
 ```
 
-- 断线/daemon 崩溃 → 状态栏变红 + 自动重连（复用 `client_connect_to_server` 的"未运行则拉起"逻辑）。
+> **为什么 TUI 也要改（已由 Phase 2 完成）**：`client/app.py` 从 1994 行瘦身至 1796 行，协议客户端逻辑沉淀为 `daemon_manager.py`——它是 Node 客户端的行为参照。**Node 不复制 Python 代码，但复制协议语义**（相同 JSON 消息、相同 auth 流程、相同断连处理）。
+
+#### 线程模型（双进程，IPC 桥）
+
+```
+Electron main 进程（Node）          Electron renderer 进程（Chromium）
+  ├── daemon_client.js：ws 连接      ├── UI 渲染（React/原生 JS）
+  ├── 事件循环：异步收 daemon 帧      ├── 用户输入 → IPC → main → daemon
+  └── 事件 → IPC → renderer          └── IPC ← main ← daemon 帧 → 增量渲染
+```
+
+- main 进程是**唯一连 daemon 的进程**（daemon_client.js），renderer 零网络权限（contextBridge 隔离，安全沙箱）。
+- 断线/daemon 崩溃 → main 检测 ConnectionClosed → 状态栏变红 + 自动重连（复用"未运行则拉起"逻辑）。
 - 发送时 UI 不阻塞：输入条 disable + 状态栏"思考中…"，收到 done 后恢复。
 
 #### 会话数据流（复用 daemon 已有 IPC）
 
 ```
-启动 → daemon_manager 确保 emrgd 运行
+启动 → main 进程 daemon_client.js 确保 emrgd 运行（spawn python -m emrg.server）
      → list_sessions?session_id=… → 左侧会话列表（无会话则自动新建）
-发消息 → send_task(session_id, prompt, stream=true)
-     → 流式帧 → chat_view 增量追加
+发消息 → sendTask(sessionId, prompt, stream=true)（renderer → IPC → main → daemon）
+     → 流式帧 → main onEvent → IPC → renderer 增量追加
      → tool_start/tool_end → 状态栏一行「🔧 bash — 运行中… / 完成 1.2s」
 切换会话 → resume_session → chat_view 加载历史（daemon 返回 history_list）
 ```
@@ -407,11 +414,11 @@ QThread (主线程) = Qt 事件循环 + qasync 桥接的 asyncio 事件循环
 #### 验收标准（GUI v1）
 
 - [ ] 全新环境：双击安装 → 打开 GUI → 首启引导填 key → 聊天 → 工具调用状态显示 → 正常
-- [ ] 流式响应无卡顿（qasync 单线程不阻塞 UI）
+- [ ] 流式响应无卡顿（renderer 增量渲染不阻塞）
 - [ ] 会话切换/新建/删除 与 TUI 操作同一 daemon，数据一致
 - [ ] daemon 被杀 → 状态栏变红 → 自动拉起 → 重连成功
 - [ ] `emrg`（TUI）与 `emrg-gui` 同时连接，互不干扰
-- [ ] PyInstaller 打包后 GUI 可运行（Qt 插件收集完整）
+- [ ] electron-builder 打包后 GUI 可运行（win/mac/linux）
 
 ---
 
@@ -559,9 +566,9 @@ matrix:
 ```
 
 **PyInstaller spec 要点**（`packaging/emrg.spec`）：
-- `Analyze(['emrg/__main__.py', 'emrg/server/__main__.py', 'emrg/gui/__main__.py'])` → 三个 EXE（emrg、emrgd、emrg-gui）
+- `Analyze(['emrg/__main__.py', 'emrg/server/__main__.py'])` → 两个 EXE（emrg、emrgd）；**emrg-gui 用 electron-builder 单独打包**（不走 PyInstaller）
 - `datas`：上述 5 个模板文件 + LICENSE + `packaging/assets/`（图标）
-- `hiddenimports`：`yaml`（C 扩展）、`jinja2`、`httpx`、`rich`、skills loader 的动态 import 模块、GUI 框架（PySide6 的 Qt 插件）
+- `hiddenimports`：`yaml`（C 扩展）、`jinja2`、`httpx`、`rich`、skills loader 的动态 import 模块
 - `--noupx`（规避杀软误报）
 - onedir 模式（daemon 长期运行 + 更新替换需要，避免 onefile 的临时解压目录与运行中文件替换冲突）
 
@@ -603,15 +610,15 @@ matrix:
 - [ ] 更新检查提示（启动时比对最新 release 版本，可选开关）
 
 ### Phase 5 — GUI 客户端（极简 v1，并行推进，不阻塞 1-4）
-- [ ] 技术栈定稿：PySide6（仅 QtWidgets）+ qasync，验证 PyInstaller 打包
-- [ ] `emrg/gui/` 按 §7.1 结构落地：main_window / daemon_client（信号桥）/ chat_view / session_panel / settings_dialog
-- [ ] 复用层接入：GUI 走 `client/daemon_manager.py`（Phase 1 提取），不复制网络代码
+- [ ] 技术栈定稿：Electron + Node `ws` 客户端，验证 electron-builder 打包
+- [ ] `emrg/gui/` 按 §7.1 结构落地：main.js / preload.js / renderer（app.js + markdown.js + settings.js）/ daemon_client.js
+- [ ] 协议接入：daemon_client.js 照 daemon_manager.py 写（读 port 文件 + auth + 消息收发），行为一致
 - [ ] 功能 v1 验收：聊天流式 + 会话切换/新建/删除 + 工具状态行 + 设置对话框（首启引导填 key）
-- [ ] `emrg-gui` 入口接入 `sys.frozen` daemon 启动逻辑
+- [ ] `emrg-gui` 入口接入 daemon 启动逻辑（spawn python -m emrg.server，sys.frozen 分支）
 - [ ] 平台外壳：macOS `.app`（Info.plist+图标）、Windows 快捷方式、Linux AppImage `.desktop`（Exec=emrg-gui）
 - [ ] GUI 冒烟测试：启动 → 连 daemon → 流式对话 + 工具调用 → daemon 被杀自动重连
 - [ ] 多客户端同开验证：TUI + GUI 同时连接，会话/记忆一致
-- [ ] v2 立项清单（不实现）：Markdown 渲染、diff 视图、图片 vision、/命令补全、记忆浏览
+- [ ] v2 立项清单（不实现）：diff 视图、图片 vision、/命令补全、记忆浏览（Markdown 渲染用 marked 已含）
 
 ### Phase 6 — 远程连接（wss + 认证，协议已在 Phase 1 统一）
 - [ ] 前提：协议 WebSocket 化已完成（roadmap Phase 1）——本机 `ws://127.0.0.1:<port>` + token 已就绪
@@ -640,12 +647,11 @@ matrix:
 | 测试套件（pytest）不打包 | 打包产物无回归保障 | CI 中先跑全量 pytest 再打包；产物跑冒烟脚本 |
 | 捆绑 git 构建失败（某平台无便携版） | 该平台安装不完整 | CI 构建时验证捆绑产物存在；缺失则构建失败（fail-fast），不发布残缺包 |
 | 卸载误删宿主数据 | 不可逆损失 | 卸载只删 `~/.emrg/`；`<cwd>/.emrg/` 项目数据仅列位置不删除；删除前强制墓地快照 |
-| GUI 框架（PySide6）体积 +80-120MB | 下载变大、安装变慢 | 接受（GUI 是主入口，体验优先）；仅打包 QtWidgets 模块（不引 WebEngine/QML）省 ~50MB |
-| Linux 上 GUI 依赖（若选 pywebview→WebKitGTK） | 违背零依赖目标 | 选 PySide6（捆绑 Qt），规避系统库依赖 |
+| GUI 框架（Electron）体积 +80-200MB | 下载变大、安装变慢 | 接受（GUI 是主入口，体验优先）；Chromium 自带（无额外系统依赖） |
+| Linux 上 GUI 依赖 | 违背零依赖目标 | Electron 捆绑 Chromium，规避系统 WebKit 依赖 |
 | GUI 与 TUI 同时操作同一会话 | 状态不一致 | daemon 为唯一写者（现状），客户端只读历史、写操作经 IPC 提交 |
-| 三个 PyInstaller 入口互相干扰 | 打包产物残缺 | spec 单文件三 EXE 共用同一 `_internal/`；冒烟测试逐个验证入口 |
-| qasync 桥接（asyncio 跑在 Qt 事件循环）引入死锁 | UI 卡死 | 单线程模型（无 QThread）；只经 Qt Signal 投递跨域事件；验收含"流式不卡 UI"用例 |
-| Qt 平台插件（macOS 的 libqcocoa / Windows 的 qwindows.dll）漏收 | GUI 启动即崩 | spec 用 `collect_qt_plugins`；冒烟测试在 CI 无显示环境用 offscreen 跑通 |
+| 两个 PyInstaller 入口（emrg/emrgd）+ electron-builder（emrg-gui）打包互扰 | 产物残缺 | 各自独立打包；冒烟测试逐个验证入口 |
+| Electron main 进程 Node ws 断连检测遗漏 | 断连不重连 | daemon_client.js 监听 ws close/error（同 TUI 的 ConnectionClosed 语义）；状态栏变红 + 自动重连 |
 | 从 app.py 提取 daemon_manager 引入 TUI 回归 | TUI 功能受损 | 提取后 TUI 全量 pytest + 手动冒烟；共享逻辑用独立单测覆盖 |
 | 远程模式暴露 bash/API key（安全敏感） | 凭据与代码泄漏 | 默认关闭 + 直连 TLS 强制 + token + TOFU 指纹；安全验收含抓包无明文 |
 | TOFU 首次确认被用户跳过 → MITM | 中间人接管连接 | 首次连接强提示（非交互环境则拒绝连接）；支持 `server_fingerprint` 手动钉死；指纹变更即拒连 |
@@ -663,6 +669,6 @@ matrix:
 6. **自更新**：版本目录 + 符号链接原子切换，失败回滚，免 sudo，只动安装目录不动数据。
 7. **卸载全面**：`emrg uninstall` + 平台卸载器，终止报告 + 墓地快照 + 清理运行时 + 环境痕迹 + 自校验，幂等可重跑。
 8. **数据与安装目录严格分离**：安装目录只读，一切可变数据在 `~/.emrg/` 与工作目录 `.emrg/`。
-9. **TUI + GUI 双客户端**：`emrg`（TUI）与 `emrg-gui`（GUI）是平等入口，共享唯一 `emrgd`；协议/传输层复用，GUI 零状态只渲染。
-10. **GUI v1 极简**：PySide6（仅 QtWidgets）+ qasync 单线程；功能只做聊天/会话/工具状态行/设置，Markdown/diff/图片/补全留 v2；共享逻辑从 `client/app.py` 提取 `daemon_manager.py`，GUI 不复制 TUI 网络代码。
+9. **TUI + GUI 双客户端**：`emrg`（TUI）与 `emrg-gui`（GUI）是平等入口，共享唯一 `emrgd`；协议（WebSocket）复用，GUI 零状态只渲染。
+10. **GUI v1 极简（2026-08-03 改版：Electron）**：Electron（main Node + renderer Chromium）+ Node `ws` 客户端（daemon_client.js，照 daemon_manager.py 写）；功能只做聊天/会话/工具状态行/设置，diff/图片/补全留 v2；**Phase 2 的 daemon_manager.py 是协议参考实现，Node 薄客户端复制协议语义不复制 Python 代码**。
 11. **远程连接 = WebSocket 协议的自然延伸**：协议统一（roadmap Phase 1，本机 `ws://127.0.0.1:<port>`、远程 `wss://`）后，远程只加 TLS + token + **自签名证书 TOFU 指纹验证（SSH known_hosts 模式，无 CA）**；SSH 隧道为官方零代码路径（隧道内 ws 明文——加密分层，不叠加）。默认关闭、直连 TLS 强制。远程模式下会话/记忆/工具执行全在 daemon 侧，客户端是瘦终端（MANIFESTO 架构条款的自然推论）。
