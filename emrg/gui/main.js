@@ -205,6 +205,7 @@ function main() {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       if (ownStream) throw new Error("stream in progress — cannot switch"); // G65
       if (!client?.connected) throw new Error("daemon not connected");
+      client.clearGroups(); // G110：切会话清空旧分组缓存（含 timer），防广播"幽灵"残留
       const meta = await client.sendCommandAndWait("resume_session", { session_id: sessionId, cwd: projectDir }, 5000)
         .catch((e) => {
           // G106：被动删除恢复——resume error → 刷新列表 + 切最近

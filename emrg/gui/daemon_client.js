@@ -418,6 +418,13 @@ class DaemonClient {
     this._emit("group_cleared", { requestId, keepDom });
   }
 
+  // G110：会话切换时清空旧 session 分组缓存（含 timer），防"幽灵"广播残留
+  clearGroups() {
+    for (const requestId of [...this._groups.keys()]) {
+      this._cleanupGroup(requestId, true);
+    }
+  }
+
   // G124：当前发起流缓存
   _setCurrentStream(requestId) {
     this.clearActiveStream();

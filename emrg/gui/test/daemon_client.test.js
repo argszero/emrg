@@ -316,6 +316,12 @@ test("分组生命周期（G83+G104）：建组 → done 清理；>20 丢最老"
   // >20 丢最老
   for (let i = 0; i < 30; i++) send({ request_id: `bulk-${i}`, content: "", done: false, delta: true });
   assert.ok(client._groups.size <= 20, `group size ${client._groups.size} capped at 20`);
+  // G110：clearGroups 清空全部（含 timer）
+  const cleared = [];
+  client.onEvent((t, d) => { if (t === "group_cleared") cleared.push(d.requestId); });
+  client.clearGroups();
+  assert.strictEqual(client._groups.size, 0, "clearGroups empties all groups");
+  assert.ok(cleared.length >= 2, `group_cleared emitted for ${cleared.length} groups`);
 });
 
 test("generateSessionId 格式（G28+G81）", () => {
