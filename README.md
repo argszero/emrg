@@ -249,8 +249,14 @@ HN 社区（[讨论帖](https://news.ycombinator.com/item?id=49119274)）对 age
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # 安装依赖
-uv run pytest tests/ -v   # 跑测试（当前 428 项）
-uv run python -m emrg     # 启动
+uv run pytest tests/ -v   # 跑测试（当前 464 项）
+uv run python -m emrg     # 启动 TUI
+
+# 可选：Electron GUI（非开发者主入口，Phase 3）
+cd emrg/gui
+npm ci               # 安装依赖（生产模式可 --omit=dev）
+npm start            # 启动 GUI（自动拉起 daemon）
+npm test             # 运行 Node 测试（单测；集成测试本地跑）
 ```
 
 CI 通过 GitHub Actions 自动运行测试并检查冲突标记（`.github/workflows/test.yml`）。
@@ -262,6 +268,7 @@ emrg/
 ├── emrg/                   # 核心包
 │   ├── server/             # 守护进程——LLM 循环、工具执行、演化引擎
 │   ├── client/             # TUI——基于 python-tui 的交互式聊天
+│   ├── gui/                # Electron GUI（非开发者主入口，Phase 3）
 │   ├── tools/              # bash, read, write, edit, glob, grep
 │   ├── skills/             # 动态加载模块
 │   └── __main__.py         # CLI 入口
