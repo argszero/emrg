@@ -28,6 +28,7 @@ function main() {
   let configExists = false;
   let currentSessionId = null;
   let ownStream = false; // 自有流运行中（G65：禁止切会话）
+  let ownStreamRequestId = null; // 自有流 request_id（广播 done 不清锁）
   let reconnectTimer = null;
   let stopping = false;
 
@@ -196,6 +197,7 @@ function main() {
       if (!client || !client.connected) throw new Error("daemon not connected");
       ownStream = true;
       const requestId = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true });
+      ownStreamRequestId = requestId; // 追踪自有流（G65 锁仅由自有 done 释放）
       return { ok: true, requestId }; // G124：回传 requestId → renderer 识别自有流
     });
 
@@ -294,6 +296,7 @@ function main() {
       // G24：无参数
       await client?.sendCommand("cancel");
       ownStream = false;
+      ownStreamRequestId = null;
       return { ok: true };
     });
 
@@ -327,8 +330,13 @@ function main() {
           }
           return;
         }
-        if (type === "done" && data.timeout) ownStream = false;
-        if (type === "done") ownStream = false;
+        if (type === "done") {
+          // 仅自有流的 done 释放 G65 锁（广播 done 不影响）；timeout 兜底同样只清自有
+          if (data.request_id === ownStreamRequestId || (data.timeout && ownStream)) {
+            ownStream = false;
+            ownStreamRequestId = null;
+          }
+        }
         if (type === "error") { /* error 帧：有流式错误等 done */ }
         if (win && !win.isDestroyed()) {
           win.webContents.send("emrg:event", { type, data });
@@ -337,6 +345,7 @@ function main() {
       client.onEvent((type) => {
         if (type === "disconnected") {
           ownStream = false;
+          ownStreamRequestId = null;
           scheduleReconnect();
         }
       });
