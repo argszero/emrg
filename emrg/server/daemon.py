@@ -101,6 +101,11 @@ class EmrgServer:
         self._projects_log = runtime_dir / "projects.yml"
         self._rants_log = runtime_dir / "rants.jsonl"
 
+        # ── Phase 2 broadcast model (protocol-contract §2.6) ──
+        self._session_subscribers: dict[str, set] = {}  # session_id → set[ws]
+        self._session_busy: dict[str, bool] = {}        # session_id → active task?
+        self._all_connections: set = set()              # all authenticated connections
+
         # Build tool registry
         self.tools = ToolRegistry()
         self.tools.register(BashTool())
@@ -239,6 +244,7 @@ class EmrgServer:
             # Confirm auth so the client can distinguish auth failure from a
             # transient disconnect (prevents infinite reconnect loops).
             await self._send(ws, {"type": "auth_ok"})
+            self._all_connections.add(ws)
 
             while True:
                 try:
@@ -255,8 +261,16 @@ class EmrgServer:
                     continue
 
                 # Track session for disconnect-time consolidation
+                # Phase 2 broadcast: maintain subscription on session_id change
+                # (protocol-contract §2.6.2 — the read loop is the only place
+                # last_session_id is updated; task/cancel/compact all pass here).
                 if data.get("session_id"):
-                    last_session_id = data["session_id"]
+                    new_sid = data["session_id"]
+                    if new_sid != last_session_id:
+                        if last_session_id:  # unsubscribe from previous session
+                            self._session_subscribers.get(last_session_id, set()).discard(ws)
+                        self._session_subscribers.setdefault(new_sid, set()).add(ws)
+                        last_session_id = new_sid
                 if data.get("cwd"):
                     last_cwd = data["cwd"]
                     self._touch_project(last_cwd)
@@ -288,6 +302,15 @@ class EmrgServer:
                             "error": "task requires session_id and cwd",
                         })
                         continue
+                    # Phase 2 session-level lock (protocol-contract §2.6.5):
+                    # one active task per session — concurrent clients get
+                    # "session busy" instead of racing writes.
+                    if self._session_busy.get(session_id):
+                        await self._send(ws, {
+                            "error": "session busy",
+                            "session_id": session_id,
+                        })
+                        continue
                     try:
                         req = TaskRequest(
                             id=data.get("id", ""),
@@ -312,13 +335,14 @@ class EmrgServer:
                         session_id, req.prompt[:60], req.stream,
                     )
                     _cancel_event = asyncio.Event()
+                    self._session_busy[session_id] = True  # lock (released in *locked wrapper)
                     if req.stream:
                         _tool_task = asyncio.create_task(
-                            self._run_tool_loop(req, ws, session, _cancel_event)
+                            self._run_tool_loop_locked(req, ws, session, _cancel_event)
                         )
                     else:
                         _tool_task = asyncio.create_task(
-                            self._run_chat_once(req, ws, session)
+                            self._run_chat_once_locked(req, ws, session)
                         )
                     continue
 
@@ -335,6 +359,10 @@ class EmrgServer:
                     await _tool_task
                 except asyncio.CancelledError:
                     pass
+            # Phase 2 broadcast: unsubscribe on disconnect (protocol-contract §2.6.2)
+            if last_session_id:
+                self._session_subscribers.get(last_session_id, set()).discard(ws)
+            self._all_connections.discard(ws)
             try:
                 await ws.close()
             except Exception:
@@ -359,6 +387,29 @@ class EmrgServer:
         except (ConnectionClosed, OSError):
             logger.debug("client disconnected during send")
             return False
+
+    # ── Phase 2 broadcast (protocol-contract §2.6.3) ────────────
+
+    async def _broadcast(self, session_id: str, data: dict) -> None:
+        """Send data to all subscribers of session_id (including the originator).
+
+        Best-effort: a single dead subscriber must not affect the others.
+        """
+        for w in list(self._session_subscribers.get(session_id, ())):
+            try:
+                await self._send(w, data)
+            except Exception:
+                pass  # individual subscriber failure is non-fatal
+
+    async def _broadcast_all(self, data: dict, exclude=None) -> None:
+        """Send data to ALL authenticated connections (global state, e.g. model_set)."""
+        for w in list(self._all_connections):
+            if w is exclude:
+                continue
+            try:
+                await self._send(w, data)
+            except Exception:
+                pass  # individual connection failure is non-fatal
 
     # ── Project tracking ─────────────────────────────────────
 
@@ -1015,22 +1066,49 @@ class EmrgServer:
                 "content": content or "",
             })
 
-            if not await self._send(ws, {
+            await self._broadcast(session.session_id, {
                 "request_id": req.id,
                 "content": content or "",
                 "done": True,
                 "delta": False,
                 "session_id": session.session_id,
-            }):
-                return  # client disconnected
+            })
 
             # Fire-and-forget: reflect on whether to save memories
             self._maybe_reflect_memory(session, req.prompt, content or "")
         except Exception as e:
             logger.exception("LLM error")
-            await self._send(ws, {
+            await self._broadcast(session.session_id, {
                 "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
             })
+
+    # ── Phase 2 session-lock wrappers (protocol-contract §2.6.5) ──
+    # The caller fire-and-forgets with asyncio.create_task() and never awaits,
+    # so the lock MUST be released inside the task (wrapper finally) — not in
+    # the caller. cancel path: _tool_task.cancel() → task cancelled → wrapper
+    # finally runs → lock released. This also roots out the multi-connection
+    # write race (§5): session writes are serialized by the single active task.
+
+    async def _run_tool_loop_locked(
+        self, req: TaskRequest, ws, session: Session,
+        cancel_event: asyncio.Event | None = None,
+    ) -> None:
+        """Run _run_tool_loop and release the session busy lock on exit."""
+        session_id = session.session_id
+        try:
+            await self._run_tool_loop(req, ws, session, cancel_event)
+        finally:
+            self._session_busy[session_id] = False
+
+    async def _run_chat_once_locked(
+        self, req: TaskRequest, ws, session: Session,
+    ) -> None:
+        """Run _run_chat_once and release the session busy lock on exit."""
+        session_id = session.session_id
+        try:
+            await self._run_chat_once(req, ws, session)
+        finally:
+            self._session_busy[session_id] = False
 
     async def _run_tool_loop(
         self, req: TaskRequest, ws, session: Session,
@@ -1075,7 +1153,7 @@ class EmrgServer:
             # Check for cancellation between rounds
             if cancel_event and cancel_event.is_set():
                 logger.info("tool loop cancelled by client at round %d", round_num)
-                await self._send(ws, {
+                await self._broadcast(session.session_id, {
                     "request_id": req.id,
                     "content": "",
                     "done": True,
@@ -1100,8 +1178,8 @@ class EmrgServer:
                         estimated, trigger_at,
                         self.llm.config.auto_compact_threshold * 100,
                     )
-                    # Notify client
-                    await self._send(ws, {
+                    # Notify client (broadcast to all session subscribers)
+                    await self._broadcast(session.session_id, {
                         "type": "compact_result",
                         "session_id": session.session_id,
                         "messages_compacted": 0,
@@ -1123,7 +1201,7 @@ class EmrgServer:
                                 raise
                         count = session.compact(summary, keep_recent=5)
                         logger.info("auto-compact done: %d messages compacted", count)
-                        await self._send(ws, {
+                        await self._broadcast(session.session_id, {
                             "type": "compact_result",
                             "session_id": session.session_id,
                             "messages_compacted": count,
@@ -1155,14 +1233,13 @@ class EmrgServer:
                     c = delta.get("content")
                     if c:
                         content_parts.append(c)
-                        if not await self._send(ws, {
+                        await self._broadcast(session.session_id, {
                             "request_id": req.id,
                             "content": c,
                             "done": False,
                             "delta": True,
                             "session_id": session.session_id,
-                        }):
-                            return  # client disconnected
+                        })
 
                     # Track accumulated tool calls for finalization
                     tcs = delta.get("tool_calls")
@@ -1180,7 +1257,7 @@ class EmrgServer:
                         final_usage = usage
             except asyncio.CancelledError:
                 logger.info("tool loop cancelled mid-stream in round %d", round_num)
-                await self._send(ws, {
+                await self._broadcast(session.session_id, {
                     "request_id": req.id,
                     "content": "",
                     "done": True,
@@ -1190,12 +1267,12 @@ class EmrgServer:
                 return
             except Exception as e:
                 logger.exception("LLM stream error in round %d", round_num)
-                await self._send(ws, {
+                await self._broadcast(session.session_id, {
                     "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
                 })
                 # Send done so the client knows the stream is over.
                 # Without this, the client stays in its read loop → deadlock.
-                await self._send(ws, {
+                await self._broadcast(session.session_id, {
                     "done": True,
                     "request_id": req.id,
                 })
@@ -1220,14 +1297,13 @@ class EmrgServer:
                     "content": full_content,
                 })
 
-                if not await self._send(ws, {
+                await self._broadcast(session.session_id, {
                     "request_id": req.id,
                     "content": "",
                     "done": True,
                     "delta": False,
                     "session_id": session.session_id,
-                }):
-                    return  # client disconnected
+                })
 
                 # Fire-and-forget: reflect on whether to save memories
                 self._maybe_reflect_memory(session, req.prompt, full_content)
@@ -1298,15 +1374,14 @@ class EmrgServer:
                     logger.info("tool call: %s(%s)", tc_name,
                                 json.dumps(args, ensure_ascii=False)[:200])
 
-                    # Notify client (best-effort — fail means client is gone)
-                    if not await self._send(ws, {
+                    # Notify client (broadcast to all session subscribers)
+                    await self._broadcast(session.session_id, {
                         "type": "tool_start",
                         "request_id": req.id,
                         "tool_name": tc_name,
                         "tool_call_id": tc_id,
                         "arguments": args,
-                    }):
-                        return  # client disconnected
+                    })
 
                     # Inject session cwd as default for filesystem tools
                     if tc_name in ("bash", "glob") and "workdir" not in args:
@@ -1354,16 +1429,15 @@ class EmrgServer:
                         "content": result.content,
                     })
 
-                    # Notify client of result (best-effort)
-                    if not await self._send(ws, {
+                    # Notify client of result (broadcast to all session subscribers)
+                    await self._broadcast(session.session_id, {
                         "type": "tool_end",
                         "request_id": req.id,
                         "tool_name": tc_name,
                         "tool_call_id": tc_id,
                         "content": result.content,
                         "error": result.error,
-                    }):
-                        return  # client disconnected
+                    })
 
                 # Log LLM request for this round (before continuing)
                 continue
@@ -1380,14 +1454,13 @@ class EmrgServer:
                 "content": full_content,
             })
 
-            if not await self._send(ws, {
+            await self._broadcast(session.session_id, {
                 "request_id": req.id,
                 "content": full_content or "",
                 "done": True,
                 "delta": False,
                 "session_id": session.session_id,
-            }):
-                return  # client disconnected
+            })
 
             # Fire-and-forget: reflect on whether to save memories
             self._maybe_reflect_memory(session, req.prompt, full_content)
@@ -1396,14 +1469,13 @@ class EmrgServer:
         # Exceeded max tool rounds
         logger.warning("max tool rounds (%d) exceeded for task %s",
                        self._max_tool_rounds, req.id)
-        if not await self._send(ws, {
+        await self._broadcast(session.session_id, {
             "request_id": req.id,
             "content": f"Exceeded maximum tool call rounds ({self._max_tool_rounds}).",
             "done": True,
             "delta": False,
             "session_id": session.session_id,
-        }):
-            return  # client disconnected
+        })
 
         # Fire-and-forget: reflect on whether to save memories
         self._maybe_reflect_memory(session, req.prompt, full_content)
@@ -1542,7 +1614,7 @@ class EmrgServer:
         """Handle a compact request: summarize history via LLM and replace old messages."""
         records = session._read_history()
         if len(records) <= 5:
-            await self._send(ws, {
+            await self._broadcast(session.session_id, {
                 "type": "compact_result",
                 "session_id": session.session_id,
                 "messages_compacted": 0,
@@ -1561,7 +1633,7 @@ class EmrgServer:
                     summary = await self._chunked_compact(records)
                 except Exception as e2:
                     logger.exception("chunked compact also failed")
-                    await self._send(ws, {
+                    await self._broadcast(session.session_id, {
                         "type": "compact_result",
                         "session_id": session.session_id,
                         "messages_compacted": 0,
@@ -1574,7 +1646,7 @@ class EmrgServer:
         # Apply compact
         count = session.compact(summary, keep_recent=5)
 
-        await self._send(ws, {
+        await self._broadcast(session.session_id, {
             "type": "compact_result",
             "session_id": session.session_id,
             "messages_compacted": count,
@@ -1858,6 +1930,15 @@ class EmrgServer:
             "context_window": self.llm.config.context_window,
             "previous": old_model,
         })
+        # Phase 2 broadcast: model is global daemon state — all connected
+        # clients must see the same model (protocol-contract §2.6.3).
+        # The requester already got model_set above; exclude it from _broadcast_all.
+        await self._broadcast_all({
+            "type": "model_set",
+            "model": model_name,
+            "context_window": self.llm.config.context_window,
+            "previous": old_model,
+        }, exclude=ws)
 
     async def _handle_resume_session(
         self, session_id: str, cwd: Path, ws
