@@ -187,6 +187,7 @@ function main() {
         project_dir_valid: projectDirValid,
         server_id: pong?.identity?.instance_id || "",
         model: pong?.model || "",
+        evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
         sessions,
       };
     });

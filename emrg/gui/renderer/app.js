@@ -33,6 +33,7 @@ async function boot() {
     state.serverId = init.server_id || "";
     state.model = init.model || "";
     updateStatusBar(init);
+    updateEvolutionCount(init.evolution_count);
 
     if (!init.config_exists) {
       showWelcome(); // G71：config 缺失 → 首启引导（不拉起 daemon）
@@ -413,6 +414,7 @@ async function handleEvent(evt) {
       state.model = data.model || state.model;
       $("server-id").textContent = state.serverId || "—";
       $("model-name").textContent = state.model || "—";
+      updateEvolutionCount(data.evolution_count);
       break;
     case "status":
       handleStatus(data);
@@ -565,6 +567,7 @@ function handleStatus(data) {
     $("daemon-dot").className = "dot green";
     if (data.server_id) $("server-id").textContent = data.server_id;
     if (data.model) $("model-name").textContent = data.model;
+    updateEvolutionCount(data.evolution_count);
     addSystemMessage("✓ 已重新连接");
   } else if (data.auth_failed) {
     $("daemon-dot").className = "dot red";
@@ -572,6 +575,13 @@ function handleStatus(data) {
   } else {
     $("daemon-dot").className = "dot red";
   }
+}
+
+// G19：状态栏演化计数（pong evolution_count / init / status）
+function updateEvolutionCount(count) {
+  const el = $("evolution-count");
+  if (!el) return;
+  el.textContent = count !== undefined && count !== null ? `演化 ${count} 次` : "";
 }
 
 // ── 启动 ─────────────────────────────────────────────────
