@@ -56,7 +56,6 @@ async function boot() {
   } catch (e) {
     addSystemMessage(`启动失败: ${e.message}`);
   }
-  window.emrg.onEvent(handleEvent);
 }
 
 // ── UI 绑定 ──────────────────────────────────────────────
@@ -586,4 +585,5 @@ function updateEvolutionCount(count) {
 // ── 启动 ─────────────────────────────────────────────────
 
 bindUi(); // 模块级只绑定一次（boot 可被 saveSettings/saveWelcome 重复调用，防重复 listener）
+window.emrg.onEvent(handleEvent); // 模块级只注册一次（防 ipcRenderer listener 泄漏 → delta 重复渲染）
 boot();
