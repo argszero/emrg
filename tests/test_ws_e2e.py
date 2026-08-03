@@ -327,3 +327,153 @@ class TestWSProtocol:
                     await ws.close()
                     await cleanup()
         asyncio.run(_test())
+
+
+class TestWSBroadcast:
+    """Phase 2 broadcast model (protocol-contract §2.6).
+
+    Same session → all subscribed connections see the same streaming
+    response. Concurrent task on a busy session → 'session busy'.
+    """
+
+    def test_broadcast_to_subscribers(self):
+        """Two connections on the same session: B sees A's streaming task."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        # B subscribes to the session first (any message carrying
+                        # session_id triggers the subscription in the read loop).
+                        await ws_b.send(json.dumps({
+                            "type": "list_history",
+                            "session_id": "s_bcast",
+                            "cwd": str(cwd),
+                        }))
+                        await asyncio.wait_for(ws_b.recv(), timeout=5)  # history_list
+                        task = {
+                            "type": "task",
+                            "id": "t-bcast",
+                            "session_id": "s_bcast",
+                            "cwd": str(cwd),
+                            "prompt": "你好",
+                            "stream": True,
+                            "timestamp": "2026-08-02T00:00:00",
+                        }
+                        await ws_a.send(json.dumps(task, ensure_ascii=False))
+                        # B must see the same streaming events as A
+                        got_delta = got_tool = got_done = False
+                        while True:
+                            frame = await asyncio.wait_for(ws_b.recv(), timeout=10)
+                            resp = json.loads(frame)
+                            if resp.get("delta"):
+                                got_delta = True
+                            if "tool_name" in resp:
+                                got_tool = True
+                            if resp.get("done"):
+                                got_done = True
+                                break
+                        assert got_delta and got_tool and got_done
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_session_busy(self):
+        """A's task holds the session lock; B's task gets 'session busy'."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def slow_chat_stream(messages, tools=None):
+                        yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
+                        await asyncio.sleep(0.8)
+                        yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
+                    server.llm.chat_stream = slow_chat_stream
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        task = {
+                            "type": "task", "id": "t-busy-a", "session_id": "s_busy",
+                            "cwd": str(cwd), "prompt": "hi", "stream": True,
+                            "timestamp": "2026-08-02T00:00:00",
+                        }
+                        await ws_a.send(json.dumps(task, ensure_ascii=False))
+                        await asyncio.sleep(0.2)  # let A's task grab the lock
+                        task_b = {**task, "id": "t-busy-b"}
+                        await ws_b.send(json.dumps(task_b, ensure_ascii=False))
+                        frame = await asyncio.wait_for(ws_b.recv(), timeout=5)
+                        resp = json.loads(frame)
+                        assert resp.get("error") == "session busy"
+                        assert resp.get("session_id") == "s_busy"
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_unsubscribe_on_disconnect(self):
+        """B disconnects → removed from the session's subscriber set.
+
+        Note: server-side subscription holds ServerConnection objects (the
+        handler's ws), which differ from the client-side ClientConnection
+        handles. We assert by subscriber-set size: 2 before, 1 after B closes.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        for w in (ws_a, ws_b):
+                            await w.send(json.dumps({
+                                "type": "list_history",
+                                "session_id": "s_unsub",
+                                "cwd": str(cwd),
+                            }))
+                            await asyncio.wait_for(w.recv(), timeout=5)
+                        assert len(server._session_subscribers.get("s_unsub", set())) == 2
+                    finally:
+                        await ws_b.close()
+                    # Daemon processes the disconnect → unsubscribes B
+                    await asyncio.sleep(0.3)
+                    subs = server._session_subscribers.get("s_unsub", set())
+                    assert len(subs) == 1  # B removed, A still subscribed
+                    await ws_a.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_model_set_broadcast(self):
+        """B switches model → A receives the model_set broadcast (global state)."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        await ws_b.send(json.dumps({"type": "set_model", "model": "model-x"}))
+                        # A must receive the broadcast model_set
+                        while True:
+                            frame = await asyncio.wait_for(ws_a.recv(), timeout=5)
+                            resp = json.loads(frame)
+                            if resp.get("type") == "model_set":
+                                assert resp["model"] == "model-x"
+                                break
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())

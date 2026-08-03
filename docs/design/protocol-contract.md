@@ -2,15 +2,17 @@
 
 > **用途**：这是 EMRG daemon 与客户端之间的**唯一通信契约**。任何客户端（TUI / Electron GUI / 未来客户端）按本文实现即可与 daemon 互通——**不需阅读任何 Python 源码**。
 >
-> **状态**：✅ 已与 daemon 实际行为逐条核对（v1，2026-08-02）
+> **状态**：✅ 已与 daemon 实际行为逐条核对（v2，2026-08-03 —— 广播模型已实施）
 > **对应实现**：`emrg/server/daemon.py`（服务端）、`emrg/connect.py`（连接层）、`emrg/protocol.py`（类型定义）
 > **传输**：WebSocket over TCP loopback（Phase 1 已完成）
 >
-> **⚠️ 现状 vs 目标（Electron 端必读）**：
-> - **本文主体（§1-§6）= 当前 daemon 的现状协议**（点对点：响应只发给发起连接）——Electron v1 **按此实现**
-> - **§2.6 = 广播模型的目标设计**（Phase 2 实施，roadmap-electron.md）——实施后 §2.2/§3.1/§5/§6 同步更新
-> - **Electron v1 不要按 §2.6 实现**（daemon 还是点对点，广播会收不到）——按现状实现，等 Phase 2 落地后再升级
-> - 判断"广播是否已实施"：`git log` 查 "broadcast" commit，或跑双连接测试（A 发 task B 能否收到）
+> **⚠️ 广播模型状态（Electron 端必读）**：
+> - **本文主体（§1-§6）= 当前 daemon 的现状协议**，其中 §2.6 广播模型 **已实施**（2026-08-03，daemon 改造 + e2e 验证）：
+>   - task 的流式响应（delta/tool_start/tool_end/done）**广播给所有订阅该 session 的连接**
+>   - **session 级锁**：同一 session 同时只允许一个 task，并发请求返回 `{"error": "session busy"}`
+>   - **model_set 广播**：模型切换是全局状态，向所有连接广播
+>   - 断开自动退订；单客户端时广播退化为点对点，行为与 v1 一致
+> - **Electron 端按本文实现即可**（含 §2.6 广播语义）
 
 ---
 
@@ -139,6 +141,13 @@
 
 > **服务端主动推送**（客户端未请求也会收到）：`compact_result`（`auto: true`，task 流式中途，§3.10）。客户端事件循环必须容忍响应流中插入其他类型事件。
 
+> **📡 广播语义（Phase 2 已实施，2026-08-03）**：
+> - **广播给 session 订阅者**（所有订阅了该 session 的连接，含发起者）：delta 帧、done 帧、`tool_start`、`tool_end`、`compact_result`（手动/自动）——同一 session 的所有客户端看到相同的流式响应
+> - **广播给所有连接**（全局状态）：`model_set`——模型切换后所有客户端状态栏同步
+> - **保持点对点（非广播）**：`auth_ok`、pong、错误帧、`cancelled` 确认（谁 cancel 谁知道）、列表/结果类响应（`sessions_list`/`models_list`/`resume_result`/...）——请求者专用
+> - **session 级锁**：同一 session 同时只允许一个 task；第二个 task 请求返回 `{"error": "session busy", "session_id": "..."}`
+> - 详见 §2.6
+
 ---
 
 ## 2.5 请求-响应关联（Electron 端架构级约束，勿设计成 Promise 配对）
@@ -171,7 +180,7 @@
 
 > **决策（2026-08-03）**：从用户视角，"在多个客户端打开同一 session = 从不同地方和同一 Agent 对话，看到同样结果"。因此协议采用**广播模型**——task 的流式响应**广播给所有订阅了该 session 的连接**，而非只发给发起者。
 >
-> **状态**：设计定稿，Phase 2 实施（roadmap-electron.md Phase 2）。v1（当前 daemon）是点对点——只发给发起连接（实测验证）。
+> **状态**：✅ **已实施（2026-08-03）**——daemon 广播改造完成（`_broadcast`/`_broadcast_all`/session 级锁），e2e 测试覆盖广播、session busy、退订、model_set 广播。v1（点对点）成为历史行为。
 
 ### 2.6.1 数据结构
 
