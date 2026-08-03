@@ -518,9 +518,15 @@ function handleDone(data) {
 function handleToolStart(data) {
   const rid = data.request_id;
   if (rid && !state.groupNodes.has(rid)) {
-    // G104：tool_start 也建组
+    // G104：tool_start 也建组（LLM 先出 tool_calls 后出文本）——与 handleDelta 一致，广播流标 remote
+    const isOwn = state.ownStreamRequestId === rid;
     const node = document.createElement("div");
     node.className = "msg assistant";
+    if (!isOwn) node.classList.add("remote");
+    const label = document.createElement("div");
+    label.className = "remote-label";
+    label.textContent = isOwn ? "" : "（来自其他客户端）";
+    if (!isOwn) node.appendChild(label);
     const body = document.createElement("div");
     body.className = "msg-body";
     node.appendChild(body);
