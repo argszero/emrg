@@ -459,6 +459,7 @@ class DaemonClient {
   _onClose() {
     this.connected = false;
     this._rejectAllPending("connection closed");
+    this.clearActiveStream(); // G94 timer 清理：断连后 30s 超时 timer 不应再触发（防虚假"响应超时"提示）
     this._emit("disconnected", {});
     this.logger.info("[gui] daemon connection closed");
   }
