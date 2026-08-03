@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>EMRG</title>
+  <link rel="stylesheet" href="app.css" />
+  <link rel="stylesheet" href="../vendor/highlight.github-dark.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- 会话栏 -->
+    <aside id="sidebar">
+      <div id="session-list">
+        <div class="session-item placeholder">暂无会话</div>
+      </div>
+      <button id="new-session-btn" title="新建会话">＋ 新建</button>
+    </aside>
+
+    <!-- 聊天区 -->
+    <main id="main">
+      <div id="chat-view"></div>
+      <div id="composer">
+        <textarea id="input" rows="1" placeholder="输入消息… (Enter 发送 / Shift+Enter 换行)" disabled></textarea>
+        <button id="send-btn" disabled>发送</button>
+        <button id="stop-btn" style="display:none" title="停止响应">⏹</button>
+      </div>
+    </main>
+
+    <!-- 状态栏 -->
+    <footer id="status-bar">
+      <span id="daemon-dot" class="dot gray" title="daemon 状态"></span>
+      <span id="server-id">—</span>
+      <span id="model-name">—</span>
+      <span id="evolution-count"></span>
+      <span id="project-name"></span>
+      <span class="spacer"></span>
+      <button id="settings-btn">设置</button>
+    </footer>
+  </div>
+
+  <!-- 设置对话框 -->
+  <dialog id="settings-dialog">
+    <form method="dialog" id="settings-form">
+      <h2>设置</h2>
+      <label>API Key <input type="password" id="set-api-key" required /></label>
+      <label>Base URL <input type="text" id="set-base-url" /></label>
+      <label>Model
+        <select id="set-model"></select>
+      </label>
+      <label>项目目录
+        <div class="dir-row">
+          <input type="text" id="set-project-dir" readonly />
+          <button type="button" id="pick-dir-btn">选择…</button>
+        </div>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="settings-cancel">取消</button>
+        <button type="submit" id="settings-save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 首启引导 -->
+  <dialog id="welcome-dialog">
+    <form method="dialog" id="welcome-form">
+      <h2>欢迎使用 EMRG</h2>
+      <p>请先完成初始设置（选择工作目录 + 配置 API Key）。</p>
+      <label>项目目录
+        <div class="dir-row">
+          <input type="text" id="welcome-project-dir" readonly />
+          <button type="button" id="welcome-pick-btn">选择…</button>
+        </div>
+        <small class="hint">可跳过（默认 ~/.emrg/evolution）</small>
+      </label>
+      <label>API Key <input type="password" id="welcome-api-key" required /></label>
+      <label>Base URL <input type="text" id="welcome-base-url" /></label>
+      <label>Model
+        <select id="welcome-model"></select>
+      </label>
+      <div class="dialog-actions">
+        <button type="submit" id="welcome-save">保存并开始</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="../vendor/marked.min.js"></script>
+  <script src="../vendor/dompurify.min.js"></script>
+  <script src="../vendor/highlight.custom.js"></script>
+  <script src="markdown.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
