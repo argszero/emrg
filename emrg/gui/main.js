@@ -241,6 +241,9 @@ function main() {
     ipcMain.handle("emrg:newSession", async () => {
       // G14/G81：本地生成 session_id（无 new_session 消息）
       const sid = generateSessionId();
+      // 同步 main 侧会话状态：重连后 resume 正确会话（G41）+ 窗口标题（G109）
+      currentSessionId = sid;
+      win.setTitle(`EMRG — ${sid}`);
       return { session_id: sid };
     });
 
