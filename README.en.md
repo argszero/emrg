@@ -233,8 +233,14 @@ EMRG doesn't just keep up — it catches up on its own.
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # install deps
-uv run pytest tests/ -v   # run tests (currently 428 items)
-uv run python -m emrg     # launch
+uv run pytest tests/ -v   # run tests (currently 464 items)
+uv run python -m emrg     # launch TUI
+
+# Optional: Electron GUI (non-developer entry point, Phase 3)
+cd emrg/gui
+npm ci               # install deps (production: --omit=dev)
+npm start            # launch GUI (auto-starts daemon)
+npm test             # run Node tests (unit; integration local)
 ```
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
@@ -246,6 +252,7 @@ emrg/
 ├── emrg/                   # Core package
 │   ├── server/             # Daemon — LLM loop, tool execution, evolution
 │   ├── client/             # TUI — python-tui based interactive chat
+│   ├── gui/                # Electron GUI (non-developer entry point, Phase 3)
 │   ├── tools/              # bash, read, write, edit, glob, grep
 │   ├── skills/             # Dynamically loadable modules
 │   └── __main__.py         # CLI entry point
