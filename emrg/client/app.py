@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio, fcntl, json, logging, os, platform, signal, subprocess, sys, time
 from datetime import datetime
 from pathlib import Path, PurePath
+from emrg.client import daemon_manager
 from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Terminal, ToolCard
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
 from emrg.client.widgets import (
@@ -14,130 +15,12 @@ from emrg.client.widgets import (
     TaskSelector, ModelSelector, CommandDropdown, ChatHistory, SelectorState,
     _COMMAND_HELP,
 )
-from emrg.connect import connect_to_server, cleanup_server, is_server_running_sync, get_server_path
 from websockets.exceptions import ConnectionClosed
-from emrg.protocol import TaskRequest, TaskResponse, ToolEnd, ToolStart
+from emrg.protocol import TaskResponse, ToolEnd, ToolStart
 from emrg.session import generate_session_id
 from emrg.skills.loader import load_skills
 
 logger = logging.getLogger(__name__)
-
-
-def _get_server_source_mtime() -> float:
-    """Get the mtime of the newest .py file in the emrg package — used to detect code changes."""
-    import glob as _glob
-    emrg_dir = Path(__file__).parent.parent  # emrg/
-    max_mtime = 0.0
-    for py in _glob.glob(str(emrg_dir / "**/*.py"), recursive=True):
-        try:
-            mtime = os.stat(py).st_mtime
-            if mtime > max_mtime:
-                max_mtime = mtime
-        except OSError:
-            pass
-    return max_mtime
-
-
-def _get_config_mtime() -> float:
-    """Get the mtime of ~/.emrg/config.toml — used to detect config changes.
-    
-    Returns 0.0 if config doesn't exist (it's optional).
-    """
-    from emrg.config import config_path as _config_path
-    cfg = _config_path()
-    try:
-        return os.stat(cfg).st_mtime
-    except OSError:
-        return 0.0
-
-def _try_connect():
-    return is_server_running_sync()
-
-def is_server_running(): return _try_connect()
-
-async def start_server_daemon():
-    logger.info("starting emrgd daemon...")
-    cleanup_server()
-    proc = await asyncio.create_subprocess_exec(sys.executable, "-m", "emrg.server",
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-        start_new_session=True, close_fds=True)
-    for _ in range(15):
-        await asyncio.sleep(0.3)
-        if is_server_running(): logger.info("emrgd started (pid=%d)", proc.pid); return
-    raise RuntimeError("emrgd failed to start within timeout")
-
-async def _check_and_restart_if_stale():
-    """Ping the server. If source has changed since server started, restart it."""
-    server_path = get_server_path()
-
-    # Port file check (daemon not started yet → fresh start via connect_to_server)
-    if not Path(server_path).exists():
-        return
-
-    source_mtime = _get_server_source_mtime()
-    config_mtime = _get_config_mtime()
-
-    try:
-        writer = await connect_to_server()
-        await writer.send(json.dumps({"type": "ping"}))
-        frame = await asyncio.wait_for(writer.recv(), timeout=3)
-        try:
-            await writer.close()
-        except Exception:
-            pass
-
-        if frame is None:
-            return
-
-        data = json.loads(frame)
-        started_at = data.get("started_at", "")
-        server_pid = data.get("pid", 0)
-
-        if started_at:
-            try:
-                server_start = datetime.fromisoformat(started_at).timestamp()
-            except (ValueError, TypeError):
-                server_start = 0
-
-            restart_reason = ""
-            if source_mtime > server_start:
-                restart_reason = f"source changed (src={source_mtime:.0f} > server={server_start:.0f})"
-            elif config_mtime > server_start:
-                restart_reason = f"config.toml changed (cfg={config_mtime:.0f} > server={server_start:.0f})"
-
-            if restart_reason:
-                logger.info(
-                    "%s, restarting (old pid=%d)", restart_reason, server_pid,
-                )
-                # Kill old server: SIGTERM first, SIGKILL if still alive
-                try:
-                    os.kill(server_pid, signal.SIGTERM)
-                except (ProcessLookupError, OSError):
-                    pass
-                cleanup_server()
-                # Wait for old server to die
-                for _ in range(10):
-                    await asyncio.sleep(0.2)
-                    if not is_server_running():
-                        break
-                else:
-                    # SIGTERM didn't work — force kill
-                    logger.warning("old daemon (pid=%d) didn't die, sending SIGKILL", server_pid)
-                    try:
-                        os.kill(server_pid, signal.SIGKILL)
-                        await asyncio.sleep(0.3)
-                    except (ProcessLookupError, OSError):
-                        pass
-    except (ConnectionRefusedError, FileNotFoundError, OSError, json.JSONDecodeError,
-            asyncio.TimeoutError, Exception):
-        pass  # Server not reachable — connect_to_server will handle
-
-async def client_connect_to_server():
-    await _check_and_restart_if_stale()
-    if not is_server_running():
-        cleanup_server()
-        await start_server_daemon()
-    return await connect_to_server()
 
 
 # ── Clipboard image support (platform-adaptive) ─────────────
@@ -290,7 +173,7 @@ async def interactive(init_auto_evolve: bool = False):
     if not sys.stdin.isatty():
         print("This client requires a real terminal (TTY).", file=sys.stderr); return
 
-    try: writer = await client_connect_to_server()
+    try: conn = await daemon_manager.ensure_connected()
     except Exception as e:
         print(f"Failed to connect to emrgd: {e}", file=sys.stderr); return
     logger.info("connected to emrgd")
@@ -303,17 +186,14 @@ async def interactive(init_auto_evolve: bool = False):
     # Send init_auto_evolve if requested (before ping, so daemon
     # processes it before any user interaction starts)
     if init_auto_evolve:
-        await writer.send(json.dumps({
-            "type": "init_auto_evolve",
-            "cwd": cwd,
-        }))
-        # Read the response to consume it
+        await conn.send_command("init_auto_evolve", cwd=cwd)
+        # Read the response to consume it (daemon replies {"ok": ...} synchronously)
         try:
-            await asyncio.wait_for(writer.recv(), timeout=5)
+            await conn.recv(timeout=5)
         except asyncio.TimeoutError:
             pass
 
-    await writer.send(json.dumps({"type": "ping"}))
+    await conn.send_command("ping")
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
@@ -400,11 +280,11 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
-        nonlocal _last_center, _elapsed_task, writer
+        nonlocal _last_center, _elapsed_task, conn
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
-            nonlocal writer, busy, _elapsed_task
+            nonlocal conn, busy, _elapsed_task
             # stop elapsed timer
             if _elapsed_task is not None:
                 _elapsed_task.cancel(); _elapsed_task = None
@@ -413,13 +293,13 @@ async def interactive(init_auto_evolve: bool = False):
             status.update(center="reconnecting...")
             term.render()
             # close stale connection
-            try: await writer.close()
+            try: await conn.close()
             except Exception: pass
             while True:
                 try:
                     await asyncio.sleep(1)
-                    writer = await client_connect_to_server()
-                    await writer.send(json.dumps({"type": "ping"}))
+                    conn = await daemon_manager.ensure_connected()
+                    await conn.send_command("ping")
                     logger.info("reconnected to emrgd")
                     chat.add("system", "✓ server reconnected")
                     status.update(center=server_id or "emrg")
@@ -429,15 +309,16 @@ async def interactive(init_auto_evolve: bool = False):
                     continue
 
         while True:
-            try: frame = await asyncio.wait_for(writer.recv(), timeout=0.1)
-            except asyncio.TimeoutError: continue
+            try:
+                data = await conn.recv(0.1)
+            except asyncio.TimeoutError:
+                continue
             except ConnectionClosed:
                 await _reconnect()
                 continue
-            text = frame.strip()
-            if not text: continue
+            if data is None:
+                continue
             try:
-                data = json.loads(text)
                 if "uptime_seconds" in data:
                     ident = data.get("identity", {}); hid = ident.get("instance_id", "?")[:8]
                     host = ident.get("host_name", "?")
@@ -619,7 +500,7 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add("system", f"↶ Session rewound — {removed} messages removed.")
                         msg_count = 0
                         # Reload session state from server
-                        await writer.send(json.dumps({"type": "ping"}))
+                        await conn.send_command("ping")
                         _update_right()
                     status.update(center=server_id or "emrg")
                     term.render()
@@ -1003,7 +884,7 @@ async def interactive(init_auto_evolve: bool = False):
         return False
 
     async def handle_key(data: bytes) -> bool:
-        nonlocal inp, status, history, paste_mode, stream_buffer, writer, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
+        nonlocal inp, status, history, paste_mode, stream_buffer, conn, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
         nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
@@ -1056,7 +937,7 @@ async def interactive(init_auto_evolve: bool = False):
                 _elapsed_task = None
             status.elapsed = ""
             # Send cancel to daemon so it stops tool/LLM processing
-            await writer.send(json.dumps({"type": "cancel"}))
+            await conn.send_command("cancel")
             chat.add("system", "⏸ Interrupted — response stopped. You can continue.")
             _last_center = server_id or "emrg"
             status.update(center=_last_center)
@@ -1077,11 +958,7 @@ async def interactive(init_auto_evolve: bool = False):
                 session_sel.active = False
                 session_sel.widget = None
                 if sid:
-                    await writer.send(json.dumps({
-                        "type": "resume_session",
-                        "session_id": sid,
-                        "cwd": cwd,
-                    }))
+                    await conn.send_command("resume_session", session_id=sid, cwd=cwd)
                     status.update(center=f"resuming {sid}...")
                     term.render()
                 else:
@@ -1109,11 +986,7 @@ async def interactive(init_auto_evolve: bool = False):
                 delete_sel.active = False
                 delete_sel.widget = None
                 if sid:
-                    await writer.send(json.dumps({
-                        "type": "delete_session",
-                        "session_id": sid,
-                        "cwd": cwd,
-                    }))
+                    await conn.send_command("delete_session", session_id=sid, cwd=cwd)
                     status.update(center=f"deleting {sid}...")
                     term.render()
                 else:
@@ -1169,10 +1042,7 @@ async def interactive(init_auto_evolve: bool = False):
                 model_sel.active = False
                 model_sel.widget = None
                 if mname:
-                    await writer.send(json.dumps({
-                        "type": "set_model",
-                        "model": mname,
-                    }))
+                    await conn.send_command("set_model", model=mname)
                     status.update(center=f"switching model to {mname}...")
                 else:
                     chat.add("system", "No model selected.")
@@ -1199,12 +1069,8 @@ async def interactive(init_auto_evolve: bool = False):
                 rewind_sel.active = False
                 rewind_sel.widget = None
                 if idx is not None:
-                    await writer.send(json.dumps({
-                        "type": "rewind_session",
-                        "session_id": session_id,
-                        "cwd": cwd,
-                        "record_index": idx,
-                    }))
+                    await conn.send_command("rewind_session", session_id=session_id,
+                                            cwd=cwd, record_index=idx)
                     status.update(center=f"rewinding to message #{idx}...")
                     term.render()
                 else:
@@ -1232,12 +1098,8 @@ async def interactive(init_auto_evolve: bool = False):
                 task_sel.active = False
                 task_sel.widget = None
                 if task_name:
-                    await writer.send(json.dumps({
-                        "type": "trigger_task",
-                        "name": task_name,
-                        "session_id": session_id,
-                        "cwd": cwd,
-                    }))
+                    await conn.send_command("trigger_task", name=task_name,
+                                            session_id=session_id, cwd=cwd)
                     chat.add("system", f"Triggering task: {task_name}")
                     status.update(center=f"triggering {task_name}...")
                 else:
@@ -1420,13 +1282,8 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # If a rant project was selected, use this message as the rant
                 if _rant_project:
-                    payload = {
-                        "type": "rant",
-                        "message": text,
-                        "project": _rant_project,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                    await writer.send(json.dumps(payload, ensure_ascii=False))
+                    await conn.send_command("rant", message=text, project=_rant_project,
+                                            timestamp=datetime.now().isoformat())
 
                     chat.add("system", f"Rant recorded (@{_rant_project}). The evolution system will review it.")
                     _rant_project = None
@@ -1450,25 +1307,17 @@ async def interactive(init_auto_evolve: bool = False):
                         else:
                             mem_id = sub
                             # Could be a read request — send as read
-                            await writer.send(json.dumps({
-                                "type": "read_memory",
-                                "scope": scope,
-                                "memory_id": mem_id,
-                                "session_id": session_id,
-                                "cwd": cwd,
-                            }))
+                            await conn.send_command("read_memory", scope=scope,
+                                                    memory_id=mem_id, session_id=session_id,
+                                                    cwd=cwd)
         
                             status.update(center="reading memory...")
                             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                             return True
 
                     # List memories
-                    await writer.send(json.dumps({
-                        "type": "list_memories",
-                        "scope": scope,
-                        "session_id": session_id,
-                        "cwd": cwd,
-                    }))
+                    await conn.send_command("list_memories", scope=scope,
+                                            session_id=session_id, cwd=cwd)
 
                     status.update(center=f"listing {scope} memories...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1476,11 +1325,7 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Handle /compact command
                 if text.lower() == "/compact":
-                    await writer.send(json.dumps({
-                        "type": "compact",
-                        "session_id": session_id,
-                        "cwd": cwd,
-                    }))
+                    await conn.send_command("compact", session_id=session_id, cwd=cwd)
 
                     status.update(center="compacting...")
                     chat.add("system", "Compact requested — summarizing conversation...")
@@ -1491,12 +1336,8 @@ async def interactive(init_auto_evolve: bool = False):
                 if text.lower().startswith("/rename"):
                     parts = text.split(None, 1)
                     title = parts[1].strip() if len(parts) > 1 else ""
-                    await writer.send(json.dumps({
-                        "type": "rename_session",
-                        "session_id": session_id,
-                        "cwd": cwd,
-                        "title": title,
-                    }, ensure_ascii=False))
+                    await conn.send_command("rename_session", session_id=session_id,
+                                            cwd=cwd, title=title)
 
                     if title:
                         status.update(center=f"renaming to {title}...")
@@ -1509,10 +1350,7 @@ async def interactive(init_auto_evolve: bool = False):
 
                 # Handle /sessions command
                 if text.lower() == "/sessions":
-                    await writer.send(json.dumps({
-                        "type": "list_sessions",
-                        "cwd": cwd,
-                    }))
+                    await conn.send_command("list_sessions", cwd=cwd)
 
                     status.update(center="listing sessions...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1524,19 +1362,12 @@ async def interactive(init_auto_evolve: bool = False):
                     if len(parts) < 2:
                         # No argument: fetch sessions and enter interactive delete mode
                         delete_sel.pending = True
-                        await writer.send(json.dumps({
-                            "type": "list_sessions",
-                            "cwd": cwd,
-                        }))
+                        await conn.send_command("list_sessions", cwd=cwd)
                         status.update(center="loading sessions for delete...")
                     else:
                         target_sid = parts[1].strip()
                         # Direct delete by session ID
-                        await writer.send(json.dumps({
-                            "type": "delete_session",
-                            "session_id": target_sid,
-                            "cwd": cwd,
-                        }))
+                        await conn.send_command("delete_session", session_id=target_sid, cwd=cwd)
                         status.update(center=f"deleting {target_sid}...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1678,11 +1509,7 @@ Streaming
 
                 # Handle /clear command
                 if text.lower() == "/clear":
-                    await writer.send(json.dumps({
-                        "type": "clear_session",
-                        "session_id": session_id,
-                        "cwd": cwd,
-                    }))
+                    await conn.send_command("clear_session", session_id=session_id, cwd=cwd)
 
                     status.update(center="clearing session...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1690,11 +1517,7 @@ Streaming
 
                 # Handle /rewind command
                 if text.lower() == "/rewind":
-                    await writer.send(json.dumps({
-                        "type": "list_history",
-                        "session_id": session_id,
-                        "cwd": cwd,
-                    }))
+                    await conn.send_command("list_history", session_id=session_id, cwd=cwd)
 
                     rewind_sel.pending = True
                     status.update(center="loading session history...")
@@ -1718,21 +1541,18 @@ Streaming
                             return True
                         # /rant without args → interactive project selector
                         project_sel.pending = True
-                        await writer.send(json.dumps({
-                            "type": "list_projects",
-                        }))
-    
+                        await conn.send_command("list_projects")
+
                         status.update(center="loading projects...")
                         inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                         return True
                     payload = {
-                        "type": "rant",
                         "message": message,
                         "timestamp": datetime.now().isoformat(),
                     }
                     if project:
                         payload["project"] = project
-                    await writer.send(json.dumps(payload, ensure_ascii=False))
+                    await conn.send_command("rant", **payload)
 
                     target = f" (@{project})" if project else ""
                     chat.add("system", f"Rant recorded{target}. The evolution system will review it.")
@@ -1745,18 +1565,13 @@ Streaming
                     model_arg = parts[1].strip() if len(parts) > 1 else ""
                     if model_arg:
                         # /model <name> → direct switch
-                        await writer.send(json.dumps({
-                            "type": "set_model",
-                            "model": model_arg,
-                        }))
+                        await conn.send_command("set_model", model=model_arg)
     
                         status.update(center=f"switching model to {model_arg}...")
                     else:
                         # /model without args → interactive picker
                         model_sel.pending = True
-                        await writer.send(json.dumps({
-                            "type": "list_models",
-                        }))
+                        await conn.send_command("list_models")
     
                         status.update(center="loading models...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1768,16 +1583,11 @@ Streaming
                     task_name = parts[1].strip() if len(parts) > 1 else ""
                     if task_name:
                         # /trigger <name> → direct trigger
-                        await writer.send(json.dumps({
-                            "type": "trigger_task",
-                            "name": task_name,
-                        }, ensure_ascii=False))
+                        await conn.send_command("trigger_task", name=task_name)
                         status.update(center=f"triggering task '{task_name}'...")
                     else:
                         # /trigger without args → list tasks
-                        await writer.send(json.dumps({
-                            "type": "list_tasks",
-                        }))
+                        await conn.send_command("list_tasks")
                         status.update(center="loading tasks...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1788,10 +1598,7 @@ Streaming
                     if len(parts) < 2:
                         # No argument: enter interactive session selection
                         session_sel.pending = True
-                        await writer.send(json.dumps({
-                            "type": "list_sessions",
-                            "cwd": cwd,
-                        }))
+                        await conn.send_command("list_sessions", cwd=cwd)
     
                         status.update(center="loading sessions...")
                     else:
@@ -1800,11 +1607,7 @@ Streaming
                         session_sel.active = False
                         session_sel.widget = None
                         session_sel.pending = False
-                        await writer.send(json.dumps({
-                            "type": "resume_session",
-                            "session_id": target_sid,
-                            "cwd": cwd,
-                        }))
+                        await conn.send_command("resume_session", session_id=target_sid, cwd=cwd)
     
                         status.update(center=f"resuming {target_sid}...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1831,14 +1634,13 @@ Streaming
                 _last_center = "thinking..."
                 status.update(center=_last_center)
                 term.render()
-                req = TaskRequest(session_id=session_id, cwd=cwd, prompt=text, stream=True)
                 # Drop images whose placeholder was deleted from the input text
                 if _pending_images:
                     _pending_images[:] = [img for img in _pending_images if img.get("label") in inp.text]
-                if _pending_images:
-                    req.images = _pending_images
-                    _pending_images = []
-                await writer.send(json.dumps(req.to_dict(), ensure_ascii=False).encode())
+                images = _pending_images or None
+                _pending_images = []
+                await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
+                                     stream=True, images=images)
                 logger.info("task sent, prompt_len=%d chars", len(text))
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):
@@ -1918,7 +1720,7 @@ Streaming
         try: await read_task
         except (asyncio.CancelledError, Exception): pass
         try:
-            await writer.close()
+            await conn.close()
         except Exception:
             pass
         term.shutdown(); sys.stdout.write("\n"); sys.stdout.flush()

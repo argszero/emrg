@@ -117,9 +117,9 @@ emrg/client/
 ```
 
 **验收**：
-- [ ] TUI 全功能回归（全量 pytest + 手动冒烟）
-- [ ] `daemon_manager` 独立单测覆盖（不依赖 TUI 渲染）
-- [ ] 提取后 `app.py` 行数显著下降（目标 <1200 行）
+- [x] TUI 全功能回归（全量 pytest + 手动冒烟）— 464 passed（含 23 个 daemon_manager 新测试）
+- [x] `daemon_manager` 独立单测覆盖（不依赖 TUI 渲染）— tests/test_daemon_manager.py + tests/test_daemon_manager_e2e.py
+- [x] 提取后 `app.py` 行数显著下降（1994 → 1796，R62 核算 ≤1800 达标）
 
 **为什么在 GUI 前**：GUI 不复制网络代码是核心原则（§7.1 复用层）。协议在 Phase 1 已稳，此时提取无后顾之忧。
 
