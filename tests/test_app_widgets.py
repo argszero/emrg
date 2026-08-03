@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from emrg.client.python_tui.widgets.base import RenderContext
+from emrg.client.python_tui.widgets.base import Line, RenderContext, Span, Widget
 from emrg.client.app import ProjectSelector, ModelSelector
+from emrg.client.widgets import ChatHistory
 
 # ── ProjectSelector tests ──
 
@@ -250,3 +251,70 @@ def test_model_selector_no_name_field():
 
     assert "?" in "".join(s.text for s in lines[1].spans)
     assert ms.selected_model_name == ""  # no name field → ""
+
+
+# ── ChatHistory line-cache tests (rant 2026-08-03T14:22:06) ──
+
+class _CountingWidget(Widget):
+    """Widget that counts render() invocations to verify line-level caching."""
+
+    def __init__(self, label: str = "x"):
+        self.label = label
+        self.render_calls = 0
+        self._dirty = True
+
+    @property
+    def dirty(self): return self._dirty
+    @dirty.setter
+    def dirty(self, v): self._dirty = v
+
+    def render(self, ctx):
+        self.render_calls += 1
+        self._dirty = False
+        return [Line(spans=[Span(text=self.label)])]
+
+
+def test_chat_history_line_cache_reuses_clean_rows():
+    """Clean rows are NOT re-rendered; only dirty rows re-render."""
+    chat = ChatHistory()
+    w1, w2, w3 = _CountingWidget("a"), _CountingWidget("b"), _CountingWidget("c")
+    chat.add(w1); chat.add(w2); chat.add(w3)
+    ctx = RenderContext(width=80)
+
+    lines = chat.render(ctx)
+    assert [s.text for s in lines[0].spans] == ["a"]
+    assert w1.render_calls == w2.render_calls == w3.render_calls == 1
+
+    # No row dirty → render reuses cache entirely
+    lines = chat.render(ctx)
+    assert w1.render_calls == 1 and w2.render_calls == 1 and w3.render_calls == 1
+    assert len(lines) == 3
+
+    # One row dirty → only that row re-renders
+    w2.dirty = True
+    lines = chat.render(ctx)
+    assert w1.render_calls == 1
+    assert w2.render_calls == 2
+    assert w3.render_calls == 1
+    assert len(lines) == 3
+
+
+def test_chat_history_line_cache_remove_sync():
+    """remove() keeps _line_cache in sync with rows (no stale index)."""
+    chat = ChatHistory()
+    w1, w2, w3 = _CountingWidget("a"), _CountingWidget("b"), _CountingWidget("c")
+    chat.add(w1); chat.add(w2); chat.add(w3)
+    chat.render(RenderContext(width=80))
+    assert w1.render_calls == 1
+
+    chat.remove(w2)
+    lines = chat.render(RenderContext(width=80))
+    # w1/w3 are clean (cached), w2 gone — no new renders
+    assert w1.render_calls == 1 and w3.render_calls == 1
+    assert len(lines) == 2
+    assert "".join(s.text for s in lines[0].spans) == "a"
+    assert "".join(s.text for s in lines[1].spans) == "c"
+
+    # Removing a row not in the list is a no-op
+    chat.remove(_CountingWidget("ghost"))
+    assert len(chat.rows) == 2

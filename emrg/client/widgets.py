@@ -659,6 +659,7 @@ class ChatHistory(Widget):
 
     def __init__(self):
         self.rows: list[Widget] = []
+        self._line_cache: list[list | None] = []  # row.render() 结果缓存，与 rows 一一对应
         self._dirty = True
 
     @property
@@ -671,12 +672,16 @@ class ChatHistory(Widget):
             self.rows.append(role_or_widget)
         else:
             self.rows.append(ChatRow(role=role_or_widget, content=content or ""))
+        self._line_cache.append(None)  # 新 row 无缓存
         self._dirty = True
 
     def remove(self, row):
         """Remove a widget from the chat — used for transient UI overlays."""
         try:
+            idx = self.rows.index(row)
             self.rows.remove(row)
+            if idx < len(self._line_cache):
+                del self._line_cache[idx]
             self._dirty = True
         except ValueError:
             pass
@@ -703,9 +708,16 @@ class ChatHistory(Widget):
 
     def render(self, ctx):
         lines = []
-        for row in self.rows:
+        # 防御：缓存长度与 rows 对齐（正常路径 add/remove 已同步维护）
+        while len(self._line_cache) < len(self.rows):
+            self._line_cache.append(None)
+        for i, row in enumerate(self.rows):
             if isinstance(row, Widget):
-                lines.extend(row.render(ctx))
+                cached = self._line_cache[i]
+                if row.dirty or cached is None:
+                    cached = row.render(ctx)  # 仅 dirty 行重算（rant 14:22:06 行级缓存）
+                    self._line_cache[i] = cached
+                lines.extend(cached)
         self._dirty = False
         return lines
 
