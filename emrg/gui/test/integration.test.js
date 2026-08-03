@@ -92,9 +92,26 @@ before(async () => {
   await client.ensureConnected();
 });
 
-after(() => {
+async function killDaemon(child) {
+  if (!child) return;
+  // SIGTERM → 等待退出（最多 3s）→ SIGKILL 兜底（防 detached 孤儿残留）
+  try { process.kill(-child.pid); } catch { /* ignore */ }
+  const deadline = Date.now() + 3000;
+  while (Date.now() < deadline && child.exitCode === null) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (child.exitCode === null) {
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* ignore */ }
+  }
+}
+
+after(async () => {
   if (client) { try { client.close(); } catch { /* ignore */ } }
-  try { if (daemonProc) process.kill(-daemonProc.pid); } catch { /* ignore */ }
+  // 清理 before spawn 的 daemon + 重连测试中 startDaemon 重拉的 daemon（G43 孤儿修复）
+  await killDaemon(daemonProc);
+  if (client && client._daemonChild && client._daemonChild !== daemonProc) {
+    await killDaemon(client._daemonChild);
+  }
   try { process.env.HOME = origHome; } catch { /* ignore */ }
   try { process.env.USERPROFILE = origUserProfile; } catch { /* ignore */ }
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }

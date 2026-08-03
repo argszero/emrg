@@ -89,6 +89,7 @@ class DaemonClient {
       detached: true, // 对照 start_new_session=True
     });
     child.unref(); // GUI 退出不带走 daemon
+    this._daemonChild = child; // 暴露 child（集成测试 after 清理用）
     // 等最多 SPAWN_WAIT_MS 就绪
     const deadline = Date.now() + SPAWN_WAIT_MS;
     while (Date.now() < deadline) {
