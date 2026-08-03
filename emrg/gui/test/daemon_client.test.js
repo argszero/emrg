@@ -201,6 +201,26 @@ test("ws close → disconnected 事件 + pending reject（G89/G90）", async () 
   assert.strictEqual(client.connected, false);
 });
 
+test("断连清 _currentStream + G94 timer（#338 回归：不弹虚假超时）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  await connectClient(client);
+  // 发起任务 → _currentStream 建立
+  const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: tmpHome, prompt: "hi", stream: true });
+  assert.ok(client._currentStream, "_currentStream 已建立");
+  assert.ok(client._currentStream.requestId === rid);
+  // 收到 delta → _resetStreamTimer 挂起 G94 30s timer
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ request_id: rid, session_id: "s_260803_1730_abcd1234", content: "hi", delta: true })));
+  assert.ok(client._currentStream.timer, "G94 timer 已挂起（delta 后）");
+  const doneEvents = [];
+  client.onEvent((t, d) => { if (t === "done") doneEvents.push(d); });
+  // 断连 → clearActiveStream 清 timer + _currentStream（#338）
+  currentMockWs.emit("close");
+  assert.strictEqual(client._currentStream, null, "断连后 _currentStream 被清（#338）");
+  // 等 40ms（远小于 30s timer）——若 timer 未被清，这里不可能触发；验证无虚假 done
+  await new Promise((r) => setTimeout(r, 40));
+  assert.deepStrictEqual(doneEvents, [], "断连后无虚假 done 事件");
+});
+
 test("sendTask payload（G32/G96）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
