@@ -24,6 +24,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
 - `emrg/tools/` — Tool implementations (bash, read, write, edit, glob, grep, base + registry)
 - `emrg/skills/` — Dynamically loaded skill modules (skills, progressive disclosure)
 - `emrg/client/` — Client (TUI interface based on inlined python-tui)
+  - `daemon_manager.py` — Daemon lifecycle (start/restart-if-stale/ensure-connected) + protocol client (DaemonConnection: send_task/send_command/recv/read_stream) — shared with GUI (Phase 3)
   - `app.py` — Main entry, event loop, ChatHistory widget, command autocomplete, session selector
 
 ## Key Conventions
