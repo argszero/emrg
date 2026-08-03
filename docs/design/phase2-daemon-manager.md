@@ -3,7 +3,7 @@
 > 主路线图：[`roadmap.md`](roadmap.md) Phase 2
 > 关联文档：[`packaged-installer.md`](packaged-installer.md) §7.1（GUI 复用层）、[`phase1-websocket-protocol.md`](phase1-websocket-protocol.md)（协议基础，已实施）
 > 本文是 Phase 2 的完整设计：现状分析、提取边界、目标形态、改动清单、测试策略、验收标准。
-> 修订：v18（review R1-R62 全部采纳，见 §6 决策记录）
+> 修订：v20（review R1-R66 全部采纳，见 §6 决策记录）
 
 ---
 
@@ -251,6 +251,7 @@ class DaemonConnection:
 | 原代码 | 新代码 |
 |--------|--------|
 | `writer = await client_connect_to_server()` | `conn = await daemon_manager.ensure_connected()` |
+| interactive 初始化 conn 声明（293 行） | `conn = await daemon_manager.ensure_connected()`（R66——首次连接，read_server 循环外；漏改则闭包引用 conn 但声明 writer → NameError） |
 | `await writer.send(json.dumps({"type": "ping"}))` | `await conn.send_command("ping")` |
 | `await writer.send(json.dumps(req.to_dict(), ...))`（1841 行，聊天发送） | `await conn.send_task(session_id, cwd, text, stream=True, images=...)` |
 | `await writer.send(json.dumps({"type": "trigger_task", ...}))` | `await conn.send_command("trigger_task", name=..., session_id=..., cwd=...)` |
@@ -327,7 +328,7 @@ await conn.send_command("rant", **payload)
 - `DaemonConnection.read_stream`：mock writer.recv 依次返回多帧，验证逐帧 yield；ConnectionClosed 向上传播（不吞）
 - `DaemonConnection.close`：验证 writer.close 被调用
 
-**`tests/test_daemon_manager_e2e.py`**（起真实 daemon，复用 test_ws_e2e 的模式。**⚠️ 不经 `ensure_connected()`（R51）**——它内部 `is_running()` 读真实 `~/.emrg/emrgd.port`，本机有真实 emrgd 时会连错 daemon。改为：`daemon_mod.config_dir = lambda: tmp` 隔离 + `EmrgServer(...).serve()` 手动起 + `DaemonConnection(await connect_to_server())` 直连。**跨文件复用（R63）**：`from tests.test_ws_e2e import _make_config, _boot_server, _make_fake_chat_stream`（不复制三件套））：
+**`tests/test_daemon_manager_e2e.py`**（起真实 daemon，复用 test_ws_e2e 的模式。**⚠️ 不经 `ensure_connected()`（R51）**——它内部 `is_running()` 读真实 `~/.emrg/emrgd.port`，本机有真实 emrgd 时会连错 daemon。改为复用 `_boot_server`：**async 函数，返回 `(server, serve_task)`，内含 config_dir 隔离 + `EmrgServer(...).serve()` 后台任务 + 等 port 文件**（R65）——R51 的手动隔离已由它完成，然后 `DaemonConnection(await connect_to_server())` 直连。**跨文件复用（R63）**：`from tests.test_ws_e2e import _make_config, _boot_server, _make_fake_chat_stream`（不复制三件套））：
 - ensure_connected → send_command("ping") → 收到响应（**ServerPong 结构**：`identity`（instance_id/host_name/fork_source/branch_id）+ `uptime_seconds` + `evolution_count`）
 - send_command("list_models") → 收到模型列表
 - send_task(stream=True) → 收到 delta 流 → done（**复用 test_ws_e2e 的 `_make_fake_chat_stream` 模式**：`server.llm = AsyncMock()` + `server.llm.chat_stream = _make_fake_chat_stream()`，不调真实 LLM）
@@ -544,3 +545,10 @@ await conn.send_command("rant", **payload)
 |---|------|
 | R63 | §3.4 补 e2e 跨文件复用：`from tests.test_ws_e2e import _make_config, _boot_server, _make_fake_chat_stream`（不复制三件套） |
 | R64 | 第 6 行修订标注 v15 → v18 |
+
+### v20 修订记录（review v19 R65-R66 全部采纳）
+
+| # | 修订 |
+|---|------|
+| R65 | §3.4 补 `_boot_server` 是 async + 返回 `(server, serve_task)` + 内含 config_dir 隔离（R51 的隔离已由它完成） |
+| R66 | §3.2 替换表补 293 行 interactive 初始化 conn 声明（漏改则闭包 NameError） |
