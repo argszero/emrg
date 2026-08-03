@@ -438,6 +438,10 @@ async function handleEvent(evt) {
     case "disconnected":
       $("daemon-dot").className = "dot red";
       addSystemMessage("⏸ 与 daemon 的连接已断开，重连中…");
+      // G89：断连时恢复输入条（流式中断连 → busy 永久卡死；不能依赖 30s 超时兜底）
+      state.busy = false;
+      state.ownStreamRequestId = null;
+      setComposerDisabled(false);
       break;
     case "group_cleared":
       // DOM 保留，仅清缓存
