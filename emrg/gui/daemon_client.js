@@ -38,10 +38,12 @@ const RESPONSE_TYPES = {
   resume_session: "resume_result",
   delete_session: "session_deleted",
   set_model: "model_set",
-  clear: "clear_result",
-  rename: "rename_result",
+  clear_session: "clear_result", // 修正：daemon 命令名是 clear_session（原 clear 匹配不上）
+  rename_session: "rename_result", // 修正：daemon 命令名是 rename_session
+  trigger_task: "trigger_result", // 修正：daemon 命令名是 trigger_task
   compact: "compact_result",
-  trigger: "trigger_result",
+  rewind_session: "rewind_result", // 补缺：daemon.py:955 rewind_result
+  read_memory: "memory_content", // 补缺：daemon.py:771/778 memory_content
 };
 
 class DaemonClient {

@@ -273,6 +273,41 @@ test("命令-响应配对（G93）：list_sessions → sessions_list resolve", a
   assert.strictEqual(res.sessions.length, 1);
 });
 
+test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/trigger + 补 rewind/read_memory）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  await connectClient(client);
+  // clear_session → clear_result（原 clear 映射会超时）
+  const p1 = client.sendCommandAndWait("clear_session", { session_id: "s1", cwd: tmpHome }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "clear_result", ok: true })));
+  const r1 = await p1;
+  assert.strictEqual(r1.type, "clear_result");
+  // rename_session → rename_result
+  const p2 = client.sendCommandAndWait("rename_session", { session_id: "s1", cwd: tmpHome, title: "t" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "rename_result", ok: true })));
+  const r2 = await p2;
+  assert.strictEqual(r2.type, "rename_result");
+  // trigger_task → trigger_result
+  const p3 = client.sendCommandAndWait("trigger_task", { task: "x" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "trigger_result", ok: true })));
+  const r3 = await p3;
+  assert.strictEqual(r3.type, "trigger_result");
+  // rewind_session → rewind_result（补缺）
+  const p4 = client.sendCommandAndWait("rewind_session", { session_id: "s1", cwd: tmpHome, record_index: 0 }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "rewind_result", ok: true })));
+  const r4 = await p4;
+  assert.strictEqual(r4.type, "rewind_result");
+  // read_memory → memory_content（补缺）
+  const p5 = client.sendCommandAndWait("read_memory", { name: "m" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "memory_content", content: "x" })));
+  const r5 = await p5;
+  assert.strictEqual(r5.type, "memory_content");
+});
+
 test("命令-响应配对超时 → reject（G93）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
