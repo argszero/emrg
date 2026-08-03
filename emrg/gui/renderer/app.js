@@ -153,6 +153,10 @@ async function switchSession(sid, opts = {}) {
 }
 
 async function newSession() {
+  if (state.busy && state.ownStreamRequestId) {
+    addSystemMessage("当前有进行中的响应，请等待完成或停止后再新建会话。"); // G65 同款锁
+    return;
+  }
   try {
     const res = await window.emrg.newSession();
     const sid = res.session_id;
@@ -168,6 +172,11 @@ async function newSession() {
 }
 
 async function deleteSession(sid) {
+  // G65：自有流运行中禁止删除当前会话（删除后自动切换会被 busy 锁拒绝 → sessionId 指向已删会话）
+  if (state.busy && state.ownStreamRequestId && state.sessionId === sid) {
+    addSystemMessage("当前有进行中的响应，请等待完成或停止后再删除会话。");
+    return;
+  }
   if (!confirm(`确定删除会话 ${sid}？`)) return; // G76
   try {
     await window.emrg.deleteSession({ sessionId: sid });

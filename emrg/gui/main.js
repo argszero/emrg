@@ -338,7 +338,14 @@ function main() {
             ownStreamRequestId = null;
           }
         }
-        if (type === "error") { /* error 帧：有流式错误等 done */ }
+        if (type === "error") {
+          // session busy 是即发错误（daemon 返回后无 done 跟随）——释放 ownStream，防 G65 锁泄漏
+          // （流式错误如 LLM error 则有 done 跟随，由 done 分支释放，不在此处理）
+          if (data.error && String(data.error).includes("session busy")) {
+            ownStream = false;
+            ownStreamRequestId = null;
+          }
+        }
         if (win && !win.isDestroyed()) {
           win.webContents.send("emrg:event", { type, data });
         }
