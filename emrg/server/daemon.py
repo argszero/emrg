@@ -179,6 +179,10 @@ class EmrgServer:
             host="127.0.0.1",
             port=0,
             max_size=16 * 1024 * 1024,
+            # keepalive 超时放宽：TUI 回答结束时全量渲染可阻塞事件循环数秒，
+            # 默认 ping_timeout=20 会导致服务器 CLOSE 1011 踢连接（rant 14:22:06）。
+            # 保留 ping_interval=20（liveness 检测），容忍 300s 的 pong 延迟。
+            ping_timeout=300,
         )
         port = self._server.sockets[0].getsockname()[1]
         self._auth_token = secrets.token_urlsafe(32)
