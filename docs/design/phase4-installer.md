@@ -25,8 +25,8 @@
 
 - [ ] 干净容器（无 python/uv/git/gh/node）→ 双击安装 → 无报错
 - [ ] **全程离线（断网）安装 + 首启 + daemon/UI 可用**（R47：安装包自包含、零在线安装；⚠️ R79：**"聊天"除外**——LLM API 调用必须联网，离线指安装/首启/daemon/UI/会话持久化全链路无网络依赖）
-- [ ] 安装后 GUI 启动 → 首启引导填 key → 聊天流式 + 工具调用 + 会话持久化
-- [ ] 安装后 TUI `emrg` 启动 → `/help`、聊天、`/rant`、演化周期正常
+- [ ] 安装后 GUI 启动 → 首启引导填 key → 聊天流式 + 工具调用 + 会话持久化（⚠️ R119：聊天/工具调用需 **API key + 网络**——首启引导填 key 是离线步骤（R106 已确认纯本地），聊天本身联网；干净容器离线验证到"首启引导 + 会话持久化"，聊天留本地联网手动，同 R118 分两阶段）
+- [ ] 安装后 TUI `emrg` 启动 → `/help`、聊天、`/rant`、演化周期正常（⚠️ R118：聊天/演化需 **API key + 网络**（R79）——验收分两阶段：① 干净容器（无 key）验证 TUI 启动 + `/help` + R62 占位 key 提示；② 填 key 后验证聊天/rant/演化（联网））
 - [ ] **会话内 `python script.py` 可执行**（bash 工具走捆绑 python）
 - [ ] GUI 与 TUI 同开同 daemon，数据一致（广播模型）
 - [ ] 平台卸载器彻底清理（终止报告 + 墓地快照 + install/ + 数据 + PATH/快捷方式 + 自校验），幂等
@@ -523,7 +523,7 @@ jobs:
 | 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22）。**CI 无显示器（R39）**：Linux runner 无 X server——CI 冒烟 8 降级为 `EMRG.app/Contents/MacOS/EMRG --version` / `emrg-gui.exe --version` 验证入口存在（electron 支持 `--version` 不启窗）；**完整 GUI 冒烟（启窗+首启+聊天）留本地手动**（§1.3 范围已有） |
 | 9 | GUI + TUI 同开同 session | 广播一致 |
 | 10 | 平台卸载器（macOS 卸载 app / unins000.exe / Linux `emrg-uninstall`）→ 幂等重跑 → 自校验 | 卸载全流程（⚠️ R57：**不新增 `emrg uninstall` 命令**（§6 决策）——冒烟入口是平台卸载器） |
-| 11 | 安装目录只读验证（`chmod -w` 后全功能跑） | 零写入审计 |
+| 11 | 安装目录只读验证（POSIX `chmod -w` / **Windows `attrib +R`（⚠️ R117：Windows 无 chmod）** 后全功能跑） | 零写入审计（PYTHONDONTWRITEBYTECODE=1（R61）+ 运行时零 pip（R47）→ 只读成立） |
 | 12 | **离线安装（无网络全程可用）** | R47：安装包自包含、零在线安装；安装 = 文件复制。**⚠️ R96（CI 可执行性）**：GitHub Actions runner 默认联网，模拟离线用 `sudo iptables -A OUTPUT -j REJECT`（Linux runner）或 `unshare -n` 隔离网络 → 跑安装 + 首启 + daemon + 会话（无 LLM 调用）→ 撤销规则；macOS/Windows runner 无 root 用**审计降级**：构建产物检查（无在线安装脚本引用 + lib/ 预装完整 + 冒烟 1/2/4/5 全过）+ 本地断网手动验证留文档 |
 
 ---
