@@ -113,7 +113,7 @@ exec "$DIR/python" -m emrg.server "$@"
   1. `PYTHONPATH` 含 `$PREFIX/source`（emrg 包父目录）
   2. 用 `-m emrg` / `-m emrg.server`（包入口，`__main__` 由包机制解析）——实测 `emrg 0.2.0` 正常输出
 - **Windows 版**：`.cmd` 批处理同逻辑（`%~dp0` 定位；`set PATH=%~dp0;%PATH%`、`set PYTHONPATH=<prefix>\source;<prefix>\lib;%PYTHONPATH%`、`python -m emrg %*`）
-- **PATH 导出**：启动脚本内 `export PATH="$DIR:$PATH"` 使 daemon 继承后，bash 工具子进程（`create_subprocess_shell`）能直接找到 `python`/`git`/`gh`——**这是会话内脚本能力的关键**（§5.0）
+- **PATH 导出**：启动脚本内 `export PATH="$DIR:$PATH"` 使 daemon 继承后，bash 工具子进程（`create_subprocess_shell`）能直接找到 `python`/`git`/`gh`——**这是会话内脚本能力的关键**（§5.0）。**GUI 场景成立（R28）**：GUI 由启动台点击（launchd 最小 PATH `/usr/bin:/bin:...`）启动 → spawn emrgd 用绝对路径（不依赖 PATH 找到它）→ emrgd 脚本运行时注入 PATH → daemon 的 bash 工具继承 → 链路完整
 
 ### 2.2 ⚠️ source/ 复制必须排除 emrg/gui（R14，448MB 陷阱）
 
@@ -268,9 +268,11 @@ cd emrg/gui && npm run dist   # electron-builder 只打包 GUI 本体（无 extr
 
 | 平台 | 卸载方式 | 卸载器做的事 |
 |------|----------|-------------|
-| macOS | pkg 卸载器（双击，pkgbuild 生成） | 停 daemon → 终止报告 + 墓地快照 → 删 install/ → 删 ~/.emrg 数据 → 清 shell rc 的 PATH |
+| macOS | **自带卸载 app**（安装时放 Applications，双击运行；.pkg 无原生卸载器——R30） | 停 daemon → 终止报告 + 墓地快照 → 删 install/ → 删 ~/.emrg 数据 → 清 shell rc 的 PATH → 提示拖入废纸篓（R31：运行中 .app 不能自删） |
 | Windows | 控制面板卸载（Inno Setup 生成 unins000.exe） | 停 daemon → 终止报告 + 墓地快照 → 删 install/ → 删 %LOCALAPPDATA%\EMRG\ 数据 → 清注册表 PATH + 快捷方式 |
 | Linux | 删除 AppImage 文件（+ 可选 `rm -rf ~/.emrg`） | AppImage 单文件即删即走；tarball 版删解压目录 |
+
+**macOS 卸载 app（R30+R31 补充）**：.pkg 安装**不生成卸载器**（macOS 无标准 pkg 卸载 API）——需 pkg 安装时额外放置一个"卸载 EMRG.app"（shell 脚本包装的 .app，双击运行执行 §6.2 六步）。**自删限制（R31）**：运行中的 .app 不能删自己——卸载 app 删数据 + install/ 后，**提示"请将 EMRG 图标拖入废纸篓"**（macOS 用户习惯，不做延迟自删的复杂机制）。卸载 app 调用 python 需自设 PYTHONPATH（R15）——它本身是 bash 脚本，头部 `export PYTHONPATH=~/.emrg/install/source:~/.emrg/install/lib`。
 
 ### 6.2 终止报告 + 墓地快照（对齐 MANIFESTO 第十条【终止权】）
 
@@ -292,6 +294,7 @@ cd emrg/gui && npm run dist   # electron-builder 只打包 GUI 本体（无 extr
 - 宿主工作目录 `.emrg/`（项目会话/记忆副本）**不删除**——卸载报告列出位置
 - 幂等：重复执行不报错，未找到项跳过
 - **PATH 写入用锚点标记（R19）**：macOS/Linux 写 shell rc 时用**可识别锚点**（如 `# >>> emrg path >>>` / `# <<< emrg path <<<` 包裹的块），卸载时按锚点**精确删除该块**（不误删用户其他 PATH 配置）；GUI 用户（非开发者）不依赖 PATH（启动台/app 图标），PATH 只服务终端用户——用户级免 sudo 下 shell rc 是唯一可靠方式（/etc/paths.d 需 sudo ❌、launchctl 不继承终端 ⚠️）
+- **Windows PATH（R27）**：注册表 `HKCU\Environment\Path`（无锚点概念）——安装写**确定格式** `%LOCALAPPDATA%\EMRG\bin`，卸载用 **Pascal 脚本读旧值 → 精确字符串替换移除 EMRG 段 → 写回**（`RegQueryStringValue`/`RegWriteStringValue`），不误删其他条目
 - **平台卸载器的实现载体（R10+R15 核查）**：
   - 卸载器先执行**内置 python 脚本**（install/ 未删时 python 可用）——**⚠️ 卸载脚本无启动脚本的 PYTHONPATH，必须自设**（头部 `export PYTHONPATH=<prefix>/source:<prefix>/lib`，否则 `import emrg`/`websockets` 失败，R15 实证 connect.py:24 依赖 websockets）
   - 脚本做：停 daemon（走 shutdown 协议，`import emrg.connect` 或读 port 文件发 ws 消息；Windows 兜底 `taskkill`）→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
