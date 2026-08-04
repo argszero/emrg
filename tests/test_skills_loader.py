@@ -1,6 +1,9 @@
 """Tests for skills.loader — frontmatter parser, file parser, and context builder."""
 
 import os
+import sys
+
+import pytest
 from pathlib import Path
 
 from emrg.skills.loader import Skill, _parse_frontmatter, _parse_skill_file, build_skills_context
@@ -179,6 +182,7 @@ class TestBuildSkillsContext:
         """Empty skills list returns empty string."""
         assert build_skills_context([]) == ""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="/tmp path is POSIX-only")
     def test_single_skill(self):
         """Single skill generates a summary with name, source, path, description."""
         skill = Skill(

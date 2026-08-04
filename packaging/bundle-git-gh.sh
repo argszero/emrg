@@ -32,7 +32,13 @@ else
     darwin|macos)
       GH_OS="macOS"; GH_ARCH="$(uname -m)" ;;   # amd64 / arm64
     linux)
-      GH_OS="linux"; GH_ARCH="$(uname -m)" ;;
+      GH_OS="linux"
+      # ⚠️ uname -m 返回 aarch64/x86_64，gh 资产名用 arm64/amd64——需映射
+      case "$(uname -m)" in
+        aarch64|arm64) GH_ARCH="arm64" ;;
+        x86_64|amd64)  GH_ARCH="amd64" ;;
+        *)             GH_ARCH="$(uname -m)" ;;
+      esac ;;
     windows|mingw*|msys*|win32)
       GH_OS="windows"; GH_ARCH="amd64" ;;
     *) echo "!! unknown platform $PLATFORM — gh bundling skipped"; exit 1 ;;
