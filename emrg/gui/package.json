@@ -30,14 +30,54 @@
         "to": "emrgd"
       }
     ],
-    "target": [
-      "dmg",
-      "exe",
-      "AppImage"
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**",
+      "daemon_client.js",
+      "package.json",
+      "scripts/**"
     ],
     "icon": "../packaging/assets/",
     "mac": {
-      "identity": null
+      "identity": null,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development",
+      "extraResources": [
+        {
+          "from": "../dist/runtime",
+          "to": "runtime"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
     }
   }
 }
