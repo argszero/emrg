@@ -100,6 +100,13 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 vim ~/.emrg/config.toml
 ```
 
+**不想用终端？** 非开发者可用图形界面（Electron GUI）：
+
+```bash
+git clone https://github.com/argszero/emrg.git && cd emrg/emrg/gui
+npm ci && npm start     # 自动拉起 daemon，聊天/会话/设置全图形化
+```
+
 `~/.emrg/config.toml` 模板示例：
 
 ```toml
