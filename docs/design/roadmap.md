@@ -146,16 +146,24 @@ emrg/client/
 
 **目标**：`.pkg` / `.exe` / `.AppImage` 一键安装，安装即完整，卸载彻底。
 
-**设计**（详见 `packaged-installer.md` §1-6）：
-- PyInstaller 三入口（`emrg` / `emrgd` / `emrg-gui`）+ git/gh 捆绑
-- 用户级安装（免 sudo）；统一安装方式（不再区分开发者/非开发者）
-- 卸载：终止报告 + 墓地快照 + 清理 + 自校验
+**设计**（详见 `phase4-installer.md` v3 定稿 + 120 轮 review R1-R120）：
+- 方案 C：standalone Python 3.13 + 源码 + lib/ 依赖 + git/gh 捆绑（1 套 python 三用，免 PyInstaller spec/frozen 坑）
+- 安装布局 `~/.emrg/install/`（bin/ + git/ + lib/ + source/ + emrg-gui/），启动脚本 bin/emrg + bin/emrgd（bash + Windows .cmd）
+- 统一卸载脚本 bin/emrg-uninstall（六步：停 daemon → 终止报告 → 墓地快照 → 白名单删除 → 环境清理 → 自校验）+ 平台卸载器
+- GUI 打包改造（isPackaged 分支 + AppImage 自解压 + ensureConfigTemplate 内联模板）
+- CI 构建流水线（build-release.yml，4 平台 matrix：macos-15 / ubuntu-24.04 x64+aarch64 / windows-2025）
+- 冒烟测试 12 项（临时 HOME，覆盖 daemon auth+pong / 会话核心 / 捆绑 git+gh / 会话内 python）
 
 **可与 Phase 3 并行准备**：spec 文件、CI matrix、签名流程可以在 GUI 开发期间搭好，GUI 一合入即出完整安装包。
 
 **验收**：
-- [ ] 干净机器（无 python/uv/git）双击安装 → 全部功能可用（TUI + GUI + 演化）
-- [ ] `emrg uninstall` 清理彻底，无残留
+- [x] 干净机器（无 python/uv/git/gh/node）双击安装 → 全部功能可用（TUI + GUI + 演化）— 代码侧完成（build-runtime + smoke 12/12 本地实测；完整 E2E 待 CI 冒烟落地）
+- [x] 卸载彻底，无残留 — bin/emrg-uninstall 六步 + 白名单 + 幂等（临时 HOME 实测通过；Windows/macOS 平台卸载器在 CI 验证）
+- [x] 安装目录只读零写入（PYTHONDONTWRITEBYTECODE + 零 pip）— smoke §11
+- [x] 离线安装+首启+daemon+UI（Linux iptables 断网冒烟 CI）— smoke §12
+- [x] 会话内 python 脚本可执行（bash 工具走捆绑 python）— smoke §7
+
+**实施 PR**：#360 启动脚本 / #361 卸载脚本 / #362 核心改造 / #363 GUI 打包 / #364 packaging 资产 / #365 CI workflow（合并中）
 
 ---
 

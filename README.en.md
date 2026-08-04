@@ -44,7 +44,29 @@ EMRG is an experiment in *autonomous self-improvement*. It's an AI agent that he
 
 ## 🚀 Quick Start
 
-### 🍎 macOS
+### 📦 Download installer (recommended, Phase 4 one-click)
+
+Download the installer for your platform from [GitHub Releases](https://github.com/argszero/emrg/releases) and double-click:
+
+| Platform | Installer | Notes |
+|----------|-----------|-------|
+| macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | Double-click; GUI at `~/Applications/EMRG.app` |
+| macOS (Intel) | `EMRG-<ver>-macos-x64.pkg` | Same |
+| Windows | `EMRG-<ver>-windows-x64.exe` | Inno Setup, no UAC, Start-menu shortcut |
+| Linux | `EMRG-<ver>-linux-x86_64.AppImage` | Self-extracts to `~/.emrg/install/` on first run |
+| Linux (ARM64) | `EMRG-<ver>-linux-aarch64.AppImage` | Same |
+
+The installer bundles a full runtime (standalone Python 3.13 + deps + git + gh + GUI) — **zero prerequisites on a clean machine (no python/uv/git/gh/node)**, 100% offline install. After install:
+
+- GUI: launch **EMRG** from Launchpad / Start menu
+- TUI: `~/.emrg/install/bin/emrg` (Linux also creates `~/.local/bin/emrg` symlink)
+- First-run wizard asks for your API key; python scripts work inside sessions
+
+> **Uninstall**: macOS run "卸载 EMRG.app" (uninstall app); Windows uninstall from Control Panel; Linux run `~/.emrg/install/bin/emrg-uninstall` (or delete the AppImage + symlink). Uninstall preserves non-EMRG user files in `~/.emrg`, and writes a termination report + data snapshot.
+>
+> **Unsigned builds**: if the macOS package is unsigned, right-click → Open on first launch (Gatekeeper). Besides the GUI, you can also edit `~/.emrg/config.toml` directly (GUI settings save rewrites config and drops comments — for advanced config, edit the file).
+
+### 🍎 macOS (source install)
 
 **Install:**
 
@@ -58,7 +80,7 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
 ```
 
-### 🐧 Linux
+### 🐧 Linux (source install)
 
 **Install:**
 
@@ -72,7 +94,7 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
 ```
 
-### 🪟 Windows (WSL2)
+### 🪟 Windows (WSL2, source install)
 
 **Install:**
 
@@ -92,7 +114,7 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
 ```
 
-> Prerequisites (install.sh auto-detects and prompts): git, python 3.11+, uv. gh CLI recommended.
+> Source-install prerequisites (install.sh auto-detects and prompts): git, python 3.11+, uv. gh CLI recommended. For native Windows (non-WSL), use the installer above.
 
 After installing, edit the auto-generated config template:
 
