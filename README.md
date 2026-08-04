@@ -44,7 +44,29 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 
 ## 🚀 快速开始
 
-### 🍎 macOS
+### 📦 下载安装包（推荐，Phase 4 一键安装）
+
+到 [GitHub Releases](https://github.com/argszero/emrg/releases) 下载对应平台的安装文件，双击安装即可：
+
+| 平台 | 安装文件 | 说明 |
+|------|---------|------|
+| macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | 双击安装，GUI 到 `~/Applications/EMRG.app` |
+| macOS (Intel) | `EMRG-<ver>-macos-x64.pkg` | 同上 |
+| Windows | `EMRG-<ver>-windows-x64.exe` | Inno Setup 免 UAC，开始菜单快捷方式 |
+| Linux | `EMRG-<ver>-linux-x86_64.AppImage` | 首次运行自解压到 `~/.emrg/install/` |
+| Linux (ARM64) | `EMRG-<ver>-linux-aarch64.AppImage` | 同上 |
+
+安装包内置完整运行时（standalone Python 3.13 + 依赖 + git + gh + GUI），**干净机器（无 python/uv/git/gh/node）零前置依赖**，100% 离线安装。安装后：
+
+- GUI：启动台 / 开始菜单点击 **EMRG**
+- TUI：`~/.emrg/install/bin/emrg`（Linux 另生成 `~/.local/bin/emrg` 软链）
+- 首次启动引导填写 API key；会话内可直接执行 python 脚本
+
+> **卸载**：macOS 运行"卸载 EMRG.app"；Windows 控制面板卸载；Linux 运行 `~/.emrg/install/bin/emrg-uninstall`（或删 AppImage + 软链）。卸载保留 `~/.emrg` 中非 EMRG 的用户文件，并生成终止报告与数据快照。
+>
+> **无 Apple 证书**：macOS 安装包未签名时，首次打开右键 → 打开（Gatekeeper 提示说明）。API key 配置除 GUI 外也可直接编辑 `~/.emrg/config.toml`（GUI 保存设置会重写 config，注释会丢失——高级配置建议直接编辑文件）。
+
+### 🍎 macOS（源码安装）
 
 **一键安装：**
 
@@ -58,7 +80,7 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
 ```
 
-### 🐧 Linux
+### 🐧 Linux（源码安装）
 
 **一键安装：**
 
@@ -72,7 +94,7 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
 ```
 
-### 🪟 Windows (WSL2)
+### 🪟 Windows (WSL2，源码安装)
 
 **一键安装：**
 
@@ -92,7 +114,7 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | bash -s -- purge
 ```
 
-> 前置依赖（install.sh 会自动检测提示）：git、python 3.11+、uv。gh CLI 推荐安装。
+> 源码安装前置依赖（install.sh 会自动检测提示）：git、python 3.11+、uv。gh CLI 推荐安装。Windows 原生版（非 WSL）请用上方安装包。
 
 安装完成后，编辑自动生成的配置文件即可使用：
 
