@@ -43,7 +43,7 @@
       "identity": null,
       "target": [
         {
-          "target": "dmg",
+          "target": "dir",
           "arch": [
             "arm64",
             "x64"
@@ -55,7 +55,7 @@
     "win": {
       "target": [
         {
-          "target": "nsis",
+          "target": "dir",
           "arch": [
             "x64"
           ]

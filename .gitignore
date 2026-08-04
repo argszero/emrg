@@ -10,3 +10,4 @@ node_modules/
 .claude
 .pytest_cache/
 /dist/
+/emrg/gui/dist/
