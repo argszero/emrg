@@ -21,6 +21,14 @@ smoke_home="$(mktemp -d)"
 trap 'rm -rf "$smoke_home"' EXIT
 export HOME="$smoke_home"
 mkdir -p "$HOME/.emrg"
+# R114: Windows 下经 cmd 启动的原生 python.exe 不认 Git Bash 的 $HOME —
+# Path.home() 读 USERPROFILE/HOMEDRIVE/HOMEPATH。隔离 HOME 冒烟必须同步这三个
+# 变量，否则 daemon 会把 config/port 写到真实用户目录（config 缺失 → 崩溃不写 port）。
+if [ -n "${WINDIR:-}" ]; then
+  export USERPROFILE="$(cygpath -w "$HOME")"
+  export HOMEDRIVE="${USERPROFILE:0:2}"
+  export HOMEPATH="${USERPROFILE:2}"
+fi
 
 say()  { printf '\n==> %s\n' "$*"; }
 ok()   { PASS=$((PASS+1)); printf '  ✓ %s\n' "$*"; }
@@ -51,18 +59,23 @@ model = "deepseek-chat"
 EOF
 # R101：Windows Git Bash 的 nohup 后台 bash 脚本会立即退出（无 POSIX 进程模型）
 # → 用 cmd //c start /b emrgd.cmd 后台启动；POSIX 保持 nohup emrgd
+# R114：输出保留到 emrgd-debug.log（不丢 /dev/null），daemon 启动失败时可诊断。
 if [ -n "${WINDIR:-}" ]; then
   # $HOME 在 Git Bash 是 POSIX 路径（/c/Users/...），cmd 需 Windows 路径（C:\Users\...）→ cygpath -m
   EMRGD_CMD="$(cygpath -m "$HOME/.emrg/install/bin/emrgd.cmd")"
-  (cd "$HOME" && cmd //c "start /b $EMRGD_CMD" >/dev/null 2>&1)
+  (cd "$HOME" && cmd //c "start /b $EMRGD_CMD" >"$HOME/.emrg/emrgd-debug.log" 2>&1)
 else
-  nohup emrgd >/dev/null 2>&1 &
+  nohup emrgd >"$HOME/.emrg/emrgd-debug.log" 2>&1 &
 fi
 for i in $(seq 1 30); do
   [ -f "$HOME/.emrg/emrgd.port" ] && break
   sleep 0.5
 done
 if [ ! -f "$HOME/.emrg/emrgd.port" ]; then
+  echo "  [debug] emrgd-debug.log:" >&2
+  cat "$HOME/.emrg/emrgd-debug.log" 2>/dev/null || true
+  echo "  [debug] emrgd.log (tail):" >&2
+  tail -20 "$HOME/.emrg/emrgd.log" 2>/dev/null || true
   fail "daemon did not write port file"
 else
   port=$(head -1 "$HOME/.emrg/emrgd.port")
@@ -116,9 +129,9 @@ say "5. emrg rant"
 if [ -n "${WINDIR:-}" ]; then
   # $HOME 在 Git Bash 是 POSIX 路径（/c/Users/...），cmd 需 Windows 路径（C:\Users\...）→ cygpath -m
   EMRGD_CMD="$(cygpath -m "$HOME/.emrg/install/bin/emrgd.cmd")"
-  (cd "$HOME" && cmd //c "start /b $EMRGD_CMD" >/dev/null 2>&1)
+  (cd "$HOME" && cmd //c "start /b $EMRGD_CMD" >"$HOME/.emrg/emrgd-debug2.log" 2>&1)
 else
-  nohup emrgd >/dev/null 2>&1 &
+  nohup emrgd >"$HOME/.emrg/emrgd-debug2.log" 2>&1 &
 fi
 sleep 1
 if emrg rant "smoke-test" 2>&1 | grep -qi "daemon not running"; then
