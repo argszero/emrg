@@ -55,6 +55,11 @@ cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
     # Windows：Git Bash 的 ln -s 需管理员权限（软链创建失败）→ 用复制替代
     cp "$PYEXE" python.exe
     cp "$PYEXE" python3.exe
+    # R100：python-build-standalone 的 DLL（python313.dll/vcruntime140*.dll 等）
+    # 在 python-dist/ 根目录——bin/python.exe 复制品缺 DLL 不可用（Windows loader
+    # 找不到 → 启动失败）。把根目录 *.dll 一并复制到 bin/，使 PATH 里的
+    # python 命令（session-scoped 脚本）可用。
+    cp python-dist/*.dll . 2>/dev/null || true
   else
     ln -sfn python-dist/bin/python3.13 python
     ln -sfn python-dist/bin/python3.13 python3

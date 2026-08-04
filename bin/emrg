@@ -22,4 +22,12 @@ PREFIX="$(dirname "$DIR")"
 export PATH="$DIR:$PATH"
 export PYTHONPATH="$PREFIX/source:$PREFIX/lib:$PYTHONPATH"
 export PYTHONDONTWRITEBYTECODE=1
-exec "$DIR/python" -m emrg "$@"
+# R100: Windows 下 bin/python（复制品）缺 DLL 不可用（DLL 在 python-dist/ 根）→
+# 探测 python-dist 里的 exe（与 emrg.cmd 一致）；POSIX 用 bin/python 软链。
+PY_BIN="$DIR/python"
+if [ -e "$DIR/python-dist/python.exe" ]; then
+  PY_BIN="$DIR/python-dist/python.exe"
+elif [ -e "$DIR/python-dist/python3.13.exe" ]; then
+  PY_BIN="$DIR/python-dist/python3.13.exe"
+fi
+exec "$PY_BIN" -m emrg "$@"
