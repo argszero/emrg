@@ -6,12 +6,18 @@ Manages TTY raw mode, queries terminal capabilities, provides draw/flush cycle.
 
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl  # POSIX-only
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 import logging
 import os
 import sys
-import termios
-import tty
+try:
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - Windows
+    termios = tty = None
 from dataclasses import dataclass, field
 from typing import Any, Callable
 

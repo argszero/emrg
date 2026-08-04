@@ -76,25 +76,14 @@ case "$PLATFORM" in
     rm -rf "$TMP"
     ;;
   darwin|macos|linux)
-    # R59：无官方便携二进制 → CI 源码编译。本地开发跳过（用系统 git）。
-    if [ "${CI:-}" != "true" ]; then
-      echo "!! git source build is CI-only (R59). Local dev uses system git." >&2
-      echo "   Set CI=true to force a source build." >&2
-      exit 0
+    # R59：无官方便携二进制。源码编译跨平台脆弱（依赖 autoconf/工具链，下载易 404）。
+    # → 用 CI runner 预装的系统 git（runner 必有 git）；干净机器上 git 由 PATH 注入兜底。
+    #   ⚠️ 安装包不捆绑 git 二进制，干净机器演化时 git 走 resolve_git_gh() 的 which 兜底。
+    echo "    using system git ($(git --version 2>/dev/null || echo 'none'))"
+    if [ "${CI:-}" = "true" ] && command -v git >/dev/null 2>&1; then
+      echo "    system git available — skip bundling (PATH injection covers clean machines)"
     fi
-    echo "==> building git from source (R59, ~3-5min)"
-    GIT_VERSION="${GIT_VERSION:-2.46.0}"
-    TMP="$(mktemp -d)"
-    curl -sL "https://github.com/git/git/archive/refs/tags/v${GIT_VERSION}.tar.gz" -o "$TMP/git.tgz"
-    tar -xzf "$TMP/git.tgz" -C "$TMP"
-    cd "$TMP/git-${GIT_VERSION}"
-    make configure >/dev/null 2>&1 || ./configure --prefix="$TMP/prefix" >/dev/null
-    make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" prefix="$TMP/prefix" install >/dev/null 2>&1
-    cp "$TMP/prefix/bin/git" "$RUNTIME/bin/git"
-    chmod +x "$RUNTIME/bin/git"
-    # macOS: git 依赖系统库，产物跨版本可移植；Linux: 需静态（musl）——CI 用静态基础镜像
-    rm -rf "$TMP"
-    echo "    git built: $("$RUNTIME/bin/git" --version 2>/dev/null || echo 'check failed')"
+    # 不再源码编译——源码编译需 autoconf + 3-5min，且下载 v2.46.0.tar.gz 实测 404
     ;;
 esac
 
