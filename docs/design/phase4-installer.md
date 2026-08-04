@@ -432,7 +432,11 @@ jobs:
 
 **打包资产**：
 - [ ] `packaging/assets/` 图标（icns/ico/png）——**packaging/ 目录整体不存在，需新建**
-- [ ] `packaging/build-runtime.sh`（python + source + lib 组装 → dist/runtime/）——**⚠️ python 复制必须保留软链**（R16：standalone 的 `bin/python`/`bin/python3` 是软链指向 `python3.13`；用 tar/rsync -a 保留，勿用跟随软链的 cp）
+- [ ] `packaging/build-runtime.sh`（python + source + lib 组装 → dist/runtime/）——**⚠️ python 复制细节（R16+R44+R45 实测）**：
+  - **必须整目录复制** `cpython-3.13.9-<platform>/` → `dist/runtime/bin/python-dist/`（含 `bin/python3.13` + **`lib/libpython3.13.dylib`**——R45 实测：只复制 bin/python3.13 会报 `Library not loaded: @executable_path/../lib/libpython3.13.dylib`，因二进制依赖 `../lib/` 的运行时库）
+  - **重建软链**（R44 实测：uv 的 `bin/python`/`bin/python3` 软链指向 `$HOME/.local/share/uv/...` 绝对路径，复制后失效）：
+    `dist/runtime/bin/python` → `python-dist/bin/python3.13`（相对软链）
+  - standalone 复制后**相对自身定位**（sys.prefix=复制位置，R44c 实测不依赖 HOME）——冒烟隔离（临时 HOME）不破坏
 - [ ] `packaging/bundle-git-gh.sh`（git/gh 捆绑 → dist/runtime/bin/）
 - [ ] `packaging/make-installer.sh`（pkgbuild / Inno Setup / AppImage + tarball 兜底；**含平台卸载器 §6：终止报告 + 墓地快照 + 清理 + 自校验**）
 - [ ] `packaging/smoke-test.sh`（§9 清单 12 项）
