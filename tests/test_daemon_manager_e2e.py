@@ -17,6 +17,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import sys
+
+# TUI (python_tui) 依赖 POSIX-only fcntl/termios/tty——Windows 跳过（Windows 冒烟不跑 TUI）
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="TUI is POSIX-only (fcntl/termios)")
+
 from emrg.client import daemon_manager
 from tests.test_ws_e2e import _boot_server, _make_config, _make_fake_chat_stream
 

@@ -1,6 +1,11 @@
 """Tests for InputParser — byte-stream → complete key sequences, including UTF-8."""
 
 import pytest
+
+import sys
+
+# TUI (python_tui) 依赖 POSIX-only fcntl/termios/tty——Windows 跳过（Windows 冒烟不跑 TUI）
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="TUI is POSIX-only (fcntl/termios)")
 from emrg.client.python_tui.events import InputParser, _utf8_len
 
 
