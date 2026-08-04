@@ -237,6 +237,7 @@ async function showSettings() {
       opt.selected = true;
       sel.appendChild(opt);
     }
+    if (sel.selectedIndex < 0) sel.selectedIndex = 0; // G144：默认选中第一项，防空 model 保存
   } catch (e) {
     addSystemMessage(`读取设置失败: ${e.message}`);
   }
@@ -283,8 +284,10 @@ function showWelcome() {
       const opt = document.createElement("option");
       opt.value = m;
       opt.textContent = m;
+      if (m === s.model) opt.selected = true; // G144：config 存在时回填当前模型
       sel.appendChild(opt);
     }
+    if (sel.selectedIndex < 0) sel.selectedIndex = 0; // G144：默认选中第一项，防空 model 保存
   });
 }
 
@@ -297,7 +300,7 @@ async function saveWelcome() {
   const config = {
     apiKey: key,
     baseUrl: $("welcome-base-url").value.trim(),
-    model: $("welcome-model").value,
+    model: $("welcome-model").value || "deepseek-chat", // G144：空 model 兜底默认模型
     projectDir: $("welcome-project-dir").value.trim() || "",
   };
   try {
