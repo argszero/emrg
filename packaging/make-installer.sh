@@ -5,7 +5,7 @@
 #           （R104: runtime → ~/.emrg/install/ + GUI EMRG.app → ~/Applications/）
 #           R67: postinstall $HOME 陷阱（提权时取控制台用户真实 HOME）
 #           R105: root 复制后 chown 回用户
-#   Windows: Inno Setup（R55 免 UAC；R87 {userhome} Inno 6.1+ fallback）
+#   Windows: Inno Setup（R55 免 UAC；R97 {%USERPROFILE} 替代 {userhome}——旧版 iscc 不识）
 #            GUI win-unpacked → install/emrg-gui/（R97）
 #   Linux:  AppImage（自解压归 GUI main.js §5）+ tar.gz 兜底（R83d 冒烟用）
 #
@@ -130,7 +130,7 @@ EOF
       echo "!! win-unpacked not found (run: cd emrg/gui && npm run dist first)" >&2
       exit 1
     fi
-    # 组装 Inno payload：runtime + GUI → staging（Inno 安装到 {userhome}\.emrg\install）
+    # 组装 Inno payload：runtime + GUI → staging（Inno 安装到 %USERPROFILE%\.emrg\install）
     STAGE="$(mktemp -d)"
     mkdir -p "$STAGE/payload"
     cp -R "$RUNTIME/." "$STAGE/payload/"
@@ -138,7 +138,7 @@ EOF
     cp -R "$WIN_UNPACKED" "$STAGE/payload/emrg-gui/EMRG"
     cat > "$STAGE/emrg.iss" <<EOF
 ; EMRG Inno Setup script — user-level install (R55: PrivilegesRequired=lowest)
-; R87: {userhome} requires Inno Setup 6.1+; fallback {userdocs}\..
+; R97: {userhome} 需 Inno 6.1+（runner 5.x 编译失败）→ 用 {%USERPROFILE}（全版本支持，与 Registry 段一致）
 #define MyAppName "EMRG"
 #define MyAppVersion "$VERSION"
 #define MyAppId "com.argszero.emrg"
@@ -146,7 +146,7 @@ EOF
 AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-DefaultDirName={userhome}\\.emrg\\install
+DefaultDirName={%USERPROFILE}\\.emrg\\install
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DisableProgramGroupPage=yes
