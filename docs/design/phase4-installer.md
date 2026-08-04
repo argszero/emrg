@@ -384,7 +384,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 - **Windows PATH（R27+R34）**：注册表 `HKCU\Environment\Path`（无锚点概念）——安装写**确定格式** `%USERPROFILE%\.emrg\install\bin`，卸载用 **Pascal 脚本读旧值 → 精确字符串替换移除 EMRG 段 → 写回**（`RegQueryStringValue`/`RegWriteStringValue`），不误删其他条目
 - **平台卸载器的实现载体（R10+R15 核查）**：
   - **`emrg-uninstall` 脚本先执行内置 python 逻辑**（install/ 未删时 python 可用）——**⚠️ 卸载脚本无启动脚本的 PYTHONPATH，必须自设**（头部 `export PYTHONPATH=<prefix>/source:<prefix>/lib`，否则 `import emrg`/`websockets` 失败，R15 实证 connect.py:24 依赖 websockets）
-  - 脚本做：停 daemon（**`from emrg.connect import connect_to_server` 发 shutdown 帧——R51 实证：emrg.connect 是独立模块无 CLI 副作用，卸载脚本可安全 import**；Windows 兜底 `taskkill`）→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
+  - 脚本做：**停 daemon（⚠️ R90：复用 `emrg/__main__.py:133-148` 的 `_send_shutdown()` 实现——`connect_to_server()` 连接 + 发 `{"type":"shutdown"}` + 等 `shutdown_ack`（daemon.py:965-967）**；port 文件缺失/连接失败 → 兜底删 port 文件 + SIGTERM（读 pid 文件）/ Windows taskkill）**→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
   - 再删 install/（卸载器原生删除，此时 python 已退出无锁）
   - 最后清 PATH/快捷方式 + 自校验
   - macOS：卸载 app（shell 包装）调 `emrg-uninstall`；Windows：Inno Setup `[UninstallRun]` 调 `emrg-uninstall`（.cmd 包装）→ 原生删目录 + 快捷方式；Linux：终端跑 `emrg-uninstall` → 删 AppImage + 软链（R58）
@@ -505,6 +505,7 @@ jobs:
 | electron-builder 下载二进制（国内网络） | CI/本地构建慢 | CI 用 npm 镜像缓存；electron 二进制缓存（已实测 npmmirror 方案） |
 | source/ 可读（非原生二进制） | 用户可改源码 | 开源项目无保密需求；只读权限 + 升级原子替换 |
 | pyyaml 等含 C 扩展的 wheel 在 lib/ 的加载 | 找不到 .so | 构建期 pip --target 装好（R43 实测 PYTHONPATH 加载成功）+ 冒烟 3 |
+| **GUI project_dir 兜底 os.homedir()（R91，Phase 3 遗留）** | 打包干净机器首启无 gui.project_dir → project_dir=home → daemon load_skills 从 ~/skills/ 加载（G125 cwd） | 记录为已知偏差（Phase 3 main.js:164）；Phase 4 不引入新行为——首启引导让用户选项目目录后写 gui.project_dir（§3.4 首启流已含）；skills 加载偏差不影响核心功能 |
 
 ---
 
@@ -512,7 +513,7 @@ jobs:
 
 **代码改造**：
 - [ ] `bin/emrg`、`bin/emrgd` 启动脚本（§2.1，bash + Windows .cmd 双版；**含 R71 readlink 软链解析** + PYTHONDONTWRITEBYTECODE=1（R61）；Windows 版 PATH 含 `git\cmd`+`git\mingw64\bin`（R60）——Windows .cmd 走快捷方式(.lnk)无软链问题，`%~dp0` 正确）
-- [ ] `bin/emrg-uninstall` 卸载脚本（§6.2 六步，三平台统一调用，R58）
+- [ ] `bin/emrg-uninstall` 卸载脚本（§6.2 六步，三平台统一调用，R58；**停 daemon 复用 `_send_shutdown()` 协议（R90）**）
 - [ ] TUI 占位 api_key 提示（§3.4 R62：检测占位符 → 提示先运行 GUI 配置）
 - [ ] `__main__.py:_run_update` 打包模式提示（v1.1 占位；**R86：判定只看 emrg 包父目录是否有 .git，不进 cwd 搜索**；替换生硬 sys.exit(1)）
 - [ ] `git_utils.py`：`resolve_git_gh()` + `git_cmd()` + install-info.json（§5.2，兜底用）
