@@ -131,7 +131,9 @@ async function sendMessage() {
 // ── 会话 ─────────────────────────────────────────────────
 
 async function switchSession(sid, opts = {}) {
-  if (state.busy && state.ownStreamRequestId) {
+  // G65：busy 即自有流进行中/发送中（IPC 往返窗口内 ownStreamRequestId 尚未赋值，
+  // 只查 busy 才能覆盖该窗口——与 main 侧 ownStream 锁语义对齐）
+  if (state.busy) {
     addSystemMessage("当前有进行中的响应，请等待完成或停止后再切换。"); // G65
     return;
   }
@@ -159,7 +161,7 @@ async function switchSession(sid, opts = {}) {
 }
 
 async function newSession() {
-  if (state.busy && state.ownStreamRequestId) {
+  if (state.busy) {
     addSystemMessage("当前有进行中的响应，请等待完成或停止后再新建会话。"); // G65 同款锁
     return;
   }
@@ -179,7 +181,7 @@ async function newSession() {
 
 async function deleteSession(sid) {
   // G65：自有流运行中禁止删除当前会话（删除后自动切换会被 busy 锁拒绝 → sessionId 指向已删会话）
-  if (state.busy && state.ownStreamRequestId && state.sessionId === sid) {
+  if (state.busy && state.sessionId === sid) {
     addSystemMessage("当前有进行中的响应，请等待完成或停止后再删除会话。");
     return;
   }
