@@ -11,4 +11,7 @@ set PREFIX=%DIR%\..
 set PATH=%DIR%;%PREFIX%\git\cmd;%PREFIX%\git\mingw64\bin;%PATH%
 set PYTHONPATH=%PREFIX%\source;%PREFIX%\lib;%PYTHONPATH%
 set PYTHONDONTWRITEBYTECODE=1
-"%DIR%\python.exe" -m emrg %*
+REM R90: python.exe 复制品在 bin/，DLL 在 python-dist/ → loader 找不到 → 用 python-dist 里的 exe（与 DLL 同目录）
+set PYEXE=%DIR%\python-dist\python.exe
+if not exist "%PYEXE%" set PYEXE=%DIR%\python-dist\python3.13.exe
+"%PYEXE%" -m emrg %*
