@@ -58,6 +58,7 @@ jobs:
       # ── GUI tests ────────────────────────────────────────────
       - name: GUI unit tests
         working-directory: emrg/gui
+        shell: bash
         run: |
           npm ci --omit=dev
           EMRG_SKIP_INTEGRATION=1 npm test
