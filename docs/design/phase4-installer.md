@@ -22,7 +22,7 @@
 ### 1.2 验收标准（全部一次满足）
 
 - [ ] 干净容器（无 python/uv/git/gh/node）→ 双击安装 → 无报错
-- [ ] **全程离线（断网）安装 + 首启 + 聊天可用**（R47：安装包自包含、零在线安装）
+- [ ] **全程离线（断网）安装 + 首启 + daemon/UI 可用**（R47：安装包自包含、零在线安装；⚠️ R79：**"聊天"除外**——LLM API 调用必须联网，离线指安装/首启/daemon/UI/会话持久化全链路无网络依赖）
 - [ ] 安装后 GUI 启动 → 首启引导填 key → 聊天流式 + 工具调用 + 会话持久化
 - [ ] 安装后 TUI `emrg` 启动 → `/help`、聊天、`/rant`、演化周期正常
 - [ ] **会话内 `python script.py` 可执行**（bash 工具走捆绑 python）
@@ -76,8 +76,10 @@
 ```
 <prefix>/                         # 三平台统一：~/.emrg/install/（R34 弃 Windows LOCALAPPDATA 特例）；Linux AppImage 自解压
 ├── bin/
-│   ├── python                   # ⭐ standalone CPython（uv 官方，含 pip，60MB 实测）——唯一一套 python
-│   ├── python3                  # 符号链接
+│   ├── python                   # ⭐ 软链 → python-dist/bin/python3.13（R82：../python-dist/... 相对解析）
+│   ├── python3                  # 软链（同规则）
+│   ├── python-dist/             # standalone CPython 整目录（uv 官方，含 pip，60MB 实测）——唯一一套 python
+│   │   └── bin/python3.13 + lib/libpython3.13.dylib   # R45：必须整目录（lib 运行时依赖）
 │   ├── emrg                     # 启动脚本：exec python -m emrg（R13：-m 包入口 + PYTHONPATH=source:lib）
 │   ├── emrgd                    # 启动脚本：exec python -m emrg.server（同 R13）
 │   └── gh                       # 捆绑 gh CLI（官方单文件二进制）
@@ -466,8 +468,8 @@ jobs:
 | # | 用例 | 验证点 |
 |---|------|--------|
 | 1 | `emrg --version` | 启动脚本 + python + lib 链路 |
-| 2 | `bin/emrgd` 拉起 daemon（→ port 文件 → auth_ok → pong） | 双入口 + PATH/PYTHONPATH（⚠️ R63：`emrg` 是 TUI，CI 无 TTY 会卡/报错——TUI 交互留本地手动；daemon 拉起用 §R43 实证的协议验证链路） |
-| 3 | 聊天 + 工具调用 + 会话持久化 | 核心链路 |
+| 2 | **前置：写最小 config.toml（占位 key）→** `bin/emrgd` 拉起 daemon（→ port 文件 → auth_ok → pong） | 双入口 + PATH/PYTHONPATH（⚠️ R63：`emrg` 是 TUI，CI 无 TTY 会卡/报错——TUI 交互留本地手动；⚠️ **R78：daemon 顶层 `load_config()` 在 config 缺失时抛 FileNotFoundError（config.py:60-63）直接崩——daemon 不调 ensure_config（只有 CLI 客户端调）→ 冒烟 2 必须先造 config.toml**；daemon 拉起用 §R43 实证的协议验证链路） |
+| 3 | 聊天 + 工具调用 + 会话持久化 | 核心链路（⚠️ R79：聊天需要**真 API key + 网络**——CI 无 key 且冒烟 12 离线场景矛盾 → **CI 降级为无 LLM 核心链路**：daemon 起 + 协议连接 + 会话文件持久化写入；**完整聊天（LLM 交互）留本地手动**） |
 | 4 | `emrg server stop` | daemon 生命周期 |
 | 5 | `emrg rant "test"` | rant 链路（写 ~/.emrg/rants.jsonl） |
 | 6 | 演化组件验证：`git --version` + `gh --version`（PATH 注入）+ 模板存在（`source/emrg/server/evolution_prompt.md`）+ `python -c "from emrg.skills.loader import ..."`（动态 import） | ⚠️ R68：**完整演化周期依赖 LLM + TUI /trigger（CLI 无 trigger 子命令），CI 无 TTY/无 key 跑不了**——拆为无 LLM 依赖的组件验证；完整周期留本地手动（同冒烟 3/8 降级模式） |
@@ -513,7 +515,8 @@ jobs:
   - **必须整目录复制** `cpython-3.13.9-<platform>-<arch>-none/` → `dist/runtime/bin/python-dist/`（含 `bin/python3.13` + **`lib/libpython3.13.dylib`**——R45 实测：只复制 bin/python3.13 会报 `Library not loaded: @executable_path/../lib/libpython3.13.dylib`，因二进制依赖 `../lib/` 的运行时库）
   - **⚠️ R69（目录名实测）**：uv 安装目录实际为 `cpython-<ver>-<platform>-<arch>-none/`（如 `cpython-3.13.9-macos-aarch64-none`）——build-runtime.sh **锁 patch 版本 `uv python install 3.13.9` + 动态 glob** `cpython-3.13.9-*/`（勿硬编码平台段，uv 命名随版本演进）
   - **重建软链**（R44 实测：uv 的 `bin/python`/`bin/python3` 软链指向 `$HOME/.local/share/uv/...` 绝对路径，复制后失效）：
-    `dist/runtime/bin/python` → `python-dist/bin/python3.13`（相对软链）
+    `dist/runtime/bin/python` → **`../python-dist/bin/python3.13`**（相对软链）
+  - **⚠️ R82（致命实测）**：相对软链路径**相对于软链所在目录**（bin/）解析——写成 `python-dist/bin/python3.13` 会找 `bin/python-dist/...`（**不存在**）；必须 `../python-dist/bin/python3.13`（bin/ 的上层 → install/）。修正后实测：软链调用 `sys.prefix` 正确（@executable_path follow 软链 ✅，libpython3.13.dylib 正常加载）；`bin/python3` 软链同规则
   - standalone 复制后**相对自身定位**（sys.prefix=复制位置，R44c 实测不依赖 HOME）——冒烟隔离（临时 HOME）不破坏
 - [ ] `packaging/bundle-git-gh.sh`（git/gh 捆绑 → dist/runtime/bin/）
 - [ ] `packaging/make-installer.sh`（pkgbuild / Inno Setup / AppImage + tarball 兜底；**第一步停 daemon（R70）**；**含平台卸载器 §6：终止报告 + 墓地快照 + 清理 + 自校验**）
