@@ -144,6 +144,58 @@ test("ensureConnected: port 文件缺失 → 拉起 daemon（spawn 参数正确 
   assert.strictEqual(spawnCalls.projectDir, tmpHome);
 });
 
+test("Phase4: _findDaemonExecutable 打包模式定位捆绑 emrgd（POSIX）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome, isPackaged: true });
+  const exe = client._findDaemonExecutable();
+  const expected = path.join(os.homedir(), ".emrg", "install", "bin", process.platform === "win32" ? "emrgd.cmd" : "emrgd");
+  assert.strictEqual(exe, expected);
+  assert.ok(exe.includes(path.join(".emrg", "install", "bin")), `exe=${exe}`);
+});
+
+test("Phase4: isPackaged startDaemon 走捆绑 emrgd 分支（非 python -m）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome, isPackaged: true });
+  // _findPython 只存在于源码分支；打包分支调用 _findDaemonExecutable。
+  const exe = client._findDaemonExecutable();
+  assert.ok(exe.endsWith("emrgd") || exe.endsWith("emrgd.cmd"), `exe=${exe}`);
+  // 打包分支绝不能触达 _findPython：置为抛错，若被调用测试即失败。
+  client._findPython = () => { throw new Error("_findPython must not be called in packaged mode"); };
+  // _findDaemonExecutable 返回真实路径；真实 spawn 会执行该文件——用一个
+  // 必然超时失败但能证明走了打包分支的方式：spawn 的 emrgd 不存在时 error 事件。
+  // 更稳：stub isRunning 恒 false + 缩短等待，捕获 startDaemon 抛的超时错，
+  // 说明它没有走 _findPython（否则直接抛上面的错）。
+  client.isRunning = async () => false;
+  const realSpawn = require("child_process").spawn;
+  const childProcess = require("child_process");
+  // daemon_client 顶层解构 { spawn }——只能替换 require.cache 中的模块导出。
+  // 简化：monkey-patch childProcess.spawn 无法生效，改用 spy 模块缓存。
+  // 这里直接验证：打包分支下 spawn 的 cmd 是 emrgd（通过临时替换模块再 require）。
+  const cacheKey = require.resolve("../daemon_client.js");
+  const originalModule = require.cache[cacheKey];
+  delete require.cache[cacheKey];
+  const origSpawn = require("child_process").spawn;
+  let captured = null;
+  require("child_process").spawn = (cmd, args, opts) => {
+    captured = { cmd, args, opts };
+    return { unref() {}, pid: 1234 };
+  };
+  let DaemonClientPackaged;
+  try {
+    DaemonClientPackaged = require("../daemon_client.js").DaemonClient;
+    const c2 = new DaemonClientPackaged({ projectDir: tmpHome, isPackaged: true });
+    c2._findPython = () => { throw new Error("_findPython must not be called in packaged mode"); };
+    c2.isRunning = async () => true;
+    const child = await c2.startDaemon();
+    assert.strictEqual(child.pid, 1234);
+    assert.ok(captured, "spawn should be called");
+    assert.ok(String(captured.cmd).endsWith("emrgd") || String(captured.cmd).endsWith("emrgd.cmd"), `cmd=${captured.cmd}`);
+    assert.deepStrictEqual(captured.args, []);
+    assert.strictEqual(captured.opts.detached, true);
+  } finally {
+    require("child_process").spawn = origSpawn;
+    require.cache[cacheKey] = originalModule;
+  }
+});
+
 test("G43 stale port: 连接失败（port 文件存在但拒绝）→ 删文件重拉", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   let respawned = false;
