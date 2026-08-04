@@ -25,12 +25,19 @@ mkdir -p "$DIST/bin/python-dist" "$DIST/bin" "$DIST/source" "$DIST/lib" "$DIST/a
 # ── 1. standalone CPython（uv python install 3.13.9，锁 patch 版 R69）──
 echo "==> installing standalone python $PY_VER"
 uv python install "$PY_VER" >/dev/null
-# R69：standalone 位于 `uv python dir`（R45 实测目录名 cpython-3.13.9-<platform>-<arch>-none/）；
+# R69/R89：standalone 位于 `uv python dir`（R45 实测目录名 cpython-3.13.9-<platform>-<arch>-none/）；
 # `uv python find` 在 venv 存在时返回 venv 路径，不可用于定位。
-PY_ROOT="$(uv python dir)/cpython-3.13.9-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)-none"
-if [ ! -x "$PY_ROOT/bin/python3.13" ]; then
-  # 动态 glob 兜底（架构名差异）
-  PY_ROOT="$(ls -d "$(uv python dir)"/cpython-3.13.9-* | head -1)"
+# R89 修复：uname -s 在 Git Bash 返回 MINGW64_NT-*（≠ windows）前缀拼接不可靠；
+# uv python dir 在 Windows 返回原生路径（C:\...），Git Bash 中反斜杠 glob 无法匹配
+# → 一律 glob 定位 + cygpath 转 POSIX（Windows 仅）+ `|| true` 防 pipefail（set -euo）。
+PY_DIR="$(uv python dir)"
+if command -v cygpath >/dev/null 2>&1; then
+  PY_DIR="$(cygpath -u "$PY_DIR")"
+fi
+PY_ROOT="$(ls -d "$PY_DIR"/cpython-3.13.9-* 2>/dev/null | head -1 || true)"
+if [ -z "$PY_ROOT" ] || [ ! -d "$PY_ROOT" ]; then
+  echo "error: cannot locate standalone python under $PY_DIR" >&2
+  exit 1
 fi
 # R45：整目录复制（只复制 bin/python3.13 会缺 lib/libpython3.13.dylib）
 cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
@@ -41,8 +48,9 @@ cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
   # Windows 检测：uname -s 在 Git Bash 返回 MINGW64_NT-*（≠ windows），不可靠；
   # 改为文件系统探测——Windows standalone python 布局为 python.exe/python3.13.exe
   # 在根目录（无 bin/），POSIX 布局为 bin/python3.13。探测到 .exe 即走复制分支。
+  # `|| true`：POSIX 平台 4 个 .exe 全不存在时 ls 非零，pipefail 下需吞掉。
   PYEXE="$(ls python-dist/python3.13.exe python-dist/python.exe \
-               python-dist/bin/python3.13.exe python-dist/bin/python.exe 2>/dev/null | head -1)"
+               python-dist/bin/python3.13.exe python-dist/bin/python.exe 2>/dev/null | head -1 || true)"
   if [ -n "$PYEXE" ]; then
     # Windows：Git Bash 的 ln -s 需管理员权限（软链创建失败）→ 用复制替代
     cp "$PYEXE" python.exe
