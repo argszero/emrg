@@ -116,6 +116,16 @@ EOF
   linux)
     echo "==> Linux tar.gz (AppImage built by electron-builder in CI)"
     tar -czf "$DIST/artifacts/EMRG-$VERSION-linux-$(uname -m).tar.gz" -C "$(dirname "$RUNTIME")" runtime
+    # R116: 收集 electron-builder 产出的 AppImage（emrg/gui/dist/*.AppImage）到
+    # dist/artifacts/ —— 之前只生成 tar.gz，release 缺 linux AppImage（rant #13 Step 5）。
+    # electron-builder 命名：<productName>-<version>-<arch>.AppImage（x86_64 / arm64）。
+    APPIMAGE="$(ls "$ROOT"/emrg/gui/dist/*.AppImage 2>/dev/null | head -1 || true)"
+    if [ -n "$APPIMAGE" ]; then
+      cp "$APPIMAGE" "$DIST/artifacts/EMRG-$VERSION-linux-$(uname -m).AppImage"
+      echo "==> AppImage collected: $(basename "$APPIMAGE")"
+    else
+      echo "!! AppImage not found in emrg/gui/dist — Linux release 缺 AppImage（有 tar.gz 兜底）" >&2
+    fi
     ;;
 
   windows|win32|mingw*|msys*)
