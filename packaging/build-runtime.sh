@@ -35,13 +35,16 @@ fi
 # R45：整目录复制（只复制 bin/python3.13 会缺 lib/libpython3.13.dylib）
 cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
 
-# ── 2. bin/python 软链（R82：相对软链；python-dist 与软链同在 bin/ 下）──
+# ── 2. bin/python 软链/复制（R82：相对软链；python-dist 与软链同在 bin/ 下）──
 (
   cd "$DIST/bin"
-  if [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "windows" ] || [ -f python-dist/bin/python3.13.exe ]; then
+  # Windows 检测：uname -s 在 Git Bash 返回 MINGW64_NT-*（≠ windows），不可靠；
+  # 改为文件系统探测——Windows standalone python 布局为 python.exe/python3.13.exe
+  # 在根目录（无 bin/），POSIX 布局为 bin/python3.13。探测到 .exe 即走复制分支。
+  PYEXE="$(ls python-dist/python3.13.exe python-dist/python.exe \
+               python-dist/bin/python3.13.exe python-dist/bin/python.exe 2>/dev/null | head -1)"
+  if [ -n "$PYEXE" ]; then
     # Windows：Git Bash 的 ln -s 需管理员权限（软链创建失败）→ 用复制替代
-    # （python3.13.exe 在 python-dist 根或 bin/，跨版本差异兜底）
-    PYEXE="$(ls python-dist/bin/python3.13.exe python-dist/python3.13.exe 2>/dev/null | head -1)"
     cp "$PYEXE" python.exe
     cp "$PYEXE" python3.exe
   else
