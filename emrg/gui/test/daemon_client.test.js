@@ -256,6 +256,17 @@ test("sendTask payload（G32/G96）", async () => {
   assert.ok(frame.timestamp);
 });
 
+test("sendTask 外部预生成 requestId（G143）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  await connectClient(client);
+  const outer = "s_260803_1730_outer1234";
+  const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", stream: true, requestId: outer });
+  assert.strictEqual(rid, outer, "返回外部预生成 id");
+  const frame = JSON.parse(currentMockWs.sent.at(-1));
+  assert.strictEqual(frame.id, outer, "payload id 用外部预生成 id");
+  assert.strictEqual(client._currentStream.requestId, outer, "_setCurrentStream 用外部 id（send 前自有流标记）");
+});
+
 test("sendCommand payload + cancel 无多余字段（G24）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
