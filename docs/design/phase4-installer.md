@@ -309,7 +309,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 
 | 平台 | GUI 位置 | 说明 |
 |------|----------|------|
-| macOS | `~/Applications/EMRG.app` | 用户级（免 sudo），启动台可见；pkg 安装时复制到 ~/Applications |
+| macOS | `~/Applications/EMRG.app` | 用户级（免 sudo），启动台可见；**pkg postinstall 复制（R104：与 runtime 一起，§8）** |
 | Windows | `~/.emrg\install\emrg-gui\EMRG.exe` | 开始菜单快捷方式指向它（Inno Setup 创建） |
 | Linux | AppImage 单文件本身 | 下载 → chmod +x → 双击即 GUI；桌面 .desktop 文件（首次运行创建） |
 
@@ -471,10 +471,15 @@ jobs:
         # 产物命名（R103）：EMRG-<ver>-macos-arm64.pkg / EMRG-<ver>-windows-x64.exe /
         #   EMRG-<ver>-linux-x86_64.AppImage / EMRG-<ver>-linux-aarch64.AppImage + tar.gz 兜底
         # ⚠️ macOS 用户级 pkg（R54+R67）：pkgbuild install-location 不支持 ~ 展开——
-        #   payload 装到临时位置 + postinstall 脚本复制到用户 ~/.emrg/install/
+        #   payload 装到临时位置 + postinstall 脚本复制到用户目录（⚠️ R104：postinstall **做两件事**：
+        #   ① runtime → ~/.emrg/install/（§2 布局）② GUI（EMRG.app）→ ~/Applications/（§4.4））
         #   ⚠️ R67：postinstall 的 $HOME 不可靠——GUI 安装器可能提权运行 postinstall（$HOME=/var/root）
         #   → postinstall 用 `stat -f "%Su" /dev/console` 获取控制台用户 + `dscl . -read /Users/<u> NFSHomeDirectory`
         #     查真实 HOME，取不到则 fallback $HOME
+        #   ⚠️ R105（属主修正）：postinstall 若以 root 跑，复制到用户目录的文件属主 = root →
+        #     用户无法更新 install/ 或正常写 ~/.emrg → postinstall 复制后必须
+        #     `chown -R <user>:<group> <home>/.emrg <home>/Applications/EMRG.app`
+        #     （<user> 即上一步查到的控制台用户）
         # ⚠️ Windows 免 UAC（R55+R87）：Inno Setup 配 PrivilegesRequired=lowest +
         #   DefaultDirName={userhome}\.emrg\install（⚠️ R87：{userhome} 常量需 Inno Setup 6.1+；
         #   低版本无此常量——fallback：Pascal Script 里 GetEnvironmentVariable('USERPROFILE') 取
