@@ -45,7 +45,7 @@
 
 | 维度 | A. PyInstaller（旧） | C. standalone + 源码（新） |
 |------|:---:|:---:|
-| 体积 | ~240MB（**3 套 python**：emrg onedir + emrgd onedir + 会话用 standalone） | ~120MB（**1 套**） |
+| 体积 | ~240MB（**3 套 python**：emrg onedir + emrgd onedir + 会话用 standalone） | ~250MB（**1 套 python**；R48 实测：python 60 + lib 20 + source 1 + git 40 + gh 30 + GUI 100） |
 | 会话内跑 python 脚本 | ❌ 需另捆绑 standalone | ✅ **同一套 python 天然支持** |
 | 模板收集 | ❌ spec datas 手动精确路径（prompt.md 在 server/ 根） | ✅ 源码原样 |
 | frozen 分支 | ❌ 需改 `__main__.py` + GUI resourcesPath | ✅ 启动脚本即可 |
@@ -53,7 +53,21 @@
 | 更新 | 重新 PyInstaller 构建 | 替换 source/ + pip install |
 | 启动速度 | 快（C bootloader） | 稍慢 ~300ms（可接受） |
 
-**核心洞察**：PyInstaller 解决的"没 python 也能跑"——但我们**反正要捆绑 python 给会话内脚本用**（§5.0 已论证），那就直接用这一个 python 跑源码，PyInstaller 变成纯冗余。standalone python（uv 官方，含 pip）52MB、依赖 site-packages 20MB、源码 ~1MB，一套搞定。
+**核心洞察**：PyInstaller 解决的"没 python 也能跑"——但我们**反正要捆绑 python 给会话内脚本用**（§5.0 已论证），那就直接用这一个 python 跑源码，PyInstaller 变成纯冗余。standalone python（uv 官方，含 pip）60MB、依赖 lib/ 20MB、源码 ~1MB，一套搞定。
+
+**⚠️ 体积明细（R48 实测修正）**：方案 C 总包 ~250MB（macOS），与 PyInstaller 方案同量级——**方案 C 的价值不是省体积，是"一套 python 三用 + 免 spec/frozen 坑"**：
+
+| 组件 | 体积 |
+|------|------|
+| standalone python（实测 60MB，含 pip） | 60MB |
+| 依赖 lib/（R43 实测，含传递依赖+C 扩展） | ~20MB |
+| emrg 源码（除 gui，R29） | ~1MB |
+| git（便携版） | ~40MB |
+| gh（Go 单文件） | ~30MB |
+| GUI（electron-builder，R48） | ~100MB（macOS .app）/ ~80MB（Win）/ ~90MB（AppImage） |
+| **合计** | **~250MB（macOS）/ ~230MB（Win）/ ~240MB（AppImage）** |
+
+> 体积主要被 GUI（Chromium）与 git/gh 占——这是"安装即完整"的固有成本（PyInstaller 方案同量级）。体积优化的后续选项：gh 可选装（v2）、git 用系统版兜底（§5.2 解析器已支持）——但 v1 接受全捆绑。
 
 ---
 
@@ -62,7 +76,7 @@
 ```
 <prefix>/                         # 三平台统一：~/.emrg/install/（R34 弃 Windows LOCALAPPDATA 特例）；Linux AppImage 自解压
 ├── bin/
-│   ├── python                   # ⭐ standalone CPython（uv 官方，含 pip，52MB）——唯一一套 python
+│   ├── python                   # ⭐ standalone CPython（uv 官方，含 pip，60MB 实测）——唯一一套 python
 │   ├── python3                  # 符号链接
 │   ├── emrg                     # 启动脚本：exec python -m emrg（R13：-m 包入口 + PYTHONPATH=source:lib）
 │   ├── emrgd                    # 启动脚本：exec python -m emrg.server（同 R13）
@@ -331,7 +345,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 - **Windows PATH（R27+R34）**：注册表 `HKCU\Environment\Path`（无锚点概念）——安装写**确定格式** `%USERPROFILE%\.emrg\install\bin`，卸载用 **Pascal 脚本读旧值 → 精确字符串替换移除 EMRG 段 → 写回**（`RegQueryStringValue`/`RegWriteStringValue`），不误删其他条目
 - **平台卸载器的实现载体（R10+R15 核查）**：
   - 卸载器先执行**内置 python 脚本**（install/ 未删时 python 可用）——**⚠️ 卸载脚本无启动脚本的 PYTHONPATH，必须自设**（头部 `export PYTHONPATH=<prefix>/source:<prefix>/lib`，否则 `import emrg`/`websockets` 失败，R15 实证 connect.py:24 依赖 websockets）
-  - 脚本做：停 daemon（走 shutdown 协议，`import emrg.connect` 或读 port 文件发 ws 消息；Windows 兜底 `taskkill`）→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
+  - 脚本做：停 daemon（**`from emrg.connect import connect_to_server` 发 shutdown 帧——R51 实证：emrg.connect 是独立模块无 CLI 副作用，卸载脚本可安全 import**；Windows 兜底 `taskkill`）→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
   - 再删 install/（卸载器原生删除，此时 python 已退出无锁）
   - 最后清 PATH/快捷方式 + 自校验
   - macOS：pkg 卸载器（postinstall 反向脚本）；Windows：Inno Setup 卸载段（`[UninstallRun]` 跑 python 脚本 + 原生删目录）；Linux：删 AppImage 文件即卸载（tarball 删解压目录）
