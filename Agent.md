@@ -26,7 +26,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
 - `emrg/client/` — Client (TUI interface based on inlined python-tui)
   - `daemon_manager.py` — Daemon lifecycle (start/restart-if-stale/ensure-connected) + protocol client (DaemonConnection: send_task/send_command/recv/read_stream) — shared with GUI (Phase 3)
   - `app.py` — Main entry, event loop, ChatHistory widget, command autocomplete, session selector
-- `emrg/gui/` — Electron GUI (Phase 3, non-developer entry point): main process (window/daemon lifecycle/IPC) + renderer (zero network, contextBridge sandbox) + `daemon_client.js` (protocol client mirroring `daemon_manager.py`). Start with `npm start`; unit tests `npm test` (integration local).
+- `emrg/gui/` — Electron GUI (Phase 3, non-developer entry point): main process (window/daemon lifecycle/IPC) + renderer (zero network, contextBridge sandbox) + `daemon_client.js` (protocol client mirroring `daemon_manager.py`). Start with `npm start`; unit tests `npm test` (integration tests run in CI too).
 
 ## Key Conventions
 
@@ -63,7 +63,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - Streaming chat with delta rendering (16ms batching), markdown on done (marked + DOMPurify + local highlight.js subset), tool call status cards (2000-char truncation + expand)
   - Session list/switch/new/delete synced with daemon; own-stream busy lock (G65); broadcast streams from other clients tagged "来自其他客户端"
   - Disconnect/reconnect: red status dot, auto daemon respawn (stale-port detection), session resume, input bar restored on disconnect (no 30s fake-timeout)
-  - Unit tests `npm test` (20) + integration tests (7, isolated HOME); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
+  - Unit tests `npm test` (20) + integration tests (7, isolated HOME, run in CI); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
 - **Auto project tracking** — Automatically detects and records working directories; project-scoped sessions
 - **Rant-driven evolution** — User feedback via `/rant` drives automatic self-improvement cycles
 - **Headless GitHub auth** — Non-interactive evolution auto-extracts `GH_TOKEN` from git credential store (osxkeychain / credential helper); PR comment/LGTM queries fall back to REST API (GraphQL needs `read:org` scope)
