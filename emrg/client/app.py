@@ -4,7 +4,11 @@ Keeps interactive_demo.py's input handling, renders chat in viewport.
 
 from __future__ import annotations
 
-import asyncio, fcntl, json, logging, os, platform, signal, subprocess, sys, time
+import asyncio, json, logging, os, platform, signal, subprocess, sys, time
+try:
+    import fcntl  # POSIX-only（TUI 非阻塞 stdin）；Windows 无此模块
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 from datetime import datetime
 from pathlib import Path, PurePath
 from emrg.client import daemon_manager
@@ -850,8 +854,9 @@ async def interactive(init_auto_evolve: bool = False):
     loop.add_signal_handler(signal.SIGWINCH, _on_sigwinch)
 
     # ── Stdin reader (asyncio-native, no thread pool — rant #SIGWINCH-leak) ─
-    _stdin_flags = fcntl.fcntl(stdin_fd, fcntl.F_GETFL)
-    fcntl.fcntl(stdin_fd, fcntl.F_SETFL, _stdin_flags | os.O_NONBLOCK)
+    if fcntl is not None:  # POSIX-only（Windows 无 fcntl，不跑 TUI）
+        _stdin_flags = fcntl.fcntl(stdin_fd, fcntl.F_GETFL)
+        fcntl.fcntl(stdin_fd, fcntl.F_SETFL, _stdin_flags | os.O_NONBLOCK)
 
     def _stdin_reader() -> None:
         try:
