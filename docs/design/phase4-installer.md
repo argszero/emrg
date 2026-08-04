@@ -89,6 +89,10 @@
 │   ├── mingw64/bin/
 │   └── ...
 ├── lib/                         # 依赖 site-packages（20MB，构建期 pip --target 装好打进安装包，R47）
+├── emrg-gui/                    # ⚠️ R97：Windows GUI（electron-builder win-unpacked → Inno 装入此处，
+│   │                            #     §4.4）；macOS GUI 在 ~/Applications/EMRG.app（不在 install/）；
+│   │                            #     Linux = AppImage 单文件（不在 install/）
+│   └── EMRG.exe
 ├── source/                      # emrg 源码（~1MB，只读，安装器放置）
 │   ├── emrg/
 │   │   ├── __main__.py
@@ -101,6 +105,7 @@
 ├── LICENSE
 └── version.txt
 ```
+> ⚠️ macOS 另有**卸载 EMRG.app**（pkg 安装时放置到 `~/Applications/`，§6.1）——在 install/ 之外（卸载 app 自删限制 R31）
 
 数据目录不变：`~/.emrg/`（config.toml、sessions、memory、logs、projects.yml、tasks.yml、rants.jsonl、versions/、saturation/、skills/）。
 
@@ -264,6 +269,9 @@ _findDaemonExecutable() {
 //    其余选项不变：cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref（shell 中间层不影响脱离）
 // ⚠️ R66：Windows 打包分支加 windowsHide: true——detached + shell:true 默认开新控制台窗口（黑窗闪烁）；
 //   cmd.exe /c 同步等待 python 退出 → GUI 退出后 cmd 仍在（detached 独立进程组）→ python 存活 → daemon 常驻 ✅
+// ⚠️ R92b：Windows 用户名含空格（如 C:\Users\John Doe\...）→ spawn shell:true 时 cmd.exe /c 解析
+//   路径需引号——Node spawn shell 模式对含空格 command 自动加引号（windowsVerbatimArguments=false）✅，
+//   但需在打包分支实测确认（用户名含空格场景冒烟覆盖）
 ```
 - 启动脚本自行定位 python/source/lib，GUI 只需 spawn 它
 - cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref 选项不变
@@ -336,12 +344,13 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
   - **长期进程（daemon 由 GUI 拉起）** 的 PATH 注入在 AppImage 退出后失效 → **首次运行必须把 python/git/gh 复制到 `~/.emrg/install/bin/`**（数据目录可写），启动器 exec AppImage 前先确保复制完成
 - 因此 AppImage 的**首次运行自解压**是必须的：`bin/python`/`bin/git`/`bin/gh` → `~/.emrg/install/bin/`，source/lib → `~/.emrg/install/`（与 pkg/exe 安装后的布局一致）——**AppImage 实际是"自解压安装器"**，之后 PATH 注入走 `~/.emrg/install/bin/`（稳定路径，非临时挂载）
 - **自解压实现（R56 方案 → R65 修正）**：**实现位置归 GUI main.js**（electron-builder 默认 AppRun 无官方自定义支持，覆盖 hack 脆弱）——main.js 启动时：`if (!fs.existsSync(join(os.homedir(),'.emrg','install','bin'))) { fs.cpSync(join(process.resourcesPath,'runtime'), join(os.homedir(),'.emrg','install'), {recursive:true}); fs.mkdirSync(join(os.homedir(),'.local','bin'), {recursive:true}); fs.symlinkSync(join(os.homedir(),'.emrg','install','bin','emrg'), join(os.homedir(),'.local','bin','emrg'), 'file'); }`（`process.resourcesPath` = AppImage 挂载点 `usr/lib/emrg/resources/`，runtime 来自 `build.linux.extraResources`（R64）；本地复制秒级；**R88：先 mkdir ~/.local/bin（可能不存在，否则 symlinkSync 报 ENOENT）**）→ 复制完 spawn emrgd → 之后 GUI/TUI 都从 `~/.emrg/install/` 跑（稳定路径，与 pkg/exe 一致）。AppRun 保持 electron-builder 默认（启动 GUI 本体）
+- **⚠️ R93（自解压 UI 反馈）**：250MB 复制在慢磁盘需数秒——main.js 自解压期间显示**"正在安装 EMRG（首次运行）..."** 提示（splash 或主窗口 loading 态），防用户误判卡死；复制失败（磁盘满等）→ 明确报错 + 提示重试
 
 **`resolve_git_gh()` 解析器（保留为兜底）**：
 - 场景：安装不完整、用户自定义
 - 实现：`~/.emrg/install/bin` 存在则优先，否则 `shutil.which()`；缓存 `~/.emrg/install-info.json`
 - 模板注入 `{{ git_path }}`/`{{ gh_path }}`（scheduler `_build_evolution_prompt` context 加两键；jinja2.Undefined 已容忍缺失，无回归）
-- gh 认证仍由用户 `gh auth login`（OAuth 不可自动化）
+- gh 认证仍由用户 `gh auth login`（OAuth 不可自动化）；**打包场景补充 GH_TOKEN 环境变量通道（R95）**——演化系统已有 `GH_TOKEN` 提取兜底（git credential store，PR #307），但干净机器无 git 凭据 → 用户可设 `GH_TOKEN`（gh 原生支持）或 `gh auth login`；文档 README 注明两种方式
 
 ---
 
@@ -373,6 +382,11 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
    → 快照保留，卸载后用户可自行删除
 4. 删除 ~/.emrg 全部（install/、versions/、config.toml、sessions、memory、
    logs、projects.yml、tasks.yml、rants.jsonl、saturation/、emrgd.sock/pid、install-info.json）
+   ⚠️ R92：第 4 步**执行者 = 平台卸载器（原生）**，非 emrg-uninstall 脚本内部——
+   emrg-uninstall 是 python 脚本（解释器在 install/bin/python），Windows NTFS 锁运行中
+   exe → 内部删 install/ 锁死。顺序：emrg-uninstall（python 逻辑）退出 → 平台卸载器删
+   install/（macOS 卸载 app shell / unins000.exe / Linux rm；POSIX 可删运行中文件但统一
+   由平台卸载器删更干净）
 5. 清理环境痕迹：PATH（shell rc / 注册表）、Windows 快捷方式、**Linux `~/.local/bin/emrg` 软链（R85：自解压时创建，卸载必须删）**
 6. 自校验：确认 emrg/emrgd/emrg-gui 已不可用、目录已删除，输出清理清单
 ```
@@ -384,6 +398,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 - **Windows PATH（R27+R34）**：注册表 `HKCU\Environment\Path`（无锚点概念）——安装写**确定格式** `%USERPROFILE%\.emrg\install\bin`，卸载用 **Pascal 脚本读旧值 → 精确字符串替换移除 EMRG 段 → 写回**（`RegQueryStringValue`/`RegWriteStringValue`），不误删其他条目
 - **平台卸载器的实现载体（R10+R15 核查）**：
   - **`emrg-uninstall` 脚本先执行内置 python 逻辑**（install/ 未删时 python 可用）——**⚠️ 卸载脚本无启动脚本的 PYTHONPATH，必须自设**（头部 `export PYTHONPATH=<prefix>/source:<prefix>/lib`，否则 `import emrg`/`websockets` 失败，R15 实证 connect.py:24 依赖 websockets）
+  - **⚠️ R94（容错降级）**：`install/bin/python` 不存在时（用户已手动删 install/ 或上次卸载半途）——emrg-uninstall **跳过 python 逻辑**，降级为纯清理：删 port/pid 残留文件 + 清 PATH/快捷方式/软链 + 自校验（幂等成立：重复执行不报错，未找到项跳过）
   - 脚本做：**停 daemon（⚠️ R90：复用 `emrg/__main__.py:133-148` 的 `_send_shutdown()` 实现——`connect_to_server()` 连接 + 发 `{"type":"shutdown"}` + 等 `shutdown_ack`（daemon.py:965-967）**；port 文件缺失/连接失败 → 兜底删 port 文件 + SIGTERM（读 pid 文件）/ Windows taskkill）**→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
   - 再删 install/（卸载器原生删除，此时 python 已退出无锁）
   - 最后清 PATH/快捷方式 + 自校验
@@ -488,7 +503,7 @@ jobs:
 | 9 | GUI + TUI 同开同 session | 广播一致 |
 | 10 | 平台卸载器（macOS 卸载 app / unins000.exe / Linux `emrg-uninstall`）→ 幂等重跑 → 自校验 | 卸载全流程（⚠️ R57：**不新增 `emrg uninstall` 命令**（§6 决策）——冒烟入口是平台卸载器） |
 | 11 | 安装目录只读验证（`chmod -w` 后全功能跑） | 零写入审计 |
-| 12 | **离线安装（无网络全程可用）** | R47：安装包自包含、零在线安装；安装 = 文件复制 |
+| 12 | **离线安装（无网络全程可用）** | R47：安装包自包含、零在线安装；安装 = 文件复制。**⚠️ R96（CI 可执行性）**：GitHub Actions runner 默认联网，模拟离线用 `sudo iptables -A OUTPUT -j REJECT`（Linux runner）或 `unshare -n` 隔离网络 → 跑安装 + 首启 + daemon + 会话（无 LLM 调用）→ 撤销规则；macOS/Windows runner 无 root 用**审计降级**：构建产物检查（无在线安装脚本引用 + lib/ 预装完整 + 冒烟 1/2/4/5 全过）+ 本地断网手动验证留文档 |
 
 ---
 
