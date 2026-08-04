@@ -37,11 +37,20 @@ else
       GH_OS="windows"; GH_ARCH="amd64" ;;
     *) echo "!! unknown platform $PLATFORM — gh bundling skipped"; exit 1 ;;
   esac
-  GH_URL="https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_${GH_OS}_${GH_ARCH}.tar.gz"
+  # ⚠️ gh v2.58.0 起 macOS/Windows 资产改为 .zip（linux 仍是 .tar.gz）
+  if [ "$GH_OS" = "linux" ]; then
+    GH_URL="https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_${GH_OS}_${GH_ARCH}.tar.gz"
+  else
+    GH_URL="https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_${GH_OS}_${GH_ARCH}.zip"
+  fi
   echo "    downloading gh from $GH_URL"
   TMP="$(mktemp -d)"
-  curl -sL "$GH_URL" -o "$TMP/gh.tgz"
-  tar -xzf "$TMP/gh.tgz" -C "$TMP"
+  curl -sL "$GH_URL" -o "$TMP/gh.archive"
+  if [ "$GH_OS" = "linux" ]; then
+    tar -xzf "$TMP/gh.archive" -C "$TMP"
+  else
+    unzip -q "$TMP/gh.archive" -d "$TMP"
+  fi
   find "$TMP" -name gh -type f | head -1 | xargs -I{} cp {} "$RUNTIME/bin/gh"
   chmod +x "$RUNTIME/bin/gh"
   rm -rf "$TMP"
