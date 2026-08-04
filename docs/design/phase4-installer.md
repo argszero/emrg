@@ -367,6 +367,8 @@ jobs:
       - run: cd emrg/gui && npm run dist         # electron-builder（R22：只打包 GUI 本体，无 runtime 依赖）
       - run: bash packaging/bundle-git-gh.sh ${{ matrix.os }}   # git/gh → dist/runtime/bin/
       - run: bash packaging/make-installer.sh ${{ matrix.os }}
+        # 输入组装（R38）：dist/runtime/（bin+source+lib）+ GUI 产物（dist/mac-arm64/EMRG.app
+        #   或 dist/win-unpacked/ 或 AppImage 本体）→ 平台 payload → dist/installers/EMRG-<v>.pkg 等
         # macOS pkgbuild / Windows Inno Setup / Linux AppImage + tar.gz 兜底
       - run: bash packaging/smoke-test.sh        # 产物冒烟（§9）
       - uses: softprops/action-gh-release@v2
@@ -382,6 +384,8 @@ jobs:
 
 ## 9. 冒烟测试清单（构建产物，非源码）
 
+**环境隔离（R42）**：`smoke-test.sh` 用**临时 HOME**（`HOME=$(mktemp -d)`，对齐 G73 集成测试隔离方案）跑全部用例——本地跑不污染真实 `~/.emrg`，CI 容器天然隔离。跑完清理临时 HOME。
+
 **单测补充（R20+R24）**：`daemon_client.test.js` 新增打包分支用例——`new DaemonClient({ projectDir, isPackaged: true })` → `_findDaemonExecutable()` 返回 `~/.emrg/install/bin/emrgd`（R22 安装目录路径）→ 断言 startDaemon spawn 该路径（无 `-m` 参数）；现有用例不传 isPackaged → 源码模式（向后兼容已验证）。
 
 | # | 用例 | 验证点 |
@@ -393,7 +397,7 @@ jobs:
 | 5 | `emrg rant "test"` | rant 链路（写 ~/.emrg/rants.jsonl） |
 | 6 | 演化干跑（trigger evolution） | 模板源码 + skills 动态 import + git/gh |
 | 7 | **会话内 `python -c "print(1)"`** | §5.2 PATH 注入（捆绑 python 生效） |
-| 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22） |
+| 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22）。**CI 无显示器（R39）**：Linux runner 无 X server——CI 冒烟 8 降级为 `EMRG.app/Contents/MacOS/EMRG --version` / `emrg-gui.exe --version` 验证入口存在（electron 支持 `--version` 不启窗）；**完整 GUI 冒烟（启窗+首启+聊天）留本地手动**（§1.3 范围已有） |
 | 9 | GUI + TUI 同开同 session | 广播一致 |
 | 10 | `emrg uninstall` → 幂等重跑 → 自校验 | 卸载全流程 |
 | 11 | 安装目录只读验证（`chmod -w` 后全功能跑） | 零写入审计 |
