@@ -77,6 +77,7 @@ osascript -e 'display dialog "EMRG 已卸载。请将「卸载 EMRG」图标拖�
 exit 0
 EOF
     chmod +x "$UNINSTALL_APP/Contents/MacOS/uninstall"
+    mkdir -p "$PKG_ROOT/scripts"
     cat > "$PKG_ROOT/scripts/postinstall" <<'EOF'
 #!/bin/bash
 # R67: GUI 安装器可能提权（$HOME=/var/root）→ 取控制台用户真实 HOME

@@ -67,8 +67,25 @@ case "$PLATFORM" in
     rm -rf "$TMP"
     ;;
   darwin|macos|linux)
-    echo "!! git source build required on $PLATFORM (R59: no official portable binary)"
-    echo "   CI provides the build; local dev should use system git."
+    # R59：无官方便携二进制 → CI 源码编译。本地开发跳过（用系统 git）。
+    if [ "${CI:-}" != "true" ]; then
+      echo "!! git source build is CI-only (R59). Local dev uses system git." >&2
+      echo "   Set CI=true to force a source build." >&2
+      exit 0
+    fi
+    echo "==> building git from source (R59, ~3-5min)"
+    GIT_VERSION="${GIT_VERSION:-2.46.0}"
+    TMP="$(mktemp -d)"
+    curl -sL "https://github.com/git/git/archive/refs/tags/v${GIT_VERSION}.tar.gz" -o "$TMP/git.tgz"
+    tar -xzf "$TMP/git.tgz" -C "$TMP"
+    cd "$TMP/git-${GIT_VERSION}"
+    make configure >/dev/null 2>&1 || ./configure --prefix="$TMP/prefix" >/dev/null
+    make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" prefix="$TMP/prefix" install >/dev/null 2>&1
+    cp "$TMP/prefix/bin/git" "$RUNTIME/bin/git"
+    chmod +x "$RUNTIME/bin/git"
+    # macOS: git 依赖系统库，产物跨版本可移植；Linux: 需静态（musl）——CI 用静态基础镜像
+    rm -rf "$TMP"
+    echo "    git built: $("$RUNTIME/bin/git" --version 2>/dev/null || echo 'check failed')"
     ;;
 esac
 

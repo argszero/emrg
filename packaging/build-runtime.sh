@@ -48,12 +48,16 @@ cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
   chmod +x emrg emrgd emrg-uninstall
 )
 
-# ── 3. source/（只读，排除 gui node_modules R14）──
+# ── 3. source/（只读，排除 gui node_modules R14；⚠️ 只含 emrg/ 源码，不含 bin/ ——
+#       启动脚本已在 bin/ 顶层，source 里再放一份是冗余（pkg 双份））──
 echo "==> copying source"
 (cd "$ROOT" && tar --exclude='emrg/gui/node_modules' --exclude='emrg/gui/dist' \
   --exclude='.git' --exclude='dist' --exclude='.venv' \
-  -cf - emrg bin | (cd "$DIST/source" && tar -xf -))
+  --exclude='emrg/__pycache__' --exclude='emrg/**/__pycache__' --exclude='emrg/**/*.pyc' \
+  -cf - emrg | (cd "$DIST/source" && tar -xf -))
 touch "$DIST/source/py.typed"
+# LICENSE（若存在，否则占位）
+if [ -f "$ROOT/LICENSE" ]; then cp "$ROOT/LICENSE" "$DIST/source/LICENSE"; fi
 
 # ── 4. lib/（pip --target 全量含传递依赖，R3/R43）──
 echo "==> installing deps to lib/"
