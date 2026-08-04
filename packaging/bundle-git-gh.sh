@@ -57,8 +57,16 @@ else
   else
     unzip -q "$TMP/gh.archive" -d "$TMP"
   fi
-  find "$TMP" -name gh -type f | head -1 | xargs -I{} cp {} "$RUNTIME/bin/gh"
-  chmod +x "$RUNTIME/bin/gh"
+  # Windows zip 内可执行文件为 gh.exe（find -name gh 找不到 → bin/gh 缺失）
+  GH_EXE="$(find "$TMP" \( -name gh -o -name gh.exe \) -type f | head -1)"
+  if [ -z "$GH_EXE" ]; then
+    echo "!! gh executable not found in archive" >&2
+    exit 1
+  fi
+  GH_TARGET="$RUNTIME/bin/gh"
+  case "$GH_OS" in windows) GH_TARGET="$RUNTIME/bin/gh.exe" ;; esac
+  cp "$GH_EXE" "$GH_TARGET"
+  chmod +x "$GH_TARGET"
   rm -rf "$TMP"
 fi
 
