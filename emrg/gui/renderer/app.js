@@ -444,6 +444,9 @@ async function handleEvent(evt) {
       state.busy = false;
       state.ownStreamRequestId = null;
       setComposerDisabled(false);
+      // G97：广播分组缓存清理（DOM 保留——历史消息应保留；仅清 Map 引用，防重连后"幽灵"分组缓存）
+      // daemon_client 侧 clearGroups() 已 emit group_cleared，此处兜底直接清空
+      state.groupNodes.clear();
       // G97：工具卡片 tool_start 已建 / tool_end 未到 → 标「结果未知——连接中断」
       // （无重试语义——工具副作用不可重放；重连后若收到真实 tool_end 会被 handleToolEnd 纠正）
       for (const card of state.toolCards.values()) {
