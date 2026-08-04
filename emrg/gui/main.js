@@ -192,21 +192,25 @@ function main() {
       };
     });
 
-    ipcMain.handle("emrg:sendMessage", async (_e, { sessionId, text }) => {
+    ipcMain.handle("emrg:sendMessage", async (_e, { sessionId, text, requestId }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       if (!validateText(text)) throw new Error("invalid text");
+      if (requestId !== undefined && (typeof requestId !== "string" || requestId.length < 8 || requestId.length > 64)) {
+        throw new Error("invalid request_id"); // G143：renderer 预生成 id 的格式护栏
+      }
       if (!client || !client.connected) throw new Error("daemon not connected");
       ownStream = true;
-      let requestId;
+      let rid;
       try {
-        requestId = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true });
+        // G143：renderer 预生成 requestId（send 前标记自有流，消除 IPC 往返竞态窗口）
+        rid = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true, requestId });
       } catch (e) {
         ownStream = false; // sendTask 抛异常（ws.send 失败）→ 释放锁，防 G65 锁泄漏
         ownStreamRequestId = null;
         throw e;
       }
-      ownStreamRequestId = requestId; // 追踪自有流（G65 锁仅由自有 done 释放）
-      return { ok: true, requestId }; // G124：回传 requestId → renderer 识别自有流
+      ownStreamRequestId = rid; // 追踪自有流（G65 锁仅由自有 done 释放）
+      return { ok: true, requestId: rid }; // G124：回传 requestId → renderer 识别自有流
     });
 
     ipcMain.handle("emrg:listSessions", async () => listSessions());

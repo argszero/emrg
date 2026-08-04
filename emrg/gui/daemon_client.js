@@ -237,13 +237,14 @@ class DaemonClient {
 
   // ── 消息发送 ────────────────────────────────────────────
 
-  sendTask({ sessionId, cwd, prompt, stream = true, images = null }) {
+  sendTask({ sessionId, cwd, prompt, stream = true, images = null, requestId = null }) {
     // G32：request_id 必须作为 id 字段发出（daemon 只回显不自生成）
     // G96：stream 必须显式 true（daemon 读 stream 默认 False）
-    const requestId = crypto.randomUUID();
+    // G143：外部预生成 requestId 优先（renderer send 前标记自有流，消除 IPC 往返竞态窗口）
+    const rid = requestId || crypto.randomUUID();
     const payload = {
       type: "task",
-      id: requestId,
+      id: rid,
       session_id: sessionId,
       cwd,
       prompt,
@@ -251,9 +252,9 @@ class DaemonClient {
       stream,
       images,
     };
-    this._setCurrentStream(requestId);
+    this._setCurrentStream(rid);
     this.ws.send(JSON.stringify(payload));
-    return requestId;
+    return rid;
   }
 
   sendCommand(type, params = {}) {

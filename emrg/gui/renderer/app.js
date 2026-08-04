@@ -116,9 +116,13 @@ async function sendMessage() {
   addUserMessage(text);
   input.value = "";
   input.style.height = "auto";
+  // G143：send 前预生成 requestId 并标记自有流——消除 IPC 往返竞态窗口
+  // （之前 await sendMessage 返回后才赋值，delta/tool_start 可能先到 → 自有流被误标「来自其他客户端」）
+  const requestId = genRequestId();
+  state.ownStreamRequestId = requestId;
   try {
-    const res = await window.emrg.sendMessage({ sessionId: state.sessionId, text });
-    state.ownStreamRequestId = res.requestId || null; // G124：标记自有流
+    const res = await window.emrg.sendMessage({ sessionId: state.sessionId, text, requestId });
+    state.ownStreamRequestId = res.requestId || requestId; // G124：以 daemon 实际回显为准
   } catch (e) {
     state.busy = false;
     state.ownStreamRequestId = null;
@@ -396,6 +400,17 @@ function setComposerDisabled(disabled) {
 
 function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// G143：生成 UUID（secure context 下 crypto.randomUUID；低版本兜底）
+function genRequestId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") {
+    return window.crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+  });
 }
 
 // ── 事件处理（main 已分类）───────────────────────────────
