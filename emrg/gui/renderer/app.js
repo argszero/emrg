@@ -68,7 +68,7 @@ async function boot() {
 
 function bindUi() {
   $("send-btn").addEventListener("click", sendMessage);
-  $("stop-btn").addEventListener("click", () => window.emrg.cancel());
+  $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {})); // G141：断连瞬间 IPC 可能 reject——防 unhandled rejection
   $("new-session-btn").addEventListener("click", newSession);
   $("settings-btn").addEventListener("click", showSettings);
   $("settings-cancel").addEventListener("click", () => $("settings-dialog").close());
