@@ -19,11 +19,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: GUI unit tests (G55/G100)
+      - name: GUI unit tests (G55)
         working-directory: emrg/gui
         run: |
           npm ci --omit=dev
           EMRG_SKIP_INTEGRATION=1 npm test
+      - name: GUI integration tests (G73 isolated HOME)
+        working-directory: emrg/gui
+        run: npm run test:integration
       - name: GUI syntax check (main/preload/renderer)
         working-directory: emrg/gui
         run: node --check main.js && node --check preload.js && node --check daemon_client.js && node --check renderer/app.js && node --check renderer/markdown.js
