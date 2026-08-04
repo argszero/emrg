@@ -248,7 +248,7 @@ uv run python -m emrg     # launch TUI
 cd emrg/gui
 npm ci               # install deps (production: --omit=dev)
 npm start            # launch GUI (auto-starts daemon)
-npm test             # run Node tests (unit; integration local)
+npm test             # run Node tests (unit; integration runs in CI, local: npm run test:integration)
 ```
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
