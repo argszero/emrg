@@ -227,6 +227,8 @@ CI 用 `uv pip compile` 生成 `packaging/requirements.lock`（**含全部传递
 
 > **⚠️ R62（TUI 首启引导盲区）**：首启配置入口只有 **GUI**（settings 对话框填 key 写 config.toml）。验收含"TUI 聊天正常"，但干净机器**先跑 TUI** 时：`ensure_config()` 写占位 api_key（config.py:99-130）→ 聊天必然失败且**无任何引导提示**。修正：TUI 检测 config 中 api_key 为占位符（`sk-...` 或空）→ 打印明确提示 **"请先运行 EMRG GUI 完成首启配置（填 API key），或编辑 ~/.emrg/config.toml"** 后照常进入（占位 key 聊天失败是预期，提示即可）。列入 §11 实施清单代码改造。
 
+> **⚠️ R106（GUI 写 config 注释丢失）**：GUI 保存设置用 `smol-toml` **parse 全文件 → 改字段 → stringify 全文件写回**（main.js:13/125-132）——**用户 config.toml 的注释（含 `[[llm.models]]` 段、vision 说明等）会全部丢失**。打包首启主路径（GUI 填 key）无此问题（config 刚生成无注释），但用户随后手动编辑加注释 → 再在 GUI 保存 → 注释丢。记录为已知限制（Phase 3 既有行为，Phase 4 不扩展）——README 提示"高级配置请直接编辑 config.toml，GUI 保存会重写文件"。
+
 ---
 
 ## 4. GUI 打包（electron-builder）
@@ -277,6 +279,7 @@ _findDaemonExecutable() {
 ```
 - 启动脚本自行定位 python/source/lib，GUI 只需 spawn 它
 - cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref 选项不变
+- **⚠️ R108（连带改造）**：`ensureConfigTemplate()`（main.js:108-122，首启生成官方 config 模板）用 `client._findPython()`（**源码模式**：找 `.venv`/PATH python）——**打包干净机器没有这些 python → spawn 失败 → 首启写 config 无官方模板**（丢 `[[llm.models]]` 预置段）。修正：`_findDaemonExecutable()` 同时暴露**打包模式 python 定位**（`~/.emrg/install/bin/python`）；或更简单：**打包模式首启 config 由 main.js 内联模板直接生成**（不 spawn python，模板字符串与 config.py:105-130 同源，避免运行时依赖 python）
 - **两套 runtime 不冲突（R22 实证）**：daemon pid 文件互斥（daemon.py:130-141）+ 共享 port 文件——先到先得，第二个自我退出；GUI 与 TUI 始终直连同一 daemon
 - **AppImage 时序（R25+R64+R65）**：AppImage 是 GUI 容器——**runtime payload 通过 `build.linux.extraResources` 打进 AppImage**（R64：仅 linux 段携带，mac/win 不携带——R23"删除 extraResources"限定 mac/win）；**自解压逻辑归 GUI main.js**（R65：electron 启动时检查 `~/.emrg/install/bin/emrgd` 不存在 → `fs.cpSync(process.resourcesPath/runtime → ~/.emrg/install)`（本地复制秒级）→ 建 `~/.local/bin/emrg` 软链 → 再 spawn emrgd——**不覆盖 electron-builder 默认 AppRun**，因无官方自定义 AppRun 支持，覆盖 hack 脆弱）；pkg/exe 安装场景 install/ 恒存在，main.js 自解压分支不触发
 - **electron-builder 配置变化（R23 实证 + R64 修正）**：`emrg/gui/package.json` build 段**删除顶层 `extraResources`**（现为 `[{from: '../dist/emrgd', to: 'emrgd'}]`——Phase 3 PyInstaller 遗留，R22 后 GUI 不再携带 runtime）——**但 Linux AppImage 需要 runtime 自解压源（R64）**，per-platform 配置：
@@ -510,7 +513,7 @@ jobs:
 | 2 | **前置：写最小 config.toml（占位 key）→** `bin/emrgd` 拉起 daemon（→ port 文件 → auth_ok → pong） | 双入口 + PATH/PYTHONPATH（⚠️ R63：`emrg` 是 TUI，CI 无 TTY 会卡/报错——TUI 交互留本地手动；⚠️ **R78：daemon 顶层 `load_config()` 在 config 缺失时抛 FileNotFoundError（config.py:60-63）直接崩——daemon 不调 ensure_config（只有 CLI 客户端调）→ 冒烟 2 必须先造 config.toml**；daemon 拉起用 §R43 实证的协议验证链路） |
 | 3 | 聊天 + 工具调用 + 会话持久化 | 核心链路（⚠️ R79：聊天需要**真 API key + 网络**——CI 无 key 且冒烟 12 离线场景矛盾 → **CI 降级为无 LLM 核心链路**：daemon 起 + 协议连接 + 会话文件持久化写入；**完整聊天（LLM 交互）留本地手动**） |
 | 4 | `emrg server stop` | daemon 生命周期 |
-| 5 | `emrg rant "test"` | rant 链路（写 ~/.emrg/rants.jsonl） |
+| 5 | `emrg rant "test"` | rant 链路（⚠️ **R107：`_send_rant` 依赖 daemon**（`__main__.py:231` 起）——`connect_to_server()` 连不上打印 "daemon not running" 并返回，rant 消息经 daemon 写 `~/.emrg/rants.jsonl` → **冒烟 5 须在冒烟 2 的 daemon 运行后执行**（顺序依赖）；CI 冒烟脚本内先起 daemon 再 rant） |
 | 6 | 演化组件验证：`git --version` + `gh --version`（PATH 注入）+ 模板存在（`source/emrg/server/evolution_prompt.md`）+ `python -c "from emrg.skills.loader import ..."`（动态 import） | ⚠️ R68：**完整演化周期依赖 LLM + TUI /trigger（CLI 无 trigger 子命令），CI 无 TTY/无 key 跑不了**——拆为无 LLM 依赖的组件验证；完整周期留本地手动（同冒烟 3/8 降级模式） |
 | 7 | **会话内 `python -c "print(1)"`**（验证 §5.2 PATH 注入链路） | ⚠️ R83：bash 工具由 **LLM 生成 tool_calls 才执行**（daemon.py `_run_tool_loop`：LLM 流式 → 解析 tool_calls → 执行）——**无 key 时 CI 无法走完整会话内脚本链路**。CI 降级：用启动脚本同款环境（`PATH=$PREFIX/bin:$PATH PYTHONPATH=$PREFIX/source:$PREFIX/lib` + `PYTHONDONTWRITEBYTECODE=1`）直接跑 `python -c "print(1)"` + `import rich,httpx,yaml,jinja2,websockets`（验证捆绑 python + lib 加载）；**完整"会话内 python"（LLM 发起工具调用）留本地手动**（冒烟 3 同模式） |
 | 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22）。**CI 无显示器（R39）**：Linux runner 无 X server——CI 冒烟 8 降级为 `EMRG.app/Contents/MacOS/EMRG --version` / `emrg-gui.exe --version` 验证入口存在（electron 支持 `--version` 不启窗）；**完整 GUI 冒烟（启窗+首启+聊天）留本地手动**（§1.3 范围已有） |
@@ -547,7 +550,8 @@ jobs:
 - [ ] `__main__.py:_run_update` 打包模式提示（v1.1 占位；**R86：判定只看 emrg 包父目录是否有 .git，不进 cwd 搜索**；替换生硬 sys.exit(1)）
 - [ ] `git_utils.py`：`resolve_git_gh()` + `git_cmd()` + install-info.json（§5.2，兜底用）
 - [ ] scheduler `_build_evolution_prompt` 注入 `{{ git_path }}`/`{{ gh_path }}`（§5.2）
-- [ ] **`emrg/gui/daemon_client.js`：startDaemon 打包分支（§4.2，spawn 启动脚本）**
+- [ ] **`emrg/gui/daemon_client.js`：startDaemon 打包分支（§4.2，spawn 启动脚本）+ `_findDaemonExecutable()`（isPackaged 注入）**
+- [ ] **`emrg/gui/main.js`：`ensureConfigTemplate()` 打包模式修正（R108——打包干净机器无 .venv/PATH python，spawn ensure_config 失败 → 内联模板或打包 python 定位）；`new DaemonClient({..., isPackaged: app.isPackaged })`（main.js:338）**
 
 **打包资产**：
 - [ ] `packaging/assets/` 图标（icns/ico/png）——**packaging/ 目录整体不存在，需新建**
