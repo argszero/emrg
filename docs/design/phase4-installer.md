@@ -50,7 +50,7 @@
 | 模板收集 | ❌ spec datas 手动精确路径（prompt.md 在 server/ 根） | ✅ 源码原样 |
 | frozen 分支 | ❌ 需改 `__main__.py` + GUI resourcesPath | ✅ 启动脚本即可 |
 | 依赖重复（emrg/emrgd） | ❌ 各一份解释器+依赖 | ✅ 共享 |
-| 更新 | 重新 PyInstaller 构建 | 替换 source/ + pip install |
+| 更新 | 重新 PyInstaller 构建 | 替换 source/ + lib/（R72：lib/ 构建期预装——**运行时零 pip**，与 R47 一致；非"pip install"） |
 | 启动速度 | 快（C bootloader） | 稍慢 ~300ms（可接受） |
 
 **核心洞察**：PyInstaller 解决的"没 python 也能跑"——但我们**反正要捆绑 python 给会话内脚本用**（§5.0 已论证），那就直接用这一个 python 跑源码，PyInstaller 变成纯冗余。standalone python（uv 官方，含 pip）60MB、依赖 lib/ 20MB、源码 ~1MB，一套搞定。
@@ -110,7 +110,12 @@
 #!/usr/bin/env bash
 # bin/emrg — TUI 客户端 + CLI 入口
 # ⚠️ 相对定位（AppImage 挂载到临时目录也可用）：脚本自身路径 → install 根
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ⚠️ R71（致命，实测）：BASH_SOURCE 在软链调用时 = 软链路径（~/.local/bin/emrg → 软链目录），
+#    必须 readlink 循环解析真实路径——否则 Linux 自解压的 ~/.local/bin/emrg 启动直接坏
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done   # 循环解软链（相对路径需拼）
+case "$SOURCE" in /*) ;; *) SOURCE="$(dirname "${BASH_SOURCE[0]}")/$SOURCE" ;; esac
+DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 PREFIX="$(dirname "$DIR")"
 export PATH="$DIR:$PATH"                    # python/git/gh 对子进程可见
 export PYTHONPATH="$PREFIX/source:$PREFIX/lib:$PYTHONPATH"   # ⚠️ R13：必须含 source/（emrg 包父目录）
@@ -121,7 +126,11 @@ exec "$DIR/python" -m emrg "$@"             # ⚠️ R13：用 -m emrg（包入�
 ```bash
 #!/usr/bin/env bash
 # bin/emrgd — daemon 入口（独立进程，长期运行）
-DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# ⚠️ R71：同 emrg 的 readlink 循环（emrgd 也可能被软链调用）
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
+case "$SOURCE" in /*) ;; *) SOURCE="$(dirname "${BASH_SOURCE[0]}")/$SOURCE" ;; esac
+DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 PREFIX="$(dirname "$DIR")"
 export PATH="$DIR:$PATH"
 export PYTHONPATH="$PREFIX/source:$PREFIX/lib:$PYTHONPATH"
@@ -336,7 +345,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 | 平台 | 卸载方式 | 卸载器做的事 |
 |------|----------|-------------|
 | macOS | **自带卸载 app**（安装时放 Applications，双击运行；.pkg 无原生卸载器——R30） | 运行 `emrg-uninstall` 脚本（六步，§6.2）→ 提示拖入废纸篓（R31：运行中 .app 不能自删） |
-| Windows | 控制面板卸载（Inno Setup 生成 unins000.exe） | `[UninstallRun]` 跑 `emrg-uninstall` 脚本（六步，§6.2）→ 原生删目录 + 快捷方式 |
+| Windows | 控制面板卸载（Inno Setup 生成 unins000.exe） | **先关 GUI 进程（R73：GUI 在 `install/emrg-gui/` 内，运行中锁文件删不掉——taskkill 或检测提示关闭）** → `[UninstallRun]` 跑 `emrg-uninstall` 脚本（六步，§6.2）→ 原生删目录 + 快捷方式 |
 | Linux | **运行卸载脚本 → 删 AppImage 文件** | ⚠️ R58：AppImage 首次运行已自解压 `~/.emrg/install/`（250MB，R56）——**删 AppImage ≠ 卸载**：须先运行 `~/.emrg/install/bin/emrg-uninstall`（六步，§6.2，含终止报告+墓地快照）→ 删 AppImage + `~/.local/bin/emrg` 软链 |
 
 **macOS 卸载 app（R30+R31 补充）**：.pkg 安装**不生成卸载器**（macOS 无标准 pkg 卸载 API）——需 pkg 安装时额外放置一个"卸载 EMRG.app"（shell 脚本包装的 .app，双击运行调 `emrg-uninstall` 执行 §6.2 六步）。**自删限制（R31）**：运行中的 .app 不能删自己——卸载 app 删数据 + install/ 后，**提示"请将 EMRG 图标拖入废纸篓"**（macOS 用户习惯，不做延迟自删的复杂机制）。卸载 app 调用 python 需自设 PYTHONPATH（R15）——它本身是 bash 脚本，头部 `export PYTHONPATH=~/.emrg/install/source:~/.emrg/install/lib`。
@@ -383,7 +392,8 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 ```
 
 - 安装器（pkg/exe）直接写 `~/.emrg/install/`；AppImage 首次运行自解压
-- **更新（方案 C 极简）**：新版本 = 替换 `source/` + lib/（构建期预装，R47）+ 重启 daemon。`emrg update` 二进制自更新为 **v1.1**（本次不做）——但 `_run_update` 需在打包模式下提示："打包版请从 GitHub Releases 下载新版本（v1.1 将支持 emrg update 自动更新）"。**打包模式判定**：`_find_source_dir()`（`__main__.py:359`）靠 `emrg.__file__` 上溯找 git repo——打包后 `__file__` 在 `source/emrg/` 内无 git repo → None → exit 前输出上述提示（替换现有生硬 `sys.exit(1)`）
+- **⚠️ R70（覆盖安装/升级须先停 daemon）**：`~/.emrg/install/` 正被运行中 daemon 占用——Windows 上 python.exe 文件锁导致复制失败，macOS 复制后 daemon 内存旧代码+文件新代码半新半旧。**安装器/升级流程第一步：停 daemon**（`emrg server stop` 或 shutdown 协议，复用 §6.2 卸载的同一停止逻辑；初次安装无 daemon 则跳过）——三平台一致（pkg postinstall / Inno Setup 安装段 / 新版本自解压前）
+- **更新（方案 C 极简）**：新版本 = 停 daemon（R70）→ 替换 `source/` + lib/（构建期预装，R47）→ 重启 daemon。`emrg update` 二进制自更新为 **v1.1**（本次不做）——但 `_run_update` 需在打包模式下提示："打包版请从 GitHub Releases 下载新版本（v1.1 将支持 emrg update 自动更新）"。**打包模式判定**：`_find_source_dir()`（`__main__.py:359`）靠 `emrg.__file__` 上溯找 git repo——打包后 `__file__` 在 `source/emrg/` 内无 git repo → None → exit 前输出上述提示（替换现有生硬 `sys.exit(1)`）
 
 ---
 
@@ -433,6 +443,8 @@ jobs:
         #     查真实 HOME，取不到则 fallback $HOME
         # ⚠️ Windows 免 UAC（R55）：Inno Setup 配 PrivilegesRequired=lowest +
         #   DefaultDirName={userhome}\.emrg\install（{userhome} 常量，与 R34 统一）
+        # ⚠️ 安装器第一步停 daemon（R70）：复制前 emrg server stop / shutdown 协议
+        #   （覆盖安装/升级场景 install/ 被占用；初次安装无 daemon 跳过）
       - run: bash packaging/smoke-test.sh        # 产物冒烟（§9）
       - uses: softprops/action-gh-release@v2
         with: { files: "dist/installers/*" }
@@ -473,7 +485,7 @@ jobs:
 | 风险 | 影响 | 对策 |
 |------|------|------|
 | standalone python 与 pyyaml wheel 架构不匹配 | pip 装失败 | 构建期在同平台安装（CI matrix 天然同架构，R11）；lib/ 预装打进安装包（R47） |
-| 启动脚本相对定位失效（软链调用） | emrg 找不到 source | 用 `BASH_SOURCE`/`%~dp0` 解析真实路径（非 `$0`）；软链场景实测 |
+| 启动脚本相对定位失效（软链调用） | emrg 找不到 source | **R71 实测**：`BASH_SOURCE` 在软链调用时=软链路径（非真实路径）——必须 **readlink 循环解析**（§2.1 已含），软链场景（Linux `~/.local/bin/emrg`）实测通过 |
 | 捆绑 git/gh 构建失败（某平台无便携版） | 平台安装不完整 | CI fail-fast：捆绑产物缺失即失败，不发残缺包 |
 | Windows 杀软误报（python 脚本入口） | 安装被拦截 | 启动脚本 + 可选代码签名；文档说明 |
 | 无 Apple 证书 Gatekeeper 拦截 | 首次运行需右键打开 | 产物标 unsigned + README 说明；有证书后启用公证 |
@@ -487,7 +499,7 @@ jobs:
 ## 11. 实施清单（一步交付，全部完成才合入）
 
 **代码改造**：
-- [ ] `bin/emrg`、`bin/emrgd` 启动脚本（§2.1，bash + Windows .cmd 双版；含 PYTHONDONTWRITEBYTECODE=1（R61）；Windows 版 PATH 含 `git\cmd`+`git\mingw64\bin`（R60））
+- [ ] `bin/emrg`、`bin/emrgd` 启动脚本（§2.1，bash + Windows .cmd 双版；**含 R71 readlink 软链解析** + PYTHONDONTWRITEBYTECODE=1（R61）；Windows 版 PATH 含 `git\cmd`+`git\mingw64\bin`（R60）——Windows .cmd 走快捷方式(.lnk)无软链问题，`%~dp0` 正确）
 - [ ] `bin/emrg-uninstall` 卸载脚本（§6.2 六步，三平台统一调用，R58）
 - [ ] TUI 占位 api_key 提示（§3.4 R62：检测占位符 → 提示先运行 GUI 配置）
 - [ ] `__main__.py:_run_update` 打包模式提示（v1.1 占位，替换生硬 sys.exit(1)）
@@ -498,12 +510,13 @@ jobs:
 **打包资产**：
 - [ ] `packaging/assets/` 图标（icns/ico/png）——**packaging/ 目录整体不存在，需新建**
 - [ ] `packaging/build-runtime.sh`（python + source + lib 组装 → dist/runtime/）——**⚠️ python 复制细节（R16+R44+R45 实测）**：
-  - **必须整目录复制** `cpython-3.13.9-<platform>/` → `dist/runtime/bin/python-dist/`（含 `bin/python3.13` + **`lib/libpython3.13.dylib`**——R45 实测：只复制 bin/python3.13 会报 `Library not loaded: @executable_path/../lib/libpython3.13.dylib`，因二进制依赖 `../lib/` 的运行时库）
+  - **必须整目录复制** `cpython-3.13.9-<platform>-<arch>-none/` → `dist/runtime/bin/python-dist/`（含 `bin/python3.13` + **`lib/libpython3.13.dylib`**——R45 实测：只复制 bin/python3.13 会报 `Library not loaded: @executable_path/../lib/libpython3.13.dylib`，因二进制依赖 `../lib/` 的运行时库）
+  - **⚠️ R69（目录名实测）**：uv 安装目录实际为 `cpython-<ver>-<platform>-<arch>-none/`（如 `cpython-3.13.9-macos-aarch64-none`）——build-runtime.sh **锁 patch 版本 `uv python install 3.13.9` + 动态 glob** `cpython-3.13.9-*/`（勿硬编码平台段，uv 命名随版本演进）
   - **重建软链**（R44 实测：uv 的 `bin/python`/`bin/python3` 软链指向 `$HOME/.local/share/uv/...` 绝对路径，复制后失效）：
     `dist/runtime/bin/python` → `python-dist/bin/python3.13`（相对软链）
   - standalone 复制后**相对自身定位**（sys.prefix=复制位置，R44c 实测不依赖 HOME）——冒烟隔离（临时 HOME）不破坏
 - [ ] `packaging/bundle-git-gh.sh`（git/gh 捆绑 → dist/runtime/bin/）
-- [ ] `packaging/make-installer.sh`（pkgbuild / Inno Setup / AppImage + tarball 兜底；**含平台卸载器 §6：终止报告 + 墓地快照 + 清理 + 自校验**）
+- [ ] `packaging/make-installer.sh`（pkgbuild / Inno Setup / AppImage + tarball 兜底；**第一步停 daemon（R70）**；**含平台卸载器 §6：终止报告 + 墓地快照 + 清理 + 自校验**）
 - [ ] `packaging/smoke-test.sh`（§9 清单 12 项）
 - [ ] `packaging/requirements.lock`（依赖版本锁定，R47：构建期 pip --target 预装，无需 wheels 目录）
 
