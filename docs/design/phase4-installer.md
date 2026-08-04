@@ -63,8 +63,8 @@
 ├── bin/
 │   ├── python                   # ⭐ standalone CPython（uv 官方，含 pip，52MB）——唯一一套 python
 │   ├── python3                  # 符号链接
-│   ├── emrg                     # 启动脚本：exec python ../source/emrg/__main__.py "$@"
-│   ├── emrgd                    # 启动脚本：exec python ../source/emrg/server/__main__.py "$@"
+│   ├── emrg                     # 启动脚本：exec python -m emrg（R13：-m 包入口 + PYTHONPATH=source:lib）
+│   ├── emrgd                    # 启动脚本：exec python -m emrg.server（同 R13）
 │   ├── git                      # 捆绑 git（平台便携版）
 │   ├── gh                       # 捆绑 gh CLI（官方单文件二进制）
 │   └── emrg-gui/                # Electron 产物（emrg-gui.app / emrg-gui.exe / emrg-gui）
@@ -96,8 +96,9 @@
 # ⚠️ 相对定位（AppImage 挂载到临时目录也可用）：脚本自身路径 → install 根
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="$(dirname "$DIR")"
-export PATH="$DIR:$PATH"    # python/git/gh 对子进程可见
-exec "$DIR/python" "$PREFIX/source/emrg/__main__.py" "$@"
+export PATH="$DIR:$PATH"                    # python/git/gh 对子进程可见
+export PYTHONPATH="$PREFIX/source:$PREFIX/lib:$PYTHONPATH"   # ⚠️ R13：必须含 source/（emrg 包父目录）
+exec "$DIR/python" -m emrg "$@"             # ⚠️ R13：用 -m emrg（包入口），非 python source/emrg/__main__.py
 ```
 
 ```bash
@@ -106,11 +107,33 @@ exec "$DIR/python" "$PREFIX/source/emrg/__main__.py" "$@"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="$(dirname "$DIR")"
 export PATH="$DIR:$PATH"
-exec "$DIR/python" "$PREFIX/source/emrg/server/__main__.py" "$@"
+export PYTHONPATH="$PREFIX/source:$PREFIX/lib:$PYTHONPATH"
+exec "$DIR/python" -m emrg.server "$@"
 ```
 
-- **Windows 版**：`.cmd` 批处理同逻辑（`%~dp0` 定位；无 bash）
+- **⚠️ R13（关键，实测验证）**：`python source/emrg/__main__.py` 直接跑会 `ModuleNotFoundError: No module named 'emrg'`——因为 sys.path[0] = `source/emrg/`（脚本所在目录），而 `import emrg` 需要 `source/`（包父目录）在 path。**必须**：
+  1. `PYTHONPATH` 含 `$PREFIX/source`（emrg 包父目录）
+  2. 用 `-m emrg` / `-m emrg.server`（包入口，`__main__` 由包机制解析）——实测 `emrg 0.2.0` 正常输出
+- **Windows 版**：`.cmd` 批处理同逻辑（`%~dp0` 定位；`set PATH=%~dp0;%PATH%`、`set PYTHONPATH=<prefix>\source;<prefix>\lib;%PYTHONPATH%`、`python -m emrg %*`）
 - **PATH 导出**：启动脚本内 `export PATH="$DIR:$PATH"` 使 daemon 继承后，bash 工具子进程（`create_subprocess_shell`）能直接找到 `python`/`git`/`gh`——**这是会话内脚本能力的关键**（§5.0）
+
+### 2.2 ⚠️ source/ 复制必须排除 emrg/gui（R14，448MB 陷阱）
+
+`emrg/gui/` 是 emrg 包的子目录，但**含 node_modules 448MB**（`du -sh emrg/gui` 实测）；Python 运行时**零依赖它**（grep 实证：无 `import emrg.gui`）。
+
+**build-runtime.sh 的 source/ 组装**（精确复制，勿整包拷贝）：
+```
+复制（必需）：
+  emrg/__init__.py  emrg/__main__.py  emrg/config.py  emrg/connect.py  emrg/protocol.py  emrg/session.py  emrg/memory.py
+  emrg/client/  emrg/server/  emrg/tools/  emrg/skills/          # 各子目录（排除 __pycache__）
+  emrg/server/prompts/system.j2  emrg/server/*.md                # 模板（在 server/ 根 + prompts/）
+  LICENSE
+排除（勿复制）：
+  emrg/gui/            # 448MB node_modules；GUI 由 electron-builder 独立打包
+  emrg/**/__pycache__/
+  emrg/**/*.pyc
+```
+**等价**：`rsync -a --exclude gui --exclude __pycache__ emrg/ dist/runtime/source/emrg/`（无 rsync 平台用 tar/cp 同规则）。
 
 ---
 
@@ -132,7 +155,7 @@ rich>=13.0.0 / httpx>=0.27.0 / pyyaml>=6.0 / jinja2>=3.0 / websockets>=17.0.1
 ```
 - **⚠️ 必须全量装（含传递依赖），禁用 `--no-deps`**（R3 实测：httpx→httpcore/h11/certifi、rich→markdown-it-py/pygments、jinja2→markupsafe 都是必需的——`--no-deps` 后 `import httpx` 直接失败）
 - `--target lib/`：装到安装目录（只读）
-- **PYTHONPATH 注入**：emrg 启动脚本 `export PYTHONPATH="$PREFIX/lib"`（与 PATH 并列）——daemon 与 TUI 都从 lib/ 加载依赖
+- **PYTHONPATH 注入**：emrg 启动脚本 `export PYTHONPATH="$PREFIX/source:$PREFIX/lib"`（与 PATH 并列，R13）——daemon 与 TUI 都从 lib/ 加载依赖、从 source/ 加载 emrg 包
 - **pip 本身**：standalone python 自带（无需额外捆绑）
 - **C 扩展**：pyyaml 的 `_yaml.so` 经 PYTHONPATH 正常加载（R1/R2 实测通过）
 
@@ -265,8 +288,10 @@ cd emrg/gui && npm run dist   # extraResources 复制 dist/runtime/ → resource
 **边界**：
 - 宿主工作目录 `.emrg/`（项目会话/记忆副本）**不删除**——卸载报告列出位置
 - 幂等：重复执行不报错，未找到项跳过
-- **平台卸载器的实现载体（R10 核查）**：
-  - 卸载器先执行**内置 python 脚本**（install/ 未删时 python 可用）——脚本做：停 daemon（走 shutdown 协议，`import emrg.connect` 或读 port 文件发 ws 消息；Windows 兜底 `taskkill`）→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
+- **PATH 写入用锚点标记（R19）**：macOS/Linux 写 shell rc 时用**可识别锚点**（如 `# >>> emrg path >>>` / `# <<< emrg path <<<` 包裹的块），卸载时按锚点**精确删除该块**（不误删用户其他 PATH 配置）；GUI 用户（非开发者）不依赖 PATH（启动台/app 图标），PATH 只服务终端用户——用户级免 sudo 下 shell rc 是唯一可靠方式（/etc/paths.d 需 sudo ❌、launchctl 不继承终端 ⚠️）
+- **平台卸载器的实现载体（R10+R15 核查）**：
+  - 卸载器先执行**内置 python 脚本**（install/ 未删时 python 可用）——**⚠️ 卸载脚本无启动脚本的 PYTHONPATH，必须自设**（头部 `export PYTHONPATH=<prefix>/source:<prefix>/lib`，否则 `import emrg`/`websockets` 失败，R15 实证 connect.py:24 依赖 websockets）
+  - 脚本做：停 daemon（走 shutdown 协议，`import emrg.connect` 或读 port 文件发 ws 消息；Windows 兜底 `taskkill`）→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
   - 再删 install/（卸载器原生删除，此时 python 已退出无锁）
   - 最后清 PATH/快捷方式 + 自校验
   - macOS：pkg 卸载器（postinstall 反向脚本）；Windows：Inno Setup 卸载段（`[UninstallRun]` 跑 python 脚本 + 原生删目录）；Linux：删 AppImage 文件即卸载（tarball 删解压目录）
@@ -336,6 +361,8 @@ jobs:
 
 ## 9. 冒烟测试清单（构建产物，非源码）
 
+**单测补充（R20）**：`daemon_client.test.js` 新增打包分支用例——`new DaemonClient({ projectDir, isPackaged: true, resourcesPath: mockPath })` → `_findDaemonExecutable()` 返回 `mockPath/emrgd` → 断言 startDaemon spawn 该路径（无 `-m` 参数）；现有用例不传 isPackaged → 源码模式（向后兼容已验证）。
+
 | # | 用例 | 验证点 |
 |---|------|--------|
 | 1 | `emrg --version` | 启动脚本 + python + lib 链路 |
@@ -380,7 +407,7 @@ jobs:
 
 **打包资产**：
 - [ ] `packaging/assets/` 图标（icns/ico/png）——**packaging/ 目录整体不存在，需新建**
-- [ ] `packaging/build-runtime.sh`（python + source + lib 组装 → dist/runtime/）
+- [ ] `packaging/build-runtime.sh`（python + source + lib 组装 → dist/runtime/）——**⚠️ python 复制必须保留软链**（R16：standalone 的 `bin/python`/`bin/python3` 是软链指向 `python3.13`；用 tar/rsync -a 保留，勿用跟随软链的 cp）
 - [ ] `packaging/bundle-git-gh.sh`（git/gh 捆绑 → dist/runtime/bin/）
 - [ ] `packaging/make-installer.sh`（pkgbuild / Inno Setup / AppImage + tarball 兜底；**含平台卸载器 §6：终止报告 + 墓地快照 + 清理 + 自校验**）
 - [ ] `packaging/smoke-test.sh`（§9 清单 12 项）
