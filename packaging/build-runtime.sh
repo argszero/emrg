@@ -80,11 +80,14 @@ if [ -f "$ROOT/LICENSE" ]; then cp "$ROOT/LICENSE" "$DIST/source/LICENSE"; fi
 
 # ── 4. lib/（pip --target 全量含传递依赖，R3/R43）──
 echo "==> installing deps to lib/"
-# Windows 复制产物为 python.exe（无扩展名 python 不存在，Git Bash 对带路径的
-# 直接执行不做 .exe 补全）→ 探测可执行名。POSIX 为软链 python。
+# Windows：bin/python.exe 是从 python-dist 复制的复制品，python313.dll 等 DLL
+# 仍在 python-dist/ 根目录（Windows loader 找不到 → 启动失败 exit 127）。
+# → Windows 直接用 python-dist 根目录的 exe（与 DLL 同目录）；POSIX 用 bin/python 软链。
 PY_BIN="$DIST/bin/python"
-if [ ! -e "$PY_BIN" ] && [ -e "$PY_BIN.exe" ]; then
-  PY_BIN="$PY_BIN.exe"
+if [ -e "$DIST/bin/python-dist/python.exe" ]; then
+  PY_BIN="$DIST/bin/python-dist/python.exe"
+elif [ -e "$DIST/bin/python-dist/python3.13.exe" ]; then
+  PY_BIN="$DIST/bin/python-dist/python3.13.exe"
 fi
 "$PY_BIN" -m pip install --quiet --target "$DIST/lib" \
   rich httpx pyyaml jinja2 websockets
