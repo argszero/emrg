@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# EMRG launcher — installed at ~/.emrg/install/bin/emrg
+#
+# Phase 4 installer (rant #12) §2:
+#   - R71/R84: BASH_SOURCE may be a symlink; resolve in a loop, joining each
+#     relative target against the CURRENT source's dirname (multi-level
+#     relative chains otherwise resolve wrongly).
+#   - R13: PYTHONPATH must include $PREFIX/source (parent of the emrg package).
+#   - R61: source/ is read-only — never write __pycache__ (zero-write acceptance).
+#   - PATH injection makes bundled python/git/gh visible to child processes
+#     (session-scoped python scripts key, §7).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$(dirname "$SOURCE")/$TARGET" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+PREFIX="$(dirname "$DIR")"
+export PATH="$DIR:$PATH"
+export PYTHONPATH="$PREFIX/source:$PREFIX/lib:$PYTHONPATH"
+export PYTHONDONTWRITEBYTECODE=1
+exec "$DIR/python" -m emrg "$@"
