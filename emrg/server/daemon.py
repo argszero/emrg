@@ -622,6 +622,7 @@ class EmrgServer:
                 evolution_count=len(self.evolutions),
             )
             await self._send(ws, {
+                "type": "pong",
                 "identity": pong.identity,
                 "uptime_seconds": pong.uptime_seconds,
                 "evolution_count": pong.evolution_count,
