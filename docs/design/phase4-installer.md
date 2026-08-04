@@ -335,7 +335,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
   - `~/.local/bin/emrg` **不能是符号链接**（挂载路径每次变）→ 必须是**启动器脚本**：`exec <AppImage绝对路径>`（首次运行时把 AppImage 绝对路径写入启动器）
   - **长期进程（daemon 由 GUI 拉起）** 的 PATH 注入在 AppImage 退出后失效 → **首次运行必须把 python/git/gh 复制到 `~/.emrg/install/bin/`**（数据目录可写），启动器 exec AppImage 前先确保复制完成
 - 因此 AppImage 的**首次运行自解压**是必须的：`bin/python`/`bin/git`/`bin/gh` → `~/.emrg/install/bin/`，source/lib → `~/.emrg/install/`（与 pkg/exe 安装后的布局一致）——**AppImage 实际是"自解压安装器"**，之后 PATH 注入走 `~/.emrg/install/bin/`（稳定路径，非临时挂载）
-- **自解压实现（R56 方案 → R65 修正）**：**实现位置归 GUI main.js**（electron-builder 默认 AppRun 无官方自定义支持，覆盖 hack 脆弱）——main.js 启动时：`if (!fs.existsSync(join(os.homedir(),'.emrg','install','bin'))) { fs.cpSync(join(process.resourcesPath,'runtime'), join(os.homedir(),'.emrg','install'), {recursive:true}); fs.symlinkSync(join(os.homedir(),'.emrg','install','bin','emrg'), join(os.homedir(),'.local','bin','emrg'), 'file'); }`（`process.resourcesPath` = AppImage 挂载点 `usr/lib/emrg/resources/`，runtime 来自 `build.linux.extraResources`（R64）；本地复制秒级）→ 复制完 spawn emrgd → 之后 GUI/TUI 都从 `~/.emrg/install/` 跑（稳定路径，与 pkg/exe 一致）。AppRun 保持 electron-builder 默认（启动 GUI 本体）
+- **自解压实现（R56 方案 → R65 修正）**：**实现位置归 GUI main.js**（electron-builder 默认 AppRun 无官方自定义支持，覆盖 hack 脆弱）——main.js 启动时：`if (!fs.existsSync(join(os.homedir(),'.emrg','install','bin'))) { fs.cpSync(join(process.resourcesPath,'runtime'), join(os.homedir(),'.emrg','install'), {recursive:true}); fs.mkdirSync(join(os.homedir(),'.local','bin'), {recursive:true}); fs.symlinkSync(join(os.homedir(),'.emrg','install','bin','emrg'), join(os.homedir(),'.local','bin','emrg'), 'file'); }`（`process.resourcesPath` = AppImage 挂载点 `usr/lib/emrg/resources/`，runtime 来自 `build.linux.extraResources`（R64）；本地复制秒级；**R88：先 mkdir ~/.local/bin（可能不存在，否则 symlinkSync 报 ENOENT）**）→ 复制完 spawn emrgd → 之后 GUI/TUI 都从 `~/.emrg/install/` 跑（稳定路径，与 pkg/exe 一致）。AppRun 保持 electron-builder 默认（启动 GUI 本体）
 
 **`resolve_git_gh()` 解析器（保留为兜底）**：
 - 场景：安装不完整、用户自定义
@@ -402,7 +402,8 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 
 - 安装器（pkg/exe）直接写 `~/.emrg/install/`；AppImage 首次运行自解压
 - **⚠️ R70（覆盖安装/升级须先停 daemon）**：`~/.emrg/install/` 正被运行中 daemon 占用——Windows 上 python.exe 文件锁导致复制失败，macOS 复制后 daemon 内存旧代码+文件新代码半新半旧。**安装器/升级流程第一步：停 daemon**（`emrg server stop` 或 shutdown 协议，复用 §6.2 卸载的同一停止逻辑；初次安装无 daemon 则跳过）——三平台一致（pkg postinstall / Inno Setup 安装段 / 新版本自解压前）。**R85b（macOS 补充）**：GUI 在 `~/Applications/EMRG.app`（§4.4）不在 install/ 内——但 pkg 覆盖安装运行中的 .app 有怪癖（代码签名/文件替换异常）→ 安装器检测 GUI 运行则**提示先退出**（Windows 同 R73 锁文件）
-- **更新（方案 C 极简）**：新版本 = 停 daemon（R70）→ 替换 `source/` + lib/（构建期预装，R47）→ 重启 daemon。`emrg update` 二进制自更新为 **v1.1**（本次不做）——但 `_run_update` 需在打包模式下提示："打包版请从 GitHub Releases 下载新版本（v1.1 将支持 emrg update 自动更新）"。**打包模式判定**：`_find_source_dir()`（`__main__.py:359`）靠 `emrg.__file__` 上溯找 git repo——打包后 `__file__` 在 `source/emrg/` 内无 git repo → None → exit 前输出上述提示（替换现有生硬 `sys.exit(1)`）
+- **⚠️ R86（打包模式判定，重要）**：`_find_source_dir()`（`__main__.py:358-390`）候选 1 = `emrg.__file__` 父目录（editable 安装=repo 根）；候选 2/3 = **cwd 及其所有父目录**（`Path.cwd().parents` 上溯到根）——打包模式下用户**在任何 git repo 里**跑 `emrg update`（如恰好在某项目目录），候选 2/3 会把**那个无关 repo** 当 source_dir → 执行 `git pull` + `uv tool install`（打包环境可能没有 uv）→ **危险误操作**。§7 原判定"打包后无 git repo → None"**不成立**（它还会搜 cwd）。**修正 `_run_update`**：打包模式判定只看候选 1——`Path(emrg.__file__).resolve().parent.parent` 是 git repo（有 `.git`）才是源码模式；**否则直接判打包模式 → 打印"请从 GitHub Releases 下载新版"提示并退出**（**不进 cwd 搜索**——cwd 的 git repo 是用户项目，绝不能当 emrg 源码 update）
+- **更新（方案 C 极简）**：新版本 = 停 daemon（R70）→ 替换 `source/` + lib/（构建期预装，R47）→ 重启 daemon。`emrg update` 二进制自更新为 **v1.1**（本次不做）——但 `_run_update` 需在打包模式下提示："打包版请从 GitHub Releases 下载新版本（v1.1 将支持 emrg update 自动更新）"。**⚠️ 打包模式判定（R86）**：只看 `emrg.__file__` 上溯的**包父目录**（候选 1）是否有 `.git`——无则打包模式（提示 + 退出）；**绝不 fallback 到 cwd 的 git repo**（会把用户项目误当 emrg 源码 update，且打包环境可能无 uv）
 
 ---
 
@@ -450,8 +451,10 @@ jobs:
         #   ⚠️ R67：postinstall 的 $HOME 不可靠——GUI 安装器可能提权运行 postinstall（$HOME=/var/root）
         #   → postinstall 用 `stat -f "%Su" /dev/console` 获取控制台用户 + `dscl . -read /Users/<u> NFSHomeDirectory`
         #     查真实 HOME，取不到则 fallback $HOME
-        # ⚠️ Windows 免 UAC（R55）：Inno Setup 配 PrivilegesRequired=lowest +
-        #   DefaultDirName={userhome}\.emrg\install（{userhome} 常量，与 R34 统一）
+        # ⚠️ Windows 免 UAC（R55+R87）：Inno Setup 配 PrivilegesRequired=lowest +
+        #   DefaultDirName={userhome}\.emrg\install（⚠️ R87：{userhome} 常量需 Inno Setup 6.1+；
+        #   低版本无此常量——fallback：Pascal Script 里 GetEnvironmentVariable('USERPROFILE') 取
+        #   home 拼路径，或 DefaultDirName={userdocs}\..\.emrg\install（{userdocs} 上级=home））
         # ⚠️ 安装器第一步停 daemon（R70）：复制前 emrg server stop / shutdown 协议
         #   （覆盖安装/升级场景 install/ 被占用；初次安装无 daemon 跳过）
       - run: bash packaging/smoke-test.sh        # 产物冒烟（§9）
@@ -511,7 +514,7 @@ jobs:
 - [ ] `bin/emrg`、`bin/emrgd` 启动脚本（§2.1，bash + Windows .cmd 双版；**含 R71 readlink 软链解析** + PYTHONDONTWRITEBYTECODE=1（R61）；Windows 版 PATH 含 `git\cmd`+`git\mingw64\bin`（R60）——Windows .cmd 走快捷方式(.lnk)无软链问题，`%~dp0` 正确）
 - [ ] `bin/emrg-uninstall` 卸载脚本（§6.2 六步，三平台统一调用，R58）
 - [ ] TUI 占位 api_key 提示（§3.4 R62：检测占位符 → 提示先运行 GUI 配置）
-- [ ] `__main__.py:_run_update` 打包模式提示（v1.1 占位，替换生硬 sys.exit(1)）
+- [ ] `__main__.py:_run_update` 打包模式提示（v1.1 占位；**R86：判定只看 emrg 包父目录是否有 .git，不进 cwd 搜索**；替换生硬 sys.exit(1)）
 - [ ] `git_utils.py`：`resolve_git_gh()` + `git_cmd()` + install-info.json（§5.2，兜底用）
 - [ ] scheduler `_build_evolution_prompt` 注入 `{{ git_path }}`/`{{ gh_path }}`（§5.2）
 - [ ] **`emrg/gui/daemon_client.js`：startDaemon 打包分支（§4.2，spawn 启动脚本）**
