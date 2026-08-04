@@ -158,20 +158,28 @@ class DaemonClient {
 
     // 4. 等 auth_ok（G64：auth_ok 由 ensureConnected 消费，不进事件流）
     const authOk = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("auth timeout")), AUTH_TIMEOUT_MS);
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.ws.off("message", onMsg);
+        this.ws.off("close", onClose);
+      };
+      const timer = setTimeout(() => {
+        // G142：超时（daemon 慢/卡）也要清理 listener + 关 ws，防 listener/连接泄漏
+        cleanup();
+        try { this.ws.close(); } catch { /* ignore */ }
+        reject(new Error("auth timeout"));
+      }, AUTH_TIMEOUT_MS);
       const onMsg = (data) => {
         try {
           const frame = JSON.parse(data.toString());
           if (frame.type === "auth_ok") {
-            clearTimeout(timer);
-            this.ws.off("message", onMsg);
-            this.ws.off("close", onClose);
+            cleanup();
             resolve(true);
           }
         } catch { /* 忽略坏帧 */ }
       };
       const onClose = () => {
-        clearTimeout(timer);
+        cleanup();
         reject(new Error("authentication failed"));
       };
       this.ws.on("message", onMsg);
