@@ -51,7 +51,7 @@ model = "deepseek-chat"
 EOF
 # R101：Windows Git Bash 的 nohup 后台 bash 脚本会立即退出（无 POSIX 进程模型）
 # → 用 cmd //c start /b emrgd.cmd 后台启动；POSIX 保持 nohup emrgd
-if [ -n "${WINDIR:-}" ] || [ -f "$HOME/.emrg/install/bin/emrgd.cmd" ]; then
+if [ -n "${WINDIR:-}" ]; then
   (cd "$HOME" && cmd //c "start /b $HOME/.emrg/install/bin/emrgd.cmd" >/dev/null 2>&1)
 else
   nohup emrgd >/dev/null 2>&1 &
@@ -111,7 +111,7 @@ if emrg server stop 2>&1 | grep -q "stopped"; then ok "server stop"; else fail "
 
 # 5. emrg rant "test"（R107：_send_rant 依赖 daemon——先重起）
 say "5. emrg rant"
-if [ -n "${WINDIR:-}" ] || [ -f "$HOME/.emrg/install/bin/emrgd.cmd" ]; then
+if [ -n "${WINDIR:-}" ]; then
   (cd "$HOME" && cmd //c "start /b $HOME/.emrg/install/bin/emrgd.cmd" >/dev/null 2>&1)
 else
   nohup emrgd >/dev/null 2>&1 &
