@@ -169,9 +169,6 @@ SolidCompression=yes
 Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 [Icons]
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
-Name: "{userdesktop}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; Tasks: desktopicon
-[Tasks]
-Name: desktopicon; Description: "Create desktop shortcut"; Flags: checked
 [UninstallRun]
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
 [Registry]
@@ -186,6 +183,7 @@ begin
 end;
 EOF
     # Windows 路径转义（iscc 需要 Windows 路径，但在 bash/msys 下用当前路径）
+    echo "    iscc version: $("$ISCC" /? 2>&1 | head -1)"
     "$ISCC" "$STAGE/emrg.iss" >/dev/null
     rm -rf "$STAGE"
     ;;
