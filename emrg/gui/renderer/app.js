@@ -444,6 +444,16 @@ async function handleEvent(evt) {
       state.busy = false;
       state.ownStreamRequestId = null;
       setComposerDisabled(false);
+      // G97：工具卡片 tool_start 已建 / tool_end 未到 → 标「结果未知——连接中断」
+      // （无重试语义——工具副作用不可重放；重连后若收到真实 tool_end 会被 handleToolEnd 纠正）
+      for (const card of state.toolCards.values()) {
+        if (card.classList.contains("running")) {
+          card.classList.remove("running");
+          card.classList.add("failed");
+          const st = card.querySelector(".tool-status");
+          if (st) st.textContent = "结果未知——连接中断";
+        }
+      }
       break;
     case "group_cleared":
       // DOM 保留，仅清缓存
