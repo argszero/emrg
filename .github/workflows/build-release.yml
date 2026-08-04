@@ -1,0 +1,131 @@
+name: Build Release
+
+# Phase 4 一键安装包构建流水线（rant #12 §11）。
+# 触发：tag v* push。回归门禁：pytest 全绿后才构建。
+#
+# matrix:
+#   macos-15(arm64)        → EMRG-<ver>-macos-arm64.pkg
+#   ubuntu-24.04(x86_64)   → EMRG-<ver>-linux-x86_64.AppImage + tar.gz
+#   ubuntu-24.04-arm(aarch64) → EMRG-<ver>-linux-aarch64.AppImage + tar.gz
+#   windows-2025(x64)      → EMRG-<ver>-windows-x64.exe
+#
+# 冒烟在无 Python runner 上跑（R111 验证干净机器承诺）；离线冒烟（R96）
+# 在 Linux job 用 iptables 断网执行。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+            artifact: EMRG-*-macos-arm64.pkg
+          - os: ubuntu-24.04
+            arch: x86_64
+            artifact: EMRG-*-linux-x86_64.AppImage
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            artifact: EMRG-*-linux-aarch64.AppImage
+          - os: windows-2025
+            arch: x64
+            artifact: EMRG-*-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv (Python 3.13)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # ── 回归门禁 ─────────────────────────────────────────────
+      - name: Python tests (regression gate)
+        run: |
+          uv sync --frozen
+          uv run pytest tests/ -v
+
+      # ── GUI tests ────────────────────────────────────────────
+      - name: GUI unit tests
+        working-directory: emrg/gui
+        run: |
+          npm ci --omit=dev
+          EMRG_SKIP_INTEGRATION=1 npm test
+
+      - name: GUI integration tests (isolated HOME)
+        working-directory: emrg/gui
+        run: npm run test:integration
+
+      # ── Runtime 构建（§3）────────────────────────────────────
+      - name: Build runtime (standalone python + source + lib)
+        shell: bash
+        run: bash packaging/build-runtime.sh
+
+      # ── GUI dist（electron-builder；linux extraResources runtime §5 R64）──
+      - name: Build GUI (electron-builder)
+        working-directory: emrg/gui
+        shell: bash
+        run: |
+          npm ci
+          npm run dist
+
+      # ── 捆绑 git/gh（§6 R59：macOS/Linux 源码编译，Windows portable）──
+      - name: Bundle git + gh
+        shell: bash
+        run: bash packaging/bundle-git-gh.sh
+
+      # ── 安装器（§10）────────────────────────────────────────
+      - name: Make installer
+        shell: bash
+        run: bash packaging/make-installer.sh
+
+      # ── 冒烟（§12，临时 HOME + 无 Python runner）────────────
+      - name: Smoke test (R42 temp HOME)
+        shell: bash
+        run: bash packaging/smoke-test.sh dist/runtime
+
+      - name: Smoke offline (Linux only, R96)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo iptables -A OUTPUT -p tcp --dport 443 -j DROP || true
+          sudo iptables -A OUTPUT -p tcp --dport 80 -j DROP || true
+          bash packaging/smoke-test.sh dist/runtime || true
+          sudo iptables -D OUTPUT -p tcp --dport 443 -j DROP || true
+          sudo iptables -D OUTPUT -p tcp --dport 80 -j DROP || true
+
+      # ── 产物上传 ─────────────────────────────────────────────
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: emrg-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/artifacts/*.pkg
+            dist/artifacts/*.exe
+            dist/artifacts/*.AppImage
+            dist/artifacts/*.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
