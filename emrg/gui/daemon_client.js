@@ -47,9 +47,10 @@ const RESPONSE_TYPES = {
 };
 
 class DaemonClient {
-  constructor({ projectDir = os.homedir(), logger = console } = {}) {
+  constructor({ projectDir = os.homedir(), logger = console, authTimeoutMs = AUTH_TIMEOUT_MS } = {}) {
     this.projectDir = projectDir;
     this.logger = logger;
+    this._authTimeoutMs = authTimeoutMs; // G142 测试可注入短超时（默认 10s）
     this.ws = null;
     this.connected = false;
     this._events = new Set(); // callbacks
@@ -168,7 +169,7 @@ class DaemonClient {
         cleanup();
         try { this.ws.close(); } catch { /* ignore */ }
         reject(new Error("auth timeout"));
-      }, AUTH_TIMEOUT_MS);
+      }, this._authTimeoutMs);
       const onMsg = (data) => {
         try {
           const frame = JSON.parse(data.toString());
