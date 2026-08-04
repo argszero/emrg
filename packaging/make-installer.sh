@@ -7,7 +7,9 @@
 #           R105: root 复制后 chown 回用户
 #   Windows: Inno Setup（R55 免 UAC；R97 {%USERPROFILE} 替代 {userhome}——旧版 iscc 不识）
 #            GUI win-unpacked → install/emrg-gui/（R97）
-#   Linux:  AppImage（自解压归 GUI main.js §5）+ tar.gz 兜底（R83d 冒烟用）
+#   Linux:  AppImage（自解压归 GUI main.js §5）+ tar.gz 兜底（R83d 冒烟用）。
+#           R116: 脚本负责收集 electron-builder 的 AppImage（emrg/gui/dist/*.AppImage）
+#           到 dist/artifacts/（PR #391 —— 之前只产 tar.gz，Release 缺 AppImage）。
 #
 # Artifact naming (R103): EMRG-<ver>-macos-arm64.pkg / EMRG-<ver>-windows-x64.exe /
 # EMRG-<ver>-linux-x86_64.AppImage + .tar.gz
@@ -114,7 +116,7 @@ EOF
     ;;
 
   linux)
-    echo "==> Linux tar.gz (AppImage built by electron-builder in CI)"
+    echo "==> Linux tar.gz + AppImage (AppImage built by electron-builder, collected R116)"
     tar -czf "$DIST/artifacts/EMRG-$VERSION-linux-$(uname -m).tar.gz" -C "$(dirname "$RUNTIME")" runtime
     # R116: 收集 electron-builder 产出的 AppImage（emrg/gui/dist/*.AppImage）到
     # dist/artifacts/ —— 之前只生成 tar.gz，release 缺 linux AppImage（rant #13 Step 5）。
