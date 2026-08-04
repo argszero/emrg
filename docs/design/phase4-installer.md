@@ -16,7 +16,7 @@
 | 平台 | 安装文件 | 安装体验 | 安装位置 |
 |------|----------|----------|----------|
 | macOS | `EMRG-<ver>.pkg` | 双击 → 安装向导 → 完成；启动台出现 `EMRG.app`；终端可用 `emrg` | `~/.emrg/install/`（用户级，免 sudo）+ PATH |
-| Windows | `EMRG-Setup-<ver>.exe` | 双击 → 安装向导 → 完成；开始菜单出现 `EMRG` 快捷方式；终端可用 `emrg` | `%LOCALAPPDATA%\EMRG\` + PATH |
+| Windows | `EMRG-Setup-<ver>.exe` | 双击 → 安装向导 → 完成；开始菜单出现 `EMRG` 快捷方式；终端可用 `emrg` | **`~/.emrg\install\`**（R34：统一三平台前缀，弃 %LOCALAPPDATA% 特例）+ PATH |
 | Linux | `EMRG-<ver>-linux-<arch>.AppImage` | 下载 → chmod +x → 双击运行（GUI）；**首次运行自解压到 `~/.emrg/install/` + 建 `~/.local/bin/emrg` 启动器** | 单文件 + `~/.local/bin` |
 
 ### 1.2 验收标准（全部一次满足）
@@ -59,15 +59,14 @@
 ## 2. 安装产物结构（三平台统一）
 
 ```
-<prefix>/                         # macOS: ~/.emrg/install/；Windows: %LOCALAPPDATA%\EMRG\；Linux: AppImage 内
+<prefix>/                         # 三平台统一：~/.emrg/install/（R34 弃 Windows LOCALAPPDATA 特例）；Linux AppImage 自解压
 ├── bin/
 │   ├── python                   # ⭐ standalone CPython（uv 官方，含 pip，52MB）——唯一一套 python
 │   ├── python3                  # 符号链接
 │   ├── emrg                     # 启动脚本：exec python -m emrg（R13：-m 包入口 + PYTHONPATH=source:lib）
 │   ├── emrgd                    # 启动脚本：exec python -m emrg.server（同 R13）
 │   ├── git                      # 捆绑 git（平台便携版）
-│   ├── gh                       # 捆绑 gh CLI（官方单文件二进制）
-│   └── emrg-gui/                # Electron 产物（emrg-gui.app / emrg-gui.exe / emrg-gui）
+│   └── gh                       # 捆绑 gh CLI（官方单文件二进制）
 ├── lib/                         # 依赖 site-packages（20MB，安装器预装：python -m pip install）
 ├── source/                      # emrg 源码（~1MB，只读，安装器放置）
 │   ├── emrg/
@@ -192,13 +191,17 @@ CI 用 `uv pip compile` 或直接 `pip download` 锁定版本 → 生成 `packag
 // daemon_client.js 内：
 _findDaemonExecutable() {
   if (this.isPackaged) {           // 由 main.js 注入
-    // R22：固定走安装目录（三平台一致，与 TUI 共享同一 daemon 版本）
-    return path.join(os.homedir(), ".emrg", "install", "bin", "emrgd");
+    // R22+R34：固定走安装目录（三平台统一 ~/.emrg/install/，与 TUI 共享同一 daemon 版本）
+    const exe = process.platform === "win32" ? "emrgd.cmd" : "emrgd";  // R35：Windows 需 .cmd 扩展（spawn 找不到无扩展文件）
+    return path.join(os.homedir(), ".emrg", "install", "bin", exe);
   }
   return null;  // 源码模式走 _findPython()
 }
 // startDaemon()：打包模式 spawn 安装目录 emrgd（无参数，脚本内部 exec python + 设 PATH/PYTHONPATH）
 //               源码模式保持现状（.venv python -m emrg.server）
+// ⚠️ R36：Windows spawn .cmd 需 shell 语义——spawn(emrgdPath, { shell: true, ... })（.cmd 非 PE 可执行，
+//    CreateProcess 直接跑失败；shell:true 走 cmd.exe /c）；POSIX 直接 spawn 脚本（shebang 可执行）。
+//    其余选项不变：cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref（shell 中间层不影响脱离）
 ```
 - 启动脚本自行定位 python/source/lib，GUI 只需 spawn 它
 - cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref 选项不变
@@ -221,8 +224,20 @@ _findDaemonExecutable() {
 ```
 构建 runtime（python + source + lib + emrgd 脚本）→ dist/runtime/（安装器用，非 GUI 内嵌）
 cd emrg/gui && npm run dist   # electron-builder 只打包 GUI 本体（无 extraResources runtime）
-平台包装：dist/runtime/ + dist/gui/ 组装进安装器（pkg/exe/AppImage）
+平台包装：dist/runtime/ + GUI 产物组装进安装器（pkg/exe/AppImage）
 ```
+
+### 4.4 GUI 平台放置（R33，按平台惯例）
+
+GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例放置，启动台/开始菜单可见：
+
+| 平台 | GUI 位置 | 说明 |
+|------|----------|------|
+| macOS | `~/Applications/EMRG.app` | 用户级（免 sudo），启动台可见；pkg 安装时复制到 ~/Applications |
+| Windows | `~/.emrg\install\emrg-gui\EMRG.exe` | 开始菜单快捷方式指向它（Inno Setup 创建） |
+| Linux | AppImage 单文件本身 | 下载 → chmod +x → 双击即 GUI；桌面 .desktop 文件（首次运行创建） |
+
+**GUI 与 daemon 的关系（R22 已定）**：GUI spawn `~/.emrg/install/bin/emrgd`（绝对路径，与 GUI 自身位置无关）——所以 GUI 放哪都不影响 daemon 拉起。
 
 ---
 
@@ -269,7 +284,7 @@ cd emrg/gui && npm run dist   # electron-builder 只打包 GUI 本体（无 extr
 | 平台 | 卸载方式 | 卸载器做的事 |
 |------|----------|-------------|
 | macOS | **自带卸载 app**（安装时放 Applications，双击运行；.pkg 无原生卸载器——R30） | 停 daemon → 终止报告 + 墓地快照 → 删 install/ → 删 ~/.emrg 数据 → 清 shell rc 的 PATH → 提示拖入废纸篓（R31：运行中 .app 不能自删） |
-| Windows | 控制面板卸载（Inno Setup 生成 unins000.exe） | 停 daemon → 终止报告 + 墓地快照 → 删 install/ → 删 %LOCALAPPDATA%\EMRG\ 数据 → 清注册表 PATH + 快捷方式 |
+| Windows | 控制面板卸载（Inno Setup 生成 unins000.exe） | 停 daemon → 终止报告 + 墓地快照 → 删 install/ → 删 ~/.emrg 数据 → 清注册表 PATH + 快捷方式 |
 | Linux | 删除 AppImage 文件（+ 可选 `rm -rf ~/.emrg`） | AppImage 单文件即删即走；tarball 版删解压目录 |
 
 **macOS 卸载 app（R30+R31 补充）**：.pkg 安装**不生成卸载器**（macOS 无标准 pkg 卸载 API）——需 pkg 安装时额外放置一个"卸载 EMRG.app"（shell 脚本包装的 .app，双击运行执行 §6.2 六步）。**自删限制（R31）**：运行中的 .app 不能删自己——卸载 app 删数据 + install/ 后，**提示"请将 EMRG 图标拖入废纸篓"**（macOS 用户习惯，不做延迟自删的复杂机制）。卸载 app 调用 python 需自设 PYTHONPATH（R15）——它本身是 bash 脚本，头部 `export PYTHONPATH=~/.emrg/install/source:~/.emrg/install/lib`。
@@ -294,7 +309,7 @@ cd emrg/gui && npm run dist   # electron-builder 只打包 GUI 本体（无 extr
 - 宿主工作目录 `.emrg/`（项目会话/记忆副本）**不删除**——卸载报告列出位置
 - 幂等：重复执行不报错，未找到项跳过
 - **PATH 写入用锚点标记（R19）**：macOS/Linux 写 shell rc 时用**可识别锚点**（如 `# >>> emrg path >>>` / `# <<< emrg path <<<` 包裹的块），卸载时按锚点**精确删除该块**（不误删用户其他 PATH 配置）；GUI 用户（非开发者）不依赖 PATH（启动台/app 图标），PATH 只服务终端用户——用户级免 sudo 下 shell rc 是唯一可靠方式（/etc/paths.d 需 sudo ❌、launchctl 不继承终端 ⚠️）
-- **Windows PATH（R27）**：注册表 `HKCU\Environment\Path`（无锚点概念）——安装写**确定格式** `%LOCALAPPDATA%\EMRG\bin`，卸载用 **Pascal 脚本读旧值 → 精确字符串替换移除 EMRG 段 → 写回**（`RegQueryStringValue`/`RegWriteStringValue`），不误删其他条目
+- **Windows PATH（R27+R34）**：注册表 `HKCU\Environment\Path`（无锚点概念）——安装写**确定格式** `%USERPROFILE%\.emrg\install\bin`，卸载用 **Pascal 脚本读旧值 → 精确字符串替换移除 EMRG 段 → 写回**（`RegQueryStringValue`/`RegWriteStringValue`），不误删其他条目
 - **平台卸载器的实现载体（R10+R15 核查）**：
   - 卸载器先执行**内置 python 脚本**（install/ 未删时 python 可用）——**⚠️ 卸载脚本无启动脚本的 PYTHONPATH，必须自设**（头部 `export PYTHONPATH=<prefix>/source:<prefix>/lib`，否则 `import emrg`/`websockets` 失败，R15 实证 connect.py:24 依赖 websockets）
   - 脚本做：停 daemon（走 shutdown 协议，`import emrg.connect` 或读 port 文件发 ws 消息；Windows 兜底 `taskkill`）→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
