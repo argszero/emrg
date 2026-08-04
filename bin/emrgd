@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# EMRG daemon launcher — installed at ~/.emrg/install/bin/emrgd
+#
+# Phase 4 installer (rant #12) §2 — same structure as bin/emrg; entry is the
+# server package. See bin/emrg header for R71/R84/R13/R61 rationale.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in
+    /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$(dirname "$SOURCE")/$TARGET" ;;
+  esac
+done
+DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+PREFIX="$(dirname "$DIR")"
+export PATH="$DIR:$PATH"
+export PYTHONPATH="$PREFIX/source:$PREFIX/lib:$PYTHONPATH"
+export PYTHONDONTWRITEBYTECODE=1
+exec "$DIR/python" -m emrg.server "$@"
