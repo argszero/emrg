@@ -11,7 +11,7 @@
  * - delete_session（不存在）→ 错误帧
  * - daemon 被杀 → ensureConnected 重连（G43 stale port 流程）
  *
- * 跳过条件：EMRG_SKIP_INTEGRATION=1（CI 先跑单测，集成测试本地跑，G100）。
+ * 跳过条件：EMRG_SKIP_INTEGRATION=1（CI 单测步骤用，集成测试在独立 CI 步骤跑，G100/#357）。
  */
 
 const { test, before, after, skip } = require("node:test");

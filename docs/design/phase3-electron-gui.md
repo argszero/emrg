@@ -601,7 +601,7 @@ message_delta → 追加到对应消息节点的 textContent（纯文本，不�
 
 - 现有 pytest（464）不受影响（GUI 是纯增量，不动 Python 核心）
 - Node 测试纳入 CI（`npm test`）——**G55+G100**：`.github/workflows/test.yml` 需补 `actions/setup-node` + `npm ci` + `npm test`，**工作目录 `emrg/gui/`**（`working-directory: emrg/gui`——G99 测试已放该目录，node:test 默认发现 `test/*.test.js`）；`npm ci` 前需 `cd emrg/gui` 有 package-lock.json（G79）
-- **集成测试在 CI 的条件（G100）**：`integration.test.js` 要 spawn Python daemon（G73 注入 HOME）→ 依赖 .venv/python + emrg 包——CI 中 `uv sync` 已建 .venv（test.yml 现有步骤），Node job 复用（`../.venv/bin/python` 相对 `emrg/gui/` 上溯两级 = 项目根 .venv，G59 同款定位）。**或 CI 拆分**：单测必跑，集成测试标记 skip（`EMRG_SKIP_INTEGRATION=1`）留本地——v1 建议单测必跑 + 集成测试本地跑，CI 先跑单测（Electron 打包流水线另有冒烟，packaged-installer §）
+- **集成测试在 CI 的条件（G100，已实施 #357）**：`integration.test.js` 要 spawn Python daemon（G73 注入 HOME）→ 依赖 .venv/python + emrg 包——CI 中 `uv sync` 已建 .venv（test.yml 现有步骤），Node job 复用（`../.venv/bin/python` 相对 `emrg/gui/` 上溯两级 = 项目根 .venv，G59 同款定位）。**CI 拆分（#357 定案）**：单测必跑（`EMRG_SKIP_INTEGRATION=1 npm test` 快速步骤）+ 集成测试独立步骤（`npm run test:integration`，7 个隔离 HOME 测试）——CI 全量回归不再跳过协议往返（Electron 打包流水线另有冒烟，packaged-installer §）
 - Playwright E2E 先手动跑，CI 加装 Chromium 的成本 v1 可不引入（G55）
 
 ---
@@ -810,7 +810,7 @@ message_delta → 追加到对应消息节点的 textContent（纯文本，不�
 | G97 | §3.4 补断连时工具卡片清理：tool_start 已建/tool_end 未到 → 标「结果未知——连接中断」；广播分组/pending 队列/自有流缓存全清；工具无重试语义（避免重复副作用） |
 | G98 | §4.2 saveSettings 补重连后刷新模型：daemon 重启后补 list_models 拿新 current 更新状态栏（否则显示旧 model） |
 | G99 | §6.1/6.2 测试路径定案 `emrg/gui/test/`（与 npm 工作目录一致，原 tests/gui/ 会让 node:test 找不到）+ 框架定案 node:test（零依赖，去 vitest 二选一含糊） |
-| G100 | §6.4 补 CI 细节：working-directory emrg/gui；集成测试依赖 .venv（uv sync 复用，G59 同款定位）；v1 建议单测必跑 + 集成本地跑（EMRG_SKIP_INTEGRATION 开关） |
+| G100 | §6.4 补 CI 细节：working-directory emrg/gui；集成测试依赖 .venv（uv sync 复用，G59 同款定位）；CI 拆分定案（#357）：单测必跑（EMRG_SKIP_INTEGRATION 开关）+ 集成测试独立步骤 |
 | G101 | §2.1 补 renderer 崩溃恢复：render-process-gone → 提示 + 重新 loadFile（main 持有窗口/daemon_client/IPC 不受影响）；unresponsive → 可重新加载 |
 | G102 | §2.1 补 IPC 输入校验（纵深防御）：sessionId 正则、text ≤ 20000 字符、config 三键白名单——渲染层被攻破后不能乱调 IPC |
 | G103 | §4.4 补 error 帧配对：error 帧无 type（daemon.py:306/314/976）——pending 表按 type 配对会漏；有未决命令时 FIFO reject 最近的 pending，无则广播 renderer |
