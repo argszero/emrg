@@ -310,7 +310,11 @@ function main() {
 
     ipcMain.handle("emrg:cancel", async () => {
       // G24：无参数
-      await client?.sendCommand("cancel");
+      // G141：断连边界——ws 可能已 null/closed（_onClose 后 connected=false），sendCommand 抛异常
+      // 不能让它泄漏为 IPC reject → renderer unhandled rejection（对比 sendMessage 的 try-catch 防护）
+      if (client?.ws) {
+        try { await client.sendCommand("cancel"); } catch { /* 断连时忽略 */ }
+      }
       ownStream = false;
       ownStreamRequestId = null;
       return { ok: true };
