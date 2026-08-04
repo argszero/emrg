@@ -68,8 +68,6 @@
 │   ├── git                      # 捆绑 git（平台便携版）
 │   ├── gh                       # 捆绑 gh CLI（官方单文件二进制）
 │   └── emrg-gui/                # Electron 产物（emrg-gui.app / emrg-gui.exe / emrg-gui）
-│       └── resources/
-│           └── emrgd            # ⚠️ GUI 内嵌的 emrgd 启动脚本副本（见 §4.3）
 ├── lib/                         # 依赖 site-packages（20MB，安装器预装：python -m pip install）
 ├── source/                      # emrg 源码（~1MB，只读，安装器放置）
 │   ├── emrg/
@@ -181,19 +179,9 @@ CI 用 `uv pip compile` 或直接 `pip download` 锁定版本 → 生成 `packag
 }
 ```
 
-### 4.2 ⚠️ emrgd 分发内容变更（PyInstaller → 启动脚本）
+### 4.2 ⚠️ GUI spawn emrgd（简化：复用同目录安装的 emrgd，R22）
 
-**旧（PyInstaller 版）**：`extraResources` 复制 `dist/emrgd/`（onedir 目录含 `_internal/`）。
-**新（方案 C）**：`extraResources` 复制 **`bin/emrgd` 启动脚本 + `bin/python` 软链 + `source/` + `lib/`**——或更简单：**`extraResources` 复制整个 `install/` 骨架**（python 软链 + source/ + lib/），GUI 内嵌完整运行时。
-
-**推荐：extraResources 复制 `../dist/runtime/`**（构建期把 python + source + lib + emrgd 脚本打包成独立目录）：
-```
-dist/runtime/
-├── python          # 软链/复制 standalone
-├── emrgd           # 启动脚本
-├── source/         # emrg 源码
-└── lib/            # 依赖
-```
+**R22 简化（关键）**：GUI 与 TUI 装在同一安装目录（`~/.emrg/install/`）——**GUI 无需内嵌 runtime 副本**，直接 spawn 安装目录的 `emrgd` 启动脚本（与 TUI 共享同一 daemon 版本）。extraResources **不再复制 runtime**（electron-builder 只打包 GUI 本体）。
 
 **GUI spawn emrgd（daemon_client.js 改造）**：
 ```javascript
@@ -204,21 +192,36 @@ dist/runtime/
 // daemon_client.js 内：
 _findDaemonExecutable() {
   if (this.isPackaged) {           // 由 main.js 注入
-    return path.join(process.resourcesPath, "emrgd");  // 启动脚本（方案 C）
+    // R22：固定走安装目录（三平台一致，与 TUI 共享同一 daemon 版本）
+    return path.join(os.homedir(), ".emrg", "install", "bin", "emrgd");
   }
   return null;  // 源码模式走 _findPython()
 }
-// startDaemon()：打包模式 spawn 启动脚本（无参数，脚本内部 exec python + 设 PATH/PYTHONPATH）
+// startDaemon()：打包模式 spawn 安装目录 emrgd（无参数，脚本内部 exec python + 设 PATH/PYTHONPATH）
 //               源码模式保持现状（.venv python -m emrg.server）
 ```
 - 启动脚本自行定位 python/source/lib，GUI 只需 spawn 它
+- cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref 选项不变
+- **两套 runtime 不冲突（R22 实证）**：daemon pid 文件互斥（daemon.py:130-141）+ 共享 port 文件——先到先得，第二个自我退出；GUI 与 TUI 始终直连同一 daemon
+- **AppImage 时序（R25）**：AppImage 是 GUI 容器——**自解压逻辑归 AppImage 启动器**（首次运行先解压 runtime 到 `~/.emrg/install/` 再启动 GUI）；GUI 的 `_findDaemonExecutable()` 发现 `~/.emrg/install/bin/emrgd` 不存在时 → **提示"请先运行 AppImage 完成安装"或触发自解压回调**（v1 简单处理：提示 + 退出；确保 pkg/exe 安装场景 install/ 恒存在）
+- **electron-builder 配置变化（R23 实证）**：`emrg/gui/package.json` build 段**删除 `extraResources`**（现为 `[{from: '../dist/emrgd', to: 'emrgd'}]`——Phase 3 PyInstaller 遗留，R22 后 GUI 不再携带 runtime）：
+```json
+"build": {
+  "appId": "com.emrg.gui",
+  "productName": "EMRG",
+  "target": ["dmg", "exe", "AppImage"],
+  "icon": "../packaging/assets/",
+  "mac": { "identity": null }
+}
+```
 - cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref 选项不变
 
 ### 4.3 构建顺序
 
 ```
-构建 runtime（python + source + lib + emrgd 脚本）→ dist/runtime/
-cd emrg/gui && npm run dist   # extraResources 复制 dist/runtime/ → resources/emrgd
+构建 runtime（python + source + lib + emrgd 脚本）→ dist/runtime/（安装器用，非 GUI 内嵌）
+cd emrg/gui && npm run dist   # electron-builder 只打包 GUI 本体（无 extraResources runtime）
+平台包装：dist/runtime/ + dist/gui/ 组装进安装器（pkg/exe/AppImage）
 ```
 
 ---
@@ -343,7 +346,7 @@ jobs:
       - run: bash packaging/build-runtime.sh ${{ matrix.os }}
         # → dist/runtime/：python 软链 + source/ + lib/（pip download wheels → 安装器 --no-index）+ bin/emrgd 脚本
       - run: cd emrg/gui && npm ci && npm test   # GUI 单测
-      - run: cd emrg/gui && npm run dist         # electron-builder（依赖 dist/runtime/）
+      - run: cd emrg/gui && npm run dist         # electron-builder（R22：只打包 GUI 本体，无 runtime 依赖）
       - run: bash packaging/bundle-git-gh.sh ${{ matrix.os }}   # git/gh → dist/runtime/bin/
       - run: bash packaging/make-installer.sh ${{ matrix.os }}
         # macOS pkgbuild / Windows Inno Setup / Linux AppImage + tar.gz 兜底
@@ -361,7 +364,7 @@ jobs:
 
 ## 9. 冒烟测试清单（构建产物，非源码）
 
-**单测补充（R20）**：`daemon_client.test.js` 新增打包分支用例——`new DaemonClient({ projectDir, isPackaged: true, resourcesPath: mockPath })` → `_findDaemonExecutable()` 返回 `mockPath/emrgd` → 断言 startDaemon spawn 该路径（无 `-m` 参数）；现有用例不传 isPackaged → 源码模式（向后兼容已验证）。
+**单测补充（R20+R24）**：`daemon_client.test.js` 新增打包分支用例——`new DaemonClient({ projectDir, isPackaged: true })` → `_findDaemonExecutable()` 返回 `~/.emrg/install/bin/emrgd`（R22 安装目录路径）→ 断言 startDaemon spawn 该路径（无 `-m` 参数）；现有用例不传 isPackaged → 源码模式（向后兼容已验证）。
 
 | # | 用例 | 验证点 |
 |---|------|--------|
@@ -372,7 +375,7 @@ jobs:
 | 5 | `emrg rant "test"` | rant 链路（写 ~/.emrg/rants.jsonl） |
 | 6 | 演化干跑（trigger evolution） | 模板源码 + skills 动态 import + git/gh |
 | 7 | **会话内 `python -c "print(1)"`** | §5.2 PATH 注入（捆绑 python 生效） |
-| 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + resourcesPath/emrgd 脚本 |
+| 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22） |
 | 9 | GUI + TUI 同开同 session | 广播一致 |
 | 10 | `emrg uninstall` → 幂等重跑 → 自校验 | 卸载全流程 |
 | 11 | 安装目录只读验证（`chmod -w` 后全功能跑） | 零写入审计 |
