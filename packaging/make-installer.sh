@@ -132,6 +132,15 @@ EOF
     fi
     # 组装 Inno payload：runtime + GUI → staging（Inno 安装到 %USERPROFILE%\.emrg\install）
     STAGE="$(mktemp -d)"
+    # R98：iscc 是 Windows 原生程序，读不懂 Git Bash POSIX 路径（/d/a/emrg/...）
+    # → cygpath -m 转 Windows 路径（正斜杠，iscc 可读；cygpath 仅 Git Bash 有，兜底保持原样）
+    if command -v cygpath >/dev/null 2>&1; then
+      ROOT_WIN="$(cygpath -m "$ROOT")"
+      DIST_WIN="$(cygpath -m "$DIST")"
+      STAGE_WIN="$(cygpath -m "$STAGE")"
+    else
+      ROOT_WIN="$ROOT"; DIST_WIN="$DIST"; STAGE_WIN="$STAGE"
+    fi
     mkdir -p "$STAGE/payload"
     cp -R "$RUNTIME/." "$STAGE/payload/"
     mkdir -p "$STAGE/payload/emrg-gui"
@@ -150,14 +159,14 @@ DefaultDirName={%USERPROFILE}\\.emrg\\install
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 DisableProgramGroupPage=yes
-OutputDir=$DIST/artifacts
+OutputDir=$DIST_WIN/artifacts
 OutputBaseFilename=EMRG-$VERSION-windows-x64
-SetupIconFile=$ROOT/packaging/assets/icon.ico
+SetupIconFile=$ROOT_WIN/packaging/assets/icon.ico
 UninstallDisplayIcon={app}\\bin\\emrg.cmd
 Compression=lzma2
 SolidCompression=yes
 [Files]
-Source: "$STAGE/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 [Icons]
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
 Name: "{userdesktop}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; Tasks: desktopicon
