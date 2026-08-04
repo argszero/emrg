@@ -22,6 +22,7 @@
 ### 1.2 验收标准（全部一次满足）
 
 - [ ] 干净容器（无 python/uv/git/gh/node）→ 双击安装 → 无报错
+- [ ] **全程离线（断网）安装 + 首启 + 聊天可用**（R47：安装包自包含、零在线安装）
 - [ ] 安装后 GUI 启动 → 首启引导填 key → 聊天流式 + 工具调用 + 会话持久化
 - [ ] 安装后 TUI `emrg` 启动 → `/help`、聊天、`/rant`、演化周期正常
 - [ ] **会话内 `python script.py` 可执行**（bash 工具走捆绑 python）
@@ -67,7 +68,7 @@
 │   ├── emrgd                    # 启动脚本：exec python -m emrg.server（同 R13）
 │   ├── git                      # 捆绑 git（平台便携版）
 │   └── gh                       # 捆绑 gh CLI（官方单文件二进制）
-├── lib/                         # 依赖 site-packages（20MB，安装器预装：python -m pip install）
+├── lib/                         # 依赖 site-packages（20MB，构建期 pip --target 装好打进安装包，R47）
 ├── source/                      # emrg 源码（~1MB，只读，安装器放置）
 │   ├── emrg/
 │   │   ├── __main__.py
@@ -143,22 +144,40 @@ rich>=13.0.0 / httpx>=0.27.0 / pyyaml>=6.0 / jinja2>=3.0 / websockets>=17.0.1
 ```
 全为纯 Python/轻依赖（pyyaml 的 C 加速走 wheel，standalone python 的 pip 直接装预编译 wheel，无需本机编译器）。
 
-### 3.2 安装器预装逻辑
+### 3.2 依赖部署：**构建期预装，安装器零安装步骤（R47）**
 
-安装器（或首次运行脚本）执行：
+**⚠️ 决策（R47，用户质疑修正）**：方案 C **100% 离线、零在线安装**——安装包内不含任何"首次启动时在线下载"的环节。依赖 lib/ 在 **CI 构建期**装好并打进安装包，安装器只做**纯文件复制/解压**（最快、最可靠、无失败点）。
+
+**构建期（CI build-runtime.sh）完成依赖安装**：
 ```
-"$PREFIX/bin/python" -m pip install --target "$PREFIX/lib" \
-    rich httpx pyyaml jinja2 websockets
+uv python install 3.13                          # standalone python（构建机下载一次）
+"$PREFIX/bin/python" -m pip install --target dist/runtime/lib/ \
+    rich httpx pyyaml jinja2 websockets          # ⚠️ 全量（含传递依赖），禁 --no-deps（R3）
+# → lib/ 已含全部依赖（含 markupsafe 等 C 扩展，R43 实测加载成功）
+# → dist/runtime/lib/ 整体打进安装包
 ```
-- **⚠️ 必须全量装（含传递依赖），禁用 `--no-deps`**（R3 实测：httpx→httpcore/h11/certifi、rich→markdown-it-py/pygments、jinja2→markupsafe 都是必需的——`--no-deps` 后 `import httpx` 直接失败）
-- `--target lib/`：装到安装目录（只读）
-- **PYTHONPATH 注入**：emrg 启动脚本 `export PYTHONPATH="$PREFIX/source:$PREFIX/lib"`（与 PATH 并列，R13）——daemon 与 TUI 都从 lib/ 加载依赖、从 source/ 加载 emrg 包
-- **pip 本身**：standalone python 自带（无需额外捆绑）
-- **C 扩展**：pyyaml 的 `_yaml.so` 经 PYTHONPATH 正常加载（R1/R2 实测通过）
+- **安装器 = 纯文件复制**：把 `dist/runtime/`（python + source + lib + 脚本）解压到 `~/.emrg/install/`——**不跑 pip、不联网、无安装失败点**
+- **首次启动 = 零安装步骤**：emrg/emrgd 启动脚本直接跑（PYTHONPATH 指向解压好的 lib/）——AppImage 自解压也是本地文件操作（R8），秒级
+- **"双击安装即完整"的严格含义**：安装 = 文件复制（秒级完成），之后**永不联网**（除非用户主动 emrg update，v1.1）
+- **C 扩展**：pyyaml `_yaml.so` / markupsafe C 扩展在构建期装好（R1/R43 实测 PYTHONPATH 加载成功）
 
-### 3.3 依赖收集（CI 构建期）
+### 3.3 依赖锁定与跨平台（构建期）
 
-CI 用 `uv pip compile` 或直接 `pip download` 锁定版本 → 生成 `packaging/requirements.lock`（**含全部传递依赖**）→ 安装器据此下载/预装。**离线安装**：构建期把 wheels（含传递依赖）打进安装包 `wheels/` 目录，安装器 `pip install --no-index --find-links`（干净机器无网也可装——与"双击安装即完整"一致）。
+CI 用 `uv pip compile` 生成 `packaging/requirements.lock`（**含全部传递依赖**）→ build-runtime.sh 据此 `pip install --target`。**跨平台**：CI matrix 各平台各装各架构的 wheels（同架构构建，R11）——无需 wheels/ 目录（lib/ 已预装，不需要目标机跑 pip）。requirements.lock 提交 git 保证可复现。
+
+### 3.4 预打包 vs 首次启动清单（R47，明确边界）
+
+| 组件 | 构建期（CI）预打包 | 安装器 | 首次启动 |
+|------|:---:|:---:|:---:|
+| standalone python（含 pip） | ✅ 打进安装包 | 纯复制 | 零操作 |
+| emrg 源码 source/ | ✅ 打进安装包 | 纯复制 | 零操作 |
+| 依赖 lib/（含传递依赖+C 扩展） | ✅ pip --target 装好打进安装包 | 纯复制 | 零操作 |
+| git / gh | ✅ 打进安装包 | 纯复制 | 零操作 |
+| GUI（electron-builder 产物） | ✅ 打进安装包 | 纯复制 | 零操作 |
+| 配置 config.toml | ❌ 不打包（首次启动引导生成，G71/G116） | — | 首启引导（用户填 key） |
+| **在线下载** | **无** | **无** | **无** |
+
+> **保证**：安装包是自包含的（除 config 引导外一切就绪）；安装 = 文件复制（秒级）；首次启动不联网、不跑 pip、无失败点。干净机器**离线**可用（验证项：冒烟 12）。
 
 ---
 
@@ -329,7 +348,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 ```
 
 - 安装器（pkg/exe）直接写 `~/.emrg/install/`；AppImage 首次运行自解压
-- **更新（方案 C 极简）**：新版本 = 替换 `source/` + `pip install` 增量 + 重启 daemon。`emrg update` 二进制自更新为 **v1.1**（本次不做）——但 `_run_update` 需在打包模式下提示："打包版请从 GitHub Releases 下载新版本（v1.1 将支持 emrg update 自动更新）"。**打包模式判定**：`_find_source_dir()`（`__main__.py:359`）靠 `emrg.__file__` 上溯找 git repo——打包后 `__file__` 在 `source/emrg/` 内无 git repo → None → exit 前输出上述提示（替换现有生硬 `sys.exit(1)`）
+- **更新（方案 C 极简）**：新版本 = 替换 `source/` + lib/（构建期预装，R47）+ 重启 daemon。`emrg update` 二进制自更新为 **v1.1**（本次不做）——但 `_run_update` 需在打包模式下提示："打包版请从 GitHub Releases 下载新版本（v1.1 将支持 emrg update 自动更新）"。**打包模式判定**：`_find_source_dir()`（`__main__.py:359`）靠 `emrg.__file__` 上溯找 git repo——打包后 `__file__` 在 `source/emrg/` 内无 git repo → None → exit 前输出上述提示（替换现有生硬 `sys.exit(1)`）
 
 ---
 
@@ -362,7 +381,7 @@ jobs:
       - run: uv run pytest tests/ -v        # 回归门禁
       - run: uv python install 3.13         # standalone python → 缓存
       - run: bash packaging/build-runtime.sh ${{ matrix.os }}
-        # → dist/runtime/：python 软链 + source/ + lib/（pip download wheels → 安装器 --no-index）+ bin/emrgd 脚本
+        # → dist/runtime/：python 整目录 + source/ + lib/（构建期 pip --target 装好，R47）+ bin/emrgd 脚本
       - run: cd emrg/gui && npm ci && npm test   # GUI 单测
       - run: cd emrg/gui && npm run dist         # electron-builder（R22：只打包 GUI 本体，无 runtime 依赖）
       - run: bash packaging/bundle-git-gh.sh ${{ matrix.os }}   # git/gh → dist/runtime/bin/
@@ -401,7 +420,7 @@ jobs:
 | 9 | GUI + TUI 同开同 session | 广播一致 |
 | 10 | `emrg uninstall` → 幂等重跑 → 自校验 | 卸载全流程 |
 | 11 | 安装目录只读验证（`chmod -w` 后全功能跑） | 零写入审计 |
-| 12 | 离线安装（无网络，wheels/ 预装） | 3.3 离线能力 |
+| 12 | **离线安装（无网络全程可用）** | R47：安装包自包含、零在线安装；安装 = 文件复制 |
 
 ---
 
@@ -409,7 +428,7 @@ jobs:
 
 | 风险 | 影响 | 对策 |
 |------|------|------|
-| standalone python 与 pyyaml wheel 架构不匹配 | pip 装失败 | 构建期在同平台下载 wheel（CI matrix 天然同架构）；`--no-index` 离线装 |
+| standalone python 与 pyyaml wheel 架构不匹配 | pip 装失败 | 构建期在同平台安装（CI matrix 天然同架构，R11）；lib/ 预装打进安装包（R47） |
 | 启动脚本相对定位失效（软链调用） | emrg 找不到 source | 用 `BASH_SOURCE`/`%~dp0` 解析真实路径（非 `$0`）；软链场景实测 |
 | 捆绑 git/gh 构建失败（某平台无便携版） | 平台安装不完整 | CI fail-fast：捆绑产物缺失即失败，不发残缺包 |
 | Windows 杀软误报（python 脚本入口） | 安装被拦截 | 启动脚本 + 可选代码签名；文档说明 |
@@ -417,7 +436,7 @@ jobs:
 | 安装目录被误写 | daemon 崩溃/升级冲突 | 只读 + 冒烟 11 审计 |
 | electron-builder 下载二进制（国内网络） | CI/本地构建慢 | CI 用 npm 镜像缓存；electron 二进制缓存（已实测 npmmirror 方案） |
 | source/ 可读（非原生二进制） | 用户可改源码 | 开源项目无保密需求；只读权限 + 升级原子替换 |
-| pyyaml 等含 C 扩展的 wheel 在 lib/ 的加载 | 找不到 .so | 安装器 `pip install --target lib/` 正确放置 + PYTHONPATH 注入 + 冒烟 3 |
+| pyyaml 等含 C 扩展的 wheel 在 lib/ 的加载 | 找不到 .so | 构建期 pip --target 装好（R43 实测 PYTHONPATH 加载成功）+ 冒烟 3 |
 
 ---
 
@@ -440,7 +459,7 @@ jobs:
 - [ ] `packaging/bundle-git-gh.sh`（git/gh 捆绑 → dist/runtime/bin/）
 - [ ] `packaging/make-installer.sh`（pkgbuild / Inno Setup / AppImage + tarball 兜底；**含平台卸载器 §6：终止报告 + 墓地快照 + 清理 + 自校验**）
 - [ ] `packaging/smoke-test.sh`（§9 清单 12 项）
-- [ ] `packaging/requirements.lock`（依赖版本锁定 + wheels 目录）
+- [ ] `packaging/requirements.lock`（依赖版本锁定，R47：构建期 pip --target 预装，无需 wheels 目录）
 
 **CI**：
 - [ ] `.github/workflows/build-release.yml`（§8，tag v* 触发）
