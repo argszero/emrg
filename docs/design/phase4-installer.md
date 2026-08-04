@@ -15,9 +15,11 @@
 
 | 平台 | 安装文件 | 安装体验 | 安装位置 |
 |------|----------|----------|----------|
-| macOS | `EMRG-<ver>.pkg` | 双击 → 安装向导 → 完成；启动台出现 `EMRG.app`；终端可用 `emrg` | `~/.emrg/install/`（用户级，免 sudo）+ PATH |
-| Windows | `EMRG-Setup-<ver>.exe` | 双击 → 安装向导 → 完成；开始菜单出现 `EMRG` 快捷方式；终端可用 `emrg` | **`~/.emrg\install\`**（R34：统一三平台前缀，弃 %LOCALAPPDATA% 特例）+ PATH |
+| macOS | `EMRG-<ver>-macos-<arch>.pkg` | 双击 → 安装向导 → 完成；启动台出现 `EMRG.app`；终端可用 `emrg` | `~/.emrg/install/`（用户级，免 sudo）+ PATH |
+| Windows | `EMRG-<ver>-windows-x64.exe` | 双击 → 安装向导 → 完成；开始菜单出现 `EMRG` 快捷方式；终端可用 `emrg` | **`~/.emrg\install\`**（R34：统一三平台前缀，弃 %LOCALAPPDATA% 特例）+ PATH |
 | Linux | `EMRG-<ver>-linux-<arch>.AppImage` | 下载 → chmod +x → 双击运行（GUI）；**首次运行自解压到 `~/.emrg/install/` + 建 `~/.local/bin/emrg` 启动器** | `~/.emrg/install/`（自解压）+ `~/.local/bin` |
+
+> **R103（命名统一）**：三平台交付物命名统一为 `EMRG-<ver>-<platform>-<arch>.<ext>`（macos-arm64 / windows-x64 / linux-x86_64 / linux-aarch64）——Release 页面清晰可辨，用户按平台+架构选择。
 
 ### 1.2 验收标准（全部一次满足）
 
@@ -366,7 +368,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 | Windows | 控制面板卸载（Inno Setup 生成 unins000.exe） | **先关 GUI 进程（R73：GUI 在 `install/emrg-gui/` 内，运行中锁文件删不掉——taskkill 或检测提示关闭）** → `[UninstallRun]` 跑 `emrg-uninstall` 脚本（六步，§6.2）→ 原生删目录 + 快捷方式 |
 | Linux | **运行卸载脚本 → 删 AppImage 文件** | ⚠️ R58：AppImage 首次运行已自解压 `~/.emrg/install/`（250MB，R56）——**删 AppImage ≠ 卸载**：须先运行 `~/.emrg/install/bin/emrg-uninstall`（六步，§6.2，含终止报告+墓地快照）→ 删 AppImage + `~/.local/bin/emrg` 软链 |
 
-**macOS 卸载 app（R30+R31 补充）**：.pkg 安装**不生成卸载器**（macOS 无标准 pkg 卸载 API）——需 pkg 安装时额外放置一个"卸载 EMRG.app"（shell 脚本包装的 .app，双击运行调 `emrg-uninstall` 执行 §6.2 六步）。**自删限制（R31）**：运行中的 .app 不能删自己——卸载 app 删数据 + install/ 后，**提示"请将 EMRG 图标拖入废纸篓"**（macOS 用户习惯，不做延迟自删的复杂机制）。卸载 app 调用 python 需自设 PYTHONPATH（R15）——它本身是 bash 脚本，头部 `export PYTHONPATH=~/.emrg/install/source:~/.emrg/install/lib`。
+**macOS 卸载 app（R30+R31 补充）**：.pkg 安装**不生成卸载器**（macOS 无标准 pkg 卸载 API）——需 pkg 安装时额外放置一个"卸载 EMRG.app"（shell 脚本包装的 .app，双击运行调 `emrg-uninstall` 执行 §6.2 六步）。**自删限制（R31）**：运行中的 .app 不能删自己——卸载 app 删数据 + install/ 后，**提示"请将 EMRG 图标拖入废纸篓"**（macOS 用户习惯，不做延迟自删的复杂机制）。**⚠️ R102（主 GUI 删除）**：`~/Applications/EMRG.app`（正式 GUI）**可被卸载 app 直接删除**（未运行时）——卸载 app 执行 `rm -rf ~/Applications/EMRG.app`；只有**卸载 app 自身**（运行中）需用户拖废纸篓。卸载 app 调用 python 需自设 PYTHONPATH（R15）——它本身是 bash 脚本，头部 `export PYTHONPATH=~/.emrg/install/source:~/.emrg/install/lib`。
 
 ### 6.2 终止报告 + 墓地快照（对齐 MANIFESTO 第十条【终止权】）
 
@@ -380,8 +382,10 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 3. 留存经验墓地快照（不可删除项）：
    → 打包记忆 + 会话 + 演化日志 → ~/.emrg/graveyard/emrg-data-<ts>.tar.gz
    → 快照保留，卸载后用户可自行删除
-4. 删除 ~/.emrg 全部（install/、versions/、config.toml、sessions、memory、
-   logs、projects.yml、tasks.yml、rants.jsonl、saturation/、emrgd.sock/pid、install-info.json）
+4. 删除 `~/.emrg` **已知 EMRG 文件（白名单，⚠️ R101）**（install/、versions/、config.toml、sessions、memory、
+   logs、projects.yml、tasks.yml、rants.jsonl、saturation/、emrgd.sock/pid、install-info.json）——
+   ⚠️ R101：**不"删全部"**——`~/.emrg/` 可能有用户自定义/第三方文件（自定义 scripts、skills 备份等），
+   只删白名单内的 EMRG 文件，**白名单外文件保留 + 卸载报告列出**（提示用户自行处理）
    ⚠️ R92：第 4 步**执行者 = 平台卸载器（原生）**，非 emrg-uninstall 脚本内部——
    emrg-uninstall 是 python 脚本（解释器在 install/bin/python），Windows NTFS 锁运行中
    exe → 内部删 install/ 锁死。顺序：emrg-uninstall（python 逻辑）退出 → 平台卸载器删
@@ -464,7 +468,8 @@ jobs:
       - run: bash packaging/make-installer.sh ${{ matrix.os }}
         # 输入组装（R38）：dist/runtime/（bin+source+lib）+ GUI 产物（dist/mac-arm64/EMRG.app
         #   或 dist/win-unpacked/ 或 AppImage 本体）→ 平台 payload → dist/installers/EMRG-<v>.pkg 等
-        # macOS pkgbuild / Windows Inno Setup / Linux AppImage + tar.gz 兜底
+        # 产物命名（R103）：EMRG-<ver>-macos-arm64.pkg / EMRG-<ver>-windows-x64.exe /
+        #   EMRG-<ver>-linux-x86_64.AppImage / EMRG-<ver>-linux-aarch64.AppImage + tar.gz 兜底
         # ⚠️ macOS 用户级 pkg（R54+R67）：pkgbuild install-location 不支持 ~ 展开——
         #   payload 装到临时位置 + postinstall 脚本复制到用户 ~/.emrg/install/
         #   ⚠️ R67：postinstall 的 $HOME 不可靠——GUI 安装器可能提权运行 postinstall（$HOME=/var/root）
