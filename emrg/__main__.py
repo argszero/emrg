@@ -303,12 +303,18 @@ def _run_client(init_auto_evolve: bool = False) -> None:
 # ── Update ────────────────────────────────────────────────────
 
 def _run_update() -> None:
-    """git pull the latest source and reinstall via uv tool install."""
+    """git pull the latest source and reinstall via uv tool install.
+
+    Packaged mode (rant #12 §9 R86): when no source dir is detectable the
+    binary install cannot self-update — print a pointer to GitHub Releases
+    and exit (v1.1 adds binary self-update).
+    """
     source_dir = _find_source_dir()
     if source_dir is None:
-        print("Error: cannot find emrg source directory.", file=sys.stderr)
         print(
-            "Reinstall with: git clone https://github.com/argszero/emrg.git",
+            "EMRG is installed in packaged mode — self-update is not supported yet.\n"
+            "Please download the new version from GitHub Releases:\n"
+            "  https://github.com/argszero/emrg/releases",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -359,30 +365,19 @@ def _run_update() -> None:
 def _find_source_dir() -> Path | None:
     """Find the emrg source directory (the git repo root).
 
-    Tries in order:
-    1. Editable install: emrg.__file__ → parent → parent is the git repo
-    2. Current directory: if user is inside the source tree
+    R86 (rant #12 §9): only the emrg package's parent directory is a valid
+    source dir. NEVER fall back to the current working directory or walk up
+    from cwd — in packaged mode a user running ``emrg update`` from any git
+    repo would otherwise have an unrelated repo pulled/upgraded (dangerous).
     """
     import emrg
 
-    candidates: list[Path] = []
-
-    # Editable install path
-    pkg_dir = Path(emrg.__file__).resolve().parent  # emrg/emrg/
-    candidates.append(pkg_dir.parent)  # emrg/
-
-    # Current working directory (for wheel installs)
-    candidates.append(Path.cwd())
-
-    # Walk up from cwd (in case user is in a subdirectory)
-    for p in Path.cwd().parents:
-        candidates.append(p)
-
-    for source_dir in candidates:
-        git_dir = source_dir / ".git"
-        if git_dir.exists():
-            return source_dir
-
+    # Editable install path: emrg.__file__ → parent → parent is the git repo
+    pkg_dir = Path(emrg.__file__).resolve().parent  # .../site-packages/emrg/
+    source_dir = pkg_dir.parent  # repo root when installed with -e .
+    git_dir = source_dir / ".git"
+    if git_dir.exists():
+        return source_dir
     return None
 
 

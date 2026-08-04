@@ -27,7 +27,7 @@ from emrg.connect import connect_to_server
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
-from emrg.server.git_utils import _detect_git_remote
+from emrg.server.git_utils import _detect_git_remote, resolve_git_gh
 
 logger = logging.getLogger("emrg.server.scheduler")
 
@@ -432,6 +432,8 @@ class EvolutionHandler:
             uptime_seconds = 0
         uptime = f"{uptime_seconds // 3600}h {(uptime_seconds % 3600) // 60}m"
 
+        git_path, gh_path = resolve_git_gh()
+
         context = {
             "instance_id": self.identity.instance_id,
             "host_name": self.identity.host_name,
@@ -447,6 +449,8 @@ class EvolutionHandler:
             "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S"),
             "task": self._config,
             "project": _load_project_config(self._project_name, str(self._source_dir)),
+            "git_path": git_path,
+            "gh_path": gh_path,
         }
 
         env = jinja2.Environment(undefined=jinja2.Undefined)
