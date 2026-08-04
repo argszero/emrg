@@ -80,12 +80,18 @@ if [ -f "$ROOT/LICENSE" ]; then cp "$ROOT/LICENSE" "$DIST/source/LICENSE"; fi
 
 # ── 4. lib/（pip --target 全量含传递依赖，R3/R43）──
 echo "==> installing deps to lib/"
-"$DIST/bin/python" -m pip install --quiet --target "$DIST/lib" \
+# Windows 复制产物为 python.exe（无扩展名 python 不存在，Git Bash 对带路径的
+# 直接执行不做 .exe 补全）→ 探测可执行名。POSIX 为软链 python。
+PY_BIN="$DIST/bin/python"
+if [ ! -e "$PY_BIN" ] && [ -e "$PY_BIN.exe" ]; then
+  PY_BIN="$PY_BIN.exe"
+fi
+"$PY_BIN" -m pip install --quiet --target "$DIST/lib" \
   rich httpx pyyaml jinja2 websockets
 
 # ── 5. assets/LICENSE/version ──
 cp "$ROOT/LICENSE" "$DIST/assets/LICENSE" 2>/dev/null || echo "Apache-2.0" > "$DIST/assets/LICENSE"
-"$DIST/bin/python" -c "import emrg,sys; sys.path.insert(0,'$DIST/source'); import emrg as e; print(e.__version__)" > "$DIST/version.txt" 2>/dev/null \
+"$PY_BIN" -c "import emrg,sys; sys.path.insert(0,'$DIST/source'); import emrg as e; print(e.__version__)" > "$DIST/version.txt" 2>/dev/null \
   || echo "0.2.0" > "$DIST/version.txt"
 
 echo "==> runtime size: $(du -sh "$DIST" | cut -f1)"
