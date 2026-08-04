@@ -47,10 +47,11 @@ const RESPONSE_TYPES = {
 };
 
 class DaemonClient {
-  constructor({ projectDir = os.homedir(), logger = console, authTimeoutMs = AUTH_TIMEOUT_MS } = {}) {
+  constructor({ projectDir = os.homedir(), logger = console, authTimeoutMs = AUTH_TIMEOUT_MS, isPackaged = false } = {}) {
     this.projectDir = projectDir;
     this.logger = logger;
     this._authTimeoutMs = authTimeoutMs; // G142 测试可注入短超时（默认 10s）
+    this._isPackaged = isPackaged; // Phase 4：打包模式（rant #12 §4）由 main.js 注入 app.isPackaged
     this.ws = null;
     this.connected = false;
     this._events = new Set(); // callbacks
@@ -82,6 +83,32 @@ class DaemonClient {
   }
 
   async startDaemon() {
+    // Phase 4（rant #12 §4）：打包模式直接 spawn 捆绑 emrgd 可执行文件（脚本内部
+    // exec python -m emrg.server）；源码模式保持 python -m emrg.server。
+    if (this._isPackaged) {
+      const emrgdPath = this._findDaemonExecutable();
+      const opts = {
+        cwd: this.projectDir,
+        stdio: "ignore",
+        detached: true,
+      };
+      // R36/R66：Windows .cmd 需 shell:true（非 PE），windowsHide 防黑窗闪烁；
+      // Node shell 模式自动给含空格的用户名加引号（R92b）。
+      if (process.platform === "win32") {
+        opts.shell = true;
+        opts.windowsHide = true;
+      }
+      this.logger.info(`[gui] spawning packaged daemon: ${emrgdPath} cwd=${this.projectDir}`);
+      const child = spawn(emrgdPath, [], opts);
+      child.unref();
+      this._daemonChild = child;
+      const deadline = Date.now() + SPAWN_WAIT_MS;
+      while (Date.now() < deadline) {
+        if (await this.isRunning(500)) return child;
+        await new Promise((r) => setTimeout(r, 300));
+      }
+      throw new Error("emrgd failed to start within timeout");
+    }
     // G125：spawn 设 cwd=project_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
     const python = this._findPython();
     const args = ["-m", "emrg.server"];
@@ -100,6 +127,14 @@ class DaemonClient {
       await new Promise((r) => setTimeout(r, 300));
     }
     throw new Error("emrgd failed to start within timeout");
+  }
+
+  _findDaemonExecutable() {
+    // Phase 4（rant #12 §4 R7）：打包模式定位捆绑 emrgd。
+    // Windows: ~/.emrg/install/bin/emrgd.cmd；POSIX: ~/.emrg/install/bin/emrgd。
+    const bin = path.join(os.homedir(), ".emrg", "install", "bin");
+    const name = process.platform === "win32" ? "emrgd.cmd" : "emrgd";
+    return path.join(bin, name);
   }
 
   _findPython() {

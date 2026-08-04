@@ -105,9 +105,51 @@ function main() {
 
   function configPath() { return path.join(os.homedir(), ".emrg", "config.toml"); }
 
+  // Phase 4（rant #12 §4 R108）：打包模式无 .venv/PATH python → 内联模板直接生成
+  // （与 emrg/config.py ensure_config() 105-130 行同源）；源码模式复用 ensure_config()。
+  const CONFIG_TEMPLATE = `[llm]
+# OpenAI-compatible API endpoint
+base_url = "https://api.deepseek.com"
+api_key = "sk-..."
+model = "deepseek-chat"
+max_tokens = 8192
+temperature = 0.7
+context_window = 131072
+auto_compact_threshold = 0.0
+# vision: set to true if model supports OpenAI vision API (image_url content type)
+vision = false
+
+# Additional models for /model switching (optional — add or remove as needed)
+# model: API model name (optional — defaults to name if not set)
+[[llm.models]]
+name = "deepseek-v3"
+model = "deepseek-chat"
+context_window = 131072
+vision = false
+
+[[llm.models]]
+name = "deepseek-r1"
+model = "deepseek-reasoner"
+context_window = 65536
+vision = false
+`;
+
   function ensureConfigTemplate() {
     // G116：优先复用 ensure_config() 生成官方模板（含 [[llm.models]] 预置）
     return new Promise((resolve) => {
+      if (app.isPackaged) {
+        if (!fs.existsSync(configPath())) {
+          try {
+            fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+            fs.writeFileSync(configPath(), CONFIG_TEMPLATE, { mode: 0o600 });
+          } catch (e) {
+            resolve("");
+            return;
+          }
+        }
+        resolve(fs.readFileSync(configPath(), "utf8"));
+        return;
+      }
       const python = client?._findPython() || "python3";
       const child = spawn(python, ["-c", "from emrg.config import ensure_config; ensure_config()"], {
         cwd: projectDir,
@@ -335,7 +377,9 @@ function main() {
 
   async function ensureConnected() {
     if (!client) {
-      client = new DaemonClient({ projectDir, logger });
+      // Phase 4（rant #12 §4 R7）：打包模式传 app.isPackaged → daemon_client 走
+      // 捆绑 emrgd 分支（_findDaemonExecutable）。
+      client = new DaemonClient({ projectDir, logger, isPackaged: app.isPackaged });
       // G122：message_delta 16ms 批量推送
       let deltaBuf = [];
       let deltaTimer = null;
@@ -461,9 +505,43 @@ function main() {
     }
   });
 
+  // ── Phase 4 AppImage 自解压（rant #12 §5 R65/R88/R93）──────────
+  // AppImage 是自解压安装器：首次运行把 resourcesPath/runtime 复制到
+  // ~/.emrg/install/（稳定路径，非 AppImage 挂载），并建 ~/.local/bin/emrg 软链。
+  // 仅 Linux（process.env.APPIMAGE 存在）；macOS/Windows 由安装器直接放置。
+  function ensureAppImageExtracted() {
+    if (process.platform !== "linux" || !process.env.APPIMAGE) return;
+    const home = os.homedir();
+    const installBin = path.join(home, ".emrg", "install", "bin");
+    if (fs.existsSync(installBin)) return; // 已解压
+    const runtimeSrc = path.join(process.resourcesPath, "runtime");
+    if (!fs.existsSync(runtimeSrc)) return;
+    try {
+      // R88：先 mkdir ~/.local/bin 否则 symlinkSync ENOENT
+      fs.mkdirSync(path.join(home, ".local", "bin"), { recursive: true });
+      // R93：250MB 复制期间显示"正在安装 EMRG..."提示防误判卡死
+      if (win && !win.isDestroyed()) {
+        win.webContents.send("emrg:event", { type: "status", data: { connected: false, installing: true } });
+      }
+      fs.cpSync(runtimeSrc, path.join(home, ".emrg", "install"), { recursive: true });
+      const link = path.join(home, ".local", "bin", "emrg");
+      if (!fs.existsSync(link)) {
+        fs.symlinkSync(path.join(home, ".emrg", "install", "bin", "emrg"), link, "file");
+      }
+      logger.info("[gui] AppImage runtime extracted to ~/.emrg/install/");
+    } catch (e) {
+      logger.error("[gui] AppImage extraction failed (retry on next launch)", e);
+    } finally {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send("emrg:event", { type: "status", data: { connected: false, installing: false } });
+      }
+    }
+  }
+
   app.whenReady().then(() => {
     registerIpc();
     createWindow();
+    ensureAppImageExtracted(); // R65：自解压归 main.js（electron-builder AppRun 无官方自定义）
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
