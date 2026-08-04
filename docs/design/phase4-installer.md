@@ -67,7 +67,7 @@
 | GUI（electron-builder，R48） | ~100MB（macOS .app）/ ~80MB（Win）/ ~90MB（AppImage） |
 | **合计** | **~250MB（macOS）/ ~230MB（Win）/ ~240MB（AppImage）** |
 
-> 体积主要被 GUI（Chromium）与 git/gh 占——这是"安装即完整"的固有成本（PyInstaller 方案同量级）。体积优化的后续选项：gh 可选装（v2）、git 用系统版兜底（§5.2 解析器已支持）——但 v1 接受全捆绑。
+> 体积主要被 GUI（Chromium）与 git/gh 占——这是"安装即完整"的固有成本（PyInstaller 方案同量级）。**git/gh 仅演化系统用（R53 实证：git 42 处调用全在 daemon/scheduler/update，gh 在演化 prompt）**——普通聊天用户用不到，但演化是 MANIFESTO 核心，v1 全捆绑保证开箱即用；体积优化后续项：gh 可选装 / git 用系统版兜底（§5.2 解析器已支持）——v1 接受全捆绑。
 
 ---
 
@@ -299,6 +299,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
   - `~/.local/bin/emrg` **不能是符号链接**（挂载路径每次变）→ 必须是**启动器脚本**：`exec <AppImage绝对路径>`（首次运行时把 AppImage 绝对路径写入启动器）
   - **长期进程（daemon 由 GUI 拉起）** 的 PATH 注入在 AppImage 退出后失效 → **首次运行必须把 python/git/gh 复制到 `~/.emrg/install/bin/`**（数据目录可写），启动器 exec AppImage 前先确保复制完成
 - 因此 AppImage 的**首次运行自解压**是必须的：`bin/python`/`bin/git`/`bin/gh` → `~/.emrg/install/bin/`，source/lib → `~/.emrg/install/`（与 pkg/exe 安装后的布局一致）——**AppImage 实际是"自解压安装器"**，之后 PATH 注入走 `~/.emrg/install/bin/`（稳定路径，非临时挂载）
+- **自解压实现（R56）**：AppImage 的 `AppRun` 脚本——`if [ ! -d "$HOME/.emrg/install/bin" ]; then cp -r "$APPDIR/usr/" "$HOME/.emrg/install/"; ln -sf "$HOME/.emrg/install/bin/emrg" "$HOME/.local/bin/emrg"; fi`（`APPDIR` = AppImage 挂载点环境变量，首次复制本地秒级）→ 之后 GUI/TUI 都从 `~/.emrg/install/` 跑（稳定路径，与 pkg/exe 一致）
 
 **`resolve_git_gh()` 解析器（保留为兜底）**：
 - 场景：安装不完整、用户自定义
@@ -403,6 +404,11 @@ jobs:
         # 输入组装（R38）：dist/runtime/（bin+source+lib）+ GUI 产物（dist/mac-arm64/EMRG.app
         #   或 dist/win-unpacked/ 或 AppImage 本体）→ 平台 payload → dist/installers/EMRG-<v>.pkg 等
         # macOS pkgbuild / Windows Inno Setup / Linux AppImage + tar.gz 兜底
+        # ⚠️ macOS 用户级 pkg（R54）：pkgbuild install-location 不支持 ~ 展开——
+        #   payload 装到临时位置 + postinstall 脚本用安装用户 HOME 复制到 ~/.emrg/install/
+        #   （postinstall 的 $HOME = 发起安装的用户，免 sudo 双击安装）
+        # ⚠️ Windows 免 UAC（R55）：Inno Setup 配 PrivilegesRequired=lowest +
+        #   DefaultDirName={userhome}\.emrg\install（{userhome} 常量，与 R34 统一）
       - run: bash packaging/smoke-test.sh        # 产物冒烟（§9）
       - uses: softprops/action-gh-release@v2
         with: { files: "dist/installers/*" }
