@@ -178,6 +178,26 @@ test("auth 失败（G88）：auth_ok 前 close → 停止自动重试", async ()
   assert.strictEqual(client._authFailed, true, "auth failed flag set → main 停止重连");
 });
 
+test("auth 超时（G142）：reject + _authFailed + ws.close + listener 清理", async () => {
+  // 注入 30ms 短超时（生产默认 10s）——快速触发超时路径
+  const client = new DaemonClient({ projectDir: tmpHome, authTimeoutMs: 30 });
+  const p = client.ensureConnected();
+  await waitForWs();
+  currentMockWs.emit("open");
+  await waitForAuthSent(currentMockWs);
+  // 不回 auth_ok 也不 close → 30ms 后 timer 触发
+  await assert.rejects(p, /auth timeout/);
+  assert.strictEqual(client._authFailed, true, "auth timeout → _authFailed（G88 停止重试）");
+  // 超时后 ws 被 close（mock close 会 emit close → 但 listener 已清理，不会二次 reject）
+  const ws = currentMockWs;
+  const closeCbCount = (ws._listeners["close"] || []).length;
+  assert.strictEqual(closeCbCount, 0, "close listener 已清理（防泄漏）");
+  const msgCbCount = (ws._listeners["message"] || []).length;
+  assert.strictEqual(msgCbCount, 0, "message listener 已清理（防泄漏）");
+  // ws.close() 被调用（emit close 后无异常 = 清理生效）
+  ws.emit("close");
+});
+
 test("坏 JSON 帧 → 忽略不崩（R53）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
