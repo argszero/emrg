@@ -244,29 +244,35 @@ _findDaemonExecutable() {
 // ⚠️ R36：Windows spawn .cmd 需 shell 语义——spawn(emrgdPath, { shell: true, ... })（.cmd 非 PE 可执行，
 //    CreateProcess 直接跑失败；shell:true 走 cmd.exe /c）；POSIX 直接 spawn 脚本（shebang 可执行）。
 //    其余选项不变：cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref（shell 中间层不影响脱离）
+// ⚠️ R66：Windows 打包分支加 windowsHide: true——detached + shell:true 默认开新控制台窗口（黑窗闪烁）；
+//   cmd.exe /c 同步等待 python 退出 → GUI 退出后 cmd 仍在（detached 独立进程组）→ python 存活 → daemon 常驻 ✅
 ```
 - 启动脚本自行定位 python/source/lib，GUI 只需 spawn 它
 - cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref 选项不变
 - **两套 runtime 不冲突（R22 实证）**：daemon pid 文件互斥（daemon.py:130-141）+ 共享 port 文件——先到先得，第二个自我退出；GUI 与 TUI 始终直连同一 daemon
-- **AppImage 时序（R25）**：AppImage 是 GUI 容器——**自解压逻辑归 AppImage 启动器**（首次运行先解压 runtime 到 `~/.emrg/install/` 再启动 GUI）；GUI 的 `_findDaemonExecutable()` 发现 `~/.emrg/install/bin/emrgd` 不存在时 → **提示"请先运行 AppImage 完成安装"或触发自解压回调**（v1 简单处理：提示 + 退出；确保 pkg/exe 安装场景 install/ 恒存在）
-- **electron-builder 配置变化（R23 实证）**：`emrg/gui/package.json` build 段**删除 `extraResources`**（现为 `[{from: '../dist/emrgd', to: 'emrgd'}]`——Phase 3 PyInstaller 遗留，R22 后 GUI 不再携带 runtime）：
+- **AppImage 时序（R25+R64+R65）**：AppImage 是 GUI 容器——**runtime payload 通过 `build.linux.extraResources` 打进 AppImage**（R64：仅 linux 段携带，mac/win 不携带——R23"删除 extraResources"限定 mac/win）；**自解压逻辑归 GUI main.js**（R65：electron 启动时检查 `~/.emrg/install/bin/emrgd` 不存在 → `fs.cpSync(process.resourcesPath/runtime → ~/.emrg/install)`（本地复制秒级）→ 建 `~/.local/bin/emrg` 软链 → 再 spawn emrgd——**不覆盖 electron-builder 默认 AppRun**，因无官方自定义 AppRun 支持，覆盖 hack 脆弱）；pkg/exe 安装场景 install/ 恒存在，main.js 自解压分支不触发
+- **electron-builder 配置变化（R23 实证 + R64 修正）**：`emrg/gui/package.json` build 段**删除顶层 `extraResources`**（现为 `[{from: '../dist/emrgd', to: 'emrgd'}]`——Phase 3 PyInstaller 遗留，R22 后 GUI 不再携带 runtime）——**但 Linux AppImage 需要 runtime 自解压源（R64）**，per-platform 配置：
 ```json
 "build": {
   "appId": "com.emrg.gui",
   "productName": "EMRG",
   "target": ["dmg", "exe", "AppImage"],
   "icon": "../packaging/assets/",
-  "mac": { "identity": null }
+  "mac": { "identity": null },
+  "linux": {
+    "extraResources": [{ "from": "../dist/runtime", "to": "runtime" }]
+  }
 }
 ```
+（mac/win 无 runtime；linux 有——AppImage 内含 runtime 作自解压源，解压后 `~/.emrg/install/` 与 pkg/exe 布局一致）
 - cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref 选项不变
 
 ### 4.3 构建顺序
 
 ```
-构建 runtime（python + source + lib + emrgd 脚本）→ dist/runtime/（安装器用，非 GUI 内嵌）
-cd emrg/gui && npm run dist   # electron-builder 只打包 GUI 本体（无 extraResources runtime）
-平台包装：dist/runtime/ + GUI 产物组装进安装器（pkg/exe/AppImage）
+构建 runtime（python + source + lib + emrgd 脚本）→ dist/runtime/（安装器用 + Linux AppImage 自解压源，R64）
+cd emrg/gui && npm run dist   # electron-builder：mac/win 无 runtime；linux 段 extraResources 带 dist/runtime（R64）
+平台包装：dist/runtime/ + GUI 产物组装进安装器（pkg/exe）；AppImage 已含 runtime（linux extraResources，R64）
 ```
 
 ### 4.4 GUI 平台放置（R33，按平台惯例）
@@ -311,7 +317,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
   - `~/.local/bin/emrg` **不能是符号链接**（挂载路径每次变）→ 必须是**启动器脚本**：`exec <AppImage绝对路径>`（首次运行时把 AppImage 绝对路径写入启动器）
   - **长期进程（daemon 由 GUI 拉起）** 的 PATH 注入在 AppImage 退出后失效 → **首次运行必须把 python/git/gh 复制到 `~/.emrg/install/bin/`**（数据目录可写），启动器 exec AppImage 前先确保复制完成
 - 因此 AppImage 的**首次运行自解压**是必须的：`bin/python`/`bin/git`/`bin/gh` → `~/.emrg/install/bin/`，source/lib → `~/.emrg/install/`（与 pkg/exe 安装后的布局一致）——**AppImage 实际是"自解压安装器"**，之后 PATH 注入走 `~/.emrg/install/bin/`（稳定路径，非临时挂载）
-- **自解压实现（R56）**：AppImage 的 `AppRun` 脚本——`if [ ! -d "$HOME/.emrg/install/bin" ]; then cp -r "$APPDIR/usr/" "$HOME/.emrg/install/"; ln -sf "$HOME/.emrg/install/bin/emrg" "$HOME/.local/bin/emrg"; fi`（`APPDIR` = AppImage 挂载点环境变量，首次复制本地秒级）→ 之后 GUI/TUI 都从 `~/.emrg/install/` 跑（稳定路径，与 pkg/exe 一致）
+- **自解压实现（R56 方案 → R65 修正）**：**实现位置归 GUI main.js**（electron-builder 默认 AppRun 无官方自定义支持，覆盖 hack 脆弱）——main.js 启动时：`if (!fs.existsSync(join(os.homedir(),'.emrg','install','bin'))) { fs.cpSync(join(process.resourcesPath,'runtime'), join(os.homedir(),'.emrg','install'), {recursive:true}); fs.symlinkSync(join(os.homedir(),'.emrg','install','bin','emrg'), join(os.homedir(),'.local','bin','emrg'), 'file'); }`（`process.resourcesPath` = AppImage 挂载点 `usr/lib/emrg/resources/`，runtime 来自 `build.linux.extraResources`（R64）；本地复制秒级）→ 复制完 spawn emrgd → 之后 GUI/TUI 都从 `~/.emrg/install/` 跑（稳定路径，与 pkg/exe 一致）。AppRun 保持 electron-builder 默认（启动 GUI 本体）
 
 **`resolve_git_gh()` 解析器（保留为兜底）**：
 - 场景：安装不完整、用户自定义
@@ -420,9 +426,11 @@ jobs:
         # 输入组装（R38）：dist/runtime/（bin+source+lib）+ GUI 产物（dist/mac-arm64/EMRG.app
         #   或 dist/win-unpacked/ 或 AppImage 本体）→ 平台 payload → dist/installers/EMRG-<v>.pkg 等
         # macOS pkgbuild / Windows Inno Setup / Linux AppImage + tar.gz 兜底
-        # ⚠️ macOS 用户级 pkg（R54）：pkgbuild install-location 不支持 ~ 展开——
-        #   payload 装到临时位置 + postinstall 脚本用安装用户 HOME 复制到 ~/.emrg/install/
-        #   （postinstall 的 $HOME = 发起安装的用户，免 sudo 双击安装）
+        # ⚠️ macOS 用户级 pkg（R54+R67）：pkgbuild install-location 不支持 ~ 展开——
+        #   payload 装到临时位置 + postinstall 脚本复制到用户 ~/.emrg/install/
+        #   ⚠️ R67：postinstall 的 $HOME 不可靠——GUI 安装器可能提权运行 postinstall（$HOME=/var/root）
+        #   → postinstall 用 `stat -f "%Su" /dev/console` 获取控制台用户 + `dscl . -read /Users/<u> NFSHomeDirectory`
+        #     查真实 HOME，取不到则 fallback $HOME
         # ⚠️ Windows 免 UAC（R55）：Inno Setup 配 PrivilegesRequired=lowest +
         #   DefaultDirName={userhome}\.emrg\install（{userhome} 常量，与 R34 统一）
       - run: bash packaging/smoke-test.sh        # 产物冒烟（§9）
@@ -450,7 +458,7 @@ jobs:
 | 3 | 聊天 + 工具调用 + 会话持久化 | 核心链路 |
 | 4 | `emrg server stop` | daemon 生命周期 |
 | 5 | `emrg rant "test"` | rant 链路（写 ~/.emrg/rants.jsonl） |
-| 6 | 演化干跑（trigger evolution） | 模板源码 + skills 动态 import + git/gh |
+| 6 | 演化组件验证：`git --version` + `gh --version`（PATH 注入）+ 模板存在（`source/emrg/server/evolution_prompt.md`）+ `python -c "from emrg.skills.loader import ..."`（动态 import） | ⚠️ R68：**完整演化周期依赖 LLM + TUI /trigger（CLI 无 trigger 子命令），CI 无 TTY/无 key 跑不了**——拆为无 LLM 依赖的组件验证；完整周期留本地手动（同冒烟 3/8 降级模式） |
 | 7 | **会话内 `python -c "print(1)"`** | §5.2 PATH 注入（捆绑 python 生效） |
 | 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22）。**CI 无显示器（R39）**：Linux runner 无 X server——CI 冒烟 8 降级为 `EMRG.app/Contents/MacOS/EMRG --version` / `emrg-gui.exe --version` 验证入口存在（electron 支持 `--version` 不启窗）；**完整 GUI 冒烟（启窗+首启+聊天）留本地手动**（§1.3 范围已有） |
 | 9 | GUI + TUI 同开同 session | 广播一致 |
