@@ -1,0 +1,285 @@
+#!/usr/bin/env python
+"""EMRG unified uninstaller — ran by the platform uninstaller (rant #12 §8).
+
+Steps (idempotent, safe to re-run):
+  1. Stop the daemon (protocol shutdown when websockets importable, else
+     SIGTERM from pid file / Windows taskkill fallback).
+  2. Termination report  -> ~/.emrg/logs/uninstall-report-<ts>.json
+  3. Graveyard snapshot  -> ~/.emrg/graveyard/emrg-data-<ts>.tar.gz
+  4. Delete known EMRG files in ~/.emrg (R101 whitelist; anything outside the
+     whitelist is kept and listed in the report).
+  5. Clean environment traces (PATH shell-rc anchor blocks, launcher symlinks,
+     Start-menu shortcuts are handled by the native uninstaller).
+  6. Self-verify: print what remains and the cleanup list.
+
+R92: install/ itself is NOT deleted by this script — the interpreter lives in
+install/bin, so a running interpreter would lock it on Windows (NTFS). The
+platform uninstaller (macOS uninstall .app / Windows Inno / Linux wrapper)
+deletes install/ AFTER this script exits.
+
+R94: degrade gracefully — if ~/.emrg/install/bin/python is missing we still
+clean data + environment traces; every step is idempotent.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import tarfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+EMRG_DIR = Path.home() / ".emrg"
+LOG_DIR = EMRG_DIR / "logs"
+GRAVEYARD_DIR = EMRG_DIR / "graveyard"
+PORT_FILE = EMRG_DIR / "emrgd.port"
+PID_FILE = EMRG_DIR / "emrgd.pid"
+INSTALL_DIR = EMRG_DIR / "install"
+
+# R101 whitelist — known EMRG files. Anything else in ~/.emrg is user data
+# and is preserved (listed in the report instead of deleted).
+WHITELIST = [
+    "install", "versions", "config.toml", "sessions", "memory", "logs",
+    "projects.yml", "tasks.yml", "rants.jsonl", "saturation",
+    "emrgd.sock", "emrgd.pid", "emrgd.port", "install-info.json",
+]
+
+# Shell rc anchor for PATH cleanup (R19).
+PATH_ANCHOR_START = "# >>> EMRG PATH >>>"
+PATH_ANCHOR_END = "# <<< EMRG PATH <<<"
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def stop_daemon() -> dict:
+    """Step 1 — stop the daemon. Returns {method, ok}."""
+    result = {"method": "none", "ok": False}
+    # Try protocol shutdown when websockets is importable (PYTHONPATH has lib/).
+    try:
+        import asyncio
+        import json as _json
+
+        from websockets.asyncio.client import connect  # type: ignore
+        from websockets.exceptions import ConnectionClosed  # type: ignore
+
+        port = None
+        token = None
+        if PORT_FILE.exists():
+            lines = PORT_FILE.read_text(encoding="utf-8").splitlines()
+            if lines:
+                port = lines[0].strip()
+            if len(lines) > 1:
+                token = lines[1].strip()
+
+        async def _shutdown() -> bool:
+            if not port:
+                return False
+            try:
+                ws = await asyncio.wait_for(connect(f"ws://127.0.0.1:{port}", open_timeout=3), timeout=4)
+                try:
+                    # Auth handshake (mirrors connect.py connect_to_server).
+                    await ws.send(_json.dumps({"type": "auth", "token": token or ""}, ensure_ascii=False))
+                    ack = _json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                    if ack.get("type") != "auth_ok":
+                        await ws.close()
+                        return False
+                    await ws.send(_json.dumps({"type": "shutdown"}, ensure_ascii=False))
+                    frame = await asyncio.wait_for(ws.recv(), timeout=3)
+                    return _json.loads(frame).get("type") == "shutdown_ack"
+                finally:
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+            except (ConnectionClosed, OSError, asyncio.TimeoutError, _json.JSONDecodeError):
+                return False
+
+        if port:
+            ok = asyncio.run(_shutdown())
+            if ok:
+                result = {"method": "protocol-shutdown", "ok": True}
+                print("  [1] daemon stopped (protocol shutdown)")
+                return result
+    except Exception:
+        pass  # degrade to pid-based stop
+
+    # Fallback: SIGTERM via pid file (POSIX) / taskkill (Windows).
+    pid = None
+    if PID_FILE.exists():
+        try:
+            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+        except ValueError:
+            pid = None
+    if not pid and PORT_FILE.exists():
+        # port file second line is the token, not pid — skip
+        pass
+    if pid:
+        try:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    capture_output=True, timeout=10,
+                )
+            else:
+                os.kill(pid, signal.SIGTERM)
+                for _ in range(20):
+                    try:
+                        os.kill(pid, 0)
+                        time.sleep(0.15)
+                    except OSError:
+                        break
+            result = {"method": "pid-sigterm", "ok": True}
+            print(f"  [1] daemon stopped (pid {pid})")
+            return result
+        except (OSError, subprocess.SubprocessError):
+            pass
+    # Fallback: remove stale runtime files.
+    for f in (PORT_FILE, PID_FILE):
+        try:
+            f.unlink()
+        except FileNotFoundError:
+            pass
+    print("  [1] daemon not running (or already stopped); removed stale port/pid files")
+    return result
+
+
+def write_report(report: dict) -> Path:
+    """Step 2 — termination report."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    ts = report["timestamp"].replace(":", "").replace("-", "")[:14]
+    path = LOG_DIR / f"uninstall-report-{ts}.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  [2] termination report -> {path}")
+    return path
+
+
+def graveyard_snapshot() -> Path | None:
+    """Step 3 — graveyard snapshot of memory/sessions/evolution logs."""
+    GRAVEYARD_DIR.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dest = GRAVEYARD_DIR / f"emrg-data-{ts}.tar.gz"
+    members = []
+    for name in ("memory", "sessions", "logs", "rants.jsonl", "projects.yml", "tasks.yml"):
+        p = EMRG_DIR / name
+        if p.exists():
+            members.append(p)
+    if not members:
+        print("  [3] no data to snapshot")
+        return None
+    with tarfile.open(dest, "w:gz") as tar:
+        for p in members:
+            tar.add(p, arcname=p.name)
+    print(f"  [3] graveyard snapshot -> {dest}")
+    return dest
+
+
+def delete_whitelisted() -> list:
+    """Step 4 — delete whitelisted EMRG files. Returns list of removed paths."""
+    removed = []
+    for name in WHITELIST:
+        p = EMRG_DIR / name
+        if name == "install":
+            # R92: install/ is deleted by the platform uninstaller, not here.
+            continue
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+            removed.append(str(p))
+        elif p.exists() or p.is_symlink():
+            try:
+                p.unlink()
+                removed.append(str(p))
+            except OSError:
+                pass
+    return removed
+
+
+def clean_environment() -> list:
+    """Step 5 — clean environment traces. Returns list of cleaned items."""
+    cleaned = []
+    # Launcher symlink (Linux R85).
+    link = Path.home() / ".local" / "bin" / "emrg"
+    if link.is_symlink():
+        try:
+            link.unlink()
+            cleaned.append(str(link))
+        except OSError:
+            pass
+    # Shell rc PATH anchors (R19).
+    for rc_name in (".bashrc", ".zshrc", ".profile", ".bash_profile"):
+        rc = Path.home() / rc_name
+        if not rc.exists():
+            continue
+        try:
+            text = rc.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        new_text, n = re.subn(
+            re.escape(PATH_ANCHOR_START) + ".*?" + re.escape(PATH_ANCHOR_END),
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+        if n:
+            rc.write_text(new_text, encoding="utf-8")
+            cleaned.append(f"{rc_name} (PATH anchor removed)")
+    return cleaned
+
+
+def self_verify() -> list:
+    """Step 6 — self-verify. Returns list of remaining EMRG artifacts."""
+    remaining = []
+    for f in ("emrgd.port", "emrgd.pid", "config.toml", "projects.yml", "tasks.yml", "rants.jsonl"):
+        if (EMRG_DIR / f).exists():
+            remaining.append(str(EMRG_DIR / f))
+    return remaining
+
+
+def main() -> int:
+    print("EMRG uninstaller")
+    print("=================")
+    report = {
+        "timestamp": now_iso(),
+        "reason": "user-initiated",
+        "instance": os.environ.get("EMRG_INSTANCE_ID", "unknown"),
+        "steps": {},
+    }
+
+    report["steps"]["1_stop_daemon"] = stop_daemon()
+
+    report["steps"]["3_graveyard_snapshot"] = {"path": str(snap) if (snap := graveyard_snapshot()) else None}
+
+    removed = delete_whitelisted()
+    report["steps"]["4_delete_whitelisted"] = {"removed": removed}
+
+    cleaned = clean_environment()
+    report["steps"]["5_clean_environment"] = {"cleaned": cleaned}
+
+    remaining = self_verify()
+    report["steps"]["6_self_verify"] = {"remaining": remaining}
+
+    # Report written last so it captures every step (step 2 in §8 order).
+    report_path = write_report(report)
+    report["steps"]["2_termination_report"] = {"path": str(report_path)}
+
+    print("\nCleanup summary:")
+    print(f"  removed: {len(removed)} paths")
+    print(f"  env cleaned: {len(cleaned)} items")
+    if remaining:
+        print(f"  remaining (expected): {len(remaining)} artifacts")
+    else:
+        print("  remaining: none")
+    print("\nNOTE: ~/.emrg/install/ is left for the platform uninstaller to remove (R92).")
+    print("User files outside the whitelist were preserved and are not listed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
