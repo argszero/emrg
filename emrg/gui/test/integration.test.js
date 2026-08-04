@@ -21,7 +21,8 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
-if (process.env.EMRG_SKIP_INTEGRATION) {
+const SKIP = !!process.env.EMRG_SKIP_INTEGRATION;
+if (SKIP) {
   skip("EMRG_SKIP_INTEGRATION=1 — 集成测试跳过（本地运行）");
 }
 
@@ -86,6 +87,9 @@ function spawnDaemon() {
 }
 
 before(async () => {
+  // ⚠️ EMRG_SKIP_INTEGRATION 时 skip() 只跳过测试体，before() 仍执行——
+  //    必须显式短路，否则 Windows CI 单测步骤会 spawn daemon 超时（daemon port file timeout）
+  if (process.env.EMRG_SKIP_INTEGRATION) return;
   daemonProc = spawnDaemon();
   await waitForPortFile();
   client = new DaemonClient({ projectDir: tmp });
@@ -117,7 +121,7 @@ after(async () => {
   try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-test("ping → pong（ServerPong 结构）", async () => {
+test("ping → pong（ServerPong 结构）", { skip: SKIP }, async () => {
   const pong = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("pong timeout")), 5000);
     const off = client.onEvent((type, data) => {
@@ -132,13 +136,13 @@ test("ping → pong（ServerPong 结构）", async () => {
   assert.ok(pong.model, "model present");
 });
 
-test("list_sessions → sessions_list（隔离环境空列表）", async () => {
+test("list_sessions → sessions_list（隔离环境空列表）", { skip: SKIP }, async () => {
   const frame = await client.sendCommandAndWait("list_sessions", { cwd: tmp }, 5000);
   assert.strictEqual(frame.type, "sessions_list");
   assert.ok(Array.isArray(frame.sessions));
 });
 
-test("list_models → models_list", async () => {
+test("list_models → models_list", { skip: SKIP }, async () => {
   const frame = await client.sendCommandAndWait("list_models", {}, 5000);
   assert.strictEqual(frame.type, "models_list");
   assert.ok(Array.isArray(frame.models));
@@ -146,13 +150,13 @@ test("list_models → models_list", async () => {
     `models contain test-model: ${JSON.stringify(frame.models)}`);
 });
 
-test("list_projects → projects_list（空）", async () => {
+test("list_projects → projects_list（空）", { skip: SKIP }, async () => {
   const frame = await client.sendCommandAndWait("list_projects", { cwd: tmp }, 5000);
   assert.strictEqual(frame.type, "projects_list");
   assert.ok(Array.isArray(frame.projects));
 });
 
-test("resume_session（不存在）→ 错误帧（无破坏性）", async () => {
+test("resume_session（不存在）→ 错误帧（无破坏性）", { skip: SKIP }, async () => {
   const sid = generateSessionId();
   await assert.rejects(
     client.sendCommandAndWait("resume_session", { session_id: sid, cwd: tmp }, 5000),
@@ -160,7 +164,7 @@ test("resume_session（不存在）→ 错误帧（无破坏性）", async () =>
   );
 });
 
-test("delete_session（不存在）→ 错误帧（无破坏性）", async () => {
+test("delete_session（不存在）→ 错误帧（无破坏性）", { skip: SKIP }, async () => {
   const sid = generateSessionId();
   await assert.rejects(
     client.sendCommandAndWait("delete_session", { session_id: sid, cwd: tmp }, 5000),
@@ -168,7 +172,7 @@ test("delete_session（不存在）→ 错误帧（无破坏性）", async () =>
   );
 });
 
-test("daemon 被杀 → ensureConnected 重连（G43 stale port 流程）", async () => {
+test("daemon 被杀 → ensureConnected 重连（G43 stale port 流程）", { skip: SKIP }, async () => {
   // 杀 daemon（不删 port 文件）→ 连接应失败 → stale 检测 → 删文件重拉
   try { process.kill(-daemonProc.pid); } catch { /* ignore */ }
   await new Promise((r) => setTimeout(r, 800));
