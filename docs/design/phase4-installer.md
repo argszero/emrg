@@ -112,11 +112,15 @@
 #!/usr/bin/env bash
 # bin/emrg — TUI 客户端 + CLI 入口
 # ⚠️ 相对定位（AppImage 挂载到临时目录也可用）：脚本自身路径 → install 根
-# ⚠️ R71（致命，实测）：BASH_SOURCE 在软链调用时 = 软链路径（~/.local/bin/emrg → 软链目录），
-#    必须 readlink 循环解析真实路径——否则 Linux 自解压的 ~/.local/bin/emrg 启动直接坏
+# ⚠️ R71+R84（致命，实测）：BASH_SOURCE 在软链调用时 = 软链路径；readlink 循环必须
+#    在循环内拼「当前 SOURCE 的 dirname」（R84 实测：单级相对链两版都对，多级相对链
+#    拼原始 BASH_SOURCE dirname 的版本解析错——.local/bin/mid2 停住）
 SOURCE="${BASH_SOURCE[0]}"
-while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done   # 循环解软链（相对路径需拼）
-case "$SOURCE" in /*) ;; *) SOURCE="$(dirname "${BASH_SOURCE[0]}")/$SOURCE" ;; esac
+while [ -L "$SOURCE" ]; do
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$(dirname "$SOURCE")/$TARGET" ;; esac
+done
 DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 PREFIX="$(dirname "$DIR")"
 export PATH="$DIR:$PATH"                    # python/git/gh 对子进程可见
@@ -128,10 +132,13 @@ exec "$DIR/python" -m emrg "$@"             # ⚠️ R13：用 -m emrg（包入�
 ```bash
 #!/usr/bin/env bash
 # bin/emrgd — daemon 入口（独立进程，长期运行）
-# ⚠️ R71：同 emrg 的 readlink 循环（emrgd 也可能被软链调用）
+# ⚠️ R71+R84：同 emrg 的 readlink 循环（循环内拼当前 SOURCE dirname）
 SOURCE="${BASH_SOURCE[0]}"
-while [ -L "$SOURCE" ]; do SOURCE="$(readlink "$SOURCE")"; done
-case "$SOURCE" in /*) ;; *) SOURCE="$(dirname "${BASH_SOURCE[0]}")/$SOURCE" ;; esac
+while [ -L "$SOURCE" ]; do
+  TARGET="$(readlink "$SOURCE")"
+  case "$TARGET" in /*) SOURCE="$TARGET" ;;
+    *) SOURCE="$(dirname "$SOURCE")/$TARGET" ;; esac
+done
 DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
 PREFIX="$(dirname "$DIR")"
 export PATH="$DIR:$PATH"
@@ -366,7 +373,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
    → 快照保留，卸载后用户可自行删除
 4. 删除 ~/.emrg 全部（install/、versions/、config.toml、sessions、memory、
    logs、projects.yml、tasks.yml、rants.jsonl、saturation/、emrgd.sock/pid、install-info.json）
-5. 清理环境痕迹：PATH（shell rc / 注册表）、Windows 快捷方式
+5. 清理环境痕迹：PATH（shell rc / 注册表）、Windows 快捷方式、**Linux `~/.local/bin/emrg` 软链（R85：自解压时创建，卸载必须删）**
 6. 自校验：确认 emrg/emrgd/emrg-gui 已不可用、目录已删除，输出清理清单
 ```
 
@@ -394,7 +401,7 @@ GUI（electron-builder 产物）**不放 `<prefix>/bin/`**——按平台惯例�
 ```
 
 - 安装器（pkg/exe）直接写 `~/.emrg/install/`；AppImage 首次运行自解压
-- **⚠️ R70（覆盖安装/升级须先停 daemon）**：`~/.emrg/install/` 正被运行中 daemon 占用——Windows 上 python.exe 文件锁导致复制失败，macOS 复制后 daemon 内存旧代码+文件新代码半新半旧。**安装器/升级流程第一步：停 daemon**（`emrg server stop` 或 shutdown 协议，复用 §6.2 卸载的同一停止逻辑；初次安装无 daemon 则跳过）——三平台一致（pkg postinstall / Inno Setup 安装段 / 新版本自解压前）
+- **⚠️ R70（覆盖安装/升级须先停 daemon）**：`~/.emrg/install/` 正被运行中 daemon 占用——Windows 上 python.exe 文件锁导致复制失败，macOS 复制后 daemon 内存旧代码+文件新代码半新半旧。**安装器/升级流程第一步：停 daemon**（`emrg server stop` 或 shutdown 协议，复用 §6.2 卸载的同一停止逻辑；初次安装无 daemon 则跳过）——三平台一致（pkg postinstall / Inno Setup 安装段 / 新版本自解压前）。**R85b（macOS 补充）**：GUI 在 `~/Applications/EMRG.app`（§4.4）不在 install/ 内——但 pkg 覆盖安装运行中的 .app 有怪癖（代码签名/文件替换异常）→ 安装器检测 GUI 运行则**提示先退出**（Windows 同 R73 锁文件）
 - **更新（方案 C 极简）**：新版本 = 停 daemon（R70）→ 替换 `source/` + lib/（构建期预装，R47）→ 重启 daemon。`emrg update` 二进制自更新为 **v1.1**（本次不做）——但 `_run_update` 需在打包模式下提示："打包版请从 GitHub Releases 下载新版本（v1.1 将支持 emrg update 自动更新）"。**打包模式判定**：`_find_source_dir()`（`__main__.py:359`）靠 `emrg.__file__` 上溯找 git repo——打包后 `__file__` 在 `source/emrg/` 内无 git repo → None → exit 前输出上述提示（替换现有生硬 `sys.exit(1)`）
 
 ---
@@ -461,7 +468,7 @@ jobs:
 
 ## 9. 冒烟测试清单（构建产物，非源码）
 
-**环境隔离（R42）**：`smoke-test.sh` 用**临时 HOME**（`HOME=$(mktemp -d)`，对齐 G73 集成测试隔离方案）跑全部用例——本地跑不污染真实 `~/.emrg`，CI 容器天然隔离。跑完清理临时 HOME。
+**环境隔离（R42）**：`smoke-test.sh` 用**临时 HOME**（`HOME=$(mktemp -d)`，对齐 G73 集成测试隔离方案）跑全部用例——本地跑不污染真实 `~/.emrg`，CI 容器天然隔离。跑完清理临时 HOME。**产物选择（R83d）**：Linux CI 冒烟用 **tarball 兜底产物**（AppImage 运行需 FUSE/图形环境，CI 无）——解压 tarball 到临时 HOME 模拟"安装"；AppImage 自解压路径由本地手动验证。
 
 **单测补充（R20+R24）**：`daemon_client.test.js` 新增打包分支用例——`new DaemonClient({ projectDir, isPackaged: true })` → `_findDaemonExecutable()` 返回 `~/.emrg/install/bin/emrgd`（R22 安装目录路径）→ 断言 startDaemon spawn 该路径（无 `-m` 参数）；现有用例不传 isPackaged → 源码模式（向后兼容已验证）。
 
@@ -473,7 +480,7 @@ jobs:
 | 4 | `emrg server stop` | daemon 生命周期 |
 | 5 | `emrg rant "test"` | rant 链路（写 ~/.emrg/rants.jsonl） |
 | 6 | 演化组件验证：`git --version` + `gh --version`（PATH 注入）+ 模板存在（`source/emrg/server/evolution_prompt.md`）+ `python -c "from emrg.skills.loader import ..."`（动态 import） | ⚠️ R68：**完整演化周期依赖 LLM + TUI /trigger（CLI 无 trigger 子命令），CI 无 TTY/无 key 跑不了**——拆为无 LLM 依赖的组件验证；完整周期留本地手动（同冒烟 3/8 降级模式） |
-| 7 | **会话内 `python -c "print(1)"`** | §5.2 PATH 注入（捆绑 python 生效） |
+| 7 | **会话内 `python -c "print(1)"`**（验证 §5.2 PATH 注入链路） | ⚠️ R83：bash 工具由 **LLM 生成 tool_calls 才执行**（daemon.py `_run_tool_loop`：LLM 流式 → 解析 tool_calls → 执行）——**无 key 时 CI 无法走完整会话内脚本链路**。CI 降级：用启动脚本同款环境（`PATH=$PREFIX/bin:$PATH PYTHONPATH=$PREFIX/source:$PREFIX/lib` + `PYTHONDONTWRITEBYTECODE=1`）直接跑 `python -c "print(1)"` + `import rich,httpx,yaml,jinja2,websockets`（验证捆绑 python + lib 加载）；**完整"会话内 python"（LLM 发起工具调用）留本地手动**（冒烟 3 同模式） |
 | 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22）。**CI 无显示器（R39）**：Linux runner 无 X server——CI 冒烟 8 降级为 `EMRG.app/Contents/MacOS/EMRG --version` / `emrg-gui.exe --version` 验证入口存在（electron 支持 `--version` 不启窗）；**完整 GUI 冒烟（启窗+首启+聊天）留本地手动**（§1.3 范围已有） |
 | 9 | GUI + TUI 同开同 session | 广播一致 |
 | 10 | 平台卸载器（macOS 卸载 app / unins000.exe / Linux `emrg-uninstall`）→ 幂等重跑 → 自校验 | 卸载全流程（⚠️ R57：**不新增 `emrg uninstall` 命令**（§6 决策）——冒烟入口是平台卸载器） |
