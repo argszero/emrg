@@ -28,7 +28,7 @@
 - [ ] 安装后 GUI 启动 → 首启引导填 key → 聊天流式 + 工具调用 + 会话持久化（⚠️ R119：聊天/工具调用需 **API key + 网络**——首启引导填 key 是离线步骤（R106 已确认纯本地），聊天本身联网；干净容器离线验证到"首启引导 + 会话持久化"，聊天留本地联网手动，同 R118 分两阶段）
 - [ ] 安装后 TUI `emrg` 启动 → `/help`、聊天、`/rant`、演化周期正常（⚠️ R118：聊天/演化需 **API key + 网络**（R79）——验收分两阶段：① 干净容器（无 key）验证 TUI 启动 + `/help` + R62 占位 key 提示；② 填 key 后验证聊天/rant/演化（联网））
 - [ ] **会话内 `python script.py` 可执行**（bash 工具走捆绑 python）
-- [ ] GUI 与 TUI 同开同 daemon，数据一致（广播模型）
+- [ ] GUI 与 TUI 同开同 daemon，数据一致（广播模型）（⚠️ R120：**session 数据按 cwd 隔离**（daemon 用 session.cwd 存取，不读 config 的 gui.project_dir）——广播一致的前提是 **GUI 与 TUI 用同一 cwd**（GUI project_dir 设为 TUI 的工作目录，或反之）；默认 GUI project_dir=home、TUI=工作目录 → **不同 session 集**，属预期行为非缺陷）
 - [ ] 平台卸载器彻底清理（终止报告 + 墓地快照 + install/ + 数据 + PATH/快捷方式 + 自校验），幂等
 - [ ] 捆绑 git/gh 生效：干净机器上演化系统的 commit/PR 流程可用
 - [ ] 安装目录零写入（一切可变数据在 `~/.emrg/` 与工作目录 `.emrg/`）
@@ -521,7 +521,7 @@ jobs:
 | 6 | 演化组件验证：`git --version` + `gh --version`（PATH 注入）+ 模板存在（`source/emrg/server/evolution_prompt.md`）+ `python -c "from emrg.skills.loader import ..."`（动态 import） | ⚠️ R68：**完整演化周期依赖 LLM + TUI /trigger（CLI 无 trigger 子命令），CI 无 TTY/无 key 跑不了**——拆为无 LLM 依赖的组件验证；完整周期留本地手动（同冒烟 3/8 降级模式）。⚠️ **R112：断言 `which git`/`which gh` 解析到 `$HOME/.emrg/install/bin/`（显式 PATH 下 install/bin 最前）**——否则可能命中 runner 自带系统 git（/usr/bin/git），"捆绑生效"验证无效 |
 | 7 | **会话内 `python -c "print(1)"`**（验证 §5.2 PATH 注入链路） | ⚠️ R83：bash 工具由 **LLM 生成 tool_calls 才执行**（daemon.py `_run_tool_loop`：LLM 流式 → 解析 tool_calls → 执行）——**无 key 时 CI 无法走完整会话内脚本链路**。CI 降级：用启动脚本同款环境（`PATH=$PREFIX/bin:$PATH PYTHONPATH=$PREFIX/source:$PREFIX/lib` + `PYTHONDONTWRITEBYTECODE=1`）直接跑 `python -c "print(1)"` + `import rich,httpx,yaml,jinja2,websockets`（验证捆绑 python + lib 加载）；**完整"会话内 python"（LLM 发起工具调用）留本地手动**（冒烟 3 同模式） |
 | 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22）。**CI 无显示器（R39）**：Linux runner 无 X server——CI 冒烟 8 降级为 `EMRG.app/Contents/MacOS/EMRG --version` / `emrg-gui.exe --version` 验证入口存在（electron 支持 `--version` 不启窗）；**完整 GUI 冒烟（启窗+首启+聊天）留本地手动**（§1.3 范围已有） |
-| 9 | GUI + TUI 同开同 session | 广播一致 |
+| 9 | GUI + TUI 同开同 session | 广播一致（⚠️ R120：**前提是同一 cwd**——GUI project_dir 设为 TUI 工作目录；冒烟 9 需显式配置同一 projectDir 再验证） |
 | 10 | 平台卸载器（macOS 卸载 app / unins000.exe / Linux `emrg-uninstall`）→ 幂等重跑 → 自校验 | 卸载全流程（⚠️ R57：**不新增 `emrg uninstall` 命令**（§6 决策）——冒烟入口是平台卸载器） |
 | 11 | 安装目录只读验证（POSIX `chmod -w` / **Windows `attrib +R`（⚠️ R117：Windows 无 chmod）** 后全功能跑） | 零写入审计（PYTHONDONTWRITEBYTECODE=1（R61）+ 运行时零 pip（R47）→ 只读成立） |
 | 12 | **离线安装（无网络全程可用）** | R47：安装包自包含、零在线安装；安装 = 文件复制。**⚠️ R96（CI 可执行性）**：GitHub Actions runner 默认联网，模拟离线用 `sudo iptables -A OUTPUT -j REJECT`（Linux runner）或 `unshare -n` 隔离网络 → 跑安装 + 首启 + daemon + 会话（无 LLM 调用）→ 撤销规则；macOS/Windows runner 无 root 用**审计降级**：构建产物检查（无在线安装脚本引用 + lib/ 预装完整 + 冒烟 1/2/4/5 全过）+ 本地断网手动验证留文档 |
