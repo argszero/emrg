@@ -140,7 +140,11 @@ test("ensureConnected: port 文件缺失 → 拉起 daemon（spawn 参数正确 
   };
   await connectClient(client);
   assert.ok(spawnCalls, "startDaemon should be called");
-  assert.ok(spawnCalls.python.endsWith(path.join(".venv", "bin", "python")), `python=${spawnCalls.python}`);
+  // 平台自适应：POSIX = .venv/bin/python，Windows = .venv\Scripts\python.exe
+  const pyPath = process.platform === "win32"
+    ? path.join(".venv", "Scripts", "python.exe")
+    : path.join(".venv", "bin", "python");
+  assert.ok(spawnCalls.python.endsWith(pyPath), `python=${spawnCalls.python} (expected ${pyPath})`);
   assert.strictEqual(spawnCalls.projectDir, tmpHome);
 });
 
