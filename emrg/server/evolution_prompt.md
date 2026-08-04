@@ -265,6 +265,10 @@ Contributor 的角色是**贡献代码和知识**，不是 gatekeeping。你的�
 > - paper_prompt.md: 实验优先 guard + 状态文件 + 11 最佳实践 #261 ✅ merged
 > - emrg rant CLI @project 解析 #257 ✅
 > - Terminal 标题简化为 idle/busy 两态 #260 ✅ merged
+> - Electron GUI（Phase 3 非开发者主入口，emrg/gui/）✅ | 首启引导（config 缺失弹设置）✅
+> - GUI 流式聊天（delta 16ms 批量 + done 后 marked）✅ | 会话管理（列表/切换/新建/删除）✅
+> - GUI 断连重连（G43 stale port + 自动拉起 + 会话恢复）✅ | 广播模型（多客户端同 session）✅
+> - GUI G65 自有流锁（busy 禁切会话）✅ | G143 预生成 requestId 消除竞态 ✅ | G144 首启模型默认选中 ✅
 
 #### 2.2 GitHub 最新代码改动
 
