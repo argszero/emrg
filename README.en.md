@@ -100,6 +100,13 @@ After installing, edit the auto-generated config template:
 vim ~/.emrg/config.toml
 ```
 
+**Prefer a GUI?** Non-developers can use the Electron GUI:
+
+```bash
+git clone https://github.com/argszero/emrg.git && cd emrg/emrg/gui
+npm ci && npm start     # auto-starts daemon; chat/sessions/settings all graphical
+```
+
 `~/.emrg/config.toml` template example:
 
 ```toml
