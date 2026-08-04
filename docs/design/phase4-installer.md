@@ -85,6 +85,8 @@
 │   ├── emrg                     # 启动脚本：exec python -m emrg（R13：-m 包入口 + PYTHONPATH=source:lib）
 │   ├── emrgd                    # 启动脚本：exec python -m emrg.server（同 R13）
 │   └── gh                       # 捆绑 gh CLI（官方单文件二进制）
+│   # ⚠️ R113（Windows 命名）：以上均为 POSIX 名；Windows 实际为 emrg.cmd / emrgd.cmd（R35，
+│   #   spawn 需 .cmd 扩展）/ python.exe / gh.exe / git 在 install/git/（R60）
 ├── git/                         # ⚠️ R60：捆绑 git（Windows: Git for Windows portable 整目录——
 │   │                            #     cmd/ + bin/ + mingw64/ + libexec/；macOS/Linux: 单二进制直接放 bin/）
 │   ├── cmd/git.exe
@@ -505,6 +507,8 @@ jobs:
 
 **环境隔离（R42）**：`smoke-test.sh` 用**临时 HOME**（`HOME=$(mktemp -d)`，对齐 G73 集成测试隔离方案）跑全部用例——本地跑不污染真实 `~/.emrg`，CI 容器天然隔离。跑完清理临时 HOME。**产物选择（R83d）**：Linux CI 冒烟用 **tarball 兜底产物**（AppImage 运行需 FUSE/图形环境，CI 无）——解压 tarball 到临时 HOME 模拟"安装"；AppImage 自解压路径由本地手动验证。
 
+**⚠️ R111（PATH 显式注入）**：临时 HOME 的 shell rc 为空——安装器写的 PATH（§6.2 第 5 步 shell rc）**不会生效**——冒烟脚本必须**显式 `export PATH="$HOME/.emrg/install/bin:$PATH"`**（或直接调用 `$HOME/.emrg/install/bin/emrg` 绝对路径），不能依赖安装器写的 PATH。冒烟 7 的 PYTHONPATH 同理显式设置（启动脚本同款）。
+
 **单测补充（R20+R24）**：`daemon_client.test.js` 新增打包分支用例——`new DaemonClient({ projectDir, isPackaged: true })` → `_findDaemonExecutable()` 返回 `~/.emrg/install/bin/emrgd`（R22 安装目录路径）→ 断言 startDaemon spawn 该路径（无 `-m` 参数）；现有用例不传 isPackaged → 源码模式（向后兼容已验证）。
 
 | # | 用例 | 验证点 |
@@ -514,7 +518,7 @@ jobs:
 | 3 | 聊天 + 工具调用 + 会话持久化 | 核心链路（⚠️ R79：聊天需要**真 API key + 网络**——CI 无 key 且冒烟 12 离线场景矛盾 → **CI 降级为无 LLM 核心链路**：daemon 起 + 协议连接 + 会话文件持久化写入；**完整聊天（LLM 交互）留本地手动**） |
 | 4 | `emrg server stop` | daemon 生命周期（⚠️ R107b：依赖冒烟 2 的 daemon 已起（**R109 后台跑**）——顺序执行；停完 daemon 后冒烟 5 rant 需重新起 daemon 或调整顺序：建议 2→4→5→（2 重起）→... 或 2→5→4） |
 | 5 | `emrg rant "test"` | rant 链路（⚠️ **R107：`_send_rant` 依赖 daemon**（`__main__.py:231` 起）——`connect_to_server()` 连不上打印 "daemon not running" 并返回，rant 消息经 daemon 写 `~/.emrg/rants.jsonl` → **冒烟 5 须在冒烟 2 的 daemon 运行后执行**（顺序依赖）；CI 冒烟脚本内先起 daemon 再 rant） |
-| 6 | 演化组件验证：`git --version` + `gh --version`（PATH 注入）+ 模板存在（`source/emrg/server/evolution_prompt.md`）+ `python -c "from emrg.skills.loader import ..."`（动态 import） | ⚠️ R68：**完整演化周期依赖 LLM + TUI /trigger（CLI 无 trigger 子命令），CI 无 TTY/无 key 跑不了**——拆为无 LLM 依赖的组件验证；完整周期留本地手动（同冒烟 3/8 降级模式） |
+| 6 | 演化组件验证：`git --version` + `gh --version`（PATH 注入）+ 模板存在（`source/emrg/server/evolution_prompt.md`）+ `python -c "from emrg.skills.loader import ..."`（动态 import） | ⚠️ R68：**完整演化周期依赖 LLM + TUI /trigger（CLI 无 trigger 子命令），CI 无 TTY/无 key 跑不了**——拆为无 LLM 依赖的组件验证；完整周期留本地手动（同冒烟 3/8 降级模式）。⚠️ **R112：断言 `which git`/`which gh` 解析到 `$HOME/.emrg/install/bin/`（显式 PATH 下 install/bin 最前）**——否则可能命中 runner 自带系统 git（/usr/bin/git），"捆绑生效"验证无效 |
 | 7 | **会话内 `python -c "print(1)"`**（验证 §5.2 PATH 注入链路） | ⚠️ R83：bash 工具由 **LLM 生成 tool_calls 才执行**（daemon.py `_run_tool_loop`：LLM 流式 → 解析 tool_calls → 执行）——**无 key 时 CI 无法走完整会话内脚本链路**。CI 降级：用启动脚本同款环境（`PATH=$PREFIX/bin:$PATH PYTHONPATH=$PREFIX/source:$PREFIX/lib` + `PYTHONDONTWRITEBYTECODE=1`）直接跑 `python -c "print(1)"` + `import rich,httpx,yaml,jinja2,websockets`（验证捆绑 python + lib 加载）；**完整"会话内 python"（LLM 发起工具调用）留本地手动**（冒烟 3 同模式） |
 | 8 | `emrg-gui` 启动 → 连接 daemon → 首启引导 | GUI 打包 + spawn ~/.emrg/install/bin/emrgd（R22）。**CI 无显示器（R39）**：Linux runner 无 X server——CI 冒烟 8 降级为 `EMRG.app/Contents/MacOS/EMRG --version` / `emrg-gui.exe --version` 验证入口存在（electron 支持 `--version` 不启窗）；**完整 GUI 冒烟（启窗+首启+聊天）留本地手动**（§1.3 范围已有） |
 | 9 | GUI + TUI 同开同 session | 广播一致 |
@@ -565,7 +569,7 @@ jobs:
 - [ ] `packaging/bundle-git-gh.sh`（git/gh 捆绑 → dist/runtime/bin/）
 - [ ] `packaging/make-installer.sh`（pkgbuild / Inno Setup / AppImage + tarball 兜底；**第一步停 daemon（R70）**；**含平台卸载器 §6：终止报告 + 墓地快照 + 清理 + 自校验**）
 - [ ] `packaging/smoke-test.sh`（§9 清单 12 项）
-- [ ] `packaging/requirements.lock`（依赖版本锁定，R47：构建期 pip --target 预装，无需 wheels 目录）
+- [ ] `packaging/requirements.lock`（依赖版本锁定，R47：构建期 pip --target 预装，无需 wheels 目录；**⚠️ R100：按平台段生成**——`requirements-<platform>.lock` 各平台各锁，C 扩展 wheel 平台相关，勿单一锁）
 
 **CI**：
 - [ ] `.github/workflows/build-release.yml`（§8，tag v* 触发）
