@@ -1,6 +1,9 @@
 """Tests for the bash tool."""
 
 import asyncio
+import sys
+
+import pytest
 
 from emrg.tools.bash_tool import BashTool
 
@@ -39,6 +42,7 @@ def test_bash_simple_echo():
     assert "hello" in result.content
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="cmd.exe error message differs")
 def test_bash_command_not_found():
     """Shell reports 'command not found' on stderr."""
     tool = BashTool()

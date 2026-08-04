@@ -1,6 +1,7 @@
 """Tests for the grep tool."""
 
 import asyncio
+import sys
 import tempfile
 from pathlib import Path
 
@@ -34,6 +35,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="path separator differs (\\ vs /)")
 def test_grep_simple(temp_cwd):
     tool = GrepTool()
     result = _run(tool.execute({"pattern": "import", "path": str(temp_cwd)}))

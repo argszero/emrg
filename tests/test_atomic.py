@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
+
+import pytest
 from pathlib import Path
 
 import yaml
@@ -76,6 +79,7 @@ def test_atomic_write_bytes_basic(tmp_path: Path):
     assert target.read_text(encoding="utf-8") == "49152\ns3cret-token"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 0600 semantics differ on Windows")
 def test_atomic_write_bytes_mode_600(tmp_path: Path):
     """Writes with mode 0o600 by default (token file must be private)."""
     target = tmp_path / "emrgd.port"
