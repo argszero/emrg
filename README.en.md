@@ -34,6 +34,7 @@ EMRG is an experiment in *autonomous self-improvement*. It's an AI agent that he
 | 🔄 **Gets better on its own** | Background evolution cycles review rants + GitHub + competitor tools, then auto-PR improvements |
 | 📝 **Never forgets** | Project memory + session memory + daily logs — context that persists |
 | 🖥️ **Beautiful TUI** | Slash-command autocomplete, session picker, streaming markdown, elapsed timer, ESC interrupt |
+| 🖱️ **Electron GUI (new)** | Non-developer entry point — chat/sessions/tool status/settings, auto-starts daemon, `npm start` to launch |
 | ⚡ **Parallel tools** | Independent tool calls run concurrently for speed |
 | 🔌 **Micro-kernel daemon** | `emrgd` runs persistently — reconnect anytime without losing state |
 | 🎮 **Vim-friendly** | `j`/`k` navigation, `Ctrl+W`/`Ctrl+K` editing, `Tab` to expand tool cards |
