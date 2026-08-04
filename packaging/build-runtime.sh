@@ -38,8 +38,16 @@ cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
 # ── 2. bin/python 软链（R82：相对软链；python-dist 与软链同在 bin/ 下）──
 (
   cd "$DIST/bin"
-  ln -sfn python-dist/bin/python3.13 python
-  ln -sfn python-dist/bin/python3.13 python3
+  if [ "$(uname -s | tr '[:upper:]' '[:lower:]')" = "windows" ] || [ -f python-dist/bin/python3.13.exe ]; then
+    # Windows：Git Bash 的 ln -s 需管理员权限（软链创建失败）→ 用复制替代
+    # （python3.13.exe 在 python-dist 根或 bin/，跨版本差异兜底）
+    PYEXE="$(ls python-dist/bin/python3.13.exe python-dist/python3.13.exe 2>/dev/null | head -1)"
+    cp "$PYEXE" python.exe
+    cp "$PYEXE" python3.exe
+  else
+    ln -sfn python-dist/bin/python3.13 python
+    ln -sfn python-dist/bin/python3.13 python3
+  fi
   cp "$ROOT/bin/emrg" emrg
   cp "$ROOT/bin/emrgd" emrgd
   cp "$ROOT/bin/emrg.cmd" emrg.cmd 2>/dev/null || true
