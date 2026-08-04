@@ -17,7 +17,7 @@
 |------|----------|----------|----------|
 | macOS | `EMRG-<ver>.pkg` | 双击 → 安装向导 → 完成；启动台出现 `EMRG.app`；终端可用 `emrg` | `~/.emrg/install/`（用户级，免 sudo）+ PATH |
 | Windows | `EMRG-Setup-<ver>.exe` | 双击 → 安装向导 → 完成；开始菜单出现 `EMRG` 快捷方式；终端可用 `emrg` | `%LOCALAPPDATA%\EMRG\` + PATH |
-| Linux | `EMRG-<ver>-linux-<arch>.AppImage` | 下载 → chmod +x → 双击运行（GUI）；首次运行建 `~/.local/bin/emrg` 符号链接 | 单文件 + `~/.local/bin` |
+| Linux | `EMRG-<ver>-linux-<arch>.AppImage` | 下载 → chmod +x → 双击运行（GUI）；**首次运行自解压到 `~/.emrg/install/` + 建 `~/.local/bin/emrg` 启动器** | 单文件 + `~/.local/bin` |
 
 ### 1.2 验收标准（全部一次满足）
 
@@ -127,16 +127,18 @@ rich>=13.0.0 / httpx>=0.27.0 / pyyaml>=6.0 / jinja2>=3.0 / websockets>=17.0.1
 
 安装器（或首次运行脚本）执行：
 ```
-"$PREFIX/bin/python" -m pip install --no-deps --target "$PREFIX/lib" \
+"$PREFIX/bin/python" -m pip install --target "$PREFIX/lib" \
     rich httpx pyyaml jinja2 websockets
 ```
+- **⚠️ 必须全量装（含传递依赖），禁用 `--no-deps`**（R3 实测：httpx→httpcore/h11/certifi、rich→markdown-it-py/pygments、jinja2→markupsafe 都是必需的——`--no-deps` 后 `import httpx` 直接失败）
 - `--target lib/`：装到安装目录（只读）
 - **PYTHONPATH 注入**：emrg 启动脚本 `export PYTHONPATH="$PREFIX/lib"`（与 PATH 并列）——daemon 与 TUI 都从 lib/ 加载依赖
 - **pip 本身**：standalone python 自带（无需额外捆绑）
+- **C 扩展**：pyyaml 的 `_yaml.so` 经 PYTHONPATH 正常加载（R1/R2 实测通过）
 
 ### 3.3 依赖收集（CI 构建期）
 
-CI 用 `uv pip compile` 或直接 `pip download` 锁定版本 → 生成 `packaging/requirements.lock`（含 wheel 哈希）→ 安装器据此下载/预装。**离线安装**：构建期把 wheels 打进安装包 `wheels/` 目录，安装器 `pip install --no-index --find-links`（干净机器无网也可装——与"双击安装即完整"一致）。
+CI 用 `uv pip compile` 或直接 `pip download` 锁定版本 → 生成 `packaging/requirements.lock`（**含全部传递依赖**）→ 安装器据此下载/预装。**离线安装**：构建期把 wheels（含传递依赖）打进安装包 `wheels/` 目录，安装器 `pip install --no-index --find-links`（干净机器无网也可装——与"双击安装即完整"一致）。
 
 ---
 
@@ -172,13 +174,19 @@ dist/runtime/
 
 **GUI spawn emrgd（daemon_client.js 改造）**：
 ```javascript
+// ⚠️ daemon_client.js 是纯 Node 模块（无 electron import，G99 单测依赖此）
+// isPackaged 由 main.js 传入（main.js 已持有 app，main.js:8）
+// main.js 创建处（main.js:338）：client = new DaemonClient({ projectDir, logger, isPackaged: app.isPackaged })
+
+// daemon_client.js 内：
 _findDaemonExecutable() {
-  if (app.isPackaged) {
-    return path.join(process.resourcesPath, "emrgd");  // 启动脚本（方案 C，非 PyInstaller 二进制）
+  if (this.isPackaged) {           // 由 main.js 注入
+    return path.join(process.resourcesPath, "emrgd");  // 启动脚本（方案 C）
   }
   return null;  // 源码模式走 _findPython()
 }
-// startDaemon()：打包模式 spawn 启动脚本（它内部 exec python + 设 PATH/PYTHONPATH）
+// startDaemon()：打包模式 spawn 启动脚本（无参数，脚本内部 exec python + 设 PATH/PYTHONPATH）
+//               源码模式保持现状（.venv python -m emrg.server）
 ```
 - 启动脚本自行定位 python/source/lib，GUI 只需 spawn 它
 - cwd=projectDir（G125）/ stdio ignore（G68）/ detached / unref 选项不变
@@ -212,11 +220,16 @@ cd emrg/gui && npm run dist   # extraResources 复制 dist/runtime/ → resource
 - **git**：`["git", ...]` 裸调用自动命中捆绑 git（scheduler.py:164 / git_utils.py:15 / __main__.py:325 无需改——PATH 优先）
 - **gh**：`which gh` 命中捆绑 gh
 
+**⚠️ AppImage 特例（R8 实测分析）**：
+- AppImage 运行 = 挂载到 `/tmp/.mount_XXXX`（**每次随机**）→ 启动脚本的 PATH 注入指向**临时挂载目录**——运行期间可用，但：
+  - `~/.local/bin/emrg` **不能是符号链接**（挂载路径每次变）→ 必须是**启动器脚本**：`exec <AppImage绝对路径>`（首次运行时把 AppImage 绝对路径写入启动器）
+  - **长期进程（daemon 由 GUI 拉起）** 的 PATH 注入在 AppImage 退出后失效 → **首次运行必须把 python/git/gh 复制到 `~/.emrg/install/bin/`**（数据目录可写），启动器 exec AppImage 前先确保复制完成
+- 因此 AppImage 的**首次运行自解压**是必须的：`bin/python`/`bin/git`/`bin/gh` → `~/.emrg/install/bin/`，source/lib → `~/.emrg/install/`（与 pkg/exe 安装后的布局一致）——**AppImage 实际是"自解压安装器"**，之后 PATH 注入走 `~/.emrg/install/bin/`（稳定路径，非临时挂载）
+
 **`resolve_git_gh()` 解析器（保留为兜底）**：
-- 场景：AppImage 挂载临时目录（`install/bin` 不在 PATH 的极端情况）、用户自定义
+- 场景：安装不完整、用户自定义
 - 实现：`~/.emrg/install/bin` 存在则优先，否则 `shutil.which()`；缓存 `~/.emrg/install-info.json`
 - 模板注入 `{{ git_path }}`/`{{ gh_path }}`（scheduler `_build_evolution_prompt` context 加两键；jinja2.Undefined 已容忍缺失，无回归）
-- **AppImage 特例**：首次运行把 AppImage 内 `bin/git`/`bin/gh` 复制到 `~/.emrg/install/bin/`（数据目录可写）→ 之后走捆绑版
 - gh 认证仍由用户 `gh auth login`（OAuth 不可自动化）
 
 ---
@@ -252,7 +265,11 @@ cd emrg/gui && npm run dist   # extraResources 复制 dist/runtime/ → resource
 **边界**：
 - 宿主工作目录 `.emrg/`（项目会话/记忆副本）**不删除**——卸载报告列出位置
 - 幂等：重复执行不报错，未找到项跳过
-- 平台卸载器的实现载体：macOS 用 pkg 的 `postinstall` 脚本反向逻辑或独立卸载 app；Windows 用 Inno Setup 卸载段；Linux 无（删文件即卸载）
+- **平台卸载器的实现载体（R10 核查）**：
+  - 卸载器先执行**内置 python 脚本**（install/ 未删时 python 可用）——脚本做：停 daemon（走 shutdown 协议，`import emrg.connect` 或读 port 文件发 ws 消息；Windows 兜底 `taskkill`）→ 终止报告 → 墓地快照（tar 打包记忆/会话/演化日志）
+  - 再删 install/（卸载器原生删除，此时 python 已退出无锁）
+  - 最后清 PATH/快捷方式 + 自校验
+  - macOS：pkg 卸载器（postinstall 反向脚本）；Windows：Inno Setup 卸载段（`[UninstallRun]` 跑 python 脚本 + 原生删目录）；Linux：删 AppImage 文件即卸载（tarball 删解压目录）
 
 ---
 
