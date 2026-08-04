@@ -207,7 +207,7 @@ uv python install 3.13                          # standalone python（构建机�
 
 ### 3.3 依赖锁定与跨平台（构建期）
 
-CI 用 `uv pip compile` 生成 `packaging/requirements.lock`（**含全部传递依赖**）→ build-runtime.sh 据此 `pip install --target`。**跨平台**：CI matrix 各平台各装各架构的 wheels（同架构构建，R11）——无需 wheels/ 目录（lib/ 已预装，不需要目标机跑 pip）。requirements.lock 提交 git 保证可复现。
+CI 用 `uv pip compile` 生成 `packaging/requirements.lock`（**含全部传递依赖**）→ build-runtime.sh 据此 `pip install --target`。**跨平台**：CI matrix 各平台各装各架构的 wheels（同架构构建，R11）——无需 wheels/ 目录（lib/ 已预装，不需要目标机跑 pip）。**⚠️ R100：requirements.lock 按平台段生成**（`uv pip compile --python-platform <platform>` 各平台各锁——x86_64/aarch64 linux、macos arm64、windows x64；C 扩展 wheel 平台相关，单一锁会解析错）。requirements.lock 提交 git 保证可复现。
 
 ### 3.4 预打包 vs 首次启动清单（R47，明确边界）
 
@@ -436,10 +436,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: macos-15        # arm64
-          - os: ubuntu-24.04    # x86_64
-          - os: ubuntu-24.04-arm  # aarch64（AppImage）
-          - os: windows-2025    # x64
+          - os: macos-15        # arm64 → macOS arm64 .pkg
+          - os: ubuntu-24.04    # x86_64 → x86_64 AppImage + tar.gz
+          - os: ubuntu-24.04-arm  # aarch64 → arm64 AppImage（electron-builder aarch64 AppImage 支持，appimagetool 自带）
+          - os: windows-2025    # x64 → Inno Setup .exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -452,6 +452,10 @@ jobs:
       - run: uv python install 3.13         # standalone python → 缓存
       - run: bash packaging/build-runtime.sh ${{ matrix.os }}
         # → dist/runtime/：python 整目录 + source/ + lib/（构建期 pip --target 装好，R47）+ bin/emrgd 脚本
+        # ⚠️ R100：aarch64（ubuntu-24.04-arm）C 扩展依赖（pyyaml/markupsafe）有 aarch64 manylinux wheel
+        #   （uv pip compile --python-platform aarch64-unknown-linux-gnu 实测解析 OK）——requirements.lock
+        #   需按平台段生成（--python-platform 各平台各锁），lib/ 各架构装各架构 wheel；uv standalone python
+        #   支持 aarch64-linux（uv python install 3.13 在 arm runner 拉 arm build）
       - run: cd emrg/gui && npm ci && npm test   # GUI 单测
       - run: cd emrg/gui && npm run dist         # electron-builder（R22：只打包 GUI 本体，无 runtime 依赖）
       - run: bash packaging/bundle-git-gh.sh ${{ matrix.os }}   # git/gh → dist/runtime/bin/
@@ -492,7 +496,7 @@ jobs:
 
 | # | 用例 | 验证点 |
 |---|------|--------|
-| 1 | `emrg --version` | 启动脚本 + python + lib 链路 |
+| 1 | `emrg --version` | 启动脚本 + python + lib 链路（⚠️ R98：`emrg --version` 走 argparse 不进 TUI（`__main__.py:42`）——**R62 的 TUI 占位 api_key 提示在无参 TUI 路径**，CI 无 TTY 无法覆盖 → 冒烟加 CLI 可测判定：`emrg` 无参在无 TTY 下退出并打印提示（占位 key 检测逻辑可单测）或标注留本地手动） |
 | 2 | **前置：写最小 config.toml（占位 key）→** `bin/emrgd` 拉起 daemon（→ port 文件 → auth_ok → pong） | 双入口 + PATH/PYTHONPATH（⚠️ R63：`emrg` 是 TUI，CI 无 TTY 会卡/报错——TUI 交互留本地手动；⚠️ **R78：daemon 顶层 `load_config()` 在 config 缺失时抛 FileNotFoundError（config.py:60-63）直接崩——daemon 不调 ensure_config（只有 CLI 客户端调）→ 冒烟 2 必须先造 config.toml**；daemon 拉起用 §R43 实证的协议验证链路） |
 | 3 | 聊天 + 工具调用 + 会话持久化 | 核心链路（⚠️ R79：聊天需要**真 API key + 网络**——CI 无 key 且冒烟 12 离线场景矛盾 → **CI 降级为无 LLM 核心链路**：daemon 起 + 协议连接 + 会话文件持久化写入；**完整聊天（LLM 交互）留本地手动**） |
 | 4 | `emrg server stop` | daemon 生命周期 |
