@@ -37,7 +37,7 @@ jobs:
             artifact: EMRG-*-windows-x64.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup uv (Python 3.13)
         uses: astral-sh/setup-uv@v5
@@ -45,7 +45,7 @@ jobs:
           python-version: "3.13"
 
       - name: Setup Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
 
@@ -111,7 +111,7 @@ jobs:
 
       # ── 产物上传 ─────────────────────────────────────────────
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: emrg-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -129,7 +129,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: artifacts
           merge-multiple: true
