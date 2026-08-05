@@ -103,6 +103,46 @@ class TestStartDaemon:
 
         asyncio.run(_run())
 
+    @patch("emrg.client.daemon_manager.is_running", return_value=False)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.asyncio.create_subprocess_exec",
+           new_callable=AsyncMock)
+    def test_timeout_appends_log_tail(self, mock_spawn, mock_cleanup, mock_is_running):
+        """R124: 超时错误附带 emrgd.log 尾部真实原因（stderr 被 DEVNULL 丢弃）。"""
+        tmp = Path(tempfile.mkdtemp())
+        emrg_dir = tmp / ".emrg"
+        emrg_dir.mkdir()
+        (emrg_dir / "emrgd.log").write_text(
+            "12:00:01 [ERROR] emrg.config: vision = trues 解析失败\n"
+            "12:00:02 [ERROR] emrg.server: config load failed\n",
+            encoding="utf-8",
+        )
+        mock_spawn.return_value = MagicMock(pid=1234)
+
+        async def _run():
+            with pytest.raises(RuntimeError) as exc_info:
+                await daemon_manager.start_daemon()
+            assert "failed to start" in str(exc_info.value)
+            assert "vision = trues" in str(exc_info.value)
+            assert "config load failed" in str(exc_info.value)
+
+        with patch("emrg.client.daemon_manager.Path.home",
+                   return_value=tmp):
+            asyncio.run(_run())
+
+    def test_tail_daemon_log_no_file(self):
+        tmp = Path(tempfile.mkdtemp())
+        result = daemon_manager._tail_daemon_log(tmp / "missing.log")
+        assert result == "no emrgd.log"
+
+    def test_tail_daemon_log_reads_tail(self):
+        tmp = Path(tempfile.mkdtemp())
+        log = tmp / "emrgd.log"
+        log.write_text("\n".join(f"line {i}" for i in range(30)), encoding="utf-8")
+        result = daemon_manager._tail_daemon_log(log, max_lines=5)
+        assert "line 29" in result
+        assert "line 0" not in result  # 只读尾部
+
 
 # ── check_and_restart_if_stale ───────────────────────────────
 

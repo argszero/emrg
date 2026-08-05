@@ -67,6 +67,24 @@ def is_running() -> bool:
     return is_server_running_sync()
 
 
+def _tail_daemon_log(log_path: Path | None = None, max_lines: int = 20) -> str:
+    """Return the tail of ~/.emrg/emrgd.log (best-effort).
+
+    Used when the daemon fails to start within the timeout: stderr is
+    DEVNULL, so the RotatingFileHandler log (~/.emrg/emrgd.log) is the only
+    place the real failure reason survives (rant 2026-08-05T15:54:28 关联项 —
+    config.toml 解析错误等曾只显示 "failed to start within timeout").
+    """
+    try:
+        log_file = log_path or (Path.home() / ".emrg" / "emrgd.log")
+        if not log_file.exists():
+            return "no emrgd.log"
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        return " | ".join(lines[-max_lines:]) or "empty emrgd.log"
+    except OSError as e:
+        return f"cannot read emrgd.log: {e}"
+
+
 async def start_daemon() -> subprocess.Popen:
     """Start emrgd in the background and wait until it accepts connections."""
     logger.info("starting emrgd daemon...")
@@ -80,7 +98,8 @@ async def start_daemon() -> subprocess.Popen:
         if is_running():
             logger.info("emrgd started (pid=%d)", proc.pid)
             return proc
-    raise RuntimeError("emrgd failed to start within timeout")
+    # R124: 附加 daemon 日志尾部真实原因（stderr 被 DEVNULL 丢弃，日志是唯一线索）
+    raise RuntimeError(f"emrgd failed to start within timeout: {_tail_daemon_log()}")
 
 
 async def check_and_restart_if_stale() -> None:
