@@ -173,12 +173,34 @@ const App = (() => {
 
   // ── 右键菜单（重命名 / 删除） ───────────
   function showConvMenu(item, sid, title) {
-    // 简单版：确认删除（P3 完善重命名）。右键菜单容器复用 conv-item 定位。
-    Dialogs.showConfirm(EMRG_Copy.COPY.deleteConfirmTitle, EMRG_Copy.COPY.deleteConfirmBody, {
+    // 设计 §3.2：右键菜单 = 重命名 / 删除（删除有友好确认）
+    const menu = $("ctx-menu");
+    menu.innerHTML = "";
+    const mk = (label, danger, action) => {
+      const b = el("button", { class: "ctx-item" + (danger ? " danger" : "") }, label);
+      b.addEventListener("click", () => {
+        hideCtxMenu();
+        action();
+      });
+      menu.appendChild(b);
+    };
+    mk("✏️ 重命名", false, () => Dialogs.showRename(sid, title));
+    mk("🗑 删除对话", true, () => Dialogs.showConfirm(EMRG_Copy.COPY.deleteConfirmTitle, EMRG_Copy.COPY.deleteConfirmBody, {
       okText: "删除",
       danger: true,
       onOk: () => deleteSession(sid),
-    });
+    }));
+    menu.hidden = false;
+    // 定位在右键处，超出视口则上移/左移
+    const rect = item.getBoundingClientRect();
+    menu.style.left = Math.min(rect.right, window.innerWidth - 160) + "px";
+    menu.style.top = Math.min(rect.bottom, window.innerHeight - 80) + "px";
+  }
+
+  function hideCtxMenu() {
+    const menu = $("ctx-menu");
+    menu.hidden = true;
+    menu.innerHTML = "";
   }
 
   // ── 模型切换器 ─────────────────────────
@@ -439,6 +461,11 @@ const App = (() => {
       input.style.height = Math.min(input.scrollHeight, 150) + "px";
     });
 
+    // 右键菜单：点击别处隐藏（showConvMenu 内已绑定选项点击）
+    document.addEventListener("click", (e) => {
+      if (!$("ctx-menu").hidden && !e.target.closest("#ctx-menu")) hideCtxMenu();
+    });
+
     // 快捷键：⌘N 新对话 / ⌘B 折叠侧边栏 / ⌘, 设置 / ESC 停止或关弹窗
     document.addEventListener("keydown", (e) => {
       if (e.metaKey || e.ctrlKey) {
@@ -455,6 +482,7 @@ const App = (() => {
         return;
       }
       if (e.key === "Escape") {
+        hideCtxMenu(); // 右键菜单优先关闭
         const dlgs = document.querySelectorAll("dialog[open]");
         if (dlgs.length) return; // dialog 原生 ESC 处理
         if (state.busy) {
@@ -466,6 +494,7 @@ const App = (() => {
 
     Dialogs.initThemeButtons();
     Dialogs.initModelForm();
+    Dialogs.initRenameDialog();
     initModelSwitcher();
   }
 

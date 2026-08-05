@@ -55,6 +55,7 @@ function makeEl(id) {
     insertBefore(c) { this.children.unshift(c); return c; },
     remove() {},
     focus() {},
+    select() {},
   };
   return node;
 }
@@ -66,6 +67,7 @@ const ELEMENT_IDS = [
   "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
   "welcome-model", "welcome-project-dir", "welcome-pick-btn", "welcome-save", "confirm-dialog",
   "confirm-title", "confirm-message", "confirm-cancel", "confirm-ok", "main",
+  "rename-dialog", "rename-input", "rename-cancel", "rename-ok", "ctx-menu",
   "model-list", "add-model-btn", "model-form", "model-form-name", "model-form-id",
   "model-form-vision", "model-form-save", "model-form-cancel", "back-to-bottom",
 ];
@@ -233,4 +235,39 @@ test("多模型管理：modelDetails 加载渲染 + saveSettings 传 models 数�
   assert.strictEqual(saved.models.length, 2, "models 数组含默认 + gpt-4o");
   const gpt = saved.models.find((m) => m.name === "gpt-4o");
   assert.strictEqual(gpt.vision, true);
+});
+
+test("右键菜单：重命名对话框 → renameSession 调用（设计 §3.2）", async () => {
+  let renamed = null;
+  const { ctx, els } = makeSandbox({
+    renameSession: async (payload) => {
+      renamed = payload;
+      return { ok: true, title: payload.title };
+    },
+    listSessions: async () => [
+      { session_id: "s1", title: "旧标题", created_at: "2026-08-06T00:00:00" },
+    ],
+  });
+  // 模拟 App.showConvMenu（右键菜单构建）
+  await tick();
+  vm.runInContext('App.showConvMenu({ getBoundingClientRect: () => ({ right: 100, bottom: 100 }) }, "s1", "旧标题")', ctx);
+  const menu = els["ctx-menu"];
+  assert.strictEqual(menu.hidden, false, "右键菜单应显示");
+  assert.ok(menu.children.length >= 2, "菜单应有 重命名 + 删除 两项");
+  const labels = menu.children.map((c) => c.textContent);
+  assert.ok(labels.some((l) => l.includes("重命名")), `菜单应含重命名，实际 ${labels}`);
+  assert.ok(labels.some((l) => l.includes("删除")), `菜单应含删除，实际 ${labels}`);
+
+  // 点击重命名 → 对话框打开
+  await vm.runInContext('Dialogs.showRename("s1", "旧标题")', ctx);
+  assert.strictEqual(els["rename-dialog"].open, true, "重命名对话框应打开");
+  assert.strictEqual(els["rename-input"].value, "旧标题", "输入框预填当前标题");
+
+  // 提交新标题 → renameSession 调用
+  els["rename-input"].value = "新标题";
+  await vm.runInContext("Dialogs.submitRename()", ctx);
+  await tick();
+  assert.ok(renamed, "renameSession 应被调用");
+  assert.strictEqual(renamed.sessionId, "s1");
+  assert.strictEqual(renamed.title, "新标题");
 });

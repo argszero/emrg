@@ -13,6 +13,7 @@ const api = {
   switchSession: (payload) => ipcRenderer.invoke("emrg:switchSession", payload),
   newSession: () => ipcRenderer.invoke("emrg:newSession"),
   deleteSession: (payload) => ipcRenderer.invoke("emrg:deleteSession", payload),
+  renameSession: (payload) => ipcRenderer.invoke("emrg:renameSession", payload),
   setModel: (payload) => ipcRenderer.invoke("emrg:setModel", payload),
   listModels: () => ipcRenderer.invoke("emrg:listModels"),
   saveSettings: (payload) => ipcRenderer.invoke("emrg:saveSettings", payload),
