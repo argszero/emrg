@@ -190,10 +190,24 @@ vision = false
   }
 
   function validateConfig(c) {
-    const allowed = ["apiKey", "baseUrl", "model", "projectDir"];
+    // 设计 §7.1：直接接收所需字段 + 基本类型检查（防写坏 config.toml 的健壮性，非安全设计）
     const out = {};
-    for (const k of allowed) {
-      if (k in c) out[k] = typeof c[k] === "string" ? c[k] : String(c[k]);
+    for (const k of ["apiKey", "baseUrl", "model", "projectDir", "theme"]) {
+      if (c[k] !== undefined) out[k] = typeof c[k] === "string" ? c[k] : String(c[k]);
+    }
+    if (Array.isArray(c.models)) {
+      // models: [{name, model?, vision?}] → 写 [[llm.models]]（name 必填）
+      out.models = c.models
+        .filter((m) => m && typeof m === "object")
+        .map((m) => {
+          const name = String(m.name || "").trim();
+          if (!name) return null;
+          const item = { name };
+          if (m.model && String(m.model).trim() && String(m.model).trim() !== name) item.model = String(m.model).trim();
+          if (m.vision !== undefined) item.vision = Boolean(m.vision);
+          return item;
+        })
+        .filter(Boolean);
     }
     return out;
   }
@@ -289,6 +303,14 @@ vision = false
       return { ok: true };
     });
 
+    ipcMain.handle("emrg:renameSession", async (_e, { sessionId, title }) => {
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      const clean = String(title || "").trim().slice(0, 80); // 截断超长标题
+      if (!clean) throw new Error("empty title");
+      const frame = await client.sendCommandAndWait("rename_session", { session_id: sessionId, cwd: projectDir, title: clean }, 5000);
+      return { ok: true, title: frame.title || clean };
+    });
+
     ipcMain.handle("emrg:newSession", async () => {
       // G14/G81：本地生成 session_id（无 new_session 消息）
       const sid = generateSessionId();
@@ -312,13 +334,21 @@ vision = false
       const cfg = readConfig();
       const key = cfg.llm?.api_key || "";
       // G118：占位符返回空串；camelCase 形状
+      // models：name 字符串数组（向后兼容旧 renderer 下拉）；modelDetails：完整对象数组（§7.1 多模型编辑用）
       const models = (cfg.llm?.models || []).map((m) => m.name || m.model);
+      const modelDetails = (cfg.llm?.models || []).map((m) => ({
+        name: m.name || m.model || "",
+        ...(m.model && m.model !== (m.name || "") ? { model: m.model } : {}),
+        ...(m.vision !== undefined ? { vision: m.vision } : {}),
+      }));
       return {
         apiKey: isKeyConfigured(key) ? key : "",
         baseUrl: cfg.llm?.base_url || "",
         model: cfg.llm?.model || "",
         projectDir: cfg.gui?.project_dir || os.homedir(),
         models,
+        modelDetails,
+        theme: cfg.gui?.theme || "system", // §7.1：外观主题持久化（浅色/深色/跟随系统）
       };
     });
 
@@ -342,6 +372,18 @@ vision = false
         toml.gui = toml.gui || {};
         toml.gui.project_dir = cfg.projectDir; // G115：snake_case 落盘
         projectDir = cfg.projectDir;
+      }
+      if (cfg.theme !== undefined) {
+        toml.gui = toml.gui || {};
+        toml.gui.theme = cfg.theme; // §7.1：主题持久化（浅色/深色/跟随系统）
+      }
+      if (cfg.models !== undefined) {
+        // §7.1：多模型保存——合并写 [[llm.models]]（保留已有项的 context_window 等高级字段）
+        const existing = toml.llm.models || [];
+        toml.llm.models = cfg.models.map((item) => {
+          const prev = existing.find((p) => (p.name || p.model) === item.name);
+          return { ...(prev || {}), ...item };
+        });
       }
       writeConfig(toml);
       // 保存后 daemon mtime 检测自动重启（G11）
