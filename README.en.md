@@ -50,7 +50,7 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 
 | Platform | Installer | Notes |
 |----------|-----------|-------|
-| macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | Double-click; GUI at `~/Applications/EMRG.app` |
+| macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | Double-click (user-level install, no admin password); GUI at `~/Applications/EMRG.app` |
 | macOS (Intel) | `EMRG-<ver>-macos-x64.pkg` | Same |
 | Windows | `EMRG-<ver>-windows-x64.exe` | Inno Setup, no UAC, Start-menu shortcut, PATH auto-registered (native TUI: run `emrg` directly in cmd/PowerShell) |
 | Linux | `EMRG-<ver>-linux-x86_64.AppImage` | Self-extracts to `~/.emrg/install/` on first run |

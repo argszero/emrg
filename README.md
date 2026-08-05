@@ -50,7 +50,7 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 
 | 平台 | 安装文件 | 说明 |
 |------|---------|------|
-| macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | 双击安装，GUI 到 `~/Applications/EMRG.app` |
+| macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | 双击安装（用户级，无需管理员密码），GUI 到 `~/Applications/EMRG.app` |
 | macOS (Intel) | `EMRG-<ver>-macos-x64.pkg` | 同上 |
 | Windows | `EMRG-<ver>-windows-x64.exe` | Inno Setup 免 UAC，开始菜单快捷方式，PATH 自动注册（含原生 TUI，cmd/PowerShell 直接 `emrg`） |
 | Linux | `EMRG-<ver>-linux-x86_64.AppImage` | 首次运行自解压到 `~/.emrg/install/` |
