@@ -4,90 +4,171 @@
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
   <title>EMRG</title>
-  <link rel="stylesheet" href="app.css" />
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/components.css" />
+  <link rel="stylesheet" href="css/animations.css" />
   <link rel="stylesheet" href="../vendor/highlight.github-dark.css" />
 </head>
 <body>
   <div id="app">
-    <!-- 会话栏 -->
+    <!-- 左侧边栏 -->
     <aside id="sidebar">
-      <div id="session-list">
-        <div class="session-item placeholder">暂无会话</div>
+      <div class="sidebar-brand">
+        <span class="brand-star" id="brand-star">✦</span>
+        <span>EMRG</span>
       </div>
-      <button id="new-session-btn" title="新建会话">＋ 新建</button>
+      <button id="new-chat-btn" class="new-chat-btn" title="新对话 (⌘N)">＋ 新对话</button>
+      <nav id="conv-list"></nav>
+      <div class="sidebar-footer">
+        <span id="status-dot" class="status-dot gray" title="连接状态"></span>
+        <button id="settings-btn" class="btn btn-ghost" style="margin-left:auto;padding:6px 12px;min-height:30px;">设置</button>
+      </div>
     </aside>
 
-    <!-- 聊天区 -->
+    <!-- 主区 -->
     <main id="main">
+      <!-- 断连横幅 -->
+      <div id="conn-banner" class="hidden"></div>
+
+      <!-- 聊天区 -->
       <div id="chat-view"></div>
-      <div id="composer">
-        <textarea id="input" rows="1" placeholder="输入消息… (Enter 发送 / Shift+Enter 换行)" disabled></textarea>
-        <button id="send-btn" disabled>发送</button>
-        <button id="stop-btn" style="display:none" title="停止响应">⏹</button>
+
+      <!-- 空状态欢迎屏 -->
+      <div id="empty-state" class="hidden">
+        <div class="empty-hello"><span class="brand-star">✦</span> 你好，我是 EMRG</div>
+        <div class="empty-sub">你的 AI 工作伙伴。问我任何事——写东西、整理文件、规划任务，都可以。</div>
+        <div class="example-grid">
+          <button class="example-card" data-example="帮我写一份本周的工作周报">帮我写一份本周的工作周报</button>
+          <button class="example-card" data-example="帮我整理这个文件夹里的文件">帮我整理这个文件夹里的文件</button>
+          <button class="example-card" data-example="帮我规划一次周末旅行">帮我规划一次周末旅行</button>
+        </div>
+      </div>
+
+      <!-- 输入区 -->
+      <div id="composer-wrap">
+        <div class="model-switcher" id="model-switcher" title="切换模型">
+          <span id="model-switcher-label">加载中…</span>
+          <span style="font-size:10px;">⌄</span>
+        </div>
+        <div class="composer-card">
+          <textarea id="input" rows="1" placeholder="发消息给 EMRG… (Enter 发送 / Shift+Enter 换行)" disabled></textarea>
+          <button id="send-btn" class="send-btn" disabled title="发送">↑</button>
+          <button id="stop-btn" class="stop-btn" style="display:none" title="停止回复">■</button>
+        </div>
+        <div class="composer-hint">EMRG 可能会犯错，请核对重要信息</div>
       </div>
     </main>
-
-    <!-- 状态栏 -->
-    <footer id="status-bar">
-      <span id="daemon-dot" class="dot gray" title="daemon 状态"></span>
-      <span id="server-id">—</span>
-      <span id="model-name">—</span>
-      <span id="evolution-count"></span>
-      <span id="project-name"></span>
-      <span class="spacer"></span>
-      <button id="settings-btn">设置</button>
-    </footer>
   </div>
 
   <!-- 设置对话框 -->
   <dialog id="settings-dialog">
-    <form method="dialog" id="settings-form">
+    <div class="dialog-card">
       <h2>设置</h2>
-      <label>API Key <input type="password" id="set-api-key" required /></label>
-      <label>Base URL <input type="text" id="set-base-url" /></label>
-      <label>Model
-        <select id="set-model"></select>
-      </label>
-      <label>项目目录
-        <div class="dir-row">
-          <input type="text" id="set-project-dir" readonly />
-          <button type="button" id="pick-dir-btn">选择…</button>
+      <div class="settings-group">
+        <div class="settings-group-title">模型服务</div>
+        <label>API Key <input type="password" id="set-api-key" /></label>
+        <label>接口地址 <input type="text" id="set-base-url" placeholder="https://api.deepseek.com" /></label>
+        <div class="settings-group-title" style="margin-top:14px;">可用模型</div>
+        <div id="model-list"></div>
+        <button type="button" id="add-model-btn" class="btn btn-ghost" style="width:100%;margin-top:6px;">＋ 添加模型</button>
+        <!-- 行内添加/编辑模型表单 -->
+        <div id="model-form" class="model-form hidden">
+          <div class="model-form-row">
+            <label class="model-form-label">名称
+              <input type="text" id="model-form-name" placeholder="如 deepseek-v3" maxlength="40" />
+            </label>
+            <label class="model-form-label">模型 ID（选填）
+              <input type="text" id="model-form-id" placeholder="默认同名称" maxlength="60" />
+            </label>
+          </div>
+          <div class="model-form-footer">
+            <label class="model-form-vision"><input type="checkbox" id="model-form-vision" /> 支持图片</label>
+            <div style="display:flex;gap:8px;margin-left:auto;">
+              <button type="button" id="model-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;">取消</button>
+              <button type="button" id="model-form-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;">保存模型</button>
+            </div>
+          </div>
         </div>
-      </label>
-      <div class="dialog-actions">
-        <button type="button" id="settings-cancel">取消</button>
-        <button type="submit" id="settings-save">保存</button>
+        <div class="hint" style="margin-top:8px;">点左侧圆点可设为默认模型，切换后下一条消息即生效</div>
       </div>
-    </form>
+      <div class="settings-group">
+        <div class="settings-group-title">工作目录</div>
+        <label>EMRG 在哪里帮你干活
+          <div class="dir-row">
+            <input type="text" id="set-project-dir" readonly />
+            <button type="button" id="pick-dir-btn" class="btn btn-ghost">选择…</button>
+          </div>
+        </label>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">外观</div>
+        <label>主题
+          <div class="theme-options" id="theme-options">
+            <button type="button" class="theme-option" data-theme="light">浅色</button>
+            <button type="button" class="theme-option" data-theme="dark">深色</button>
+            <button type="button" class="theme-option" data-theme="system">跟随系统</button>
+          </div>
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <button type="button" id="settings-cancel" class="btn btn-ghost">取消</button>
+        <button type="button" id="settings-save" class="btn btn-primary">保存</button>
+      </div>
+    </div>
   </dialog>
 
   <!-- 首启引导 -->
   <dialog id="welcome-dialog">
-    <form method="dialog" id="welcome-form">
-      <h2>欢迎使用 EMRG</h2>
-      <p>请先完成初始设置（选择工作目录 + 配置 API Key）。</p>
-      <label>项目目录
-        <div class="dir-row">
-          <input type="text" id="welcome-project-dir" readonly />
-          <button type="button" id="welcome-pick-btn">选择…</button>
-        </div>
-        <small class="hint">可跳过（默认 ~/.emrg/evolution）</small>
+    <div class="dialog-card">
+      <div class="welcome-brand">
+        <div class="brand-star">✦</div>
+        <h1>欢迎使用 EMRG</h1>
+        <p>我是你的 AI 工作伙伴。先做两步简单设置，马上就能开始。</p>
+      </div>
+      <label>第一步：告诉我 API Key
+        <input type="password" id="welcome-api-key" placeholder="sk-…" />
+        <div class="hint">用于连接你的 AI 模型服务</div>
       </label>
-      <label>API Key <input type="password" id="welcome-api-key" required /></label>
-      <label>Base URL <input type="text" id="welcome-base-url" /></label>
-      <label>Model
+      <label>接口地址 <input type="text" id="welcome-base-url" placeholder="https://api.deepseek.com" /></label>
+      <label>默认模型
         <select id="welcome-model"></select>
       </label>
+      <label>第二步：选择工作目录（可跳过）
+        <div class="dir-row">
+          <input type="text" id="welcome-project-dir" readonly placeholder="默认 ~/.emrg/evolution" />
+          <button type="button" id="welcome-pick-btn" class="btn btn-ghost">选择…</button>
+        </div>
+        <div class="hint">EMRG 会在这个目录里帮你干活</div>
+      </label>
       <div class="dialog-actions">
-        <button type="submit" id="welcome-save">保存并开始</button>
+        <button type="button" id="welcome-save" class="btn btn-primary">保存并开始</button>
       </div>
-    </form>
+    </div>
+  </dialog>
+
+  <!-- 确认对话框（替代 confirm()） -->
+  <dialog id="confirm-dialog">
+    <div class="dialog-card" style="min-width:320px;">
+      <h2 id="confirm-title">确认</h2>
+      <p id="confirm-message" style="color:var(--text-2);font-size:var(--fs-secondary);"></p>
+      <div class="dialog-actions">
+        <button type="button" id="confirm-cancel" class="btn btn-ghost">取消</button>
+        <button type="button" id="confirm-ok" class="btn btn-danger">删除</button>
+      </div>
+    </div>
   </dialog>
 
   <script src="../vendor/marked.min.js"></script>
   <script src="../vendor/dompurify.min.js"></script>
   <script src="../vendor/highlight.custom.js"></script>
-  <script src="markdown.js"></script>
-  <script src="app.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/markdown.js"></script>
+  <script src="js/copywriting.js"></script>
+  <script src="js/chat.js"></script>
+  <script src="js/sidebar.js"></script>
+  <script src="js/dialogs.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>
