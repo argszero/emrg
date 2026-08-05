@@ -245,13 +245,15 @@ begin
     SMTO_ABORTIFHUNG, 5000, Dummy);
 end;
 
-{ R119: 安装后把 {app}\bin 加入 HKCU 用户 PATH。
-  旧实现（R27 [Registry]{olddata} + NeedsPath）缺陷：
-  1. NeedsPath 用未展开的字面 %USERPROFILE%\... 与已展开的 GetEnv('Path')
-     比较 → 永不匹配 → 重复安装 PATH 段累积；
-  2. ValueData 写死 %USERPROFILE%\...\bin → 用户自定义安装目录时 PATH 指向错误；
-  3. {olddata} 依赖值已存在，HKCU Path 缺失（Server/精简镜像）时行为不确定。
-  R119 改 [Code] 显式读写：展开 {app}\bin 真实路径 + 段边界去重 + 值缺失时创建。}
+// R123: 以下注释用 // 行注释（Inno Pascal 块注释 { } 不支持嵌套，
+// 内含 {app}/{olddata} 的 } 会提前终止注释块 → Syntax error，v0.2.2 CI 四次失败）。
+// R119: 安装后把 {app}\bin 加入 HKCU 用户 PATH。
+//   旧实现（R27 [Registry]{olddata} + NeedsPath）缺陷：
+//   1. NeedsPath 用未展开的字面 %USERPROFILE%\... 与已展开的 GetEnv('Path')
+//      比较 → 永不匹配 → 重复安装 PATH 段累积；
+//   2. ValueData 写死 %USERPROFILE%\...\bin → 用户自定义安装目录时 PATH 指向错误；
+//   3. {olddata} 依赖值已存在，HKCU Path 缺失（Server/精简镜像）时行为不确定。
+//   R119 改 [Code] 显式读写：展开 {app}\bin 真实路径 + 段边界去重 + 值缺失时创建。
 procedure AddBinDirToPath;
 var
   BinPath, OldPath, NewPath: string;
@@ -269,7 +271,7 @@ begin
   BroadcastEnvironmentChange;
 end;
 
-{ R119: 卸载后从 HKCU 用户 PATH 移除 {app}\bin }
+// R119: 卸载后从 HKCU 用户 PATH 移除 {app}\bin
 procedure RemoveBinDirFromPath;
 var
   BinPath, PathEnv: string;
