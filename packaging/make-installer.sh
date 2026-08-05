@@ -187,9 +187,11 @@ Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconF
 [UninstallRun]
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
 [Code]
+{ R120: HWND_BROADCAST 为 iscc 预定义常量（Compiler.ScriptFunc.pas RegisterConst），
+  显式定义会报 Duplicate identifier 'HWND_BROADCAST'（v0.2.2 CI 二次失败）。
+  WM_SETTINGCHANGE / SMTO_ABORTIFHUNG 未预置，需保留 const 定义。 }
 const
   WM_SETTINGCHANGE = 26;        { \$001A }
-  HWND_BROADCAST = 65535;       { \$FFFF }
   SMTO_ABORTIFHUNG = 2;         { \$0002 }
 
 function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM;
