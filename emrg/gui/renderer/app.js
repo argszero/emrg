@@ -175,7 +175,7 @@ async function newSession() {
     // 本地切订阅（resume 不存在的新会话会被 daemon 自动创建）
     state.sessionId = sid;
     clearChat();
-    addSystemMessage(`新会话 ${sid}`);
+    showWelcomeScreen(); // P3：空状态欢迎屏（设计 §3.5）
     await refreshSessions();
     highlightActiveSession(sid);
   } catch (e) {
@@ -189,21 +189,8 @@ async function deleteSession(sid) {
     addSystemMessage("当前有进行中的响应，请等待完成或停止后再删除会话。");
     return;
   }
-  if (!confirm(`确定删除会话 ${sid}？`)) return; // G76
-  try {
-    await window.emrg.deleteSession({ sessionId: sid });
-    if (state.sessionId === sid) {
-      const remaining = state.sessions.filter((s) => s.session_id !== sid);
-      if (remaining.length > 0) {
-        await switchSession(remaining[0].session_id, { silent: true });
-      } else {
-        await newSession();
-      }
-    }
-    await refreshSessions();
-  } catch (e) {
-    addSystemMessage(`删除失败: ${e.message}`);
-  }
+  // P3：删除走友好确认对话框（sidebar.js），不再用原生 confirm()
+  await requestDeleteSession(sid);
 }
 
 async function refreshSessions() {
@@ -341,6 +328,7 @@ function addSystemMessage(text) {
 }
 
 function appendMsg(node) {
+  hideWelcomeScreen(); // P3：首条真实消息到达即移除欢迎屏
   $("chat-view").appendChild(node);
   scrollToBottom();
 }
@@ -349,6 +337,45 @@ function clearChat() {
   $("chat-view").innerHTML = "";
   state.groupNodes.clear();
   state.toolCards.clear();
+}
+
+// ── 空状态欢迎屏（P3，设计 §3.5）──────────────────────
+
+const WELCOME_SUGGESTIONS = [
+  { icon: "📝", text: "帮我写一份周报" },
+  { icon: "🗂", text: "整理这个文件夹" },
+  { icon: "✈️", text: "规划一次旅行" },
+];
+
+function showWelcomeScreen() {
+  const cv = $("chat-view");
+  cv.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "welcome";
+  const cards = WELCOME_SUGGESTIONS.map(
+    (s) => `<button class="welcome-card" data-text="${escapeHtml(s.text)}"><span class="welcome-icon">${s.icon}</span><span>${escapeHtml(s.text)}</span></button>`
+  ).join("");
+  wrap.innerHTML = `
+    <div class="welcome-mark">✦</div>
+    <div class="welcome-title">你好，我是 EMRG</div>
+    <div class="welcome-sub">我可以帮你写作、整理、查资料、处理文件…</div>
+    <div class="welcome-cards">${cards}</div>
+  `;
+  for (const card of wrap.querySelectorAll(".welcome-card")) {
+    card.addEventListener("click", () => {
+      const input = $("input");
+      input.value = card.dataset.text;
+      input.style.height = "auto";
+      input.style.height = Math.min(input.scrollHeight, 150) + "px";
+      input.focus();
+    });
+  }
+  cv.appendChild(wrap);
+}
+
+function hideWelcomeScreen() {
+  const w = $("chat-view").querySelector(".welcome");
+  if (w) w.remove();
 }
 
 function scrollToBottom() {
@@ -366,25 +393,29 @@ function renderSessions(sessions) {
     list.innerHTML = "<div class='session-item placeholder'>暂无会话</div>";
     return;
   }
-  for (const s of state.sessions) {
-    const item = document.createElement("div");
-    item.className = "session-item";
-    const title = s.title || s.session_id; // G27：title 优先 session_id 兜底
-    const count = s.message_count || 0;
-    item.innerHTML = `<span class="sess-title">${escapeHtml(title)}</span><span class="sess-count">${count} msgs</span>`;
-    item.addEventListener("click", () => switchSession(s.session_id));
-    item.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      deleteSession(s.session_id);
-    });
-    list.appendChild(item);
+  // P3：按时间分组（今天/昨天/更早），只显示标题（设计 §3.2——不显示 session ID/消息数）
+  for (const [label, group] of groupSessionsByTime(state.sessions)) {
+    if (!group.length) continue;
+    const gl = document.createElement("div");
+    gl.className = "session-group-label";
+    gl.textContent = label;
+    list.appendChild(gl);
+    for (const s of group) {
+      const item = document.createElement("div");
+      item.className = "session-item";
+      item.dataset.sid = s.session_id; // P3：右键菜单定位
+      const title = s.title || s.session_id; // G27：title 优先 session_id 兜底
+      item.innerHTML = `<span class="sess-title">${escapeHtml(title)}</span>`;
+      item.addEventListener("click", () => switchSession(s.session_id));
+      list.appendChild(item);
+    }
   }
   highlightActiveSession(state.sessionId);
 }
 
 function highlightActiveSession(sid) {
-  for (const item of $("session-list").children) {
-    item.classList.toggle("active", item.textContent.includes(sid) && item.classList.contains("session-item"));
+  for (const item of $("session-list").querySelectorAll(".session-item")) {
+    item.classList.toggle("active", item.dataset.sid === sid);
   }
 }
 

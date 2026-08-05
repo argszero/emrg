@@ -26,6 +26,37 @@
 .brand-mark { color: var(--accent); font-size: 20px; line-height: 1; }
 .brand-name { font-size: 17px; font-weight: 600; color: var(--text-1); letter-spacing: 0.2px; }
 
+/* 折叠按钮（⌘B）：hover 出现，轻柔 */
+.btn-sidebar-toggle {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: none;
+  background: none;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.btn-sidebar-toggle:hover { background: var(--bg-soft); color: var(--text-1); }
+
+/* 折叠态：只留品牌区（窄条），其余隐藏 */
+#sidebar.collapsed {
+  width: 52px;
+  min-width: 52px;
+}
+#sidebar.collapsed .brand-name,
+#sidebar.collapsed .btn-new,
+#sidebar.collapsed #session-list,
+#sidebar.collapsed .sidebar-footer .btn-settings {
+  display: none;
+}
+#sidebar.collapsed .brand { justify-content: center; padding: var(--space-3) 0; }
+#sidebar.collapsed .btn-sidebar-toggle { margin-left: 0; }
+#sidebar.collapsed .sidebar-footer { justify-content: center; padding: var(--space-3) 0; }
+#sidebar.collapsed .conn-dot { margin: 0 auto; }
+
 /* 新对话按钮 */
 .btn-new {
   margin: 0 var(--space-4) var(--space-3);

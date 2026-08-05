@@ -17,6 +17,7 @@
       <div class="brand">
         <span class="brand-mark">✦</span>
         <span class="brand-name">EMRG</span>
+        <button id="sidebar-toggle" class="btn-sidebar-toggle" title="折叠侧边栏 (⌘B)">◂</button>
       </div>
       <button id="new-session-btn" class="btn-new" title="新对话">＋ 新对话</button>
       <div id="session-list">
@@ -111,11 +112,39 @@
     </form>
   </dialog>
 
+  <!-- 右键菜单（P3 sidebar：重命名 / 删除） -->
+  <div id="ctx-menu" class="ctx-menu" hidden></div>
+
+  <!-- 确认对话框（友好文案，替代 confirm()） -->
+  <dialog id="confirm-dialog">
+    <h2 id="confirm-title">确认操作</h2>
+    <p id="confirm-desc" class="desc"></p>
+    <div class="dialog-actions">
+      <button type="button" id="confirm-cancel">取消</button>
+      <button type="button" id="confirm-ok" class="danger">确认</button>
+    </div>
+  </dialog>
+
+  <!-- 重命名对话框 -->
+  <dialog id="rename-dialog">
+    <h2>重命名对话</h2>
+    <div class="form-row">
+      <label>对话标题
+        <input type="text" id="rename-input" maxlength="80" placeholder="给这段对话起个名字" />
+      </label>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" id="rename-cancel">取消</button>
+      <button type="button" id="rename-ok" class="primary">保存</button>
+    </div>
+  </dialog>
+
   <script src="../vendor/marked.min.js"></script>
   <script src="../vendor/dompurify.min.js"></script>
   <script src="../vendor/highlight.custom.js"></script>
   <script src="markdown.js"></script>
   <script src="js/copywriting.js"></script>
+  <script src="js/sidebar.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -289,6 +289,14 @@ vision = false
       return { ok: true };
     });
 
+    ipcMain.handle("emrg:renameSession", async (_e, { sessionId, title }) => {
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      const clean = String(title || "").trim().slice(0, 80); // 截断超长标题
+      if (!clean) throw new Error("empty title");
+      const frame = await client.sendCommandAndWait("rename_session", { session_id: sessionId, cwd: projectDir, title: clean }, 5000);
+      return { ok: true, title: frame.title || clean };
+    });
+
     ipcMain.handle("emrg:newSession", async () => {
       // G14/G81：本地生成 session_id（无 new_session 消息）
       const sid = generateSessionId();

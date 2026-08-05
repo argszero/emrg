@@ -28,8 +28,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.sess-count { color: var(--text-3); font-size: 11px; flex-shrink: 0; }
-.session-item.active .sess-count { color: var(--accent); }
 
 /* ── 消息 ──────────────────────────── */
 .msg {
@@ -196,6 +194,83 @@ dialog .desc { font-size: var(--text-aux); color: var(--text-2); margin-bottom: 
 .dir-row { display: flex; gap: var(--space-2); }
 .dir-row input { flex: 1; }
 .dir-row button { flex-shrink: 0; }
+
+/* ── 空状态欢迎屏（P3，设计 §3.5）───────────────── */
+.welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  text-align: center;
+  padding: var(--space-5);
+  animation: msg-in var(--dur-med) var(--ease);
+}
+.welcome-mark {
+  font-size: 44px;
+  color: var(--accent);
+  line-height: 1;
+  margin-bottom: var(--space-2);
+}
+.welcome-title { font-size: 20px; font-weight: 600; color: var(--text-1); }
+.welcome-sub { font-size: var(--text-secondary); color: var(--text-2); }
+.welcome-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+  width: 100%;
+  max-width: 340px;
+}
+.welcome-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  color: var(--text-1);
+  font-size: var(--text-secondary);
+  text-align: left;
+  box-shadow: var(--shadow-sm);
+  transition: border-color var(--dur-fast), box-shadow var(--dur-fast), transform var(--dur-fast);
+}
+.welcome-card:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+.welcome-icon { font-size: 18px; }
+
+/* ── 右键菜单（P3，设计 §3.2）────────────────── */
+.ctx-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 150px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  animation: msg-in var(--dur-fast) var(--ease);
+}
+.ctx-item {
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: var(--text-secondary);
+  color: var(--text-1);
+  cursor: pointer;
+  transition: background var(--dur-fast);
+}
+.ctx-item:hover { background: var(--bg-soft); }
+.ctx-item.danger { color: var(--red); }
+.ctx-item.danger:hover { background: color-mix(in srgb, var(--red) 10%, transparent); }
+
+/* ── 对话框危险按钮 ─────────────────────────── */
+.dialog-actions button.danger { background: var(--red); border-color: var(--red); color: #fff; font-weight: 600; }
+.dialog-actions button.danger:hover { filter: brightness(1.08); }
 
 /* 消息入场动效：轻微上浮 + 淡入（克制） */
 @keyframes msg-in {
