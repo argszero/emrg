@@ -170,6 +170,9 @@ AppVersion={#MyAppVersion}
 DefaultDirName={%USERPROFILE}\\.emrg\\install
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+; R118: ChangesEnvironment=yes — 写 HKCU\Environment\Path 后广播 WM_SETTINGCHANGE，
+; 否则 explorer 不刷新环境变量缓存，新开 cmd 也看不到更新后的 PATH（rant 2026-08-05T14:28:02）
+ChangesEnvironment=yes
 DisableProgramGroupPage=yes
 OutputDir=$DIST_WIN/artifacts
 OutputBaseFilename=EMRG-$VERSION-windows-x64
