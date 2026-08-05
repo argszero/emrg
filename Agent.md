@@ -59,11 +59,12 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - 60fps render throttling
 - **Electron GUI** — Non-developer entry point (Phase 3), chat/sessions/tool status/settings (80% daily use)
   - `npm start` from `emrg/gui/` auto-starts the daemon; main process is the only daemon connection (renderer zero network, contextBridge sandbox)
+  - v0.2.5 full redesign (rant 08-05): light/dark dual theme (prefers-color-scheme), friendly tool status rows (collapsible, 2000-char truncation), multi-model management (add/edit/delete/set-default in settings + in-chat switcher), empty-state welcome screen, back-to-bottom button
   - First-run onboarding: missing config → settings dialog (no daemon spawn) → save → daemon starts; placeholder API key treated as unconfigured
   - Streaming chat with delta rendering (16ms batching), markdown on done (marked + DOMPurify + local highlight.js subset), tool call status cards (2000-char truncation + expand)
   - Session list/switch/new/delete synced with daemon; own-stream busy lock (G65); broadcast streams from other clients tagged "来自其他客户端"
   - Disconnect/reconnect: red status dot, auto daemon respawn (stale-port detection), session resume, input bar restored on disconnect (no 30s fake-timeout)
-  - Unit tests `npm test` (20) + integration tests (7, isolated HOME, run in CI); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
+  - Unit tests `npm test` (34: 22 daemon_client + 7 integration + 5 renderer smoke); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
 - **Auto project tracking** — Automatically detects and records working directories; project-scoped sessions
 - **Rant-driven evolution** — User feedback via `/rant` drives automatic self-improvement cycles
 - **Headless GitHub auth** — Non-interactive evolution auto-extracts `GH_TOKEN` from git credential store (osxkeychain / credential helper); PR comment/LGTM queries fall back to REST API (GraphQL needs `read:org` scope)
@@ -90,8 +91,8 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (464) — import check: `uv run python -c "from emrg.client.app import run_client"`
-GUI: `cd emrg/gui && npm test` (27: 20 unit + 7 integration) — syntax: `node --check main.js preload.js daemon_client.js renderer/app.js`
+Python: `uv run pytest tests/ -v` (472) — import check: `uv run python -c "from emrg.client.app import run_client"`
+GUI: `cd emrg/gui && npm test` (34: 22 daemon_client + 7 integration + 5 renderer smoke) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
 
 ## Configuration
 

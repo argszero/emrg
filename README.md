@@ -34,7 +34,7 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 | 🔄 **吐槽驱动进化** | 你的 `/rant` 直接驱动后台演化循环——吐槽 → 分析 → 写代码 → 提 PR → 自动变强 |
 | 📝 **永不忘事** | 项目记忆 + 会话记忆 + 每日日志——上下文持续保留，不怕断线 |
 | 🖥️ **颜值在线的 TUI** | 斜杠命令自动补全、会话选择器、流式 Markdown 渲染、请求计时器、ESC 中断 |
-| 🖱️ **Electron GUI（新）** | 非开发者主入口——聊天/会话/工具状态/设置，自动拉起 daemon，`npm start` 即开即用 |
+| 🖱️ **Electron GUI（新）** | 非开发者主入口——聊天/会话/工具状态/设置，自动拉起 daemon，`npm start` 即开即用。v0.2.5 完全重设计：浅/深双主题跟随系统、工具过程友好化（折叠展开）、多模型管理（增删改/设默认/对话中切换）、空状态欢迎屏、回到底部按钮 |
 | ⚡ **并行工具调用** | 独立的工具调用并发执行，速度飞快 |
 | 🔌 **微内核守护进程** | `emrgd` 持久运行——随时重连，状态不丢 |
 | 🎮 **Vim 友好** | `j`/`k` 导航、`Ctrl+W`/`Ctrl+K` 编辑、`Tab` 展开工具卡片 |
@@ -279,14 +279,14 @@ HN 社区（[讨论帖](https://news.ycombinator.com/item?id=49119274)）对 age
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # 安装依赖
-uv run pytest tests/ -v   # 跑测试（当前 464 项）
+uv run pytest tests/ -v   # 跑测试（当前 472 项）
 uv run python -m emrg     # 启动 TUI
 
 # 可选：Electron GUI（非开发者主入口，Phase 3）
 cd emrg/gui
 npm ci               # 安装依赖（生产模式可 --omit=dev）
 npm start            # 启动 GUI（自动拉起 daemon）
-npm test             # 运行 Node 测试（单测；集成测试在 CI 跑，本地可 npm run test:integration）
+npm test             # 运行 Node 测试（34 项：22 daemon_client + 7 integration + 5 renderer smoke；集成测试在 CI 跑，本地可 npm run test:integration）
 ```
 
 CI 通过 GitHub Actions 自动运行测试并检查冲突标记（`.github/workflows/test.yml`）。
