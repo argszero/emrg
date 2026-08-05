@@ -198,7 +198,12 @@ const
   WM_SETTINGCHANGE = 26;        { \$001A }
   SMTO_ABORTIFHUNG = 2;         { \$0002 }
 
-function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM;
+{ R122: WPARAM/LPARAM 类型在 Inno Setup 6.7.2+ 才加入 iscc 预置
+  （issrc commit 27bce18660, 2025-12-27）；runner windows-2025 为 6.7.1 →
+  Unknown type 'WPARAM'（v0.2.2 CI 三次失败）。改用 DWORD（6.7.1 已注册
+  = LongWord）。iscc 生成 32 位安装器，WPARAM/LPARAM 在 32 位下即 4 字节，
+  与 DWORD 完全兼容。 }
+function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: DWORD; lParam: DWORD;
   fuFlags: UINT; uTimeout: UINT; var lpdwResult: DWORD): BOOL;
   external 'SendMessageTimeoutW@user32.dll stdcall';
 
