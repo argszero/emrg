@@ -59,7 +59,7 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 安装包内置完整运行时（standalone Python 3.13 + 依赖 + git + gh + GUI），**干净机器（无 python/uv/git/gh/node）零前置依赖**，100% 离线安装。安装后：
 
 - GUI：启动台 / 开始菜单点击 **EMRG**
-- TUI：`~/.emrg/install/bin/emrg`（Linux 另生成 `~/.local/bin/emrg` 软链）
+- TUI：`~/.emrg/install/bin/emrg`（macOS 安装时写 shell rc PATH anchor，新开终端直接 `emrg`；Linux 另生成 `~/.local/bin/emrg` 软链）
 - 首次启动引导填写 API key；会话内可直接执行 python 脚本
 
 > **卸载**：macOS 运行"卸载 EMRG.app"；Windows 控制面板卸载；Linux 运行 `~/.emrg/install/bin/emrg-uninstall`（或删 AppImage + 软链）。卸载保留 `~/.emrg` 中非 EMRG 的用户文件，并生成终止报告与数据快照。**Windows 卸载彻底**（v0.2.2+）：先终止 GUI 进程防止 daemon 复活，白名单全量清理运行时文件，`[UninstallDelete]` 兜底删除 install/，`~/.emrg` 卸载后不残留。

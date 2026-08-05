@@ -59,7 +59,7 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 The installer bundles a full runtime (standalone Python 3.13 + deps + git + gh + GUI) — **zero prerequisites on a clean machine (no python/uv/git/gh/node)**, 100% offline install. After install:
 
 - GUI: launch **EMRG** from Launchpad / Start menu
-- TUI: `~/.emrg/install/bin/emrg` (Linux also creates `~/.local/bin/emrg` symlink)
+- TUI: `~/.emrg/install/bin/emrg` (macOS writes a shell rc PATH anchor at install, so `emrg` works in new terminals; Linux also creates `~/.local/bin/emrg` symlink)
 - First-run wizard asks for your API key; python scripts work inside sessions
 
 > **Uninstall**: macOS run "卸载 EMRG.app" (uninstall app); Windows uninstall from Control Panel; Linux run `~/.emrg/install/bin/emrg-uninstall` (or delete the AppImage + symlink). Uninstall preserves non-EMRG user files in `~/.emrg`, and writes a termination report + data snapshot. **Windows uninstall is thorough** (v0.2.2+): kills GUI first to prevent daemon respawn, full whitelist cleanup of runtime files, `[UninstallDelete]` fallback removes install/, no residue in `~/.emrg`.
