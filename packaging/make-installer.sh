@@ -187,9 +187,12 @@ Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconF
 [UninstallRun]
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
 [Code]
-{ R120: WM_SETTINGCHANGE / HWND_BROADCAST / SMTO_ABORTIFHUNG 为 Inno Setup 6.3+ 内置常量，
-  不可在 const 段重复定义（Duplicate identifier 'HWND_BROADCAST'，v0.2.2 CI 二次失败）。
-  旧代码的显式 const 定义在 IS 6.3 之前是必需的，现版本已预置。 }
+{ R120: HWND_BROADCAST 为 iscc 预定义常量（Compiler.ScriptFunc.pas RegisterConst），
+  显式定义会报 Duplicate identifier 'HWND_BROADCAST'（v0.2.2 CI 二次失败）。
+  WM_SETTINGCHANGE / SMTO_ABORTIFHUNG 未预置，需保留 const 定义。 }
+const
+  WM_SETTINGCHANGE = 26;        { \$001A }
+  SMTO_ABORTIFHUNG = 2;         { \$0002 }
 
 function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM;
   fuFlags: UINT; uTimeout: UINT; var lpdwResult: DWORD): BOOL;
