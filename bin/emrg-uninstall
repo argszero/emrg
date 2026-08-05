@@ -2,15 +2,21 @@
 """EMRG unified uninstaller — ran by the platform uninstaller (rant #12 §8).
 
 Steps (idempotent, safe to re-run):
-  1. Stop the daemon (protocol shutdown when websockets importable, else
-     SIGTERM from pid file / Windows taskkill fallback).
+  1a. Stop GUI processes (EMRG.exe / pkill EMRG) so it cannot respawn daemon
+      while we delete runtime files (R121).
+  1b. Stop the daemon (protocol shutdown when websockets importable, else
+      SIGTERM from pid file / Windows taskkill fallback, with exit poll).
   2. Termination report  -> ~/.emrg/logs/uninstall-report-<ts>.json
   3. Graveyard snapshot  -> ~/.emrg/graveyard/emrg-data-<ts>.tar.gz
   4. Delete known EMRG files in ~/.emrg (R101 whitelist; anything outside the
-     whitelist is kept and listed in the report).
+     whitelist is kept and listed in the report). Failures are collected, not
+     swallowed (R121).
   5. Clean environment traces (PATH shell-rc anchor blocks, launcher symlinks,
      Start-menu shortcuts are handled by the native uninstaller).
-  6. Self-verify: print what remains and the cleanup list.
+  6. Self-verify: full scan of ~/.emrg top-level items; any runtime residue is
+     reported with a non-zero exit code (R121).
+  7. Finalize: move uninstall records (report + graveyard snapshot) to the home
+     directory, then remove ~/.emrg entirely (R121).
 
 R92: install/ itself is NOT deleted by this script — the interpreter lives in
 install/bin, so a running interpreter would lock it on Windows (NTFS). The
@@ -44,10 +50,14 @@ INSTALL_DIR = EMRG_DIR / "install"
 
 # R101 whitelist — known EMRG files. Anything else in ~/.emrg is user data
 # and is preserved (listed in the report instead of deleted).
+# R121: 补全运行时文件 — emrgd.log / emrg-gui.log / gui-window.json 为 daemon/GUI
+# 运行日志与窗口状态；skills/ 是 daemon 启动时 mkdir 的运行时骨架（非用户数据），
+# 用户自定义 skills 先入 graveyard 快照再删除（rant 2026-08-05T15:35:17）。
 WHITELIST = [
     "install", "versions", "config.toml", "sessions", "memory", "logs",
     "projects.yml", "tasks.yml", "rants.jsonl", "saturation",
     "emrgd.sock", "emrgd.pid", "emrgd.port", "install-info.json",
+    "emrgd.log", "emrg-gui.log", "gui-window.json", "skills",
 ]
 
 # Shell rc anchor for PATH cleanup (R19).
@@ -59,8 +69,37 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def stop_gui() -> dict:
+    """Step 1a — stop GUI processes BEFORE daemon, so the GUI cannot respawn
+    the daemon (daemon_client.js auto-startDaemon on ws disconnect) while we
+    are deleting runtime files (rant 2026-08-05T15:35:17)."""
+    result = {"method": "none", "ok": False}
+    try:
+        if os.name == "nt":
+            r = subprocess.run(
+                ["taskkill", "/IM", "EMRG.exe", "/F"],
+                capture_output=True, timeout=10,
+            )
+            if r.returncode == 0:
+                result = {"method": "taskkill-EMRG.exe", "ok": True}
+                print("  [1] GUI stopped (taskkill /IM EMRG.exe /F)")
+        else:
+            # POSIX: EMRG Electron GUI (app path contains 'EMRG'). Matches the
+            # packaged app only — not this script (lowercase 'emrg-uninstall').
+            r = subprocess.run(
+                ["pkill", "-f", "EMRG"],
+                capture_output=True, timeout=10,
+            )
+            if r.returncode == 0:
+                result = {"method": "pkill-EMRG", "ok": True}
+                print("  [1] GUI stopped (pkill -f EMRG)")
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return result
+
+
 def stop_daemon() -> dict:
-    """Step 1 — stop the daemon. Returns {method, ok}."""
+    """Step 1b — stop the daemon. Returns {method, ok}."""
     result = {"method": "none", "ok": False}
     # Try protocol shutdown when websockets is importable (PYTHONPATH has lib/).
     try:
@@ -128,6 +167,15 @@ def stop_daemon() -> dict:
                     ["taskkill", "/PID", str(pid), "/F"],
                     capture_output=True, timeout=10,
                 )
+                # R121: 轮询确认进程退出（≤5s），避免 pid 文件被并发重建
+                for _ in range(35):
+                    chk = subprocess.run(
+                        ["tasklist", "/FI", f"PID eq {pid}"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if "No tasks" in chk.stdout:
+                        break
+                    time.sleep(0.15)
             else:
                 os.kill(pid, signal.SIGTERM)
                 for _ in range(20):
@@ -167,7 +215,8 @@ def graveyard_snapshot() -> Path | None:
     ts = time.strftime("%Y%m%d-%H%M%S")
     dest = GRAVEYARD_DIR / f"emrg-data-{ts}.tar.gz"
     members = []
-    for name in ("memory", "sessions", "logs", "rants.jsonl", "projects.yml", "tasks.yml"):
+    # R121: skills 一并快照（备份用户自定义 skills 后再删）
+    for name in ("memory", "sessions", "logs", "rants.jsonl", "projects.yml", "tasks.yml", "skills"):
         p = EMRG_DIR / name
         if p.exists():
             members.append(p)
@@ -181,24 +230,29 @@ def graveyard_snapshot() -> Path | None:
     return dest
 
 
-def delete_whitelisted() -> list:
-    """Step 4 — delete whitelisted EMRG files. Returns list of removed paths."""
-    removed = []
+def delete_whitelisted() -> tuple[list, list]:
+    """Step 4 — delete whitelisted EMRG files.
+
+    Returns (removed, failed). R121: 删除失败不再静默吞掉 — 失败路径
+    收集进 failed，由 main() 写入 report 的 4_delete_whitelisted.failed
+    并以非零退出码告警。
+    """
+    removed, failed = [], []
     for name in WHITELIST:
         p = EMRG_DIR / name
         if name == "install":
             # R92: install/ is deleted by the platform uninstaller, not here.
             continue
-        if p.is_dir() and not p.is_symlink():
-            shutil.rmtree(p, ignore_errors=True)
-            removed.append(str(p))
-        elif p.exists() or p.is_symlink():
-            try:
+        try:
+            if p.is_dir() and not p.is_symlink():
+                shutil.rmtree(p)
+                removed.append(str(p))
+            elif p.exists() or p.is_symlink():
                 p.unlink()
                 removed.append(str(p))
-            except OSError:
-                pass
-    return removed
+        except OSError as e:
+            failed.append({"path": str(p), "error": str(e)})
+    return removed, failed
 
 
 def clean_environment() -> list:
@@ -234,12 +288,41 @@ def clean_environment() -> list:
 
 
 def self_verify() -> list:
-    """Step 6 — self-verify. Returns list of remaining EMRG artifacts."""
+    """Step 6 — self-verify. R121: 全量扫描 ~/.emrg 顶层项，任何运行时残留
+    （除 logs/graveyard 卸载产物外）都视为残留。"""
     remaining = []
-    for f in ("emrgd.port", "emrgd.pid", "config.toml", "projects.yml", "tasks.yml", "rants.jsonl"):
-        if (EMRG_DIR / f).exists():
-            remaining.append(str(EMRG_DIR / f))
+    if EMRG_DIR.exists():
+        for p in sorted(EMRG_DIR.iterdir()):
+            if p.name in ("logs", "graveyard"):
+                continue  # 卸载产物目录（report / snapshot），finalize 阶段处理
+            remaining.append(str(p))
     return remaining
+
+
+def finalize_artifacts(report_path: Path, snap: Path | None) -> list:
+    """Final — move uninstall artifacts (report + graveyard snapshot) to the
+    home directory (kept as uninstall records, outside ~/.emrg), then remove
+    ~/.emrg entirely (R121: 卸载彻底，~/.emrg 不留运行时残留).
+
+    Windows: install/ may stay locked by the running interpreter — the Inno
+    [UninstallDelete] step removes {app} after this script exits (R92).
+    """
+    moved = []
+    for p in (report_path, snap):
+        if p is None or not p.exists():
+            continue
+        dest = Path.home() / p.name
+        i = 1
+        while dest.exists():
+            dest = Path.home() / f"{p.stem}-{i}{p.suffix}"
+            i += 1
+        try:
+            shutil.move(str(p), str(dest))
+            moved.append(str(dest))
+        except OSError:
+            pass
+    shutil.rmtree(EMRG_DIR, ignore_errors=True)
+    return moved
 
 
 def main() -> int:
@@ -252,12 +335,14 @@ def main() -> int:
         "steps": {},
     }
 
-    report["steps"]["1_stop_daemon"] = stop_daemon()
+    report["steps"]["1a_stop_gui"] = stop_gui()
+    report["steps"]["1b_stop_daemon"] = stop_daemon()
 
-    report["steps"]["3_graveyard_snapshot"] = {"path": str(snap) if (snap := graveyard_snapshot()) else None}
+    snap = graveyard_snapshot()
+    report["steps"]["3_graveyard_snapshot"] = {"path": str(snap) if snap else None}
 
-    removed = delete_whitelisted()
-    report["steps"]["4_delete_whitelisted"] = {"removed": removed}
+    removed, failed = delete_whitelisted()
+    report["steps"]["4_delete_whitelisted"] = {"removed": removed, "failed": failed}
 
     cleaned = clean_environment()
     report["steps"]["5_clean_environment"] = {"cleaned": cleaned}
@@ -269,16 +354,28 @@ def main() -> int:
     report_path = write_report(report)
     report["steps"]["2_termination_report"] = {"path": str(report_path)}
 
+    # Final: move uninstall records to home, then remove ~/.emrg (R121).
+    moved = finalize_artifacts(report_path, snap)
+    report["steps"]["7_finalize"] = {"moved_to_home": moved}
+
     print("\nCleanup summary:")
     print(f"  removed: {len(removed)} paths")
     print(f"  env cleaned: {len(cleaned)} items")
+    if failed:
+        print(f"  WARNING: {len(failed)} delete failures:")
+        for item in failed:
+            print(f"    - {item['path']}: {item['error']}")
+    if moved:
+        print("  uninstall records kept:")
+        for m in moved:
+            print(f"    - {m}")
     if remaining:
-        print(f"  remaining (expected): {len(remaining)} artifacts")
+        print(f"  WARNING: {len(remaining)} artifacts remain under ~/.emrg:")
+        for r in remaining:
+            print(f"    - {r}")
     else:
-        print("  remaining: none")
-    print("\nNOTE: ~/.emrg/install/ is left for the platform uninstaller to remove (R92).")
-    print("User files outside the whitelist were preserved and are not listed.")
-    return 0
+        print("  ~/.emrg fully removed (or empty)")
+    return 1 if (failed or remaining) else 0
 
 
 if __name__ == "__main__":
