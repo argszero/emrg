@@ -5,8 +5,9 @@ from __future__ import annotations
 import sys
 import pytest
 
-# TUI (python_tui) 依赖 POSIX-only fcntl/termios/tty——Windows 跳过（Windows 冒烟不跑 TUI）
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="TUI is POSIX-only (fcntl/termios)")
+# R123 (#401) 后 Windows 已有原生 TUI（Win32Console），但 app.py 交互测试依赖
+# 终端输入/信号行为（SIGWINCH/raw mode），Windows CI 冒烟阶段不可靠 → 仍跳过。
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="app 交互测试依赖 POSIX 终端行为（SIGWINCH/raw mode）")
 
 from emrg.client.python_tui.widgets.base import Line, RenderContext, Span, Widget
 from emrg.client.app import ProjectSelector, ModelSelector

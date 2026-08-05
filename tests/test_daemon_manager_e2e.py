@@ -19,8 +19,10 @@ import pytest
 
 import sys
 
-# TUI (python_tui) 依赖 POSIX-only fcntl/termios/tty——Windows 跳过（Windows 冒烟不跑 TUI）
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="TUI is POSIX-only (fcntl/termios)")
+# R123 (#401) 后 Windows 已有原生 TUI，但 e2e 测试 spawn 真实 daemon + asyncio
+# 事件循环行为（ProactorEventLoop 无 add_reader）与 POSIX 差异大 → Windows CI
+# 冒烟阶段仍跳过（纯逻辑测试见 test_buffer/test_output/test_input_parser）。
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="e2e 测试依赖 POSIX daemon spawn/事件循环语义（Windows CI 冒烟不跑）")
 
 from emrg.client import daemon_manager
 from tests.test_ws_e2e import _boot_server, _make_config, _make_fake_chat_stream
