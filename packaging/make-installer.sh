@@ -187,10 +187,9 @@ Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconF
 [UninstallRun]
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
 [Code]
-const
-  WM_SETTINGCHANGE = 26;        { \$001A }
-  HWND_BROADCAST = 65535;       { \$FFFF }
-  SMTO_ABORTIFHUNG = 2;         { \$0002 }
+{ R120: WM_SETTINGCHANGE / HWND_BROADCAST / SMTO_ABORTIFHUNG 为 Inno Setup 6.3+ 内置常量，
+  不可在 const 段重复定义（Duplicate identifier 'HWND_BROADCAST'，v0.2.2 CI 二次失败）。
+  旧代码的显式 const 定义在 IS 6.3 之前是必需的，现版本已预置。 }
 
 function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM;
   fuFlags: UINT; uTimeout: UINT; var lpdwResult: DWORD): BOOL;
