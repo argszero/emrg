@@ -48,7 +48,7 @@
   color: var(--text-1);
   border-radius: var(--radius-bubble) var(--radius-bubble) 6px var(--radius-bubble);
 }
-/* EMRG：全宽无气泡，行首 ✦ 标识（P2 chat.js 渲染时加 ✦，P1 保留全宽样式） */
+/* EMRG：全宽无气泡，行首 ✦ 品牌标识（设计 §3.3；remote 有标签不加） */
 .msg.assistant {
   align-self: flex-start;
   max-width: 100%;
@@ -59,7 +59,9 @@
   border-radius: 0;
   white-space: normal;
 }
+.msg.assistant::before { content: "✦ "; color: var(--accent); font-weight: 600; }
 .msg.assistant.remote { border-left: 3px solid var(--amber); padding-left: var(--space-3); }
+.msg.assistant.remote::before { content: none; }
 /* 系统提示：居中弱化小字 */
 .msg.system {
   align-self: center;
@@ -73,7 +75,7 @@
 .remote-label { font-size: 11px; color: var(--amber); margin-bottom: var(--space-1); }
 .msg-body { color: var(--text-1); }
 
-/* ── 工具过程（P2 改折叠友好行；P1 保留卡片样式保证功能）── */
+/* ── 工具过程：友好状态行（设计 §4.2 重点——折叠式，渐进披露）── */
 .tool-card {
   align-self: flex-start;
   min-width: 320px;
@@ -86,14 +88,43 @@
   font-size: var(--text-secondary);
   margin: 2px 0;
   box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
 }
 .tool-card.running { border-left-color: var(--amber); }
 .tool-card.done { border-left-color: var(--accent); }
 .tool-card.failed { border-left-color: var(--red); }
-.tool-icon { }
-.tool-name { font-family: var(--font-mono); font-weight: 600; }
-.tool-status { color: var(--text-2); margin-left: var(--space-2); font-size: var(--text-aux); }
+/* 进行中：琥珀色温和转动圆点（不刺眼） */
+.tool-spin {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--amber);
+  border-top-color: transparent;
+  animation: tool-spin 0.9s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes tool-spin { to { transform: rotate(360deg); } }
+/* 完成/失败图标 */
+.tool-icon { flex-shrink: 0; }
+.tool-card.done .tool-icon { color: var(--accent); font-weight: 600; }
+.tool-card.failed .tool-icon { color: var(--red); font-weight: 600; }
+.tool-text { flex-shrink: 0; }
+.tool-detail { color: var(--text-3); font-size: var(--text-aux); }
+.tool-toggle {
+  color: var(--blue);
+  cursor: pointer;
+  font-size: var(--text-aux);
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 2px 4px;
+  border-radius: 6px;
+}
+.tool-toggle:hover { background: var(--bg-soft); }
 .tool-output {
+  flex-basis: 100%;
   margin-top: var(--space-2);
   background: var(--bg-soft);
   border-radius: var(--radius-input);
@@ -106,6 +137,7 @@
   word-break: break-all;
 }
 .tool-expand {
+  flex-basis: 100%;
   margin-top: var(--space-1);
   background: none;
   border: none;
@@ -113,6 +145,7 @@
   cursor: pointer;
   font-size: var(--text-aux);
   padding: 0;
+  text-align: left;
 }
 .tool-expand:hover { text-decoration: underline; }
 

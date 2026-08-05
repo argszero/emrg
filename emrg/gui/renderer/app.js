@@ -471,8 +471,7 @@ async function handleEvent(evt) {
         if (card.classList.contains("running")) {
           card.classList.remove("running");
           card.classList.add("failed");
-          const st = card.querySelector(".tool-status");
-          if (st) st.textContent = "结果未知——连接中断";
+          card.innerHTML = '<span class="tool-icon">⚠</span><span class="tool-text">连接中断，结果未知</span>';
         }
       }
       break;
@@ -570,9 +569,11 @@ function handleToolStart(data) {
     appendMsg(node);
     state.groupNodes.set(rid, node);
   }
+  // P2：友好状态行（设计 §4.2）——琥珀色转动圆点 + 动词短语，无技术黑话
   const card = document.createElement("div");
   card.className = "tool-card running";
-  card.innerHTML = `<span class="tool-icon">🔧</span> <span class="tool-name">${escapeHtml(data.tool_name)}</span> <span class="tool-status">运行中…</span>`;
+  const phrase = toolPhrase(data.tool_name, "doing");
+  card.innerHTML = `<span class="tool-spin"></span><span class="tool-text">${escapeHtml(phrase)}</span>`;
   appendMsg(card);
   state.toolCards.set(data.tool_call_id, card);
 }
@@ -582,14 +583,21 @@ function handleToolEnd(data) {
   if (!card) return;
   const ok = !data.error;
   card.className = "tool-card " + (ok ? "done" : "failed");
+  const phrase = toolPhrase(data.tool_name, ok ? "done" : "fail");
   const elapsed = data.elapsed !== undefined ? `${data.elapsed.toFixed(1)}s` : "";
-  card.querySelector(".tool-status").textContent = ok ? `完成 ${elapsed}` : `失败 ${elapsed}`;
-  // G91/G131：content 默认截断 2000 字符 + 展开（textContent 纯文本，不做 marked）
   const content = data.content || "";
+  const toggle = content ? '<span class="tool-toggle">展开 ⌄</span>' : "";
+  card.innerHTML =
+    `<span class="tool-icon">${ok ? "✓" : "⚠"}</span>` +
+    `<span class="tool-text">${escapeHtml(phrase)}</span>` +
+    (elapsed ? `<span class="tool-detail">${elapsed}</span>` : "") +
+    toggle;
+  // 原始输出默认折叠（渐进披露：点「展开」才看；G91/G131 保留 2000 字符截断）
   if (content) {
     const truncated = content.length > 2000 ? content.slice(0, 2000) + "…" : content;
     const body = document.createElement("div");
     body.className = "tool-output";
+    body.style.display = "none";
     body.textContent = truncated;
     card.appendChild(body);
     if (content.length > 2000) {
@@ -601,6 +609,14 @@ function handleToolEnd(data) {
         btn.remove();
       });
       card.appendChild(btn);
+    }
+    const tg = card.querySelector(".tool-toggle");
+    if (tg) {
+      tg.addEventListener("click", () => {
+        const hidden = body.style.display === "none";
+        body.style.display = hidden ? "block" : "none";
+        tg.textContent = hidden ? "收起 ⌃" : "展开 ⌄";
+      });
     }
   }
   scrollToBottom();
