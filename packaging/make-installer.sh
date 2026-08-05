@@ -186,6 +186,10 @@ Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createa
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
 [UninstallRun]
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
+[UninstallDelete]
+; R121: emrg-uninstall 脚本退出后（python.exe 已退出，无文件锁），强制删除
+; {app}（install/）— 兜底卸载彻底（rant 2026-08-05T15:35:17）
+Type: filesandordirs; Name: "{app}"
 [Code]
 { R120: HWND_BROADCAST 为 iscc 预定义常量（Compiler.ScriptFunc.pas RegisterConst），
   显式定义会报 Duplicate identifier 'HWND_BROADCAST'（v0.2.2 CI 二次失败）。
