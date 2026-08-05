@@ -109,6 +109,23 @@ if [ -d "$INSTALL_DEST/emrg-gui/卸载 EMRG.app" ]; then
   cp -R "$INSTALL_DEST/emrg-gui/卸载 EMRG.app" "$HOME_DIR/Applications/"
   chown -R "$USER":staff "$HOME_DIR/Applications/卸载 EMRG.app" 2>/dev/null || true
 fi
+# ④ PATH anchor（R127/R19：安装后 emrg 命令可用 —— rant 2026-08-05T18:45:35 验收项）。
+# anchor 标记与 bin/emrg-uninstall clean_environment() 的 PATH_ANCHOR_START/END 完全一致，
+# 卸载时按同标记清理（Windows 用 HKCU PATH，Linux AppImage 用 ~/.local/bin 软链，macOS 用 rc）。
+# 幂等：任一 rc 已含 anchor 则跳过；写所有存在的 rc（zsh 默认 + bash 兼容），无 rc 兜底建 ~/.zshrc。
+ANCHOR_START="# >>> EMRG PATH >>>"
+ANCHOR_END="# <<< EMRG PATH <<<"
+if ! grep -qsF "$ANCHOR_START" "$HOME_DIR/.zshrc" "$HOME_DIR/.bash_profile" "$HOME_DIR/.bashrc" "$HOME_DIR/.profile" 2>/dev/null; then
+  for RC in "$HOME_DIR/.zshrc" "$HOME_DIR/.bash_profile" "$HOME_DIR/.bashrc" "$HOME_DIR/.profile"; do
+    [ -f "$RC" ] || continue
+    printf '\n%s\nexport PATH="$HOME/.emrg/install/bin:$PATH"\n%s\n' "$ANCHOR_START" "$ANCHOR_END" >> "$RC"
+    chown "$USER":staff "$RC" 2>/dev/null || true
+  done
+  if [ ! -f "$HOME_DIR/.zshrc" ]; then
+    printf '\n%s\nexport PATH="$HOME/.emrg/install/bin:$PATH"\n%s\n' "$ANCHOR_START" "$ANCHOR_END" >> "$HOME_DIR/.zshrc"
+    chown "$USER":staff "$HOME_DIR/.zshrc" 2>/dev/null || true
+  fi
+fi
 exit 0
 EOF
     chmod +x "$PKG_ROOT/scripts/postinstall"
