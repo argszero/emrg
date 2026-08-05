@@ -114,7 +114,8 @@ class Terminal:
         self._enter_raw_mode()
         # PR #205's add_reader+fcntl(stdin, O_NONBLOCK) leaks to stdout on
         # macOS (pty fd sharing). Force stdout back to blocking write.
-        if sys.stdout.isatty():
+        # R123: fcntl is None on Windows — skip (no fcntl available).
+        if sys.stdout.isatty() and fcntl is not None:
             try:
                 fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL,
                             os.O_WRONLY | os.O_APPEND)
@@ -340,11 +341,13 @@ class Terminal:
             # fcntl guard: PR #205's add_reader+fcntl(stdin) may leak
             # O_NONBLOCK to stdout via macOS pty sharing. Restore
             # blocking on BlockingIOError and retry the flush.
+            # R123: fcntl is None on Windows — just flush.
             try:
                 sys.stdout.flush()
             except BlockingIOError:
-                fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL,
-                            os.O_WRONLY | os.O_APPEND)
+                if fcntl is not None:
+                    fcntl.fcntl(sys.stdout.fileno(), fcntl.F_SETFL,
+                                os.O_WRONLY | os.O_APPEND)
                 sys.stdout.flush()
 
         # Swap buffers
@@ -462,8 +465,27 @@ class Terminal:
     # ── Raw mode ─────────────────────────────────────────────
 
     def _enter_raw_mode(self) -> None:
-        """Enable raw mode on stdin for direct key reading."""
+        """Enable raw mode on stdin for direct key reading.
+
+        R123: Windows uses Win32Console (ctypes SetConsoleMode) — termios/tty
+        are None there; POSIX keeps the termios path unchanged.
+        """
         if not sys.stdin.isatty():
+            return
+        if sys.platform == "win32":
+            from emrg.client.python_tui.win32 import Win32Console
+            try:
+                ok = Win32Console().enable_raw_mode(sys.stdin.fileno())
+                if not ok:
+                    return
+                self._raw_mode = True
+                sys.stdout.write(CURSOR_HIDE)
+                sys.stdout.write("\x1b[?2004h")
+                sys.stdout.flush()
+            except (OSError, AttributeError):
+                return
+            return
+        if termios is None or tty is None:
             return
         try:
             self._original_termios = termios.tcgetattr(sys.stdin.fileno())
@@ -478,6 +500,14 @@ class Terminal:
     def _exit_raw_mode(self) -> None:
         """Restore original terminal settings."""
         self.restore_title()
+        if sys.platform == "win32":
+            from emrg.client.python_tui.win32 import Win32Console
+            try:
+                Win32Console().disable_raw_mode(sys.stdin.fileno())
+                self._raw_mode = False
+            except (OSError, AttributeError):
+                pass
+            return
         if self._original_termios is not None:
             try:
                 termios.tcsetattr(

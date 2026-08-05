@@ -4,7 +4,7 @@ Keeps interactive_demo.py's input handling, renders chat in viewport.
 
 from __future__ import annotations
 
-import asyncio, json, logging, os, platform, signal, subprocess, sys, time
+import asyncio, json, logging, os, platform, signal, subprocess, sys, threading, time
 try:
     import fcntl  # POSIX-only（TUI 非阻塞 stdin）；Windows 无此模块
 except ImportError:  # pragma: no cover - Windows
@@ -845,18 +845,44 @@ async def interactive(init_auto_evolve: bool = False):
 
     read_task = asyncio.create_task(read_server())
 
-    # ── SIGWINCH (terminal resize) handler ─────────────────
+    # ── Terminal resize handler ──────────────────────────────
+    # R123: Windows 无 SIGWINCH + ProactorEventLoop 不支持 add_signal_handler
+    # → 轮询线程每 500ms 检测 get_terminal_size 变化；POSIX 保持 SIGWINCH。
     _resize_event = asyncio.Event()
+    _win_resize_thread: threading.Thread | None = None
+    _win_resize_stop = threading.Event()
+    _last_size = os.get_terminal_size() if sys.platform == "win32" else None
 
     def _on_sigwinch() -> None:
         _resize_event.set()
 
-    loop.add_signal_handler(signal.SIGWINCH, _on_sigwinch)
+    if sys.platform == "win32":
+        def _poll_resize() -> None:
+            nonlocal _last_size
+            while not _win_resize_stop.is_set():
+                try:
+                    size = os.get_terminal_size()
+                    if size != _last_size:
+                        _last_size = size
+                        loop.call_soon_threadsafe(_resize_event.set)
+                except (OSError, ValueError):
+                    pass
+                _win_resize_stop.wait(0.5)
 
-    # ── Stdin reader (asyncio-native, no thread pool — rant #SIGWINCH-leak) ─
-    if fcntl is not None:  # POSIX-only（Windows 无 fcntl，不跑 TUI）
-        _stdin_flags = fcntl.fcntl(stdin_fd, fcntl.F_GETFL)
-        fcntl.fcntl(stdin_fd, fcntl.F_SETFL, _stdin_flags | os.O_NONBLOCK)
+        _win_resize_thread = threading.Thread(
+            target=_poll_resize, name="emrg-resize-poll", daemon=True)
+        _win_resize_thread.start()
+    else:
+        sigwinch = getattr(signal, "SIGWINCH", None)
+        if sigwinch is not None:
+            loop.add_signal_handler(sigwinch, _on_sigwinch)
+
+    # ── Stdin reader ────────────────────────────────────────
+    # R123: Windows ProactorEventLoop 无 add_reader → daemon 线程阻塞
+    # os.read + call_soon_threadsafe 填充同一 stdin_queue；POSIX 保持
+    # asyncio-native add_reader + O_NONBLOCK（rant #SIGWINCH-leak）。
+    _win_stdin_thread: threading.Thread | None = None
+    _win_stdin_stop = threading.Event()
 
     def _stdin_reader() -> None:
         try:
@@ -865,8 +891,28 @@ async def interactive(init_auto_evolve: bool = False):
                 stdin_queue.put_nowait(data)
         except (BlockingIOError, InterruptedError):
             pass
+        except OSError:
+            pass
 
-    loop.add_reader(stdin_fd, _stdin_reader)
+    if sys.platform == "win32":
+        def _win_stdin_loop() -> None:
+            while not _win_stdin_stop.is_set():
+                try:
+                    data = os.read(stdin_fd, 4096)
+                    if not data:
+                        break
+                    loop.call_soon_threadsafe(stdin_queue.put_nowait, data)
+                except (OSError, ValueError):
+                    break
+
+        _win_stdin_thread = threading.Thread(
+            target=_win_stdin_loop, name="emrg-stdin-reader", daemon=True)
+        _win_stdin_thread.start()
+    else:
+        if fcntl is not None:  # POSIX-only（Windows 无 fcntl）
+            _stdin_flags = fcntl.fcntl(stdin_fd, fcntl.F_GETFL)
+            fcntl.fcntl(stdin_fd, fcntl.F_SETFL, _stdin_flags | os.O_NONBLOCK)
+        loop.add_reader(stdin_fd, _stdin_reader)
 
     def _handle_selector_nav(data: bytes, widget) -> bool:
         """Handle arrow key and j/k navigation for any selector widget.
@@ -1719,7 +1765,16 @@ Streaming
                     break
     except Exception: logger.exception("TUI main loop crashed")
     finally:
-        loop.remove_reader(stdin_fd)
+        # R123: Windows 无 add_reader（线程 reader）→ remove_reader 需保护；
+        # 停掉轮询/读线程（daemon=True 兜底，显式 stop 更干净）。
+        if sys.platform == "win32":
+            _win_resize_stop.set()
+            _win_stdin_stop.set()
+        else:
+            try:
+                loop.remove_reader(stdin_fd)
+            except (NotImplementedError, ValueError):
+                pass
         logger.info("disconnecting from emrgd")
         read_task.cancel()
         try: await read_task
