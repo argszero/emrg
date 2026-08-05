@@ -1,0 +1,85 @@
+/* base.css — reset + 全局排版（依赖 tokens.css 变量） */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  font-size: var(--text-base);
+  line-height: var(--text-line);
+  background: var(--bg);
+  color: var(--text-1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+input, textarea, select {
+  font-family: inherit;
+}
+
+/* 滚动条（柔和） */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-3); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 聊天区 Markdown 排版（EMRG 消息全宽渲染）── */
+.msg-body p { margin: 0 0 var(--space-2); }
+.msg-body p:last-child { margin-bottom: 0; }
+.msg-body pre {
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  padding: var(--space-3);
+  overflow-x: auto;
+  font-size: 13px;
+  margin: var(--space-2) 0;
+  font-family: var(--font-mono);
+}
+.msg-body code {
+  font-family: var(--font-mono);
+  background: var(--bg-soft);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.msg-body pre code { padding: 0; background: none; }
+.msg-body ul, .msg-body ol { padding-left: 20px; margin: var(--space-2) 0; }
+.msg-body li { margin: 2px 0; }
+.msg-body blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: var(--space-3);
+  color: var(--text-2);
+  margin: var(--space-2) 0;
+}
+.msg-body h1, .msg-body h2, .msg-body h3, .msg-body h4 {
+  font-weight: 600;
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--text-1);
+}
+.msg-body h1 { font-size: 18px; }
+.msg-body h2 { font-size: 17px; }
+.msg-body h3 { font-size: 16px; }
+.msg-body h4 { font-size: 15px; }
+.msg-body a { color: var(--blue); text-decoration: none; }
+.msg-body a:hover { text-decoration: underline; }
+.msg-body table {
+  border-collapse: collapse;
+  margin: var(--space-2) 0;
+  font-size: var(--text-secondary);
+}
+.msg-body th, .msg-body td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+}
+.msg-body th { background: var(--bg-soft); font-weight: 600; }
+.msg-body hr { border: none; border-top: 1px solid var(--border); margin: var(--space-4) 0; }
+.msg-body img { max-width: 100%; border-radius: var(--radius-input); }

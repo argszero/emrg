@@ -1,0 +1,175 @@
+/* components.css — 组件：消息气泡 / 工具行 / 会话项 / 对话框 / 按钮
+ * 从旧 app.css 迁移，颜色改为 tokens 变量；P2 起逐步按 §4 组件规格细化
+ */
+
+/* ── 会话项 ────────────────────────── */
+.session-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-input);
+  cursor: pointer;
+  margin-bottom: 2px;
+  font-size: var(--text-secondary);
+  color: var(--text-2);
+  transition: background var(--dur-fast);
+}
+.session-item:hover { background: var(--bg-soft); }
+.session-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+.session-item.placeholder { color: var(--text-3); cursor: default; }
+.sess-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess-count { color: var(--text-3); font-size: 11px; flex-shrink: 0; }
+.session-item.active .sess-count { color: var(--accent); }
+
+/* ── 消息 ──────────────────────────── */
+.msg {
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: var(--radius-input);
+  line-height: var(--text-line);
+  word-break: break-word;
+  white-space: pre-wrap;
+  animation: msg-in var(--dur-med) var(--ease);
+}
+/* 用户：右对齐柔和气泡（accent-soft 底，右下角 6px 小圆角） */
+.msg.user {
+  align-self: flex-end;
+  background: var(--accent-soft);
+  color: var(--text-1);
+  border-radius: var(--radius-bubble) var(--radius-bubble) 6px var(--radius-bubble);
+}
+/* EMRG：全宽无气泡，行首 ✦ 标识（P2 chat.js 渲染时加 ✦，P1 保留全宽样式） */
+.msg.assistant {
+  align-self: flex-start;
+  max-width: 100%;
+  width: 100%;
+  background: none;
+  color: var(--text-1);
+  padding: 0;
+  border-radius: 0;
+  white-space: normal;
+}
+.msg.assistant.remote { border-left: 3px solid var(--amber); padding-left: var(--space-3); }
+/* 系统提示：居中弱化小字 */
+.msg.system {
+  align-self: center;
+  background: none;
+  color: var(--text-3);
+  font-size: var(--text-aux);
+  padding: var(--space-1) var(--space-3);
+  max-width: 95%;
+  text-align: center;
+}
+.remote-label { font-size: 11px; color: var(--amber); margin-bottom: var(--space-1); }
+.msg-body { color: var(--text-1); }
+
+/* ── 工具过程（P2 改折叠友好行；P1 保留卡片样式保证功能）── */
+.tool-card {
+  align-self: flex-start;
+  min-width: 320px;
+  max-width: 85%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--amber);
+  border-radius: var(--radius-input);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-secondary);
+  margin: 2px 0;
+  box-shadow: var(--shadow-sm);
+}
+.tool-card.running { border-left-color: var(--amber); }
+.tool-card.done { border-left-color: var(--accent); }
+.tool-card.failed { border-left-color: var(--red); }
+.tool-icon { }
+.tool-name { font-family: var(--font-mono); font-weight: 600; }
+.tool-status { color: var(--text-2); margin-left: var(--space-2); font-size: var(--text-aux); }
+.tool-output {
+  margin-top: var(--space-2);
+  background: var(--bg-soft);
+  border-radius: var(--radius-input);
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-aux);
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.tool-expand {
+  margin-top: var(--space-1);
+  background: none;
+  border: none;
+  color: var(--blue);
+  cursor: pointer;
+  font-size: var(--text-aux);
+  padding: 0;
+}
+.tool-expand:hover { text-decoration: underline; }
+
+/* ── 对话框（P4 重设计：友好文案/分组；P1 保持可用）── */
+dialog {
+  background: var(--bg-panel);
+  color: var(--text-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-dialog);
+  padding: var(--space-5);
+  min-width: 420px;
+  max-width: 90vw;
+  box-shadow: var(--shadow-lg);
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); backdrop-filter: blur(2px); }
+dialog h2 { font-size: var(--text-heading); font-weight: 600; margin-bottom: var(--space-2); color: var(--text-1); }
+dialog .desc { font-size: var(--text-aux); color: var(--text-2); margin-bottom: var(--space-4); }
+.form-row { margin-bottom: var(--space-3); }
+.form-row label { display: block; font-size: var(--text-aux); color: var(--text-2); margin-bottom: var(--space-1); }
+.form-row input, .form-row select {
+  width: 100%;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  color: var(--text-1);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-secondary);
+  outline: none;
+  transition: border-color var(--dur-fast);
+}
+.form-row input:focus, .form-row select:focus { border-color: var(--accent); }
+.hint { font-size: var(--text-aux); color: var(--text-3); }
+.dialog-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-4); }
+.dialog-actions button {
+  padding: 8px 18px;
+  border-radius: var(--radius-input);
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-1);
+  cursor: pointer;
+  font-size: var(--text-secondary);
+  min-height: 36px; /* 点击区 ≥36px */
+  transition: background var(--dur-fast);
+}
+.dialog-actions button:hover { background: var(--bg-soft); }
+.dialog-actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.dialog-actions button.primary:hover { background: var(--accent-hover); }
+.dir-row { display: flex; gap: var(--space-2); }
+.dir-row input { flex: 1; }
+.dir-row button { flex-shrink: 0; }
+
+/* 消息入场动效：轻微上浮 + 淡入（克制） */
+@keyframes msg-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg { animation: none; }
+}

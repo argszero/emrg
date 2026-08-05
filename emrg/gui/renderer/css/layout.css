@@ -1,0 +1,207 @@
+/* layout.css — 整体布局：侧边栏 + 聊天区 + 输入区（docs/design/gui-redesign.md §3） */
+#app {
+  display: flex;
+  height: 100vh;
+  background: var(--bg);
+}
+
+/* ── 侧边栏（260px）────────────────── */
+#sidebar {
+  width: var(--sidebar-w);
+  min-width: 200px;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+/* 品牌区：✦ EMRG */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: var(--space-4) var(--space-4) var(--space-3);
+}
+.brand-mark { color: var(--accent); font-size: 20px; line-height: 1; }
+.brand-name { font-size: 17px; font-weight: 600; color: var(--text-1); letter-spacing: 0.2px; }
+
+/* 新对话按钮 */
+.btn-new {
+  margin: 0 var(--space-4) var(--space-3);
+  padding: 9px 12px;
+  border-radius: var(--radius-input);
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: var(--text-secondary);
+  font-weight: 600;
+  text-align: center;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.btn-new:hover { background: var(--accent); color: #fff; }
+
+/* 会话列表（时间分组 P3 接入，P1 保持列表） */
+#session-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 var(--space-2) var(--space-2);
+}
+.session-group-label {
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  font-size: var(--text-aux);
+  color: var(--text-3);
+}
+
+/* 侧边栏底部：设置 + 连接圆点（技术信息收纳隐藏） */
+.sidebar-footer {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-secondary);
+}
+.btn-settings {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--text-2);
+  font-size: var(--text-secondary);
+  padding: 6px 8px;
+  border-radius: var(--radius-input);
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.btn-settings:hover { background: var(--bg-soft); color: var(--text-1); }
+
+/* 连接状态小圆点（绿=正常，灰=未连接，红=异常） */
+.conn-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.conn-dot.green { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.conn-dot.red { background: var(--red); box-shadow: 0 0 0 3px color-mix(in srgb, var(--red) 20%, transparent); }
+.conn-dot.gray { background: var(--text-3); }
+
+/* 技术信息（instance id / 模型 / 演化计数 / 项目路径）：
+ * P1 收纳隐藏、保留 DOM id 兼容现有 app.js；P4 迁移到 设置→关于 */
+.tech-hide { display: none; }
+
+/* ── 主区 ──────────────────────────── */
+#main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--bg);
+}
+
+/* 顶栏：当前对话标题（居中简洁；P3 接入标题逻辑） */
+#chat-header {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-secondary);
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+#chat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+
+/* 聊天区：居中单栏，最大宽度 760px（app.js 直接 append 到 #chat-view，自身限宽居中） */
+#chat-view {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  width: 100%;
+  max-width: var(--chat-max-w);
+  margin: 0 auto;
+  scroll-behavior: smooth;
+}
+
+/* ── 输入区：悬浮卡片式 ────────────── */
+#composer {
+  flex-shrink: 0;
+  padding: var(--space-3) var(--space-5) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  background: linear-gradient(transparent, var(--bg) 30%);
+}
+.composer-card {
+  width: 100%;
+  max-width: var(--chat-max-w);
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-input);
+  box-shadow: var(--shadow-md);
+  padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+  transition: border-color var(--dur-fast), box-shadow var(--dur-fast);
+}
+.composer-card:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-md);
+}
+#input {
+  flex: 1;
+  resize: none;
+  border: none;
+  background: none;
+  color: var(--text-1);
+  padding: var(--space-2) 0;
+  font-size: var(--text-base);
+  line-height: 1.6;
+  max-height: 150px; /* ~6 行 */
+  outline: none;
+}
+#input::placeholder { color: var(--text-3); }
+#input:disabled { opacity: 0.6; }
+
+/* 圆形发送按钮（↑）/ 停止按钮（■） */
+.send-btn, .stop-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+  transition: background var(--dur-fast), transform var(--dur-fast);
+}
+.send-btn {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+}
+.send-btn:hover { background: var(--accent-hover); transform: translateY(-1px); }
+.send-btn:disabled { background: var(--bg-soft); color: var(--text-3); cursor: default; box-shadow: none; transform: none; }
+.stop-btn {
+  background: var(--red);
+  color: #fff;
+}
+.stop-btn:hover { filter: brightness(1.08); }
+
+/* 输入区下方友好免责提示 */
+.composer-hint {
+  font-size: var(--text-aux);
+  color: var(--text-3);
+  text-align: center;
+}
+
+/* 窄屏：侧边栏自动收起（P3 折叠按钮接入；先保证不破版） */
+@media (max-width: 720px) {
+  #sidebar { display: none; }
+  #chat-view { padding: var(--space-4); }
+  #composer { padding: var(--space-3) var(--space-4) var(--space-4); }
+}

@@ -1,0 +1,99 @@
+/* tokens.css — EMRG GUI 设计令牌（双主题）
+ * 来源：docs/design/gui-redesign.md §2 视觉设计系统（权威）
+ * 品牌色生机绿 #16a06c（浅色）/ #2fbf83（深色）—— emergence / 生长叙事
+ */
+:root {
+  color-scheme: light;
+
+  /* ── 字体 ── */
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+          "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "SF Mono", Menlo, Consolas, monospace;
+
+  /* ── 字号（正文 15px 行高 1.7，比旧 14px 更舒展）── */
+  --text-base: 15px;
+  --text-line: 1.7;
+  --text-secondary: 13px;
+  --text-secondary-line: 1.5;
+  --text-aux: 12px;
+  --text-heading: 17px;
+
+  /* ── 圆角 ── */
+  --radius-bubble: 18px;
+  --radius-input: 12px;
+  --radius-card: 14px;
+  --radius-dialog: 20px;
+
+  /* ── 间距（8px 基准网格）── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* ── 动效 ── */
+  --ease: cubic-bezier(0.2, 0.8, 0.3, 1);
+  --dur-fast: 150ms;
+  --dur-med: 250ms;
+  --dur-slow: 350ms;
+
+  /* ── 布局 ── */
+  --sidebar-w: 260px;
+  --chat-max-w: 760px;
+
+  /* ── 浅色主题 ── */
+  --bg: #fafafa;
+  --bg-panel: #ffffff;
+  --bg-soft: #f2f3f5;
+  --text-1: #1a1d21;
+  --text-2: #5f6672;
+  --text-3: #9aa1ad;
+  --border: #e8eaed;
+  --accent: #16a06c;
+  --accent-soft: #e6f5ee;
+  --accent-hover: #128a5c;
+  --blue: #3b82f6;
+  --red: #e5484d;
+  --amber: #f5a623;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 4px 16px rgba(16, 24, 40, 0.08);
+  --shadow-lg: 0 12px 40px rgba(16, 24, 40, 0.14);
+}
+
+/* ── 深色主题（data-theme 覆盖；跟随系统见 base.css）── */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #17181c;
+  --bg-panel: #1f2127;
+  --bg-soft: #26282f;
+  --text-1: #eceef2;
+  --text-2: #a4a9b4;
+  --text-3: #6b7078;
+  --border: #2e3138;
+  --accent: #2fbf83;
+  --accent-soft: #1d3a2f;
+  --accent-hover: #37d192;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #17181c;
+    --bg-panel: #1f2127;
+    --bg-soft: #26282f;
+    --text-1: #eceef2;
+    --text-2: #a4a9b4;
+    --text-3: #6b7078;
+    --border: #2e3138;
+    --accent: #2fbf83;
+    --accent-soft: #1d3a2f;
+    --accent-hover: #37d192;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5);
+  }
+}

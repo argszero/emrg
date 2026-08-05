@@ -4,82 +4,109 @@
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
   <title>EMRG</title>
-  <link rel="stylesheet" href="app.css" />
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/base.css" />
+  <link rel="stylesheet" href="css/layout.css" />
+  <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="../vendor/highlight.github-dark.css" />
 </head>
 <body>
   <div id="app">
-    <!-- 会话栏 -->
+    <!-- 侧边栏：品牌区 + 新对话 + 会话列表 + 底部设置/连接 -->
     <aside id="sidebar">
+      <div class="brand">
+        <span class="brand-mark">✦</span>
+        <span class="brand-name">EMRG</span>
+      </div>
+      <button id="new-session-btn" class="btn-new" title="新对话">＋ 新对话</button>
       <div id="session-list">
         <div class="session-item placeholder">暂无会话</div>
       </div>
-      <button id="new-session-btn" title="新建会话">＋ 新建</button>
+      <div class="sidebar-footer">
+        <button id="settings-btn" class="btn-settings" title="设置">⚙ 设置</button>
+        <span class="conn-dot gray" id="daemon-dot" title="连接状态"></span>
+        <!-- 技术信息收纳隐藏（P1 保留 id 兼容 app.js；P4 迁移到 设置→关于） -->
+        <span id="server-id" class="tech-hide"></span>
+        <span id="model-name" class="tech-hide"></span>
+        <span id="evolution-count" class="tech-hide"></span>
+        <span id="project-name" class="tech-hide"></span>
+      </div>
     </aside>
 
-    <!-- 聊天区 -->
+    <!-- 主区：顶栏 + 聊天区 + 输入区 -->
     <main id="main">
+      <div id="chat-header">
+        <span id="chat-title"></span>
+      </div>
       <div id="chat-view"></div>
       <div id="composer">
-        <textarea id="input" rows="1" placeholder="输入消息… (Enter 发送 / Shift+Enter 换行)" disabled></textarea>
-        <button id="send-btn" disabled>发送</button>
-        <button id="stop-btn" style="display:none" title="停止响应">⏹</button>
+        <div class="composer-card">
+          <textarea id="input" rows="1" placeholder="输入消息，按 Enter 发送…" disabled></textarea>
+          <button id="send-btn" class="send-btn" title="发送">↑</button>
+          <button id="stop-btn" class="stop-btn" style="display:none" title="停止回复">■</button>
+        </div>
+        <div class="composer-hint">EMRG 可能会犯错，请核对重要信息</div>
       </div>
     </main>
-
-    <!-- 状态栏 -->
-    <footer id="status-bar">
-      <span id="daemon-dot" class="dot gray" title="daemon 状态"></span>
-      <span id="server-id">—</span>
-      <span id="model-name">—</span>
-      <span id="evolution-count"></span>
-      <span id="project-name"></span>
-      <span class="spacer"></span>
-      <button id="settings-btn">设置</button>
-    </footer>
   </div>
 
-  <!-- 设置对话框 -->
+  <!-- 设置对话框（P4 重设计：分组/多模型管理；P1 保持现有结构可用） -->
   <dialog id="settings-dialog">
     <form method="dialog" id="settings-form">
       <h2>设置</h2>
-      <label>API Key <input type="password" id="set-api-key" required /></label>
-      <label>Base URL <input type="text" id="set-base-url" /></label>
-      <label>Model
-        <select id="set-model"></select>
-      </label>
-      <label>项目目录
-        <div class="dir-row">
-          <input type="text" id="set-project-dir" readonly />
-          <button type="button" id="pick-dir-btn">选择…</button>
-        </div>
-      </label>
+      <div class="form-row">
+        <label>API Key <input type="password" id="set-api-key" required /></label>
+      </div>
+      <div class="form-row">
+        <label>Base URL <input type="text" id="set-base-url" /></label>
+      </div>
+      <div class="form-row">
+        <label>Model
+          <select id="set-model"></select>
+        </label>
+      </div>
+      <div class="form-row">
+        <label>项目目录
+          <div class="dir-row">
+            <input type="text" id="set-project-dir" readonly />
+            <button type="button" id="pick-dir-btn">选择…</button>
+          </div>
+        </label>
+      </div>
       <div class="dialog-actions">
         <button type="button" id="settings-cancel">取消</button>
-        <button type="submit" id="settings-save">保存</button>
+        <button type="submit" id="settings-save" class="primary">保存</button>
       </div>
     </form>
   </dialog>
 
-  <!-- 首启引导 -->
+  <!-- 首启引导（P4 重设计：全屏友好向导；P1 保持现有结构可用） -->
   <dialog id="welcome-dialog">
     <form method="dialog" id="welcome-form">
       <h2>欢迎使用 EMRG</h2>
-      <p>请先完成初始设置（选择工作目录 + 配置 API Key）。</p>
-      <label>项目目录
-        <div class="dir-row">
-          <input type="text" id="welcome-project-dir" readonly />
-          <button type="button" id="welcome-pick-btn">选择…</button>
-        </div>
+      <p class="desc">请先完成初始设置（选择工作目录 + 配置 API Key）。</p>
+      <div class="form-row">
+        <label>项目目录
+          <div class="dir-row">
+            <input type="text" id="welcome-project-dir" readonly />
+            <button type="button" id="welcome-pick-btn">选择…</button>
+          </div>
+        </label>
         <small class="hint">可跳过（默认 ~/.emrg/evolution）</small>
-      </label>
-      <label>API Key <input type="password" id="welcome-api-key" required /></label>
-      <label>Base URL <input type="text" id="welcome-base-url" /></label>
-      <label>Model
-        <select id="welcome-model"></select>
-      </label>
+      </div>
+      <div class="form-row">
+        <label>API Key <input type="password" id="welcome-api-key" required /></label>
+      </div>
+      <div class="form-row">
+        <label>Base URL <input type="text" id="welcome-base-url" /></label>
+      </div>
+      <div class="form-row">
+        <label>Model
+          <select id="welcome-model"></select>
+        </label>
+      </div>
       <div class="dialog-actions">
-        <button type="submit" id="welcome-save">保存并开始</button>
+        <button type="submit" id="welcome-save" class="primary">保存并开始</button>
       </div>
     </form>
   </dialog>
