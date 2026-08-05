@@ -193,7 +193,7 @@ const
   SMTO_ABORTIFHUNG = 2;         { $0002 }
 
 function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM;
-  fuFlags: UINT; uTimeout: UINT; lpdwResult: DWORD): BOOL;
+  fuFlags: UINT; uTimeout: UINT; var lpdwResult: DWORD): BOOL;
   external 'SendMessageTimeoutW@user32.dll stdcall';
 
 { R119: PATH 段精确匹配（大小写不敏感，段边界防 C:\Users 与 c:\users 误判） }
