@@ -327,6 +327,62 @@ def test_load_and_start_unknown_type(tmp_path):
     assert coros == []
 
 
+# ── Template task types (paper / open-source / promote) ────────────
+
+
+def test_task_templates_cover_all_handlers():
+    """Every HANDLERS type has a TASK_TEMPLATES mapping and the file exists.
+
+    Regression guard: template path bugs (promote #304, #306) crashed the
+    scheduler at runtime. This test fails fast if a handler type loses its
+    template mapping or a template file is renamed/missing.
+    """
+    from emrg.server import scheduler as mod
+
+    for task_type in TaskScheduler.HANDLERS:
+        assert task_type in mod.TASK_TEMPLATES, (
+            f"missing TASK_TEMPLATES mapping for {task_type!r}"
+        )
+        template_path = (
+            Path(__file__).resolve().parent.parent
+            / "emrg" / "server" / mod.TASK_TEMPLATES[task_type]
+        )
+        assert template_path.exists(), (
+            f"template file missing for {task_type!r}: {template_path.name}"
+        )
+
+
+def test_load_and_start_promote_task(tmp_path):
+    """Promote tasks start an EvolutionHandler with the promote template."""
+    tasks_yml = tmp_path / "tasks.yml"
+    tasks_yml.write_text(yaml.safe_dump([
+        {"name": "olr-promote", "type": "promote",
+         "config": {"project": "openlocalrouter"},
+         "interval": 3600, "enabled": True},
+    ]))
+
+    async def _run():
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tasks_yml
+        return sched.load_and_start(), sched
+
+    from emrg.server import scheduler as mod
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        (coros, sched) = asyncio.run(_run())
+    finally:
+        mod.config_dir = orig_config
+
+    assert len(coros) == 1
+    handler = sched._handlers[0]
+    assert handler.name == "olr-promote"
+    assert handler._template_path.name == "promote_prompt.md"
+    sched.stop_all()
+    for c in coros:
+        c.cancel()
+
+
 # ── EvolutionHandler core ─────────────────────────────────────────
 
 

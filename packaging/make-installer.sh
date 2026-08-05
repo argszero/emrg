@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # EMRG Phase 4 — platform installer wrapper (rant #12 §10/§13).
 #
-#   macOS:  pkgbuild 用户级（R54）。payload 装临时位置 + postinstall 复制
-#           （R104: runtime → ~/.emrg/install/ + GUI EMRG.app → ~/Applications/）
+#   macOS:  用户级 pkg（R54/R126）。pkgbuild --install-location '/.emrg/install'
+#           + distribution currentUserHome 域 → pkg 引擎直接装 ~/.emrg/install/
+#           （R104: GUI EMRG.app → ~/Applications/，postinstall 复制）
 #           R67: postinstall $HOME 陷阱（提权时取控制台用户真实 HOME）
 #           R105: root 复制后 chown 回用户
 #   Windows: Inno Setup（R55 免 UAC；R97 {%USERPROFILE} 替代 {userhome}——旧版 iscc 不识）
@@ -24,7 +25,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 RUNTIME="$DIST/runtime"
-VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.0)"
+VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.4)"
 PLATFORM="${1:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 
 mkdir -p "$DIST/artifacts"
@@ -39,11 +40,14 @@ case "$PLATFORM" in
       exit 1
     fi
     PKG_ROOT="$(mktemp -d)"
-    mkdir -p "$PKG_ROOT/payload/runtime" "$PKG_ROOT/payload/runtime/emrg-gui"
-    cp -R "$RUNTIME/." "$PKG_ROOT/payload/runtime/"
-    cp -R "$GUI_APP" "$PKG_ROOT/payload/runtime/emrg-gui/EMRG.app"
+    # R126: payload 不再套 runtime/ 层 —— 直接放 runtime 内容。
+    # pkgbuild --install-location '/.emrg/install' + distribution currentUserHome 域
+    # → pkg 引擎直接装到 ~/.emrg/install/（rant 2026-08-05T18:45:35）
+    mkdir -p "$PKG_ROOT/payload/emrg-gui"
+    cp -R "$RUNTIME/." "$PKG_ROOT/payload/"
+    cp -R "$GUI_APP" "$PKG_ROOT/payload/emrg-gui/EMRG.app"
     # 生成"卸载 EMRG.app"（R30/R31/R102：bash 包装调 emrg-uninstall + 删主 GUI + 提示拖废纸篓）
-    UNINSTALL_APP="$PKG_ROOT/payload/runtime/emrg-gui/卸载 EMRG.app"
+    UNINSTALL_APP="$PKG_ROOT/payload/emrg-gui/卸载 EMRG.app"
     mkdir -p "$UNINSTALL_APP/Contents/MacOS"
     cat > "$UNINSTALL_APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -82,37 +86,70 @@ EOF
     mkdir -p "$PKG_ROOT/scripts"
     cat > "$PKG_ROOT/scripts/postinstall" <<'EOF'
 #!/bin/bash
+# R126: pkg 引擎已把 payload 直接装到用户 home（currentUserHome 域），
+# postinstall 不再从 /tmp 复制（旧实现依赖构建机路径 /tmp/emrg-payload，
+# 用户机不存在 → 空安装；pkgbuild 未指定 --install-location → 默认装系统宗卷）。
 # R67: GUI 安装器可能提权（$HOME=/var/root）→ 取控制台用户真实 HOME
 USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "$USER")"
 [ -z "$USER" ] && USER="$(whoami)"
 HOME_DIR="$(dscl . -read "/Users/$USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
 [ -z "$HOME_DIR" ] && HOME_DIR="$HOME"
-INSTALL_DEST="$HOME_DIR/.emrg/install"
-# R104: ① runtime → ~/.emrg/install/
-mkdir -p "$INSTALL_DEST"
-cp -R "/tmp/emrg-payload/runtime/." "$INSTALL_DEST/"
+# $2 = 安装器传入的真实安装位置（currentUserHome 域下 = <home>/.emrg/install）
+INSTALL_DEST="${2:-$HOME_DIR/.emrg/install}"
 # R105: root 复制 → chown 回用户（否则用户无法更新 install/）
 chown -R "$USER":staff "$HOME_DIR/.emrg" 2>/dev/null || true
 # ② GUI EMRG.app → ~/Applications/（R104）
-if [ -d "/tmp/emrg-payload/runtime/emrg-gui/EMRG.app" ]; then
+if [ -d "$INSTALL_DEST/emrg-gui/EMRG.app" ]; then
   mkdir -p "$HOME_DIR/Applications"
-  cp -R "/tmp/emrg-payload/runtime/emrg-gui/EMRG.app" "$HOME_DIR/Applications/"
+  cp -R "$INSTALL_DEST/emrg-gui/EMRG.app" "$HOME_DIR/Applications/"
   chown -R "$USER":staff "$HOME_DIR/Applications/EMRG.app" 2>/dev/null || true
 fi
 # ③ 卸载 EMRG.app（R30：pkg 无原生卸载器，放置卸载 app）
-if [ -d "/tmp/emrg-payload/runtime/emrg-gui/卸载 EMRG.app" ]; then
-  cp -R "/tmp/emrg-payload/runtime/emrg-gui/卸载 EMRG.app" "$HOME_DIR/Applications/"
+if [ -d "$INSTALL_DEST/emrg-gui/卸载 EMRG.app" ]; then
+  cp -R "$INSTALL_DEST/emrg-gui/卸载 EMRG.app" "$HOME_DIR/Applications/"
   chown -R "$USER":staff "$HOME_DIR/Applications/卸载 EMRG.app" 2>/dev/null || true
+fi
+# ④ PATH anchor（R127/R19：安装后 emrg 命令可用 —— rant 2026-08-05T18:45:35 验收项）。
+# anchor 标记与 bin/emrg-uninstall clean_environment() 的 PATH_ANCHOR_START/END 完全一致，
+# 卸载时按同标记清理（Windows 用 HKCU PATH，Linux AppImage 用 ~/.local/bin 软链，macOS 用 rc）。
+# 幂等：任一 rc 已含 anchor 则跳过；写所有存在的 rc（zsh 默认 + bash 兼容），无 rc 兜底建 ~/.zshrc。
+ANCHOR_START="# >>> EMRG PATH >>>"
+ANCHOR_END="# <<< EMRG PATH <<<"
+if ! grep -qsF "$ANCHOR_START" "$HOME_DIR/.zshrc" "$HOME_DIR/.bash_profile" "$HOME_DIR/.bashrc" "$HOME_DIR/.profile" 2>/dev/null; then
+  for RC in "$HOME_DIR/.zshrc" "$HOME_DIR/.bash_profile" "$HOME_DIR/.bashrc" "$HOME_DIR/.profile"; do
+    [ -f "$RC" ] || continue
+    printf '\n%s\nexport PATH="$HOME/.emrg/install/bin:$PATH"\n%s\n' "$ANCHOR_START" "$ANCHOR_END" >> "$RC"
+    chown "$USER":staff "$RC" 2>/dev/null || true
+  done
+  if [ ! -f "$HOME_DIR/.zshrc" ]; then
+    printf '\n%s\nexport PATH="$HOME/.emrg/install/bin:$PATH"\n%s\n' "$ANCHOR_START" "$ANCHOR_END" >> "$HOME_DIR/.zshrc"
+    chown "$USER":staff "$HOME_DIR/.zshrc" 2>/dev/null || true
+  fi
 fi
 exit 0
 EOF
     chmod +x "$PKG_ROOT/scripts/postinstall"
-    rm -rf /tmp/emrg-payload
-    cp -R "$PKG_ROOT/payload/runtime" /tmp/emrg-payload
+    # 组件包：--install-location '/.emrg/install'（currentUserHome 域下相对 home 锚点，
+    # 解析为 ~/.emrg/install/，不再落到系统宗卷 /）
     pkgbuild --root "$PKG_ROOT/payload" --scripts "$PKG_ROOT/scripts" \
       --identifier "com.argszero.emrg" --version "$VERSION" \
+      --install-location '/.emrg/install' \
+      "$PKG_ROOT/EMRG-component.pkg"
+    # distribution：仅当前用户 home 域（enable_currentUserHome=true, localSystem=false）
+    # → 安装器显示"仅当前用户"，装到 ~/.emrg/install/，不要求系统卷权限
+    cat > "$PKG_ROOT/distribution.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="1">
+  <domains enable_currentUserHome="true" enable_localSystem="false"/>
+  <options customize="never" require-scripts="true"/>
+  <choices-outline><line choice="default"/></choices-outline>
+  <choice id="default" visible="false"><pkg-ref id="com.argszero.emrg"/></choice>
+  <pkg-ref id="com.argszero.emrg" version="$VERSION" onConclusion="none">EMRG-component.pkg</pkg-ref>
+</installer-gui-script>
+EOF
+    productbuild --distribution "$PKG_ROOT/distribution.xml" --package-path "$PKG_ROOT" \
       "$DIST/artifacts/EMRG-$VERSION-macos-$(uname -m).pkg"
-    rm -rf "$PKG_ROOT" /tmp/emrg-payload
+    rm -rf "$PKG_ROOT"
     ;;
 
   linux)
@@ -170,6 +207,9 @@ AppVersion={#MyAppVersion}
 DefaultDirName={%USERPROFILE}\\.emrg\\install
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+; R118: ChangesEnvironment=yes — 写 HKCU\Environment\Path 后广播 WM_SETTINGCHANGE，
+; 否则 explorer 不刷新环境变量缓存，新开 cmd 也看不到更新后的 PATH（rant 2026-08-05T14:28:02）
+ChangesEnvironment=yes
 DisableProgramGroupPage=yes
 OutputDir=$DIST_WIN/artifacts
 OutputBaseFilename=EMRG-$VERSION-windows-x64
@@ -183,15 +223,116 @@ Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createa
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
 [UninstallRun]
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
-[Registry]
-; R27: 用户级 PATH（确定格式 %USERPROFILE%\\.emrg\\install\\bin，卸载时精确移除）
-Root: HKCU; Subkey: "Environment"; ValueType: expandsz; \
-  ValueName: "Path"; ValueData: "%USERPROFILE%\\.emrg\\install\\bin;{olddata}"; \
-  Check: NeedsPath
+[UninstallDelete]
+; R121: emrg-uninstall 脚本退出后（python.exe 已退出，无文件锁），强制删除
+; {app}（install/）— 兜底卸载彻底（rant 2026-08-05T15:35:17）
+Type: filesandordirs; Name: "{app}"
 [Code]
-function NeedsPath: Boolean;
+{ R120: HWND_BROADCAST 为 iscc 预定义常量（Compiler.ScriptFunc.pas RegisterConst），
+  显式定义会报 Duplicate identifier 'HWND_BROADCAST'（v0.2.2 CI 二次失败）。
+  WM_SETTINGCHANGE / SMTO_ABORTIFHUNG 未预置，需保留 const 定义。 }
+const
+  WM_SETTINGCHANGE = 26;        { \$001A }
+  SMTO_ABORTIFHUNG = 2;         { \$0002 }
+
+{ R122: WPARAM/LPARAM 类型在 Inno Setup 6.7.2+ 才加入 iscc 预置
+  （issrc commit 27bce18660, 2025-12-27）；runner windows-2025 为 6.7.1 →
+  Unknown type 'WPARAM'（v0.2.2 CI 三次失败）。改用 DWORD（6.7.1 已注册
+  = LongWord）。iscc 生成 32 位安装器，WPARAM/LPARAM 在 32 位下即 4 字节，
+  与 DWORD 完全兼容。 }
+function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: DWORD; lParam: DWORD;
+  fuFlags: UINT; uTimeout: UINT; var lpdwResult: DWORD): BOOL;
+  external 'SendMessageTimeoutW@user32.dll stdcall';
+
+{ R119: PATH 段精确匹配（大小写不敏感，段边界防 C:\Users 与 c:\users 误判） }
+function PathHasSegment(const PathEnv, Segment: string): Boolean;
 begin
-  Result := Pos(LowerCase('%USERPROFILE%\\.emrg\\install\\bin'), LowerCase(GetEnv('Path'))) = 0;
+  Result := Pos(';' + UpperCase(Segment) + ';', ';' + UpperCase(PathEnv) + ';') > 0;
+end;
+
+{ R119: 从 PATH 中移除指定段，保留其余段与相对顺序 }
+function PathRemoveSegment(const PathEnv, Segment: string): string;
+var
+  i, StartPos: Integer;
+  Part: string;
+begin
+  Result := '';
+  StartPos := 1;
+  for i := 1 to Length(PathEnv) + 1 do
+  begin
+    if (i > Length(PathEnv)) or (PathEnv[i] = ';') then
+    begin
+      Part := Copy(PathEnv, StartPos, i - StartPos);
+      if (Part <> '') and (CompareText(Part, Segment) <> 0) then
+      begin
+        if Result <> '' then
+          Result := Result + ';';
+        Result := Result + Part;
+      end;
+      StartPos := i + 1;
+    end;
+  end;
+end;
+
+procedure BroadcastEnvironmentChange;
+var
+  Dummy: DWORD;
+begin
+  SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0,
+    SMTO_ABORTIFHUNG, 5000, Dummy);
+end;
+
+// R123: 以下注释用 // 行注释（Inno Pascal 块注释 { } 不支持嵌套，
+// 内含 {app}/{olddata} 的 } 会提前终止注释块 → Syntax error，v0.2.2 CI 四次失败）。
+// R119: 安装后把 {app}\bin 加入 HKCU 用户 PATH。
+//   旧实现（R27 [Registry]{olddata} + NeedsPath）缺陷：
+//   1. NeedsPath 用未展开的字面 %USERPROFILE%\... 与已展开的 GetEnv('Path')
+//      比较 → 永不匹配 → 重复安装 PATH 段累积；
+//   2. ValueData 写死 %USERPROFILE%\...\bin → 用户自定义安装目录时 PATH 指向错误；
+//   3. {olddata} 依赖值已存在，HKCU Path 缺失（Server/精简镜像）时行为不确定。
+//   R119 改 [Code] 显式读写：展开 {app}\bin 真实路径 + 段边界去重 + 值缺失时创建。
+procedure AddBinDirToPath;
+var
+  BinPath, OldPath, NewPath: string;
+begin
+  BinPath := ExpandConstant('{app}\bin');
+  if RegQueryStringValue(HKCU, 'Environment', 'Path', OldPath) then
+  begin
+    if PathHasSegment(OldPath, BinPath) then
+      Exit;
+    NewPath := BinPath + ';' + OldPath;
+  end
+  else
+    NewPath := BinPath;
+  RegWriteExpandStringValue(HKCU, 'Environment', 'Path', NewPath);
+  BroadcastEnvironmentChange;
+end;
+
+// R119: 卸载后从 HKCU 用户 PATH 移除 {app}\bin
+procedure RemoveBinDirFromPath;
+var
+  BinPath, PathEnv: string;
+begin
+  BinPath := ExpandConstant('{app}\bin');
+  if not RegQueryStringValue(HKCU, 'Environment', 'Path', PathEnv) then
+    Exit;
+  if not PathHasSegment(PathEnv, BinPath) then
+    Exit;
+  PathEnv := PathRemoveSegment(PathEnv, BinPath);
+  RegWriteExpandStringValue(HKCU, 'Environment', 'Path', PathEnv);
+  BroadcastEnvironmentChange;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    AddBinDirToPath;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveBinDirFromPath;
 end;
 EOF
     # Windows 路径转义（iscc 需要 Windows 路径，但在 bash/msys 下用当前路径）

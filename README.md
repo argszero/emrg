@@ -50,19 +50,19 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 
 | 平台 | 安装文件 | 说明 |
 |------|---------|------|
-| macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | 双击安装，GUI 到 `~/Applications/EMRG.app` |
+| macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | 双击安装（用户级，无需管理员密码），GUI 到 `~/Applications/EMRG.app` |
 | macOS (Intel) | `EMRG-<ver>-macos-x64.pkg` | 同上 |
-| Windows | `EMRG-<ver>-windows-x64.exe` | Inno Setup 免 UAC，开始菜单快捷方式 |
+| Windows | `EMRG-<ver>-windows-x64.exe` | Inno Setup 免 UAC，开始菜单快捷方式，PATH 自动注册（含原生 TUI，cmd/PowerShell 直接 `emrg`） |
 | Linux | `EMRG-<ver>-linux-x86_64.AppImage` | 首次运行自解压到 `~/.emrg/install/` |
 | Linux (ARM64) | `EMRG-<ver>-linux-aarch64.AppImage` | 同上 |
 
 安装包内置完整运行时（standalone Python 3.13 + 依赖 + git + gh + GUI），**干净机器（无 python/uv/git/gh/node）零前置依赖**，100% 离线安装。安装后：
 
 - GUI：启动台 / 开始菜单点击 **EMRG**
-- TUI：`~/.emrg/install/bin/emrg`（Linux 另生成 `~/.local/bin/emrg` 软链）
+- TUI：`~/.emrg/install/bin/emrg`（macOS 安装时写 shell rc PATH anchor，新开终端直接 `emrg`；Linux 另生成 `~/.local/bin/emrg` 软链）
 - 首次启动引导填写 API key；会话内可直接执行 python 脚本
 
-> **卸载**：macOS 运行"卸载 EMRG.app"；Windows 控制面板卸载；Linux 运行 `~/.emrg/install/bin/emrg-uninstall`（或删 AppImage + 软链）。卸载保留 `~/.emrg` 中非 EMRG 的用户文件，并生成终止报告与数据快照。
+> **卸载**：macOS 运行"卸载 EMRG.app"；Windows 控制面板卸载；Linux 运行 `~/.emrg/install/bin/emrg-uninstall`（或删 AppImage + 软链）。卸载保留 `~/.emrg` 中非 EMRG 的用户文件，并生成终止报告与数据快照。**Windows 卸载彻底**（v0.2.2+）：先终止 GUI 进程防止 daemon 复活，白名单全量清理运行时文件，`[UninstallDelete]` 兜底删除 install/，`~/.emrg` 卸载后不残留。
 >
 > **无 Apple 证书**：macOS 安装包未签名时，首次打开右键 → 打开（Gatekeeper 提示说明）。API key 配置除 GUI 外也可直接编辑 `~/.emrg/config.toml`（GUI 保存设置会重写 config，注释会丢失——高级配置建议直接编辑文件）。
 

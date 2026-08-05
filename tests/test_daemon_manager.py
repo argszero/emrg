@@ -16,8 +16,10 @@ import pytest
 
 import sys
 
-# TUI (python_tui) 依赖 POSIX-only fcntl/termios/tty——Windows 跳过（Windows 冒烟不跑 TUI）
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="TUI is POSIX-only (fcntl/termios)")
+# R123 (#401) 后 Windows 已有原生 TUI，但 daemon_manager 测试覆盖 daemon 生命周期
+# （spawn/信号/超时语义），Windows 上 CREATE_NEW_PROCESS_GROUP 等行为与 POSIX 不同
+# → Windows CI 冒烟阶段仍跳过（纯逻辑测试见 test_buffer/test_output/test_input_parser）。
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon 生命周期测试依赖 POSIX 进程语义（Windows CI 冒烟不跑）")
 
 from emrg.client import daemon_manager
 
@@ -287,3 +289,26 @@ class TestDaemonConnection:
         conn = self._conn()
         asyncio.run(conn.close())
         assert conn._ws.closed is True
+
+class TestReadLogTail:
+    """_read_log_tail — daemon start-timeout diagnostics (R124)."""
+
+    def test_tail_last_lines(self, tmp_path):
+        p = tmp_path / "emrgd.log"
+        p.write_text("\n".join(f"line{i}" for i in range(1, 31)), encoding="utf-8")
+        out = daemon_manager._read_log_tail(p, lines=5)
+        assert out == "line26\nline27\nline28\nline29\nline30"
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert daemon_manager._read_log_tail(tmp_path / "nope.log") == ""
+
+    def test_shorter_than_lines_returns_all(self, tmp_path):
+        p = tmp_path / "emrgd.log"
+        p.write_text("a\nb", encoding="utf-8")
+        assert daemon_manager._read_log_tail(p, lines=10) == "a\nb"
+
+    def test_invalid_utf8_replaced(self, tmp_path):
+        p = tmp_path / "emrgd.log"
+        p.write_bytes(b"ok\n\xff\xfebad\nend")
+        out = daemon_manager._read_log_tail(p, lines=5)
+        assert "end" in out and "\ufffd" in out

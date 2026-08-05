@@ -80,7 +80,22 @@ async def start_daemon() -> subprocess.Popen:
         if is_running():
             logger.info("emrgd started (pid=%d)", proc.pid)
             return proc
-    raise RuntimeError("emrgd failed to start within timeout")
+    # R124: 超时后读取 emrgd.log 尾部打印真实失败原因（rant 2026-08-05T15:54:28 关联：
+    # config.toml 解析错误时 CLI 只显示 'failed to start within timeout'，吞掉真实报错）
+    tail = _read_log_tail(Path.home() / ".emrg" / "emrgd.log", lines=15)
+    detail = f"\n  emrgd.log 尾部:\n{tail}" if tail else ""
+    raise RuntimeError(f"emrgd failed to start within timeout{detail}")
+
+
+def _read_log_tail(path: Path, lines: int = 15) -> str:
+    """Return the last `lines` of a log file (empty string on any error)."""
+    try:
+        if not path.exists():
+            return ""
+        data = path.read_text(encoding="utf-8", errors="replace")
+        return "\n".join(data.rstrip().splitlines()[-lines:])
+    except OSError:
+        return ""
 
 
 async def check_and_restart_if_stale() -> None:
