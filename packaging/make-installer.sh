@@ -24,7 +24,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 RUNTIME="$DIST/runtime"
-VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.0)"
+VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.1)"
 PLATFORM="${1:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 
 mkdir -p "$DIST/artifacts"
@@ -186,15 +186,103 @@ Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createa
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
 [UninstallRun]
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
-[Registry]
-; R27: 用户级 PATH（确定格式 %USERPROFILE%\\.emrg\\install\\bin，卸载时精确移除）
-Root: HKCU; Subkey: "Environment"; ValueType: expandsz; \
-  ValueName: "Path"; ValueData: "%USERPROFILE%\\.emrg\\install\\bin;{olddata}"; \
-  Check: NeedsPath
 [Code]
-function NeedsPath: Boolean;
+const
+  WM_SETTINGCHANGE = 26;        { $001A }
+  HWND_BROADCAST = 65535;       { $FFFF }
+  SMTO_ABORTIFHUNG = 2;         { $0002 }
+
+function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM;
+  fuFlags: UINT; uTimeout: UINT; lpdwResult: DWORD): BOOL;
+  external 'SendMessageTimeoutW@user32.dll stdcall';
+
+{ R119: PATH 段精确匹配（大小写不敏感，段边界防 C:\Users 与 c:\users 误判） }
+function PathHasSegment(const PathEnv, Segment: string): Boolean;
 begin
-  Result := Pos(LowerCase('%USERPROFILE%\\.emrg\\install\\bin'), LowerCase(GetEnv('Path'))) = 0;
+  Result := Pos(';' + UpperCase(Segment) + ';', ';' + UpperCase(PathEnv) + ';') > 0;
+end;
+
+{ R119: 从 PATH 中移除指定段，保留其余段与相对顺序 }
+function PathRemoveSegment(const PathEnv, Segment: string): string;
+var
+  i, StartPos: Integer;
+  Part: string;
+begin
+  Result := '';
+  StartPos := 1;
+  for i := 1 to Length(PathEnv) + 1 do
+  begin
+    if (i > Length(PathEnv)) or (PathEnv[i] = ';') then
+    begin
+      Part := Copy(PathEnv, StartPos, i - StartPos);
+      if (Part <> '') and (CompareText(Part, Segment) <> 0) then
+      begin
+        if Result <> '' then
+          Result := Result + ';';
+        Result := Result + Part;
+      end;
+      StartPos := i + 1;
+    end;
+  end;
+end;
+
+procedure BroadcastEnvironmentChange;
+var
+  Dummy: DWORD;
+begin
+  SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0,
+    SMTO_ABORTIFHUNG, 5000, Dummy);
+end;
+
+{ R119: 安装后把 {app}\bin 加入 HKCU 用户 PATH。
+  旧实现（R27 [Registry]{olddata} + NeedsPath）缺陷：
+  1. NeedsPath 用未展开的字面 %USERPROFILE%\... 与已展开的 GetEnv('Path')
+     比较 → 永不匹配 → 重复安装 PATH 段累积；
+  2. ValueData 写死 %USERPROFILE%\...\bin → 用户自定义安装目录时 PATH 指向错误；
+  3. {olddata} 依赖值已存在，HKCU Path 缺失（Server/精简镜像）时行为不确定。
+  R119 改 [Code] 显式读写：展开 {app}\bin 真实路径 + 段边界去重 + 值缺失时创建。}
+procedure AddBinDirToPath;
+var
+  BinPath, OldPath, NewPath: string;
+begin
+  BinPath := ExpandConstant('{app}\bin');
+  if RegQueryStringValue(HKCU, 'Environment', 'Path', OldPath) then
+  begin
+    if PathHasSegment(OldPath, BinPath) then
+      Exit;
+    NewPath := BinPath + ';' + OldPath;
+  end
+  else
+    NewPath := BinPath;
+  RegWriteExpandStringValue(HKCU, 'Environment', 'Path', NewPath);
+  BroadcastEnvironmentChange;
+end;
+
+{ R119: 卸载后从 HKCU 用户 PATH 移除 {app}\bin }
+procedure RemoveBinDirFromPath;
+var
+  BinPath, PathEnv: string;
+begin
+  BinPath := ExpandConstant('{app}\bin');
+  if not RegQueryStringValue(HKCU, 'Environment', 'Path', PathEnv) then
+    Exit;
+  if not PathHasSegment(PathEnv, BinPath) then
+    Exit;
+  PathEnv := PathRemoveSegment(PathEnv, BinPath);
+  RegWriteExpandStringValue(HKCU, 'Environment', 'Path', PathEnv);
+  BroadcastEnvironmentChange;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    AddBinDirToPath;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveBinDirFromPath;
 end;
 EOF
     # Windows 路径转义（iscc 需要 Windows 路径，但在 bash/msys 下用当前路径）
