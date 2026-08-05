@@ -162,6 +162,23 @@
     </div>
   </dialog>
 
+  <!-- 重命名对话框（对话列表右键 → 重命名） -->
+  <dialog id="rename-dialog">
+    <div class="dialog-card" style="min-width:320px;">
+      <h2>重命名对话</h2>
+      <label>给这段对话起个好记的名字
+        <input type="text" id="rename-input" maxlength="80" placeholder="例如：周报草稿" />
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="rename-cancel" class="btn btn-ghost">取消</button>
+        <button type="button" id="rename-ok" class="btn btn-primary">保存</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 右键菜单（对话列表：重命名 / 删除） -->
+  <div id="ctx-menu" class="ctx-menu" hidden></div>
+
   <script src="../vendor/marked.min.js"></script>
   <script src="../vendor/dompurify.min.js"></script>
   <script src="../vendor/highlight.custom.js"></script>

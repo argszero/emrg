@@ -274,6 +274,46 @@ const Dialogs = (() => {
     }
   }
 
+  // ── 重命名对话（右键菜单 → 重命名） ────
+  let renameSid = null;
+  function showRename(sid, currentTitle) {
+    renameSid = sid;
+    const input = $("rename-input");
+    input.value = (currentTitle && currentTitle !== sid) ? currentTitle : "";
+    $("rename-dialog").showModal();
+    input.focus();
+    input.select();
+  }
+
+  async function submitRename() {
+    if (!renameSid) return;
+    const input = $("rename-input");
+    const title = input.value.trim();
+    if (!title) return; // 空名不提交
+    try {
+      await window.emrg.renameSession({ sessionId: renameSid, title });
+      renameSid = null;
+      $("rename-dialog").close();
+      await App.refreshSessions();
+    } catch (e) {
+      Chat.addSystemMessage(`重命名失败了：${e.message}`);
+    }
+  }
+
+  function initRenameDialog() {
+    $("rename-cancel").addEventListener("click", () => {
+      renameSid = null;
+      $("rename-dialog").close();
+    });
+    $("rename-ok").addEventListener("click", submitRename);
+    $("rename-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitRename();
+      }
+    });
+  }
+
   // ── 确认对话框（替代 confirm/alert） ────
   let confirmCb = null;
   function showConfirm(title, message, opts = {}) {
@@ -302,6 +342,9 @@ const Dialogs = (() => {
   return {
     initThemeButtons,
     initModelForm,
+    initRenameDialog,
+    showRename,
+    submitRename,
     showSettings,
     saveSettings,
     showWelcome,
