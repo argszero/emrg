@@ -29,4 +29,10 @@ jobs:
         run: npm run test:integration
       - name: GUI syntax check (main/preload/renderer)
         working-directory: emrg/gui
-        run: node --check main.js && node --check preload.js && node --check daemon_client.js && node --check renderer/app.js && node --check renderer/markdown.js
+        run: |
+          node --check main.js && node --check preload.js && node --check daemon_client.js
+          # renderer JS — 兼容旧扁平结构（renderer/*.js）与新 js/ 子目录结构（renderer/js/*.js，#417）
+          for f in renderer/app.js renderer/markdown.js renderer/js/*.js; do
+            [ -f "$f" ] || continue
+            node --check "$f" || exit 1
+          done
