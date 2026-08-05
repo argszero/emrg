@@ -473,9 +473,9 @@ class Terminal:
         if not sys.stdin.isatty():
             return
         if sys.platform == "win32":
-            from emrg.client.python_tui.win32 import Win32Console
+            from emrg.client.python_tui.win32 import win32_console
             try:
-                ok = Win32Console().enable_raw_mode(sys.stdin.fileno())
+                ok = win32_console.enable_raw_mode(sys.stdin.fileno())
                 if not ok:
                     return
                 self._raw_mode = True
@@ -501,9 +501,9 @@ class Terminal:
         """Restore original terminal settings."""
         self.restore_title()
         if sys.platform == "win32":
-            from emrg.client.python_tui.win32 import Win32Console
+            from emrg.client.python_tui.win32 import win32_console
             try:
-                Win32Console().disable_raw_mode(sys.stdin.fileno())
+                win32_console.disable_raw_mode(sys.stdin.fileno())
                 self._raw_mode = False
             except (OSError, AttributeError):
                 pass

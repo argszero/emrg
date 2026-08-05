@@ -97,3 +97,9 @@ class Win32Console:
     @property
     def active(self) -> bool:
         return bool(self._saved_modes)
+
+
+# Module-level singleton — saved console modes must survive across
+# _enter_raw_mode / _exit_raw_mode calls (a fresh instance per call would
+# lose _saved_modes and fail to restore the terminal).
+win32_console = Win32Console()
