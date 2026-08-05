@@ -100,7 +100,7 @@ fi
 # ── 5. assets/LICENSE/version ──
 cp "$ROOT/LICENSE" "$DIST/assets/LICENSE" 2>/dev/null || echo "Apache-2.0" > "$DIST/assets/LICENSE"
 "$PY_BIN" -c "import emrg,sys; sys.path.insert(0,'$DIST/source'); import emrg as e; print(e.__version__)" > "$DIST/version.txt" 2>/dev/null \
-  || echo "0.2.3" > "$DIST/version.txt"
+  || echo "0.2.4" > "$DIST/version.txt"
 
 echo "==> runtime size: $(du -sh "$DIST" | cut -f1)"
 echo "==> runtime built OK"
