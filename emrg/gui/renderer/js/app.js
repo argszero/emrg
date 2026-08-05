@@ -456,6 +456,7 @@ const App = (() => {
     });
 
     Dialogs.initThemeButtons();
+    Dialogs.initModelForm();
     initModelSwitcher();
   }
 
@@ -472,6 +473,7 @@ const App = (() => {
     handleEvent,
     bindUi,
     updateEmptyState,
+    updateModelSwitcher,
   };
 })();
 

@@ -523,6 +523,142 @@ dialog::backdrop {
   color: var(--text-1);
   margin-bottom: var(--sp-2);
 }
+
+/* 多模型管理列表 */
+#model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.model-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+.model-item.default {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.model-radio {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  border-radius: 50%;
+  border: 2px solid var(--text-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  color: var(--accent);
+  padding: 0;
+  background: transparent;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+.model-radio.checked {
+  border-color: var(--accent);
+}
+.model-radio:hover {
+  border-color: var(--accent);
+}
+.model-name {
+  font-size: var(--fs-secondary);
+  font-weight: 500;
+  color: var(--text-1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.model-badge {
+  font-size: 10px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-weight: 600;
+}
+.model-id {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  font-family: var(--font-mono);
+}
+.model-vision {
+  font-size: var(--fs-aux);
+  color: var(--text-2);
+}
+.model-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.model-action-btn {
+  font-size: var(--fs-aux);
+  color: var(--text-2);
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.model-action-btn:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+.model-action-btn.danger:hover {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.model-list-empty {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  text-align: center;
+  padding: var(--sp-2);
+}
+
+/* 行内模型表单 */
+.model-form {
+  margin-top: 8px;
+  padding: var(--sp-3);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+.model-form-row {
+  display: flex;
+  gap: var(--sp-3);
+}
+.model-form-label {
+  flex: 1;
+  margin-bottom: 0;
+}
+.model-form-label input {
+  width: 100%;
+  margin-top: 2px;
+  padding: 6px 10px;
+  font-size: var(--fs-secondary);
+}
+.model-form-footer {
+  display: flex;
+  align-items: center;
+  margin-top: var(--sp-2);
+}
+.model-form-vision {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-secondary);
+  color: var(--text-2);
+  margin-bottom: 0;
+  cursor: pointer;
+}
+.model-form-vision input {
+  accent-color: var(--accent);
+}
 .theme-options {
   display: flex;
   gap: var(--sp-2);
