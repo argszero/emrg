@@ -431,6 +431,35 @@
   cursor: pointer;
 }
 
+/* 回到底部悬浮按钮（上滑阅读时出现，不打扰） */
+.back-to-bottom {
+  position: absolute;
+  bottom: 96px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+  color: var(--text-2);
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 15;
+  transition:
+    opacity var(--dur-med) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+.back-to-bottom:hover {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow-lg);
+}
+
 /* ── 连接状态圆点 ─────────────────────── */
 .status-dot {
   width: 9px;

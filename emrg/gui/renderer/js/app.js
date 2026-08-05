@@ -415,9 +415,18 @@ const App = (() => {
     });
 
     const chatView = $("chat-view");
-    chatView.addEventListener("scroll", () => {
-      state.autoScroll =
-        chatView.scrollTop + chatView.clientHeight >= chatView.scrollHeight - 40;
+    const updateBackToBottom = () => {
+      const btn = $("back-to-bottom");
+      const atBottom = chatView.scrollTop + chatView.clientHeight >= chatView.scrollHeight - 40;
+      state.autoScroll = atBottom;
+      // 上滑阅读（不在底部）→ 显示"回到底部"悬浮按钮（不打扰）
+      if (btn) btn.classList.toggle("hidden", atBottom);
+    };
+    chatView.addEventListener("scroll", updateBackToBottom);
+    $("back-to-bottom").addEventListener("click", () => {
+      chatView.scrollTop = chatView.scrollHeight;
+      state.autoScroll = true;
+      $("back-to-bottom").classList.add("hidden");
     });
 
     // 空状态示例问题卡片 → 填入输入框

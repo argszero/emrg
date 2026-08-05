@@ -67,7 +67,7 @@ const ELEMENT_IDS = [
   "welcome-model", "welcome-project-dir", "welcome-pick-btn", "welcome-save", "confirm-dialog",
   "confirm-title", "confirm-message", "confirm-cancel", "confirm-ok", "main",
   "model-list", "add-model-btn", "model-form", "model-form-name", "model-form-id",
-  "model-form-vision", "model-form-save", "model-form-cancel",
+  "model-form-vision", "model-form-save", "model-form-cancel", "back-to-bottom",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
