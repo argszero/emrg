@@ -1,0 +1,236 @@
+"use strict";
+/**
+ * renderer.smoke.test.js — renderer 层冒烟测试（node:test，零依赖）。
+ * 覆盖：7 个 JS 模块按 index.html 顺序加载无崩溃、boot 两条路径（config 缺失→首启 / config 就绪→会话）、
+ *       流式 delta 追加、工具行 running→done 状态流转、多模型管理加载/保存。
+ * 背景：renderer 是 GUI 重设计（#417）核心，CI 此前仅 node --check 语法检查，逻辑零覆盖。
+ * 方法：vm.createContext 模拟浏览器全局（DOM mock + window.emrg），逐模块 runInContext。
+ */
+
+const { test } = require("node:test");
+const assert = require("node:assert");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+const RENDERER_JS = path.join(__dirname, "..", "renderer", "js");
+
+// ── DOM mock（最小但真实：classList 操作同步到 className） ──
+function makeEl(id) {
+  const node = {
+    id,
+    children: [],
+    dataset: {},
+    style: {},
+    attributes: {},
+    _cls: new Set(),
+    classList: {
+      add(c) { node._cls.add(c); node._update(); },
+      remove(c) { node._cls.delete(c); node._update(); },
+      toggle(c) { node._cls.has(c) ? node._cls.delete(c) : node._cls.add(c); node._update(); },
+      contains(c) { return node._cls.has(c); },
+    },
+    _update() { node.className = [...node._cls].join(" "); },
+    className: "",
+    textContent: "",
+    innerHTML: "",
+    value: "",
+    disabled: false,
+    title: "",
+    checked: false,
+    selectedIndex: -1,
+    scrollTop: 0,
+    scrollHeight: 0,
+    clientHeight: 100,
+    open: false,
+    appendChild(c) { this.children.push(c); return c; },
+    addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    closest() { return null; },
+    showModal() { this.open = true; },
+    close() { this.open = false; },
+    setAttribute(k, v) { this.attributes[k] = v; if (k === "value") this.value = v; },
+    removeAttribute(k) { delete this.attributes[k]; },
+    insertBefore(c) { this.children.unshift(c); return c; },
+    remove() {},
+    focus() {},
+  };
+  return node;
+}
+
+const ELEMENT_IDS = [
+  "chat-view", "input", "send-btn", "stop-btn", "conv-list", "status-dot", "settings-btn",
+  "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn",
+  "settings-dialog", "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",
+  "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
+  "welcome-model", "welcome-project-dir", "welcome-pick-btn", "welcome-save", "confirm-dialog",
+  "confirm-title", "confirm-message", "confirm-cancel", "confirm-ok", "main",
+  "model-list", "add-model-btn", "model-form", "model-form-name", "model-form-id",
+  "model-form-vision", "model-form-save", "model-form-cancel", "back-to-bottom",
+];
+
+/** 构造浏览器沙箱（win 即全局对象） */
+function makeSandbox(overrides = {}) {
+  const els = {};
+  for (const id of ELEMENT_IDS) els[id] = makeEl(id);
+  const document = {
+    getElementById: (id) => els[id] || makeEl(id),
+    createElement: (tag) => makeEl(tag),
+    createTextNode: (t) => ({ text: t }),
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener() {},
+    documentElement: { setAttribute() {}, removeAttribute() {} },
+    body: { classList: { add() {}, remove() {}, toggle() {} } },
+  };
+  const win = {
+    console,
+    setTimeout,
+    clearTimeout,
+    Date,
+    Math,
+    JSON,
+    String,
+    Number,
+    Object,
+    Array,
+    RegExp,
+    Map,
+    Set,
+    Promise,
+    requestAnimationFrame: (cb) => cb(),
+    requestIdleCallback: (cb) => cb(),
+    crypto: { randomUUID: () => "mock-uuid" },
+    DOMPurify: { sanitize: (x) => x },
+    marked: null,
+    hljs: null,
+    emrg: {
+      init: async () => ({ config_exists: false, api_key_configured: false, project_dir: "", project_dir_valid: true, server_id: "", model: "", evolution_count: 0, sessions: [] }),
+      onEvent() {},
+      sendMessage: async () => ({}),
+      cancel: async () => ({}),
+      getSettings: async () => ({ apiKey: "", baseUrl: "", model: "", projectDir: "", models: [], modelDetails: [], theme: "system" }),
+      saveSettings: async () => ({}),
+      pickProjectDir: async () => null,
+      listSessions: async () => [],
+      switchSession: async () => ({}),
+      newSession: async () => ({ session_id: "s2" }),
+      deleteSession: async () => ({}),
+      setModel: async () => ({}),
+      ...overrides,
+    },
+  };
+  win.window = win;
+  win.document = document;
+  const ctx = vm.createContext(win);
+  for (const f of ["utils", "markdown", "copywriting", "chat", "sidebar", "dialogs", "app"]) {
+    const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
+    vm.runInContext(code, ctx, { filename: "renderer/js/" + f + ".js" });
+  }
+  return { ctx, win, els, document };
+}
+
+/** 等 microtask 完成 */
+const tick = () => new Promise((r) => setTimeout(r, 20));
+
+test("7 模块按序加载且全局符号解析", () => {
+  const { ctx } = makeSandbox();
+  const out = vm.runInContext(
+    "(function(){ return { App: typeof App, Chat: typeof EMRG_Chat, Copy: typeof EMRG_Copy, Sidebar: typeof EMRG_Sidebar, Dialogs: typeof EMRG_Dialogs, utils: typeof $ }; })()",
+    ctx
+  );
+  // ⚠️ vm 上下文对象原型不同 Realm → 不用 deepStrictEqual，逐个字段断言
+  assert.strictEqual(out.App, "object");
+  assert.strictEqual(out.Chat, "object");
+  assert.strictEqual(out.Copy, "object");
+  assert.strictEqual(out.Sidebar, "object");
+  assert.strictEqual(out.Dialogs, "object");
+  assert.strictEqual(out.utils, "function");
+});
+
+test("boot：config 缺失 → 首启引导（不拉起 daemon）", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  // 首启路径：welcome-dialog 应 open（mock showModal 置 open=true）
+  assert.ok(els["welcome-dialog"].open, "welcome-dialog 应打开");
+});
+
+test("boot：config 就绪 → 加载会话列表", async () => {
+  const { ctx, els } = makeSandbox({
+    init: async () => ({
+      config_exists: true,
+      api_key_configured: true,
+      project_dir: "/tmp",
+      project_dir_valid: true,
+      server_id: "srv-1",
+      model: "deepseek-chat",
+      evolution_count: 42,
+      sessions: [{ session_id: "s1", title: "测试对话", updated_at: "2026-08-05T10:00:00Z" }],
+    }),
+    switchSession: async () => ({}),
+  });
+  await tick();
+  // conv-list 应有分组标签 + 会话项
+  const items = vm.runInContext('document.getElementById("conv-list").children.length', ctx);
+  assert.ok(items >= 2, `conv-list 应有分组标签+会话项，实际 ${items}`);
+});
+
+test("流式 delta 追加 + 工具行 running→done 状态流转", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  const r = vm.runInContext(`(function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "你好" }]);
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "，世界" }]);
+    EMRG_Chat.handleToolStart({ request_id: "rid-1", tool_call_id: "t1", tool_name: "read" });
+    EMRG_Chat.handleToolEnd({ tool_call_id: "t1", tool_name: "read", content: "file contents", elapsed: 0.3 });
+    EMRG_Chat.handleDone({ request_id: "rid-1" });
+    return {
+      chatChildren: $("chat-view").children.length,
+      toolRowClass: $("chat-view").children[1] ? $("chat-view").children[1].className : "none",
+    };
+  })()`, ctx);
+  assert.strictEqual(r.chatChildren, 2, "用户流 + 工具行 2 个节点");
+  assert.ok(r.toolRowClass.includes("done"), `工具行应 done，实际 ${r.toolRowClass}`);
+});
+
+test("多模型管理：modelDetails 加载渲染 + saveSettings 传 models 数组", async () => {
+  let saved = null;
+  const { ctx, els } = makeSandbox({
+    getSettings: async () => ({
+      apiKey: "sk-x",
+      baseUrl: "",
+      model: "deepseek-chat",
+      projectDir: "/tmp",
+      theme: "system",
+      models: ["deepseek-chat", "gpt-4o"],
+      modelDetails: [
+        { name: "deepseek-chat", vision: false },
+        { name: "gpt-4o", model: "gpt-4o", vision: true },
+      ],
+    }),
+    saveSettings: async (cfg) => {
+      saved = cfg;
+      return { ok: true };
+    },
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showSettings()", ctx);
+  const rows = vm.runInContext('document.getElementById("model-list").children.length', ctx);
+  assert.ok(rows >= 2, `模型列表应 ≥2 行（默认 + gpt-4o），实际 ${rows}`);
+
+  vm.runInContext(
+    'document.getElementById("set-api-key").value = "sk-x"; document.getElementById("set-base-url").value = ""; document.getElementById("set-project-dir").value = "/tmp"',
+    ctx
+  );
+  await vm.runInContext("EMRG_Dialogs.saveSettings()", ctx);
+  assert.ok(saved, "saveSettings 应被调用");
+  assert.strictEqual(saved.model, "deepseek-chat");
+  assert.strictEqual(saved.theme, "system");
+  assert.ok(Array.isArray(saved.models));
+  assert.strictEqual(saved.models.length, 2, "models 数组含默认 + gpt-4o");
+  const gpt = saved.models.find((m) => m.name === "gpt-4o");
+  assert.strictEqual(gpt.vision, true);
+});
