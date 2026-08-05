@@ -52,7 +52,7 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 |----------|-----------|-------|
 | macOS (Apple Silicon) | `EMRG-<ver>-macos-arm64.pkg` | Double-click; GUI at `~/Applications/EMRG.app` |
 | macOS (Intel) | `EMRG-<ver>-macos-x64.pkg` | Same |
-| Windows | `EMRG-<ver>-windows-x64.exe` | Inno Setup, no UAC, Start-menu shortcut |
+| Windows | `EMRG-<ver>-windows-x64.exe` | Inno Setup, no UAC, Start-menu shortcut, PATH auto-registered (native TUI: run `emrg` directly in cmd/PowerShell) |
 | Linux | `EMRG-<ver>-linux-x86_64.AppImage` | Self-extracts to `~/.emrg/install/` on first run |
 | Linux (ARM64) | `EMRG-<ver>-linux-aarch64.AppImage` | Same |
 
@@ -62,7 +62,7 @@ The installer bundles a full runtime (standalone Python 3.13 + deps + git + gh +
 - TUI: `~/.emrg/install/bin/emrg` (Linux also creates `~/.local/bin/emrg` symlink)
 - First-run wizard asks for your API key; python scripts work inside sessions
 
-> **Uninstall**: macOS run "卸载 EMRG.app" (uninstall app); Windows uninstall from Control Panel; Linux run `~/.emrg/install/bin/emrg-uninstall` (or delete the AppImage + symlink). Uninstall preserves non-EMRG user files in `~/.emrg`, and writes a termination report + data snapshot.
+> **Uninstall**: macOS run "卸载 EMRG.app" (uninstall app); Windows uninstall from Control Panel; Linux run `~/.emrg/install/bin/emrg-uninstall` (or delete the AppImage + symlink). Uninstall preserves non-EMRG user files in `~/.emrg`, and writes a termination report + data snapshot. **Windows uninstall is thorough** (v0.2.2+): kills GUI first to prevent daemon respawn, full whitelist cleanup of runtime files, `[UninstallDelete]` fallback removes install/, no residue in `~/.emrg`.
 >
 > **Unsigned builds**: if the macOS package is unsigned, right-click → Open on first launch (Gatekeeper). Besides the GUI, you can also edit `~/.emrg/config.toml` directly (GUI settings save rewrites config and drops comments — for advanced config, edit the file).
 
