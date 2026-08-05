@@ -188,9 +188,9 @@ Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconF
 Filename: "{app}\\bin\\python.exe"; Parameters: "{app}\\bin\\emrg-uninstall"; Flags: runhidden
 [Code]
 const
-  WM_SETTINGCHANGE = 26;        { $001A }
-  HWND_BROADCAST = 65535;       { $FFFF }
-  SMTO_ABORTIFHUNG = 2;         { $0002 }
+  WM_SETTINGCHANGE = 26;        { \$001A }
+  HWND_BROADCAST = 65535;       { \$FFFF }
+  SMTO_ABORTIFHUNG = 2;         { \$0002 }
 
 function SendMessageTimeout(hWnd: HWND; Msg: UINT; wParam: WPARAM; lParam: LPARAM;
   fuFlags: UINT; uTimeout: UINT; var lpdwResult: DWORD): BOOL;
