@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # EMRG Phase 4 — platform installer wrapper (rant #12 §10/§13).
 #
-#   macOS:  pkgbuild 用户级（R54）。payload 装临时位置 + postinstall 复制
-#           （R104: runtime → ~/.emrg/install/ + GUI EMRG.app → ~/Applications/）
+#   macOS:  用户级 pkg（R54/R126）。pkgbuild --install-location '/.emrg/install'
+#           + distribution currentUserHome 域 → pkg 引擎直接装 ~/.emrg/install/
+#           （R104: GUI EMRG.app → ~/Applications/，postinstall 复制）
 #           R67: postinstall $HOME 陷阱（提权时取控制台用户真实 HOME）
 #           R105: root 复制后 chown 回用户
 #   Windows: Inno Setup（R55 免 UAC；R97 {%USERPROFILE} 替代 {userhome}——旧版 iscc 不识）
@@ -39,11 +40,14 @@ case "$PLATFORM" in
       exit 1
     fi
     PKG_ROOT="$(mktemp -d)"
-    mkdir -p "$PKG_ROOT/payload/runtime" "$PKG_ROOT/payload/runtime/emrg-gui"
-    cp -R "$RUNTIME/." "$PKG_ROOT/payload/runtime/"
-    cp -R "$GUI_APP" "$PKG_ROOT/payload/runtime/emrg-gui/EMRG.app"
+    # R126: payload 不再套 runtime/ 层 —— 直接放 runtime 内容。
+    # pkgbuild --install-location '/.emrg/install' + distribution currentUserHome 域
+    # → pkg 引擎直接装到 ~/.emrg/install/（rant 2026-08-05T18:45:35）
+    mkdir -p "$PKG_ROOT/payload/emrg-gui"
+    cp -R "$RUNTIME/." "$PKG_ROOT/payload/"
+    cp -R "$GUI_APP" "$PKG_ROOT/payload/emrg-gui/EMRG.app"
     # 生成"卸载 EMRG.app"（R30/R31/R102：bash 包装调 emrg-uninstall + 删主 GUI + 提示拖废纸篓）
-    UNINSTALL_APP="$PKG_ROOT/payload/runtime/emrg-gui/卸载 EMRG.app"
+    UNINSTALL_APP="$PKG_ROOT/payload/emrg-gui/卸载 EMRG.app"
     mkdir -p "$UNINSTALL_APP/Contents/MacOS"
     cat > "$UNINSTALL_APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -82,37 +86,53 @@ EOF
     mkdir -p "$PKG_ROOT/scripts"
     cat > "$PKG_ROOT/scripts/postinstall" <<'EOF'
 #!/bin/bash
+# R126: pkg 引擎已把 payload 直接装到用户 home（currentUserHome 域），
+# postinstall 不再从 /tmp 复制（旧实现依赖构建机路径 /tmp/emrg-payload，
+# 用户机不存在 → 空安装；pkgbuild 未指定 --install-location → 默认装系统宗卷）。
 # R67: GUI 安装器可能提权（$HOME=/var/root）→ 取控制台用户真实 HOME
 USER="$(stat -f "%Su" /dev/console 2>/dev/null || echo "$USER")"
 [ -z "$USER" ] && USER="$(whoami)"
 HOME_DIR="$(dscl . -read "/Users/$USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
 [ -z "$HOME_DIR" ] && HOME_DIR="$HOME"
-INSTALL_DEST="$HOME_DIR/.emrg/install"
-# R104: ① runtime → ~/.emrg/install/
-mkdir -p "$INSTALL_DEST"
-cp -R "/tmp/emrg-payload/runtime/." "$INSTALL_DEST/"
+# $2 = 安装器传入的真实安装位置（currentUserHome 域下 = <home>/.emrg/install）
+INSTALL_DEST="${2:-$HOME_DIR/.emrg/install}"
 # R105: root 复制 → chown 回用户（否则用户无法更新 install/）
 chown -R "$USER":staff "$HOME_DIR/.emrg" 2>/dev/null || true
 # ② GUI EMRG.app → ~/Applications/（R104）
-if [ -d "/tmp/emrg-payload/runtime/emrg-gui/EMRG.app" ]; then
+if [ -d "$INSTALL_DEST/emrg-gui/EMRG.app" ]; then
   mkdir -p "$HOME_DIR/Applications"
-  cp -R "/tmp/emrg-payload/runtime/emrg-gui/EMRG.app" "$HOME_DIR/Applications/"
+  cp -R "$INSTALL_DEST/emrg-gui/EMRG.app" "$HOME_DIR/Applications/"
   chown -R "$USER":staff "$HOME_DIR/Applications/EMRG.app" 2>/dev/null || true
 fi
 # ③ 卸载 EMRG.app（R30：pkg 无原生卸载器，放置卸载 app）
-if [ -d "/tmp/emrg-payload/runtime/emrg-gui/卸载 EMRG.app" ]; then
-  cp -R "/tmp/emrg-payload/runtime/emrg-gui/卸载 EMRG.app" "$HOME_DIR/Applications/"
+if [ -d "$INSTALL_DEST/emrg-gui/卸载 EMRG.app" ]; then
+  cp -R "$INSTALL_DEST/emrg-gui/卸载 EMRG.app" "$HOME_DIR/Applications/"
   chown -R "$USER":staff "$HOME_DIR/Applications/卸载 EMRG.app" 2>/dev/null || true
 fi
 exit 0
 EOF
     chmod +x "$PKG_ROOT/scripts/postinstall"
-    rm -rf /tmp/emrg-payload
-    cp -R "$PKG_ROOT/payload/runtime" /tmp/emrg-payload
+    # 组件包：--install-location '/.emrg/install'（currentUserHome 域下相对 home 锚点，
+    # 解析为 ~/.emrg/install/，不再落到系统宗卷 /）
     pkgbuild --root "$PKG_ROOT/payload" --scripts "$PKG_ROOT/scripts" \
       --identifier "com.argszero.emrg" --version "$VERSION" \
+      --install-location '/.emrg/install' \
+      "$PKG_ROOT/EMRG-component.pkg"
+    # distribution：仅当前用户 home 域（enable_currentUserHome=true, localSystem=false）
+    # → 安装器显示"仅当前用户"，装到 ~/.emrg/install/，不要求系统卷权限
+    cat > "$PKG_ROOT/distribution.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<installer-gui-script minSpecVersion="1">
+  <domains enable_currentUserHome="true" enable_localSystem="false"/>
+  <options customize="never" require-scripts="true"/>
+  <choices-outline><line choice="default"/></choices-outline>
+  <choice id="default" visible="false"><pkg-ref id="com.argszero.emrg"/></choice>
+  <pkg-ref id="com.argszero.emrg" version="$VERSION" onConclusion="none">EMRG-component.pkg</pkg-ref>
+</installer-gui-script>
+EOF
+    productbuild --distribution "$PKG_ROOT/distribution.xml" --package-path "$PKG_ROOT" \
       "$DIST/artifacts/EMRG-$VERSION-macos-$(uname -m).pkg"
-    rm -rf "$PKG_ROOT" /tmp/emrg-payload
+    rm -rf "$PKG_ROOT"
     ;;
 
   linux)
