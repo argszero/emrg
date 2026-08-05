@@ -7,12 +7,6 @@ terminal color/highlight rendering. Directly relevant to the "记录显示高亮
 
 from __future__ import annotations
 
-import sys
-import pytest
-
-# TUI (python_tui) 依赖 POSIX-only fcntl/termios/tty——Windows 跳过（Windows 冒烟不跑 TUI）
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="TUI is POSIX-only (fcntl/termios)")
-
 from rich.style import Style
 
 from emrg.client.python_tui.output import style_diff_sgr, style_to_sgr

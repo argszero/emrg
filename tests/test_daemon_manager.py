@@ -16,8 +16,10 @@ import pytest
 
 import sys
 
-# TUI (python_tui) 依赖 POSIX-only fcntl/termios/tty——Windows 跳过（Windows 冒烟不跑 TUI）
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="TUI is POSIX-only (fcntl/termios)")
+# R123 (#401) 后 Windows 已有原生 TUI，但 daemon_manager 测试覆盖 daemon 生命周期
+# （spawn/信号/超时语义），Windows 上 CREATE_NEW_PROCESS_GROUP 等行为与 POSIX 不同
+# → Windows CI 冒烟阶段仍跳过（纯逻辑测试见 test_buffer/test_output/test_input_parser）。
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon 生命周期测试依赖 POSIX 进程语义（Windows CI 冒烟不跑）")
 
 from emrg.client import daemon_manager
 
