@@ -62,7 +62,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - v0.2.5 full redesign (rant 08-05): light/dark dual theme (prefers-color-scheme), friendly tool status rows (collapsible, 2000-char truncation), multi-model management (add/edit/delete/set-default in settings + in-chat switcher), empty-state welcome screen, back-to-bottom button
   - First-run onboarding: missing config → settings dialog (no daemon spawn) → save → daemon starts; placeholder API key treated as unconfigured
   - Streaming chat with delta rendering (16ms batching), markdown on done (marked + DOMPurify + local highlight.js subset), tool call status cards (2000-char truncation + expand)
-  - Session list/switch/new/delete synced with daemon; own-stream busy lock (G65); broadcast streams from other clients tagged "来自其他客户端"
+  - Session list/switch/new/delete + right-click rename (context menu, #423) synced with daemon; own-stream busy lock (G65); broadcast streams from other clients tagged "来自其他客户端"
   - Disconnect/reconnect: red status dot, auto daemon respawn (stale-port detection), session resume, input bar restored on disconnect (no 30s fake-timeout)
   - Unit tests `npm test` (34: 22 daemon_client + 7 integration + 5 renderer smoke); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
 - **Auto project tracking** — Automatically detects and records working directories; project-scoped sessions

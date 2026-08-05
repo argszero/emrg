@@ -34,7 +34,7 @@ EMRG is an experiment in *autonomous self-improvement*. It's an AI agent that he
 | 🔄 **Gets better on its own** | Background evolution cycles review rants + GitHub + competitor tools, then auto-PR improvements |
 | 📝 **Never forgets** | Project memory + session memory + daily logs — context that persists |
 | 🖥️ **Beautiful TUI** | Slash-command autocomplete, session picker, streaming markdown, elapsed timer, ESC interrupt |
-| 🖱️ **Electron GUI (new)** | Non-developer entry point — chat/sessions/tool status/settings, auto-starts daemon, `npm start` to launch |
+| 🖱️ **Electron GUI (new)** | Non-developer entry point — chat/sessions/tool status/settings, auto-starts daemon, `npm start` to launch. v0.2.5 full redesign: light/dark theme (follows system), friendly tool status rows, multi-model management, empty-state welcome, back-to-bottom button |
 | ⚡ **Parallel tools** | Independent tool calls run concurrently for speed |
 | 🔌 **Micro-kernel daemon** | `emrgd` runs persistently — reconnect anytime without losing state |
 | 🎮 **Vim-friendly** | `j`/`k` navigation, `Ctrl+W`/`Ctrl+K` editing, `Tab` to expand tool cards |
@@ -263,14 +263,14 @@ EMRG doesn't just keep up — it catches up on its own.
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # install deps
-uv run pytest tests/ -v   # run tests (currently 464 items)
+uv run pytest tests/ -v   # run tests (currently 472 items)
 uv run python -m emrg     # launch TUI
 
 # Optional: Electron GUI (non-developer entry point, Phase 3)
 cd emrg/gui
 npm ci               # install deps (production: --omit=dev)
 npm start            # launch GUI (auto-starts daemon)
-npm test             # run Node tests (unit; integration runs in CI, local: npm run test:integration)
+npm test             # run Node tests (34: 22 daemon_client + 7 integration + 5 renderer smoke; integration runs in CI, local: npm run test:integration)
 ```
 
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
