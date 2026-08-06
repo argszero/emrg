@@ -66,13 +66,16 @@ jobs:
         run: |
           echo "$MACOS_SIGNING_P12_BASE64" | base64 --decode > /tmp/signing.p12
           security create-keychain -p 'ci-temp' /tmp/ci.keychain
+          security default-keychain -s /tmp/ci.keychain
           security set-keychain-settings -lut 21600 /tmp/ci.keychain
           security unlock-keychain -p 'ci-temp' /tmp/ci.keychain
           security import /tmp/signing.p12 -k /tmp/ci.keychain -P "$MACOS_SIGNING_P12_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/productsign
-          # -s: 将 partition list 同步到 keychain 内所有项目（含导入的私钥）。
-          # 缺失 -s 时 set-key-partition-list 报 "item not found"（v0.2.7 构建失败根因）。
-          security set-key-partition-list -S apple-tool:,apple: -s -k 'ci-temp' /tmp/ci.keychain
+          # set-key-partition-list 语法：[-S partition-list] [-k password] [match-options] [keychain]
+          # -s = Match keys that can sign（匹配可签名私钥，必须显式提供才能定位项目）；
+          # -S 后跟分区 ID 列表；-k 后跟 keychain 密码。
+          # 缺失匹配参数 → SecItemCopyMatching: item not found（v0.2.7 构建失败根因）。
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k 'ci-temp' /tmp/ci.keychain
           # SC2046: -s 需要将每个 keychain 路径作为独立参数传递，词分割是有意的
           # shellcheck disable=SC2046
           security list-keychains -d user -s /tmp/ci.keychain $(security list-keychains -d user | tr -d '"')
