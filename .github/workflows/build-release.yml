@@ -206,7 +206,10 @@ jobs:
           pkgutil --check-signature "$PKG"
 
       # ── pkg 公证（macOS only，P2 后半；Secret 未配则跳过降级）──
-      # notarytool submit --wait：轮询直至 Accepted/Invalid，失败即非零退出 → CI 失败。
+      # notarytool submit --wait：轮询直至 Accepted/Invalid。
+      # ⚠️ 实测（run 31081477123，#475）：公证结果 Invalid 时 notarytool 退出码仍为 0
+      # （提交处理完成 ≠ 通过），若不解析 status 字段会继续 Staple → 报 cryptic 的
+      # "Record not found" Error 65，掩盖真实 rejection 原因。必须显式解析并抓 log。
       # --timeout 20m：设计文档 §4.4 明确要求（默认 10m，Apple 公证排队高峰可能超时）
       - name: Notarize pkg (macOS only)
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
@@ -214,11 +217,28 @@ jobs:
         run: |
           PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
-          xcrun notarytool submit "$PKG" \
+          NOTARY_OUT="$(xcrun notarytool submit "$PKG" \
             --apple-id "$APPLE_ID" \
             --password "$MACOS_NOTARY_APP_PASSWORD" \
             --team-id "$MACOS_NOTARY_TEAM_ID" \
-            --wait --timeout 20m --output-format json
+            --wait --timeout 20m --output-format json 2>&1)"
+          echo "$NOTARY_OUT"
+          # 解析提交 ID 与状态（--output-format json 输出 {"id","message","status"}）
+          SUB_ID="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)"
+          STATUS="$(printf '%s' "$NOTARY_OUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)"
+          if [ -z "$SUB_ID" ] || [ -z "$STATUS" ]; then
+            echo "::error::notarytool 输出解析失败（无法获取提交 ID/状态），请手动运行 notarytool submit 排查。原始输出：$NOTARY_OUT"
+            exit 1
+          fi
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Apple 公证未通过（status=$STATUS, submission-id=$SUB_ID）。抓取 rejection 日志定位原因："
+            xcrun notarytool log "$SUB_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$MACOS_NOTARY_APP_PASSWORD" \
+              --team-id "$MACOS_NOTARY_TEAM_ID" || echo "（notarytool log 拉取失败，请用上述命令手动查看）"
+            exit 1
+          fi
+          echo "✅ 公证通过（status=Accepted, submission-id=$SUB_ID）"
 
       - name: Staple pkg (macOS only)
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
