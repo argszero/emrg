@@ -320,6 +320,20 @@ vision = false
       return { session_id: sid };
     });
 
+    ipcMain.handle("emrg:clearSession", async (_e, { sessionId }) => {
+      // GUI / 指令 P1：/clear — 清空当前会话（daemon 协议 clear_session 已存在）
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      await client.sendCommandAndWait("clear_session", { session_id: sessionId, cwd: projectDir }, 5000);
+      return { ok: true };
+    });
+
+    ipcMain.handle("emrg:compactSession", async (_e, { sessionId }) => {
+      // GUI / 指令 P1：/compact — 压缩当前会话历史（daemon 协议 compact 已存在）
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      await client.sendCommandAndWait("compact", { session_id: sessionId, cwd: projectDir }, 5000);
+      return { ok: true };
+    });
+
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };

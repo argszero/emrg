@@ -109,6 +109,7 @@
 
 /* 输入区 */
 #composer-wrap {
+  position: relative; /* / 指令补全菜单锚点（rant 19:44 P1） */
   padding: var(--sp-2) var(--sp-5) var(--sp-4);
   max-width: 808px;
   margin: 0 auto;

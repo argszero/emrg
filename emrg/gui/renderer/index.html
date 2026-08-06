@@ -50,6 +50,7 @@
 
       <!-- 输入区 -->
       <div id="composer-wrap">
+        <div id="cmd-menu" class="cmd-menu" hidden></div>
         <div class="model-switcher" id="model-switcher" title="切换模型">
           <span id="model-switcher-label">加载中…</span>
           <span style="font-size:10px;">⌄</span>
@@ -182,7 +183,20 @@
   <script src="../vendor/marked.min.js"></script>
   <script src="../vendor/dompurify.min.js"></script>
   <script src="../vendor/highlight.custom.js"></script>
+  <!-- 帮助对话框（/help，GUI / 指令 P1） -->
+  <dialog id="help-dialog">
+    <div class="dialog-card" style="min-width:420px;">
+      <h2>/ 指令帮助</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">以 / 开头的指令在输入框执行，或点击补全菜单选择。</p>
+      <div id="help-list" class="help-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="help-close" class="btn btn-ghost">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
   <script src="js/utils.js"></script>
+  <script src="js/commands.js"></script>
   <script src="js/markdown.js"></script>
   <script src="js/copywriting.js"></script>
   <script src="js/chat.js"></script>

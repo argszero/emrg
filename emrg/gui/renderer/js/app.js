@@ -23,6 +23,8 @@ const App = (() => {
     serverId: "",
     evolutionCount: null,
     autoScroll: true,
+    // GUI / 指令补全菜单（rant 19:44 P1）：items=[{cmd,hint,phase}] index=当前高亮
+    cmdMenu: { items: [], index: -1 },
   };
 
   // ── 启动 ─────────────────────────────────
@@ -75,6 +77,15 @@ const App = (() => {
     const input = $("input");
     const text = input.value.trim();
     if (!text || state.busy) return;
+    // GUI / 指令（rant 19:44 P1）：/ 开头 → 路由到指令 handler，不走 sendMessage
+    const parsed = Commands.parseInput(text);
+    if (parsed.type !== "message") {
+      input.value = "";
+      input.style.height = "auto";
+      hideCmdMenu();
+      await handleCommand(parsed);
+      return;
+    }
     if (!state.sessionId) {
       Chat.addSystemMessage("请先创建一个对话。");
       return;
@@ -100,9 +111,118 @@ const App = (() => {
     }
   }
 
+  // ── / 指令（rant 19:44 P1）──────────────────
+  /** 执行 / 指令。phase 1 纯操作类已实现；phase 2+ 提示阶段未开放。 */
+  async function handleCommand(parsed) {
+    const cmd = parsed.cmd;
+    const meta = Commands.COMMANDS[cmd];
+    if (!meta || meta.phase > 1) {
+      const phase = meta ? `（阶段 ${meta.phase}，后续版本开放）` : "";
+      Chat.addSystemMessage(`指令 ${cmd} 暂未开放${phase}。`);
+      return;
+    }
+    try {
+      switch (cmd) {
+        case "/clear":
+          if (!state.sessionId) {
+            Chat.addSystemMessage("请先创建一个对话。");
+            return;
+          }
+          await window.emrg.clearSession({ sessionId: state.sessionId });
+          Chat.clear();
+          Chat.addSystemMessage("已清空当前对话。");
+          break;
+        case "/compact":
+          if (!state.sessionId) {
+            Chat.addSystemMessage("请先创建一个对话。");
+            return;
+          }
+          await window.emrg.compactSession({ sessionId: state.sessionId });
+          Chat.addSystemMessage("已压缩当前对话历史。");
+          break;
+        case "/version":
+          Chat.addSystemMessage(
+            `EMRG GUI v0.2.7 · 实例 ${state.serverId || "未知"} · 模型 ${state.model || "未知"} · 已进化 ${state.evolutionCount ?? 0} 次`
+          );
+          break;
+        case "/help":
+          showHelpDialog();
+          break;
+        case "/image":
+          Chat.addSystemMessage("请直接粘贴图片到输入框（Ctrl+V / ⌘V）。");
+          break;
+        default:
+          Chat.addSystemMessage(`指令 ${cmd} 暂未开放。`);
+      }
+    } catch (e) {
+      Chat.addSystemMessage(`指令 ${cmd} 执行失败：${e.message}`);
+    }
+  }
+
+  // / 补全菜单：输入以 / 开头 → 显示匹配指令；↑↓ 导航、Enter/点击选择填充
+  function showCmdMenu(prefix) {
+    const items = Commands.getCompletions(prefix);
+    const menu = $("cmd-menu");
+    if (!menu) return;
+    if (items.length === 0) {
+      hideCmdMenu();
+      return;
+    }
+    state.cmdMenu = { items, index: 0 };
+    menu.innerHTML = "";
+    items.forEach((it, i) => {
+      const row = el("button", { class: "cmd-menu-item", type: "button", dataset: { cmd: it.cmd } });
+      row.innerHTML = `<span class="cmd-menu-name">${escapeHtml(it.cmd)}</span><span class="cmd-menu-hint">${escapeHtml(it.hint)}</span>`;
+      row.addEventListener("mousedown", (e) => {
+        e.preventDefault(); // 防输入框失焦
+        selectCmd(it.cmd);
+      });
+      menu.appendChild(row);
+    });
+    menu.hidden = false;
+    highlightCmdMenu();
+  }
+
+  function hideCmdMenu() {
+    state.cmdMenu = { items: [], index: -1 };
+    const menu = $("cmd-menu");
+    if (menu) menu.hidden = true;
+  }
+
+  function highlightCmdMenu() {
+    const menu = $("cmd-menu");
+    if (!menu) return;
+    [...menu.children].forEach((c, i) => c.classList.toggle("selected", i === state.cmdMenu.index));
+  }
+
+  /** 选择补全项：填充输入框 + 关闭菜单（用户可继续回车执行） */
+  function selectCmd(cmd) {
+    const input = $("input");
+    input.value = cmd;
+    input.focus();
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 150) + "px";
+    hideCmdMenu();
+  }
+
+  /** /help 帮助对话框：列出全部指令 + 说明 */
+  function showHelpDialog() {
+    const list = $("help-list");
+    if (!list) return;
+    list.innerHTML = "";
+    Object.entries(Commands.COMMANDS).forEach(([cmd, meta]) => {
+      const row = el("div", { class: "help-row" });
+      const name = el("span", { class: "help-cmd" }, cmd);
+      const hint = el("span", { class: "help-hint" }, meta.hint);
+      row.appendChild(name);
+      row.appendChild(hint);
+      list.appendChild(row);
+    });
+    $("help-dialog").showModal();
+  }
+
   // ── 会话 ─────────────────────────────────
-  async function switchSession(sid, opts = {}) {
-    // G65：busy 即自有流进行中/发送中（IPC 往返窗口内 ownStreamRequestId 尚未赋值）
+  async function switchSession(sid, opts = {}) {    // G65：busy 即自有流进行中/发送中（IPC 往返窗口内 ownStreamRequestId 尚未赋值）
     if (state.busy) {
       Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy);
       return;
@@ -486,6 +606,7 @@ const App = (() => {
     $("welcome-save").addEventListener("click", Dialogs.saveWelcome);
     $("confirm-cancel").addEventListener("click", Dialogs.closeConfirm);
     $("confirm-ok").addEventListener("click", Dialogs.confirmOk);
+    $("help-close").addEventListener("click", () => $("help-dialog").close());
 
     // 设置/首启对话框：Enter 提交（与重命名/模型表单一致的交互）
     const enterToSave = (fn) => (e) => {
@@ -498,6 +619,32 @@ const App = (() => {
 
     const input = $("input");
     input.addEventListener("keydown", (e) => {
+      // / 补全菜单键盘导航（rant 19:44 P1）：↑↓ 移动、Enter 选择、Esc 关闭
+      if (state.cmdMenu.items.length > 0) {
+        if (e.key === "ArrowDown") {
+          e.preventDefault();
+          state.cmdMenu.index = (state.cmdMenu.index + 1) % state.cmdMenu.items.length;
+          highlightCmdMenu();
+          return;
+        }
+        if (e.key === "ArrowUp") {
+          e.preventDefault();
+          state.cmdMenu.index = (state.cmdMenu.index - 1 + state.cmdMenu.items.length) % state.cmdMenu.items.length;
+          highlightCmdMenu();
+          return;
+        }
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          const item = state.cmdMenu.items[state.cmdMenu.index];
+          if (item) selectCmd(item.cmd);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          hideCmdMenu();
+          return;
+        }
+      }
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
@@ -511,6 +658,13 @@ const App = (() => {
     input.addEventListener("input", () => {
       input.style.height = "auto";
       input.style.height = Math.min(input.scrollHeight, 150) + "px";
+      // / 指令补全：以 / 开头且无空格（仍处于指令词）→ 弹出菜单
+      const v = input.value.trim();
+      if (v.startsWith("/") && !v.includes(" ")) {
+        showCmdMenu(v);
+      } else {
+        hideCmdMenu();
+      }
     });
 
     const chatView = $("chat-view");
@@ -580,6 +734,7 @@ const App = (() => {
     state,
     boot,
     sendMessage,
+    handleCommand,
     switchSession,
     newSession,
     deleteSession,

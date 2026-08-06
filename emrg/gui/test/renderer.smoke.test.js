@@ -70,6 +70,7 @@ const ELEMENT_IDS = [
   "rename-dialog", "rename-input", "rename-cancel", "rename-ok", "ctx-menu",
   "model-list", "add-model-btn", "model-form", "model-form-name", "model-form-id",
   "model-form-vision", "model-form-save", "model-form-cancel", "back-to-bottom",
+  "cmd-menu", "help-dialog", "help-list", "help-close",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
@@ -126,7 +127,7 @@ function makeSandbox(overrides = {}) {
   win.window = win;
   win.document = document;
   const ctx = vm.createContext(win);
-  for (const f of ["utils", "markdown", "copywriting", "chat", "sidebar", "dialogs", "app"]) {
+  for (const f of ["utils", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "app"]) {
     const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
     vm.runInContext(code, ctx, { filename: "renderer/js/" + f + ".js" });
   }
@@ -136,10 +137,10 @@ function makeSandbox(overrides = {}) {
 /** 等 microtask 完成 */
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
-test("7 模块按序加载且全局符号解析", () => {
+test("8 模块按序加载且全局符号解析", () => {
   const { ctx } = makeSandbox();
   const out = vm.runInContext(
-    "(function(){ return { App: typeof App, Chat: typeof EMRG_Chat, Copy: typeof EMRG_Copy, Sidebar: typeof EMRG_Sidebar, Dialogs: typeof EMRG_Dialogs, utils: typeof $ }; })()",
+    "(function(){ return { App: typeof App, Chat: typeof EMRG_Chat, Copy: typeof EMRG_Copy, Sidebar: typeof EMRG_Sidebar, Dialogs: typeof EMRG_Dialogs, Commands: typeof EMRG_Commands, utils: typeof $ }; })()",
     ctx
   );
   // ⚠️ vm 上下文对象原型不同 Realm → 不用 deepStrictEqual，逐个字段断言
@@ -148,6 +149,7 @@ test("7 模块按序加载且全局符号解析", () => {
   assert.strictEqual(out.Copy, "object");
   assert.strictEqual(out.Sidebar, "object");
   assert.strictEqual(out.Dialogs, "object");
+  assert.strictEqual(out.Commands, "object");
   assert.strictEqual(out.utils, "function");
 });
 
