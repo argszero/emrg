@@ -134,6 +134,11 @@ const Chat = (() => {
     if (data.timeout) {
       addSystemMessage(EMRG_Copy._t("chat.timeoutWarn"));
     }
+    // 工具调用次数上限中断（跨项目教训：截断的工作不提示 = 用户拿半成品）
+    // 对齐 TUI：明确提示结果可能不完整 + 可继续（TUI 已有 "Try '继续' to resume"）
+    if (data.content && /exceeded/i.test(data.content) && /max|limit|round/i.test(data.content)) {
+      addSystemMessage(EMRG_Copy._t("chat.maxRoundsHint"));
+    }
   }
 
   /** 工具友好状态行（进行中 → 完成/失败，默认折叠，点开展示原始输出） */
