@@ -62,6 +62,9 @@ const App = (() => {
       } else {
         await newSession();
       }
+      // 修复：boot 成功路径必须启用输入框（此前仅 done/cancelled/disconnected/error
+      // 回调会调用 setComposerDisabled(false)，形成"需先发消息才能启用输入框"死锁）
+      setComposerDisabled(false);
     } catch (e) {
       Chat.addSystemMessage(`启动遇到了问题：${e.message}`);
     }
@@ -126,6 +129,7 @@ const App = (() => {
       }
       updateEmptyState();
       Sidebar.highlight(sid);
+      setComposerDisabled(false); // 防御性：独立调用 switchSession 也确保输入框可用
     } catch (e) {
       Chat.addSystemMessage(`切换对话失败了：${e.message}`);
     }
@@ -143,6 +147,7 @@ const App = (() => {
       updateEmptyState(); // 欢迎屏即反馈
       await refreshSessions();
       Sidebar.highlight(state.sessionId);
+      setComposerDisabled(false); // 防御性：独立调用 newSession 也确保输入框可用
     } catch (e) {
       Chat.addSystemMessage(`新建对话失败了：${e.message}`);
     }
