@@ -91,7 +91,7 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (472) — import check: `uv run python -c "from emrg.client.app import run_client"`
+Python: `uv run pytest tests/ -v` (473) — import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (37: 22 daemon_client + 7 integration + 8 renderer smoke) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
 
 ## Configuration

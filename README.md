@@ -279,7 +279,7 @@ HN 社区（[讨论帖](https://news.ycombinator.com/item?id=49119274)）对 age
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # 安装依赖
-uv run pytest tests/ -v   # 跑测试（当前 472 项）
+uv run pytest tests/ -v   # 跑测试（当前 473 项）
 uv run python -m emrg     # 启动 TUI
 
 # 可选：Electron GUI（非开发者主入口，Phase 3）

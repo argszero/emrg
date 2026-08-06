@@ -263,7 +263,7 @@ EMRG doesn't just keep up — it catches up on its own.
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # install deps
-uv run pytest tests/ -v   # run tests (currently 472 items)
+uv run pytest tests/ -v   # run tests (currently 473 items)
 uv run python -m emrg     # launch TUI
 
 # Optional: Electron GUI (non-developer entry point, Phase 3)
