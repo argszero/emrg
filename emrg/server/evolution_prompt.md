@@ -310,6 +310,7 @@ When reading rants, follow these rules:
 > - log redaction sk- tightening (#515 sk- 16+ 纯字母数字/sk-proj-/sk-ant-apiNN-，排除 task-evolution 等路径片段误伤；测试密钥拼接构造防 push protection 拦截) ✅
 > - log previews redaction (#516 _redact_string 覆盖日志内容预览：任务 prompt/rant 消息/记忆 reflection+consolidation 工具结果；LLM prompt 内嵌 user_prompt 不在日志脱敏范围) ✅
 > - LLM error redaction (#518 llm.py _redact_text/_redact_headers：错误日志/异常脱敏 response headers（set-cookie/auth/token）+ body 内联凭据；lazy import daemon._redact_string 防循环导入) ✅
+> - LLM URL redaction (#520 logger.debug 请求/流式 URL 经 _redact_text 遮蔽 query-string 凭据；base_url 可携带 token) ✅
 
 #### 2.2 Latest GitHub code changes
 
