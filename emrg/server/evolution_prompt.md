@@ -315,6 +315,7 @@ When reading rants, follow these rules:
 > - evolution cycle truncation flag (#525 scheduler EvolutionHandler done 帧检测 exceeded → truncated 标记，不误计空周期/不推进 idle-halt backoff；impact tag -truncated + truncated=max-tool-rounds；正反两态测试) ✅
 > - Test workflow manual dispatch (#527 test.yml 加 workflow_dispatch 触发：push 事件被丢/CI 队列故障时 `gh workflow run test.yml --ref <branch>` 手动重触发，替代空 commit 重触发（空 commit 污染 git 历史且 push 管线若坏同样无效）；actionlint gate 已验) ✅
 > - CI re-trigger one-click script (#529 scripts/re-trigger-ci.sh [branch]：宿主侧一键 dispatch 重触发（默认当前分支，set -euo pipefail），替代手记 gh workflow run 命令/空 commit；Agent.md CI 段已文档化) ✅
+> - saturation halt auto-resume (#531 scheduler _saturation_halt_active：停机（≥30 空循环）后 scheduled run 全 skip → handler 无法自检 HEAD 变化，只有手动 /trigger 能恢复；_remote_advanced 用 git ls-remote 对比 origin/master，上游推进即自动恢复+计数清零；+4 测试正反两态/边界/无 git 仓库不崩) ✅
 
 #### 2.2 Latest GitHub code changes
 
