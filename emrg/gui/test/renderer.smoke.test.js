@@ -271,3 +271,39 @@ test("右键菜单：重命名对话框 → renameSession 调用（设计 §3.2�
   assert.strictEqual(renamed.sessionId, "s1");
   assert.strictEqual(renamed.title, "新标题");
 });
+
+test("双主题 token 对比度达标（WCAG AA，rant 验收项 4 深色校准）", () => {
+  const css = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "tokens.css"), "utf8");
+  function parseVars(block) {
+    const vars = {};
+    for (const m of block.matchAll(/--([\w-]+):\s*(#[0-9a-fA-F]{6})/g)) vars[m[1]] = m[2];
+    return vars;
+  }
+  const lightBlock = css.match(/:root\s*\{([^}]*)\}/)[1];
+  const darkBlock = css.match(/:root\[data-theme="dark"\]\s*\{([^}]*)\}/)[1];
+  const light = parseVars(lightBlock);
+  const dark = parseVars(darkBlock);
+  function lum(h) {
+    const lin = [0, 2, 4].map((i) => parseInt(h.slice(i + 1, i + 3), 16) / 255)
+      .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+  }
+  function cr(a, b) {
+    const la = lum(a), lb = lum(b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  }
+  // 深色主题（bg #17181c）：正文 ≥4.5、辅助/强调 ≥3.0
+  const d = { bg: "#17181c", t1: cr(dark["text-1"], "#17181c"), t2: cr(dark["text-2"], "#17181c"), t3: cr(dark["text-3"], "#17181c"), ac: cr(dark["accent"], "#17181c") };
+  assert.ok(d.t1 >= 4.5, `深色 text-1 ${d.t1.toFixed(2)}:1 < 4.5`);
+  assert.ok(d.t2 >= 4.5, `深色 text-2 ${d.t2.toFixed(2)}:1 < 4.5`);
+  assert.ok(d.t3 >= 3.0, `深色 text-3 ${d.t3.toFixed(2)}:1 < 3.0`);
+  assert.ok(d.ac >= 3.0, `深色 accent ${d.ac.toFixed(2)}:1 < 3.0`);
+  // 浅色主题（bg #fafafa）
+  const l = { t1: cr(light["text-1"], "#fafafa"), t2: cr(light["text-2"], "#fafafa"), t3: cr(light["text-3"], "#fafafa"), ac: cr(light["accent"], "#fafafa") };
+  assert.ok(l.t1 >= 4.5, `浅色 text-1 ${l.t1.toFixed(2)}:1 < 4.5`);
+  assert.ok(l.t2 >= 4.5, `浅色 text-2 ${l.t2.toFixed(2)}:1 < 4.5`);
+  assert.ok(l.t3 >= 3.0, `浅色 text-3 ${l.t3.toFixed(2)}:1 < 3.0`);
+  assert.ok(l.ac >= 3.0, `浅色 accent ${l.ac.toFixed(2)}:1 < 3.0`);
+  // 记录实际值便于审阅
+  assert.ok(true, `深色 ${d.t1.toFixed(2)}/${d.t2.toFixed(2)}/${d.t3.toFixed(2)}/${d.ac.toFixed(2)}，浅色 ${l.t1.toFixed(2)}/${l.t2.toFixed(2)}/${l.t3.toFixed(2)}/${l.ac.toFixed(2)}`);
+});

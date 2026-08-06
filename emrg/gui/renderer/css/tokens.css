@@ -42,7 +42,7 @@
   --bg-soft: #f2f3f5;
   --text-1: #1a1d21;
   --text-2: #5f6672;
-  --text-3: #9aa1ad;
+  --text-3: #8a919d; /* WCAG 对比度 3.04:1（辅助文本 ≥3:1），原 #9aa1ad 2.49:1 不达标 */
   --border: #e8eaed;
   --accent: #16a06c; /* 生机绿 */
   --accent-strong: #0e8a5c;
@@ -121,7 +121,7 @@
   --bg-soft: #f2f3f5;
   --text-1: #1a1d21;
   --text-2: #5f6672;
-  --text-3: #9aa1ad;
+  --text-3: #8a919d; /* WCAG 对比度 3.04:1（辅助文本 ≥3:1），原 #9aa1ad 2.49:1 不达标 */
   --border: #e8eaed;
   --accent: #16a06c;
   --accent-strong: #0e8a5c;
