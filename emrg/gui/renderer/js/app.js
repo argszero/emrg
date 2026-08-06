@@ -757,10 +757,10 @@ const App = (() => {
       const items = (res && res.recent) || [];
       recent.innerHTML = "";
       if (items.length === 0) {
-        recent.appendChild(el("div", { class: "about-recent-item" }, "还没有改进记录，输入 /rant 驱动第一次进化吧"));
+        recent.appendChild(el("div", { class: "about-recent-item" }, _t("app.noImprovements")));
         return;
       }
-      const header = el("div", { class: "about-recent-title" }, "最近改进");
+      const header = el("div", { class: "about-recent-title" }, _t("app.recentImprovements"));
       recent.appendChild(header);
       for (const it of items) {
         const ts = String(it.timestamp || "").slice(0, 16).replace("T", " ");

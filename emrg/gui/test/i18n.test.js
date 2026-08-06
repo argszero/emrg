@@ -191,3 +191,38 @@ test("Stage3：新增静态键双语一致（growth-card title / about / status-
   assert.strictEqual(evalIn(zh, 'I18N.t("settings.recentTitle")'), "最近改进");
   assert.strictEqual(evalIn(zh, 'I18N.t("sidebar.backToBottom")'), "回到底部");
 });
+
+// ── Stage 3b（cycle 20260806-230036）：renderer JS 运行时中文字符串防漏网 ──
+test("Stage3b：renderer JS 无未接入 i18n 的中文字符串（防 JS 侧回归）", () => {
+  // 扫描 renderer/js/*.js：含中文且非注释、非 i18n 取词、非词典、非功能正则的行
+  const fs2 = require("node:fs");
+  const path2 = require("node:path");
+  const cjk = /[\u4e00-\u9fff]/;
+  const leaks = [];
+  for (const f of fs2.readdirSync(path.join(__dirname, "..", "renderer", "js"))) {
+    if (!f.endsWith(".js")) continue;
+    if (f === "i18n.js") continue; // 词典本身全是中文（合法）
+    const src = fs2.readFileSync(path.join(__dirname, "..", "renderer", "js", f), "utf8");
+    for (const [i, line] of src.split("\n").entries()) {
+      let s = line.trim();
+      if (!cjk.test(s)) continue;
+      // 剥离注释：行首 //、行尾 // 注释、/* */ 块
+      s = s.replace(/^\/\/.*$/, "").replace(/^\*.*$/, "").replace(/ \/\/.*$/, "").replace(/\/\*.*?\*\//g, "").trim();
+      if (!cjk.test(s)) continue;                           // 仅注释含中文 → 跳过
+      if (s.includes("_t(") || s.includes("EMRG_I18N")) continue; // 已取词
+      if (s.includes("i18n")) continue;                    // i18n 基础设施/注释
+      if (s.includes("match(") || s.includes("replace(")) continue; // 功能正则（如文件路径提取）
+      if (s.includes("ensure_ascii")) continue;            // 序列化说明
+      leaks.push(`${f}:L${i + 1}: ${s.slice(0, 80)}`);
+    }
+  }
+  assert.strictEqual(leaks.length, 0, "renderer JS 存在未接入 i18n 的中文:\n" + leaks.join("\n"));
+});
+
+test("Stage3b：最近改进列表文案双语（#502 evolution_summary 侧）", () => {
+  const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
+  assert.strictEqual(evalIn(ctx, 'I18N.t("app.recentImprovements")'), "Recent improvements");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("app.noImprovements")'), "No improvements recorded yet — type /rant to drive the first evolution");
+  const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
+  assert.strictEqual(evalIn(zh, 'I18N.t("app.recentImprovements")'), "最近改进");
+});
