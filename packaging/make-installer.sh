@@ -46,6 +46,25 @@ case "$PLATFORM" in
     mkdir -p "$PKG_ROOT/payload/emrg-gui"
     cp -R "$RUNTIME/." "$PKG_ROOT/payload/"
     cp -R "$GUI_APP" "$PKG_ROOT/payload/emrg-gui/EMRG.app"
+    # macOS 公证要求 pkg 内所有 Mach-O 二进制都有 Developer ID 签名 + 时间戳
+    # （第 10 次构建教训：Python runtime 的 .so 未签名 → notarytool Invalid，
+    #  报 "The binary is not signed with a valid Developer ID certificate"）。
+    # 对 payload 内除 EMRG.app（electron-builder 已签）外的所有 Mach-O 签名。
+    if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null; then
+      SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep 'Developer ID Application' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+      if [ -n "$SIGN_ID" ]; then
+        echo "==> codesign runtime binaries（公证要求：Developer ID + timestamp）"
+        # 收集 payload 内所有 Mach-O（.so / 无扩展名可执行 / Python 解释器）
+        # 排除 EMRG.app（electron-builder 已签）与"卸载 EMRG.app"（纯 bash 脚本无 Mach-O）
+        find "$PKG_ROOT/payload" -path '*EMRG.app' -prune -o -path '*卸载 EMRG.app' -prune -o \
+          -type f \( -name '*.so' -o -name '*.dylib' -o -name 'python*' -o -name 'emrgd' -o -name 'emrg' -o -name 'emrg-uninstall' \) \
+          -exec file {} + 2>/dev/null | grep 'Mach-O' | grep -v 'for architecture' | cut -d: -f1 | sort -u | while read -r BIN; do
+          codesign --force --timestamp --sign "$SIGN_ID" "$BIN" 2>/dev/null && echo "    ✓ $(basename "$BIN")" || echo "    ✗ 跳过 $(basename "$BIN")"
+        done
+      else
+        echo "!! 未找到 Developer ID Application 身份，跳过 runtime codesign（公证可能失败）" >&2
+      fi
+    fi
     # 生成"卸载 EMRG.app"（R30/R31/R102：bash 包装调 emrg-uninstall + 删主 GUI + 提示拖废纸篓）
     UNINSTALL_APP="$PKG_ROOT/payload/emrg-gui/卸载 EMRG.app"
     mkdir -p "$UNINSTALL_APP/Contents/MacOS"
