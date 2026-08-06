@@ -657,22 +657,29 @@ def test_ensure_evolution_workspace_clones_and_aligns(tmp_path):
 
     handler = _make_handler(tmp_path, path=str(tmp_path / "install" / "source" / "emrg"))
 
-    # Installed version hint → tag alignment
-    (tmp_path / "install").mkdir()
-    (tmp_path / "install" / "version.txt").write_text("0.2.7", encoding="utf-8")
+    # Installed version hint → tag alignment. The code reads
+    # Path.home()/.emrg/install/version.txt — patch home so the test is
+    # hermetic (CI hosts don't have ~/.emrg/install).
+    import pathlib as _pathlib
+    install_dir = tmp_path / ".emrg" / "install"
+    install_dir.mkdir(parents=True)
+    (install_dir / "version.txt").write_text("0.2.7", encoding="utf-8")
 
     fake = FakeGitRun(git_repo=False, tags="v0.2.7")
     orig_run = mod.subprocess.run
     orig_evolve = mod.EVOLUTION_CWD
     orig_config = mod.config_dir
+    orig_home = _pathlib.Path.home
     mod.subprocess.run = fake
     mod.config_dir = lambda: tmp_path
+    _pathlib.Path.home = classmethod(lambda cls: tmp_path)
     try:
         ok = handler._ensure_evolution_workspace()
     finally:
         mod.subprocess.run = orig_run
         mod.config_dir = orig_config
         mod.EVOLUTION_CWD = orig_evolve
+        _pathlib.Path.home = orig_home
 
     assert ok is True
     assert handler._source_dir == str(evolve_dir)
