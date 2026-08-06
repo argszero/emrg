@@ -349,6 +349,9 @@ class EmrgServer:
                     except Exception as e:
                         await self._send(ws, {"error": f"invalid task: {e}"})
                         continue
+                    # WorkBuddy P2 (rant 21:35): Ask mode — pure chat, no tools.
+                    # mode="ask" → LLM gets an empty tool set so it can only reply.
+                    allow_tools = data.get("mode", "auto") != "ask"
                     # Cancel previous task if still running
                     if _tool_task and not _tool_task.done():
                         if _cancel_event:
@@ -363,7 +366,7 @@ class EmrgServer:
                     self._session_busy[session_id] = True  # lock (released in *locked wrapper)
                     if req.stream:
                         _tool_task = asyncio.create_task(
-                            self._run_tool_loop_locked(req, ws, session, _cancel_event)
+                            self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
                         )
                     else:
                         _tool_task = asyncio.create_task(
@@ -1119,11 +1122,12 @@ class EmrgServer:
     async def _run_tool_loop_locked(
         self, req: TaskRequest, ws, session: Session,
         cancel_event: asyncio.Event | None = None,
+        allow_tools: bool = True,
     ) -> None:
         """Run _run_tool_loop and release the session busy lock on exit."""
         session_id = session.session_id
         try:
-            await self._run_tool_loop(req, ws, session, cancel_event)
+            await self._run_tool_loop(req, ws, session, cancel_event, allow_tools)
         finally:
             self._session_busy[session_id] = False
 
@@ -1140,6 +1144,7 @@ class EmrgServer:
     async def _run_tool_loop(
         self, req: TaskRequest, ws, session: Session,
         cancel_event: asyncio.Event | None = None,
+        allow_tools: bool = True,
     ) -> None:
         """Run the streaming tool-calling loop with session persistence.
 
@@ -1154,6 +1159,9 @@ class EmrgServer:
 
         Supports cancellation via cancel_event (checked between rounds) and
         asyncio task cancellation (interrupts streaming mid-round).
+
+        allow_tools=False (Ask mode, WorkBuddy P2) sends an empty tool set —
+        the LLM can only reply in plain chat, the loop exits after round 1.
         """
         system_prompt = self._build_system_prompt(session)
         history_messages = session.get_messages_for_llm()
@@ -1174,7 +1182,7 @@ class EmrgServer:
             *history_messages,
             {"role": "user", "content": user_content},
         ]
-        tools_openai = self.tools.to_openai_tools()
+        tools_openai = self.tools.to_openai_tools() if allow_tools else []
 
         for round_num in range(1, self._max_tool_rounds + 1):
             # Check for cancellation between rounds
