@@ -49,7 +49,52 @@ const Sidebar = (() => {
     }
   }
 
-  return { render, highlight };
+  // ── 键盘导航：↑↓ 切换高亮 / Enter 切换会话（与 TUI /resume 选择器一致）──
+  let _keyHandler = null;
+  let _focusIdx = -1;
+
+  function initKeyboard() {
+    const nav = $("conv-list");
+    _keyHandler = (e) => {
+      const items = nav.querySelectorAll(".conv-item");
+      if (!items.length) return;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (_focusIdx < 0) {
+          // 未聚焦：从当前会话开始
+          _focusIdx = items.findIndex((it) => it.classList.contains("active"));
+          if (_focusIdx < 0) _focusIdx = 0;
+        }
+        _focusIdx = e.key === "ArrowDown"
+          ? (_focusIdx + 1) % items.length
+          : (_focusIdx - 1 + items.length) % items.length;
+        items.forEach((it, j) => it.classList.toggle("kbd-focus", j === _focusIdx));
+        items[_focusIdx].scrollIntoView({ block: "nearest" });
+      } else if (e.key === "Enter" && _focusIdx >= 0) {
+        e.preventDefault();
+        const target = items[_focusIdx];
+        if (target.dataset.sid) App.switchSession(target.dataset.sid);
+        clearFocus();
+      } else if (e.key === "Escape") {
+        clearFocus();
+      }
+    };
+    document.addEventListener("keydown", _keyHandler);
+  }
+
+  function clearFocus() {
+    _focusIdx = -1;
+    for (const it of $("conv-list").querySelectorAll(".kbd-focus")) {
+      it.classList.remove("kbd-focus");
+    }
+  }
+
+  function init() {
+    if (!_keyHandler) initKeyboard();
+  }
+  init(); // 模块级绑定一次
+
+  return { render, highlight, clearFocus };
 })();
 
 window.EMRG_Sidebar = Sidebar;

@@ -405,3 +405,14 @@ test("设置/首启对话框：Enter 提交键盘绑定（交互一致性）", a
   assert.ok(bindBlock.includes("welcome-api-key"), "首启引导 API Key 应绑定键盘");
   assert.ok(bindBlock.includes("enterToSave"), "Enter 应通过 enterToSave 触发提交");
 });
+
+test("对话列表键盘导航：↑↓ 聚焦 / Enter 切换（与 TUI /resume 一致）", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  const src = fs.readFileSync(path.join(RENDERER_JS, "sidebar.js"), "utf8");
+  assert.ok(src.includes("ArrowDown"), "sidebar 应支持 ↑↓ 键盘导航");
+  assert.ok(src.includes("kbd-focus"), "应有键盘聚焦状态");
+  assert.ok(src.includes("App.switchSession"), "Enter 应切换会话");
+  const css = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "components.css"), "utf8");
+  assert.ok(css.includes(".conv-item.kbd-focus"), "键盘聚焦高亮样式应存在");
+});
