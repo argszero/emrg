@@ -5,7 +5,7 @@
  * 安全：contextIsolation + nodeIntegration:false + sandbox:true（renderer 零网络权限）。
  */
 
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -436,6 +436,15 @@ vision = false
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };
+    });
+
+    ipcMain.handle("emrg:openFile", async (_e, { filePath }) => {
+      // GUI / 指令 WorkBuddy P1：产物面板打开文件（系统默认程序）
+      if (typeof filePath !== "string" || !filePath.trim()) throw new Error("invalid file path");
+      const p = path.resolve(filePath.trim());
+      if (!fs.existsSync(p)) return { ok: false, error: "file_not_found" };
+      const err = await shell.openPath(p);
+      return { ok: err === "", error: err || "" };
     });
 
     ipcMain.handle("emrg:listModels", async () => {

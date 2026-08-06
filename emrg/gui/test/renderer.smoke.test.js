@@ -77,6 +77,7 @@ const ELEMENT_IDS = [
   "skills-dialog", "skills-list", "skills-close",
   "rant-dialog", "rant-message", "rant-project", "rant-cancel", "rant-submit",
   "tasks-dialog", "tasks-list", "tasks-close",
+  "result-panel", "result-list", "result-toggle",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
@@ -127,13 +128,14 @@ function makeSandbox(overrides = {}) {
       newSession: async () => ({ session_id: "s2" }),
       deleteSession: async () => ({}),
       setModel: async () => ({}),
+      openFile: async () => ({ ok: true }),
       ...overrides,
     },
   };
   win.window = win;
   win.document = document;
   const ctx = vm.createContext(win);
-  for (const f of ["utils", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "app"]) {
+  for (const f of ["utils", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "app"]) {
     const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
     vm.runInContext(code, ctx, { filename: "renderer/js/" + f + ".js" });
   }
@@ -432,4 +434,39 @@ test("对话列表键盘导航：输入控件内不劫持（e.target 守卫，te
   // 输入框是 <textarea id="input">，document 级常驻 keydown 必须跳过输入控件
   assert.ok(src.includes("closest(\"input, textarea, select, [contenteditable]\")"), "输入控件内应跳过键盘导航");
   assert.ok(src.includes("e.target.closest"), "应使用 e.target 守卫");
+});
+
+test("WorkBuddy P1：tool_finished → 产物卡片登记到结果面板", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  // 空状态
+  const empty = vm.runInContext('document.getElementById("result-list").innerHTML', ctx);
+  assert.ok(String(empty).includes("还没有产物"), "应有空状态占位");
+  // tool_finished → ResultPanel.addToolResult
+  await vm.runInContext(`
+    ResultPanel.addToolResult({ tool_call_id: "t1", tool_name: "write", content: "Wrote file: /tmp/hello.py\\nHello", elapsed: 0.5 });
+  `, ctx);
+  const items = vm.runInContext('document.getElementById("result-list").children.length', ctx);
+  assert.ok(items >= 1, `应登记产物卡片，实际 ${items}`);
+  // write 输出中的文件路径被识别（卡片 children 中含 .result-file）
+  const hasFile = vm.runInContext(`
+    (function(){
+      const list = document.getElementById("result-list");
+      for (const c of list.children) {
+        if (c.className && c.className.includes("result-file")) return true;
+        if (c.children) for (const g of c.children) if (g.className && g.className.includes("result-file")) return true;
+      }
+      return false;
+    })()
+  `, ctx);
+  assert.ok(hasFile, "write 产物应显示文件条目");
+});
+
+test("WorkBuddy P1：ResultPanel 折叠切换（⌘\ 与按钮）", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext("ResultPanel.toggle()", ctx);
+  assert.ok(els["result-panel"].classList.contains("collapsed"), "toggle 后应折叠");
+  await vm.runInContext("ResultPanel.toggle()", ctx);
+  assert.ok(!els["result-panel"].classList.contains("collapsed"), "再次 toggle 应展开");
 });
