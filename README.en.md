@@ -64,7 +64,7 @@ The installer bundles a full runtime (standalone Python 3.13 + deps + git + gh +
 
 > **Uninstall**: macOS run "卸载 EMRG.app" (uninstall app); Windows uninstall from Control Panel; Linux run `~/.emrg/install/bin/emrg-uninstall` (or delete the AppImage + symlink). Uninstall preserves non-EMRG user files in `~/.emrg`, and writes a termination report + data snapshot. **Windows uninstall is thorough** (v0.2.2+): kills GUI first to prevent daemon respawn, full whitelist cleanup of runtime files, `[UninstallDelete]` fallback removes install/, no residue in `~/.emrg`.
 >
-> **Unsigned builds**: if the macOS package is unsigned, right-click → Open on first launch (Gatekeeper). Besides the GUI, you can also edit `~/.emrg/config.toml` directly (GUI settings save rewrites config and drops comments — for advanced config, edit the file).
+> **macOS signing & notarization**: since v0.2.7, macOS packages are signed with Developer ID dual-cert and notarized by Apple (zero Gatekeeper dialogs — double-click to install directly). Only for unsigned builds (e.g. self-built old versions) is right-click → Open needed on first launch. Besides the GUI, you can also edit `~/.emrg/config.toml` directly (GUI settings save rewrites config and drops comments — for advanced config, edit the file).
 
 ### 🍎 macOS (source install)
 
