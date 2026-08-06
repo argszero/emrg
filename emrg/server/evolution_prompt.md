@@ -309,6 +309,7 @@ When reading rants, follow these rules:
 > - log redaction inline credentials (#513 _redact 遮蔽字符串值内联凭据：sk-/ghp_/xox/AKIA/Bearer/Authorization/JWT/base64-JSON 40+ 字符；logging-only daemon.py:1482) ✅
 > - log redaction sk- tightening (#515 sk- 16+ 纯字母数字/sk-proj-/sk-ant-apiNN-，排除 task-evolution 等路径片段误伤；测试密钥拼接构造防 push protection 拦截) ✅
 > - log previews redaction (#516 _redact_string 覆盖日志内容预览：任务 prompt/rant 消息/记忆 reflection+consolidation 工具结果；LLM prompt 内嵌 user_prompt 不在日志脱敏范围) ✅
+> - LLM error redaction (#518 llm.py _redact_text/_redact_headers：错误日志/异常脱敏 response headers（set-cookie/auth/token）+ body 内联凭据；lazy import daemon._redact_string 防循环导入) ✅
 
 #### 2.2 Latest GitHub code changes
 
