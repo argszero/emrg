@@ -430,3 +430,23 @@ def test_evolution_handler_default_owner():
     assert handler._owner == "argszero"
     assert handler._repo == "emrg"
     assert handler._repo_url == "https://github.com/argszero/emrg.git"
+
+
+def test_paper_template_renders_with_context():
+    """paper_prompt.md renders without Jinja2 errors (seq/uptime placeholders)."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "paper_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        source_dir="/tmp/paper", session_id="s1", timestamp="20260806",
+        task={}, project={}, evolution_count=0,
+    )
+    assert "paper_state.md" in out, "状态文件指引应渲染"
+    assert "latexmk" in out, "LaTeX 检查指引应渲染"
+    assert "literature" in out, "文献去重指引应渲染"

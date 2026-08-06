@@ -7,6 +7,7 @@
 - 已运行: {{ uptime }}
 - 项目源码: `{{ source_dir }}`
 - 会话 ID: `{{ session_id }}`
+- ⚠️ 注意：daemon 重启后循环序号会重置为 1，**不代表真实的历史运行次数**。判断"是否第一次运行"以状态文件 `paper_state.md` 和项目文件为准。
 
 ---
 
@@ -136,13 +137,17 @@ date "+%Y-%m-%d %H:%M"
 
 **文献检索**（回顾步骤必须包含——向外看，不只向内看）：
 
-1. **优先使用 browser harness skill** 访问 arXiv（cs.LG, cs.CL, cs.AI），搜索近 6 个月与研究方向相关的新预印本
-2. **若 browser harness 不可用**，用 bash + curl 调 arXiv API 兜底：
+1. **先列出已读文献**（避免重复添加）：
    ```bash
-   # 示例：搜索近 6 个月 cs.CL 领域与大语言模型相关的论文
-   curl -s "http://export.arxiv.org/api/query?search_query=cat:cs.CL+AND+all:large+language+model&sortBy=submittedDate&sortOrder=descending&max_results=10"
+   ls {{ source_dir }}/literature/ 2>/dev/null || echo "无 literature/ 目录（尚未开始文献工作）"
    ```
-3. 读取摘要或全文，生成中文笔记保存到 `literature/` 目录
+2. **优先使用 browser harness skill** 访问 arXiv（cs.LG, cs.CL, cs.AI），搜索近 6 个月与研究方向相关的新预印本
+3. **若 browser harness 不可用**，用 bash + curl 调 arXiv API 兜底。关键词必须从项目研究方向派生（读 Agent.md / 摘要 / 状态文件确定方向术语，如互学习、co-teaching、self-play、知识蒸馏），禁止使用通用大词：
+   ```bash
+   # 示例：搜索近 6 个月与研究方向相关的论文（方向术语替换 xxx）
+   curl -s "http://export.arxiv.org/api/query?search_query=cat:cs.CL+AND+all:xxx&sortBy=submittedDate&sortOrder=descending&max_results=10"
+   ```
+4. 读取摘要或全文，生成中文笔记保存到 `literature/` 目录——**若该论文已有笔记，跳过并标记已读**
 
 ### 2. 规划
 
@@ -173,8 +178,12 @@ date "+%Y-%m-%d %H:%M"
 - 若为 LaTeX 项目：编译并检查编译日志
 
 ```bash
-# LaTeX 项目：编译检查
-cd {{ source_dir }} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -20
+# LaTeX 项目：编译检查（先确认 latexmk 可用，不可用则跳过编译，只做文本交叉引用检查）
+if which latexmk >/dev/null 2>&1; then
+  cd {{ source_dir }} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -20
+else
+  echo "latexmk 不可用——跳过编译，改为文本级检查（交叉引用/参考文献编号一致性）"
+fi
 ```
 
 ### 5. 提交
