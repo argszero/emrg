@@ -54,6 +54,7 @@ const App = (() => {
         return;
       }
       if (init.sessions && init.sessions.length > 0) {
+        state.sessions = init.sessions;
         Sidebar.render(init.sessions);
         const current = init.sessions.find((s) => s.session_id === state.sessionId);
         if (current) {
@@ -632,6 +633,7 @@ const App = (() => {
         handleStatus(data);
         break;
       case "sessions":
+        state.sessions = data.sessions || [];
         Sidebar.render(data.sessions || []);
         break;
       case "disconnected":
@@ -657,7 +659,10 @@ const App = (() => {
         Chat.groupNodes.delete(data.requestId);
         break;
       case "list_result":
-        if (data.type === "sessions_list") Sidebar.render(data.sessions || []);
+        if (data.type === "sessions_list") {
+          state.sessions = data.sessions || [];
+          Sidebar.render(data.sessions || []);
+        }
         break;
       case "command_result":
         if (data.type === "model_set") {
