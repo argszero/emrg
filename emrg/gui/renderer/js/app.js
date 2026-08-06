@@ -25,6 +25,8 @@ const App = (() => {
     autoScroll: true,
     // GUI / 指令补全菜单（rant 19:44 P1）：items=[{cmd,hint,phase}] index=当前高亮
     cmdMenu: { items: [], index: -1 },
+    // WorkBuddy P2（rant 21:35）：工作模式 ask（纯对话）/ auto（默认，自动执行工具）
+    mode: "auto",
   };
 
   // ── 启动 ─────────────────────────────────
@@ -100,7 +102,7 @@ const App = (() => {
     const requestId = genRequestId();
     state.ownStreamRequestId = requestId;
     try {
-      const res = await window.emrg.sendMessage({ sessionId: state.sessionId, text, requestId });
+      const res = await window.emrg.sendMessage({ sessionId: state.sessionId, text, requestId, mode: state.mode });
       state.ownStreamRequestId = res.requestId || requestId; // G124：以 daemon 回显为准
     } catch (e) {
       state.busy = false;
@@ -752,6 +754,31 @@ const App = (() => {
     }
   }
 
+  // ── 工作模式切换器（Ask/Auto，WorkBuddy P2） ───────
+  function initModeSwitcher() {
+    const sw = $("mode-switcher");
+    if (!sw) return;
+    sw.addEventListener("click", (e) => {
+      const btn = e.target.closest ? e.target.closest(".mode-btn") : null;
+      if (!btn || !btn.dataset.mode) return;
+      setMode(btn.dataset.mode);
+    });
+  }
+
+  function setMode(mode) {
+    if (mode !== "ask" && mode !== "auto") return;
+    state.mode = mode;
+    const sw = $("mode-switcher");
+    if (!sw) return;
+    for (const btn of sw.querySelectorAll(".mode-btn")) {
+      btn.classList.toggle("active", btn.dataset.mode === mode);
+    }
+    // Ask 模式提示（仅当切到 ask 时轻提示一次，不打断）
+    if (mode === "ask") {
+      Chat.addSystemMessage("Ask 模式：我只对话，不执行工具。输入内容问我就好。");
+    }
+  }
+
   // ── 空状态欢迎屏 ───────────────────────
   function updateEmptyState() {
     const empty = $("empty-state");
@@ -1043,6 +1070,7 @@ const App = (() => {
     Dialogs.initModelForm();
     Dialogs.initRenameDialog();
     initModelSwitcher();
+    initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
     ResultPanel.init(); // WorkBuddy P1：结果面板（⌘\ 折叠 + 窄屏自动隐藏）
   }
 
@@ -1061,6 +1089,7 @@ const App = (() => {
     bindUi,
     updateEmptyState,
     updateModelSwitcher,
+    setMode, // WorkBuddy P2：Ask/Auto 模式（导出供测试与外部调用）
   };
 })();
 

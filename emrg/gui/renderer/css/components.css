@@ -887,3 +887,34 @@ dialog::backdrop {
   word-break: break-word;
   margin: 0;
 }
+
+/* ── 工作模式切换器（Ask/Auto，WorkBuddy P2） ─────────────── */
+.mode-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 999px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  margin-left: 8px;
+}
+.mode-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.mode-btn.active {
+  background: var(--bg-panel);
+  color: var(--accent);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+}
+.mode-btn:hover:not(.active) {
+  color: var(--text-1);
+}

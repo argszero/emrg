@@ -223,3 +223,37 @@ test("P4：/trigger <name> 直接触发（不打开对话框）", async () => {
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/trigger', args: ['emrg-task'] })", ctx);
   assert.ok(!(els["tasks-dialog"] && els["tasks-dialog"].__open), "direct trigger should not open dialog");
 });
+
+// ── WorkBuddy P2（rant 21:35）：Ask/Auto 模式 ────────────────
+test("P2：setMode('ask') 更新 state.mode 并提示（Ask 只对话不执行工具）", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext("App.setMode('ask')", ctx);
+  const mode = await vm.runInContext("App.state.mode", ctx);
+  assert.strictEqual(mode, "ask", "state.mode 应为 ask");
+  await vm.runInContext("App.setMode('auto')", ctx);
+  const mode2 = await vm.runInContext("App.state.mode", ctx);
+  assert.strictEqual(mode2, "auto", "state.mode 应切回 auto");
+});
+
+test("P2：setMode 非法值不生效（白名单 ask/auto）", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext("App.setMode('bogus')", ctx);
+  const mode = await vm.runInContext("App.state.mode", ctx);
+  assert.strictEqual(mode, "auto", "非法 mode 应保持默认 auto");
+});
+
+test("P2：sendMessage 透传 state.mode（ask → sendMessage 带 mode）", async () => {
+  let sent = null;
+  const { ctx, els } = makeSandbox({
+    sendMessage: async (p) => { sent = p; return {}; },
+  });
+  await tick();
+  vm.runInContext('App.state.sessionId = "s1"; App.state.mode = "ask";', ctx);
+  els["input"].value = "帮我写一段代码";
+  await vm.runInContext("App.sendMessage()", ctx);
+  assert.ok(sent, "sendMessage 应被调用");
+  assert.strictEqual(sent.mode, "ask", "ask 模式应透传 mode 参数");
+  assert.strictEqual(sent.text, "帮我写一段代码", "文本应正常透传");
+});
