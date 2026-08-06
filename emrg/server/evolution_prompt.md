@@ -311,6 +311,7 @@ When reading rants, follow these rules:
 > - log previews redaction (#516 _redact_string 覆盖日志内容预览：任务 prompt/rant 消息/记忆 reflection+consolidation 工具结果；LLM prompt 内嵌 user_prompt 不在日志脱敏范围) ✅
 > - LLM error redaction (#518 llm.py _redact_text/_redact_headers：错误日志/异常脱敏 response headers（set-cookie/auth/token）+ body 内联凭据；lazy import daemon._redact_string 防循环导入) ✅
 > - LLM URL redaction (#520 logger.debug 请求/流式 URL 经 _redact_text 遮蔽 query-string 凭据；base_url 可携带 token) ✅
+> - GUI max-rounds truncation hint (#523 chat.js handleDone 检测 exceeded+max|limit|round → chat.maxRoundsHint zh/en 提示可继续；对齐 TUI client/app.py:442；正反两态测试无假阳性) ✅
 
 #### 2.2 Latest GitHub code changes
 
