@@ -801,6 +801,7 @@ const App = (() => {
         break;
       case "tool_finished":
         Chat.handleToolEnd(data);
+        ResultPanel.addToolResult(data);
         break;
       case "cancelled":
         state.busy = false;
@@ -1042,6 +1043,7 @@ const App = (() => {
     Dialogs.initModelForm();
     Dialogs.initRenameDialog();
     initModelSwitcher();
+    ResultPanel.init(); // WorkBuddy P1：结果面板（⌘\ 折叠 + 窄屏自动隐藏）
   }
 
   // ── 暴露 ─────────────────────────────────

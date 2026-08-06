@@ -72,6 +72,8 @@ function makeSandbox(overrides = {}) {
     requestAnimationFrame: (cb) => cb(),
     requestIdleCallback: (cb) => cb(),
     crypto: { randomUUID: () => "mock-uuid" },
+    localStorage: { getItem: () => null, setItem() {} },
+    matchMedia: () => ({ matches: false, addEventListener() {} }),
     DOMPurify: { sanitize: (x) => x },
     marked: null,
     hljs: null,
@@ -93,13 +95,21 @@ function makeSandbox(overrides = {}) {
       setModel: async () => ({}),
       listHistory: async () => { calls.listHistory.push(1); return { messages: [{ record_index: 0, preview: "你好" }, { record_index: 1, preview: "帮我写代码" }] }; },
       rewindSession: async (p) => { calls.rewind.push(p); return { removedCount: 2 }; },
+      listMemories: async () => [],
+      readMemory: async () => ({}),
+      listSkills: async () => [],
+      listProjects: async () => [],
+      listTasks: async () => [],
+      triggerTask: async () => ({}),
+      sendRant: async () => ({}),
+      openFile: async () => ({ ok: true }),
       ...overrides,
     },
   };
   win.window = win;
   win.document = document;
   const ctx = vm.createContext(win);
-  for (const f of ["utils", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "app"]) {
+  for (const f of ["utils", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "app"]) {
     const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
     vm.runInContext(code, ctx, { filename: "renderer/js/" + f + ".js" });
   }

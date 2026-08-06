@@ -27,6 +27,7 @@ const api = {
   triggerTask: (payload) => ipcRenderer.invoke("emrg:triggerTask", payload),
   sendRant: (payload) => ipcRenderer.invoke("emrg:sendRant", payload),
   listModels: () => ipcRenderer.invoke("emrg:listModels"),
+  openFile: (payload) => ipcRenderer.invoke("emrg:openFile", payload),
   saveSettings: (payload) => ipcRenderer.invoke("emrg:saveSettings", payload),
   getSettings: () => ipcRenderer.invoke("emrg:getSettings"),
   cancel: () => ipcRenderer.invoke("emrg:cancel"),
