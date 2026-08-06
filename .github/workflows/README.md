@@ -51,6 +51,34 @@ security import 你的证书.p12 -k /tmp/test.keychain -P 密码
 base64 < 含私钥的证书.p12   # 输出结果整段复制为 MACOS_SIGNING_P12_BASE64
 ```
 
+## ⚠️ 需要两种证书：Developer ID Application + Developer ID Installer（v0.2.7 第 7 次构建教训）
+
+**现象**：第 7 次构建（#461 修复私钥校验后）在 `Sign pkg` 步骤报：
+```
+productsign: error: Could not find appropriate signing identity for "***".
+An installer signing identity (not an application signing identity) is required for signing flat-style products.
+```
+
+**根因**：macOS 代码签名需要**两种不同证书**，缺一不可：
+| 证书类型 | 用途 | 产物 |
+|---|---|---|
+| `Developer ID Application` | 签名 .app（electron-builder codesign） | GUI 应用本体 |
+| `Developer ID Installer` | 签名 .pkg（productsign） | 安装包 |
+
+p12 若只有 Application 证书：.app 签名成功，但 productsign 报 cryptic 错误——CI 已在 import 步骤加显式校验（#462），缺失时明确报错。
+
+**获取 Installer 证书**（developer.apple.com → Certificates → + → Software → **Developer ID Installer**）：
+1. 在开发者门户创建 Developer ID Installer 证书（与 Application 是两张不同的证书，需分别申请）
+2. 下载 .cer 双击导入钥匙串
+3. 导出 p12 时**同时勾选两张证书**（或分别导出后合并）——`security export -t identities` 会导出所有 identity
+
+**验证 p12 含两种证书**：
+```bash
+security import 你的证书.p12 -k /tmp/test.keychain -P 密码
+security find-certificate -c "Developer ID Installer" -a /tmp/test.keychain   # 必须能找到
+security find-certificate -c "Developer ID Application" -a /tmp/test.keychain  # 必须能找到
+```
+
 ## 降级行为
 
 - **Secret 未配置**（空字符串）：对应步骤跳过，构建不失败（不签名、不公证）。

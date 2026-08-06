@@ -80,6 +80,16 @@ jobs:
             echo "::error::MACOS_SIGNING_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请从 Keychain Access 导出含私钥的 p12（证书右键 → 导出 → 勾选\"包含私钥\"），重新 base64 后更新 GitHub Secret。import 输出：${IMPORT_OUTPUT}"
             exit 1
           fi
+          # pkg 签名证书存在性校验（v0.2.7 第 7 次构建根因：p12 只有 Developer ID
+          # Application 证书——签 .app 成功，但 productsign 签 pkg 需要独立的
+          # Developer ID Installer 证书，缺失报 "An installer signing identity (not
+          # an application signing identity) is required" 的 cryptic 错误）。
+          # 两种证书在 developer.apple.com → Certificates 分别创建，导出 p12 时
+          # 需同时勾选（或分别导出后合并）。
+          if ! security find-certificate -c "Developer ID Installer" -a /tmp/ci.keychain >/dev/null 2>&1; then
+            echo "::error::MACOS_SIGNING_P12_BASE64 缺少 Developer ID Installer 证书（pkg 签名必需）。Developer ID Application 只能签 .app，productsign 签 pkg 需要独立的 Developer ID Installer 证书。请在 developer.apple.com → Certificates 创建 Developer ID Installer（与 Application 是两张不同证书），连同私钥一起导出 p12 后更新 GitHub Secret。"
+            exit 1
+          fi
           # set-key-partition-list 与 electron-builder macCodeSign.js 完全一致：
           #   security set-key-partition-list -S apple-tool:,apple: -s -k <password> <keychain>
           # -s = Match keys that can sign（必须显式提供才能定位私钥项目）；
@@ -152,7 +162,15 @@ jobs:
         run: |
           PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
-          productsign --sign "$MACOS_SIGNING_IDENTITY" "$PKG" "${PKG}.signed"
+          # productsign 需要 Developer ID Installer 证书（非 Application）。
+          # 从已导入的临时 keychain 自动探测 Installer 身份，避免使用
+          # MACOS_SIGNING_IDENTITY（Application）导致 productsign 报 cryptic 错误。
+          INSTALLER_ID="$(security find-identity -v -p codesigning /tmp/ci.keychain | grep -o 'Developer ID Installer: [^"]*' | head -1)"
+          if [ -z "$INSTALLER_ID" ]; then
+            echo "::error::临时 keychain 未找到 Developer ID Installer 身份（pkg 签名必需）。请检查 p12 是否包含 Developer ID Installer 证书。"
+            exit 1
+          fi
+          productsign --sign "$INSTALLER_ID" "$PKG" "${PKG}.signed"
           mv "${PKG}.signed" "$PKG"
           # P3 验证：证书存在时签名必须成功（rant 验收：pkgutil 显示 signed by Developer ID）
           pkgutil --check-signature "$PKG"
