@@ -35,6 +35,28 @@
   font-size: 18px;
 }
 
+/* 成长状态卡（WorkBuddy P3：自进化可见化） */
+.growth-card {
+  margin: 0 var(--sp-3) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 8%, transparent), transparent);
+}
+.growth-line {
+  font-size: var(--fs-secondary);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.growth-line b {
+  color: var(--accent);
+}
+.growth-note {
+  margin-top: 2px;
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+}
+
 .new-chat-btn {
   margin: 0 var(--sp-3) var(--sp-3);
   display: flex;

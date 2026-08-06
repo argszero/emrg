@@ -21,7 +21,10 @@ const App = (() => {
     projectDir: "",
     model: "",
     serverId: "",
+    version: "", // WorkBuddy P3：init 返回的 package.json 版本号（/version 不再硬编码）
     evolutionCount: null,
+    // WorkBuddy P3：上次已知进化计数（用于检测"进化刚发生"→toast）
+    lastKnownEvolutionCount: null,
     autoScroll: true,
     // GUI / 指令补全菜单（rant 19:44 P1）：items=[{cmd,hint,phase}] index=当前高亮
     cmdMenu: { items: [], index: -1 },
@@ -38,9 +41,12 @@ const App = (() => {
       state.projectDir = init.project_dir || "";
       state.serverId = init.server_id || "";
       state.model = init.model || "";
+      state.version = init.version || "";
       state.evolutionCount = init.evolution_count ?? null;
+      state.lastKnownEvolutionCount = state.evolutionCount;
       updateConnectionDot(init.config_exists && init.api_key_configured ? "green" : "gray");
       updateModelSwitcher();
+      updateGrowthCard();
 
       if (!init.config_exists) {
         Dialogs.showWelcome(); // 首启引导
@@ -143,9 +149,7 @@ const App = (() => {
           Chat.addSystemMessage("已压缩当前对话历史。");
           break;
         case "/version":
-          Chat.addSystemMessage(
-            `EMRG GUI v0.2.7 · 实例 ${state.serverId || "未知"} · 模型 ${state.model || "未知"} · 已进化 ${state.evolutionCount ?? 0} 次`
-          );
+          showVersionInfo();
           break;
         case "/help":
           showHelpDialog();
@@ -669,6 +673,67 @@ const App = (() => {
     if (label) label.textContent = state.model || "选择模型";
   }
 
+  // ── 自进化可见化（WorkBuddy P3）──────────────────
+  /** 版本信息（/version 命令 + 进化 toast "去看看" 共用） */
+  function showVersionInfo() {
+    Chat.addSystemMessage(
+      `EMRG GUI v${state.version || "0.2.8"} · 实例 ${state.serverId || "未知"} · 模型 ${state.model || "未知"} · 已进化 ${state.evolutionCount ?? 0} 次`
+    );
+  }
+
+  /** 更新侧边栏成长状态卡（计数 + 提示语） */
+  function updateGrowthCard() {
+    const n = state.evolutionCount ?? 0;
+    const countEl = $("growth-count");
+    if (countEl) countEl.textContent = String(n);
+    const noteEl = $("growth-note");
+    if (noteEl) noteEl.textContent = EMRG_Copy.COPY.growthNote;
+  }
+
+  /** 进化完成 toast：检测 evolution_count 增长，一天最多提示一次 */
+  function maybeShowEvolutionToast() {
+    if (state.evolutionCount == null) return;
+    const prev = state.lastKnownEvolutionCount;
+    state.lastKnownEvolutionCount = state.evolutionCount;
+    if (prev == null || state.evolutionCount <= prev) return; // 首次连接/无增长不提示
+    // 频率控制：一天最多 1 次（localStorage 可能不可用 → 静默跳过）
+    const today = new Date().toISOString().slice(0, 10);
+    try {
+      if (localStorage.getItem("emrg.evoToast.date") === today) return;
+      localStorage.setItem("emrg.evoToast.date", today);
+    } catch { /* ignore */ }
+    showEvolutionToast();
+  }
+
+  function showEvolutionToast() {
+    const toast = $("evolution-toast");
+    if (!toast) return;
+    const msg = $("evolution-toast-msg");
+    if (msg) msg.textContent = EMRG_Copy.COPY.evolutionToastMsg(state.evolutionCount ?? 0);
+    toast.classList.remove("hidden");
+    const star = $("brand-star");
+    if (star) star.classList.add("pulse");
+  }
+
+  function hideEvolutionToast() {
+    const toast = $("evolution-toast");
+    if (toast) toast.classList.add("hidden");
+    const star = $("brand-star");
+    if (star) star.classList.remove("pulse");
+  }
+
+  function initEvolutionToast() {
+    const see = $("evolution-toast-see");
+    if (see) {
+      see.addEventListener("click", () => {
+        hideEvolutionToast();
+        showVersionInfo();
+      });
+    }
+    const dismiss = $("evolution-toast-dismiss");
+    if (dismiss) dismiss.addEventListener("click", hideEvolutionToast);
+  }
+
   function initModelSwitcher() {
     const sw = $("model-switcher");
     sw.addEventListener("click", async (e) => {
@@ -843,6 +908,8 @@ const App = (() => {
         state.model = data.model || state.model;
         state.evolutionCount = data.evolution_count ?? state.evolutionCount;
         updateModelSwitcher();
+        updateGrowthCard();
+        maybeShowEvolutionToast();
         break;
       case "status":
         handleStatus(data);
@@ -909,6 +976,8 @@ const App = (() => {
       if (data.model) state.model = data.model;
       state.evolutionCount = data.evolution_count ?? state.evolutionCount;
       updateModelSwitcher();
+      updateGrowthCard();
+      maybeShowEvolutionToast();
       Chat.addSystemMessage(EMRG_Copy.COPY.reconnected);
     } else if (data.auth_failed) {
       updateConnectionDot("red");
@@ -1072,6 +1141,7 @@ const App = (() => {
     initModelSwitcher();
     initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
     ResultPanel.init(); // WorkBuddy P1：结果面板（⌘\ 折叠 + 窄屏自动隐藏）
+    initEvolutionToast(); // WorkBuddy P3：进化 toast 按钮绑定
   }
 
   // ── 暴露 ─────────────────────────────────
@@ -1089,6 +1159,9 @@ const App = (() => {
     bindUi,
     updateEmptyState,
     updateModelSwitcher,
+    updateGrowthCard, // WorkBuddy P3：成长卡（导出供测试）
+    maybeShowEvolutionToast, // WorkBuddy P3：进化 toast 检测
+    showVersionInfo, // WorkBuddy P3：/version 内容（toast "去看看" 共用）
     setMode, // WorkBuddy P2：Ask/Auto 模式（导出供测试与外部调用）
   };
 })();

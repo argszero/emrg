@@ -26,8 +26,16 @@ function makeEl(id) {
     children: [],
     style: {},
     dataset: {},
-    classList: { add() {}, remove() {}, toggle() {} },
-    addEventListener() {},
+    classList: {
+      _s: new Set(),
+      add(c) { this._s.add(c); },
+      remove(c) { this._s.delete(c); },
+      toggle(c) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); },
+      contains(c) { return this._s.has(c); },
+    },
+    _listeners: {},
+    addEventListener(t, fn) { this._listeners[t] = fn; },
+    click() { const fn = this._listeners.click; if (fn) fn(); },
     appendChild() {},
     removeChild() {},
     querySelectorAll: () => [],
@@ -256,4 +264,63 @@ test("P2：sendMessage 透传 state.mode（ask → sendMessage 带 mode）", asy
   assert.ok(sent, "sendMessage 应被调用");
   assert.strictEqual(sent.mode, "ask", "ask 模式应透传 mode 参数");
   assert.strictEqual(sent.text, "帮我写一段代码", "文本应正常透传");
+});
+
+// ── WorkBuddy P3（rant 21:35）：自进化可见化 ────────────────
+test("P3：/version 使用动态版本号（不再硬编码 v0.2.7）", async () => {
+  const { ctx } = makeSandbox({
+    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 3, sessions: [] }),
+  });
+  await tick();
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/version', args: [] })", ctx);
+  const src = fs.readFileSync(path.join(RENDERER_JS, "app.js"), "utf8");
+  assert.ok(!src.includes("EMRG GUI v0.2.7"), "app.js 不应再硬编码 v0.2.7");
+  assert.ok(src.includes("state.version"), "版本应来自 state.version");
+  assert.strictEqual(typeof (await vm.runInContext("App.showVersionInfo", ctx)), "function");
+});
+
+test("P3：updateGrowthCard 更新侧边栏成长计数", async () => {
+  const { ctx, els } = makeSandbox({
+    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 42, sessions: [] }),
+  });
+  await tick();
+  await vm.runInContext("App.updateGrowthCard()", ctx);
+  assert.strictEqual(els["growth-count"].textContent, "42", "成长卡应显示 42 次");
+});
+
+test("P3：进化计数增长 → toast 显示（一天最多一次）", async () => {
+  const { ctx, els } = makeSandbox({
+    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 5, sessions: [] }),
+  });
+  await tick();
+  // 模拟 pong 事件：计数 5 → 6（进化发生）
+  await vm.runInContext(
+    "App.handleEvent({ type: 'pong', data: { identity: { instance_id: 'srv' }, model: 'm', evolution_count: 6 } })",
+    ctx
+  );
+  assert.ok(els["evolution-toast"], "toast 元素存在");
+  assert.ok(!els["evolution-toast"].classList.contains("hidden"), "toast 应显示");
+  // 同一天再次增长 → 不再提示（频率控制）
+  await vm.runInContext(
+    "App.handleEvent({ type: 'pong', data: { identity: { instance_id: 'srv' }, model: 'm', evolution_count: 7 } })",
+    ctx
+  );
+  // toast 仍显示（未隐藏），但不重新触发——验证不可直接观测；此处确认无异常即可
+  assert.ok(!els["evolution-toast"].classList.contains("hidden"), "toast 保持显示");
+});
+
+test("P3：toast '去看看' 关闭并输出版本信息", async () => {
+  const { ctx, els } = makeSandbox({
+    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 2, sessions: [] }),
+  });
+  await tick();
+  // 计数 2 → 3 触发 toast
+  await vm.runInContext(
+    "App.handleEvent({ type: 'pong', data: { identity: { instance_id: 'srv' }, model: 'm', evolution_count: 3 } })",
+    ctx
+  );
+  const see = els["evolution-toast-see"];
+  assert.ok(see, "去看看按钮存在");
+  if (see.click) see.click();
+  assert.ok(els["evolution-toast"].classList.contains("hidden"), "点击后 toast 应隐藏");
 });

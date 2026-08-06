@@ -918,3 +918,39 @@ dialog::backdrop {
 .mode-btn:hover:not(.active) {
   color: var(--text-1);
 }
+
+/* ── 进化完成 toast（WorkBuddy P3）────────────────── */
+.evolution-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 1000;
+  width: 320px;
+  max-width: calc(100vw - 40px);
+  padding: var(--sp-4);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.18));
+  animation: toast-in 0.25s var(--ease);
+}
+.evolution-toast-title {
+  font-size: var(--fs-title, 15px);
+  font-weight: 600;
+  color: var(--text-1);
+}
+.evolution-toast-msg {
+  margin-top: var(--sp-1);
+  font-size: var(--fs-secondary);
+  color: var(--text-2);
+}
+.evolution-toast-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  justify-content: flex-end;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}

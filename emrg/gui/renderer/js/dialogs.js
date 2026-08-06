@@ -196,6 +196,13 @@ const Dialogs = (() => {
         vision: Boolean(m.vision),
       }));
       renderModelList();
+      // WorkBuddy P3：关于区（版本 + 进化计数）随设置面板打开时刷新
+      try {
+        const ver = $("about-version");
+        if (ver) ver.textContent = `v${App.state.version || "0.2.8"}`;
+        const evo = $("about-evolutions");
+        if (evo) evo.textContent = EMRG_Copy.COPY.growthCount(App.state.evolutionCount ?? 0);
+      } catch { /* 元素缺失（测试桩）时忽略 */ }
     } catch (e) {
       Chat.addSystemMessage(`读取设置失败了：${e.message}`);
     }
