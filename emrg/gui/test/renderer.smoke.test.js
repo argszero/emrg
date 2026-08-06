@@ -416,3 +416,12 @@ test("对话列表键盘导航：↑↓ 聚焦 / Enter 切换（与 TUI /resume 
   const css = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "components.css"), "utf8");
   assert.ok(css.includes(".conv-item.kbd-focus"), "键盘聚焦高亮样式应存在");
 });
+
+test("对话列表键盘导航：输入控件内不劫持（e.target 守卫，textarea ↑↓/Enter 正常）", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  const src = fs.readFileSync(path.join(RENDERER_JS, "sidebar.js"), "utf8");
+  // 输入框是 <textarea id="input">，document 级常驻 keydown 必须跳过输入控件
+  assert.ok(src.includes("closest(\"input, textarea, select, [contenteditable]\")"), "输入控件内应跳过键盘导航");
+  assert.ok(src.includes("e.target.closest"), "应使用 e.target 守卫");
+});
