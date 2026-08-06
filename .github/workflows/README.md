@@ -7,12 +7,19 @@
 
 | Secret | 用途 | 说明 |
 |---|---|---|
-| `MACOS_SIGNING_P12_BASE64` | 签名证书包 | **必须包含私钥！** `base64 < 含私钥的证书.p12` 的结果 |
+| `MACOS_SIGNING_P12_BASE64` | 签名证书包（Application） | **必须包含私钥！** `base64 < 含私钥的证书.p12` 的结果 |
 | `MACOS_SIGNING_P12_PASSWORD` | p12 导出密码 | 导出 p12 时设置的密码 |
 | `MACOS_SIGNING_IDENTITY` | 签名身份名称（可选） | `.app` 签名用 `Developer ID Application: ... (TEAMID)`（electron-builder 从 p12 自动发现）；pkg 签名自动检测 `Developer ID Installer` 身份，无需填此值 |
+| `MACOS_INSTALLER_IDENTITY` | Installer 身份（可选，双 p12 方案） | `Developer ID Installer: ... (TEAMID)`，Sign pkg 优先用此值 |
+| `MACOS_INSTALLER_P12_BASE64` | Installer p12（可选，双 p12 方案） | 含 Developer ID Installer 证书+私钥的 p12 的 base64；配置后 Import step 会额外导入它 |
+| `MACOS_INSTALLER_P12_PASSWORD` | Installer p12 密码（可选，双 p12 方案） | 导出 Installer p12 时设置的密码 |
 | `APPLE_ID` | Apple ID（公证） | notarytool 使用的 Apple ID 邮箱 |
 | `MACOS_NOTARY_APP_PASSWORD` | App 专用密码 | Apple ID → 登录与安全 → App 专用密码 |
 | `MACOS_NOTARY_TEAM_ID` | Team ID | 开发者账号 Team ID |
+
+**两种方案**（rant 2026-08-06T15:26 起支持）：
+- **单 p12 方案**（默认）：只配 `MACOS_SIGNING_*`，p12 内含双证书（Application + Installer），`security export -t identities` 导出
+- **双 p12 方案**（宿主已采用）：`MACOS_SIGNING_*` 含 Application，另配 `MACOS_INSTALLER_*` 含 Installer——CI Import step 分别导入两个 p12，Sign pkg 优先用 `MACOS_INSTALLER_IDENTITY`
 
 ## ⚠️ p12 必须包含两种证书（Application + Installer）
 
