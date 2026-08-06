@@ -491,7 +491,7 @@ class _FakeWriter:
 
 def test_rant_field_order(tmp_path, monkeypatch):
     """Rant entries are written with field order:
-    timestamp → project → status → progress → message (message last)."""
+    timestamp → project → status → progress → completed → message (message last)."""
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
     server = _make_server()
     writer = _FakeWriter()
@@ -508,8 +508,9 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert len(lines) == 1
     entry = json.loads(lines[0])
     assert list(entry.keys()) == [
-        "timestamp", "project", "status", "progress", "message",
+        "timestamp", "project", "status", "progress", "completed", "message",
     ]
+    assert entry["completed"] is None  # new rants default to null completed
     assert entry["project"] == "emrg"
     assert entry["status"] == "pending"
     assert entry["message"] == "test rant message"
