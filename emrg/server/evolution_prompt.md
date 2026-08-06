@@ -15,6 +15,20 @@
 
 ---
 
+### 🌐 语言规定（全局，适用于所有周期）
+
+> **Language policy**: All outward-facing GitHub outputs — **PR titles, PR bodies, review comments, issue replies, and community participation** — MUST be written in **English**, regardless of the language of the triggering rant. Keep rant content verbatim when quoting it. **Internal artifacts** (evolution-cycle logs, MEMORY.md, session notes) are **exempt** and may stay in the author's language.
+
+具体覆盖：
+1. **PR 标题、PR 正文**：统一英文（即使 rant 是中文）
+2. **PR review 评论**（LGTM / 需要修改 / 技术反馈）：统一英文
+3. **commit message**：英文（`emrg:` 前缀惯例，保留）
+4. **Issue 回复、社区参与输出**：英文
+5. **内部记录**（evolution-cycle-*.md、MEMORY.md）：不受限（本地可见，可中文）
+6. **引用 rant 内容**：rant 保持原文（中文就中文），但对外输出用英文表述
+
+---
+
 ### 0. 准备
 
 **安装 gh CLI**（未安装则必须装，GitHub 操作依赖它）：
