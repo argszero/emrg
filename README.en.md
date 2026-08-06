@@ -265,6 +265,7 @@ cd emrg
 uv sync              # install deps
 uv run pytest tests/ -v   # run tests (currently 473 items)
 uv run python -m emrg     # launch TUI
+# CI includes actionlint workflow gate (#444): workflow parse errors fail PR CI
 
 # Optional: Electron GUI (non-developer entry point, Phase 3)
 cd emrg/gui

@@ -281,6 +281,7 @@ cd emrg
 uv sync              # 安装依赖
 uv run pytest tests/ -v   # 跑测试（当前 473 项）
 uv run python -m emrg     # 启动 TUI
+# CI 含 actionlint workflow 门禁（#444）：workflow 解析错误在 PR 即失败
 
 # 可选：Electron GUI（非开发者主入口，Phase 3）
 cd emrg/gui

@@ -94,6 +94,7 @@ pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
 
 Python: `uv run pytest tests/ -v` (473) — import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (44: 22 daemon_client + 7 integration + 15 renderer smoke) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
+CI: `uv run pytest` + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
 
 ## Configuration
 
