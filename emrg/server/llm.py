@@ -23,6 +23,31 @@ import httpx
 from emrg import __version__
 from emrg.config import LlmConfig
 
+
+# ── 错误信息脱敏（20260807-0107）────────────────────────────
+# LLM 错误日志/异常可能包含 response headers（set-cookie/auth 回显）与 body
+# （模型回显的密钥/令牌）。复用 daemon._redact_string 的内联凭据遮蔽能力，
+# 避免 emrgd.log / 会话历史泄露。
+def _redact_text(text: str) -> str:
+    """遮蔽字符串中的内联凭据（sk-/ghp_/Bearer/JWT/base64-JSON）。"""
+    try:
+        from emrg.server.daemon import _redact_string
+        return _redact_string(text)
+    except Exception:
+        return text
+
+
+def _redact_headers(headers: dict) -> dict:
+    """遮蔽 response headers 中的敏感键值（set-cookie/authorization/token 等）。"""
+    sensitive = ("cookie", "set-cookie", "authorization", "token", "api-key", "apikey", "x-api-key")
+    out = {}
+    for k, v in headers.items():
+        if any(s in k.lower() for s in sensitive):
+            out[k] = "***"
+        else:
+            out[k] = _redact_text(str(v))
+    return out
+
 logger = logging.getLogger(__name__)
 
 # HTTP status codes that warrant a retry
@@ -115,18 +140,22 @@ class LlmClient:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
                 logger.warning(
                     "LLM transient error %d, retrying in %.1fs (attempt %d/%d): %s",
-                    resp.status_code, delay, attempt + 1, MAX_RETRIES, text[:200],
+                    resp.status_code, delay, attempt + 1, MAX_RETRIES,
+                    _redact_text(text[:200]),
                 )
                 await asyncio.sleep(delay)
                 last_error = RuntimeError(
-                    f"LLM request failed: {resp.status_code} - {text}"
+                    f"LLM request failed: {resp.status_code} - {_redact_text(text)}"
                 )
                 continue
 
-            hdr = dict(resp.headers)
-            logger.error("LLM error: %s headers=%s body=%s", resp.status_code, hdr, text)
+            # 错误日志与异常信息脱敏：response headers 可能回显 set-cookie/auth，
+            # body 可能含敏感回显；统一经脱敏 + 截断（防止 API key 等泄露到 emrgd.log / 会话）。
+            hdr = _redact_headers(dict(resp.headers))
+            text_redacted = _redact_text(text)
+            logger.error("LLM error: %s headers=%s body=%s", resp.status_code, hdr, text_redacted[:2000])
             raise RuntimeError(
-                f"LLM request failed: {resp.status_code} headers={hdr} body={text}"
+                f"LLM request failed: {resp.status_code} headers={hdr} body={text_redacted[:2000]}"
             )
 
         raise last_error  # type: ignore[misc]
@@ -186,18 +215,18 @@ class LlmClient:
                             "LLM stream transient error %d, retrying in %.1fs "
                             "(attempt %d/%d): %s",
                             resp.status_code, delay, attempt + 1, MAX_RETRIES,
-                            text[:200],
+                            _redact_text(text[:200]),
                         )
                         await asyncio.sleep(delay)
                         last_error = RuntimeError(
-                            f"LLM stream request failed: {resp.status_code} - {text}"
+                            f"LLM stream request failed: {resp.status_code} - {_redact_text(text[:500])}"
                         )
                         continue
-                    logger.error("LLM stream error: %s %s", resp.status_code, text[:500])
-                    hdr = dict(resp.headers)
+                    logger.error("LLM stream error: %s %s", resp.status_code, _redact_text(text[:500]))
+                    hdr = _redact_headers(dict(resp.headers))
                     raise RuntimeError(
                         f"LLM stream request failed: {resp.status_code} "
-                        f"headers={hdr} body={text[:1000]}"
+                        f"headers={hdr} body={_redact_text(text[:1000])}"
                     )
 
                 # Capture response metadata for llm.jsonl logging
