@@ -9,10 +9,23 @@
 |---|---|---|
 | `MACOS_SIGNING_P12_BASE64` | 签名证书包 | **必须包含私钥！** `base64 < 含私钥的证书.p12` 的结果 |
 | `MACOS_SIGNING_P12_PASSWORD` | p12 导出密码 | 导出 p12 时设置的密码 |
-| `MACOS_SIGNING_IDENTITY` | 签名身份名称 | `security find-identity -v -p codesigning` 输出的证书 CN，如 `Developer ID Application: ... (TEAMID)` |
+| `MACOS_SIGNING_IDENTITY` | 签名身份名称（可选） | `.app` 签名用 `Developer ID Application: ... (TEAMID)`（electron-builder 从 p12 自动发现）；pkg 签名自动检测 `Developer ID Installer` 身份，无需填此值 |
 | `APPLE_ID` | Apple ID（公证） | notarytool 使用的 Apple ID 邮箱 |
 | `MACOS_NOTARY_APP_PASSWORD` | App 专用密码 | Apple ID → 登录与安全 → App 专用密码 |
 | `MACOS_NOTARY_TEAM_ID` | Team ID | 开发者账号 Team ID |
+
+## ⚠️ p12 必须包含两种证书（Application + Installer）
+
+**`.app` 签名**需要 **Developer ID Application** 证书；**pkg 签名**（`productsign`）需要 **Developer ID Installer** 证书——两者是独立的证书类型，缺一不可：
+
+- 只有 Application 证书 → `.app` 签名成功，但 `Sign pkg` 步骤报错 `An installer signing identity (not an application signing identity) is required`（实测 #462）
+- 两个证书都要在 Apple Developer 后台生成（Certificates → 分别创建两种类型），下载安装到钥匙串后**一并导出**到 p12（`security export -t identities` 会导出全部证书+私钥对）
+
+**检查本机已有哪些身份**：
+```bash
+security find-identity -v -p codesigning   # 列出 Developer ID Application
+security find-identity -v                  # 列出全部（含 Developer ID Installer）
+```
 
 ## ⚠️ p12 必须包含私钥（v0.2.7 四次构建失败的教训）
 
@@ -33,9 +46,9 @@
 # 用证书 CN 查询准确名称（本机已有有效 identity，无需重新申请证书）
 security find-identity -v -p codesigning
 # 导出含私钥 p12（会提示输入钥匙串密码 + 设置导出密码）
+# ⚠️ 不指定证书名称 = 导出全部身份（Application + Installer 一并包含）
 security export -k ~/Library/Keychains/login.keychain-db -t identities -f pkcs12 \
-  -P '新导出密码' -o ~/Downloads/emrg-cert/signing-with-key.p12 \
-  "Developer ID Application: <你的名字> (Y55RQ6LU24)"
+  -P '新导出密码' -o ~/Downloads/emrg-cert/signing-with-key.p12
 # 用导出的 p12 更新 MACOS_SIGNING_P12_BASE64 和 MACOS_SIGNING_P12_PASSWORD（导出密码）
 ```
 
