@@ -71,6 +71,12 @@ jobs:
           security unlock-keychain -p 'ci-temp' /tmp/ci.keychain
           security import /tmp/signing.p12 -k /tmp/ci.keychain -P "$MACOS_SIGNING_P12_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/productsign
+          # ── 诊断（R88：set-key-partition-list SecItemCopyMatching 根因排查）──
+          echo "=== p12 诊断 ==="
+          ls -la /tmp/signing.p12
+          security find-identity -v -p codesigning /tmp/ci.keychain || true
+          echo "=== keychain 私钥数量（key class=0x0000000F）==="
+          security dump-keychain /tmp/ci.keychain 2>&1 | grep -c "class: 0x0000000F" || true
           # set-key-partition-list 语法：[-S partition-list] [-k password] [match-options] [keychain]
           # -s = Match keys that can sign（匹配可签名私钥，必须显式提供才能定位项目）；
           # -S 后跟分区 ID 列表；-k 后跟 keychain 密码。
