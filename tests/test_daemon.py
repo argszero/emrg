@@ -514,3 +514,79 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert entry["project"] == "emrg"
     assert entry["status"] == "pending"
     assert entry["message"] == "test rant message"
+
+
+# ── WorkBuddy P2：Ask mode（rant 21:35） ──────────────────────────
+
+
+class _FakeLlm:
+    """Fake LLM that records the tools it received and yields one text delta."""
+
+    def __init__(self):
+        self.received_tools = None
+        self.config = LlmConfig(base_url="http://localhost", api_key="test")
+        self.last_payload = None
+        self.last_response_status = None
+        self.last_response_headers = None
+        self.model = "test"
+
+    async def chat_stream(self, messages, tools=None):
+        self.received_tools = tools
+        yield {"content": "纯对话回复"}
+
+
+def test_run_tool_loop_ask_mode_no_tools():
+    """mode=ask → _run_tool_loop receives allow_tools=False → LLM gets no tools."""
+    import asyncio
+
+    from emrg.protocol import TaskRequest
+
+    server = _make_server()
+    fake = _FakeLlm()
+    server.llm = fake  # type: ignore[assignment]
+
+    session = Session.create_with_id("ask-test", Path("/tmp"))
+    req = TaskRequest(
+        id="ask-1", session_id="ask-test", cwd="/tmp",
+        prompt="这是什么？", stream=True,
+    )
+    received: list[dict] = []
+
+    async def fake_send(d, _ws):
+        received.append(d)
+
+    # 直接调用核心循环（allow_tools=False = Ask）
+    async def run():
+        await server._run_tool_loop(req, None, session, None, allow_tools=False)
+
+    asyncio.run(run())
+
+    assert fake.received_tools == [], (
+        f"Ask 模式不应向 LLM 传工具，实际收到 {fake.received_tools!r}"
+    )
+
+
+def test_run_tool_loop_auto_mode_has_tools():
+    """mode=auto（默认）→ LLM 收到完整工具集。"""
+    import asyncio
+
+    from emrg.protocol import TaskRequest
+
+    server = _make_server()
+    fake = _FakeLlm()
+    server.llm = fake  # type: ignore[assignment]
+
+    session = Session.create_with_id("auto-test", Path("/tmp"))
+    req = TaskRequest(
+        id="auto-1", session_id="auto-test", cwd="/tmp",
+        prompt="帮我看看", stream=True,
+    )
+
+    async def run():
+        await server._run_tool_loop(req, None, session, None, allow_tools=True)
+
+    asyncio.run(run())
+
+    assert fake.received_tools, "Auto 模式应携带工具集"
+    names = [t.get("function", {}).get("name") for t in fake.received_tools]
+    assert "bash" in names and "read" in names, f"工具集应含 bash/read，实际 {names}"

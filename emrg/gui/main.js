@@ -5,7 +5,7 @@
  * 安全：contextIsolation + nodeIntegration:false + sandbox:true（renderer 零网络权限）。
  */
 
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -248,7 +248,7 @@ vision = false
       };
     });
 
-    ipcMain.handle("emrg:sendMessage", async (_e, { sessionId, text, requestId }) => {
+    ipcMain.handle("emrg:sendMessage", async (_e, { sessionId, text, requestId, mode }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       if (!validateText(text)) throw new Error("invalid text");
       if (requestId !== undefined && (typeof requestId !== "string" || requestId.length < 8 || requestId.length > 64)) {
@@ -259,7 +259,8 @@ vision = false
       let rid;
       try {
         // G143：renderer 预生成 requestId（send 前标记自有流，消除 IPC 往返竞态窗口）
-        rid = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true, requestId });
+        // WorkBuddy P2：mode="ask" → daemon 不启用工具（纯对话）
+        rid = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true, requestId, mode });
       } catch (e) {
         ownStream = false; // sendTask 抛异常（ws.send 失败）→ 释放锁，防 G65 锁泄漏
         ownStreamRequestId = null;
@@ -436,15 +437,6 @@ vision = false
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };
-    });
-
-    ipcMain.handle("emrg:openFile", async (_e, { filePath }) => {
-      // GUI / 指令 WorkBuddy P1：产物面板打开文件（系统默认程序）
-      if (typeof filePath !== "string" || !filePath.trim()) throw new Error("invalid file path");
-      const p = path.resolve(filePath.trim());
-      if (!fs.existsSync(p)) return { ok: false, error: "file_not_found" };
-      const err = await shell.openPath(p);
-      return { ok: err === "", error: err || "" };
     });
 
     ipcMain.handle("emrg:listModels", async () => {

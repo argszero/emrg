@@ -272,10 +272,11 @@ class DaemonClient {
 
   // ── 消息发送 ────────────────────────────────────────────
 
-  sendTask({ sessionId, cwd, prompt, stream = true, images = null, requestId = null }) {
+  sendTask({ sessionId, cwd, prompt, stream = true, images = null, requestId = null, mode = "auto" }) {
     // G32：request_id 必须作为 id 字段发出（daemon 只回显不自生成）
     // G96：stream 必须显式 true（daemon 读 stream 默认 False）
     // G143：外部预生成 requestId 优先（renderer send 前标记自有流，消除 IPC 往返竞态窗口）
+    // WorkBuddy P2：mode="ask" → daemon 不启用工具（纯对话）
     const rid = requestId || crypto.randomUUID();
     const payload = {
       type: "task",
@@ -287,6 +288,7 @@ class DaemonClient {
       stream,
       images,
     };
+    if (mode && mode !== "auto") payload.mode = mode;
     this._setCurrentStream(rid);
     this.ws.send(JSON.stringify(payload));
     return rid;

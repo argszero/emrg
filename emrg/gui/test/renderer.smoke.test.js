@@ -78,6 +78,7 @@ const ELEMENT_IDS = [
   "rant-dialog", "rant-message", "rant-project", "rant-cancel", "rant-submit",
   "tasks-dialog", "tasks-list", "tasks-close",
   "result-panel", "result-list", "result-toggle",
+  "mode-switcher",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
@@ -469,4 +470,28 @@ test("WorkBuddy P1：ResultPanel 折叠切换（⌘\ 与按钮）", async () => 
   assert.ok(els["result-panel"].classList.contains("collapsed"), "toggle 后应折叠");
   await vm.runInContext("ResultPanel.toggle()", ctx);
   assert.ok(!els["result-panel"].classList.contains("collapsed"), "再次 toggle 应展开");
+});
+
+test("WorkBuddy P2：Ask/Auto 模式切换 + sendMessage 携带 mode", async () => {
+  const { ctx, els } = makeSandbox({
+    sendMessage: async (payload) => { globalThis.__lastSend = payload; return { ok: true, requestId: "r1" }; },
+  });
+  await tick();
+  // 默认 auto
+  const m0 = vm.runInContext("App.state.mode", ctx);
+  assert.strictEqual(m0, "auto", "默认 auto 模式");
+  // 切到 ask → state 更新（DOM 按钮高亮由 querySelectorAll 真实 DOM 完成，沙箱不模拟）
+  await vm.runInContext("App.setMode('ask')", ctx);
+  const m1 = vm.runInContext("App.state.mode", ctx);
+  assert.strictEqual(m1, "ask", "切换到 ask");
+  // 发送消息 → mode 透传
+  await vm.runInContext(`
+    (async () => {
+      App.state.sessionId = "s1";
+      const input = document.getElementById("input");
+      input.value = "问个问题";
+      await App.sendMessage();
+    })()
+  `, ctx);
+  assert.strictEqual(globalThis.__lastSend.mode, "ask", "sendMessage 应携带 mode=ask");
 });
