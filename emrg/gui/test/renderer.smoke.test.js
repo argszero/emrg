@@ -78,6 +78,7 @@ const ELEMENT_IDS = [
   "rant-dialog", "rant-message", "rant-project", "rant-cancel", "rant-submit",
   "tasks-dialog", "tasks-list", "tasks-close",
   "result-panel", "result-list", "result-toggle",
+  "growth-card", "growth-count", "about-recent",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */

@@ -871,6 +871,41 @@ class EmrgServer:
         elif msg_type == "list_projects":
             await self._handle_list_projects(ws)
 
+        elif msg_type == "evolution_summary":
+            # WorkBuddy P3 (rant 21:35): self-evolution visibility.
+            # Low-cost: read evolution log files (~/.emrg/logs/evolution-*.json)
+            # written by EvolutionHandler; return count + recent N summaries.
+            limit = msg.get("limit", 5)
+            try:
+                logs_dir = config_dir() / "logs"
+                files = sorted(
+                    logs_dir.glob("evolution-*.json"),
+                    key=lambda p: p.name,
+                    reverse=True,
+                )[: max(1, min(int(limit), 20))]
+                recent = []
+                for f in files:
+                    try:
+                        data = json.loads(f.read_text(encoding="utf-8"))
+                        recent.append({
+                            "timestamp": data.get("timestamp", ""),
+                            "impact": data.get("impact", []),
+                            "operations": data.get("operations", []),
+                        })
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                await self._send(ws, {
+                    "type": "evolution_summary",
+                    "count": len(self.evolutions),
+                    "recent": recent,
+                })
+            except OSError:
+                await self._send(ws, {
+                    "type": "evolution_summary",
+                    "count": len(self.evolutions),
+                    "recent": [],
+                })
+
         elif msg_type == "clear_session":
             session_id = msg.get("session_id", "")
             cwd = msg.get("cwd", "")

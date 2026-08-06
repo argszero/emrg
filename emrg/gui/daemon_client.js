@@ -44,6 +44,7 @@ const RESPONSE_TYPES = {
   compact: "compact_result",
   rewind_session: "rewind_result", // 补缺：daemon.py:955 rewind_result
   read_memory: "memory_content", // 补缺：daemon.py:771/778 memory_content
+  evolution_summary: "evolution_summary", // WorkBuddy P3：自进化可见化
 };
 
 class DaemonClient {

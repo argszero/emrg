@@ -170,3 +170,7 @@ const ResultPanel = (() => {
 
   return { init, addToolResult, toggle, isCollapsed };
 })();
+
+// ⚠️ 必须暴露到 window：app.js 作为独立 <script> 加载，模块级 const 不跨 script 共享。
+// 缺失会导致真实 GUI 打开即 ReferenceError（测试沙箱因共享 vm context 掩盖此问题）。
+window.ResultPanel = ResultPanel;
