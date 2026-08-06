@@ -140,3 +140,34 @@ def test_payload_temperature_default():
     c = LlmClient(default_cfg)
     p = c._make_payload([{"role": "user", "content": "x"}])
     assert p["temperature"] == 0.7
+
+
+# ── LLM 错误信息脱敏（20260807-0107）──────────────────────────
+
+
+def test_redact_headers_masks_sensitive():
+    """response headers 敏感键（set-cookie/authorization/token）被遮蔽。"""
+    from emrg.server.llm import _redact_headers
+    h = {"set-cookie": "session=abc; HttpOnly", "content-type": "application/json",
+         "x-request-id": "req-123", "x-api-key": "sk-A1b2C3d4A1b2C3d4A1b2C3d4A1b2C3d4"}
+    r = _redact_headers(h)
+    assert r["set-cookie"] == "***"
+    assert r["x-api-key"] == "***"
+    assert r["content-type"] == "application/json"
+    assert r["x-request-id"] == "req-123"
+
+
+def test_redact_headers_masks_inline_secret_in_values():
+    """非敏感键但值内联密钥也被遮蔽（如 server 回显 x-error: invalid sk-...）。"""
+    from emrg.server.llm import _redact_headers
+    r = _redact_headers({"x-error": "invalid key sk-A1b2C3d4A1b2C3d4A1b2C3d4A1b2C3d4"})
+    assert "sk-" not in r["x-error"]
+    assert "invalid key ***" in r["x-error"]
+
+
+def test_redact_text_masks_inline_credentials():
+    """LLM 错误 body 内联凭据被遮蔽，普通文本保留。"""
+    from emrg.server.llm import _redact_text
+    assert "sk-" not in _redact_text("bad key sk-A1b2C3d4A1b2C3d4A1b2C3d4A1b2C3d4 supplied")
+    assert "ghp_" not in _redact_text("token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 rejected")
+    assert _redact_text("rate limit exceeded, try later") == "rate limit exceeded, try later"
