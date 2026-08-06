@@ -477,3 +477,86 @@ class TestWSBroadcast:
                 finally:
                     await cleanup()
         asyncio.run(_test())
+
+
+class TestWSEvolutionSummary:
+    """evolution_summary command (WorkBuddy P3, #502) — count + recent list.
+
+    Covers: empty logs, ordered recent list, limit clamp (1-20), corrupt
+    file skip. Uses the isolated tmp config dir as the logs root.
+    """
+
+    def _write_log(self, tmp: Path, name: str, timestamp: str, operations, impact=None):
+        """Write an evolution-*.json log file under tmp/logs."""
+        (tmp / "logs").mkdir(parents=True, exist_ok=True)
+        payload = {"timestamp": timestamp, "operations": operations, "impact": impact or []}
+        (tmp / "logs" / name).write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_evolution_summary_empty_and_with_logs(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                server, _, cleanup = await _boot_server(tmp)
+                try:
+                    # ── 1. empty: no log files → recent=[], count=0 ──
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({"type": "evolution_summary", "limit": 5}))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=5)
+                        resp = json.loads(frame)
+                        assert resp["type"] == "evolution_summary"
+                        assert resp["count"] == 0
+                        assert resp["recent"] == []
+                    finally:
+                        await ws.close()
+
+                    # ── 2. with logs: newest-first, corrupt skipped ──
+                    self._write_log(tmp, "evolution-20260806-090000.json", "2026-08-06T09:00:00",
+                                     ["llm-reflection"])
+                    self._write_log(tmp, "evolution-20260806-100000.json", "2026-08-06T10:00:00",
+                                     ["tool-execution"], impact=["fixed-x"])
+                    (tmp / "logs" / "evolution-20260806-110000.json").write_text(
+                        "{corrupt json", encoding="utf-8")  # must be skipped, not crash
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({"type": "evolution_summary", "limit": 10}))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=5)
+                        resp = json.loads(frame)
+                        assert resp["type"] == "evolution_summary"
+                        assert resp["count"] == 0  # in-memory evolutions empty in test harness
+                        # newest first (reverse lexicographic = chronological)
+                        assert [r["timestamp"] for r in resp["recent"]] == [
+                            "2026-08-06T10:00:00", "2026-08-06T09:00:00"]
+                        assert resp["recent"][0]["operations"] == ["tool-execution"]
+                        assert resp["recent"][0]["impact"] == ["fixed-x"]
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_evolution_summary_limit_clamped_to_20(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                _, _, cleanup = await _boot_server(tmp)
+                try:
+                    # write 25 valid logs
+                    for i in range(25):
+                        self._write_log(tmp, f"evolution-20260806-{i:06d}.json",
+                                        f"2026-08-06T00:{i:02d}:00", [f"op-{i}"])
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({"type": "evolution_summary", "limit": 100}))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=5)
+                        resp = json.loads(frame)
+                        assert resp["type"] == "evolution_summary"
+                        assert len(resp["recent"]) == 20, f"limit must clamp to 20, got {len(resp['recent'])}"
+                        # newest-first: first entry is the highest timestamp
+                        assert resp["recent"][0]["timestamp"] == "2026-08-06T00:24:00"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
