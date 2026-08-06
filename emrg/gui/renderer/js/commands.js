@@ -4,9 +4,9 @@
  * 对齐 TUI 15 个 / 指令。指令解析在 GUI 侧（renderer），daemon 零改动（协议已存在）。
  *
  * 阶段（分期）：
- *   phase 1 — 纯操作类（/clear /compact /version /help /image 提示）→ 本轮实现
- *   phase 2 — 会话类（/delete /rename /resume /rewind /sessions）→ P2
- *   phase 3 — 模型/记忆/技能类（/model /memory /skills）→ P3
+ *   phase 1 — 纯操作类（/clear /compact /version /help /image 提示）→ 已实现
+ *   phase 2 — 会话类（/delete /rename /resume /rewind /sessions）→ 已实现
+ *   phase 3 — 模型/记忆/技能类（/model /memory /skills）→ P3 已实现
  *   phase 4 — 演化类（/rant /trigger）→ P4
  */
 

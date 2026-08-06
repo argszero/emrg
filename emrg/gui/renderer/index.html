@@ -219,6 +219,31 @@
     </div>
   </dialog>
 
+  <!-- 记忆浏览器对话框（/memory，GUI / 指令 P3） -->
+  <dialog id="memory-dialog">
+    <div class="dialog-card" style="min-width:440px;">
+      <h2>记忆</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">EMRG 记住的长期信息，点击查看详情。</p>
+      <div id="memory-list" class="help-list"></div>
+      <div id="memory-detail" class="memory-detail hidden"></div>
+      <div class="dialog-actions">
+        <button type="button" id="memory-close" class="btn btn-ghost">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 技能列表对话框（/skills，GUI / 指令 P3） -->
+  <dialog id="skills-dialog">
+    <div class="dialog-card" style="min-width:440px;">
+      <h2>技能</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">EMRG 已加载的技能。</p>
+      <div id="skills-list" class="help-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="skills-close" class="btn btn-ghost">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
   <script src="js/utils.js"></script>
   <script src="js/commands.js"></script>
   <script src="js/markdown.js"></script>

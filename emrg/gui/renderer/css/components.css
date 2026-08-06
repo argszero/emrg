@@ -869,3 +869,21 @@ dialog::backdrop {
 .help-row:last-child { border-bottom: none; }
 .help-cmd { font-family: var(--font-mono, monospace); font-weight: 600; color: var(--accent); }
 .help-hint { color: var(--text-2); font-size: var(--fs-secondary); }
+
+/* / 指令 P3：记忆详情 / 技能列表 */
+.memory-detail {
+  margin-top: var(--sp-3, 12px);
+  padding: var(--sp-3, 12px);
+  background: var(--bg-soft);
+  border-radius: var(--radius-sm, 8px);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.memory-detail-title { font-weight: 600; margin-bottom: 6px; }
+.memory-detail-body {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--fs-aux, 12px);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
