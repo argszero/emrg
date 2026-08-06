@@ -143,7 +143,7 @@ jobs:
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
         shell: bash
         run: |
-          PKG="$(ls dist/artifacts/EMRG-*-macos-*.pkg | head -1)"
+          PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
           xcrun notarytool submit "$PKG" \
             --apple-id "$APPLE_ID" \
@@ -155,7 +155,7 @@ jobs:
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
         shell: bash
         run: |
-          PKG="$(ls dist/artifacts/EMRG-*-macos-*.pkg | head -1)"
+          PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
           xcrun stapler staple "$PKG"
           xcrun stapler validate "$PKG"
