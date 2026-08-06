@@ -586,3 +586,16 @@ def test_redact_real_key_formats_still_masked():
     # Anthropic sk-ant-apiNN-（裸值）
     ant = "sk-ant-api03-" + "Q2xjbHVkZ" * 4
     assert "sk-ant-" not in _redact({"command": f"echo {ant}"})["command"]
+
+
+# ── _redact_string 覆盖日志内容预览（rant/任务 prompt/记忆工具结果）──────
+
+
+def test_redact_string_applies_to_log_previews():
+    """日志内容预览（rant 消息/任务 prompt/记忆工具结果）同样脱敏。"""
+    from emrg.server.daemon import _redact_string
+    # 用户消息/提示词里粘贴的密钥
+    assert "sk-" not in _redact_string("帮我看看 sk-A1b2C3d4A1b2C3d4A1b2C3d4A1b2C3d4 是不是我的 key")
+    assert "ghp_" not in _redact_string("token 是 ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 吗")
+    # 普通内容保留
+    assert "帮我看看这个文件" in _redact_string("帮我看看这个文件")
