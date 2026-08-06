@@ -6,6 +6,9 @@
  */
 
 const App = (() => {
+  // 模型切换菜单键盘导航 handler（打开时注册，关闭时移除）
+  let _modelMenuKeyHandler = null;
+
   const state = {
     sessionId: null,
     sessions: [],
@@ -254,6 +257,31 @@ const App = (() => {
         }
         $("main").appendChild(menu);
         document.addEventListener("click", closeModelMenu, { once: true });
+        // 键盘导航：↑↓ 移动 / Enter 选择 / ESC 关闭（与 TUI 选择器一致的交互）
+        const items = menu.querySelectorAll(".model-menu-item");
+        let idx = items.length ? 0 : -1;
+        const setActive = (i) => {
+          if (i < 0 || i >= items.length) return;
+          idx = i;
+          items.forEach((it, j) => it.classList.toggle("active", j === idx));
+        };
+        setActive(0);
+        _modelMenuKeyHandler = (ev) => {
+          if (ev.key === "ArrowDown") {
+            ev.preventDefault();
+            setActive((idx + 1) % items.length);
+          } else if (ev.key === "ArrowUp") {
+            ev.preventDefault();
+            setActive((idx - 1 + items.length) % items.length);
+          } else if (ev.key === "Enter") {
+            ev.preventDefault();
+            if (idx >= 0) items[idx].click();
+          } else if (ev.key === "Escape") {
+            ev.preventDefault();
+            closeModelMenu();
+          }
+        };
+        document.addEventListener("keydown", _modelMenuKeyHandler);
       } catch (err) {
         Chat.addSystemMessage(`读取模型列表失败了：${err.message}`);
       }
@@ -263,6 +291,10 @@ const App = (() => {
   function closeModelMenu() {
     const menu = document.querySelector(".model-menu");
     if (menu) menu.remove();
+    if (_modelMenuKeyHandler) {
+      document.removeEventListener("keydown", _modelMenuKeyHandler);
+      _modelMenuKeyHandler = null;
+    }
   }
 
   // ── 空状态欢迎屏 ───────────────────────

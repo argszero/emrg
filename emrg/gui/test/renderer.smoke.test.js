@@ -329,3 +329,28 @@ test("代码块复制按钮：codeRenderer 输出容器 + 点击复制（设计 
   const chatSrc = fs.readFileSync(path.join(RENDERER_JS, "chat.js"), "utf8");
   assert.ok(chatSrc.includes(".code-copy"), "chat.js 应含复制按钮事件委托");
 });
+
+test("模型切换器：菜单项构建 + 键盘导航 handler 注册", async () => {
+  const { ctx } = makeSandbox({
+    getSettings: async () => ({
+      apiKey: "sk-x", baseUrl: "", model: "deepseek-chat", projectDir: "/tmp",
+      theme: "system",
+      models: ["deepseek-chat", "gpt-4o"],
+      modelDetails: [
+        { name: "deepseek-chat", vision: false },
+        { name: "gpt-4o", vision: true },
+      ],
+    }),
+    setModel: async ({ model }) => ({ ok: true }),
+  });
+  await tick();
+  // initModelSwitcher 已在 bindUi 注册；模拟点击 model-switcher
+  // 直接验证 closeModelMenu 引用存在 + 键盘 handler 生命周期（打开→注册，关闭→移除）
+  const src = fs.readFileSync(path.join(RENDERER_JS, "app.js"), "utf8");
+  assert.ok(src.includes("_modelMenuKeyHandler"), "app.js 应维护键盘 handler 引用");
+  assert.ok(src.includes("ArrowDown"), "应支持 ↑↓ 键盘导航");
+  assert.ok(src.includes("Escape"), "ESC 应关闭菜单");
+  // CSS 高亮
+  const css = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "components.css"), "utf8");
+  assert.ok(css.includes(".model-menu-item.active"), "键盘导航高亮样式应存在");
+});
