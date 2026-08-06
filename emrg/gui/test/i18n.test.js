@@ -161,3 +161,33 @@ test("Stage2：成长卡/关于区静态文案键（#501 吸收）", () => {
   const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
   assert.strictEqual(evalIn(zh, 'I18N.t("copy.growthCount", { n: 7 })'), "已自我进化 7 次");
 });
+
+// ── Stage 3（cycle 20260806-225341）：index.html 无遗漏硬编码中文 ──
+test("Stage3：index.html 中文字符串必须带 data-i18n（防漏网回归）", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "renderer", "index.html"), "utf8");
+  const cjk = /[\u4e00-\u9fff]/;
+  const leaks = [];
+  for (const [i, line] of html.split("\n").entries()) {
+    const s = line.trim();
+    if (!cjk.test(s)) continue;            // 无中文
+    if (s.startsWith("<!--")) continue;    // HTML 注释
+    if (s.includes("data-i18n")) continue; // 已接入 i18n（含 data-i18n-title/placeholder）
+    leaks.push(`L${i + 1}: ${s.slice(0, 80)}`);
+  }
+  assert.strictEqual(leaks.length, 0, "index.html 存在未接入 i18n 的中文（补 data-i18n 或 data-i18n-title/placeholder）:\n" + leaks.join("\n"));
+});
+
+test("Stage3：新增静态键双语一致（growth-card title / about / status-dot / toast 静态）", () => {
+  const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
+  assert.strictEqual(evalIn(ctx, 'I18N.t("copy.growthCardTitle")'), "EMRG reports every self-improvement automatically");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("sidebar.statusTitle")'), "Connection status");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("sidebar.backToBottom")'), "Back to bottom");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("settings.aboutTitle")'), "About");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("settings.recentTitle")'), "Recent improvements");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("settings.modelNamePlaceholder")'), "e.g. deepseek-v3");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("copy.evolutionToastMsgStatic")'), "It learned something new and is even better now.");
+  const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
+  assert.strictEqual(evalIn(zh, 'I18N.t("settings.aboutTitle")'), "关于");
+  assert.strictEqual(evalIn(zh, 'I18N.t("settings.recentTitle")'), "最近改进");
+  assert.strictEqual(evalIn(zh, 'I18N.t("sidebar.backToBottom")'), "回到底部");
+});

@@ -20,14 +20,14 @@
         <span>EMRG</span>
       </div>
       <!-- 成长状态卡（WorkBuddy P3：自进化可见化；#501） -->
-      <div class="growth-card" id="growth-card" title="EMRG 每次自我改进都会自动汇报">
+      <div class="growth-card" id="growth-card" title="EMRG 每次自我改进都会自动汇报" data-i18n-title="copy.growthCardTitle">
         <div class="growth-line">🌱 <span data-i18n="copy.growthCountPrefix">已自我进化</span> <b id="growth-count">0</b> <span data-i18n="copy.times">次</span></div>
-        <div class="growth-note" id="growth-note">边工作边学习，越用越懂你</div>
+        <div class="growth-note" id="growth-note" data-i18n="copy.growthNote">边工作边学习，越用越懂你</div>
       </div>
       <button id="new-chat-btn" class="new-chat-btn" title="新对话 (⌘N)" data-i18n="sidebar.newChat" data-i18n-title="sidebar.newChatTitle">＋ 新对话</button>
       <nav id="conv-list"></nav>
       <div class="sidebar-footer">
-        <span id="status-dot" class="status-dot gray" title="连接状态"></span>
+        <span id="status-dot" class="status-dot gray" title="连接状态" data-i18n-title="sidebar.statusTitle"></span>
         <button id="settings-btn" class="btn btn-ghost" style="margin-left:auto;padding:6px 12px;min-height:30px;" data-i18n="sidebar.settings">设置</button>
       </div>
     </aside>
@@ -40,7 +40,7 @@
       <!-- 聊天区 -->
       <div id="chat-view"></div>
       <!-- 回到底部悬浮按钮（上滑阅读时出现） -->
-      <button id="back-to-bottom" class="back-to-bottom hidden" title="回到底部">↓</button>
+      <button id="back-to-bottom" class="back-to-bottom hidden" title="回到底部" data-i18n-title="sidebar.backToBottom">↓</button>
 
       <!-- 空状态欢迎屏 -->
       <div id="empty-state" class="hidden">
@@ -98,7 +98,7 @@
         <div id="model-form" class="model-form hidden">
           <div class="model-form-row">
             <label class="model-form-label" data-i18n="settings.name">名称
-              <input type="text" id="model-form-name" placeholder="如 deepseek-v3" maxlength="40" />
+              <input type="text" id="model-form-name" placeholder="如 deepseek-v3" maxlength="40" data-i18n-placeholder="settings.modelNamePlaceholder" />
             </label>
             <label class="model-form-label" data-i18n="settings.modelId">模型 ID（选填）
               <input type="text" id="model-form-id" placeholder="默认同名称" maxlength="60" data-i18n-placeholder="settings.modelIdPlaceholder" />
@@ -144,15 +144,15 @@
         </label>
       </div>
       <div class="settings-group">
-        <div class="settings-group-title">关于</div>
+        <div class="settings-group-title" data-i18n="settings.aboutTitle">关于</div>
         <div class="about-box">
           <div class="about-line">EMRG <span id="about-version">v0.2.8</span> · <span id="about-evolutions">🌱 <span data-i18n="copy.growthCountPrefix">已自我进化</span> 0 <span data-i18n="copy.times">次</span></span></div>
-          <div class="hint" style="margin-top:6px;">EMRG 是一个会自我进化的 AI 智能体——每次改进都会自动汇报，你可以随时在这里看到它的成长。</div>
+          <div class="hint" style="margin-top:6px;" data-i18n="settings.aboutDesc">EMRG 是一个会自我进化的 AI 智能体——每次改进都会自动汇报，你可以随时在这里看到它的成长。</div>
         </div>
       </div>
       <!-- WorkBuddy P3：最近改进列表（daemon evolution_summary） -->
       <div class="settings-group">
-        <div class="settings-group-title">最近改进</div>
+        <div class="settings-group-title" data-i18n="settings.recentTitle">最近改进</div>
         <div id="about-recent" class="about-recent"></div>
       </div>
       <div class="dialog-actions">
@@ -316,11 +316,11 @@
 
   <!-- 进化完成 toast（WorkBuddy P3：进化发生时温和提示） -->
   <div id="evolution-toast" class="evolution-toast hidden">
-    <div class="evolution-toast-title">🌱 EMRG 刚刚完成一次自我进化！</div>
-    <div class="evolution-toast-msg" id="evolution-toast-msg">它学会了新的东西，变得更好用了。</div>
+    <div class="evolution-toast-title" data-i18n="copy.evolutionToastTitle">🌱 EMRG 刚刚完成一次自我进化！</div>
+    <div class="evolution-toast-msg" id="evolution-toast-msg" data-i18n="copy.evolutionToastMsgStatic">它学会了新的东西，变得更好用了。</div>
     <div class="evolution-toast-actions">
-      <button type="button" id="evolution-toast-see" class="btn btn-primary">去看看</button>
-      <button type="button" id="evolution-toast-dismiss" class="btn btn-ghost">知道了</button>
+      <button type="button" id="evolution-toast-see" class="btn btn-primary" data-i18n="copy.evolutionToastSee">去看看</button>
+      <button type="button" id="evolution-toast-dismiss" class="btn btn-ghost" data-i18n="copy.evolutionToastDismiss">知道了</button>
     </div>
   </div>
 
