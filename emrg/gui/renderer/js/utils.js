@@ -44,15 +44,23 @@ function genRequestId() {
 
 /** 会话时间分组：今天 / 昨天 / 更早 */
 function groupLabel(ts) {
-  if (!ts) return "更早";
+  if (!ts) return _t("util.groupEarlier");
   const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "更早";
+  if (Number.isNaN(d.getTime())) return _t("util.groupEarlier");
   const now = new Date();
   const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const dayDiff = Math.round((startOfDay(now) - startOfDay(d)) / 86400000);
-  if (dayDiff <= 0) return "今天";
-  if (dayDiff === 1) return "昨天";
-  return "更早";
+  if (dayDiff <= 0) return _t("util.groupToday");
+  if (dayDiff === 1) return _t("util.groupYesterday");
+  return _t("util.groupEarlier");
+}
+
+/** rant 21:19：i18n 取词（i18n.js 缺失时回退 key 本身） */
+function _t(key, params) {
+  try {
+    if (window.EMRG_I18N) return window.EMRG_I18N.t(key, params);
+  } catch { /* ignore */ }
+  return key;
 }
 
 /** 主题应用：system 时移除 data-theme（CSS 跟随 prefers-color-scheme） */

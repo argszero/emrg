@@ -16,7 +16,11 @@ const Sidebar = (() => {
       nav.appendChild(el("div", { class: "conv-item placeholder" }, EMRG_Copy.COPY.noSessions));
       return;
     }
-    const groups = { 今天: [], 昨天: [], 更早: [] };
+    // rant 21:19：分组标签本地化（顺序保持 今天→昨天→更早 不变）
+    const groups = {};
+    for (const lbl of [_t("util.groupToday"), _t("util.groupYesterday"), _t("util.groupEarlier")]) {
+      groups[lbl] = [];
+    }
     for (const s of sessions) {
       const g = groupLabel(s.updated_at || s.created_at);
       if (!groups[g]) groups[g] = [];

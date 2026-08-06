@@ -31,7 +31,7 @@ function codeRenderer(code, infostring, escaped) {
     ? `<code class="${cls}">${highlighted}</code>`
     : `<code class="${cls}">${escaped ? code : escapeHtml(code)}</code>`;
   // 复制按钮：事件委托在 chat-view（CSP 禁内联 handler）；code 文本经 escapeHtml 防注入
-  return `<div class="code-block"><div class="code-head"><button type="button" class="code-copy" title="复制代码">复制</button></div><pre>${codeHtml}</pre></div>`;
+  return `<div class="code-block"><div class="code-head"><button type="button" class="code-copy" title="${window.EMRG_I18N ? window.EMRG_I18N.t("md.copyCode") : "复制代码"}">${window.EMRG_I18N ? window.EMRG_I18N.t("chat.copyCode") : "复制"}</button></div><pre>${codeHtml}</pre></div>`;
 }
 
 renderer.renderMarkdown = async function (mdText) {

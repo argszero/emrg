@@ -55,6 +55,7 @@ const EMRG_Copy = (() => {
     toolPhrases,
     COPY,
     refresh,
+    _t, // rant 21:19 Stage 2：chat.js 等模块取词统一走这里（i18n 就绪时）
     get TOOL_FAIL_TEXT() { return failText; },
   };
 })();

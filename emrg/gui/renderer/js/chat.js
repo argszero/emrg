@@ -20,12 +20,12 @@ const Chat = (() => {
       if (!pre) return;
       const code = pre.textContent || "";
       const done = () => {
-        btn.textContent = "已复制 ✓";
-        setTimeout(() => { btn.textContent = "复制"; }, 1500);
+        btn.textContent = EMRG_Copy._t("chat.copied");
+        setTimeout(() => { btn.textContent = EMRG_Copy._t("chat.copyCode"); }, 1500);
       };
       const fail = () => {
-        btn.textContent = "复制失败";
-        setTimeout(() => { btn.textContent = "复制"; }, 1500);
+        btn.textContent = EMRG_Copy._t("chat.copyFailed");
+        setTimeout(() => { btn.textContent = EMRG_Copy._t("chat.copyCode"); }, 1500);
       };
       if (navigator.clipboard?.writeText) {
         navigator.clipboard.writeText(code).then(done, fail);
@@ -77,7 +77,7 @@ const Chat = (() => {
   function createAssistantNode(isOwn) {
     const node = el("div", { class: "msg assistant" });
     if (!isOwn) {
-      node.appendChild(el("div", { class: "remote-label" }, "（来自其他客户端）"));
+      node.appendChild(el("div", { class: "remote-label" }, EMRG_Copy._t("chat.fromOtherClient")));
     }
     const mark = el("span", { class: "msg-assistant-mark" }, "✦ ");
     const body = el("div", { class: "msg-body typing" });
@@ -132,7 +132,7 @@ const Chat = (() => {
       groupNodes.delete(rid);
     }
     if (data.timeout) {
-      addSystemMessage("⚠️ 响应超时了，我还没说完——可以再试一次。");
+      addSystemMessage(EMRG_Copy._t("chat.timeoutWarn"));
     }
   }
 
@@ -181,7 +181,7 @@ const Chat = (() => {
     }
     const elapsed = data.elapsed !== undefined ? `${data.elapsed.toFixed(1)}s` : "";
     if (elapsed && ok) {
-      row.title = `耗时 ${elapsed}`;
+      row.title = EMRG_Copy._t("chat.elapsed", { s: elapsed });
     }
     // G91/G131：content 截断 2000 字符 + 展开全文
     const content = data.content || "";
@@ -190,7 +190,7 @@ const Chat = (() => {
       const out = el("div", { class: "tool-output hidden" }, truncated);
       row.appendChild(out);
       if (content.length > 2000) {
-        const btn = el("button", { class: "tool-expand-btn" }, "展开全文");
+        const btn = el("button", { class: "tool-expand-btn" }, EMRG_Copy._t("chat.expand"));
         btn.addEventListener("click", () => {
           out.textContent = content;
           btn.remove();

@@ -86,6 +86,7 @@ function makeSandbox(overrides = {}) {
     Set,
     Promise,
     requestAnimationFrame: (cb) => cb(),
+    navigator: { language: "zh-CN" }, // rant 21:19：沙箱固定 zh，断言保持确定性
     requestIdleCallback: (cb) => cb(),
     crypto: { randomUUID: () => "mock-uuid" },
     localStorage: { getItem: () => null, setItem() {} },
