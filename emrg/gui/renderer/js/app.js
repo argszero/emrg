@@ -112,14 +112,13 @@ const App = (() => {
     }
   }
 
-  // ── / 指令（rant 19:44 P1/P2/P3）──────────────────
-  /** 执行 / 指令。phase 1 纯操作 + phase 2 会话 + phase 3 模型/记忆/技能已实现；phase 4 提示未开放。 */
+  // ── / 指令（rant 19:44 P1-P4）──────────────────
+  /** 执行 / 指令。全部 4 阶段已实现（phase 4 = 演化类 /rant /trigger）。 */
   async function handleCommand(parsed) {
     const cmd = parsed.cmd;
     const meta = Commands.COMMANDS[cmd];
-    if (!meta || meta.phase > 3) {
-      const phase = meta ? `（阶段 ${meta.phase}，后续版本开放）` : "";
-      Chat.addSystemMessage(`指令 ${cmd} 暂未开放${phase}。`);
+    if (!meta) {
+      Chat.addSystemMessage(`指令 ${cmd} 暂未开放。`);
       return;
     }
     try {
@@ -197,6 +196,22 @@ const App = (() => {
         case "/skills":
           // P3：技能列表对话框
           showSkillsDialog();
+          break;
+        case "/rant":
+          // P4：/rant 直接跟内容 → 快速提交；无参数 → 进化对话框
+          if (parsed.args.length > 0) {
+            await submitRant(parsed.args.join(" "), "");
+          } else {
+            showRantDialog();
+          }
+          break;
+        case "/trigger":
+          // P4：/trigger <name> 直接触发；无参数 → 任务列表对话框
+          if (parsed.args.length > 0) {
+            await doTrigger(parsed.args[0]);
+          } else {
+            showTasksDialog();
+          }
           break;
         default:
           Chat.addSystemMessage(`指令 ${cmd} 暂未开放。`);
@@ -355,6 +370,90 @@ const App = (() => {
       }
     } catch (e) {
       list.innerHTML = `<div class="help-row"><span class="help-hint">加载技能失败：${escapeHtml(e.message)}</span></div>`;
+    }
+  }
+
+  // /rant：进化对话框（项目下拉 + 文本输入 → daemon rant 协议）
+  async function showRantDialog() {
+    const dialog = $("rant-dialog");
+    const msgInput = $("rant-message");
+    const projSel = $("rant-project");
+    if (!dialog || !msgInput) return;
+    // 加载项目列表填充下拉
+    try {
+      const projects = await window.emrg.listProjects();
+      projSel.innerHTML = `<option value="">（全局 — 所有项目）</option>`;
+      for (const p of projects) {
+        const name = typeof p === "string" ? p : (p.name || "");
+        if (name) projSel.appendChild(el("option", { value: name }, name));
+      }
+    } catch { /* 项目加载失败则只留全局项 */ }
+    msgInput.value = "";
+    dialog.showModal();
+    msgInput.focus();
+  }
+
+  async function submitRant(message, project) {
+    const text = String(message || "").trim();
+    if (!text) {
+      Chat.addSystemMessage("写点内容再提交吧。");
+      return;
+    }
+    try {
+      const res = await window.emrg.sendRant({ message: text, project });
+      Chat.addSystemMessage(`✓ 收到！EMRG 会据此进化${res.count ? `（已累计 ${res.count} 条反馈）` : ""}。`);
+    } catch (e) {
+      Chat.addSystemMessage(`提交失败了：${e.message}`);
+    }
+  }
+
+  // /trigger：任务列表对话框（点击立即触发）
+  async function showTasksDialog() {
+    const list = $("tasks-list");
+    const dialog = $("tasks-dialog");
+    if (!list || !dialog) return;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">加载中…</span></div>`;
+    dialog.showModal();
+    try {
+      const tasks = await window.emrg.listTasks();
+      list.innerHTML = "";
+      if (!tasks || tasks.length === 0) {
+        list.innerHTML = `<div class="help-row"><span class="help-hint">没有可触发的任务。</span></div>`;
+        return;
+      }
+      for (const t of tasks) {
+        const row = el("button", {
+          class: "help-row",
+          type: "button",
+          style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;",
+        });
+        const name = el("span", { class: "help-cmd" }, t.name || t.type || "(任务)" );
+        const hint = el("span", { class: "help-hint" }, t.enabled === false ? "已停用" : `间隔 ${t.interval ?? "-"}s`);
+        row.appendChild(name);
+        row.appendChild(hint);
+        row.addEventListener("click", async () => {
+          dialog.close();
+          await doTrigger(t.name);
+        });
+        list.appendChild(row);
+      }
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">加载任务失败：${escapeHtml(e.message)}</span></div>`;
+    }
+  }
+
+  async function doTrigger(name) {
+    const n = String(name || "").trim();
+    if (!n) return;
+    try {
+      const res = await window.emrg.triggerTask({ name: n });
+      if (res.error) {
+        Chat.addSystemMessage(`触发失败：${res.error}`);
+      } else {
+        Chat.addSystemMessage(`已触发任务 ${n}。`);
+      }
+    } catch (e) {
+      Chat.addSystemMessage(`触发失败：${e.message}`);
     }
   }
 
@@ -815,6 +914,14 @@ const App = (() => {
     $("rewind-close").addEventListener("click", () => $("rewind-dialog").close());
     $("memory-close").addEventListener("click", () => $("memory-dialog").close());
     $("skills-close").addEventListener("click", () => $("skills-dialog").close());
+    $("rant-cancel").addEventListener("click", () => $("rant-dialog").close());
+    $("rant-submit").addEventListener("click", async () => {
+      const msg = $("rant-message")?.value || "";
+      const proj = $("rant-project")?.value || "";
+      $("rant-dialog").close();
+      await submitRant(msg, proj);
+    });
+    $("tasks-close").addEventListener("click", () => $("tasks-dialog").close());
 
     // 设置/首启对话框：Enter 提交（与重命名/模型表单一致的交互）
     const enterToSave = (fn) => (e) => {

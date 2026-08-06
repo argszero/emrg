@@ -403,6 +403,36 @@ vision = false
       return skills;
     });
 
+    ipcMain.handle("emrg:listProjects", async () => {
+      // GUI / 指令 P4：/rant 项目下拉 — daemon list_projects → projects_list
+      const frame = await client.sendCommandAndWait("list_projects", {}, 5000);
+      return frame.projects || [];
+    });
+
+    ipcMain.handle("emrg:listTasks", async () => {
+      // GUI / 指令 P4：/trigger — daemon list_tasks → tasks_list
+      const frame = await client.sendCommandAndWait("list_tasks", {}, 5000);
+      return frame.tasks || [];
+    });
+
+    ipcMain.handle("emrg:triggerTask", async (_e, { name }) => {
+      // GUI / 指令 P4：/trigger <name> — daemon trigger_task → trigger_result
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
+      const frame = await client.sendCommandAndWait("trigger_task", { name: name.trim() }, 5000);
+      return frame;
+    });
+
+    ipcMain.handle("emrg:sendRant", async (_e, { message, project = "" } = {}) => {
+      // GUI / 指令 P4：/rant — 提交反馈到演化系统（daemon rant 协议，字段序与 rants.jsonl 一致）
+      if (typeof message !== "string" || !message.trim()) throw new Error("invalid rant message");
+      const frame = await client.sendCommandAndWait("rant", {
+        message: message.trim().slice(0, 10000),
+        project: String(project || "").trim(),
+        timestamp: new Date().toISOString(),
+      }, 5000);
+      return { ok: true, count: frame.count ?? 0 };
+    });
+
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };

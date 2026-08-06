@@ -6,8 +6,8 @@
  * 阶段（分期）：
  *   phase 1 — 纯操作类（/clear /compact /version /help /image 提示）→ 已实现
  *   phase 2 — 会话类（/delete /rename /resume /rewind /sessions）→ 已实现
- *   phase 3 — 模型/记忆/技能类（/model /memory /skills）→ P3 已实现
- *   phase 4 — 演化类（/rant /trigger）→ P4
+ *   phase 3 — 模型/记忆/技能类（/model /memory /skills）→ 已实现
+ *   phase 4 — 演化类（/rant /trigger）→ 已实现（全部 15 指令完成）
  */
 
 const Commands = (() => {
