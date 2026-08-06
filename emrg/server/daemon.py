@@ -55,7 +55,10 @@ import re as _re
 
 # 字符串值内联凭据模式（保守匹配，宁多勿漏）
 _INLINE_SECRET_PATTERNS = (
-    _re.compile(r"(sk-[A-Za-z0-9_\-]{8,})"),                       # OpenAI/DeepSeek/Anthropic 密钥
+    # sk- 密钥：sk- 后必须 ≥16 位纯字母数字（OpenAI/DeepSeek），或 sk-proj-（OpenAI 项目）
+    # 或 sk-ant-apiNN-（Anthropic）—— 排除 "task-evolution" 等路径片段误伤
+    _re.compile(r"(sk-(?:proj-)?[A-Za-z0-9]{16,})"),
+    _re.compile(r"(sk-ant-api[0-9]+-[A-Za-z0-9]{16,})"),           # Anthropic
     _re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,})"),                  # GitHub PAT / OAuth / gist token
     _re.compile(r"(xox[baprs]-[A-Za-z0-9\-]{10,})"),               # Slack token
     _re.compile(r"(AKIA[0-9A-Z]{16})"),                            # AWS access key id

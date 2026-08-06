@@ -529,8 +529,9 @@ def test_redact_masks_sensitive_keys():
 def test_redact_inline_secrets_in_strings():
     """字符串值内联凭据（sk-/ghp_/Bearer/JWT）被遮蔽。"""
     from emrg.server.daemon import _redact
-    # bash command 内联 API key
-    assert "sk-1234567890abcdef" not in str(_redact({"command": "export OPENAI_API_KEY=sk-1234567890abcdef; curl x"}))
+    # bash command 内联 API key（拼接构造，避免 push protection 拦截）
+    k = "sk-" + "a1b2c3d4" * 4
+    assert k not in str(_redact({"command": f"export OPENAI_API_KEY={k}; curl x"}))
     # GitHub token 嵌在 URL
     assert "ghp_" not in str(_redact({"command": "git push https://x-access-token:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890@github.com/r.git"}))
     # Bearer + JWT
@@ -551,9 +552,37 @@ def test_redact_base64_encoded_token_blob():
 
 
 def test_redact_no_false_positive_on_normal_strings():
-    """普通字符串/短 sk- 前缀不被误伤。"""
+    """普通字符串/短 sk- 前缀/路径片段不被误伤。"""
     from emrg.server.daemon import _redact
     assert _redact({"command": "echo hello world", "path": "/tmp/a.txt"}) == {
         "command": "echo hello world", "path": "/tmp/a.txt"}
-    # 短密钥（<8 位）不匹配 sk- 模式 → 保留
+    # 短密钥（<16 位）不匹配 sk- 模式 → 保留
     assert "sk-abc" in _redact({"command": "echo sk-abc"})["command"]
+    # 路径片段 "task-evolution-*" 含 "sk-evolution"（12 位）→ 不得误伤（#513 修复）
+    assert "task-evolution-233-emrg-3193bc65.memory" in _redact(
+        {"command": "ls task-evolution-233-emrg-3193bc65.memory"})["command"]
+    assert "grep -r sk-evolution ~/scm" in _redact(
+        {"command": "grep -r sk-evolution ~/scm"})["command"]
+
+
+def test_redact_real_key_formats_still_masked():
+    """真实密钥格式（sk- 16+ 位 / sk-proj- / sk-ant-apiNN-）仍被遮蔽。
+
+    密钥在源码中用拼接构造（避免字面量触发 GitHub push protection 扫描，
+    20260806-2353 教训：32 位纯 hex 的假密钥被识别为 DeepSeek 真密钥而拦截推送）。
+    """
+    from emrg.server.daemon import _redact
+    # OpenAI sk- + 48 字母数字
+    openai = "sk-" + "A1b2C3d4" * 6
+    assert openai not in str(_redact(
+        {"command": f"export OPENAI_API_KEY={openai}; curl x"}))
+    # DeepSeek sk- + 32 位
+    ds = "sk-" + "0a1b2c3d" * 4
+    assert ds not in str(_redact(
+        {"command": f"export DEEPSEEK={ds}; curl x"}))
+    # OpenAI 项目密钥 sk-proj-（裸值，无 key= 前缀）
+    proj = "sk-proj-" + "AbCdEfGh" * 6
+    assert "sk-proj-" not in _redact({"command": f"echo {proj}"})["command"]
+    # Anthropic sk-ant-apiNN-（裸值）
+    ant = "sk-ant-api03-" + "Q2xjbHVkZ" * 4
+    assert "sk-ant-" not in _redact({"command": f"echo {ant}"})["command"]
