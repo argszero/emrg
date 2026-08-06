@@ -549,6 +549,7 @@ class EvolutionHandler:
 
         tool_count = 0
         error = None
+        truncated = False
 
         try:
             await ws.send(task_msg)
@@ -560,10 +561,25 @@ class EvolutionHandler:
                     break
                 if resp.get("done"):
                     duration = int((datetime.now() - cycle_time).total_seconds())
-                    logger.info(
-                        "EvolutionHandler[%s] complete (tools=%d, duration=%ds)",
-                        self.name, tool_count, duration,
-                    )
+                    # Distinguish truncation from successful completion: the
+                    # daemon's max-tool-rounds frame (daemon.py "Exceeded
+                    # maximum tool call rounds") is a done frame too — without
+                    # this check a truncated cycle is misreported as complete
+                    # and (when HEAD is unchanged) counted as an *empty* cycle,
+                    # wrongly advancing the idle-halt backoff (mem repo lesson:
+                    # truncation must be flagged, not silently treated as done).
+                    content = resp.get("content") or ""
+                    truncated = "exceeded" in content.lower()
+                    if truncated:
+                        logger.warning(
+                            "EvolutionHandler[%s] truncated (max tool rounds, tools=%d, duration=%ds)",
+                            self.name, tool_count, duration,
+                        )
+                    else:
+                        logger.info(
+                            "EvolutionHandler[%s] complete (tools=%d, duration=%ds)",
+                            self.name, tool_count, duration,
+                        )
                     break
 
                 if "tool_name" in resp:
@@ -586,9 +602,15 @@ class EvolutionHandler:
             except Exception:
                 pass
 
-        # Detect empty cycles: git HEAD unchanged → no work was done
+        # Detect empty cycles: git HEAD unchanged → no work was done.
+        # A truncated cycle is NOT empty — the agent wanted to work but hit
+        # the tool-round cap; counting it would wrongly back off the handler.
         git_head_after = self._get_git_head()
-        if git_head_before and git_head_after and git_head_before == git_head_after:
+        if (
+            not truncated
+            and git_head_before and git_head_after
+            and git_head_before == git_head_after
+        ):
             self._empty_cycles += 1
             self._save_saturation_state()
             logger.debug(
@@ -597,18 +619,21 @@ class EvolutionHandler:
             )
         else:
             if self._empty_cycles > 0:
+                reason = "truncated cycle" if truncated else "git HEAD changed"
                 logger.info(
-                    "EvolutionHandler[%s]: git HEAD changed, resetting empty streak",
-                    self.name,
+                    "EvolutionHandler[%s]: %s, resetting empty streak",
+                    self.name, reason,
                 )
             self._empty_cycles = 0
             self._save_saturation_state()
 
         cycle_ts = cycle_time.isoformat()
         impact = [
-            f"evolution-cycle-{cycle_ts}-complete",
+            f"evolution-cycle-{cycle_ts}-{'truncated' if truncated else 'complete'}",
             f"tools-executed={tool_count}",
         ]
+        if truncated:
+            impact.append("truncated=max-tool-rounds")
         if error:
             impact.append(f"error={error[:200]}")
 

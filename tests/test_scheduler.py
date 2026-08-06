@@ -718,3 +718,77 @@ def test_ensure_evolution_workspace_clone_failure_skips(tmp_path):
 
     assert ok is False
     assert handler._source_dir != str(mod.EVOLUTION_CWD / "emrg")
+
+
+# ── EvolutionHandler cycle truncation detection ──────────────────
+# mem-repo lesson (tool-call truncation must be flagged, not silently
+# treated as a successful/empty cycle — #523 applied it to the chat UI;
+# this covers EMRG's own evolution task loop).
+
+def _make_cycle_handler(tmp_path, frames):
+    """Build a fully-scripted handler for _run_evolution_cycle tests."""
+    import json as _json
+
+    from websockets.exceptions import ConnectionClosed as _Closed
+
+    from emrg.server import scheduler as mod
+
+    class _FakeWS:
+        def __init__(self, frm):
+            self._frames = list(frm)
+            self.sent = []
+
+        async def send(self, msg):
+            self.sent.append(msg)
+
+        async def recv(self):
+            if self._frames:
+                return _json.dumps(self._frames.pop(0), ensure_ascii=False)
+            raise _Closed()
+
+        async def close(self):
+            pass
+
+    async def _fake_connect():
+        return _FakeWS(frames)
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler._ensure_evolution_workspace = lambda: True
+    handler._build_evolution_prompt = lambda: "test prompt"
+    handler._get_git_head = lambda: "abc123"  # HEAD unchanged
+    captured = {}
+    async def _fake_write_log(log):
+        captured["log"] = log
+    handler._write_evolution_log = _fake_write_log
+    mod.connect_to_server = _fake_connect
+    return handler, captured
+
+
+def test_evolution_cycle_truncated_not_empty_not_complete(tmp_path):
+    """Truncated done frame → flagged truncated, NOT an empty cycle, impact reflects it."""
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"tool_name": "bash"},
+        {"request_id": "r1", "content": "Exceeded maximum tool call rounds (270).",
+         "done": True, "delta": False, "session_id": "s"},
+    ])
+    asyncio.run(handler._run_evolution_cycle())
+    assert handler._empty_cycles == 0, \
+        "truncated cycle must not advance the idle-halt backoff"
+    impact = captured["log"].impact
+    assert any("truncated" in i for i in impact), impact
+    assert "truncated=max-tool-rounds" in impact, impact
+    assert not any(i.endswith("-complete") for i in impact), impact
+
+
+def test_evolution_cycle_complete_unchanged_head_still_empty(tmp_path):
+    """Normal completion with unchanged HEAD keeps the existing empty-cycle semantics."""
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+    asyncio.run(handler._run_evolution_cycle())
+    assert handler._empty_cycles == 1, \
+        "unchanged-HEAD complete cycle is still counted as empty (existing behavior)"
+    impact = captured["log"].impact
+    assert any(i.endswith("-complete") for i in impact), impact
+    assert "truncated=max-tool-rounds" not in impact, impact
