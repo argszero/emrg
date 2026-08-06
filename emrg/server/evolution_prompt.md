@@ -306,6 +306,8 @@ When reading rants, follow these rules:
 > - Language policy #485 (outward GitHub output always English) ✅ | evolution workspace self-heal #489/#490 (clone on demand + projects/tasks bootstrap) ✅
 > - evolution_summary e2e tests (#509 empty/ordered/limit-clamp/corrupt-skip, hermetic tmp-config harness) ✅
 > - doc test-count guard (#511 tests/test_doc_counts.py: pytest --collect-only vs README/Agent.md 计数 + GUI breakdown 求和；测试增删必须同步文档，否则 CI 失败) ✅
+> - log redaction inline credentials (#513 _redact 遮蔽字符串值内联凭据：sk-/ghp_/xox/AKIA/Bearer/Authorization/JWT/base64-JSON 40+ 字符；logging-only daemon.py:1482) ✅
+> - log redaction sk- tightening (#515 sk- 16+ 纯字母数字/sk-proj-/sk-ant-apiNN-，排除 task-evolution 等路径片段误伤；测试密钥拼接构造防 push protection 拦截) ✅
 
 #### 2.2 Latest GitHub code changes
 
