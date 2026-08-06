@@ -30,11 +30,11 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 
 | 特性 | 说明 |
 |---|---|
-| 🧠 **读写改跑，样样精通** | 完整的工具调用能力——bash、文件读写、diff 编辑，全在终端里搞定 |
+| 🖥️ **Electron GUI（主入口）** | 非开发者主入口——安装即用：首次启动引导配置 API Key、聊天/会话/工具状态/设置全图形化。v0.2.5 完全重设计：浅/深双主题跟随系统、工具过程友好化（折叠展开）、多模型管理（增删改/设默认/对话中切换）、空状态欢迎屏、回到底部按钮。v0.2.6 键盘可达性补全：模型切换器/右键菜单/对话列表 ↑↓ 导航、表单 Enter 提交。v0.2.7 macOS 签名+公证零 Gatekeeper 弹窗。**GUI 配好即 TUI 可用**（配置共享） |
+| 🧠 **读写改跑，样样精通** | 完整的工具调用能力——bash、文件读写、diff 编辑 |
 | 🔄 **吐槽驱动进化** | 你的 `/rant` 直接驱动后台演化循环——吐槽 → 分析 → 写代码 → 提 PR → 自动变强 |
 | 📝 **永不忘事** | 项目记忆 + 会话记忆 + 每日日志——上下文持续保留，不怕断线 |
-| 🖥️ **颜值在线的 TUI** | 斜杠命令自动补全、会话选择器、流式 Markdown 渲染、请求计时器、ESC 中断 |
-| 🖱️ **Electron GUI（新）** | 非开发者主入口——聊天/会话/工具状态/设置，自动拉起 daemon，`npm start` 即开即用。v0.2.5 完全重设计：浅/深双主题跟随系统、工具过程友好化（折叠展开）、多模型管理（增删改/设默认/对话中切换）、空状态欢迎屏、回到底部按钮。v0.2.6 键盘可达性补全：模型切换器/右键菜单/对话列表 ↑↓ 导航、表单 Enter 提交（全组件键盘可用）。v0.2.7 macOS 签名+公证：Developer ID 双证书、内嵌 Python runtime 签名、公证+spctl 终验——安装零 Gatekeeper 弹窗 |
+| 🖥️ **颜值在线的 TUI** | 斜杠命令自动补全、会话选择器、流式 Markdown 渲染、请求计时器、ESC 中断。`/rant` `/model` `/memory` 等进阶命令 |
 | ⚡ **并行工具调用** | 独立的工具调用并发执行，速度飞快 |
 | 🔌 **微内核守护进程** | `emrgd` 持久运行——随时重连，状态不丢 |
 | 🎮 **Vim 友好** | `j`/`k` 导航、`Ctrl+W`/`Ctrl+K` 编辑、`Tab` 展开工具卡片 |
@@ -56,15 +56,21 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 | Linux | `EMRG-<ver>-linux-x86_64.AppImage` | 首次运行自解压到 `~/.emrg/install/` |
 | Linux (ARM64) | `EMRG-<ver>-linux-aarch64.AppImage` | 同上 |
 
+> **Windows SmartScreen 提示**：Windows 安装包未做 Authenticode 签名（发布者显示"未知"），首次下载/运行时 SmartScreen 可能提示"通常不会下载此文件"或"Windows 已保护你的电脑"。这是未签名软件的常见安全提醒，不代表文件有问题（EMRG 完全开源，源码可审计）。放行方法：
+> (1) 浏览器下载提示 → 点**保留**（或三个点 → 保留）
+> (2) 双击 exe 若提示"Windows 已保护你的电脑" → 点**更多信息** → 点**仍要运行**
+> (3) 或右键 exe → 属性 → 勾选**解除锁定**（若有）→ 确定 → 双击运行
+
 安装包内置完整运行时（standalone Python 3.13 + 依赖 + git + gh + GUI），**干净机器（无 python/uv/git/gh/node）零前置依赖**，100% 离线安装。安装后：
 
-- GUI：启动台 / 开始菜单点击 **EMRG**
-- TUI：`~/.emrg/install/bin/emrg`（macOS 安装时写 shell rc PATH anchor，新开终端直接 `emrg`；Linux 另生成 `~/.local/bin/emrg` 软链）
-- 首次启动引导填写 API key；会话内可直接执行 python 脚本
+**三步开始使用：**
+1. 启动台 / 开始菜单点击 **EMRG**（GUI）
+2. 首次启动引导配置 **API Key / 模型**
+3. 开始对话——**TUI 同步可用**（新开终端运行 `emrg`）
 
 > **卸载**：macOS 运行"卸载 EMRG.app"；Windows 控制面板卸载；Linux 运行 `~/.emrg/install/bin/emrg-uninstall`（或删 AppImage + 软链）。卸载保留 `~/.emrg` 中非 EMRG 的用户文件，并生成终止报告与数据快照。**Windows 卸载彻底**（v0.2.2+）：先终止 GUI 进程防止 daemon 复活，白名单全量清理运行时文件，`[UninstallDelete]` 兜底删除 install/，`~/.emrg` 卸载后不残留。
 >
-> **macOS 签名与公证**：v0.2.7 起 macOS 安装包已用 Developer ID 双证书签名并完成 Apple 公证（零 Gatekeeper 弹窗，双击直接安装）。仅当安装包未签名时（如自建旧版本），才需要首次打开右键 → 打开。API key 配置除 GUI 外也可直接编辑 `~/.emrg/config.toml`（GUI 保存设置会重写 config，注释会丢失——高级配置建议直接编辑文件）。
+> **macOS 签名与公证**：v0.2.7 起 macOS 安装包已用 Developer ID 双证书签名并完成 Apple 公证（零 Gatekeeper 弹窗，双击直接安装）。仅当安装包未签名时（如自建旧版本），才需要首次打开右键 → 打开。
 
 ### 🍎 macOS（源码安装）
 
@@ -116,20 +122,29 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 
 > 源码安装前置依赖（install.sh 会自动检测提示）：git、python 3.11+、uv。gh CLI 推荐安装。Windows 原生版（非 WSL）请用上方安装包。
 
-安装完成后，编辑自动生成的配置文件即可使用：
+### 🖥️ 首次配置（GUI 第一）
+
+安装完成后，**打开 GUI 完成首次配置**：
+
+1. **macOS**：启动台 → 点击 **EMRG**；**Windows**：开始菜单 → **EMRG**
+2. 首次启动引导会带你配置 **API Key / 接口地址 / 模型**（也随时可在设置 ⚙ 中修改）
+3. 保存后即可开始对话——**配置写入 `~/.emrg/config.toml`，GUI 与 TUI 共享**
+
+> 💡 **GUI 配好，TUI 直接用**：安装包内置完整 TUI。GUI 保存的配置（API Key/模型/工作目录）写入 `~/.emrg/config.toml`，终端新开窗口运行 `emrg` 即进入 TUI，无需重复配置。GUI 覆盖大部分日常操作；TUI 提供 `/rant` `/model` `/memory` 等进阶命令。
+
+### ⌨️ 使用 TUI
 
 ```bash
-vim ~/.emrg/config.toml
+emrg
 ```
 
-**不想用终端？** 非开发者可用图形界面（Electron GUI）：
+输入 `/help` 查看所有命令，或者直接开始说话——EMRG 会读文件、跑命令、做编辑。
 
-```bash
-git clone https://github.com/argszero/emrg.git && cd emrg/emrg/gui
-npm ci && npm start     # 自动拉起 daemon，聊天/会话/设置全图形化
-```
+### 🔧 高级配置（可选）
 
-`~/.emrg/config.toml` 模板示例：
+> GUI 保存设置会重写 config 并丢失注释——高级用户可直接编辑 `~/.emrg/config.toml`（首次配置无需手动编辑，GUI 引导即可）。
+
+`~/.emrg/config.toml` 模板示例（GUI 保存后自动生成等价内容）：
 
 ```toml
 [llm]
@@ -158,15 +173,11 @@ context_window = 128000
 vision = true
 ```
 
-```bash
-emrg
-```
-
-输入 `/help` 查看所有命令，或者直接开始说话——EMRG 会读文件、跑命令、做编辑。
-
 ---
 
 ## 🎮 命令一览
+
+> GUI 覆盖大部分日常操作（聊天/会话/设置/模型切换）；TUI 提供以下进阶命令。
 
 | 命令 | 功能 |
 |---|---|
@@ -324,6 +335,9 @@ emrg/
 
 **和 Claude Code 或 Codex 有什么不同？**<br>
 它们是产品。EMRG 是一个关于*闭环进化*的实验——AI 改进 AI。此外：完全开源、无厂商锁定、你掌控自己的数据。
+
+**为什么 Windows 安装包会提示"未知发布者"？**<br>
+Windows 安装包未做 Authenticode 签名（该证书需付费申请，暂不采购），因此 SmartScreen 会显示"发布者：未知"并可能阻止运行。这是微软对新发布/未签名软件的通用安全提醒，**不代表文件有问题**——EMRG 完全开源（MIT），源码可审计。放行：浏览器提示点"保留"；运行提示点"更多信息 → 仍要运行"；或右键 exe → 属性 → 勾选"解除锁定"。macOS 安装包已签名+公证（v0.2.7+），无此问题。
 
 ---
 
