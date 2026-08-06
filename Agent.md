@@ -93,7 +93,7 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (480) — import check: `uv run python -c "from emrg.client.app import run_client"`
+Python: `uv run pytest tests/ -v` (482) — import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (86: 22 daemon_client + 22 app-commands + 17 renderer smoke + 15 i18n + 7 integration + 3 commands) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
 CI: `uv run pytest` + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
 
