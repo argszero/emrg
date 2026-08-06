@@ -180,6 +180,9 @@ jobs:
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
           xcrun stapler staple "$PKG"
           xcrun stapler validate "$PKG"
+          # P3 终验（rant 验收 + 设计文档 §5.1）：spctl -a 确认 Gatekeeper 接受
+          # （签名 + 公证 + staple 全链路的最终裁决；期望输出 "accepted"）
+          spctl -a -vv "$PKG"
 
       # ── 冒烟（§12，临时 HOME + 无 Python runner）────────────
       - name: Smoke test (R42 temp HOME)
