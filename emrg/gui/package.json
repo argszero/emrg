@@ -26,8 +26,8 @@
     "productName": "EMRG",
     "extraResources": [
       {
-        "from": "../dist/emrgd",
-        "to": "emrgd"
+        "from": "../dist/runtime",
+        "to": "runtime"
       }
     ],
     "files": [
@@ -41,6 +41,7 @@
     "icon": "../packaging/assets/",
     "mac": {
       "hardenedRuntime": true,
+      "notarize": false,
       "target": [
         {
           "target": "dir",
