@@ -21,7 +21,7 @@ emrg = "emrg.__main__:main"
 allow-direct-references = true
 
 [tool.hatch.build]
-include = ["emrg/**/*.py", "emrg/**/*.md", "emrg/**/*.j2", "LICENSE", "README.md", "README.en.md"]
+include = ["emrg/**/*.py", "emrg/**/*.md", "emrg/**/*.j2", "LICENSE", "README.md", "README.cn.md"]
 
 [build-system]
 requires = ["hatchling"]
