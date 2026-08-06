@@ -47,6 +47,7 @@ const App = (() => {
       updateConnectionDot(init.config_exists && init.api_key_configured ? "green" : "gray");
       updateModelSwitcher();
       updateGrowthCard();
+      if (window.EMRG_I18N) window.EMRG_I18N.apply(); // rant 21:19：应用当前语言静态文案
 
       if (!init.config_exists) {
         Dialogs.showWelcome(); // 首启引导
@@ -517,7 +518,7 @@ const App = (() => {
     Object.entries(Commands.COMMANDS).forEach(([cmd, meta]) => {
       const row = el("div", { class: "help-row" });
       const name = el("span", { class: "help-cmd" }, cmd);
-      const hint = el("span", { class: "help-hint" }, meta.hint);
+      const hint = el("span", { class: "help-hint" }, Commands.hintText(cmd)); // rant 21:19：hint 经 i18n 解析
       row.appendChild(name);
       row.appendChild(hint);
       list.appendChild(row);
@@ -670,7 +671,17 @@ const App = (() => {
   // ── 模型切换器 ─────────────────────────
   async function updateModelSwitcher() {
     const label = $("model-switcher-label");
-    if (label) label.textContent = state.model || "选择模型";
+    if (label) label.textContent = state.model || (window.EMRG_I18N ? window.EMRG_I18N.t("composer.modelLoading") : "加载中…");
+  }
+
+  /** rant 21:19：locale 切换后重刷动态文案（i18n.apply 回调） */
+  function refreshLocale() {
+    updateModelSwitcher();
+    // 空状态示例卡片：data-i18n 已由 apply 重刷；若补全菜单打开则重建（hint 本地化）
+    const menu = $("cmd-menu");
+    if (menu && !menu.hidden) {
+      showCmdMenu(($("input").value || "").trim());
+    }
   }
 
   // ── 自进化可见化（WorkBuddy P3）──────────────────
@@ -1021,9 +1032,10 @@ const App = (() => {
     $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {}));
     $("new-chat-btn").addEventListener("click", newSession);
     $("settings-btn").addEventListener("click", () => {
-      loadEvolutionSummary(); // WorkBuddy P3：打开设置时加载最近改进
+      loadEvolutionSummary(); // WorkBuddy P3（#502）：打开设置时加载最近改进
       Dialogs.showSettings();
     });
+    Dialogs.initLangButtons(); // rant 21:19：设置语言选择器
     $("settings-cancel").addEventListener("click", () => $("settings-dialog").close());
     $("settings-save").addEventListener("click", Dialogs.saveSettings);
     $("pick-dir-btn").addEventListener("click", async () => {
@@ -1129,7 +1141,8 @@ const App = (() => {
     $("empty-state").addEventListener("click", (e) => {
       const card = e.target.closest(".example-card");
       if (!card) return;
-      input.value = card.dataset.example || "";
+      // rant 21:19：示例提示随语言走（textContent 已本地化；data-example 为中文兜底）
+      input.value = (card.textContent || card.dataset.example || "").trim();
       input.focus();
       input.style.height = "auto";
       input.style.height = Math.min(input.scrollHeight, 150) + "px";
@@ -1193,6 +1206,7 @@ const App = (() => {
     updateGrowthCard, // WorkBuddy P3：成长卡（导出供测试）
     maybeShowEvolutionToast, // WorkBuddy P3：进化 toast 检测
     showVersionInfo, // WorkBuddy P3：/version 内容（toast "去看看" 共用）
+    refreshLocale, // rant 21:19：locale 切换后动态文案重刷
     setMode, // WorkBuddy P2：Ask/Auto 模式（导出供测试与外部调用）
     loadEvolutionSummary, // WorkBuddy P3：最近改进摘要
   };

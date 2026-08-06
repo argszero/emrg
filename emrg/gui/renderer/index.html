@@ -19,16 +19,16 @@
         <span class="brand-star" id="brand-star">✦</span>
         <span>EMRG</span>
       </div>
-      <!-- 成长状态卡（WorkBuddy P3：自进化可见化） -->
+      <!-- 成长状态卡（WorkBuddy P3：自进化可见化；#501） -->
       <div class="growth-card" id="growth-card" title="EMRG 每次自我改进都会自动汇报">
         <div class="growth-line">🌱 已自我进化 <b id="growth-count">0</b> 次</div>
         <div class="growth-note" id="growth-note">边工作边学习，越用越懂你</div>
       </div>
-      <button id="new-chat-btn" class="new-chat-btn" title="新对话 (⌘N)">＋ 新对话</button>
+      <button id="new-chat-btn" class="new-chat-btn" title="新对话 (⌘N)" data-i18n="sidebar.newChat" data-i18n-title="sidebar.newChatTitle">＋ 新对话</button>
       <nav id="conv-list"></nav>
       <div class="sidebar-footer">
         <span id="status-dot" class="status-dot gray" title="连接状态"></span>
-        <button id="settings-btn" class="btn btn-ghost" style="margin-left:auto;padding:6px 12px;min-height:30px;">设置</button>
+        <button id="settings-btn" class="btn btn-ghost" style="margin-left:auto;padding:6px 12px;min-height:30px;" data-i18n="sidebar.settings">设置</button>
       </div>
     </aside>
 
@@ -44,40 +44,40 @@
 
       <!-- 空状态欢迎屏 -->
       <div id="empty-state" class="hidden">
-        <div class="empty-hello"><span class="brand-star">✦</span> 你好，我是 EMRG</div>
-        <div class="empty-sub">你的 AI 工作伙伴。问我任何事——写东西、整理文件、规划任务，都可以。</div>
+        <div class="empty-hello"><span class="brand-star">✦</span> <span data-i18n="empty.hello">你好，我是 EMRG</span></div>
+        <div class="empty-sub" data-i18n="empty.sub">你的 AI 工作伙伴。问我任何事——写东西、整理文件、规划任务，都可以。</div>
         <div class="example-grid">
-          <button class="example-card" data-example="帮我写一份本周的工作周报">帮我写一份本周的工作周报</button>
-          <button class="example-card" data-example="帮我整理这个文件夹里的文件">帮我整理这个文件夹里的文件</button>
-          <button class="example-card" data-example="帮我规划一次周末旅行">帮我规划一次周末旅行</button>
+          <button class="example-card" data-example="帮我写一份本周的工作周报" data-i18n="empty.example1">帮我写一份本周的工作周报</button>
+          <button class="example-card" data-example="帮我整理这个文件夹里的文件" data-i18n="empty.example2">帮我整理这个文件夹里的文件</button>
+          <button class="example-card" data-example="帮我规划一次周末旅行" data-i18n="empty.example3">帮我规划一次周末旅行</button>
         </div>
       </div>
 
       <!-- 输入区 -->
       <div id="composer-wrap">
         <div id="cmd-menu" class="cmd-menu" hidden></div>
-        <div class="model-switcher" id="model-switcher" title="切换模型">
-          <span id="model-switcher-label">加载中…</span>
+        <div class="model-switcher" id="model-switcher" title="切换模型" data-i18n-title="composer.switchModel">
+          <span id="model-switcher-label" data-i18n="composer.modelLoading">加载中…</span>
           <span style="font-size:10px;">⌄</span>
         </div>
-        <div class="mode-switcher" id="mode-switcher" title="工作模式：Ask 只对话 / Auto 自动执行">
+        <div class="mode-switcher" id="mode-switcher" title="工作模式：Ask 只对话 / Auto 自动执行" data-i18n-title="composer.modeTitle">
           <button type="button" class="mode-btn" data-mode="ask">Ask</button>
           <button type="button" class="mode-btn active" data-mode="auto">Auto</button>
         </div>
         <div class="composer-card">
-          <textarea id="input" rows="1" placeholder="发消息给 EMRG… (Enter 发送 / Shift+Enter 换行)" disabled></textarea>
-          <button id="send-btn" class="send-btn" disabled title="发送">↑</button>
-          <button id="stop-btn" class="stop-btn" style="display:none" title="停止回复">■</button>
+          <textarea id="input" rows="1" placeholder="发消息给 EMRG… (Enter 发送 / Shift+Enter 换行)" data-i18n-placeholder="composer.placeholder" disabled></textarea>
+          <button id="send-btn" class="send-btn" disabled title="发送" data-i18n-title="composer.send">↑</button>
+          <button id="stop-btn" class="stop-btn" style="display:none" title="停止回复" data-i18n-title="composer.stop">■</button>
         </div>
-        <div class="composer-hint">EMRG 可能会犯错，请核对重要信息</div>
+        <div class="composer-hint" data-i18n="composer.hint">EMRG 可能会犯错，请核对重要信息</div>
       </div>
     </main>
 
     <!-- 结果面板（右栏 Artifacts，WorkBuddy P1） -->
     <aside id="result-panel">
       <div class="result-header">
-        <span class="result-title">产物</span>
-        <button id="result-toggle" class="result-toggle" title="折叠/展开 (⌘\)">»</button>
+        <span class="result-title" data-i18n="result.title">产物</span>
+        <button id="result-toggle" class="result-toggle" title="折叠/展开 (⌘\)" data-i18n-title="result.collapse">»</button>
       </div>
       <div id="result-list" class="result-list"></div>
     </aside>
@@ -86,50 +86,60 @@
   <!-- 设置对话框 -->
   <dialog id="settings-dialog">
     <div class="dialog-card">
-      <h2>设置</h2>
+      <h2 data-i18n="settings.title">设置</h2>
       <div class="settings-group">
-        <div class="settings-group-title">模型服务</div>
-        <label>API Key <input type="password" id="set-api-key" /></label>
-        <label>接口地址 <input type="text" id="set-base-url" placeholder="https://api.deepseek.com" /></label>
-        <div class="settings-group-title" style="margin-top:14px;">可用模型</div>
+        <div class="settings-group-title" data-i18n="settings.groupModel">模型服务</div>
+        <label><span data-i18n="settings.apiKey">API Key</span> <input type="password" id="set-api-key" /></label>
+        <label><span data-i18n="settings.baseUrl">接口地址</span> <input type="text" id="set-base-url" placeholder="https://api.deepseek.com" /></label>
+        <div class="settings-group-title" style="margin-top:14px;" data-i18n="settings.availableModels">可用模型</div>
         <div id="model-list"></div>
-        <button type="button" id="add-model-btn" class="btn btn-ghost" style="width:100%;margin-top:6px;">＋ 添加模型</button>
+        <button type="button" id="add-model-btn" class="btn btn-ghost" style="width:100%;margin-top:6px;" data-i18n="settings.addModel">＋ 添加模型</button>
         <!-- 行内添加/编辑模型表单 -->
         <div id="model-form" class="model-form hidden">
           <div class="model-form-row">
-            <label class="model-form-label">名称
+            <label class="model-form-label" data-i18n="settings.name">名称
               <input type="text" id="model-form-name" placeholder="如 deepseek-v3" maxlength="40" />
             </label>
-            <label class="model-form-label">模型 ID（选填）
-              <input type="text" id="model-form-id" placeholder="默认同名称" maxlength="60" />
+            <label class="model-form-label" data-i18n="settings.modelId">模型 ID（选填）
+              <input type="text" id="model-form-id" placeholder="默认同名称" maxlength="60" data-i18n-placeholder="settings.modelIdPlaceholder" />
             </label>
           </div>
           <div class="model-form-footer">
-            <label class="model-form-vision"><input type="checkbox" id="model-form-vision" /> 支持图片</label>
+            <label class="model-form-vision"><input type="checkbox" id="model-form-vision" /> <span data-i18n="settings.vision">支持图片</span></label>
             <div style="display:flex;gap:8px;margin-left:auto;">
-              <button type="button" id="model-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;">取消</button>
-              <button type="button" id="model-form-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;">保存模型</button>
+              <button type="button" id="model-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
+              <button type="button" id="model-form-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.saveModel">保存模型</button>
             </div>
           </div>
         </div>
-        <div class="hint" style="margin-top:8px;">点左侧圆点可设为默认模型，切换后下一条消息即生效</div>
+        <div class="hint" style="margin-top:8px;" data-i18n="settings.defaultHint">点左侧圆点可设为默认模型，切换后下一条消息即生效</div>
       </div>
       <div class="settings-group">
-        <div class="settings-group-title">工作目录</div>
-        <label>EMRG 在哪里帮你干活
+        <div class="settings-group-title" data-i18n="settings.groupWorkdir">工作目录</div>
+        <label><span data-i18n="settings.workdirDesc">EMRG 在哪里帮你干活</span>
           <div class="dir-row">
             <input type="text" id="set-project-dir" readonly />
-            <button type="button" id="pick-dir-btn" class="btn btn-ghost">选择…</button>
+            <button type="button" id="pick-dir-btn" class="btn btn-ghost" data-i18n="settings.choose">选择…</button>
           </div>
         </label>
       </div>
       <div class="settings-group">
-        <div class="settings-group-title">外观</div>
-        <label>主题
+        <div class="settings-group-title" data-i18n="settings.groupAppearance">外观</div>
+        <label><span data-i18n="settings.theme">主题</span>
           <div class="theme-options" id="theme-options">
-            <button type="button" class="theme-option" data-theme="light">浅色</button>
-            <button type="button" class="theme-option" data-theme="dark">深色</button>
-            <button type="button" class="theme-option" data-theme="system">跟随系统</button>
+            <button type="button" class="theme-option" data-theme="light" data-i18n="settings.themeLight">浅色</button>
+            <button type="button" class="theme-option" data-theme="dark" data-i18n="settings.themeDark">深色</button>
+            <button type="button" class="theme-option" data-theme="system" data-i18n="settings.themeSystem">跟随系统</button>
+          </div>
+        </label>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title" data-i18n="settings.groupLanguage">语言</div>
+        <label><span data-i18n="settings.groupLanguage">语言</span>
+          <div class="theme-options" id="lang-options">
+            <button type="button" class="theme-option" data-lang="" data-i18n="settings.langFollowSystem">跟随系统</button>
+            <button type="button" class="theme-option" data-lang="zh" data-i18n="settings.langZh">中文</button>
+            <button type="button" class="theme-option" data-lang="en" data-i18n="settings.langEn">English</button>
           </div>
         </label>
       </div>
@@ -146,8 +156,8 @@
         <div id="about-recent" class="about-recent"></div>
       </div>
       <div class="dialog-actions">
-        <button type="button" id="settings-cancel" class="btn btn-ghost">取消</button>
-        <button type="button" id="settings-save" class="btn btn-primary">保存</button>
+        <button type="button" id="settings-cancel" class="btn btn-ghost" data-i18n="settings.cancel">取消</button>
+        <button type="button" id="settings-save" class="btn btn-primary" data-i18n="settings.save">保存</button>
       </div>
     </div>
   </dialog>
@@ -157,26 +167,26 @@
     <div class="dialog-card">
       <div class="welcome-brand">
         <div class="brand-star">✦</div>
-        <h1>欢迎使用 EMRG</h1>
-        <p>我是你的 AI 工作伙伴。先做两步简单设置，马上就能开始。</p>
+        <h1 data-i18n="welcome.title">欢迎使用 EMRG</h1>
+        <p data-i18n="welcome.sub">我是你的 AI 工作伙伴。先做两步简单设置，马上就能开始。</p>
       </div>
-      <label>第一步：告诉我 API Key
+      <label><span data-i18n="welcome.step1">第一步：告诉我 API Key</span>
         <input type="password" id="welcome-api-key" placeholder="sk-…" />
-        <div class="hint">用于连接你的 AI 模型服务</div>
+        <div class="hint" data-i18n="welcome.step1Hint">用于连接你的 AI 模型服务</div>
       </label>
-      <label>接口地址 <input type="text" id="welcome-base-url" placeholder="https://api.deepseek.com" /></label>
-      <label>默认模型
+      <label><span data-i18n="welcome.baseUrl">接口地址</span> <input type="text" id="welcome-base-url" placeholder="https://api.deepseek.com" /></label>
+      <label><span data-i18n="welcome.defaultModel">默认模型</span>
         <select id="welcome-model"></select>
       </label>
-      <label>第二步：选择工作目录（可跳过）
+      <label><span data-i18n="welcome.step2">第二步：选择工作目录（可跳过）</span>
         <div class="dir-row">
-          <input type="text" id="welcome-project-dir" readonly placeholder="默认 ~/.emrg/evolution" />
-          <button type="button" id="welcome-pick-btn" class="btn btn-ghost">选择…</button>
+          <input type="text" id="welcome-project-dir" readonly placeholder="默认 ~/.emrg/evolution" data-i18n-placeholder="welcome.projectPlaceholder" />
+          <button type="button" id="welcome-pick-btn" class="btn btn-ghost" data-i18n="settings.choose">选择…</button>
         </div>
-        <div class="hint">EMRG 会在这个目录里帮你干活</div>
+        <div class="hint" data-i18n="welcome.step2Hint">EMRG 会在这个目录里帮你干活</div>
       </label>
       <div class="dialog-actions">
-        <button type="button" id="welcome-save" class="btn btn-primary">保存并开始</button>
+        <button type="button" id="welcome-save" class="btn btn-primary" data-i18n="welcome.saveStart">保存并开始</button>
       </div>
     </div>
   </dialog>
@@ -184,11 +194,11 @@
   <!-- 确认对话框（替代 confirm()） -->
   <dialog id="confirm-dialog">
     <div class="dialog-card" style="min-width:320px;">
-      <h2 id="confirm-title">确认</h2>
+      <h2 id="confirm-title" data-i18n="confirm.title">确认</h2>
       <p id="confirm-message" style="color:var(--text-2);font-size:var(--fs-secondary);"></p>
       <div class="dialog-actions">
-        <button type="button" id="confirm-cancel" class="btn btn-ghost">取消</button>
-        <button type="button" id="confirm-ok" class="btn btn-danger">删除</button>
+        <button type="button" id="confirm-cancel" class="btn btn-ghost" data-i18n="settings.cancel">取消</button>
+        <button type="button" id="confirm-ok" class="btn btn-danger" data-i18n="confirm.delete">删除</button>
       </div>
     </div>
   </dialog>
@@ -196,13 +206,13 @@
   <!-- 重命名对话框（对话列表右键 → 重命名） -->
   <dialog id="rename-dialog">
     <div class="dialog-card" style="min-width:320px;">
-      <h2>重命名对话</h2>
-      <label>给这段对话起个好记的名字
-        <input type="text" id="rename-input" maxlength="80" placeholder="例如：周报草稿" />
+      <h2 data-i18n="rename.title">重命名对话</h2>
+      <label><span data-i18n="rename.label">给这段对话起个好记的名字</span>
+        <input type="text" id="rename-input" maxlength="80" placeholder="例如：周报草稿" data-i18n-placeholder="rename.placeholder" />
       </label>
       <div class="dialog-actions">
-        <button type="button" id="rename-cancel" class="btn btn-ghost">取消</button>
-        <button type="button" id="rename-ok" class="btn btn-primary">保存</button>
+        <button type="button" id="rename-cancel" class="btn btn-ghost" data-i18n="settings.cancel">取消</button>
+        <button type="button" id="rename-ok" class="btn btn-primary" data-i18n="settings.save">保存</button>
       </div>
     </div>
   </dialog>
@@ -216,11 +226,11 @@
   <!-- 帮助对话框（/help，GUI / 指令 P1） -->
   <dialog id="help-dialog">
     <div class="dialog-card" style="min-width:420px;">
-      <h2>/ 指令帮助</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">以 / 开头的指令在输入框执行，或点击补全菜单选择。</p>
+      <h2 data-i18n="help.title">/ 指令帮助</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="help.desc">以 / 开头的指令在输入框执行，或点击补全菜单选择。</p>
       <div id="help-list" class="help-list"></div>
       <div class="dialog-actions">
-        <button type="button" id="help-close" class="btn btn-ghost">关闭</button>
+        <button type="button" id="help-close" class="btn btn-ghost" data-i18n="help.close">关闭</button>
       </div>
     </div>
   </dialog>
@@ -228,11 +238,11 @@
   <!-- 会话列表对话框（/sessions /resume，GUI / 指令 P2） -->
   <dialog id="sessions-dialog">
     <div class="dialog-card" style="min-width:420px;">
-      <h2>切换对话</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">点击切换，或输入 /resume &lt;id&gt; 直接切换。</p>
+      <h2 data-i18n="sessions.title">切换对话</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="sessions.desc">点击切换，或输入 /resume &lt;id&gt; 直接切换。</p>
       <div id="sessions-list" class="help-list"></div>
       <div class="dialog-actions">
-        <button type="button" id="sessions-close" class="btn btn-ghost">关闭</button>
+        <button type="button" id="sessions-close" class="btn btn-ghost" data-i18n="help.close">关闭</button>
       </div>
     </div>
   </dialog>
@@ -240,11 +250,11 @@
   <!-- 历史回退对话框（/rewind，GUI / 指令 P2） -->
   <dialog id="rewind-dialog">
     <div class="dialog-card" style="min-width:480px;">
-      <h2>回退到历史消息点</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">选择要保留到的消息点，之后的对话将被移除。</p>
+      <h2 data-i18n="rewind.title">回退到历史消息点</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="rewind.desc">选择要保留到的消息点，之后的对话将被移除。</p>
       <div id="rewind-list" class="help-list"></div>
       <div class="dialog-actions">
-        <button type="button" id="rewind-close" class="btn btn-ghost">取消</button>
+        <button type="button" id="rewind-close" class="btn btn-ghost" data-i18n="rewind.cancel">取消</button>
       </div>
     </div>
   </dialog>
@@ -252,12 +262,12 @@
   <!-- 记忆浏览器对话框（/memory，GUI / 指令 P3） -->
   <dialog id="memory-dialog">
     <div class="dialog-card" style="min-width:440px;">
-      <h2>记忆</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">EMRG 记住的长期信息，点击查看详情。</p>
+      <h2 data-i18n="memory.title">记忆</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="memory.desc">EMRG 记住的长期信息，点击查看详情。</p>
       <div id="memory-list" class="help-list"></div>
       <div id="memory-detail" class="memory-detail hidden"></div>
       <div class="dialog-actions">
-        <button type="button" id="memory-close" class="btn btn-ghost">关闭</button>
+        <button type="button" id="memory-close" class="btn btn-ghost" data-i18n="help.close">关闭</button>
       </div>
     </div>
   </dialog>
@@ -265,11 +275,11 @@
   <!-- 技能列表对话框（/skills，GUI / 指令 P3） -->
   <dialog id="skills-dialog">
     <div class="dialog-card" style="min-width:440px;">
-      <h2>技能</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">EMRG 已加载的技能。</p>
+      <h2 data-i18n="skills.title">技能</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="skills.desc">EMRG 已加载的技能。</p>
       <div id="skills-list" class="help-list"></div>
       <div class="dialog-actions">
-        <button type="button" id="skills-close" class="btn btn-ghost">关闭</button>
+        <button type="button" id="skills-close" class="btn btn-ghost" data-i18n="help.close">关闭</button>
       </div>
     </div>
   </dialog>
@@ -277,17 +287,17 @@
   <!-- 进化对话框（/rant，GUI / 指令 P4） -->
   <dialog id="rant-dialog">
     <div class="dialog-card" style="min-width:460px;">
-      <h2>🧬 进化 — 告诉 EMRG 往哪里走</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">你的输入会驱动 EMRG 的自我进化——它会认真读，并据此改进自己。</p>
-      <label>项目（可选）
+      <h2 data-i18n="rant.title">🧬 进化 — 告诉 EMRG 往哪里走</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="rant.desc">你的输入会驱动 EMRG 的自我进化——它会认真读，并据此改进自己。</p>
+      <label><span data-i18n="rant.project">项目（可选）</span>
         <select id="rant-project"></select>
       </label>
-      <label>你的想法
-        <textarea id="rant-message" rows="4" maxlength="10000" placeholder="哪里不好用、想要什么新功能、或者希望它怎么改进…"></textarea>
+      <label><span data-i18n="rant.message">你的想法</span>
+        <textarea id="rant-message" rows="4" maxlength="10000" placeholder="哪里不好用、想要什么新功能、或者希望它怎么改进…" data-i18n-placeholder="rant.placeholder"></textarea>
       </label>
       <div class="dialog-actions">
-        <button type="button" id="rant-cancel" class="btn btn-ghost">取消</button>
-        <button type="button" id="rant-submit" class="btn btn-primary">驱动进化</button>
+        <button type="button" id="rant-cancel" class="btn btn-ghost" data-i18n="settings.cancel">取消</button>
+        <button type="button" id="rant-submit" class="btn btn-primary" data-i18n="rant.submit">驱动进化</button>
       </div>
     </div>
   </dialog>
@@ -295,11 +305,11 @@
   <!-- 任务列表对话框（/trigger，GUI / 指令 P4） -->
   <dialog id="tasks-dialog">
     <div class="dialog-card" style="min-width:440px;">
-      <h2>后台任务</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">点击任务立即触发一次运行。</p>
+      <h2 data-i18n="tasks.title">后台任务</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="tasks.desc">点击任务立即触发一次运行。</p>
       <div id="tasks-list" class="help-list"></div>
       <div class="dialog-actions">
-        <button type="button" id="tasks-close" class="btn btn-ghost">关闭</button>
+        <button type="button" id="tasks-close" class="btn btn-ghost" data-i18n="help.close">关闭</button>
       </div>
     </div>
   </dialog>
@@ -315,6 +325,7 @@
   </div>
 
   <script src="js/utils.js"></script>
+  <script src="js/i18n.js"></script>
   <script src="js/commands.js"></script>
   <script src="js/markdown.js"></script>
   <script src="js/copywriting.js"></script>
