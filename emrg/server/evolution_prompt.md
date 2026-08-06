@@ -97,6 +97,9 @@ cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
   - 没有问题 → `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "✅ LGTM — cycle"`
   - 有问题 → `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "❌ 需要修改：<具体问题>"`
 - **审查 PR 就是演化工作** — 即使代码无需改动，review 和 approve 本身也是有价值的产出。
+- **⚡ workflow/CI 改动必须跑 actionlint 校验**（#441 教训：build-release.yml 的 `if:` 中直接引用 `secrets` 上下文导致 workflow 解析失败，人工审查漏检、push 后才在 CI 暴露）：
+  - 本地校验：`actionlint .github/workflows/*.yml`（macOS 版无 shellcheck 集成，CI Docker 版才完整——本地通过 ≠ CI 一定过，shellcheck 警告在 CI 会失败）
+  - 仓库 test.yml 已有 `rhysd/actionlint@v1.7.12` 门禁步骤（#444 固化，全量校验所有 workflow），但 review CI 改动时仍应主动本地跑一遍确认
 - 检查合并条件：PR 的 comment 历史中是否已有连续 3 个不同 cycle 的 ✅ 且中间无 ❌？
   - ⚠️ 查询评论用 REST API（GraphQL 需 `read:org` scope，token 常缺）：
     `gh api repos/{{ owner }}/{{ repo }}/issues/<N>/comments --jq '.[] | "\(.user.login): \(.body)"'`
