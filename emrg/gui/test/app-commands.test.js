@@ -174,11 +174,42 @@ test("P3：/skills 打开技能列表对话框并调用 listSkills", async () =>
   assert.ok(els["skills-dialog"] && els["skills-dialog"].__open === true, "skills dialog opened");
 });
 
-test("P3：phase 4 指令（/rant）仍提示未开放", async () => {
-  const { ctx, win } = makeSandbox();
-  const out = await vm.runInContext(
-    "(async () => { let m = ''; const orig = EMRG_Chat.addSystemMessage; EMRG_Chat.addSystemMessage = (x) => { m = x; }; await App.handleCommand({ type: 'command', cmd: '/rant', args: [] }); EMRG_Chat.addSystemMessage = orig; return m; })()",
-    ctx
-  );
-  assert.ok(String(out).includes("暂未开放"), `phase 4 应提示未开放，实际: ${out}`);
+test("P4：/rant 无参数打开进化对话框（项目下拉加载）", async () => {
+  const { ctx, els } = makeSandbox({
+    listProjects: async () => [{ name: "emrg" }],
+    sendRant: async () => ({ ok: true, count: 5 }),
+  });
+  await tick();
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/rant', args: [] })", ctx);
+  assert.ok(els["rant-dialog"] && els["rant-dialog"].__open === true, "rant dialog opened");
+});
+
+test("P4：/rant 直接跟内容快速提交（不打开对话框）", async () => {
+  const { ctx, els } = makeSandbox({
+    listProjects: async () => [{ name: "emrg" }],
+    sendRant: async () => ({ ok: true, count: 5 }),
+  });
+  await tick();
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/rant', args: ['希望支持主题切换'] })", ctx);
+  assert.ok(!(els["rant-dialog"] && els["rant-dialog"].__open), "direct rant submit should not open dialog");
+});
+
+test("P4：/trigger 无参数打开任务列表对话框", async () => {
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [{ name: "emrg-task", type: "evolution", interval: 60 }],
+    triggerTask: async () => ({ ok: true }),
+  });
+  await tick();
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/trigger', args: [] })", ctx);
+  assert.ok(els["tasks-dialog"] && els["tasks-dialog"].__open === true, "tasks dialog opened");
+});
+
+test("P4：/trigger <name> 直接触发（不打开对话框）", async () => {
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [{ name: "emrg-task", type: "evolution", interval: 60 }],
+    triggerTask: async () => ({ ok: true }),
+  });
+  await tick();
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/trigger', args: ['emrg-task'] })", ctx);
+  assert.ok(!(els["tasks-dialog"] && els["tasks-dialog"].__open), "direct trigger should not open dialog");
 });

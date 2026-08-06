@@ -244,6 +244,36 @@
     </div>
   </dialog>
 
+  <!-- 进化对话框（/rant，GUI / 指令 P4） -->
+  <dialog id="rant-dialog">
+    <div class="dialog-card" style="min-width:460px;">
+      <h2>🧬 进化 — 告诉 EMRG 往哪里走</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">你的输入会驱动 EMRG 的自我进化——它会认真读，并据此改进自己。</p>
+      <label>项目（可选）
+        <select id="rant-project"></select>
+      </label>
+      <label>你的想法
+        <textarea id="rant-message" rows="4" maxlength="10000" placeholder="哪里不好用、想要什么新功能、或者希望它怎么改进…"></textarea>
+      </label>
+      <div class="dialog-actions">
+        <button type="button" id="rant-cancel" class="btn btn-ghost">取消</button>
+        <button type="button" id="rant-submit" class="btn btn-primary">驱动进化</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 任务列表对话框（/trigger，GUI / 指令 P4） -->
+  <dialog id="tasks-dialog">
+    <div class="dialog-card" style="min-width:440px;">
+      <h2>后台任务</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">点击任务立即触发一次运行。</p>
+      <div id="tasks-list" class="help-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="tasks-close" class="btn btn-ghost">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
   <script src="js/utils.js"></script>
   <script src="js/commands.js"></script>
   <script src="js/markdown.js"></script>

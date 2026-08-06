@@ -75,6 +75,8 @@ const ELEMENT_IDS = [
   "rewind-dialog", "rewind-list", "rewind-close",
   "memory-dialog", "memory-list", "memory-detail", "memory-close",
   "skills-dialog", "skills-list", "skills-close",
+  "rant-dialog", "rant-message", "rant-project", "rant-cancel", "rant-submit",
+  "tasks-dialog", "tasks-list", "tasks-close",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
