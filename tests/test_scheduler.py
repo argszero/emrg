@@ -496,11 +496,12 @@ def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
 class FakeGitRun:
     """Controllable subprocess.run fake for git commands."""
 
-    def __init__(self, git_repo=True, tags="v0.2.7", clone_fails=False):
+    def __init__(self, git_repo=True, tags="v0.2.7", clone_fails=False, remote_head="abc123"):
         self.calls = []
         self.git_repo = git_repo
         self.tags = tags
         self.clone_fails = clone_fails
+        self.remote_head = remote_head
 
     def __call__(self, cmd, *args, **kwargs):
         self.calls.append((list(cmd), kwargs.get("cwd")))
@@ -512,6 +513,9 @@ class FakeGitRun:
                     return _R(0, "true\n" if self.git_repo else "false\n")
                 if "HEAD" in cmd:
                     return _R(0, "abc123\n")
+            if sub == "ls-remote":
+                # `git ls-remote origin master` → "<sha>\trefs/heads/master"
+                return _R(0, f"{self.remote_head}\trefs/heads/master\n")
             if sub == "clone":
                 if self.clone_fails:
                     raise _CalledProcessErrorStub("clone failed")
@@ -792,3 +796,63 @@ def test_evolution_cycle_complete_unchanged_head_still_empty(tmp_path):
     impact = captured["log"].impact
     assert any(i.endswith("-complete") for i in impact), impact
     assert "truncated=max-tool-rounds" not in impact, impact
+
+
+# ── Saturation halt auto-resume on upstream advance ───────────────
+# The halt skips scheduled runs entirely, so a halted handler can never
+# detect a HEAD change itself (only /trigger could resume it). If every
+# instance halted during an idle stretch, new upstream work would go
+# unnoticed — the halt must auto-resume when origin/master advances.
+
+def test_saturation_halt_active_true_when_remote_unchanged(tmp_path):
+    """At/above threshold + unchanged remote → tick skipped (halt stays)."""
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler._empty_cycles = 30  # == _IDLE_HALT_THRESHOLD
+    fake = FakeGitRun(remote_head="abc123")  # == local HEAD → not advanced
+    orig_run = mod.subprocess.run
+    mod.subprocess.run = fake
+    try:
+        assert handler._saturation_halt_active() is True
+        assert handler._empty_cycles == 30  # counter untouched
+    finally:
+        mod.subprocess.run = orig_run
+
+
+def test_saturation_halt_resumes_and_resets_when_remote_advanced(tmp_path):
+    """At/above threshold + remote advanced → resume, counter reset to 0."""
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler._empty_cycles = 30
+    fake = FakeGitRun(remote_head="9f8e7d6")  # != local abc123 → advanced
+    orig_run = mod.subprocess.run
+    mod.subprocess.run = fake
+    try:
+        assert handler._saturation_halt_active() is False
+        assert handler._empty_cycles == 0  # reset → scheduled runs resume
+    finally:
+        mod.subprocess.run = orig_run
+
+
+def test_saturation_halt_active_false_below_threshold(tmp_path):
+    """Below threshold → never halt (remote state irrelevant)."""
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler._empty_cycles = 10
+    assert handler._saturation_halt_active() is False
+    assert handler._empty_cycles == 10
+
+
+def test_remote_advanced_false_without_git_repo(tmp_path):
+    """Not a git repo / ls-remote fails → False (stay halted, no crash)."""
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    fake = FakeGitRun(git_repo=False)
+    orig_run = mod.subprocess.run
+    mod.subprocess.run = fake
+    try:
+        assert handler._remote_advanced() is False
+    finally:
+        mod.subprocess.run = orig_run

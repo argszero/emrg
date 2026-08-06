@@ -440,13 +440,7 @@ class EvolutionHandler:
                     )
                 self._empty_cycles = 0
                 self._save_saturation_state()
-            elif self._empty_cycles >= self._IDLE_HALT_THRESHOLD:
-                logger.info(
-                    "EvolutionHandler[%s]: saturation halt — "
-                    "skipping scheduled run (%d empty cycles). "
-                    "Use /trigger to resume.",
-                    self.name, self._empty_cycles,
-                )
+            elif self._saturation_halt_active():
                 continue
 
             logger.debug("EvolutionHandler[%s] tick", self.name)
@@ -502,8 +496,62 @@ class EvolutionHandler:
             "interval": self.interval,
         }
 
+    def _remote_advanced(self) -> bool:
+        """True if origin/master differs from the local HEAD (new upstream work).
+
+        A saturation-halted handler never runs scheduled cycles, so it can
+        never detect a HEAD change on its own — only a manual /trigger
+        could resume it. If every instance halted during an idle stretch,
+        new upstream work (PRs/commits from other instances or the host)
+        would go unnoticed indefinitely. This cheap check (one ``git
+        ls-remote`` — no fetch, no working-tree mutation) lets the halt
+        auto-resume on genuine upstream activity.
+        """
+        try:
+            local = self._get_git_head()
+            if not local:
+                return False
+            result = subprocess.run(
+                ["git", "ls-remote", "origin", "master"],
+                cwd=self._source_dir,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return False
+            remote = result.stdout.strip().split()
+            return bool(remote) and remote[0] != local
+        except Exception:
+            return False
+
+    def _saturation_halt_active(self) -> bool:
+        """Whether a scheduled tick should be skipped due to saturation halt.
+
+        Extracted from the run loop so the halt decision is testable:
+        at/above the threshold the tick is skipped UNLESS the upstream
+        remote advanced (auto-resume: reset the counter and run the cycle,
+        so a halted handler does not miss new work forever).
+        """
+        if self._empty_cycles < self._IDLE_HALT_THRESHOLD:
+            return False
+        if self._remote_advanced():
+            logger.info(
+                "EvolutionHandler[%s]: upstream advanced — resuming from saturation halt",
+                self.name,
+            )
+            self._empty_cycles = 0
+            self._save_saturation_state()
+            return False
+        logger.info(
+            "EvolutionHandler[%s]: saturation halt — "
+            "skipping scheduled run (%d empty cycles). "
+            "Use /trigger to resume.",
+            self.name, self._empty_cycles,
+        )
+        return True
+
     async def _run_evolution_cycle(self) -> None:
-        """Connect to server, send evolution prompt, read streaming response."""
 
         # Self-heal the evolution workspace first (rant 20:42 方案 C):
         # packaged installs lack a writable git repo; clone on demand.
