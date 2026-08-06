@@ -400,7 +400,7 @@ class EmrgServer:
                     session = self._get_or_create_session(session_id, Path(cwd))
                     logger.info(
                         'task received: session=%s prompt="%s" → routing via LLM (stream=%s)',
-                        session_id, req.prompt[:60], req.stream,
+                        session_id, _redact_string(req.prompt[:60]), req.stream,
                     )
                     _cancel_event = asyncio.Event()
                     self._session_busy[session_id] = True  # lock (released in *locked wrapper)
@@ -892,7 +892,7 @@ class EmrgServer:
             count = len(rants)
 
             logger.info("rant recorded (%d total)%s: %s",
-                count, f" project={project}" if project else "", rant_message[:100])
+                count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
             await self._send(ws, {"ok": True, "count": count})
 
         elif msg_type == "list_models":
@@ -2343,7 +2343,7 @@ class EmrgServer:
                             "tool_call_id": tc_id,
                             "content": result_text,
                         })
-                        logger.debug("memory reflection tool: %s → %s", tc_name, result_text[:100])
+                        logger.debug("memory reflection tool: %s → %s", tc_name, _redact_string(result_text[:100]))
 
             except Exception:
                 logger.debug("memory reflection failed", exc_info=True)
@@ -2447,7 +2447,7 @@ class EmrgServer:
                         "tool_call_id": tc_id,
                         "content": result_text,
                     })
-                    logger.debug("consolidation tool: %s → %s", tc_name, result_text[:100])
+                    logger.debug("consolidation tool: %s → %s", tc_name, _redact_string(result_text[:100]))
         except Exception:
             logger.debug("memory consolidation failed", exc_info=True)
 
