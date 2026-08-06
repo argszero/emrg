@@ -394,3 +394,14 @@ test("boot 死锁修复：boot/newSession/switchSession 成功路径启用输入
   const ssBlock = src.slice(ssIdx, nsIdx);
   assert.ok(ssBlock.includes("setComposerDisabled(false)"), "switchSession() 成功路径应启用输入框");
 });
+
+test("设置/首启对话框：Enter 提交键盘绑定（交互一致性）", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  const src = fs.readFileSync(path.join(RENDERER_JS, "app.js"), "utf8");
+  const bindIdx = src.indexOf("function bindUi()");
+  const bindBlock = src.slice(bindIdx); // bindUi 到文件末尾（含 enterToSave 绑定）
+  assert.ok(bindBlock.includes("set-api-key"), "设置对话框 API Key 应绑定键盘");
+  assert.ok(bindBlock.includes("welcome-api-key"), "首启引导 API Key 应绑定键盘");
+  assert.ok(bindBlock.includes("enterToSave"), "Enter 应通过 enterToSave 触发提交");
+});

@@ -487,6 +487,15 @@ const App = (() => {
     $("confirm-cancel").addEventListener("click", Dialogs.closeConfirm);
     $("confirm-ok").addEventListener("click", Dialogs.confirmOk);
 
+    // 设置/首启对话框：Enter 提交（与重命名/模型表单一致的交互）
+    const enterToSave = (fn) => (e) => {
+      if (e.key === "Enter") { e.preventDefault(); fn(); }
+    };
+    $("set-api-key").addEventListener("keydown", enterToSave(Dialogs.saveSettings));
+    $("set-base-url").addEventListener("keydown", enterToSave(Dialogs.saveSettings));
+    $("welcome-api-key").addEventListener("keydown", enterToSave(Dialogs.saveWelcome));
+    $("welcome-base-url").addEventListener("keydown", enterToSave(Dialogs.saveWelcome));
+
     const input = $("input");
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
