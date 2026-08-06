@@ -1,6 +1,6 @@
 # EMRG — Agent.md
 
-> This is the Codex-compatible project context file. See `README.md` for the canonical project description (中文).
+> This is the Codex-compatible project context file. See `README.md` for the canonical project description (English).
 
 ## Project Overview
 
@@ -34,8 +34,8 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
 - Client auto-detects/starts the server on launch; server stays running on client exit
 - Server logs are discarded (`stderr=DEVNULL`)
 - Client logs go to `./.emrg/emrg-client.log`
-- **README language**: `README.md` = Chinese (default), `README.en.md` = English
-- **Project context files**: `README.md` = Chinese, `Agent.md` = English
+- **README language**: `README.md` = English (default), `README.cn.md` = Chinese
+- **Project context files**: `README.md` = English, `Agent.md` = English
 
 ## Current Features
 
