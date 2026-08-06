@@ -365,3 +365,15 @@ test("右键菜单：键盘导航 handler 注册 + CSS 高亮", async () => {
   const css = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "components.css"), "utf8");
   assert.ok(css.includes(".ctx-item.active"), "右键菜单键盘高亮样式应存在");
 });
+
+test("模型表单：Enter 保存 / ESC 取消键盘绑定（对话框内交互一致）", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  const src = fs.readFileSync(path.join(RENDERER_JS, "dialogs.js"), "utf8");
+  assert.ok(src.includes("model-form-name").value || src.includes('"model-form-name"'), "dialogs.js 应绑定模型表单键盘");
+  // initModelForm 内应注册 Enter/Escape 处理
+  const initIdx = src.indexOf("function initModelForm");
+  const initBlock = src.slice(initIdx, initIdx + 600);
+  assert.ok(initBlock.includes('key === "Enter"'), "Enter 应保存模型表单");
+  assert.ok(initBlock.includes('key === "Escape"'), "ESC 应取消模型表单");
+});

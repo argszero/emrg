@@ -169,6 +169,15 @@ const Dialogs = (() => {
     $("add-model-btn").addEventListener("click", () => openModelForm(""));
     $("model-form-save").addEventListener("click", saveModelForm);
     $("model-form-cancel").addEventListener("click", closeModelForm);
+    // 键盘：Enter 保存 / ESC 取消（与重命名对话框一致的交互）
+    $("model-form-name").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveModelForm(); }
+      else if (e.key === "Escape") { e.preventDefault(); closeModelForm(); }
+    });
+    $("model-form-id").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); saveModelForm(); }
+      else if (e.key === "Escape") { e.preventDefault(); closeModelForm(); }
+    });
   }
 
   // ── 设置 ─────────────────────────────────
