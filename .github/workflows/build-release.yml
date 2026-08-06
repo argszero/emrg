@@ -69,8 +69,17 @@ jobs:
           security default-keychain -s /tmp/ci.keychain
           security set-keychain-settings -lut 21600 /tmp/ci.keychain
           security unlock-keychain -p 'ci-temp' /tmp/ci.keychain
-          security import /tmp/signing.p12 -k /tmp/ci.keychain -P "$MACOS_SIGNING_P12_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/productsign
+          # 私钥存在性校验（v0.2.7 根因：p12 仅证书链无私钥 → set-key-partition-list 报
+          # "SecItemCopyMatching: item not found" 的 cryptic 错误）。实测（macOS 本机）：
+          #   p12 含私钥 → "1 identity imported."；仅证书链 → "N certificates imported."（无 identity 行）
+          # import 输出捕获后校验 identity 行，缺失即明确报错，指引宿主重新导出含私钥的 p12。
+          IMPORT_OUTPUT="$(security import /tmp/signing.p12 -k /tmp/ci.keychain -P "$MACOS_SIGNING_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productsign 2>&1)"
+          echo "$IMPORT_OUTPUT"
+          if [[ "$IMPORT_OUTPUT" != *"identity imported"* ]]; then
+            echo "::error::MACOS_SIGNING_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请从 Keychain Access 导出含私钥的 p12（证书右键 → 导出 → 勾选\"包含私钥\"），重新 base64 后更新 GitHub Secret。import 输出：${IMPORT_OUTPUT}"
+            exit 1
+          fi
           # set-key-partition-list 语法：[-S partition-list] [-k password] [match-options] [keychain]
           # -s = Match keys that can sign（匹配可签名私钥，必须显式提供才能定位项目）；
           # -S 后跟分区 ID 列表；-k 后跟 keychain 密码。
