@@ -56,6 +56,11 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 | Linux | `EMRG-<ver>-linux-x86_64.AppImage` | Self-extracts to `~/.emrg/install/` on first run |
 | Linux (ARM64) | `EMRG-<ver>-linux-aarch64.AppImage` | Same |
 
+> **Windows SmartScreen notice**: The Windows installer is not Authenticode-signed (publisher shows "Unknown"), so SmartScreen may show "usually doesn't download" or "Windows protected your PC" on first download/run. This is a standard security prompt for unsigned software — it does **not** mean the file is bad (EMRG is fully open source and auditable). To proceed:
+> (1) Browser download prompt → click **Keep** (or ⋯ → Keep)
+> (2) If double-clicking shows "Windows protected your PC" → click **More info** → click **Run anyway**
+> (3) Or right-click the exe → Properties → check **Unblock** (if present) → OK → double-click to run
+
 The installer bundles a full runtime (standalone Python 3.13 + deps + git + gh + GUI) — **zero prerequisites on a clean machine (no python/uv/git/gh/node)**, 100% offline install. After install:
 
 - GUI: launch **EMRG** from Launchpad / Start menu
@@ -308,6 +313,9 @@ Any OpenAI-compatible API. Tested with DeepSeek and OpenAI. Works with Anthropic
 
 **How is this different from Claude Code or Codex?**<br>
 They're products. EMRG is an experiment in *closing the loop* — the AI improves the AI. Also: fully open source, no vendor lock-in, and you control your data.
+
+**Why does the Windows installer show "Unknown publisher"?**<br>
+The Windows installer is not Authenticode-signed (that certificate costs money to obtain and is not procured yet), so SmartScreen shows "Publisher: Unknown" and may block the run. This is a standard Microsoft security prompt for newly released/unsigned software — it does **not** mean the file is bad: EMRG is fully open source (MIT) and auditable. To proceed: click "Keep" on the browser prompt; click "More info → Run anyway" on the run prompt; or right-click the exe → Properties → check "Unblock". The macOS installer is signed + notarized (v0.2.7+) and has no such prompt.
 
 ---
 

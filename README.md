@@ -56,6 +56,11 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 | Linux | `EMRG-<ver>-linux-x86_64.AppImage` | 首次运行自解压到 `~/.emrg/install/` |
 | Linux (ARM64) | `EMRG-<ver>-linux-aarch64.AppImage` | 同上 |
 
+> **Windows SmartScreen 提示**：Windows 安装包未做 Authenticode 签名（发布者显示"未知"），首次下载/运行时 SmartScreen 可能提示"通常不会下载此文件"或"Windows 已保护你的电脑"。这是未签名软件的常见安全提醒，不代表文件有问题（EMRG 完全开源，源码可审计）。放行方法：
+> (1) 浏览器下载提示 → 点**保留**（或三个点 → 保留）
+> (2) 双击 exe 若提示"Windows 已保护你的电脑" → 点**更多信息** → 点**仍要运行**
+> (3) 或右键 exe → 属性 → 勾选**解除锁定**（若有）→ 确定 → 双击运行
+
 安装包内置完整运行时（standalone Python 3.13 + 依赖 + git + gh + GUI），**干净机器（无 python/uv/git/gh/node）零前置依赖**，100% 离线安装。安装后：
 
 - GUI：启动台 / 开始菜单点击 **EMRG**
@@ -324,6 +329,9 @@ emrg/
 
 **和 Claude Code 或 Codex 有什么不同？**<br>
 它们是产品。EMRG 是一个关于*闭环进化*的实验——AI 改进 AI。此外：完全开源、无厂商锁定、你掌控自己的数据。
+
+**为什么 Windows 安装包会提示"未知发布者"？**<br>
+Windows 安装包未做 Authenticode 签名（该证书需付费申请，暂不采购），因此 SmartScreen 会显示"发布者：未知"并可能阻止运行。这是微软对新发布/未签名软件的通用安全提醒，**不代表文件有问题**——EMRG 完全开源（MIT），源码可审计。放行：浏览器提示点"保留"；运行提示点"更多信息 → 仍要运行"；或右键 exe → 属性 → 勾选"解除锁定"。macOS 安装包已签名+公证（v0.2.7+），无此问题。
 
 ---
 
