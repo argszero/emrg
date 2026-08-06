@@ -294,6 +294,15 @@ When reading rants, follow these rules:
 > - GUI streaming chat (16ms delta batching + marked after done) ✅ | session management (list/switch/new/delete) ✅
 > - GUI disconnect-reconnect (G43 stale port + auto-relaunch + session restore) ✅ | broadcast model (multi-client same session) ✅
 > - GUI G65 own-stream lock (busy blocks session switch) ✅ | G143 pre-generated requestId eliminates race ✅ | G144 first-run default model selected ✅
+> - GUI 15 TUI slash commands (P1-P4, #486/#487/#491/#496) ✅ | GUI /rant evolution dialog + /trigger task dialog ✅
+> - GUI WorkBuddy P1 result panel (three-column, tool-output cards, ⌘\ collapse, narrow auto-hide, #498) ✅
+> - GUI WorkBuddy P2 Ask/Auto mode (daemon empty toolset on ask, capsule switcher, #500) ✅
+> - GUI WorkBuddy P3 evolution visibility (#501 growth card + one-per-day toast + dynamic /version) ✅
+> - daemon evolution_summary command (count + recent N improvements from ~/.emrg/logs/evolution-*.json, #502) ✅
+> - result-panel.js window.ResultPanel export (ES-module migration hardening, #502) ✅
+> - GUI i18n Stage 1 (#503 i18n.js dict {zh,en} + detectLocale + Settings language switcher + data-i18n static) ✅
+> - GUI i18n Stage 2 (#504 all dynamic renderer strings localized: chat/sidebar/dialogs/result-panel/markdown/utils/app) ✅
+> - Language policy #485 (outward GitHub output always English) ✅ | evolution workspace self-heal #489/#490 (clone on demand + projects/tasks bootstrap) ✅
 
 #### 2.2 Latest GitHub code changes
 
