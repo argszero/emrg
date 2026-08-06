@@ -146,13 +146,22 @@ jobs:
         run: bash packaging/make-installer.sh
 
       # ── pkg 签名（macOS only，P2；Secret 未配则跳过降级）──
+      # ⚠️ productsign 需要 Developer ID Installer 身份（非 Application 身份）——
+      # 实测 #462：MACOS_SIGNING_IDENTITY 配 Application 身份报
+      # "An installer signing identity (not an application signing identity) is required"。
+      # 从 p12 自动检测 Installer 身份，缺失则明确报错指引宿主补证书。
       - name: Sign pkg (macOS only)
-        if: runner.os == 'macOS' && env.MACOS_SIGNING_IDENTITY != ''
+        if: runner.os == 'macOS' && env.MACOS_SIGNING_P12_BASE64 != ''
         shell: bash
         run: |
           PKG="$(find dist/artifacts -maxdepth 1 -name 'EMRG-*-macos-*.pkg' | head -1)"
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
-          productsign --sign "$MACOS_SIGNING_IDENTITY" "$PKG" "${PKG}.signed"
+          INSTALLER_ID="$(security find-identity -v /tmp/ci.keychain | grep 'Developer ID Installer' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ -z "$INSTALLER_ID" ]; then
+            echo "::error::pkg 签名需要 Developer ID Installer 证书（productsign 不接受 Application 身份）。请在 Apple Developer 后台生成 Developer ID Installer 证书，下载导入钥匙串后随 p12 一并导出（security export -t identities 含全部证书+私钥），更新 MACOS_SIGNING_P12_BASE64。"
+            exit 1
+          fi
+          productsign --sign "$INSTALLER_ID" "$PKG" "${PKG}.signed"
           mv "${PKG}.signed" "$PKG"
           # P3 验证：证书存在时签名必须成功（rant 验收：pkgutil 显示 signed by Developer ID）
           pkgutil --check-signature "$PKG"
