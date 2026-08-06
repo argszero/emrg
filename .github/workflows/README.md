@@ -28,6 +28,17 @@
 5. **勾选"包含私钥"**（Export 对话框底部）
 6. 设置导出密码 → 得到含私钥的 .p12
 
+**命令行导出方法**（推荐，精确防错——`-t identities` 保证含私钥；错误做法 `-t certs` 只导出证书链，即 v0.2.7 四次失败根因）：
+```bash
+# 用证书 CN 查询准确名称（本机已有有效 identity，无需重新申请证书）
+security find-identity -v -p codesigning
+# 导出含私钥 p12（会提示输入钥匙串密码 + 设置导出密码）
+security export -k ~/Library/Keychains/login.keychain-db -t identities -f pkcs12 \
+  -P '新导出密码' -o ~/Downloads/emrg-cert/signing-with-key.p12 \
+  "Developer ID Application: <你的名字> (Y55RQ6LU24)"
+# 用导出的 p12 更新 MACOS_SIGNING_P12_BASE64 和 MACOS_SIGNING_P12_PASSWORD（导出密码）
+```
+
 **验证 p12 含私钥**：
 ```bash
 security import 你的证书.p12 -k /tmp/test.keychain -P 密码
