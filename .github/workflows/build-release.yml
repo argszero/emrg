@@ -133,6 +133,14 @@ jobs:
             export CSC_LINK="file:///tmp/signing.p12"
             export CSC_KEY_PASSWORD="$MACOS_SIGNING_P12_PASSWORD"
           fi
+          # macOS 公证：electron-builder 签名后自动 notarize .app（macPackager.js 源码：
+          # getNotarizeOptions 读 APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD——不是我们
+          # 的 MACOS_NOTARY_APP_PASSWORD 变量名！缺失即报 "APPLE_APP_SPECIFIC_PASSWORD
+          # env var needs to be set"（第 8 次构建失败根因）。仅在 macOS + 公证 secret 就绪时导出。
+          if [ "$RUNNER_OS" = "macOS" ] && [ -n "${APPLE_ID:-}" ] && [ -n "${MACOS_NOTARY_APP_PASSWORD:-}" ] && [ -n "${MACOS_NOTARY_TEAM_ID:-}" ]; then
+            export APPLE_APP_SPECIFIC_PASSWORD="$MACOS_NOTARY_APP_PASSWORD"
+            export APPLE_TEAM_ID="$MACOS_NOTARY_TEAM_ID"
+          fi
           npm run dist
 
       # ── 捆绑 git/gh（§6 R59：macOS/Linux 源码编译，Windows portable）──
