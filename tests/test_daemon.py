@@ -514,3 +514,46 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert entry["project"] == "emrg"
     assert entry["status"] == "pending"
     assert entry["message"] == "test rant message"
+
+
+# ── _redact 日志脱敏（rant 10:21 + 跨项目 base64 教训）──────────────
+
+
+def test_redact_masks_sensitive_keys():
+    """按键名脱敏（原有行为）。"""
+    from emrg.server.daemon import _redact
+    assert _redact({"api_key": "sk-abc", "model": "m"}) == {"api_key": "***", "model": "m"}
+    assert _redact([{"token": "x"}, "plain"]) == [{"token": "***"}, "plain"]
+
+
+def test_redact_inline_secrets_in_strings():
+    """字符串值内联凭据（sk-/ghp_/Bearer/JWT）被遮蔽。"""
+    from emrg.server.daemon import _redact
+    # bash command 内联 API key
+    assert "sk-1234567890abcdef" not in str(_redact({"command": "export OPENAI_API_KEY=sk-1234567890abcdef; curl x"}))
+    # GitHub token 嵌在 URL
+    assert "ghp_" not in str(_redact({"command": "git push https://x-access-token:ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890@github.com/r.git"}))
+    # Bearer + JWT
+    jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    assert "eyJ" not in str(_redact({"text": f"Authorization: Bearer {jwt}"}))
+
+
+def test_redact_base64_encoded_token_blob():
+    """base64 编码的 access_token JSON 被整段遮蔽（跨项目教训：明文正则匹配不到编码形式）。"""
+    import base64
+    import json as _json
+    from emrg.server.daemon import _redact
+    blob = base64.b64encode(_json.dumps({"access_token": "super-secret"}).encode()).decode()
+    out = _redact({"command": f"curl -d {blob} http://x"})
+    assert "***" in out["command"]
+    assert "super-secret" not in out["command"]
+    assert blob not in out["command"]
+
+
+def test_redact_no_false_positive_on_normal_strings():
+    """普通字符串/短 sk- 前缀不被误伤。"""
+    from emrg.server.daemon import _redact
+    assert _redact({"command": "echo hello world", "path": "/tmp/a.txt"}) == {
+        "command": "echo hello world", "path": "/tmp/a.txt"}
+    # 短密钥（<8 位）不匹配 sk- 模式 → 保留
+    assert "sk-abc" in _redact({"command": "echo sk-abc"})["command"]

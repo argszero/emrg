@@ -43,14 +43,49 @@ from emrg.session import Session
 # ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
 # tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
 # 递归替换值为 ***，避免 emrgd.log 泄露凭据。
+# 除按键名脱敏外，字符串值内联的凭据模式（sk-*/ghp_*/Bearer/JWT/base64-JSON）
+# 也会被遮蔽——防止 bash command 里 `export OPENAI_API_KEY=sk-...` 或
+# base64 编码的 access_token 整体泄露（跨项目教训：明文正则匹配不到编码形式）。
 _SENSITIVE_KEY_SUBSTRINGS = (
     "api_key", "token", "authorization", "password", "secret",
     "api-key", "auth", "credential", "key",
 )
 
+import re as _re
+
+# 字符串值内联凭据模式（保守匹配，宁多勿漏）
+_INLINE_SECRET_PATTERNS = (
+    _re.compile(r"(sk-[A-Za-z0-9_\-]{8,})"),                       # OpenAI/DeepSeek/Anthropic 密钥
+    _re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,})"),                  # GitHub PAT / OAuth / gist token
+    _re.compile(r"(xox[baprs]-[A-Za-z0-9\-]{10,})"),               # Slack token
+    _re.compile(r"(AKIA[0-9A-Z]{16})"),                            # AWS access key id
+    _re.compile(r"(Bearer\s+[A-Za-z0-9\-._~+/]+=*)", _re.IGNORECASE),  # Bearer 令牌
+    _re.compile(r"(Authorization\s*[:=]\s*[A-Za-z0-9\-._~+/]+=*)", _re.IGNORECASE),
+    _re.compile(r"((api[_-]?key|apikey|password|passwd|secret|token)\s*[:=]\s*[^\s,;\"']+)", _re.IGNORECASE),
+    # JWT：三段 base64url（eyJ... 开头）—— 一段即泄露签名密钥
+    _re.compile(r"(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)"),
+)
+
+
+def _redact_string(s: str) -> str:
+    """遮蔽字符串值内联的凭据模式；base64-JSON 含敏感键时整段遮蔽。"""
+    out = s
+    for pat in _INLINE_SECRET_PATTERNS:
+        out = pat.sub("***", out)
+    # base64 编码的 JSON（跨项目教训：access_token 以编码形式进日志，明文正则匹配不到）
+    for b64 in _re.findall(r"[A-Za-z0-9+/]{40,}={0,2}", out):
+        try:
+            import base64
+            decoded = base64.b64decode(b64, validate=True)
+            if any(k in decoded for k in (b"access_token", b"api_key", b"apikey", b"authorization", b"password", b"secret")):
+                out = out.replace(b64, "***")
+        except Exception:
+            continue
+    return out
+
 
 def _redact(value):
-    """递归脱敏 dict/list 中的敏感字段值（就地不修改原对象）。"""
+    """递归脱敏 dict/list 中的敏感字段值与字符串内联凭据（不修改原对象）。"""
     if isinstance(value, dict):
         return {
             k: ("***" if any(s in k.lower() for s in _SENSITIVE_KEY_SUBSTRINGS)
@@ -59,6 +94,8 @@ def _redact(value):
         }
     if isinstance(value, list):
         return [_redact(v) for v in value]
+    if isinstance(value, str):
+        return _redact_string(value)
     return value
 
 from emrg.tools import ToolRegistry
