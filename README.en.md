@@ -30,11 +30,11 @@ EMRG is an experiment in *autonomous self-improvement*. It's an AI agent that he
 
 | What | What it means |
 |---|---|
-| 🧠 **Reads, writes, edits, runs** | Full tool-calling agent — bash, files, diffs, all in your terminal |
+| 🖥️ **Electron GUI (main entry)** | Non-developer entry point — install and go: first-run wizard configures API key, chat/sessions/tool status/settings all graphical. v0.2.5 full redesign: light/dark theme (follows system), friendly tool status rows, multi-model management, empty-state welcome, back-to-bottom button. v0.2.6 keyboard accessibility: ↑↓ nav, Enter submit in forms (all components keyboard-usable). v0.2.7 macOS code signing + notarization — zero Gatekeeper dialogs. **GUI configured = TUI ready** (shared config) |
+| 🧠 **Reads, writes, edits, runs** | Full tool-calling agent — bash, files, diffs |
 | 🔄 **Gets better on its own** | Background evolution cycles review rants + GitHub + competitor tools, then auto-PR improvements |
 | 📝 **Never forgets** | Project memory + session memory + daily logs — context that persists |
-| 🖥️ **Beautiful TUI** | Slash-command autocomplete, session picker, streaming markdown, elapsed timer, ESC interrupt |
-| 🖱️ **Electron GUI (new)** | Non-developer entry point — chat/sessions/tool status/settings, auto-starts daemon, `npm start` to launch. v0.2.5 full redesign: light/dark theme (follows system), friendly tool status rows, multi-model management, empty-state welcome, back-to-bottom button. v0.2.6 keyboard accessibility: ↑↓ nav in model switcher/context menu/conv list, Enter submit in forms (all components keyboard-usable). v0.2.7 macOS code signing + notarization: Developer ID dual-cert, embedded Python runtime codesign, notary + spctl final gate — zero Gatekeeper dialogs on install |
+| 🖥️ **Beautiful TUI** | Slash-command autocomplete, session picker, streaming markdown, elapsed timer, ESC interrupt. Advanced commands: `/rant` `/model` `/memory` |
 | ⚡ **Parallel tools** | Independent tool calls run concurrently for speed |
 | 🔌 **Micro-kernel daemon** | `emrgd` runs persistently — reconnect anytime without losing state |
 | 🎮 **Vim-friendly** | `j`/`k` navigation, `Ctrl+W`/`Ctrl+K` editing, `Tab` to expand tool cards |
@@ -56,15 +56,21 @@ Download the installer for your platform from [GitHub Releases](https://github.c
 | Linux | `EMRG-<ver>-linux-x86_64.AppImage` | Self-extracts to `~/.emrg/install/` on first run |
 | Linux (ARM64) | `EMRG-<ver>-linux-aarch64.AppImage` | Same |
 
+> **Windows SmartScreen notice**: The Windows installer is not Authenticode-signed (publisher shows "Unknown"), so SmartScreen may show "usually doesn't download" or "Windows protected your PC" on first download/run. This is a standard security prompt for unsigned software — it does **not** mean the file is bad (EMRG is fully open source and auditable). To proceed:
+> (1) Browser download prompt → click **Keep** (or ⋯ → Keep)
+> (2) If double-clicking shows "Windows protected your PC" → click **More info** → click **Run anyway**
+> (3) Or right-click the exe → Properties → check **Unblock** (if present) → OK → double-click to run
+
 The installer bundles a full runtime (standalone Python 3.13 + deps + git + gh + GUI) — **zero prerequisites on a clean machine (no python/uv/git/gh/node)**, 100% offline install. After install:
 
-- GUI: launch **EMRG** from Launchpad / Start menu
-- TUI: `~/.emrg/install/bin/emrg` (macOS writes a shell rc PATH anchor at install, so `emrg` works in new terminals; Linux also creates `~/.local/bin/emrg` symlink)
-- First-run wizard asks for your API key; python scripts work inside sessions
+**Three steps to start:**
+1. Launch **EMRG** (GUI) from Launchpad / Start menu
+2. First-run wizard configures **API Key / model**
+3. Start chatting — **TUI is ready too** (run `emrg` in a new terminal)
 
 > **Uninstall**: macOS run "卸载 EMRG.app" (uninstall app); Windows uninstall from Control Panel; Linux run `~/.emrg/install/bin/emrg-uninstall` (or delete the AppImage + symlink). Uninstall preserves non-EMRG user files in `~/.emrg`, and writes a termination report + data snapshot. **Windows uninstall is thorough** (v0.2.2+): kills GUI first to prevent daemon respawn, full whitelist cleanup of runtime files, `[UninstallDelete]` fallback removes install/, no residue in `~/.emrg`.
 >
-> **macOS signing & notarization**: since v0.2.7, macOS packages are signed with Developer ID dual-cert and notarized by Apple (zero Gatekeeper dialogs — double-click to install directly). Only for unsigned builds (e.g. self-built old versions) is right-click → Open needed on first launch. Besides the GUI, you can also edit `~/.emrg/config.toml` directly (GUI settings save rewrites config and drops comments — for advanced config, edit the file).
+> **macOS signing & notarization**: since v0.2.7, macOS packages are signed with Developer ID dual-cert and notarized by Apple (zero Gatekeeper dialogs — double-click to install directly). Only for unsigned builds (e.g. self-built old versions) is right-click → Open needed on first launch.
 
 ### 🍎 macOS (source install)
 
@@ -116,20 +122,29 @@ curl -sSL https://raw.githubusercontent.com/argszero/emrg/master/install.sh | ba
 
 > Source-install prerequisites (install.sh auto-detects and prompts): git, python 3.11+, uv. gh CLI recommended. For native Windows (non-WSL), use the installer above.
 
-After installing, edit the auto-generated config template:
+### 🖥️ First-time config (GUI first)
+
+After installing, **open the GUI to configure**:
+
+1. **macOS**: Launchpad → **EMRG**; **Windows**: Start menu → **EMRG**
+2. The first-run wizard walks you through **API Key / base URL / model** (also editable anytime in Settings ⚙)
+3. Save and start chatting — **config is written to `~/.emrg/config.toml`, shared by GUI and TUI**
+
+> 💡 **GUI configured = TUI ready**: the installer bundles a full TUI. Config saved in the GUI (API key/model/workdir) goes to `~/.emrg/config.toml`, so running `emrg` in a new terminal enters the TUI with no re-configuration. The GUI covers most daily operations; the TUI offers advanced commands like `/rant` `/model` `/memory`.
+
+### ⌨️ Using the TUI
 
 ```bash
-vim ~/.emrg/config.toml
+emrg
 ```
 
-**Prefer a GUI?** Non-developers can use the Electron GUI:
+Type `/help` for all commands, or just start talking — EMRG reads files, runs commands, and makes edits.
 
-```bash
-git clone https://github.com/argszero/emrg.git && cd emrg/emrg/gui
-npm ci && npm start     # auto-starts daemon; chat/sessions/settings all graphical
-```
+### 🔧 Advanced config (optional)
 
-`~/.emrg/config.toml` template example:
+> The GUI rewrites config on save and drops comments — advanced users can edit `~/.emrg/config.toml` directly (no manual editing needed for first-time setup; the GUI wizard handles it).
+
+`~/.emrg/config.toml` template example (the GUI generates equivalent content on save):
 
 ```toml
 [llm]
@@ -158,15 +173,11 @@ context_window = 128000
 vision = true
 ```
 
-```bash
-emrg
-```
-
-Type `/help` to see all commands, or just start talking — EMRG reads files, runs commands, and makes edits.
-
 ---
 
 ## 🎮 Commands
+
+> The GUI covers most daily operations (chat/sessions/settings/model switching); the TUI offers these advanced commands.
 
 | Command | What it does |
 |---|---|
@@ -308,6 +319,9 @@ Any OpenAI-compatible API. Tested with DeepSeek and OpenAI. Works with Anthropic
 
 **How is this different from Claude Code or Codex?**<br>
 They're products. EMRG is an experiment in *closing the loop* — the AI improves the AI. Also: fully open source, no vendor lock-in, and you control your data.
+
+**Why does the Windows installer show "Unknown publisher"?**<br>
+The Windows installer is not Authenticode-signed (that certificate costs money to obtain and is not procured yet), so SmartScreen shows "Publisher: Unknown" and may block the run. This is a standard Microsoft security prompt for newly released/unsigned software — it does **not** mean the file is bad: EMRG is fully open source (MIT) and auditable. To proceed: click "Keep" on the browser prompt; click "More info → Run anyway" on the run prompt; or right-click the exe → Properties → check "Unblock". The macOS installer is signed + notarized (v0.2.7+) and has no such prompt.
 
 ---
 
