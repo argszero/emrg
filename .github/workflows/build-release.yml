@@ -80,11 +80,12 @@ jobs:
             echo "::error::MACOS_SIGNING_P12_BASE64 未包含可签名私钥（security import 仅导入证书链）。请从 Keychain Access 导出含私钥的 p12（证书右键 → 导出 → 勾选\"包含私钥\"），重新 base64 后更新 GitHub Secret。import 输出：${IMPORT_OUTPUT}"
             exit 1
           fi
-          # set-key-partition-list 语法：[-S partition-list] [-k password] [match-options] [keychain]
-          # -s = Match keys that can sign（匹配可签名私钥，必须显式提供才能定位项目）；
-          # -S 后跟分区 ID 列表；-k 后跟 keychain 密码。
-          # 缺失匹配参数 → SecItemCopyMatching: item not found（v0.2.7 构建失败根因）。
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k 'ci-temp' /tmp/ci.keychain
+          # set-key-partition-list 与 electron-builder macCodeSign.js 完全一致：
+          #   security set-key-partition-list -S apple-tool:,apple: -s -k <password> <keychain>
+          # -s = Match keys that can sign（必须显式提供才能定位私钥项目）；
+          # -S apple-tool:,apple:（⚠️ 不可加 codesign: 分区——实测 v0.2.7 构建
+          #   #453 加 codesign: 后仍 SecItemCopyMatching: item not found）。
+          security set-key-partition-list -S apple-tool:,apple: -s -k 'ci-temp' /tmp/ci.keychain
           # SC2046: -s 需要将每个 keychain 路径作为独立参数传递，词分割是有意的
           # shellcheck disable=SC2046
           security list-keychains -d user -s /tmp/ci.keychain $(security list-keychains -d user | tr -d '"')
