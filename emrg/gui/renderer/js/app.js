@@ -54,6 +54,7 @@ const App = (() => {
         return;
       }
       if (init.sessions && init.sessions.length > 0) {
+        state.sessions = init.sessions;
         Sidebar.render(init.sessions);
         const current = init.sessions.find((s) => s.session_id === state.sessionId);
         if (current) {
@@ -111,12 +112,12 @@ const App = (() => {
     }
   }
 
-  // ── / 指令（rant 19:44 P1）──────────────────
-  /** 执行 / 指令。phase 1 纯操作类已实现；phase 2+ 提示阶段未开放。 */
+  // ── / 指令（rant 19:44 P1/P2）──────────────────
+  /** 执行 / 指令。phase 1 纯操作 + phase 2 会话管理已实现；phase 3+ 提示阶段未开放。 */
   async function handleCommand(parsed) {
     const cmd = parsed.cmd;
     const meta = Commands.COMMANDS[cmd];
-    if (!meta || meta.phase > 1) {
+    if (!meta || meta.phase > 2) {
       const phase = meta ? `（阶段 ${meta.phase}，后续版本开放）` : "";
       Chat.addSystemMessage(`指令 ${cmd} 暂未开放${phase}。`);
       return;
@@ -151,11 +152,121 @@ const App = (() => {
         case "/image":
           Chat.addSystemMessage("请直接粘贴图片到输入框（Ctrl+V / ⌘V）。");
           break;
+        case "/sessions":
+        case "/resume":
+          // P2：/resume <id> 直接切换；无参数 → 会话列表对话框
+          if (parsed.args.length > 0) {
+            await switchSession(parsed.args[0]);
+          } else {
+            showSessionsDialog();
+          }
+          break;
+        case "/rename":
+          // P2：复用现有重命名对话框（右键菜单同款）
+          if (!state.sessionId) {
+            Chat.addSystemMessage("请先创建一个对话。");
+            return;
+          }
+          const cur = state.sessions.find((s) => s.session_id === state.sessionId);
+          Dialogs.showRename(state.sessionId, cur ? cur.title : "");
+          break;
+        case "/delete":
+          // P2：复用现有删除确认（右键菜单同款）
+          if (!state.sessionId) {
+            Chat.addSystemMessage("请先创建一个对话。");
+            return;
+          }
+          Dialogs.showConfirm(EMRG_Copy.COPY.deleteConfirmTitle, EMRG_Copy.COPY.deleteConfirmBody, {
+            okText: "删除",
+            danger: true,
+            onOk: () => deleteSession(state.sessionId),
+          });
+          break;
+        case "/rewind":
+          // P2：历史消息点选择对话框
+          showRewindDialog();
+          break;
         default:
           Chat.addSystemMessage(`指令 ${cmd} 暂未开放。`);
       }
     } catch (e) {
       Chat.addSystemMessage(`指令 ${cmd} 执行失败：${e.message}`);
+    }
+  }
+
+  // /sessions /resume：会话列表对话框（复用 help-list 样式）
+  async function showSessionsDialog() {
+    const list = $("sessions-list");
+    const dialog = $("sessions-dialog");
+    if (!list || !dialog) return;
+    await refreshSessions(); // 确保 state.sessions 最新
+    list.innerHTML = "";
+    if (state.sessions.length === 0) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">还没有对话，输入内容即可开始。</span></div>`;
+    }
+    state.sessions.forEach((s) => {
+      const row = el("button", { class: "help-row", type: "button", style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;" });
+      const name = el("span", { class: "help-cmd" }, s.title || "(未命名)");
+      const hint = el("span", { class: "help-hint" }, s.session_id === state.sessionId ? "当前" : "");
+      row.appendChild(name);
+      row.appendChild(hint);
+      row.addEventListener("click", async () => {
+        dialog.close();
+        await switchSession(s.session_id);
+      });
+      list.appendChild(row);
+    });
+    dialog.showModal();
+  }
+
+  // /rewind：历史消息点选择对话框（daemon list_history → 选择 → rewind_session）
+  async function showRewindDialog() {
+    const list = $("rewind-list");
+    const dialog = $("rewind-dialog");
+    if (!list || !dialog) return;
+    if (!state.sessionId) {
+      Chat.addSystemMessage("请先创建一个对话。");
+      return;
+    }
+    list.innerHTML = `<div class="help-row"><span class="help-hint">加载中…</span></div>`;
+    dialog.showModal();
+    try {
+      const { messages } = await window.emrg.listHistory({ sessionId: state.sessionId });
+      list.innerHTML = "";
+      if (!messages || messages.length === 0) {
+        list.innerHTML = `<div class="help-row"><span class="help-hint">没有可回退的历史消息。</span></div>`;
+        return;
+      }
+      // 倒序：最新消息点在最上
+      [...messages].reverse().forEach((m) => {
+        const idx = m.record_index;
+        const row = el("button", {
+          class: "help-row",
+          type: "button",
+          style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;",
+        });
+        const name = el("span", { class: "help-cmd" }, `#${idx}`);
+        const hint = el("span", { class: "help-hint" }, (m.preview || m.content || "").slice(0, 60));
+        row.appendChild(name);
+        row.appendChild(hint);
+        row.addEventListener("click", async () => {
+          dialog.close();
+          await doRewind(idx);
+        });
+        list.appendChild(row);
+      });
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">加载历史失败：${escapeHtml(e.message)}</span></div>`;
+    }
+  }
+
+  async function doRewind(recordIndex) {
+    try {
+      const res = await window.emrg.rewindSession({ sessionId: state.sessionId, recordIndex });
+      Chat.clear();
+      Chat.addSystemMessage(`已回退到消息点 #${recordIndex}，移除了 ${res.removedCount ?? 0} 条记录。`);
+    } catch (e) {
+      Chat.addSystemMessage(`回退失败：${e.message}`);
     }
   }
 
@@ -297,6 +408,7 @@ const App = (() => {
   async function refreshSessions() {
     try {
       const sessions = await window.emrg.listSessions();
+      state.sessions = sessions;
       Sidebar.render(sessions);
     } catch { /* 忽略 */ }
   }
@@ -521,6 +633,7 @@ const App = (() => {
         handleStatus(data);
         break;
       case "sessions":
+        state.sessions = data.sessions || [];
         Sidebar.render(data.sessions || []);
         break;
       case "disconnected":
@@ -546,7 +659,10 @@ const App = (() => {
         Chat.groupNodes.delete(data.requestId);
         break;
       case "list_result":
-        if (data.type === "sessions_list") Sidebar.render(data.sessions || []);
+        if (data.type === "sessions_list") {
+          state.sessions = data.sessions || [];
+          Sidebar.render(data.sessions || []);
+        }
         break;
       case "command_result":
         if (data.type === "model_set") {
@@ -607,6 +723,8 @@ const App = (() => {
     $("confirm-cancel").addEventListener("click", Dialogs.closeConfirm);
     $("confirm-ok").addEventListener("click", Dialogs.confirmOk);
     $("help-close").addEventListener("click", () => $("help-dialog").close());
+    $("sessions-close").addEventListener("click", () => $("sessions-dialog").close());
+    $("rewind-close").addEventListener("click", () => $("rewind-dialog").close());
 
     // 设置/首启对话框：Enter 提交（与重命名/模型表单一致的交互）
     const enterToSave = (fn) => (e) => {

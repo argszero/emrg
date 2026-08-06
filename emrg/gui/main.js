@@ -334,6 +334,27 @@ vision = false
       return { ok: true };
     });
 
+    ipcMain.handle("emrg:listHistory", async (_e, { sessionId }) => {
+      // GUI / 指令 P2：/rewind — 获取会话历史消息点（daemon 协议 list_history 已存在）
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      const frame = await client.sendCommandAndWait("list_history", { session_id: sessionId, cwd: projectDir }, 5000);
+      return { messages: frame.messages || [] };
+    });
+
+    ipcMain.handle("emrg:rewindSession", async (_e, { sessionId, recordIndex }) => {
+      // GUI / 指令 P2：/rewind — 回退到指定历史消息点（daemon 协议 rewind_session 已存在）
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      if (typeof recordIndex !== "number" || !Number.isInteger(recordIndex) || recordIndex < 0) {
+        throw new Error("invalid record_index");
+      }
+      const frame = await client.sendCommandAndWait(
+        "rewind_session",
+        { session_id: sessionId, cwd: projectDir, record_index: recordIndex },
+        5000
+      );
+      return { ok: true, removedCount: frame.removed_count ?? 0 };
+    });
+
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };

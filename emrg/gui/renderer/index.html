@@ -195,6 +195,30 @@
     </div>
   </dialog>
 
+  <!-- 会话列表对话框（/sessions /resume，GUI / 指令 P2） -->
+  <dialog id="sessions-dialog">
+    <div class="dialog-card" style="min-width:420px;">
+      <h2>切换对话</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">点击切换，或输入 /resume &lt;id&gt; 直接切换。</p>
+      <div id="sessions-list" class="help-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="sessions-close" class="btn btn-ghost">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- 历史回退对话框（/rewind，GUI / 指令 P2） -->
+  <dialog id="rewind-dialog">
+    <div class="dialog-card" style="min-width:480px;">
+      <h2>回退到历史消息点</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);">选择要保留到的消息点，之后的对话将被移除。</p>
+      <div id="rewind-list" class="help-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="rewind-close" class="btn btn-ghost">取消</button>
+      </div>
+    </div>
+  </dialog>
+
   <script src="js/utils.js"></script>
   <script src="js/commands.js"></script>
   <script src="js/markdown.js"></script>
