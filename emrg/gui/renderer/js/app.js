@@ -58,7 +58,7 @@ const App = (() => {
         return;
       }
       if (!init.project_dir_valid) {
-        Chat.addSystemMessage("工作目录不可用，请到设置里改一下。");
+        Chat.addSystemMessage(_t("app.workdirInvalid"));
         Dialogs.showSettings();
         return;
       }
@@ -78,7 +78,7 @@ const App = (() => {
       // 回调会调用 setComposerDisabled(false)，形成"需先发消息才能启用输入框"死锁）
       setComposerDisabled(false);
     } catch (e) {
-      Chat.addSystemMessage(`启动遇到了问题：${e.message}`);
+      Chat.addSystemMessage(_t("app.bootFailed", { msg: e.message }));
     }
   }
 
@@ -97,7 +97,7 @@ const App = (() => {
       return;
     }
     if (!state.sessionId) {
-      Chat.addSystemMessage("请先创建一个对话。");
+      Chat.addSystemMessage(_t("app.needSession"));
       return;
     }
     state.busy = true;
@@ -127,27 +127,27 @@ const App = (() => {
     const cmd = parsed.cmd;
     const meta = Commands.COMMANDS[cmd];
     if (!meta) {
-      Chat.addSystemMessage(`指令 ${cmd} 暂未开放。`);
+      Chat.addSystemMessage(_t("app.cmdUnknown", { cmd }));
       return;
     }
     try {
       switch (cmd) {
         case "/clear":
           if (!state.sessionId) {
-            Chat.addSystemMessage("请先创建一个对话。");
+            Chat.addSystemMessage(_t("app.needSession"));
             return;
           }
           await window.emrg.clearSession({ sessionId: state.sessionId });
           Chat.clear();
-          Chat.addSystemMessage("已清空当前对话。");
+          Chat.addSystemMessage(_t("app.cleared"));
           break;
         case "/compact":
           if (!state.sessionId) {
-            Chat.addSystemMessage("请先创建一个对话。");
+            Chat.addSystemMessage(_t("app.needSession"));
             return;
           }
           await window.emrg.compactSession({ sessionId: state.sessionId });
-          Chat.addSystemMessage("已压缩当前对话历史。");
+          Chat.addSystemMessage(_t("app.compacted"));
           break;
         case "/version":
           showVersionInfo();
@@ -156,7 +156,7 @@ const App = (() => {
           showHelpDialog();
           break;
         case "/image":
-          Chat.addSystemMessage("请直接粘贴图片到输入框（Ctrl+V / ⌘V）。");
+          Chat.addSystemMessage(_t("app.imagePaste"));
           break;
         case "/sessions":
         case "/resume":
@@ -170,7 +170,7 @@ const App = (() => {
         case "/rename":
           // P2：复用现有重命名对话框（右键菜单同款）
           if (!state.sessionId) {
-            Chat.addSystemMessage("请先创建一个对话。");
+            Chat.addSystemMessage(_t("app.needSession"));
             return;
           }
           const cur = state.sessions.find((s) => s.session_id === state.sessionId);
@@ -179,11 +179,11 @@ const App = (() => {
         case "/delete":
           // P2：复用现有删除确认（右键菜单同款）
           if (!state.sessionId) {
-            Chat.addSystemMessage("请先创建一个对话。");
+            Chat.addSystemMessage(_t("app.needSession"));
             return;
           }
           Dialogs.showConfirm(EMRG_Copy.COPY.deleteConfirmTitle, EMRG_Copy.COPY.deleteConfirmBody, {
-            okText: "删除",
+            okText: _t("dlg.delete"),
             danger: true,
             onOk: () => deleteSession(state.sessionId),
           });
@@ -221,10 +221,10 @@ const App = (() => {
           }
           break;
         default:
-          Chat.addSystemMessage(`指令 ${cmd} 暂未开放。`);
+          Chat.addSystemMessage(_t("app.cmdUnknown", { cmd }));
       }
     } catch (e) {
-      Chat.addSystemMessage(`指令 ${cmd} 执行失败：${e.message}`);
+      Chat.addSystemMessage(_t("app.cmdFailed", { cmd, msg: e.message }));
     }
   }
 
@@ -236,12 +236,12 @@ const App = (() => {
     await refreshSessions(); // 确保 state.sessions 最新
     list.innerHTML = "";
     if (state.sessions.length === 0) {
-      list.innerHTML = `<div class="help-row"><span class="help-hint">还没有对话，输入内容即可开始。</span></div>`;
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.helpNoSessions")}</span></div>`;
     }
     state.sessions.forEach((s) => {
       const row = el("button", { class: "help-row", type: "button", style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;" });
-      const name = el("span", { class: "help-cmd" }, s.title || "(未命名)");
-      const hint = el("span", { class: "help-hint" }, s.session_id === state.sessionId ? "当前" : "");
+      const name = el("span", { class: "help-cmd" }, s.title || _t("app.unnamed"));
+      const hint = el("span", { class: "help-hint" }, s.session_id === state.sessionId ? _t("app.current") : "");
       row.appendChild(name);
       row.appendChild(hint);
       row.addEventListener("click", async () => {
@@ -259,16 +259,16 @@ const App = (() => {
     const dialog = $("rewind-dialog");
     if (!list || !dialog) return;
     if (!state.sessionId) {
-      Chat.addSystemMessage("请先创建一个对话。");
+      Chat.addSystemMessage(_t("app.needSession"));
       return;
     }
-    list.innerHTML = `<div class="help-row"><span class="help-hint">加载中…</span></div>`;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
     dialog.showModal();
     try {
       const { messages } = await window.emrg.listHistory({ sessionId: state.sessionId });
       list.innerHTML = "";
       if (!messages || messages.length === 0) {
-        list.innerHTML = `<div class="help-row"><span class="help-hint">没有可回退的历史消息。</span></div>`;
+        list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.noHistory")}</span></div>`;
         return;
       }
       // 倒序：最新消息点在最上
@@ -290,7 +290,7 @@ const App = (() => {
         list.appendChild(row);
       });
     } catch (e) {
-      list.innerHTML = `<div class="help-row"><span class="help-hint">加载历史失败：${escapeHtml(e.message)}</span></div>`;
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.historyFailed", { msg: escapeHtml(e.message) })}</span></div>`;
     }
   }
 
@@ -298,9 +298,9 @@ const App = (() => {
     try {
       const res = await window.emrg.rewindSession({ sessionId: state.sessionId, recordIndex });
       Chat.clear();
-      Chat.addSystemMessage(`已回退到消息点 #${recordIndex}，移除了 ${res.removedCount ?? 0} 条记录。`);
+      Chat.addSystemMessage(_t("app.rewound", { index: recordIndex, n: res.removedCount ?? 0 }));
     } catch (e) {
-      Chat.addSystemMessage(`回退失败：${e.message}`);
+      Chat.addSystemMessage(_t("app.rewindFailed", { msg: e.message }));
     }
   }
 
@@ -310,7 +310,7 @@ const App = (() => {
     const detail = $("memory-detail");
     const dialog = $("memory-dialog");
     if (!list || !dialog) return;
-    list.innerHTML = `<div class="help-row"><span class="help-hint">加载中…</span></div>`;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
     if (detail) detail.classList.add("hidden");
     dialog.showModal();
     const scope = String(sub || "").toLowerCase() === "session" ? "session" : "project";
@@ -318,7 +318,7 @@ const App = (() => {
       const memories = await window.emrg.listMemories({ scope, sessionId: state.sessionId });
       list.innerHTML = "";
       if (!memories || memories.length === 0) {
-        list.innerHTML = `<div class="help-row"><span class="help-hint">还没有${scope === "session" ? "会话" : "项目"}记忆。</span></div>`;
+        list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.noMemories", { scope: scope === "session" ? _t("app.sessionMem") : _t("app.projectMem") })}</span></div>`;
         return;
       }
       for (const m of memories) {
@@ -327,7 +327,7 @@ const App = (() => {
           type: "button",
           style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;",
         });
-        const title = m.title || m.id || "(未命名)";
+        const title = m.title || m.id || _t("app.unnamed");
         const name = el("span", { class: "help-cmd" }, String(title).slice(0, 40));
         const hint = el("span", { class: "help-hint" }, (m.summary || m.content || "").slice(0, 50));
         row.appendChild(name);
@@ -343,13 +343,13 @@ const App = (() => {
               Chat.addSystemMessage(body.slice(0, 500));
             }
           } catch (err) {
-            Chat.addSystemMessage(`读取记忆失败：${err.message}`);
+            Chat.addSystemMessage(_t("app.readMemFailed", { msg: err.message }));
           }
         });
         list.appendChild(row);
       }
     } catch (e) {
-      list.innerHTML = `<div class="help-row"><span class="help-hint">加载记忆失败：${escapeHtml(e.message)}</span></div>`;
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.memFailed", { msg: escapeHtml(e.message) })}</span></div>`;
     }
   }
 
@@ -358,25 +358,25 @@ const App = (() => {
     const list = $("skills-list");
     const dialog = $("skills-dialog");
     if (!list || !dialog) return;
-    list.innerHTML = `<div class="help-row"><span class="help-hint">加载中…</span></div>`;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
     dialog.showModal();
     try {
       const skills = await window.emrg.listSkills();
       list.innerHTML = "";
       if (!skills || skills.length === 0) {
-        list.innerHTML = `<div class="help-row"><span class="help-hint">还没有加载技能。</span></div>`;
+        list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.noSkills")}</span></div>`;
         return;
       }
       for (const s of skills) {
         const row = el("div", { class: "help-row" });
-        const name = el("span", { class: "help-cmd" }, s.name || "(未命名)");
+        const name = el("span", { class: "help-cmd" }, s.name || _t("app.unnamed"));
         const hint = el("span", { class: "help-hint" }, `${s.source || ""}${s.description ? " · " + s.description.slice(0, 50) : ""}`);
         row.appendChild(name);
         row.appendChild(hint);
         list.appendChild(row);
       }
     } catch (e) {
-      list.innerHTML = `<div class="help-row"><span class="help-hint">加载技能失败：${escapeHtml(e.message)}</span></div>`;
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.skillsFailed", { msg: escapeHtml(e.message) })}</span></div>`;
     }
   }
 
@@ -389,7 +389,7 @@ const App = (() => {
     // 加载项目列表填充下拉
     try {
       const projects = await window.emrg.listProjects();
-      projSel.innerHTML = `<option value="">（全局 — 所有项目）</option>`;
+      projSel.innerHTML = `<option value="">${_t("app.globalAll")}</option>`;
       for (const p of projects) {
         const name = typeof p === "string" ? p : (p.name || "");
         if (name) projSel.appendChild(el("option", { value: name }, name));
@@ -403,14 +403,14 @@ const App = (() => {
   async function submitRant(message, project) {
     const text = String(message || "").trim();
     if (!text) {
-      Chat.addSystemMessage("写点内容再提交吧。");
+      Chat.addSystemMessage(_t("app.rantEmpty"));
       return;
     }
     try {
       const res = await window.emrg.sendRant({ message: text, project });
-      Chat.addSystemMessage(`✓ 收到！EMRG 会据此进化${res.count ? `（已累计 ${res.count} 条反馈）` : ""}。`);
+      Chat.addSystemMessage(`${_t("app.rantReceived")}${res.count ? _t("app.rantCount", { n: res.count }) : ""}`);
     } catch (e) {
-      Chat.addSystemMessage(`提交失败了：${e.message}`);
+      Chat.addSystemMessage(_t("app.rantFailed", { msg: e.message }));
     }
   }
 
@@ -419,13 +419,13 @@ const App = (() => {
     const list = $("tasks-list");
     const dialog = $("tasks-dialog");
     if (!list || !dialog) return;
-    list.innerHTML = `<div class="help-row"><span class="help-hint">加载中…</span></div>`;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
     dialog.showModal();
     try {
       const tasks = await window.emrg.listTasks();
       list.innerHTML = "";
       if (!tasks || tasks.length === 0) {
-        list.innerHTML = `<div class="help-row"><span class="help-hint">没有可触发的任务。</span></div>`;
+        list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.noTasks")}</span></div>`;
         return;
       }
       for (const t of tasks) {
@@ -434,8 +434,8 @@ const App = (() => {
           type: "button",
           style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;",
         });
-        const name = el("span", { class: "help-cmd" }, t.name || t.type || "(任务)" );
-        const hint = el("span", { class: "help-hint" }, t.enabled === false ? "已停用" : `间隔 ${t.interval ?? "-"}s`);
+        const name = el("span", { class: "help-cmd" }, t.name || t.type || _t("app.unnamed"));
+        const hint = el("span", { class: "help-hint" }, t.enabled === false ? _t("app.taskDisabled") : _t("app.taskInterval", { n: t.interval ?? "-" }));
         row.appendChild(name);
         row.appendChild(hint);
         row.addEventListener("click", async () => {
@@ -445,7 +445,7 @@ const App = (() => {
         list.appendChild(row);
       }
     } catch (e) {
-      list.innerHTML = `<div class="help-row"><span class="help-hint">加载任务失败：${escapeHtml(e.message)}</span></div>`;
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.tasksFailed", { msg: escapeHtml(e.message) })}</span></div>`;
     }
   }
 
@@ -455,12 +455,12 @@ const App = (() => {
     try {
       const res = await window.emrg.triggerTask({ name: n });
       if (res.error) {
-        Chat.addSystemMessage(`触发失败：${res.error}`);
+        Chat.addSystemMessage(_t("app.triggerFailed", { msg: res.error }));
       } else {
-        Chat.addSystemMessage(`已触发任务 ${n}。`);
+        Chat.addSystemMessage(_t("app.triggered", { n }));
       }
     } catch (e) {
-      Chat.addSystemMessage(`触发失败：${e.message}`);
+      Chat.addSystemMessage(_t("app.triggerFailed", { msg: e.message }));
     }
   }
 
@@ -539,7 +539,7 @@ const App = (() => {
       Chat.clear();
       updateEmptyState();
       if (res.error === "session_not_found") {
-        Chat.addSystemMessage("这个对话已被删除，已帮你切到最近的对话。");
+        Chat.addSystemMessage(_t("app.deletedSwitch"));
         if (res.next_session) {
           Sidebar.render(res.sessions || []);
           await switchSession(res.next_session, { silent: true });
@@ -550,13 +550,13 @@ const App = (() => {
       }
       // G13：v1 不加载历史（G12）
       if (!opts.silent) {
-        Chat.addSystemMessage("已切换对话。");
+        Chat.addSystemMessage(_t("app.switched"));
       }
       updateEmptyState();
       Sidebar.highlight(sid);
       setComposerDisabled(false); // 防御性：独立调用 switchSession 也确保输入框可用
     } catch (e) {
-      Chat.addSystemMessage(`切换对话失败了：${e.message}`);
+      Chat.addSystemMessage(_t("app.switchFailed", { msg: e.message }));
     }
   }
 
@@ -574,7 +574,7 @@ const App = (() => {
       Sidebar.highlight(state.sessionId);
       setComposerDisabled(false); // 防御性：独立调用 newSession 也确保输入框可用
     } catch (e) {
-      Chat.addSystemMessage(`新建对话失败了：${e.message}`);
+      Chat.addSystemMessage(_t("app.newFailed", { msg: e.message }));
     }
   }
 
@@ -595,7 +595,7 @@ const App = (() => {
       }
       await refreshSessions();
     } catch (e) {
-      Chat.addSystemMessage(`删除失败了：${e.message}`);
+      Chat.addSystemMessage(_t("app.deleteFailed", { msg: e.message }));
     }
   }
 
@@ -620,9 +620,9 @@ const App = (() => {
       });
       menu.appendChild(b);
     };
-    mk("✏️ 重命名", false, () => Dialogs.showRename(sid, title));
-    mk("🗑 删除对话", true, () => Dialogs.showConfirm(EMRG_Copy.COPY.deleteConfirmTitle, EMRG_Copy.COPY.deleteConfirmBody, {
-      okText: "删除",
+    mk(_t("app.rename"), false, () => Dialogs.showRename(sid, title));
+    mk(_t("app.deleteConv"), true, () => Dialogs.showConfirm(EMRG_Copy.COPY.deleteConfirmTitle, EMRG_Copy.COPY.deleteConfirmBody, {
+      okText: _t("dlg.delete"),
       danger: true,
       onOk: () => deleteSession(sid),
     }));
@@ -688,7 +688,7 @@ const App = (() => {
   /** 版本信息（/version 命令 + 进化 toast "去看看" 共用） */
   function showVersionInfo() {
     Chat.addSystemMessage(
-      `EMRG GUI v${state.version || "0.2.8"} · 实例 ${state.serverId || "未知"} · 模型 ${state.model || "未知"} · 已进化 ${state.evolutionCount ?? 0} 次`
+      _t("app.versionInfo", { ver: state.version || "0.2.8", id: state.serverId || _t("app.unknown"), model: state.model || _t("app.unknown"), n: state.evolutionCount ?? 0 })
     );
   }
 
@@ -783,8 +783,8 @@ const App = (() => {
         const models = s.models?.length ? s.models : s.model ? [s.model] : [];
         const menu = el("div", { class: "model-menu" });
         if (!models.length) {
-          const empty = el("div", { class: "model-menu-empty" }, "还没有配置模型");
-          const go = el("a", {}, "去设置添加");
+          const empty = el("div", { class: "model-menu-empty" }, _t("app.noModels"));
+          const go = el("a", {}, _t("app.goSettings"));
           go.addEventListener("click", () => {
             closeModelMenu();
             Dialogs.showSettings();
@@ -810,7 +810,7 @@ const App = (() => {
                 sw.classList.add("highlight");
                 setTimeout(() => sw.classList.remove("highlight"), 1200);
               } catch (err) {
-                Chat.addSystemMessage(`切换模型失败了：${err.message}`);
+                Chat.addSystemMessage(_t("app.modelSwitchFailed", { msg: err.message }));
               }
             });
             menu.appendChild(item);
@@ -844,7 +844,7 @@ const App = (() => {
         };
         document.addEventListener("keydown", _modelMenuKeyHandler);
       } catch (err) {
-        Chat.addSystemMessage(`读取模型列表失败了：${err.message}`);
+        Chat.addSystemMessage(_t("app.modelListFailed", { msg: err.message }));
       }
     });
   }
@@ -879,7 +879,7 @@ const App = (() => {
     }
     // Ask 模式提示（仅当切到 ask 时轻提示一次，不打断）
     if (mode === "ask") {
-      Chat.addSystemMessage("Ask 模式：我只对话，不执行工具。输入内容问我就好。");
+      Chat.addSystemMessage(_t("app.askModeNotice"));
     }
   }
 
@@ -972,7 +972,7 @@ const App = (() => {
             row.classList.remove("running");
             row.classList.add("failed");
             const label = row.querySelector(".tool-label");
-            if (label) label.textContent = "结果未知——连接中断";
+            if (label) label.textContent = _t("app.unknownResult");
           }
         }
         break;
@@ -1003,7 +1003,7 @@ const App = (() => {
       state.ownStreamRequestId = null;
       setComposerDisabled(false);
     } else {
-      Chat.addSystemMessage(`出了点问题：${data.error || "未知错误"}`);
+      Chat.addSystemMessage(_t("app.error", { msg: data.error || _t("app.unknownError") }));
     }
   }
 
@@ -1020,7 +1020,7 @@ const App = (() => {
       Chat.addSystemMessage(EMRG_Copy.COPY.reconnected);
     } else if (data.auth_failed) {
       updateConnectionDot("red");
-      Chat.addSystemMessage("认证失败了，请检查设置里的 API Key。");
+      Chat.addSystemMessage(_t("app.authFailed"));
     } else {
       updateConnectionDot("red");
     }

@@ -127,3 +127,37 @@ test("词典完整性：zh 与 en 键集合一致", () => {
   const n = zhKeys.split(",").length;
   assert.ok(n > 60, `词典应覆盖全部 Stage 1 文案（实际 ${n} 键）`);
 });
+
+// ── Stage 2（rant 21:19）：动态文案本地化 ────────────────
+test("Stage2：动态文案键（app/chat/dlg/panel）双语齐全", () => {
+  const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
+  // 抽查关键动态文案
+  assert.strictEqual(evalIn(ctx, 'I18N.t("app.needSession")'), "Start a conversation first.");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("app.versionInfo", { ver: "0.2.8", id: "srv", model: "m", n: 42 })'),
+    "EMRG GUI v0.2.8 · Instance srv · Model m · Evolved 42 times");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("chat.elapsed", { s: "1.2s" })'), "took 1.2s");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("dlg.deleteModelBody", { name: "gpt-4o" })'),
+    '"gpt-4o" will be removed from available models.');
+  assert.strictEqual(evalIn(ctx, 'I18N.t("app.rewound", { index: 3, n: 5 })'),
+    "Rewound to message point #3, removed 5 records.");
+  const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
+  assert.strictEqual(evalIn(zh, 'I18N.t("app.needSession")'), "请先创建一个对话。");
+  assert.strictEqual(evalIn(zh, 'I18N.t("dlg.deleteModelBody", { name: "gpt-4o" })'), "「gpt-4o」将从可用模型里移除。");
+});
+
+test("Stage2：时间分组标签本地化（util.group*）", () => {
+  const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
+  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupToday")'), "Today");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupYesterday")'), "Yesterday");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupEarlier")'), "Earlier");
+  const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
+  assert.strictEqual(evalIn(zh, 'I18N.t("util.groupToday")'), "今天");
+});
+
+test("Stage2：成长卡/关于区静态文案键（#501 吸收）", () => {
+  const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
+  assert.strictEqual(evalIn(ctx, 'I18N.t("copy.growthCountPrefix")'), "Self-evolved");
+  assert.strictEqual(evalIn(ctx, 'I18N.t("copy.times")'), "times");
+  const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
+  assert.strictEqual(evalIn(zh, 'I18N.t("copy.growthCount", { n: 7 })'), "已自我进化 7 次");
+});

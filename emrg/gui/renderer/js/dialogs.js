@@ -69,7 +69,7 @@ const Dialogs = (() => {
     const def = extraModels.find((m) => m.name === defaultName);
     list.appendChild(
       renderModelItem(
-        defaultName || "未配置",
+        defaultName || _t("dlg.notConfigured"),
         true,
         Boolean(def?.vision),
         def?.model && def.model !== def.name ? def.model : ""
@@ -85,7 +85,7 @@ const Dialogs = (() => {
       );
     }
     if (extraModels.filter((m) => m.name !== defaultName).length === 0) {
-      const hint = el("div", { class: "model-list-empty" }, "暂无其他模型，点下方按钮添加");
+      const hint = el("div", { class: "model-list-empty" }, _t("dlg.noOtherModels"));
       list.appendChild(hint);
     }
   }
@@ -93,7 +93,7 @@ const Dialogs = (() => {
   function renderModelItem(name, isDefault, vision, modelId) {
     const row = el("div", { class: "model-item" + (isDefault ? " default" : "") });
     // 单选圆点 → 设为默认
-    const radio = el("button", { class: "model-radio" + (isDefault ? " checked" : ""), title: isDefault ? "当前默认模型" : "设为默认" });
+    const radio = el("button", { class: "model-radio" + (isDefault ? " checked" : ""), title: isDefault ? _t("dlg.currentDefault") : _t("dlg.setDefault") });
     if (isDefault) {
       radio.textContent = "●";
     } else {
@@ -105,20 +105,20 @@ const Dialogs = (() => {
     }
     row.appendChild(radio);
     const title = el("span", { class: "model-name" }, name);
-    if (isDefault) title.appendChild(el("span", { class: "model-badge" }, "默认"));
+    if (isDefault) title.appendChild(el("span", { class: "model-badge" }, _t("dlg.defaultBadge")));
     row.appendChild(title);
     if (modelId) row.appendChild(el("span", { class: "model-id" }, modelId));
-    if (vision) row.appendChild(el("span", { class: "model-vision" }, "🖼 支持图片"));
+    if (vision) row.appendChild(el("span", { class: "model-vision" }, _t("dlg.supportsImages")));
     // 操作：编辑（非默认行 → 打开表单填本条）；删除（默认不可删）
     const actions = el("span", { class: "model-actions" });
-    const editBtn = el("button", { class: "model-action-btn", title: "编辑" }, "编辑");
+    const editBtn = el("button", { class: "model-action-btn", title: _t("dlg.edit") }, _t("dlg.edit"));
     editBtn.addEventListener("click", () => openModelForm(name, isDefault));
     actions.appendChild(editBtn);
     if (!isDefault) {
-      const delBtn = el("button", { class: "model-action-btn danger", title: "删除" }, "删除");
+      const delBtn = el("button", { class: "model-action-btn danger", title: _t("dlg.delete") }, _t("dlg.delete"));
       delBtn.addEventListener("click", () => {
-        showConfirm("删除这个模型？", `「${name}」将从可用模型里移除。`, {
-          okText: "删除",
+        showConfirm(_t("dlg.deleteModelTitle"), _t("dlg.deleteModelBody", { name }), {
+          okText: _t("dlg.delete"),
           danger: true,
           onOk: () => {
             extraModels = extraModels.filter((m) => m.name !== name);
@@ -156,7 +156,7 @@ const Dialogs = (() => {
   function saveModelForm() {
     const name = $("model-form-name").value.trim();
     if (!name) {
-      showConfirm("还差一步", "模型名称是必填的哦。", { okText: "知道了", danger: false });
+      showConfirm(_t("dlg.stepTitle"), _t("dlg.nameRequiredBody"), { okText: _t("dlg.gotIt"), danger: false });
       return;
     }
     const modelId = $("model-form-id").value.trim() || name;
@@ -165,7 +165,7 @@ const Dialogs = (() => {
     if (editingName === null) {
       // 添加新模型
       if (name === defaultName || extraModels.some((m) => m.name === name)) {
-        showConfirm("重名了", "这个名称已经有模型了，换个名字吧。", { okText: "知道了", danger: false });
+        showConfirm(_t("dlg.duplicateTitle"), _t("dlg.duplicateBody"), { okText: _t("dlg.gotIt"), danger: false });
         return;
       }
       extraModels.push({ name, model: modelId, vision });
@@ -178,11 +178,11 @@ const Dialogs = (() => {
     } else {
       // 编辑非默认模型
       if (name === defaultName) {
-        showConfirm("重名了", "这个名称是默认模型，请在默认行编辑。", { okText: "知道了", danger: false });
+        showConfirm(_t("dlg.duplicateTitle"), _t("dlg.duplicateDefaultBody"), { okText: _t("dlg.gotIt"), danger: false });
         return;
       }
       if (name !== editingName && extraModels.some((m) => m.name === name)) {
-        showConfirm("重名了", "这个名称已经有模型了，换个名字吧。", { okText: "知道了", danger: false });
+        showConfirm(_t("dlg.duplicateTitle"), _t("dlg.duplicateBody"), { okText: _t("dlg.gotIt"), danger: false });
         return;
       }
       extraModels = extraModels.map((m) => (m.name === editingName ? { name, model: modelId, vision } : m));
@@ -228,10 +228,10 @@ const Dialogs = (() => {
         const ver = $("about-version");
         if (ver) ver.textContent = `v${App.state.version || "0.2.8"}`;
         const evo = $("about-evolutions");
-        if (evo) evo.textContent = EMRG_Copy.COPY.growthCount(App.state.evolutionCount ?? 0);
+        if (evo) evo.textContent = `🌱 ${_t("copy.growthCountPrefix")} ${App.state.evolutionCount ?? 0} ${_t("copy.times")}`;
       } catch { /* 元素缺失（测试桩）时忽略 */ }
     } catch (e) {
-      Chat.addSystemMessage(`读取设置失败了：${e.message}`);
+      Chat.addSystemMessage(_t("settings.readFailed", { msg: e.message }));
     }
     $("settings-dialog").showModal();
   }
@@ -246,8 +246,8 @@ const Dialogs = (() => {
       models: extraModels,
     };
     if (!config.apiKey) {
-      showConfirm("还差一步", "API Key 是连接模型服务必需的，填上才能继续哦。", {
-        okText: "知道了",
+      showConfirm(_t("dlg.stepTitle"), _t("app.authKeyRequired"), {
+        okText: _t("dlg.gotIt"),
         danger: false,
       });
       return;
@@ -255,14 +255,14 @@ const Dialogs = (() => {
     try {
       await window.emrg.saveSettings(config);
       if ($("settings-dialog").open) $("settings-dialog").close();
-      Chat.addSystemMessage("设置已保存。");
+      Chat.addSystemMessage(_t("dlg.saved"));
       App.state.apiKeyConfigured = true;
       App.state.projectDir = config.projectDir || App.state.projectDir;
       App.state.model = defaultName;
       App.updateModelSwitcher();
       await App.boot();
     } catch (e) {
-      Chat.addSystemMessage(`保存失败了：${e.message}`);
+      Chat.addSystemMessage(_t("settings.saveFailed", { msg: e.message }));
     }
   }
 
@@ -271,7 +271,7 @@ const Dialogs = (() => {
     $("welcome-project-dir").value = "";
     $("welcome-api-key").value = "";
     $("welcome-base-url").value = "";
-    $("welcome-model").innerHTML = "<option value=''>加载中…</option>";
+    $("welcome-model").innerHTML = `<option value="">${_t("dlg.loading")}</option>`;
     $("welcome-dialog").showModal();
     window.emrg.getSettings().then((s) => {
       const sel = $("welcome-model");
@@ -293,8 +293,8 @@ const Dialogs = (() => {
   async function saveWelcome() {
     const key = $("welcome-api-key").value.trim();
     if (!key) {
-      showConfirm("还差一步", "API Key 是连接模型服务必需的，填上才能继续哦。", {
-        okText: "知道了",
+      showConfirm(_t("dlg.stepTitle"), _t("app.authKeyRequired"), {
+        okText: _t("dlg.gotIt"),
         danger: false,
       });
       return;
@@ -308,12 +308,12 @@ const Dialogs = (() => {
     try {
       await window.emrg.saveSettings(config);
       if ($("welcome-dialog").open) $("welcome-dialog").close();
-      Chat.addSystemMessage("设置完成，正在启动…");
+      Chat.addSystemMessage(_t("dlg.starting"));
       App.state.apiKeyConfigured = true;
       App.state.projectDir = config.projectDir || App.state.projectDir;
       await App.boot();
     } catch (e) {
-      Chat.addSystemMessage(`初始化失败了：${e.message}`);
+      Chat.addSystemMessage(_t("dlg.initFailed", { msg: e.message }));
     }
   }
 
@@ -339,7 +339,7 @@ const Dialogs = (() => {
       $("rename-dialog").close();
       await App.refreshSessions();
     } catch (e) {
-      Chat.addSystemMessage(`重命名失败了：${e.message}`);
+      Chat.addSystemMessage(_t("dlg.renameFailed", { msg: e.message }));
     }
   }
 
@@ -363,7 +363,7 @@ const Dialogs = (() => {
     $("confirm-title").textContent = title;
     $("confirm-message").textContent = message;
     const ok = $("confirm-ok");
-    ok.textContent = opts.okText || "删除";
+    ok.textContent = opts.okText || _t("dlg.delete");
     ok.className = opts.danger === false ? "btn btn-primary" : "btn btn-danger";
     confirmCb = opts.onOk || null;
     $("confirm-dialog").showModal();

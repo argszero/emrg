@@ -41,7 +41,7 @@ const ResultPanel = (() => {
     const list = listEl();
     if (!list) return;
     if (list.children.length === 0) {
-      list.innerHTML = `<div class="result-empty">还没有产物，对话中生成的文件会出现在这里</div>`;
+      list.innerHTML = `<div class="result-empty">${window.EMRG_I18N ? window.EMRG_I18N.t("result.empty") : "还没有产物，对话中生成的文件会出现在这里"}</div>`;
     }
   }
 
@@ -81,7 +81,7 @@ const ResultPanel = (() => {
         const res = await window.emrg.openFile({ filePath });
         if (res && res.ok === false) {
           // 打开失败提示（文件可能已删除）
-          fileRow.title = res.error || "无法打开文件";
+          fileRow.title = res.error || (window.EMRG_I18N ? window.EMRG_I18N.t("panel.openFailed") : "无法打开文件");
         }
       });
       card.appendChild(fileRow);
@@ -93,13 +93,13 @@ const ResultPanel = (() => {
       const body = el("div", { class: "result-body hidden" }, preview);
       card.appendChild(body);
       // 复制按钮
-      const copyBtn = el("button", { class: "result-copy", type: "button" }, "复制");
+      const copyBtn = el("button", { class: "result-copy", type: "button" }, _t("chat.copyCode"));
       copyBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         try {
           navigator.clipboard.writeText(content).then(() => {
-            copyBtn.textContent = "✓ 已复制";
-            setTimeout(() => { copyBtn.textContent = "复制"; }, 1500);
+            copyBtn.textContent = _t("panel.copied");
+            setTimeout(() => { copyBtn.textContent = _t("chat.copyCode"); }, 1500);
           });
         } catch { /* clipboard unavailable */ }
       });
