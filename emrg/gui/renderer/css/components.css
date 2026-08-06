@@ -817,3 +817,55 @@ dialog::backdrop {
 .ctx-item.danger { color: var(--danger, #e5484d); }
 .ctx-item.danger:hover { background-color: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent); }
 .ctx-item.danger.active { background-color: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent); color: var(--danger, #e5484d); }
+
+/* ── / 指令补全菜单（rant 19:44 P1） ─────────────── */
+.cmd-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  right: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-lg);
+  padding: 4px;
+  z-index: 100;
+  animation: fade-in var(--dur-fast) var(--ease);
+}
+.cmd-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  font-size: var(--fs-secondary);
+  color: var(--text-1);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+.cmd-menu-item:hover { background-color: var(--bg-soft); }
+.cmd-menu-item.selected { background-color: var(--accent-soft); color: var(--accent); }
+.cmd-menu-name { font-family: var(--font-mono, monospace); font-weight: 600; }
+.cmd-menu-hint { color: var(--text-2); font-size: var(--fs-aux); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmd-menu-item.selected .cmd-menu-hint { color: var(--accent); }
+
+/* / 指令帮助对话框（/help） */
+.help-list { max-height: 300px; overflow-y: auto; }
+.help-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.help-row:last-child { border-bottom: none; }
+.help-cmd { font-family: var(--font-mono, monospace); font-weight: 600; color: var(--accent); }
+.help-hint { color: var(--text-2); font-size: var(--fs-secondary); }
