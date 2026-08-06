@@ -43,7 +43,15 @@ security find-identity -v                  # 列出全部（含 Developer ID Ins
 5. **勾选"包含私钥"**（Export 对话框底部）
 6. 设置导出密码 → 得到含私钥的 .p12
 
-**命令行导出方法**（推荐，精确防错——`-t identities` 保证含私钥；错误做法 `-t certs` 只导出证书链，即 v0.2.7 四次失败根因）：
+**⭐ 一键导出脚本（推荐，v0.2.7 九次失败教训固化，杜绝手敲命令出错）**：
+```bash
+# 前置：双证书（Application + Installer）都已导入本机钥匙串
+bash packaging/export-signing-p12.sh
+# 脚本自动完成：检查双证书 → 导出 p12（-t identities）→ 生成 b64 → 导入验证（与 CI 一致）
+# 输出含更新 Secret 的指引（MACOS_SIGNING_P12_BASE64 / MACOS_SIGNING_P12_PASSWORD）
+```
+
+**命令行导出方法**（精确防错——`-t identities` 保证含私钥；错误做法 `-t certs` 只导出证书链，即 v0.2.7 四次失败根因）：
 ```bash
 # 用证书 CN 查询准确名称（本机已有有效 identity，无需重新申请证书）
 security find-identity -v -p codesigning
