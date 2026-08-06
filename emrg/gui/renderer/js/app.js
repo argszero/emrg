@@ -8,6 +8,8 @@
 const App = (() => {
   // 模型切换菜单键盘导航 handler（打开时注册，关闭时移除）
   let _modelMenuKeyHandler = null;
+  // 右键菜单键盘导航 handler（同上生命周期管理）
+  let _ctxMenuKeyHandler = null;
 
   const state = {
     sessionId: null,
@@ -198,12 +200,41 @@ const App = (() => {
     const rect = item.getBoundingClientRect();
     menu.style.left = Math.min(rect.right, window.innerWidth - 160) + "px";
     menu.style.top = Math.min(rect.bottom, window.innerHeight - 80) + "px";
+    // 键盘导航：↑↓ 移动 / Enter 选择 / ESC 关闭（与模型切换器一致）
+    const btns = menu.querySelectorAll(".ctx-item");
+    let idx = btns.length ? 0 : -1;
+    const setActive = (i) => {
+      if (i < 0 || i >= btns.length) return;
+      idx = i;
+      btns.forEach((b, j) => b.classList.toggle("active", j === idx));
+    };
+    setActive(0);
+    _ctxMenuKeyHandler = (ev) => {
+      if (ev.key === "ArrowDown") {
+        ev.preventDefault();
+        setActive((idx + 1) % btns.length);
+      } else if (ev.key === "ArrowUp") {
+        ev.preventDefault();
+        setActive((idx - 1 + btns.length) % btns.length);
+      } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        if (idx >= 0) btns[idx].click();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        hideCtxMenu();
+      }
+    };
+    document.addEventListener("keydown", _ctxMenuKeyHandler);
   }
 
   function hideCtxMenu() {
     const menu = $("ctx-menu");
     menu.hidden = true;
     menu.innerHTML = "";
+    if (_ctxMenuKeyHandler) {
+      document.removeEventListener("keydown", _ctxMenuKeyHandler);
+      _ctxMenuKeyHandler = null;
+    }
   }
 
   // ── 模型切换器 ─────────────────────────

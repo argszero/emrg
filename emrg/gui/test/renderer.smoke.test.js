@@ -354,3 +354,14 @@ test("模型切换器：菜单项构建 + 键盘导航 handler 注册", async ()
   const css = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "components.css"), "utf8");
   assert.ok(css.includes(".model-menu-item.active"), "键盘导航高亮样式应存在");
 });
+
+test("右键菜单：键盘导航 handler 注册 + CSS 高亮", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  const src = fs.readFileSync(path.join(RENDERER_JS, "app.js"), "utf8");
+  assert.ok(src.includes("_ctxMenuKeyHandler"), "app.js 应维护右键菜单键盘 handler 引用");
+  assert.ok(src.includes("ArrowDown"), "应支持 ↑↓ 键盘导航");
+  assert.ok(src.includes(".ctx-item") === false || src.includes("setActive"), "菜单项应有焦点管理");
+  const css = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "components.css"), "utf8");
+  assert.ok(css.includes(".ctx-item.active"), "右键菜单键盘高亮样式应存在");
+});

@@ -806,5 +806,8 @@ dialog::backdrop {
   transition: background-color var(--dur-fast) var(--ease);
 }
 .ctx-item:hover { background-color: var(--bg-soft); }
+/* 键盘导航高亮（↑↓） */
+.ctx-item.active { background-color: var(--accent-soft); color: var(--accent); }
 .ctx-item.danger { color: var(--danger, #e5484d); }
 .ctx-item.danger:hover { background-color: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent); }
+.ctx-item.danger.active { background-color: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent); color: var(--danger, #e5484d); }
