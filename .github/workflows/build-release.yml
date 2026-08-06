@@ -109,13 +109,17 @@ jobs:
       - name: Build GUI (electron-builder)
         working-directory: emrg/gui
         shell: bash
-        env:
-          # macOS 签名：CSC_LINK+CSC_KEY_PASSWORD 激活 electron-builder 自动 codesign
-          # （含 hardened runtime；Secret 未配时为空 → 不签名，保持现状降级）
-          CSC_LINK: ${{ runner.os == 'macOS' && env.MACOS_SIGNING_P12_BASE64 != '' && 'file:///tmp/signing.p12' || '' }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && env.MACOS_SIGNING_P12_PASSWORD || '' }}
         run: |
           npm ci
+          # macOS 签名：仅在 macOS + 有证书时导出 CSC_LINK/CSC_KEY_PASSWORD，
+          # 激活 electron-builder 自动 codesign（含 hardened runtime）。
+          # ⚠️ 不可在 step env 里设空字符串：electron-builder 对空 CSC_LINK 仍走签名分支
+          # （path.resolve("") = 工作目录 → "WIN_CSC_LINK is not correct ... not a file"，
+          # v0.2.7 windows job 失败根因）。未设置 = 不签名，保持降级。
+          if [ "$RUNNER_OS" = "macOS" ] && [ -n "${MACOS_SIGNING_P12_BASE64:-}" ]; then
+            export CSC_LINK="file:///tmp/signing.p12"
+            export CSC_KEY_PASSWORD="$MACOS_SIGNING_P12_PASSWORD"
+          fi
           npm run dist
 
       # ── 捆绑 git/gh（§6 R59：macOS/Linux 源码编译，Windows portable）──
