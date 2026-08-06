@@ -101,6 +101,8 @@ cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
   - 本地校验：`actionlint .github/workflows/*.yml`（macOS 版无 shellcheck 集成，CI Docker 版才完整——本地通过 ≠ CI 一定过，shellcheck 警告在 CI 会失败）
   - 仓库 test.yml 已有 `rhysd/actionlint@v1.7.12` 门禁步骤（#444 固化，全量校验所有 workflow），但 review CI 改动时仍应主动本地跑一遍确认
 - **⚡ 验证类逻辑（检查/检测/grep 条件）必须在正反两态都验证**（#455 教训：review 时从"失败数据"推断检查逻辑，`grep -c 'class: 0x0000000F'` 数私钥——实测 0x0000000F 是属性 ID 非 class 行，含私钥时返回 0 → 宿主修复后误报失败；正确方法解析 `security import` 输出的 `identity imported` 判别信号，#456 修正）。审查此类改动时：**在成功场景与失败场景各跑一遍确认判别信号可靠**，不能只在失败案例上推断。
+  - **匹配类逻辑还需验证同义多态（单数/复数）**（#461 教训：`security import` 输出多 identity 时为复数 `3 identities imported`，检查只匹配单数 `identity imported` → 含私钥的 p12 被误报拦截。修复：`identit(y|ies)\ imported` 同时匹配单复数）。审查包含 `*"子串"*` 匹配的检查时，**列出所有可能的输出形态逐一验证**。
+  - **验证类逻辑用输出判空而非退出码**（#464 教训：`security find-certificate -c X -a` 无匹配证书时也返回 exit 0——`-a` 参数下退出码恒 0，不可靠；正确写法 `[ -z "$(find-certificate ...)" ]` 判输出空）。审查 shell 检查时，**先实测退出码在目标场景是否可靠**，不可靠则改用输出判空。
 - 检查合并条件：PR 的 comment 历史中是否已有连续 3 个不同 cycle 的 ✅ 且中间无 ❌？
   - ⚠️ 查询评论用 REST API（GraphQL 需 `read:org` scope，token 常缺）：
     `gh api repos/{{ owner }}/{{ repo }}/issues/<N>/comments --jq '.[] | "\(.user.login): \(.body)"'`
