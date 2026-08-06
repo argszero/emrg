@@ -472,3 +472,26 @@ test("WorkBuddy P1：ResultPanel 折叠切换（⌘\ 与按钮）", async () => 
   await vm.runInContext("ResultPanel.toggle()", ctx);
   assert.ok(!els["result-panel"].classList.contains("collapsed"), "再次 toggle 应展开");
 });
+
+test("工具调用上限中断 → 系统提示可继续（对齐 TUI，跨项目教训）", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  // 模拟 daemon 广播：max tool rounds 超限的 done 帧
+  await vm.runInContext(
+    'EMRG_Chat.handleDone({ request_id: "rid-max", content: "Exceeded maximum tool call rounds (30).", done: true })',
+    ctx
+  );
+  const texts = (els["chat-view"].children || []).map((c) => c.textContent).join("|");
+  assert.ok(/继续/.test(texts), `应提示可继续，实际: ${texts}`);
+});
+
+test("正常 done 帧不触发上限提示（无假阳性）", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'EMRG_Chat.handleDone({ request_id: "rid-ok", content: "完成了！", done: true })',
+    ctx
+  );
+  const texts = (els["chat-view"].children || []).map((c) => c.textContent).join("|");
+  assert.ok(!/继续/.test(texts), "正常完成不应出现继续提示");
+});

@@ -187,6 +187,7 @@ const I18N = (() => {
       "chat.copyFailed": "复制失败",
       "chat.fromOtherClient": "（来自其他客户端）",
       "chat.timeoutWarn": "⚠️ 响应超时了，我还没说完——可以再试一次。",
+      "chat.maxRoundsHint": "⚠️ 这次任务因为工具调用次数上限中断了，结果可能不完整——输入“继续”我可以接着做。",
       "chat.elapsed": "耗时 {s}",
       "chat.expand": "展开全文",
       // 时间分组（utils.js/sidebar.js）
@@ -449,6 +450,7 @@ const I18N = (() => {
       "chat.copyFailed": "Copy failed",
       "chat.fromOtherClient": "(from another client)",
       "chat.timeoutWarn": "⚠️ Response timed out — I wasn't done. Try again?",
+      "chat.maxRoundsHint": "⚠️ This task hit the tool-call limit and may be incomplete — type \"continue\" and I'll keep going.",
       "chat.elapsed": "took {s}",
       "chat.expand": "Expand full text",
       // Time groups (utils.js/sidebar.js)
