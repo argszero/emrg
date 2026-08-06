@@ -70,7 +70,9 @@ jobs:
           security unlock-keychain -p 'ci-temp' /tmp/ci.keychain
           security import /tmp/signing.p12 -k /tmp/ci.keychain -P "$MACOS_SIGNING_P12_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/productsign
-          security set-key-partition-list -S apple-tool:,apple: -k 'ci-temp' /tmp/ci.keychain
+          # -s: 将 partition list 同步到 keychain 内所有项目（含导入的私钥）。
+          # 缺失 -s 时 set-key-partition-list 报 "item not found"（v0.2.7 构建失败根因）。
+          security set-key-partition-list -S apple-tool:,apple: -s -k 'ci-temp' /tmp/ci.keychain
           # SC2046: -s 需要将每个 keychain 路径作为独立参数传递，词分割是有意的
           # shellcheck disable=SC2046
           security list-keychains -d user -s /tmp/ci.keychain $(security list-keychains -d user | tr -d '"')
