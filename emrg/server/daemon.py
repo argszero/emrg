@@ -793,13 +793,14 @@ class EmrgServer:
             # Optional project targeting (multi-project support)
             project = msg.get("project", "").strip()
 
-            # Field order: timestamp → project → status → progress → message
+            # Field order: timestamp → project → status → progress → completed → message
             # (project right after timestamp per user feedback; message last)
             entry = {
                 "timestamp": msg.get("timestamp", datetime.now().isoformat()),
                 "project": project,
                 "status": "pending",
                 "progress": None,
+                "completed": None,
             }
             # message last, so status fields stay visible when scanning the file
             entry["message"] = rant_message
