@@ -112,12 +112,12 @@ const App = (() => {
     }
   }
 
-  // ── / 指令（rant 19:44 P1/P2）──────────────────
-  /** 执行 / 指令。phase 1 纯操作 + phase 2 会话管理已实现；phase 3+ 提示阶段未开放。 */
+  // ── / 指令（rant 19:44 P1/P2/P3）──────────────────
+  /** 执行 / 指令。phase 1 纯操作 + phase 2 会话 + phase 3 模型/记忆/技能已实现；phase 4 提示未开放。 */
   async function handleCommand(parsed) {
     const cmd = parsed.cmd;
     const meta = Commands.COMMANDS[cmd];
-    if (!meta || meta.phase > 2) {
+    if (!meta || meta.phase > 3) {
       const phase = meta ? `（阶段 ${meta.phase}，后续版本开放）` : "";
       Chat.addSystemMessage(`指令 ${cmd} 暂未开放${phase}。`);
       return;
@@ -185,6 +185,18 @@ const App = (() => {
         case "/rewind":
           // P2：历史消息点选择对话框
           showRewindDialog();
+          break;
+        case "/model":
+          // P3：触发模型切换器（已有 UI）
+          document.querySelector(".model-switcher")?.click();
+          break;
+        case "/memory":
+          // P3：记忆浏览器对话框（/memory [session|project|<id>]）
+          showMemoryDialog(parsed.args[0] || "");
+          break;
+        case "/skills":
+          // P3：技能列表对话框
+          showSkillsDialog();
           break;
         default:
           Chat.addSystemMessage(`指令 ${cmd} 暂未开放。`);
@@ -267,6 +279,82 @@ const App = (() => {
       Chat.addSystemMessage(`已回退到消息点 #${recordIndex}，移除了 ${res.removedCount ?? 0} 条记录。`);
     } catch (e) {
       Chat.addSystemMessage(`回退失败：${e.message}`);
+    }
+  }
+
+  // /memory：记忆浏览器对话框（daemon list_memories → 列表；read_memory → 详情）
+  async function showMemoryDialog(sub) {
+    const list = $("memory-list");
+    const detail = $("memory-detail");
+    const dialog = $("memory-dialog");
+    if (!list || !dialog) return;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">加载中…</span></div>`;
+    if (detail) detail.classList.add("hidden");
+    dialog.showModal();
+    const scope = String(sub || "").toLowerCase() === "session" ? "session" : "project";
+    try {
+      const memories = await window.emrg.listMemories({ scope, sessionId: state.sessionId });
+      list.innerHTML = "";
+      if (!memories || memories.length === 0) {
+        list.innerHTML = `<div class="help-row"><span class="help-hint">还没有${scope === "session" ? "会话" : "项目"}记忆。</span></div>`;
+        return;
+      }
+      for (const m of memories) {
+        const row = el("button", {
+          class: "help-row",
+          type: "button",
+          style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;",
+        });
+        const title = m.title || m.id || "(未命名)";
+        const name = el("span", { class: "help-cmd" }, String(title).slice(0, 40));
+        const hint = el("span", { class: "help-hint" }, (m.summary || m.content || "").slice(0, 50));
+        row.appendChild(name);
+        row.appendChild(hint);
+        row.addEventListener("click", async () => {
+          try {
+            const mem = await window.emrg.readMemory({ memoryId: m.id, scope, sessionId: state.sessionId });
+            const body = mem.content || mem.body || "";
+            if (detail) {
+              detail.innerHTML = `<div class="memory-detail-title">${escapeHtml(String(title).slice(0, 80))}</div><pre class="memory-detail-body">${escapeHtml(body.slice(0, 2000))}</pre>`;
+              detail.classList.remove("hidden");
+            } else {
+              Chat.addSystemMessage(body.slice(0, 500));
+            }
+          } catch (err) {
+            Chat.addSystemMessage(`读取记忆失败：${err.message}`);
+          }
+        });
+        list.appendChild(row);
+      }
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">加载记忆失败：${escapeHtml(e.message)}</span></div>`;
+    }
+  }
+
+  // /skills：技能列表对话框（main 进程读 ~/.emrg/skills + <project>/.emrg/skills）
+  async function showSkillsDialog() {
+    const list = $("skills-list");
+    const dialog = $("skills-dialog");
+    if (!list || !dialog) return;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">加载中…</span></div>`;
+    dialog.showModal();
+    try {
+      const skills = await window.emrg.listSkills();
+      list.innerHTML = "";
+      if (!skills || skills.length === 0) {
+        list.innerHTML = `<div class="help-row"><span class="help-hint">还没有加载技能。</span></div>`;
+        return;
+      }
+      for (const s of skills) {
+        const row = el("div", { class: "help-row" });
+        const name = el("span", { class: "help-cmd" }, s.name || "(未命名)");
+        const hint = el("span", { class: "help-hint" }, `${s.source || ""}${s.description ? " · " + s.description.slice(0, 50) : ""}`);
+        row.appendChild(name);
+        row.appendChild(hint);
+        list.appendChild(row);
+      }
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">加载技能失败：${escapeHtml(e.message)}</span></div>`;
     }
   }
 
@@ -725,6 +813,8 @@ const App = (() => {
     $("help-close").addEventListener("click", () => $("help-dialog").close());
     $("sessions-close").addEventListener("click", () => $("sessions-dialog").close());
     $("rewind-close").addEventListener("click", () => $("rewind-dialog").close());
+    $("memory-close").addEventListener("click", () => $("memory-dialog").close());
+    $("skills-close").addEventListener("click", () => $("skills-dialog").close());
 
     // 设置/首启对话框：Enter 提交（与重命名/模型表单一致的交互）
     const enterToSave = (fn) => (e) => {

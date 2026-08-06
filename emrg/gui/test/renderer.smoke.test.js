@@ -73,6 +73,8 @@ const ELEMENT_IDS = [
   "cmd-menu", "help-dialog", "help-list", "help-close",
   "sessions-dialog", "sessions-list", "sessions-close",
   "rewind-dialog", "rewind-list", "rewind-close",
+  "memory-dialog", "memory-list", "memory-detail", "memory-close",
+  "skills-dialog", "skills-list", "skills-close",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */

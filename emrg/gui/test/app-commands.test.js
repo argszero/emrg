@@ -135,11 +135,50 @@ test("P2：/rename 复用现有重命名对话框（Dialogs.showRename 被调用
   assert.strictEqual(els["rename-input"].value, "旧标题", "重命名输入框预填当前标题");
 });
 
-test("P2：phase 3+ 指令（/model）仍提示未开放", async () => {
+test("P3：/model 触发模型切换器（点击 .model-switcher）", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  // 沙箱 querySelector 返回 null → /model 应优雅跳过（不抛异常、不阻断）
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/model', args: [] })", ctx);
+});
+
+test("P3：/memory 打开记忆浏览器并调用 listMemories（project 默认）", async () => {
+  const { ctx, els } = makeSandbox({
+    listMemories: async ({ scope }) => {
+      return [{ id: "m1", title: "记忆一", content: "内容一" }];
+    },
+  });
+  await tick();
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/memory', args: [] })", ctx);
+  assert.ok(els["memory-dialog"] && els["memory-dialog"].__open === true, "memory dialog opened");
+});
+
+test("P3：/memory session 传 scope=session；/memory <id> 可点击读详情", async () => {
+  const { ctx, els } = makeSandbox({
+    listMemories: async ({ scope }) => {
+      return [{ id: "m1", title: "记忆一", content: "内容一" }];
+    },
+    readMemory: async ({ memoryId }) => ({ id: memoryId, content: "详情正文" }),
+  });
+  await tick();
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/memory', args: ['session'] })", ctx);
+  assert.ok(els["memory-dialog"].__open === true, "memory dialog opened for session scope");
+});
+
+test("P3：/skills 打开技能列表对话框并调用 listSkills", async () => {
+  const { ctx, els } = makeSandbox({
+    listSkills: async () => [{ name: "browser-harness", description: "web automation", source: "user" }],
+  });
+  await tick();
+  await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/skills', args: [] })", ctx);
+  assert.ok(els["skills-dialog"] && els["skills-dialog"].__open === true, "skills dialog opened");
+});
+
+test("P3：phase 4 指令（/rant）仍提示未开放", async () => {
   const { ctx, win } = makeSandbox();
   const out = await vm.runInContext(
-    "(async () => { let m = ''; const orig = EMRG_Chat.addSystemMessage; EMRG_Chat.addSystemMessage = (x) => { m = x; }; await App.handleCommand({ type: 'command', cmd: '/model', args: [] }); EMRG_Chat.addSystemMessage = orig; return m; })()",
+    "(async () => { let m = ''; const orig = EMRG_Chat.addSystemMessage; EMRG_Chat.addSystemMessage = (x) => { m = x; }; await App.handleCommand({ type: 'command', cmd: '/rant', args: [] }); EMRG_Chat.addSystemMessage = orig; return m; })()",
     ctx
   );
-  assert.ok(String(out).includes("暂未开放"), `phase 3 应提示未开放，实际: ${out}`);
+  assert.ok(String(out).includes("暂未开放"), `phase 4 应提示未开放，实际: ${out}`);
 });

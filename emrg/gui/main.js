@@ -355,6 +355,54 @@ vision = false
       return { ok: true, removedCount: frame.removed_count ?? 0 };
     });
 
+    ipcMain.handle("emrg:listMemories", async (_e, { scope = "project", sessionId } = {}) => {
+      // GUI / 指令 P3：/memory — 列出记忆（daemon list_memories → memories_list）
+      const params = { scope, cwd: projectDir };
+      if (scope === "session") {
+        if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+        params.session_id = sessionId;
+      }
+      const frame = await client.sendCommandAndWait("list_memories", params, 5000);
+      return frame.memories || [];
+    });
+
+    ipcMain.handle("emrg:readMemory", async (_e, { memoryId, scope = "project", sessionId } = {}) => {
+      // GUI / 指令 P3：/memory <id> — 读取单条记忆（daemon read_memory → memory_content）
+      if (typeof memoryId !== "string" || !memoryId.trim()) throw new Error("invalid memory_id");
+      const params = { scope, memory_id: memoryId.trim(), cwd: projectDir };
+      if (scope === "session") {
+        if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+        params.session_id = sessionId;
+      }
+      const frame = await client.sendCommandAndWait("read_memory", params, 5000);
+      return frame.memory || { id: memoryId, content: "" };
+    });
+
+    ipcMain.handle("emrg:listSkills", async () => {
+      // GUI / 指令 P3：/skills — 读取技能列表（TUI 本地 load_skills 等价物，daemon 无协议）
+      // 技能在 ~/.emrg/skills/*.md（user）与 <projectDir>/.emrg/skills/*.md（project）
+      const skills = [];
+      const dirs = [
+        { dir: path.join(os.homedir(), ".emrg", "skills"), source: "user" },
+        { dir: path.join(projectDir, ".emrg", "skills"), source: "project" },
+      ];
+      for (const { dir, source } of dirs) {
+        let files = [];
+        try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".md")); } catch { continue; }
+        for (const f of files) {
+          try {
+            const text = fs.readFileSync(path.join(dir, f), "utf8");
+            const m = text.match(/^---\n([\s\S]*?)\n---/);
+            const meta = m ? m[1] : "";
+            const name = (meta.match(/^name:\s*(.+)$/m) || [])[1]?.trim() || f.replace(/\.md$/, "");
+            const desc = (meta.match(/^description:\s*(.+)$/m) || [])[1]?.trim() || "";
+            skills.push({ name, description: desc, source });
+          } catch { /* 单个技能读取失败跳过 */ }
+        }
+      }
+      return skills;
+    });
+
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };
