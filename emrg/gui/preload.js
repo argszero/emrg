@@ -26,6 +26,7 @@ const api = {
   listTasks: () => ipcRenderer.invoke("emrg:listTasks"),
   triggerTask: (payload) => ipcRenderer.invoke("emrg:triggerTask", payload),
   sendRant: (payload) => ipcRenderer.invoke("emrg:sendRant", payload),
+  evolutionSummary: (payload) => ipcRenderer.invoke("emrg:evolutionSummary", payload),
   listModels: () => ipcRenderer.invoke("emrg:listModels"),
   openFile: (payload) => ipcRenderer.invoke("emrg:openFile", payload),
   saveSettings: (payload) => ipcRenderer.invoke("emrg:saveSettings", payload),

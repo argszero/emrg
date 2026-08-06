@@ -436,6 +436,12 @@ vision = false
       return { ok: true, count: frame.count ?? 0 };
     });
 
+    ipcMain.handle("emrg:evolutionSummary", async (_e, { limit = 5 } = {}) => {
+      // GUI / 指令 P3：自进化可见化 — daemon evolution_summary（count + 最近改进）
+      const frame = await client.sendCommandAndWait("evolution_summary", { limit }, 5000);
+      return { count: frame.count ?? 0, recent: frame.recent || [] };
+    });
+
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };

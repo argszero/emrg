@@ -36,7 +36,15 @@ function makeEl(id) {
     _listeners: {},
     addEventListener(t, fn) { this._listeners[t] = fn; },
     click() { const fn = this._listeners.click; if (fn) fn(); },
-    appendChild() {},
+    appendChild(child) {
+      this.children.push(child);
+      // 近似真实 DOM：优先文本，其次子元素 innerHTML（嵌套渲染）
+      let frag = "";
+      if (child && child.text !== undefined) frag = String(child.text);
+      else if (child && typeof child.textContent === "string" && child.textContent.length > 0) frag = child.textContent;
+      else if (child && typeof child.innerHTML === "string" && child.innerHTML.length > 0) frag = child.innerHTML;
+      if (frag) this.innerHTML += frag;
+    },
     removeChild() {},
     querySelectorAll: () => [],
     getBoundingClientRect: () => ({ left: 0, right: 100, top: 0, bottom: 100, width: 100, height: 100 }),
@@ -323,4 +331,44 @@ test("P3：toast '去看看' 关闭并输出版本信息", async () => {
   assert.ok(see, "去看看按钮存在");
   if (see.click) see.click();
   assert.ok(els["evolution-toast"].classList.contains("hidden"), "点击后 toast 应隐藏");
+});
+
+test("P3：updateGrowthCard 更新进化计数（兼容 #501 growth-count / about-evolutions id）", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  vm.runInContext("App.state.evolutionCount = 42; App.updateGrowthCard();", ctx);
+  // #501 的 id（growth-count / about-evolutions）存在时更新
+  assert.ok(els["growth-count"] === undefined || String(els["growth-count"].textContent) === "42", "growth-count 应更新为 42");
+  assert.ok(els["about-evolutions"] === undefined || els["about-evolutions"].innerHTML.includes("42"), "about-evolutions 应显示 42");
+});
+
+test("P3：loadEvolutionSummary 拉取最近改进并渲染（关于区列表）", async () => {
+  const { ctx, els } = makeSandbox({
+    evolutionSummary: async () => ({
+      count: 7,
+      recent: [
+        { timestamp: "2026-08-06T20:00:00", operations: ["llm-reflection", "tool-execution"], impact: [] },
+        { timestamp: "2026-08-06T19:00:00", operations: ["self-improvement"], impact: [] },
+      ],
+    }),
+  });
+  await tick();
+  await vm.runInContext("App.loadEvolutionSummary()", ctx);
+  assert.ok(els["about-recent"].innerHTML.includes("最近改进"), "应渲染最近改进标题");
+  assert.ok(els["about-recent"].innerHTML.includes("llm-reflection"), "应显示操作摘要");
+  assert.ok(els["about-recent"].innerHTML.includes("20:00"), "应显示时间戳");
+});
+
+test("P3：loadEvolutionSummary 空记录显示引导文案", async () => {
+  const { ctx, els } = makeSandbox({
+    evolutionSummary: async () => ({ count: 0, recent: [] }),
+  });
+  await tick();
+  await vm.runInContext("App.loadEvolutionSummary()", ctx);
+  assert.ok(els["about-recent"].innerHTML.includes("/rant"), "空状态应提示 /rant 驱动第一次进化");
+});
+
+test("P1 回归：result-panel.js 暴露 window.ResultPanel（真实 GUI 防 ReferenceError）", async () => {
+  const src = fs.readFileSync(path.join(RENDERER_JS, "result-panel.js"), "utf8");
+  assert.ok(src.includes("window.ResultPanel"), "result-panel.js 必须暴露 window.ResultPanel（app.js 独立 script 加载需要）");
 });

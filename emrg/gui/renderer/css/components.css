@@ -954,3 +954,39 @@ dialog::backdrop {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* WorkBuddy P3：设置 → 关于区 */
+.about-row {
+  font-size: var(--fs-secondary, 13px);
+  color: var(--text-2);
+  margin-bottom: 4px;
+}
+.about-row b { color: var(--accent); }
+.about-recent {
+  margin-top: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.about-recent-title {
+  font-size: var(--fs-aux, 12px);
+  font-weight: 600;
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+.about-recent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-aux, 12px);
+  color: var(--text-2);
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+.about-recent-item:last-child { border-bottom: none; }
+.about-recent-time {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-3);
+  white-space: nowrap;
+  font-size: 11px;
+}
+}

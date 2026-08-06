@@ -734,6 +734,34 @@ const App = (() => {
     if (dismiss) dismiss.addEventListener("click", hideEvolutionToast);
   }
 
+  async function loadEvolutionSummary() {
+    const recent = $("about-recent");
+    if (!recent) return;
+    try {
+      const res = await window.emrg.evolutionSummary({ limit: 5 });
+      if (res && res.count !== undefined) {
+        state.evolutionCount = res.count;
+        updateGrowthCard();
+      }
+      const items = (res && res.recent) || [];
+      recent.innerHTML = "";
+      if (items.length === 0) {
+        recent.appendChild(el("div", { class: "about-recent-item" }, "还没有改进记录，输入 /rant 驱动第一次进化吧"));
+        return;
+      }
+      const header = el("div", { class: "about-recent-title" }, "最近改进");
+      recent.appendChild(header);
+      for (const it of items) {
+        const ts = String(it.timestamp || "").slice(0, 16).replace("T", " ");
+        const ops = (it.operations || []).join(" · ");
+        const row = el("div", { class: "about-recent-item" });
+        row.appendChild(el("span", { class: "about-recent-time" }, ts));
+        row.appendChild(el("span", {}, ops || "self-improvement"));
+        recent.appendChild(row);
+      }
+    } catch { /* 摘要加载失败静默（进化卡仍显示 count） */ }
+  }
+
   function initModelSwitcher() {
     const sw = $("model-switcher");
     sw.addEventListener("click", async (e) => {
@@ -992,7 +1020,10 @@ const App = (() => {
     $("send-btn").addEventListener("click", sendMessage);
     $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {}));
     $("new-chat-btn").addEventListener("click", newSession);
-    $("settings-btn").addEventListener("click", Dialogs.showSettings);
+    $("settings-btn").addEventListener("click", () => {
+      loadEvolutionSummary(); // WorkBuddy P3：打开设置时加载最近改进
+      Dialogs.showSettings();
+    });
     $("settings-cancel").addEventListener("click", () => $("settings-dialog").close());
     $("settings-save").addEventListener("click", Dialogs.saveSettings);
     $("pick-dir-btn").addEventListener("click", async () => {
@@ -1163,6 +1194,7 @@ const App = (() => {
     maybeShowEvolutionToast, // WorkBuddy P3：进化 toast 检测
     showVersionInfo, // WorkBuddy P3：/version 内容（toast "去看看" 共用）
     setMode, // WorkBuddy P2：Ask/Auto 模式（导出供测试与外部调用）
+    loadEvolutionSummary, // WorkBuddy P3：最近改进摘要
   };
 })();
 
