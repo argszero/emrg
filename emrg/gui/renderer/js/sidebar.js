@@ -56,6 +56,9 @@ const Sidebar = (() => {
   function initKeyboard() {
     const nav = $("conv-list");
     _keyHandler = (e) => {
+      // 输入控件（textarea/input/select/contenteditable）内不劫持 ↑↓/Enter——
+      // 输入框是 <textarea id="input">，多行输入需 ↑↓ 移动光标、Shift+Enter 换行
+      if (e.target.closest("input, textarea, select, [contenteditable]")) return;
       const items = nav.querySelectorAll(".conv-item");
       if (!items.length) return;
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
