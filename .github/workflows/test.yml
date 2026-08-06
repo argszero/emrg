@@ -11,6 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # #441 教训：workflow 文件的 if: secrets 等解析错误人工审查易漏
+      # （actionlint 可捕获），push 后才在 build-release 触发时暴露。
+      # → CI 全量校验所有 workflow，解析错误立即失败（R82 固化）。
+      - name: Actionlint (workflow lint)
+        uses: rhysd/actionlint@v1.7.12
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
