@@ -41,6 +41,7 @@
     "icon": "../packaging/assets/",
     "mac": {
       "identity": null,
+      "hardenedRuntime": true,
       "target": [
         {
           "target": "dir",
