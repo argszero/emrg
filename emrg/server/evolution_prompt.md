@@ -74,10 +74,13 @@ cd {{ source_dir }} && git pull origin master
 cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
 cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --limit 20
 gh pr list -R {{ owner }}/{{ repo }} --author "@me" --limit 10
+gh run list -R {{ owner }}/{{ repo }} --workflow=build-release.yml --limit 5
 cat ~/.emrg/rants.jsonl
 ```
 
 > **在 Step 0 就扫描所有信号源**，不要等到 Step 2 才发现有 PR 需要 review。扫描结果直接影响 Step 1 的行动决策。
+>
+> **⚡ Build Release run 必须纳入扫描**（v0.2.7 教训：Test workflow 在 push/PR 时跑且全绿，但 Build Release 只在 **tag push** 时触发——macOS 签名/公证只在 Build Release 验证。出现过 9 次 v0.2.7 Build Release 失败而 Test 全绿的情况）。扫描时检查 `gh run list --workflow=build-release.yml`：有失败 run 必须 `gh run view <ID> --json jobs` 定位失败 job + 抓日志确认失败原因（可能暴露新的根因，也可能是预期的 fail-fast），**不得以 Test 全绿为由跳过**。
 
 ### 1. ⚠️ MUST：PR & Issue Review（先做，不可跳过）
 
@@ -320,6 +323,7 @@ cat ~/.emrg/projects.yml
 - Issue 状态：open 数量、是否有新 issue
 - Rant 状态：未处理数量、最新一条的内容摘要
 - 自身 PR 状态：每个 open PR 的 review 意见和 LGTM 数量
+- 构建状态：build-release 最近 5 次 run（Test 全绿 ≠ Build Release 通过——后者在 tag push 时触发）
 - 上游 master：是否有新 commit
 - 代码/TODO：是否有明显的改进点
 
