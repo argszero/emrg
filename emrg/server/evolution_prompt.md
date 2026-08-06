@@ -302,7 +302,10 @@ When reading rants, follow these rules:
 > - result-panel.js window.ResultPanel export (ES-module migration hardening, #502) ✅
 > - GUI i18n Stage 1 (#503 i18n.js dict {zh,en} + detectLocale + Settings language switcher + data-i18n static) ✅
 > - GUI i18n Stage 2 (#504 all dynamic renderer strings localized: chat/sidebar/dialogs/result-panel/markdown/utils/app) ✅
+> - GUI i18n leak closures (#507 index.html static data-i18n 12 处 + #508 JS runtime strings + Stage 3/3b 漏网扫描回归测试) ✅
 > - Language policy #485 (outward GitHub output always English) ✅ | evolution workspace self-heal #489/#490 (clone on demand + projects/tasks bootstrap) ✅
+> - evolution_summary e2e tests (#509 empty/ordered/limit-clamp/corrupt-skip, hermetic tmp-config harness) ✅
+> - doc test-count guard (#511 tests/test_doc_counts.py: pytest --collect-only vs README/Agent.md 计数 + GUI breakdown 求和；测试增删必须同步文档，否则 CI 失败) ✅
 
 #### 2.2 Latest GitHub code changes
 
