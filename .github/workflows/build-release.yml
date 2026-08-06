@@ -36,6 +36,12 @@ jobs:
             arch: x64
             artifact: EMRG-*-windows-x64.exe
     runs-on: ${{ matrix.os }}
+    env:
+      # secrets 不能在 if: 中直接引用（GitHub Actions 硬限制，否则 workflow 解析失败）。
+      # 先提升为 job 级 env（允许 secrets context）；未配置时求值为空字符串 → 跳过降级。
+      MACOS_SIGNING_P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
+      MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
     steps:
       - uses: actions/checkout@v5
 
@@ -51,11 +57,8 @@ jobs:
 
       # ── macOS 代码签名（rant 2026-08-06T10:06:55 P1/P2；Secret 未配则跳过降级）──
       - name: Import signing certificate (macOS only)
-        if: runner.os == 'macOS' && secrets.MACOS_SIGNING_P12_BASE64 != ''
+        if: runner.os == 'macOS' && env.MACOS_SIGNING_P12_BASE64 != ''
         shell: bash
-        env:
-          MACOS_SIGNING_P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
-          MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
         run: |
           echo "$MACOS_SIGNING_P12_BASE64" | base64 --decode > /tmp/signing.p12
           security create-keychain -p 'ci-temp' /tmp/ci.keychain
@@ -101,8 +104,8 @@ jobs:
         env:
           # macOS 签名：CSC_LINK+CSC_KEY_PASSWORD 激活 electron-builder 自动 codesign
           # （含 hardened runtime；Secret 未配时为空 → 不签名，保持现状降级）
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_P12_BASE64 != '' && 'file:///tmp/signing.p12' || '' }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MACOS_SIGNING_P12_PASSWORD || '' }}
+          CSC_LINK: ${{ runner.os == 'macOS' && env.MACOS_SIGNING_P12_BASE64 != '' && 'file:///tmp/signing.p12' || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && env.MACOS_SIGNING_P12_PASSWORD || '' }}
         run: |
           npm ci
           npm run dist
@@ -119,10 +122,8 @@ jobs:
 
       # ── pkg 签名（macOS only，P2；Secret 未配则跳过降级）──
       - name: Sign pkg (macOS only)
-        if: runner.os == 'macOS' && secrets.MACOS_SIGNING_IDENTITY != ''
+        if: runner.os == 'macOS' && env.MACOS_SIGNING_IDENTITY != ''
         shell: bash
-        env:
-          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
           PKG="$(ls dist/artifacts/EMRG-*-macos-*.pkg | head -1)"
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
