@@ -46,20 +46,24 @@ case "$PLATFORM" in
     mkdir -p "$PKG_ROOT/payload/emrg-gui"
     cp -R "$RUNTIME/." "$PKG_ROOT/payload/"
     cp -R "$GUI_APP" "$PKG_ROOT/payload/emrg-gui/EMRG.app"
-    # macOS 公证要求 pkg 内所有 Mach-O 二进制都有 Developer ID 签名 + 时间戳
-    # （第 10 次构建教训：Python runtime 的 .so 未签名 → notarytool Invalid，
-    #  报 "The binary is not signed with a valid Developer ID certificate"）。
+    # macOS 公证要求 pkg 内所有 Mach-O 二进制都有 Developer ID 签名 + 时间戳 +
+    # hardened runtime（第 10 次构建教训：Python runtime 的 .so/dylib 未签名 →
+    # notarytool Invalid statusCode 4000，12 个文件报三类错：
+    #   "not signed with a valid Developer ID certificate"
+    #   "does not include a secure timestamp"
+    #   "does not have the hardened runtime enabled"）。
     # 对 payload 内除 EMRG.app（electron-builder 已签）外的所有 Mach-O 签名。
+    # --options runtime = hardened runtime（缺它会触发第三类错误）；实测 OK。
     if [ "$(uname -s)" = "Darwin" ] && command -v codesign >/dev/null; then
       SIGN_ID="$(security find-identity -v -p codesigning 2>/dev/null | grep 'Developer ID Application' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
       if [ -n "$SIGN_ID" ]; then
-        echo "==> codesign runtime binaries（公证要求：Developer ID + timestamp）"
+        echo "==> codesign runtime binaries（公证要求：Developer ID + timestamp + hardened runtime）"
         # 收集 payload 内所有 Mach-O（.so / 无扩展名可执行 / Python 解释器）
         # 排除 EMRG.app（electron-builder 已签）与"卸载 EMRG.app"（纯 bash 脚本无 Mach-O）
         find "$PKG_ROOT/payload" -path '*EMRG.app' -prune -o -path '*卸载 EMRG.app' -prune -o \
           -type f \( -name '*.so' -o -name '*.dylib' -o -name 'python*' -o -name 'emrgd' -o -name 'emrg' -o -name 'emrg-uninstall' \) \
           -exec file {} + 2>/dev/null | grep 'Mach-O' | grep -v 'for architecture' | cut -d: -f1 | sort -u | while read -r BIN; do
-          codesign --force --timestamp --sign "$SIGN_ID" "$BIN" 2>/dev/null && echo "    ✓ $(basename "$BIN")" || echo "    ✗ 跳过 $(basename "$BIN")"
+          codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$BIN" 2>/dev/null && echo "    ✓ $(basename "$BIN")" || echo "    ✗ 跳过 $(basename "$BIN")"
         done
       else
         echo "!! 未找到 Developer ID Application 身份，跳过 runtime codesign（公证可能失败）" >&2
