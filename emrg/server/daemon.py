@@ -40,6 +40,27 @@ from emrg.protocol import (
 )
 from emrg.session import Session
 
+# ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
+# tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
+# 递归替换值为 ***，避免 emrgd.log 泄露凭据。
+_SENSITIVE_KEY_SUBSTRINGS = (
+    "api_key", "token", "authorization", "password", "secret",
+    "api-key", "auth", "credential", "key",
+)
+
+
+def _redact(value):
+    """递归脱敏 dict/list 中的敏感字段值（就地不修改原对象）。"""
+    if isinstance(value, dict):
+        return {
+            k: ("***" if any(s in k.lower() for s in _SENSITIVE_KEY_SUBSTRINGS)
+                else _redact(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
 from emrg.tools import ToolRegistry
 from emrg.tools.bash_tool import BashTool
 from emrg.tools.read_tool import ReadTool
@@ -1378,7 +1399,7 @@ class EmrgServer:
                         args = {}
 
                     logger.info("tool call: %s(%s)", tc_name,
-                                json.dumps(args, ensure_ascii=False)[:200])
+                                json.dumps(_redact(args), ensure_ascii=False)[:200])
 
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
