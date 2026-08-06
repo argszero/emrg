@@ -10,6 +10,7 @@
 const renderer = {};
 
 // marked 自定义 code renderer（v12 无 highlight 选项）
+// 设计 §3.3：代码块带复制按钮（圆角浅底 + 一键复制）
 function codeRenderer(code, infostring, escaped) {
   const lang = (infostring || "").split(/\s+/)[0];
   let highlighted = "";
@@ -26,10 +27,11 @@ function codeRenderer(code, infostring, escaped) {
     }
   }
   const cls = `hljs language-${escapeHtml(lang || "plaintext")}`;
-  if (highlighted) {
-    return `<pre><code class="${cls}">${highlighted}</code></pre>`;
-  }
-  return `<pre><code class="${cls}">${escaped ? code : escapeHtml(code)}</code></pre>`;
+  const codeHtml = highlighted
+    ? `<code class="${cls}">${highlighted}</code>`
+    : `<code class="${cls}">${escaped ? code : escapeHtml(code)}</code>`;
+  // 复制按钮：事件委托在 chat-view（CSP 禁内联 handler）；code 文本经 escapeHtml 防注入
+  return `<div class="code-block"><div class="code-head"><button type="button" class="code-copy" title="复制代码">复制</button></div><pre>${codeHtml}</pre></div>`;
 }
 
 renderer.renderMarkdown = async function (mdText) {

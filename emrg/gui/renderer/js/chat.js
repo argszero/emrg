@@ -10,6 +10,45 @@ const Chat = (() => {
   // tool_call_id → 工具行 DOM 节点
   const toolRows = new Map();
 
+  /** 复制代码按钮（设计 §3.3）：事件委托在聊天区，CSP 无内联 handler */
+  function initCodeCopy() {
+    const cv = $("chat-view");
+    cv.addEventListener("click", (e) => {
+      const btn = e.target.closest(".code-copy");
+      if (!btn) return;
+      const pre = btn.closest(".code-block")?.querySelector("pre");
+      if (!pre) return;
+      const code = pre.textContent || "";
+      const done = () => {
+        btn.textContent = "已复制 ✓";
+        setTimeout(() => { btn.textContent = "复制"; }, 1500);
+      };
+      const fail = () => {
+        btn.textContent = "复制失败";
+        setTimeout(() => { btn.textContent = "复制"; }, 1500);
+      };
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(code).then(done, fail);
+      } else {
+        // 非安全上下文兜底：textarea 选中复制
+        const ta = document.createElement("textarea");
+        ta.value = code;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          document.execCommand("copy");
+          done();
+        } catch {
+          fail();
+        }
+        document.body.removeChild(ta);
+      }
+    });
+  }
+  initCodeCopy(); // 模块级绑定一次（boot 可重复调用，防 listener 泄漏）
+
   /** 追加节点到聊天区并滚动 */
   function append(node) {
     $("chat-view").appendChild(node);
