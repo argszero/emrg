@@ -55,12 +55,17 @@ def _cached_tool_path(tool: str) -> str | None:
 
 
 def _cache_tool_paths(git: str, gh: str) -> None:
-    """Persist resolved tool paths so later lookups are O(1)."""
+    """Persist resolved tool paths so later lookups are O(1).
+
+    Also persists the EMRG repo URL (``repo``) so the evolution workspace
+    self-heal (rant 2026-08-06T20:42:05) can clone on demand without
+    hardcoding — packaged installs have no git remote to detect.
+    """
     try:
         data = {}
         if INSTALL_INFO.exists():
             data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
-        data.update({"git_path": git, "gh_path": gh})
+        data.update({"git_path": git, "gh_path": gh, "repo": "https://github.com/argszero/emrg.git"})
         INSTALL_INFO.write_text(
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )

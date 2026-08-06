@@ -75,3 +75,41 @@ def test_detect_nonexistent_dir():
     """Returns empty string for a directory that doesn't exist."""
     result = _detect_git_remote("/nonexistent/path/xyz/test")
     assert result == ""
+
+
+# ── _cache_tool_paths (repo field, rant 2026-08-06T20:42:05) ──────
+
+
+def test_cache_tool_paths_writes_repo_field(tmp_path, monkeypatch):
+    """_cache_tool_paths persists git/gh paths AND the EMRG repo URL."""
+    from emrg.server import git_utils as mod
+    import json as _json
+
+    info = tmp_path / "install-info.json"
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")
+
+    data = _json.loads(info.read_text(encoding="utf-8"))
+    assert data["git_path"] == "/usr/bin/git"
+    assert data["gh_path"] == "/usr/bin/gh"
+    assert data["repo"] == "https://github.com/argszero/emrg.git"
+
+
+def test_cache_tool_paths_preserves_existing_fields(tmp_path, monkeypatch):
+    """Existing fields in install-info.json are preserved on rewrite."""
+    from emrg.server import git_utils as mod
+    import json as _json
+
+    info = tmp_path / "install-info.json"
+    info.write_text(
+        _json.dumps({"git_path": "/old/git", "custom": 1}), encoding="utf-8"
+    )
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")
+
+    data = _json.loads(info.read_text(encoding="utf-8"))
+    assert data["git_path"] == "/usr/bin/git"
+    assert data["custom"] == 1  # preserved
+    assert data["repo"] == "https://github.com/argszero/emrg.git"
