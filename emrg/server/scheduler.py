@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import time
 from datetime import datetime
@@ -27,7 +28,7 @@ from emrg.connect import connect_to_server
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
-from emrg.server.git_utils import _detect_git_remote, resolve_git_gh
+from emrg.server.git_utils import INSTALL_INFO, _detect_git_remote, resolve_git_gh
 
 logger = logging.getLogger("emrg.server.scheduler")
 
@@ -173,6 +174,204 @@ class EvolutionHandler:
             pass
         return None
 
+    # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──
+    #
+    # Packaged installs run the daemon from ~/.emrg/install/source/emrg — a
+    # .git-less source snapshot — so evolution cannot commit/push/PR. Each
+    # cycle starts by ensuring the workspace is a usable git repo:
+    #   - dev machine (source_dir is a real git repo) → untouched
+    #   - otherwise → clone EMRG into ~/.emrg/evolution/emrg/, align it to the
+    #     installed release tag, and self-heal projects.yml/tasks.yml entries.
+    # Idempotent and failure-tolerant (no network → skip cycle, GUI unaffected).
+
+    def _repo_url_from_install_info(self) -> str | None:
+        """Read the repo URL from install-info.json 'repo' field, if present."""
+        try:
+            data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
+            value = data.get("repo")
+            return str(value) if value else None
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return None
+
+    def _is_usable_git_repo(self, path: str) -> bool:
+        """True if path is a git repo with a working tree we can commit to."""
+        if not path or not Path(path).is_dir():
+            return False
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--is-inside-work-tree"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=5,
+            )
+            if result.returncode != 0 or result.stdout.strip() != "true":
+                return False
+            return os.access(path, os.W_OK)
+        except (subprocess.SubprocessError, OSError):
+            return False
+
+    def _ensure_git_identity(self, repo_dir: Path) -> None:
+        """Set git user.name/user.email if missing (fresh clones have none)."""
+        name = os.environ.get("GIT_AUTHOR_NAME", "") or "EMRG Evolution"
+        email = os.environ.get("GIT_AUTHOR_EMAIL", "") or "emrg@argszero.dev"
+        try:
+            for key, default in (("user.name", name), ("user.email", email)):
+                result = subprocess.run(
+                    ["git", "config", key],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=5,
+                )
+                if not result.stdout.strip():
+                    subprocess.run(
+                        ["git", "config", key, default],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        timeout=5,
+                    )
+        except (subprocess.SubprocessError, OSError):
+            pass
+
+    def _align_to_installed_version(self, repo_dir: Path) -> None:
+        """Point the local master branch at the installed release tag.
+
+        Reads ~/.emrg/install/version.txt (e.g. "0.2.7"); checks out
+        ``v0.2.7`` if the tag exists, otherwise stays on the clone's
+        default branch (latest master). A named branch (not detached HEAD)
+        keeps the evolution flow (branch-from-master, push, PR) working.
+        """
+        tag = None
+        try:
+            version_file = Path.home() / ".emrg" / "install" / "version.txt"
+            if version_file.exists():
+                ver = version_file.read_text(encoding="utf-8").strip()
+                if ver:
+                    tag = f"v{ver}"
+        except OSError:
+            tag = None
+        if not tag:
+            return
+        try:
+            result = subprocess.run(
+                ["git", "tag", "-l", tag],
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=10,
+            )
+            if result.returncode == 0 and tag in result.stdout.split():
+                subprocess.run(
+                    ["git", "checkout", "-B", "master", tag],
+                    cwd=repo_dir,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=30,
+                    check=True,
+                )
+                logger.info(
+                    "EvolutionHandler[%s]: evolution workspace aligned to %s",
+                    self.name, tag,
+                )
+        except (subprocess.CalledProcessError, OSError) as e:
+            logger.warning(
+                "EvolutionHandler[%s]: tag checkout %s failed (stay on master): %s",
+                self.name, tag, e,
+            )
+
+    def _ensure_project_entry(self) -> None:
+        """Add/update the emrg project entry in projects.yml (idempotent)."""
+        projects_file = config_dir() / "projects.yml"
+        try:
+            entries: list[dict] = []
+            if projects_file.exists():
+                data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    entries = [e for e in data if isinstance(e, dict)]
+            new_path = str(self._source_dir)
+            for entry in entries:
+                if entry.get("name") == "emrg":
+                    if entry.get("path") != new_path:
+                        entry["path"] = new_path
+                        entry["last_active"] = datetime.now().isoformat()
+                        atomic_write_yaml(entries, projects_file, prefix=".projects_")
+                        logger.info(
+                            "EvolutionHandler[%s]: projects.yml self-heal — emrg → %s",
+                            self.name, new_path,
+                        )
+                    return
+            entries.append({
+                "name": "emrg",
+                "path": new_path,
+                "last_active": datetime.now().isoformat(),
+            })
+            atomic_write_yaml(entries, projects_file, prefix=".projects_")
+            logger.info(
+                "EvolutionHandler[%s]: projects.yml self-heal — added emrg → %s",
+                self.name, new_path,
+            )
+        except (yaml.YAMLError, OSError) as e:
+            logger.warning(
+                "EvolutionHandler[%s]: projects.yml self-heal failed: %s",
+                self.name, e,
+            )
+
+    def _ensure_evolution_workspace(self) -> bool:
+        """Self-heal the evolution workspace; returns False to skip the cycle.
+
+        Only applies to the EMRG self-evolution task (config.project == emrg).
+        Returns True when the workspace is usable (existing dev repo, or a
+        successful clone into ``~/.emrg/evolution/emrg/``).
+        """
+        if self._project_name != "emrg" or self._repo != self.REPO:
+            return True  # paper/open-source/promote tasks: not our concern
+        if self._is_usable_git_repo(self._source_dir):
+            return True  # dev machine — use the existing repo as-is
+        repo_url = self._repo_url_from_install_info() or self._repo_url
+        evolve_dir = EVOLUTION_CWD / self.REPO
+        if evolve_dir.exists():
+            if self._is_usable_git_repo(str(evolve_dir)):
+                self._source_dir = str(evolve_dir)
+                self.project_path = str(evolve_dir)
+                return True
+            logger.warning(
+                "EvolutionHandler[%s]: %s exists but is not a git repo — "
+                "skipping self-heal to avoid data loss",
+                self.name, evolve_dir,
+            )
+            return False
+        try:
+            logger.info(
+                "EvolutionHandler[%s]: cloning %s → %s (workspace self-heal)",
+                self.name, repo_url, evolve_dir,
+            )
+            subprocess.run(
+                ["git", "clone", repo_url, str(evolve_dir)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=120,
+                check=True,
+            )
+            self._align_to_installed_version(evolve_dir)
+            self._ensure_git_identity(evolve_dir)
+            self._source_dir = str(evolve_dir)
+            self.project_path = str(evolve_dir)
+            self._ensure_project_entry()
+            return True
+        except (subprocess.CalledProcessError, OSError) as e:
+            logger.warning(
+                "EvolutionHandler[%s]: evolution workspace self-heal failed "
+                "(network down?): %s — skipping cycle",
+                self.name, e,
+            )
+            return False
+
     def _load_saturation_state(self) -> int:
         """Restore _empty_cycles counter from disk (survives daemon restarts)."""
         try:
@@ -305,6 +504,15 @@ class EvolutionHandler:
 
     async def _run_evolution_cycle(self) -> None:
         """Connect to server, send evolution prompt, read streaming response."""
+
+        # Self-heal the evolution workspace first (rant 20:42 方案 C):
+        # packaged installs lack a writable git repo; clone on demand.
+        if not self._ensure_evolution_workspace():
+            logger.warning(
+                "EvolutionHandler[%s]: workspace not ready — skipping cycle",
+                self.name,
+            )
+            return
 
         cycle_time = datetime.now()
         prompt = self._build_evolution_prompt()
@@ -520,6 +728,11 @@ class TaskScheduler:
 
     def load_and_start(self) -> list[asyncio.Task]:
         """Load tasks.yml, start all enabled tasks, return coroutine list."""
+        # Self-heal: packaged installs may lack the emrg self-evolution task.
+        # This must run here (not inside the handler) because a missing task
+        # means no EvolutionHandler is ever started (rant 20:42 方案 C).
+        self._ensure_self_evolution_task()
+
         tasks_config = self._load_tasks()
         if not tasks_config:
             # Bootstrap: if projects.yml has auto_evolve entries but
@@ -636,6 +849,29 @@ class TaskScheduler:
                 "TaskScheduler: migrated %d auto_evolve entries to tasks.yml",
                 len(new_tasks),
             )
+
+    def _ensure_self_evolution_task(self) -> None:
+        """Ensure tasks.yml has an emrg self-evolution task (idempotent).
+
+        Packaged installs (or first runs) may lack tasks.yml entirely, or lack
+        the emrg-task entry. Without it, no EvolutionHandler is ever created,
+        so the workspace self-heal (which lives inside the handler) cannot run.
+        """
+        tasks = self._load_tasks()
+        for t in tasks:
+            cfg = t.get("config") if isinstance(t.get("config"), dict) else {}
+            if t.get("type") == "evolution" and cfg.get("project") == "emrg":
+                return  # already present — idempotent
+        tasks.append({
+            "name": "emrg-task",
+            "type": "evolution",
+            "config": {"project": "emrg"},
+            "interval": 60,
+            "enabled": True,
+            "last_run": None,
+        })
+        self._save_tasks(tasks)
+        logger.info("TaskScheduler: self-heal — added emrg-task to tasks.yml")
 
     def create_task(self, name: str, task_type: str, config: dict, interval: int) -> None:
         """Add a new task entry (used by init_auto_evolve).

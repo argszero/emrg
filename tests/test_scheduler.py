@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -233,19 +234,31 @@ def test_migrate_auto_evolve_entries_real(tmp_path):
 
 
 def test_load_and_start_no_file(tmp_path):
-    """Returns empty coro list when tasks.yml doesn't exist."""
+    """No tasks.yml → self-heal creates emrg-task and starts it (rant 20:42 方案 C).
+
+    Previously returned an empty list; now a packaged install without
+    tasks.yml gets the emrg self-evolution task bootstrapped automatically.
+    """
     from emrg.server import scheduler as mod
-    sched = TaskScheduler(InstanceIdentity())
-    sched._tasks_file = tmp_path / "nonexistent" / "tasks.yml"
+
+    async def _run():
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        return sched.load_and_start(), sched
 
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        coros = sched.load_and_start()
+        (coros, sched) = asyncio.run(_run())
     finally:
         mod.config_dir = orig_config
 
-    assert coros == []
+    assert len(coros) == 1
+    assert sched._handlers[0].name == "emrg-task"
+    assert sched._handlers[0].interval == 60
+    sched.stop_all()
+    for c in coros:
+        c.cancel()
 
 
 def test_load_and_start_enabled_task(tmp_path):
@@ -253,7 +266,7 @@ def test_load_and_start_enabled_task(tmp_path):
     from emrg.server import scheduler as mod
     tasks_yml = tmp_path / "tasks.yml"
     tasks_yml.write_text(yaml.safe_dump([
-        {"name": "emrg", "type": "evolution", "config": {"path": "/tmp"}, "interval": 99, "enabled": True},
+        {"name": "emrg", "type": "evolution", "config": {"project": "emrg"}, "interval": 99, "enabled": True},
     ]))
 
     async def _run():
@@ -268,7 +281,7 @@ def test_load_and_start_enabled_task(tmp_path):
     finally:
         mod.config_dir = orig_config
 
-    assert len(coros) == 1
+    assert len(coros) == 1  # emrg-task is the self-evolution task — no duplicate
     assert len(sched._handlers) == 1
     assert sched._handlers[0].name == "emrg"
     assert sched._handlers[0].interval == 99
@@ -282,7 +295,7 @@ def test_load_and_start_skips_disabled(tmp_path):
     """Disabled tasks are not started."""
     tasks_yml = tmp_path / "tasks.yml"
     tasks_yml.write_text(yaml.safe_dump([
-        {"name": "enabled", "type": "evolution", "config": {"path": "/tmp"}, "enabled": True},
+        {"name": "enabled", "type": "evolution", "config": {"project": "emrg"}, "enabled": True},
         {"name": "disabled", "type": "evolution", "config": {"path": "/tmp"}, "enabled": False},
     ]))
 
@@ -307,24 +320,30 @@ def test_load_and_start_skips_disabled(tmp_path):
 
 
 def test_load_and_start_unknown_type(tmp_path):
-    """Tasks with unknown handler type are skipped gracefully."""
+    """Tasks with unknown handler type are skipped; self-heal still adds emrg-task."""
     tasks_yml = tmp_path / "tasks.yml"
     tasks_yml.write_text(yaml.safe_dump([
         {"name": "bad", "type": "nonexistent_handler", "config": {}, "enabled": True},
     ]))
 
-    sched = TaskScheduler(InstanceIdentity())
-    sched._tasks_file = tasks_yml
+    async def _run():
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tasks_yml
+        return sched.load_and_start(), sched
 
     from emrg.server import scheduler as mod
     orig_config = mod.config_dir
     try:
         mod.config_dir = lambda: tmp_path
-        coros = sched.load_and_start()
+        (coros, sched) = asyncio.run(_run())
     finally:
         mod.config_dir = orig_config
 
-    assert coros == []
+    assert len(coros) == 1  # the self-healed emrg-task
+    assert sched._handlers[0].name == "emrg-task"
+    sched.stop_all()
+    for c in coros:
+        c.cancel()
 
 
 # ── Template task types (paper / open-source / promote) ────────────
@@ -374,10 +393,11 @@ def test_load_and_start_promote_task(tmp_path):
     finally:
         mod.config_dir = orig_config
 
-    assert len(coros) == 1
-    handler = sched._handlers[0]
-    assert handler.name == "olr-promote"
-    assert handler._template_path.name == "promote_prompt.md"
+    # promote task + self-healed emrg-task
+    assert len(coros) == 2
+    by_name = {h.name: h for h in sched._handlers}
+    assert by_name["olr-promote"]._template_path.name == "promote_prompt.md"
+    assert by_name["emrg-task"]._template_path.name == "evolution_prompt.md"
     sched.stop_all()
     for c in coros:
         c.cancel()
@@ -450,3 +470,251 @@ def test_paper_template_renders_with_context():
     assert "paper_state.md" in out, "状态文件指引应渲染"
     assert "latexmk" in out, "LaTeX 检查指引应渲染"
     assert "literature" in out, "文献去重指引应渲染"
+
+
+# ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
+
+
+def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
+    """Build an EvolutionHandler pointed at a tmp config dir."""
+    from emrg.server import scheduler as mod
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    handler = EvolutionHandler(
+        name=name,
+        config={"project": project} if project else {},
+        interval=60,
+        identity=InstanceIdentity(),
+    )
+    mod.config_dir = orig_config
+    if path is not None:
+        handler._source_dir = str(path)
+        handler.project_path = str(path)
+    return handler
+
+
+class FakeGitRun:
+    """Controllable subprocess.run fake for git commands."""
+
+    def __init__(self, git_repo=True, tags="v0.2.7", clone_fails=False):
+        self.calls = []
+        self.git_repo = git_repo
+        self.tags = tags
+        self.clone_fails = clone_fails
+
+    def __call__(self, cmd, *args, **kwargs):
+        self.calls.append((list(cmd), kwargs.get("cwd")))
+        cwd = kwargs.get("cwd") or ""
+        if cmd[0] == "git":
+            sub = cmd[1]
+            if sub == "rev-parse":
+                if "--is-inside-work-tree" in cmd:
+                    return _R(0, "true\n" if self.git_repo else "false\n")
+                if "HEAD" in cmd:
+                    return _R(0, "abc123\n")
+            if sub == "clone":
+                if self.clone_fails:
+                    raise _CalledProcessErrorStub("clone failed")
+                target = Path(cmd[-1])
+                target.mkdir(parents=True, exist_ok=True)
+                return _R(0, "")
+            if sub == "tag":
+                return _R(0, self.tags + "\n")
+            if sub == "checkout":
+                return _R(0, "")
+            if sub == "config":
+                return _R(0, "")  # getter → empty → setter will run
+        return _R(0, "")
+
+
+class _R:
+    def __init__(self, returncode, stdout):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = ""
+
+
+class _CalledProcessErrorStub(subprocess.CalledProcessError):
+    def __init__(self, msg):
+        super().__init__(returncode=1, cmd=["git", "clone"], output=msg)
+
+
+def test_ensure_self_evolution_task_adds_when_missing(tmp_path):
+    """tasks.yml without an emrg evolution task gets emrg-task appended."""
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import TaskScheduler
+
+    tasks_yml = tmp_path / "tasks.yml"
+    tasks_yml.write_text(yaml.safe_dump([
+        {"name": "other", "type": "evolution", "config": {"project": "other"}, "enabled": True},
+    ]))
+
+    sched = TaskScheduler(InstanceIdentity())
+    sched._tasks_file = tasks_yml
+
+    orig_config = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        sched._ensure_self_evolution_task()
+        sched._ensure_self_evolution_task()  # idempotent
+    finally:
+        mod.config_dir = orig_config
+
+    data = yaml.safe_load(tasks_yml.read_text(encoding="utf-8"))
+    names = [e["name"] for e in data]
+    assert "emrg-task" in names
+    assert "other" in names
+    emrg = next(e for e in data if e["name"] == "emrg-task")
+    assert emrg["type"] == "evolution"
+    assert emrg["config"] == {"project": "emrg"}
+    assert emrg["interval"] == 60
+    assert emrg["enabled"] is True
+    assert len(names) == 2  # no duplicate from second call
+
+
+def test_ensure_self_evolution_task_idempotent_when_present(tmp_path):
+    """Existing emrg evolution task is left untouched (no duplicate)."""
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import TaskScheduler
+
+    tasks_yml = tmp_path / "tasks.yml"
+    tasks_yml.write_text(yaml.safe_dump([
+        {"name": "emrg-task", "type": "evolution",
+         "config": {"project": "emrg"}, "interval": 60, "enabled": True,
+         "last_run": None},
+    ]))
+
+    sched = TaskScheduler(InstanceIdentity())
+    sched._tasks_file = tasks_yml
+
+    orig_config = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        sched._ensure_self_evolution_task()
+    finally:
+        mod.config_dir = orig_config
+
+    data = yaml.safe_load(tasks_yml.read_text(encoding="utf-8"))
+    assert len(data) == 1
+    assert data[0]["name"] == "emrg-task"
+
+
+def test_ensure_evolution_workspace_dev_repo_untouched(tmp_path):
+    """A real writable git repo (dev machine) is used as-is — no clone."""
+    import subprocess as real_subprocess
+
+    from emrg.server import scheduler as mod
+
+    repo = tmp_path / "dev-emrg"
+    repo.mkdir()
+    real_subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    real_subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
+    real_subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "t"], check=True)
+    (repo / "f.txt").write_text("x", encoding="utf-8")
+    real_subprocess.run(
+        ["git", "-C", str(repo), "add", "."], check=True)
+    real_subprocess.run(
+        ["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
+
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        handler = EvolutionHandler(
+            name="emrg-task",
+            config={"project": "emrg"},
+            interval=60,
+            identity=InstanceIdentity(),
+        )
+    finally:
+        mod.config_dir = orig_config
+    handler._source_dir = str(repo)
+    handler.project_path = str(repo)
+
+    fake = FakeGitRun()
+    orig_run = mod.subprocess.run
+    mod.subprocess.run = fake
+    try:
+        ok = handler._ensure_evolution_workspace()
+    finally:
+        mod.subprocess.run = orig_run
+
+    assert ok is True
+    assert handler._source_dir == str(repo)  # unchanged
+    assert not any("clone" in c[0] for c in fake.calls), f"unexpected clone: {fake.calls}"
+
+
+def test_ensure_evolution_workspace_clones_and_aligns(tmp_path):
+    """Non-git source_dir → clone into evolution workspace + align + projects.yml self-heal."""
+    from emrg.server import scheduler as mod
+
+    evolve_dir = tmp_path / "evolution" / "emrg"
+    mod.EVOLUTION_CWD = tmp_path / "evolution"
+
+    projects_yml = tmp_path / "projects.yml"
+    projects_yml.write_text(yaml.safe_dump([]))
+
+    handler = _make_handler(tmp_path, path=str(tmp_path / "install" / "source" / "emrg"))
+
+    # Installed version hint → tag alignment. The code reads
+    # Path.home()/.emrg/install/version.txt — patch home so the test is
+    # hermetic (CI hosts don't have ~/.emrg/install).
+    import pathlib as _pathlib
+    install_dir = tmp_path / ".emrg" / "install"
+    install_dir.mkdir(parents=True)
+    (install_dir / "version.txt").write_text("0.2.7", encoding="utf-8")
+
+    fake = FakeGitRun(git_repo=False, tags="v0.2.7")
+    orig_run = mod.subprocess.run
+    orig_evolve = mod.EVOLUTION_CWD
+    orig_config = mod.config_dir
+    orig_home = _pathlib.Path.home
+    mod.subprocess.run = fake
+    mod.config_dir = lambda: tmp_path
+    _pathlib.Path.home = classmethod(lambda cls: tmp_path)
+    try:
+        ok = handler._ensure_evolution_workspace()
+    finally:
+        mod.subprocess.run = orig_run
+        mod.config_dir = orig_config
+        mod.EVOLUTION_CWD = orig_evolve
+        _pathlib.Path.home = orig_home
+
+    assert ok is True
+    assert handler._source_dir == str(evolve_dir)
+    # clone called with repo URL + target
+    clone_calls = [c for c in fake.calls if c[0][1] == "clone"]
+    assert len(clone_calls) == 1
+    # tag alignment: checkout -B master v0.2.7
+    checkout_calls = [c for c in fake.calls if c[0][1] == "checkout"]
+    assert any("v0.2.7" in c[0] for c in checkout_calls), f"no tag checkout: {checkout_calls}"
+    # git identity configured
+    config_calls = [c for c in fake.calls if c[0][1] == "config"]
+    assert any("user.name" in c[0] for c in config_calls)
+    assert any("user.email" in c[0] for c in config_calls)
+    # projects.yml self-heal
+    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    assert any(e.get("name") == "emrg" and e.get("path") == str(evolve_dir) for e in data)
+
+
+def test_ensure_evolution_workspace_clone_failure_skips(tmp_path):
+    """Clone failure (no network) → returns False so the cycle is skipped."""
+    from emrg.server import scheduler as mod
+
+    mod.EVOLUTION_CWD = tmp_path / "evolution"
+    handler = _make_handler(tmp_path, path=str(tmp_path / "nonexistent"))
+    handler._repo_url = "https://github.com/argszero/emrg.git"
+
+    fake = FakeGitRun(git_repo=False, clone_fails=True)
+    orig_run = mod.subprocess.run
+    orig_evolve = mod.EVOLUTION_CWD
+    mod.subprocess.run = fake
+    try:
+        ok = handler._ensure_evolution_workspace()
+    finally:
+        mod.subprocess.run = orig_run
+        mod.EVOLUTION_CWD = orig_evolve
+
+    assert ok is False
+    assert handler._source_dir != str(mod.EVOLUTION_CWD / "emrg")
