@@ -1,43 +1,62 @@
 "use strict";
 /**
- * copywriting.js — 去黑话文案映射（非开发者友好）。
+ * copywriting.js — 去黑话文案映射（非开发者友好，rant 21:19 起经 i18n 词典取词）。
  * 工具名 → 友好的动词短语；系统级状态 → 口语化鼓励性文案。
+ * refresh()：locale 切换后重建 COPY（i18n.apply 会调用）。
+ * 注意：EMRG_Copy 需在 i18n.js 之后加载（引用 EMRG_I18N.t）。
  */
 
-/** 工具名 → 进行中 / 完成 短语（渐进披露：默认折叠，点开展示原始输出） */
-const TOOL_PHRASES = {
-  bash: { doing: "正在运行命令…", done: "已运行命令" },
-  read: { doing: "正在读取文件…", done: "已读取文件" },
-  write: { doing: "正在写入文件…", done: "已写入文件" },
-  edit: { doing: "正在修改文件…", done: "已修改文件" },
-  glob: { doing: "正在查找文件…", done: "已找到文件" },
-  grep: { doing: "正在搜索内容…", done: "已完成搜索" },
-};
+const EMRG_Copy = (() => {
+  const _t = (key, params) => {
+    try {
+      return window.EMRG_I18N ? window.EMRG_I18N.t(key, params) : key;
+    } catch { return key; }
+  };
 
-function toolPhrases(name) {
-  return TOOL_PHRASES[name] || { doing: "正在处理…", done: "已完成" };
-}
+  /** 工具名 → 进行中 / 完成 短语（渐进披露：默认折叠，点开展示原始输出） */
+  function toolPhrases(name) {
+    const base = name || "fallback";
+    return {
+      doing: _t(`tool.${base}.doing`),
+      done: _t(`tool.${base}.done`),
+    };
+  }
 
-/** 工具失败（不 blame 用户，给出下一步） */
-const TOOL_FAIL_TEXT = "这一步没成功，我换个方法试试";
+  /** 系统状态文案（locale 敏感：切换语言后 refresh 重建；含 #501 P3 成长卡/toast 键） */
+  function buildCopy() {
+    return {
+      disconnected: _t("copy.disconnected"),
+      reconnected: _t("copy.reconnected"),
+      sessionBusy: _t("copy.sessionBusy"),
+      sendFailed: _t("copy.sendFailed"),
+      deleteConfirmTitle: _t("copy.deleteConfirmTitle"),
+      deleteConfirmBody: _t("copy.deleteConfirmBody"),
+      noSessions: _t("copy.noSessions"),
+      aboutEvolution: (n) =>
+        n ? _t("copy.aboutEvolution", { n }) : _t("copy.aboutEvolutionEmpty"),
+      // WorkBuddy P3（#501）：成长卡 + 进化 toast
+      growthCount: (n) => _t("copy.growthCount", { n }),
+      growthNote: _t("copy.growthNote"),
+      evolutionToastTitle: _t("copy.evolutionToastTitle"),
+      evolutionToastMsg: (n) => _t("copy.evolutionToastMsg", { n }),
+      evolutionToastSee: _t("copy.evolutionToastSee"),
+      evolutionToastDismiss: _t("copy.evolutionToastDismiss"),
+    };
+  }
+  let COPY = buildCopy();
+  let failText = _t("tool.failText"); // 工具失败文案（字符串属性，chat.js 直接赋值用）
 
-/** 系统状态文案 */
-const COPY = {
-  disconnected: "连接中断了，正在重新连接…",
-  reconnected: "回来了，我们继续 ✦",
-  sessionBusy: "我还在处理上一条，稍等一下哦",
-  sendFailed: "没发送成功，你的话我还留着，再试一次？",
-  deleteConfirmTitle: "删除这段对话？",
-  deleteConfirmBody: "删除后无法恢复。",
-  noSessions: "还没有对话",
-  aboutEvolution: (n) => (n ? `EMRG 已自我成长 ${n} 次，感谢你的每一次反馈` : "EMRG 正在成长中"),
-  // WorkBuddy P3（rant 21:35）：自进化可见化
-  growthCount: (n) => `已自我进化 ${n} 次`,
-  growthNote: "边工作边学习，越用越懂你",
-  evolutionToastTitle: "EMRG 刚刚完成一次自我进化！",
-  evolutionToastMsg: (n) => `这是它的第 ${n} 次自我改进，现在更好用了。`,
-  evolutionToastSee: "去看看",
-  evolutionToastDismiss: "知道了",
-};
+  function refresh() {
+    COPY = buildCopy();
+    failText = _t("tool.failText");
+  }
 
-window.EMRG_Copy = { toolPhrases, TOOL_FAIL_TEXT, COPY };
+  return {
+    toolPhrases,
+    COPY,
+    refresh,
+    get TOOL_FAIL_TEXT() { return failText; },
+  };
+})();
+
+window.EMRG_Copy = EMRG_Copy;

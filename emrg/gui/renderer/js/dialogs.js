@@ -31,6 +31,32 @@ const Dialogs = (() => {
     });
   }
 
+  // ── 语言（rant 21:19：i18n 手动覆盖，即时生效）──
+  function renderLangOptions() {
+    const wrap = $("lang-options");
+    if (!wrap) return;
+    // 原始 localStorage 值："" = 跟随系统（高亮第一项）
+    let saved = "";
+    try {
+      if (typeof localStorage !== "undefined") saved = localStorage.getItem("emrg.locale") || "";
+    } catch { /* ignore */ }
+    for (const btn of wrap.querySelectorAll(".theme-option")) {
+      btn.classList.toggle("active", (btn.dataset.lang || "") === saved);
+    }
+  }
+
+  function initLangButtons() {
+    const wrap = $("lang-options");
+    if (!wrap) return;
+    wrap.addEventListener("click", (e) => {
+      const btn = e.target.closest(".theme-option");
+      if (!btn) return;
+      const loc = btn.dataset.lang || "";
+      if (window.EMRG_I18N) window.EMRG_I18N.setLocale(loc); // 立即重刷全界面
+      renderLangOptions();
+    });
+  }
+
   // ── 多模型管理 ───────────────────────────
   // defaultName：当前默认模型（llm.model）；extraModels：[[llm.models]] 条目（含与默认同名的配置项）
   let defaultName = "";
@@ -189,6 +215,7 @@ const Dialogs = (() => {
       $("set-project-dir").value = s.projectDir || "";
       if (s.theme) theme = s.theme;
       renderThemeOptions();
+      renderLangOptions(); // rant 21:19：语言选择器高亮当前值
       defaultName = s.model || "";
       extraModels = (s.modelDetails || []).map((m) => ({
         name: m.name || "",
@@ -357,6 +384,8 @@ const Dialogs = (() => {
 
   return {
     initThemeButtons,
+    initLangButtons,
+    renderLangOptions,
     initModelForm,
     initRenameDialog,
     showRename,

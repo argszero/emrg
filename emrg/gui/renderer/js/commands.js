@@ -12,22 +12,23 @@
 
 const Commands = (() => {
   // 指令注册表：cmd → { hint, phase }
+  // hint 为 i18n 词典键（rant 21:19）：显示时经 t() 解析为当前语言文案
   const COMMANDS = {
-    "/clear": { hint: "清空当前对话", phase: 1 },
-    "/compact": { hint: "压缩当前对话历史", phase: 1 },
-    "/version": { hint: "显示版本与实例信息", phase: 1 },
-    "/help": { hint: "查看全部指令说明", phase: 1 },
-    "/image": { hint: "发送图片（请直接粘贴）", phase: 1 },
-    "/delete": { hint: "删除当前对话", phase: 2 },
-    "/rename": { hint: "重命名当前对话", phase: 2 },
-    "/resume": { hint: "切换/恢复对话", phase: 2 },
-    "/rewind": { hint: "回退到历史消息点", phase: 2 },
-    "/sessions": { hint: "查看全部对话", phase: 2 },
-    "/model": { hint: "切换模型", phase: 3 },
-    "/memory": { hint: "浏览记忆", phase: 3 },
-    "/skills": { hint: "查看已加载技能", phase: 3 },
-    "/rant": { hint: "驱动 EMRG 进化", phase: 4 },
-    "/trigger": { hint: "触发后台任务", phase: 4 },
+    "/clear": { hint: "cmd.clear.hint", phase: 1 },
+    "/compact": { hint: "cmd.compact.hint", phase: 1 },
+    "/version": { hint: "cmd.version.hint", phase: 1 },
+    "/help": { hint: "cmd.help.hint", phase: 1 },
+    "/image": { hint: "cmd.image.hint", phase: 1 },
+    "/delete": { hint: "cmd.delete.hint", phase: 2 },
+    "/rename": { hint: "cmd.rename.hint", phase: 2 },
+    "/resume": { hint: "cmd.resume.hint", phase: 2 },
+    "/rewind": { hint: "cmd.rewind.hint", phase: 2 },
+    "/sessions": { hint: "cmd.sessions.hint", phase: 2 },
+    "/model": { hint: "cmd.model.hint", phase: 3 },
+    "/memory": { hint: "cmd.memory.hint", phase: 3 },
+    "/skills": { hint: "cmd.skills.hint", phase: 3 },
+    "/rant": { hint: "cmd.rant.hint", phase: 4 },
+    "/trigger": { hint: "cmd.trigger.hint", phase: 4 },
   };
 
   /**
@@ -43,15 +44,24 @@ const Commands = (() => {
     return { type: "unknown", cmd: key };
   }
 
+  /** 解析 i18n hint：词典键 → 当前语言文案 */
+  function hintText(cmd) {
+    const meta = COMMANDS[cmd];
+    if (!meta) return "";
+    try {
+      return window.EMRG_I18N ? window.EMRG_I18N.t(meta.hint) : meta.hint;
+    } catch { return meta.hint; }
+  }
+
   /** / 前缀补全：返回匹配的指令（含 hint），供补全菜单过滤 */
   function getCompletions(prefix) {
     const p = String(prefix || "").toLowerCase();
     return Object.entries(COMMANDS)
       .filter(([cmd]) => cmd.startsWith(p))
-      .map(([cmd, meta]) => ({ cmd, hint: meta.hint, phase: meta.phase }));
+      .map(([cmd, meta]) => ({ cmd, hint: hintText(cmd), phase: meta.phase }));
   }
 
-  return { COMMANDS, parseInput, getCompletions };
+  return { COMMANDS, parseInput, getCompletions, hintText };
 })();
 
 window.EMRG_Commands = Commands;
