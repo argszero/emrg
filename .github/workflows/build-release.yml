@@ -135,10 +135,12 @@ jobs:
           if [ -z "$PKG" ]; then echo "no pkg found, skipping"; exit 0; fi
           productsign --sign "$MACOS_SIGNING_IDENTITY" "$PKG" "${PKG}.signed"
           mv "${PKG}.signed" "$PKG"
-          pkgutil --check-signature "$PKG" || true
+          # P3 验证：证书存在时签名必须成功（rant 验收：pkgutil 显示 signed by Developer ID）
+          pkgutil --check-signature "$PKG"
 
       # ── pkg 公证（macOS only，P2 后半；Secret 未配则跳过降级）──
-      # notarytool submit --wait：轮询直至 Accepted/Invalid，失败即非零退出 → CI 失败
+      # notarytool submit --wait：轮询直至 Accepted/Invalid，失败即非零退出 → CI 失败。
+      # --timeout 20m：设计文档 §4.4 明确要求（默认 10m，Apple 公证排队高峰可能超时）
       - name: Notarize pkg (macOS only)
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
         shell: bash
@@ -149,7 +151,7 @@ jobs:
             --apple-id "$APPLE_ID" \
             --password "$MACOS_NOTARY_APP_PASSWORD" \
             --team-id "$MACOS_NOTARY_TEAM_ID" \
-            --wait --output-format json
+            --wait --timeout 20m --output-format json
 
       - name: Staple pkg (macOS only)
         if: runner.os == 'macOS' && env.APPLE_ID != '' && env.MACOS_NOTARY_APP_PASSWORD != '' && env.MACOS_NOTARY_TEAM_ID != ''
