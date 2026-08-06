@@ -377,3 +377,20 @@ test("模型表单：Enter 保存 / ESC 取消键盘绑定（对话框内交互�
   assert.ok(initBlock.includes('key === "Enter"'), "Enter 应保存模型表单");
   assert.ok(initBlock.includes('key === "Escape"'), "ESC 应取消模型表单");
 });
+
+test("boot 死锁修复：boot/newSession/switchSession 成功路径启用输入框", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  const src = fs.readFileSync(path.join(RENDERER_JS, "app.js"), "utf8");
+  // boot() 成功路径（sessions 分支汇合处）必须调用 setComposerDisabled(false)
+  const bootIdx = src.indexOf("async function boot()");
+  const bootBlock = src.slice(bootIdx, src.indexOf("async function sendMessage"));
+  assert.ok(bootBlock.includes("setComposerDisabled(false)"), "boot() 成功路径应启用输入框");
+  // newSession()/switchSession() 成功路径也应启用（防御性，独立调用场景）
+  const nsIdx = src.indexOf("async function newSession()");
+  const nsBlock = src.slice(nsIdx, src.indexOf("async function deleteSession"));
+  assert.ok(nsBlock.includes("setComposerDisabled(false)"), "newSession() 成功路径应启用输入框");
+  const ssIdx = src.indexOf("async function switchSession(");
+  const ssBlock = src.slice(ssIdx, nsIdx);
+  assert.ok(ssBlock.includes("setComposerDisabled(false)"), "switchSession() 成功路径应启用输入框");
+});
