@@ -71,6 +71,8 @@ const ELEMENT_IDS = [
   "model-list", "add-model-btn", "model-form", "model-form-name", "model-form-id",
   "model-form-vision", "model-form-save", "model-form-cancel", "back-to-bottom",
   "cmd-menu", "help-dialog", "help-list", "help-close",
+  "sessions-dialog", "sessions-list", "sessions-close",
+  "rewind-dialog", "rewind-list", "rewind-close",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
