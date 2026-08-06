@@ -124,7 +124,7 @@ class LlmClient:
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
             logger.debug("LLM request: url=%s model=%s (attempt %d/%d)",
-                         url, self.config.model, attempt + 1, MAX_RETRIES + 1)
+                         _redact_text(url), self.config.model, attempt + 1, MAX_RETRIES + 1)
 
             resp = await client.post(url, headers=headers, json=payload)
 
@@ -193,7 +193,7 @@ class LlmClient:
         self.last_response_status = 0
         self.last_response_headers = {}
 
-        logger.debug("LLM stream: url=%s model=%s", url, self.config.model)
+        logger.debug("LLM stream: url=%s model=%s", _redact_text(url), self.config.model)
 
         # Accumulated state across chunks (reset on retry)
         content_parts: list[str] = []
