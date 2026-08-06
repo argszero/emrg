@@ -64,7 +64,7 @@ EMRG 是一个关于*自主进化*的实验。它能帮你写代码——读文�
 
 > **卸载**：macOS 运行"卸载 EMRG.app"；Windows 控制面板卸载；Linux 运行 `~/.emrg/install/bin/emrg-uninstall`（或删 AppImage + 软链）。卸载保留 `~/.emrg` 中非 EMRG 的用户文件，并生成终止报告与数据快照。**Windows 卸载彻底**（v0.2.2+）：先终止 GUI 进程防止 daemon 复活，白名单全量清理运行时文件，`[UninstallDelete]` 兜底删除 install/，`~/.emrg` 卸载后不残留。
 >
-> **无 Apple 证书**：macOS 安装包未签名时，首次打开右键 → 打开（Gatekeeper 提示说明）。API key 配置除 GUI 外也可直接编辑 `~/.emrg/config.toml`（GUI 保存设置会重写 config，注释会丢失——高级配置建议直接编辑文件）。
+> **macOS 签名与公证**：v0.2.7 起 macOS 安装包已用 Developer ID 双证书签名并完成 Apple 公证（零 Gatekeeper 弹窗，双击直接安装）。仅当安装包未签名时（如自建旧版本），才需要首次打开右键 → 打开。API key 配置除 GUI 外也可直接编辑 `~/.emrg/config.toml`（GUI 保存设置会重写 config，注释会丢失——高级配置建议直接编辑文件）。
 
 ### 🍎 macOS（源码安装）
 
