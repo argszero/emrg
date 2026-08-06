@@ -445,6 +445,11 @@
 .model-menu-item:hover {
   background: var(--bg-soft);
 }
+/* 键盘导航高亮（↑↓） */
+.model-menu-item.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 .model-menu-item .model-check {
   color: var(--accent);
   font-weight: 700;
