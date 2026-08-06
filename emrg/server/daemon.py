@@ -11,10 +11,12 @@ IPC transport is abstracted by emrg.connect:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
 import platform
+import re
 import secrets
 import signal
 from datetime import datetime
@@ -51,22 +53,20 @@ _SENSITIVE_KEY_SUBSTRINGS = (
     "api-key", "auth", "credential", "key",
 )
 
-import re as _re
-
 # 字符串值内联凭据模式（保守匹配，宁多勿漏）
 _INLINE_SECRET_PATTERNS = (
     # sk- 密钥：sk- 后必须 ≥16 位纯字母数字（OpenAI/DeepSeek），或 sk-proj-（OpenAI 项目）
     # 或 sk-ant-apiNN-（Anthropic）—— 排除 "task-evolution" 等路径片段误伤
-    _re.compile(r"(sk-(?:proj-)?[A-Za-z0-9]{16,})"),
-    _re.compile(r"(sk-ant-api[0-9]+-[A-Za-z0-9]{16,})"),           # Anthropic
-    _re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,})"),                  # GitHub PAT / OAuth / gist token
-    _re.compile(r"(xox[baprs]-[A-Za-z0-9\-]{10,})"),               # Slack token
-    _re.compile(r"(AKIA[0-9A-Z]{16})"),                            # AWS access key id
-    _re.compile(r"(Bearer\s+[A-Za-z0-9\-._~+/]+=*)", _re.IGNORECASE),  # Bearer 令牌
-    _re.compile(r"(Authorization\s*[:=]\s*[A-Za-z0-9\-._~+/]+=*)", _re.IGNORECASE),
-    _re.compile(r"((api[_-]?key|apikey|password|passwd|secret|token)\s*[:=]\s*[^\s,;\"']+)", _re.IGNORECASE),
+    re.compile(r"(sk-(?:proj-)?[A-Za-z0-9]{16,})"),
+    re.compile(r"(sk-ant-api[0-9]+-[A-Za-z0-9]{16,})"),           # Anthropic
+    re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,})"),                  # GitHub PAT / OAuth / gist token
+    re.compile(r"(xox[baprs]-[A-Za-z0-9\-]{10,})"),               # Slack token
+    re.compile(r"(AKIA[0-9A-Z]{16})"),                            # AWS access key id
+    re.compile(r"(Bearer\s+[A-Za-z0-9\-._~+/]+=*)", re.IGNORECASE),  # Bearer 令牌
+    re.compile(r"(Authorization\s*[:=]\s*[A-Za-z0-9\-._~+/]+=*)", re.IGNORECASE),
+    re.compile(r"((api[_-]?key|apikey|password|passwd|secret|token)\s*[:=]\s*[^\s,;\"']+)", re.IGNORECASE),
     # JWT：三段 base64url（eyJ... 开头）—— 一段即泄露签名密钥
-    _re.compile(r"(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)"),
+    re.compile(r"(eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)"),
 )
 
 
@@ -76,9 +76,8 @@ def _redact_string(s: str) -> str:
     for pat in _INLINE_SECRET_PATTERNS:
         out = pat.sub("***", out)
     # base64 编码的 JSON（跨项目教训：access_token 以编码形式进日志，明文正则匹配不到）
-    for b64 in _re.findall(r"[A-Za-z0-9+/]{40,}={0,2}", out):
+    for b64 in re.findall(r"[A-Za-z0-9+/]{40,}={0,2}", out):
         try:
-            import base64
             decoded = base64.b64decode(b64, validate=True)
             if any(k in decoded for k in (b"access_token", b"api_key", b"apikey", b"authorization", b"password", b"secret")):
                 out = out.replace(b64, "***")
@@ -1098,7 +1097,6 @@ class EmrgServer:
             # Model doesn't support vision: degrade images to text placeholders
             labels = [img.get("label", "?") for img in images]
             return f"[用户粘贴了 {len(images)} 张图片: {', '.join(labels)}。当前模型不支持图片理解，请回复用户告知此限制。]\n\n{text}"
-        import base64
         content: list[dict] = []
         last_pos = 0
         for img in sorted(images, key=lambda i: i.get("position", -1)):
