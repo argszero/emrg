@@ -12,6 +12,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
 const { DaemonClient, generateSessionId, SESSION_ID_RE, PORT_FILE } = require("./daemon_client");
+const APP_VERSION = require("./package.json").version;
 
 // ── 单实例锁（G85/G120：第二个实例退出并 focus 已有窗口）──
 if (!app.requestSingleInstanceLock()) {
@@ -226,11 +227,11 @@ vision = false
 
       if (!configExists) {
         // config 缺失 → 不拉起 daemon（daemon 启动即崩），直接返回缺配置
-        return { config_exists: false, api_key_configured: false, project_dir: projectDir, project_dir_valid: projectDirValid, server_id: "", model: "" };
+        return { config_exists: false, api_key_configured: false, project_dir: projectDir, project_dir_valid: projectDirValid, server_id: "", model: "", version: APP_VERSION };
       }
       const keyConfigured = isKeyConfigured(cfg.llm?.api_key);
       if (!keyConfigured) {
-        return { config_exists: true, api_key_configured: false, project_dir: projectDir, project_dir_valid: projectDirValid, server_id: "", model: "" };
+        return { config_exists: true, api_key_configured: false, project_dir: projectDir, project_dir_valid: projectDirValid, server_id: "", model: "", version: APP_VERSION };
       }
 
       await ensureConnected();
@@ -244,6 +245,7 @@ vision = false
         server_id: pong?.identity?.instance_id || "",
         model: pong?.model || "",
         evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
+        version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
         sessions,
       };
     });

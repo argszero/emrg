@@ -31,6 +31,13 @@ const COPY = {
   deleteConfirmBody: "删除后无法恢复。",
   noSessions: "还没有对话",
   aboutEvolution: (n) => (n ? `EMRG 已自我成长 ${n} 次，感谢你的每一次反馈` : "EMRG 正在成长中"),
+  // WorkBuddy P3（rant 21:35）：自进化可见化
+  growthCount: (n) => `已自我进化 ${n} 次`,
+  growthNote: "边工作边学习，越用越懂你",
+  evolutionToastTitle: "EMRG 刚刚完成一次自我进化！",
+  evolutionToastMsg: (n) => `这是它的第 ${n} 次自我改进，现在更好用了。`,
+  evolutionToastSee: "去看看",
+  evolutionToastDismiss: "知道了",
 };
 
 window.EMRG_Copy = { toolPhrases, TOOL_FAIL_TEXT, COPY };

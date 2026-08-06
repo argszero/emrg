@@ -19,6 +19,11 @@
         <span class="brand-star" id="brand-star">✦</span>
         <span>EMRG</span>
       </div>
+      <!-- 成长状态卡（WorkBuddy P3：自进化可见化） -->
+      <div class="growth-card" id="growth-card" title="EMRG 每次自我改进都会自动汇报">
+        <div class="growth-line">🌱 已自我进化 <b id="growth-count">0</b> 次</div>
+        <div class="growth-note" id="growth-note">边工作边学习，越用越懂你</div>
+      </div>
       <button id="new-chat-btn" class="new-chat-btn" title="新对话 (⌘N)">＋ 新对话</button>
       <nav id="conv-list"></nav>
       <div class="sidebar-footer">
@@ -127,6 +132,13 @@
             <button type="button" class="theme-option" data-theme="system">跟随系统</button>
           </div>
         </label>
+      </div>
+      <div class="settings-group">
+        <div class="settings-group-title">关于</div>
+        <div class="about-box">
+          <div class="about-line">EMRG <span id="about-version">v0.2.8</span> · <span id="about-evolutions">🌱 已自我进化 0 次</span></div>
+          <div class="hint" style="margin-top:6px;">EMRG 是一个会自我进化的 AI 智能体——每次改进都会自动汇报，你可以随时在这里看到它的成长。</div>
+        </div>
       </div>
       <div class="dialog-actions">
         <button type="button" id="settings-cancel" class="btn btn-ghost">取消</button>
@@ -286,6 +298,16 @@
       </div>
     </div>
   </dialog>
+
+  <!-- 进化完成 toast（WorkBuddy P3：进化发生时温和提示） -->
+  <div id="evolution-toast" class="evolution-toast hidden">
+    <div class="evolution-toast-title">🌱 EMRG 刚刚完成一次自我进化！</div>
+    <div class="evolution-toast-msg" id="evolution-toast-msg">它学会了新的东西，变得更好用了。</div>
+    <div class="evolution-toast-actions">
+      <button type="button" id="evolution-toast-see" class="btn btn-primary">去看看</button>
+      <button type="button" id="evolution-toast-dismiss" class="btn btn-ghost">知道了</button>
+    </div>
+  </div>
 
   <script src="js/utils.js"></script>
   <script src="js/commands.js"></script>
