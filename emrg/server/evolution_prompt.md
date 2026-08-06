@@ -308,6 +308,7 @@ When reading rants, follow these rules:
 > - doc test-count guard (#511 tests/test_doc_counts.py: pytest --collect-only vs README/Agent.md 计数 + GUI breakdown 求和；测试增删必须同步文档，否则 CI 失败) ✅
 > - log redaction inline credentials (#513 _redact 遮蔽字符串值内联凭据：sk-/ghp_/xox/AKIA/Bearer/Authorization/JWT/base64-JSON 40+ 字符；logging-only daemon.py:1482) ✅
 > - log redaction sk- tightening (#515 sk- 16+ 纯字母数字/sk-proj-/sk-ant-apiNN-，排除 task-evolution 等路径片段误伤；测试密钥拼接构造防 push protection 拦截) ✅
+> - log previews redaction (#516 _redact_string 覆盖日志内容预览：任务 prompt/rant 消息/记忆 reflection+consolidation 工具结果；LLM prompt 内嵌 user_prompt 不在日志脱敏范围) ✅
 
 #### 2.2 Latest GitHub code changes
 
