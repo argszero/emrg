@@ -28,7 +28,12 @@ from emrg.connect import connect_to_server
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
-from emrg.server.git_utils import INSTALL_INFO, _detect_git_remote, resolve_git_gh
+from emrg.server.git_utils import (
+    INSTALL_INFO,
+    _detect_git_remote,
+    no_prompt_env,
+    resolve_git_gh,
+)
 
 logger = logging.getLogger("emrg.server.scheduler")
 
@@ -167,6 +172,7 @@ class EvolutionHandler:
                 capture_output=True,
                 text=True,
                 timeout=5,
+                env=no_prompt_env(),
             )
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -205,6 +211,7 @@ class EvolutionHandler:
                 text=True,
                 encoding="utf-8",
                 timeout=5,
+                env=no_prompt_env(),
             )
             if result.returncode != 0 or result.stdout.strip() != "true":
                 return False
@@ -225,6 +232,7 @@ class EvolutionHandler:
                     text=True,
                     encoding="utf-8",
                     timeout=5,
+                    env=no_prompt_env(),
                 )
                 if not result.stdout.strip():
                     subprocess.run(
@@ -232,6 +240,7 @@ class EvolutionHandler:
                         cwd=repo_dir,
                         capture_output=True,
                         timeout=5,
+                        env=no_prompt_env(),
                     )
         except (subprocess.SubprocessError, OSError):
             pass
@@ -263,6 +272,7 @@ class EvolutionHandler:
                 text=True,
                 encoding="utf-8",
                 timeout=10,
+                env=no_prompt_env(),
             )
             if result.returncode == 0 and tag in result.stdout.split():
                 subprocess.run(
@@ -273,6 +283,7 @@ class EvolutionHandler:
                     encoding="utf-8",
                     timeout=30,
                     check=True,
+                    env=no_prompt_env(),
                 )
                 logger.info(
                     "EvolutionHandler[%s]: evolution workspace aligned to %s",
@@ -357,6 +368,7 @@ class EvolutionHandler:
                 encoding="utf-8",
                 timeout=120,
                 check=True,
+                env=no_prompt_env(),
             )
             self._align_to_installed_version(evolve_dir)
             self._ensure_git_identity(evolve_dir)
@@ -517,6 +529,7 @@ class EvolutionHandler:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=no_prompt_env(),
             )
             if result.returncode != 0:
                 return False

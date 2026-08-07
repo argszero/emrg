@@ -42,16 +42,32 @@ gh auth status 2>&1 || {
   # environment — gh auth login is not possible; the host's git credentials
   # usually contain a valid GitHub token that can be reused as GH_TOKEN
   # (never persisted to disk, never printed in plaintext).
-  TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2-)
-  if [ -n "$TOKEN" ]; then
-    export GH_TOKEN="$TOKEN"
-    echo "gh 未认证 — 已从 git 凭据提取 token (GH_TOKEN)"
-    gh auth status 2>&1
+  #
+  # ⚠️ Platform guard (rant 2026-08-07T10:17:27): on Windows, `git credential
+  # fill` triggers Git Credential Manager GUI popups inside the non-interactive
+  # daemon session, and the daemon's env already forces GIT_TERMINAL_PROMPT=0
+  # / GCM_INTERACTIVE=never — so credential extraction must be SKIPPED on
+  # Windows entirely. The host connects GitHub from the EMRG GUI settings
+  # page instead (device flow / PAT paste).
+  if [ "$(uname)" = "Darwin" ] || [ "$(uname)" = "Linux" ]; then
+    TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2-)
+    if [ -n "$TOKEN" ]; then
+      export GH_TOKEN="$TOKEN"
+      echo "gh 未认证 — 已从 git 凭据提取 token (GH_TOKEN)"
+      gh auth status 2>&1
+    else
+      echo "gh 未认证且无可用凭据 — 提示宿主执行 gh auth login"
+    fi
   else
-    echo "gh 未认证且无可用凭据 — 提示宿主执行 gh auth login"
+    echo "gh 未认证 — 请在 EMRG GUI 设置页连接 GitHub（无需终端）"
   fi
 }
 ```
+
+**If gh is still unauthenticated after the steps above**: skip all GitHub
+operations for this cycle (no retries — retrying re-triggers credential
+prompts on some platforms), record "awaiting gh authentication" in the
+evolution record, and finish the cycle gracefully.
 
 **Confirm GitHub identity** (first run only; afterwards read `identity-github-role.md`):
 

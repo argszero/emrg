@@ -599,3 +599,78 @@ def test_redact_string_applies_to_log_previews():
     assert "ghp_" not in _redact_string("token 是 ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 吗")
     # 普通内容保留
     assert "帮我看看这个文件" in _redact_string("帮我看看这个文件")
+
+
+# ── github_status command (rant 2026-08-07T10:17:27, Windows GCM) ──
+
+
+def test_github_status_authenticated(monkeypatch):
+    """github_status returns authenticated user when _check_github_auth succeeds."""
+    import asyncio
+
+    server = _make_server()
+    writer = _FakeWriter()
+
+    async def fake_check():
+        return {"authenticated": True, "user": "octocat", "method": "gh"}
+
+    monkeypatch.setattr(server, "_check_github_auth", fake_check)
+    asyncio.run(server._process_message({"type": "github_status"}, writer))
+
+    assert len(writer._frames) == 1
+    reply = json.loads(writer._frames[0])
+    assert reply["type"] == "github_status"
+    assert reply["authenticated"] is True
+    assert reply["user"] == "octocat"
+    assert reply["method"] == "gh"
+
+
+def test_github_status_unauthenticated(monkeypatch):
+    """github_status returns not-authenticated when no gh token is present."""
+    import asyncio
+
+    server = _make_server()
+    writer = _FakeWriter()
+
+    async def fake_check():
+        return {"authenticated": False, "user": None, "method": "none"}
+
+    monkeypatch.setattr(server, "_check_github_auth", fake_check)
+    asyncio.run(server._process_message({"type": "github_status"}, writer))
+
+    reply = json.loads(writer._frames[0])
+    assert reply["authenticated"] is False
+    assert reply["user"] is None
+
+
+def test_check_github_auth_no_gh_binary(monkeypatch):
+    """Missing gh binary degrades to not-authenticated, never raises."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("", ""))
+    result = asyncio.run(server._check_github_auth())
+    assert result == {"authenticated": False, "user": None, "method": "none"}
+
+
+def test_check_github_auth_parses_gh_output(monkeypatch):
+    """Real gh auth status output is parsed into an authenticated user."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+
+    class FakeProc:
+        async def communicate(self):
+            return (b"Logged in to github.com as octocat (keyring)\n", None)
+
+    async def fake_exec(*args, **kwargs):
+        return FakeProc()
+
+    monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(server._check_github_auth())
+    assert result == {"authenticated": True, "user": "octocat", "method": "gh"}
