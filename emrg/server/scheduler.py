@@ -924,12 +924,44 @@ class TaskScheduler:
             )
 
     def _ensure_self_evolution_task(self) -> None:
-        """Ensure tasks.yml has an emrg self-evolution task (idempotent).
+        """Ensure projects.yml has an emrg entry and tasks.yml has the task.
 
         Packaged installs (or first runs) may lack tasks.yml entirely, or lack
         the emrg-task entry. Without it, no EvolutionHandler is ever created,
         so the workspace self-heal (which lives inside the handler) cannot run.
+
+        The projects.yml emrg entry is ensured here too (rant 02:58): the only
+        other writer (_ensure_evolution_workspace's clone branch) requires a
+        first tick + network. If projects.yml lacks the entry,
+        _resolve_project_path("emrg") returns None and the handler's
+        _source_dir degenerates to the relative string "emrg" (dangling cwd).
+        The path is fixed to ~/.emrg/evolution/emrg; an existing entry is
+        preserved as-is (dev machines may configure a custom path).
         """
+        # 1. projects.yml — add name=emrg entry if missing (preserve existing).
+        projects_file = config_dir() / "projects.yml"
+        try:
+            entries: list[dict] = []
+            if projects_file.exists():
+                data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    entries = [e for e in data if isinstance(e, dict)]
+            if not any(e.get("name") == "emrg" for e in entries):
+                entries.append({
+                    "name": "emrg",
+                    "path": str(EVOLUTION_CWD / "emrg"),
+                    "last_active": datetime.now().isoformat(),
+                })
+                atomic_write_yaml(entries, projects_file, prefix=".projects_")
+                logger.info(
+                    "TaskScheduler: self-heal — added emrg entry to projects.yml"
+                )
+        except (yaml.YAMLError, OSError) as e:
+            logger.warning(
+                "TaskScheduler: projects.yml self-heal failed: %s", e
+            )
+
+        # 2. tasks.yml — add emrg-task if missing (existing logic unchanged).
         tasks = self._load_tasks()
         for t in tasks:
             cfg = t.get("config") if isinstance(t.get("config"), dict) else {}

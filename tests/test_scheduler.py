@@ -603,6 +603,82 @@ def test_ensure_self_evolution_task_idempotent_when_present(tmp_path):
     assert data[0]["name"] == "emrg-task"
 
 
+def test_ensure_self_evolution_task_adds_project_entry_when_missing(tmp_path):
+    """Missing projects.yml emrg entry gets added (fixed path, no network)."""
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import EVOLUTION_CWD, TaskScheduler
+
+    sched = TaskScheduler(InstanceIdentity())
+
+    orig_config = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        sched._ensure_self_evolution_task()
+        sched._ensure_self_evolution_task()  # idempotent
+    finally:
+        mod.config_dir = orig_config
+
+    projects_yml = tmp_path / "projects.yml"
+    assert projects_yml.exists()
+    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    assert isinstance(data, list)
+    emrg = next(e for e in data if e.get("name") == "emrg")
+    assert emrg["path"] == str(EVOLUTION_CWD / "emrg")
+    assert len([e for e in data if e.get("name") == "emrg"]) == 1  # no dup
+
+
+def test_ensure_self_evolution_task_preserves_existing_project_entry(tmp_path):
+    """Existing emrg project entry (dev-machine path) is preserved as-is."""
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import TaskScheduler
+
+    projects_yml = tmp_path / "projects.yml"
+    projects_yml.write_text(yaml.safe_dump([
+        {"name": "emrg", "path": "/dev/machine/custom/emrg",
+         "last_active": "2026-01-01T00:00:00"},
+    ]))
+
+    sched = TaskScheduler(InstanceIdentity())
+
+    orig_config = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        sched._ensure_self_evolution_task()
+    finally:
+        mod.config_dir = orig_config
+
+    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    assert len(data) == 1
+    assert data[0]["name"] == "emrg"
+    assert data[0]["path"] == "/dev/machine/custom/emrg"  # untouched
+
+
+def test_ensure_self_evolution_task_other_entries_preserved(tmp_path):
+    """Non-emrg project entries survive the self-heal."""
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import TaskScheduler
+
+    projects_yml = tmp_path / "projects.yml"
+    projects_yml.write_text(yaml.safe_dump([
+        {"name": "paper", "path": "/some/paper"},
+    ]))
+
+    sched = TaskScheduler(InstanceIdentity())
+
+    orig_config = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        sched._ensure_self_evolution_task()
+    finally:
+        mod.config_dir = orig_config
+
+    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    names = [e.get("name") for e in data]
+    assert "paper" in names
+    assert "emrg" in names
+    assert len(names) == 2
+
+
 def test_ensure_evolution_workspace_dev_repo_untouched(tmp_path):
     """A real writable git repo (dev machine) is used as-is — no clone."""
     import subprocess as real_subprocess
