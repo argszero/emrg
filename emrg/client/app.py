@@ -896,12 +896,24 @@ async def interactive(init_auto_evolve: bool = False):
 
     if sys.platform == "win32":
         def _win_stdin_loop() -> None:
+            # ReadConsoleInputW 主路径（rant 2026-08-07T21:35:47）：
+            # os.read 字节流按 OEM 代码页（中文系统 GBK）交付 IME 字符，
+            # UTF-8 假设的输入链必然乱码；宽字符 API 直接给 UTF-16。
+            from emrg.client.python_tui.win32 import (
+                flush_console_input,
+                read_console_unicode,
+            )
+            try:
+                flush_console_input(stdin_fd)  # 丢弃切换前的字节流残余
+            except (OSError, ValueError):
+                pass
             while not _win_stdin_stop.is_set():
                 try:
-                    data = os.read(stdin_fd, 4096)
-                    if not data:
-                        break
-                    loop.call_soon_threadsafe(stdin_queue.put_nowait, data)
+                    data = read_console_unicode(stdin_fd)
+                    if data:
+                        loop.call_soon_threadsafe(stdin_queue.put_nowait, data)
+                    else:
+                        _win_stdin_stop.wait(0.005)  # 防忙轮询
                 except (OSError, ValueError):
                     break
 

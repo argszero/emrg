@@ -11,23 +11,37 @@ Raw mode on Windows mirrors the POSIX termios.tcgetattr/tty.setraw contract:
   - set the fd to binary mode so CRLF translation is off (key sequences like
     the arrow prefix ESC [ A arrive byte-identical to POSIX)
 
-ENABLE_VIRTUAL_TERMINAL_INPUT (rant 2026-08-07T10:38:21) is required:
-without it conhost delivers keystrokes in the OEM code page (GBK on Chinese
-systems → UTF-8-assuming input chain garbles CJK IME text) and arrow keys
-arrive as legacy 0xE0 scan codes instead of ANSI ESC [ A/B/C/D. With VT
-input enabled the console delivers UTF-8 + standard ANSI sequences, fixing
-both problems at once. Pre-Win10-1607 consoles reject the flag — fall back
-to window-input-only raw mode (InputParser defensively translates legacy
-scan codes).
+ENABLE_VIRTUAL_TERMINAL_INPUT (rant 2026-08-07T10:38:21) makes conhost
+deliver function/arrow keys as ANSI ESC [ A/B/C/D sequences (fixing the
+legacy 0xE0 scan-code problem) and is kept as the raw-mode input flag.
+However it does NOT fix CJK IME input: character keystrokes still arrive
+through the os.read byte stream encoded in the console input code page
+(GBK/CP936 on Chinese systems), which the UTF-8-assuming input chain
+garbles (rant 2026-08-07T21:35:47, host-verified on v0.2.11).
+
+The reliable path for Unicode characters is the wide-char API
+ReadConsoleInputW — it returns KEY_EVENT_RECORDs whose UnicodeChar holds
+the IME-confirmed UTF-16 character. read_console_unicode() is the primary
+stdin reader on Windows; the VT-input byte path remains only as a fallback
+for older conhost versions.
+
+The module imports cleanly on POSIX (guarded msvcrt / windll access) so
+its pure KEY_EVENT → bytes translation logic is unit-testable everywhere.
 """
 
 from __future__ import annotations
 
 import ctypes
-import msvcrt
 import os
 from ctypes import wintypes
 from typing import Any
+
+try:
+    import msvcrt
+except ImportError:  # POSIX — module imported only for its pure helpers
+    msvcrt = None  # type: ignore[assignment]
+
+from emrg.client.python_tui.events import _LEGACY_SCAN_TO_ANSI
 
 # ── Console input/output mode flags (wincon.h) ───────────────────────────
 ENABLE_PROCESSED_INPUT = 0x0001
@@ -52,13 +66,18 @@ class Win32Console:
     """Raw-mode / VT support for a console handle (ctypes, no pywin32)."""
 
     def __init__(self) -> None:
-        self._kernel32 = ctypes.windll.kernel32
+        try:
+            self._kernel32 = ctypes.windll.kernel32
+        except AttributeError:  # POSIX — imported only for pure helpers
+            self._kernel32 = None
         self._saved_modes: dict[int, tuple[int, int]] = {}  # fd -> (in, out)
 
     # -- internal helpers ------------------------------------------------
     @staticmethod
     def _fd_to_handle(fd: int) -> int | None:
         """Return the Win32 HANDLE for a std fd (via _get_osfhandle)."""
+        if msvcrt is None:  # POSIX
+            return None
         try:
             return msvcrt.get_osfhandle(fd)
         except OSError:
@@ -122,3 +141,115 @@ class Win32Console:
 # _enter_raw_mode / _exit_raw_mode calls (a fresh instance per call would
 # lose _saved_modes and fail to restore the terminal).
 win32_console = Win32Console()
+
+
+# ── Wide-char input (rant 2026-08-07T21:35:47) ─────────────────────────
+# CJK IME-confirmed text must be read via ReadConsoleInputW (UTF-16
+# KEY_EVENT_RECORDs), not the os.read byte stream (OEM code page — GBK on
+# Chinese systems — garbles the UTF-8-assuming input chain).
+
+KEY_EVENT = 0x0001
+
+
+class _KEY_EVENT_RECORD(ctypes.Structure):
+    # ABI-critical: use FIXED-WIDTH ctypes (c_int/c_uint/c_ushort), NOT
+    # wintypes.BOOL/DWORD — those are c_long/c_ulong, 4B on Windows but 8B
+    # on LP64 POSIX, inflating the struct and breaking Win32 ABI parity
+    # (review ❌ finding on #553: sizes were 32/40 instead of 16/20).
+    _fields_ = [
+        ("bKeyDown", ctypes.c_int),  # Win32 BOOL
+        ("wRepeatCount", ctypes.c_ushort),
+        ("wVirtualKeyCode", ctypes.c_ushort),
+        ("wVirtualScanCode", ctypes.c_ushort),
+        # uChar is the union { WCHAR UnicodeChar; CHAR AsciiChar; } — we
+        # read the UnicodeChar view (c_ushort, 2B, matches WCHAR everywhere).
+        ("uChar", ctypes.c_ushort),
+        ("dwControlKeyState", ctypes.c_uint),  # Win32 DWORD
+    ]
+
+
+class _INPUT_RECORD(ctypes.Structure):
+    _fields_ = [
+        ("EventType", wintypes.WORD),
+        ("Event", _KEY_EVENT_RECORD),
+    ]
+
+
+try:
+    _k32 = ctypes.windll.kernel32
+except AttributeError:  # POSIX — no kernel32
+    _k32 = None
+
+_ReadConsoleInputW = None
+_FlushConsoleInputBuffer = None
+if _k32 is not None:
+    _ReadConsoleInputW = _k32.ReadConsoleInputW
+    _ReadConsoleInputW.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(_INPUT_RECORD),
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _ReadConsoleInputW.restype = wintypes.BOOL
+    _FlushConsoleInputBuffer = _k32.FlushConsoleInputBuffer
+    _FlushConsoleInputBuffer.argtypes = [wintypes.HANDLE]
+    _FlushConsoleInputBuffer.restype = wintypes.BOOL
+
+
+def _key_event_to_bytes(b_key_down: bool, unicode_char: str, scan_code: int) -> bytes:
+    """Translate one KEY_EVENT_RECORD to input bytes (pure, unit-testable).
+
+    - key-up events are dropped (avoids duplicate characters)
+    - UnicodeChar != 0 → UTF-8 encode (covers ASCII, Ctrl chars, and
+      IME-confirmed CJK — the whole point of ReadConsoleInputW)
+    - UnicodeChar == 0 (function/arrow keys) → legacy scan-code table
+      (same _LEGACY_SCAN_TO_ANSI map the VT-input path uses)
+    """
+    if not b_key_down:
+        return b""
+    if unicode_char and unicode_char != "\x00":
+        return unicode_char.encode("utf-8", errors="replace")
+    return _LEGACY_SCAN_TO_ANSI.get(scan_code, b"")
+
+
+def flush_console_input(fd: int) -> None:
+    """Flush the console input buffer (drop stale byte-stream residue)."""
+    if _FlushConsoleInputBuffer is None:
+        return
+    handle = Win32Console._fd_to_handle(fd)
+    if handle is not None:
+        _FlushConsoleInputBuffer(handle)
+
+
+def read_console_unicode(fd: int, max_events: int = 32) -> bytes:
+    """Read console input via ReadConsoleInputW, returning UTF-8 bytes.
+
+    Character keys (incl. IME-confirmed CJK) are UTF-8 encoded; function
+    keys (UnicodeChar == 0) are translated to ANSI CSI via the scan-code
+    table. Returns b"" when no key events are pending — callers should
+    sleep briefly to avoid busy-polling.
+    """
+    if _ReadConsoleInputW is None:
+        return b""
+    handle = Win32Console._fd_to_handle(fd)
+    if handle is None:
+        return b""
+    records = (_INPUT_RECORD * max_events)()
+    n_read = wintypes.DWORD(0)
+    if not _ReadConsoleInputW(handle, records, max_events, ctypes.byref(n_read)):
+        return b""
+    out = bytearray()
+    for i in range(n_read.value):
+        rec = records[i]
+        if rec.EventType != KEY_EVENT:
+            continue
+        key = rec.Event
+        uchar = int(key.uChar)  # c_ushort → int (0 = no char / function key)
+        out.extend(
+            _key_event_to_bytes(
+                bool(key.bKeyDown),
+                chr(uchar) if uchar else "\x00",
+                int(key.wVirtualScanCode),
+            )
+        )
+    return bytes(out)
