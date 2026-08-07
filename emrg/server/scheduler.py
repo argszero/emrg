@@ -889,6 +889,10 @@ class TaskScheduler:
         """Return status for all running handlers."""
         return [handler.status() for handler in self._handlers]
 
+    def total_evolutions(self) -> int:
+        """Total completed evolution cycles across all running handlers."""
+        return sum(len(handler.evolutions) for handler in self._handlers)
+
     async def wait_all(self) -> None:
         """Wait for all handler coroutines to finish (after cancel)."""
         for coro in self._coros:
