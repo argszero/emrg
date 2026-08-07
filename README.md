@@ -28,17 +28,40 @@ EMRG is an experiment in *autonomous self-improvement*. It's an AI agent that he
 
 ## ✨ Why you'll love it
 
+**The one-line pitch**: EMRG is the only coding agent that **improves itself from your feedback** — rant about what bothers you, and the next evolution cycle writes the fix and ships it. Chat, tools, and memory are what you'd expect; the self-improvement loop is what you won't find anywhere else.
+
 | What | What it means |
 |---|---|
-| 🖥️ **Electron GUI (main entry)** | Non-developer entry point — install and go: first-run wizard configures API key, chat/sessions/tool status/settings all graphical. v0.2.5 full redesign: light/dark theme (follows system), friendly tool status rows, multi-model management, empty-state welcome, back-to-bottom button. v0.2.6 keyboard accessibility: ↑↓ nav, Enter submit in forms. v0.2.7 macOS code signing + notarization — zero Gatekeeper dialogs. **v0.2.8: all 15 TUI slash commands now work in the GUI** (`/rant` evolution dialog, `/memory` browser, `/skills` list, session management, model switcher). **GUI configured = TUI ready** (shared config). **Newest — WorkBuddy-inspired**: three-column layout with a **results panel** (tool outputs & generated files as collapsible cards, ⌘\\ to collapse, auto-hides on narrow screens), **Ask/Auto working modes** (Ask = chat-only, no tool execution; Auto = full tool execution), and **visible self-evolution** (sidebar growth card, one-per-day evolution toast, recent-improvements list in About) |
-| 🧠 **Reads, writes, edits, runs** | Full tool-calling agent — bash, files, diffs |
-| 🔄 **Gets better on its own** | Background evolution cycles review rants + GitHub + competitor tools, then auto-PR improvements. **Self-healing workspace** (v0.2.8): packaged installs clone the repo on demand and bootstrap projects/tasks automatically |
+| 🔄 **Gets better on its own** | **The core feature.** Background evolution cycles turn your `/rant`s, GitHub issues, and competitor updates into real improvements — analyzed, coded, tested, PR'd, merged. Self-healing workspace: packaged installs clone the repo on demand and bootstrap projects/tasks automatically |
+| 🖥️ **Electron GUI (main entry)** | Install & go: first-run wizard configures your API key; all 15 slash commands work in the GUI (`/rant` evolution dialog, `/memory` browser…); WorkBuddy-inspired **results panel**, **Ask/Auto** modes, **visible self-evolution** (growth card + toasts). GUI configured = TUI ready |
+| 🧠 **Reads, writes, edits, runs** | Full tool-calling agent — bash, files, diffs, glob, grep |
 | 📝 **Never forgets** | Project memory + session memory + daily logs — context that persists |
-| 🖥️ **Beautiful TUI** | Slash-command autocomplete, session picker, streaming markdown, elapsed timer, ESC interrupt. Advanced commands: `/rant` `/model` `/memory` |
-| ⚡ **Parallel tools** | Independent tool calls run concurrently for speed |
-| 🔌 **Micro-kernel daemon** | `emrgd` runs persistently — reconnect anytime without losing state |
-| 🎮 **Vim-friendly** | `j`/`k` navigation, `Ctrl+W`/`Ctrl+K` editing, `Tab` to expand tool cards |
-| 🌍 **100% open source** | MIT license — no walled garden, no vendor lock-in. **Internationalized** (v0.2.8): all prompts and docs in English, Chinese version available |
+| ⚡ **Full-featured TUI + daemon** | Streaming markdown, `/` autocomplete, session picker, ESC interrupt, vim-friendly keys, parallel tool calls — on a persistent `emrgd` daemon you can reconnect to anytime |
+| 🌍 **100% open source** | MIT — no walled garden, no vendor lock-in. Internationalized: English default, Chinese version available |
+
+---
+
+## 🔄 Rant-Driven Evolution (the core feature)
+
+EMRG isn't just a tool — it's a coding partner that **listens to your complaints and improves itself**. **Your rants are the primary driver of evolution.** Every `/rant` is read, analyzed, and turned into code improvements:
+
+```
+ 📢 Your rants (/rant) ←── primary input
+ 📥 GitHub Issues & PRs
+ 📥 Competitor tools (Codex, Claude Code)
+ 📥 Cross-project learning
+         ↓
+    🧬 Evolution Cycle (every 30 min)
+    (Prepare → Review → Discover → Improve → Commit → Record)
+         ↓
+    ✅ pytest + import check
+    ✅ git commit + push → PR
+    ✅ Evolution log
+```
+
+**Real example**: Someone ranted "TUI needs `/` autocomplete like Codex." Next evolution cycle, EMRG built it — complete with prefix filtering and arrow-key navigation. Merged. Deployed. Done. **What you rant about, it improves.**
+
+Runs fully unattended: `gh` auth auto-recovers from your git credentials, PR votes use the REST API, and packaged-install workspaces self-heal (clone on demand, auto-bootstrap projects/tasks). See [MANIFESTO.md](MANIFESTO.md) — EMRG's design charter on autonomous evolution.
 
 ---
 
@@ -200,32 +223,6 @@ vision = true
 | `/version` | Show EMRG version and instance info |
 | `Esc` | Interrupt a running response mid-stream |
 | `Ctrl+C` / `exit` | Quit |
-
----
-
-## 🔄 Rant-Driven Evolution (the core feature)
-
-EMRG isn't just a tool — it's a coding partner that **listens to your complaints and improves itself**. **Your rants are the primary driver of evolution.** Every `/rant` is read, analyzed, and turned into code improvements:
-
-```
- 📢 Your rants (/rant) ←── primary input
- 📥 GitHub Issues & PRs
- 📥 Competitor tools (Codex, Claude Code)
- 📥 Cross-project learning
-         ↓
-    🧬 Evolution Cycle (every 30 min)
-    (Prepare → Review → Discover → Improve → Commit → Record)
-         ↓
-    ✅ pytest + import check
-    ✅ git commit + push → PR
-    ✅ Evolution log
-```
-
-**Real example**: Someone ranted "TUI needs `/` autocomplete like Codex." Next evolution cycle, EMRG built it — complete with prefix filtering and arrow-key navigation. Merged. Deployed. Done. **What you rant about, it improves.**
-
-**Robust evolution environment**: the evolution cycle runs in a non-interactive environment where interactive `gh auth login` is impossible. If `gh` is unauthenticated, the cycle automatically extracts a token from git credential storage (osxkeychain / credential helper) as `GH_TOKEN` (never persisted, never printed); PR comment/LGTM counting queries automatically use the REST API (GraphQL needs an extra `read:org` scope). The host only needs git credentials configured — evolution runs fully automatically. On packaged installs, the evolution workspace **self-heals** (v0.2.8): clones the repo on demand, aligns to the installed release tag, and bootstraps `projects.yml`/`tasks.yml` — no manual setup.
-
-> 💡 See [MANIFESTO.md](MANIFESTO.md) — EMRG's design charter on autonomous evolution in the AI era.
 
 ---
 
