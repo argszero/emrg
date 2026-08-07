@@ -171,7 +171,7 @@ class TestProjectMemoryStore:
         assert file_path.exists()
         index_path = project_store.index_path
         assert index_path.exists()
-        assert mem.filename in index_path.read_text()
+        assert mem.filename in index_path.read_text(encoding="utf-8")
 
     def test_list_returns_all_active(self, project_store):
         project_store.create("task", "Task 1", "body1")

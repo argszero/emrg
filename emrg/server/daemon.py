@@ -1083,8 +1083,13 @@ class EmrgServer:
 
             # Field order: timestamp → project → status → progress → completed → message
             # (project right after timestamp per user feedback; message last)
+            # Timestamp is daemon-authoritative local time (rant 2026-08-07T13:34Z):
+            # clients previously supplied timestamps — GUI sent new Date().toISOString()
+            # (UTC, 8h behind on UTC+8 hosts), TUI sent naive local time. A tz-aware
+            # local ISO timestamp (+08:00) is self-describing, sorts correctly, and is
+            # consistent regardless of which client submitted the rant.
             entry = {
-                "timestamp": msg.get("timestamp", datetime.now().isoformat()),
+                "timestamp": datetime.now().astimezone().isoformat(),
                 "project": project,
                 "status": "pending",
                 "progress": None,

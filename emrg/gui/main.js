@@ -431,7 +431,9 @@ vision = false
       const frame = await client.sendCommandAndWait("rant", {
         message: message.trim().slice(0, 10000),
         project: String(project || "").trim(),
-        timestamp: new Date().toISOString(),
+        // timestamp deliberately NOT sent: daemon stamps rants with local time
+        // (rant 2026-08-07T13:34Z — GUI previously sent new Date().toISOString(),
+        // which is UTC and 8h behind on UTC+8 hosts)
       }, 5000);
       return { ok: true, count: frame.count ?? 0 };
     });

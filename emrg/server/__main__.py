@@ -15,7 +15,8 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
     handlers=[
         RotatingFileHandler(
-            str(_log_file), maxBytes=10 * 1024 * 1024, backupCount=3
+            str(_log_file), maxBytes=10 * 1024 * 1024, backupCount=3,
+            encoding="utf-8",  # rant 2026-08-07T14:00Z: default locale code page (GBK on zh-CN Windows) mojibakes CJK log lines
         ),
         logging.StreamHandler(),  # also to stderr (visible when run directly)
     ],
