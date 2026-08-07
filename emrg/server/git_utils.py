@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,6 +13,50 @@ from emrg.config import config_dir
 
 INSTALL_BIN = Path.home() / ".emrg" / "install" / "bin"
 INSTALL_INFO = config_dir() / "install-info.json"
+
+
+# ── Non-interactive subprocess environment (rant 2026-08-07T10:17:27) ──
+#
+# Windows GCM popup storm: the daemon is a background non-interactive
+# process — any git/gh subprocess that needs credentials must FAIL FAST
+# and silently, never spawn GCM GUI dialogs / askpass / terminal prompts.
+# These vars are applied to every git/gh subprocess the daemon spawns
+# (bash_tool child processes, scheduler clone/fetch, github_status).
+
+def no_prompt_env() -> dict:
+    """Copy of the current environment with all interactive git prompts disabled.
+
+    - ``GIT_TERMINAL_PROMPT=0`` — git never asks on the terminal
+    - ``GCM_INTERACTIVE=never`` — Git Credential Manager never shows its GUI
+    - ``GIT_ASKPASS=`` — disables askpass helper popups
+
+    macOS/Linux are unaffected (osxkeychain / credential helpers are
+    non-interactive there); Windows without stored credentials now fails
+    with a clear git error instead of popping a window.
+    """
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GCM_INTERACTIVE"] = "never"
+    env["GIT_ASKPASS"] = ""
+    return env
+
+
+# gh auth status user extraction — output forms seen across gh versions:
+#   "Logged in to github.com as octocat"
+#   "Logged in to github.com account octocat"
+#   "Logged in to github.com account octocat using token"
+_GH_AUTH_USER_RE = re.compile(
+    r"Logged in to github\.com (?:account |as )['\"]?([A-Za-z0-9][A-Za-z0-9-]*)"
+)
+
+
+def parse_gh_auth_user(output: str) -> str | None:
+    """Extract the authenticated GitHub username from ``gh auth status`` output.
+
+    Returns None when the output does not describe an authenticated session.
+    """
+    match = _GH_AUTH_USER_RE.search(output or "")
+    return match.group(1) if match else None
 
 
 def _detect_git_remote(cwd: str) -> str:
@@ -118,10 +163,12 @@ def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess
     """Run a git command using the resolved git binary.
 
     Falls back to bare ``git`` when no bundled binary is found (dev mode).
+    The prompt-free environment guarantees no GCM/askpass popups from a
+    background daemon (rant 2026-08-07T10:17:27).
     """
     git, _ = resolve_git_gh()
     exe = git or "git"
     return subprocess.run(
         [exe, *args], cwd=cwd, capture_output=True, text=True,
-        encoding="utf-8", timeout=timeout,
+        encoding="utf-8", timeout=timeout, env=no_prompt_env(),
     )

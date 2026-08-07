@@ -31,7 +31,12 @@ from emrg.config import LlmConfig, config_dir
 from emrg.connect import cleanup_server
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.llm import LlmClient
-from emrg.server.git_utils import _detect_git_remote
+from emrg.server.git_utils import (
+    _detect_git_remote,
+    no_prompt_env,
+    parse_gh_auth_user,
+    resolve_git_gh,
+)
 from emrg.server.tool_types import ToolResult
 from emrg.memory import ProjectMemoryStore, SessionMemoryStore
 from emrg.protocol import (
@@ -567,6 +572,33 @@ class EmrgServer:
 
         atomic_write_yaml(entries, self._projects_log, prefix=".projects_")
 
+    async def _check_github_auth(self) -> dict:
+        """Detect whether GitHub auth is configured (rant 2026-08-07T10:17:27).
+
+        Runs the bundled ``gh auth status`` with a 10s timeout in a
+        prompt-free environment. Returns:
+            {"authenticated": bool, "user": str|None, "method": "gh"|"none"}
+        Never raises; any failure degrades to {"authenticated": False, ...}.
+        """
+        _, gh = resolve_git_gh()
+        if not gh:
+            return {"authenticated": False, "user": None, "method": "none"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                gh, "auth", "status",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=no_prompt_env(),
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            output = stdout.decode("utf-8", errors="replace")
+            user = parse_gh_auth_user(output)
+            if user:
+                return {"authenticated": True, "user": user, "method": "gh"}
+            return {"authenticated": False, "user": None, "method": "none"}
+        except (asyncio.TimeoutError, OSError, ValueError):
+            return {"authenticated": False, "user": None, "method": "none"}
+
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt via Jinja2 template.
 
@@ -944,6 +976,13 @@ class EmrgServer:
                     "count": len(self.evolutions),
                     "recent": [],
                 })
+
+        elif msg_type == "github_status":
+            # Windows GCM rant (2026-08-07T10:17:27): GUI queries whether
+            # GitHub auth is configured so it can show a connect banner only
+            # when evolution actually needs GitHub.
+            auth = await self._check_github_auth()
+            await self._send(ws, {"type": "github_status", **auth})
 
         elif msg_type == "clear_session":
             session_id = msg.get("session_id", "")

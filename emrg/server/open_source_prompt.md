@@ -29,17 +29,26 @@ gh auth status 2>&1 || {
   # environment — gh auth login is not possible; the host's git credentials
   # usually contain a valid GitHub token that can be reused as GH_TOKEN
   # (never persisted to disk, never printed in plaintext).
-  TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2-)
-  if [ -n "$TOKEN" ]; then
-    export GH_TOKEN="$TOKEN"
-    echo "gh 未认证 — 已从 git 凭据提取 token (GH_TOKEN)"
-    gh auth status 2>&1
+  #
+  # ⚠️ Platform guard (rant 2026-08-07T10:17:27): on Windows, `git credential
+  # fill` triggers Git Credential Manager GUI popups inside the non-interactive
+  # daemon session — skip credential extraction on Windows entirely; the host
+  # connects GitHub from the EMRG GUI settings page instead.
+  if [ "$(uname)" = "Darwin" ] || [ "$(uname)" = "Linux" ]; then
+    TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2-)
+    if [ -n "$TOKEN" ]; then
+      export GH_TOKEN="$TOKEN"
+      echo "gh 未认证 — 已从 git 凭据提取 token (GH_TOKEN)"
+      gh auth status 2>&1
+    fi
+  else
+    echo "gh 未认证 — 请在 EMRG GUI 设置页连接 GitHub（无需终端）"
   fi
 }
 ```
 
 - `gh` not installed → install (`brew install gh` / `sudo apt install gh`)
-- `gh` unauthenticated and credential extraction failed → **stop this cycle**, record "awaiting gh authentication" in the state file, and finish
+- `gh` unauthenticated and credential extraction failed → **stop this cycle**, record "awaiting gh authentication" in the state file, and finish — do NOT retry GitHub operations (retries re-trigger credential prompts on some platforms)
 
 {% if task.get('role', '')|lower in ('committer', 'contributor') %}
 

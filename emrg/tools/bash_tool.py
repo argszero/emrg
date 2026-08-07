@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 
+from emrg.server.git_utils import no_prompt_env
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
 
@@ -65,6 +66,10 @@ class BashTool(ToolExecutor):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workdir,
+                # Non-interactive daemon: git/gh children must fail fast
+                # silently, never spawn GCM/askpass popups (rant
+                # 2026-08-07T10:17:27).
+                env=no_prompt_env(),
                 preexec_fn=os.setsid if os.name != "nt" else None,
             )
             try:

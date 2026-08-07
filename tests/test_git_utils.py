@@ -113,3 +113,54 @@ def test_cache_tool_paths_preserves_existing_fields(tmp_path, monkeypatch):
     assert data["git_path"] == "/usr/bin/git"
     assert data["custom"] == 1  # preserved
     assert data["repo"] == "https://github.com/argszero/emrg.git"
+
+
+# ── no_prompt_env / parse_gh_auth_user (rant 2026-08-07T10:17:27) ──
+
+
+def test_no_prompt_env_sets_all_three_guards():
+    """All three interactive-prompt guards are present."""
+    from emrg.server.git_utils import no_prompt_env
+
+    env = no_prompt_env()
+    assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GCM_INTERACTIVE"] == "never"
+    assert env["GIT_ASKPASS"] == ""
+
+
+def test_no_prompt_env_preserves_parent_environment():
+    """Parent environment variables must survive (PATH etc.)."""
+    import os
+
+    from emrg.server.git_utils import no_prompt_env
+
+    env = no_prompt_env()
+    assert env.get("PATH") == os.environ.get("PATH")
+
+
+def test_parse_gh_auth_user_logged_in_as():
+    from emrg.server.git_utils import parse_gh_auth_user
+
+    out = "Logged in to github.com as octocat (keyring)\n"
+    assert parse_gh_auth_user(out) == "octocat"
+
+
+def test_parse_gh_auth_user_account_form():
+    from emrg.server.git_utils import parse_gh_auth_user
+
+    out = "Logged in to github.com account argszero using token\n"
+    assert parse_gh_auth_user(out) == "argszero"
+
+
+def test_parse_gh_auth_user_unauthenticated():
+    from emrg.server.git_utils import parse_gh_auth_user
+
+    out = "You are not logged into any GitHub hosts.\n"
+    assert parse_gh_auth_user(out) is None
+
+
+def test_parse_gh_auth_user_empty():
+    from emrg.server.git_utils import parse_gh_auth_user
+
+    assert parse_gh_auth_user("") is None
+    assert parse_gh_auth_user(None) is None  # type: ignore[arg-type]
