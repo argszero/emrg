@@ -210,11 +210,29 @@ class TestLegacyScanCodes:
         assert parser.feed(b"\xe0\x52") == [b"\x1b[2~"]
         assert parser.feed(b"\xe0\x53") == [b"\x1b[3~"]
 
-    def test_legacy_unknown_scan_passthrough(self):
-        """Unknown scan codes are consumed as 2 bytes, never UTF-8-garbled."""
+    def test_legacy_unknown_scan_waits_as_utf8(self):
+        """0xE0 + non-scan-code byte is NOT consumed as a pair — it falls
+        through to the UTF-8 path (pre-PR behavior). 0xE0 is the UTF-8 lead
+        for U+0800-U+0FFF; valid continuation bytes (0xA0-0xBF) are disjoint
+        from scan codes (0x47-0x53), so gating on the map is exact."""
         parser = InputParser()
-        assert parser.feed(b"\xe0\xff") == [b"\xe0\xff"]
-        assert not parser.has_pending()
+        assert parser.feed(b"\xe0\xff") == []
+        assert parser.has_pending()
+
+    def test_e0_led_utf8_not_garbled(self):
+        """Regression (review 4882245397): 0xE0-led UTF-8 scripts must
+        survive intact — Thai ก (U+0E01) and Devanagari अ (U+0905)."""
+        parser = InputParser()
+        thai = "ก".encode()  # E0 B8 81
+        assert parser.feed(thai) == [thai]
+        deva = "अ".encode()  # E0 A4 85
+        assert parser.feed(deva) == [deva]
+
+    def test_nul_not_swallowed_with_next_key(self):
+        """Regression (review 4882245397): lone 0x00 (Ctrl+@) followed by a
+        key in the same read must yield two sequences, not one pair."""
+        parser = InputParser()
+        assert parser.feed(b"\x00A") == [b"\x00", b"A"]
 
     def test_legacy_incomplete_waits(self):
         """A lone 0xE0 prefix waits for the scan-code byte."""

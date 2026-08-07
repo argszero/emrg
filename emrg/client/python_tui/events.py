@@ -381,15 +381,19 @@ class InputParser:
             # Legacy Windows scan-code prefix (no VT input): 0xE0 0x48 = ↑.
             # Intercept before _utf8_len (which would misread 0xE0 as a
             # 3-byte UTF-8 lead) and normalize to the ANSI equivalent.
+            # Only intercept when the second byte is a recognized scan code
+            # (0x47-0x53); valid UTF-8 continuation bytes after 0xE0 are
+            # always 0xA0-0xBF, so the ranges are disjoint and this is exact.
             if b in (0xE0, 0x00):
-                if len(self._buf) < 2:
-                    break  # wait for the scan-code byte
-                ansi = normalize_legacy_scan_codes(bytes(self._buf[:2]))
-                consumed = 2
-                seq = bytes(self._buf[:consumed])
-                del self._buf[:consumed]
-                results.append(ansi if ansi is not None else seq)
-                continue
+                if len(self._buf) >= 2:
+                    ansi = normalize_legacy_scan_codes(bytes(self._buf[:2]))
+                    if ansi is not None:
+                        del self._buf[:2]
+                        results.append(ansi)
+                        continue
+                # Not a recognized scan code — fall through to normal
+                # processing. Lone 0x00 reaches the single-byte path below;
+                # 0xE0 + non-scan-code byte is handled as UTF-8.
             # Determine bytes needed for this sequence
             need = 1
             if b == 0x1B:
