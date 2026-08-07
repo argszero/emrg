@@ -31,17 +31,23 @@ _LLM_LOG_BACKUP_COUNT = 2
 
 
 def generate_session_id(cwd: Path) -> str:
-    """Generate a human-friendly session ID: s_YYMMDD_HHMM_xxxx."""
+    """Generate a human-friendly session ID: s_YYMMDD_HHMM_xxxxxxxx.
+
+    Suffix uses 4 random bytes (32 bits of entropy) — a 2-byte suffix
+    (16 bits, 65536 possibilities) made the 10-sample uniqueness test
+    flaky via the birthday paradox (~0.07% collision per run; observed
+    on CI master push run 31145421676).
+    """
     now = datetime.now()
     prefix = f"s_{now.strftime('%y%m%d_%H%M')}_"
     sessions_dir = cwd / ".emrg" / "sessions"
     for _ in range(100):
-        suffix = secrets.token_hex(2)[:4]
+        suffix = secrets.token_hex(4)
         sid = prefix + suffix
         if not (sessions_dir / sid).exists():
             return sid
-    # Fallback: use longer suffix
-    suffix = secrets.token_hex(4)[:8]
+    # Fallback: same 4-byte entropy (loop exhaustion is astronomically rare)
+    suffix = secrets.token_hex(4)
     return prefix + suffix
 
 
