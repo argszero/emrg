@@ -177,3 +177,72 @@ class TestInputParser:
         parser = InputParser()
         results = parser.feed(b"\x1bZ")
         assert results == [b"\x1bZ"]
+
+
+# ── Legacy Windows scan codes (rant 2026-08-07T10:38:21) ──
+
+
+class TestLegacyScanCodes:
+    """0xE0/0x00 prefix + scan code → normalized ANSI sequence."""
+
+    def test_legacy_up(self):
+        parser = InputParser()
+        assert parser.feed(b"\xe0\x48") == [b"\x1b[A"]
+
+    def test_legacy_down_zero_prefix(self):
+        parser = InputParser()
+        assert parser.feed(b"\x00\x50") == [b"\x1b[B"]
+
+    def test_legacy_left_right(self):
+        parser = InputParser()
+        assert parser.feed(b"\xe0\x4b") == [b"\x1b[D"]
+        assert parser.feed(b"\xe0\x4d") == [b"\x1b[C"]
+
+    def test_legacy_home_end(self):
+        parser = InputParser()
+        assert parser.feed(b"\xe0\x47") == [b"\x1b[H"]
+        assert parser.feed(b"\xe0\x4f") == [b"\x1b[F"]
+
+    def test_legacy_pgup_pgdn_ins_del(self):
+        parser = InputParser()
+        assert parser.feed(b"\xe0\x49") == [b"\x1b[5~"]
+        assert parser.feed(b"\xe0\x51") == [b"\x1b[6~"]
+        assert parser.feed(b"\xe0\x52") == [b"\x1b[2~"]
+        assert parser.feed(b"\xe0\x53") == [b"\x1b[3~"]
+
+    def test_legacy_unknown_scan_passthrough(self):
+        """Unknown scan codes are consumed as 2 bytes, never UTF-8-garbled."""
+        parser = InputParser()
+        assert parser.feed(b"\xe0\xff") == [b"\xe0\xff"]
+        assert not parser.has_pending()
+
+    def test_legacy_incomplete_waits(self):
+        """A lone 0xE0 prefix waits for the scan-code byte."""
+        parser = InputParser()
+        assert parser.feed(b"\xe0") == []
+        assert parser.has_pending()
+        assert parser.feed(b"\x48") == [b"\x1b[A"]
+
+    def test_utf8_cjk_still_works(self):
+        """CJK UTF-8 multi-byte input is unaffected by the scan-code branch."""
+        parser = InputParser()
+        encoded = "中".encode()
+        assert parser.feed(encoded) == [encoded]
+
+
+class TestParseKeypressLegacy:
+    def test_parse_legacy_up(self):
+        from emrg.client.python_tui.events import KeyName, parse_keypress
+        key = parse_keypress(b"\xe0\x48")
+        assert key is not None
+        assert key.name == KeyName.UP
+
+    def test_parse_legacy_down(self):
+        from emrg.client.python_tui.events import KeyName, parse_keypress
+        key = parse_keypress(b"\x00\x50")
+        assert key is not None
+        assert key.name == KeyName.DOWN
+
+    def test_parse_legacy_unknown_returns_none(self):
+        from emrg.client.python_tui.events import parse_keypress
+        assert parse_keypress(b"\xe0\xff") is None

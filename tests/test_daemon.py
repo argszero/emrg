@@ -674,3 +674,33 @@ def test_check_github_auth_parses_gh_output(monkeypatch):
     monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
     result = asyncio.run(server._check_github_auth())
     assert result == {"authenticated": True, "user": "octocat", "method": "gh"}
+
+
+# ── /rant project list shows evolution-workspace entries (rant 10:48:00) ──
+
+
+def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
+    """A registered project under ~/.emrg/evolution is NOT filtered from /rant."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    projects_file = tmp_path / "projects.yml"
+    projects_file.write_text(
+        "- name: emrg\n  path: /Users/argszero/.emrg/evolution/emrg\n"
+        "- name: other\n  path: /home/u/work/other\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "_projects_log", projects_file)
+    monkeypatch.setattr(dmod, "EVOLUTION_CWD", tmp_path)  # not under /Users path in test
+
+    writer = _FakeWriter()
+    asyncio.run(server._handle_list_projects(writer))
+
+    assert len(writer._frames) == 1
+    reply = json.loads(writer._frames[0])
+    assert reply["type"] == "projects_list"
+    paths = [p["path"] for p in reply["projects"]]
+    assert "/Users/argszero/.emrg/evolution/emrg" in paths  # emrg visible
+    assert "/home/u/work/other" in paths

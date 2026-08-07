@@ -10,6 +10,15 @@ Raw mode on Windows mirrors the POSIX termios.tcgetattr/tty.setraw contract:
     cmd/conhost (Windows Terminal enables VT by default)
   - set the fd to binary mode so CRLF translation is off (key sequences like
     the arrow prefix ESC [ A arrive byte-identical to POSIX)
+
+ENABLE_VIRTUAL_TERMINAL_INPUT (rant 2026-08-07T10:38:21) is required:
+without it conhost delivers keystrokes in the OEM code page (GBK on Chinese
+systems → UTF-8-assuming input chain garbles CJK IME text) and arrow keys
+arrive as legacy 0xE0 scan codes instead of ANSI ESC [ A/B/C/D. With VT
+input enabled the console delivers UTF-8 + standard ANSI sequences, fixing
+both problems at once. Pre-Win10-1607 consoles reject the flag — fall back
+to window-input-only raw mode (InputParser defensively translates legacy
+scan codes).
 """
 
 from __future__ import annotations
@@ -27,9 +36,14 @@ ENABLE_ECHO_INPUT = 0x0004
 ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004  # output mode
 ENABLE_PROCESSED_OUTPUT = 0x0001
 ENABLE_WINDOW_INPUT = 0x0008
+ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200  # input mode (rant 2026-08-07T10:38:21)
 
-# Raw mode = everything off except window input (keeps console resize events)
-_RAW_INPUT_MODE = ENABLE_WINDOW_INPUT
+# Raw mode = everything off except window input + VT input.
+# ENABLE_VIRTUAL_TERMINAL_INPUT makes conhost deliver UTF-8 keystrokes
+# (CJK IME works) and standard ANSI arrow sequences (ESC [ A/B/C/D).
+# Without it: OEM code page bytes (GBK on Chinese systems) garble the
+# UTF-8-assuming input chain, and arrows arrive as legacy 0xE0 scan codes.
+_RAW_INPUT_MODE = ENABLE_WINDOW_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT
 # Output mode that makes ANSI/VT sequences work
 _VT_OUTPUT_MODE = ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING
 
@@ -71,6 +85,11 @@ class Win32Console:
             return False
         self._saved_modes[fd] = (in_mode, out_mode if out_mode is not None else 0)
         ok_in = self._set_console_mode(handle, _RAW_INPUT_MODE)
+        if not ok_in:
+            # Pre-Win10-1607 consoles reject ENABLE_VIRTUAL_TERMINAL_INPUT —
+            # fall back to window-input-only raw mode (InputParser in
+            # events.py defensively translates legacy 0xE0 scan codes).
+            ok_in = self._set_console_mode(handle, ENABLE_WINDOW_INPUT)
         ok_out = True
         if out_mode is not None:
             ok_out = self._set_console_mode(self._fd_to_handle(1), _VT_OUTPUT_MODE)

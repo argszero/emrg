@@ -1976,8 +1976,15 @@ class EmrgServer:
     async def _handle_list_projects(
         self, ws
     ) -> None:
-        """Read projects.yml and return all project entries."""
-        evolution_cwd = str(EVOLUTION_CWD.resolve())
+        """Read projects.yml and return all project entries.
+
+        No evolution-workspace filter (rant 2026-08-07T10:48:00): projects.yml
+        only contains explicitly registered entries, and on packaged installs
+        the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it
+        hid emrg from /rant entirely. _touch_project still skips evolution
+        subdirs so evolution cycles' cwd is never auto-tracked as a user
+        project.
+        """
         projects: list[dict] = []
         try:
             if self._projects_log.exists():
@@ -1988,14 +1995,6 @@ class EmrgServer:
                          "repo": _detect_git_remote(p.get("path", "")),
                          "path": p.get("path", "")}
                         for p in data if isinstance(p, dict)
-                    ]
-                    # Filter out evolution workspace (exact match + subdirs)
-                    projects = [
-                        p for p in projects
-                        if not (
-                            p["path"] == evolution_cwd
-                            or p["path"].startswith(evolution_cwd + os.sep)
-                        )
                     ]
         except (yaml.YAMLError, OSError):
             logger.exception("Failed to read projects.yml")
