@@ -318,6 +318,7 @@ When reading rants, follow these rules:
 > - saturation halt auto-resume (#531 scheduler _saturation_halt_active：停机（≥30 空循环）后 scheduled run 全 skip → handler 无法自检 HEAD 变化，只有手动 /trigger 能恢复；_remote_advanced 用 git ls-remote 对比 origin/master，上游推进即自动恢复+计数清零；+4 测试正反两态/边界/无 git 仓库不崩) ✅
 > - README MANIFESTO intro anglicized (#533 README.md 行 25 MANIFESTO 中文引言→英文；MANIFESTO.md 零改动（宿主方案 C）；行 16 语言切换器 + 行 71 `卸载 EMRG.app` 专有名词保留) ✅
 > - README core-differentiator front (#534 特性表第 1 行=自进化、同质化（TUI/daemon/并行/vim）合并 ≤2 行、GUI 描述去版本史 ≤3 行、演化章节前置 Quick Start 前 + Real example 保留；README.md/README.cn.md 同步) ✅
+> - scheduler projects.yml self-heal (#535 _ensure_self_evolution_task 启动即补 projects.yml emrg 条目（path 固定 ~/.emrg/evolution/emrg，已有条目保留）——tasks.yml 有启动自愈但 projects.yml 缺对等保证，唯一补写点 clone 分支需 tick+网络 → _resolve_project_path None → _source_dir 退化 "emrg" 悬空 cwd；+3 测试缺失追加/存在保留/其他条目保留) ✅
 
 #### 2.2 Latest GitHub code changes
 
