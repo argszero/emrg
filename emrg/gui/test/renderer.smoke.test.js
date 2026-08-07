@@ -211,6 +211,56 @@ test("流式 delta 追加 + 工具行 running→done 状态流转", async () => 
   assert.ok(r.toolRowClass.includes("done"), `工具行应 done，实际 ${r.toolRowClass}`);
 });
 
+test("rant 21:57:10：交替文本/工具按顺序交错展示（每段文本独立成块）", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = vm.runInContext(`(function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    // LLM 常见输出序列：文本段1 → 工具1 → 文本段2 → 工具2 → 文本段3
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "文本段1" }]);
+    EMRG_Chat.handleToolStart({ request_id: "rid-1", tool_call_id: "t1", tool_name: "read" });
+    EMRG_Chat.handleToolEnd({ tool_call_id: "t1", tool_name: "read", content: "out1", elapsed: 0.1 });
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "文本段2" }]);
+    EMRG_Chat.handleToolStart({ request_id: "rid-1", tool_call_id: "t2", tool_name: "bash" });
+    EMRG_Chat.handleToolEnd({ tool_call_id: "t2", tool_name: "bash", content: "out2", elapsed: 0.2 });
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "文本段3" }]);
+    const children = $("chat-view").children;
+    const kinds = [];
+    const texts = [];
+    const isToolRow = (c) =>
+      c.children.length > 0 && (c.children[0].className || "").includes("tool-spinner");
+    for (let i = 0; i < children.length; i++) {
+      const c = children[i];
+      if (isToolRow(c)) {
+        kinds.push("tool");
+      } else {
+        kinds.push("text");
+        texts.push(c.textContent);
+      }
+    }
+    const beforeDone = children.length;
+    // done 后该 rid 的所有文本段都应渲染（typing 移除）
+    EMRG_Chat.handleDone({ request_id: "rid-1" });
+    let typingAfter = 0;
+    for (let i = 0; i < $("chat-view").children.length; i++) {
+      const c = $("chat-view").children[i];
+      if (c.className.includes("typing")) typingAfter++;
+    }
+    return {
+      count: children.length,
+      kinds: kinds.join(","),
+      texts: texts.join("|"),
+      beforeDone,
+      typingAfter,
+    };
+  })()`, ctx);
+  assert.strictEqual(r.beforeDone, 5, "3 文本段 + 2 工具行 = 5 节点");
+  assert.strictEqual(r.kinds, "text,tool,text,tool,text", "应按 文本→工具→文本→工具→文本 交错（TUI 一致）");
+  assert.strictEqual(r.texts, "文本段1|文本段2|文本段3", "每段文本独立成块，不拼接在顶部（沙箱 textContent 不含 ✦ 标记 span）");
+  assert.strictEqual(r.typingAfter, 0, "done 后所有文本段 typing 光标应移除");
+});
+
 test("rant 14:11：首条消息后欢迎屏立即隐藏（append 同步 updateEmptyState）", async () => {
   const { ctx } = makeSandbox();
   await tick();
