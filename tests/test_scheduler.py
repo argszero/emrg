@@ -891,6 +891,29 @@ def test_evolution_cycle_complete_unchanged_head_still_empty(tmp_path):
     assert "truncated=max-tool-rounds" not in impact, impact
 
 
+def test_evolution_cycle_aborted_error_not_counted(tmp_path):
+    """Server error frame (e.g. 'session busy') → no evolution log, no count."""
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"error": "session busy"},
+    ])
+    asyncio.run(handler._run_evolution_cycle())
+    assert "log" not in captured, "aborted cycle must not write an evolution log"
+    assert handler.evolutions == [], "aborted cycle must not append to evolutions"
+    assert handler._empty_cycles == 0, \
+        "aborted cycle must not advance the idle-halt backoff (agent never ran)"
+
+
+def test_evolution_cycle_aborted_resets_empty_streak(tmp_path):
+    """Aborted cycle resets a pre-existing empty streak (blocked ≠ NTE)."""
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"error": "session busy"},
+    ])
+    handler._empty_cycles = 5
+    asyncio.run(handler._run_evolution_cycle())
+    assert "log" not in captured
+    assert handler._empty_cycles == 0, "abort resets the streak (not a real empty cycle)"
+
+
 # ── Saturation halt auto-resume on upstream advance ───────────────
 # The halt skips scheduled runs entirely, so a halted handler can never
 # detect a HEAD change itself (only /trigger could resume it). If every
