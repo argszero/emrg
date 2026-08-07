@@ -171,3 +171,100 @@ def test_redact_text_masks_inline_credentials():
     assert "sk-" not in _redact_text("bad key sk-A1b2C3d4A1b2C3d4A1b2C3d4A1b2C3d4 supplied")
     assert "ghp_" not in _redact_text("token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 rejected")
     assert _redact_text("rate limit exceeded, try later") == "rate limit exceeded, try later"
+
+
+# ── gzip body 容错（20260807-1240：memory reflection UnicodeDecodeError）──
+
+
+def test_parse_json_body_plain():
+    """Plain JSON body parses unchanged."""
+    from emrg.server.llm import _parse_json_body
+    data = _parse_json_body(b'{"choices": []}')
+    assert data == {"choices": []}
+
+
+def test_parse_json_body_gzip_without_content_encoding():
+    """Gzip body (no Content-Encoding header → httpx won't decompress) is
+    transparently decompressed via magic-byte detection."""
+    import gzip as gz
+    from emrg.server.llm import _parse_json_body
+    raw = '{"choices": [{"message": {"content": "hi"}}]}'.encode()
+    data = _parse_json_body(gz.compress(raw))
+    assert data["choices"][0]["message"]["content"] == "hi"
+
+
+def test_parse_json_body_corrupt_gzip_raises():
+    """Gzip magic bytes with corrupt payload raise OSError (BadGzipFile)."""
+    import gzip as gz
+    import pytest
+    from emrg.server.llm import _parse_json_body
+    with pytest.raises(OSError):
+        _parse_json_body(b"\x1f\x8bCORRUPTED-NOT-REAL-GZIP")
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, content: bytes, headers=None):
+        self.status_code = status_code
+        self.content = content
+        self.headers = headers or {}
+
+
+class _FakeHttpClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    async def post(self, url, headers=None, json=None):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def _patch_fast_sleep(monkeypatch):
+    """Make retry backoff instant in tests."""
+    import emrg.server.llm as llm_mod
+
+    async def fast_sleep(_delay):
+        pass
+
+    monkeypatch.setattr(llm_mod.asyncio, "sleep", fast_sleep)
+
+
+def test_chat_gzip_body_transparent_decompress(monkeypatch, client):
+    """chat() returns the message when the 200 body is gzip-compressed
+    without Content-Encoding (the production failure mode)."""
+    import asyncio
+    import gzip as gz
+    body = gz.compress(b'{"choices": [{"message": {"content": "ok"}}]}')
+    fake = _FakeHttpClient([_FakeResponse(200, body)])
+    client._client = fake
+    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert msg == {"content": "ok"}
+    assert fake.calls == 1  # no retry needed
+
+
+def test_chat_malformed_body_retries_then_succeeds(monkeypatch, client):
+    """Unparseable 200 body retries with backoff instead of crashing
+    (previously: UnicodeDecodeError killed memory reflection outright)."""
+    import asyncio
+    _patch_fast_sleep(monkeypatch)
+    good = b'{"choices": [{"message": {"content": "recovered"}}]}'
+    fake = _FakeHttpClient([
+        _FakeResponse(200, b"\x1f\x8bCORRUPT"),
+        _FakeResponse(200, good),
+    ])
+    client._client = fake
+    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert msg == {"content": "recovered"}
+    assert fake.calls == 2
+
+
+def test_chat_malformed_body_exhausts_retries(monkeypatch, client):
+    """Persistently malformed body raises RuntimeError after MAX_RETRIES."""
+    import asyncio
+    import pytest
+    _patch_fast_sleep(monkeypatch)
+    fake = _FakeHttpClient([_FakeResponse(200, b"\x1f\x8bBAD")] * 4)
+    client._client = fake
+    with pytest.raises(RuntimeError, match="unparseable"):
+        asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert fake.calls == 4  # 1 initial + 3 retries
