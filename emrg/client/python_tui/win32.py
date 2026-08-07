@@ -152,13 +152,19 @@ KEY_EVENT = 0x0001
 
 
 class _KEY_EVENT_RECORD(ctypes.Structure):
+    # ABI-critical: use FIXED-WIDTH ctypes (c_int/c_uint/c_ushort), NOT
+    # wintypes.BOOL/DWORD — those are c_long/c_ulong, 4B on Windows but 8B
+    # on LP64 POSIX, inflating the struct and breaking Win32 ABI parity
+    # (review ❌ finding on #553: sizes were 32/40 instead of 16/20).
     _fields_ = [
-        ("bKeyDown", wintypes.BOOL),
-        ("wRepeatCount", wintypes.WORD),
-        ("wVirtualKeyCode", wintypes.WORD),
-        ("wVirtualScanCode", wintypes.WORD),
-        ("uChar", wintypes.WCHAR),  # union { WCHAR UnicodeChar; CHAR AsciiChar; }
-        ("dwControlKeyState", wintypes.DWORD),
+        ("bKeyDown", ctypes.c_int),  # Win32 BOOL
+        ("wRepeatCount", ctypes.c_ushort),
+        ("wVirtualKeyCode", ctypes.c_ushort),
+        ("wVirtualScanCode", ctypes.c_ushort),
+        # uChar is the union { WCHAR UnicodeChar; CHAR AsciiChar; } — we
+        # read the UnicodeChar view (c_ushort, 2B, matches WCHAR everywhere).
+        ("uChar", ctypes.c_ushort),
+        ("dwControlKeyState", ctypes.c_uint),  # Win32 DWORD
     ]
 
 
@@ -238,9 +244,12 @@ def read_console_unicode(fd: int, max_events: int = 32) -> bytes:
         if rec.EventType != KEY_EVENT:
             continue
         key = rec.Event
+        uchar = int(key.uChar)  # c_ushort → int (0 = no char / function key)
         out.extend(
             _key_event_to_bytes(
-                bool(key.bKeyDown), key.uChar, int(key.wVirtualScanCode)
+                bool(key.bKeyDown),
+                chr(uchar) if uchar else "\x00",
+                int(key.wVirtualScanCode),
             )
         )
     return bytes(out)

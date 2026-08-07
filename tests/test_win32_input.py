@@ -75,3 +75,90 @@ class TestKeyEventToBytes:
     def test_zero_unicode_with_unknown_scan(self):
         """修饰键（UnicodeChar==0 且非功能键）→ 空。"""
         assert _key_event_to_bytes(True, "\x00", 0) == b""
+
+
+import ctypes  # noqa: E402
+
+import emrg.client.python_tui.win32 as win32  # noqa: E402
+
+
+class TestInputRecordLayout:
+    """ctypes struct must match the Win32 ABI on every platform (review ❌
+    finding: wintypes.WCHAR/c_wchar is 4B on POSIX, inflating the layout;
+    uChar is now c_ushort so sizes are platform-stable and simulatable)."""
+
+    def test_key_event_record_size(self):
+        assert ctypes.sizeof(win32._KEY_EVENT_RECORD) == 16
+
+    def test_input_record_size(self):
+        assert ctypes.sizeof(win32._INPUT_RECORD) == 20
+
+    def test_event_offset(self):
+        # EventType (WORD) at 0; union is 4-aligned (DWORD members) → 2B pad,
+        # Event at offset 4, INPUT_RECORD = 20B total (Win32 ABI)
+        assert win32._INPUT_RECORD.Event.offset == 4
+
+
+class TestReadConsoleUnicodeLoop:
+    """Simulated INPUT_RECORD buffers through the real read loop — the part
+    the pure-function tests cannot reach. _ReadConsoleInputW is faked to
+    write a record into the buffer the same way kernel32 would."""
+
+    @staticmethod
+    def _monkeypatch(monkeypatch, records):
+        monkeypatch.setattr(
+            win32.Win32Console, "_fd_to_handle", staticmethod(lambda fd: 12345)
+        )
+
+        def _set_path(obj, path, value):
+            # ctypes setattr with a dotted name silently no-ops — traverse
+            parts = path.split(".")
+            for p in parts[:-1]:
+                obj = getattr(obj, p)
+            setattr(obj, parts[-1], value)
+
+        def fake_read(handle, buf, max_events, n_read):
+            rec = ctypes.cast(buf, ctypes.POINTER(win32._INPUT_RECORD)).contents
+            for field, value in records:
+                _set_path(rec, field, value)
+            # n_read arrives as the byref() CArgObject wrapping the DWORD
+            ctypes.cast(n_read, ctypes.POINTER(ctypes.c_uint32)).contents.value = 1
+            return True
+
+        monkeypatch.setattr(win32, "_ReadConsoleInputW", fake_read)
+
+    def test_cjk_char_through_loop(self, monkeypatch):
+        self._monkeypatch(monkeypatch, [
+            ("EventType", win32.KEY_EVENT),
+            ("Event.bKeyDown", True),
+            ("Event.wVirtualScanCode", 0),
+            ("Event.uChar", ord("中")),
+        ])
+        assert win32.read_console_unicode(0) == "中".encode("utf-8")
+
+    def test_arrow_scan_code_through_loop(self, monkeypatch):
+        self._monkeypatch(monkeypatch, [
+            ("EventType", win32.KEY_EVENT),
+            ("Event.bKeyDown", True),
+            ("Event.wVirtualScanCode", 0x48),
+            ("Event.uChar", 0),
+        ])
+        assert win32.read_console_unicode(0) == b"\x1b[A"
+
+    def test_key_up_dropped_through_loop(self, monkeypatch):
+        self._monkeypatch(monkeypatch, [
+            ("EventType", win32.KEY_EVENT),
+            ("Event.bKeyDown", False),
+            ("Event.wVirtualScanCode", 0x48),
+            ("Event.uChar", ord("中")),
+        ])
+        assert win32.read_console_unicode(0) == b""
+
+    def test_mouse_event_skipped_through_loop(self, monkeypatch):
+        self._monkeypatch(monkeypatch, [
+            ("EventType", 0x0002),  # MOUSE_EVENT — not a key, must be skipped
+            ("Event.bKeyDown", True),
+            ("Event.wVirtualScanCode", 0),
+            ("Event.uChar", ord("a")),
+        ])
+        assert win32.read_console_unicode(0) == b""
