@@ -14,6 +14,7 @@ The streaming protocol for tool_calls is nuanced:
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import logging
 from typing import AsyncIterator, Optional
@@ -54,6 +55,19 @@ logger = logging.getLogger(__name__)
 RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 RETRY_BASE_DELAY = 1.0  # seconds, doubled each retry
+
+
+def _parse_json_body(content: bytes) -> dict:
+    """Parse an LLM response body, transparently decompressing gzip.
+
+    Some gateways/proxies return gzip-compressed bodies without a proper
+    Content-Encoding header, so httpx does not decompress them and
+    ``resp.json()`` crashes with UnicodeDecodeError on the gzip magic
+    bytes (0x1f 0x8b). Detect the magic prefix and decompress first.
+    """
+    if content[:2] == b"\x1f\x8b":
+        content = gzip.decompress(content)
+    return json.loads(content)
 
 
 class LlmClient:
@@ -131,7 +145,28 @@ class LlmClient:
             if resp.status_code == 200:
                 self.last_response_status = resp.status_code
                 self.last_response_headers = dict(resp.headers)
-                data = resp.json()
+                try:
+                    data = _parse_json_body(resp.content)
+                except (json.JSONDecodeError, UnicodeDecodeError, OSError, EOFError) as exc:
+                    # Malformed body (e.g. truncated gzip / proxy error page).
+                    # Treat as transient — retry with backoff instead of crashing
+                    # (20260807: memory reflection died on gzip body without
+                    # Content-Encoding, resp.json() raised UnicodeDecodeError).
+                    if attempt < MAX_RETRIES:
+                        delay = RETRY_BASE_DELAY * (2 ** attempt)
+                        logger.warning(
+                            "LLM response body unparseable (%s), retrying in %.1fs "
+                            "(attempt %d/%d)",
+                            type(exc).__name__, delay, attempt + 1, MAX_RETRIES,
+                        )
+                        await asyncio.sleep(delay)
+                        last_error = RuntimeError(
+                            f"LLM response body unparseable: {type(exc).__name__}"
+                        )
+                        continue
+                    raise RuntimeError(
+                        f"LLM response body unparseable: {type(exc).__name__}"
+                    ) from exc
                 choice = data["choices"][0]
                 return choice.get("message", {})
 
