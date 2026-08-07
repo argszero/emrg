@@ -320,6 +320,7 @@ When reading rants, follow these rules:
 > - README core-differentiator front (#534 特性表第 1 行=自进化、同质化（TUI/daemon/并行/vim）合并 ≤2 行、GUI 描述去版本史 ≤3 行、演化章节前置 Quick Start 前 + Real example 保留；README.md/README.cn.md 同步) ✅
 > - scheduler projects.yml self-heal (#535 _ensure_self_evolution_task 启动即补 projects.yml emrg 条目（path 固定 ~/.emrg/evolution/emrg，已有条目保留）——tasks.yml 有启动自愈但 projects.yml 缺对等保证，唯一补写点 clone 分支需 tick+网络 → _resolve_project_path None → _source_dir 退化 "emrg" 悬空 cwd；+3 测试缺失追加/存在保留/其他条目保留) ✅
 > - LLM gzip body tolerance (#541 llm.py _parse_json_body：gateway 返回无 Content-Encoding 的 gzip body（0x1f 0x8b magic）时 httpx 不解压 → resp.json() UnicodeDecodeError 裸崩（memory reflection 12:40 生产事故）；magic 检测透明解压 + chat() 解析失败（JSONDecodeError/UnicodeDecodeError/OSError/EOFError）走瞬时错误同款指数退避重试；chat_stream 已优雅降级无需改；+6 测试 plain/gzip/corrupt/解压/重试成功/重试耗尽) ✅
+> - GUI message display fixes (#543 rant 14:11 宿主实测三缺陷：欢迎屏不隐藏 + 光标残留 + 误标"来自其他客户端"；Bug A updateEmptyState 只在切会话调用 → Chat.append()/clear() 同步 App.updateEmptyState?.()；Bug B G122 16ms delta 缓冲 vs done 直通竞态 → 残留 delta 晚到建孤儿节点 → main.js flushDeltaBuf 终态（done/error/cancelled）前同步冲刷（webContents.send 保序）+ chat.js doneRids 集合丢弃已 done 流残留 delta（UUID 不复用，500 上限）+ cancelled/流式 error 调 clearTyping 全清在途 typing（daemon cancelled 无 request_id，mid-round 取消无 done 帧）；+3 回归测试，npm test 88→91 文档同步) ✅
 
 #### 2.2 Latest GitHub code changes
 
