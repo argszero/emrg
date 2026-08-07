@@ -286,6 +286,25 @@ class EmrgServer:
             except OSError:
                 pass
 
+    def _evolution_count(self) -> int:
+        """Total completed evolution cycles across scheduler handlers.
+
+        The daemon's own ``self.evolutions`` list is a legacy from the
+        pre-scheduler BackgroundThread design (#95) and is never appended;
+        the scheduler's handlers own the real per-cycle logs. Aggregate from
+        the scheduler, falling back to the legacy list only when the
+        scheduler is unavailable (e.g. test harnesses mock it away).
+        """
+        sched = getattr(self, "_scheduler", None)
+        if sched is not None:
+            try:
+                total = sched.total_evolutions()
+                if isinstance(total, int):
+                    return total
+            except Exception:
+                pass
+        return len(self.evolutions)
+
     async def _handle_client(self, ws) -> None:
         """Handle a single WebSocket client connection.
 
@@ -907,7 +926,7 @@ class EmrgServer:
                     "branch_id": self.identity.branch_id,
                 },
                 uptime_seconds=max(0, elapsed),
-                evolution_count=len(self.evolutions),
+                evolution_count=self._evolution_count(),
             )
             await self._send(ws, {
                 "type": "pong",
@@ -1165,13 +1184,13 @@ class EmrgServer:
                         continue
                 await self._send(ws, {
                     "type": "evolution_summary",
-                    "count": len(self.evolutions),
+                    "count": self._evolution_count(),
                     "recent": recent,
                 })
             except OSError:
                 await self._send(ws, {
                     "type": "evolution_summary",
-                    "count": len(self.evolutions),
+                    "count": self._evolution_count(),
                     "recent": [],
                 })
 

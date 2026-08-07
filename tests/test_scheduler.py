@@ -452,6 +452,23 @@ def test_evolution_handler_default_owner():
     assert handler._repo_url == "https://github.com/argszero/emrg.git"
 
 
+def test_task_scheduler_total_evolutions():
+    """total_evolutions sums per-handler evolution log counts."""
+    from emrg.protocol import EvolutionLog
+
+    sched = TaskScheduler(InstanceIdentity())
+    h1 = EvolutionHandler(name="a", config={}, interval=60, identity=InstanceIdentity())
+    h2 = EvolutionHandler(name="b", config={}, interval=60, identity=InstanceIdentity())
+    sched._handlers = [h1, h2]
+
+    assert sched.total_evolutions() == 0
+    h1.evolutions.append(EvolutionLog(timestamp="t1"))
+    h1.evolutions.append(EvolutionLog(timestamp="t2"))
+    assert sched.total_evolutions() == 2
+    h2.evolutions.append(EvolutionLog(timestamp="t3"))
+    assert sched.total_evolutions() == 3
+
+
 def test_paper_template_renders_with_context():
     """paper_prompt.md renders without Jinja2 errors (seq/uptime placeholders)."""
     import jinja2
