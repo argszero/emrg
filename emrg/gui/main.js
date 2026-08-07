@@ -460,6 +460,19 @@ vision = false
       return { ok: Boolean(frame.ok), error: frame.error || null };
     });
 
+    ipcMain.handle("emrg:githubConnectWeb", async () => {
+      // Windows GCM rant Stage 2b：device flow 启动（daemon github_connect_web）
+      const frame = await client.sendCommandAndWait("github_connect_web", {}, 15000);
+      return { ok: Boolean(frame.ok), code: frame.code || null, url: frame.url || null, error: frame.error || null };
+    });
+
+    ipcMain.handle("emrg:openExternal", async (_e, { url }) => {
+      // Windows GCM rant Stage 2b：打开 device flow 授权页（默认浏览器）
+      if (typeof url !== "string" || !/^https:\/\//.test(url)) return { ok: false };
+      await shell.openExternal(url);
+      return { ok: true };
+    });
+
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };

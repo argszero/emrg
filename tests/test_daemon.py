@@ -7,6 +7,7 @@ evolution infrastructure stays operational.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -858,6 +859,200 @@ def test_github_disconnect_gh_missing(monkeypatch):
     assert reply["type"] == "github_disconnect_result"
     assert reply["ok"] is False
     assert reply["error"] == "gh binary not found"
+
+
+# ── github_connect_web (device flow) command (rant 10:17:27 Stage 2b) ──
+
+
+class _FakeWebStream:
+    """Async-iterable of stdout lines for the device-flow fake proc."""
+
+    def __init__(self, lines):
+        self._lines = list(lines)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if not self._lines:
+            raise StopAsyncIteration
+        return self._lines.pop(0)
+
+
+class _FakeWebProc:
+    """Fake gh auth login --web subprocess."""
+
+    def __init__(self, stream, blocking=False):
+        self.stdout = stream
+        self.killed = False
+        self.returncode = None
+        self._blocking = blocking
+
+    async def communicate(self, data=None):
+        if self._blocking:
+            while True:
+                await asyncio.sleep(3600)
+        return (b"", None)
+
+    def kill(self):
+        self.killed = True
+
+
+def test_github_connect_web_parses_device_code(monkeypatch):
+    """Device flow parses the one-time code + URL and starts a background task."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(server, "_check_github_auth",
+                        lambda: _async_value({"authenticated": False, "user": None, "method": "none"}))
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+    procs = []
+
+    async def fake_exec(*args, **kwargs):
+        p = _FakeWebProc(_FakeWebStream([
+            b"\n",
+            b"! First copy your one-time code: ABCD-1234\n",
+            b"Open this URL to continue in your web browser: https://github.com/login/device\n",
+        ]))
+        procs.append(p)
+        return p
+
+    monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(server._github_connect_web_start())
+
+    assert result["ok"] is True
+    assert result["code"] == "ABCD-1234"
+    assert result["url"] == "https://github.com/login/device"
+    assert result["error"] is None
+    assert len(procs) == 1
+    assert procs[0].killed is False
+
+
+def test_github_connect_web_already_authenticated(monkeypatch):
+    """Already-authenticated short-circuits without spawning a subprocess."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(server, "_check_github_auth",
+                        lambda: _async_value({"authenticated": True, "user": "octocat", "method": "gh"}))
+    spawned = []
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+
+    async def fake_exec(*args, **kwargs):
+        spawned.append(args)
+        return _FakeWebProc(_FakeWebStream([]))
+
+    monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(server._github_connect_web_start())
+
+    assert result["ok"] is True
+    assert result["user"] == "octocat"
+    assert result["error"] == "already_authenticated"
+    assert spawned == []  # no gh process started
+
+
+def test_github_connect_web_gh_missing(monkeypatch):
+    """Missing gh binary degrades to ok=False, never raises."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(server, "_check_github_auth",
+                        lambda: _async_value({"authenticated": False, "user": None, "method": "none"}))
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("", ""))
+    result = asyncio.run(server._github_connect_web_start())
+
+    assert result["ok"] is False
+    assert result["error"] == "gh binary not found"
+
+
+def test_github_connect_web_no_device_code_kills_proc(monkeypatch):
+    """gh produces no code → ok=False and the process is killed."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(server, "_check_github_auth",
+                        lambda: _async_value({"authenticated": False, "user": None, "method": "none"}))
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+    proc = _FakeWebProc(_FakeWebStream([b"unexpected output\n"]))
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(server._github_connect_web_start())
+
+    assert result["ok"] is False
+    assert result["error"] == "gh auth login --web produced no device code"
+    assert proc.killed is True
+
+
+def test_github_connect_web_dispatch(monkeypatch):
+    """github_connect_web returns github_connect_web_result frame."""
+    import asyncio
+
+    server = _make_server()
+    writer = _FakeWriter()
+
+    async def fake_start():
+        return {"ok": True, "code": "WXYZ-9876", "url": "https://github.com/login/device",
+                "user": None, "error": None}
+
+    monkeypatch.setattr(server, "_github_connect_web_start", fake_start)
+    asyncio.run(server._process_message({"type": "github_connect_web"}, writer))
+
+    assert len(writer._frames) == 1
+    reply = json.loads(writer._frames[0])
+    assert reply["type"] == "github_connect_web_result"
+    assert reply["ok"] is True
+    assert reply["code"] == "WXYZ-9876"
+
+
+def test_github_connect_web_cancel_kills_pending(monkeypatch):
+    """Cancelling a pending device flow kills the gh process."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(server, "_check_github_auth",
+                        lambda: _async_value({"authenticated": False, "user": None, "method": "none"}))
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+    proc = _FakeWebProc(
+        _FakeWebStream([b"one-time code: WXYZ-9876\nhttps://github.com/login/device\n"]),
+        blocking=True,
+    )
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
+
+    async def run():
+        r = await server._github_connect_web_start()
+        assert r["ok"] is True
+        assert server._pending_web_auth is not None
+        await server._github_connect_web_cancel()
+        assert server._pending_web_auth is None
+        return r
+
+    result = asyncio.run(run())
+    assert result["code"] == "WXYZ-9876"
+    assert proc.killed is True
+
+
+def _async_value(v):
+    """Return an awaitable that yields v (for monkeypatched async fakes)."""
+    async def _wrap():
+        return v
+    return _wrap()
 
 
 # ── /rant project list shows evolution-workspace entries (rant 10:48:00) ──

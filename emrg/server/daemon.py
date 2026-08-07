@@ -171,6 +171,10 @@ class EmrgServer:
         self._session_busy: dict[str, bool] = {}        # session_id → active task?
         self._all_connections: set = set()              # all authenticated connections
 
+        # Device-flow auth (rant 10:17 Stage 2b): background gh auth login --web task
+        self._pending_web_auth: Optional[asyncio.Task] = None
+        self._pending_web_auth_proc: Optional[asyncio.subprocess.Process] = None
+
         # Build tool registry
         self.tools = ToolRegistry()
         self.tools.register(BashTool())
@@ -686,6 +690,108 @@ class EmrgServer:
         except (asyncio.TimeoutError, OSError, ValueError):
             return {"ok": False, "error": "gh auth logout failed"}
 
+    # ── Device-flow auth (rant 2026-08-07T10:17:27 Stage 2b) ────────────
+    # gh auth login --web prints a one-time code + device URL even with
+    # stdin closed (probe-verified). We return those to the GUI, keep the
+    # gh process alive in the background until the host authorizes in the
+    # browser (or a timeout kills it), and the GUI discovers completion by
+    # polling github_status.
+    _GH_DEVICE_CODE_RE = re.compile(r"one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})")
+    _GH_DEVICE_URL_RE = re.compile(r"(https://github\.com/login/device)")
+    _GH_DEVICE_TIMEOUT = 300
+
+    async def _github_connect_web_start(self) -> dict:
+        """Start a device-flow login. Returns {ok, code, url, user?, error?}.
+
+        Cancels any previously pending device flow (only one may run).
+        If already authenticated, short-circuits with ok=True + user so the
+        GUI can just reflect the connected state.
+        """
+        status = await self._check_github_auth()
+        if status.get("authenticated"):
+            return {"ok": True, "code": None, "url": None,
+                    "user": status.get("user"), "error": "already_authenticated"}
+        _, gh = resolve_git_gh()
+        if not gh:
+            return {"ok": False, "code": None, "url": None,
+                    "user": None, "error": "gh binary not found"}
+        await self._github_connect_web_cancel()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                gh, "auth", "login", "--web",
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=no_prompt_env(),
+            )
+        except (OSError, ValueError):
+            return {"ok": False, "code": None, "url": None,
+                    "user": None, "error": "failed to start gh auth login --web"}
+        code = None
+        url = None
+        try:
+            async for raw in proc.stdout:
+                line = raw.decode("utf-8", errors="replace")
+                if code is None:
+                    m = self._GH_DEVICE_CODE_RE.search(line)
+                    if m:
+                        code = m.group(1)
+                if url is None:
+                    m = self._GH_DEVICE_URL_RE.search(line)
+                    if m:
+                        url = m.group(1)
+                if code and url:
+                    break
+            if not (code and url):
+                proc.kill()
+                return {"ok": False, "code": None, "url": None,
+                        "user": None, "error": "gh auth login --web produced no device code"}
+        except (asyncio.CancelledError, OSError, ValueError):
+            return {"ok": False, "code": None, "url": None,
+                    "user": None, "error": "failed reading device code"}
+        # Keep the process alive until the host authorizes; the GUI polls
+        # github_status. On success gh writes its config and exits 0; on
+        # timeout we kill it so a stale flow never lingers. The proc is also
+        # kept on self so a cancel racing the task start still kills it.
+        self._pending_web_auth_proc = proc
+        self._pending_web_auth = asyncio.create_task(
+            self._gh_web_auth_wait(proc)
+        )
+        return {"ok": True, "code": code, "url": url, "user": None, "error": None}
+
+    async def _gh_web_auth_wait(self, proc) -> None:
+        """Background: await gh auth login --web completion, timeout-kill."""
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=self._GH_DEVICE_TIMEOUT)
+        except (asyncio.TimeoutError, asyncio.CancelledError, OSError, ValueError):
+            try:
+                proc.kill()
+            except (OSError, ValueError):
+                pass
+        finally:
+            if self._pending_web_auth is not None:
+                self._pending_web_auth = None
+            if getattr(self, "_pending_web_auth_proc", None) is proc:
+                self._pending_web_auth_proc = None
+
+    async def _github_connect_web_cancel(self) -> None:
+        """Kill any pending device-flow gh process."""
+        task = getattr(self, "_pending_web_auth", None)
+        proc = getattr(self, "_pending_web_auth_proc", None)
+        self._pending_web_auth = None
+        self._pending_web_auth_proc = None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if proc is not None:
+            try:
+                proc.kill()
+            except (OSError, ValueError):
+                pass
+
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt via Jinja2 template.
 
@@ -1082,6 +1188,13 @@ class EmrgServer:
             # Windows GCM rant Stage 2: GUI disconnect — gh auth logout.
             result = await self._github_disconnect()
             await self._send(ws, {"type": "github_disconnect_result", **result})
+
+        elif msg_type == "github_connect_web":
+            # Windows GCM rant Stage 2b: device-flow login — gh auth login
+            # --web; the GUI shows the one-time code and polls github_status
+            # until the host authorizes in the browser.
+            result = await self._github_connect_web_start()
+            await self._send(ws, {"type": "github_connect_web_result", **result})
 
         elif msg_type == "clear_session":
             session_id = msg.get("session_id", "")

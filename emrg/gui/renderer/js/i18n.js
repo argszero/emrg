@@ -95,6 +95,13 @@ const I18N = (() => {
       "settings.githubConnectFailed": "GitHub 连接失败：{msg}",
       "settings.githubDisconnected": "已断开 GitHub 连接",
       "settings.githubDisconnectFailed": "断开失败：{msg}",
+      // Windows GCM rant Stage 2b：device flow
+      "settings.githubDeviceTitle": "连接 GitHub",
+      "settings.githubDeviceDesc": "在浏览器中打开 GitHub 并输入下方一次性代码以完成授权。",
+      "settings.githubDeviceOpen": "打开浏览器",
+      "settings.githubDeviceCancel": "取消",
+      "settings.githubDeviceWait": "等待浏览器中确认…",
+      "settings.githubDeviceFailed": "GitHub 连接失败：{msg}",
 
       // 首启引导
       "welcome.title": "欢迎使用 EMRG",
@@ -374,6 +381,13 @@ const I18N = (() => {
       "settings.githubConnectFailed": "GitHub connect failed: {msg}",
       "settings.githubDisconnected": "Disconnected from GitHub",
       "settings.githubDisconnectFailed": "Disconnect failed: {msg}",
+      // Windows GCM rant Stage 2b: device flow
+      "settings.githubDeviceTitle": "Connect GitHub",
+      "settings.githubDeviceDesc": "Open GitHub in your browser and enter the one-time code below to finish authorization.",
+      "settings.githubDeviceOpen": "Open browser",
+      "settings.githubDeviceCancel": "Cancel",
+      "settings.githubDeviceWait": "Waiting for confirmation in browser…",
+      "settings.githubDeviceFailed": "GitHub connect failed: {msg}",
 
       // Welcome / onboarding
       "welcome.title": "Welcome to EMRG",

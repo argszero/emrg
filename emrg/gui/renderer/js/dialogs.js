@@ -359,12 +359,13 @@ const Dialogs = (() => {
     });
   }
 
-  // ── GitHub 连接（Windows GCM rant Stage 2：设置页 PAT 授权） ────
+  // ── GitHub 连接（Windows GCM rant Stage 2：设置页授权） ────
   function initGithubSection() {
     $("github-connect-btn").addEventListener("click", async () => {
       const token = $("set-github-token").value.trim();
       if (!token) {
-        Chat.addSystemMessage(_t("settings.githubTokenEmpty"));
+        // 首选 device flow（不开终端、不弹 GCM）；PAT 为受限环境兜底
+        await startDeviceFlow();
         return;
       }
       $("github-connect-btn").disabled = true;
@@ -397,6 +398,70 @@ const Dialogs = (() => {
       } catch (e) {
         Chat.addSystemMessage(_t("settings.githubDisconnectFailed", { msg: e.message }));
       }
+    });
+  }
+
+  // ── GitHub device flow（Stage 2b：gh auth login --web） ────
+  let _devicePollTimer = null;
+  function stopDevicePolling() {
+    if (_devicePollTimer) {
+      clearInterval(_devicePollTimer);
+      _devicePollTimer = null;
+    }
+  }
+
+  async function startDeviceFlow() {
+    const dlg = $("github-device-dialog");
+    const codeEl = $("github-device-code");
+    if (!dlg || !codeEl) return; // 元素缺失（测试桩）时忽略
+    stopDevicePolling();
+    codeEl.textContent = "…";
+    dlg.showModal();
+    try {
+      const res = await window.emrg.githubConnectWeb();
+      if (!res || !res.ok) {
+        dlg.close();
+        Chat.addSystemMessage(_t("settings.githubDeviceFailed", { msg: (res && res.error) || _t("app.unknownError") }));
+        return;
+      }
+      if (res.code && res.url) {
+        codeEl.textContent = res.code;
+        const openBtn = $("github-device-open");
+        if (openBtn) {
+          openBtn.onclick = () => window.emrg.openExternal({ url: res.url });
+        }
+      } else {
+        // already authenticated
+        dlg.close();
+        Chat.addSystemMessage(_t("settings.githubConnected", { user: res.user || "" }));
+        await refreshGithubStatus();
+        return;
+      }
+    } catch (e) {
+      dlg.close();
+      Chat.addSystemMessage(_t("settings.githubDeviceFailed", { msg: e.message }));
+      return;
+    }
+    // 轮询 github_status 直到授权完成（daemon 侧 300s 超时兜底）
+    _devicePollTimer = setInterval(async () => {
+      try {
+        const s = await window.emrg.githubStatus();
+        if (s && s.authenticated) {
+          stopDevicePolling();
+          if (dlg.open) dlg.close();
+          Chat.addSystemMessage(_t("settings.githubConnected", { user: s.user || "" }));
+          await refreshGithubStatus();
+        }
+      } catch { /* 网络抖动忽略，下一轮再试 */ }
+    }, 3000);
+  }
+
+  function initDeviceDialog() {
+    const dlg = $("github-device-dialog");
+    if (!dlg) return;
+    $("github-device-close").addEventListener("click", () => {
+      stopDevicePolling();
+      dlg.close();
     });
   }
 
@@ -452,6 +517,7 @@ const Dialogs = (() => {
     initModelForm,
     initRenameDialog,
     initGithubSection,
+    initDeviceDialog,
     refreshGithubStatus,
     showRename,
     submitRename,

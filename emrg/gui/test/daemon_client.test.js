@@ -427,6 +427,13 @@ test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/t
   const r7 = await p7;
   assert.strictEqual(r7.type, "github_disconnect_result");
   assert.strictEqual(r7.ok, true);
+  // github_connect_web → github_connect_web_result（Windows GCM rant Stage 2b）
+  const p8 = client.sendCommandAndWait("github_connect_web", {}, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "github_connect_web_result", ok: true, code: "ABCD-1234", url: "https://github.com/login/device", error: null })));
+  const r8 = await p8;
+  assert.strictEqual(r8.type, "github_connect_web_result");
+  assert.strictEqual(r8.code, "ABCD-1234");
 });
 
 test("命令-响应配对超时 → reject（G93）", async () => {
