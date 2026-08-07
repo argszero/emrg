@@ -79,6 +79,7 @@ const ELEMENT_IDS = [
   "tasks-dialog", "tasks-list", "tasks-close",
   "result-panel", "result-list", "result-toggle",
   "growth-card", "growth-count", "about-recent",
+  "github-banner", "github-banner-msg", "github-banner-connect", "github-banner-dismiss",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
@@ -297,6 +298,52 @@ test("多模型管理：modelDetails 加载渲染 + saveSettings 传 models 数�
   assert.strictEqual(saved.theme, "system");
   assert.ok(Array.isArray(saved.models));
   assert.strictEqual(saved.models.length, 2, "models 数组含默认 + gpt-4o");
+
+test("GCM rant Stage 2：演化增长 + 未认证 → GitHub 连接横幅出现（正反两态）", async () => {
+  // 正态：未认证 + 演化计数增长 → 横幅出现（先加 hidden 模拟 index.html 初始态）
+  const { ctx } = makeSandbox({
+    githubStatus: async () => ({ authenticated: false, user: null }),
+  });
+  await tick();
+  await vm.runInContext(`(async function() {
+    document.getElementById("github-banner").classList.add("hidden");
+    App.state.evolutionCount = 42;
+    App.state.lastKnownEvolutionCount = 40;
+    App.maybeShowEvolutionToast();
+  })()`, ctx);
+  await tick(); // 等待 githubStatus promise 解析
+  const visible = vm.runInContext(
+    '!document.getElementById("github-banner").classList.contains("hidden")',
+    ctx
+  );
+  assert.strictEqual(visible, true, "未认证 + 演化增长 → 横幅应出现");
+
+  // 负态：已认证 → 横幅保持隐藏
+  const { ctx: ctx2 } = makeSandbox({
+    githubStatus: async () => ({ authenticated: true, user: "octocat" }),
+  });
+  await tick();
+  await vm.runInContext(`(async function() {
+    document.getElementById("github-banner").classList.add("hidden");
+    App.state.evolutionCount = 42;
+    App.state.lastKnownEvolutionCount = 40;
+    App.maybeShowEvolutionToast();
+  })()`, ctx2);
+  await tick();
+  const hidden = vm.runInContext(
+    'document.getElementById("github-banner").classList.contains("hidden")',
+    ctx2
+  );
+  assert.strictEqual(hidden, true, "已认证 → 横幅应保持隐藏");
+
+  // 源码断言：连接/关闭按钮绑定 + 演化增长钩子
+  const src = fs.readFileSync(path.join(RENDERER_JS, "app.js"), "utf8");
+  assert.ok(src.includes("Dialogs.showSettings()"), "横幅[去连接]应打开设置页 GitHub 区");
+  assert.ok(src.includes("_githubBannerDismissed = true"), "关闭横幅应本会话不再弹");
+  const toastIdx = src.indexOf("function maybeShowEvolutionToast()");
+  const toastBlock = src.slice(toastIdx, toastIdx + 800);
+  assert.ok(toastBlock.includes("maybeShowGithubBanner()"), "演化增长应触发 GitHub 横幅检查");
+});
   const gpt = saved.models.find((m) => m.name === "gpt-4o");
   assert.strictEqual(gpt.vision, true);
 });

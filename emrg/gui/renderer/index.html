@@ -37,6 +37,13 @@
       <!-- 断连横幅 -->
       <div id="conn-banner" class="hidden"></div>
 
+      <!-- GitHub 连接横幅（Windows GCM rant Stage 2：演化需要 GitHub 但未认证时出现） -->
+      <div id="github-banner" class="hidden">
+        <span id="github-banner-msg"></span>
+        <button type="button" id="github-banner-connect" class="btn btn-primary" data-i18n="settings.githubBannerConnect">去连接</button>
+        <button type="button" id="github-banner-dismiss" class="btn btn-ghost" title="关闭" data-i18n-title="settings.githubBannerDismiss">✕</button>
+      </div>
+
       <!-- 聊天区 -->
       <div id="chat-view"></div>
       <!-- 回到底部悬浮按钮（上滑阅读时出现） -->

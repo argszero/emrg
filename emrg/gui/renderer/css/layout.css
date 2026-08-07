@@ -195,6 +195,29 @@
   animation: banner-in var(--dur-med) var(--ease);
 }
 
+/* ── GitHub 连接横幅（Windows GCM rant Stage 2） ────── */
+#github-banner {
+  position: absolute;
+  top: var(--sp-3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--amber-soft);
+  color: var(--amber);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px var(--sp-3) 6px var(--sp-4);
+  font-size: var(--fs-secondary);
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+  animation: banner-in var(--dur-med) var(--ease);
+  white-space: nowrap;
+  max-width: 90%;
+}
+#github-banner .btn { padding: 4px 12px; min-height: 0; font-size: var(--fs-secondary); }
+
 /* ── 侧边栏折叠（⌘B / 窄屏） ────────────── */
 body.sidebar-collapsed #sidebar {
   display: none;
