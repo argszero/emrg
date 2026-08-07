@@ -9,6 +9,8 @@ const Chat = (() => {
   const groupNodes = new Map();
   // tool_call_id → 工具行 DOM 节点
   const toolRows = new Map();
+  // rant 14:11：已 done 的 request_id（UUID 不复用）——残留 delta 直接丢弃，防孤儿节点
+  const doneRids = new Set();
 
   /** 复制代码按钮（设计 §3.3）：事件委托在聊天区，CSP 无内联 handler */
   function initCodeCopy() {
@@ -53,6 +55,8 @@ const Chat = (() => {
   function append(node) {
     $("chat-view").appendChild(node);
     scrollToBottom();
+    // rant 14:11：任何消息增删都重新评估欢迎屏显隐（此前只在切会话时评估 → 首条消息后欢迎屏不隐藏）
+    App.updateEmptyState?.();
   }
 
   function scrollToBottom() {
@@ -64,6 +68,8 @@ const Chat = (() => {
     $("chat-view").innerHTML = "";
     groupNodes.clear();
     toolRows.clear();
+    doneRids.clear();
+    App.updateEmptyState?.(); // rant 14:11：清空（切会话/新会话）也同步欢迎屏显隐
   }
 
   /** 用户消息：右对齐柔和气泡 */
@@ -96,7 +102,7 @@ const Chat = (() => {
   function handleDelta(chunks) {
     for (const chunk of chunks) {
       const rid = chunk.request_id;
-      if (!rid) continue;
+      if (!rid || doneRids.has(rid)) continue; // rant 14:11：已 done 的流丢弃残留 delta，不建孤儿节点
       let node = groupNodes.get(rid);
       if (!node) {
         const isOwn = App.state.ownStreamRequestId === rid;
@@ -110,9 +116,21 @@ const Chat = (() => {
     }
   }
 
+  /** 取消/错误收尾：移除所有在途节点的 typing 光标（cancelled 事件无 request_id，只能全清） */
+  function clearTyping() {
+    for (const node of groupNodes.values()) {
+      const body = node.querySelector(".msg-body") || node;
+      body.classList.remove("typing");
+    }
+  }
+
   /** done：整体 Markdown 渲染（requestIdleCallback 调度，G127） */
   function handleDone(data) {
     const rid = data.request_id;
+    if (rid) {
+      doneRids.add(rid);
+      if (doneRids.size > 500) doneRids.clear(); // UUID 不复用，超限即清防长期运行增长
+    }
     const node = groupNodes.get(rid);
     if (node) {
       const body = node.querySelector(".msg-body") || node;
@@ -216,6 +234,7 @@ const Chat = (() => {
     handleDone,
     handleToolStart,
     handleToolEnd,
+    clearTyping,
     get groupNodes() {
       return groupNodes;
     },

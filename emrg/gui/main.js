@@ -556,20 +556,30 @@ vision = false
       // G122：message_delta 16ms 批量推送
       let deltaBuf = [];
       let deltaTimer = null;
+      // rant 14:11：冲刷 delta 缓冲——终态事件（done/error/cancelled）直通不走缓冲，
+      // 若残留 delta 在 16ms 定时器之后才 flush，会晚于终态到达渲染层 →
+      // handleDelta 找不到 group 节点 → 建孤儿节点（误标"来自其他客户端"）+ 光标永不消失。
+      const flushDeltaBuf = () => {
+        if (deltaTimer) {
+          clearTimeout(deltaTimer);
+          deltaTimer = null;
+        }
+        if (deltaBuf.length && win && !win.isDestroyed()) {
+          const chunks = deltaBuf;
+          deltaBuf = [];
+          win.webContents.send("emrg:event", { type: "message_delta", data: { chunks } });
+        }
+      };
       client.onEvent((type, data) => {
         if (type === "message_delta") {
           deltaBuf.push(data);
           if (!deltaTimer) {
-            deltaTimer = setTimeout(() => {
-              const chunks = deltaBuf;
-              deltaBuf = [];
-              deltaTimer = null;
-              if (win && !win.isDestroyed()) {
-                win.webContents.send("emrg:event", { type: "message_delta", data: { chunks } });
-              }
-            }, 16);
+            deltaTimer = setTimeout(flushDeltaBuf, 16);
           }
           return;
+        }
+        if (type === "done" || type === "error" || type === "cancelled") {
+          flushDeltaBuf(); // 终态前先清空缓冲：delta 保证不晚于终态（webContents.send 保序）
         }
         if (type === "done") {
           // 仅自有流的 done 释放 G65 锁（广播 done 不影响）；timeout 兜底同样只清自有

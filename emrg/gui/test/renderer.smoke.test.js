@@ -210,6 +210,58 @@ test("流式 delta 追加 + 工具行 running→done 状态流转", async () => 
   assert.ok(r.toolRowClass.includes("done"), `工具行应 done，实际 ${r.toolRowClass}`);
 });
 
+test("rant 14:11：首条消息后欢迎屏立即隐藏（append 同步 updateEmptyState）", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = vm.runInContext(`(function() {
+    App.state.sessionId = "s1";
+    EMRG_Chat.addUserMessage("hello");
+    return {
+      emptyHidden: $("empty-state").classList.contains("hidden"),
+      msgCount: $("chat-view").children.length,
+    };
+  })()`, ctx);
+  assert.strictEqual(r.msgCount, 1, "消息应已追加");
+  assert.strictEqual(r.emptyHidden, true, "有消息时欢迎屏应隐藏（欢迎屏不得叠在消息区上方）");
+});
+
+test("rant 14:11：done 后残留 delta 被丢弃，不建孤儿节点", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = vm.runInContext(`(function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "你" }]);
+    EMRG_Chat.handleDone({ request_id: "rid-1" });
+    const afterDone = $("chat-view").children.length;
+    // 模拟 16ms 批量定时器在 done 之后才 flush 的残留 delta（G122 竞态）
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "残留" }]);
+    const afterStale = $("chat-view").children.length;
+    return { afterDone, afterStale };
+  })()`, ctx);
+  assert.strictEqual(r.afterDone, 1, "done 前 1 个节点");
+  assert.strictEqual(r.afterStale, 1, "残留 delta 应被丢弃，不得产生孤儿节点（否则误标来自其他客户端 + 光标残留）");
+});
+
+test("rant 14:11：cancelled 事件清除在途节点 typing 光标", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = vm.runInContext(`(function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "部分" }]);
+    const node = $("chat-view").children[0];
+    const body = node.querySelector(".msg-body") || node;
+    body.classList.add("typing");
+    const typingBefore = body.classList.contains("typing");
+    App.handleEvent({ type: "cancelled" });
+    const typingAfter = body.classList.contains("typing");
+    return { typingBefore, typingAfter };
+  })()`, ctx);
+  assert.strictEqual(r.typingBefore, true, "取消前应处于 typing 态");
+  assert.strictEqual(r.typingAfter, false, "取消后 typing 光标（▍）应移除");
+});
+
 test("多模型管理：modelDetails 加载渲染 + saveSettings 传 models 数组", async () => {
   let saved = null;
   const { ctx, els } = makeSandbox({
