@@ -103,51 +103,65 @@ const Chat = (() => {
     for (const chunk of chunks) {
       const rid = chunk.request_id;
       if (!rid || doneRids.has(rid)) continue; // rant 14:11：已 done 的流丢弃残留 delta，不建孤儿节点
-      let node = groupNodes.get(rid);
-      if (!node) {
+      let group = groupNodes.get(rid);
+      if (!group) {
         const isOwn = App.state.ownStreamRequestId === rid;
-        node = createAssistantNode(isOwn);
-        groupNodes.set(rid, node);
+        const node = createAssistantNode(isOwn);
+        group = { node, nodes: [node], hasText: false, sealed: false };
+        groupNodes.set(rid, group);
+      } else if (group.sealed) {
+        // rant 21:57:10：上一文本段被工具行"封存"→ 新文本段开新节点（旧节点保留在 DOM 原位）
+        const isOwn = App.state.ownStreamRequestId === rid;
+        const node = createAssistantNode(isOwn);
+        group.node = node;
+        group.nodes.push(node);
+        group.sealed = false;
       }
-      const body = node.querySelector(".msg-body") || node;
+      const content = chunk.content || "";
+      if (content) group.hasText = true;
+      const body = group.node.querySelector(".msg-body") || group.node;
       // 流式中只动 textContent（不解析 Markdown）——性能约束
-      body.textContent += chunk.content || "";
+      body.textContent += content;
       scrollToBottom();
     }
   }
 
   /** 取消/错误收尾：移除所有在途节点的 typing 光标（cancelled 事件无 request_id，只能全清） */
   function clearTyping() {
-    for (const node of groupNodes.values()) {
-      const body = node.querySelector(".msg-body") || node;
-      body.classList.remove("typing");
+    for (const group of groupNodes.values()) {
+      for (const node of group.nodes) {
+        const body = node.querySelector(".msg-body") || node;
+        body.classList.remove("typing");
+      }
     }
   }
 
-  /** done：整体 Markdown 渲染（requestIdleCallback 调度，G127） */
+  /** done：整体 Markdown 渲染（requestIdleCallback 调度，G127）——该 rid 的全部文本段逐个渲染 */
   function handleDone(data) {
     const rid = data.request_id;
     if (rid) {
       doneRids.add(rid);
       if (doneRids.size > 500) doneRids.clear(); // UUID 不复用，超限即清防长期运行增长
-    }
-    const node = groupNodes.get(rid);
-    if (node) {
-      const body = node.querySelector(".msg-body") || node;
-      body.classList.remove("typing");
-      const text = body.textContent;
-      const render = () => {
-        window.emrgMarkdown.renderMarkdown(text).then((html) => {
-          body.innerHTML = html;
-          scrollToBottom();
-        });
-      };
-      if (window.requestIdleCallback) {
-        window.requestIdleCallback(render, { timeout: 2000 });
-      } else {
-        render();
+      const group = groupNodes.get(rid);
+      if (group) {
+        for (const node of group.nodes) {
+          const body = node.querySelector(".msg-body") || node;
+          body.classList.remove("typing");
+          const text = body.textContent;
+          const render = () => {
+            window.emrgMarkdown.renderMarkdown(text).then((html) => {
+              body.innerHTML = html;
+              scrollToBottom();
+            });
+          };
+          if (window.requestIdleCallback) {
+            window.requestIdleCallback(render, { timeout: 2000 });
+          } else {
+            render();
+          }
+        }
+        groupNodes.delete(rid);
       }
-      groupNodes.delete(rid);
     }
     if (data.timeout) {
       addSystemMessage(EMRG_Copy._t("chat.timeoutWarn"));
@@ -162,10 +176,18 @@ const Chat = (() => {
   /** 工具友好状态行（进行中 → 完成/失败，默认折叠，点开展示原始输出） */
   function handleToolStart(data) {
     const rid = data.request_id;
-    if (rid && !groupNodes.has(rid)) {
-      // G104：tool_start 也建组（LLM 先出 tool_calls 后出文本）
-      const isOwn = App.state.ownStreamRequestId === rid;
-      groupNodes.set(rid, createAssistantNode(isOwn));
+    if (rid) {
+      let group = groupNodes.get(rid);
+      if (!group) {
+        // G104：tool_start 也建组（LLM 先出 tool_calls 后出文本）
+        const isOwn = App.state.ownStreamRequestId === rid;
+        const node = createAssistantNode(isOwn);
+        group = { node, nodes: [node], hasText: false, sealed: false };
+        groupNodes.set(rid, group);
+      } else if (group.hasText) {
+        // rant 21:57:10：已有文本段之后来了工具 → 封存当前段，后续 delta 新建段（保持 TUI 交错顺序）
+        group.sealed = true;
+      }
     }
     const phrases = EMRG_Copy.toolPhrases(data.tool_name);
     const row = el("div", { class: "tool-row running" });
