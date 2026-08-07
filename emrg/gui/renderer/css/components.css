@@ -560,10 +560,19 @@ dialog::backdrop {
   margin-bottom: var(--sp-3);
 }
 .dialog-card label > input,
-.dialog-card label > select {
+.dialog-card label > select,
+.dialog-card label > textarea {
   width: 100%;
   margin-top: var(--sp-1);
   padding: 8px 10px;
+}
+/* rant 2026-08-07T13:32Z: rant dialog textarea was unstyled — default box was
+   tiny. Full width + comfortable min-height + vertical resize + inherited font. */
+.dialog-card label > textarea {
+  min-height: 120px;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.5;
 }
 .dialog-card .hint {
   font-size: var(--fs-aux);

@@ -502,7 +502,10 @@ def test_rant_field_order(tmp_path, monkeypatch):
         "type": "rant",
         "message": "test rant message",
         "project": "emrg",
-        "timestamp": "2026-07-31T20:46:59.734987",
+        # Client-supplied timestamp must be IGNORED — the daemon stamps rants
+        # with tz-aware local time (rant 2026-08-07T13:34Z: GUI sent UTC Z,
+        # 8h behind on UTC+8 hosts). A stale UTC value here must not leak through.
+        "timestamp": "2026-07-31T20:46:59.734987Z",
     }, writer))  # type: ignore[arg-type]
 
     lines = (tmp_path / "rants.jsonl").read_text(encoding="utf-8").strip().splitlines()
@@ -515,6 +518,13 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert entry["project"] == "emrg"
     assert entry["status"] == "pending"
     assert entry["message"] == "test rant message"
+    # Daemon-authoritative local timestamp: tz-aware, NOT UTC (no Z suffix),
+    # and within 60s of the wall clock.
+    import datetime as _dt
+    assert not entry["timestamp"].endswith("Z")
+    ts = _dt.datetime.fromisoformat(entry["timestamp"])
+    assert ts.tzinfo is not None
+    assert abs((_dt.datetime.now(ts.tzinfo) - ts).total_seconds()) < 60
 
 
 # ── _redact 日志脱敏（rant 10:21 + 跨项目 base64 教训）──────────────
