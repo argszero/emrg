@@ -348,6 +348,8 @@ When reading rants, follow these rules:
 
 > - Evolution count aggregation (#558 外部贡献 pm25coder fork：`/version` pong 与 evolution_summary 的 evolution count 生产恒 0——daemon.py:161 `self.evolutions=[]` 是 pre-scheduler BackgroundThread #95 遗留，从未 append；真实 per-cycle 日志归 scheduler handler（scheduler.py:131 初始化 :708 append）；修复=`_evolution_count()` 聚合 `scheduler.total_evolutions()`（sum over handlers 的 evolutions），scheduler 不可用（测试 harness）时回退 legacy `len(self.evolutions)`（isinstance int 守卫 + try/except 双保险）；`total_evolutions()` 挂 TaskScheduler（`_handlers` 类型 list[EvolutionHandler]，全部任务类型都解析到 EvolutionHandler → 不会 AttributeError）；count/recent 一致性（evolution_summary recent 读磁盘 evolution-*.json、count 读 scheduler——两源皆活无错配）；+1 测试 572→573；与 #559 配套=aborted cycle 排除后 count 才真正干净) ✅
 
+> - Aborted-cycle exclusion (#559 外部贡献 pm25coder fork：aborted evolution cycle（server error 如 "session busy"、或异常）被双重误分类——①空循环判定只查 truncated 不查 error → aborted+HEAD 未变被当 empty cycle 推进 idle-halt backoff（agent 被阻塞 ≠ NTE）；②aborted cycle 仍写 EvolutionLog+append self.evolutions+impact 带 error= → 膨胀 evolution count（GUI growth card/toast/evolution_summary）；修复=空循环条件加 `not error` + else 分支 reset empty streak（reason "aborted cycle (error[:80])"）+ **error 提前 return 不写 log 不计数**（error= impact 条目随 no-log 退役）；三态分类完备（complete/truncated/aborted 互斥穷尽循环全部出口）；与 #558 配套：total_evolutions() 计 handler.evolutions 而 aborted 永不 append → count 按构造排除 abort；+2 测试 572→575（_get_git_head 钉死 HEAD 判别力：撤 not error 即红/撤 return 即 "log" not in captured 红）) ✅
+
 #### 2.2 Latest GitHub code changes
 
 ```bash
