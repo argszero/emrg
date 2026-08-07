@@ -680,20 +680,29 @@ def test_check_github_auth_parses_gh_output(monkeypatch):
 
 
 def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
-    """A registered project under ~/.emrg/evolution is NOT filtered from /rant."""
+    """A registered project under the evolution workspace is NOT filtered from /rant.
+
+    Discriminating-power fix (review cycle 190846): the registered path must
+    actually live under the monkeypatched EVOLUTION_CWD — otherwise a restored
+    filter would keep the entry and the test would pass anyway (false
+    confidence). Here the emrg entry's path is under tmp_path (= EVOLUTION_CWD),
+    so re-adding the old filter would exclude it and fail the assertion.
+    """
     import asyncio
 
     from emrg.server import daemon as dmod
 
     server = _make_server()
+    evolution_cwd = str(tmp_path.resolve())
+    emrg_path = f"{evolution_cwd}/emrg"  # under EVOLUTION_CWD on purpose
     projects_file = tmp_path / "projects.yml"
     projects_file.write_text(
-        "- name: emrg\n  path: /Users/argszero/.emrg/evolution/emrg\n"
+        f"- name: emrg\n  path: {emrg_path}\n"
         "- name: other\n  path: /home/u/work/other\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(server, "_projects_log", projects_file)
-    monkeypatch.setattr(dmod, "EVOLUTION_CWD", tmp_path)  # not under /Users path in test
+    monkeypatch.setattr(dmod, "EVOLUTION_CWD", tmp_path)
 
     writer = _FakeWriter()
     asyncio.run(server._handle_list_projects(writer))
@@ -702,5 +711,5 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
     reply = json.loads(writer._frames[0])
     assert reply["type"] == "projects_list"
     paths = [p["path"] for p in reply["projects"]]
-    assert "/Users/argszero/.emrg/evolution/emrg" in paths  # emrg visible
+    assert emrg_path in paths  # emrg visible even though under evolution cwd
     assert "/home/u/work/other" in paths
