@@ -124,6 +124,16 @@
         </label>
       </div>
       <div class="settings-group">
+        <div class="settings-group-title" data-i18n="settings.groupGithub">GitHub 连接</div>
+        <div id="github-status" class="hint" style="margin-bottom:6px;">—</div>
+        <div id="github-auth-row" style="display:flex;gap:8px;">
+          <input type="password" id="set-github-token" placeholder="GitHub Personal Access Token" style="flex:1;min-width:0;" data-i18n-placeholder="settings.githubTokenPlaceholder" />
+          <button type="button" id="github-connect-btn" class="btn btn-primary" data-i18n="settings.githubConnect">连接</button>
+          <button type="button" id="github-disconnect-btn" class="btn btn-ghost hidden" data-i18n="settings.githubDisconnect">断开</button>
+        </div>
+        <div class="hint" style="margin-top:6px;" data-i18n="settings.githubHint">用于自进化推送 PR；授权后自动执行 gh auth setup-git，git 操作不再弹 GCM</div>
+      </div>
+      <div class="settings-group">
         <div class="settings-group-title" data-i18n="settings.groupAppearance">外观</div>
         <label><span data-i18n="settings.theme">主题</span>
           <div class="theme-options" id="theme-options">

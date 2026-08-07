@@ -45,6 +45,8 @@ const RESPONSE_TYPES = {
   rewind_session: "rewind_result", // 补缺：daemon.py:955 rewind_result
   read_memory: "memory_content", // 补缺：daemon.py:771/778 memory_content
   evolution_summary: "evolution_summary", // WorkBuddy P3：自进化可见化
+  github_connect: "github_connect_result", // Windows GCM rant Stage 2：PAT 授权（daemon.py github_connect）
+  github_disconnect: "github_disconnect_result", // Windows GCM rant Stage 2：断开（daemon.py github_disconnect）
 };
 
 class DaemonClient {

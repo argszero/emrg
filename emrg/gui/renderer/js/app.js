@@ -1184,6 +1184,7 @@ const App = (() => {
     Dialogs.initThemeButtons();
     Dialogs.initModelForm();
     Dialogs.initRenameDialog();
+    Dialogs.initGithubSection(); // Windows GCM rant Stage 2：设置页 GitHub 连接
     initModelSwitcher();
     initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
     ResultPanel.init(); // WorkBuddy P1：结果面板（⌘\ 折叠 + 窄屏自动隐藏）

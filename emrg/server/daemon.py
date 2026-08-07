@@ -599,6 +599,93 @@ class EmrgServer:
         except (asyncio.TimeoutError, OSError, ValueError):
             return {"authenticated": False, "user": None, "method": "none"}
 
+    async def _github_connect(self, token: str) -> dict:
+        """Authenticate gh with a PAT (rant 2026-08-07T10:17:27 Stage 2).
+
+        Runs ``gh auth login --with-token`` (token via stdin) followed by
+        ``gh auth setup-git`` so git uses gh as its credential helper and
+        push/pull/fetch never falls back to a GCM popup on Windows.
+        Returns:
+            {"ok": bool, "user": str|None, "error": str|None}
+        Never raises; any failure degrades to {"ok": False, "error": ...}.
+        """
+        token = (token or "").strip()
+        if not token:
+            return {"ok": False, "user": None, "error": "empty token"}
+        _, gh = resolve_git_gh()
+        if not gh:
+            return {"ok": False, "user": None, "error": "gh binary not found"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                gh, "auth", "login", "--with-token",
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=no_prompt_env(),
+            )
+            stdout, _ = await asyncio.wait_for(
+                proc.communicate(token.encode("utf-8") + b"\n"), timeout=30
+            )
+            if proc.returncode != 0:
+                output = stdout.decode("utf-8", errors="replace").strip()
+                return {
+                    "ok": False,
+                    "user": None,
+                    "error": output or f"gh auth login failed ({proc.returncode})",
+                }
+            # Re-verify via the same parser used by github_status.
+            user = (await self._check_github_auth()).get("user")
+            # setup-git: git must use gh as credential helper, otherwise
+            # git push/pull/fetch would still trigger GCM (acceptance item).
+            setup_ok = await self._gh_setup_git(gh)
+            return {
+                "ok": True,
+                "user": user,
+                "error": None if setup_ok else "auth ok but gh auth setup-git failed",
+            }
+        except (asyncio.TimeoutError, OSError, ValueError):
+            return {"ok": False, "user": None, "error": "gh auth login failed"}
+
+    async def _gh_setup_git(self, gh: str) -> bool:
+        """Run ``gh auth setup-git`` so git uses gh as credential helper."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                gh, "auth", "setup-git",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=no_prompt_env(),
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=30)
+            return proc.returncode == 0
+        except (asyncio.TimeoutError, OSError, ValueError):
+            return False
+
+    async def _github_disconnect(self) -> dict:
+        """Log out of gh (rant 2026-08-07T10:17:27 Stage 2).
+
+        Returns {"ok": bool, "error": str|None}. Never raises.
+        """
+        _, gh = resolve_git_gh()
+        if not gh:
+            return {"ok": False, "error": "gh binary not found"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                gh, "auth", "logout", "--hostname", "github.com",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=no_prompt_env(),
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+            if proc.returncode != 0:
+                output = stdout.decode("utf-8", errors="replace").strip()
+                return {
+                    "ok": False,
+                    "error": output or f"gh auth logout failed ({proc.returncode})",
+                }
+            return {"ok": True, "error": None}
+        except (asyncio.TimeoutError, OSError, ValueError):
+            return {"ok": False, "error": "gh auth logout failed"}
+
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt via Jinja2 template.
 
@@ -983,6 +1070,18 @@ class EmrgServer:
             # when evolution actually needs GitHub.
             auth = await self._check_github_auth()
             await self._send(ws, {"type": "github_status", **auth})
+
+        elif msg_type == "github_connect":
+            # Windows GCM rant Stage 2: GUI PAT auth — gh auth login
+            # --with-token + gh auth setup-git (git no longer touches GCM).
+            token = msg.get("token", "")
+            result = await self._github_connect(token)
+            await self._send(ws, {"type": "github_connect_result", **result})
+
+        elif msg_type == "github_disconnect":
+            # Windows GCM rant Stage 2: GUI disconnect — gh auth logout.
+            result = await self._github_disconnect()
+            await self._send(ws, {"type": "github_disconnect_result", **result})
 
         elif msg_type == "clear_session":
             session_id = msg.get("session_id", "")

@@ -230,6 +230,8 @@ const Dialogs = (() => {
         const evo = $("about-evolutions");
         if (evo) evo.textContent = `🌱 ${_t("copy.growthCountPrefix")} ${App.state.evolutionCount ?? 0} ${_t("copy.times")}`;
       } catch { /* 元素缺失（测试桩）时忽略 */ }
+      // Windows GCM rant Stage 2：GitHub 连接状态随设置面板打开时刷新
+      await refreshGithubStatus();
     } catch (e) {
       Chat.addSystemMessage(_t("settings.readFailed", { msg: e.message }));
     }
@@ -357,6 +359,67 @@ const Dialogs = (() => {
     });
   }
 
+  // ── GitHub 连接（Windows GCM rant Stage 2：设置页 PAT 授权） ────
+  function initGithubSection() {
+    $("github-connect-btn").addEventListener("click", async () => {
+      const token = $("set-github-token").value.trim();
+      if (!token) {
+        Chat.addSystemMessage(_t("settings.githubTokenEmpty"));
+        return;
+      }
+      $("github-connect-btn").disabled = true;
+      $("github-connect-btn").textContent = _t("settings.githubConnecting");
+      try {
+        const res = await window.emrg.githubConnect({ token });
+        if (res && res.ok) {
+          $("set-github-token").value = "";
+          Chat.addSystemMessage(_t("settings.githubConnected", { user: res.user || "" }));
+          await refreshGithubStatus();
+        } else {
+          Chat.addSystemMessage(_t("settings.githubConnectFailed", { msg: (res && res.error) || _t("app.unknownError") }));
+        }
+      } catch (e) {
+        Chat.addSystemMessage(_t("settings.githubConnectFailed", { msg: e.message }));
+      } finally {
+        $("github-connect-btn").disabled = false;
+        $("github-connect-btn").textContent = _t("settings.githubConnect");
+      }
+    });
+    $("github-disconnect-btn").addEventListener("click", async () => {
+      try {
+        const res = await window.emrg.githubDisconnect();
+        if (res && res.ok) {
+          Chat.addSystemMessage(_t("settings.githubDisconnected"));
+          await refreshGithubStatus();
+        } else {
+          Chat.addSystemMessage(_t("settings.githubDisconnectFailed", { msg: (res && res.error) || _t("app.unknownError") }));
+        }
+      } catch (e) {
+        Chat.addSystemMessage(_t("settings.githubDisconnectFailed", { msg: e.message }));
+      }
+    });
+  }
+
+  async function refreshGithubStatus() {
+    const statusEl = $("github-status");
+    const authRow = $("github-auth-row");
+    if (!statusEl || !authRow) return; // 元素缺失（测试桩）时忽略
+    statusEl.textContent = _t("settings.githubChecking");
+    try {
+      const s = await window.emrg.githubStatus();
+      const connected = Boolean(s && s.authenticated);
+      const user = (s && s.user) || "";
+      statusEl.textContent = connected
+        ? _t("settings.githubConnectedStatus", { user })
+        : _t("settings.githubNotConnected");
+      $("github-disconnect-btn").classList.toggle("hidden", !connected);
+      $("set-github-token").classList.toggle("hidden", connected);
+      $("github-connect-btn").classList.toggle("hidden", connected);
+    } catch {
+      statusEl.textContent = _t("settings.githubStatusFailed");
+    }
+  }
+
   // ── 确认对话框（替代 confirm/alert） ────
   let confirmCb = null;
   function showConfirm(title, message, opts = {}) {
@@ -388,6 +451,8 @@ const Dialogs = (() => {
     renderLangOptions,
     initModelForm,
     initRenameDialog,
+    initGithubSection,
+    refreshGithubStatus,
     showRename,
     submitRename,
     showSettings,

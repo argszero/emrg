@@ -676,6 +676,190 @@ def test_check_github_auth_parses_gh_output(monkeypatch):
     assert result == {"authenticated": True, "user": "octocat", "method": "gh"}
 
 
+# ── github_connect / github_disconnect commands (rant 10:17:27 Stage 2) ──
+
+
+class _FakeProc:
+    """Minimal fake subprocess for github_connect/setup-git tests."""
+
+    def __init__(self, returncode=0, output=b""):
+        self.returncode = returncode
+        self._output = output
+        self.received = None
+
+    async def communicate(self, data=None):
+        self.received = data
+        return (self._output, None)
+
+
+def test_github_connect_success_dispatch(monkeypatch):
+    """github_connect returns github_connect_result with ok/user."""
+    import asyncio
+
+    server = _make_server()
+    writer = _FakeWriter()
+
+    async def fake_connect(token):
+        return {"ok": True, "user": "octocat", "error": None}
+
+    monkeypatch.setattr(server, "_github_connect", fake_connect)
+    asyncio.run(server._process_message({"type": "github_connect", "token": "ghp_x"}, writer))
+
+    assert len(writer._frames) == 1
+    reply = json.loads(writer._frames[0])
+    assert reply["type"] == "github_connect_result"
+    assert reply["ok"] is True
+    assert reply["user"] == "octocat"
+
+
+def test_github_connect_empty_token(monkeypatch):
+    """Empty/whitespace token is rejected before any subprocess runs."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    writer = _FakeWriter()
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+    asyncio.run(server._process_message({"type": "github_connect", "token": "  "}, writer))
+
+    reply = json.loads(writer._frames[0])
+    assert reply["type"] == "github_connect_result"
+    assert reply["ok"] is False
+    assert reply["error"] == "empty token"
+
+
+def test_github_connect_gh_missing(monkeypatch):
+    """Missing gh binary degrades to ok=False, never raises."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    writer = _FakeWriter()
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("", ""))
+    asyncio.run(server._process_message({"type": "github_connect", "token": "ghp_x"}, writer))
+
+    reply = json.loads(writer._frames[0])
+    assert reply["type"] == "github_connect_result"
+    assert reply["ok"] is False
+    assert reply["error"] == "gh binary not found"
+
+
+def test_github_connect_pat_login_sets_up_git(monkeypatch):
+    """PAT path: gh auth login --with-token → re-verify → setup-git runs."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+    calls = []  # [(argv, proc)]
+
+    async def fake_exec(*args, **kwargs):
+        if "setup-git" in args:
+            proc = _FakeProc(0, b"gh auth setup-git ok\n")
+        elif "status" in args:
+            proc = _FakeProc(0, b"Logged in to github.com as octocat (keyring)\n")
+        else:
+            proc = _FakeProc(0, b"Logged in as octocat\n")
+        calls.append((list(args), proc))
+        return proc
+
+    monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(server._github_connect("ghp_x"))
+
+    assert result["ok"] is True
+    assert result["user"] == "octocat"
+    assert result["error"] is None
+    login_entries = [(a, p) for a, p in calls if "login" in a]
+    setup_entries = [(a, p) for a, p in calls if "setup-git" in a]
+    assert len(login_entries) == 1
+    assert login_entries[0][0][1:] == ["auth", "login", "--with-token"]
+    # token must be delivered via stdin, never argv (argv leaks into ps)
+    assert login_entries[0][1].received == b"ghp_x\n"
+    assert len(setup_entries) == 1
+    assert setup_entries[0][0][1:] == ["auth", "setup-git"]
+
+
+def test_github_connect_login_failure_reported(monkeypatch):
+    """gh auth login non-zero → ok=False with gh output as error."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+
+    async def fake_exec(*args, **kwargs):
+        return _FakeProc(1, b"HTTP 401: Bad credentials\n")
+
+    monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(server._github_connect("ghp_bad"))
+
+    assert result["ok"] is False
+    assert "401" in result["error"]
+
+
+def test_github_connect_setup_git_failure_reported(monkeypatch):
+    """Auth ok but setup-git fails → ok=True with explanatory error note."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("/usr/bin/git", "/usr/bin/gh"))
+
+    async def fake_exec(*args, **kwargs):
+        if "setup-git" in args:
+            return _FakeProc(1, b"could not set git config\n")
+        if "status" in args:
+            return _FakeProc(0, b"Logged in to github.com as octocat (keyring)\n")
+        return _FakeProc(0, b"Logged in as octocat\n")
+
+    monkeypatch.setattr(dmod.asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(server._github_connect("ghp_x"))
+
+    assert result["ok"] is True
+    assert result["user"] == "octocat"
+    assert "setup-git" in result["error"]
+
+
+def test_github_disconnect_success_dispatch(monkeypatch):
+    """github_disconnect returns github_disconnect_result with ok."""
+    import asyncio
+
+    server = _make_server()
+    writer = _FakeWriter()
+
+    async def fake_disconnect():
+        return {"ok": True, "error": None}
+
+    monkeypatch.setattr(server, "_github_disconnect", fake_disconnect)
+    asyncio.run(server._process_message({"type": "github_disconnect"}, writer))
+
+    reply = json.loads(writer._frames[0])
+    assert reply["type"] == "github_disconnect_result"
+    assert reply["ok"] is True
+
+
+def test_github_disconnect_gh_missing(monkeypatch):
+    """Missing gh binary degrades to ok=False with error, never raises."""
+    import asyncio
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    writer = _FakeWriter()
+    monkeypatch.setattr(dmod, "resolve_git_gh", lambda: ("", ""))
+    asyncio.run(server._process_message({"type": "github_disconnect"}, writer))
+
+    reply = json.loads(writer._frames[0])
+    assert reply["type"] == "github_disconnect_result"
+    assert reply["ok"] is False
+    assert reply["error"] == "gh binary not found"
+
+
 # ── /rant project list shows evolution-workspace entries (rant 10:48:00) ──
 
 
