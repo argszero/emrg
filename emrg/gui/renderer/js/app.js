@@ -707,6 +707,8 @@ const App = (() => {
     const prev = state.lastKnownEvolutionCount;
     state.lastKnownEvolutionCount = state.evolutionCount;
     if (prev == null || state.evolutionCount <= prev) return; // 首次连接/无增长不提示
+    // 演化刚完成 = 演化真正需要 GitHub 的时刻（Windows GCM rant Stage 2）
+    maybeShowGithubBanner();
     // 频率控制：一天最多 1 次（localStorage 可能不可用 → 静默跳过）
     const today = new Date().toISOString().slice(0, 10);
     try {
@@ -731,6 +733,50 @@ const App = (() => {
     if (toast) toast.classList.add("hidden");
     const star = $("brand-star");
     if (star) star.classList.remove("pulse");
+  }
+
+  // ── GitHub 连接横幅（Windows GCM rant Stage 2） ────
+  // 触发时机：演化计数增长（演化刚完成、需要 GitHub 推 PR）且未认证时。
+  // 本地聊天不依赖 GitHub → 启动时不打扰。横幅可关闭；关闭后本会话不再弹。
+  let _githubBannerDismissed = false;
+
+  function showGithubBanner() {
+    const b = $("github-banner");
+    if (!b) return;
+    const msg = $("github-banner-msg");
+    if (msg) msg.textContent = _t("settings.githubBannerMsg");
+    b.classList.remove("hidden");
+  }
+
+  function hideGithubBanner() {
+    const b = $("github-banner");
+    if (b) b.classList.add("hidden");
+  }
+
+  async function maybeShowGithubBanner() {
+    if (_githubBannerDismissed) return;
+    try {
+      const s = await window.emrg.githubStatus();
+      if (s && s.authenticated) return; // 已连接 → 无需提示
+      showGithubBanner();
+    } catch { /* githubStatus 不可用（daemon 忙/未合入）→ 静默跳过 */ }
+  }
+
+  function initGithubBanner() {
+    const connect = $("github-banner-connect");
+    if (connect) {
+      connect.addEventListener("click", () => {
+        hideGithubBanner();
+        Dialogs.showSettings(); // 设置页 GitHub 连接区（Stage 2a）
+      });
+    }
+    const dismiss = $("github-banner-dismiss");
+    if (dismiss) {
+      dismiss.addEventListener("click", () => {
+        _githubBannerDismissed = true;
+        hideGithubBanner();
+      });
+    }
   }
 
   function initEvolutionToast() {
@@ -1186,6 +1232,7 @@ const App = (() => {
     Dialogs.initRenameDialog();
     Dialogs.initGithubSection(); // Windows GCM rant Stage 2：设置页 GitHub 连接
     Dialogs.initDeviceDialog(); // Windows GCM rant Stage 2b：device flow 对话框
+    initGithubBanner(); // Windows GCM rant Stage 2：演化需 GitHub 但未认证时的连接横幅
     initModelSwitcher();
     initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
     ResultPanel.init(); // WorkBuddy P1：结果面板（⌘\ 折叠 + 窄屏自动隐藏）

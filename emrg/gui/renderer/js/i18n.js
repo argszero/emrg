@@ -102,6 +102,10 @@ const I18N = (() => {
       "settings.githubDeviceCancel": "取消",
       "settings.githubDeviceWait": "等待浏览器中确认…",
       "settings.githubDeviceFailed": "GitHub 连接失败：{msg}",
+      // Windows GCM rant Stage 2：连接横幅
+      "settings.githubBannerMsg": "启用自进化需连接 GitHub →",
+      "settings.githubBannerConnect": "去连接",
+      "settings.githubBannerDismiss": "关闭",
 
       // 首启引导
       "welcome.title": "欢迎使用 EMRG",
@@ -388,6 +392,10 @@ const I18N = (() => {
       "settings.githubDeviceCancel": "Cancel",
       "settings.githubDeviceWait": "Waiting for confirmation in browser…",
       "settings.githubDeviceFailed": "GitHub connect failed: {msg}",
+      // Windows GCM rant Stage 2: connect banner
+      "settings.githubBannerMsg": "Connect GitHub to enable self-evolution →",
+      "settings.githubBannerConnect": "Connect",
+      "settings.githubBannerDismiss": "Dismiss",
 
       // Welcome / onboarding
       "welcome.title": "Welcome to EMRG",
