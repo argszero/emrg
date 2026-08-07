@@ -102,7 +102,7 @@ def test_ensure_config_creates_if_missing(tmp_path, monkeypatch):
     assert not config_file.exists()
     ensure_config()
     assert config_file.exists()
-    content = config_file.read_text()
+    content = config_file.read_text(encoding="utf-8")
     assert "[llm]" in content
     assert "deepseek-chat" in content
 
@@ -114,7 +114,7 @@ def test_ensure_config_noop_when_exists(tmp_path, monkeypatch):
     config_file.write_text("custom")
     monkeypatch.setattr("emrg.config.config_path", lambda: config_file)
     ensure_config()
-    assert config_file.read_text() == "custom"  # unchanged
+    assert config_file.read_text(encoding="utf-8") == "custom"  # unchanged
 
 
 def test_load_config_with_models(tmp_path, monkeypatch):
