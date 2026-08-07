@@ -413,6 +413,20 @@ test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/t
   currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "memory_content", content: "x" })));
   const r5 = await p5;
   assert.strictEqual(r5.type, "memory_content");
+  // github_connect → github_connect_result（Windows GCM rant Stage 2）
+  const p6 = client.sendCommandAndWait("github_connect", { token: "ghp_x" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "github_connect_result", ok: true, user: "octocat", error: null })));
+  const r6 = await p6;
+  assert.strictEqual(r6.type, "github_connect_result");
+  assert.strictEqual(r6.ok, true);
+  // github_disconnect → github_disconnect_result（Windows GCM rant Stage 2）
+  const p7 = client.sendCommandAndWait("github_disconnect", {}, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "github_disconnect_result", ok: true, error: null })));
+  const r7 = await p7;
+  assert.strictEqual(r7.type, "github_disconnect_result");
+  assert.strictEqual(r7.ok, true);
 });
 
 test("命令-响应配对超时 → reject（G93）", async () => {

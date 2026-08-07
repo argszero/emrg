@@ -442,6 +442,24 @@ vision = false
       return { count: frame.count ?? 0, recent: frame.recent || [] };
     });
 
+    ipcMain.handle("emrg:githubStatus", async () => {
+      // Windows GCM rant Stage 2：设置页 GitHub 连接状态（daemon github_status）
+      const frame = await client.sendCommandAndWait("github_status", {}, 10000);
+      return { authenticated: Boolean(frame.authenticated), user: frame.user || null };
+    });
+
+    ipcMain.handle("emrg:githubConnect", async (_e, { token }) => {
+      // Windows GCM rant Stage 2：PAT 授权 + setup-git（daemon github_connect）
+      const frame = await client.sendCommandAndWait("github_connect", { token: String(token || "").trim() }, 40000);
+      return { ok: Boolean(frame.ok), user: frame.user || null, error: frame.error || null };
+    });
+
+    ipcMain.handle("emrg:githubDisconnect", async () => {
+      // Windows GCM rant Stage 2：断开 GitHub（daemon github_disconnect）
+      const frame = await client.sendCommandAndWait("github_disconnect", {}, 40000);
+      return { ok: Boolean(frame.ok), error: frame.error || null };
+    });
+
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
       await client.sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };
