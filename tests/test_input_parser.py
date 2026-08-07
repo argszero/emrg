@@ -177,3 +177,90 @@ class TestInputParser:
         parser = InputParser()
         results = parser.feed(b"\x1bZ")
         assert results == [b"\x1bZ"]
+
+
+# ── Legacy Windows scan codes (rant 2026-08-07T10:38:21) ──
+
+
+class TestLegacyScanCodes:
+    """0xE0/0x00 prefix + scan code → normalized ANSI sequence."""
+
+    def test_legacy_up(self):
+        parser = InputParser()
+        assert parser.feed(b"\xe0\x48") == [b"\x1b[A"]
+
+    def test_legacy_down_zero_prefix(self):
+        parser = InputParser()
+        assert parser.feed(b"\x00\x50") == [b"\x1b[B"]
+
+    def test_legacy_left_right(self):
+        parser = InputParser()
+        assert parser.feed(b"\xe0\x4b") == [b"\x1b[D"]
+        assert parser.feed(b"\xe0\x4d") == [b"\x1b[C"]
+
+    def test_legacy_home_end(self):
+        parser = InputParser()
+        assert parser.feed(b"\xe0\x47") == [b"\x1b[H"]
+        assert parser.feed(b"\xe0\x4f") == [b"\x1b[F"]
+
+    def test_legacy_pgup_pgdn_ins_del(self):
+        parser = InputParser()
+        assert parser.feed(b"\xe0\x49") == [b"\x1b[5~"]
+        assert parser.feed(b"\xe0\x51") == [b"\x1b[6~"]
+        assert parser.feed(b"\xe0\x52") == [b"\x1b[2~"]
+        assert parser.feed(b"\xe0\x53") == [b"\x1b[3~"]
+
+    def test_legacy_unknown_scan_waits_as_utf8(self):
+        """0xE0 + non-scan-code byte is NOT consumed as a pair — it falls
+        through to the UTF-8 path (pre-PR behavior). 0xE0 is the UTF-8 lead
+        for U+0800-U+0FFF; valid continuation bytes (0xA0-0xBF) are disjoint
+        from scan codes (0x47-0x53), so gating on the map is exact."""
+        parser = InputParser()
+        assert parser.feed(b"\xe0\xff") == []
+        assert parser.has_pending()
+
+    def test_e0_led_utf8_not_garbled(self):
+        """Regression (review 4882245397): 0xE0-led UTF-8 scripts must
+        survive intact — Thai ก (U+0E01) and Devanagari अ (U+0905)."""
+        parser = InputParser()
+        thai = "ก".encode()  # E0 B8 81
+        assert parser.feed(thai) == [thai]
+        deva = "अ".encode()  # E0 A4 85
+        assert parser.feed(deva) == [deva]
+
+    def test_nul_not_swallowed_with_next_key(self):
+        """Regression (review 4882245397): lone 0x00 (Ctrl+@) followed by a
+        key in the same read must yield two sequences, not one pair."""
+        parser = InputParser()
+        assert parser.feed(b"\x00A") == [b"\x00", b"A"]
+
+    def test_legacy_incomplete_waits(self):
+        """A lone 0xE0 prefix waits for the scan-code byte."""
+        parser = InputParser()
+        assert parser.feed(b"\xe0") == []
+        assert parser.has_pending()
+        assert parser.feed(b"\x48") == [b"\x1b[A"]
+
+    def test_utf8_cjk_still_works(self):
+        """CJK UTF-8 multi-byte input is unaffected by the scan-code branch."""
+        parser = InputParser()
+        encoded = "中".encode()
+        assert parser.feed(encoded) == [encoded]
+
+
+class TestParseKeypressLegacy:
+    def test_parse_legacy_up(self):
+        from emrg.client.python_tui.events import KeyName, parse_keypress
+        key = parse_keypress(b"\xe0\x48")
+        assert key is not None
+        assert key.name == KeyName.UP
+
+    def test_parse_legacy_down(self):
+        from emrg.client.python_tui.events import KeyName, parse_keypress
+        key = parse_keypress(b"\x00\x50")
+        assert key is not None
+        assert key.name == KeyName.DOWN
+
+    def test_parse_legacy_unknown_returns_none(self):
+        from emrg.client.python_tui.events import parse_keypress
+        assert parse_keypress(b"\xe0\xff") is None

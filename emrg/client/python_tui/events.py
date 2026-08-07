@@ -142,6 +142,52 @@ _CSI_LETTER_MOD: dict[str, tuple[int, KeyName]] = {
     "Z": (2, KeyName.TAB),  # shift-tab
 }
 
+# ── Legacy Windows scan codes (rant 2026-08-07T10:38:21) ──────────────
+#
+# Consoles without ENABLE_VIRTUAL_TERMINAL_INPUT (pre-Win10-1607, or when
+# SetConsoleMode with the flag fails) deliver extended keys as a 0xE0 or
+# 0x00 prefix followed by an IBM PC scan code — e.g. ↑ = 0xE0 0x48 —
+# instead of ANSI ESC [ A. Without translation the UTF-8-assuming input
+# chain misreads 0xE0 as a 3-byte UTF-8 lead and arrow keys go dead.
+
+_LEGACY_SCAN_MAP: dict[int, KeyName] = {
+    0x48: KeyName.UP,
+    0x50: KeyName.DOWN,
+    0x4B: KeyName.LEFT,
+    0x4D: KeyName.RIGHT,
+    0x47: KeyName.HOME,
+    0x4F: KeyName.END,
+    0x49: KeyName.PAGE_UP,
+    0x51: KeyName.PAGE_DOWN,
+    0x52: KeyName.INSERT,
+    0x53: KeyName.DELETE,
+}
+
+# Same scan codes → equivalent ANSI CSI sequence (what handle_key expects)
+_LEGACY_SCAN_TO_ANSI: dict[int, bytes] = {
+    0x48: b"\x1b[A",
+    0x50: b"\x1b[B",
+    0x4B: b"\x1b[D",
+    0x4D: b"\x1b[C",
+    0x47: b"\x1b[H",
+    0x4F: b"\x1b[F",
+    0x49: b"\x1b[5~",
+    0x51: b"\x1b[6~",
+    0x52: b"\x1b[2~",
+    0x53: b"\x1b[3~",
+}
+
+
+def normalize_legacy_scan_codes(data: bytes) -> bytes | None:
+    """Translate a 2-byte legacy Windows scan-code sequence to ANSI CSI.
+
+    Returns the ANSI equivalent (e.g. b'\\x1b[A' for ↑) or None when the
+    bytes are not a recognized legacy extended-key sequence.
+    """
+    if len(data) == 2 and data[0] in (0xE0, 0x00):
+        return _LEGACY_SCAN_TO_ANSI.get(data[1])
+    return None
+
 
 def parse_keypress(data: bytes) -> KeyEvent | None:
     """Parse a raw key sequence into a structured KeyEvent.
@@ -178,6 +224,15 @@ def parse_keypress(data: bytes) -> KeyEvent | None:
         # Printable ASCII
         if 0x20 <= b <= 0x7E:
             return KeyEvent(char=chr(b), sequence=chr(b))
+
+    # Legacy Windows scan-code pair (0xE0 0x48 / 0x00 0x50 etc.) —
+    # consoles without ENABLE_VIRTUAL_TERMINAL_INPUT (rant 2026-08-07T10:38:21)
+    if len(data) == 2 and data[0] in (0xE0, 0x00):
+        name = _LEGACY_SCAN_MAP.get(data[1])
+        if name:
+            return KeyEvent(
+                name=name, sequence=f"0x{data[0]:02X} {data[1]:02X}"
+            )
 
     # ESC sequence
     if data[0] == 0x1B:
@@ -323,6 +378,22 @@ class InputParser:
 
         while len(self._buf) > 0:
             b = self._buf[0]
+            # Legacy Windows scan-code prefix (no VT input): 0xE0 0x48 = ↑.
+            # Intercept before _utf8_len (which would misread 0xE0 as a
+            # 3-byte UTF-8 lead) and normalize to the ANSI equivalent.
+            # Only intercept when the second byte is a recognized scan code
+            # (0x47-0x53); valid UTF-8 continuation bytes after 0xE0 are
+            # always 0xA0-0xBF, so the ranges are disjoint and this is exact.
+            if b in (0xE0, 0x00):
+                if len(self._buf) >= 2:
+                    ansi = normalize_legacy_scan_codes(bytes(self._buf[:2]))
+                    if ansi is not None:
+                        del self._buf[:2]
+                        results.append(ansi)
+                        continue
+                # Not a recognized scan code — fall through to normal
+                # processing. Lone 0x00 reaches the single-byte path below;
+                # 0xE0 + non-scan-code byte is handled as UTF-8.
             # Determine bytes needed for this sequence
             need = 1
             if b == 0x1B:
