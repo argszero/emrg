@@ -299,6 +299,9 @@ test("多模型管理：modelDetails 加载渲染 + saveSettings 传 models 数�
   assert.ok(Array.isArray(saved.models));
   assert.strictEqual(saved.models.length, 2, "models 数组含默认 + gpt-4o");
 
+  const gpt = saved.models.find((m) => m.name === "gpt-4o");
+  assert.strictEqual(gpt.vision, true);
+});
 test("GCM rant Stage 2：演化增长 + 未认证 → GitHub 连接横幅出现（正反两态）", async () => {
   // 正态：未认证 + 演化计数增长 → 横幅出现（先加 hidden 模拟 index.html 初始态）
   const { ctx } = makeSandbox({
@@ -343,9 +346,6 @@ test("GCM rant Stage 2：演化增长 + 未认证 → GitHub 连接横幅出现�
   const toastIdx = src.indexOf("function maybeShowEvolutionToast()");
   const toastBlock = src.slice(toastIdx, toastIdx + 800);
   assert.ok(toastBlock.includes("maybeShowGithubBanner()"), "演化增长应触发 GitHub 横幅检查");
-});
-  const gpt = saved.models.find((m) => m.name === "gpt-4o");
-  assert.strictEqual(gpt.vision, true);
 });
 
 test("右键菜单：重命名对话框 → renameSession 调用（设计 §3.2）", async () => {
