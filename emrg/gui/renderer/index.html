@@ -294,6 +294,20 @@
     </div>
   </dialog>
 
+  <!-- GitHub device-flow 授权对话框（Windows GCM rant Stage 2b） -->
+  <dialog id="github-device-dialog">
+    <div class="dialog-card" style="min-width:440px;">
+      <h2 data-i18n="settings.githubDeviceTitle">连接 GitHub</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="settings.githubDeviceDesc">在浏览器中打开 GitHub 并输入下方一次性代码以完成授权。</p>
+      <div id="github-device-code" style="font-size:28px;font-weight:700;letter-spacing:3px;text-align:center;padding:var(--sp-3);background:var(--bg-2, rgba(0,0,0,.04));border-radius:8px;margin-bottom:var(--sp-3);font-family:monospace;">—</div>
+      <div class="dialog-actions" style="justify-content:center;flex-wrap:wrap;gap:8px;">
+        <button type="button" id="github-device-open" class="btn btn-primary" data-i18n="settings.githubDeviceOpen">打开浏览器</button>
+        <button type="button" id="github-device-close" class="btn btn-ghost" data-i18n="settings.githubDeviceCancel">取消</button>
+      </div>
+      <div id="github-device-wait" class="hint" style="text-align:center;margin-top:var(--sp-2);" data-i18n="settings.githubDeviceWait">等待浏览器中确认…</div>
+    </div>
+  </dialog>
+
   <!-- 进化对话框（/rant，GUI / 指令 P4） -->
   <dialog id="rant-dialog">
     <div class="dialog-card" style="min-width:460px;">

@@ -47,6 +47,7 @@ const RESPONSE_TYPES = {
   evolution_summary: "evolution_summary", // WorkBuddy P3：自进化可见化
   github_connect: "github_connect_result", // Windows GCM rant Stage 2：PAT 授权（daemon.py github_connect）
   github_disconnect: "github_disconnect_result", // Windows GCM rant Stage 2：断开（daemon.py github_disconnect）
+  github_connect_web: "github_connect_web_result", // Stage 2b：device flow（daemon.py github_connect_web）
 };
 
 class DaemonClient {
