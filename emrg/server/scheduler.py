@@ -666,9 +666,13 @@ class EvolutionHandler:
         # Detect empty cycles: git HEAD unchanged → no work was done.
         # A truncated cycle is NOT empty — the agent wanted to work but hit
         # the tool-round cap; counting it would wrongly back off the handler.
+        # An aborted cycle (server error like "session busy", or an exception)
+        # is NOT empty either — the agent was blocked before reaching an NTE
+        # conclusion; counting it would also advance the idle-halt backoff.
         git_head_after = self._get_git_head()
         if (
-            not truncated
+            not error
+            and not truncated
             and git_head_before and git_head_after
             and git_head_before == git_head_after
         ):
@@ -681,12 +685,25 @@ class EvolutionHandler:
         else:
             if self._empty_cycles > 0:
                 reason = "truncated cycle" if truncated else "git HEAD changed"
+                if error:
+                    reason = f"aborted cycle ({error[:80]})"
                 logger.info(
                     "EvolutionHandler[%s]: %s, resetting empty streak",
                     self.name, reason,
                 )
             self._empty_cycles = 0
             self._save_saturation_state()
+
+        # Aborted cycles are not evolutions: no log file, no count. Writing
+        # them would inflate the evolution count (GUI growth card / toast,
+        # evolution_summary) with work that never happened — the "session
+        # busy" aborts observed when interactive sessions hold the daemon.
+        if error:
+            logger.warning(
+                "EvolutionHandler[%s]: cycle aborted (%s) — not counted as evolution",
+                self.name, error[:200],
+            )
+            return
 
         cycle_ts = cycle_time.isoformat()
         impact = [
@@ -695,8 +712,6 @@ class EvolutionHandler:
         ]
         if truncated:
             impact.append("truncated=max-tool-rounds")
-        if error:
-            impact.append(f"error={error[:200]}")
 
         log = EvolutionLog(
             timestamp=cycle_ts,
