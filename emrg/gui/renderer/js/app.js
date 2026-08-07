@@ -935,6 +935,7 @@ const App = (() => {
         ResultPanel.addToolResult(data);
         break;
       case "cancelled":
+        Chat.clearTyping(); // rant 14:11：取消时移除在途节点 typing 光标（无 request_id，全清）
         state.busy = false;
         state.ownStreamRequestId = null;
         setComposerDisabled(false);
@@ -1003,6 +1004,7 @@ const App = (() => {
       state.ownStreamRequestId = null;
       setComposerDisabled(false);
     } else {
+      Chat.clearTyping(); // rant 14:11：流式错误时移除在途节点 typing 光标
       Chat.addSystemMessage(_t("app.error", { msg: data.error || _t("app.unknownError") }));
     }
   }
