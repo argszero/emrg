@@ -266,6 +266,7 @@ async def interactive(init_auto_evolve: bool = False):
     rewind_sel = SelectorState()
     task_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
+    _skills_confirm: tuple | None = None  # (skill_name, install_cmd) — next Enter answers the prompt
 
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
@@ -699,6 +700,71 @@ async def interactive(init_auto_evolve: bool = False):
                     term.render()
                     continue
 
+                # Skills available result (installable-skills catalog)
+                if data.get("type") == "skills_available_result":
+                    skills = data.get("skills", [])
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Error: {err}")
+                    elif not skills:
+                        chat.add("system", "No catalog skills found. Check ~/.emrg/skills/skill-catalog.md")
+                    else:
+                        lines = ["**Available Skills (catalog):**", ""]
+                        for s in skills:
+                            mark = "✅ installed" if s.get("installed") else "not installed"
+                            if s.get("managed"):
+                                mark += " · managed"
+                            lines.append(f"- **{s.get('name', '?')}** — {s.get('description', '')} ({mark})")
+                        lines.append("")
+                        lines.append("Install: `/skills install <name>` · Refresh: `/skills update`")
+                        chat.add("system", "\n".join(lines))
+                    term.render()
+                    continue
+
+                # Skills install result
+                if data.get("type") == "skills_install_result":
+                    nonlocal _skills_confirm
+                    name = data.get("name", "")
+                    if data.get("confirm_required"):
+                        cmd = data.get("install_command", "")
+                        _skills_confirm = (name, cmd)
+                        chat.add("system",
+                                 f"⚠️  Skill `{name}` needs its CLI installed first:\n"
+                                 f"`{cmd}`\n\n"
+                                 f"Type `yes` to confirm, or anything else to cancel.")
+                    elif data.get("error"):
+                        chat.add("system", f"Install failed for `{name}`: {data['error']}")
+                    elif data.get("ok"):
+                        chat.add("system",
+                                 f"✅ Skill `{name}` installed"
+                                 + (f" (v{data.get('version', '?')})" if data.get("version") else "")
+                                 + ". It will appear in the next session's Available Skills.")
+                    term.render()
+                    continue
+
+                # Skills update result
+                if data.get("type") == "skills_update_result":
+                    err = data.get("error", "")
+                    checked = data.get("checked", 0)
+                    updated = data.get("updated", [])
+                    skipped = data.get("skipped", [])
+                    errors = data.get("errors", [])
+                    if err:
+                        chat.add("system", f"Skill update failed: {err}")
+                    else:
+                        lines = [f"**Skill update check:** {checked} managed skill(s)"]
+                        if updated:
+                            lines.append(f"Updated: {', '.join(updated)}")
+                        if skipped:
+                            lines.append(f"Skipped (CLI missing): {', '.join(skipped)}")
+                        if errors:
+                            lines.append(f"Failed: {', '.join(errors)}")
+                        if not updated and not skipped and not errors:
+                            lines.append("All up to date.")
+                        chat.add("system", "\n".join(lines))
+                    term.render()
+                    continue
+
                 # Resume result
                 if data.get("type") == "resume_result":
                     err = data.get("error", "")
@@ -952,6 +1018,7 @@ async def interactive(init_auto_evolve: bool = False):
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
+        nonlocal _skills_confirm
         if len(data) == 0: return True
         if data == b"\x1b[200~": paste_mode = True; return True
         if data == b"\x1b[201~":
@@ -1354,6 +1421,19 @@ async def interactive(init_auto_evolve: bool = False):
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
+                # Pending /skills install confirmation — next line is the answer
+                if _skills_confirm is not None:
+                    name, cmd = _skills_confirm
+                    _skills_confirm = None
+                    if text.lower() in ("y", "yes"):
+                        await conn.send_command("skills_install", name=name, confirmed=True)
+                        chat.add("system", f"Confirmed — installing `{name}` (CLI: `{cmd}`)…")
+                    else:
+                        chat.add("system", "Install cancelled.")
+                    status.update(center=server_id or "emrg")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
                 # Handle /memory command
                 if text.lower().startswith("/memory"):
                     parts = text.split(None, 1)
@@ -1435,16 +1515,34 @@ async def interactive(init_auto_evolve: bool = False):
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
-                # Handle /skills command
-                if text.lower() == "/skills":
-                    skills = load_skills()
-                    if skills:
-                        lines = ["**Loaded Skills:**", ""]
-                        for s in skills:
-                            lines.append(f"- **{s.name}** ({s.source}) — {s.description}")
-                        chat.add("system", "\n".join(lines))
+                # Handle /skills command (list / available / install / update)
+                if text.lower().startswith("/skills"):
+                    parts = text.split(None, 1)
+                    sub = parts[1].strip() if len(parts) > 1 else ""
+                    sub_l = sub.lower()
+                    if sub_l == "available":
+                        # Installable-skills catalog (rant 2026-08-08T10:14:29)
+                        await conn.send_command("skills_available")
+                        status.update(center="checking available skills…")
+                    elif sub_l.startswith("install "):
+                        name = sub[8:].strip()
+                        if not name:
+                            chat.add("system", "Usage: /skills install <name>")
+                        else:
+                            await conn.send_command("skills_install", name=name, confirmed=False)
+                            status.update(center=f"installing {name}…")
+                    elif sub_l == "update":
+                        await conn.send_command("skills_update")
+                        status.update(center="checking skill updates…")
                     else:
-                        chat.add("system", "No skills loaded. Add .md files to ~/.emrg/skills/ or .emrg/skills/")
+                        skills = load_skills()
+                        if skills:
+                            lines = ["**Loaded Skills:**", ""]
+                            for s in skills:
+                                lines.append(f"- **{s.name}** ({s.source}) — {s.description}")
+                            chat.add("system", "\n".join(lines))
+                        else:
+                            chat.add("system", "No skills loaded. Add .md files to ~/.emrg/skills/ or .emrg/skills/")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 

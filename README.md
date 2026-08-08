@@ -219,7 +219,7 @@ vision = true
 | `/delete [id]` | Delete a session — no args for interactive picker |
 | `/rewind` | Rewind conversation — pick a history point and truncate after it |
 | `/trigger` | Trigger an evolution task — interactive picker (↑↓/j/k) |
-| `/skills` | List loaded skill modules |
+| `/skills` | List loaded skills (incl. skill-catalog); `/skills available` = installable catalog, `/skills install <name>` = install, `/skills update` = refresh managed skills |
 | `/version` | Show EMRG version and instance info |
 | `Esc` | Interrupt a running response mid-stream |
 | `Ctrl+C` / `exit` | Quit |
@@ -273,7 +273,7 @@ EMRG doesn't just keep up — it catches up on its own.
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # install deps
-uv run pytest tests/ -v   # run tests (currently 599 items)
+uv run pytest tests/ -v   # run tests (currently 634 items)
 uv run python -m emrg     # launch TUI
 # CI includes actionlint workflow gate (#444): workflow parse errors fail PR CI
 
