@@ -718,6 +718,7 @@ async def interactive(init_auto_evolve: bool = False):
                         lines.append("")
                         lines.append("Install: `/skills install <name>` · Refresh: `/skills update`")
                         chat.add("system", "\n".join(lines))
+                    status.update(center=server_id or "emrg")
                     term.render()
                     continue
 
@@ -739,6 +740,7 @@ async def interactive(init_auto_evolve: bool = False):
                                  f"✅ Skill `{name}` installed"
                                  + (f" (v{data.get('version', '?')})" if data.get("version") else "")
                                  + ". It will appear in the next session's Available Skills.")
+                    status.update(center=server_id or "emrg")
                     term.render()
                     continue
 
@@ -762,6 +764,7 @@ async def interactive(init_auto_evolve: bool = False):
                         if not updated and not skipped and not errors:
                             lines.append("All up to date.")
                         chat.add("system", "\n".join(lines))
+                    status.update(center=server_id or "emrg")
                     term.render()
                     continue
 
