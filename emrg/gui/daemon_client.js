@@ -121,6 +121,9 @@ class DaemonClient {
       cwd: this.projectDir,
       stdio: "ignore", // G68：对照 DEVNULL
       detached: true, // 对照 start_new_session=True
+      // windowsHide: python.exe 是 console 子系统——GUI spawn 时不隐藏会
+      // 弹一个命令行黑窗（打包模式 emrgd.cmd 已改走 pythonw.exe，这里补源码模式）。
+      ...(process.platform === "win32" ? { windowsHide: true } : {}),
     });
     child.unref(); // GUI 退出不带走 daemon
     this._daemonChild = child; // 暴露 child（集成测试 after 清理用）
