@@ -99,6 +99,9 @@ fi
 
 # ── 5. assets/LICENSE/version ──
 cp "$ROOT/LICENSE" "$DIST/assets/LICENSE" 2>/dev/null || echo "Apache-2.0" > "$DIST/assets/LICENSE"
+# Installable-skills catalog baseline (rant 2026-08-08T10:14:29): ship it in
+# the runtime so installed machines have it even before daemon first run.
+cp "$ROOT/packaging/assets/skill-catalog.md" "$DIST/assets/skill-catalog.md" 2>/dev/null || true
 "$PY_BIN" -c "import emrg,sys; sys.path.insert(0,'$DIST/source'); import emrg as e; print(e.__version__)" > "$DIST/version.txt" 2>/dev/null \
   || echo "0.2.12" > "$DIST/version.txt"
 

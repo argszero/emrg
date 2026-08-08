@@ -113,6 +113,7 @@ from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
 from emrg.skills.loader import load_skills
+from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
 from emrg.server.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,13 @@ class EmrgServer:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         # Ensure skills directory exists for evolution-installed skills
         (runtime_dir / "skills").mkdir(exist_ok=True)
+        # Installable-skills catalog baseline (rant 2026-08-08T10:14:29):
+        # the catalog is itself a skill (skill-catalog.md); on upgrades or
+        # user deletion the daemon re-writes it from the embedded baseline.
+        try:
+            ensure_catalog_file()
+        except Exception:
+            logger.debug("could not ensure skill catalog", exc_info=True)
 
         host_name = platform.node()
         self.identity = InstanceIdentity(
@@ -269,11 +277,22 @@ class EmrgServer:
         self._scheduler = TaskScheduler(self.identity)
         self._scheduler.load_and_start()
 
+        # Background deterministic skill update check (rant 2026-08-08T10:14:29):
+        # runs at startup + every 24h — refreshes managed skills to their
+        # latest GitHub releases. Never installs a CLI silently, never touches
+        # host-modified skill copies.
+        self._skills_ttl_task = asyncio.create_task(self._skills_ttl_loop())
+
         try:
             await self._server.serve_forever()
         except asyncio.CancelledError:
             pass
         finally:
+            self._skills_ttl_task.cancel()
+            try:
+                await self._skills_ttl_task
+            except (asyncio.CancelledError, Exception):
+                pass
             self._scheduler.stop_all()
             await self._scheduler.wait_all()
             await self.llm.close()
@@ -285,6 +304,25 @@ class EmrgServer:
                     logger.debug("pid file removed: %s", pid_file)
             except OSError:
                 pass
+
+    async def _skills_ttl_loop(self) -> None:
+        """Background deterministic skill update check (startup + every 24h).
+
+        Design (rant 2026-08-08T10:14:29 §6): the check is deterministic
+        logic, not LLM thinking — on each tick, refresh every managed=true
+        skill whose latest GitHub release differs from the recorded version.
+        Failures are logged at debug level and never crash the daemon.
+        """
+        from emrg.skills.installer import _UPDATE_TTL_SECONDS, run_update_check_once
+
+        while True:
+            result = await run_update_check_once()
+            if result.get("updated"):
+                logger.info("skills auto-updated: %s", result["updated"])
+                self.skills = load_skills()
+            elif result.get("errors"):
+                logger.warning("skills update errors: %s", result["errors"])
+            await asyncio.sleep(_UPDATE_TTL_SECONDS)
 
     def _evolution_count(self) -> int:
         """Total completed evolution cycles across scheduler handlers + disk.
@@ -1164,6 +1202,49 @@ class EmrgServer:
             logger.info("rant recorded (%d total)%s: %s",
                 count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
             await self._send(ws, {"ok": True, "count": count})
+
+        elif msg_type == "skills_available":
+            # Installable-skills catalog (rant 2026-08-08T10:14:29): list
+            # catalog skills with installed/managed status.
+            entries = load_catalog_skills()
+            installed = {s.name for s in self.skills}
+            result = [
+                {
+                    "name": e.get("name", ""),
+                    "description": e.get("description", ""),
+                    "installed": e.get("name", "") in installed,
+                    "managed": skill_is_managed(e.get("name", "")),
+                }
+                for e in entries
+            ]
+            await self._send(ws, {"type": "skills_available_result", "skills": result})
+
+        elif msg_type == "skills_install":
+            # /skills install <name> — host-confirmed CLI install, then
+            # self-publish skill files into ~/.emrg/skills/.
+            from emrg.skills.installer import install_skill
+
+            name = msg.get("name", "").strip()
+            confirmed = bool(msg.get("confirmed", False))
+            if not name:
+                await self._send(ws, {
+                    "type": "skills_install_result",
+                    "error": "skills_install requires a skill name",
+                })
+                return
+            result = await install_skill(name, confirmed=confirmed)
+            if result.get("ok"):
+                # Reload so the next system-prompt build includes the skill
+                # (design: "下次构建系统提示即含该技能", no daemon restart needed).
+                self.skills = load_skills()
+            await self._send(ws, {"type": "skills_install_result", "name": name, **result})
+
+        elif msg_type == "skills_update":
+            # /skills update — refresh managed skills to latest releases.
+            from emrg.skills.installer import update_managed_skills
+
+            result = await update_managed_skills()
+            await self._send(ws, {"type": "skills_update_result", **result})
 
         elif msg_type == "list_models":
             await self._handle_list_models(ws)

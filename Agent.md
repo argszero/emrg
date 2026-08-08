@@ -22,7 +22,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - `tool_types.py` — Tool type definitions (ToolDefinition, ToolResult)
   - `evolution_prompt.md` — Evolution prompt template
 - `emrg/tools/` — Tool implementations (bash, read, write, edit, glob, grep, base + registry)
-- `emrg/skills/` — Dynamically loaded skill modules (skills, progressive disclosure)
+- `emrg/skills/` — Dynamically loaded skill modules (skills, progressive disclosure) + installable-skills catalog (`skill-catalog.md`, `/skills available|install|update`)
 - `emrg/client/` — Client (TUI interface based on inlined python-tui)
   - `daemon_manager.py` — Daemon lifecycle (start/restart-if-stale/ensure-connected) + protocol client (DaemonConnection: send_task/send_command/recv/read_stream) — shared with GUI (Phase 3)
   - `app.py` — Main entry, event loop, ChatHistory widget, command autocomplete, session selector
@@ -93,7 +93,7 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (599) — import check: `uv run python -c "from emrg.client.app import run_client"`
+Python: `uv run pytest tests/ -v` (634) — import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (93: 22 daemon_client + 22 app-commands + 24 renderer smoke + 15 i18n + 7 integration + 3 commands) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
 CI: `uv run pytest` + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
 Re-trigger: `scripts/re-trigger-ci.sh [branch]` (workflow_dispatch, #527 — 替代空 commit 重触发：Actions outage 会整段丢弃 push 事件，dispatch 走 API 路径不受影响)

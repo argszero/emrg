@@ -221,7 +221,7 @@ vision = true
 | `/delete [id]` | 删除会话——不带参数进入交互式选择器 |
 | `/rewind` | 回退对话——选择历史消息点，截断后续内容 |
 | `/trigger` | 触发演化任务——交互式选择器（↑↓/j/k） |
-| `/skills` | 列出已加载的技能模块 |
+| `/skills` | 列出已加载技能（含 skill-catalog）；`/skills available`=可安装目录，`/skills install <name>`=安装，`/skills update`=刷新受管技能 |
 | `/version` | 显示 EMRG 版本和实例信息 |
 | `Esc` | 中断正在运行的响应 |
 | `Ctrl+C` / `exit` | 退出 |
@@ -274,7 +274,7 @@ EMRG 不只是追赶——它自己追上来。
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # 安装依赖
-uv run pytest tests/ -v   # 跑测试（当前 599 项）
+uv run pytest tests/ -v   # 跑测试（当前 634 项）
 uv run python -m emrg     # 启动 TUI
 # CI 含 actionlint workflow 门禁（#444）：workflow 解析错误在 PR 即失败
 
