@@ -206,6 +206,17 @@ def test_is_git_connection_error_matches_connection_failures():
     assert is_git_connection_error("ssh: connect to host github.com port 22: Connection refused")
 
 
+def test_is_git_connection_error_matches_hung_up():
+    """'remote end hung up' (network drop mid-transfer) is a connection error."""
+    from emrg.server.git_utils import is_git_connection_error
+
+    assert is_git_connection_error("fatal: the remote end hung up unexpectedly")
+    assert is_git_connection_error(
+        "error: RPC failed; curl 92 HTTP/2 stream 0 was not closed cleanly: "
+        "PROTOCOL_ERROR (err 1)\nfatal: the remote end hung up unexpectedly"
+    )
+
+
 def test_is_git_connection_error_rejects_auth_and_404():
     from emrg.server.git_utils import is_git_connection_error
 
