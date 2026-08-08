@@ -115,6 +115,46 @@ def test_cache_tool_paths_preserves_existing_fields(tmp_path, monkeypatch):
     assert data["repo"] == "https://github.com/argszero/emrg.git"
 
 
+def test_cache_tool_paths_tolerates_corrupt_cache(tmp_path, monkeypatch):
+    """A corrupt/partial install-info.json must not raise — degrades to {}.
+
+    Regression for the flaky test_daemon::test_build_prompt_with_project
+    (json.decoder.JSONDecodeError): the live daemon rewrites this shared
+    file non-atomically; a concurrent reader could catch a partial write.
+    """
+    from emrg.server import git_utils as mod
+    import json as _json
+
+    info = tmp_path / "install-info.json"
+    info.write_text('{"git_path": "/partial', encoding="utf-8")  # truncated JSON
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")  # must not raise
+
+    data = _json.loads(info.read_text(encoding="utf-8"))
+    assert data["git_path"] == "/usr/bin/git"
+    assert data["repo"] == "https://github.com/argszero/emrg.git"
+
+
+def test_cache_tool_paths_atomic_write_no_temp_leftover(tmp_path, monkeypatch):
+    """Write is atomic: target is valid JSON and no .tmp file remains."""
+    from emrg.server import git_utils as mod
+    import json as _json
+
+    info = tmp_path / "install-info.json"
+    info.write_text(
+        _json.dumps({"custom": "old"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")
+
+    assert not (tmp_path / "install-info.json.tmp").exists()
+    data = _json.loads(info.read_text(encoding="utf-8"))
+    assert data["git_path"] == "/usr/bin/git"
+    assert data["custom"] == "old"
+
+
 # ── no_prompt_env / parse_gh_auth_user (rant 2026-08-07T10:17:27) ──
 
 

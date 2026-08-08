@@ -172,15 +172,25 @@ def _cache_tool_paths(git: str, gh: str) -> None:
     Also persists the EMRG repo URL (``repo``) so the evolution workspace
     self-heal (rant 2026-08-06T20:42:05) can clone on demand without
     hardcoding — packaged installs have no git remote to detect.
+
+    The write is atomic (temp file + os.replace) so concurrent readers
+    never observe a partially-written file; the read is guarded like
+    ``_cached_tool_path`` so a corrupt/partial cache (e.g. a crashed or
+    concurrent writer) degrades to an empty dict instead of raising
+    JSONDecodeError (observed as a flaky test_daemon failure when the
+    live daemon rewrote install-info.json mid-suite).
     """
     try:
         data = {}
         if INSTALL_INFO.exists():
-            data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
+            try:
+                data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, AttributeError):
+                data = {}
         data.update({"git_path": git, "gh_path": gh, "repo": "https://github.com/argszero/emrg.git"})
-        INSTALL_INFO.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        tmp = INSTALL_INFO.with_name(INSTALL_INFO.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, INSTALL_INFO)
     except OSError:
         pass
 
