@@ -227,6 +227,10 @@
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
 }
+/* rant 21:08：工具完成后 spinner 不再转圈（JS 亦移除元素，CSS 兜底防闪烁） */
+.tool-row:not(.running) .tool-spinner {
+  display: none;
+}
 .tool-row.running {
   color: var(--amber);
 }
