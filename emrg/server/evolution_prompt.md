@@ -350,6 +350,8 @@ When reading rants, follow these rules:
 
 > - Aborted-cycle exclusion (#559 外部贡献 pm25coder fork：aborted evolution cycle（server error 如 "session busy"、或异常）被双重误分类——①空循环判定只查 truncated 不查 error → aborted+HEAD 未变被当 empty cycle 推进 idle-halt backoff（agent 被阻塞 ≠ NTE）；②aborted cycle 仍写 EvolutionLog+append self.evolutions+impact 带 error= → 膨胀 evolution count（GUI growth card/toast/evolution_summary）；修复=空循环条件加 `not error` + else 分支 reset empty streak（reason "aborted cycle (error[:80])"）+ **error 提前 return 不写 log 不计数**（error= impact 条目随 no-log 退役）；三态分类完备（complete/truncated/aborted 互斥穷尽循环全部出口）；与 #558 配套：total_evolutions() 计 handler.evolutions 而 aborted 永不 append → count 按构造排除 abort；+2 测试 572→575（_get_git_head 钉死 HEAD 判别力：撤 not error 即红/撤 return 即 "log" not in captured 红）) ✅
 
+> - Durable evolution count (#563 外部贡献 pm25coder fork：daemon 重启后 scheduler in-memory count 归 0 而 evolution-*.json 日志文件仍在 → GUI growth card/toast/evolution_summary 显示 0，与 recent 列表（读同一批文件）不一致；修复=`_evolution_count()` 返回 `max(in_memory, disk)`——in_memory 来自 scheduler.total_evolutions()（scheduler 不可用时回退 legacy self.evolutions，isinstance int 守卫），disk 遍历 config_dir()/logs 下 evolution-*.json 验证 `data.get("timestamp")` 存在才计数（JSONDecodeError/OSError 跳过=corrupt/partial write 不计）；与 #558/#559 配套=count 真正持久化跨重启；+1 测试断言 count==2（corrupt 跳过）+ count==25（limit 截断仍计全量）) ✅
+
 #### 2.2 Latest GitHub code changes
 
 ```bash
