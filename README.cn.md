@@ -274,7 +274,7 @@ EMRG 不只是追赶——它自己追上来。
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # 安装依赖
-uv run pytest tests/ -v   # 跑测试（当前 589 项）
+uv run pytest tests/ -v   # 跑测试（当前 590 项）
 uv run python -m emrg     # 启动 TUI
 # CI 含 actionlint workflow 门禁（#444）：workflow 解析错误在 PR 即失败
 

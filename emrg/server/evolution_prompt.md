@@ -145,7 +145,7 @@ cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
     and `gh api repos/{{ owner }}/{{ repo }}/pulls/<N>/reviews --jq '.[] | "\(.user.login) [\(.state)]: \(.body)"'`
   - If there are already 2 ✅, this cycle is the 3rd → approve then merge
   - If satisfied → `gh pr merge <N> -R {{ owner }}/{{ repo }} --squash`
-  - On merge conflict → `gh pr checkout <N> && git fetch origin master && git merge origin/master`, resolve conflicts, push, then merge
+  - On merge conflict → `gh pr checkout <N> && git fetch origin master && git merge FETCH_HEAD`, resolve conflicts, push, then merge
   - Not satisfied → keep waiting
 
 **Issue management**:
@@ -355,10 +355,14 @@ When reading rants, follow these rules:
 #### 2.2 Latest GitHub code changes
 
 ```bash
-cd {{ source_dir }} && git fetch origin master && git log origin/master --oneline -10
+cd {{ source_dir }} && git fetch origin master && git log FETCH_HEAD --oneline -10
 ```
 
 Fetch and understand the newest commits on master (possibly from other Committers) — analyze what changed, why, and whether follow-up is needed.
+> ⚡ Use `FETCH_HEAD`, not `origin/master`: `git fetch origin master` always
+> writes FETCH_HEAD even when the repo has no remote-tracking refs (e.g.
+> after a workspace repair that stripped `remote.origin.fetch`), where
+> `git log origin/master` fails with "unknown revision".
 
 #### 2.3 EMRG memory and conversations across projects
 
