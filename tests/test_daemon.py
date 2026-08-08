@@ -73,6 +73,28 @@ def test_build_prompt_all_variables_substituted():
     assert not braces, f"Unsubstituted placeholders: {braces}"
 
 
+def test_build_prompt_step22_uses_fetch_head():
+    """Step 2.2 must log FETCH_HEAD, not origin/master.
+
+    `git fetch origin master` always writes FETCH_HEAD even when the repo
+    has no remote-tracking refs (e.g. after a workspace repair that
+    stripped `remote.origin.fetch`), where `git log origin/master` fails
+    with "unknown revision" (observed 2026-08-08, cycles 09:15 & 09:30).
+    """
+    handler = EvolutionHandler(
+        name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
+        identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
+    )
+    prompt = handler._build_evolution_prompt()
+    # The actual Step 2.2 command block must log FETCH_HEAD, not origin/master.
+    step22 = prompt.split("#### 2.2 Latest GitHub code changes", 1)[1].split("#### 2.3", 1)[0]
+    assert "git fetch origin master && git log FETCH_HEAD --oneline -10" in step22
+    assert "git fetch origin master && git log origin/master" not in step22
+    # Merge-conflict guidance must also merge FETCH_HEAD (line 148).
+    assert "git merge FETCH_HEAD" in prompt
+    assert "git merge origin/master" not in prompt
+
+
 # ── TaskScheduler._load_tasks ────────────────────────────────────
 
 
