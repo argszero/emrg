@@ -357,6 +357,7 @@ When reading rants, follow these rules:
 > - Windows TUI GBK logging crash (#568 宿主 rant 09:35:30 Windows "--- Logging error ---" 崩溃：`__main__.py` 客户端 RotatingFileHandler `encoding="utf-8", errors="backslashreplace"`；`bash_tool.py` `_decode_output()`（locale strict → UTF-8 strict → UTF-8 replace；POSIX 零改动）；+6 测试，mutation-verified) ✅
 > - install-info.json 原子性 (#569 外部贡献 pm25coder：`_cache_tool_paths` 读共享 install-info.json 非原子 + daemon 实时重写 → 并发读半写 JSONDecodeError flake；修复=守卫 json.loads（损坏→{}）+ .tmp/os.replace 原子写；+2 测试 597→599) ✅
 > - Installable-skills catalog (#570 宿主 rant 10:14:29 修订版覆盖 10:11:35 原方案：推荐技能列表本身就是一个技能 skill-catalog.md——复用现有 loader（Available Skills 自动渲染一行）、system.j2 零改动、无元机制；frontmatter 嵌套 `skills:` 列表承载 5 字段元信息；/skills available/install（宿主确认 CLI 安装，MANIFESTO §10）/update；24h TTL 后台自更（仅 managed=true、CLI 缺失跳过、不动宿主手工副本）；版本走 api.github.com releases/latest（本机 github.com:443/raw 被墙）；loader `_parse_frontmatter` 跳过缩进行（防嵌套 description 覆盖顶层）+ 废弃 recommended.md 永不加载；+35 测试 599→634) ✅
+> - TUI skills 结果状态栏复位 (#572 外部贡献 pm25coder：/skills available|install|update 三个 result handler 渲染后未复位状态中心——/skills available 后状态栏停在 "checking available skills…" 直到下次无关状态变更；修复=三个 handler 的 term.render() 前加 `status.update(center=server_id or "emrg")`，与 resume/memory/session 等兄弟 handler 同款模式；纯 UI 一致性，+3 行零行为变更，无测试增减（634 不变）；#570 合入后的跟进修复) ✅
 
 #### 2.2 Latest GitHub code changes
 
