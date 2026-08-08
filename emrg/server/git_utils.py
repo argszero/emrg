@@ -84,6 +84,13 @@ _CONNECTION_ERROR_MARKERS = (
     "network is unreachable",
     "unable to access",
     "tls handshake timeout",
+    # "the remote end hung up unexpectedly" / "connection ... hung up" —
+    # git's classic message when a proxy/network drops the connection
+    # mid-transfer (observed on the packaged host: fetch fails with
+    # "fatal: the remote end hung up unexpectedly" while https works via
+    # proxy on retry). A network-level drop is exactly the case where an
+    # SSH retry may succeed.
+    "hung up",
 )
 
 
