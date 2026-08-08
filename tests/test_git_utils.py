@@ -164,3 +164,76 @@ def test_parse_gh_auth_user_empty():
 
     assert parse_gh_auth_user("") is None
     assert parse_gh_auth_user(None) is None  # type: ignore[arg-type]
+
+
+# ── HTTPS→SSH fallback helpers (2026-08-08) ───────────────────────
+
+def test_https_to_ssh_url_dot_git():
+    from emrg.server.git_utils import https_to_ssh_url
+
+    assert https_to_ssh_url("https://github.com/argszero/emrg.git") == "git@github.com:argszero/emrg.git"
+
+
+def test_https_to_ssh_url_no_dot_git():
+    from emrg.server.git_utils import https_to_ssh_url
+
+    assert https_to_ssh_url("https://github.com/argszero/emrg") == "git@github.com:argszero/emrg.git"
+
+
+def test_https_to_ssh_url_rejects_ssh_url():
+    from emrg.server.git_utils import https_to_ssh_url
+
+    assert https_to_ssh_url("git@github.com:argszero/emrg.git") is None
+
+
+def test_https_to_ssh_url_rejects_other_hosts_and_garbage():
+    from emrg.server.git_utils import https_to_ssh_url
+
+    assert https_to_ssh_url("https://gitlab.com/argszero/emrg.git") is None
+    assert https_to_ssh_url("https://github.example.com/a/b.git") is None
+    assert https_to_ssh_url("") is None
+    assert https_to_ssh_url(None) is None  # type: ignore[arg-type]
+    assert https_to_ssh_url("file:///tmp/repo") is None
+
+
+def test_is_git_connection_error_matches_connection_failures():
+    from emrg.server.git_utils import is_git_connection_error
+
+    assert is_git_connection_error(
+        "fatal: unable to access 'https://github.com/a/b.git/': "
+        "Failed to connect to github.com port 443 after 10013 ms"
+    )
+    assert is_git_connection_error("ssh: connect to host github.com port 22: Connection refused")
+
+
+def test_is_git_connection_error_rejects_auth_and_404():
+    from emrg.server.git_utils import is_git_connection_error
+
+    assert not is_git_connection_error("remote: Repository not found.")
+    assert not is_git_connection_error("Permission denied (publickey).")
+    assert not is_git_connection_error("Authentication failed for 'https://github.com/a/b.git'")
+    assert not is_git_connection_error("")
+    assert not is_git_connection_error(None)  # type: ignore[arg-type]
+
+
+def test_git_origin_url_real_repo():
+    """Reads the raw origin URL from a real repo."""
+    import subprocess as real_subprocess
+
+    from emrg.server.git_utils import git_origin_url
+
+    repo = real_subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if repo.returncode != 0:
+        return  # not in a git repo (packaged source) — skip
+    url = git_origin_url(repo.stdout.strip())
+    assert isinstance(url, str)
+    assert url  # the evolution workspace has an origin
+
+
+def test_git_origin_url_missing_remote(tmp_path):
+    import subprocess as real_subprocess
+
+    from emrg.server.git_utils import git_origin_url
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert git_origin_url(str(tmp_path)) == ""

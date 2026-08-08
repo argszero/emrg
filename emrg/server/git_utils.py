@@ -59,6 +59,66 @@ def parse_gh_auth_user(output: str) -> str | None:
     return match.group(1) if match else None
 
 
+# ── HTTPS→SSH fallback for blocked github.com:443 (2026-08-08) ───
+#
+# Some networks block github.com:443 (HTTPS git transport) while SSH
+# (port 22) and the api.github.com REST endpoint stay reachable. Observed
+# on the packaged host: `git pull` hangs ~75 s then fails with "Failed to
+# connect to github.com port 443", while `ssh -T git@github.com` succeeds.
+# A fresh `git clone` or any pull/push against an https origin then fails
+# and the evolution workspace never syncs. These helpers convert a
+# github.com https URL to its SSH form and recognise connection-type git
+# errors, so the scheduler can retry via SSH. Deliberately narrow: auth
+# failures / 404s / repo-specific errors never trigger a switch.
+
+_HTTPS_GITHUB_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$")
+
+_CONNECTION_ERROR_MARKERS = (
+    "failed to connect",
+    "couldn't connect",
+    "could not connect",
+    "connection refused",
+    "connection timed out",
+    "operation timed out",
+    "could not resolve host",
+    "network is unreachable",
+    "unable to access",
+    "tls handshake timeout",
+)
+
+
+def https_to_ssh_url(url: str) -> str | None:
+    """Convert a github.com https URL to its SSH form, or None.
+
+    ``https://github.com/owner/repo.git`` → ``git@github.com:owner/repo.git``
+    Returns None for non-github / non-https URLs (SSH URLs, enterprise
+    hosts, local paths) — callers must not switch those.
+    """
+    match = _HTTPS_GITHUB_RE.match((url or "").strip())
+    if not match:
+        return None
+    return f"git@github.com:{match.group(1)}/{match.group(2)}.git"
+
+
+def is_git_connection_error(stderr: str) -> bool:
+    """True when git stderr indicates a network/connection failure.
+
+    Does NOT match auth errors ("Authentication failed", "Permission
+    denied (publickey)"), missing repos ("Repository not found") or other
+    non-connection failures — switching the remote would not fix those.
+    """
+    text = (stderr or "").lower()
+    return any(marker in text for marker in _CONNECTION_ERROR_MARKERS)
+
+
+def git_origin_url(cwd: str) -> str:
+    """Return the raw origin URL for a repo, '' when absent/unreadable."""
+    result = git_cmd("remote", "get-url", "origin", cwd=cwd, timeout=5)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return ""
+
+
 def _detect_git_remote(cwd: str) -> str:
     """Detect the origin remote (owner/repo) from a git repository.
 

@@ -31,6 +31,9 @@ from emrg.server.atomic import atomic_write_yaml
 from emrg.server.git_utils import (
     INSTALL_INFO,
     _detect_git_remote,
+    git_origin_url,
+    https_to_ssh_url,
+    is_git_connection_error,
     no_prompt_env,
     resolve_git_gh,
 )
@@ -162,6 +165,9 @@ class EvolutionHandler:
             self._repo_url = self.EMRG_REPO_URL
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
+        # One-shot https-origin probe per handler lifetime (see
+        # _ensure_origin_reachable) — avoids re-probing every cycle.
+        self._origin_probed = False
 
     def _get_git_head(self) -> str | None:
         """Return current git HEAD hash, or None if not a git repo."""
@@ -342,6 +348,7 @@ class EvolutionHandler:
         if self._project_name != "emrg" or self._repo != self.REPO:
             return True  # paper/open-source/promote tasks: not our concern
         if self._is_usable_git_repo(self._source_dir):
+            self._ensure_origin_reachable()
             return True  # dev machine — use the existing repo as-is
         repo_url = self._repo_url_from_install_info() or self._repo_url
         evolve_dir = EVOLUTION_CWD / self.REPO
@@ -349,6 +356,7 @@ class EvolutionHandler:
             if self._is_usable_git_repo(str(evolve_dir)):
                 self._source_dir = str(evolve_dir)
                 self.project_path = str(evolve_dir)
+                self._ensure_origin_reachable()
                 return True
             logger.warning(
                 "EvolutionHandler[%s]: %s exists but is not a git repo — "
@@ -361,15 +369,7 @@ class EvolutionHandler:
                 "EvolutionHandler[%s]: cloning %s → %s (workspace self-heal)",
                 self.name, repo_url, evolve_dir,
             )
-            subprocess.run(
-                ["git", "clone", repo_url, str(evolve_dir)],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=120,
-                check=True,
-                env=no_prompt_env(),
-            )
+            self._clone_workspace(repo_url, evolve_dir)
             self._align_to_installed_version(evolve_dir)
             self._ensure_git_identity(evolve_dir)
             self._source_dir = str(evolve_dir)
@@ -383,6 +383,88 @@ class EvolutionHandler:
                 self.name, e,
             )
             return False
+
+    def _clone_workspace(self, repo_url: str, target: Path) -> None:
+        """Clone the evolution repo, retrying via SSH when https is blocked.
+
+        Uses a short ``http.connectTimeout`` so a blocked github.com:443
+        fails fast (seconds) instead of hanging; on a connection-type
+        failure the clone is retried with the SSH URL
+        (``git@github.com:owner/repo.git``), which works on networks that
+        block https git transport (observed on the packaged host). Other
+        failures (auth / 404 / repo-specific) propagate unchanged.
+        """
+        cmd = ["git", "-c", "http.connectTimeout=10", "clone", repo_url, str(target)]
+        reason = ""
+        try:
+            subprocess.run(
+                cmd, capture_output=True, text=True, encoding="utf-8",
+                timeout=120, check=True, env=no_prompt_env(),
+            )
+            return
+        except subprocess.CalledProcessError as e:
+            ssh_url = https_to_ssh_url(repo_url)
+            if not ssh_url or not is_git_connection_error(e.stderr or ""):
+                raise
+            # NB: `e` is deleted when the except block exits — capture first.
+            reason = (e.stderr.strip() or str(e))[:80]
+        logger.warning(
+            "EvolutionHandler[%s]: https clone failed (%s) — retrying via SSH",
+            self.name, reason,
+        )
+        subprocess.run(
+            ["git", "clone", ssh_url, str(target)],
+            capture_output=True, text=True, encoding="utf-8",
+            timeout=120, check=True, env=no_prompt_env(),
+        )
+
+    def _ensure_origin_reachable(self) -> None:
+        """Probe the github.com https origin; switch to SSH when blocked.
+
+        Some networks block github.com:443 while SSH port 22 stays open.
+        With an https origin every evolution pull/push hangs ~75 s and the
+        saturation-halt auto-resume (``git ls-remote``) never fires,
+        silently starving the cycle. One cheap probe per handler lifetime
+        (bounded by ``http.connectTimeout``) detects the blocked case; on
+        success nothing changes; on a connection-type failure the origin is
+        switched to the equivalent SSH URL so pull/push/ls-remote keep
+        working. Auth/404 errors never trigger a switch.
+        """
+        if self._origin_probed:
+            return
+        self._origin_probed = True
+        origin = git_origin_url(self._source_dir)
+        ssh_url = https_to_ssh_url(origin)
+        if not ssh_url:
+            return  # not a github.com https origin — nothing to switch
+        result = subprocess.run(
+            ["git", "-c", "http.connectTimeout=4", "ls-remote", origin, "HEAD"],
+            cwd=self._source_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=15,
+            env=no_prompt_env(),
+        )
+        if result.returncode == 0:
+            return  # reachable — keep https
+        if not is_git_connection_error(result.stderr):
+            return  # auth/404 etc — switching would not help
+        switch = subprocess.run(
+            ["git", "remote", "set-url", "origin", ssh_url],
+            cwd=self._source_dir,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+            env=no_prompt_env(),
+        )
+        if switch.returncode == 0:
+            logger.warning(
+                "EvolutionHandler[%s]: https origin unreachable (%s) — "
+                "switched origin to %s",
+                self.name, (result.stderr.strip() or "")[:80], ssh_url,
+            )
 
     def _load_saturation_state(self) -> int:
         """Restore _empty_cycles counter from disk (survives daemon restarts)."""
@@ -524,13 +606,26 @@ class EvolutionHandler:
             if not local:
                 return False
             result = subprocess.run(
-                ["git", "ls-remote", "origin", "master"],
+                ["git", "-c", "http.connectTimeout=4", "ls-remote", "origin", "master"],
                 cwd=self._source_dir,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=15,
                 env=no_prompt_env(),
             )
+            if result.returncode != 0:
+                # https github.com may be blocked while SSH port 22 works —
+                # retry with the SSH form of the origin before giving up.
+                ssh_url = https_to_ssh_url(git_origin_url(self._source_dir))
+                if ssh_url and is_git_connection_error(result.stderr):
+                    result = subprocess.run(
+                        ["git", "ls-remote", ssh_url, "master"],
+                        cwd=self._source_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        env=no_prompt_env(),
+                    )
             if result.returncode != 0:
                 return False
             remote = result.stdout.strip().split()
