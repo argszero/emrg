@@ -285,7 +285,14 @@ def _run_client(init_auto_evolve: bool = False) -> None:
         datefmt="%H:%M:%S",
         handlers=[
             RotatingFileHandler(
-                str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3
+                str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3,
+                # encoding="utf-8" — symmetric with the daemon's #556 fix:
+                # the default locale code page (GBK on zh-CN Windows) cannot
+                # encode U+FFFD and logging.emit would crash with "--- Logging
+                # error ---", polluting the shared TUI terminal. errors=
+                # "backslashreplace" is defense-in-depth: logging must never
+                # crash on exotic characters (rant 2026-08-08T09:35:30).
+                encoding="utf-8", errors="backslashreplace",
             ),
         ],
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import locale
 import logging
 import os
 import signal
@@ -15,6 +16,34 @@ logger = logging.getLogger(__name__)
 
 
 MAX_OUTPUT_CHARS = 200_000  # Truncate large outputs (framing supports up to 16MB)
+
+
+def _decode_output(data: bytes, os_name: str | None = None) -> str:
+    """Decode subprocess output bytes without corrupting non-UTF-8 text.
+
+    POSIX: subprocess output is UTF-8 — unchanged behavior.
+
+    Windows: cmd.exe/dir/echo output uses the console locale code page
+    (GBK/cp936 on zh-CN), while git/gh emit UTF-8. Both must decode
+    correctly, so we try the locale encoding **strictly** first and fall
+    back to UTF-8 (also strict), then to UTF-8 with replacement as a last
+    resort. A non-strict first attempt would silently mojibake UTF-8
+    output and never reach the fallback (rant 2026-08-08T09:35:30 —
+    U+FFFD garbage from decoding GBK bytes as UTF-8).
+
+    ``os_name`` is injectable for tests (defaults to ``os.name``).
+    """
+    if not data:
+        return ""
+    name = os_name or os.name
+    if name == "nt":
+        enc = locale.getpreferredencoding(False) or "utf-8"
+        for candidate in (enc, "utf-8"):
+            try:
+                return data.decode(candidate)  # strict
+            except (LookupError, UnicodeDecodeError):
+                continue
+    return data.decode("utf-8", errors="replace")
 
 
 class BashTool(ToolExecutor):
@@ -92,8 +121,8 @@ class BashTool(ToolExecutor):
                     error=True,
                 )
 
-            out = stdout.decode("utf-8", errors="replace").rstrip()
-            err = stderr.decode("utf-8", errors="replace").rstrip()
+            out = _decode_output(stdout).rstrip()
+            err = _decode_output(stderr).rstrip()
 
             # Smart truncation: keep stderr intact (errors are critical),
             # truncate stdout with head+tail when output exceeds limit.
