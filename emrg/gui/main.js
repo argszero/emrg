@@ -155,6 +155,7 @@ vision = false
       const child = spawn(python, ["-c", "from emrg.config import ensure_config; ensure_config()"], {
         cwd: projectDir,
         stdio: "ignore",
+        ...(process.platform === "win32" ? { windowsHide: true } : {}),
       });
       child.on("exit", () => {
         resolve(fs.existsSync(configPath()) ? fs.readFileSync(configPath(), "utf8") : "");
