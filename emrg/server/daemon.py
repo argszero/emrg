@@ -287,23 +287,45 @@ class EmrgServer:
                 pass
 
     def _evolution_count(self) -> int:
-        """Total completed evolution cycles across scheduler handlers.
+        """Total completed evolution cycles across scheduler handlers + disk.
 
         The daemon's own ``self.evolutions`` list is a legacy from the
         pre-scheduler BackgroundThread design (#95) and is never appended;
         the scheduler's handlers own the real per-cycle logs. Aggregate from
         the scheduler, falling back to the legacy list only when the
         scheduler is unavailable (e.g. test harnesses mock it away).
+
+        The scheduler's in-memory count resets to 0 on daemon restart, while
+        the ``evolution-*.json`` log files persist — so also count valid log
+        files on disk and return the max. This keeps the GUI growth card /
+        evolution toast consistent with the ``recent`` list (which reads the
+        same files) across restarts instead of showing 0.
         """
+        in_memory = 0
         sched = getattr(self, "_scheduler", None)
         if sched is not None:
             try:
                 total = sched.total_evolutions()
                 if isinstance(total, int):
-                    return total
+                    in_memory = total
             except Exception:
                 pass
-        return len(self.evolutions)
+        else:
+            in_memory = len(self.evolutions)
+
+        disk = 0
+        try:
+            logs_dir = config_dir() / "logs"
+            for f in logs_dir.glob("evolution-*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    if data.get("timestamp"):
+                        disk += 1
+                except (json.JSONDecodeError, OSError):
+                    continue  # corrupt/partial write — don't count
+        except OSError:
+            pass
+        return max(in_memory, disk)
 
     async def _handle_client(self, ws) -> None:
         """Handle a single WebSocket client connection.
