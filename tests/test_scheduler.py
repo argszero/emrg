@@ -513,51 +513,83 @@ def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
 class FakeGitRun:
     """Controllable subprocess.run fake for git commands."""
 
-    def __init__(self, git_repo=True, tags="v0.2.7", clone_fails=False, remote_head="abc123"):
+    def __init__(self, git_repo=True, tags="v0.2.7", clone_fails=False, remote_head="abc123",
+                 origin_url="", ls_remote_stderr="", clone_stderr="", clone_fail_once=False):
         self.calls = []
         self.git_repo = git_repo
         self.tags = tags
         self.clone_fails = clone_fails
         self.remote_head = remote_head
+        self.origin_url = origin_url
+        self.ls_remote_stderr = ls_remote_stderr
+        self.clone_stderr = clone_stderr
+        self.clone_fail_once = clone_fail_once
+        self._clone_calls = 0
+
+    @staticmethod
+    def _norm(cmd):
+        """Strip `git -c key=value` config pairs (http.connectTimeout=…)."""
+        out, i = [], 1
+        args = list(cmd)
+        while i < len(args):
+            if args[i] == "-c" and i + 1 < len(args):
+                i += 2
+                continue
+            out.append(args[i])
+            i += 1
+        return out
 
     def __call__(self, cmd, *args, **kwargs):
         self.calls.append((list(cmd), kwargs.get("cwd")))
         cwd = kwargs.get("cwd") or ""
         if cmd[0] == "git":
-            sub = cmd[1]
-            if sub == "rev-parse":
-                if "--is-inside-work-tree" in cmd:
+            sub = self._norm(cmd)
+            if sub and sub[0] == "rev-parse":
+                if "--is-inside-work-tree" in sub:
                     return _R(0, "true\n" if self.git_repo else "false\n")
-                if "HEAD" in cmd:
+                if "HEAD" in sub:
                     return _R(0, "abc123\n")
-            if sub == "ls-remote":
-                # `git ls-remote origin master` → "<sha>\trefs/heads/master"
+            if sub and sub[0] == "remote":
+                if sub[1] == "get-url":
+                    return _R(0, self.origin_url + "\n")
+                if sub[1] == "set-url":
+                    return _R(0, "")
+            if sub and sub[0] == "ls-remote":
+                # `git ls-remote origin master` → "<sha>\trefs/heads/master".
+                # When ls_remote_stderr is set, only the https-origin form
+                # fails — the SSH retry (git@github.com:…) succeeds.
+                # NB: list `in` is element-equality — use substring scan.
+                ssh_retry = any("git@github.com" in str(c) for c in cmd)
+                if self.ls_remote_stderr and not ssh_retry:
+                    return _R(128, "", self.ls_remote_stderr)
                 return _R(0, f"{self.remote_head}\trefs/heads/master\n")
-            if sub == "clone":
-                if self.clone_fails:
-                    raise _CalledProcessErrorStub("clone failed")
+            if sub and sub[0] == "clone":
+                self._clone_calls += 1
+                if self.clone_fails and (not self.clone_fail_once or self._clone_calls == 1):
+                    raise _CalledProcessErrorStub(self.clone_stderr or "clone failed",
+                                                  stderr=self.clone_stderr)
                 target = Path(cmd[-1])
                 target.mkdir(parents=True, exist_ok=True)
                 return _R(0, "")
-            if sub == "tag":
+            if sub and sub[0] == "tag":
                 return _R(0, self.tags + "\n")
-            if sub == "checkout":
+            if sub and sub[0] == "checkout":
                 return _R(0, "")
-            if sub == "config":
+            if sub and sub[0] == "config":
                 return _R(0, "")  # getter → empty → setter will run
         return _R(0, "")
 
 
 class _R:
-    def __init__(self, returncode, stdout):
+    def __init__(self, returncode, stdout, stderr=""):
         self.returncode = returncode
         self.stdout = stdout
-        self.stderr = ""
+        self.stderr = stderr
 
 
 class _CalledProcessErrorStub(subprocess.CalledProcessError):
-    def __init__(self, msg):
-        super().__init__(returncode=1, cmd=["git", "clone"], output=msg)
+    def __init__(self, msg, stderr=""):
+        super().__init__(returncode=1, cmd=["git", "clone"], output=msg, stderr=stderr)
 
 
 def test_ensure_self_evolution_task_adds_when_missing(tmp_path):
@@ -781,7 +813,7 @@ def test_ensure_evolution_workspace_clones_and_aligns(tmp_path):
     assert ok is True
     assert handler._source_dir == str(evolve_dir)
     # clone called with repo URL + target
-    clone_calls = [c for c in fake.calls if c[0][1] == "clone"]
+    clone_calls = [c for c in fake.calls if "clone" in c[0]]
     assert len(clone_calls) == 1
     # tag alignment: checkout -B master v0.2.7
     checkout_calls = [c for c in fake.calls if c[0][1] == "checkout"]
@@ -815,6 +847,197 @@ def test_ensure_evolution_workspace_clone_failure_skips(tmp_path):
 
     assert ok is False
     assert handler._source_dir != str(mod.EVOLUTION_CWD / "emrg")
+
+
+# ── HTTPS→SSH fallback for blocked github.com:443 (2026-08-08) ─────
+# Some networks block github.com:443 while SSH port 22 stays open — the
+# self-heal clone and the saturation auto-resume (ls-remote) must not
+# hard-depend on https reaching github.com.
+
+def test_ensure_origin_reachable_switches_to_ssh_when_https_blocked(tmp_path):
+    """https origin unreachable (connection error) → origin switched to SSH."""
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, path=str(tmp_path))
+    handler._origin_probed = False
+    fake = FakeGitRun(
+        origin_url="https://github.com/argszero/emrg.git",
+        ls_remote_stderr=(
+            "fatal: unable to access 'https://github.com/argszero/emrg.git/': "
+            "Failed to connect to github.com port 443 after 4004 ms: "
+            "Couldn't connect to server"
+        ),
+    )
+    orig_run = mod.subprocess.run
+    orig_origin = mod.git_origin_url
+    mod.subprocess.run = fake
+    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
+    try:
+        handler._ensure_origin_reachable()
+    finally:
+        mod.subprocess.run = orig_run
+        mod.git_origin_url = orig_origin
+
+    set_url_calls = [
+        c for c in fake.calls
+        if c[0][0] == "git" and c[0][1] == "remote" and c[0][2] == "set-url"
+    ]
+    assert len(set_url_calls) == 1, f"expected one set-url, got {fake.calls}"
+    assert set_url_calls[0][0][4] == "git@github.com:argszero/emrg.git"
+
+
+def test_ensure_origin_reachable_probes_only_once(tmp_path):
+    """One-shot probe: a second call never re-runs git."""
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, path=str(tmp_path))
+    handler._origin_probed = False
+    fake = FakeGitRun(
+        origin_url="https://github.com/argszero/emrg.git",
+        ls_remote_stderr="fatal: unable to access: Failed to connect",
+    )
+    orig_run = mod.subprocess.run
+    orig_origin = mod.git_origin_url
+    mod.subprocess.run = fake
+    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
+    try:
+        handler._ensure_origin_reachable()
+        handler._ensure_origin_reachable()
+    finally:
+        mod.subprocess.run = orig_run
+        mod.git_origin_url = orig_origin
+
+    set_url_calls = [
+        c for c in fake.calls
+        if c[0][0] == "git" and c[0][1] == "remote" and c[0][2] == "set-url"
+    ]
+    assert len(set_url_calls) == 1
+
+
+def test_ensure_origin_reachable_keeps_https_when_reachable(tmp_path):
+    """ls-remote succeeds → origin untouched."""
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, path=str(tmp_path))
+    handler._origin_probed = False
+    fake = FakeGitRun(origin_url="https://github.com/argszero/emrg.git")
+    orig_run = mod.subprocess.run
+    orig_origin = mod.git_origin_url
+    mod.subprocess.run = fake
+    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
+    try:
+        handler._ensure_origin_reachable()
+    finally:
+        mod.subprocess.run = orig_run
+        mod.git_origin_url = orig_origin
+
+    set_url_calls = [
+        c for c in fake.calls
+        if c[0][0] == "git" and c[0][1] == "remote" and c[0][2] == "set-url"
+    ]
+    assert set_url_calls == []
+
+
+def test_ensure_origin_reachable_ignores_non_connection_errors(tmp_path):
+    """Auth/404 failures never switch the origin."""
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, path=str(tmp_path))
+    handler._origin_probed = False
+    fake = FakeGitRun(
+        origin_url="https://github.com/argszero/emrg.git",
+        ls_remote_stderr="remote: Repository not found.",
+    )
+    orig_run = mod.subprocess.run
+    orig_origin = mod.git_origin_url
+    mod.subprocess.run = fake
+    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
+    try:
+        handler._ensure_origin_reachable()
+    finally:
+        mod.subprocess.run = orig_run
+        mod.git_origin_url = orig_origin
+
+    set_url_calls = [
+        c for c in fake.calls
+        if c[0][0] == "git" and c[0][1] == "remote" and c[0][2] == "set-url"
+    ]
+    assert set_url_calls == []
+
+
+def test_ensure_evolution_workspace_clone_falls_back_to_ssh(tmp_path):
+    """https clone connection failure → retried via SSH, workspace usable."""
+    import pathlib as _pathlib
+
+    from emrg.server import scheduler as mod
+
+    evolve_dir = tmp_path / "evolution" / "emrg"
+    mod.EVOLUTION_CWD = tmp_path / "evolution"
+    handler = _make_handler(tmp_path, path=str(tmp_path / "nonexistent"))
+    handler._repo_url = "https://github.com/argszero/emrg.git"
+
+    install_dir = tmp_path / ".emrg" / "install"
+    install_dir.mkdir(parents=True)
+    (install_dir / "version.txt").write_text("0.2.7", encoding="utf-8")
+
+    fake = FakeGitRun(
+        git_repo=False, tags="v0.2.7",
+        clone_fails=True, clone_fail_once=True,
+        clone_stderr=(
+            "fatal: unable to access 'https://github.com/argszero/emrg.git/': "
+            "Failed to connect to github.com port 443 after 10013 ms: "
+            "Couldn't connect to server"
+        ),
+    )
+    orig_run = mod.subprocess.run
+    orig_evolve = mod.EVOLUTION_CWD
+    orig_config = mod.config_dir
+    orig_home = _pathlib.Path.home
+    mod.subprocess.run = fake
+    mod.config_dir = lambda: tmp_path
+    _pathlib.Path.home = classmethod(lambda cls: tmp_path)
+    try:
+        ok = handler._ensure_evolution_workspace()
+    finally:
+        mod.subprocess.run = orig_run
+        mod.config_dir = orig_config
+        mod.EVOLUTION_CWD = orig_evolve
+        _pathlib.Path.home = orig_home
+
+    assert ok is True
+    assert handler._source_dir == str(evolve_dir)
+    clone_calls = [c for c in fake.calls if "clone" in c[0]]
+    assert len(clone_calls) == 2, f"expected https + ssh clone, got {fake.calls}"
+    assert clone_calls[0][0][-2] == "https://github.com/argszero/emrg.git"
+    assert clone_calls[1][0][-2] == "git@github.com:argszero/emrg.git"
+
+
+def test_remote_advanced_ssh_fallback_when_https_blocked(tmp_path):
+    """ls-remote over a blocked https origin → retried via the SSH URL."""
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    fake = FakeGitRun(
+        origin_url="https://github.com/argszero/emrg.git",
+        ls_remote_stderr=(
+            "fatal: unable to access 'https://github.com/argszero/emrg.git/': "
+            "Failed to connect to github.com port 443"
+        ),
+        remote_head="9f8e7d6",  # != local abc123 → advanced
+    )
+    orig_run = mod.subprocess.run
+    orig_origin = mod.git_origin_url
+    mod.subprocess.run = fake
+    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
+    try:
+        assert handler._remote_advanced() is True
+    finally:
+        mod.subprocess.run = orig_run
+        mod.git_origin_url = orig_origin
+
+    ls_calls = [c for c in fake.calls if "ls-remote" in c[0]]
+    assert len(ls_calls) == 2, f"expected https + ssh ls-remote, got {fake.calls}"
+    assert "git@github.com:argszero/emrg.git" in ls_calls[1][0]
 
 
 # ── EvolutionHandler cycle truncation detection ──────────────────
