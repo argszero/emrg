@@ -147,10 +147,14 @@ const Chat = (() => {
         for (const node of group.nodes) {
           const body = node.querySelector(".msg-body") || node;
           body.classList.remove("typing");
-          const text = body.textContent;
+          // rant 21:10：✦ 标记是元素而非文本——流式时 body.textContent 含 "✦ " 前缀，
+          // 直接整体 render 会让 "✦ # Title" 等块语法（标题/列表/代码围栏）解析失败
+          // （前缀不在行首 → marked 不识别）。渲染前剥离前缀，渲染后重新插入标记保持视觉一致。
+          const text = body.textContent.replace(/^✦\s*/, "");
           const render = () => {
             window.emrgMarkdown.renderMarkdown(text).then((html) => {
               body.innerHTML = html;
+              body.insertBefore(el("span", { class: "msg-assistant-mark" }, "✦ "), body.firstChild);
               scrollToBottom();
             });
           };
@@ -187,6 +191,10 @@ const Chat = (() => {
       } else if (group.hasText) {
         // rant 21:57:10：已有文本段之后来了工具 → 封存当前段，后续 delta 新建段（保持 TUI 交错顺序）
         group.sealed = true;
+        // rant 21:09：已结束的文本段不再闪烁——封存时移除其 typing 光标，
+        // 让 ▍ 只保留在最新一段文本后面（"前面的文本都结束了还显示闪烁光标"）。
+        const prevBody = group.node.querySelector(".msg-body") || group.node;
+        prevBody.classList.remove("typing");
       }
     }
     const phrases = EMRG_Copy.toolPhrases(data.tool_name);
@@ -210,6 +218,9 @@ const Chat = (() => {
   function handleToolEnd(data) {
     const row = toolRows.get(data.tool_call_id);
     if (!row) return;
+    // rant 21:08：工具执行完成后 spinner 必须停止——移除转圈元素（CSS 亦有
+    // .tool-row:not(.running) 隐藏兜底），只保留 ✓ 完成标记，防止"对号前面一直转圈"。
+    row.querySelector(".tool-spinner")?.remove();
     const ok = !data.error;
     row.classList.remove("running");
     row.classList.add(ok ? "done" : "failed");

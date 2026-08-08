@@ -25,10 +25,12 @@ function makeEl(id) {
     attributes: {},
     _cls: new Set(),
     classList: {
-      add(c) { node._cls.add(c); node._update(); },
-      remove(c) { node._cls.delete(c); node._update(); },
-      toggle(c) { node._cls.has(c) ? node._cls.delete(c) : node._cls.add(c); node._update(); },
-      contains(c) { return node._cls.has(c); },
+      // className 为唯一事实源：el() 直接赋值 className 后 classList 操作不得清空既有类
+      _set() { node._cls = new Set((node.className || "").split(/\s+/).filter(Boolean)); },
+      add(c) { node.classList._set(); node._cls.add(c); node._update(); },
+      remove(c) { node.classList._set(); node._cls.delete(c); node._update(); },
+      toggle(c) { node.classList._set(); node._cls.has(c) ? node._cls.delete(c) : node._cls.add(c); node._update(); },
+      contains(c) { return (node.className || "").split(/\s+/).includes(c); },
     },
     _update() { node.className = [...node._cls].join(" "); },
     className: "",
@@ -43,17 +45,34 @@ function makeEl(id) {
     scrollHeight: 0,
     clientHeight: 100,
     open: false,
-    appendChild(c) { this.children.push(c); return c; },
+    appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
     addEventListener() {},
-    querySelector() { return null; },
+    querySelector(sel) {
+      // 最小类选择器搜索（chat.js 用 ".msg-body"/".tool-spinner"）：DFS 子节点
+      if (!sel || !sel.startsWith(".")) return null;
+      const cls = sel.slice(1);
+      const stack = [...(this.children || [])];
+      while (stack.length) {
+        const n = stack.shift();
+        if ((n.className || "").split(/\s+/).includes(cls)) return n;
+        stack.push(...(n.children || []));
+      }
+      return null;
+    },
     querySelectorAll() { return []; },
     closest() { return null; },
     showModal() { this.open = true; },
     close() { this.open = false; },
     setAttribute(k, v) { this.attributes[k] = v; if (k === "value") this.value = v; },
     removeAttribute(k) { delete this.attributes[k]; },
-    insertBefore(c) { this.children.unshift(c); return c; },
-    remove() {},
+    insertBefore(c) { c.parentNode = this; this.children.unshift(c); return c; },
+    remove() {
+      // 真实脱离父节点（chat.js handleToolEnd 移除 .tool-spinner）
+      if (this.parentNode) {
+        const i = this.parentNode.children.indexOf(this);
+        if (i >= 0) this.parentNode.children.splice(i, 1);
+      }
+    },
     focus() {},
     select() {},
   };
@@ -229,14 +248,14 @@ test("rant 21:57:10：交替文本/工具按顺序交错展示（每段文本独
     const kinds = [];
     const texts = [];
     const isToolRow = (c) =>
-      c.children.length > 0 && (c.children[0].className || "").includes("tool-spinner");
+      (c.className || "").includes("tool-row"); // 用行类而非 spinner 子元素（rant 21:08 后 spinner 完成即移除）
     for (let i = 0; i < children.length; i++) {
       const c = children[i];
       if (isToolRow(c)) {
         kinds.push("tool");
       } else {
         kinds.push("text");
-        texts.push(c.textContent);
+        texts.push((c.querySelector(".msg-body") || c).textContent); // 文本在 body 子节点
       }
     }
     const beforeDone = children.length;
@@ -259,6 +278,74 @@ test("rant 21:57:10：交替文本/工具按顺序交错展示（每段文本独
   assert.strictEqual(r.kinds, "text,tool,text,tool,text", "应按 文本→工具→文本→工具→文本 交错（TUI 一致）");
   assert.strictEqual(r.texts, "文本段1|文本段2|文本段3", "每段文本独立成块，不拼接在顶部（沙箱 textContent 不含 ✦ 标记 span）");
   assert.strictEqual(r.typingAfter, 0, "done 后所有文本段 typing 光标应移除");
+});
+
+test("rant 21:08：工具完成后 spinner 停止（元素移除，不再转圈）", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = vm.runInContext(`(function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    EMRG_Chat.handleToolStart({ request_id: "rid-1", tool_call_id: "t1", tool_name: "read" });
+    const row = $("chat-view").children[1]; // children[0] 是助手文本节点，[1] 是工具行
+    const spinnerBefore = (row.querySelector(".tool-spinner") !== null);
+    EMRG_Chat.handleToolEnd({ tool_call_id: "t1", tool_name: "read", content: "ok", elapsed: 0.3 });
+    const spinnerAfter = (row.querySelector(".tool-spinner") !== null);
+    return { spinnerBefore, spinnerAfter, cls: row.className };
+  })()`, ctx);
+  assert.strictEqual(r.spinnerBefore, true, "工具运行中应有 spinner");
+  assert.strictEqual(r.spinnerAfter, false, "工具完成后 spinner 应移除（不得一直转圈）");
+  assert.ok(r.cls.includes("done"), `工具行应 done，实际 ${r.cls}`);
+});
+
+test("rant 21:09：文本段被工具封存后 typing 光标移除（只留最新段闪烁）", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = vm.runInContext(`(function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "第一段" }]);
+    const firstNode = $("chat-view").children[0];
+    const firstBody = firstNode.querySelector(".msg-body") || firstNode;
+    const typingBefore = firstBody.classList.contains("typing");
+    EMRG_Chat.handleToolStart({ request_id: "rid-1", tool_call_id: "t1", tool_name: "read" });
+    const typingAfter = firstBody.classList.contains("typing");
+    return { typingBefore, typingAfter };
+  })()`, ctx);
+  assert.strictEqual(r.typingBefore, true, "封存前第一段应有 typing 光标（流式中）");
+  assert.strictEqual(r.typingAfter, false, "封存后第一段 typing 光标应移除（光标只留在最新文本段）");
+});
+
+test("rant 21:10：done 渲染剥离 ✦ 前缀（标题/列表/代码围栏不被前缀破坏）", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const p = vm.runInContext(`(async function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "# 标题\\n- 列表项\\n\\n\\u0060\\u0060\\u0060python\\nprint(1)\\n\\u0060\\u0060\\u0060" }]);
+    const node = $("chat-view").children[0];
+    const body = node.querySelector(".msg-body") || node;
+    // 模拟真实 DOM：body 内先有 ✦ 标记 span（textContent 含前缀）
+    body.textContent = "✦ " + body.textContent;
+    let captured = null;
+    window.marked = {
+      use: () => {},
+      parse: async (t) => { captured = t; return "<h1>标题</h1><ul><li>列表项</li></ul>"; },
+    };
+    EMRG_Chat.handleDone({ request_id: "rid-1" });
+    await new Promise((res) => setTimeout(res, 10)); // 等 renderMarkdown microtask
+    return {
+      renderedHasHeader: body.innerHTML.includes("h1"),
+      renderedHasMark: (body.children[0]?.className || "").includes("msg-assistant-mark"),
+      capturedStartsClean: String(captured).startsWith("# 标题"),
+      capturedHasPrefix: String(captured).includes("✦"),
+    };
+  })()`, ctx);
+  const r = await p;
+  assert.strictEqual(r.capturedStartsClean, true, "传入 marked 的文本应以 # 开头（✦ 前缀已剥离）");
+  assert.strictEqual(r.capturedHasPrefix, false, "传入 marked 的文本不得含 ✦ 前缀");
+  assert.ok(r.renderedHasHeader, "剥离前缀后 # 标题渲染为 h1（块语法不被破坏）");
+  assert.strictEqual(r.renderedHasMark, true, "渲染后 ✦ 标记应重新插入（元素而非文本）");
 });
 
 test("rant 14:11：首条消息后欢迎屏立即隐藏（append 同步 updateEmptyState）", async () => {
