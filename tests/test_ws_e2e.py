@@ -524,7 +524,7 @@ class TestWSEvolutionSummary:
                         frame = await asyncio.wait_for(ws.recv(), timeout=5)
                         resp = json.loads(frame)
                         assert resp["type"] == "evolution_summary"
-                        assert resp["count"] == 0  # in-memory evolutions empty in test harness
+                        assert resp["count"] == 2  # valid disk logs counted (corrupt skipped)
                         # newest first (reverse lexicographic = chronological)
                         assert [r["timestamp"] for r in resp["recent"]] == [
                             "2026-08-06T10:00:00", "2026-08-06T09:00:00"]
@@ -552,6 +552,7 @@ class TestWSEvolutionSummary:
                         frame = await asyncio.wait_for(ws.recv(), timeout=5)
                         resp = json.loads(frame)
                         assert resp["type"] == "evolution_summary"
+                        assert resp["count"] == 25, f"count must include all valid disk logs, got {resp['count']}"
                         assert len(resp["recent"]) == 20, f"limit must clamp to 20, got {len(resp['recent'])}"
                         # newest-first: first entry is the highest timestamp
                         assert resp["recent"][0]["timestamp"] == "2026-08-06T00:24:00"
