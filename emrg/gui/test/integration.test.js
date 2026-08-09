@@ -100,16 +100,34 @@ before(async () => {
   await client.ensureConnected();
 });
 
+// G130 (rant 2026-08-09T08:03:46 follow-up): POSIX process-group kill
+// process.kill(-pid) is a no-op on Windows (throws ESRCH — negative PIDs are
+// not supported), so killed daemons stayed alive as orphans and test 7
+// ("daemon 被杀 → ensureConnected 重连") failed locally. Use taskkill /T /F
+// (tree kill) on win32, keep the POSIX group kill elsewhere.
+function killProcessTree(pid, signal) {
+  if (process.platform === "win32") {
+    try {
+      require("node:child_process").execSync(`taskkill /PID ${pid} /T /F`, {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch { /* process already gone */ }
+    return;
+  }
+  try { process.kill(-pid, signal); } catch { /* ignore */ }
+}
+
 async function killDaemon(child) {
   if (!child) return;
   // SIGTERM → 等待退出（最多 3s）→ SIGKILL 兜底（防 detached 孤儿残留）
-  try { process.kill(-child.pid); } catch { /* ignore */ }
+  killProcessTree(child.pid);
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline && child.exitCode === null) {
     await new Promise((r) => setTimeout(r, 100));
   }
   if (child.exitCode === null) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch { /* ignore */ }
+    killProcessTree(child.pid, "SIGKILL");
   }
 }
 
@@ -178,7 +196,7 @@ test("delete_session（不存在）→ 错误帧（无破坏性）", { skip: SKI
 
 test("daemon 被杀 → ensureConnected 重连（G43 stale port 流程）", { skip: SKIP }, async () => {
   // 杀 daemon（不删 port 文件）→ 连接应失败 → stale 检测 → 删文件重拉
-  try { process.kill(-daemonProc.pid); } catch { /* ignore */ }
+  killProcessTree(daemonProc.pid);
   await new Promise((r) => setTimeout(r, 800));
   assert.strictEqual(client.connected, false, "daemon killed → disconnected");
   // ensureConnected 应自动重拉（G43 stale port）
