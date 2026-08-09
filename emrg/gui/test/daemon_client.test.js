@@ -293,6 +293,52 @@ test("rant 13:16:36 G43 加固：无 pid 文件 → 视为死 daemon（删文件
   assert.strictEqual(client._daemonProcessAlive(), false, "无 pid 文件 → false");
 });
 
+test("rant 13:16:36 ⑤ spawn 节流：超 MAX_SPAWN_ATTEMPTS 后不再拉起 daemon", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  let spawnCount = 0;
+  // 镜像真实 startDaemon 的节流语义（检查上限 → 计数 +1 → spawn → 超时失败）
+  client.startDaemon = async function () {
+    if (this._spawnAttempts >= 3) {
+      throw new Error("daemon failed to start after 3 attempts — please start it manually");
+    }
+    this._spawnAttempts += 1;
+    spawnCount += 1;
+    await new Promise((r) => setTimeout(r, 5));
+    throw new Error("emrgd failed to start within timeout");
+  };
+  for (let i = 0; i < 3; i++) {
+    await assert.rejects(client.startDaemon(), /emrgd failed to start within timeout/);
+  }
+  assert.strictEqual(spawnCount, 3, "3 次尝试内每次都会真正 spawn");
+  // 第 4 次：不再 spawn，直接抛节流错误
+  await assert.rejects(client.startDaemon(), /after 3 attempts/);
+  assert.strictEqual(spawnCount, 3, "超过上限后不再 spawn（防窗口/重试风暴）");
+  assert.strictEqual(client._spawnAttempts, 3);
+});
+
+test("rant 13:16:36 ⑤ spawn 节流计数在成功连接后归零", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  // 先失败一次（计数 +1），再成功 auth → 计数归零
+  client.startDaemon = async function () {
+    this._spawnAttempts += 1; // 镜像真实 startDaemon 的计数
+    await new Promise((r) => setTimeout(r, 10));
+    throw new Error("emrgd failed to start within timeout");
+  };
+  client.isRunning = async () => false;
+  await assert.rejects(client.startDaemon(), /emrgd failed to start within timeout/);
+  assert.strictEqual(client._spawnAttempts, 1);
+  // 恢复真实 startDaemon（port 文件已预写 → ensureConnected 直接 ws → auth_ok）
+  delete client.startDaemon;
+  const p = client.ensureConnected();
+  await waitForWs();
+  currentMockWs.emit("open");
+  await waitForAuthSent(currentMockWs);
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "auth_ok" })));
+  await p;
+  assert.strictEqual(client.connected, true);
+  assert.strictEqual(client._spawnAttempts, 0, "成功连接后 spawn 节流计数必须归零");
+});
+
 test("auth 失败（G88）：auth_ok 前 close → 停止自动重试", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   const p = client.ensureConnected();

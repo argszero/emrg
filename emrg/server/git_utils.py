@@ -9,6 +9,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from emrg._win import win32_no_window_kwargs
 from emrg.config import config_dir
 
 INSTALL_BIN = Path.home() / ".emrg" / "install" / "bin"
@@ -135,6 +136,7 @@ def _detect_git_remote(cwd: str) -> str:
         result = subprocess.run(
             ["git", "remote", "get-url", "origin"],
             cwd=cwd, capture_output=True, text=True, encoding="utf-8", timeout=5,
+            **win32_no_window_kwargs(),
         )
         if result.returncode == 0:
             url = result.stdout.strip()
@@ -248,4 +250,5 @@ def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess
     return subprocess.run(
         [exe, *args], cwd=cwd, capture_output=True, text=True,
         encoding="utf-8", timeout=timeout, env=no_prompt_env(),
+        **win32_no_window_kwargs(),
     )

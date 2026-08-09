@@ -1069,6 +1069,11 @@ const App = (() => {
     } else if (data.auth_failed) {
       updateConnectionDot("red");
       Chat.addSystemMessage(_t("app.authFailed"));
+    } else if (data.daemon_stopped) {
+      // Rant 2026-08-09T13:16:36 ⑤：spawn 节流命中——显示真实失败原因（含
+      // emrgd.log 尾部），提示宿主手动启动，不再无限重试弹窗。
+      updateConnectionDot("red");
+      Chat.addSystemMessage(_t("app.daemonStopped", { msg: data.error || "" }));
     } else {
       updateConnectionDot("red");
     }
