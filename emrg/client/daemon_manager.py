@@ -22,12 +22,14 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from emrg.connect import (
+    AuthError,
     cleanup_server,
     connect_to_server,
     get_server_path,
     is_server_running_sync,
 )
 from emrg.protocol import TaskRequest
+from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
 
@@ -166,8 +168,14 @@ async def check_and_restart_if_stale() -> None:
                     except (ProcessLookupError, OSError):
                         pass
     except (ConnectionRefusedError, FileNotFoundError, OSError, json.JSONDecodeError,
-            asyncio.TimeoutError, Exception):
-        pass  # Server not reachable — connect_to_server will handle
+            asyncio.TimeoutError, ConnectionClosed):
+        # G129 (rant 2026-08-09T08:03:46): only genuinely transient connection
+        # failures are swallowed here — connect_to_server in ensure_connected()
+        # will surface the real error. AuthError and programming errors are NOT
+        # in this list: a token mismatch is a config/install problem the user
+        # must see (previously hidden by a bare `except Exception`).
+        logger.debug("stale check: server not reachable — connect_to_server will handle")
+        pass
 
 
 async def ensure_connected() -> "DaemonConnection":

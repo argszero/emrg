@@ -164,6 +164,35 @@ class TestCheckAndRestartIfStale:
                    return_value=str(port_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())  # no raise
 
+    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_server_auth_error_propagates(self, mock_connect, mock_src, mock_cfg, tmp_path):
+        """G129: AuthError (token mismatch) must NOT be swallowed — it's a
+        config/install problem the user must see, not a transient disconnect."""
+        port_file = tmp_path / "emrgd.port"
+        port_file.write_text("12345\ntoken\n")
+        mock_connect.side_effect = daemon_manager.AuthError("authentication failed")
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(port_file)):
+            with pytest.raises(daemon_manager.AuthError):
+                asyncio.run(daemon_manager.check_and_restart_if_stale())
+
+    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_server_programming_error_propagates(self, mock_connect, mock_src, mock_cfg, tmp_path):
+        """G129: genuine bugs must surface, not vanish into a bare except Exception."""
+        port_file = tmp_path / "emrgd.port"
+        port_file.write_text("12345\ntoken\n")
+        mock_connect.side_effect = AttributeError("boom")
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(port_file)):
+            with pytest.raises(AttributeError):
+                asyncio.run(daemon_manager.check_and_restart_if_stale())
+
 
 # ── ensure_connected ─────────────────────────────────────────
 
