@@ -35,6 +35,10 @@ function main() {
   // 之前固定 1s——daemon 缺失时每 5s 一轮 spawn，弹窗/日志风暴。成功连接后复位。
   let reconnectDelayMs = 1000;
   const MAX_RECONNECT_DELAY_MS = 60_000;
+  // Rant 2026-08-09T13:16:36 ⑤：daemon_stopped 提示每个连接生命周期只发一次——
+  // 否则退避封顶 60s 后每轮重试都命中节流、渲染层每分钟追加一条重复系统消息
+  // （对称 TUI app.py _throttle_warned，PR #594）。成功连接后复位。
+  let daemonStoppedNotified = false;
   let stopping = false;
 
   // ── 窗口 ────────────────────────────────────────────────
@@ -651,6 +655,7 @@ vision = false
       logger.info("[gui] connected to emrgd");
       cancelReconnect();
       reconnectDelayMs = 1000; // 退避复位
+      daemonStoppedNotified = false; // 节流提示复位（下个生命周期可再提示）
       sendToRenderer("status", { connected: true });
     } catch (e) {
       if (client._authFailed) {
@@ -659,8 +664,10 @@ vision = false
         return;
       }
       // Rant 2026-08-09T13:16:36 ⑤：spawn 节流命中 → 告知宿主真实原因
-      // （含 emrgd.log 尾部），不再无限拉起 daemon。
-      if (String(e.message).includes("after 3 attempts")) {
+      // （含 emrgd.log 尾部），不再无限拉起 daemon。只提示一次，防退避重试
+      // 每分钟重复追加系统消息。
+      if (String(e.message).includes("after 3 attempts") && !daemonStoppedNotified) {
+        daemonStoppedNotified = true;
         sendToRenderer("status", { connected: false, daemon_stopped: true, error: e.message });
       }
       logger.warn(`[gui] ensureConnected failed: ${e.message}`);
