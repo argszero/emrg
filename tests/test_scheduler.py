@@ -1192,6 +1192,57 @@ def test_evolution_cycle_connect_failure_resets_on_success(tmp_path, caplog):
         mod.connect_to_server = _original_connect_to_server()
 
 
+# ── Connect-failure exponential backoff (rant 2026-08-09T13:16:36 ③) ─
+# Windows v0.2.15 regression: daemon down → every tick's connect failure
+# returned immediately and the loop re-ran at full interval — with multiple
+# handlers that produced a per-second retry/window storm. Backoff must be
+# max(30s, interval * 2^n) capped at 10 minutes.
+
+def test_connect_backoff_zero_failures_returns_interval():
+    """No consecutive failures → normal interval (no backoff)."""
+    from emrg.server.scheduler import EvolutionHandler
+
+    handler = EvolutionHandler(
+        name="emrg-task", config={"project": "emrg"}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    handler._connect_failures = 0
+    assert handler._connect_backoff() == 60.0
+
+
+def test_connect_backoff_grows_exponentially_capped(tmp_path):
+    """Consecutive failures grow the wait, capped at 10 minutes."""
+    from emrg.server.scheduler import EvolutionHandler
+
+    handler = EvolutionHandler(
+        name="emrg-task", config={"project": "emrg"}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    # interval=60s: 2^1=2 → 120s; 2^2=4 → 240s; 2^3=8 → 480s; 2^4=16 → 960s → capped 600s
+    expectations = {1: 120.0, 2: 240.0, 3: 480.0, 4: 600.0, 5: 600.0, 10: 600.0}
+    for failures, expected in expectations.items():
+        handler._connect_failures = failures
+        assert handler._connect_backoff() == expected, (
+            f"failures={failures}: expected {expected}"
+        )
+
+
+def test_connect_backoff_floor_30s_for_small_interval(tmp_path):
+    """Backoff never drops below 30s even for very fast intervals."""
+    from emrg.server.scheduler import EvolutionHandler
+
+    handler = EvolutionHandler(
+        name="emrg-task", config={"project": "emrg"}, interval=10,
+        identity=InstanceIdentity(),
+    )
+    handler._connect_failures = 2
+    # max(30, 10 * 2^2) = max(30, 40) = 40
+    assert handler._connect_backoff() == 40.0
+    handler._connect_failures = 1
+    # max(30, 10 * 2^1) = max(30, 20) = 30 → floor holds
+    assert handler._connect_backoff() == 30.0
+
+
 class _FakeWsForCycle:
     """Minimal ws stand-in for the reset-on-success test."""
     def __init__(self, frames):

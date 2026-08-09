@@ -24,11 +24,16 @@ const WebSocket = require("ws");
 // 真实的 ~/.emrg/emrgd.port → 演化周期 10 小时连不上 daemon（WinError 1225）。
 // 所有调用点必须传 this.projectDir（默认 os.homedir() 保持生产行为不变）。
 const PORT_FILE = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.port");
+const EMRGD_LOG = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.log");
 const MAX_PAYLOAD = 16 * 1024 * 1024; // G62/G105：16MB 双向一致（工具输出上限 200KB）
 const AUTH_TIMEOUT_MS = 10_000;
 const SPAWN_WAIT_MS = 5_000;
 const PENDING_TIMEOUT_MS = 5_000;
 const STREAM_END_TIMEOUT_MS = 30_000; // G94：最后帧后 30s 无 done 强制结束
+// Rant 2026-08-09T13:16:36 ⑤（防风暴总闸）：单个"连接生命周期"内最多 spawn
+// MAX_SPAWN_ATTEMPTS 次 daemon——之后不再拉起，只把真实错误（含 emrgd.log 尾部）
+// 抛给上层，杜绝 GUI 每 5s 反复 spawn（每次 spawn 都是一个新的 cmd 窗口来源）。
+const MAX_SPAWN_ATTEMPTS = 3;
 
 const SESSION_ID_RE = /^s_\d{6}_\d{4}_[0-9a-f]{4,8}$/;
 
@@ -72,6 +77,7 @@ class DaemonClient {
     this._authFailed = false;
     this._reconnectTimer = null;
     this._stopReconnect = false;
+    this._spawnAttempts = 0; // 连接生命周期内 spawn 计数（成功 auth 后归零）
   }
 
   // ── 生命周期 ────────────────────────────────────────────
@@ -91,7 +97,28 @@ class DaemonClient {
     }
   }
 
+  _readLogTail(lines = 15) {
+    // R124 对应（daemon_manager.py）：spawn 超时后读 emrgd.log 尾部，
+    // 让宿主看到真实失败原因（缺 DLL / PATH / 端口冲突），而不是干巴巴的
+    // "failed to start within timeout"（rant 2026-08-09T13:16:36 验收项 ②）。
+    try {
+      const data = fs.readFileSync(EMRGD_LOG(this.projectDir), "utf8");
+      const tail = data.trim().split("\n").slice(-lines).join("\n");
+      return tail ? `\n  emrgd.log tail:\n${tail}` : "";
+    } catch {
+      return "";
+    }
+  }
+
   async startDaemon() {
+    // Rant 2026-08-09T13:16:36 ⑤：spawn 节流——超过上限不再拉起（防窗口/重试风暴）。
+    if (this._spawnAttempts >= MAX_SPAWN_ATTEMPTS) {
+      throw new Error(
+        `daemon failed to start after ${MAX_SPAWN_ATTEMPTS} attempts — ` +
+        `please start it manually ('emrg server') and check emrgd.log${this._readLogTail()}`
+      );
+    }
+    this._spawnAttempts += 1;
     // Phase 4（rant #12 §4）：打包模式直接 spawn 捆绑 emrgd 可执行文件（脚本内部
     // exec python -m emrg.server）；源码模式保持 python -m emrg.server。
     if (this._isPackaged) {
@@ -116,7 +143,7 @@ class DaemonClient {
         if (await this.isRunning(500)) return child;
         await new Promise((r) => setTimeout(r, 300));
       }
-      throw new Error("emrgd failed to start within timeout");
+      throw new Error(`emrgd failed to start within timeout${this._readLogTail()}`);
     }
     // G125：spawn 设 cwd=project_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
     const python = this._findPython();
@@ -138,7 +165,7 @@ class DaemonClient {
       if (await this.isRunning(500)) return child;
       await new Promise((r) => setTimeout(r, 300));
     }
-    throw new Error("emrgd failed to start within timeout");
+    throw new Error(`emrgd failed to start within timeout${this._readLogTail()}`);
   }
 
   _findDaemonExecutable() {
@@ -240,6 +267,7 @@ class DaemonClient {
 
     this.connected = true;
     this._authFailed = false;
+    this._spawnAttempts = 0; // 连接生命周期成功 → 重置 spawn 节流计数
 
     // 5. 注册 message/close 监听 → 事件流分发
     this.ws.on("message", (data) => this._onFrame(data));

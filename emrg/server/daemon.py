@@ -27,6 +27,7 @@ import yaml
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
+from emrg._win import win32_no_window_kwargs
 from emrg.config import LlmConfig, config_dir
 from emrg.connect import cleanup_server
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
@@ -672,6 +673,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             output = stdout.decode("utf-8", errors="replace")
@@ -705,6 +707,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             stdout, _ = await asyncio.wait_for(
                 proc.communicate(token.encode("utf-8") + b"\n"), timeout=30
@@ -737,6 +740,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             await asyncio.wait_for(proc.communicate(), timeout=30)
             return proc.returncode == 0
@@ -757,6 +761,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
             if proc.returncode != 0:
@@ -802,6 +807,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
         except (OSError, ValueError):
             return {"ok": False, "code": None, "url": None,

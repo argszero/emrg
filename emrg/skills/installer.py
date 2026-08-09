@@ -77,10 +77,15 @@ HttpGet = Callable[[str], Awaitable[Optional[dict]]]
 
 async def _default_runner(cmd: list[str], **kwargs) -> CmdResult:
     """Run a command via asyncio subprocess (captures merged output)."""
+    from emrg._win import win32_no_window_kwargs
+
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        # Windows: background daemon children must not pop a console window
+        # (rant 2026-08-09T13:16:36 — cmd-window storm).
+        **win32_no_window_kwargs(),
         **kwargs,
     )
     out, _ = await proc.communicate()

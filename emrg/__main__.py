@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from emrg import __version__
+from emrg._win import win32_no_window_kwargs
 from emrg.connect import cleanup_server, connect_to_server
 from websockets.exceptions import ConnectionClosed
 
@@ -126,6 +127,9 @@ def _start_daemon_background() -> subprocess.Popen:
         stdin=subprocess.DEVNULL,
         start_new_session=True,
         close_fds=True,
+        # Windows: background daemon spawn must not pop a console window
+        # (rant 2026-08-09T13:16:36 — cmd-window storm).
+        **win32_no_window_kwargs(),
     )
     return proc
 
@@ -341,6 +345,7 @@ def _run_update() -> None:
             text=True,
             encoding="utf-8",
             timeout=10,
+            **win32_no_window_kwargs(),
         )
         if result.returncode != 0:
             print(f"git pull failed:\n{result.stderr}", file=sys.stderr)
@@ -357,6 +362,7 @@ def _run_update() -> None:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        **win32_no_window_kwargs(),
     )
     if result.returncode != 0:
         print(f"reinstall failed:\n{result.stderr}", file=sys.stderr)
