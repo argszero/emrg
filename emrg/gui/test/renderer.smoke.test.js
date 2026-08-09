@@ -363,6 +363,164 @@ test("rant 14:11：首条消息后欢迎屏立即隐藏（append 同步 updateEm
   assert.strictEqual(r.emptyHidden, true, "有消息时欢迎屏应隐藏（欢迎屏不得叠在消息区上方）");
 });
 
+test("rant 21:00:28：块投影——流式中标题即时渲染，稳定块缓存不重建", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = await vm.runInContext(`(async function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    // 假 marked：空行分隔块，heading 行 → heading token，其余合并 paragraph
+    window.marked = {
+      use: () => {},
+      parser: (tokens) => tokens.map((t) => t.type === "heading" ? "<h2>" + t.text + "</h2>" : "<p>" + t.text + "</p>").join(""),
+      parse: async (t) => "<div>" + t + "</div>",
+      lexer: (text) => {
+        const toks = [];
+        const blocks = text.split(/\\n\\n+/);
+        for (const b of blocks) {
+          const lines = b.split("\\n");
+          if (/^#{1,6}\\s/.test(lines[0])) toks.push({ type: "heading", raw: lines[0], text: lines[0].replace(/^#+\\s*/, "") });
+          else if (b.trim()) toks.push({ type: "paragraph", raw: b, text: b.replace(/\\n/g, " ") });
+        }
+        return toks;
+      },
+    };
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "# 标题" }]);
+    const body = $("chat-view").children[0].querySelector(".msg-body");
+    const stream = body.querySelector(".md-stream");
+    const live1 = stream.children[stream.children.length - 1]; // 尾部 live 块
+    const h2WhileStreaming = live1.className.includes("live") && live1.innerHTML.includes("<h2>");
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "\\n\\n正文段落" }]);
+    const stable = stream.children[0];
+    const live2 = stream.children[stream.children.length - 1];
+    const firstIsHeading = stable.innerHTML.includes("<h2>");
+    const liveIsParagraph = live2.innerHTML.includes("<p>正文段落</p>");
+    // 稳定块缓存：再追加增量，首个稳定块节点身份不变（不重建 → 不闪烁/不打断选中）
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: " 追加" }]);
+    const stableSame = (stream.children[0] === stable);
+    return { h2WhileStreaming, firstIsHeading, liveIsParagraph, stableSame };
+  })()`, ctx);
+  assert.strictEqual(r.h2WhileStreaming, true, "流式过程中标题应即时渲染为 h2");
+  assert.strictEqual(r.firstIsHeading, true, "稳定块应完整渲染标题");
+  assert.strictEqual(r.liveIsParagraph, true, "live 块应渲染段落");
+  assert.strictEqual(r.stableSame, true, "稳定块 DOM 应缓存复用（不重建）");
+});
+
+test("rant 21:00:28：代码块围栏未闭合纯文本不高亮，闭合后转完整渲染", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = await vm.runInContext(`(function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    // 假 marked：整个输入视为一个 code token（raw 含未闭合/闭合围栏由内容决定）
+    window.marked = {
+      use: () => {},
+      parser: (tokens) => tokens.map((t) => "<pre class=\\"hljs\\">" + t.text + "</pre>").join(""),
+      parse: async (t) => "<div>" + t + "</div>",
+      lexer: (text) => {
+        const m = /\`\`\`\\w*\\n([\\s\\S]*?)(\`\`\`\\s*)?$/.exec(text);
+        return [{ type: "code", raw: text, text: m ? m[1] : text }];
+      },
+    };
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "before\\n\\\`\\\`\\\`python\\nprint(1)" }]);
+    const body = $("chat-view").children[0].querySelector(".msg-body");
+    const live = body.querySelector(".md-stream");
+    const liveDiv = live.children[live.children.length - 1]; // 尾部 live 块（单类选择器 mock 限制）
+    const unclosedPlain = liveDiv.className.includes("live") && liveDiv.innerHTML.startsWith("<pre class=\\"stream-code\\">") && !liveDiv.innerHTML.includes("hljs");
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "\\n\\\`\\\`\\\`" }]);
+    const liveDiv2 = live.children[live.children.length - 1];
+    const closedHighlight = liveDiv2.className.includes("live") && liveDiv2.innerHTML.includes("hljs") && !liveDiv2.innerHTML.includes("stream-code");
+    return { unclosedPlain, closedHighlight };
+  })()`, ctx);
+  assert.strictEqual(r.unclosedPlain, true, "围栏未闭合 → 纯文本不高亮（TUI fence_count%2 启发式一致）");
+  assert.strictEqual(r.closedHighlight, true, "围栏闭合 → 转完整渲染（高亮）");
+});
+
+test("rant 21:00:28：done 收尾 live 块转 full（mark span 保留，typing 移除）", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  const r = await vm.runInContext(`(async function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    window.marked = {
+      use: () => {},
+      parser: (tokens) => tokens.map((t) => "<p>" + t.text + "</p>").join(""),
+      parse: async (t) => "<div class=\\"full\\">" + t + "</div>",
+      lexer: (text) => [{ type: "paragraph", raw: text, text }],
+    };
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "部分" }]);
+    const node = $("chat-view").children[0];
+    const body = node.querySelector(".msg-body");
+    EMRG_Chat.handleDone({ request_id: "rid-1" });
+    await new Promise((res) => setTimeout(res, 10)); // 等 streamFinalize microtask
+    const stream = body.querySelector(".md-stream");
+    const fullRendered = stream.innerHTML.includes("class=\\"full\\"");
+    const markKept = (body.children[0].className || "").includes("msg-assistant-mark");
+    const typingAfter = body.classList.contains("typing");
+    return { fullRendered, markKept, typingAfter };
+  })()`, ctx);
+  assert.strictEqual(r.fullRendered, true, "done 后容器应整体渲染（live 转 full 校正）");
+  assert.strictEqual(r.markKept, true, "✦ mark span 应保留为元素（块语法不被前缀破坏）");
+  assert.strictEqual(r.typingAfter, false, "done 后 typing 光标应移除");
+});
+
+test("rant 21:00:28：真实 marked 集成——块投影与真实分词一致（未闭合围栏纯文本→闭合高亮→done full）", async () => {
+  const markedReal = require(path.join(__dirname, "..", "vendor", "marked.min.js")).marked;
+  const { ctx } = makeSandbox();
+  await tick();
+  ctx.marked = markedReal; // 注入真实 marked 到 vm 全局（window.marked）
+  const r = await vm.runInContext(`(async function() {
+    App.state.sessionId = "s1";
+    App.state.ownStreamRequestId = "rid-1";
+    const bodyOf = () => $("chat-view").children[0].querySelector(".msg-body");
+    const liveOf = (b) => {
+      const s = b.querySelector(".md-stream");
+      return s.children[s.children.length - 1]; // 尾部 live 块（单类选择器 mock 限制）
+    };
+    const streamOf = (b) => b.querySelector(".md-stream");
+    // 1. 流式标题即时渲染
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "# 标题" }]);
+    const b1 = bodyOf();
+    const liveHeading = liveOf(b1).innerHTML; // 应为 <h1>标题</h1>（单个 #）
+    // 2. 追加段落 → 标题变稳定块，live 变段落
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "\\n\\n正文段落" }]);
+    const s2 = streamOf(b1);
+    const stableHeading = s2.children[0].innerHTML;
+    const livePara = s2.children[s2.children.length - 1].innerHTML;
+    // 3. 未闭合代码围栏 → 纯文本不高亮
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "\\n\\n\\\`\\\`\\\`python\\nprint(1)" }]);
+    const s3 = streamOf(b1);
+    const liveUnclosed = s3.children[s3.children.length - 1].innerHTML;
+    // 4. 闭合围栏 → 完整渲染（codeRenderer 容器 code-block）
+    EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "\\n\\\`\\\`\\\`" }]);
+    const s4 = streamOf(b1);
+    const liveClosed = s4.children[s4.children.length - 1].innerHTML;
+    // 5. done → full 渲染（同源 renderMarkdown）
+    EMRG_Chat.handleDone({ request_id: "rid-1" });
+    await new Promise((res) => setTimeout(res, 20));
+    const s5 = streamOf(b1);
+    return {
+      liveHeading,
+      stableHeading,
+      livePara,
+      liveUnclosed,
+      liveClosed,
+      fullHtml: s5.innerHTML,
+      markKept: (b1.children[0].className || "").includes("msg-assistant-mark"),
+    };
+  })()`, ctx);
+  assert.strictEqual(r.liveHeading, "<h1>标题</h1>\n", "流式中标题应即时渲染为 h1（真实 marked）");
+  assert.strictEqual(r.stableHeading, "<h1>标题</h1>\n", "追加后标题应转稳定块完整渲染");
+  assert.strictEqual(r.livePara, "<p>正文段落</p>\n", "live 块应渲染段落");
+  assert.ok(r.liveUnclosed.includes("stream-code"), `未闭合围栏应纯文本，实际 ${r.liveUnclosed}`);
+  assert.ok(!r.liveUnclosed.includes("code-block"), "未闭合围栏不得出现 code-block（不高亮）");
+  assert.ok(r.liveClosed.includes("code-block"), `闭合围栏应转完整渲染（codeRenderer），实际 ${r.liveClosed}`);
+  assert.ok(!r.liveClosed.includes("stream-code"), "闭合后不得再走纯文本路径");
+  assert.ok(r.fullHtml.includes("<h1>标题</h1>"), "done 后 full 渲染应含标题");
+  assert.ok(r.fullHtml.includes("code-block"), "done 后 full 渲染应含代码块");
+  assert.strictEqual(r.markKept, true, "done 后 mark span 应保留");
+});
+
 test("rant 14:11：done 后残留 delta 被丢弃，不建孤儿节点", async () => {
   const { ctx } = makeSandbox();
   await tick();

@@ -120,8 +120,14 @@ const Chat = (() => {
       const content = chunk.content || "";
       if (content) group.hasText = true;
       const body = group.node.querySelector(".msg-body") || group.node;
-      // 流式中只动 textContent（不解析 Markdown）——性能约束
-      body.textContent += content;
+      // rant 21:00:28：流式 markdown（块投影）——稳定块完整渲染并缓存 DOM（不闪烁/不打断选中），
+      // 尾部 live 块只渲染已稳定部分；代码围栏未闭合 → 纯文本不高亮（TUI fence_count%2 启发式一致）。
+      // 无 marked.lexer 或投影异常 → 回退既有纯文本追加（done 时整体渲染）。
+      const stream = group.node.__stream || (group.node.__stream = { stableCount: 0, container: null, live: null, rawText: "" });
+      const raw = stream.rawText + content;
+      if (!window.emrgMarkdown.streamProject(body, raw, stream)) {
+        body.textContent += content;
+      }
       scrollToBottom();
     }
   }
@@ -147,7 +153,20 @@ const Chat = (() => {
         for (const node of group.nodes) {
           const body = node.querySelector(".msg-body") || node;
           body.classList.remove("typing");
-          // rant 21:10：✦ 标记是元素而非文本——流式时 body.textContent 含 "✦ " 前缀，
+          // rant 21:00:28：流式投影结束 → live 块转 full 一次性校正（与旧 done 渲染同源 renderMarkdown）
+          const stream = node.__stream;
+          if (stream && stream.container) {
+            const render = () => {
+              window.emrgMarkdown.streamFinalize(body, stream.rawText).then(() => scrollToBottom());
+            };
+            if (window.requestIdleCallback) {
+              window.requestIdleCallback(render, { timeout: 2000 });
+            } else {
+              render();
+            }
+            continue;
+          }
+          // 非流式路径（既有）：✦ 标记是元素而非文本——流式时 body.textContent 含 "✦ " 前缀，
           // 直接整体 render 会让 "✦ # Title" 等块语法（标题/列表/代码围栏）解析失败
           // （前缀不在行首 → marked 不识别）。渲染前剥离前缀，渲染后重新插入标记保持视觉一致。
           const text = body.textContent.replace(/^✦\s*/, "");
