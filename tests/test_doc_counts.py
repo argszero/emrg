@@ -4,6 +4,12 @@ Pattern history: #426 -> #430 -> #510 -> #511. Every time tests are added or
 removed, the documented counts drift and require a follow-up doc PR. This
 module asserts the documented Python count matches the real collection, and
 that the documented GUI breakdown sums to its headline number.
+
+#584: README.cn.md was the only test-count doc NOT guarded — it drifted to
+91 (22 renderer smoke) while README.md/Agent.md said 96 (27 renderer smoke)
+after #580 added 3 GUI tests. Both checks now cover all three docs
+(README.md, README.cn.md, Agent.md); CJK full-width parens and the
+"项：" separator are normalized before matching.
 """
 
 import re
@@ -29,11 +35,14 @@ def _collected_pytest_count() -> int:
 def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
     """Extract (label, headline, parts) for every documented GUI count."""
     found = []
-    for doc in ("README.md", "Agent.md"):
+    for doc in ("README.md", "README.cn.md", "Agent.md"):
         text = (REPO_ROOT / doc).read_text(encoding="utf-8")
         for line in text.splitlines():
             if "npm test" not in line:
                 continue
+            # CJK docs use full-width parens and "（N 项：..." instead of "(N: ..."
+            line = line.replace("（", "(").replace("）", ")")
+            line = re.sub(r"(\d+) 项：", r"\1: ", line)
             m = re.search(r"\((\d+): ([^)]+)\)", line)
             if not m:
                 continue
@@ -51,10 +60,13 @@ def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
 
 def test_python_count_matches_docs() -> None:
     collected = _collected_pytest_count()
-    for doc in ("README.md", "Agent.md"):
+    for doc in ("README.md", "README.cn.md", "Agent.md"):
         text = (REPO_ROOT / doc).read_text(encoding="utf-8")
-        # README: "run tests (currently N items)" | Agent.md: "pytest tests/ -v` (N)"
+        # README: "run tests (currently N items)" | README.cn: "（当前 N 项）"
+        # Agent.md: "pytest tests/ -v` (N)"
         m = re.search(r"currently (\d+) items", text) or re.search(
+            r"当前 (\d+) 项", text
+        ) or re.search(
             r"uv run pytest tests/ -v` \((\d+)\)", text
         )
         assert m, f"no documented Python count found in {doc}"

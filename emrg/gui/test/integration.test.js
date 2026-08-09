@@ -41,7 +41,11 @@ process.env.HOME = tmp;
 process.env.USERPROFILE = tmp;
 
 function findPython() {
-  const root = path.resolve(__dirname, "..", ".."); // emrg/gui → 项目根
+  // G129: 本文件位于 emrg/gui/test/ —— 必须上溯 3 级到仓库根（emrg/gui/ 下的
+  // daemon_client.js 才是 2 级）。此前只上溯 2 级解析到 emrg/ 包目录，找不到
+  // .venv → 回退 PATH python3/python；本机 PATH python 是损坏的
+  // ~/.emrg/install/bin/python.exe（Failed to import encodings）→ daemon 起不来。
+  const root = path.resolve(__dirname, "..", "..", ".."); // test → gui → emrg → 仓库根
   const candidates = [
     path.join(root, ".venv", "bin", "python"),
     path.join(root, ".venv", "Scripts", "python.exe"),
@@ -65,7 +69,7 @@ function waitForPortFile(timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const check = () => {
       try {
-        const text = fs.readFileSync(PORT_FILE(), "utf8");
+        const text = fs.readFileSync(PORT_FILE(tmp), "utf8");
         if (text && text.trim()) return resolve(text);
       } catch { /* not yet */ }
       if (Date.now() > deadline) return reject(new Error("daemon port file timeout"));
@@ -180,7 +184,7 @@ test("daemon 被杀 → ensureConnected 重连（G43 stale port 流程）", { sk
   // ensureConnected 应自动重拉（G43 stale port）
   await client.ensureConnected();
   assert.strictEqual(client.connected, true);
-  assert.ok(fs.existsSync(PORT_FILE()), "new port file written");
+  assert.ok(fs.existsSync(PORT_FILE(tmp)), "new port file written");
   // 重连后可继续通信
   const frame = await client.sendCommandAndWait("list_sessions", { cwd: tmp }, 5000);
   assert.strictEqual(frame.type, "sessions_list");

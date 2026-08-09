@@ -18,7 +18,12 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const WebSocket = require("ws");
 
-const PORT_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.port");
+// G129 (rant 2026-08-09T08:03:46): PORT_FILE 必须接受 projectDir——硬编码
+// os.homedir() 时，Windows 测试的 setupTempHome() 只设 HOME 不设 USERPROFILE，
+// os.homedir() 仍读 USERPROFILE（真实用户目录）→ 测试把假 port/token 写进
+// 真实的 ~/.emrg/emrgd.port → 演化周期 10 小时连不上 daemon（WinError 1225）。
+// 所有调用点必须传 this.projectDir（默认 os.homedir() 保持生产行为不变）。
+const PORT_FILE = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.port");
 const MAX_PAYLOAD = 16 * 1024 * 1024; // G62/G105：16MB 双向一致（工具输出上限 200KB）
 const AUTH_TIMEOUT_MS = 10_000;
 const SPAWN_WAIT_MS = 5_000;
@@ -74,7 +79,7 @@ class DaemonClient {
   isRunning(timeoutMs = 1500) {
     // G43/G90：TCP 探测（不可简化为 port 文件存在）
     try {
-      const port = Number(fs.readFileSync(PORT_FILE(), "utf8").split("\n")[0]);
+      const port = Number(fs.readFileSync(PORT_FILE(this.projectDir), "utf8").split("\n")[0]);
       return new Promise((resolve) => {
         const sock = net.connect({ host: "127.0.0.1", port, timeout: timeoutMs });
         sock.once("connect", () => { sock.destroy(); resolve(true); });
@@ -166,12 +171,12 @@ class DaemonClient {
     // 1. 读 port 文件 → 无则拉 daemon
     let port, token;
     try {
-      const text = fs.readFileSync(PORT_FILE(), "utf8");
+      const text = fs.readFileSync(PORT_FILE(this.projectDir), "utf8");
       [port, token] = text.split(/\s+/);
       if (!port || !token) throw new Error("malformed port file");
     } catch {
       await this.startDaemon();
-      const text = fs.readFileSync(PORT_FILE(), "utf8");
+      const text = fs.readFileSync(PORT_FILE(this.projectDir), "utf8");
       [port, token] = text.split(/\s+/);
     }
 
@@ -188,9 +193,9 @@ class DaemonClient {
       // G43：port 文件存在但连不上（daemon 已死/端口被占）→ 删文件重拉一次
       this.logger.warn(`[gui] ws connect failed: ${e.message} — stale port, respawning daemon`);
       try { this.ws.close(); } catch { /* ignore */ }
-      try { fs.unlinkSync(PORT_FILE()); } catch { /* ignore */ }
+      try { fs.unlinkSync(PORT_FILE(this.projectDir)); } catch { /* ignore */ }
       await this.startDaemon();
-      const text = fs.readFileSync(PORT_FILE(), "utf8");
+      const text = fs.readFileSync(PORT_FILE(this.projectDir), "utf8");
       [port, token] = text.split(/\s+/);
       this.ws = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: MAX_PAYLOAD });
       await this._awaitOpen();
