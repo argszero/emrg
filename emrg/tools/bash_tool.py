@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 
+from emrg._win import win32_no_window_kwargs
 from emrg.server.git_utils import no_prompt_env
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
@@ -100,6 +101,10 @@ class BashTool(ToolExecutor):
                 # 2026-08-07T10:17:27).
                 env=no_prompt_env(),
                 preexec_fn=os.setsid if os.name != "nt" else None,
+                # Windows: background daemon children must never pop a
+                # console window (rant 2026-08-09T13:16:36 — cmd-window
+                # storm; bash tool was a top contributor).
+                **win32_no_window_kwargs(),
             )
             try:
                 stdout, stderr = await asyncio.wait_for(

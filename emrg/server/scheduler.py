@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 import yaml
 
+from emrg._win import win32_no_window_kwargs
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
 from websockets.exceptions import ConnectionClosed
@@ -185,6 +186,7 @@ class EvolutionHandler:
                 text=True,
                 timeout=5,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -224,6 +226,7 @@ class EvolutionHandler:
                 encoding="utf-8",
                 timeout=5,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             if result.returncode != 0 or result.stdout.strip() != "true":
                 return False
@@ -245,6 +248,7 @@ class EvolutionHandler:
                     encoding="utf-8",
                     timeout=5,
                     env=no_prompt_env(),
+                    **win32_no_window_kwargs(),
                 )
                 if not result.stdout.strip():
                     subprocess.run(
@@ -253,6 +257,7 @@ class EvolutionHandler:
                         capture_output=True,
                         timeout=5,
                         env=no_prompt_env(),
+                        **win32_no_window_kwargs(),
                     )
         except (subprocess.SubprocessError, OSError):
             pass
@@ -285,6 +290,7 @@ class EvolutionHandler:
                 encoding="utf-8",
                 timeout=10,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             if result.returncode == 0 and tag in result.stdout.split():
                 subprocess.run(
@@ -296,6 +302,7 @@ class EvolutionHandler:
                     timeout=30,
                     check=True,
                     env=no_prompt_env(),
+                    **win32_no_window_kwargs(),
                 )
                 logger.info(
                     "EvolutionHandler[%s]: evolution workspace aligned to %s",
@@ -406,6 +413,7 @@ class EvolutionHandler:
             subprocess.run(
                 cmd, capture_output=True, text=True, encoding="utf-8",
                 timeout=120, check=True, env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             return
         except subprocess.CalledProcessError as e:
@@ -422,6 +430,7 @@ class EvolutionHandler:
             ["git", "clone", ssh_url, str(target)],
             capture_output=True, text=True, encoding="utf-8",
             timeout=120, check=True, env=no_prompt_env(),
+            **win32_no_window_kwargs(),
         )
 
     def _ensure_origin_reachable(self) -> None:
@@ -451,6 +460,7 @@ class EvolutionHandler:
             encoding="utf-8",
             timeout=15,
             env=no_prompt_env(),
+            **win32_no_window_kwargs(),
         )
         if result.returncode == 0:
             return  # reachable — keep https
@@ -464,6 +474,7 @@ class EvolutionHandler:
             encoding="utf-8",
             timeout=5,
             env=no_prompt_env(),
+            **win32_no_window_kwargs(),
         )
         if switch.returncode == 0:
             logger.warning(
@@ -517,7 +528,9 @@ class EvolutionHandler:
             wait_timeout = (
                 self._heartbeat_interval()
                 if self._saturation_heartbeat_active()
-                else self.interval
+                # Rant 2026-08-09T13:16:36: exponential backoff while the
+                # daemon is unreachable — stops the retry/window storm.
+                else self._connect_backoff()
             )
             # Wait for interval or manual trigger (interruptible)
             self._next_run_at = time.time() + wait_timeout
@@ -624,6 +637,7 @@ class EvolutionHandler:
                 text=True,
                 timeout=15,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             if result.returncode != 0:
                 # https github.com may be blocked while SSH port 22 works —
@@ -637,6 +651,7 @@ class EvolutionHandler:
                         text=True,
                         timeout=15,
                         env=no_prompt_env(),
+                        **win32_no_window_kwargs(),
                     )
             if result.returncode != 0:
                 return False
@@ -652,6 +667,23 @@ class EvolutionHandler:
         keep their original cadence (the 8x/8h caps don't apply).
         """
         return max(self.interval, min(self.interval * 8, 8 * 3600))
+
+    def _connect_backoff(self) -> float:
+        """Exponential backoff while the daemon is unreachable.
+
+        Rant 2026-08-09T13:16:36 (v0.2.15 Windows regression): when the
+        daemon is down (emrgd.port missing), every tick's connect failure
+        returned immediately and the loop re-ran at full interval — with
+        multiple handlers that produced a per-second retry/window storm.
+        Backoff = max(30s, interval * 2^n) capped at 10 minutes, where n
+        is the consecutive-failure count. Returns the normal interval when
+        there are no consecutive failures.
+        """
+        if self._connect_failures <= 0:
+            return float(self.interval)
+        n = min(self._connect_failures, 10)  # cap the exponent growth
+        backoff = max(30.0, float(self.interval) * (2 ** n))
+        return min(backoff, 600.0)  # never wait longer than 10 minutes
 
     def _saturation_heartbeat_active(self) -> bool:
         """Whether this tick should run at the low-frequency heartbeat interval

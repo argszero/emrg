@@ -302,6 +302,7 @@ const I18N = (() => {
       "app.unknownError": "未知错误",
       "app.unknown": "未知",
       "app.authFailed": "认证失败了，请检查设置里的 API Key。",
+      "app.daemonStopped": "daemon 启动失败（已停止自动重试）。请在终端运行 `emrg server` 排查；\n{msg}",
       "app.versionInfo": "EMRG GUI v{ver} · 实例 {id} · 模型 {model} · 已进化 {n} 次",
     },
 
@@ -592,6 +593,7 @@ const I18N = (() => {
       "app.unknownError": "Unknown error",
       "app.unknown": "unknown",
       "app.authFailed": "Authentication failed — check your API Key in Settings.",
+      "app.daemonStopped": "daemon failed to start (auto-retry stopped). Run `emrg server` in a terminal to debug;\n{msg}",
       "app.versionInfo": "EMRG GUI v{ver} · Instance {id} · Model {model} · Evolved {n} times",
     },
   };
