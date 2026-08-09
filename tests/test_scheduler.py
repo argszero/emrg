@@ -1137,6 +1137,87 @@ def test_evolution_cycle_aborted_resets_empty_streak(tmp_path):
     assert handler._empty_cycles == 0, "abort resets the streak (not a real empty cycle)"
 
 
+# ── Connect-failure alerting (G129, rant 2026-08-09T08:03:46) ─────
+# GUI tests once overwrote the real ~/.emrg/emrgd.port with fake values,
+# so the evolution cycle failed to reach the daemon for 10 hours with only
+# a WARNING log. Consecutive failures must escalate to ERROR + carry an
+# actionable hint (check the port file), never silently swallow.
+
+def test_evolution_cycle_connect_failure_escalates_to_error(tmp_path, caplog):
+    """Repeated connect failures must escalate from warning to error alert."""
+    import logging
+
+    from emrg.server import scheduler as mod
+
+    handler, captured = _make_cycle_handler(tmp_path, frames=[])
+    async def _refuse():
+        raise ConnectionRefusedError("no daemon")
+    mod.connect_to_server = _refuse
+    try:
+        for i in range(handler._CONNECT_FAIL_ALERT):
+            with caplog.at_level(logging.ERROR, logger="emrg.server.scheduler"):
+                asyncio.run(handler._run_evolution_cycle())
+                assert "log" not in captured, "connect failure must not write an evolution log"
+                assert handler.evolutions == []
+                assert handler._empty_cycles == 0, "connect failure ≠ empty cycle"
+        assert handler._connect_failures == handler._CONNECT_FAIL_ALERT
+        # 第 3 次（达到阈值）必须出现 ERROR 告警，且提示检查 port 文件
+        error_msgs = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error_msgs, "expected an ERROR alert after threshold"
+        assert any("emrgd.port" in m for m in error_msgs), error_msgs
+        assert any("consecutive" in m for m in error_msgs), error_msgs
+    finally:
+        mod.connect_to_server = _original_connect_to_server()
+
+
+def test_evolution_cycle_connect_failure_resets_on_success(tmp_path, caplog):
+    """A successful connection resets the consecutive-failure counter."""
+    from emrg.server import scheduler as mod
+
+    handler, captured = _make_cycle_handler(tmp_path, frames=[])
+    async def _refuse():
+        raise ConnectionRefusedError("no daemon")
+    mod.connect_to_server = _refuse
+    try:
+        asyncio.run(handler._run_evolution_cycle())
+        assert handler._connect_failures == 1
+        # 成功连接 → 计数归零
+        async def _fake_connect():
+            return _FakeWsForCycle([{"request_id": "r1", "content": "Done", "done": True,
+                                     "delta": False, "session_id": "s"}])
+        mod.connect_to_server = _fake_connect
+        asyncio.run(handler._run_evolution_cycle())
+        assert handler._connect_failures == 0, "success must reset the failure counter"
+    finally:
+        mod.connect_to_server = _original_connect_to_server()
+
+
+class _FakeWsForCycle:
+    """Minimal ws stand-in for the reset-on-success test."""
+    def __init__(self, frames):
+        import json as _json
+        from websockets.exceptions import ConnectionClosed as _Closed
+        self._frames = list(frames)
+        self._json = _json
+        self._Closed = _Closed
+        self.sent = []
+    async def send(self, msg):
+        self.sent.append(msg)
+    async def recv(self):
+        if self._frames:
+            return self._json.dumps(self._frames.pop(0), ensure_ascii=False)
+        raise self._Closed()
+    async def close(self):
+        pass
+
+
+def _original_connect_to_server():
+    """Restore the real connect_to_server after a test replaced it."""
+    import importlib
+    from emrg.server import scheduler as mod
+    return importlib.import_module("emrg.connect").connect_to_server
+
+
 # ── Saturation halt auto-resume on upstream advance ───────────────
 # The halt skips scheduled runs entirely, so a halted handler can never
 # detect a HEAD change itself (only /trigger could resume it). If every

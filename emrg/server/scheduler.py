@@ -142,6 +142,10 @@ class EvolutionHandler:
         #
         # Counter is persisted to disk to survive daemon restarts.
         self._IDLE_HALT_THRESHOLD = 30
+        # G129: 连续连接失败告警阈值——达到后升级为 ERROR（防静默吞掉，
+        # rant 2026-08-09T08:03:46：GUI 测试覆盖真实 emrgd.port 致 10h 连不上）。
+        self._CONNECT_FAIL_ALERT = 3
+        self._connect_failures = 0
         self._saturation_dir = config_dir() / "saturation"
         self._saturation_dir.mkdir(parents=True, exist_ok=True)
         self._saturation_file = self._saturation_dir / f"{self.name}.json"
@@ -684,10 +688,27 @@ class EvolutionHandler:
         try:
             ws = await connect_to_server()
             logger.info("EvolutionHandler[%s]: connected", self.name)
-        except (ConnectionRefusedError, FileNotFoundError) as e:
-            logger.warning(
-                "EvolutionHandler[%s]: cannot connect: %s", self.name, e
-            )
+            self._connect_failures = 0
+        except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+            # G129 (rant 2026-08-09T08:03:46): 连接失败不得静默吞掉——GUI 测试曾把
+            # 假 port 值写进真实 ~/.emrg/emrgd.port，导致演化周期 10 小时连不上
+            # daemon（WinError 1225）只留下 WARNING。累计失败达到阈值后升级为
+            # ERROR 告警，提示 port 文件可能被外部覆盖（检查 ~/.emrg/emrgd.port）。
+            self._connect_failures += 1
+            port_path = config_dir() / "emrgd.port"
+            if self._connect_failures >= self._CONNECT_FAIL_ALERT:
+                logger.error(
+                    "EvolutionHandler[%s]: cannot connect for %d consecutive cycles "
+                    "(%s) — daemon unreachable. Check %s (may have been overwritten "
+                    "by GUI tests or stale after daemon restart); run 'emrg server' "
+                    "or restart the daemon to recover.",
+                    self.name, self._connect_failures, e, port_path,
+                )
+            else:
+                logger.warning(
+                    "EvolutionHandler[%s]: cannot connect (%d/%d): %s",
+                    self.name, self._connect_failures, self._CONNECT_FAIL_ALERT, e,
+                )
             return
 
         task_msg = json.dumps(

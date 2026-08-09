@@ -63,18 +63,39 @@ Module._load = function (request, parent, isMain) {
 const { DaemonClient, generateSessionId, PORT_FILE } = require("../daemon_client.js");
 let tmpHome = null;
 let origHome = null;
+let origUserProfile = null;
+
+// G129 (rant 2026-08-09T08:03:46): 测试隔离守卫——写 port 文件前断言目标路径
+// 位于临时目录内。Windows 上 Node os.homedir() 优先读 USERPROFILE（HOME 无效），
+// 若无此守卫，PORT_FILE() 会解析到真实 ~/.emrg/emrgd.port，测试假值
+// ("41234\nseekrit-token") 会覆盖真实 daemon 端口文件 → 演化周期 10h 连不上。
+function assertPortFileInTmp(portFile) {
+  const resolved = path.resolve(portFile);
+  const tmpResolved = path.resolve(tmpHome);
+  assert.ok(
+    resolved.startsWith(tmpResolved + path.sep),
+    `port file ${resolved} escapes tmpHome ${tmpResolved} — refusing to write`,
+  );
+}
 
 function setupTempHome() {
   tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "emrg-gui-test-"));
   fs.mkdirSync(path.join(tmpHome, ".emrg"), { recursive: true });
   origHome = process.env.HOME;
+  origUserProfile = process.env.USERPROFILE;
   process.env.HOME = tmpHome;
-  // 预写 port 文件（模拟已运行 daemon）
-  fs.writeFileSync(PORT_FILE(), "41234\nseekrit-token");
+  // G129: Windows os.homedir() 读 USERPROFILE —— 必须一并重定向，否则
+  // os.homedir() 仍返回真实用户目录（这是 10h daemon gap 的直接根因）。
+  process.env.USERPROFILE = tmpHome;
+  // 预写 port 文件（模拟已运行 daemon）—— 路径必须落在 tmpHome 内
+  const portFile = PORT_FILE(tmpHome);
+  assertPortFileInTmp(portFile);
+  fs.writeFileSync(portFile, "41234\nseekrit-token");
 }
 
 function teardownTempHome() {
   if (origHome !== undefined) process.env.HOME = origHome; else delete process.env.HOME;
+  if (origUserProfile !== undefined) process.env.USERPROFILE = origUserProfile; else delete process.env.USERPROFILE;
   if (tmpHome) fs.rmSync(tmpHome, { recursive: true, force: true });
   tmpHome = null;
 }
@@ -130,13 +151,13 @@ test("ensureConnected: port 文件读取 + auth 首帧 + auth_ok", async () => {
 });
 
 test("ensureConnected: port 文件缺失 → 拉起 daemon（spawn 参数正确 G28/G68/G125）", async () => {
-  fs.rmSync(PORT_FILE(), { force: true });
+  fs.rmSync(PORT_FILE(tmpHome), { force: true });
   const client = new DaemonClient({ projectDir: tmpHome });
   // stub startDaemon：模拟拉起后写 port 文件
   let spawnCalls = null;
   client.startDaemon = async function () {
     spawnCalls = { python: this._findPython(), projectDir: this.projectDir };
-    fs.writeFileSync(PORT_FILE(), "41235\nseekrit-token");
+    fs.writeFileSync(PORT_FILE(tmpHome), "41235\nseekrit-token");
   };
   await connectClient(client);
   assert.ok(spawnCalls, "startDaemon should be called");
@@ -205,7 +226,7 @@ test("G43 stale port: 连接失败（port 文件存在但拒绝）→ 删文件�
   let respawned = false;
   client.startDaemon = async function () {
     respawned = true;
-    fs.writeFileSync(PORT_FILE(), "41236\nseekrit-token");
+    fs.writeFileSync(PORT_FILE(tmpHome), "41236\nseekrit-token");
   };
   const p = client.ensureConnected();
   await waitForWs();
@@ -214,7 +235,7 @@ test("G43 stale port: 连接失败（port 文件存在但拒绝）→ 删文件�
   // 重拉后创建第二个 ws → open → auth → auth_ok
   await waitForWs(() => currentMockWs !== firstWs);
   assert.ok(respawned, "startDaemon should respawn after stale port");
-  assert.strictEqual(fs.existsSync(PORT_FILE()), true);
+  assert.strictEqual(fs.existsSync(PORT_FILE(tmpHome)), true);
   assert.strictEqual(currentMockWs.url, "ws://127.0.0.1:41236");
   currentMockWs.emit("open");
   await waitForAuthSent(currentMockWs);
@@ -512,7 +533,7 @@ test("isRunning：TCP 探测（G43/G90）", async () => {
     net.connect = origConnect;
   }
   // port 文件缺失 → false
-  fs.rmSync(PORT_FILE(), { force: true });
+  fs.rmSync(PORT_FILE(tmpHome), { force: true });
   assert.strictEqual(await client.isRunning(), false);
 });
 
