@@ -1218,14 +1218,30 @@ def _original_connect_to_server():
     return importlib.import_module("emrg.connect").connect_to_server
 
 
-# ── Saturation halt auto-resume on upstream advance ───────────────
-# The halt skips scheduled runs entirely, so a halted handler can never
-# detect a HEAD change itself (only /trigger could resume it). If every
-# instance halted during an idle stretch, new upstream work would go
-# unnoticed — the halt must auto-resume when origin/master advances.
+# ── Saturation heartbeat: slow down, never stop (rant 2026-08-09T09:35:55) ─
+# The old complete halt (skipping scheduled runs) is replaced by
+# low-frequency full cycles: saturated ticks still run, just at the heartbeat
+# interval. Upstream advance auto-resumes (counter reset, normal frequency).
 
-def test_saturation_halt_active_true_when_remote_unchanged(tmp_path):
-    """At/above threshold + unchanged remote → tick skipped (halt stays)."""
+def test_heartbeat_interval_formula(tmp_path):
+    """heartbeat = max(interval, min(interval*8, 8h)); long intervals unchanged."""
+    from emrg.server import scheduler as mod
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    for interval, expected in [
+        (1, 8),            # min*8 floor below the 8h cap
+        (60, 480),         # emrg-task: 8 minutes
+        (600, 4800),       # 10-min task: 80 minutes
+        (3600, 28800),     # 1h task: 8h (cap)
+        (14400, 28800),    # 4h task: min(115200, 28800) = 8h (cap)
+        (28800, 28800),    # 8h task: unchanged (max keeps original)
+        (86400, 86400),    # 24h task: unchanged (8x beyond cap → original)
+    ]:
+        handler.interval = interval
+        assert handler._heartbeat_interval() == expected, (interval, expected)
+
+
+def test_saturation_heartbeat_active_true_when_remote_unchanged(tmp_path):
+    """At/above threshold + unchanged remote → heartbeat cadence (not skip)."""
     from emrg.server import scheduler as mod
 
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
@@ -1234,14 +1250,36 @@ def test_saturation_halt_active_true_when_remote_unchanged(tmp_path):
     orig_run = mod.subprocess.run
     mod.subprocess.run = fake
     try:
-        assert handler._saturation_halt_active() is True
+        assert handler._saturation_heartbeat_active() is True
         assert handler._empty_cycles == 30  # counter untouched
+        assert handler._heartbeat_interval() == 480  # 60s task → 8 min
     finally:
         mod.subprocess.run = orig_run
 
 
-def test_saturation_halt_resumes_and_resets_when_remote_advanced(tmp_path):
-    """At/above threshold + remote advanced → resume, counter reset to 0."""
+def test_saturation_heartbeat_log_message_no_skip(tmp_path, caplog):
+    """Saturation log must say heartbeat, never 'skipping scheduled run'."""
+    import logging
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler._empty_cycles = 30
+    fake = FakeGitRun(remote_head="abc123")
+    orig_run = mod.subprocess.run
+    mod.subprocess.run = fake
+    try:
+        with caplog.at_level(logging.INFO, logger="emrg.server.scheduler"):
+            assert handler._saturation_heartbeat_active() is True
+        msgs = " ".join(r.message for r in caplog.records)
+        assert "skipping scheduled run" not in msgs, \
+            "old complete-halt log must not appear (rant 09:35:55)"
+        assert "heartbeat" in msgs and "never halting" in msgs, msgs
+    finally:
+        mod.subprocess.run = orig_run
+
+
+def test_saturation_heartbeat_resumes_and_resets_when_remote_advanced(tmp_path):
+    """At/above threshold + remote advanced → normal frequency, counter reset."""
     from emrg.server import scheduler as mod
 
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
@@ -1250,22 +1288,43 @@ def test_saturation_halt_resumes_and_resets_when_remote_advanced(tmp_path):
     orig_run = mod.subprocess.run
     mod.subprocess.run = fake
     try:
-        assert handler._saturation_halt_active() is False
-        assert handler._empty_cycles == 0  # reset → scheduled runs resume
+        assert handler._saturation_heartbeat_active() is False
+        assert handler._empty_cycles == 0  # reset → normal frequency resumes
     finally:
         mod.subprocess.run = orig_run
 
 
-def test_saturation_halt_active_false_below_threshold(tmp_path):
-    """Below threshold → never halt (remote state irrelevant)."""
+def test_saturation_heartbeat_false_below_threshold(tmp_path):
+    """Below threshold → normal interval (remote state irrelevant)."""
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     handler._empty_cycles = 10
-    assert handler._saturation_halt_active() is False
+    assert handler._saturation_heartbeat_active() is False
     assert handler._empty_cycles == 10
 
 
+def test_saturated_tick_still_runs_full_cycle(tmp_path):
+    """Saturated handler runs a full cycle (never skipped) at heartbeat."""
+    from emrg.server import scheduler as mod
+
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+    handler._empty_cycles = 30  # saturated
+    fake = FakeGitRun(remote_head="abc123")  # unchanged → stay saturated
+    orig_run = mod.subprocess.run
+    mod.subprocess.run = fake
+    try:
+        asyncio.run(handler._run_evolution_cycle())
+    finally:
+        mod.subprocess.run = orig_run
+    assert "log" in captured, "saturated tick must still run a full cycle"
+    assert handler._empty_cycles == 31, \
+        "NTE cycle during saturation keeps incrementing (heartbeat continues)"
+
+
 def test_remote_advanced_false_without_git_repo(tmp_path):
-    """Not a git repo / ls-remote fails → False (stay halted, no crash)."""
+    """Not a git repo / ls-remote fails → False (stay saturated, no crash)."""
     from emrg.server import scheduler as mod
 
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
