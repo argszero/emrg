@@ -645,3 +645,57 @@ test("断连 pending 请求全部 reject + disconnected（G89）", async () => {
   assert.strictEqual(client._pending.size, 0);
   assert.strictEqual(client._pendingFifo.length, 0);
 });
+
+// ── Rant 2026-08-09T18:47:37（GUI 连不上 daemon 回归）──────────────────
+
+test("18:47:37: projectDir port 文件缺失 → 回退规范 ~/.emrg（home）→ 不 spawn 直接连接", async () => {
+  // 宿主场景：config gui.project_dir 指向非 home 目录 → projectDir/.emrg 无 port 文件，
+  // 真 daemon 写在 ~/.emrg/emrgd.port（setupTempHome 已预写 41234）。
+  const elsewhere = path.join(tmpHome, "elsewhere");
+  fs.mkdirSync(path.join(elsewhere, ".emrg"), { recursive: true });
+  const client = new DaemonClient({ projectDir: elsewhere });
+  let spawned = false;
+  client.startDaemon = async function () { spawned = true; };
+  await connectClient(client);
+  assert.strictEqual(spawned, false, "home 有 port 文件 → 必须复用，不 spawn");
+  assert.strictEqual(client.connected, true);
+  assert.strictEqual(currentMockWs.url, "ws://127.0.0.1:41234", "连接 canonical home port");
+});
+
+test("18:47:37: stale projectDir port + spawn 节流失败 → probe 复用 canonical home daemon", async () => {
+  // 宿主场景变体：projectDir 有 STALE port 文件（ws 连不上），真 daemon 在 home。
+  // ws 失败 → 删 projectDir stale 文件 → spawn 节流抛错 → probe 发现 home 活着 → 复用。
+  const elsewhere = path.join(tmpHome, "elsewhere");
+  fs.mkdirSync(path.join(elsewhere, ".emrg"), { recursive: true });
+  fs.writeFileSync(PORT_FILE(elsewhere), "41299\nstale-token"); // stale：无 daemon 监听
+  const client = new DaemonClient({ projectDir: elsewhere });
+  // spawn 命中节流（正是宿主看到的假错误 "after 3 attempts"）
+  client.startDaemon = async function () {
+    throw new Error("daemon failed to start after 3 attempts — please start it manually");
+  };
+  // TCP 探测：home port 文件指向的 41234 "可连接"（模拟真 daemon 在跑）
+  client.isRunning = async () => true;
+  // 捕获日志 → 断言 4 状态诊断字段齐全（B1/B3）
+  const logs = [];
+  client.logger = { info: (...a) => logs.push(a.join(" ")), warn: (...a) => logs.push(a.join(" ")) };
+  const p = client.ensureConnected();
+  await waitForWs();
+  const firstWs = currentMockWs;
+  firstWs.emit("error", new Error("connect ECONNREFUSED")); // 41299 拒绝
+  // probe 复用 → 新 ws 到 canonical home 41234 → open → auth → auth_ok
+  await waitForWs(() => currentMockWs !== firstWs);
+  assert.strictEqual(currentMockWs.url, "ws://127.0.0.1:41234", "复用 canonical home port");
+  currentMockWs.emit("open");
+  await waitForAuthSent(currentMockWs);
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "auth_ok" })));
+  await p;
+  assert.strictEqual(client.connected, true, "probe 到已有 daemon → 直接连接");
+  const probeLine = logs.find((l) => l.includes("probe:"));
+  assert.ok(probeLine, "必须输出 probe 诊断日志");
+  assert.match(probeLine, /port_file_exists=/);
+  assert.match(probeLine, /port_file_content=/);
+  assert.match(probeLine, /daemon_alive\(ping\)=/);
+  assert.match(probeLine, /spawn_result=/);
+  assert.match(probeLine, /failed\(daemon failed to start after 3 attempts/);
+  assert.ok(logs.some((l) => l.includes("existing daemon detected at port=41234, reusing")), "复用日志");
+});
