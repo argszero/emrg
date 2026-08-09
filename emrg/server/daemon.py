@@ -265,10 +265,15 @@ class EmrgServer:
         port = self._server.sockets[0].getsockname()[1]
         self._auth_token = secrets.token_urlsafe(32)
         self._assert_port_file(port)
+        # Rant 2026-08-09T18:47:37 B4：启动完成一行自证——pid/port/port 文件路径/写入成功，
+        # 宿主拿到 emrgd.log 就知道 daemon 到底起没起、写没写对文件。
         logger.info(
-            "emrgd listening on 127.0.0.1:%d | identity=%s",
+            "emrgd listening on 127.0.0.1:%d | identity=%s | pid=%d | port_file=%s | port_file_written_ok=%s",
             port,
             self.identity.instance_id[:8],
+            os.getpid(),
+            config_dir() / "emrgd.port",
+            (config_dir() / "emrgd.port").exists(),
         )
 
         # Rant 2026-08-09T13:16:36 root-cause self-heal: G43 stale-port logic

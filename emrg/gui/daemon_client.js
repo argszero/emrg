@@ -25,6 +25,15 @@ const WebSocket = require("ws");
 // 所有调用点必须传 this.projectDir（默认 os.homedir() 保持生产行为不变）。
 const PORT_FILE = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.port");
 const EMRGD_LOG = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.log");
+// Rant 2026-08-09T18:47:37（GUI 连不上 daemon 回归）：daemon 的规范运行时目录永远是
+// ~/.emrg（daemon.py config_dir() = Path.home()/".emrg"；connect.py 无条件读
+// ~/.emrg/emrgd.port）。GUI 的 projectDir 若被 config gui.project_dir 指向别处
+// （非 home），按 projectDir 读 port/pid/log 全部落空 → 误判 daemon 不存在 →
+// 反复 spawn 撞 PID 锁 → "failed to start after 3 attempts" 假错误，而真 daemon 一直活着。
+// 规范位置常量：作为 projectDir 读取失败时的权威回退。
+const HOME_PORT_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.port");
+const HOME_PID_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.pid");
+const HOME_EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
 const MAX_PAYLOAD = 16 * 1024 * 1024; // G62/G105：16MB 双向一致（工具输出上限 200KB）
 const AUTH_TIMEOUT_MS = 10_000;
 const SPAWN_WAIT_MS = 5_000;
@@ -82,32 +91,57 @@ class DaemonClient {
 
   // ── 生命周期 ────────────────────────────────────────────
 
-  isRunning(timeoutMs = 1500) {
-    // G43/G90：TCP 探测（不可简化为 port 文件存在）
-    try {
-      const port = Number(fs.readFileSync(PORT_FILE(this.projectDir), "utf8").split("\n")[0]);
-      return new Promise((resolve) => {
-        const sock = net.connect({ host: "127.0.0.1", port, timeout: timeoutMs });
-        sock.once("connect", () => { sock.destroy(); resolve(true); });
-        sock.once("error", () => { sock.destroy(); resolve(false); });
-        sock.once("timeout", () => { sock.destroy(); resolve(false); });
-      });
-    } catch {
-      return Promise.resolve(false);
+  // Rant 2026-08-09T18:47:37：读 port/token 的权威入口。先试 projectDir（G129 语义），
+  // 缺失/畸形时回退 daemon 规范位置 ~/.emrg。返回 {port, token, source} 或 null。
+  _readPortToken() {
+    const tryRead = (file) => {
+      try {
+        const text = fs.readFileSync(file, "utf8");
+        const [port, token] = text.split(/\s+/);
+        if (port && token) return { port, token };
+      } catch { /* missing/unreadable → try next */ }
+      return null;
+    };
+    const project = tryRead(PORT_FILE(this.projectDir));
+    if (project) return { ...project, source: "projectDir" };
+    const home = tryRead(HOME_PORT_FILE());
+    if (home) {
+      this.logger.warn(
+        `[gui] port file not found at projectDir (${PORT_FILE(this.projectDir)}) — ` +
+        `reusing canonical ~/.emrg/emrgd.port (port=${home.port})`
+      );
+      return { ...home, source: "home" };
     }
+    return null;
+  }
+
+  isRunning(timeoutMs = 1500) {
+    // G43/G90：TCP 探测（不可简化为 port 文件存在）。18:47:37：port 源改为权威读取
+    // （projectDir 回退 ~/.emrg），否则 projectDir≠home 时永远探测假路径 → 假 false。
+    const pt = this._readPortToken();
+    if (!pt) return Promise.resolve(false);
+    const port = Number(pt.port);
+    return new Promise((resolve) => {
+      const sock = net.connect({ host: "127.0.0.1", port, timeout: timeoutMs });
+      sock.once("connect", () => { sock.destroy(); resolve(true); });
+      sock.once("error", () => { sock.destroy(); resolve(false); });
+      sock.once("timeout", () => { sock.destroy(); resolve(false); });
+    });
   }
 
   _readLogTail(lines = 15) {
     // R124 对应（daemon_manager.py）：spawn 超时后读 emrgd.log 尾部，
     // 让宿主看到真实失败原因（缺 DLL / PATH / 端口冲突），而不是干巴巴的
     // "failed to start within timeout"（rant 2026-08-09T13:16:36 验收项 ②）。
-    try {
-      const data = fs.readFileSync(EMRGD_LOG(this.projectDir), "utf8");
-      const tail = data.trim().split("\n").slice(-lines).join("\n");
-      return tail ? `\n  emrgd.log tail:\n${tail}` : "";
-    } catch {
-      return "";
+    // 18:47:37：log 也在规范 ~/.emrg 下——projectDir 读不到就回退 home。
+    for (const file of [EMRGD_LOG(this.projectDir), HOME_EMRGD_LOG()]) {
+      try {
+        const data = fs.readFileSync(file, "utf8");
+        const tail = data.trim().split("\n").slice(-lines).join("\n");
+        return tail ? `\n  emrgd.log tail (${file}):\n${tail}` : "";
+      } catch { /* try next */ }
     }
+    return "";
   }
 
   async startDaemon() {
@@ -138,6 +172,7 @@ class DaemonClient {
       const child = spawn(emrgdPath, [], opts);
       child.unref();
       this._daemonChild = child;
+      this.logger.info(`[gui] daemon spawned: pid=${child.pid} (packaged emrgd)`); // 18:47:37 B2
       const deadline = Date.now() + SPAWN_WAIT_MS;
       while (Date.now() < deadline) {
         if (await this.isRunning(500)) return child;
@@ -159,6 +194,7 @@ class DaemonClient {
     });
     child.unref(); // GUI 退出不带走 daemon
     this._daemonChild = child; // 暴露 child（集成测试 after 清理用）
+    this.logger.info(`[gui] daemon spawned: pid=${child.pid} (source mode)`); // 18:47:37 B2
     // 等最多 SPAWN_WAIT_MS 就绪
     const deadline = Date.now() + SPAWN_WAIT_MS;
     while (Date.now() < deadline) {
@@ -171,17 +207,24 @@ class DaemonClient {
   // Rant 2026-08-09T13:16:36 G43 加固：daemon 进程是否存活（emrgd.pid 探测）。
   // 存活 → ws 连接失败视为瞬时（daemon 重启/启动中），保留 port 文件交给退避重试；
   // 死亡 → 允许 G43 删文件重拉。
+  // 18:47:37：pid 文件也在规范 ~/.emrg —— projectDir 读不到回退 home。
   _daemonProcessAlive() {
-    try {
-      const pidFile = path.join(this.projectDir, ".emrg", "emrgd.pid");
-      const pid = Number(String(fs.readFileSync(pidFile, "utf8")).trim());
-      if (!Number.isInteger(pid) || pid <= 0) return false;
-      process.kill(pid, 0); // 信号 0 = 仅探测存在性
-      return true;
-    } catch (err) {
-      if (err && err.code === "EPERM") return true; // 进程存在但权限不同（Windows）
-      return false; // ESRCH（不存在）/ ENOENT（无 pid 文件）
+    const pidFiles = [
+      path.join(this.projectDir, ".emrg", "emrgd.pid"),
+      HOME_PID_FILE(),
+    ];
+    for (const pidFile of pidFiles) {
+      try {
+        const pid = Number(String(fs.readFileSync(pidFile, "utf8")).trim());
+        if (!Number.isInteger(pid) || pid <= 0) return false;
+        process.kill(pid, 0); // 信号 0 = 仅探测存在性
+        return true;
+      } catch (err) {
+        if (err && err.code === "EPERM") return true; // 进程存在但权限不同（Windows）
+        // ESRCH（不存在）/ ENOENT（无 pid 文件）→ 试下一个候选
+      }
     }
+    return false;
   }
 
   _findDaemonExecutable() {
@@ -210,17 +253,71 @@ class DaemonClient {
     return "python3";
   }
 
-  async ensureConnected() {
-    // 1. 读 port 文件 → 无则拉 daemon
-    let port, token;
+  // Rant 2026-08-09T18:47:37（A1 + B1）：探测"已存在的 daemon"——4 状态诊断日志
+  // （port_file_exists / port_file_content / daemon_alive(ping) / spawn_result）。
+  // spawn 失败 ≠ daemon 不存在：GUI 可能因 projectDir≠home 读错 port 文件，
+  // 或 daemon 早已被 scheduler/TUI 拉起。返回 {port, token} 或 null。
+  async _probeExistingDaemon(spawnResult = "n/a") {
+    const pt = this._readPortToken();
+    const portFileExists = !!(pt || this._readPortTokenRaw());
+    const alive = pt ? await this.isRunning(1000) : false;
+    this.logger.info(
+      `[gui] probe: port_file_exists=${portFileExists}, port_file_content=${pt ? pt.port : "—"}, ` +
+      `daemon_alive(ping)=${alive}, spawn_result=${spawnResult}`
+    );
+    if (pt && alive) return pt;
+    return null;
+  }
+
+  // 读 port 文件原始存在性（不含解析），供 probe 日志用。
+  _readPortTokenRaw() {
+    for (const file of [PORT_FILE(this.projectDir), HOME_PORT_FILE()]) {
+      try { if (fs.readFileSync(file, "utf8").trim()) return true; } catch { /* next */ }
+    }
+    return false;
+  }
+
+  // Rant 2026-08-09T18:47:37（A1）：spawn 失败（含 3 次节流）→ 探测已有 daemon →
+  // 活着直接复用；确实无 daemon 才抛原始错误。spawn 成功则读回 port/token。
+  async _spawnOrProbe() {
     try {
-      const text = fs.readFileSync(PORT_FILE(this.projectDir), "utf8");
-      [port, token] = text.split(/\s+/);
-      if (!port || !token) throw new Error("malformed port file");
-    } catch {
       await this.startDaemon();
-      const text = fs.readFileSync(PORT_FILE(this.projectDir), "utf8");
-      [port, token] = text.split(/\s+/);
+    } catch (spawnErr) {
+      const existing = await this._probeExistingDaemon(`failed(${String(spawnErr.message).slice(0, 60)})`);
+      if (existing) {
+        this.logger.warn(
+          `[gui] spawn failed (${spawnErr.message}) — existing daemon detected at port=${existing.port}, reusing`
+        );
+        return existing;
+      }
+      this.logger.warn(`[gui] spawn failed (${spawnErr.message}) — no existing daemon reachable, giving up`);
+      throw spawnErr;
+    }
+    // spawn 成功：daemon 永远写规范 ~/.emrg/emrgd.port（daemon.py config_dir()），
+    // 用权威读取（projectDir 回退 home），不假设 projectDir==home。
+    const pt = this._readPortToken();
+    if (!pt) throw new Error("port file not written after spawn");
+    this.logger.info(`[gui] daemon spawned ok: port=${pt.port}`);
+    return pt;
+  }
+
+  async ensureConnected() {
+    // Rant 2026-08-09T18:47:37：1. 读 port 文件（projectDir → 规范 ~/.emrg 回退）→
+    // 无则拉 daemon；spawn 失败先探测已有 daemon，活着直接复用，不再盲报
+    // "failed to start after 3 attempts"。每步打结构化诊断日志（B1-B5）。
+    let port, token;
+    const pt = this._readPortToken();
+    if (pt) {
+      port = pt.port;
+      token = pt.token;
+      this.logger.info(
+        `[gui] ensureConnected: port_file_exists=true, port_file_content=${port}, source=${pt.source}`
+      );
+    } else {
+      this.logger.info(`[gui] ensureConnected: port_file_exists=false — spawning daemon`);
+      const r = await this._spawnOrProbe();
+      port = r.port;
+      token = r.token;
     }
 
     // 2. ws 连接（G43 stale port：连接失败删文件重拉一次）
@@ -247,9 +344,9 @@ class DaemonClient {
       this.logger.warn(`[gui] ws connect failed: ${e.message} — stale port, respawning daemon`);
       try { this.ws.close(); } catch { /* ignore */ }
       try { fs.unlinkSync(PORT_FILE(this.projectDir)); } catch { /* ignore */ }
-      await this.startDaemon();
-      const text = fs.readFileSync(PORT_FILE(this.projectDir), "utf8");
-      [port, token] = text.split(/\s+/);
+      const r = await this._spawnOrProbe();
+      port = r.port;
+      token = r.token;
       this.ws = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: MAX_PAYLOAD });
       await this._awaitOpen();
     }
@@ -294,6 +391,10 @@ class DaemonClient {
     this.connected = true;
     this._authFailed = false;
     this._spawnAttempts = 0; // 连接生命周期成功 → 重置 spawn 节流计数
+    // Rant 2026-08-09T18:47:37 B5：最终状态一行自证——GUI 连的是谁、连没连上。
+    this.logger.info(
+      `[gui] ensureConnected result=connected, daemon_running=true, port=${port}, token_set=${!!token}`
+    );
 
     // 5. 注册 message/close 监听 → 事件流分发
     this.ws.on("message", (data) => this._onFrame(data));
