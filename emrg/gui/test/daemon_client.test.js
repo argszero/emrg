@@ -244,6 +244,55 @@ test("G43 stale port: 连接失败（port 文件存在但拒绝）→ 删文件�
   assert.strictEqual(client.connected, true);
 });
 
+test("rant 13:16:36 G43 加固：daemon 进程活着 → ws 失败不删 port 文件、不重拉", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  // 写入 emrgd.pid（当前进程 = 活着）
+  fs.writeFileSync(path.join(tmpHome, ".emrg", "emrgd.pid"), String(process.pid));
+  const portFile = PORT_FILE(tmpHome);
+  fs.writeFileSync(portFile, "41237\nseekrit-token");
+  assert.strictEqual(client._daemonProcessAlive(), true, "pid alive → true");
+
+  let respawned = false;
+  client.startDaemon = async function () { respawned = true; };
+  const p = client.ensureConnected();
+  await waitForWs();
+  const firstWs = currentMockWs;
+  firstWs.emit("error", new Error("connect ECONNREFUSED"));
+  // 守卫路径：不删文件、不重拉，直接抛"daemon unreachable (pid alive)"
+  await assert.rejects(p, /daemon unreachable \(pid alive\)/);
+  assert.strictEqual(fs.existsSync(portFile), true, "port 文件必须保留（daemon 还活着）");
+  assert.strictEqual(respawned, false, "pid 活着 → 不重拉 daemon（防风暴）");
+});
+
+test("rant 13:16:36 G43 加固：daemon 真死了（pid 不存在）→ 仍删文件重拉", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  // pid 文件指向不存在的进程 → 视为死 daemon
+  fs.writeFileSync(path.join(tmpHome, ".emrg", "emrgd.pid"), "999999");
+  assert.strictEqual(client._daemonProcessAlive(), false, "pid 不存在 → false");
+
+  let respawned = false;
+  client.startDaemon = async function () {
+    respawned = true;
+    fs.writeFileSync(PORT_FILE(tmpHome), "41238\nseekrit-token");
+  };
+  const p = client.ensureConnected();
+  await waitForWs();
+  const firstWs = currentMockWs;
+  firstWs.emit("error", new Error("connect ECONNREFUSED"));
+  await waitForWs(() => currentMockWs !== firstWs);
+  assert.ok(respawned, "真死 → 重拉 daemon");
+  currentMockWs.emit("open");
+  await waitForAuthSent(currentMockWs);
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "auth_ok" })));
+  await p;
+  assert.strictEqual(client.connected, true);
+});
+
+test("rant 13:16:36 G43 加固：无 pid 文件 → 视为死 daemon（删文件重拉）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  assert.strictEqual(client._daemonProcessAlive(), false, "无 pid 文件 → false");
+});
+
 test("rant 13:16:36 ⑤ spawn 节流：超 MAX_SPAWN_ATTEMPTS 后不再拉起 daemon", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   let spawnCount = 0;

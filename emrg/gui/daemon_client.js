@@ -168,6 +168,22 @@ class DaemonClient {
     throw new Error(`emrgd failed to start within timeout${this._readLogTail()}`);
   }
 
+  // Rant 2026-08-09T13:16:36 G43 加固：daemon 进程是否存活（emrgd.pid 探测）。
+  // 存活 → ws 连接失败视为瞬时（daemon 重启/启动中），保留 port 文件交给退避重试；
+  // 死亡 → 允许 G43 删文件重拉。
+  _daemonProcessAlive() {
+    try {
+      const pidFile = path.join(this.projectDir, ".emrg", "emrgd.pid");
+      const pid = Number(String(fs.readFileSync(pidFile, "utf8")).trim());
+      if (!Number.isInteger(pid) || pid <= 0) return false;
+      process.kill(pid, 0); // 信号 0 = 仅探测存在性
+      return true;
+    } catch (err) {
+      if (err && err.code === "EPERM") return true; // 进程存在但权限不同（Windows）
+      return false; // ESRCH（不存在）/ ENOENT（无 pid 文件）
+    }
+  }
+
   _findDaemonExecutable() {
     // Phase 4（rant #12 §4 R7）：打包模式定位捆绑 emrgd。
     // Windows: ~/.emrg/install/bin/emrgd.cmd；POSIX: ~/.emrg/install/bin/emrgd。
@@ -217,7 +233,17 @@ class DaemonClient {
     try {
       await this._awaitOpen();
     } catch (e) {
-      // G43：port 文件存在但连不上（daemon 已死/端口被占）→ 删文件重拉一次
+      // G43 加固（rant 2026-08-09T13:16:36 根因）：port 文件存在但连不上时，
+      // 先查 emrgd.pid —— daemon 进程还活着就【绝不删 port 文件】。旧 G43 直接
+      // unlink 会把健康 daemon 的 port 文件删掉 → 僵尸态（daemon 活着、scheduler
+      // 永远 cannot connect、PID 锁挡住新 spawn）。只有 daemon 真死了才删+重拉。
+      if (this._daemonProcessAlive()) {
+        this.logger.warn(
+          `[gui] ws connect failed: ${e.message} — daemon pid alive, keeping port file (transient)`
+        );
+        try { this.ws.close(); } catch { /* ignore */ }
+        throw new Error(`daemon unreachable (pid alive): ${e.message}`);
+      }
       this.logger.warn(`[gui] ws connect failed: ${e.message} — stale port, respawning daemon`);
       try { this.ws.close(); } catch { /* ignore */ }
       try { fs.unlinkSync(PORT_FILE(this.projectDir)); } catch { /* ignore */ }
