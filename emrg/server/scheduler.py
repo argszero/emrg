@@ -133,12 +133,14 @@ class EvolutionHandler:
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         self.evolutions: list[EvolutionLog] = []
 
-        # ── Saturation halt — stop burning tokens on empty cycles ───
+        # ── Saturation — slow down, never stop (rant 2026-08-09T09:35:55) ──
         # Track consecutive cycles where git HEAD didn't advance (NTE).
-        # After _IDLE_HALT_THRESHOLD empty cycles, switch to trigger-only:
-        #   - Scheduled runs are skipped
-        #   - Only manual trigger (/trigger) resumes the cycle
-        #   - Counter resets on trigger or when git HEAD advances
+        # After _IDLE_HALT_THRESHOLD empty cycles, switch to low-frequency
+        # heartbeat full cycles instead of the old complete halt:
+        #   - Scheduled runs continue at heartbeat interval (never skipped)
+        #   - heartbeat = max(interval, min(interval*8, 8h)) — 60s task → 8min
+        #   - Manual trigger (/trigger) or upstream git HEAD advance restores
+        #     the normal frequency immediately (counter reset to 0)
         #
         # Counter is persisted to disk to survive daemon restarts.
         self._IDLE_HALT_THRESHOLD = 30
@@ -509,13 +511,21 @@ class EvolutionHandler:
         )
 
         while self._running:
+            # Saturation → wait at the heartbeat interval (low-frequency full
+            # cycle, rant 2026-08-09T09:35:55); otherwise the normal interval.
+            # Manual trigger wakes immediately either way. Never skip a cycle.
+            wait_timeout = (
+                self._heartbeat_interval()
+                if self._saturation_heartbeat_active()
+                else self.interval
+            )
             # Wait for interval or manual trigger (interruptible)
-            self._next_run_at = time.time() + self.interval
+            self._next_run_at = time.time() + wait_timeout
             manual_trigger = False
             try:
                 await asyncio.wait_for(
                     self._trigger_event.wait(),
-                    timeout=self.interval,
+                    timeout=wait_timeout,
                 )
                 # Manual trigger fired — clear and proceed
                 self._trigger_event.clear()
@@ -527,19 +537,17 @@ class EvolutionHandler:
                 # Normal scheduled run
                 pass
 
-            # Saturation halt: if too many empty cycles, skip scheduled runs.
-            # Manual triggers always bypass the halt and reset the counter.
+            # Manual triggers always reset the saturation counter; otherwise
+            # saturated ticks keep running full cycles at heartbeat cadence.
             if manual_trigger:
                 if self._empty_cycles >= self._IDLE_HALT_THRESHOLD:
                     logger.info(
                         "EvolutionHandler[%s]: resumed via manual trigger "
-                        "(was halted at %d empty cycles)",
+                        "(was in saturation at %d empty cycles)",
                         self.name, self._empty_cycles,
                     )
                 self._empty_cycles = 0
                 self._save_saturation_state()
-            elif self._saturation_halt_active():
-                continue
 
             logger.debug("EvolutionHandler[%s] tick", self.name)
             self._cycle_running = True
@@ -637,29 +645,38 @@ class EvolutionHandler:
         except Exception:
             return False
 
-    def _saturation_halt_active(self) -> bool:
-        """Whether a scheduled tick should be skipped due to saturation halt.
+    def _heartbeat_interval(self) -> int:
+        """Low-frequency heartbeat interval (rant 2026-08-09T09:35:55):
+        heartbeat = max(task_interval, min(task_interval * 8, 8 hours)).
+        Protection = slow down, never stop. Long-interval tasks (>= 8h)
+        keep their original cadence (the 8x/8h caps don't apply).
+        """
+        return max(self.interval, min(self.interval * 8, 8 * 3600))
 
-        Extracted from the run loop so the halt decision is testable:
-        at/above the threshold the tick is skipped UNLESS the upstream
-        remote advanced (auto-resume: reset the counter and run the cycle,
-        so a halted handler does not miss new work forever).
+    def _saturation_heartbeat_active(self) -> bool:
+        """Whether this tick should run at the low-frequency heartbeat interval
+        instead of the normal interval.
+
+        Replaces the old complete saturation halt (rant 2026-08-09T09:35:55):
+        at/above the empty-cycle threshold the handler keeps running full
+        cycles, just at a reduced cadence — never skipping. Upstream advance
+        auto-resumes (counter reset, normal frequency), so a saturated handler
+        does not miss new work forever.
         """
         if self._empty_cycles < self._IDLE_HALT_THRESHOLD:
             return False
         if self._remote_advanced():
             logger.info(
-                "EvolutionHandler[%s]: upstream advanced — resuming from saturation halt",
+                "EvolutionHandler[%s]: upstream advanced — resuming normal frequency from saturation",
                 self.name,
             )
             self._empty_cycles = 0
             self._save_saturation_state()
             return False
         logger.info(
-            "EvolutionHandler[%s]: saturation halt — "
-            "skipping scheduled run (%d empty cycles). "
-            "Use /trigger to resume.",
-            self.name, self._empty_cycles,
+            "EvolutionHandler[%s]: saturation (%d empty cycles) — "
+            "running full cycle at heartbeat interval (%ds) — never halting",
+            self.name, self._empty_cycles, self._heartbeat_interval(),
         )
         return True
 
