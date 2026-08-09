@@ -38,8 +38,22 @@ class LlmConfig:
 
 
 @dataclass
+class UpdateConfig:
+    """Auto update-check settings (rant 2026-08-10T07:12:12).
+
+    check: master switch — when false, the daemon never queries GitHub.
+    ttl_hours: how often to re-check the latest release (default 24h).
+    Prompting is always display-only (no auto download/install).
+    """
+
+    check: bool = True
+    ttl_hours: int = 24
+
+
+@dataclass
 class EmrgConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
+    update: UpdateConfig = field(default_factory=UpdateConfig)
 
 
 def config_dir() -> Path:
@@ -92,7 +106,34 @@ def load_config() -> EmrgConfig:
         var_name = llm.api_key[2:-1]
         llm.api_key = os.environ.get(var_name, llm.api_key)
 
-    return EmrgConfig(llm=llm)
+    update_data = data.get("update", {})
+    update = UpdateConfig(
+        check=update_data.get("check", True),
+        ttl_hours=update_data.get("ttl_hours", 24),
+    )
+
+    return EmrgConfig(llm=llm, update=update)
+
+
+def load_update_config() -> UpdateConfig:
+    """Load only the [update] section (rant 2026-08-10T07:12:12).
+
+    The daemon is constructed with just LlmConfig; this helper lets it read
+    the update-check switch without parsing the full config. Missing config
+    file or missing section → defaults (check=True, ttl=24h).
+    """
+    cfg_path = config_path()
+    if not cfg_path.exists():
+        return UpdateConfig()
+    try:
+        data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return UpdateConfig()
+    update_data = data.get("update", {})
+    return UpdateConfig(
+        check=update_data.get("check", True),
+        ttl_hours=update_data.get("ttl_hours", 24),
+    )
 
 
 def ensure_config() -> None:

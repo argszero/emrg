@@ -356,6 +356,13 @@ async def interactive(init_auto_evolve: bool = False):
                         import emrg
                         ver = getattr(emrg, "__version__", "dev")
                         chat.add("system", f"EMRG {ver}  |  {server_id}\nType /help for shortcuts, or just start chatting.")
+                        # Auto update-check prompt (rant 2026-08-10T07:12:12):
+                        # one-time, non-blocking — query daemon's cached latest
+                        # release, show a status line, mark prompted (idempotent).
+                        try:
+                            await conn.send_command("update_check")
+                        except Exception:
+                            pass  # never block chat on update check
                     status.update(left=_status_left(session_title, session_id), center=server_id)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render(); continue
@@ -906,6 +913,29 @@ async def interactive(init_auto_evolve: bool = False):
                     continue
 
                 # Memory content (read)
+                if data.get("type") == "update_check":
+                    # Auto update-check prompt (rant 2026-08-10T07:12:12):
+                    # one-time, non-blocking status line; idempotent per version.
+                    if data.get("has_update") and data.get("enabled"):
+                        latest = data.get("latest_version", "")
+                        prompted = data.get("prompted_version", "")
+                        if latest and latest != prompted:
+                            import emrg
+                            ver = getattr(emrg, "__version__", "dev")
+                            chat.add("system",
+                                f"New version v{latest} available (current v{ver}) — "
+                                f"https://github.com/argszero/emrg/releases")
+                            status.update(center=server_id or "emrg")
+                            try:
+                                await conn.send_command(
+                                    "update_check_prompted",
+                                    {"version": latest},
+                                )
+                            except Exception:
+                                pass
+                    term.render()
+                    continue
+
                 if data.get("type") == "memory_content":
                     err = data.get("error", "")
                     if err:

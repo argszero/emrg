@@ -232,6 +232,9 @@ const Dialogs = (() => {
       } catch { /* 元素缺失（测试桩）时忽略 */ }
       // Windows GCM rant Stage 2：GitHub 连接状态随设置面板打开时刷新
       await refreshGithubStatus();
+      // Auto update-check prompt (rant 2026-08-10T07:12:12): about area shows
+      // a one-time non-intrusive line when a newer release exists.
+      await refreshUpdateCheck();
     } catch (e) {
       Chat.addSystemMessage(_t("settings.readFailed", { msg: e.message }));
     }
@@ -482,6 +485,39 @@ const Dialogs = (() => {
       $("github-connect-btn").classList.toggle("hidden", connected);
     } catch {
       statusEl.textContent = _t("settings.githubStatusFailed");
+    }
+  }
+
+  // Auto update-check prompt (rant 2026-08-10T07:12:12): display-only, one
+  // line in the about area, never a modal — no auto download/install.
+  async function refreshUpdateCheck() {
+    const el = $("about-update");
+    if (!el) return; // 元素缺失（测试桩）时忽略
+    try {
+      const u = await window.emrg.updateCheck();
+      if (!u || !u.enabled || !u.has_update || !u.latest_version) {
+        el.classList.add("hidden");
+        el.textContent = "";
+        return;
+      }
+      if (u.latest_version === u.prompted_version) {
+        el.classList.add("hidden");
+        el.textContent = "";
+        return;
+      }
+      const link = el("a", {
+        href: "https://github.com/argszero/emrg/releases",
+        target: "_blank",
+        rel: "noopener",
+      }, _t("settings.updateAvailable", { latest: u.latest_version }));
+      el.textContent = "";
+      el.appendChild(link);
+      el.classList.remove("hidden");
+      // 幂等：同版本只提示一次
+      try { await window.emrg.updateCheckPrompted({ version: u.latest_version }); } catch { /* ignore */ }
+    } catch {
+      el.classList.add("hidden");
+      el.textContent = "";
     }
   }
 

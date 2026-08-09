@@ -292,12 +292,19 @@ class EmrgServer:
         # host-modified skill copies.
         self._skills_ttl_task = asyncio.create_task(self._skills_ttl_loop())
 
+        # Auto update-check prompt (rant 2026-08-10T07:12:12): runs at startup
+        # + every [update] ttl_hours (default 24h). ONLY checks the latest
+        # release and persists state — clients (TUI/GUI) decide how to show
+        # the one-time prompt. No auto download/install, silent on failure.
+        self._update_check_task = asyncio.create_task(self._update_check_loop())
+
         try:
             await self._server.serve_forever()
         except asyncio.CancelledError:
             pass
         finally:
             self._skills_ttl_task.cancel()
+            self._update_check_task.cancel()
             try:
                 await self._skills_ttl_task
             except (asyncio.CancelledError, Exception):
@@ -368,6 +375,38 @@ class EmrgServer:
             elif result.get("errors"):
                 logger.warning("skills update errors: %s", result["errors"])
             await asyncio.sleep(_UPDATE_TTL_SECONDS)
+
+    async def _update_check_loop(self) -> None:
+        """Background auto update-check prompt (rant 2026-08-10T07:12:12).
+
+        Runs at startup + every [update] ttl_hours (default 24h). ONLY checks
+        the latest release via api.github.com and persists state to
+        ~/.emrg/.last_update_check.json — no auto download/install. Failures
+        are silent (never crash, never log noise); the next TTL retries.
+        Disabled entirely when [update] check = false in config.toml.
+        """
+        from emrg.config import load_update_config
+        from emrg.update_check import (
+            load_state,
+            run_update_check_once,
+            should_check,
+        )
+
+        update_cfg = load_update_config()
+        if not update_cfg.check:
+            logger.debug("auto update-check disabled by config ([update] check=false)")
+            return
+
+        ttl = max(3600, int(update_cfg.ttl_hours or 24) * 3600)
+        while True:
+            state = load_state()
+            if should_check(state, ttl):
+                result = await run_update_check_once()
+                if result.get("checked"):
+                    logger.debug(
+                        "update check: latest=%s", result.get("latest_version")
+                    )
+            await asyncio.sleep(ttl)
 
     def _evolution_count(self) -> int:
         """Total completed evolution cycles across scheduler handlers + disk.
@@ -1353,6 +1392,41 @@ class EmrgServer:
             # when evolution actually needs GitHub.
             auth = await self._check_github_auth()
             await self._send(ws, {"type": "github_status", **auth})
+
+        elif msg_type == "update_check":
+            # Auto update-check prompt (rant 2026-08-10T07:12:12): TUI/GUI
+            # query the daemon's latest known release. Returns the cached
+            # latest_version (populated at startup + every TTL) plus a
+            # has_update flag computed against the running version. No auto
+            # download/install; the client shows a one-time prompt.
+            import emrg
+            from emrg.config import load_update_config
+            from emrg.update_check import is_newer, load_state, parse_version
+
+            current = getattr(emrg, "__version__", "0")
+            state = load_state()
+            latest = state.get("latest_version") or ""
+            has_update = bool(
+                latest and is_newer(parse_version(latest), parse_version(current))
+            )
+            await self._send(ws, {
+                "type": "update_check",
+                "current_version": current,
+                "latest_version": latest,
+                "has_update": has_update,
+                "prompted_version": state.get("prompted_version") or "",
+                "enabled": load_update_config().check,
+            })
+
+        elif msg_type == "update_check_prompted":
+            # Idempotency (rant 07:12:12 §4): a client records that it showed
+            # the prompt for this version — same version never re-prompted.
+            from emrg.update_check import load_state, mark_prompted
+
+            version = msg.get("version", "")
+            if version:
+                mark_prompted(load_state(), version)
+            await self._send(ws, {"type": "update_check_prompted", "ok": True})
 
         elif msg_type == "github_connect":
             # Windows GCM rant Stage 2: GUI PAT auth — gh auth login

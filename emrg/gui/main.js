@@ -459,6 +459,32 @@ vision = false
       return { authenticated: Boolean(frame.authenticated), user: frame.user || null };
     });
 
+    ipcMain.handle("emrg:updateCheck", async () => {
+      // Auto update-check prompt (rant 2026-08-10T07:12:12): query daemon's
+      // cached latest release; display-only, no auto download/install.
+      try {
+        const frame = await client.sendCommandAndWait("update_check", {}, 10000);
+        return {
+          current_version: frame.current_version || "",
+          latest_version: frame.latest_version || "",
+          has_update: Boolean(frame.has_update),
+          prompted_version: frame.prompted_version || "",
+          enabled: Boolean(frame.enabled),
+        };
+      } catch {
+        return { has_update: false, enabled: false, latest_version: "", current_version: "" };
+      }
+    });
+
+    ipcMain.handle("emrg:updateCheckPrompted", async (_e, { version }) => {
+      // Idempotency (rant 07:12:12 §4): record that the GUI showed the prompt
+      // for this version — same version never re-prompted.
+      try {
+        await client.sendCommandAndWait("update_check_prompted", { version: String(version || "") }, 5000);
+      } catch { /* best-effort */ }
+      return { ok: true };
+    });
+
     ipcMain.handle("emrg:githubConnect", async (_e, { token }) => {
       // Windows GCM rant Stage 2：PAT 授权 + setup-git（daemon github_connect）
       const frame = await client.sendCommandAndWait("github_connect", { token: String(token || "").trim() }, 40000);
