@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None
 from datetime import datetime
 from pathlib import Path, PurePath
+from emrg._win import win32_no_window_kwargs
 from emrg.client import daemon_manager
 from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Terminal, ToolCard
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
@@ -39,6 +40,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
             result = subprocess.run(
                 ['osascript', '-e', 'clipboard info'],
                 capture_output=True, text=True, timeout=3,
+                **win32_no_window_kwargs(),
             )
             out = result.stdout
             has_image = any(tag in out for tag in (
@@ -55,7 +57,8 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                      'try\n  set f to (the clipboard as «class furl»)\n'
                      '  return POSIX path of f\nend try'],
                     capture_output=True, text=True, timeout=2,
-                )
+                    **win32_no_window_kwargs(),
+            )
                 if r2.stdout.strip():
                     label = Path(r2.stdout.strip()).name
             except Exception:
@@ -66,6 +69,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
             result = subprocess.run(
                 ['xclip', '-selection', 'clipboard', '-t', 'TARGETS', '-o'],
                 capture_output=True, text=True, timeout=3,
+                **win32_no_window_kwargs(),
             )
             out = result.stdout
             if 'image/png' not in out:
@@ -78,7 +82,8 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                         ['xclip', '-selection', 'clipboard', '-t',
                          'text/uri-list', '-o'],
                         capture_output=True, text=True, timeout=2,
-                    )
+                        **win32_no_window_kwargs(),
+            )
                     uri = r2.stdout.strip()
                     if uri:
                         label = Path(uri.replace('file://', '')).name
@@ -95,6 +100,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
             result = subprocess.run(
                 ['powershell', '-Command', ps_cmd],
                 capture_output=True, text=True, timeout=5,
+                **win32_no_window_kwargs(),
             )
             if 'IMAGE' not in result.stdout:
                 return False, None
@@ -108,7 +114,8 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                      'if ($files -ne $null -and $files.Count -gt 0) '
                      '{ Write-Output $files[0] }'],
                     capture_output=True, text=True, timeout=3,
-                )
+                    **win32_no_window_kwargs(),
+            )
                 if r2.stdout.strip():
                     label = Path(r2.stdout.strip()).name
             except Exception:
@@ -139,6 +146,7 @@ def _extract_clipboard_image(target_path: str) -> bool:
             subprocess.run(
                 ['osascript', '-e', applescript],
                 capture_output=True, timeout=5,
+                **win32_no_window_kwargs(),
             )
             path = Path(target_path)
             return path.exists() and path.stat().st_size > 0
@@ -149,7 +157,8 @@ def _extract_clipboard_image(target_path: str) -> bool:
                     ['xclip', '-selection', 'clipboard', '-t',
                      'image/png', '-o'],
                     stdout=f, timeout=5,
-                )
+                    **win32_no_window_kwargs(),
+            )
             path = Path(target_path)
             return path.exists() and path.stat().st_size > 0
 
@@ -164,6 +173,7 @@ def _extract_clipboard_image(target_path: str) -> bool:
             subprocess.run(
                 ['powershell', '-Command', ps_cmd],
                 capture_output=True, timeout=5,
+                **win32_no_window_kwargs(),
             )
             path = Path(target_path)
             return path.exists() and path.stat().st_size > 0

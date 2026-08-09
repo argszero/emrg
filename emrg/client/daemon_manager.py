@@ -21,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 
+from emrg._win import win32_no_window_kwargs
 from emrg.connect import (
     AuthError,
     cleanup_server,
@@ -92,7 +93,10 @@ async def start_daemon() -> subprocess.Popen:
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "emrg.server",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-        start_new_session=True, close_fds=True)
+        start_new_session=True, close_fds=True,
+        # Windows: daemon spawn must never pop a console window
+        # (rant 2026-08-09T13:16:36 — cmd-window storm).
+        **win32_no_window_kwargs())
     for _ in range(15):
         await asyncio.sleep(0.3)
         if is_running():

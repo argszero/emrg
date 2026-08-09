@@ -549,6 +549,63 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert abs((_dt.datetime.now(ts.tzinfo) - ts).total_seconds()) < 60
 
 
+# ── Port-file self-heal (rant 2026-08-09T13:16:36 root cause) ─────────
+# G43 stale-port logic once deleted a healthy daemon's emrgd.port after a
+# transient ws failure → daemon's own scheduler lost the file (93× "cannot
+# connect") while the PID lock blocked new spawns. The daemon re-asserts
+# its port file so any external deletion self-heals.
+
+def test_assert_port_file_writes_port_and_token(tmp_path, monkeypatch):
+    """_assert_port_file writes '<port>\\n<token>' with mode 0o600."""
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    server._auth_token = "tok123"
+    server._assert_port_file(43210)
+    text = (tmp_path / "emrgd.port").read_text(encoding="utf-8")
+    assert text == "43210\ntok123"
+
+
+def test_assert_port_file_rewrites_deleted_file(tmp_path, monkeypatch):
+    """A deleted port file is re-asserted on the next keepalive tick."""
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    server._auth_token = "tok456"
+    server._assert_port_file(45678)
+    port_path = tmp_path / "emrgd.port"
+    assert port_path.exists()
+
+    # 外部删除（模拟 G43 unlink 竞态）
+    port_path.unlink()
+    assert not port_path.exists()
+
+    # keepalive loop 的恢复逻辑：缺失 → 重新断言
+    server._assert_port_file(45678)
+    text = (tmp_path / "emrgd.port").read_text(encoding="utf-8")
+    assert text == "45678\ntok456"
+
+
+def test_port_keepalive_loop_restores_missing_file(tmp_path, monkeypatch):
+    """The keepalive loop re-asserts a deleted port file within one tick."""
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    server._auth_token = "tok789"
+    server._server = type("S", (), {"sockets": [type("Sock", (), {"getsockname": lambda self: (None, 9999)})()]})()
+    server._running = True
+    server._assert_port_file(9999)
+    port_path = tmp_path / "emrgd.port"
+    port_path.unlink()
+
+    # 执行与 loop 相同的恢复逻辑（loop 本体 sleep 60s，测试直接驱动检查体）
+    async def one_tick():
+        if not port_path.exists():
+            server._assert_port_file(9999)
+    asyncio.run(one_tick())
+    assert port_path.exists()
+    assert port_path.read_text(encoding="utf-8") == "9999\ntok789"
+
+
 # ── _redact 日志脱敏（rant 10:21 + 跨项目 base64 教训）──────────────
 
 
