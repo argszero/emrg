@@ -24,6 +24,14 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon 生命�
 from emrg.client import daemon_manager
 
 
+@pytest.fixture(autouse=True)
+def _reset_spawn_attempts():
+    """每个测试前重置模块级 spawn 节流计数（跨测试状态不泄漏）。"""
+    daemon_manager._spawn_attempts = 0
+    yield
+    daemon_manager._spawn_attempts = 0
+
+
 class FakeWS:
     """Minimal websockets-like fake: send/recv/close."""
 
@@ -229,6 +237,54 @@ class TestEnsureConnected:
             assert conn._ws is ws
             mock_start.assert_awaited_once()
             mock_cleanup.assert_called_once()
+
+        asyncio.run(_run())
+
+
+# ── Spawn throttle (rant 2026-08-09T13:16:36 ⑤) ─────────────
+# TUI _reconnect 循环每 1s 调 ensure_connected → start_daemon 会每 1s spawn 一台
+# 新 daemon（Windows 每个 spawn 都是 cmd 窗口来源）。单个连接生命周期内最多
+# _MAX_SPAWN_ATTEMPTS 次，超限抛节流错误；成功连接后归零。
+
+class TestSpawnThrottle:
+    @patch("emrg.client.daemon_manager.is_running", return_value=False)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.asyncio.create_subprocess_exec",
+           new_callable=AsyncMock)
+    def test_start_daemon_throttles_after_max_attempts(self, mock_spawn,
+                                                       mock_cleanup, mock_is_running):
+        proc = MagicMock(pid=1234)
+        mock_spawn.return_value = proc
+
+        async def _run():
+            # 前 3 次：真正 spawn（is_running 恒 False → 超时抛错）
+            for _ in range(3):
+                with pytest.raises(RuntimeError, match="failed to start"):
+                    await daemon_manager.start_daemon()
+            assert mock_spawn.await_count == 3
+            # 第 4 次：不再 spawn，直接抛节流错误（提示手动 emrg server）
+            with pytest.raises(RuntimeError, match="after 3 attempts"):
+                await daemon_manager.start_daemon()
+            assert mock_spawn.await_count == 3, "超过上限后不得再 spawn（防弹窗/重试风暴）"
+            assert daemon_manager._spawn_attempts == 3
+
+        asyncio.run(_run())
+
+    @patch("emrg.client.daemon_manager.is_running", return_value=False)
+    @patch("emrg.client.daemon_manager.check_and_restart_if_stale",
+           new_callable=AsyncMock)
+    @patch("emrg.client.daemon_manager.start_daemon", new_callable=AsyncMock)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_spawn_attempts_reset_on_success(self, mock_connect, mock_cleanup,
+                                             mock_start, mock_check, mock_running):
+        daemon_manager._spawn_attempts = 2  # 模拟已有失败
+        ws = FakeWS([json.dumps({"type": "auth_ok"})])
+        mock_connect.return_value = ws
+
+        async def _run():
+            await daemon_manager.ensure_connected()
+            assert daemon_manager._spawn_attempts == 0, "成功连接后节流计数必须归零"
 
         asyncio.run(_run())
 
