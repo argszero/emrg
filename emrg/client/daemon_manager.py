@@ -70,9 +70,25 @@ def is_running() -> bool:
     return is_server_running_sync()
 
 
+# Rant 2026-08-09T13:16:36 ⑤（防风暴总闸）：daemon 启动失败时不得无限重拉——
+# TUI app.py _reconnect 循环每 1s 调 ensure_connected → start_daemon 会每 1s
+# spawn 一个新 daemon 进程（Windows 上每个 spawn 都是 cmd 窗口来源）。单个
+# "连接生命周期"内最多 _MAX_SPAWN_ATTEMPTS 次 spawn，超限抛错提示宿主手动
+# `emrg server`；成功连接后归零。
+_MAX_SPAWN_ATTEMPTS = 3
+_spawn_attempts = 0
+
+
 async def start_daemon() -> subprocess.Popen:
     """Start emrgd in the background and wait until it accepts connections."""
-    logger.info("starting emrgd daemon...")
+    global _spawn_attempts
+    if _spawn_attempts >= _MAX_SPAWN_ATTEMPTS:
+        raise RuntimeError(
+            f"daemon failed to start after {_MAX_SPAWN_ATTEMPTS} attempts — "
+            "please run 'emrg server' manually and check emrgd.log"
+        )
+    _spawn_attempts += 1
+    logger.info("starting emrgd daemon (attempt %d/%d)...", _spawn_attempts, _MAX_SPAWN_ATTEMPTS)
     cleanup_server()
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "emrg.server",
@@ -187,11 +203,15 @@ async def ensure_connected() -> "DaemonConnection":
 
     内部改名：check_and_restart_if_stale / is_running / start_daemon。
     """
+    global _spawn_attempts
     await check_and_restart_if_stale()
     if not is_running():
         cleanup_server()
         await start_daemon()
-    return DaemonConnection(await connect_to_server())
+    conn = DaemonConnection(await connect_to_server())
+    # 连接生命周期成功 → spawn 节流计数归零（对照 GUI daemon_client.js auth_ok）
+    _spawn_attempts = 0
+    return conn
 
 
 # ── 协议客户端封装 ─────────────────────────────────────────────────────

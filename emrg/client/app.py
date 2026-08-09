@@ -310,6 +310,9 @@ async def interactive(init_auto_evolve: bool = False):
             # close stale connection
             try: await conn.close()
             except Exception: pass
+            # Rant 2026-08-09T13:16:36 ⑤: spawn 节流命中后提示宿主手动启动
+            # （否则每 1s 静默重试 spawn 一台新 daemon，Windows 上即弹窗风暴）。
+            _throttle_warned = False
             while True:
                 try:
                     await asyncio.sleep(1)
@@ -320,6 +323,13 @@ async def interactive(init_auto_evolve: bool = False):
                     status.update(center=server_id or "emrg")
                     term.render()
                     return
+                except RuntimeError as e:
+                    if "failed to start after" in str(e) and not _throttle_warned:
+                        _throttle_warned = True
+                        chat.add("system", f"⚠ {e}")
+                        status.update(center="daemon down — run 'emrg server'")
+                        term.render()
+                    continue
                 except Exception:
                     continue
 
