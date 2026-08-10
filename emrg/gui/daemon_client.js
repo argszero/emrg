@@ -93,6 +93,18 @@ class DaemonClient {
     this._deltaBatchMs = deltaBatchMs;
     this._deltaBuf = [];
     this._deltaTimer = null;
+    // P2 connManager（rant 2026-08-10T15:07:19）：G65 自有流锁每连接一份。
+    // 从 main.js 全局移入——多会话各自独立：本连接发出的 task 流运行中 →
+    // ownStream=true，切会话/关连接前必须释放。
+    this.ownStream = false;
+    this.ownStreamRequestId = null;
+  }
+
+  // 释放自有流锁（G65）。done（request 匹配或 timeout 兜底）、session busy 即发
+  // 错误、cancelled（request 匹配）与断连时调用；sendTask 抛异常时由调用方清理。
+  _releaseOwnStream() {
+    this.ownStream = false;
+    this.ownStreamRequestId = null;
   }
 
   // ── 生命周期 ────────────────────────────────────────────
@@ -492,6 +504,12 @@ class DaemonClient {
     };
     if (mode && mode !== "auto") payload.mode = mode;
     this._setCurrentStream(rid);
+    // G65：自有流锁——本连接发出流式 task 即标记，done/error/cancelled/断连释放
+    // （多会话各自独立；main.js emrg:sendMessage 的 G65 切会话检查读本字段）
+    if (stream) {
+      this.ownStream = true;
+      this.ownStreamRequestId = rid;
+    }
     this.ws.send(JSON.stringify(payload));
     return rid;
   }
@@ -579,6 +597,8 @@ class DaemonClient {
     }
     if (frame.type === "cancelled") {
       this._flushDeltaBuf(); // 终态前冲刷（rant 14:11 同源：delta 不晚于终态）
+      // 自有流取消 → 释放 G65 锁（带 request_id 的 cancelled 明确是本流的终态）
+      if (frame.request_id === this.ownStreamRequestId) this._releaseOwnStream();
       this._emit("cancelled", frame);
       return;
     }
@@ -610,6 +630,9 @@ class DaemonClient {
     }
     if (frame.error) {
       this._flushDeltaBuf(); // 终态前冲刷（rant 14:11 同源）
+      // session busy 是即发错误（daemon 返回后无 done 跟随）——释放自有流锁，防 G65 锁泄漏
+      // （流式错误如 LLM error 则有 done 跟随，由 done 分支释放，不在此处理）
+      if (frame.error && String(frame.error).includes("session busy")) this._releaseOwnStream();
       this._emit("error", frame);
       return;
     }
@@ -643,6 +666,10 @@ class DaemonClient {
     const rid = frame.request_id;
     if (rid && this._currentStream && this._currentStream.requestId === rid) {
       this.clearActiveStream();
+    }
+    // G65：仅自有流的 done 释放锁（广播 done 不影响）；timeout 兜底同样只清自有
+    if (rid === this.ownStreamRequestId || (frame.timeout && this.ownStream)) {
+      this._releaseOwnStream();
     }
     // G83：done 清理分组缓存（DOM 保留）
     if (rid) this._cleanupGroup(rid, true);
@@ -717,6 +744,7 @@ class DaemonClient {
   // G41/G89/G97：断连处理
   _onClose() {
     this.connected = false;
+    this._releaseOwnStream(); // 断连即释放 G65 自有流锁（防锁泄漏）
     this._rejectAllPending("connection closed");
     this.clearActiveStream(); // G94 timer 清理：断连后 30s 超时 timer 不应再触发（防虚假"响应超时"提示）
     this.clearGroups(); // G97：断连清空广播分组缓存（含 10 分钟 timer），防"幽灵"分组残留

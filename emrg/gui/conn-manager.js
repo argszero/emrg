@@ -4,38 +4,50 @@
 // open session (each session = one independent websocket connection, aligned
 // with the TUI multi-open model).
 //
-// This slice establishes the open/close/get contract and the daemon-ownership
-// bootstrap. main.js rewiring to use this manager (single-session no-regression
-// target) lands in a later slice — until then main.js keeps its single client.
+// This slice completes the P2 wiring contract:
+// - `ensureDaemon()` keeps a daemon-level connection (`_daemonConn`) used for
+//   non-session commands (ping / list_sessions / set_model / github_* / ...).
+//   Session connections only connect to the already-running daemon
+//   (ensureConnected({ skipStart: true }) — never spawn).
+// - `open(sid, projectPath)` creates the per-session connection with
+//   per-connection delta batching (deltaBatchMs=16, #626) and resumes the
+//   session (auto-subscribe). `{ resume: false }` skips resume for brand-new
+//   sessions (daemon implicitly subscribes on first task message).
+// - restart recovery: short-window all-drop → recoverAll (re-open + re-subscribe).
+// - `onOpen` / `onRecovered` hooks let main.js attach the renderer event
+//   bridge (sid-tagged) and refresh UI state after recovery.
 //
 // Design notes (from the rant):
 // - Each open session = one independent ws connection → natural isolation, no
 //   event routing.
-// - connManager ensures the daemon is ready (spawn if missing) before opening;
-//   session connections then use ensureConnected({ skipStart: true }) — they
-//   only connect to the already-running daemon, never spawn.
 // - resume_session(sid, cwd=projectPath) auto-subscribes the connection.
 // - Already-open sid → reuse the existing connection (no duplicate).
 
 const { DaemonClient } = require("./daemon_client.js");
 
 class ConnManager {
-  constructor({ projectDir, logger = console, isPackaged = false, restartWindowMs = 1000 } = {}) {
+  constructor({ projectDir, logger = console, isPackaged = false, restartWindowMs = 1000, singleRetryDelayMs = 1000 } = {}) {
     this.projectDir = projectDir;
     this.logger = logger;
     this.isPackaged = isPackaged;
     this._conns = new Map(); // sid -> { conn, projectPath }
+    this._daemonConn = null; // daemon 级连接（ping/list_sessions 等非会话命令）
+    this._openHooks = new Set(); // (sid, conn) => void（新会话连接建立时）
+    this._recoverHooks = new Set(); // () => void（recoverAll 完成后）
     // daemon 重启恢复（rant 15:07:19 P2）：短窗口内所有连接同时断 → 判定 daemon 重启
-    // → 全部重连重订阅；单条断 → 不做全量恢复（留给独立退避重试）。
+    // → 全部重连重订阅；单条断 → 独立退避重试（多会话场景，单会话全断走恢复）。
     this._restartWindowMs = restartWindowMs;
     this._disconnects = new Map(); // sid -> timestamp（最近一次断连）
     this._recovering = false; // 恢复中守卫（防 close→disconnect→recoverAll 递归）
+    this._singleRetryDelayMs = singleRetryDelayMs;
+    this._singleRetries = new Map(); // sid -> timer（单连接独立退避在途）
   }
 
   // 确保 daemon 已运行（connManager = daemon 生命周期唯一 owner）。
-  // 引导 client ensureConnected()：port 文件缺失 → spawn；已运行 → 直连。
-  // 连接后立即关闭引导连接——会话连接统一走 skipStart（只连不拉）。
-  async _ensureDaemon() {
+  // 引导连接保留为 _daemonConn：供 ping/list_sessions 等非会话命令使用；
+  // 会话连接统一 skipStart（只连不拉）。已连接 → 直接复用。
+  async ensureDaemon() {
+    if (this._daemonConn && this._daemonConn.connected) return this._daemonConn;
     const boot = new DaemonClient({
       projectDir: this.projectDir,
       logger: this.logger,
@@ -43,39 +55,67 @@ class ConnManager {
     });
     try {
       await boot.ensureConnected();
-    } finally {
+    } catch (e) {
       boot.close();
+      throw e;
     }
+    this._daemonConn = boot;
+    return boot;
+  }
+
+  // daemon 级连接访问器（main.js 非会话命令用；未建立返回 null）
+  daemonConn() {
+    return this._daemonConn || null;
   }
 
   // open(sid, projectPath)：创建 DaemonClient → ensureConnected(skipStart) →
-  // resume_session（自动订阅）。已打开的 sid 直接复用现有连接。
-  async open(sid, projectPath) {
+  // resume_session（自动订阅；resume:false 跳过，供新会话首条消息前用）。
+  // 已打开的 sid 直接复用现有连接。失败时关闭连接不泄漏。
+  async open(sid, projectPath, { resume = true } = {}) {
     const existing = this._conns.get(sid);
-    if (existing) return existing.conn;
-    await this._ensureDaemon();
+    if (existing) {
+      if (existing.conn.connected) return existing.conn;
+      this.close(sid); // 残留断连连接 → 关闭重开（_intentionalClose 标记抑制断线横幅）
+    }
+    await this.ensureDaemon();
     const conn = new DaemonClient({
       projectDir: this.projectDir,
       logger: this.logger,
       isPackaged: this.isPackaged,
+      deltaBatchMs: 16, // P2：delta 批量（G122 16ms）每连接一份（#626）
     });
-    await conn.ensureConnected({ skipStart: true }); // daemon 已就绪 → 只连不拉
-    await conn.sendCommandAndWait("resume_session", { session_id: sid, cwd: projectPath }, 5000);
+    try {
+      await conn.ensureConnected({ skipStart: true }); // daemon 已就绪 → 只连不拉
+      if (resume) {
+        await conn.sendCommandAndWait("resume_session", { session_id: sid, cwd: projectPath }, 5000);
+      }
+    } catch (e) {
+      conn.close(); // resume 失败（会话已删等）→ 不泄漏连接
+      throw e;
+    }
     // 断开监听 → 重启恢复判定（仅当所有打开会话在同一短窗口内断开）
     conn.onEvent((type) => {
       if (type === "disconnected") {
+        if (conn._intentionalClose) return; // 主动关闭（切走/删除）不参与重启判定
         this._disconnects.set(sid, Date.now());
         this._onDisconnect(sid);
       }
     });
     this._conns.set(sid, { conn, projectPath });
+    for (const cb of this._openHooks) {
+      try { cb(sid, conn); } catch (e) { this.logger.warn(`[gui] connManager onOpen hook error: ${e.message}`); }
+    }
     return conn;
   }
 
   // close(sid)：conn.close（断开 ws）→ 移除。返回是否有关闭对象。
+  // 标记 _intentionalClose：主动关闭（切走/删除）不触发 renderer 断线横幅
+  // （桥检查该标记；真断连/daemon 重启的 disconnected 照常转发）。
   close(sid) {
     const entry = this._conns.get(sid);
     if (!entry) return false;
+    this._cancelSingleRetry(sid); // 主动关闭 → 取消该会话的独立退避
+    entry.conn._intentionalClose = true;
     entry.conn.close();
     this._conns.delete(sid);
     this._disconnects.delete(sid);
@@ -94,6 +134,20 @@ class ConnManager {
 
   closeAll() {
     for (const sid of [...this._conns.keys()]) this.close(sid);
+    if (this._daemonConn) {
+      this._daemonConn.close();
+      this._daemonConn = null;
+    }
+  }
+
+  // 新会话连接建立钩子（main.js 挂 renderer 事件桥；recoverAll 重开路径同样触发）
+  onOpen(callback) {
+    this._openHooks.add(callback);
+  }
+
+  // recoverAll 完成钩子（main.js 刷新 UI 状态：status connected + sessions + pong）
+  onRecovered(callback) {
+    this._recoverHooks.add(callback);
   }
 
   // ── daemon 重启恢复（rant 15:07:19 P2）──────────────────────────────
@@ -118,10 +172,45 @@ class ConnManager {
       this.recoverAll().catch((e) =>
         this.logger.warn(`[gui] connManager recover failed: ${e.message}`)
       );
+    } else {
+      // 单条断（多会话场景，非重启）→ 独立退避重试
+      this._scheduleSingleRetry(sid);
     }
   }
 
-  // 全部重连重订阅（复用 open 序列：引导 daemon 就绪 → skipStart 会话连接 →
+  // 单连接独立退避（rant 15:07:19 P2：单条断 → 独立退避重试）。
+  // 退避到期后若该会话连接仍断 → open() 重开（stale → 关闭重开 + resume 重订阅）。
+  _scheduleSingleRetry(sid) {
+    if (this._singleRetries.has(sid)) return; // 已有退避在途
+    this.logger.info(
+      `[gui] connManager: session ${sid} dropped (not all) — independent backoff retry in ${this._singleRetryDelayMs}ms`
+    );
+    const timer = setTimeout(() => {
+      this._singleRetries.delete(sid);
+      this._retrySingle(sid).catch((e) =>
+        this.logger.warn(`[gui] connManager: session ${sid} retry failed: ${e.message}`)
+      );
+    }, this._singleRetryDelayMs);
+    timer.unref?.();
+    this._singleRetries.set(sid, timer);
+  }
+
+  _cancelSingleRetry(sid) {
+    const t = this._singleRetries.get(sid);
+    if (t) {
+      clearTimeout(t);
+      this._singleRetries.delete(sid);
+    }
+  }
+
+  async _retrySingle(sid) {
+    const entry = this._conns.get(sid);
+    if (!entry || entry.conn.connected) return; // 已重开/已主动关闭
+    this.logger.info(`[gui] connManager retrying session ${sid}`);
+    await this.open(sid, entry.projectPath); // stale → close + reopen（含 resume 重订阅）
+  }
+
+  // 全部重连重订阅（复用 open 序列：ensureDaemon → skipStart 会话连接 →
   // resume_session）。单会话恢复失败跳过不阻塞其余（写盘/重试由后续片处理）。
   async recoverAll() {
     if (this._recovering) return;
@@ -132,6 +221,8 @@ class ConnManager {
     }));
     try {
       for (const { sid } of sessions) this.close(sid);
+      for (const t of this._singleRetries.values()) clearTimeout(t);
+      this._singleRetries.clear();
       this._disconnects.clear();
       for (const { sid, projectPath } of sessions) {
         try {
@@ -143,6 +234,9 @@ class ConnManager {
       }
     } finally {
       this._recovering = false;
+    }
+    for (const cb of this._recoverHooks) {
+      try { cb(); } catch (e) { this.logger.warn(`[gui] connManager onRecovered hook error: ${e.message}`); }
     }
   }
 }
