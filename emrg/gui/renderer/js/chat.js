@@ -20,9 +20,12 @@ const Chat = (() => {
     return sessionState.get(key);
   }
 
-  /** 该会话的渲染容器：已注册的独立容器优先，否则默认聊天区（P3 过渡期行为） */
+  /** 该会话的渲染容器：已注册的独立容器优先，其次当前激活会话的容器（无 sid 事件落激活会话，P3 slice 2），最后回退默认聊天区（单会话过渡期行为）。 */
   function chatContainer(sid) {
-    return containers.get(sid) || $("chat-view");
+    if (containers.has(sid)) return containers.get(sid);
+    const active = App.state?.sessionId;
+    if (active && containers.has(active)) return containers.get(active);
+    return $("chat-view");
   }
 
   /** P4 起：为新打开的会话注册独立容器；关闭时 unregister 清引用 */

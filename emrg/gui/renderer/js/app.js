@@ -164,7 +164,7 @@ const App = (() => {
             return;
           }
           await window.emrg.clearSession({ sessionId: state.sessionId });
-          Chat.clear();
+          Chat.clear(state.sessionId);
           Chat.addSystemMessage(_t("app.cleared"));
           break;
         case "/compact":
@@ -323,7 +323,7 @@ const App = (() => {
   async function doRewind(recordIndex) {
     try {
       const res = await window.emrg.rewindSession({ sessionId: state.sessionId, recordIndex });
-      Chat.clear();
+      Chat.clear(state.sessionId);
       Chat.addSystemMessage(_t("app.rewound", { index: recordIndex, n: res.removedCount ?? 0 }));
     } catch (e) {
       Chat.addSystemMessage(_t("app.rewindFailed", { msg: e.message }));
@@ -553,6 +553,30 @@ const App = (() => {
   }
 
   // ── 会话 ─────────────────────────────────
+  // P3 slice 2：每会话一个 .session-view 容器（浏览器 tab 效果——切换 display 保留状态）
+  function ensureSessionView(sid) {
+    if (!sid) return $("chat-view");
+    // 在 wrapper 内按 dataset.sid 查找既有容器（不依赖 getElementById——测试沙箱对
+    // 未知 id 返回新 mock，且 mock 的 .id 不入 attributes；dataset 双端一致）
+    let view = [...$("chat-view").children].find((c) => c.dataset?.sid === sid);
+    if (!view) {
+      view = el("div", { class: "session-view", id: "chat-view-" + sid, dataset: { sid } });
+      $("chat-view").appendChild(view);
+    }
+    Chat.registerContainer(sid, view); // 幂等：重复注册覆盖同一元素
+    return view;
+  }
+
+  function activateSessionView(sid) {
+    const view = ensureSessionView(sid);
+    for (const child of $("chat-view").children) {
+      if (child.classList) child.classList.remove("active");
+    }
+    view.classList.add("active");
+    Chat.scrollToBottom(sid);
+    return view;
+  }
+
   async function switchSession(sid, opts = {}) {    // G65：busy 即自有流进行中/发送中（IPC 往返窗口内 ownStreamRequestId 尚未赋值）
     if (state.busy) {
       Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy);
@@ -562,8 +586,8 @@ const App = (() => {
       const res = await window.emrg.switchSession({ sessionId: sid });
       state.sessionId = sid;
       // P3 slice 1：切换只移动激活指针——每会话条目保留自己的 busy/ownStreamRequestId
-      // （G110 旧语义=清全局自有流标记；per-sid 后由各会话条目自己管理，P4 切回继续生成）
-      Chat.clear();
+      // P3 slice 2：激活该会话容器（状态保留，不 Chat.clear——切回继续看到原消息/流式现场）
+      activateSessionView(sid);
       updateEmptyState();
       if (res.error === "session_not_found") {
         Chat.addSystemMessage(_t("app.deletedSwitch"));
@@ -577,7 +601,7 @@ const App = (() => {
       }
       // G13：v1 不加载历史（G12）
       if (!opts.silent) {
-        Chat.addSystemMessage(_t("app.switched"));
+        Chat.addSystemMessage(_t("app.switched"), sid);
       }
       updateEmptyState();
       Sidebar.highlight(sid);
@@ -595,7 +619,8 @@ const App = (() => {
     try {
       const res = await window.emrg.newSession();
       state.sessionId = res.session_id;
-      Chat.clear();
+      activateSessionView(state.sessionId); // P3 slice 2：新会话独立容器（空）
+      Chat.clear(state.sessionId); // 新会话从空开始（容器可能被复用）
       updateEmptyState(); // 欢迎屏即反馈
       await refreshSessions();
       Sidebar.highlight(state.sessionId);
@@ -612,6 +637,10 @@ const App = (() => {
     }
     try {
       await window.emrg.deleteSession({ sessionId: sid });
+      // P3 slice 2：删除会话 → 释放其容器（若已打开）
+      Chat.unregisterContainer(sid);
+      const view = [...$("chat-view").children].find((c) => c.dataset?.sid === sid);
+      if (view) view.remove();
       if (state.sessionId === sid) {
         const remaining = state.sessions.filter((s) => s.session_id !== sid);
         if (remaining.length > 0) {
@@ -959,8 +988,9 @@ const App = (() => {
   // ── 空状态欢迎屏 ───────────────────────
   function updateEmptyState() {
     const empty = $("empty-state");
-    const chatView = $("chat-view");
-    empty.classList.toggle("hidden", chatView.children.length > 0);
+    // P3 slice 2：检查**激活会话**容器（wrapper 恒含 session-view 子节点，不能数 wrapper）
+    const activeView = Chat.chatContainer(state.sessionId);
+    empty.classList.toggle("hidden", activeView.children.length > 0);
   }
 
   // ── 输入条状态 ─────────────────────────
@@ -1297,6 +1327,7 @@ const App = (() => {
     switchSession,
     newSession,
     deleteSession,
+    activateSessionView, // P3 slice 2：激活会话容器（display 切换；导出供测试）
     refreshSessions,
     showConvMenu,
     handleEvent,
