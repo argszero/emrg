@@ -21,6 +21,7 @@ from websockets.exceptions import ConnectionClosed
 
 from emrg.config import LlmConfig
 from emrg.connect import connect_to_server
+from emrg.server.tool_types import ToolResult
 
 
 def _make_config() -> LlmConfig:
@@ -333,7 +334,9 @@ class TestWSBroadcast:
     """Phase 2 broadcast model (protocol-contract §2.6).
 
     Same session → all subscribed connections see the same streaming
-    response. Concurrent task on a busy session → 'session busy'.
+    response. Concurrent task on a busy session → queued (task_queued,
+    P1 rant 2026-08-10T21:55:37), injected at the next round boundary or
+    re-sent via queued_requeue when the turn ends normally.
     """
 
     def test_broadcast_to_subscribers(self):
@@ -384,8 +387,10 @@ class TestWSBroadcast:
                     await cleanup()
         asyncio.run(_test())
 
-    def test_session_busy(self):
-        """A's task holds the session lock; B's task gets 'session busy'."""
+    def test_task_queued_instead_of_busy_error(self):
+        """A's task holds the session lock; B's task is queued (task_queued,
+        NOT 'session busy'), then injected into A's turn at the stop boundary
+        (steer_committed) — the message is never lost."""
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 cwd = Path(tmp)
@@ -393,7 +398,7 @@ class TestWSBroadcast:
                 try:
                     async def slow_chat_stream(messages, tools=None):
                         yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
-                        await asyncio.sleep(0.8)
+                        await asyncio.sleep(0.6)
                         yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
                     server.llm.chat_stream = slow_chat_stream
                     ws_a = await connect_to_server()
@@ -408,10 +413,73 @@ class TestWSBroadcast:
                         await asyncio.sleep(0.2)  # let A's task grab the lock
                         task_b = {**task, "id": "t-busy-b"}
                         await ws_b.send(json.dumps(task_b, ensure_ascii=False))
-                        frame = await asyncio.wait_for(ws_b.recv(), timeout=5)
-                        resp = json.loads(frame)
-                        assert resp.get("error") == "session busy"
+                        # B must get task_queued (with position), NOT "session busy"
+                        resp = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=5))
+                        assert resp.get("type") == "task_queued", f"got {resp!r}"
+                        assert resp.get("request_id") == "t-busy-b"
                         assert resp.get("session_id") == "s_busy"
+                        assert resp.get("position") == 1
+                        # A's stop branch injects B's message into the same turn
+                        fsc = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "steer_committed",
+                            what="steer_committed")
+                        assert fsc.get("request_id") == "t-busy-b"
+                        # A's turn (now containing B's message) completes
+                        await _recv_until(
+                            ws_a,
+                            lambda f: f.get("done") and f.get("request_id") == "t-busy-a",
+                            what="t-busy-a done")
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_queued_requeue_on_normal_end(self):
+        """Turn ends with a message still queued (race window: it arrived
+        after the last injection drain) → the wrapper broadcasts
+        queued_requeue with the request_ids so clients re-send. White-box:
+        _inject_pending_messages is stubbed to never drain, forcing the
+        queue to survive until the wrapper's finally."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def slow_chat_stream(messages, tools=None):
+                        yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
+                        await asyncio.sleep(0.5)
+                        yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
+                    server.llm.chat_stream = slow_chat_stream
+                    async def no_drain(session, messages):
+                        return 0, False
+                    server._inject_pending_messages = no_drain  # type: ignore[assignment]
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        task = {
+                            "type": "task", "id": "t-rq-a", "session_id": "s_rq",
+                            "cwd": str(cwd), "prompt": "hi", "stream": True,
+                            "timestamp": "2026-08-02T00:00:00",
+                        }
+                        await ws_a.send(json.dumps(task, ensure_ascii=False))
+                        await asyncio.sleep(0.2)
+                        task_b = {**task, "id": "t-rq-b"}
+                        await ws_b.send(json.dumps(task_b, ensure_ascii=False))
+                        resp = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=5))
+                        assert resp.get("type") == "task_queued"
+                        # Turn ends normally → queued_requeue carries the ids
+                        requeue = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "queued_requeue",
+                            what="queued_requeue")
+                        assert "t-rq-b" in requeue.get("request_ids", [])
+                        # Re-send now that the lock is released → normal execution
+                        await ws_b.send(json.dumps(task_b, ensure_ascii=False))
+                        await _recv_until(
+                            ws_b,
+                            lambda f: f.get("done") and f.get("request_id") == "t-rq-b",
+                            what="t-rq-b done")
                     finally:
                         await ws_a.close()
                         await ws_b.close()
@@ -558,6 +626,330 @@ class TestWSEvolutionSummary:
                         assert resp["recent"][0]["timestamp"] == "2026-08-06T00:24:00"
                     finally:
                         await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+
+async def _recv_until(ws, pred, timeout=10, limit=50, what="frame"):
+    """Read frames (skipping unrelated broadcasts) until pred(frame) or fail."""
+    for _ in range(limit):
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+        if pred(frame):
+            return frame
+    raise AssertionError(f"expected {what} not received in {limit} frames")
+
+
+class TestWSQueueInjection:
+    """P1 queue-injection (rant 2026-08-10T21:55:37, design doc
+    mid-turn-input-queue): messages sent while a session's tool loop is busy
+    are queued per session and injected at the next round boundary (after the
+    current round's LLM request + ALL tool executions, before the next LLM
+    request) — never interrupting tools, never losing messages.
+
+    All clients subscribed to a session receive that session's broadcast
+    stream, so every read here filters for the expected frame type (queue
+    frames interleave with the active turn's deltas/tool frames).
+    """
+
+    @staticmethod
+    def _task(sid, tid, prompt, cwd, mode="auto"):
+        return {
+            "type": "task", "id": tid, "session_id": sid,
+            "cwd": str(cwd), "prompt": prompt, "stream": True,
+            "mode": mode, "timestamp": "2026-08-10T21:55:37",
+        }
+
+    def test_pending_injected_at_round_boundary_after_tools(self):
+        """B's message queued while A's tool executes is injected at the
+        round boundary: round 2's LLM request sees it, the tool ran to
+        completion first (no interruption), and steer_committed is
+        broadcast. Nothing is lost."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    loop = asyncio.get_running_loop()
+                    seen = {"round2_user_texts": None, "round2_tools": None,
+                            "t_inject_seen": None, "t_tool_end": None}
+
+                    class _SlowBash:
+                        async def execute(self, args):
+                            await asyncio.sleep(0.6)
+                            seen["t_tool_end"] = loop.time()
+                            return ToolResult(tool_call_id="call_1", name="bash",
+                                              content="hi", error=False)
+
+                    orig_get = server.tools.get
+                    server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)
+
+                    async def chat_stream(messages, tools=None):
+                        user_texts = [m.get("content") for m in messages
+                                      if m.get("role") == "user"]
+                        if any("steer-mid" in str(t) for t in user_texts):
+                            seen["round2_user_texts"] = user_texts
+                            seen["round2_tools"] = tools
+                            seen["t_inject_seen"] = loop.time()
+                            yield {"content": "收到", "tool_calls": None,
+                                   "finish_reason": "stop", "usage": None}
+                            return
+                        yield {"content": "开始", "tool_calls": None,
+                               "finish_reason": None, "usage": None}
+                        yield {"content": None, "tool_calls": [{
+                            "index": 0, "id": "call_1",
+                            "function": {"name": "bash",
+                                         "arguments": '{"command":"echo hi"}'},
+                        }], "finish_reason": "tool_calls", "usage": None}
+                    server.llm.chat_stream = chat_stream
+
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        await ws_a.send(json.dumps(
+                            self._task("s_inj", "t-inj-a", "turn-one", cwd), ensure_ascii=False))
+                        await asyncio.sleep(0.15)  # round 1 tool now executing
+                        await ws_b.send(json.dumps(
+                            self._task("s_inj", "t-inj-b", "steer-mid", cwd), ensure_ascii=False))
+
+                        # B: task_queued then steer_committed
+                        fq = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "task_queued", what="task_queued")
+                        assert fq.get("position") == 1
+                        fsc = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "steer_committed",
+                            what="steer_committed")
+                        assert fsc.get("request_id") == "t-inj-b"
+
+                        # A: tool_end before done
+                        tool_end_seen = done_seen = False
+                        while not done_seen:
+                            fa = json.loads(await asyncio.wait_for(ws_a.recv(), timeout=10))
+                            if fa.get("type") == "tool_end":
+                                tool_end_seen = True
+                            if fa.get("done"):
+                                done_seen = True
+                        assert tool_end_seen, "tool must run to completion"
+
+                        # round 2 LLM request received the injected message
+                        assert seen["round2_user_texts"] is not None
+                        assert any("steer-mid" in str(t) for t in seen["round2_user_texts"])
+                        # injection happened strictly after the tool finished
+                        assert seen["t_inject_seen"] >= seen["t_tool_end"] - 0.05
+                        # tools preserved for auto-mode rounds
+                        assert seen["round2_tools"] is not None
+                        assert len(seen["round2_tools"]) > 0
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_pending_ask_injects_empty_tools(self):
+        """A queued Ask-mode message is injected with an empty tool set
+        (mode=ask → tools=[]), so the injected round can only reply."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    loop = asyncio.get_running_loop()
+                    seen = {"tools": "unset"}
+
+                    class _SlowBash:
+                        async def execute(self, args):
+                            await asyncio.sleep(0.5)
+                            return ToolResult(tool_call_id="call_1", name="bash",
+                                              content="hi", error=False)
+
+                    orig_get = server.tools.get
+                    server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)
+
+                    async def chat_stream(messages, tools=None):
+                        user_texts = [m.get("content") for m in messages
+                                      if m.get("role") == "user"]
+                        if any("ask-me" in str(t) for t in user_texts):
+                            seen["tools"] = tools
+                            yield {"content": "仅回复", "tool_calls": None,
+                                   "finish_reason": "stop", "usage": None}
+                            return
+                        yield {"content": None, "tool_calls": [{
+                            "index": 0, "id": "call_1",
+                            "function": {"name": "bash",
+                                         "arguments": '{"command":"echo hi"}'},
+                        }], "finish_reason": "tool_calls", "usage": None}
+                    server.llm.chat_stream = chat_stream
+
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        await ws_a.send(json.dumps(
+                            self._task("s_ask", "t-ask-a", "turn", cwd), ensure_ascii=False))
+                        await asyncio.sleep(0.15)
+                        await ws_b.send(json.dumps(
+                            self._task("s_ask", "t-ask-b", "ask-me", cwd, mode="ask"),
+                            ensure_ascii=False))
+                        fq = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "task_queued", what="task_queued")
+                        while seen["tools"] == "unset":
+                            await asyncio.wait_for(ws_a.recv(), timeout=10)
+                        assert seen["tools"] == [], f"ask round must have empty tools, got {seen['tools']}"
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_queued_cancelled_on_cancel(self):
+        """A cancels mid-turn → the queued message is not lost silently:
+        clients get queued_cancelled (queue dropped, client can re-send)."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def long_stream(messages, tools=None):
+                        yield {"content": "工作中", "tool_calls": None,
+                               "finish_reason": None, "usage": None}
+                        await asyncio.sleep(5)
+                        yield {"content": "完成", "tool_calls": None,
+                               "finish_reason": "stop", "usage": None}
+                    server.llm.chat_stream = long_stream
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        await ws_a.send(json.dumps(
+                            self._task("s_can", "t-can-a", "long", cwd), ensure_ascii=False))
+                        await asyncio.sleep(0.2)
+                        await ws_b.send(json.dumps(
+                            self._task("s_can", "t-can-b", "queued", cwd), ensure_ascii=False))
+                        fq = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "task_queued", what="task_queued")
+                        # A cancels
+                        await ws_a.send(json.dumps({"type": "cancel", "session_id": "s_can"}))
+                        # A gets cancelled frame
+                        got_cancelled = False
+                        while not got_cancelled:
+                            fa = json.loads(await asyncio.wait_for(ws_a.recv(), timeout=10))
+                            if fa.get("type") == "cancelled":
+                                got_cancelled = True
+                        # B gets queued_cancelled (skipping A's cancelled-done broadcast)
+                        fb = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "queued_cancelled",
+                            what="queued_cancelled")
+                        assert fb.get("session_id") == "s_can"
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_clear_session_drops_pending(self):
+        """clear_session pops the session's pending queue and broadcasts
+        queued_cancelled (Change F, design doc)."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def long_stream(messages, tools=None):
+                        yield {"content": "工作中", "tool_calls": None,
+                               "finish_reason": None, "usage": None}
+                        await asyncio.sleep(1.0)
+                        yield {"content": "完成", "tool_calls": None,
+                               "finish_reason": "stop", "usage": None}
+                    server.llm.chat_stream = long_stream
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        await ws_a.send(json.dumps(
+                            self._task("s_drop", "t-drop-a", "long", cwd), ensure_ascii=False))
+                        await asyncio.sleep(0.2)
+                        await ws_b.send(json.dumps(
+                            self._task("s_drop", "t-drop-b", "queued", cwd), ensure_ascii=False))
+                        fq = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "task_queued", what="task_queued")
+                        assert len(server._session_pending.get("s_drop", [])) == 1
+                        # B clears the session while its message is queued
+                        await ws_b.send(json.dumps({
+                            "type": "clear_session", "session_id": "s_drop", "cwd": str(cwd),
+                        }))
+                        got_clear = got_qc = False
+                        while not (got_clear and got_qc):
+                            fb = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=10))
+                            if fb.get("type") == "clear_result" and fb.get("ok"):
+                                got_clear = True
+                            if fb.get("type") == "queued_cancelled":
+                                got_qc = True
+                        assert got_clear and got_qc
+                        assert server._session_pending.get("s_drop") in (None, [])
+                        # A's turn ends normally → no requeue (queue was dropped)
+                        got_done = False
+                        while not got_done:
+                            fa = json.loads(await asyncio.wait_for(ws_a.recv(), timeout=10))
+                            if fa.get("done"):
+                                got_done = True
+                        assert server._session_pending.get("s_drop") in (None, [])
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_per_session_isolation(self):
+        """The pending queue is per-session: a task on a different session
+        runs immediately (not queued); a task on the busy session queues."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def chat_stream(messages, tools=None):
+                        user_texts = [m.get("content") for m in messages
+                                      if m.get("role") == "user"]
+                        if any("iso2" in str(t) for t in user_texts):
+                            yield {"content": "iso2-done", "tool_calls": None,
+                                   "finish_reason": "stop", "usage": None}
+                            return
+                        yield {"content": "iso1-start", "tool_calls": None,
+                               "finish_reason": None, "usage": None}
+                        await asyncio.sleep(1.2)
+                        yield {"content": "iso1-done", "tool_calls": None,
+                               "finish_reason": "stop", "usage": None}
+                    server.llm.chat_stream = chat_stream
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        # A busy on s_iso1
+                        await ws_a.send(json.dumps(
+                            self._task("s_iso1", "t-iso-a", "iso1 long", cwd), ensure_ascii=False))
+                        await asyncio.sleep(0.2)
+                        # B on s_iso2 → NOT busy → immediate streaming, no task_queued
+                        await ws_b.send(json.dumps(
+                            self._task("s_iso2", "t-iso-b2", "iso2 fast", cwd), ensure_ascii=False))
+                        got_done = False
+                        saw_queued = False
+                        while not got_done:
+                            fb = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=10))
+                            if fb.get("type") == "task_queued":
+                                saw_queued = True
+                            if fb.get("done"):
+                                got_done = True
+                        assert not saw_queued, "different session must not be queued"
+                        assert got_done
+                        # B on s_iso1 (busy) → queued
+                        await ws_b.send(json.dumps(
+                            self._task("s_iso1", "t-iso-b1", "iso1 queued", cwd), ensure_ascii=False))
+                        fq = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "task_queued", what="task_queued")
+                        assert fq.get("session_id") == "s_iso1"
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
                 finally:
                     await cleanup()
         asyncio.run(_test())

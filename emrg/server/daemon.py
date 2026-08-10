@@ -178,6 +178,10 @@ class EmrgServer:
         # ── Phase 2 broadcast model (protocol-contract §2.6) ──
         self._session_subscribers: dict[str, set] = {}  # session_id → set[ws]
         self._session_busy: dict[str, bool] = {}        # session_id → active task?
+        # P1 queue-injection (rant 2026-08-10T21:55:37): per-session FIFO of
+        # (TaskRequest, allow_tools) received while a tool loop is busy —
+        # injected at the next round boundary (aligned with codex steer_input).
+        self._session_pending: dict[str, list[tuple[TaskRequest, bool]]] = {}
         self._all_connections: set = set()              # all authenticated connections
 
         # Device-flow auth (rant 10:17 Stage 2b): background gh auth login --web task
@@ -539,14 +543,10 @@ class EmrgServer:
                         })
                         continue
                     # Phase 2 session-level lock (protocol-contract §2.6.5):
-                    # one active task per session — concurrent clients get
-                    # "session busy" instead of racing writes.
-                    if self._session_busy.get(session_id):
-                        await self._send(ws, {
-                            "error": "session busy",
-                            "session_id": session_id,
-                        })
-                        continue
+                    # one active task per session — concurrent tasks queue.
+                    # P1 (rant 21:55:37): construct req + allow_tools FIRST
+                    # (the busy branch must append req to the pending queue),
+                    # then check busy.
                     try:
                         req = TaskRequest(
                             id=data.get("id", ""),
@@ -562,6 +562,16 @@ class EmrgServer:
                     # WorkBuddy P2 (rant 21:35): Ask mode — pure chat, no tools.
                     # mode="ask" → LLM gets an empty tool set so it can only reply.
                     allow_tools = data.get("mode", "auto") != "ask"
+                    if self._session_busy.get(session_id):
+                        # Queue the task; injected at the next round boundary.
+                        self._session_pending.setdefault(session_id, []).append((req, allow_tools))
+                        await self._broadcast(session_id, {
+                            "type": "task_queued",
+                            "request_id": req.id,
+                            "session_id": session_id,
+                            "position": len(self._session_pending[session_id]),
+                        })
+                        continue
                     # Cancel previous task if still running
                     if _tool_task and not _tool_task.done():
                         if _cancel_event:
@@ -1465,6 +1475,14 @@ class EmrgServer:
                 return
             session = self._get_or_create_session(session_id, Path(cwd))
             session.clear()
+            # P1 (rant 21:55:37) Change F: clearing a session also drops its
+            # pending queue (queued messages are stale after clear).
+            dropped = self._session_pending.pop(session_id, [])
+            if dropped:
+                await self._broadcast(session_id, {
+                    "type": "queued_cancelled",
+                    "session_id": session_id,
+                })
             await self._send(ws, {
                 "type": "clear_result",
                 "session_id": session_id,
@@ -1492,6 +1510,14 @@ class EmrgServer:
 
             deleted = Session.delete(session_id, Path(cwd))
             if deleted:
+                # P1 (rant 21:55:37) Change F: deleting the session also
+                # drops its pending queue.
+                dropped = self._session_pending.pop(session_id, [])
+                if dropped:
+                    await self._broadcast(session_id, {
+                        "type": "queued_cancelled",
+                        "session_id": session_id,
+                    })
                 await self._send(ws, {
                     "type": "session_deleted",
                     "session_id": session_id,
@@ -1643,6 +1669,50 @@ class EmrgServer:
     # finally runs → lock released. This also roots out the multi-connection
     # write race (§5): session writes are serialized by the single active task.
 
+    async def _inject_pending_messages(
+        self, session: Session, messages: list[dict],
+    ) -> tuple[int, bool]:
+        """Pop the session's pending queue and inject it into `messages`.
+
+        P1 queue-injection (rant 2026-08-10T21:55:37), aligned with codex
+        steer_input: messages sent while the tool loop is busy are queued per
+        session and injected at the next round boundary (after the current
+        round's tools, before the next LLM request).
+
+        Uses pop() for atomic removal — while we await broadcasts, the read
+        loop may append new messages to the same list; popping the whole list
+        means those land in a fresh list (setdefault) and are injected next
+        round. Never dropped.
+
+        Each injected message is persisted (append_message) so auto-compact
+        rebuilding from history keeps it, and a ``steer_committed`` broadcast
+        tells clients the message was committed into the turn.
+
+        Returns ``(injected_count, ask_injected)`` — ``ask_injected`` is True
+        when any queued message was Ask mode (mode=ask); the caller must use
+        an empty tool set for the round that processes it.
+        """
+        sid = session.session_id
+        pending = self._session_pending.pop(sid, [])
+        if not pending:
+            return 0, False
+        ask_injected = any(not allow for _, allow in pending)
+        for preq, _ in pending:
+            pcontent = self._build_user_content(
+                preq.prompt, preq.images, self.llm.config.vision
+            )
+            messages.append({"role": "user", "content": pcontent})
+            record: dict = {"type": "message", "role": "user", "content": preq.prompt}
+            if preq.images:
+                record["images"] = preq.images
+            session.append_message(record)
+            await self._broadcast(sid, {
+                "type": "steer_committed",
+                "request_id": preq.id,
+                "session_id": sid,
+            })
+        return len(pending), ask_injected
+
     async def _run_tool_loop_locked(
         self, req: TaskRequest, ws, session: Session,
         cancel_event: asyncio.Event | None = None,
@@ -1650,10 +1720,36 @@ class EmrgServer:
     ) -> None:
         """Run _run_tool_loop and release the session busy lock on exit."""
         session_id = session.session_id
+        normal_end = False
         try:
             await self._run_tool_loop(req, ws, session, cancel_event, allow_tools)
+            normal_end = True
         finally:
             self._session_busy[session_id] = False
+            # P1 (rant 21:55:37): messages still queued when the loop ends are
+            # not lost. We do NOT start a follow-up task here (_tool_task /
+            # _cancel_event are read-loop locals — a hand-off would break
+            # cancel + busy tracking); instead:
+            #   normal end → queued_requeue → clients auto re-send (busy is
+            #     now released, the re-send goes through the normal path)
+            #   cancel / error / disconnect → queued_cancelled (queue dropped)
+            pending = self._session_pending.pop(session_id, [])
+            if pending:
+                # A cancel (even one caught and returned from inside the loop)
+                # must NOT auto-requeue: the user stopped the turn. Exception /
+                # disconnect also drop the queue. Only a clean turn end
+                # re-sends the queued messages.
+                if normal_end and not (cancel_event and cancel_event.is_set()):
+                    await self._broadcast(session_id, {
+                        "type": "queued_requeue",
+                        "session_id": session_id,
+                        "request_ids": [r.id for r, _ in pending],
+                    })
+                else:
+                    await self._broadcast(session_id, {
+                        "type": "queued_cancelled",
+                        "session_id": session_id,
+                    })
 
     async def _run_tool_loop(
         self, req: TaskRequest, ws, session: Session,
@@ -1696,9 +1792,41 @@ class EmrgServer:
             *history_messages,
             {"role": "user", "content": user_content},
         ]
-        tools_openai = self.tools.to_openai_tools() if allow_tools else []
+        tools_base = self.tools.to_openai_tools() if allow_tools else []
+        # P1 (rant 21:55:37): injection rounds do NOT consume the round budget;
+        # force_ask latches "an Ask message was injected outside the round-top
+        # injection (stop / Case 3 / loop-end)" so the next round uses an empty
+        # tool set for it.
+        force_ask = False
+        round_num = 1
+        while True:
+            if round_num > self._max_tool_rounds:
+                # P1 (rant 21:55:37): round budget exhausted but messages
+                # still queued — process them with a fresh round budget
+                # instead of stranding them; only fall back to the
+                # "Exceeded maximum" error when the queue is empty.
+                _n, _ask = await self._inject_pending_messages(session, messages)
+                if _n:
+                    force_ask = _ask
+                    round_num = 1
+                    continue
 
-        for round_num in range(1, self._max_tool_rounds + 1):
+                # Exceeded max tool rounds
+                logger.warning("max tool rounds (%d) exceeded for task %s",
+                               self._max_tool_rounds, req.id)
+                await self._broadcast(session.session_id, {
+                    "request_id": req.id,
+                    "content": f"Exceeded maximum tool call rounds ({self._max_tool_rounds}).",
+                    "done": True,
+                    "delta": False,
+                    "session_id": session.session_id,
+                })
+
+                # Fire-and-forget: reflect on whether to save memories
+                self._maybe_reflect_memory(session, req.prompt, full_content)
+                return
+
+            tools_openai = tools_base
             # Check for cancellation between rounds
             if cancel_event and cancel_event.is_set():
                 logger.info("tool loop cancelled by client at round %d", round_num)
@@ -1710,6 +1838,13 @@ class EmrgServer:
                     "session_id": session.session_id,
                 })
                 return
+
+            # P1 queue-injection: drain pending at the round boundary (after
+            # this round's tools, before the next LLM request — codex steer).
+            _injected, _ask = await self._inject_pending_messages(session, messages)
+            if _ask or force_ask:
+                tools_openai = []
+            force_ask = False
 
             logger.debug("tool loop round %d: %d messages, %d tools",
                          round_num, len(messages), len(tools_openai))
@@ -1845,6 +1980,20 @@ class EmrgServer:
                     "role": "assistant",
                     "content": full_content,
                 })
+
+                # Append the assistant reply to the local messages so the
+                # LLM context stays coherent when queued messages are
+                # injected after this round (mirrors Case 2's assistant
+                # tool_calls message).
+                messages.append({"role": "assistant", "content": full_content})
+
+                # P1 (rant 21:55:37): messages queued mid-round (after the
+                # round-top drain) must not end the turn — inject and continue.
+                # Injection round does not consume the round budget.
+                _n, _ask = await self._inject_pending_messages(session, messages)
+                if _n:
+                    force_ask = _ask
+                    continue
 
                 await self._broadcast(session.session_id, {
                     "request_id": req.id,
@@ -1988,7 +2137,11 @@ class EmrgServer:
                         "error": result.error,
                     })
 
-                # Log LLM request for this round (before continuing)
+                # Log LLM request for this round (before continuing).
+                # Tool rounds consume the round budget; injection rounds do
+                # not (they `continue` from the stop / Case 3 branches
+                # without incrementing).
+                round_num += 1
                 continue
 
             # Case 3: Max tokens or other stop — done
@@ -2003,6 +2156,19 @@ class EmrgServer:
                 "content": full_content,
             })
 
+            # Append the assistant reply to the local messages so the LLM
+            # context stays coherent when queued messages are injected
+            # after this round.
+            messages.append({"role": "assistant", "content": full_content})
+
+            # P1 (rant 21:55:37): messages queued mid-round must not end the
+            # turn — inject and continue (injection round does not consume
+            # the round budget).
+            _n, _ask = await self._inject_pending_messages(session, messages)
+            if _n:
+                force_ask = _ask
+                continue
+
             await self._broadcast(session.session_id, {
                 "request_id": req.id,
                 "content": full_content or "",
@@ -2014,20 +2180,6 @@ class EmrgServer:
             # Fire-and-forget: reflect on whether to save memories
             self._maybe_reflect_memory(session, req.prompt, full_content)
             return
-
-        # Exceeded max tool rounds
-        logger.warning("max tool rounds (%d) exceeded for task %s",
-                       self._max_tool_rounds, req.id)
-        await self._broadcast(session.session_id, {
-            "request_id": req.id,
-            "content": f"Exceeded maximum tool call rounds ({self._max_tool_rounds}).",
-            "done": True,
-            "delta": False,
-            "session_id": session.session_id,
-        })
-
-        # Fire-and-forget: reflect on whether to save memories
-        self._maybe_reflect_memory(session, req.prompt, full_content)
 
     def _log_llm_exchange(
         self, session: Session, messages, tools,
