@@ -11,7 +11,8 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
-const { DaemonClient, generateSessionId, SESSION_ID_RE, PORT_FILE } = require("./daemon_client");
+const { generateSessionId, SESSION_ID_RE } = require("./daemon_client");
+const { ConnManager } = require("./conn-manager");
 const APP_VERSION = require("./package.json").version;
 
 // ── 单实例锁（G85/G120：第二个实例退出并 focus 已有窗口）──
@@ -24,12 +25,10 @@ if (!app.requestSingleInstanceLock()) {
 function main() {
   const logger = createLogger();
   let win = null;
-  let client = null;
+  let connManager = null; // P2（rant 15:07:19）：连接管理器 = daemon 生命周期唯一 owner
   let projectDir = os.homedir();
   let configExists = false;
   let currentSessionId = null;
-  let ownStream = false; // 自有流运行中（G65：禁止切会话）
-  let ownStreamRequestId = null; // 自有流 request_id（广播 done 不清锁）
   let reconnectTimer = null;
   // Rant 2026-08-09T13:16:36 ③/⑤：重连指数退避（1s→2s→4s→…封顶 60s）。
   // 之前固定 1s——daemon 缺失时每 5s 一轮 spawn，弹窗/日志风暴。成功连接后复位。
@@ -159,7 +158,7 @@ vision = false
         resolve(fs.readFileSync(configPath(), "utf8"));
         return;
       }
-      const python = client?._findPython() || "python3";
+      const python = connManager?.daemonConn()?._findPython() || "python3";
       const child = spawn(python, ["-c", "from emrg.config import ensure_config; ensure_config()"], {
         cwd: projectDir,
         stdio: "ignore",
@@ -265,19 +264,21 @@ vision = false
       if (requestId !== undefined && (typeof requestId !== "string" || requestId.length < 8 || requestId.length > 64)) {
         throw new Error("invalid request_id"); // G143：renderer 预生成 id 的格式护栏
       }
-      if (!client || !client.connected) throw new Error("daemon not connected");
-      ownStream = true;
+      // P2：每会话独立连接——首条消息前自动打开（新会话不 resume，daemon 隐式订阅）
+      let conn = connManager?.get(sessionId);
+      if (!conn || !conn.connected) {
+        conn = await openSession(sessionId, projectDir, { resume: false });
+      }
       let rid;
       try {
         // G143：renderer 预生成 requestId（send 前标记自有流，消除 IPC 往返竞态窗口）
         // WorkBuddy P2：mode="ask" → 纯对话（daemon 不启用工具）
-        rid = client.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true, requestId, mode });
+        // G65：conn.sendTask 内部标记 ownStream（每连接独立锁）
+        rid = conn.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true, requestId, mode });
       } catch (e) {
-        ownStream = false; // sendTask 抛异常（ws.send 失败）→ 释放锁，防 G65 锁泄漏
-        ownStreamRequestId = null;
+        conn._releaseOwnStream(); // sendTask 抛异常（ws.send 失败）→ 释放锁，防 G65 锁泄漏
         throw e;
       }
-      ownStreamRequestId = rid; // 追踪自有流（G65 锁仅由自有 done 释放）
       return { ok: true, requestId: rid }; // G124：回传 requestId → renderer 识别自有流
     });
 
@@ -285,33 +286,35 @@ vision = false
 
     ipcMain.handle("emrg:switchSession", async (_e, { sessionId }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      if (ownStream) throw new Error("stream in progress — cannot switch"); // G65
-      if (!client?.connected) throw new Error("daemon not connected");
-      client.clearGroups(); // G110：切会话清空旧分组缓存（含 timer），防广播"幽灵"残留
-      const meta = await client.sendCommandAndWait("resume_session", { session_id: sessionId, cwd: projectDir }, 5000)
-        .catch((e) => {
-          // G106：被动删除恢复——resume error → 刷新列表 + 切最近
-          if (/not found|error/i.test(e.message)) {
-            return listSessions().then((sessions) => {
-              const next = sessions[0]?.session_id || null;
-              return { error: "session_not_found", sessions, next_session: next };
-            });
-          }
-          throw e;
-        });
-      if (meta.error === "session_not_found") {
-        // G106：resume 失败（会话已删）→ 不更新 currentSessionId（renderer 会切到 next_session，
-        // 但 main 侧保持旧值，重连 resume 也不指向已删会话；renderer 随后 switchSession(next) 会纠正）
-        return meta;
+      // G65：自有流运行中禁止切会话（每连接独立锁，查当前激活连接）
+      if (connManager?.get(currentSessionId)?.ownStream) throw new Error("stream in progress — cannot switch");
+      const prevSid = currentSessionId;
+      // G110：切会话清空旧连接分组缓存（含 timer），防广播"幽灵"残留
+      connManager?.get(prevSid)?.clearGroups();
+      try {
+        await openSession(sessionId, projectDir); // 打开（新）会话连接 + resume_session 自动订阅
+      } catch (e) {
+        // G106：被动删除恢复——resume error → 刷新列表 + 切最近
+        if (/not found|error/i.test(e.message)) {
+          connManager?.close(sessionId); // 防御：失败连接已由 open 内部关闭
+          return listSessions().then((sessions) => {
+            const next = sessions[0]?.session_id || null;
+            return { error: "session_not_found", sessions, next_session: next };
+          });
+        }
+        throw e;
       }
       currentSessionId = sessionId;
       win.setTitle(`EMRG — ${sessionId}`); // G109
-      return meta;
+      // 单会话模型：切走即关闭旧会话连接（每会话一条连接；多会话 openSessions 由 P4 管理）
+      if (prevSid && prevSid !== sessionId) connManager?.close(prevSid);
+      return {};
     });
 
     ipcMain.handle("emrg:deleteSession", async (_e, { sessionId }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await client.sendCommandAndWait("delete_session", { session_id: sessionId, cwd: projectDir }, 5000);
+      await requireConn().sendCommandAndWait("delete_session", { session_id: sessionId, cwd: projectDir }, 5000);
+      connManager?.close(sessionId); // P2：删除会话 → 关闭该会话连接（若打开）
       return { ok: true };
     });
 
@@ -319,7 +322,7 @@ vision = false
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       const clean = String(title || "").trim().slice(0, 80); // 截断超长标题
       if (!clean) throw new Error("empty title");
-      const frame = await client.sendCommandAndWait("rename_session", { session_id: sessionId, cwd: projectDir, title: clean }, 5000);
+      const frame = await requireConn().sendCommandAndWait("rename_session", { session_id: sessionId, cwd: projectDir, title: clean }, 5000);
       return { ok: true, title: frame.title || clean };
     });
 
@@ -335,21 +338,21 @@ vision = false
     ipcMain.handle("emrg:clearSession", async (_e, { sessionId }) => {
       // GUI / 指令 P1：/clear — 清空当前会话（daemon 协议 clear_session 已存在）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await client.sendCommandAndWait("clear_session", { session_id: sessionId, cwd: projectDir }, 5000);
+      await requireConn().sendCommandAndWait("clear_session", { session_id: sessionId, cwd: projectDir }, 5000);
       return { ok: true };
     });
 
     ipcMain.handle("emrg:compactSession", async (_e, { sessionId }) => {
       // GUI / 指令 P1：/compact — 压缩当前会话历史（daemon 协议 compact 已存在）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await client.sendCommandAndWait("compact", { session_id: sessionId, cwd: projectDir }, 5000);
+      await requireConn().sendCommandAndWait("compact", { session_id: sessionId, cwd: projectDir }, 5000);
       return { ok: true };
     });
 
     ipcMain.handle("emrg:listHistory", async (_e, { sessionId }) => {
       // GUI / 指令 P2：/rewind — 获取会话历史消息点（daemon 协议 list_history 已存在）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      const frame = await client.sendCommandAndWait("list_history", { session_id: sessionId, cwd: projectDir }, 5000);
+      const frame = await requireConn().sendCommandAndWait("list_history", { session_id: sessionId, cwd: projectDir }, 5000);
       return { messages: frame.messages || [] };
     });
 
@@ -359,7 +362,7 @@ vision = false
       if (typeof recordIndex !== "number" || !Number.isInteger(recordIndex) || recordIndex < 0) {
         throw new Error("invalid record_index");
       }
-      const frame = await client.sendCommandAndWait(
+      const frame = await requireConn().sendCommandAndWait(
         "rewind_session",
         { session_id: sessionId, cwd: projectDir, record_index: recordIndex },
         5000
@@ -374,7 +377,7 @@ vision = false
         if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
         params.session_id = sessionId;
       }
-      const frame = await client.sendCommandAndWait("list_memories", params, 5000);
+      const frame = await requireConn().sendCommandAndWait("list_memories", params, 5000);
       return frame.memories || [];
     });
 
@@ -386,7 +389,7 @@ vision = false
         if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
         params.session_id = sessionId;
       }
-      const frame = await client.sendCommandAndWait("read_memory", params, 5000);
+      const frame = await requireConn().sendCommandAndWait("read_memory", params, 5000);
       return frame.memory || { id: memoryId, content: "" };
     });
 
@@ -417,27 +420,27 @@ vision = false
 
     ipcMain.handle("emrg:listProjects", async () => {
       // GUI / 指令 P4：/rant 项目下拉 — daemon list_projects → projects_list
-      const frame = await client.sendCommandAndWait("list_projects", {}, 5000);
+      const frame = await requireConn().sendCommandAndWait("list_projects", {}, 5000);
       return frame.projects || [];
     });
 
     ipcMain.handle("emrg:listTasks", async () => {
       // GUI / 指令 P4：/trigger — daemon list_tasks → tasks_list
-      const frame = await client.sendCommandAndWait("list_tasks", {}, 5000);
+      const frame = await requireConn().sendCommandAndWait("list_tasks", {}, 5000);
       return frame.tasks || [];
     });
 
     ipcMain.handle("emrg:triggerTask", async (_e, { name }) => {
       // GUI / 指令 P4：/trigger <name> — daemon trigger_task → trigger_result
       if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
-      const frame = await client.sendCommandAndWait("trigger_task", { name: name.trim() }, 5000);
+      const frame = await requireConn().sendCommandAndWait("trigger_task", { name: name.trim() }, 5000);
       return frame;
     });
 
     ipcMain.handle("emrg:sendRant", async (_e, { message, project = "" } = {}) => {
       // GUI / 指令 P4：/rant — 提交反馈到演化系统（daemon rant 协议，字段序与 rants.jsonl 一致）
       if (typeof message !== "string" || !message.trim()) throw new Error("invalid rant message");
-      const frame = await client.sendCommandAndWait("rant", {
+      const frame = await requireConn().sendCommandAndWait("rant", {
         message: message.trim().slice(0, 10000),
         project: String(project || "").trim(),
         // timestamp deliberately NOT sent: daemon stamps rants with local time
@@ -449,13 +452,13 @@ vision = false
 
     ipcMain.handle("emrg:evolutionSummary", async (_e, { limit = 5 } = {}) => {
       // GUI / 指令 P3：自进化可见化 — daemon evolution_summary（count + 最近改进）
-      const frame = await client.sendCommandAndWait("evolution_summary", { limit }, 5000);
+      const frame = await requireConn().sendCommandAndWait("evolution_summary", { limit }, 5000);
       return { count: frame.count ?? 0, recent: frame.recent || [] };
     });
 
     ipcMain.handle("emrg:githubStatus", async () => {
       // Windows GCM rant Stage 2：设置页 GitHub 连接状态（daemon github_status）
-      const frame = await client.sendCommandAndWait("github_status", {}, 10000);
+      const frame = await requireConn().sendCommandAndWait("github_status", {}, 10000);
       return { authenticated: Boolean(frame.authenticated), user: frame.user || null };
     });
 
@@ -463,7 +466,7 @@ vision = false
       // Auto update-check prompt (rant 2026-08-10T07:12:12): query daemon's
       // cached latest release; display-only, no auto download/install.
       try {
-        const frame = await client.sendCommandAndWait("update_check", {}, 10000);
+        const frame = await requireConn().sendCommandAndWait("update_check", {}, 10000);
         return {
           current_version: frame.current_version || "",
           latest_version: frame.latest_version || "",
@@ -480,26 +483,26 @@ vision = false
       // Idempotency (rant 07:12:12 §4): record that the GUI showed the prompt
       // for this version — same version never re-prompted.
       try {
-        await client.sendCommandAndWait("update_check_prompted", { version: String(version || "") }, 5000);
+        await requireConn().sendCommandAndWait("update_check_prompted", { version: String(version || "") }, 5000);
       } catch { /* best-effort */ }
       return { ok: true };
     });
 
     ipcMain.handle("emrg:githubConnect", async (_e, { token }) => {
       // Windows GCM rant Stage 2：PAT 授权 + setup-git（daemon github_connect）
-      const frame = await client.sendCommandAndWait("github_connect", { token: String(token || "").trim() }, 40000);
+      const frame = await requireConn().sendCommandAndWait("github_connect", { token: String(token || "").trim() }, 40000);
       return { ok: Boolean(frame.ok), user: frame.user || null, error: frame.error || null };
     });
 
     ipcMain.handle("emrg:githubDisconnect", async () => {
       // Windows GCM rant Stage 2：断开 GitHub（daemon github_disconnect）
-      const frame = await client.sendCommandAndWait("github_disconnect", {}, 40000);
+      const frame = await requireConn().sendCommandAndWait("github_disconnect", {}, 40000);
       return { ok: Boolean(frame.ok), error: frame.error || null };
     });
 
     ipcMain.handle("emrg:githubConnectWeb", async () => {
       // Windows GCM rant Stage 2b：device flow 启动（daemon github_connect_web）
-      const frame = await client.sendCommandAndWait("github_connect_web", {}, 15000);
+      const frame = await requireConn().sendCommandAndWait("github_connect_web", {}, 15000);
       return { ok: Boolean(frame.ok), code: frame.code || null, url: frame.url || null, error: frame.error || null };
     });
 
@@ -511,7 +514,7 @@ vision = false
     });
 
     ipcMain.handle("emrg:setModel", async (_e, { model }) => {
-      await client.sendCommandAndWait("set_model", { model }, 5000);
+      await requireConn().sendCommandAndWait("set_model", { model }, 5000);
       return { ok: true };
     });
 
@@ -525,7 +528,7 @@ vision = false
     });
 
     ipcMain.handle("emrg:listModels", async () => {
-      const frame = await client.sendCommandAndWait("list_models", {}, 5000);
+      const frame = await requireConn().sendCommandAndWait("list_models", {}, 5000);
       return frame.models || [];
     });
 
@@ -553,7 +556,7 @@ vision = false
 
     ipcMain.handle("emrg:saveSettings", async (_e, rawConfig) => {
       const cfg = validateConfig(rawConfig || {});
-      const wasRunning = await client?.isRunning() || false; // G123
+      const wasRunning = Boolean(connManager?.daemonConn()?.connected); // G123：daemon 已连 = 运行中
       let text;
       if (!fs.existsSync(configPath())) {
         text = await ensureConfigTemplate(); // G116
@@ -599,11 +602,12 @@ vision = false
       // G24：无参数
       // G141：断连边界——ws 可能已 null/closed（_onClose 后 connected=false），sendCommand 抛异常
       // 不能让它泄漏为 IPC reject → renderer unhandled rejection（对比 sendMessage 的 try-catch 防护）
-      if (client?.ws) {
-        try { await client.sendCommand("cancel"); } catch { /* 断连时忽略 */ }
+      // P2：cancel 发到当前激活连接（自有流所在连接），并释放其 G65 锁
+      const c = activeConn();
+      if (c?.ws) {
+        try { await c.sendCommand("cancel"); } catch { /* 断连时忽略 */ }
       }
-      ownStream = false;
-      ownStreamRequestId = null;
+      c?._releaseOwnStream();
       return { ok: true };
     });
 
@@ -614,77 +618,73 @@ vision = false
     });
   }
 
-  // ── daemon 生命周期 ─────────────────────────────────────
+  // ── daemon 生命周期（P2：connManager 为 daemon 唯一 owner）──────────
+
+  // 惰性初始化 connManager（挂事件桥 + 恢复钩子）。
+  function ensureConnManager() {
+    if (connManager) return connManager;
+    connManager = new ConnManager({ projectDir, logger, isPackaged: app.isPackaged });
+    // 每个新会话连接建立时挂 renderer 事件桥（附带 sid；含 recoverAll 重开路径）
+    connManager.onOpen((sid, conn) => {
+      conn.onEvent((type, data) => {
+        if (win && !win.isDestroyed()) {
+          // 主动关闭（切走/删除）不触发断线横幅——真断连/daemon 重启照常转发
+          if (type === "disconnected" && conn._intentionalClose) return;
+          win.webContents.send("emrg:event", { type, data, sid });
+        }
+      });
+    });
+    // daemon 重启恢复完成后刷新 UI 状态（对齐旧 G41 重连成功块）
+    connManager.onRecovered(async () => {
+      try {
+        const sessions = await listSessions();
+        sendToRenderer("sessions", { sessions });
+        const pong = await waitForPong();
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model });
+        logger.info("[gui] connManager recovery complete");
+      } catch (e) {
+        logger.warn(`[gui] post-recovery refresh failed: ${e.message}`);
+      }
+    });
+    return connManager;
+  }
+
+  // 当前激活连接：有会话连接用会话连接（同一 daemon，命令通用）；否则 daemon 级连接。
+  function activeConn() {
+    if (!connManager) return null;
+    if (currentSessionId) {
+      const c = connManager.get(currentSessionId);
+      if (c) return c;
+    }
+    return connManager.daemonConn();
+  }
+
+  // 同步取可用连接（未连 → 抛错，与旧 `if (!client?.connected) throw` 语义一致）。
+  function requireConn() {
+    const c = activeConn();
+    if (!c || !c.connected) throw new Error("daemon not connected");
+    return c;
+  }
+
+  // 打开（或复用）会话连接；事件桥由 onOpen 钩子统一挂（含 recoverAll 重开）。
+  async function openSession(sid, projectPath, { resume = true } = {}) {
+    const existing = connManager.get(sid);
+    if (existing && existing.connected) return existing;
+    return connManager.open(sid, projectPath, { resume });
+  }
 
   async function ensureConnected() {
-    if (!client) {
-      // Phase 4（rant #12 §4 R7）：打包模式传 app.isPackaged → daemon_client 走
-      // 捆绑 emrgd 分支（_findDaemonExecutable）。
-      client = new DaemonClient({ projectDir, logger, isPackaged: app.isPackaged });
-      // G122：message_delta 16ms 批量推送
-      let deltaBuf = [];
-      let deltaTimer = null;
-      // rant 14:11：冲刷 delta 缓冲——终态事件（done/error/cancelled）直通不走缓冲，
-      // 若残留 delta 在 16ms 定时器之后才 flush，会晚于终态到达渲染层 →
-      // handleDelta 找不到 group 节点 → 建孤儿节点（误标"来自其他客户端"）+ 光标永不消失。
-      const flushDeltaBuf = () => {
-        if (deltaTimer) {
-          clearTimeout(deltaTimer);
-          deltaTimer = null;
-        }
-        if (deltaBuf.length && win && !win.isDestroyed()) {
-          const chunks = deltaBuf;
-          deltaBuf = [];
-          win.webContents.send("emrg:event", { type: "message_delta", data: { chunks } });
-        }
-      };
-      client.onEvent((type, data) => {
-        if (type === "message_delta") {
-          deltaBuf.push(data);
-          if (!deltaTimer) {
-            deltaTimer = setTimeout(flushDeltaBuf, 16);
-          }
-          return;
-        }
-        if (type === "done" || type === "error" || type === "cancelled") {
-          flushDeltaBuf(); // 终态前先清空缓冲：delta 保证不晚于终态（webContents.send 保序）
-        }
-        if (type === "done") {
-          // 仅自有流的 done 释放 G65 锁（广播 done 不影响）；timeout 兜底同样只清自有
-          if (data.request_id === ownStreamRequestId || (data.timeout && ownStream)) {
-            ownStream = false;
-            ownStreamRequestId = null;
-          }
-        }
-        if (type === "error") {
-          // session busy 是即发错误（daemon 返回后无 done 跟随）——释放 ownStream，防 G65 锁泄漏
-          // （流式错误如 LLM error 则有 done 跟随，由 done 分支释放，不在此处理）
-          if (data.error && String(data.error).includes("session busy")) {
-            ownStream = false;
-            ownStreamRequestId = null;
-          }
-        }
-        if (win && !win.isDestroyed()) {
-          win.webContents.send("emrg:event", { type, data });
-        }
-      });
-      client.onEvent((type) => {
-        if (type === "disconnected") {
-          ownStream = false;
-          ownStreamRequestId = null;
-          scheduleReconnect();
-        }
-      });
-    }
+    ensureConnManager();
     try {
-      await client.ensureConnected();
+      await connManager.ensureDaemon();
       logger.info("[gui] connected to emrgd");
       cancelReconnect();
       reconnectDelayMs = 1000; // 退避复位
       daemonStoppedNotified = false; // 节流提示复位（下个生命周期可再提示）
       sendToRenderer("status", { connected: true });
     } catch (e) {
-      if (client._authFailed) {
+      const dm = connManager.daemonConn();
+      if (dm?._authFailed) {
         // G88：认证失败 → 停止自动重试
         sendToRenderer("status", { connected: false, auth_failed: true, error: e.message });
         return;
@@ -701,6 +701,8 @@ vision = false
     }
   }
 
+  // daemon 级重连退避（connManager 重启恢复覆盖会话连接；此处覆盖"无会话连接
+  // 时 daemon 连接不可用"的初始/空闲场景）。
   function scheduleReconnect() {
     if (stopping || reconnectTimer) return;
     const delay = reconnectDelayMs;
@@ -709,19 +711,17 @@ vision = false
       reconnectTimer = null;
       sendToRenderer("status", { connected: false, reconnecting: true });
       await ensureConnected();
-      if (client?.connected) {
-        // G41：重连成功 → list_sessions + 重新 resume 当前会话
+      if (connManager.daemonConn()?.connected) {
+        // G41（P2 改写）：恢复当前会话连接（若 daemon 重启后未由 recoverAll 重开）
+        if (currentSessionId && !connManager.get(currentSessionId)) {
+          try { await openSession(currentSessionId, projectDir); } catch { /* 会话可能已删 */ }
+        }
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
-        if (currentSessionId) {
-          try {
-            await client.sendCommandAndWait("resume_session", { session_id: currentSessionId, cwd: projectDir }, 5000);
-          } catch { /* 会话可能已删 */ }
-        }
         const pong = await waitForPong();
         sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model });
       }
-    }, 1000);
+    }, delay);
   }
 
   function cancelReconnect() {
@@ -729,8 +729,10 @@ vision = false
   }
 
   async function waitForPong(timeoutMs = 3000) {
+    const conn = activeConn();
+    if (!conn || !conn.connected) return null; // 未连接 → 直接超时语义（不抛）
     return new Promise((resolve) => {
-      const off = client.onEvent((type, data) => {
+      const off = conn.onEvent((type, data) => {
         if (type === "pong") {
           off();
           clearTimeout(timer);
@@ -738,13 +740,13 @@ vision = false
         }
       });
       const timer = setTimeout(() => { off(); resolve(null); }, timeoutMs);
-      client.sendCommand("ping");
+      conn.sendCommand("ping");
     });
   }
 
   async function listSessions() {
     try {
-      const frame = await client.sendCommandAndWait("list_sessions", { cwd: projectDir }, 5000);
+      const frame = await requireConn().sendCommandAndWait("list_sessions", { cwd: projectDir }, 5000);
       return frame.sessions || [];
     } catch (e) {
       logger.warn(`[gui] list_sessions failed: ${e.message}`);
@@ -812,7 +814,7 @@ vision = false
   app.on("window-all-closed", () => {
     stopping = true;
     cancelReconnect();
-    if (client) client.close();
+    connManager?.closeAll(); // P2：关闭全部会话连接 + daemon 级连接
     if (process.platform !== "darwin") app.quit();
   });
 
