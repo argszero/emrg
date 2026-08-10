@@ -84,3 +84,25 @@ def test_gui_breakdown_sums_to_headline() -> None:
         assert sum(parts) == headline, (
             f"{label}: breakdown {parts} sums to {sum(parts)} but headline says {headline}"
         )
+
+
+def test_no_duplicate_npm_test_command_lines() -> None:
+    """Each doc must not contain an identical `npm test` command line twice.
+
+    #617: README.cn.md carried the `npm test` line twice (exact copy-paste
+    duplicate). The breakdown-sum guard above passed because it validates
+    each line independently — both copies sum correctly to the same
+    headline. Exact-line duplicates within one doc are always a copy-paste
+    bug: README.md has one line, README.cn.md must have one, Agent.md has
+    two *different* lines (features + test-commands sections), never an
+    identical repeat.
+    """
+    for doc in ("README.md", "README.cn.md", "Agent.md"):
+        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+        lines = [ln.rstrip() for ln in text.splitlines() if "npm test" in ln]
+        dupes = {ln for ln in lines if lines.count(ln) > 1}
+        assert not dupes, (
+            f"{doc} contains duplicated npm-test command line(s) — remove the "
+            f"copy-paste duplicate: {dupes}"
+        )
+
