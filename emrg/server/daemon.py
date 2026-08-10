@@ -2454,6 +2454,11 @@ class EmrgServer:
     ) -> None:
         """Read projects.yml and return all project entries.
 
+        Ordered by each project's latest session activity (created_at desc,
+        parallel scan) — P6 of the GUI multi-session rant (2026-08-10T15:07:19)
+        so the open/new-session dialogs show the most recently active projects
+        first.
+
         No evolution-workspace filter (rant 2026-08-07T10:48:00): projects.yml
         only contains explicitly registered entries, and on packaged installs
         the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it
@@ -2466,11 +2471,28 @@ class EmrgServer:
             if self._projects_log.exists():
                 data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                 if isinstance(data, list):
+                    entries = [p for p in data if isinstance(p, dict)]
+                    # P6 验收（rant 2026-08-10T15:07:19）：项目按"该项目最新会话活跃"倒序
+                    # ——并行扫描各项目 sessions 目录取最大 created_at（GUI 单连接无法并发
+                    # list_sessions：_pending 按 respType 键控会互相覆盖，故 daemon 侧聚合）。
+                    async def _latest_session_at(entry: dict) -> str:
+                        p = entry.get("path", "")
+                        if not p:
+                            return ""
+                        try:
+                            sessions = Session.list_sessions(Path(p))
+                            return sessions[0].get("created_at", "") if sessions else ""
+                        except (OSError, ValueError, json.JSONDecodeError):
+                            return ""
+
+                    ats = await asyncio.gather(*(_latest_session_at(e) for e in entries))
+                    ordered = sorted(zip(entries, ats), key=lambda t: t[1], reverse=True)
                     projects = [
                         {"name": p.get("name", ""),
                          "repo": _detect_git_remote(p.get("path", "")),
-                         "path": p.get("path", "")}
-                        for p in data if isinstance(p, dict)
+                         "path": p.get("path", ""),
+                         "latest_session_at": at}
+                        for p, at in ordered
                     ]
         except (yaml.YAMLError, OSError):
             logger.exception("Failed to read projects.yml")

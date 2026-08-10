@@ -1476,3 +1476,24 @@ test("P6: switchSession 超限（too many open sessions）→ 本地化提示（
   );
   assert.ok(!last.includes("close some first"), "raw english error must not leak: " + last);
 });
+
+// ── P6 验收（rant 15:07:19）：model_set 多连接重复收无副作用（幂等） ──
+
+test("P6: model_set 多连接重复广播幂等 — 状态一致、无副作用、重复收同值不崩", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  // 初始模型 m1
+  await vm.runInContext('App.state.model = "m1"; App.updateModelSwitcher();', ctx);
+  // 连接 A 广播 model_set m2
+  await vm.runInContext('App.handleEvent({ type: "command_result", sid: "conn-a", data: { type: "model_set", model: "m2" } });', ctx);
+  assert.strictEqual(ctx.App.state.model, "m2", "model updated after first broadcast");
+  assert.strictEqual(els["model-switcher-label"].textContent, "m2", "switcher label updated");
+  const msgsAfterA = els["chat-view"].children.length;
+  // 连接 B（另一会话连接）重复收同一 model_set → 无副作用（无新系统消息/无崩）
+  await vm.runInContext('App.handleEvent({ type: "command_result", sid: "conn-b", data: { type: "model_set", model: "m2" } });', ctx);
+  assert.strictEqual(ctx.App.state.model, "m2", "idempotent: same value, no change");
+  assert.strictEqual(els["chat-view"].children.length, msgsAfterA, "no extra system messages from duplicate broadcast");
+  // 再次重复（三连接场景）仍稳定
+  await vm.runInContext('App.handleEvent({ type: "command_result", sid: "conn-c", data: { type: "model_set", model: "m2" } });', ctx);
+  assert.strictEqual(ctx.App.state.model, "m2", "still idempotent after third broadcast");
+});
