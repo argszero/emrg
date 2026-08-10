@@ -80,6 +80,29 @@
   box-shadow: var(--shadow-md);
 }
 
+/* B2（rant 21:59:11）："打开会话"入口——新对话按钮下的轻量 ghost 按钮 */
+.open-chat-btn {
+  margin: calc(-1 * var(--sp-1)) var(--sp-3) var(--sp-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 8px var(--sp-3);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.open-chat-btn:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+
 #conv-list {
   flex: 1;
   overflow-y: auto;

@@ -19,6 +19,8 @@ const I18N = (() => {
       // 侧边栏
       "sidebar.newChat": "＋ 新对话",
       "sidebar.newChatTitle": "新对话 (⌘N)",
+      "sidebar.openChat": "打开会话",
+      "sidebar.openChatTitle": "打开会话（跨项目）",
       "sidebar.settings": "设置",
       "sidebar.statusTitle": "连接状态",
       "sidebar.backToBottom": "回到底部",
@@ -344,6 +346,8 @@ const I18N = (() => {
       // Sidebar
       "sidebar.newChat": "＋ New chat",
       "sidebar.newChatTitle": "New chat (⌘N)",
+      "sidebar.openChat": "Open session",
+      "sidebar.openChatTitle": "Open session (cross-project)",
       "sidebar.settings": "Settings",
       "sidebar.statusTitle": "Connection status",
       "sidebar.backToBottom": "Back to bottom",

@@ -109,7 +109,7 @@ const ELEMENT_IDS = [
   "chat-view", "input", "send-btn", "stop-btn", "conv-list", "open-sessions", "open-sessions-label", "status-dot", "settings-btn",
   "open-session-dialog", "open-session-list", "open-session-title", "open-session-desc", "open-session-new", "open-session-cancel", "open-session-new-session",
   "new-session-dialog", "new-session-list", "new-session-new", "new-session-cancel",
-  "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn",
+  "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn", "open-chat-btn",
   "settings-dialog", "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",
   "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
   "welcome-model", "welcome-project-dir", "welcome-pick-btn", "welcome-save", "confirm-dialog",
@@ -1541,4 +1541,64 @@ test("P6: 打开会话弹窗项目行显示最近活跃提示（latest_session_a
   const pick1 = rows[1].children[0];
   const texts1 = [...pick1.children].map((c) => c.textContent || "");
   assert.ok(!texts1.some((t) => t.includes("前") || t.includes("ago")), "no activity hint when absent");
+});
+
+// ── rant 21:59:11：GUI 多会话实现偏差修正（B1-B3） ──
+
+test("B1: 侧边栏'＋ 新对话'按钮 → 项目选择弹窗（不再直接新建）", async () => {
+  const newCalls = [];
+  const { els } = makeSandbox({
+    listProjects: async () => [],
+    newSession: async (payload) => { newCalls.push(payload); return { session_id: "s2" }; },
+  });
+  await tick();
+  els["new-chat-btn"].click();
+  await tick();
+  assert.strictEqual(els["new-session-dialog"].open, true, "new-session dialog opened (not direct newSession)");
+  assert.strictEqual(newCalls.length, 0, "newSession NOT called directly by the button");
+});
+
+test("B2: 侧边栏'打开会话'按钮 → 两步弹窗（项目→会话）", async () => {
+  const { els } = makeSandbox({ listProjects: async () => [] });
+  await tick();
+  els["open-chat-btn"].click();
+  await tick();
+  assert.strictEqual(els["open-session-dialog"].open, true, "open-session dialog opened");
+});
+
+test("B3: 切换会话保存/恢复输入框草稿（每会话 draft，浏览器 tab 式）", async () => {
+  const { ctx, els } = makeSandbox({ switchSession: async () => ({}) });
+  await tick();
+  // 在 s1 输入草稿 → 切到 s2（s2 无草稿 → 清空）→ 切回 s1（草稿恢复）
+  await vm.runInContext("App.state.sessionId = 's1'", ctx);
+  els["input"].value = "s1 draft";
+  await vm.runInContext("App.switchSession('s2')", ctx);
+  await tick();
+  assert.strictEqual(els["input"].value, "", "s2 has no draft → input cleared");
+  await vm.runInContext("App.switchSession('s1')", ctx);
+  await tick();
+  assert.strictEqual(els["input"].value, "s1 draft", "s1 draft restored after switching back");
+});
+
+test("B3: 发送消息清除该会话草稿；新会话从空草稿开始", async () => {
+  const { ctx, els } = makeSandbox({
+    sendMessage: async () => ({}),
+    newSession: async () => ({ session_id: "s-new" }),
+  });
+  await tick();
+  // 发送后草稿删除
+  await vm.runInContext("App.state.sessionId = 's1'; App.state.drafts.set('s1', 'draft')", ctx);
+  els["input"].value = "hello";
+  els["send-btn"].click();
+  await tick();
+  const hasDraft = await vm.runInContext("App.state.drafts.has('s1')", ctx);
+  assert.strictEqual(hasDraft, false, "draft cleared after send");
+  // 新建会话 → 新会话草稿为空 → 输入框清空
+  await vm.runInContext("App.state.sessionId = 's-old'; App.state.drafts.set('s-old', 'old draft')", ctx);
+  els["input"].value = "old draft";
+  await vm.runInContext("App.newSession()", ctx);
+  await tick();
+  assert.strictEqual(els["input"].value, "", "new session input cleared");
+  const newDraft = await vm.runInContext("App.state.drafts.get('s-new')", ctx);
+  assert.strictEqual(newDraft, "", "new session starts with empty draft");
 });
