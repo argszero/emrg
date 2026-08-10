@@ -180,6 +180,29 @@ test("P2 close: 主动关闭标记 _intentionalClose 且不触发重启恢复", 
   assert.strictEqual(recoverCalls, 0, "intentional close must not trigger restart recovery");
 });
 
+test("P6 close: 在忙连接（ownStream）先 cancel 再 close", async () => {
+  const manager = new ConnManager({ projectDir: tmpHome });
+  // 停用自动恢复（本测试专注 close 行为；单连接全关会触发重启判定）
+  manager.recoverAll = async () => {};
+  const busy = await driveOpen(manager, "sess-busy", "/proj/a");
+  busy.conn.ownStream = true;
+  busy.sessionWs.sent.length = 0; // 清空历史帧，聚焦 close 行为
+  assert.strictEqual(manager.close("sess-busy"), true);
+  const lastFrame = JSON.parse(busy.sessionWs.sent.at(-1));
+  assert.strictEqual(lastFrame.type, "cancel", "busy close must send cancel before disconnect");
+  assert.strictEqual(busy.conn.connected, false, "close must disconnect the ws");
+});
+
+test("P6 close: 空闲连接 close 不 cancel", async () => {
+  const manager = new ConnManager({ projectDir: tmpHome });
+  manager.recoverAll = async () => {};
+  const idle = await driveOpen(manager, "sess-idle", "/proj/a");
+  idle.sessionWs.sent.length = 0;
+  assert.strictEqual(manager.close("sess-idle"), true);
+  assert.strictEqual(idle.sessionWs.sent.length, 0, "idle close must not send cancel");
+  assert.strictEqual(idle.conn.connected, false, "close must disconnect the ws");
+});
+
 test("P2 open: 断连残留连接 → 关闭重开（不返回 stale conn）", async () => {
   const manager = new ConnManager({ projectDir: tmpHome });
   const s1 = await driveOpen(manager, "sess-1", "/proj/a");

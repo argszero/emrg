@@ -111,10 +111,16 @@ class ConnManager {
   // close(sid)：conn.close（断开 ws）→ 移除。返回是否有关闭对象。
   // 标记 _intentionalClose：主动关闭（切走/删除）不触发 renderer 断线横幅
   // （桥检查该标记；真断连/daemon 重启的 disconnected 照常转发）。
+  // P6（rant 15:07:19 边界）：关闭在忙连接先 cancel 再 close——流式进行中
+  // （ownStream）先发 cancel 让 daemon 停流，再断 ws，防半途断线留脏状态
+  // （fire-and-forget：断连/ws 已 null 时忽略，不阻塞同步 close 语义）。
   close(sid) {
     const entry = this._conns.get(sid);
     if (!entry) return false;
     this._cancelSingleRetry(sid); // 主动关闭 → 取消该会话的独立退避
+    if (entry.conn.ownStream && entry.conn.ws) {
+      try { entry.conn.sendCommand("cancel"); } catch { /* 断连时忽略 */ }
+    }
     entry.conn._intentionalClose = true;
     entry.conn.close();
     this._conns.delete(sid);
