@@ -7,7 +7,7 @@
  * - ensureConnected：port 文件读取 + auth 首帧 + auth_ok 处理
  * - 坏 JSON 帧 → 忽略不崩
  * - ws close → 触发 disconnected 事件（重连回调由 main 层调度）
- * - sendTask：payload（type=task + session_id + prompt + images + id + stream:true）
+ * - sendTask：payload（type=task + session_id + prompt + images + id，无 stream 字段——非 stream 路径已删）
  * - sendCommand：payload（type + params）；cancel 无多余字段（G24）
  * - 帧分类（G21+G58）：tool_start/tool_end/delta/done/cancelled/error/pong/
  *   list_result/command_result 各帧正确分类
@@ -524,7 +524,7 @@ test("断连清 _currentStream + G94 timer（#338 回归：不弹虚假超时）
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
   // 发起任务 → _currentStream 建立
-  const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: tmpHome, prompt: "hi", stream: true });
+  const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: tmpHome, prompt: "hi" });
   assert.ok(client._currentStream, "_currentStream 已建立");
   assert.ok(client._currentStream.requestId === rid);
   // 收到 delta → _resetStreamTimer 挂起 G94 30s timer
@@ -540,7 +540,7 @@ test("断连清 _currentStream + G94 timer（#338 回归：不弹虚假超时）
   assert.deepStrictEqual(doneEvents, [], "断连后无虚假 done 事件");
 });
 
-test("sendTask payload（G32/G96）", async () => {
+test("sendTask payload（G32，无 stream 字段——rant 21:20:38）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
   const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hello", images: null });
@@ -550,8 +550,7 @@ test("sendTask payload（G32/G96）", async () => {
   assert.strictEqual(frame.session_id, "s_260803_1730_abcd1234");
   assert.strictEqual(frame.cwd, "/proj");
   assert.strictEqual(frame.prompt, "hello");
-  assert.strictEqual(frame.stream, true, "stream 显式 true（G96）");
-  assert.strictEqual(frame.images, null);
+    assert.strictEqual(frame.images, null);
   assert.ok(frame.timestamp);
 });
 
@@ -559,7 +558,7 @@ test("sendTask 外部预生成 requestId（G143）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
   const outer = "s_260803_1730_outer1234";
-  const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", stream: true, requestId: outer });
+  const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: outer });
   assert.strictEqual(rid, outer, "返回外部预生成 id");
   const frame = JSON.parse(currentMockWs.sent.at(-1));
   assert.strictEqual(frame.id, outer, "payload id 用外部预生成 id");
@@ -829,11 +828,11 @@ test("18:47:37: stale projectDir port + spawn 节流失败 → probe 复用 cano
 
 // ── P2 自有流锁（G65 每连接独立；rant 15:07:19）──────────────────────────
 
-test("P2 ownStream: sendTask(stream:true) 标记 ownStream + requestId", async () => {
+test("P2 ownStream: sendTask 恒标记 ownStream + requestId（非 stream 路径已删）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
-  const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", stream: true, requestId: "req-own-1" });
-  assert.strictEqual(client.ownStream, true, "stream:true must set ownStream");
+  const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-1" });
+  assert.strictEqual(client.ownStream, true, "ownStream set unconditionally");
   assert.strictEqual(client.ownStreamRequestId, "req-own-1");
   assert.strictEqual(rid, "req-own-1");
 });
@@ -841,7 +840,7 @@ test("P2 ownStream: sendTask(stream:true) 标记 ownStream + requestId", async (
 test("P2 ownStream: 自有 done（request 匹配）→ 释放锁；广播 done（不匹配）→ 保持", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
-  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", stream: true, requestId: "req-own-2" });
+  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-2" });
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
   // 广播 done（其他客户端/其他流）→ 锁保持
   send({ request_id: "req-other", done: true, delta: false });
@@ -855,7 +854,7 @@ test("P2 ownStream: 自有 done（request 匹配）→ 释放锁；广播 done�
 test("P2 ownStream: timeout 兜底 done（无匹配 request）→ 释放锁", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
-  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", stream: true, requestId: "req-own-3" });
+  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-3" });
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
   send({ request_id: "req-stale", done: true, delta: false, timeout: true });
   assert.strictEqual(client.ownStream, false, "timeout done must release own lock");
@@ -864,7 +863,7 @@ test("P2 ownStream: timeout 兜底 done（无匹配 request）→ 释放锁", as
 test("P2 ownStream: session busy 即发 error → 释放锁（防 G65 锁泄漏）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
-  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", stream: true, requestId: "req-own-4" });
+  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-4" });
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
   send({ error: "session busy: another stream running" });
   assert.strictEqual(client.ownStream, false, "session busy error must release lock");
@@ -873,7 +872,7 @@ test("P2 ownStream: session busy 即发 error → 释放锁（防 G65 锁泄漏�
 test("P2 ownStream: cancelled（request 匹配）→ 释放锁", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
-  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", stream: true, requestId: "req-own-5" });
+  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-5" });
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
   send({ type: "cancelled", request_id: "req-own-5" });
   assert.strictEqual(client.ownStream, false, "own cancelled must release lock");
@@ -882,7 +881,7 @@ test("P2 ownStream: cancelled（request 匹配）→ 释放锁", async () => {
 test("P2 ownStream: 断连 → 释放锁", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
-  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", stream: true, requestId: "req-own-6" });
+  client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-6" });
   assert.strictEqual(client.ownStream, true);
   client.close();
   assert.strictEqual(client.ownStream, false, "disconnect must release lock");

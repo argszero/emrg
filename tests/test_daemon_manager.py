@@ -298,7 +298,7 @@ class TestDaemonConnection:
     def test_send_task_payload(self):
         conn = self._conn()
         asyncio.run(conn.send_task(
-            session_id="s1", cwd="/tmp/x", prompt="hello", stream=True,
+            session_id="s1", cwd="/tmp/x", prompt="hello",
             images=[{"path": "/tmp/a.png", "label": "[image1]"}],
         ))
         sent = json.loads(conn._ws.sent[0])
@@ -306,7 +306,7 @@ class TestDaemonConnection:
         assert sent["session_id"] == "s1"
         assert sent["cwd"] == "/tmp/x"
         assert sent["prompt"] == "hello"
-        assert sent["stream"] is True
+        assert "stream" not in sent  # non-stream path removed (rant 21:20:38)
         assert sent["images"] == [{"path": "/tmp/a.png", "label": "[image1]"}]
 
     def test_send_task_no_images(self):

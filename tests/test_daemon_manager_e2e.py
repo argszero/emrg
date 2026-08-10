@@ -80,7 +80,7 @@ class TestDaemonManagerE2E:
 
                     # streaming task → delta frames → done
                     await conn.send_task(session_id="e2e-session",
-                                         cwd=str(tmp), prompt="你好", stream=True)
+                                         cwd=str(tmp), prompt="你好")
                     frames = []
                     while True:
                         frame = await conn.recv(timeout=5)

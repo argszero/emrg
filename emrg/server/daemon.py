@@ -554,7 +554,6 @@ class EmrgServer:
                             cwd=cwd,
                             prompt=data.get("prompt", ""),
                             timestamp=data.get("timestamp", ""),
-                            stream=data.get("stream", False),
                             images=data.get("images"),
                         )
                     except Exception as e:
@@ -570,19 +569,14 @@ class EmrgServer:
                         _tool_task.cancel()
                     session = self._get_or_create_session(session_id, Path(cwd))
                     logger.info(
-                        'task received: session=%s prompt="%s" → routing via LLM (stream=%s)',
-                        session_id, _redact_string(req.prompt[:60]), req.stream,
+                        'task received: session=%s prompt="%s" → routing via LLM',
+                        session_id, _redact_string(req.prompt[:60]),
                     )
                     _cancel_event = asyncio.Event()
                     self._session_busy[session_id] = True  # lock (released in *locked wrapper)
-                    if req.stream:
-                        _tool_task = asyncio.create_task(
-                            self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
-                        )
-                    else:
-                        _tool_task = asyncio.create_task(
-                            self._run_chat_once_locked(req, ws, session)
-                        )
+                    _tool_task = asyncio.create_task(
+                        self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
+                    )
                     continue
 
                 await self._process_message(data, ws)
@@ -1642,64 +1636,6 @@ class EmrgServer:
             content.insert(0, {"type": "text", "text": "请分析这张图片"})
         return content
 
-    async def _run_chat_once(
-        self, req: TaskRequest, ws, session: Session
-    ) -> None:
-        """Non-streaming single-turn chat (no tool loop)."""
-        system_prompt = self._build_system_prompt(session)
-        history_messages = session.get_messages_for_llm()
-        user_content = self._build_user_content(req.prompt, req.images, self.llm.config.vision)
-        messages: list[dict] = [
-            {"role": "system", "content": system_prompt},
-            *history_messages,
-            {"role": "user", "content": user_content},
-        ]
-        tools = self.tools.to_openai_tools()
-
-        # Persist user message (with image references if present)
-        user_record: dict = {
-            "type": "message",
-            "role": "user",
-            "content": req.prompt,
-        }
-        if req.images:
-            user_record["images"] = req.images
-        session.append_message(user_record)
-
-        try:
-            msg = await self.llm.chat(messages, tools=tools)
-            content = msg.get("content", "")
-
-            # Log LLM request/response
-            self._log_llm_exchange(
-                session, messages, tools, content,
-                finish_reason=msg.get("finish_reason", "stop"),
-                tool_calls=msg.get("tool_calls"),
-            )
-
-            # Persist assistant message
-            session.append_message({
-                "type": "message",
-                "role": "assistant",
-                "content": content or "",
-            })
-
-            await self._broadcast(session.session_id, {
-                "request_id": req.id,
-                "content": content or "",
-                "done": True,
-                "delta": False,
-                "session_id": session.session_id,
-            })
-
-            # Fire-and-forget: reflect on whether to save memories
-            self._maybe_reflect_memory(session, req.prompt, content or "")
-        except Exception as e:
-            logger.exception("LLM error")
-            await self._broadcast(session.session_id, {
-                "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
-            })
-
     # ── Phase 2 session-lock wrappers (protocol-contract §2.6.5) ──
     # The caller fire-and-forgets with asyncio.create_task() and never awaits,
     # so the lock MUST be released inside the task (wrapper finally) — not in
@@ -1716,16 +1652,6 @@ class EmrgServer:
         session_id = session.session_id
         try:
             await self._run_tool_loop(req, ws, session, cancel_event, allow_tools)
-        finally:
-            self._session_busy[session_id] = False
-
-    async def _run_chat_once_locked(
-        self, req: TaskRequest, ws, session: Session,
-    ) -> None:
-        """Run _run_chat_once and release the session busy lock on exit."""
-        session_id = session.session_id
-        try:
-            await self._run_chat_once(req, ws, session)
         finally:
             self._session_busy[session_id] = False
 
@@ -2110,8 +2036,8 @@ class EmrgServer:
     ) -> None:
         """Log a complete LLM request/response exchange to the session.
 
-        Centralizes the 4 identical append_llm patterns from _run_chat_once
-        and _run_tool_loop, ensuring consistent logging format.
+        Centralizes the identical append_llm patterns from _run_tool_loop,
+        ensuring consistent logging format.
         """
         session.append_llm({
             "type": "request",

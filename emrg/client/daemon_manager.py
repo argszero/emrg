@@ -228,12 +228,12 @@ class DaemonConnection:
         self._ws = ws
 
     async def send_task(self, session_id: str, cwd: str, prompt: str,
-                        stream: bool = True, images: list | None = None) -> None:
+                        images: list | None = None) -> None:
         """聊天发送：TaskRequest(type="task")。images 支持 /image 粘贴图。
 
         内部 json.dumps(req.to_dict(), ensure_ascii=False) 以 str 发送（不 .encode()）。
         """
-        req = TaskRequest(session_id=session_id, cwd=cwd, prompt=prompt, stream=stream)
+        req = TaskRequest(session_id=session_id, cwd=cwd, prompt=prompt)
         if images:
             req.images = images
         await self._ws.send(json.dumps(req.to_dict(), ensure_ascii=False))
