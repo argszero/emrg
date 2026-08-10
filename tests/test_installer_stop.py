@@ -22,6 +22,14 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_in_order():
     assert "taskkill /IM EMRG.exe" in content
     assert "taskkill /F /IM EMRG.exe" in content
     assert content.index("taskkill /IM EMRG.exe") < content.index("taskkill /F /IM EMRG.exe")
+    # 宿主 2026-08-10T01:27:07Z 实测：长活 ~15h GUI 会话 WM_CLOSE 在 5s 窗内未退出，
+    # 两次整跑未终止、直接 taskkill /F 才终止 → /F 必须是无条件兜底（不 gate 在
+    # survivor 检查上），否则旧 GUI 会话可无限期拖住安装器。判别：ping 等待之后、
+    # /F 之前不得再有 findstr 判定。
+    ping_idx = content.index("ping -n 6 127.0.0.1")
+    f_idx = content.index("taskkill /F /IM EMRG.exe")
+    assert ping_idx < f_idx
+    assert "findstr" not in content[ping_idx:f_idx]
     # TUI：命令行过滤（wmic LIKE 通配符须 %% 转义）
     assert "wmic" in content and "commandline like" in content
     assert "powershell" in content  # wmic 缺失（Win11 24H2+）时的回退

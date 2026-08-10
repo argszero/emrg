@@ -5,8 +5,9 @@ REM stuck at "停止已有进程" because the windowless pythonw daemon holds fi
 REM and Inno CloseApplications cannot see it).
 REM
 REM Order matters (mirrors bin/emrg-uninstall steps 1a/1b):
-REM   1. GUI   (EMRG.exe): graceful WM_CLOSE first (taskkill without /F),
-REM      /F fallback after ~5s if still alive
+REM   1. GUI   (EMRG.exe): graceful WM_CLOSE first (taskkill without /F), then
+REM      UNCONDITIONAL /F after the ~5s grace window (host 01:27:07Z: long-lived
+REM      GUI deferred WM_CLOSE past 5s — /F must not be gated on a survivor check)
 REM   2. TUI   (python.exe -m emrg): command-line filter (wmic, PowerShell
 REM      fallback), excludes the daemon (pythonw.exe -m emrg.server)
 REM   3. daemon: `emrg server stop` protocol shutdown via the OLD install's CLI
@@ -20,14 +21,19 @@ setlocal enabledelayedexpansion
 set "EMRG_DIR=%USERPROFILE%\.emrg"
 set "INSTALL=%EMRG_DIR%\install"
 
-REM --- 1. GUI: graceful WM_CLOSE, then /F fallback ---
+REM --- 1. GUI: graceful WM_CLOSE, then unconditional /F after the grace window ---
+REM    (host report 2026-08-10T01:27:07Z: a long-lived ~15h GUI session deferred
+REM    WM_CLOSE past the 5s window — two full script runs did not terminate it
+REM    while a direct `taskkill /IM EMRG.exe` did. => the /F fallback must be
+REM    UNCONDITIONAL after the wait so an old GUI session can never hold the
+REM    installer hostage. When the GUI is not running, the graceful taskkill
+REM    returns errorlevel 1 (skip the wait) and the /F below is a fast no-op.)
 taskkill /IM EMRG.exe >nul 2>&1
 if not errorlevel 1 (
   REM give the GUI up to ~5s to exit cleanly (ping = portable sleep)
   ping -n 6 127.0.0.1 >nul 2>&1
 )
-tasklist /FI "IMAGENAME eq EMRG.exe" 2>nul | findstr /i "EMRG.exe" >nul
-if not errorlevel 1 taskkill /F /IM EMRG.exe >nul 2>&1
+taskkill /F /IM EMRG.exe >nul 2>&1
 
 REM --- 2. TUI: python.exe -m emrg (daemon is pythonw.exe -m emrg.server, excluded) ---
 where wmic >nul 2>&1
