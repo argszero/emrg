@@ -175,3 +175,84 @@ test("P2 closeAll: 全部关闭", async () => {
   manager.closeAll();
   assert.strictEqual(manager.all().length, 0);
 });
+
+test("P2 重启恢复: 所有连接同窗口断开 → 判定重启并自动 recoverAll", async () => {
+  const manager = new ConnManager({ projectDir: tmpHome });
+  const s1 = await driveOpen(manager, "sess-1", "/proj/a");
+  const s2 = await driveOpen(manager, "sess-2", "/proj/b");
+  assert.deepStrictEqual(manager.all().sort(), ["sess-1", "sess-2"]);
+
+  // 第一条断 → 未全部断，不应判定重启
+  let recoverCalls = 0;
+  manager.recoverAll = async () => { recoverCalls += 1; }; // 防真恢复挂起
+  s1.sessionWs.emit("close");
+  assert.strictEqual(manager._restartDetected(), false);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(recoverCalls, 0, "single drop must not trigger recovery");
+
+  // 第二条断（同窗口）→ 全部断 → 判定重启 + 自动 recoverAll
+  s2.sessionWs.emit("close");
+  assert.strictEqual(manager._restartDetected(), true);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(recoverCalls, 1, "recoverAll must be triggered once on full drop");
+});
+
+test("P2 重启恢复: 单条断开 → 不判定重启、不 recoverAll", async () => {
+  const manager = new ConnManager({ projectDir: tmpHome });
+  const s1 = await driveOpen(manager, "sess-1", "/proj/a");
+  await driveOpen(manager, "sess-2", "/proj/b");
+  let recoverCalls = 0;
+  manager.recoverAll = async () => { recoverCalls += 1; };
+  s1.sessionWs.emit("close"); // 只有一条断
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(manager._restartDetected(), false, "single drop must not detect restart");
+  assert.strictEqual(recoverCalls, 0, "recoverAll must not be triggered on single drop");
+});
+
+test("P2 重启恢复: recoverAll 重连重订阅全部会话（复用 open 序列）", async () => {
+  const manager = new ConnManager({ projectDir: tmpHome });
+  const s1 = await driveOpen(manager, "sess-1", "/proj/a");
+  const s2 = await driveOpen(manager, "sess-2", "/proj/b");
+  // 关闭自动触发（本测试专注 recoverAll 本体；自动触发已在上一测试覆盖）
+  const origRecover = manager.recoverAll.bind(manager);
+  manager.recoverAll = async () => {};
+  s1.sessionWs.emit("close");
+  s2.sessionWs.emit("close");
+  await new Promise((r) => setTimeout(r, 30));
+  manager.recoverAll = origRecover;
+
+  // 并发驱动恢复期间出现的每条连接（2 引导 + 2 会话 = 4 条）
+  // processed 集合：循环内创建的 ws 不会被跳过（prev 快照法会漏掉内循环期间
+  // 新建的连接 → 死锁：等"下一个" ws 而当前未驱动的 ws 正卡住 open）
+  // stale 集合：恢复前已关闭的旧连接 ws（s1/s2 sessionWs）不算"新连接"，
+  // 否则驱动会拿旧连接凑数（已发过 resume → 误判 reopened 提前退出）
+  let reopened = 0;
+  const processed = new Set();
+  const stale = new Set([s1.sessionWs, s2.sessionWs]);
+  const deadline = Date.now() + 4000;
+  const driver = (async () => {
+    while (reopened < 2 && Date.now() < deadline) {
+      const ws = await waitForWs(() => !processed.has(currentMockWs) && !stale.has(currentMockWs));
+      processed.add(ws);
+      await driveAuth(ws);
+      // 等 resume 帧（仅会话连接发）；引导连接不发则直接跳过
+      const d2 = Date.now() + 300;
+      while (ws.sent.length < 2 && Date.now() < d2) await new Promise((r) => setTimeout(r, 5));
+      if (ws.sent.length >= 2) {
+        const f = JSON.parse(ws.sent.at(-1));
+        if (f.type === "resume_session") {
+          ws.emit("message", Buffer.from(JSON.stringify({ type: "resume_result", session_id: f.session_id })));
+          reopened += 1;
+        }
+      }
+    }
+  })();
+
+  await manager.recoverAll();
+  await driver;
+  assert.strictEqual(reopened, 2, "both sessions reopened");
+  assert.deepStrictEqual(manager.all().sort(), ["sess-1", "sess-2"], "sessions restored");
+  for (const sid of manager.all()) {
+    assert.strictEqual(manager.get(sid).connected, true, `session ${sid} reconnected`);
+  }
+});

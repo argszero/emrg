@@ -20,11 +20,16 @@
 const { DaemonClient } = require("./daemon_client.js");
 
 class ConnManager {
-  constructor({ projectDir, logger = console, isPackaged = false } = {}) {
+  constructor({ projectDir, logger = console, isPackaged = false, restartWindowMs = 1000 } = {}) {
     this.projectDir = projectDir;
     this.logger = logger;
     this.isPackaged = isPackaged;
     this._conns = new Map(); // sid -> { conn, projectPath }
+    // daemon 重启恢复（rant 15:07:19 P2）：短窗口内所有连接同时断 → 判定 daemon 重启
+    // → 全部重连重订阅；单条断 → 不做全量恢复（留给独立退避重试）。
+    this._restartWindowMs = restartWindowMs;
+    this._disconnects = new Map(); // sid -> timestamp（最近一次断连）
+    this._recovering = false; // 恢复中守卫（防 close→disconnect→recoverAll 递归）
   }
 
   // 确保 daemon 已运行（connManager = daemon 生命周期唯一 owner）。
@@ -56,6 +61,13 @@ class ConnManager {
     });
     await conn.ensureConnected({ skipStart: true }); // daemon 已就绪 → 只连不拉
     await conn.sendCommandAndWait("resume_session", { session_id: sid, cwd: projectPath }, 5000);
+    // 断开监听 → 重启恢复判定（仅当所有打开会话在同一短窗口内断开）
+    conn.onEvent((type) => {
+      if (type === "disconnected") {
+        this._disconnects.set(sid, Date.now());
+        this._onDisconnect(sid);
+      }
+    });
     this._conns.set(sid, { conn, projectPath });
     return conn;
   }
@@ -66,6 +78,7 @@ class ConnManager {
     if (!entry) return false;
     entry.conn.close();
     this._conns.delete(sid);
+    this._disconnects.delete(sid);
     return true;
   }
 
@@ -81,6 +94,56 @@ class ConnManager {
 
   closeAll() {
     for (const sid of [...this._conns.keys()]) this.close(sid);
+  }
+
+  // ── daemon 重启恢复（rant 15:07:19 P2）──────────────────────────────
+
+  // 所有当前打开会话都在重启窗口内断开 → 判定 daemon 重启。
+  _restartDetected() {
+    const open = [...this._conns.keys()];
+    if (open.length === 0) return false;
+    const now = Date.now();
+    return open.every((sid) => {
+      const t = this._disconnects.get(sid);
+      return t !== undefined && now - t <= this._restartWindowMs;
+    });
+  }
+
+  _onDisconnect(sid) {
+    if (this._recovering) return; // 恢复中自己触发的断开不递归
+    if (this._restartDetected()) {
+      this.logger.info(
+        `[gui] connManager: all ${this._conns.size} connection(s) dropped within ${this._restartWindowMs}ms — daemon restart detected, recovering`
+      );
+      this.recoverAll().catch((e) =>
+        this.logger.warn(`[gui] connManager recover failed: ${e.message}`)
+      );
+    }
+  }
+
+  // 全部重连重订阅（复用 open 序列：引导 daemon 就绪 → skipStart 会话连接 →
+  // resume_session）。单会话恢复失败跳过不阻塞其余（写盘/重试由后续片处理）。
+  async recoverAll() {
+    if (this._recovering) return;
+    this._recovering = true;
+    const sessions = [...this._conns.entries()].map(([sid, entry]) => ({
+      sid,
+      projectPath: entry.projectPath,
+    }));
+    try {
+      for (const { sid } of sessions) this.close(sid);
+      this._disconnects.clear();
+      for (const { sid, projectPath } of sessions) {
+        try {
+          await this.open(sid, projectPath);
+          this.logger.info(`[gui] connManager recovered session ${sid}`);
+        } catch (e) {
+          this.logger.warn(`[gui] connManager recover: session ${sid} reopen failed: ${e.message}`);
+        }
+      }
+    } finally {
+      this._recovering = false;
+    }
   }
 }
 
