@@ -1351,6 +1351,19 @@ class EmrgServer:
         elif msg_type == "list_projects":
             await self._handle_list_projects(ws)
 
+        elif msg_type == "remove_project":
+            # P1 GUI multi-session (rant 2026-08-10T15:07:19): drop a
+            # projects.yml entry by name (disk session data preserved).
+            name = msg.get("name", "").strip()
+            if not name:
+                await self._send(ws, {
+                    "type": "project_removed",
+                    "removed": False,
+                    "error": "remove_project requires name",
+                })
+                return
+            await self._handle_remove_project(name, ws)
+
         elif msg_type == "evolution_summary":
             # WorkBuddy P3 (rant 21:35): self-evolution visibility.
             # Low-cost: read evolution log files (~/.emrg/logs/evolution-*.json)
@@ -2464,6 +2477,71 @@ class EmrgServer:
         await self._send(ws, {
             "type": "projects_list",
             "projects": projects,
+        })
+
+    async def _handle_remove_project(self, name: str, ws) -> None:
+        """Remove a project entry from projects.yml by name.
+
+        P1 of the GUI multi-session feature (rant 2026-08-10T15:07:19):
+        deletes only the projects.yml entry — on-disk session data under
+        <path>/.emrg/sessions/ is preserved (a later _touch_project
+        re-registers the project). Mirrors _touch_project's read path and
+        atomic_write_yaml. Responses:
+          {"type": "project_removed", "removed": true,  "name": name}
+          {"type": "project_removed", "removed": false, "name": name, ...}
+        """
+        if not self._projects_log.exists():
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+            })
+            return
+        try:
+            data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError):
+            logger.exception("remove_project: failed to read %s", self._projects_log)
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+                "error": "failed to read projects.yml",
+            })
+            return
+        if not isinstance(data, list):
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+            })
+            return
+        remaining = [
+            e for e in data
+            if not (isinstance(e, dict) and e.get("name") == name)
+        ]
+        if len(remaining) == len(data):
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+            })
+            return
+        try:
+            atomic_write_yaml(remaining, self._projects_log, prefix=".projects_")
+        except OSError:
+            logger.exception("remove_project: failed to write %s", self._projects_log)
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+                "error": "failed to write projects.yml",
+            })
+            return
+        logger.info("remove_project: removed %s from projects.yml", name)
+        await self._send(ws, {
+            "type": "project_removed",
+            "removed": True,
+            "name": name,
         })
 
     async def _handle_list_models(
