@@ -456,6 +456,25 @@ vision = false
       return frame.projects || [];
     });
 
+    // P5（rant 15:07:19）：某项目的会话列表（list_sessions(cwd=projectPath)）
+    ipcMain.handle("emrg:listProjectSessions", async (_e, { projectPath }) => {
+      if (typeof projectPath !== "string" || !projectPath) throw new Error("invalid project path");
+      const frame = await requireConn().sendCommandAndWait("list_sessions", { cwd: projectPath }, 5000);
+      return { sessions: frame.sessions || [] };
+    });
+
+    // P5：新建项目 = 轻量命令带 cwd → daemon 隐式 _touch_project 注册（零改动）
+    ipcMain.handle("emrg:registerProject", async (_e, { path: p }) => {
+      if (typeof p !== "string" || !p) throw new Error("invalid project path");
+      try {
+        fs.accessSync(p, fs.constants.W_OK); // 目录可写校验（G121）
+      } catch {
+        throw new Error("project directory not writable");
+      }
+      await requireConn().sendCommandAndWait("list_sessions", { cwd: p }, 5000); // 隐式注册
+      return { ok: true, path: p };
+    });
+
     ipcMain.handle("emrg:listTasks", async () => {
       // GUI / 指令 P4：/trigger — daemon list_tasks → tasks_list
       const frame = await requireConn().sendCommandAndWait("list_tasks", {}, 5000);

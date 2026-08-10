@@ -24,6 +24,7 @@ const Commands = (() => {
     "/resume": { hint: "cmd.resume.hint", phase: 2 },
     "/rewind": { hint: "cmd.rewind.hint", phase: 2 },
     "/sessions": { hint: "cmd.sessions.hint", phase: 2 },
+    "/open": { hint: "cmd.open.hint", phase: 4 }, // P5：打开会话（跨项目）
     "/model": { hint: "cmd.model.hint", phase: 3 },
     "/memory": { hint: "cmd.memory.hint", phase: 3 },
     "/skills": { hint: "cmd.skills.hint", phase: 3 },
