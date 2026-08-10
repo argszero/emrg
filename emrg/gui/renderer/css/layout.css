@@ -251,13 +251,24 @@ body.sidebar-collapsed #app {
   transition: width 0.2s cubic-bezier(.2,.8,.3,1), min-width 0.2s cubic-bezier(.2,.8,.3,1);
 }
 #result-panel.collapsed {
-  width: 0;
-  min-width: 0;
-  border-left: none;
+  /* 方案 A（rant 2026-08-10T14:11:18）：折叠成窄条而非 0，header（含 toggle 按钮）保持可见可点 */
+  width: 40px;
+  min-width: 40px;
+  border-left: 1px solid var(--border);
 }
-#result-panel.collapsed .result-header,
 #result-panel.collapsed .result-list {
-  display: none;
+  display: none; /* 只藏内容区 */
+}
+#result-panel.collapsed .result-header {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-3) 0;
+}
+#result-panel.collapsed .result-title {
+  display: none; /* 窄条只留 toggle 按钮 */
+}
+#result-panel.collapsed .result-toggle {
+  transform: rotate(180deg); /* » → « 指示可展开 */
 }
 
 .result-header {
