@@ -59,7 +59,8 @@ function makeEl(id) {
     clientHeight: 100,
     open: false,
     appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
-    addEventListener() {},
+    addEventListener(type, fn) { this._listeners = this._listeners || {}; (this._listeners[type] = this._listeners[type] || []).push(fn); },
+    click() { (this._listeners && this._listeners.click || []).forEach((fn) => fn({ preventDefault() {} })); },
     querySelector(sel) {
       // 最小类选择器搜索（chat.js 用 ".msg-body"/".tool-spinner"）：DFS 子节点
       if (!sel || !sel.startsWith(".")) return null;
@@ -106,6 +107,7 @@ function makeEl(id) {
 
 const ELEMENT_IDS = [
   "chat-view", "input", "send-btn", "stop-btn", "conv-list", "open-sessions", "open-sessions-label", "status-dot", "settings-btn",
+  "open-session-dialog", "open-session-list", "open-session-title", "open-session-desc", "open-session-new", "open-session-cancel",
   "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn",
   "settings-dialog", "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",
   "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
@@ -1334,4 +1336,47 @@ test("P4 s2: boot init 携带 open_sessions + active_sid → 采用恢复的激�
   const va = ctx.EMRG_Chat.chatContainer("sess-r");
   assert.strictEqual(va.classList.contains("active"), true, "restored session view activated");
   assert.strictEqual(els["input"].disabled, false, "composer enabled after boot");
+});
+
+// ── P5（rant 15:07:19）：打开会话对话框（两步：项目 → 会话） ────────
+
+test("P5: showOpenSessionDialog 列项目（第一步）→ 点项目列会话（第二步）", async () => {
+  const projects = [
+    { name: "emrg", path: "/p/emrg" },
+    { name: "mem", path: "/p/mem" },
+  ];
+  const { ctx, els } = makeSandbox({
+    listProjects: async () => projects,
+    listProjectSessions: async ({ projectPath }) => {
+      if (projectPath === "/p/emrg") return { sessions: [{ session_id: "s1", title: "S1" }, { session_id: "s2", title: "S2" }] };
+      return { sessions: [] };
+    },
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showOpenSessionDialog()", ctx);
+  await tick();
+  assert.strictEqual(els["open-session-dialog"].open, true, "dialog opened");
+  assert.strictEqual(els["open-session-list"].children.length, 2, "two projects listed");
+  // 点击 emrg 项目 → 第二步列出会话（按钮行子节点 [name, hint]）
+  els["open-session-list"].children[0].click();
+  await tick();
+  const rows = els["open-session-list"].children;
+  assert.strictEqual(rows.length, 2, "two sessions listed for project");
+  const nameSpan = rows[0].children[0] || rows[0];
+  assert.ok((nameSpan.textContent || "").includes("S1"), "session title shown");
+});
+
+test("P5: /open 指令 → 打开会话对话框；无项目 → 提示新建", async () => {
+  const { ctx, els } = makeSandbox({
+    listProjects: async () => [],
+  });
+  await tick();
+  await vm.runInContext('App.handleCommand({ cmd: "/open", args: [] });', ctx);
+  await tick();
+  assert.strictEqual(els["open-session-dialog"].open, true, "dialog opened via /open");
+  // 无项目 → innerHTML 字符串呈现提示（mock innerHTML 赋值不建子节点）
+  assert.ok(
+    (els["open-session-list"].innerHTML || "").includes("新建项目") || (els["open-session-list"].innerHTML || "").includes("New project"),
+    "no-projects hint"
+  );
 });

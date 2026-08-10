@@ -282,7 +282,7 @@ uv run python -m emrg     # 启动 TUI
 cd emrg/gui
 npm ci               # 安装依赖（生产模式可 --omit=dev）
 npm start            # 启动 GUI（自动拉起 daemon）
-npm test             # 运行 Node 测试（167 项：43 daemon_client + 17 conn-manager + 22 app-commands + 50 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config + 7 gui-state；集成测试在 CI 跑，本地可 npm run test:integration）
+npm test             # 运行 Node 测试（169 项：43 daemon_client + 17 conn-manager + 22 app-commands + 52 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config + 7 gui-state；集成测试在 CI 跑，本地可 npm run test:integration）
 ```
 
 CI 通过 GitHub Actions 自动运行测试并检查冲突标记（`.github/workflows/test.yml`）。

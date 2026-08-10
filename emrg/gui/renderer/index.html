@@ -268,6 +268,19 @@
     </div>
   </dialog>
 
+  <!-- P5：打开会话对话框（两步：选项目 → 选会话；跨项目） -->
+  <dialog id="open-session-dialog">
+    <div class="dialog-card" style="min-width:440px;">
+      <h2 id="open-session-title" data-i18n="openSession.title">打开会话</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" id="open-session-desc" data-i18n="openSession.desc">选择项目后选择要打开的会话（跨项目多开）。</p>
+      <div id="open-session-list" class="help-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="open-session-new" class="btn btn-ghost" data-i18n="openSession.newProject">＋ 新建项目…</button>
+        <button type="button" id="open-session-cancel" class="btn btn-ghost" data-i18n="help.close">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
   <!-- 历史回退对话框（/rewind，GUI / 指令 P2） -->
   <dialog id="rewind-dialog">
     <div class="dialog-card" style="min-width:480px;">

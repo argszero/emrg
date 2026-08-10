@@ -533,6 +533,82 @@ const Dialogs = (() => {
     $("confirm-dialog").showModal();
   }
 
+  // ── P5（rant 15:07:19）：打开会话对话框（两步：选项目 → 选会话，跨项目） ──
+  async function showOpenSessionDialog() {
+    const list = $("open-session-list");
+    const dialog = $("open-session-dialog");
+    if (!list || !dialog) return;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
+    dialog.showModal();
+    try {
+      const projects = await window.emrg.listProjects();
+      list.innerHTML = "";
+      if (!projects || projects.length === 0) {
+        list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("openSession.noProjects")}</span></div>`;
+        return;
+      }
+      // 第一步：项目列表（按最近活跃倒序——daemon 已排；底部"新建项目…"按钮）
+      projects.forEach((p) => {
+        const row = el("button", { class: "help-row", type: "button", style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;" });
+        const name = el("span", { class: "help-cmd" }, p.name || p.path || "");
+        const hint = el("span", { class: "help-hint" }, p.path || "");
+        row.appendChild(name);
+        row.appendChild(hint);
+        row.addEventListener("click", () => showProjectSessions(p));
+        list.appendChild(row);
+      });
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("openSession.loadFailed", { msg: e.message })}</span></div>`;
+    }
+  }
+
+  // 第二步：该项目会话列表（created_at 倒序）→ 点击打开（switchSession 复用连接）
+  async function showProjectSessions(project) {
+    const list = $("open-session-list");
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
+    $("open-session-title").textContent = _t("openSession.titleProject", { project: project.name || project.path || "" });
+    try {
+      const frame = await window.emrg.listProjectSessions({ projectPath: project.path });
+      const sessions = frame.sessions || [];
+      list.innerHTML = "";
+      if (sessions.length === 0) {
+        list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("openSession.noSessions")}</span></div>`;
+        return;
+      }
+      sessions.forEach((s) => {
+        const row = el("button", { class: "help-row", type: "button", style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;" });
+        const name = el("span", { class: "help-cmd" }, s.title || _t("app.unnamed"));
+        const hint = el("span", { class: "help-hint" }, s.session_id === App.state.sessionId ? _t("app.current") : "");
+        row.appendChild(name);
+        row.appendChild(hint);
+        row.addEventListener("click", async () => {
+          $("open-session-dialog").close();
+          await App.switchSession(s.session_id);
+        });
+        list.appendChild(row);
+      });
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("openSession.loadFailed", { msg: e.message })}</span></div>`;
+    }
+  }
+
+  function initOpenSessionDialog() {
+    $("open-session-cancel").addEventListener("click", () => $("open-session-dialog").close());
+    $("open-session-new").addEventListener("click", async () => {
+      // P5：新建项目 = 选目录 → 轻量命令注册（daemon 隐式 _touch_project）
+      try {
+        const res = await window.emrg.pickProjectDir();
+        if (res && res.path) {
+          await window.emrg.registerProject({ path: res.path });
+          Chat.addSystemMessage(_t("openSession.projectCreated", { path: res.path }));
+          showOpenSessionDialog(); // 刷新项目列表
+        }
+      } catch (e) {
+        Chat.addSystemMessage(_t("openSession.projectFailed", { msg: e.message }));
+      }
+    });
+  }
+
   function closeConfirm() {
     $("confirm-dialog").close();
     confirmCb = null;
@@ -555,6 +631,8 @@ const Dialogs = (() => {
     initGithubSection,
     initDeviceDialog,
     refreshGithubStatus,
+    initOpenSessionDialog, // P5：打开会话对话框初始化
+    showOpenSessionDialog, // P5：两步打开会话
     showRename,
     submitRename,
     showSettings,

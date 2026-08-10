@@ -206,6 +206,10 @@ const App = (() => {
             showSessionsDialog();
           }
           break;
+        case "/open":
+          // P5（rant 15:07:19）：打开会话对话框（两步：项目 → 会话，跨项目多开）
+          Dialogs.showOpenSessionDialog();
+          break;
         case "/rename":
           // P2：复用现有重命名对话框（右键菜单同款）
           if (!state.sessionId) {
@@ -1273,6 +1277,7 @@ const App = (() => {
     $("send-btn").addEventListener("click", sendMessage);
     $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {}));
     $("new-chat-btn").addEventListener("click", newSession);
+    Dialogs.initOpenSessionDialog(); // P5：打开会话对话框绑定
     $("settings-btn").addEventListener("click", () => {
       loadEvolutionSummary(); // WorkBuddy P3（#502）：打开设置时加载最近改进
       Dialogs.showSettings();
