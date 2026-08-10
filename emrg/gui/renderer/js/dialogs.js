@@ -555,6 +555,9 @@ const Dialogs = (() => {
         const hint = el("span", { class: "help-hint" }, p.path || "");
         pick.appendChild(name);
         pick.appendChild(hint);
+        // P6 验收补完：项目行显示"最近活跃"相对时间（消费 daemon latest_session_at）
+        const act = relTime(p.latest_session_at);
+        if (act) pick.appendChild(el("span", { class: "help-hint" }, act));
         // P5 slice 2：点击打开会话（带项目路径 → resume 用该项目 cwd）
         pick.addEventListener("click", () => showProjectSessions(p));
         row.appendChild(pick);
@@ -674,6 +677,9 @@ const Dialogs = (() => {
         const hint = el("span", { class: "help-hint" }, p.path || "");
         row.appendChild(name);
         row.appendChild(hint);
+        // P6 验收补完：项目行显示"最近活跃"相对时间
+        const act = relTime(p.latest_session_at);
+        if (act) row.appendChild(el("span", { class: "help-hint" }, act));
         row.addEventListener("click", async () => {
           $("new-session-dialog").close();
           await App.newSession({ projectPath: p.path });

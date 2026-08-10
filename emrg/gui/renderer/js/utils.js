@@ -73,6 +73,25 @@ function applyTheme(mode) {
   }
 }
 
+/**
+ * 相对时间（P6 验收补完：项目行"最近活跃"提示，消费 daemon list_projects 的
+ * latest_session_at）。ISO 时间串 → "刚刚 / {n} 分钟前 / {n} 小时前 / {n} 天前"，
+ * 走 i18n（zh/en）；缺失/非法输入返回空串（调用点自行隐藏）。
+ */
+function relTime(iso) {
+  if (!iso) return "";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "";
+  const diffMin = Math.floor((Date.now() - then) / 60000);
+  const t = (window.EMRG_I18N && window.EMRG_I18N.t) || ((k) => k);
+  if (diffMin < 1) return t("relTime.justNow");
+  if (diffMin < 60) return t("relTime.minutesAgo", { n: diffMin });
+  const hrs = Math.floor(diffMin / 60);
+  if (hrs < 24) return t("relTime.hoursAgo", { n: hrs });
+  const days = Math.floor(hrs / 24);
+  return t("relTime.daysAgo", { n: days });
+}
+
 // 显式挂载到 window（多 script 顺序加载共享全局，显式挂载更健壮）
 window.$ = $;
 window.el = el;
@@ -80,3 +99,4 @@ window.escapeHtml = escapeHtml;
 window.genRequestId = genRequestId;
 window.groupLabel = groupLabel;
 window.applyTheme = applyTheme;
+window.relTime = relTime;

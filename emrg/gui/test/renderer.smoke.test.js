@@ -1497,3 +1497,48 @@ test("P6: model_set 多连接重复广播幂等 — 状态一致、无副作用�
   await vm.runInContext('App.handleEvent({ type: "command_result", sid: "conn-c", data: { type: "model_set", model: "m2" } });', ctx);
   assert.strictEqual(ctx.App.state.model, "m2", "still idempotent after third broadcast");
 });
+
+// ── P6 验收补完（rant 15:07:19）：relTime 相对时间助手 + 项目行最近活跃提示 ──
+
+test("P6: relTime 相对时间 — 刚刚/分钟/小时/天 + 无效输入空串", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  const out = vm.runInContext(`(function(){
+    const now = Date.now();
+    return {
+      justNow: relTime(new Date(now).toISOString()),
+      mins: relTime(new Date(now - 5 * 60000).toISOString()),
+      hrs: relTime(new Date(now - 3 * 3600000).toISOString()),
+      days: relTime(new Date(now - 2 * 86400000).toISOString()),
+      none: relTime(""),
+      bad: relTime("not-a-date"),
+    };
+  })()`, ctx);
+  assert.strictEqual(out.justNow, "刚刚", "just now");
+  assert.strictEqual(out.mins, "5 分钟前", "5 minutes ago");
+  assert.strictEqual(out.hrs, "3 小时前", "3 hours ago");
+  assert.strictEqual(out.days, "2 天前", "2 days ago");
+  assert.strictEqual(out.none, "", "empty input → empty");
+  assert.strictEqual(out.bad, "", "invalid input → empty");
+});
+
+test("P6: 打开会话弹窗项目行显示最近活跃提示（latest_session_at）", async () => {
+  const projects = [
+    { name: "mem", path: "/p/mem", latest_session_at: new Date(Date.now() - 5 * 60000).toISOString() },
+    { name: "emrg", path: "/p/emrg" }, // 无 latest_session_at → 不显示
+  ];
+  const { ctx, els } = makeSandbox({ listProjects: async () => projects });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showOpenSessionDialog()", ctx);
+  await tick();
+  const rows = els["open-session-list"].children;
+  assert.strictEqual(rows.length, 2, "two project rows");
+  // 行 0 = div[pick, del]；pick 子节点含 name/path/act hint（relTime 5 分钟前）
+  const pick0 = rows[0].children[0];
+  const texts0 = [...pick0.children].map((c) => c.textContent || "");
+  assert.ok(texts0.includes("5 分钟前"), "recent activity hint shown, got: " + texts0.join(","));
+  // 行 1 无 latest_session_at → 无活动提示
+  const pick1 = rows[1].children[0];
+  const texts1 = [...pick1.children].map((c) => c.textContent || "");
+  assert.ok(!texts1.some((t) => t.includes("前") || t.includes("ago")), "no activity hint when absent");
+});
