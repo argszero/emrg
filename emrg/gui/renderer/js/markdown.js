@@ -46,7 +46,10 @@ function ensureConfigured() {
 }
 
 renderer.renderMarkdown = async function (mdText) {
-  if (!window.marked) return escapeHtml(mdText || "");
+  if (!window.marked) {
+    console.warn("markdown vendor missing (marked not loaded)");
+    return escapeHtml(mdText || "");
+  }
   try {
     ensureConfigured();
     const html = window.marked.parse(mdText || "", { async: true, gfm: true, breaks: false });
