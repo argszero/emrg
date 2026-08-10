@@ -984,3 +984,79 @@ test("P3: registerContainer 后该会话渲染进独立容器；无 sid 回退�
   assert.strictEqual(extra.children.length, 1, "unregistered container no longer receives");
   assert.strictEqual(els["chat-view"].children.length, 2, "falls back to default container");
 });
+
+// ── P3 slice 1（rant 15:07:19）：renderer sessionsBySid 会话级状态表 ─────
+
+test("P3 s1: state.busy/ownStreamRequestId 路由到激活会话条目（get-or-create）", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-1";' +
+    'App.state.busy = true;' +
+    'App.state.ownStreamRequestId = "req-1";',
+    ctx
+  );
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-1").busy, true, "busy stored in sess-1 entry");
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-1").ownStreamRequestId, "req-1");
+  assert.strictEqual(ctx.App.state.busy, true, "state.busy reads active entry");
+});
+
+test("P3 s1: 切换会话后 state.busy 指向新会话条目（各会话独立）", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-a";' +
+    'App.state.busy = true;' +
+    'App.state.sessionId = "sess-b";' +
+    'App.state.busy = false;',
+    ctx
+  );
+  const sa = ctx.App.state.sessionsBySid.get("sess-a");
+  const sb = ctx.App.state.sessionsBySid.get("sess-b");
+  assert.strictEqual(sa.busy, true, "sess-a stays busy after switching away");
+  assert.strictEqual(sb.busy, false, "sess-b independent");
+});
+
+test("P3 s1: done 带 sid → 只释放该会话条目；后台会话 done 不误清激活会话", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-active";' +
+    'App.state.busy = true;' +
+    'App.state.ownStreamRequestId = "req-active";' +
+    // 模拟后台会话的流：事件带 sid=sess-bg（非激活）→ 释放 bg 条目，不动 active
+    'window.emrg.onEvent.calls = window.emrg.onEvent.calls || [];',
+    ctx
+  );
+  // 直接驱动 handleEvent：后台会话 done
+  await vm.runInContext(
+    'App.handleEvent({ type: "done", sid: "sess-bg", data: { request_id: "req-bg", done: true } });',
+    ctx
+  );
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-bg").busy, false, "bg entry released");
+  // 激活会话未被误清（bg done 不匹配 active 的 rid——除非我们预设了 bg 的 rid）
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-active").busy, true, "active busy untouched by bg done");
+  // 激活会话自己的 done（带激活 sid）→ 释放
+  await vm.runInContext(
+    'App.handleEvent({ type: "done", sid: "sess-active", data: { request_id: "req-active", done: true } });',
+    ctx
+  );
+  assert.strictEqual(ctx.App.state.busy, false, "active released by own done");
+  assert.strictEqual(els["input"].disabled, false, "composer re-enabled for active");
+});
+
+test("P3 s1: cancelled 带 sid → 只清该会话条目；无 sid → 清激活会话", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-1";' +
+    'App.state.busy = true;' +
+    'App.handleEvent({ type: "cancelled", sid: "sess-2", data: {} });',
+    ctx
+  );
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-2").busy, false, "sess-2 cancelled released");
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-1").busy, true, "sess-1 (active) untouched");
+  // 无 sid cancelled → 清激活会话
+  await vm.runInContext('App.handleEvent({ type: "cancelled", data: {} });', ctx);
+  assert.strictEqual(ctx.App.state.busy, false, "no-sid cancelled clears active");
+});
