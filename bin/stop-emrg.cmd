@@ -16,7 +16,7 @@ REM
 REM Returns 0 when nothing EMRG-related survives; 1 if a process could not be
 REM stopped (installer aborts with a clear message instead of hanging).
 REM Safe on clean install: no old install dir -> everything is skipped -> 0.
-setlocal
+setlocal enabledelayedexpansion
 set "EMRG_DIR=%USERPROFILE%\.emrg"
 set "INSTALL=%EMRG_DIR%\install"
 
@@ -58,11 +58,13 @@ if defined DPID taskkill /F /PID %DPID% >nul 2>&1
 :verify
 set "EXIT_CODE=0"
 tasklist /FI "IMAGENAME eq EMRG.exe" 2>nul | findstr /i "EMRG.exe" >nul && set "EXIT_CODE=1"
+REM 括号块内 %-变量 在块解析时展开（set "DPID=" 之后取到旧值/空值）→ 必须用
+REM enabledelayedexpansion 的 !DPID!（运行时展开）；if defined 本身是运行时判定。
 if exist "%EMRG_DIR%\emrgd.pid" (
   set "DPID="
   for /f "usebackq delims=" %%p in ("%EMRG_DIR%\emrgd.pid") do set "DPID=%%p"
   if defined DPID (
-    tasklist /FI "PID eq %DPID%" 2>nul | findstr /i "%DPID%" >nul && set "EXIT_CODE=1"
+    tasklist /FI "PID eq !DPID!" 2>nul | findstr /i "!DPID!" >nul && set "EXIT_CODE=1"
   )
 )
 endlocal & exit /b %EXIT_CODE%

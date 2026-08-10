@@ -33,6 +33,15 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_in_order():
     assert content.index("taskkill /IM EMRG.exe") < daemon_line
     # 干净安装安全：无旧 install 目录时跳过
     assert 'set "INSTALL=%EMRG_DIR%\\install"' in content
+    # 括号块内 pid 判定必须用延迟展开（!DPID!）——%DPID% 在块解析时展开，
+    # set "DPID=" 后取到旧值/空值 → if defined 恒假 → daemon 存活误报干净
+    # （rant 2026-08-10T08:50:44，cmd.exe 经典括号块展开坑）
+    assert "setlocal enabledelayedexpansion" in content
+    # 从标签定义处（而非前面 wait 循环的 goto :verify）截取校验块
+    verify_block = content[content.index(":verify\nset \"EXIT_CODE=0\""):]
+    assert "PID eq !DPID!" in verify_block
+    # 非延迟展开 %DPID% 不得出现在括号块内（块解析时展开=恒旧值）
+    assert "%DPID%" not in verify_block
 
 
 def test_emrgd_cmd_has_stop_branch():
