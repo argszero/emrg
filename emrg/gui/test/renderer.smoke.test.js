@@ -107,7 +107,8 @@ function makeEl(id) {
 
 const ELEMENT_IDS = [
   "chat-view", "input", "send-btn", "stop-btn", "conv-list", "open-sessions", "open-sessions-label", "status-dot", "settings-btn",
-  "open-session-dialog", "open-session-list", "open-session-title", "open-session-desc", "open-session-new", "open-session-cancel",
+  "open-session-dialog", "open-session-list", "open-session-title", "open-session-desc", "open-session-new", "open-session-cancel", "open-session-new-session",
+  "new-session-dialog", "new-session-list", "new-session-new", "new-session-cancel",
   "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn",
   "settings-dialog", "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",
   "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
@@ -820,7 +821,7 @@ test("boot 死锁修复：boot/newSession/switchSession 成功路径启用输入
   const bootBlock = src.slice(bootIdx, src.indexOf("async function sendMessage"));
   assert.ok(bootBlock.includes("setComposerDisabled(false)"), "boot() 成功路径应启用输入框");
   // newSession()/switchSession() 成功路径也应启用（防御性，独立调用场景）
-  const nsIdx = src.indexOf("async function newSession()");
+  const nsIdx = src.indexOf("async function newSession(");
   const nsBlock = src.slice(nsIdx, src.indexOf("async function deleteSession"));
   assert.ok(nsBlock.includes("setComposerDisabled(false)"), "newSession() 成功路径应启用输入框");
   const ssIdx = src.indexOf("async function switchSession(");
@@ -1357,8 +1358,8 @@ test("P5: showOpenSessionDialog 列项目（第一步）→ 点项目列会话�
   await tick();
   assert.strictEqual(els["open-session-dialog"].open, true, "dialog opened");
   assert.strictEqual(els["open-session-list"].children.length, 2, "two projects listed");
-  // 点击 emrg 项目 → 第二步列出会话（按钮行子节点 [name, hint]）
-  els["open-session-list"].children[0].click();
+  // 点击 emrg 项目 → 第二步列出会话（行 = div[pick 按钮, 删除按钮]；点 pick 按钮）
+  els["open-session-list"].children[0].children[0].click();
   await tick();
   const rows = els["open-session-list"].children;
   assert.strictEqual(rows.length, 2, "two sessions listed for project");
@@ -1379,4 +1380,80 @@ test("P5: /open 指令 → 打开会话对话框；无项目 → 提示新建", 
     (els["open-session-list"].innerHTML || "").includes("新建项目") || (els["open-session-list"].innerHTML || "").includes("New project"),
     "no-projects hint"
   );
+});
+
+// ── P5 slice 2（rant 15:07:19）：新建会话对话框 + 删除项目（受保护守卫） ──
+
+test("P5 slice 2: showNewSessionDialog 列项目 → 点选项目 → newSession(projectPath)", async () => {
+  const projects = [
+    { name: "emrg", path: "/p/emrg" },
+    { name: "mem", path: "/p/mem" },
+  ];
+  const newCalls = [];
+  const { ctx, els } = makeSandbox({
+    listProjects: async () => projects,
+    newSession: async (payload) => { newCalls.push(payload); return { session_id: "s-new" }; },
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showNewSessionDialog()", ctx);
+  await tick();
+  assert.strictEqual(els["new-session-dialog"].open, true, "new-session dialog opened");
+  assert.strictEqual(els["new-session-list"].children.length, 2, "two projects listed");
+  // 点选 mem 项目 → newSession({ projectPath }) 被调用 + 弹窗关闭
+  els["new-session-list"].children[1].click();
+  await tick();
+  assert.strictEqual(newCalls.length, 1, "newSession called once");
+  assert.strictEqual(newCalls[0] && newCalls[0].projectPath, "/p/mem", "projectPath passed");
+  assert.strictEqual(els["new-session-dialog"].open, false, "dialog closed after pick");
+});
+
+test("P5 slice 2: 新建会话弹窗 → 新建项目 → registerProject + newSession(new path)", async () => {
+  const registerCalls = [];
+  const newCalls = [];
+  const { ctx, els } = makeSandbox({
+    pickProjectDir: async () => ({ path: "/p/brand-new" }),
+    registerProject: async (p) => { registerCalls.push(p); return { ok: true }; },
+    newSession: async (payload) => { newCalls.push(payload); return { session_id: "s-new2" }; },
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showNewSessionDialog()", ctx);
+  await tick();
+  els["new-session-new"].click();
+  await tick();
+  assert.strictEqual(registerCalls.length, 1, "registerProject called once");
+  assert.strictEqual(registerCalls[0] && registerCalls[0].path, "/p/brand-new", "new path registered");
+  assert.strictEqual(newCalls.length, 1, "newSession called after register");
+  assert.strictEqual(newCalls[0] && newCalls[0].projectPath, "/p/brand-new", "new session in new project");
+});
+
+test("P5 slice 2: 删除项目 — 受保护 emrg 提示不可删；普通项目确认后 removeProject", async () => {
+  const projects = [
+    { name: "emrg", path: "/p/emrg" },
+    { name: "mem", path: "/p/mem" },
+  ];
+  const removeCalls = [];
+  const { ctx, els } = makeSandbox({
+    listProjects: async () => projects,
+    removeProject: async (p) => { removeCalls.push(p); return { ok: true, removed: true, closed: [] }; },
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showOpenSessionDialog()", ctx);
+  await tick();
+  // 受保护项目：行 = [pick, delete]；点删除 → 确认框提示系统项目不可删（不调 removeProject）
+  els["open-session-list"].children[0].children[1].click();
+  await tick();
+  assert.strictEqual(removeCalls.length, 0, "protected project NOT removed");
+  assert.ok(
+    (els["confirm-message"].textContent || "").includes("系统项目") || (els["confirm-message"].textContent || "").includes("system project"),
+    "protected hint shown"
+  );
+  await vm.runInContext("EMRG_Dialogs.closeConfirm()", ctx);
+  // 普通项目：点删除 → 确认 → removeProject({name, path})
+  els["open-session-list"].children[1].children[1].click();
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.confirmOk()", ctx);
+  await tick();
+  assert.strictEqual(removeCalls.length, 1, "removeProject called once");
+  assert.strictEqual(removeCalls[0] && removeCalls[0].name, "mem", "project name passed");
+  assert.strictEqual(removeCalls[0] && removeCalls[0].path, "/p/mem", "project path passed");
 });
