@@ -283,7 +283,6 @@ cd emrg/gui
 npm ci               # 安装依赖（生产模式可 --omit=dev）
 npm start            # 启动 GUI（自动拉起 daemon）
 npm test             # 运行 Node 测试（111 项：29 daemon_client + 22 app-commands + 32 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config；集成测试在 CI 跑，本地可 npm run test:integration）
-npm test             # 运行 Node 测试（111 项：29 daemon_client + 22 app-commands + 32 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config；集成测试在 CI 跑，本地可 npm run test:integration）
 ```
 
 CI 通过 GitHub Actions 自动运行测试并检查冲突标记（`.github/workflows/test.yml`）。
