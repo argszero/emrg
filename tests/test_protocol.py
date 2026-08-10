@@ -17,7 +17,6 @@ def test_task_request_to_dict():
         session_id="s_260718_1200_a3f9",
         cwd="/home/user/project",
         prompt="hello",
-        stream=True,
     )
     d = req.to_dict()
     assert d["type"] == "task"
@@ -25,7 +24,6 @@ def test_task_request_to_dict():
     assert d["session_id"] == "s_260718_1200_a3f9"
     assert d["cwd"] == "/home/user/project"
     assert d["prompt"] == "hello"
-    assert d["stream"] is True
     assert "timestamp" in d
 
 
@@ -35,7 +33,7 @@ def test_task_request_defaults():
     assert d["type"] == "task"
     assert d["id"]  # auto-generated UUID
     assert d["session_id"] == ""
-    assert d["stream"] is False
+    assert "stream" not in d  # non-stream path removed (rant 21:20:38)
 
 
 def test_task_response_from_dict():

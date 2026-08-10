@@ -486,11 +486,11 @@ class DaemonClient {
 
   // ── 消息发送 ────────────────────────────────────────────
 
-  sendTask({ sessionId, cwd, prompt, stream = true, images = null, requestId = null, mode = "auto" }) {
+  sendTask({ sessionId, cwd, prompt, images = null, requestId = null, mode = "auto" }) {
     // G32：request_id 必须作为 id 字段发出（daemon 只回显不自生成）
-    // G96：stream 必须显式 true（daemon 读 stream 默认 False）
     // G143：外部预生成 requestId 优先（renderer send 前标记自有流，消除 IPC 往返竞态窗口）
     // WorkBuddy P2：mode="ask" → daemon 不启用工具（纯对话）
+    // rant 21:20:38：非 stream 路径已删除——所有 task 恒走 tool_loop（流式）
     const rid = requestId || crypto.randomUUID();
     const payload = {
       type: "task",
@@ -499,17 +499,14 @@ class DaemonClient {
       cwd,
       prompt,
       timestamp: new Date().toISOString(),
-      stream,
       images,
     };
     if (mode && mode !== "auto") payload.mode = mode;
     this._setCurrentStream(rid);
     // G65：自有流锁——本连接发出流式 task 即标记，done/error/cancelled/断连释放
     // （多会话各自独立；main.js emrg:sendMessage 的 G65 切会话检查读本字段）
-    if (stream) {
-      this.ownStream = true;
-      this.ownStreamRequestId = rid;
-    }
+    this.ownStream = true;
+    this.ownStreamRequestId = rid;
     this.ws.send(JSON.stringify(payload));
     return rid;
   }

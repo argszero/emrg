@@ -29,7 +29,6 @@ class TaskRequest:
     timestamp: str = field(
         default_factory=lambda: datetime.now().isoformat()
     )
-    stream: bool = False
     images: Optional[list[dict]] = None
 
     def to_dict(self) -> dict:
@@ -40,7 +39,6 @@ class TaskRequest:
             "cwd": self.cwd,
             "prompt": self.prompt,
             "timestamp": self.timestamp,
-            "stream": self.stream,
         }
         if self.images:
             d["images"] = self.images

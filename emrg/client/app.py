@@ -1854,7 +1854,7 @@ Streaming
                 images = _pending_images or None
                 _pending_images = []
                 await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
-                                     stream=True, images=images)
+                                     images=images)
                 logger.info("task sent, prompt_len=%d chars", len(text))
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):
