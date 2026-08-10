@@ -240,17 +240,18 @@ Every cycle must curate `~/.emrg/rants.jsonl`. Each rant has a three-state `stat
 | status | meaning | when to set |
 |--------|---------|-------------|
 | `pending` | waiting to be handled | default for new rants |
-| `in_progress` | being handled | PR submitted but not merged; or staged progress (acceptance items still unmet) |
-| `completed` | done | **only after ALL acceptance items declared in the rant (e.g. markdown `- [ ]` checkbox list) are satisfied**; also write the `completed` timestamp |
+| `in_progress` | being handled | PR(s) submitted but not all merged yet; or staged progress (remaining self-verifiable acceptance items) |
+| `completed` | done | **all PRs for the rant merged + evolution self-tests pass** (local pytest + import + CLI checks green; CI green). Host verification is **NOT** a precondition — if the host finds a problem, they open a new rant. Write the `completed` timestamp |
 
 `progress` is a string (e.g. `"PR #275 submitted, awaiting review"`) recording progress. `completed` is set only when status=completed, as an ISO timestamp; otherwise null.
 
 **State transition rules**: pending → in_progress → completed. Never jump directly from pending to completed.
 Old entries without a `status` field are treated as pending.
 
-- **Marking complete**: **first check off every acceptance item declared in the rant** — if the rant has an acceptance checklist (`- [ ]` checkboxes or an "acceptance criteria" section), every item must be verified before marking completed; if any is unmet, keep it in_progress. Set status to `"completed"` and append `"completed": "<ISO timestamp>"`
-- **Staged progress rule**: when splitting a large change into stages, keep status **in_progress** after each stage's PR merges (a single PR merge is NOT grounds for completed); record progress as `"Stage N done (PR #xxx), remaining: <unmet acceptance items>"`, and only mark completed when the final stage (all acceptance items) is done
-- **Correction mechanism**: if you find a rant marked completed that is actually unfinished (unmet acceptance items, unmerged branches), immediately revert it to in_progress, note the reason in progress, and keep working on the remaining items
+- **Marking complete**: a rant is complete when **all its PRs are merged and the evolution's own verification passes** (rant 2026-08-10T08:59:57 — "completed 不再等宿主验证"：等待宿主实测没有任何意义，宿主发现问题会新起 rant)。Acceptance items in the rant must be **self-verifiable by the evolution** (tests, CI, code review) — do NOT write "host must verify on their machine / 宿主实测" style acceptance items, they block convergence forever. Set status to `"completed"` and append `"completed": "<ISO timestamp>"`
+- **Host feedback goes through new rants**: if the host finds a fix insufficient, they open a new rant (existing mechanism) — never keep a rant in_progress waiting for host sign-off
+- **Staged progress rule**: when splitting a large change into stages (multiple PRs), keep status **in_progress** until the FINAL PR merges (a single PR merge is NOT grounds for completed); record progress as `"Stage N done (PR #xxx), remaining: <remaining PRs>"`, and only mark completed when all PRs are merged
+- **Correction mechanism**: if a new rant reveals a completed rant's fix was insufficient, immediately revert it to in_progress, note the reason in progress, and keep working on the remaining items
 - **Periodic cleanup**: keep all pending/in_progress rants; keep only the 10 most recent completed
 - **⚡ Sort constraint**: every rewrite must be ordered by `timestamp` ascending (oldest first, newest last). Do not group by category (handled/unhandled); do not change chronological order. Read all entries → modify (mark completed / delete old entries) → `sorted(..., key=lambda r: r.get("timestamp", ""))` → write
 - **⚡ Field order constraint**: each JSON line's field order MUST be `timestamp → project → status → progress → completed → message` (**message last**). Build the dict in this order and `json.dumps` preserves it. The message is long; putting it last makes manual review of status fields easier.
