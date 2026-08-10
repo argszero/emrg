@@ -180,6 +180,25 @@ jobs:
         shell: bash
         run: bash packaging/make-installer.sh
 
+      # ── zip 安装包（Windows only，rant 2026-08-10T20:10:41）──
+      # 宿主反馈：除 exe 安装包外再提供 zip 压缩版（内容 = 同名 exe），
+      # 方便直接解压使用/分发。压缩后产物 EMRG-<ver>-windows-x64.zip
+      # 走下方 Upload artifacts（glob 需含 *.zip）。
+      - name: Zip installer (Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd dist/artifacts
+          EXE="$(find . -maxdepth 1 -name 'EMRG-*-windows-x64.exe' | head -1)"
+          if [ -z "$EXE" ]; then
+            echo "::error::no EMRG-*-windows-x64.exe found in dist/artifacts"
+            exit 1
+          fi
+          ZIP="${EXE%.exe}.zip"
+          powershell -NoProfile -Command "Compress-Archive -Force -Path \"$EXE\" -DestinationPath \"$ZIP\""
+          ls -la
+          test -s "$ZIP"
+
       # ── pkg 签名（macOS only，P2；Secret 未配则跳过降级）──
       # ⚠️ productsign 需要 Developer ID Installer 身份（非 Application 身份）——
       # 实测 #462：MACOS_SIGNING_IDENTITY 配 Application 身份报
@@ -284,6 +303,7 @@ jobs:
             dist/artifacts/*.exe
             dist/artifacts/*.AppImage
             dist/artifacts/*.tar.gz
+            dist/artifacts/*.zip
 
   release:
     needs: build
