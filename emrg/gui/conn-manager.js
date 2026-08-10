@@ -103,7 +103,7 @@ class ConnManager {
     });
     this._conns.set(sid, { conn, projectPath });
     for (const cb of this._openHooks) {
-      try { cb(sid, conn); } catch (e) { this.logger.warn(`[gui] connManager onOpen hook error: ${e.message}`); }
+      try { cb(sid, conn, projectPath); } catch (e) { this.logger.warn(`[gui] connManager onOpen hook error: ${e.message}`); }
     }
     return conn;
   }

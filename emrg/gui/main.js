@@ -13,6 +13,7 @@ const { spawn } = require("child_process");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
 const { generateSessionId, SESSION_ID_RE } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
+const { guiStatePath, sanitizeOpenSessions, saveGuiState } = require("./gui-state");
 const APP_VERSION = require("./package.json").version;
 
 // ── 单实例锁（G85/G120：第二个实例退出并 focus 已有窗口）──
@@ -39,6 +40,11 @@ function main() {
   // （对称 TUI app.py _throttle_warned，PR #594）。成功连接后复位。
   let daemonStoppedNotified = false;
   let stopping = false;
+  // P4（rant 15:07:19）：跨项目打开的会话状态——sid → {projectName, projectPath,
+  // lastActive}。写盘防抖 1s（打开/关闭/切换时更新，镜像 rant 设计）。
+  let openSessions = new Map();
+  let guiStateTimer = null;
+  const GUI_STATE_DEBOUNCE_MS = 1000;
 
   // ── 窗口 ────────────────────────────────────────────────
 
@@ -269,6 +275,7 @@ vision = false
       if (!conn || !conn.connected) {
         conn = await openSession(sessionId, projectDir, { resume: false });
       }
+      markSessionActive(sessionId); // P4：发送 = 会话活动 → lastActive + 持久化
       let rid;
       try {
         // G143：renderer 预生成 requestId（send 前标记自有流，消除 IPC 往返竞态窗口）
@@ -306,8 +313,9 @@ vision = false
       }
       currentSessionId = sessionId;
       win.setTitle(`EMRG — ${sessionId}`); // G109
-      // 单会话模型：切走即关闭旧会话连接（每会话一条连接；多会话 openSessions 由 P4 管理）
-      if (prevSid && prevSid !== sessionId) connManager?.close(prevSid);
+      // P4（rant 15:07:19）：多会话保持——切走**不再关闭**旧会话连接（浏览器 tab
+      // 效果：切回继续生成/看现场）。关闭走 emrg:closeSession（P4 slice 2 侧边栏）。
+      markSessionActive(sessionId); // 更新 lastActive + activeSid 防抖写盘
       return {};
     });
 
@@ -315,6 +323,8 @@ vision = false
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       await requireConn().sendCommandAndWait("delete_session", { session_id: sessionId, cwd: projectDir }, 5000);
       connManager?.close(sessionId); // P2：删除会话 → 关闭该会话连接（若打开）
+      openSessions.delete(sessionId); // P4：删除（删数据）→ 一并移出打开会话簿记
+      schedulePersistGuiState();
       return { ok: true };
     });
 
@@ -326,12 +336,28 @@ vision = false
       return { ok: true, title: frame.title || clean };
     });
 
+    // P4（rant 15:07:19）：关闭会话 = 断开连接 + 移除 + 持久化，**保留磁盘数据**
+    // （与 delete_session 区分：关闭留数据 / 删除删数据）。
+    ipcMain.handle("emrg:closeSession", async (_e, { sessionId }) => {
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      return closeSession(sessionId);
+    });
+
+    // P4：跨项目打开会话列表（侧边栏数据源，slice 2 消费）
+    ipcMain.handle("emrg:getOpenSessions", async () => ({
+      openSessions: openSessionsList(),
+      activeSid: currentSessionId,
+    }));
+
     ipcMain.handle("emrg:newSession", async () => {
       // G14/G81：本地生成 session_id（无 new_session 消息）
       const sid = generateSessionId();
       // 同步 main 侧会话状态：重连后 resume 正确会话（G41）+ 窗口标题（G109）
       currentSessionId = sid;
       win.setTitle(`EMRG — ${sid}`);
+      // P4：新会话在首条消息前不建连接（sendMessage 自动 open）——此处仅标记激活
+      // 并刷新持久化（activeSid 前进；openSessions 条目随 openSession 落簿记）
+      schedulePersistGuiState();
       return { session_id: sid };
     });
 
@@ -625,8 +651,10 @@ vision = false
     if (connManager) return connManager;
     connManager = new ConnManager({ projectDir, logger, isPackaged: app.isPackaged });
     // 每个新会话连接建立时挂 renderer 事件桥（附带 sid；含 recoverAll 重开路径）
-    connManager.onOpen((sid, conn) => {
+    connManager.onOpen((sid, conn, projectPath) => {
       conn.onEvent((type, data) => {
+        // P4：消息活动刷新该会话 lastActive（激活/发送/done 更新，写盘防抖 1s）
+        if (type === "done" || type === "message_delta") touchOpenSession(sid, projectPath);
         if (win && !win.isDestroyed()) {
           // 主动关闭（切走/删除）不触发断线横幅——真断连/daemon 重启照常转发
           if (type === "disconnected" && conn._intentionalClose) return;
@@ -669,8 +697,83 @@ vision = false
   // 打开（或复用）会话连接；事件桥由 onOpen 钩子统一挂（含 recoverAll 重开）。
   async function openSession(sid, projectPath, { resume = true } = {}) {
     const existing = connManager.get(sid);
-    if (existing && existing.connected) return existing;
-    return connManager.open(sid, projectPath, { resume });
+    if (existing && existing.connected) {
+      touchOpenSession(sid, projectPath); // P4：复用连接也刷新打开会话状态
+      return existing;
+    }
+    const conn = await connManager.open(sid, projectPath, { resume });
+    touchOpenSession(sid, projectPath);
+    return conn;
+  }
+
+  // ── P4 openSessions 簿记 + gui_state.json 持久化 ──────────────────
+
+  function projectNameOf(projectPath) {
+    return path.basename(projectPath) || projectPath;
+  }
+
+  // 记录/刷新一个打开会话（复用连接、恢复重开、recoverAll 均刷新）
+  function touchOpenSession(sid, projectPath) {
+    openSessions.set(sid, {
+      projectName: projectNameOf(projectPath),
+      projectPath,
+      lastActive: new Date().toISOString(),
+    });
+  }
+
+  // 激活会话变化（切换/新会话/发送）→ 更新 lastActive + activeSid → 防抖写盘
+  function markSessionActive(sid) {
+    if (sid && openSessions.has(sid)) {
+      openSessions.get(sid).lastActive = new Date().toISOString();
+    }
+    schedulePersistGuiState();
+  }
+
+  function schedulePersistGuiState() {
+    if (guiStateTimer) clearTimeout(guiStateTimer);
+    guiStateTimer = setTimeout(() => {
+      guiStateTimer = null;
+      persistGuiStateNow();
+    }, GUI_STATE_DEBOUNCE_MS);
+    guiStateTimer.unref?.();
+  }
+
+  function persistGuiStateNow() {
+    try {
+      const entries = [...openSessions.entries()].map(([sid, v]) => ({
+        sid,
+        projectName: v.projectName,
+        projectPath: v.projectPath,
+        lastActive: v.lastActive,
+      }));
+      const state = {
+        openSessions: sanitizeOpenSessions(entries), // 写盘侧也守上限 20
+        activeSid: currentSessionId,
+      };
+      saveGuiState(os.homedir(), state);
+    } catch (e) {
+      logger.warn(`[gui] gui_state.json persist failed: ${e.message}`);
+    }
+  }
+
+  // 关闭会话（保留磁盘数据）：断连 + 移除 + 持久化。P4 slice 2 侧边栏"关闭"入口用。
+  async function closeSession(sid) {
+    const entry = openSessions.get(sid);
+    connManager?.close(sid); // 主动关闭（_intentionalClose 抑制断线横幅）
+    openSessions.delete(sid);
+    schedulePersistGuiState();
+    if (currentSessionId === sid) currentSessionId = null; // 关闭激活会话 → 无激活
+    return { ok: true, closed: !!entry };
+  }
+
+  function openSessionsList() {
+    return [...openSessions.entries()]
+      .map(([sid, v]) => ({ sid, projectName: v.projectName, projectPath: v.projectPath, lastActive: v.lastActive }))
+      .sort((a, b) => String(b.lastActive || "").localeCompare(String(a.lastActive || "")));
+  }
+
+  function guiStateFilePath() {
+    return guiStatePath(os.homedir());
   }
 
   async function ensureConnected() {
@@ -814,6 +917,7 @@ vision = false
   app.on("window-all-closed", () => {
     stopping = true;
     cancelReconnect();
+    persistGuiStateNow(); // P4：退出前冲刷未落盘的打开会话状态（防抖 timer 取消）
     connManager?.closeAll(); // P2：关闭全部会话连接 + daemon 级连接
     if (process.platform !== "darwin") app.quit();
   });
