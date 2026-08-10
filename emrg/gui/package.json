@@ -34,6 +34,7 @@
       "main.js",
       "preload.js",
       "renderer/**",
+      "vendor/**",
       "daemon_client.js",
       "package.json",
       "scripts/**"
