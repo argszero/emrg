@@ -1275,3 +1275,56 @@ def test_remove_project_corrupt_yaml_reports_error(tmp_path):
     replies = _decode_frames(writer)
     assert replies[0]["removed"] is False
     assert replies[0]["error"]
+
+
+# ── list_projects ordering by latest session activity (P6, rant 15:07:19) ──
+
+
+def test_list_projects_ordered_by_latest_session_activity(tmp_path, monkeypatch):
+    """Projects come back sorted by their newest session's created_at (desc).
+
+    P6 acceptance ("选项目按该项目最新会话活跃倒序"): the daemon aggregates
+    each project's sessions dir (parallel scan) because the GUI cannot issue
+    concurrent list_sessions on one connection (pending map keys by respType).
+    """
+    import asyncio
+    import json
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    p_old = tmp_path / "old"
+    p_new = tmp_path / "new"
+    p_none = tmp_path / "nosess"
+    for p in (p_old, p_new, p_none):
+        p.mkdir()
+    # 老项目：最近会话 created_at 较早
+    (p_old / ".emrg" / "sessions" / "s-old").mkdir(parents=True)
+    (p_old / ".emrg" / "sessions" / "s-old" / "meta.json").write_text(
+        json.dumps({"session_id": "s-old", "created_at": "2026-08-01T00:00:00"}), encoding="utf-8"
+    )
+    # 新项目：最近会话 created_at 较晚 → 应排第一
+    (p_new / ".emrg" / "sessions" / "s-new").mkdir(parents=True)
+    (p_new / ".emrg" / "sessions" / "s-new" / "meta.json").write_text(
+        json.dumps({"session_id": "s-new", "created_at": "2026-08-10T12:00:00"}), encoding="utf-8"
+    )
+    # 无会话项目 → 排最后（无 latest_session_at）
+    projects_file = tmp_path / "projects.yml"
+    projects_file.write_text(
+        f"- name: old\n  path: {p_old}\n"
+        f"- name: new\n  path: {p_new}\n"
+        f"- name: nosess\n  path: {p_none}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "_projects_log", projects_file)
+
+    writer = _FakeWriter()
+    asyncio.run(server._handle_list_projects(writer))
+
+    reply = json.loads(writer._frames[0])
+    names = [p["name"] for p in reply["projects"]]
+    assert names == ["new", "old", "nosess"], f"ordered by latest session activity: {names}"
+    new_proj = next(p for p in reply["projects"] if p["name"] == "new")
+    assert new_proj["latest_session_at"] == "2026-08-10T12:00:00"
+    none_proj = next(p for p in reply["projects"] if p["name"] == "nosess")
+    assert none_proj["latest_session_at"] == ""
