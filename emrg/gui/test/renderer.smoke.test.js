@@ -36,7 +36,13 @@ function makeEl(id) {
     _update() { node.className = [...node._cls].join(" "); },
     className: "",
     textContent: "",
-    innerHTML: "",
+    _html: "",
+    get innerHTML() { return this._html; },
+    set innerHTML(v) {
+      this._html = v;
+      // 忠实 DOM：innerHTML = "" 清空子节点（Chat.clear 依赖；P3 s2 容器隔离判别）
+      if (v === "") { while (this.children.length) this.children[0].remove(); }
+    },
     value: "",
     disabled: false,
     title: "",
@@ -1060,3 +1066,70 @@ test("P3 s1: cancelled 带 sid → 只清该会话条目；无 sid → 清激活
   await vm.runInContext('App.handleEvent({ type: "cancelled", data: {} });', ctx);
   assert.strictEqual(ctx.App.state.busy, false, "no-sid cancelled clears active");
 });
+
+// ── P3 slice 2（rant 15:07:19）：每会话 .session-view 容器 + display 切换 ──
+
+test("P3 s2: activateSessionView 建独立容器并切换 display（仅激活可见）", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-a";' +
+    'App.activateSessionView("sess-a");' +
+    'App.state.sessionId = "sess-b";' +
+    'App.activateSessionView("sess-b");',
+    ctx
+  );
+  // 沙箱 getElementById 对未知 id 返回新 mock —— 视图经 Chat.chatContainer(sid) 取实际对象
+  const va = ctx.EMRG_Chat.chatContainer("sess-a");
+  const vb = ctx.EMRG_Chat.chatContainer("sess-b");
+  assert.notStrictEqual(va, vb, "two distinct per-session views");
+  assert.strictEqual(va.classList.contains("active"), false, "sess-a deactivated after switch");
+  assert.strictEqual(vb.classList.contains("active"), true, "sess-b is the active view");
+  assert.strictEqual(els["chat-view"].children.length, 2, "both views live under the #chat-view wrapper");
+  // 无 sid 渲染 → 落激活会话容器（slice 2 回退链第二跳）
+  ctx.EMRG_Chat.addSystemMessage("to-active");
+  assert.strictEqual(vb.children.length, 1, "unsid'd node goes to active session view");
+  assert.strictEqual(va.children.length, 0, "inactive view untouched (state preserved)");
+});
+
+test("P3 s2: Chat.clear 只清目标容器——无 sid 清激活，带 sid 定向清", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-a";' +
+    'App.activateSessionView("sess-a");' +
+    'App.state.sessionId = "sess-b";' +
+    'App.activateSessionView("sess-b");' +
+    'EMRG_Chat.addSystemMessage("msg-a", "sess-a");' +
+    'EMRG_Chat.addSystemMessage("msg-b", "sess-b");',
+    ctx
+  );
+  const va = ctx.EMRG_Chat.chatContainer("sess-a");
+  const vb = ctx.EMRG_Chat.chatContainer("sess-b");
+  assert.strictEqual(va.children.length, 1, "sess-a has its node");
+  assert.strictEqual(vb.children.length, 1, "sess-b has its node");
+  // 无 sid clear（/clear 的既有调用形态）→ 只清激活容器
+  ctx.EMRG_Chat.clear();
+  assert.strictEqual(vb.children.length, 0, "active view cleared");
+  assert.strictEqual(va.children.length, 1, "inactive view retained (切回继续看到原消息)");
+  // 带 sid clear → 定向清
+  ctx.EMRG_Chat.clear("sess-a");
+  assert.strictEqual(va.children.length, 0, "targeted clear empties sess-a");
+});
+
+test("P3 s2: 未注册 sid 的事件落激活容器，状态桶仍按 sid 隔离", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-x";' +
+    'App.activateSessionView("sess-x");',
+    ctx
+  );
+  const vx = ctx.EMRG_Chat.chatContainer("sess-x");
+  // 广播流（sid=sess-other 无独立容器，P4 前过渡）→ 节点落激活容器、状态入自己桶
+  ctx.EMRG_Chat.handleDelta([{ request_id: "r1", content: "fallback", done: false, delta: true }], "sess-other");
+  assert.strictEqual(vx.children.length, 1, "unregistered sid renders into active view");
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-other").size, 1, "state bucket keyed by own sid");
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-x").size, 0, "active bucket untouched by other sid");
+});
+

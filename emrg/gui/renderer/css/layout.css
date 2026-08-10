@@ -112,17 +112,31 @@
   background: var(--bg);
 }
 
-/* 聊天滚动区：居中单栏最大 760px，左右留白 ≥24px */
+/* 聊天区包装（P3 slice 2：多会话容器——每会话一个 .session-view，display 切换） */
 #chat-view {
   flex: 1;
-  overflow-y: auto;
+  position: relative;
+  overflow: hidden;
   display: flex;
+  flex-direction: column;
+}
+
+/* 每会话滚动容器：只有激活会话可见，切换 display 保留状态（浏览器 tab 效果） */
+.session-view {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  display: none;
   flex-direction: column;
   gap: var(--sp-5);
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
   scroll-behavior: smooth;
 }
-#chat-view > * {
+.session-view.active {
+  display: flex;
+}
+#chat-view > *:not(.session-view),
+.session-view > * {
   width: 100%;
   max-width: 760px;
   margin-left: auto;
@@ -231,7 +245,8 @@ body.sidebar-collapsed #app {
   #sidebar {
     display: none;
   }
-  #chat-view {
+  /* #chat-view 现为绝对定位包装（padding 移入 .session-view，避免滚动条内缩） */
+  .session-view {
     padding: var(--sp-4) var(--sp-4) var(--sp-3);
   }
   #composer-wrap {
