@@ -35,6 +35,9 @@ const App = (() => {
     cmdMenu: { items: [], index: -1 },
     // WorkBuddy P2（rant 21:35）：工作模式 ask（纯对话）/ auto（默认，自动执行工具）
     mode: "auto",
+    // B3（rant 21:59:11）：每会话输入框草稿（浏览器 tab 式状态保留）——切换会话保存旧
+    // sid 草稿、恢复新 sid 草稿；发送成功即清除该 sid 草稿
+    drafts: new Map(), // sid → 草稿文本
   };
 
   // P3 slice 1：会话条目访问器（get-or-create）。无 sid/未激活 → 归入当前激活会话。
@@ -144,6 +147,8 @@ const App = (() => {
     Chat.addUserMessage(text);
     input.value = "";
     input.style.height = "auto";
+    // B3：消息已发送 → 清除该会话草稿
+    state.drafts.delete(state.sessionId);
     // G143：send 前预生成 requestId 并标记自有流——消除 IPC 往返竞态窗口
     const requestId = genRequestId();
     state.ownStreamRequestId = requestId;
@@ -594,14 +599,30 @@ const App = (() => {
     return view;
   }
 
+  // B3（rant 21:59:11）：会话切换时保留/恢复输入框草稿（浏览器 tab 式状态）
+  function saveDraft(sid) {
+    if (!sid) return;
+    state.drafts.set(sid, $("input").value);
+  }
+  function restoreDraft(sid) {
+    const input = $("input");
+    input.value = sid ? (state.drafts.get(sid) || "") : "";
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 150) + "px";
+  }
+
   async function switchSession(sid, opts = {}) {    // G65：busy 即自有流进行中/发送中（IPC 往返窗口内 ownStreamRequestId 尚未赋值）
     if (state.busy) {
       Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy);
       return;
     }
     try {
+      // B3：离开前保存当前会话草稿
+      saveDraft(state.sessionId);
       const res = await window.emrg.switchSession({ sessionId: sid, projectPath: opts.projectPath });
       state.sessionId = sid;
+      // B3：恢复目标会话草稿
+      restoreDraft(sid);
       // P3 slice 1：切换只移动激活指针——每会话条目保留自己的 busy/ownStreamRequestId
       // P3 slice 2：激活该会话容器（状态保留，不 Chat.clear——切回继续看到原消息/流式现场）
       activateSessionView(sid);
@@ -639,14 +660,18 @@ const App = (() => {
       return;
     }
     try {
+      // B3：离开前保存当前会话草稿；新会话从空草稿开始
+      saveDraft(state.sessionId);
       const res = await window.emrg.newSession({ projectPath: opts.projectPath });
       state.sessionId = res.session_id;
+      state.drafts.set(res.session_id, ""); // 新会话无草稿
       activateSessionView(state.sessionId); // P3 slice 2：新会话独立容器（空）
       Chat.clear(state.sessionId); // 新会话从空开始（容器可能被复用）
       updateEmptyState(); // 欢迎屏即反馈
       await refreshSessions();
       Sidebar.highlight(state.sessionId);
       setComposerDisabled(false); // 防御性：独立调用 newSession 也确保输入框可用
+      restoreDraft(state.sessionId); // 新会话草稿为空 → 清空输入框
     } catch (e) {
       Chat.addSystemMessage(_t("app.newFailed", { msg: e.message }));
     }
@@ -1277,7 +1302,10 @@ const App = (() => {
   function bindUi() {
     $("send-btn").addEventListener("click", sendMessage);
     $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {}));
-    $("new-chat-btn").addEventListener("click", newSession);
+    // B1（rant 21:59:11）：侧边栏"＋ 新对话"→ 项目选择弹窗（选项目新建 / 新建项目），不再直接新建
+    $("new-chat-btn").addEventListener("click", () => Dialogs.showNewSessionDialog());
+    // B2（rant 21:59:11）：侧边栏"打开会话"入口 → 两步弹窗（选项目 → 选会话）
+    $("open-chat-btn")?.addEventListener("click", () => Dialogs.showOpenSessionDialog());
     Dialogs.initOpenSessionDialog(); // P5：打开会话对话框绑定
     Dialogs.initNewSessionDialog(); // P5 slice 2：新建会话对话框绑定
     $("open-session-new-session")?.addEventListener("click", () => Dialogs.showNewSessionDialog()); // P5 slice 2：打开弹窗 → 新建会话
@@ -1408,7 +1436,8 @@ const App = (() => {
       if (e.metaKey || e.ctrlKey) {
         if (e.key === "n") {
           e.preventDefault();
-          newSession();
+          // B1（rant 21:59:11）：⌘N 与侧边栏按钮一致 → 项目选择弹窗
+          Dialogs.showNewSessionDialog();
         } else if (e.key === "b") {
           e.preventDefault();
           document.body.classList.toggle("sidebar-collapsed");
