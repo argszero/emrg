@@ -135,6 +135,17 @@
 .session-view.active {
   display: flex;
 }
+/* P3 finalize：会话连接断开标记（P4 每会话容器可见；激活会话另走全局横幅） */
+.session-view.disconnected {
+  opacity: 0.55;
+}
+.session-view.disconnected::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(45deg, transparent 0 8px, rgba(128, 128, 128, 0.08) 8px 16px);
+}
 #chat-view > *:not(.session-view),
 .session-view > * {
   width: 100%;

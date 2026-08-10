@@ -1133,3 +1133,86 @@ test("P3 s2: 未注册 sid 的事件落激活容器，状态桶仍按 sid 隔离
   assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-x").size, 0, "active bucket untouched by other sid");
 });
 
+// ── P3 finalize（rant 15:07:19）：disconnected 按 sid 隔离 + 断线标记 ────
+
+test("P3 fin: 后台会话断连不触发全局横幅；仅激活会话断连显示", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  els["conn-banner"].classList.add("hidden"); // index.html 初始 hidden
+  await vm.runInContext(
+    'App.state.sessionId = "sess-active";' +
+    'App.activateSessionView("sess-active");' +
+    'App.activateSessionView("sess-bg");' +
+    'App.state.sessionId = "sess-active";',
+    ctx
+  );
+  // 后台会话断连：有独立注册容器 → 标 .disconnected；无全局横幅/红点
+  await vm.runInContext('App.handleEvent({ type: "disconnected", sid: "sess-bg", data: {} });', ctx);
+  const vb = ctx.EMRG_Chat.chatContainer("sess-bg");
+  assert.strictEqual(vb.classList.contains("disconnected"), true, "bg container marked disconnected");
+  assert.strictEqual(els["conn-banner"].classList.contains("hidden"), true, "no global banner for bg disconnect");
+  // 激活会话断连：全局横幅显示 + 容器标断线 + 输入条恢复（G89）
+  await vm.runInContext('App.handleEvent({ type: "disconnected", sid: "sess-active", data: {} });', ctx);
+  const va = ctx.EMRG_Chat.chatContainer("sess-active");
+  assert.strictEqual(va.classList.contains("disconnected"), true, "active container marked disconnected");
+  assert.strictEqual(els["conn-banner"].classList.contains("hidden"), false, "global banner shown for active disconnect");
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-bg").disconnected, true, "bg entry flagged");
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-active").disconnected, true, "active entry flagged");
+});
+
+test("P3 fin: status connected 清除全部断线标记 + 容器类", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-a";' +
+    'App.activateSessionView("sess-a");' +
+    'App.activateSessionView("sess-b");' +
+    'App.handleEvent({ type: "disconnected", sid: "sess-a", data: {} });' +
+    'App.handleEvent({ type: "disconnected", sid: "sess-b", data: {} });',
+    ctx
+  );
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-a").disconnected, true);
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-b").disconnected, true);
+  await vm.runInContext('App.handleEvent({ type: "status", data: { connected: true } });', ctx);
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-a").disconnected, false, "flag cleared on reconnect");
+  assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-b").disconnected, false, "bg flag cleared on reconnect");
+  const va = ctx.EMRG_Chat.chatContainer("sess-a");
+  const vb = ctx.EMRG_Chat.chatContainer("sess-b");
+  assert.strictEqual(va.classList.contains("disconnected"), false, "container class removed");
+  assert.strictEqual(vb.classList.contains("disconnected"), false, "bg container class removed");
+  assert.strictEqual(els["conn-banner"].classList.contains("hidden"), true, "banner hidden after reconnect");
+});
+
+test("P3 fin: 未注册容器 sid 断连不打标；切到断线会话提示重连", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-active";' +
+    'App.activateSessionView("sess-active");',
+    ctx
+  );
+  const va = ctx.EMRG_Chat.chatContainer("sess-active");
+  const lenBefore = va.children.length;
+  // 未注册容器（且非激活）的 sid 断连：不打 .disconnected（防 chatContainer 回退误标激活容器）
+  await vm.runInContext('App.handleEvent({ type: "disconnected", sid: "sess-ghost", data: {} });', ctx);
+  assert.strictEqual(va.classList.contains("disconnected"), false, "active container not falsely marked");
+  assert.strictEqual(va.children.length, lenBefore, "no node added to active container");
+  // 断线会话切入 → 提示自动重连（switchSession 走 mock IPC）
+  await vm.runInContext(
+    'App.state.sessionId = "sess-d";' + // 经 defineProperty setter 触发 sidState get-or-create 建条目
+    'App.state.busy = false;' +
+    'App.state.sessions = [{ session_id: "sess-d" }];' +
+    'App.state.sessionsBySid.get("sess-d").disconnected = true;',
+    ctx
+  );
+  await vm.runInContext('App.switchSession("sess-d", { silent: true });', ctx);
+  await tick();
+  const vd = ctx.EMRG_Chat.chatContainer("sess-d");
+  assert.ok(vd.children.length >= 1, "switch renders reconnect notice into session container");
+  assert.ok(
+    (vd.children[vd.children.length - 1].textContent || "").includes("重连") || (vd.children[vd.children.length - 1].textContent || "").includes("reconnect"),
+    "reconnect notice text present"
+  );
+});
+
+
