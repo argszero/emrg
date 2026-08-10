@@ -1,17 +1,17 @@
 @echo off
-REM stop-emrg.cmd — gracefully stop EMRG GUI/TUI/daemon before the installer
+REM stop-emrg.cmd -- gracefully stop EMRG GUI/TUI/daemon before the installer
 REM overwrites ~\.emrg\install files (rant 2026-08-10T08:50:44: Inno Setup got
-REM stuck at "停止已有进程" because the windowless pythonw daemon holds file locks
+REM stuck at "stopping existing processes" because the windowless pythonw daemon holds file locks
 REM and Inno CloseApplications cannot see it).
 REM
 REM Order matters (mirrors bin/emrg-uninstall steps 1a/1b):
 REM   1. GUI   (EMRG.exe): graceful WM_CLOSE first (taskkill without /F), then
 REM      UNCONDITIONAL /F after the ~5s grace window (host 01:27:07Z: long-lived
-REM      GUI deferred WM_CLOSE past 5s — /F must not be gated on a survivor check)
+REM      GUI deferred WM_CLOSE past 5s -- /F must not be gated on a survivor check)
 REM   2. TUI   (python.exe -m emrg): command-line filter (wmic, PowerShell
 REM      fallback), excludes the daemon (pythonw.exe -m emrg.server)
 REM   3. daemon: `emrg server stop` protocol shutdown via the OLD install's CLI
-REM      (present since #364 — version-safe), emrgd.pid poll (<=10s), then
+REM      (present since #364 -- version-safe), emrgd.pid poll (<=10s), then
 REM      taskkill /F /PID fallback
 REM
 REM Returns 0 when nothing EMRG-related survives; 1 if a process could not be
@@ -23,7 +23,7 @@ set "INSTALL=%EMRG_DIR%\install"
 
 REM --- 1. GUI: graceful WM_CLOSE, then unconditional /F after the grace window ---
 REM    (host report 2026-08-10T01:27:07Z: a long-lived ~15h GUI session deferred
-REM    WM_CLOSE past the 5s window — two full script runs did not terminate it
+REM    WM_CLOSE past the 5s window -- two full script runs did not terminate it
 REM    while a direct `taskkill /IM EMRG.exe` did. => the /F fallback must be
 REM    UNCONDITIONAL after the wait so an old GUI session can never hold the
 REM    installer hostage. When the GUI is not running, the graceful taskkill
@@ -64,8 +64,8 @@ if defined DPID taskkill /F /PID %DPID% >nul 2>&1
 :verify
 set "EXIT_CODE=0"
 tasklist /FI "IMAGENAME eq EMRG.exe" 2>nul | findstr /i "EMRG.exe" >nul && set "EXIT_CODE=1"
-REM 括号块内 %-变量 在块解析时展开（set "DPID=" 之后取到旧值/空值）→ 必须用
-REM enabledelayedexpansion 的 !DPID!（运行时展开）；if defined 本身是运行时判定。
+REM %-variables inside a parenthesized block expand at parse time (after set "DPID=" they hold the old/empty value) -> must use
+REM enabledelayedexpansion !DPID! (runtime expansion); if defined itself is a runtime check.
 if exist "%EMRG_DIR%\emrgd.pid" (
   set "DPID="
   for /f "usebackq delims=" %%p in ("%EMRG_DIR%\emrgd.pid") do set "DPID=%%p"
