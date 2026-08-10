@@ -39,7 +39,7 @@ const App = (() => {
   function sidState(sid) {
     const key = sid || state.sessionId || "default";
     if (!state.sessionsBySid.has(key)) {
-      state.sessionsBySid.set(key, { busy: false, ownStreamRequestId: null, mode: "auto", autoScroll: true });
+      state.sessionsBySid.set(key, { busy: false, ownStreamRequestId: null, mode: "auto", autoScroll: true, disconnected: false });
     }
     return state.sessionsBySid.get(key);
   }
@@ -603,6 +603,10 @@ const App = (() => {
       if (!opts.silent) {
         Chat.addSystemMessage(_t("app.switched"), sid);
       }
+      // P3 finalize：切入断线会话 → 提示自动重连中（状态保留，不打断输入——G89）
+      if (sidState(sid).disconnected) {
+        Chat.addSystemMessage(_t("app.sessionDisconnected"), sid);
+      }
       updateEmptyState();
       Sidebar.highlight(sid);
       setComposerDisabled(false); // 防御性：独立调用 switchSession 也确保输入框可用
@@ -1074,15 +1078,26 @@ const App = (() => {
         Sidebar.render(data.sessions || []);
         break;
       case "disconnected":
-        updateConnectionDot("red");
-        showBanner(EMRG_Copy.COPY.disconnected);
-        // G89：断连时恢复输入条（不能依赖 30s 超时兜底）——仅当激活会话断连
-        // P3 slice 1：断连释放该事件所属会话的锁
+        // P3 finalize：断连按 sid 隔离——后台会话断连不影响全局 UI（无横幅/红点），
+        // 仅激活会话（或无 sid 的单会话过渡期）断连显示全局横幅 + 红点。
         {
           const sst = sidState(sid);
           sst.busy = false;
           sst.ownStreamRequestId = null;
-          if (!sid || sid === state.sessionId) setComposerDisabled(false);
+          sst.disconnected = true; // P3 finalize：该会话条目标断线（P4 恢复 UI 用）
+          const isActive = !sid || sid === state.sessionId;
+          if (isActive) {
+            updateConnectionDot("red");
+            showBanner(EMRG_Copy.COPY.disconnected);
+            // G89：断连时恢复输入条（不能依赖 30s 超时兜底）
+            setComposerDisabled(false);
+          }
+          // 容器标断线（仅当该 sid 有**独立注册**容器——chatContainer 对未注册
+          // sid 回退激活容器，打错标；P4 openSessions 后每会话都有注册容器）
+          if (Chat.hasContainer(sid)) {
+            const cv = Chat.chatContainer(sid);
+            if (cv && cv.classList) cv.classList.add("disconnected");
+          }
         }
         // P3：广播分组缓存清理按会话隔离（DOM 保留；仅清该会话 Map 引用；无 sid → 默认桶）
         Chat.groupNodesFor(sid).clear();
@@ -1133,6 +1148,11 @@ const App = (() => {
     if (data.connected) {
       updateConnectionDot("green");
       hideBanner();
+      // P3 finalize：重连成功 → 清全部会话断线标记 + 容器 .disconnected 类
+      for (const entry of state.sessionsBySid.values()) entry.disconnected = false;
+      for (const child of $("chat-view").children) {
+        if (child.classList && child.classList.contains("disconnected")) child.classList.remove("disconnected");
+      }
       if (data.server_id) state.serverId = data.server_id;
       if (data.model) state.model = data.model;
       state.evolutionCount = data.evolution_count ?? state.evolutionCount;

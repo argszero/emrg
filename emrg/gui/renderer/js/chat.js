@@ -36,6 +36,10 @@ const Chat = (() => {
     containers.delete(sid);
     sessionState.delete(sid); // 会话关闭 → 释放其分组/工具行/已 done 状态
   }
+  /** 该 sid 是否有**独立注册**容器（区别于 chatContainer 的回退链——断线标记只打真实容器） */
+  function hasContainer(sid) {
+    return containers.has(sid);
+  }
 
   /** 复制代码按钮（设计 §3.3）：事件委托在聊天区，CSP 无内联 handler */
   function initCodeCopy() {
@@ -318,6 +322,7 @@ const Chat = (() => {
     clearTyping,
     registerContainer,
     unregisterContainer,
+    hasContainer,
     chatContainer,
     // P3：会话级状态访问器（sid=null → 旧版单会话桶，兼容既有调用方）
     groupNodesFor: (sid) => st(sid).groupNodes,
