@@ -19,6 +19,8 @@ const App = (() => {
     // （defineProperty getter/setter → sidState(sessionId)），既有调用点零改动；
     // 事件按 sid 路由时操作对应条目（后台会话的 done 不误清激活会话的 busy）。
     sessionsBySid: new Map(), // sid → { busy, ownStreamRequestId, mode, autoScroll }
+    // P4 slice 2（rant 15:07:19）：跨项目打开的会话（侧边栏数据源，main 广播）
+    openSessions: [], // [{ sid, projectName, projectPath, lastActive }]，lastActive 倒序
     apiKeyConfigured: false,
     configExists: false,
     projectDir: "",
@@ -91,11 +93,22 @@ const App = (() => {
       if (init.sessions && init.sessions.length > 0) {
         state.sessions = init.sessions;
         Sidebar.render(init.sessions);
-        const current = init.sessions.find((s) => s.session_id === state.sessionId);
-        if (current) {
-          Sidebar.highlight(state.sessionId);
+        // P4 slice 2：main 恢复的打开会话 + 激活会话（跳过 switchSession 的 IPC 往返）
+        state.openSessions = init.open_sessions || [];
+        Sidebar.renderOpenSessions(state.openSessions);
+        const restoredSid = init.active_sid;
+        if (restoredSid && init.sessions.some((s) => s.session_id === restoredSid)) {
+          state.sessionId = restoredSid;
+          activateSessionView(restoredSid);
+          updateEmptyState();
+          Sidebar.highlight(restoredSid);
         } else {
-          await switchSession(init.sessions[0].session_id, { silent: true });
+          const current = init.sessions.find((s) => s.session_id === state.sessionId);
+          if (current) {
+            Sidebar.highlight(state.sessionId);
+          } else {
+            await switchSession(init.sessions[0].session_id, { silent: true });
+          }
         }
       } else {
         await newSession();
@@ -667,6 +680,83 @@ const App = (() => {
     } catch { /* 忽略 */ }
   }
 
+  // ── P4 slice 2：打开会话（跨项目侧边栏） ───────────
+  // 关闭 = 断开连接 + 移出列表，**保留磁盘数据**（与删除区分：关闭留数据/删除删数据）
+  async function closeOpenSession(sid) {
+    if (state.busy && state.sessionId === sid) {
+      Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy);
+      return;
+    }
+    try {
+      await window.emrg.closeSession({ sessionId: sid });
+      Chat.unregisterContainer(sid); // 释放容器（若已打开）
+      const view = [...$("chat-view").children].find((c) => c.dataset?.sid === sid);
+      if (view) view.remove();
+      if (state.sessionId === sid) {
+        // 关闭激活会话 → 切到剩余打开会话中最近激活的，否则新建
+        const remaining = state.openSessions.filter((s) => s.sid !== sid);
+        if (remaining.length > 0) {
+          await switchSession(remaining[0].sid, { silent: true });
+        } else {
+          await newSession();
+        }
+      }
+    } catch (e) {
+      Chat.addSystemMessage(_t("app.closeFailed", { msg: e.message }));
+    }
+  }
+
+  // 打开会话右键菜单：关闭（留数据）/ 重命名 / 删除（删数据，确认）
+  function showOpenSessionsMenu(item, entry) {
+    const menu = $("ctx-menu");
+    menu.innerHTML = "";
+    const mk = (label, danger, action) => {
+      const b = el("button", { class: "ctx-item" + (danger ? " danger" : "") }, label);
+      b.addEventListener("click", () => {
+        hideCtxMenu();
+        action();
+      });
+      menu.appendChild(b);
+    };
+    const cur = state.sessions.find((s) => s.session_id === entry.sid);
+    const title = (cur && cur.title) || entry.sid;
+    mk(_t("app.closeSession"), false, () => closeOpenSession(entry.sid));
+    mk(_t("app.rename"), false, () => Dialogs.showRename(entry.sid, title));
+    mk(_t("app.deleteConv"), true, () => Dialogs.showConfirm(EMRG_Copy.COPY.deleteConfirmTitle, EMRG_Copy.COPY.deleteConfirmBody, {
+      okText: _t("dlg.delete"),
+      danger: true,
+      onOk: () => deleteSession(entry.sid),
+    }));
+    menu.hidden = false;
+    const rect = item.getBoundingClientRect();
+    menu.style.left = Math.min(rect.right, window.innerWidth - 160) + "px";
+    menu.style.top = Math.min(rect.bottom, window.innerHeight - 80) + "px";
+    const btns = menu.querySelectorAll(".ctx-item");
+    let idx = btns.length ? 0 : -1;
+    const setActive = (i) => {
+      if (i < 0 || i >= btns.length) return;
+      idx = i;
+      btns.forEach((b, j) => b.classList.toggle("active", j === idx));
+    };
+    setActive(0);
+    _ctxMenuKeyHandler = (ev) => {
+      if (ev.key === "ArrowDown") {
+        ev.preventDefault();
+        setActive((idx + 1) % btns.length);
+      } else if (ev.key === "ArrowUp") {
+        ev.preventDefault();
+        setActive((idx - 1 + btns.length) % btns.length);
+      } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        if (idx >= 0) btns[idx].click();
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        hideCtxMenu();
+      }
+    };
+    document.addEventListener("keydown", _ctxMenuKeyHandler);
+  }
+
   // ── 右键菜单（重命名 / 删除） ───────────
   function showConvMenu(item, sid, title) {
     // 设计 §3.2：右键菜单 = 重命名 / 删除（删除有友好确认）
@@ -1077,6 +1167,11 @@ const App = (() => {
         state.sessions = data.sessions || [];
         Sidebar.render(data.sessions || []);
         break;
+      case "open_sessions":
+        // P4 slice 2：main 广播打开会话列表变化 → 刷新侧边栏打开会话区
+        state.openSessions = data.openSessions || [];
+        Sidebar.renderOpenSessions(state.openSessions);
+        break;
       case "disconnected":
         // P3 finalize：断连按 sid 隔离——后台会话断连不影响全局 UI（无横幅/红点），
         // 仅激活会话（或无 sid 的单会话过渡期）断连显示全局横幅 + 红点。
@@ -1347,6 +1442,8 @@ const App = (() => {
     switchSession,
     newSession,
     deleteSession,
+    closeOpenSession, // P4 slice 2：关闭打开会话（保留数据）
+    showOpenSessionsMenu, // P4 slice 2：打开会话右键菜单
     activateSessionView, // P3 slice 2：激活会话容器（display 切换；导出供测试）
     refreshSessions,
     showConvMenu,

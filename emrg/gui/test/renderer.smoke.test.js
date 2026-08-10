@@ -30,7 +30,13 @@ function makeEl(id) {
       _set() { node._cls = new Set((node.className || "").split(/\s+/).filter(Boolean)); },
       add(c) { node.classList._set(); node._cls.add(c); node._update(); },
       remove(c) { node.classList._set(); node._cls.delete(c); node._update(); },
-      toggle(c) { node.classList._set(); node._cls.has(c) ? node._cls.delete(c) : node._cls.add(c); node._update(); },
+      // 忠实 DOM：toggle(c, force)——force 指定时按 force 加/删（sidebar highlight 依赖）
+      toggle(c, force) {
+        node.classList._set();
+        const want = force === undefined ? !node._cls.has(c) : !!force;
+        if (want) node._cls.add(c); else node._cls.delete(c);
+        node._update();
+      },
       contains(c) { return (node.className || "").split(/\s+/).includes(c); },
     },
     _update() { node.className = [...node._cls].join(" "); },
@@ -66,7 +72,19 @@ function makeEl(id) {
       }
       return null;
     },
-    querySelectorAll() { return []; },
+    querySelectorAll(sel) {
+      // P4 s2：类选择器 DFS 收集（sidebar highlight 用 ".conv-item"）
+      if (!sel || !sel.startsWith(".")) return [];
+      const cls = sel.slice(1);
+      const out = [];
+      const stack = [...(this.children || [])];
+      while (stack.length) {
+        const n = stack.shift();
+        if ((n.className || "").split(/\s+/).includes(cls)) out.push(n);
+        stack.push(...(n.children || []));
+      }
+      return out;
+    },
     closest() { return null; },
     showModal() { this.open = true; },
     close() { this.open = false; },
@@ -87,7 +105,7 @@ function makeEl(id) {
 }
 
 const ELEMENT_IDS = [
-  "chat-view", "input", "send-btn", "stop-btn", "conv-list", "status-dot", "settings-btn",
+  "chat-view", "input", "send-btn", "stop-btn", "conv-list", "open-sessions", "open-sessions-label", "status-dot", "settings-btn",
   "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn",
   "settings-dialog", "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",
   "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
@@ -1216,3 +1234,104 @@ test("P3 fin: 未注册容器 sid 断连不打标；切到断线会话提示重�
 });
 
 
+
+// ── P4 slice 2（rant 15:07:19）：跨项目打开会话侧边栏 + gui_state 恢复 ──
+
+test("P4 s2: open_sessions 事件 → 渲染打开会话区（项目名/标题 + 激活高亮）", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-b";' +
+    'App.state.sessions = [{ session_id: "sess-a", title: "Alpha" }, { session_id: "sess-b", title: "Beta" }];' +
+    'App.handleEvent({ type: "open_sessions", data: { openSessions: [' + // main 已按 lastActive 倒序
+    '  { sid: "sess-b", projectName: "proj-b", projectPath: "/b", lastActive: "t2" },' +
+    '  { sid: "sess-a", projectName: "proj-a", projectPath: "/a", lastActive: "t1" }' +
+    '] } });',
+    ctx
+  );
+  const nav = els["open-sessions"];
+  assert.strictEqual(nav.children.length, 2, "two open-session items rendered");
+  const titleSpan0 = nav.children[0].children[0] || nav.children[0];
+  assert.ok((titleSpan0.textContent || "").includes("proj-b"), "entry shows project name");
+  assert.ok((titleSpan0.textContent || "").includes("Beta"), "entry shows session title");
+  // 激活高亮：sess-b active
+  assert.strictEqual(nav.children[0].classList.contains("active"), true, "active open-session highlighted");
+  assert.strictEqual(nav.children[1].classList.contains("active"), false, "inactive not highlighted");
+  // 空列表 → 隐藏 label
+  await vm.runInContext('App.handleEvent({ type: "open_sessions", data: { openSessions: [] } });', ctx);
+  assert.strictEqual(els["open-sessions-label"].hidden, true, "label hidden when no open sessions");
+});
+
+test("P4 s2: closeOpenSession 关闭激活会话 → 切到剩余打开会话 + 容器释放", async () => {
+  let closed = null;
+  const { ctx, els } = makeSandbox({
+    closeSession: async (p) => { closed = p; return { ok: true, closed: true }; },
+  });
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-a";' +
+    'App.state.sessions = [{ session_id: "sess-a" }, { session_id: "sess-b" }];' +
+    'App.state.openSessions = [' +
+    '  { sid: "sess-a", projectName: "pa", projectPath: "/a", lastActive: "t2" },' +
+    '  { sid: "sess-b", projectName: "pb", projectPath: "/b", lastActive: "t1" }' +
+    '];' +
+    'App.activateSessionView("sess-a");' +
+    'App.activateSessionView("sess-b");',
+    ctx
+  );
+  await vm.runInContext('App.closeOpenSession("sess-a");', ctx);
+  await tick();
+  assert.strictEqual(closed && closed.sessionId, "sess-a", "closeSession IPC called with sid");
+  assert.strictEqual(
+    els["chat-view"].children.some((c) => c.dataset && c.dataset.sid === "sess-a"),
+    false,
+    "closed session container removed from wrapper"
+  );
+  assert.strictEqual(ctx.App.state.sessionId, "sess-b", "switched to remaining open session");
+});
+
+test("P4 s2: closeOpenSession 非激活会话 → 不切换激活指针", async () => {
+  let closed = null;
+  const { ctx } = makeSandbox({
+    closeSession: async (p) => { closed = p; return { ok: true, closed: true }; },
+  });
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-a";' +
+    'App.state.sessions = [{ session_id: "sess-a" }, { session_id: "sess-b" }];' +
+    'App.state.openSessions = [' +
+    '  { sid: "sess-a", projectName: "pa", projectPath: "/a", lastActive: "t2" },' +
+    '  { sid: "sess-b", projectName: "pb", projectPath: "/b", lastActive: "t1" }' +
+    '];' +
+    'App.activateSessionView("sess-a");',
+    ctx
+  );
+  await vm.runInContext('App.closeOpenSession("sess-b");', ctx);
+  await tick();
+  assert.strictEqual(ctx.App.state.sessionId, "sess-a", "active session untouched when closing bg session");
+});
+
+test("P4 s2: boot init 携带 open_sessions + active_sid → 采用恢复的激活会话", async () => {
+  const { ctx, els } = makeSandbox({
+    init: async () => ({
+      config_exists: true,
+      api_key_configured: true,
+      project_dir: "/tmp",
+      project_dir_valid: true,
+      server_id: "srv",
+      model: "m",
+      evolution_count: 0,
+      sessions: [{ session_id: "sess-r", title: "Restored" }],
+      open_sessions: [{ sid: "sess-r", projectName: "proj", projectPath: "/p", lastActive: "t" }],
+      active_sid: "sess-r",
+    }),
+  });
+  await tick();
+  await ctx.App.boot();
+  await tick();
+  assert.strictEqual(ctx.App.state.sessionId, "sess-r", "restored active sid adopted without switchSession IPC");
+  assert.strictEqual(ctx.App.state.openSessions.length, 1, "open sessions populated");
+  const va = ctx.EMRG_Chat.chatContainer("sess-r");
+  assert.strictEqual(va.classList.contains("active"), true, "restored session view activated");
+  assert.strictEqual(els["input"].disabled, false, "composer enabled after boot");
+});

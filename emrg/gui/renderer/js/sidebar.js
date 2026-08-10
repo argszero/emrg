@@ -6,6 +6,40 @@
 
 const Sidebar = (() => {
   let sessions = [];
+  let openSessions = [];
+
+  /**
+   * P4 slice 2：渲染跨项目打开会话区（侧边栏顶部）。
+   * 条目 = 项目名 / 会话标题（lastActive 倒序，main 已排序）；激活高亮；
+   * 点击 → 切换；右键 → 关闭（保留数据）/ 重命名 / 删除。
+   */
+  function renderOpenSessions(list) {
+    openSessions = list || [];
+    const nav = $("open-sessions");
+    const label = $("open-sessions-label");
+    if (!nav) return;
+    nav.innerHTML = "";
+    if (!openSessions.length) {
+      if (label) label.hidden = true;
+      return;
+    }
+    if (label) label.hidden = false;
+    const known = (App.state && App.state.sessions) || [];
+    for (const entry of openSessions) {
+      const cur = known.find((s) => s.session_id === entry.sid) || {};
+      const title = cur.title || entry.sid; // G27：title 优先
+      const item = el("div", { class: "conv-item open-session-item" });
+      item.dataset.sid = entry.sid;
+      item.appendChild(el("span", { class: "conv-title" }, _t("sidebar.openSessionOf", { project: entry.projectName || "", title })));
+      item.addEventListener("click", () => App.switchSession(entry.sid));
+      item.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        App.showOpenSessionsMenu(item, entry);
+      });
+      nav.appendChild(item);
+    }
+    highlight(App.state.sessionId);
+  }
 
   /** 渲染分组对话列表 */
   function render(list) {
@@ -46,10 +80,13 @@ const Sidebar = (() => {
     highlight(App.state.sessionId);
   }
 
-  /** 高亮当前对话 */
+  /** 高亮当前对话（含打开会话区） */
   function highlight(sid) {
-    for (const item of $("conv-list").querySelectorAll(".conv-item")) {
-      item.classList.toggle("active", item.dataset.sid === sid);
+    for (const nav of [$("conv-list"), $("open-sessions")]) {
+      if (!nav) continue;
+      for (const item of nav.querySelectorAll(".conv-item")) {
+        item.classList.toggle("active", item.dataset.sid === sid);
+      }
     }
   }
 
@@ -101,7 +138,7 @@ const Sidebar = (() => {
   }
   init(); // 模块级绑定一次
 
-  return { render, highlight, clearFocus };
+  return { render, renderOpenSessions, highlight, clearFocus };
 })();
 
 window.EMRG_Sidebar = Sidebar;
