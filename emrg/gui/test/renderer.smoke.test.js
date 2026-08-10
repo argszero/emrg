@@ -913,3 +913,74 @@ test("正常 done 帧不触发上限提示（无假阳性）", async () => {
   const texts = (els["chat-view"].children || []).map((c) => c.textContent).join("|");
   assert.ok(!/继续/.test(texts), "正常完成不应出现继续提示");
 });
+
+// ── P3 slice 0（rant 15:07:19）：会话级状态隔离 + 容器路由 ──────────────
+
+test("P3: 按 sid 隔离 delta 分组——两会话同 request_id 互不串扰", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'EMRG_Chat.handleDelta([{ request_id: "rid-x", content: "A", done: false, delta: true }], "sess-a");' +
+    'EMRG_Chat.handleDelta([{ request_id: "rid-x", content: "B", done: false, delta: true }], "sess-b");',
+    ctx
+  );
+  // 两会话各自建组：A 组在 sess-a 桶，B 组在 sess-b 桶
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-a").size, 1, "sess-a has its group");
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-b").size, 1, "sess-b has its group");
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-a").get("rid-x").node.querySelector(".msg-body").textContent.includes("A"), true);
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-b").get("rid-x").node.querySelector(".msg-body").textContent.includes("B"), true);
+});
+
+test("P3: done 只清理该会话分组；另一会话同 rid 组保留", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'EMRG_Chat.handleDelta([{ request_id: "rid-y", content: "a", done: false, delta: true }], "sess-a");' +
+    'EMRG_Chat.handleDelta([{ request_id: "rid-y", content: "b", done: false, delta: true }], "sess-b");' +
+    'EMRG_Chat.handleDone({ request_id: "rid-y", done: true }, "sess-a");',
+    ctx
+  );
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-a").size, 0, "sess-a done clears its group");
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-b").size, 1, "sess-b group untouched");
+  // 残留 delta 只丢已 done 会话（sess-a 的 rid 已 done），sess-b 同 rid 仍渲染
+  await vm.runInContext(
+    'EMRG_Chat.handleDelta([{ request_id: "rid-y", content: "more", done: false, delta: true }], "sess-b");',
+    ctx
+  );
+  assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-b").get("rid-y").node.querySelector(".msg-body").textContent.includes("more"), true);
+});
+
+test("P3: clearTyping(sid) 只清该会话在途 typing；另一会话保留", async () => {
+  const { ctx } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "x", done: false, delta: true }], "sess-a");' +
+    'EMRG_Chat.handleDelta([{ request_id: "rid-2", content: "y", done: false, delta: true }], "sess-b");' +
+    'EMRG_Chat.clearTyping("sess-a");',
+    ctx
+  );
+  const bodyA = ctx.EMRG_Chat.groupNodesFor("sess-a").get("rid-1").node.querySelector(".msg-body");
+  const bodyB = ctx.EMRG_Chat.groupNodesFor("sess-b").get("rid-2").node.querySelector(".msg-body");
+  assert.ok(!bodyA.classList.contains("typing"), "sess-a typing cleared");
+  assert.ok(bodyB.classList.contains("typing"), "sess-b typing retained");
+});
+
+test("P3: registerContainer 后该会话渲染进独立容器；无 sid 回退默认聊天区", async () => {
+  const { ctx, els, document } = makeSandbox({});
+  await tick();
+  // 注册独立容器（P4 openSessions 语义）——直接经 ctx 导出的 API 挂 Node 侧元素
+  const extra = document.createElement("div");
+  extra.id = "chat-view-sess-c";
+  els["main"].appendChild(extra);
+  ctx.EMRG_Chat.registerContainer("sess-c", extra);
+  ctx.EMRG_Chat.addSystemMessage("hello-c", "sess-c");
+  ctx.EMRG_Chat.addSystemMessage("hello-default");
+  assert.strictEqual(extra.children.length, 1, "registered container receives its session's nodes");
+  assert.strictEqual(extra.children[0].textContent, "hello-c");
+  assert.strictEqual(els["chat-view"].children.length, 1, "default container receives un-sid'd nodes");
+  // unregister → 状态释放，再发同 sid 消息回落默认容器
+  ctx.EMRG_Chat.unregisterContainer("sess-c");
+  ctx.EMRG_Chat.addSystemMessage("after-unreg", "sess-c");
+  assert.strictEqual(extra.children.length, 1, "unregistered container no longer receives");
+  assert.strictEqual(els["chat-view"].children.length, 2, "falls back to default container");
+});
