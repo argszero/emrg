@@ -14,6 +14,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const RENDERER_JS = path.join(__dirname, "..", "renderer", "js");
+const RENDERER_CSS = path.join(__dirname, "..", "renderer", "css");
 
 // ── DOM mock（最小但真实：classList 操作同步到 className） ──
 function makeEl(id) {
@@ -865,6 +866,29 @@ test("WorkBuddy P1：ResultPanel 折叠切换（⌘\ 与按钮）", async () => 
   assert.ok(els["result-panel"].classList.contains("collapsed"), "toggle 后应折叠");
   await vm.runInContext("ResultPanel.toggle()", ctx);
   assert.ok(!els["result-panel"].classList.contains("collapsed"), "再次 toggle 应展开");
+});
+
+test("WorkBuddy P1：折叠后 toggle 按钮仍可见可点（rant 2026-08-10T14:11:18 死锁回归）", async () => {
+  // CSS 规则断言（沙箱无 CSS 引擎，源级验证折叠态布局语义）
+  const css = fs.readFileSync(path.join(RENDERER_CSS, "layout.css"), "utf8");
+  const start = css.indexOf("#result-panel.collapsed");
+  const end = css.indexOf(".result-header {", start); // 折叠规则组结束（下一个独立规则）
+  const block = css.slice(start, end > start ? end : start + 400);
+  // 折叠 = 40px 窄条（非 0 宽度）
+  assert.ok(/width:\s*40px/.test(block), "折叠态应为 40px 窄条，而非 width: 0（否则按钮不可点）");
+  assert.ok(!/width:\s*0/.test(block), "折叠态不得 width: 0");
+  // header 保留可见（display: flex），只藏内容区 .result-list
+  assert.ok(/#result-panel\.collapsed \.result-header\s*{[^}]*display:\s*flex/.test(css.replace(/\n/g, " ")), "折叠态 .result-header 应 display: flex（含 toggle 按钮）");
+  assert.ok(!/display:\s*none[^}]*result-header/.test(css), "折叠态不得隐藏 .result-header");
+  assert.ok(/#result-panel\.collapsed \.result-list\s*{[^}]*display:\s*none/.test(css.replace(/\n/g, " ")), "折叠态 .result-list 应隐藏");
+  // toggle 按钮折叠态旋转提示可展开
+  assert.ok(/#result-panel\.collapsed \.result-toggle\s*{[^}]*rotate\(180deg\)/.test(css.replace(/\n/g, " ")), "折叠态 toggle 应 rotate(180deg) 指示可展开");
+  // DOM 存活：折叠后 toggle 按钮仍在文档中
+  const { ctx } = makeSandbox();
+  await tick();
+  await vm.runInContext("ResultPanel.toggle()", ctx);
+  const btnStillThere = vm.runInContext('document.getElementById("result-toggle") !== null', ctx);
+  assert.ok(btnStillThere, "折叠后 toggle 按钮不得从 DOM 移除");
 });
 
 test("工具调用上限中断 → 系统提示可继续（对齐 TUI，跨项目教训）", async () => {

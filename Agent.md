@@ -66,7 +66,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - Streaming chat with delta rendering (16ms batching), markdown on done (marked + DOMPurify + local highlight.js subset), tool call status cards (2000-char truncation + expand)
   - Session list/switch/new/delete + right-click rename (context menu, #423) synced with daemon; own-stream busy lock (G65); broadcast streams from other clients tagged "来自其他客户端"
   - Disconnect/reconnect: red status dot, auto daemon respawn (stale-port detection), session resume, input bar restored on disconnect (no 30s fake-timeout)
-  - Unit tests `npm test` (110: 29 daemon_client + 22 app-commands + 31 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
+  - Unit tests `npm test` (111: 29 daemon_client + 22 app-commands + 32 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
 - **Auto project tracking** — Automatically detects and records working directories; project-scoped sessions
 - **Rant-driven evolution** — User feedback via `/rant` drives automatic self-improvement cycles
 - **Headless GitHub auth** — Non-interactive evolution auto-extracts `GH_TOKEN` from git credential store (osxkeychain / credential helper); PR comment/LGTM queries fall back to REST API (GraphQL needs `read:org` scope)
@@ -94,7 +94,7 @@ pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
 ```
 
 Python: `uv run pytest tests/ -v` (674) — import check: `uv run python -c "from emrg.client.app import run_client"`
-GUI: `cd emrg/gui && npm test` (110: 29 daemon_client + 22 app-commands + 31 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
+GUI: `cd emrg/gui && npm test` (111: 29 daemon_client + 22 app-commands + 32 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
 CI: `uv run pytest` + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
 Re-trigger: `scripts/re-trigger-ci.sh [branch]` (workflow_dispatch, #527 — 替代空 commit 重触发：Actions outage 会整段丢弃 push 事件，dispatch 走 API 路径不受影响)
 
