@@ -70,7 +70,7 @@ const RESPONSE_TYPES = {
 };
 
 class DaemonClient {
-  constructor({ projectDir = os.homedir(), logger = console, authTimeoutMs = AUTH_TIMEOUT_MS, isPackaged = false } = {}) {
+  constructor({ projectDir = os.homedir(), logger = console, authTimeoutMs = AUTH_TIMEOUT_MS, isPackaged = false, deltaBatchMs = 0 } = {}) {
     this.projectDir = projectDir;
     this.logger = logger;
     this._authTimeoutMs = authTimeoutMs; // G142 测试可注入短超时（默认 10s）
@@ -87,6 +87,12 @@ class DaemonClient {
     this._reconnectTimer = null;
     this._stopReconnect = false;
     this._spawnAttempts = 0; // 连接生命周期内 spawn 计数（成功 auth 后归零）
+    // P2 connManager（rant 2026-08-10T15:07:19）：deltaBuf 批量（G122 16ms）每连接一份。
+    // deltaBatchMs > 0 时本实例自行批量 message_delta，终态（done/error/cancelled）前
+    // 强制冲刷保序（rant 14:11 孤儿节点教训）；默认 0 = 每帧即时发（既有行为不变）。
+    this._deltaBatchMs = deltaBatchMs;
+    this._deltaBuf = [];
+    this._deltaTimer = null;
   }
 
   // ── 生命周期 ────────────────────────────────────────────
@@ -431,11 +437,26 @@ class DaemonClient {
   }
 
   close() {
+    this._flushDeltaBuf(); // 断连前冲刷残留 delta（防丢失）
     if (this.ws) {
       try { this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
     }
     this.connected = false;
+  }
+
+  // P2（rant 2026-08-10T15:07:19 + 14:11）：批量冲刷 delta 缓冲。
+  // 有定时器则清；有残留则按 {chunks} 形状一次性发出（与 main.js G122 同形）。
+  _flushDeltaBuf() {
+    if (this._deltaTimer) {
+      clearTimeout(this._deltaTimer);
+      this._deltaTimer = null;
+    }
+    if (this._deltaBuf.length) {
+      const chunks = this._deltaBuf;
+      this._deltaBuf = [];
+      this._emit("message_delta", { chunks });
+    }
   }
 
   // ── 事件 ────────────────────────────────────────────────
@@ -557,6 +578,7 @@ class DaemonClient {
       return;
     }
     if (frame.type === "cancelled") {
+      this._flushDeltaBuf(); // 终态前冲刷（rant 14:11 同源：delta 不晚于终态）
       this._emit("cancelled", frame);
       return;
     }
@@ -569,16 +591,25 @@ class DaemonClient {
       return;
     }
     if (frame.done) {
+      this._flushDeltaBuf(); // 终态前冲刷 delta：保证 delta 不晚于终态（rant 14:11）
       this._onDone(frame);
       this._emit("done", frame);
       return;
     }
     if (frame.delta) {
       this._onDelta(frame);
+      if (this._deltaBatchMs > 0) {
+        this._deltaBuf.push(frame);
+        if (!this._deltaTimer) {
+          this._deltaTimer = setTimeout(() => this._flushDeltaBuf(), this._deltaBatchMs);
+        }
+        return; // 批量模式：不即时发单帧
+      }
       this._emit("message_delta", frame);
       return;
     }
     if (frame.error) {
+      this._flushDeltaBuf(); // 终态前冲刷（rant 14:11 同源）
       this._emit("error", frame);
       return;
     }

@@ -169,6 +169,96 @@ test("ensureConnected: port 文件缺失 → 拉起 daemon（spawn 参数正确 
   assert.strictEqual(spawnCalls.projectDir, tmpHome);
 });
 
+test("P2 deltaBatchMs: 批量合并 message_delta，终态前冲刷保序（rant 14:11）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 16 });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const rid = "req-b";
+  // 多条 delta → 不即时发（批量模式），16ms 后合并为一次 {chunks}
+  send({ request_id: rid, content: "a", done: false, delta: true });
+  send({ request_id: rid, content: "b", done: false, delta: true });
+  assert.deepStrictEqual(seen.filter(([t]) => t === "message_delta"), [],
+    "delta must not emit immediately in batch mode");
+  await new Promise((r) => setTimeout(r, 40));
+  const deltas = seen.filter(([t]) => t === "message_delta");
+  assert.strictEqual(deltas.length, 1, "deltas batched into one message_delta");
+  assert.ok(Array.isArray(deltas[0][1].chunks), "batched payload has chunks array");
+  assert.strictEqual(deltas[0][1].chunks.length, 2);
+});
+
+test("P2 deltaBatchMs: done 终态到达 → 先冲刷残留 delta 再发 done（顺序保证）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 1000 }); // 定时器远未到期
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  const rid = "req-c";
+  send({ request_id: rid, content: "a", done: false, delta: true });
+  send({ request_id: rid, content: "a", done: true, delta: false });
+  // delta 必须出现在 done 之前（顺序保证：delta 不晚于终态）
+  const idxDelta = seen.findIndex(([t]) => t === "message_delta");
+  const idxDone = seen.findIndex(([t]) => t === "done");
+  assert.ok(idxDelta >= 0, "delta flushed before done");
+  assert.ok(idxDone > idxDelta, "done must come after flushed delta");
+  assert.strictEqual(seen[idxDelta][1].chunks.length, 1);
+});
+
+test("P2 deltaBatchMs: cancelled 终态 → 冲刷残留 delta 再发 cancelled", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 1000 });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ request_id: "req-d", content: "x", done: false, delta: true });
+  send({ type: "cancelled" });
+  const types = seen.map(([t]) => t);
+  assert.ok(types.indexOf("message_delta") < types.indexOf("cancelled"),
+    "delta must be flushed before cancelled");
+  assert.strictEqual(seen.find(([t]) => t === "message_delta")[1].chunks.length, 1);
+});
+
+test("P2 deltaBatchMs: 默认 0 = 每帧即时发（既有行为回归）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ request_id: "req-e", content: "a", done: false, delta: true });
+  send({ request_id: "req-e", content: "b", done: false, delta: true });
+  const deltas = seen.filter(([t]) => t === "message_delta");
+  assert.strictEqual(deltas.length, 2, "default mode emits per frame");
+  assert.ok(!Array.isArray(deltas[0][1].chunks), "default payload is the frame, not chunks");
+});
+
+test("P2 deltaBatchMs: close 冲刷残留 delta", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 1000 });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ request_id: "req-f", content: "y", done: false, delta: true });
+  client.close();
+  const deltas = seen.filter(([t]) => t === "message_delta");
+  assert.strictEqual(deltas.length, 1, "close must flush pending delta");
+  assert.strictEqual(deltas[0][1].chunks.length, 1);
+});
+
+test("P2 deltaBatchMs: error 终态 → 冲刷残留 delta 再发 error", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 1000 });
+  await connectClient(client);
+  const seen = [];
+  client.onEvent((type, data) => seen.push([type, data]));
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  send({ request_id: "req-g", content: "z", done: false, delta: true });
+  send({ error: "boom" });
+  const types = seen.map(([t]) => t);
+  assert.ok(types.indexOf("message_delta") < types.indexOf("error"),
+    "delta must be flushed before error");
+  assert.strictEqual(seen.find(([t]) => t === "message_delta")[1].chunks.length, 1);
+});
+
 test("P2 skipStart: port 文件缺失 → 抛错不拉起 daemon（connManager 独占 daemon 生命周期）", async () => {
   fs.rmSync(PORT_FILE(tmpHome), { force: true });
   const client = new DaemonClient({ projectDir: tmpHome });
