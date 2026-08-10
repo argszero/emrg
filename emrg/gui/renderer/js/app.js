@@ -14,8 +14,11 @@ const App = (() => {
   const state = {
     sessionId: null,
     sessions: [],
-    busy: false,
-    ownStreamRequestId: null,
+    // P3 slice 1（rant 15:07:19）：会话级状态表——每会话独立 busy/ownStreamRequestId/
+    // mode/autoScroll。busy/ownStreamRequestId/mode 为**激活会话条目**的实时视图
+    // （defineProperty getter/setter → sidState(sessionId)），既有调用点零改动；
+    // 事件按 sid 路由时操作对应条目（后台会话的 done 不误清激活会话的 busy）。
+    sessionsBySid: new Map(), // sid → { busy, ownStreamRequestId, mode, autoScroll }
     apiKeyConfigured: false,
     configExists: false,
     projectDir: "",
@@ -31,6 +34,29 @@ const App = (() => {
     // WorkBuddy P2（rant 21:35）：工作模式 ask（纯对话）/ auto（默认，自动执行工具）
     mode: "auto",
   };
+
+  // P3 slice 1：会话条目访问器（get-or-create）。无 sid/未激活 → 归入当前激活会话。
+  function sidState(sid) {
+    const key = sid || state.sessionId || "default";
+    if (!state.sessionsBySid.has(key)) {
+      state.sessionsBySid.set(key, { busy: false, ownStreamRequestId: null, mode: "auto", autoScroll: true });
+    }
+    return state.sessionsBySid.get(key);
+  }
+
+  // 激活会话条目 = state.busy/ownStreamRequestId/mode 的事实源（P3 过渡期兼容层）
+  Object.defineProperty(state, "busy", {
+    get() { return sidState(state.sessionId).busy; },
+    set(v) { sidState(state.sessionId).busy = v; },
+  });
+  Object.defineProperty(state, "ownStreamRequestId", {
+    get() { return sidState(state.sessionId).ownStreamRequestId; },
+    set(v) { sidState(state.sessionId).ownStreamRequestId = v; },
+  });
+  Object.defineProperty(state, "mode", {
+    get() { return sidState(state.sessionId).mode; },
+    set(v) { sidState(state.sessionId).mode = v; },
+  });
 
   // ── 启动 ─────────────────────────────────
   async function boot() {
@@ -535,7 +561,8 @@ const App = (() => {
     try {
       const res = await window.emrg.switchSession({ sessionId: sid });
       state.sessionId = sid;
-      state.ownStreamRequestId = null; // G110：切会话清自有流标记
+      // P3 slice 1：切换只移动激活指针——每会话条目保留自己的 busy/ownStreamRequestId
+      // （G110 旧语义=清全局自有流标记；per-sid 后由各会话条目自己管理，P4 切回继续生成）
       Chat.clear();
       updateEmptyState();
       if (res.error === "session_not_found") {
@@ -970,10 +997,15 @@ const App = (() => {
         break;
       case "done":
         Chat.handleDone(data, sid);
-        if (data.request_id && (state.ownStreamRequestId === data.request_id || data.timeout)) {
-          state.busy = false;
-          state.ownStreamRequestId = null;
-          setComposerDisabled(false);
+        // P3 slice 1：done 释放**该事件所属会话**的 busy 锁（后台会话的广播 done
+        // 不误清激活会话）；仅当该会话是激活会话时同步输入条 UI。
+        {
+          const sst = sidState(sid);
+          if (data.request_id && (sst.ownStreamRequestId === data.request_id || data.timeout)) {
+            sst.busy = false;
+            sst.ownStreamRequestId = null;
+            if (!sid || sid === state.sessionId) setComposerDisabled(false);
+          }
         }
         break;
       case "tool_started":
@@ -985,9 +1017,13 @@ const App = (() => {
         break;
       case "cancelled":
         Chat.clearTyping(sid); // rant 14:11：取消时移除在途节点 typing 光标（无 request_id，全清）
-        state.busy = false;
-        state.ownStreamRequestId = null;
-        setComposerDisabled(false);
+        // P3 slice 1：cancelled 释放该事件所属会话的锁（后台会话取消不误清激活会话）
+        {
+          const sst = sidState(sid);
+          sst.busy = false;
+          sst.ownStreamRequestId = null;
+          if (!sid || sid === state.sessionId) setComposerDisabled(false);
+        }
         break;
       case "error":
         handleError(data, sid);
@@ -1010,10 +1046,14 @@ const App = (() => {
       case "disconnected":
         updateConnectionDot("red");
         showBanner(EMRG_Copy.COPY.disconnected);
-        // G89：断连时恢复输入条（不能依赖 30s 超时兜底）
-        state.busy = false;
-        state.ownStreamRequestId = null;
-        setComposerDisabled(false);
+        // G89：断连时恢复输入条（不能依赖 30s 超时兜底）——仅当激活会话断连
+        // P3 slice 1：断连释放该事件所属会话的锁
+        {
+          const sst = sidState(sid);
+          sst.busy = false;
+          sst.ownStreamRequestId = null;
+          if (!sid || sid === state.sessionId) setComposerDisabled(false);
+        }
         // P3：广播分组缓存清理按会话隔离（DOM 保留；仅清该会话 Map 引用；无 sid → 默认桶）
         Chat.groupNodesFor(sid).clear();
         // 进行中的工具行 → 结果未知（工具副作用不可重放）
@@ -1047,11 +1087,12 @@ const App = (() => {
   }
 
   function handleError(data, sid) {
+    const sst = sidState(sid);
     if (data.error && String(data.error).includes("session busy")) {
       Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy, sid);
-      state.busy = false;
-      state.ownStreamRequestId = null;
-      setComposerDisabled(false);
+      sst.busy = false;
+      sst.ownStreamRequestId = null;
+      if (!sid || sid === state.sessionId) setComposerDisabled(false);
     } else {
       Chat.clearTyping(sid); // rant 14:11：流式错误时移除在途节点 typing 光标
       Chat.addSystemMessage(_t("app.error", { msg: data.error || _t("app.unknownError") }), sid);
