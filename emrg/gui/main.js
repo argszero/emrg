@@ -251,6 +251,8 @@ vision = false
       await ensureConnected();
       const pong = await waitForPong();
       const sessions = await listSessions();
+      // P4 slice 2：启动恢复打开会话（gui_state.json → 重开连接 + resume 重订阅）
+      await restoreOpenSessions(sessions);
       return {
         config_exists: true,
         api_key_configured: true,
@@ -261,6 +263,8 @@ vision = false
         evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
         version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
         sessions,
+        open_sessions: openSessionsList(),
+        active_sid: currentSessionId, // P4 slice 2：恢复后的激活会话（renderer 直接采用）
       };
     });
 
@@ -325,6 +329,7 @@ vision = false
       connManager?.close(sessionId); // P2：删除会话 → 关闭该会话连接（若打开）
       openSessions.delete(sessionId); // P4：删除（删数据）→ 一并移出打开会话簿记
       schedulePersistGuiState();
+      broadcastOpenSessions();
       return { ok: true };
     });
 
@@ -358,6 +363,7 @@ vision = false
       // P4：新会话在首条消息前不建连接（sendMessage 自动 open）——此处仅标记激活
       // 并刷新持久化（activeSid 前进；openSessions 条目随 openSession 落簿记）
       schedulePersistGuiState();
+      broadcastOpenSessions();
       return { session_id: sid };
     });
 
@@ -719,6 +725,7 @@ vision = false
       projectPath,
       lastActive: new Date().toISOString(),
     });
+    broadcastOpenSessions();
   }
 
   // 激活会话变化（切换/新会话/发送）→ 更新 lastActive + activeSid → 防抖写盘
@@ -727,6 +734,7 @@ vision = false
       openSessions.get(sid).lastActive = new Date().toISOString();
     }
     schedulePersistGuiState();
+    broadcastOpenSessions();
   }
 
   function schedulePersistGuiState() {
@@ -756,6 +764,61 @@ vision = false
     }
   }
 
+  // 读盘 + 清洗（启动恢复用；损坏/缺失 → 空）
+  function readGuiState() {
+    try {
+      const p = guiStatePath(os.homedir());
+      if (!fs.existsSync(p)) return { openSessions: [], activeSid: null };
+      const raw = JSON.parse(fs.readFileSync(p, "utf8"));
+      return {
+        openSessions: sanitizeOpenSessions(raw.openSessions || []),
+        activeSid: raw.activeSid || null,
+      };
+    } catch (e) {
+      logger.warn(`[gui] gui_state.json read failed: ${e.message}`);
+      return { openSessions: [], activeSid: null };
+    }
+  }
+
+  // P4 slice 2：启动恢复——gui_state.json 中的打开会话（上限 20）逐个重开连接 +
+  // resume 重订阅；activeSid 失效 → 第一个有效；失效条目跳过 + 重写盘。
+  async function restoreOpenSessions(sessions) {
+    const { openSessions: saved, activeSid } = readGuiState();
+    const validSids = new Set((sessions || []).map((s) => s.session_id));
+    let restored = 0;
+    for (const entry of saved) {
+      if (restored >= 20) break; // 恢复上限（sanitize 已守，双保险）
+      if (!validSids.has(entry.sid)) continue; // 失效条目跳过
+      try {
+        await openSession(entry.sid, entry.projectPath); // resume 重订阅
+        restored += 1;
+      } catch (e) {
+        logger.warn(`[gui] restore session ${entry.sid} failed: ${e.message}`);
+        openSessions.delete(entry.sid); // 失效 → 移除
+      }
+    }
+    // activeSid：优先恢复原激活；失效 → 第一个有效
+    if (openSessions.has(activeSid)) {
+      currentSessionId = activeSid;
+    } else if (openSessions.size > 0) {
+      currentSessionId = openSessionsList()[0].sid;
+    }
+    if (currentSessionId) {
+      win?.setTitle(`EMRG — ${currentSessionId}`);
+    }
+    schedulePersistGuiState(); // 失效条目剔除后重写盘
+    broadcastOpenSessions();
+    return restored;
+  }
+
+  // 通知 renderer 打开会话列表变化（侧边栏数据源，slice 2）
+  function broadcastOpenSessions() {
+    sendToRenderer("open_sessions", {
+      openSessions: openSessionsList(),
+      activeSid: currentSessionId,
+    });
+  }
+
   // 关闭会话（保留磁盘数据）：断连 + 移除 + 持久化。P4 slice 2 侧边栏"关闭"入口用。
   async function closeSession(sid) {
     const entry = openSessions.get(sid);
@@ -763,6 +826,7 @@ vision = false
     openSessions.delete(sid);
     schedulePersistGuiState();
     if (currentSessionId === sid) currentSessionId = null; // 关闭激活会话 → 无激活
+    broadcastOpenSessions();
     return { ok: true, closed: !!entry };
   }
 

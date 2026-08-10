@@ -94,6 +94,18 @@
   letter-spacing: 0.02em;
 }
 
+/* P4 slice 2：打开会话区（跨项目 tab）——紧贴新对话按钮，视觉轻量 */
+#open-sessions {
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-1);
+  max-height: 40%;
+  overflow-y: auto;
+}
+.open-sessions-label {
+  padding-top: var(--sp-2);
+}
+
 .sidebar-footer {
   display: flex;
   align-items: center;
