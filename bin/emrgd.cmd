@@ -15,4 +15,12 @@ REM (RotatingFileHandler)，StreamHandler 仅附加，无控制台不影响日�
 set PYEXE=%DIR%\python-dist\pythonw.exe
 if not exist "%PYEXE%" set PYEXE=%DIR%\python-dist\python.exe
 if not exist "%PYEXE%" set PYEXE=%DIR%\python-dist\python3.13.exe
+REM R124: `emrgd.cmd stop` — 优雅关闭 daemon（rant 2026-08-10T08:50:44 安装器预停止）：
+REM 复用 CLI `emrg server stop`（协议 shutdown → ping-pid SIGTERM 兜底，见
+REM emrg/__main__.py _stop_daemon）。pythonw 无控制台，print 丢弃无害，shutdown 无需 stdout。
+REM 用标签而非括号块，保证 %errorlevel% 在 python 退出后才展开。
+if /I not "%~1"=="stop" goto :start
+"%PYEXE%" -m emrg server stop
+exit /b %errorlevel%
+:start
 "%PYEXE%" -m emrg.server %*

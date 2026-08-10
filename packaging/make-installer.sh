@@ -242,6 +242,11 @@ Compression=lzma2
 SolidCompression=yes
 [Files]
 Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+; R124: dontcopy — 供 [Code] PrepareToInstall 在覆盖文件前 ExtractTemporaryFile 取出并
+; 运行 bin\stop-emrg.cmd（升级安装前优雅关闭 GUI/TUI/daemon，rant 2026-08-10T08:50:44：
+; pythonw daemon 锁文件导致卡在"停止已有进程"）。正常安装时该文件仍由上方通配符
+; 装入 {app}\bin\stop-emrg.cmd。
+Source: "$STAGE_WIN/payload\\bin\\stop-emrg.cmd"; DestDir: "{tmp}"; Flags: dontcopy
 [Icons]
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
 [UninstallRun]
@@ -356,6 +361,31 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
     RemoveBinDirFromPath;
+end;
+
+// R124: 升级安装前优雅关闭运行中的 EMRG 进程（rant 2026-08-10T08:50:44）——
+// Inno CloseApplications 看不到无窗口的 pythonw daemon（emrgd.cmd → pythonw.exe
+// -m emrg.server 常驻锁文件），覆盖 ~/.emrg\install 时卡在"停止已有进程"。
+// PrepareToInstall 在安装开始前运行 bin\stop-emrg.cmd：taskkill EMRG.exe
+// 优雅→/F 兜底、wmic/PowerShell 命令行过滤 TUI、emrg server stop 协议关闭
+// daemon + emrgd.pid 轮询兜底（顺序 GUI→TUI→daemon）。干净安装（无旧 install）
+// 脚本自行跳过。返回非空字符串 = 中止安装并显示该消息（宁可中止也不卡死）。
+// {cmd} = cmd.exe（Inno 预定义常量，批处理文件须经 cmd 启动）。
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  StopScript: string;
+begin
+  Result := '';
+  ExtractTemporaryFile('stop-emrg.cmd');
+  StopScript := ExpandConstant('{tmp}\\stop-emrg.cmd');
+  if Exec(ExpandConstant('{cmd}'), '/c "' + StopScript + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode <> 0 then
+      Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install.';
+  end
+  else
+    Result := 'EMRG could not run the process-stop helper (stop-emrg.cmd). Please close EMRG (GUI/TUI) and retry the install.';
 end;
 EOF
     # Windows 路径转义（iscc 需要 Windows 路径，但在 bash/msys 下用当前路径）
