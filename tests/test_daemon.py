@@ -12,6 +12,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import yaml
+
 from emrg.config import LlmConfig
 from emrg.protocol import InstanceIdentity
 from emrg.server.daemon import EmrgServer
@@ -1181,3 +1183,95 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
     paths = [p["path"] for p in reply["projects"]]
     assert emrg_path in paths  # emrg visible even though under evolution cwd
     assert "/home/u/work/other" in paths
+
+
+# ── remove_project (P1 GUI multi-session, rant 2026-08-10T15:07:19) ──
+
+
+def _server_with_projects(tmp_path: Path, entries: list[dict]) -> tuple[EmrgServer, Path]:
+    """Server whose _projects_log points at a tmp projects.yml with entries."""
+    server = _make_server()
+    projects_file = tmp_path / "projects.yml"
+    projects_file.write_text(
+        yaml.safe_dump(entries, allow_unicode=True), encoding="utf-8"
+    )
+    server._projects_log = projects_file
+    return server, projects_file
+
+
+def _decode_frames(writer: _FakeWriter) -> list[dict]:
+    return [json.loads(f) for f in writer._frames]
+
+
+def test_remove_project_removes_matching_entry(tmp_path):
+    """Removing an existing project drops only its projects.yml entry."""
+    server, projects_file = _server_with_projects(tmp_path, [
+        {"name": "alpha", "path": "/home/u/a", "last_active": "2026-08-10T10:00:00"},
+        {"name": "beta", "path": "/home/u/b", "last_active": "2026-08-10T10:05:00"},
+    ])
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("alpha", writer))
+
+    replies = _decode_frames(writer)
+    assert len(replies) == 1
+    assert replies[0] == {"type": "project_removed", "removed": True, "name": "alpha"}
+
+    remaining = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+    assert [e["name"] for e in remaining] == ["beta"]
+
+
+def test_remove_project_unknown_name_leaves_file_unchanged(tmp_path):
+    """Removing a non-existent name reports removed=False and keeps the file."""
+    entries = [
+        {"name": "alpha", "path": "/home/u/a", "last_active": "2026-08-10T10:00:00"},
+    ]
+    server, projects_file = _server_with_projects(tmp_path, entries)
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("nope", writer))
+
+    replies = _decode_frames(writer)
+    assert len(replies) == 1
+    assert replies[0]["removed"] is False
+    assert replies[0]["name"] == "nope"
+    assert yaml.safe_load(projects_file.read_text(encoding="utf-8")) == entries
+
+
+def test_remove_project_preserves_disk_session_data(tmp_path):
+    """Deleting the project entry must NOT touch <path>/.emrg/sessions/ data."""
+    project_dir = tmp_path / "u" / "a"
+    sessions_dir = project_dir / ".emrg" / "sessions" / "sess-1"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "history.jsonl").write_text('{"role":"user"}\n', encoding="utf-8")
+
+    server, _ = _server_with_projects(tmp_path, [
+        {"name": "alpha", "path": str(project_dir), "last_active": "2026-08-10T10:00:00"},
+    ])
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("alpha", writer))
+    assert _decode_frames(writer)[0]["removed"] is True
+    # on-disk session data survives the project removal
+    assert (sessions_dir / "history.jsonl").read_text(encoding="utf-8") == '{"role":"user"}\n'
+
+
+def test_remove_project_no_projects_file(tmp_path):
+    """No projects.yml → removed=False without raising."""
+    server = _make_server()
+    server._projects_log = tmp_path / "projects.yml"  # never created
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("alpha", writer))
+    assert _decode_frames(writer)[0] == {
+        "type": "project_removed", "removed": False, "name": "alpha",
+    }
+
+
+def test_remove_project_corrupt_yaml_reports_error(tmp_path):
+    """Corrupt projects.yml → removed=False + error, no crash."""
+    server = _make_server()
+    projects_file = tmp_path / "projects.yml"
+    projects_file.write_text("a: [unclosed", encoding="utf-8")
+    server._projects_log = projects_file
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("alpha", writer))
+    replies = _decode_frames(writer)
+    assert replies[0]["removed"] is False
+    assert replies[0]["error"]
