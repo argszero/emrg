@@ -961,12 +961,15 @@ const App = (() => {
   // ── 事件处理（main 已分类） ─────────────
   async function handleEvent(evt) {
     const { type, data } = evt;
+    // P3（rant 15:07:19）：main 事件桥附带 sid（#629 起）——Chat 按会话隔离状态；
+    // 无 sid（单会话过渡期）→ 默认桶，行为与改造前一致。
+    const sid = evt.sid;
     switch (type) {
       case "message_delta":
-        Chat.handleDelta(data.chunks || [data]);
+        Chat.handleDelta(data.chunks || [data], sid);
         break;
       case "done":
-        Chat.handleDone(data);
+        Chat.handleDone(data, sid);
         if (data.request_id && (state.ownStreamRequestId === data.request_id || data.timeout)) {
           state.busy = false;
           state.ownStreamRequestId = null;
@@ -974,20 +977,20 @@ const App = (() => {
         }
         break;
       case "tool_started":
-        Chat.handleToolStart(data);
+        Chat.handleToolStart(data, sid);
         break;
       case "tool_finished":
-        Chat.handleToolEnd(data);
+        Chat.handleToolEnd(data, sid);
         ResultPanel.addToolResult(data);
         break;
       case "cancelled":
-        Chat.clearTyping(); // rant 14:11：取消时移除在途节点 typing 光标（无 request_id，全清）
+        Chat.clearTyping(sid); // rant 14:11：取消时移除在途节点 typing 光标（无 request_id，全清）
         state.busy = false;
         state.ownStreamRequestId = null;
         setComposerDisabled(false);
         break;
       case "error":
-        handleError(data);
+        handleError(data, sid);
         break;
       case "pong":
         state.serverId = data.identity?.instance_id || state.serverId;
@@ -1011,10 +1014,10 @@ const App = (() => {
         state.busy = false;
         state.ownStreamRequestId = null;
         setComposerDisabled(false);
-        // G97：广播分组缓存清理（DOM 保留；仅清 Map 引用）
-        Chat.groupNodes.clear();
+        // P3：广播分组缓存清理按会话隔离（DOM 保留；仅清该会话 Map 引用；无 sid → 默认桶）
+        Chat.groupNodesFor(sid).clear();
         // 进行中的工具行 → 结果未知（工具副作用不可重放）
-        for (const row of Chat.toolRows.values()) {
+        for (const row of Chat.toolRowsFor(sid).values()) {
           if (row.classList.contains("running")) {
             row.classList.remove("running");
             row.classList.add("failed");
@@ -1043,15 +1046,15 @@ const App = (() => {
     }
   }
 
-  function handleError(data) {
+  function handleError(data, sid) {
     if (data.error && String(data.error).includes("session busy")) {
-      Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy);
+      Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy, sid);
       state.busy = false;
       state.ownStreamRequestId = null;
       setComposerDisabled(false);
     } else {
-      Chat.clearTyping(); // rant 14:11：流式错误时移除在途节点 typing 光标
-      Chat.addSystemMessage(_t("app.error", { msg: data.error || _t("app.unknownError") }));
+      Chat.clearTyping(sid); // rant 14:11：流式错误时移除在途节点 typing 光标
+      Chat.addSystemMessage(_t("app.error", { msg: data.error || _t("app.unknownError") }), sid);
     }
   }
 

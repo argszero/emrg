@@ -5,12 +5,34 @@
  */
 
 const Chat = (() => {
-  // requestId → 消息 DOM 节点（广播分组）
-  const groupNodes = new Map();
-  // tool_call_id → 工具行 DOM 节点
-  const toolRows = new Map();
-  // rant 14:11：已 done 的 request_id（UUID 不复用）——残留 delta 直接丢弃，防孤儿节点
-  const doneRids = new Set();
+  // P3（rant 15:07:19）：会话级状态隔离——每会话一份 groupNodes/toolRows/doneRids。
+  // sid=null 为旧版单会话桶（无 sid 事件/旧调用方 → 行为与改造前完全一致）。
+  // 容器路由：registerContainer(sid, el) 后该 sid 渲染进独立容器；未注册 → 默认 $("chat-view")
+  // （P4 openSessions 前实际只存在一个激活会话，容器切换随 P4 落地）。
+  const sessionState = new Map(); // sid|null → { groupNodes, toolRows, doneRids }
+  const containers = new Map(); // sid → 容器元素（P4 起每会话一个 chat-view）
+
+  function st(sid) {
+    const key = sid || null;
+    if (!sessionState.has(key)) {
+      sessionState.set(key, { groupNodes: new Map(), toolRows: new Map(), doneRids: new Set() });
+    }
+    return sessionState.get(key);
+  }
+
+  /** 该会话的渲染容器：已注册的独立容器优先，否则默认聊天区（P3 过渡期行为） */
+  function chatContainer(sid) {
+    return containers.get(sid) || $("chat-view");
+  }
+
+  /** P4 起：为新打开的会话注册独立容器；关闭时 unregister 清引用 */
+  function registerContainer(sid, el) {
+    containers.set(sid, el);
+  }
+  function unregisterContainer(sid) {
+    containers.delete(sid);
+    sessionState.delete(sid); // 会话关闭 → 释放其分组/工具行/已 done 状态
+  }
 
   /** 复制代码按钮（设计 §3.3）：事件委托在聊天区，CSP 无内联 handler */
   function initCodeCopy() {
@@ -51,36 +73,37 @@ const Chat = (() => {
   }
   initCodeCopy(); // 模块级绑定一次（boot 可重复调用，防 listener 泄漏）
 
-  /** 追加节点到聊天区并滚动 */
-  function append(node) {
-    $("chat-view").appendChild(node);
-    scrollToBottom();
+  /** 追加节点到该会话聊天区并滚动 */
+  function append(node, sid) {
+    chatContainer(sid).appendChild(node);
+    scrollToBottom(sid);
     // rant 14:11：任何消息增删都重新评估欢迎屏显隐（此前只在切会话时评估 → 首条消息后欢迎屏不隐藏）
     App.updateEmptyState?.();
   }
 
-  function scrollToBottom() {
-    const cv = $("chat-view");
+  function scrollToBottom(sid) {
+    const cv = chatContainer(sid);
     cv.scrollTop = cv.scrollHeight;
   }
 
-  function clear() {
-    $("chat-view").innerHTML = "";
-    groupNodes.clear();
-    toolRows.clear();
-    doneRids.clear();
+  function clear(sid) {
+    const key = sid || null;
+    chatContainer(key).innerHTML = "";
+    st(key).groupNodes.clear();
+    st(key).toolRows.clear();
+    st(key).doneRids.clear();
     App.updateEmptyState?.(); // rant 14:11：清空（切会话/新会话）也同步欢迎屏显隐
   }
 
   /** 用户消息：右对齐柔和气泡 */
-  function addUserMessage(text) {
+  function addUserMessage(text, sid) {
     const node = el("div", { class: "msg user" }, text);
-    append(node);
+    append(node, sid);
     return node;
   }
 
   /** EMRG 消息：全宽 + ✦ 标识（流式节点，body 先 textContent 后整体 marked） */
-  function createAssistantNode(isOwn) {
+  function createAssistantNode(isOwn, sid) {
     const node = el("div", { class: "msg assistant" });
     if (!isOwn) {
       node.appendChild(el("div", { class: "remote-label" }, EMRG_Copy._t("chat.fromOtherClient")));
@@ -89,30 +112,31 @@ const Chat = (() => {
     const body = el("div", { class: "msg-body typing" });
     body.appendChild(mark);
     node.appendChild(body);
-    append(node);
+    append(node, sid);
     return node;
   }
 
   /** 系统消息（温和置中） */
-  function addSystemMessage(text) {
-    append(el("div", { class: "msg system" }, text));
+  function addSystemMessage(text, sid) {
+    append(el("div", { class: "msg system" }, text), sid);
   }
 
-  /** 流式 delta（G122 main 已按 chunks 批量） */
-  function handleDelta(chunks) {
+  /** 流式 delta（G122 main 已按 chunks 批量）——按会话隔离分组/已 done 集合 */
+  function handleDelta(chunks, sid) {
+    const { groupNodes, doneRids } = st(sid);
     for (const chunk of chunks) {
       const rid = chunk.request_id;
       if (!rid || doneRids.has(rid)) continue; // rant 14:11：已 done 的流丢弃残留 delta，不建孤儿节点
       let group = groupNodes.get(rid);
       if (!group) {
         const isOwn = App.state.ownStreamRequestId === rid;
-        const node = createAssistantNode(isOwn);
+        const node = createAssistantNode(isOwn, sid);
         group = { node, nodes: [node], hasText: false, sealed: false };
         groupNodes.set(rid, group);
       } else if (group.sealed) {
         // rant 21:57:10：上一文本段被工具行"封存"→ 新文本段开新节点（旧节点保留在 DOM 原位）
         const isOwn = App.state.ownStreamRequestId === rid;
-        const node = createAssistantNode(isOwn);
+        const node = createAssistantNode(isOwn, sid);
         group.node = node;
         group.nodes.push(node);
         group.sealed = false;
@@ -128,13 +152,13 @@ const Chat = (() => {
       if (!window.emrgMarkdown.streamProject(body, raw, stream)) {
         body.textContent += content;
       }
-      scrollToBottom();
+      scrollToBottom(sid);
     }
   }
 
-  /** 取消/错误收尾：移除所有在途节点的 typing 光标（cancelled 事件无 request_id，只能全清） */
-  function clearTyping() {
-    for (const group of groupNodes.values()) {
+  /** 取消/错误收尾：移除该会话所有在途节点的 typing 光标（cancelled 事件无 request_id，只能全清） */
+  function clearTyping(sid) {
+    for (const group of st(sid).groupNodes.values()) {
       for (const node of group.nodes) {
         const body = node.querySelector(".msg-body") || node;
         body.classList.remove("typing");
@@ -143,7 +167,8 @@ const Chat = (() => {
   }
 
   /** done：整体 Markdown 渲染（requestIdleCallback 调度，G127）——该 rid 的全部文本段逐个渲染 */
-  function handleDone(data) {
+  function handleDone(data, sid) {
+    const { groupNodes, doneRids } = st(sid);
     const rid = data.request_id;
     if (rid) {
       doneRids.add(rid);
@@ -157,7 +182,7 @@ const Chat = (() => {
           const stream = node.__stream;
           if (stream && stream.container) {
             const render = () => {
-              window.emrgMarkdown.streamFinalize(body, stream.rawText).then(() => scrollToBottom());
+              window.emrgMarkdown.streamFinalize(body, stream.rawText).then(() => scrollToBottom(sid));
             };
             if (window.requestIdleCallback) {
               window.requestIdleCallback(render, { timeout: 2000 });
@@ -174,7 +199,7 @@ const Chat = (() => {
             window.emrgMarkdown.renderMarkdown(text).then((html) => {
               body.innerHTML = html;
               body.insertBefore(el("span", { class: "msg-assistant-mark" }, "✦ "), body.firstChild);
-              scrollToBottom();
+              scrollToBottom(sid);
             });
           };
           if (window.requestIdleCallback) {
@@ -187,24 +212,25 @@ const Chat = (() => {
       }
     }
     if (data.timeout) {
-      addSystemMessage(EMRG_Copy._t("chat.timeoutWarn"));
+      addSystemMessage(EMRG_Copy._t("chat.timeoutWarn"), sid);
     }
     // 工具调用次数上限中断（跨项目教训：截断的工作不提示 = 用户拿半成品）
     // 对齐 TUI：明确提示结果可能不完整 + 可继续（TUI 已有 "Try '继续' to resume"）
     if (data.content && /exceeded/i.test(data.content) && /max|limit|round/i.test(data.content)) {
-      addSystemMessage(EMRG_Copy._t("chat.maxRoundsHint"));
+      addSystemMessage(EMRG_Copy._t("chat.maxRoundsHint"), sid);
     }
   }
 
   /** 工具友好状态行（进行中 → 完成/失败，默认折叠，点开展示原始输出） */
-  function handleToolStart(data) {
+  function handleToolStart(data, sid) {
+    const { groupNodes, toolRows } = st(sid);
     const rid = data.request_id;
     if (rid) {
       let group = groupNodes.get(rid);
       if (!group) {
         // G104：tool_start 也建组（LLM 先出 tool_calls 后出文本）
         const isOwn = App.state.ownStreamRequestId === rid;
-        const node = createAssistantNode(isOwn);
+        const node = createAssistantNode(isOwn, sid);
         group = { node, nodes: [node], hasText: false, sealed: false };
         groupNodes.set(rid, group);
       } else if (group.hasText) {
@@ -230,12 +256,12 @@ const Chat = (() => {
         row.classList.toggle("expanded", !out.classList.contains("hidden"));
       }
     });
-    append(row);
+    append(row, sid);
     toolRows.set(data.tool_call_id, row);
   }
 
-  function handleToolEnd(data) {
-    const row = toolRows.get(data.tool_call_id);
+  function handleToolEnd(data, sid) {
+    const row = st(sid).toolRows.get(data.tool_call_id);
     if (!row) return;
     // rant 21:08：工具执行完成后 spinner 必须停止——移除转圈元素（CSS 亦有
     // .tool-row:not(.running) 隐藏兜底），只保留 ✓ 完成标记，防止"对号前面一直转圈"。
@@ -273,7 +299,7 @@ const Chat = (() => {
         row.appendChild(btn);
       }
     }
-    scrollToBottom();
+    scrollToBottom(sid);
   }
 
   return {
@@ -287,11 +313,17 @@ const Chat = (() => {
     handleToolStart,
     handleToolEnd,
     clearTyping,
+    registerContainer,
+    unregisterContainer,
+    chatContainer,
+    // P3：会话级状态访问器（sid=null → 旧版单会话桶，兼容既有调用方）
+    groupNodesFor: (sid) => st(sid).groupNodes,
+    toolRowsFor: (sid) => st(sid).toolRows,
     get groupNodes() {
-      return groupNodes;
+      return st(null).groupNodes;
     },
     get toolRows() {
-      return toolRows;
+      return st(null).toolRows;
     },
   };
 })();
