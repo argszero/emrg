@@ -169,6 +169,43 @@ test("ensureConnected: port 文件缺失 → 拉起 daemon（spawn 参数正确 
   assert.strictEqual(spawnCalls.projectDir, tmpHome);
 });
 
+test("P2 skipStart: port 文件缺失 → 抛错不拉起 daemon（connManager 独占 daemon 生命周期）", async () => {
+  fs.rmSync(PORT_FILE(tmpHome), { force: true });
+  const client = new DaemonClient({ projectDir: tmpHome });
+  let spawnCalls = 0;
+  client.startDaemon = async function () {
+    spawnCalls += 1;
+    throw new Error("startDaemon must not be called with skipStart");
+  };
+  await assert.rejects(
+    () => client.ensureConnected({ skipStart: true }),
+    /daemon not running \(skipStart\): no port file/
+  );
+  assert.strictEqual(spawnCalls, 0, "startDaemon must never be called");
+  assert.strictEqual(client.connected, false);
+});
+
+test("P2 skipStart: stale port + daemon 已死 → 抛错不重拉（不删文件不 spawn）", async () => {
+  // 预写 port 文件指向一个无人监听的端口（连接必然失败）
+  fs.writeFileSync(PORT_FILE(tmpHome), "1\nseekrit-token"); // 127.0.0.1:1 拒绝连接
+  const client = new DaemonClient({ projectDir: tmpHome });
+  // daemon 进程已死（无 pid 文件）→ 旧路径会删文件重拉；skipStart 必须拒绝
+  let spawnCalls = 0;
+  client.startDaemon = async function () {
+    spawnCalls += 1;
+    throw new Error("startDaemon must not be called with skipStart");
+  };
+  const p = client.ensureConnected({ skipStart: true });
+  await waitForWs();
+  const firstWs = currentMockWs;
+  firstWs.emit("error", new Error("connect ECONNREFUSED"));
+  await assert.rejects(p, /daemon unreachable \(skipStart\)/);
+  assert.strictEqual(spawnCalls, 0, "startDaemon must never be called");
+  // port 文件保留（connManager 重启恢复依赖它判断 daemon 状态）
+  assert.ok(fs.existsSync(PORT_FILE(tmpHome)), "port file must be kept");
+  assert.strictEqual(client.connected, false);
+});
+
 test("Phase4: _findDaemonExecutable 打包模式定位捆绑 emrgd（POSIX）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome, isPackaged: true });
   const exe = client._findDaemonExecutable();

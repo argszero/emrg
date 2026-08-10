@@ -301,10 +301,12 @@ class DaemonClient {
     return pt;
   }
 
-  async ensureConnected() {
+  async ensureConnected({ skipStart = false } = {}) {
     // Rant 2026-08-09T18:47:37：1. 读 port 文件（projectDir → 规范 ~/.emrg 回退）→
     // 无则拉 daemon；spawn 失败先探测已有 daemon，活着直接复用，不再盲报
     // "failed to start after 3 attempts"。每步打结构化诊断日志（B1-B5）。
+    // P2 connManager（rant 2026-08-10T15:07:19）：skipStart=true 时 daemon 生命周期
+    // 由 connManager 独占管理——本实例只连接**已运行**的 daemon，绝不自行拉起。
     let port, token;
     const pt = this._readPortToken();
     if (pt) {
@@ -314,6 +316,11 @@ class DaemonClient {
         `[gui] ensureConnected: port_file_exists=true, port_file_content=${port}, source=${pt.source}`
       );
     } else {
+      if (skipStart) {
+        throw new Error(
+          `daemon not running (skipStart): no port file at ${PORT_FILE(this.projectDir)}`
+        );
+      }
       this.logger.info(`[gui] ensureConnected: port_file_exists=false — spawning daemon`);
       const r = await this._spawnOrProbe();
       port = r.port;
@@ -340,6 +347,13 @@ class DaemonClient {
         );
         try { this.ws.close(); } catch { /* ignore */ }
         throw new Error(`daemon unreachable (pid alive): ${e.message}`);
+      }
+      if (skipStart) {
+        this.logger.warn(
+          `[gui] ws connect failed: ${e.message} — stale port, daemon dead (skipStart: not respawning)`
+        );
+        try { this.ws.close(); } catch { /* ignore */ }
+        throw new Error(`daemon unreachable (skipStart): ${e.message}`);
       }
       this.logger.warn(`[gui] ws connect failed: ${e.message} — stale port, respawning daemon`);
       try { this.ws.close(); } catch { /* ignore */ }
