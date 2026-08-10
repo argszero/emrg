@@ -99,11 +99,13 @@ class TestStartDaemon:
         assert args[0].endswith("python") or "python" in args[0]
         assert args[1:] == ("-m", "emrg.server")
 
+    @patch("emrg.client.daemon_manager.asyncio.sleep", new_callable=AsyncMock)
     @patch("emrg.client.daemon_manager.is_running", return_value=False)
     @patch("emrg.client.daemon_manager.cleanup_server")
     @patch("emrg.client.daemon_manager.asyncio.create_subprocess_exec",
            new_callable=AsyncMock)
-    def test_raises_on_timeout(self, mock_spawn, mock_cleanup, mock_is_running):
+    def test_raises_on_timeout(self, mock_spawn, mock_cleanup, mock_is_running,
+                               mock_sleep):
         proc = MagicMock(pid=1234)
         mock_spawn.return_value = proc
 
@@ -247,12 +249,14 @@ class TestEnsureConnected:
 # _MAX_SPAWN_ATTEMPTS 次，超限抛节流错误；成功连接后归零。
 
 class TestSpawnThrottle:
+    @patch("emrg.client.daemon_manager.asyncio.sleep", new_callable=AsyncMock)
     @patch("emrg.client.daemon_manager.is_running", return_value=False)
     @patch("emrg.client.daemon_manager.cleanup_server")
     @patch("emrg.client.daemon_manager.asyncio.create_subprocess_exec",
            new_callable=AsyncMock)
     def test_start_daemon_throttles_after_max_attempts(self, mock_spawn,
-                                                       mock_cleanup, mock_is_running):
+                                                       mock_cleanup, mock_is_running,
+                                                       mock_sleep):
         proc = MagicMock(pid=1234)
         mock_spawn.return_value = proc
 
