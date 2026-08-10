@@ -1457,3 +1457,22 @@ test("P5 slice 2: 删除项目 — 受保护 emrg 提示不可删；普通项目
   assert.strictEqual(removeCalls[0] && removeCalls[0].name, "mem", "project name passed");
   assert.strictEqual(removeCalls[0] && removeCalls[0].path, "/p/mem", "project path passed");
 });
+
+// ── P6（rant 15:07:19）：上限 20 超限提示本地化 + 边界 ──
+
+test("P6: switchSession 超限（too many open sessions）→ 本地化提示（非英文原始错误）", async () => {
+  const { ctx, els } = makeSandbox({
+    switchSession: async () => { throw new Error("too many open sessions (20) — close some first"); },
+  });
+  await tick();
+  await vm.runInContext('App.switchSession("s-over", { projectPath: "/p/x" })', ctx);
+  await tick();
+  // Chat.addSystemMessage 渲染进 chat-view 容器（系统消息节点 textContent）
+  const texts = els["chat-view"].children.map((c) => c.textContent || "");
+  const last = texts[texts.length - 1] || "";
+  assert.ok(
+    last.includes("上限") || last.includes("Too many open sessions"),
+    "localized over-limit message shown, got: " + last
+  );
+  assert.ok(!last.includes("close some first"), "raw english error must not leak: " + last);
+});

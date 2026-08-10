@@ -628,7 +628,8 @@ const App = (() => {
       Sidebar.highlight(sid);
       setComposerDisabled(false); // 防御性：独立调用 switchSession 也确保输入框可用
     } catch (e) {
-      Chat.addSystemMessage(_t("app.switchFailed", { msg: e.message }));
+      // P6（rant 15:07:19 上限 20）：超限提示本地化（main 抛 too many open sessions）
+      Chat.addSystemMessage(/too many open sessions/i.test(e.message || "") ? _t("app.tooManyOpenSessions") : _t("app.switchFailed", { msg: e.message }));
     }
   }
 

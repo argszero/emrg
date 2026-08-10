@@ -13,7 +13,7 @@ const { spawn } = require("child_process");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
 const { generateSessionId, SESSION_ID_RE } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
-const { guiStatePath, sanitizeOpenSessions, saveGuiState } = require("./gui-state");
+const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("./gui-state");
 const APP_VERSION = require("./package.json").version;
 
 // ── 单实例锁（G85/G120：第二个实例退出并 focus 已有窗口）──
@@ -299,6 +299,14 @@ vision = false
 
     ipcMain.handle("emrg:switchSession", async (_e, { sessionId, projectPath } = {}) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      // P6（rant 15:07:19 边界）：projectPath 校验（跨项目打开时传项目路径）
+      if (projectPath !== undefined && (typeof projectPath !== "string" || !projectPath.trim())) {
+        throw new Error("invalid project path");
+      }
+      // P6（rant 15:07:19 上限 20）：显式打开新会话超限 → 提示不自动关（已打开 sid 复用不拦）
+      if (openSessions.size >= DEFAULT_CAP && !openSessions.has(sessionId)) {
+        throw new Error(`too many open sessions (${DEFAULT_CAP}) — close some first`);
+      }
       // G65：自有流运行中禁止切会话（每连接独立锁，查当前激活连接）
       if (connManager?.get(currentSessionId)?.ownStream) throw new Error("stream in progress — cannot switch");
       const prevSid = currentSessionId;
@@ -359,6 +367,10 @@ vision = false
     }));
 
     ipcMain.handle("emrg:newSession", async (_e, { projectPath } = {}) => {
+      // P6（rant 15:07:19 边界）：projectPath 校验（新建会话指定项目时）
+      if (projectPath !== undefined && (typeof projectPath !== "string" || !projectPath.trim())) {
+        throw new Error("invalid project path");
+      }
       // G14/G81：本地生成 session_id（无 new_session 消息）
       const sid = generateSessionId();
       // 同步 main 侧会话状态：重连后 resume 正确会话（G41）+ 窗口标题（G109）
