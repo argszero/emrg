@@ -35,6 +35,8 @@
       "preload.js",
       "renderer/**",
       "vendor/**",
+      "conn-manager.js",
+      "gui-state.js",
       "daemon_client.js",
       "package.json",
       "scripts/**"
