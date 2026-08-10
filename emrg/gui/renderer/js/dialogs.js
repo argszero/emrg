@@ -549,17 +549,60 @@ const Dialogs = (() => {
       }
       // 第一步：项目列表（按最近活跃倒序——daemon 已排；底部"新建项目…"按钮）
       projects.forEach((p) => {
-        const row = el("button", { class: "help-row", type: "button", style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;" });
+        const row = el("div", { class: "help-row", style: "display:flex;align-items:center;gap:var(--sp-2);" });
+        const pick = el("button", { type: "button", style: "flex:1;text-align:left;cursor:pointer;background:none;border:none;display:flex;flex-direction:column;align-items:flex-start;padding:0;" });
         const name = el("span", { class: "help-cmd" }, p.name || p.path || "");
         const hint = el("span", { class: "help-hint" }, p.path || "");
-        row.appendChild(name);
-        row.appendChild(hint);
-        row.addEventListener("click", () => showProjectSessions(p));
+        pick.appendChild(name);
+        pick.appendChild(hint);
+        // P5 slice 2：点击打开会话（带项目路径 → resume 用该项目 cwd）
+        pick.addEventListener("click", () => showProjectSessions(p));
+        row.appendChild(pick);
+        // 删除项目（受保护项目不可删 → 提示；非受保护 → 确认弹窗）
+        const del = el("button", { type: "button", class: "btn btn-ghost", style: "padding:2px 8px;flex-shrink:0;", title: _t("deleteProject.delete") }, _t("deleteProject.delete"));
+        del.addEventListener("click", () => confirmDeleteProject(p));
+        row.appendChild(del);
         list.appendChild(row);
       });
     } catch (e) {
       list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("openSession.loadFailed", { msg: e.message })}</span></div>`;
     }
+  }
+
+  // P5 slice 2：受保护项目（内置 project emrg / 内置 task emrg-task → 演化依赖，不可删）
+  function isProtectedProject(p) {
+    return p && (p.name === "emrg" || p.name === "emrg-task");
+  }
+
+  function confirmDeleteProject(p) {
+    if (isProtectedProject(p)) {
+      showConfirm(_t("deleteProject.title"), _t("deleteProject.protectedBody", { name: p.name }), { okText: _t("dlg.gotIt"), danger: false });
+      return;
+    }
+    showConfirm(_t("deleteProject.title"), _t("deleteProject.body", { name: p.name }), {
+      okText: _t("dlg.delete"),
+      danger: true,
+      onOk: async () => {
+        try {
+          const res = await window.emrg.removeProject({ name: p.name, path: p.path });
+          if (!res || !res.ok) {
+            Chat.addSystemMessage(_t("deleteProject.failed", { msg: (res && res.error) || _t("app.unknownError") }));
+            return;
+          }
+          Chat.addSystemMessage(_t("deleteProject.removed", { name: p.name }));
+          // 该项目已打开的会话被关闭 → 激活会话被关则切相邻
+          const closed = res.closed || [];
+          if (closed.length > 0 && closed.includes(App.state.sessionId)) {
+            const remaining = (App.state.openSessions || []).filter((s) => !closed.includes(s.sid));
+            if (remaining.length > 0) await App.switchSession(remaining[0].sid, { silent: true });
+            else await App.newSession();
+          }
+          showOpenSessionDialog(); // 刷新项目列表
+        } catch (e) {
+          Chat.addSystemMessage(_t("deleteProject.failed", { msg: e.message }));
+        }
+      },
+    });
   }
 
   // 第二步：该项目会话列表（created_at 倒序）→ 点击打开（switchSession 复用连接）
@@ -583,7 +626,8 @@ const Dialogs = (() => {
         row.appendChild(hint);
         row.addEventListener("click", async () => {
           $("open-session-dialog").close();
-          await App.switchSession(s.session_id);
+          // P5 slice 2：带项目路径切换（resume 用该项目 cwd，非全局 projectDir）
+          await App.switchSession(s.session_id, { projectPath: project.path });
         });
         list.appendChild(row);
       });
@@ -605,6 +649,55 @@ const Dialogs = (() => {
         }
       } catch (e) {
         Chat.addSystemMessage(_t("openSession.projectFailed", { msg: e.message }));
+      }
+    });
+  }
+
+  // ── P5 slice 2：新建会话对话框（选已有项目 → 新建；或新建项目 → 新建） ──
+  async function showNewSessionDialog() {
+    const list = $("new-session-list");
+    const dialog = $("new-session-dialog");
+    if (!list || !dialog) return;
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
+    dialog.showModal();
+    try {
+      const projects = await window.emrg.listProjects();
+      list.innerHTML = "";
+      if (!projects || projects.length === 0) {
+        list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("openSession.noProjects")}</span></div>`;
+        return;
+      }
+      // 已有项目（活跃排序）→ 点选即在该项目新建会话
+      projects.forEach((p) => {
+        const row = el("button", { class: "help-row", type: "button", style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;" });
+        const name = el("span", { class: "help-cmd" }, p.name || p.path || "");
+        const hint = el("span", { class: "help-hint" }, p.path || "");
+        row.appendChild(name);
+        row.appendChild(hint);
+        row.addEventListener("click", async () => {
+          $("new-session-dialog").close();
+          await App.newSession({ projectPath: p.path });
+        });
+        list.appendChild(row);
+      });
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("newSession.loadFailed", { msg: e.message })}</span></div>`;
+    }
+  }
+
+  function initNewSessionDialog() {
+    $("new-session-cancel").addEventListener("click", () => $("new-session-dialog").close());
+    $("new-session-new").addEventListener("click", async () => {
+      // 新建项目 = 选目录 → 注册（轻量命令隐式 _touch_project，不调 init_auto_evolve）→ 新建会话
+      try {
+        const res = await window.emrg.pickProjectDir();
+        if (res && res.path) {
+          await window.emrg.registerProject({ path: res.path });
+          $("new-session-dialog").close();
+          await App.newSession({ projectPath: res.path });
+        }
+      } catch (e) {
+        Chat.addSystemMessage(_t("newSession.projectFailed", { msg: e.message }));
       }
     });
   }
@@ -633,6 +726,8 @@ const Dialogs = (() => {
     refreshGithubStatus,
     initOpenSessionDialog, // P5：打开会话对话框初始化
     showOpenSessionDialog, // P5：两步打开会话
+    initNewSessionDialog, // P5 slice 2：新建会话对话框初始化
+    showNewSessionDialog, // P5 slice 2：新建会话（选项目）
     showRename,
     submitRename,
     showSettings,

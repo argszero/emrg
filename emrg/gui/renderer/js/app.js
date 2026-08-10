@@ -600,7 +600,7 @@ const App = (() => {
       return;
     }
     try {
-      const res = await window.emrg.switchSession({ sessionId: sid });
+      const res = await window.emrg.switchSession({ sessionId: sid, projectPath: opts.projectPath });
       state.sessionId = sid;
       // P3 slice 1：切换只移动激活指针——每会话条目保留自己的 busy/ownStreamRequestId
       // P3 slice 2：激活该会话容器（状态保留，不 Chat.clear——切回继续看到原消息/流式现场）
@@ -632,13 +632,13 @@ const App = (() => {
     }
   }
 
-  async function newSession() {
+  async function newSession(opts = {}) {
     if (state.busy) {
       Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy);
       return;
     }
     try {
-      const res = await window.emrg.newSession();
+      const res = await window.emrg.newSession({ projectPath: opts.projectPath });
       state.sessionId = res.session_id;
       activateSessionView(state.sessionId); // P3 slice 2：新会话独立容器（空）
       Chat.clear(state.sessionId); // 新会话从空开始（容器可能被复用）
@@ -1278,6 +1278,8 @@ const App = (() => {
     $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {}));
     $("new-chat-btn").addEventListener("click", newSession);
     Dialogs.initOpenSessionDialog(); // P5：打开会话对话框绑定
+    Dialogs.initNewSessionDialog(); // P5 slice 2：新建会话对话框绑定
+    $("open-session-new-session")?.addEventListener("click", () => Dialogs.showNewSessionDialog()); // P5 slice 2：打开弹窗 → 新建会话
     $("settings-btn").addEventListener("click", () => {
       loadEvolutionSummary(); // WorkBuddy P3（#502）：打开设置时加载最近改进
       Dialogs.showSettings();

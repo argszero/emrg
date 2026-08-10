@@ -275,9 +275,11 @@ vision = false
         throw new Error("invalid request_id"); // G143：renderer 预生成 id 的格式护栏
       }
       // P2：每会话独立连接——首条消息前自动打开（新会话不 resume，daemon 隐式订阅）
+      // P5 slice 2：cwd 取该会话所属项目（跨项目会话用其项目路径，非全局 projectDir）
+      const sessionCwd = openSessions.get(sessionId)?.projectPath || projectDir;
       let conn = connManager?.get(sessionId);
       if (!conn || !conn.connected) {
-        conn = await openSession(sessionId, projectDir, { resume: false });
+        conn = await openSession(sessionId, sessionCwd, { resume: false });
       }
       markSessionActive(sessionId); // P4：发送 = 会话活动 → lastActive + 持久化
       let rid;
@@ -285,7 +287,7 @@ vision = false
         // G143：renderer 预生成 requestId（send 前标记自有流，消除 IPC 往返竞态窗口）
         // WorkBuddy P2：mode="ask" → 纯对话（daemon 不启用工具）
         // G65：conn.sendTask 内部标记 ownStream（每连接独立锁）
-        rid = conn.sendTask({ sessionId, cwd: projectDir, prompt: text, stream: true, requestId, mode });
+        rid = conn.sendTask({ sessionId, cwd: sessionCwd, prompt: text, stream: true, requestId, mode });
       } catch (e) {
         conn._releaseOwnStream(); // sendTask 抛异常（ws.send 失败）→ 释放锁，防 G65 锁泄漏
         throw e;
@@ -295,15 +297,17 @@ vision = false
 
     ipcMain.handle("emrg:listSessions", async () => listSessions());
 
-    ipcMain.handle("emrg:switchSession", async (_e, { sessionId }) => {
+    ipcMain.handle("emrg:switchSession", async (_e, { sessionId, projectPath } = {}) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       // G65：自有流运行中禁止切会话（每连接独立锁，查当前激活连接）
       if (connManager?.get(currentSessionId)?.ownStream) throw new Error("stream in progress — cannot switch");
       const prevSid = currentSessionId;
       // G110：切会话清空旧连接分组缓存（含 timer），防广播"幽灵"残留
       connManager?.get(prevSid)?.clearGroups();
+      // P5 slice 2：跨项目打开——用该项目路径 resume（非全局 projectDir）
+      const targetPath = projectPath || openSessions.get(sessionId)?.projectPath || projectDir;
       try {
-        await openSession(sessionId, projectDir); // 打开（新）会话连接 + resume_session 自动订阅
+        await openSession(sessionId, targetPath); // 打开（新）会话连接 + resume_session 自动订阅
       } catch (e) {
         // G106：被动删除恢复——resume error → 刷新列表 + 切最近
         if (/not found|error/i.test(e.message)) {
@@ -354,12 +358,14 @@ vision = false
       activeSid: currentSessionId,
     }));
 
-    ipcMain.handle("emrg:newSession", async () => {
+    ipcMain.handle("emrg:newSession", async (_e, { projectPath } = {}) => {
       // G14/G81：本地生成 session_id（无 new_session 消息）
       const sid = generateSessionId();
       // 同步 main 侧会话状态：重连后 resume 正确会话（G41）+ 窗口标题（G109）
       currentSessionId = sid;
       win.setTitle(`EMRG — ${sid}`);
+      // P5 slice 2：新会话指定项目 → 先记簿记（发送时用其 cwd 建连接）
+      if (projectPath) touchOpenSession(sid, projectPath);
       // P4：新会话在首条消息前不建连接（sendMessage 自动 open）——此处仅标记激活
       // 并刷新持久化（activeSid 前进；openSessions 条目随 openSession 落簿记）
       schedulePersistGuiState();
@@ -473,6 +479,34 @@ vision = false
       }
       await requireConn().sendCommandAndWait("list_sessions", { cwd: p }, 5000); // 隐式注册
       return { ok: true, path: p };
+    });
+
+    // P5 slice 2：删除项目 = 只删 projects.yml 条目（保留磁盘数据）+ 关闭该项目已打开会话
+    // 受保护项目不可删除（内置 project emrg / 内置 task emrg-task → 演化依赖，删了悬空）；
+    // `.emrg` 是 _touch_project 历史记录**非内置 → 可删**（再次访问重新注册）。
+    // 返回 { ok, removed, closed: [sids] }；renderer 收到后负责切换激活会话。
+    ipcMain.handle("emrg:removeProject", async (_e, { name, path: p } = {}) => {
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid project name");
+      // 受保护项目：内置 project `emrg` + 内置 task `emrg-task`
+      if (name === "emrg" || name === "emrg-task") {
+        return { ok: false, protected: true, error: "protected system project" };
+      }
+      // 该项目已打开的会话 → 关闭连接 + 移除 + 写盘（激活中先切相邻由 renderer 处理）
+      const closed = [];
+      for (const [sid, v] of [...openSessions.entries()]) {
+        if (v.projectPath === p || v.projectName === name) {
+          connManager?.close(sid);
+          openSessions.delete(sid);
+          closed.push(sid);
+        }
+      }
+      if (currentSessionId && closed.includes(currentSessionId)) {
+        currentSessionId = null; // 激活会话被关 → 无激活（renderer 切相邻）
+      }
+      const frame = await requireConn().sendCommandAndWait("remove_project", { name: name.trim() }, 5000);
+      schedulePersistGuiState();
+      broadcastOpenSessions();
+      return { ok: true, removed: Boolean(frame.removed), closed, name };
     });
 
     ipcMain.handle("emrg:listTasks", async () => {

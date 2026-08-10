@@ -275,8 +275,22 @@
       <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" id="open-session-desc" data-i18n="openSession.desc">选择项目后选择要打开的会话（跨项目多开）。</p>
       <div id="open-session-list" class="help-list"></div>
       <div class="dialog-actions">
+        <button type="button" id="open-session-new-session" class="btn btn-ghost" data-i18n="newSession.openButton">＋ 新建会话…</button>
         <button type="button" id="open-session-new" class="btn btn-ghost" data-i18n="openSession.newProject">＋ 新建项目…</button>
         <button type="button" id="open-session-cancel" class="btn btn-ghost" data-i18n="help.close">关闭</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- P5 slice 2：新建会话对话框（选已有项目 → 新建；或新建项目 → 新建） -->
+  <dialog id="new-session-dialog">
+    <div class="dialog-card" style="min-width:440px;">
+      <h2 data-i18n="newSession.title">新建会话</h2>
+      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="newSession.desc">选择项目新建会话（跨项目多开）。</p>
+      <div id="new-session-list" class="help-list"></div>
+      <div class="dialog-actions">
+        <button type="button" id="new-session-new" class="btn btn-ghost" data-i18n="newSession.newProject">＋ 新建项目…</button>
+        <button type="button" id="new-session-cancel" class="btn btn-ghost" data-i18n="help.close">关闭</button>
       </div>
     </div>
   </dialog>
