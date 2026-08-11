@@ -64,6 +64,8 @@ EMRG isn't just a tool — it's a coding partner that **listens to your complain
 
 **Real example**: Someone ranted "TUI needs `/` autocomplete like Codex." The next evolution cycle built it — prefix filtering and arrow-key navigation, merged and deployed. **What you rant about, it improves.**
 
+**How to contribute?** Use it. Connect GitHub in Settings, and rant. Your rants become real PRs — the evolution cycle codes, tests, and ships them. No fork, no clone, no code required. **Using EMRG is contributing to EMRG.**
+
 ---
 
 ## 🚀 Quick Start
