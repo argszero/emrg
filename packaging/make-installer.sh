@@ -372,8 +372,10 @@ end;
 // -m emrg.server 常驻锁文件），覆盖 ~/.emrg\install 时卡在"停止已有进程"。
 // PrepareToInstall 在安装开始前运行 bin\stop-emrg.cmd：taskkill EMRG.exe
 // 优雅→/F 兜底、wmic/PowerShell 命令行过滤 TUI、emrg server stop 协议关闭
-// daemon + emrgd.pid 轮询兜底（顺序 GUI→TUI→daemon）。干净安装（无旧 install）
-// 脚本自行跳过。返回非空字符串 = 中止安装并显示该消息（宁可中止也不卡死）。
+// daemon + emrgd.pid 轮询兜底、按可执行文件路径杀 bundled git 孤儿
+// （rant 2026-08-11T17:56:25: daemon 演化周期 git 操作中途被杀 → git/ssh/bash
+// 孤儿锁 install\git\usr\bin\msys-2.0.dll → Inno DeleteFile code 5）。干净安装
+// （无旧 install）脚本自行跳过。返回非空字符串 = 中止安装并显示该消息（宁可中止也不卡死）。
 // {cmd} = cmd.exe（Inno 预定义常量，批处理文件须经 cmd 启动）。
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -386,10 +388,10 @@ begin
   if Exec(ExpandConstant('{cmd}'), '/c "' + StopScript + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     if ResultCode <> 0 then
-      Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install.';
+      Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).';
   end
   else
-    Result := 'EMRG could not run the process-stop helper (stop-emrg.cmd). Please close EMRG (GUI/TUI) and retry the install.';
+    Result := 'EMRG could not run the process-stop helper (stop-emrg.cmd). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry.';
 end;
 EOF
     # Windows 路径转义（iscc 需要 Windows 路径，但在 bash/msys 下用当前路径）
