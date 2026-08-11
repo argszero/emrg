@@ -25,7 +25,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 RUNTIME="$DIST/runtime"
-VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.24)"
+VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.25)"
 PLATFORM="${1:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 
 mkdir -p "$DIST/artifacts"
@@ -234,6 +234,10 @@ PrivilegesRequiredOverridesAllowed=dialog
 ; 否则 explorer 不刷新环境变量缓存，新开 cmd 也看不到更新后的 PATH（rant 2026-08-05T14:28:02）
 ChangesEnvironment=yes
 DisableProgramGroupPage=yes
+; R125: CloseApplications=no — Inno Restart Manager (CloseApplications=yes default) 会误报
+; 任何占用 install 目录文件的非 EMRG 进程（sh/vim/explorer/Defender）弹 "unable to automatically
+; close all applications" 选择框，且 Try again 反复失败；EMRG 进程关闭由 R124 stop-emrg.cmd 精确负责
+CloseApplications=no
 OutputDir=$DIST_WIN/artifacts
 OutputBaseFilename=EMRG-$VERSION-windows-x64
 SetupIconFile=$ROOT_WIN/packaging/assets/icon.ico
