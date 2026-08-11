@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from rich.style import Style
 
-from emrg.client.python_tui.output import style_diff_sgr, style_to_sgr
+from emrg.client.python_tui.buffer import Cell, CellWidth, StylePool
+from emrg.client.python_tui.output import style_diff_sgr, style_to_sgr, write_frame
 
 
 # ── style_to_sgr ──────────────────────────────────────────────
@@ -177,3 +178,76 @@ def test_diff_empty_string_on_equivalent_styles():
     b = Style(bold=True, color="red")
     assert a is not b  # different objects
     assert style_diff_sgr(a, b) == ""  # but semantically equal → no transition
+
+
+# ── write_frame row cleanup (rant 2026-08-11T19:59:09) ─────────
+
+
+def _pool():
+    """StylePool with plain + reverse interned."""
+    pool = StylePool()
+    pool.intern(Style())  # id 0 = plain
+    pool.intern(Style(reverse=True))  # id 1 = reverse cursor
+    return pool
+
+
+def test_write_frame_cursor_left_no_clear_to_eol():
+    """Cursor left-move diff must NOT emit CLEAR_TO_EOL.
+
+    "hello world" cursor moving left flips the cursor cell's reverse style
+    back to plain. The old row-cleanup then emitted CUP+EL from the last
+    changed cell, erasing the unchanged "world" to the right. The fix removes
+    that cleanup entirely — output must rewrite the changed cells only.
+    """
+    pool = _pool()
+    diffs = [
+        # cell 6: 'o' loses reverse (old cursor position)
+        (6, 0,
+         Cell(char="o", style_id=1, width=CellWidth.NARROW),
+         Cell(char="o", style_id=0, width=CellWidth.NARROW)),
+        # cell 7: ' ' loses reverse
+        (7, 0,
+         Cell(char=" ", style_id=1, width=CellWidth.NARROW),
+         Cell(char=" ", style_id=0, width=CellWidth.NARROW)),
+    ]
+    out = write_frame(diffs, style_pool=pool)
+    assert "\x1b[0K" not in out  # no CLEAR_TO_EOL → chars right of cursor survive
+    assert "o" in out  # the character is rewritten
+
+
+def test_write_frame_spacer_tail_overwrites_stale_char():
+    """SPACER_TAIL over a stale ASCII char writes a space.
+
+    "hello world" → "hello 世": cell 7 was 'o', now holds the SPACER_TAIL of
+    the wide char 世. The spacer's second column is inherently empty, so
+    writing a space clears the stale 'o' without breaking the wide glyph.
+    """
+    pool = _pool()
+    diffs = [
+        (6, 0,
+         Cell(char="o", style_id=0, width=CellWidth.NARROW),
+         Cell(char="世", style_id=0, width=CellWidth.WIDE)),
+        (7, 0,
+         Cell(char="o", style_id=0, width=CellWidth.NARROW),
+         Cell(char="", style_id=0, width=CellWidth.SPACER_TAIL)),
+    ]
+    out = write_frame(diffs, style_pool=pool)
+    assert "\x1b[0K" not in out
+    assert "世" in out  # the wide char is written
+    assert " " in out  # the stale 'o' at the spacer position is covered
+
+
+def test_write_frame_spacer_tail_empty_prev_emits_nothing():
+    """SPACER_TAIL diff with empty prev must emit nothing.
+
+    A pure style change on a spacer cell (or an untouched spacer) has no
+    visible effect — no cursor motion, no character, no SGR output.
+    """
+    pool = _pool()
+    diffs = [
+        (7, 0,
+         Cell(char="", style_id=0, width=CellWidth.SPACER_TAIL),
+         Cell(char="", style_id=1, width=CellWidth.SPACER_TAIL)),
+    ]
+    out = write_frame(diffs, style_pool=pool)
+    assert out == ""

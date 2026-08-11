@@ -211,14 +211,20 @@ async def interactive(init_auto_evolve: bool = False):
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
-    def _status_left(title: str, sid: str) -> str:
-        """Format left status: show both name and short ID for renamed sessions."""
+    def _status_left(title: str, sid: str, model: str = "") -> str:
+        """Format left status: session title + short ID + current model."""
+        parts = []
         if title:
-            return f"{title} ({sid[:8]})"
-        return sid
+            parts.append(f"{title} ({sid[:8]})")
+        else:
+            parts.append(sid)
+        if model:
+            parts.append(f"[{model}]")
+        return " ".join(parts)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
+    current_model = ""  # model name tracked independently of server_id (rant 2026-08-11T20:02:43)
 
-    status = StatusLine(left=_status_left(session_title, session_id), center="connecting...")
+    status = StatusLine(left=_status_left(session_title, session_id, current_model), center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
     term.mount(status=status, composer=inp, chat=chat)
 
@@ -240,12 +246,12 @@ async def interactive(init_auto_evolve: bool = False):
             p = "…" + p[-29:]
         return p
 
-    def _update_right() -> None:
+    def _update_left_extra() -> None:
         if msg_count > 0:
-            status.update(right=f"{msg_count} msgs  {_short_path(cwd)}")
+            status.update(left_extra=f"· {msg_count} msgs · {_short_path(cwd)}")
         else:
-            status.update(right="Enter=send  Esc=quit  /help")
-    _update_right()
+            status.update(left_extra="Enter=send  Esc=quit  /help")
+    _update_left_extra()
 
     _status_base: str = ""  # base center text without timer, for elapsed timer overlay
     _last_center: str = ""  # last center text set via status.update, for timer overlay
@@ -257,7 +263,7 @@ async def interactive(init_auto_evolve: bool = False):
             try:
                 elapsed = int(time.time() - _request_start)
                 mins, secs = divmod(elapsed, 60)
-                timer = f"⏱{mins}:{secs:02d}" if mins > 0 else f"⏱{secs}s"
+                timer = f"[{mins}:{secs:02d}]"
                 status.elapsed = timer
                 term.set_title(f"{timer} {session_title or session_id} @ {project_name}")
                 term.render()
@@ -295,6 +301,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
+        nonlocal current_model
         nonlocal _last_center, _elapsed_task, conn
 
         async def _reconnect():
@@ -348,9 +355,9 @@ async def interactive(init_auto_evolve: bool = False):
                     ident = data.get("identity", {}); hid = ident.get("instance_id", "?")[:8]
                     host = ident.get("host_name", "?")
                     model = data.get("model", "")
-                    server_id = f"{hid} @ {host}"
                     if model:
-                        server_id += f" [{model}]"
+                        current_model = model
+                    server_id = f"{hid} @ {host}"
                     if not _welcomed:
                         _welcomed = True
                         import emrg
@@ -363,7 +370,7 @@ async def interactive(init_auto_evolve: bool = False):
                             await conn.send_command("update_check")
                         except Exception:
                             pass  # never block chat on update check
-                    status.update(left=_status_left(session_title, session_id), center=server_id)
+                    status.update(left=_status_left(session_title, session_id, current_model), center=server_id)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render(); continue
 
@@ -473,7 +480,7 @@ async def interactive(init_auto_evolve: bool = False):
                     _last_center = server_id or "emrg"
                     status.update(center=_last_center)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
-                    msg_count += 1; _update_right()
+                    msg_count += 1; _update_left_extra()
                     term.render()
                 if "error" in data:
                     err = data["error"]; logger.error("server error: %s", err)
@@ -490,7 +497,7 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.dirty = True
                         chat.add("system", "Session cleared — starting fresh.")
                         msg_count = 0
-                        _update_right()
+                        _update_left_extra()
                     status.update(center=server_id or "emrg")
                     term.render()
                     continue
@@ -511,10 +518,10 @@ async def interactive(init_auto_evolve: bool = False):
                             chat.rows.clear()
                             chat.dirty = True
                             chat.add("system", f"Created new session {new_sid} — continue chatting.")
-                            status.update(left=_status_left("", new_sid), center=server_id or "emrg")
+                            status.update(left=_status_left("", new_sid, current_model), center=server_id or "emrg")
                             term.set_title(f"{new_sid} @ {project_name}")
                             msg_count = 0
-                            _update_right()
+                            _update_left_extra()
                     status.update(center=server_id or "emrg")
                     term.render()
                     continue
@@ -533,7 +540,7 @@ async def interactive(init_auto_evolve: bool = False):
                         msg_count = 0
                         # Reload session state from server
                         await conn.send_command("ping")
-                        _update_right()
+                        _update_left_extra()
                     status.update(center=server_id or "emrg")
                     term.render()
                     continue
@@ -555,7 +562,7 @@ async def interactive(init_auto_evolve: bool = False):
                         )
                     busy = False
                     msg_count = max(0, msg_count - compacted)
-                    _update_right()
+                    _update_left_extra()
                     status.elapsed = ""
                     status.update(center=server_id or "emrg"); term.render()
                     continue
@@ -685,10 +692,9 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add("system",
                                  f"Model switched: {previous} → {model_name}"
                                  f" (context: {ctx_win:,})")
-                        # Update server_id so all subsequent status updates show the new model
-                        base_id = server_id.split(" [")[0] if " [" in server_id else server_id
-                        server_id = f"{base_id} [{model_name}]" if base_id else f"emrg [{model_name}]"
-                        status.update(center=server_id)
+                        # Track model independently and refresh the left section
+                        current_model = model_name
+                        status.update(left=_status_left(session_title, session_id, current_model), center=server_id)
                     term.render()
                     continue
 
@@ -860,11 +866,11 @@ async def interactive(init_auto_evolve: bool = False):
                         f"Resumed session {session_id}{title_extra} "
                         f"({meta.get('message_count', record_count)} messages, "
                         f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
-                    status.update(left=_status_left(session_title, session_id), center=server_id or "emrg")
+                    status.update(left=_status_left(session_title, session_id, current_model), center=server_id or "emrg")
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     # Set message count from loaded session
                     msg_count = meta.get("message_count", record_count)
-                    _update_right()
+                    _update_left_extra()
                     term.render()
                     continue
 
@@ -877,7 +883,7 @@ async def interactive(init_auto_evolve: bool = False):
                         new_title = data.get("title", "")
                         session_title = new_title
                         chat.add("system", f"Session renamed to: {new_title}")
-                        status.update(left=_status_left(session_title, session_id), center=server_id or "emrg")
+                        status.update(left=_status_left(session_title, session_id, current_model), center=server_id or "emrg")
                         term.set_title(f"{session_title} @ {project_name}")
                     term.render()
                     continue
@@ -1067,6 +1073,7 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, conn, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
+        nonlocal current_model
         nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
@@ -1842,7 +1849,7 @@ Streaming
                 history.append(text); stream_buffer = ""
                 history_index = -1  # reset history navigation on submit
                 chat.add("assistant", "")
-                msg_count += 1; _update_right()
+                msg_count += 1; _update_left_extra()
                 logger.debug("ROWS after asst: %d [%s]", len(chat.rows),
                     ', '.join(f'{r.role}={r.content[:20]}' for r in chat.rows if isinstance(r, ChatRow)))
                 _last_center = "thinking..."
