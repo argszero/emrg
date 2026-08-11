@@ -147,7 +147,7 @@ EMRG 不只是追赶——它自己追上来。
 
 贡献指南、源码安装、架构、详细 FAQ → [DEVELOPMENT.md](DEVELOPMENT.md)。
 
-快速检查：`uv run pytest tests/ -v`（当前 694 项）· `cd emrg/gui && npm test`（205 项：43 daemon_client + 19 conn-manager + 22 app-commands + 84 renderer smoke + 15 i18n + 7 integration + 3 commands + 5 build-config + 7 gui-state）
+快速检查：`uv run pytest tests/ -v`（当前 694 项）· `cd emrg/gui && npm test`（212 项：43 daemon_client + 19 conn-manager + 22 app-commands + 91 renderer smoke + 15 i18n + 7 integration + 3 commands + 5 build-config + 7 gui-state）
 
 ---
 

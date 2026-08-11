@@ -201,6 +201,10 @@ function makeSandbox(overrides = {}) {
         return table[path] || { entries: [] };
       },
       readFile: async ({ path } = {}) => ({ content: `# ${path}\ntext`, binary: false }),
+      previewHtml: async () => ({ ok: true }), // P2.3：HTML 预览（WebContentsView）
+      closePreview: async () => ({ ok: true }),
+      panelResized: async () => ({ ok: true }),
+      getPreviewState: async () => ({ path: null }), // P2.3：崩溃恢复拉取
       ...overrides,
     },
   };
@@ -2020,4 +2024,133 @@ test("rant 09:18：refreshUpdateCheck 透传 force 参数", async () => {
   assert.strictEqual(calls.length, 2);
   assert.strictEqual(calls[0].force, true, "refreshUpdateCheck({force:true}) 应透传 force");
   assert.strictEqual(calls[1].force, false, "默认 refreshUpdateCheck() 不带 force");
+});
+
+// ── P2.3 + P3.4（rant 2026-08-11T12:20:35）：HTML 预览 WebContentsView ──────────
+
+test("P3.4：HTML tab 打开 → previewHtml IPC + 占位渲染（不走 read_file）", async () => {
+  const calls = { previewHtml: [], readFile: [] };
+  const { ctx, els } = makeSandbox({
+    previewHtml: async (p) => { calls.previewHtml.push(p); return { ok: true }; },
+    readFile: async (p) => { calls.readFile.push(p); return { content: "x", binary: false }; },
+  });
+  await tick();
+  calls.previewHtml.length = 0; calls.readFile.length = 0; // 清 boot 期调用（init 上报）
+  await vm.runInContext('ResultPanel.openFileTab(null, "/tmp/page.html")', ctx);
+  assert.strictEqual(calls.previewHtml.length, 1, "HTML 应触发 previewHtml");
+  assert.strictEqual(calls.previewHtml[0].path, "/tmp/page.html", "previewHtml 应带完整路径");
+  assert.strictEqual(calls.readFile.length, 0, "HTML 预览不得走 read_file（内嵌浏览器直载）");
+  // 占位渲染：viewer-head + .viewer-html（混合模型 DOM 占位）
+  const cls = vm.runInContext('document.getElementById("result-viewer").children[1].className', ctx);
+  assert.ok(String(cls).includes("viewer-html"), "应渲染 .viewer-html 占位");
+  const collectText = `(function(){
+    function collect(node) {
+      let out = node.textContent || "";
+      for (const c of node.children || []) out += collect(c);
+      return out;
+    }
+    return collect(document.getElementById("result-viewer").children[1]);
+  })()`;
+  assert.ok(String(vm.runInContext(collectText, ctx)).includes("HTML 预览"), "占位应显示 HTML 预览提示");
+  // Tab 栏应显示该文件
+  assert.ok([...els["result-tabbar"].children].some((c) => c.dataset.path === "/tmp/page.html"), "Tab 栏应显示 HTML 文件");
+});
+
+test("P3.4：HTML 路径判别正反两态（.html/.htm/.HTM → 预览；.py → readFile）", async () => {
+  const calls = { previewHtml: [], readFile: [] };
+  const { ctx } = makeSandbox({
+    previewHtml: async (p) => { calls.previewHtml.push(p); return { ok: true }; },
+    readFile: async (p) => { calls.readFile.push(p); return { content: "code", binary: false }; },
+  });
+  await tick();
+  calls.previewHtml.length = 0; calls.readFile.length = 0;
+  for (const p of ["/tmp/a.html", "/tmp/b.htm", "/tmp/c.HTM"]) {
+    await vm.runInContext(`ResultPanel.openFileTab(null, ${JSON.stringify(p)})`, ctx);
+  }
+  assert.strictEqual(calls.previewHtml.length, 3, ".html/.htm/.HTM 均应走预览");
+  assert.deepStrictEqual(calls.previewHtml.map((c) => c.path), ["/tmp/a.html", "/tmp/b.htm", "/tmp/c.HTM"]);
+  assert.strictEqual(calls.readFile.length, 0);
+  // .py → 文本查看器（readFile）
+  await vm.runInContext('ResultPanel.openFileTab(null, "/tmp/a.py")', ctx);
+  assert.strictEqual(calls.previewHtml.length, 3, ".py 不得触发 previewHtml");
+  assert.ok(calls.readFile.length >= 1, ".py 应走 read_file");
+});
+
+test("P3.4：HTML→HTML 切换 = 重新加载（previewHtml 两次，无 closePreview）", async () => {
+  const calls = { previewHtml: [], closePreview: [] };
+  const { ctx } = makeSandbox({
+    previewHtml: async (p) => { calls.previewHtml.push(p); return { ok: true }; },
+    closePreview: async (p) => { calls.closePreview.push(p); return { ok: true }; },
+  });
+  await tick();
+  calls.previewHtml.length = 0; calls.closePreview.length = 0;
+  await vm.runInContext('ResultPanel.openFileTab(null, "/tmp/p1.html")', ctx);
+  await vm.runInContext('ResultPanel.openFileTab(null, "/tmp/p2.html")', ctx);
+  assert.strictEqual(calls.previewHtml.length, 2, "HTML→HTML 应各自 previewHtml（loadURL 替换）");
+  assert.strictEqual(calls.previewHtml[1].path, "/tmp/p2.html");
+  assert.strictEqual(calls.closePreview.length, 0, "HTML→HTML 切换不得 closePreview");
+});
+
+test("P3.4：关闭 HTML tab / 切到非 HTML → closePreview", async () => {
+  const calls = { previewHtml: [], closePreview: [] };
+  const { ctx } = makeSandbox({
+    previewHtml: async (p) => { calls.previewHtml.push(p); return { ok: true }; },
+    closePreview: async (p) => { calls.closePreview.push(p); return { ok: true }; },
+  });
+  await tick();
+  calls.previewHtml.length = 0; calls.closePreview.length = 0;
+  // 打开 HTML → 切到产物 Tab → closePreview
+  await vm.runInContext('ResultPanel.openFileTab(null, "/tmp/p.html")', ctx);
+  assert.strictEqual(calls.closePreview.length, 0);
+  await vm.runInContext('ResultPanel.activateTab("artifacts")', ctx);
+  assert.strictEqual(calls.closePreview.length, 1, "切到产物 Tab 应 closePreview");
+  // 再开 HTML → 直接关闭该 Tab → closePreview
+  await vm.runInContext('ResultPanel.openFileTab(null, "/tmp/p.html")', ctx);
+  await vm.runInContext('ResultPanel.closeFileTab(null, "/tmp/p.html")', ctx);
+  assert.strictEqual(calls.closePreview.length, 2, "关闭 HTML Tab 应 closePreview");
+  assert.strictEqual(calls.closePreview[1].path, undefined, "closePreview 空参 = 关闭当前预览（main 侧比对路径）");
+});
+
+test("P2.3：panelResized 上报（init 初始 + 折叠/展开）", async () => {
+  const calls = { panelResized: [] };
+  const { ctx } = makeSandbox({
+    panelResized: async (p) => { calls.panelResized.push(p); return { ok: true }; },
+  });
+  await tick();
+  assert.ok(calls.panelResized.length >= 1, "init 应上报初始布局");
+  const first = calls.panelResized[0];
+  assert.strictEqual(typeof first.width, "number", "上报应含面板宽度");
+  assert.strictEqual(typeof first.collapsed, "boolean", "上报应含折叠状态");
+  assert.strictEqual(typeof first.contentTop, "number", "上报应含内容区顶部（Tab 栏高）");
+  // 折叠 → 末次上报 collapsed: true
+  await vm.runInContext("ResultPanel.toggle()", ctx);
+  assert.strictEqual(calls.panelResized.at(-1).collapsed, true, "折叠后应上报 collapsed: true");
+  // 展开 → collapsed: false
+  await vm.runInContext("ResultPanel.toggle()", ctx);
+  assert.strictEqual(calls.panelResized.at(-1).collapsed, false, "展开后应上报 collapsed: false");
+});
+
+test("P2.3：renderer 崩溃恢复——getPreviewState 拉取后重开预览 Tab", async () => {
+  const calls = { previewHtml: [] };
+  const { ctx, els } = makeSandbox({
+    previewHtml: async (p) => { calls.previewHtml.push(p); return { ok: true }; },
+    getPreviewState: async () => ({ path: "/proj/index.html" }),
+  });
+  await tick();
+  assert.ok(calls.previewHtml.length >= 1, "崩溃恢复应经 getPreviewState 重开预览");
+  assert.strictEqual(calls.previewHtml.at(-1).path, "/proj/index.html", "恢复应加载 main 侧预览路径");
+  assert.ok([...els["result-tabbar"].children].some((c) => c.dataset.path === "/proj/index.html"), "恢复后 Tab 栏应显示预览文件");
+});
+
+test("P2.3：handlePreviewState 幂等——已打开路径仅激活不重复开 Tab", async () => {
+  const calls = { previewHtml: [] };
+  const { ctx, els } = makeSandbox({
+    previewHtml: async (p) => { calls.previewHtml.push(p); return { ok: true }; },
+  });
+  await tick();
+  await vm.runInContext('ResultPanel.openFileTab(null, "/proj/index.html")', ctx);
+  const before = els["result-tabbar"].children.length;
+  await vm.runInContext('ResultPanel.handlePreviewState("/proj/index.html", null)', ctx);
+  assert.strictEqual(els["result-tabbar"].children.length, before, "已打开路径不得重复开 Tab");
+  assert.ok(calls.previewHtml.length >= 2, "恢复激活应重新 previewHtml（bounds/loadURL 同步）");
 });
