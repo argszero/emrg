@@ -228,15 +228,20 @@ class DaemonConnection:
         self._ws = ws
 
     async def send_task(self, session_id: str, cwd: str, prompt: str,
-                        images: list | None = None) -> None:
+                        images: list | None = None, id: str | None = None) -> str:
         """聊天发送：TaskRequest(type="task")。images 支持 /image 粘贴图。
 
         内部 json.dumps(req.to_dict(), ensure_ascii=False) 以 str 发送（不 .encode()）。
+        `id` 显式指定请求 id（P1 queue requeue 复用原 id 以匹配 queued_requeue）；
+        返回最终请求 id（未指定时为内部生成的 uuid）。
         """
         req = TaskRequest(session_id=session_id, cwd=cwd, prompt=prompt)
+        if id:
+            req.id = id
         if images:
             req.images = images
         await self._ws.send(json.dumps(req.to_dict(), ensure_ascii=False))
+        return req.id
 
     async def send_command(self, type_: str, **params) -> None:
         """通用命令：ping/list_*/set_*/rant/compact/... 只发不读。

@@ -319,6 +319,21 @@ class TestDaemonConnection:
         sent = json.loads(conn._ws.sent[0])
         assert "images" not in sent
 
+    def test_send_task_explicit_id(self):
+        conn = self._conn()
+        rid = asyncio.run(conn.send_task(
+            session_id="s1", cwd="/tmp/x", prompt="hi", id="abc-123"))
+        sent = json.loads(conn._ws.sent[0])
+        assert sent["id"] == "abc-123"
+        assert rid == "abc-123"
+
+    def test_send_task_returns_generated_id(self):
+        conn = self._conn()
+        rid = asyncio.run(conn.send_task(session_id="s1", cwd="/tmp/x", prompt="hi"))
+        sent = json.loads(conn._ws.sent[0])
+        assert sent["id"] == rid
+        assert rid  # non-empty uuid
+
     def test_send_command_payload(self):
         conn = self._conn()
         asyncio.run(conn.send_command("set_model", model="gpt-4o"))
