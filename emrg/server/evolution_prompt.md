@@ -492,6 +492,14 @@ cd {{ source_dir }}
 git checkout -b feature/<short-description>
 git add -A
 git commit -m "emrg: <short-description>"
+# ⚡ Branch-collision guard (R743 lesson): a parallel instance may already have pushed
+# this exact branch name + opened a PR with the same intent. Check BEFORE pushing:
+#   gh pr list -R {{ owner }}/{{ repo }} --head feature/<short-description> --state all
+# If a PR already exists with the same intent: do NOT create a duplicate — review it
+# (Step 1.1) and, if your commit adds value, comment on the existing PR instead.
+# If the remote branch exists (push rejected non-fast-forward): git fetch origin <branch>
+# + diff against your commit; NEVER force-push over an existing remote branch — the
+# overwritten commit is often unrecoverable (already pruned from the remote).
 git push origin feature/<short-description>
 gh pr create -R {{ owner }}/{{ repo }} --title "emrg: <short-description>" --body "brief description of changes and reasons"
 ```
