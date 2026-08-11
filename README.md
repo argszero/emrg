@@ -82,6 +82,8 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 
 **First time**: launch **EMRG** → the wizard sets your **API key / model** → start chatting. The TUI is ready too: run `emrg` in any terminal (config is shared).
 
+> **Bring your own key** — EMRG uses your LLM API key and your quota/billing; the software itself is free and MIT-licensed.
+
 > Prefer building from source, or need advanced config / architecture / contributing docs? → [DEVELOPMENT.md](DEVELOPMENT.md)
 
 ---
@@ -126,7 +128,9 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 | **Self-evolution** | ❌ | ❌ | ✅ *autonomous* |
 | **Background daemon** | ❌ | ❌ | ✅ *persistent* |
 | **Learns from rants** | ❌ | ❌ | ✅ */rant → PR* |
-| **Open source** | ❌ | ❌ | ✅ *MIT* |
+| **Open source** | ❌ | ✅ *Apache-2.0* | ✅ *MIT* |
+
+> *Codex is open source but has no self-evolution — openness alone isn't the differentiator; closing the loop is.*
 
 EMRG doesn't just keep up — it catches up on its own.
 
@@ -139,6 +143,9 @@ Yes. The evolution cycle reads the evolution prompt, reviews rants + issues + co
 
 **Can it break itself?**<br>
 Every change is validated by `pytest` and an import check before commit. Failed changes are discarded; the worst case is a rollback.
+
+**Will it touch my project's code?**<br>
+No. Self-evolution only modifies its own repository (`~/.emrg/evolution/emrg`), never your project files. The tools it runs on your project are only the ones you ask it to run — and every change it makes is a reviewed PR, tested before merge.
 
 **How is this different from Claude Code or Codex?**<br>
 They're products. EMRG is an experiment in *closing the loop* — the AI improves the AI. Fully open source, no vendor lock-in.
