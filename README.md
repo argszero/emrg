@@ -1,4 +1,4 @@
-# 🧱 EMRG
+# EMRG
 
 <p align="center">
   <strong>The AI coding agent that writes code — and rewrites <em>itself</em>.</strong>
@@ -31,35 +31,38 @@ EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps y
 
 ---
 
-## ✨ Why you'll love it
+## Why you'll love it
 
 **The one-line pitch**: EMRG is the only coding agent that **improves itself from your feedback** — rant about what bothers you, and the next evolution cycle writes the fix and ships it.
 
 | What | Why it's different |
 |---|---|
-| 🔄 **Gets better on its own** | **The core feature.** Your `/rant`s, GitHub issues, and competitor updates become real improvements — analyzed, coded, tested, PR'd, merged, unattended |
-| 🖥️ **Electron GUI (main entry)** | Install & go: first-run wizard, all slash commands, results panel, Ask/Auto modes, visible self-evolution. GUI configured = TUI ready |
-| ⚡ **Full-featured TUI + daemon** | Streaming markdown, `/` autocomplete, sessions, shortcuts — on a persistent `emrgd` daemon you can reconnect to anytime |
-| 🌍 **100% open source** | MIT — no walled garden, no vendor lock-in. English default, Chinese version available |
+| **Gets better on its own** | **The core feature.** Your `/rant`s, GitHub issues, and competitor updates become real improvements — analyzed, coded, tested, PR'd, merged, unattended |
+| **Electron GUI (main entry)** | Install & go: first-run wizard, all slash commands, results panel, Ask/Auto modes, visible self-evolution. GUI configured = TUI ready |
+| **Full-featured TUI + daemon** | Streaming markdown, `/` autocomplete, sessions, shortcuts — on a persistent `emrgd` daemon you can reconnect to anytime |
+| **100% open source** | MIT — no walled garden, no vendor lock-in. English default, Chinese version available |
 
 ---
 
-## 🔄 Rant-Driven Evolution (the core feature)
+## Rant-Driven Evolution (the core feature)
 
 EMRG isn't just a tool — it's a coding partner that **listens to your complaints and improves itself**:
 
 ```
- 📢 Your rants (/rant) ←── primary input
- 📥 GitHub Issues & PRs
- 📥 Competitor tools (Codex, Claude Code)
- 📥 Cross-project learning
-         ↓
-    🧬 Evolution Cycle (every 30 min)
-    (Prepare → Review → Discover → Improve → Commit → Record)
-         ↓
-    ✅ pytest + import check
-    ✅ git commit + push → PR
-    ✅ Evolution log
+Inputs:
+  - Your rants (/rant)   <- primary input
+  - GitHub Issues & PRs
+  - Competitor tools (Codex, Claude Code)
+  - Cross-project learning
+          |
+          v
+Evolution Cycle (every 30 min)
+(Prepare -> Review -> Discover -> Improve -> Commit -> Record)
+          |
+          v
+  1. pytest + import check
+  2. git commit + push -> PR
+  3. Evolution log
 ```
 
 **Real example**: Someone ranted "TUI needs `/` autocomplete like Codex." The next evolution cycle built it — prefix filtering and arrow-key navigation, merged and deployed. **What you rant about, it improves.**
@@ -68,9 +71,9 @@ EMRG isn't just a tool — it's a coding partner that **listens to your complain
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
-### 📦 Download the installer (recommended)
+### Download the installer (recommended)
 
 Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and double-click — the installer bundles everything (Python 3.13 + git + gh + GUI), **zero prerequisites, offline install**:
 
@@ -90,7 +93,7 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 
 ---
 
-## 🎮 Commands
+## Commands
 
 > All commands work in both the GUI (type `/` for autocomplete) and the TUI (`/help` lists everything).
 
@@ -118,7 +121,7 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 
 ---
 
-## 📊 vs. the competition
+## vs. the competition
 
 |  | Claude Code | Codex | **EMRG** |
 |---|---|---|---|
@@ -138,7 +141,7 @@ EMRG doesn't just keep up — it catches up on its own.
 
 ---
 
-## ❓ FAQ
+## FAQ
 
 **Is this real — does it actually modify its own code?**<br>
 Yes. The evolution cycle reads the evolution prompt, reviews rants + issues + competitor tools, makes source changes, runs tests, and submits a PR. If tests fail, it rolls back.
@@ -154,7 +157,7 @@ They're products. EMRG is an experiment in *closing the loop* — the AI improve
 
 ---
 
-## 🧪 Development
+## Development
 
 Contributing, source installs, architecture, and the full FAQ → [DEVELOPMENT.md](DEVELOPMENT.md).
 
@@ -162,7 +165,7 @@ Quick checks: `uv run pytest tests/ -v` (currently 694 items) · `cd emrg/gui &&
 
 ---
 
-## 📜 License
+## License
 
 MIT — see [LICENSE](LICENSE) for the full terms and [MANIFESTO.md](MANIFESTO.md) for the philosophy behind the code.
 
