@@ -417,6 +417,7 @@ When reading rants, follow these rules:
 > - README/Agent.md name definition (#676 宿主 rant 2026-08-11T17:08:48：README/README.cn/Agent.md 三处对称加入 EMRG 名称定义——EMRG 读作 Emergence (emerge)，展开为 **Evolving Micro-kernel, Rant-driven Growth**（演化微内核，吐槽驱动成长）；纯文档改动 3 文件 5 行；合并 0a50e6e) ✅
 > - README fact fixes + trust copy (#677 宿主 rant 2026-08-11T17:28:02：竞品表 Codex 开源列 ❌→✅ *Apache-2.0*（此前误标 ❌——Codex 是开源但无自进化，差异化注：开源本身不是差异点，闭环进化才是）；FAQ 新增安全边界条目 EN/CN（自进化只改 `~/.emrg/evolution/emrg`，绝不碰宿主项目文件；宿主项目上的工具调用仅宿主指令触发；每处改动都过 pytest + PR 评审）；Quick Start 新增 BYOK 句 EN/CN（自带 API Key、额度/账单归宿主、软件 MIT 免费）；README.md/README.cn.md 同步，MANIFESTO.md 零改动；合并 a499732) ✅
 > - README contribution philosophy (#678 宿主 rant 2026-08-11T17:30:31：Rant-Driven Evolution 段（Real example 之后）EN/CN 对称新增"如何贡献？使用它。"——连接 GitHub + 吐槽 → 吐槽变成真实 PR（演化周期负责编码/测试/上线），无需 fork/clone/写代码，"使用 EMRG 就是在为 EMRG 做贡献"；完成三段式叙事（产品经理 / 硅基生命宿主 / 使用即贡献）；合并 35ca1c3) ✅
+> - GUI packaged icon fix (#680 宿主 rant 2026-08-11T17:37:03：打包版曾用 Electron 默认蓝色原子球图标——package.json build.mac/win/linux.icon 从目录形 `../packaging/assets/` 改显式单文件（mac .icns / win .ico / linux .png，全部存在于 packaging/assets）；运行时 `BrowserWindow icon` 经 `windowIconPath()`（打包版 extraResources 落 `resources/icon.png`，源码回退 `packaging/assets/icon.png`）；fs/path 已导入零新增依赖；node --check 通过；合并 b400267) ✅
 
 #### 2.2 Latest GitHub code changes
 
