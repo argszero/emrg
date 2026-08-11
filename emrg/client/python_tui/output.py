@@ -254,24 +254,15 @@ def write_frame(
     last_style_id = -1  # force transition on first diff cell
     last_hyperlink_id = -1
     has_output = False
-    row_dirty_end: dict[int, int] = {}  # y → max x changed in that row
 
     for x, y, prev, curr in diffs:
-        # When a WIDE character is at position x, the SPACER_TAIL at x+1
-        # must be protected from the trailing CLEAR_TO_EOL cleanup.
-        # If row_dirty_end stops at x, the cleanup CUP+EL would target the
-        # SPACER_TAIL cell and erase it, breaking the wide character on screen.
-        pw = int(getattr(prev, "width", 0))
-        cw = int(getattr(curr, "width", 0))
-        dirty_end = x + 1 if (pw == 1 or cw == 1) else x
-        row_dirty_end[y] = max(row_dirty_end.get(y, 0), dirty_end)
-
         # SPACER_TAIL detection: wide chars occupy 2 cells (WIDE + SPACER_TAIL).
         # The WIDE cell already advanced the terminal 2 columns, so the
         # SPACER_TAIL cell must not reposition the cursor, write a character,
         # or emit a style transition — it represents the terminal cursor's
         # implicit position, not a cell that needs painting.
         curr_char = getattr(curr, "char", " ")
+        cw = int(getattr(curr, "width", 0))
         is_spacer = cw == 2
 
         # Cursor positioning
@@ -308,18 +299,14 @@ def write_frame(
         if not is_spacer:
             parts.append(curr_char if curr_char else " ")
             has_output = True
-
-    # Reset style and clear to end of each affected row
-    # This eliminates wide-character ghost artifacts (spacer tails, orphan cursors)
-    if row_dirty_end:
-        if last_style_id > 0:
-            parts.append("\x1b[0m")
-            last_style_id = 0
-        for y in sorted(row_dirty_end.keys(), reverse=True):
-            last_col = row_dirty_end[y]
-            # Move to one past the last changed cell, erase to end of line
-            parts.append(f"\x1b[{y + 1};{last_col + 2}H")
-            parts.append(CLEAR_TO_EOL)
+        # SPACER_TAIL cells need no output: a wide char advances the terminal
+        # cursor 2 columns, and its 2nd column inherently covers any stale glyph
+        # from the previous frame. Wide-char removal is handled by the
+        # inline-shrink path (prev char → curr empty) which writes a space
+        # through the normal branch above (rant 2026-08-11T19:59:09 / review
+        # 2026-08-11: an explicit space here would land one column PAST the
+        # spacer — the cursor is at x+2 after the WIDE cell, not x+1 — shifting
+        # chars after CJK insertions).
 
     if sync:
         parts.append(CURSOR_SHOW)

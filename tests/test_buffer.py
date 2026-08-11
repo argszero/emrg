@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from rich.style import Style
 
-from emrg.client.python_tui.buffer import Buffer, Cell, CellWidth, write_lines_to_buffer
+from emrg.client.python_tui.buffer import (
+    Buffer,
+    Cell,
+    CellWidth,
+    diff_buffers,
+    write_lines_to_buffer,
+)
+from emrg.client.python_tui.output import write_frame
 from emrg.client.python_tui.widgets.base import Line, Span
 
 
@@ -236,3 +243,27 @@ def test_newlines_skipped():
     assert _cell_char(buf, 0, 0) == "a"
     assert _cell_char(buf, 1, 0) == "b"
     assert _cell_char(buf, 2, 0) == " "  # no newline rendered
+
+
+# ── Wide-char ghost cleanup (rant 2026-08-11T19:59:09) ─────────
+
+
+def test_wide_char_removal_ghost_covered_without_clear_to_eol():
+    """Removing a wide char covers the old SPACER_TAIL ghost with a space.
+
+    Regression for the CLEAR_TO_EOL bug: the old row-cleanup erased unchanged
+    cells right of the last changed cell (chars vanished on cursor left-move).
+    The diff engine itself emits empty-cell updates, so write_frame must write
+    a space (not clear to EOL) and never emit ``\\x1b[0K``.
+    """
+    buf1 = Buffer(width=8, height=1)
+    write_lines_to_buffer(buf1, [make_line([Span(text="a你b")])])
+    buf2 = Buffer(width=8, height=1)
+    write_lines_to_buffer(buf2, [make_line([Span(text="ab")])])
+
+    diffs = diff_buffers(buf1, buf2)
+    out = write_frame(diffs, style_pool=buf1.style_pool)
+
+    assert "\x1b[0K" not in out  # no CLEAR_TO_EOL
+    assert " " in out  # emptied cells overwritten with spaces
+    assert "b" in out  # the surviving char is rewritten
