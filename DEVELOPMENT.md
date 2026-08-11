@@ -162,6 +162,16 @@ npm start            # launch GUI (auto-starts daemon)
 npm test             # run Node tests (178: 43 daemon_client + 19 conn-manager + 22 app-commands + 59 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config + 7 gui-state; integration runs in CI, local: npm run test:integration)
 ```
 
+### Packaging (installer builds)
+
+Generated icon products (`icon.png`/`icon-512`/`icon-256`/`icon.icns`/`icon.ico`) are **not committed** — the repo keeps only the SVG design source (`packaging/assets/icon.svg`); CI generates them at build time (#688). When building installers locally (`packaging/make-installer.sh` / `build-runtime.sh`), run the generator first:
+
+```bash
+bash packaging/gen-assets.sh   # icon.svg → png/icns/ico (idempotent)
+```
+
+Renderer priority: `rsvg-convert` → Chrome/Chromium headless → `sips` (last resort, glow may be lost). Requires macOS `iconutil` for `.icns` (skipped with a notice on Linux/Windows).
+
 CI runs tests and checks for conflict markers automatically via GitHub Actions (`.github/workflows/test.yml`).
 
 > **Self-evolution from source**: the evolution workspace expects the repo at `~/.emrg/evolution/emrg`. Packaged installs self-heal (clone on demand + auto-bootstrap projects/tasks); source installs should clone there explicitly if you want the evolution daemon to work on this repo.
