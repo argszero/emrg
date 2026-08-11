@@ -67,6 +67,8 @@ const RESPONSE_TYPES = {
   github_connect: "github_connect_result", // Windows GCM rant Stage 2：PAT 授权（daemon.py github_connect）
   github_disconnect: "github_disconnect_result", // Windows GCM rant Stage 2：断开（daemon.py github_disconnect）
   github_connect_web: "github_connect_web_result", // Stage 2b：device flow（daemon.py github_connect_web）
+  list_files: "files_list", // 右栏工作区面板 P1：目录树（daemon.py list_files）
+  read_file: "file_content", // 右栏工作区面板 P1：文件查看器（daemon.py read_file）
 };
 
 class DaemonClient {
@@ -599,7 +601,7 @@ class DaemonClient {
       this._emit("cancelled", frame);
       return;
     }
-    if (["sessions_list", "models_list", "history_list", "tasks_list"].includes(frame.type)) {
+    if (["sessions_list", "models_list", "history_list", "tasks_list", "files_list"].includes(frame.type)) {
       this._emit("list_result", frame);
       return;
     }
