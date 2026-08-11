@@ -127,7 +127,7 @@ const ELEMENT_IDS = [
   "rant-dialog", "rant-message", "rant-project", "rant-cancel", "rant-submit",
   "tasks-dialog", "tasks-list", "tasks-close",
   "result-panel", "result-list", "result-toggle",
-  "result-tabs", "result-tab-files", "result-tab-artifacts", "result-tabbar", "result-files", "result-resizer",
+  "result-tabs", "result-tab-files", "result-tab-artifacts", "result-tabbar", "result-files", "result-viewer", "result-resizer",
   "growth-card", "growth-count", "about-recent",
   "about-update", "about-update-check-btn",
   "github-banner", "github-banner-msg", "github-banner-connect", "github-banner-dismiss",
@@ -190,6 +190,17 @@ function makeSandbox(overrides = {}) {
       deleteSession: async () => ({}),
       setModel: async () => ({}),
       openFile: async () => ({ ok: true }),
+      listFiles: async ({ path } = {}) => {
+        const table = {
+          "/proj": { entries: [
+            { name: "src", path: "/proj/src", type: "dir" },
+            { name: "README.md", path: "/proj/README.md", type: "file" },
+          ] },
+          "/proj/src": { entries: [{ name: "main.py", path: "/proj/src/main.py", type: "file" }] },
+        };
+        return table[path] || { entries: [] };
+      },
+      readFile: async ({ path } = {}) => ({ content: `# ${path}\ntext`, binary: false }),
       ...overrides,
     },
   };
@@ -200,7 +211,7 @@ function makeSandbox(overrides = {}) {
   win.addEventListener = function (type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); };
   win.removeEventListener = function (type, fn) { const a = this._listeners[type]; if (a) { const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); } };
   const ctx = vm.createContext(win);
-  for (const f of ["utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "app"]) {
+  for (const f of ["utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "file-tree", "app"]) {
     const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
     vm.runInContext(code, ctx, { filename: "renderer/js/" + f + ".js" });
   }
@@ -1062,6 +1073,99 @@ test("P2 框架：switchSession 按 sid 重渲染产物 pane（桶→DOM 恢复�
   const text1 = vm.runInContext(collectText, ctx);
   assert.ok(String(text1).includes("s1-out"), "s1 pane 应显示 s1 产物");
   assert.ok(!String(text1).includes("s2-out"), "s1 pane 不得显示 s2 产物");
+});
+
+test("P3：文件树渲染根 + 根自动展开懒加载", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick(); // 根自动展开（async listFiles）
+  // 根行渲染
+  const roots = els["result-files"].querySelectorAll(".ft-root");
+  assert.strictEqual(roots.length, 1, "应有根行");
+  // 根子项：src 目录 + README.md 文件（daemon 排序：目录在前）
+  const dirs = els["result-files"].querySelectorAll(".ft-dir");
+  assert.strictEqual(dirs.length, 2, "根 + src 子目录");
+  const files = els["result-files"].querySelectorAll(".ft-file");
+  assert.strictEqual(files.length, 1, "README.md 文件行");
+  assert.strictEqual(files[0].dataset.path, "/proj/README.md");
+  // 根 kids 可见（自动展开）
+  const kids = els["result-files"].querySelectorAll(".ft-kids");
+  assert.ok(kids.length >= 1);
+  assert.ok(!kids[0].classList.contains("hidden"), "根子项应可见");
+});
+
+test("P3：点击目录行懒加载展开子项（缓存，折叠再展开不重复拉取）", async () => {
+  let calls = 0;
+  const { ctx, els } = makeSandbox({
+    listFiles: async ({ path } = {}) => {
+      calls++;
+      if (path === "/proj") return { entries: [{ name: "src", path: "/proj/src", type: "dir" }] };
+      return { entries: [{ name: "inner.txt", path: "/proj/src/inner.txt", type: "file" }] };
+    },
+  });
+  await tick();
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  assert.strictEqual(calls, 1, "根自动展开拉取一次");
+  // 点击 src 目录 → 懒加载
+  const srcRow = els["result-files"].querySelectorAll(".ft-dir")[1];
+  srcRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  assert.strictEqual(calls, 2, "点击目录应懒加载一次");
+  assert.ok([...els["result-files"].querySelectorAll(".ft-file")].some((f) => f.dataset.path === "/proj/src/inner.txt"), "子项应出现");
+  // 折叠再展开 → 缓存命中（不再拉取）
+  srcRow.dispatch("click", { stopPropagation() {} });
+  assert.ok(srcRow.querySelector(".ft-kids").classList.contains("hidden"), "再次点击应折叠");
+  srcRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  assert.strictEqual(calls, 2, "缓存命中不重复拉取");
+});
+
+test("P3：点击文件行 → 打开文件 Tab + 查看器加载内容", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  // 对齐 app.js 接线：switchSession + setSession 成对（文件树 Tab 归属当前会话桶）
+  await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  const readFileRow = [...els["result-files"].querySelectorAll(".ft-file")].find((r) => r.dataset.path === "/proj/README.md");
+  readFileRow.dispatch("click", { stopPropagation() {} });
+  await tick(); // openFileTab → activateTab → loadFileTab（async readFile）
+  // 文件 Tab 打开
+  assert.ok([...els["result-tabbar"].children].some((c) => c.dataset.path === "/proj/README.md"), "文件 Tab 应打开");
+  // 查看器 pane 激活 + 文本渲染
+  assert.ok(els["result-viewer"].classList.contains("active"), "查看器 pane 应激活");
+  assert.ok(els["result-viewer"].querySelectorAll(".viewer-pre").length >= 1, "应渲染文本内容");
+  // 静态 Tab 不被误激活
+  assert.ok(!els["result-tab-files"].classList.contains("active"), "文件 Tab 不应激活");
+});
+
+test("P3：查看器二进制文件 → 提示用系统工具打开", async () => {
+  const { ctx, els } = makeSandbox({ readFile: async () => ({ content: "", binary: true }) });
+  await tick();
+  await vm.runInContext('ResultPanel.openFileTab(null, "/img/logo.png")', ctx);
+  await tick();
+  assert.ok(els["result-viewer"].classList.contains("active"), "查看器 pane 应激活");
+  const empty = els["result-viewer"].querySelectorAll(".result-empty");
+  assert.ok(empty.length >= 1, "二进制应显示提示而非文本");
+  assert.ok(els["result-viewer"].querySelectorAll(".viewer-pre").length === 0, "二进制不渲染文本");
+});
+
+test("P3：切会话 → 文件树根跟随（per-session）", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  const rootName1 = els["result-files"].querySelectorAll(".ft-root")[0].querySelector(".ft-name").textContent;
+  assert.strictEqual(rootName1, "proj", "s1 根 = proj");
+  // 切 s2（不同项目）
+  await vm.runInContext('FileTree.setSession("s2", "/other")', ctx);
+  await tick();
+  const roots = els["result-files"].querySelectorAll(".ft-root");
+  assert.strictEqual(roots.length, 1, "根应重设（缓存清空）");
+  const rootName2 = roots[0].querySelector(".ft-name").textContent;
+  assert.strictEqual(rootName2, "other", "s2 根 = other");
 });
 
 test("工具调用上限中断 → 系统提示可继续（对齐 TUI，跨项目教训）", async () => {

@@ -31,6 +31,7 @@ const ResultPanel = (() => {
   function panel() { return $("result-panel"); }
   function listEl() { return $("result-list"); }
   function filesEl() { return $("result-files"); }
+  function viewerEl() { return $("result-viewer"); }
   function tabbarEl() { return $("result-tabbar"); }
   function resizerEl() { return $("result-resizer"); }
 
@@ -164,34 +165,89 @@ const ResultPanel = (() => {
     const artBtn = $("result-tab-artifacts");
     if (filesBtn) filesBtn.classList.toggle("active", tabId === "files");
     if (artBtn) artBtn.classList.toggle("active", tabId === "artifacts");
-    const fp = filesEl(), lp = listEl();
+    const isFileTab = typeof tabId === "string" && tabId.startsWith("file:");
+    const fp = filesEl(), lp = listEl(), vp = viewerEl();
     if (fp) fp.classList.toggle("active", tabId === "files");
     if (lp) lp.classList.toggle("active", tabId === "artifacts");
+    if (vp) vp.classList.toggle("active", isFileTab);
     renderTabbar();
+    if (isFileTab) loadFileTab(tabId.slice(5));
   }
 
-  /** 打开文件 Tab：同路径去重（激活既有）/ 上限 8 淘汰最旧 */
+  /** 打开文件 Tab：同路径去重（激活既有）/ 上限 8 淘汰最旧；sid 缺省 = 当前会话 */
   function openFileTab(sid, path) {
-    const st = stateFor(sid);
+    const key = sid == null ? currentSid : sid;
+    const st = stateFor(key);
     const existing = st.tabs.find((t) => t.path === path);
-    if (existing) { activateTab(tabIdFor(path), sid); return existing; }
+    if (existing) { activateTab(tabIdFor(path), key); return existing; }
     const name = String(path).split(/[\\/]/).pop() || path;
     const tab = { path, name };
     st.tabs.push(tab);
     while (st.tabs.length > MAX_OPEN_TABS) st.tabs.shift();
-    if ((sid || null) === currentSid) renderTabbar();
-    activateTab(tabIdFor(path), sid);
+    if ((key || null) === currentSid) renderTabbar();
+    activateTab(tabIdFor(path), key);
     return tab;
   }
   function closeFileTab(sid, path) {
-    const st = stateFor(sid);
+    const key = sid == null ? currentSid : sid;
+    const st = stateFor(key);
     const idx = st.tabs.findIndex((t) => t.path === path);
     if (idx < 0) return;
     st.tabs.splice(idx, 1);
     if (st.active === tabIdFor(path)) {
       st.active = st.tabs.length ? tabIdFor(st.tabs[st.tabs.length - 1].path) : "artifacts";
     }
-    if ((sid || null) === currentSid) { renderTabbar(); activateTab(st.active, sid); }
+    if ((key || null) === currentSid) { renderTabbar(); activateTab(st.active, key); }
+  }
+
+  // ── 文件查看器（P3.3 基础版：readFile 文本 / 二进制提示 / 系统工具打开） ──
+  async function loadFileTab(path) {
+    const vp = viewerEl();
+    if (!vp) return;
+    const st = stateFor(currentSid);
+    const tab = st.tabs.find((t) => t.path === path);
+    if (!tab || tab.loading) return;
+    if (tab.content !== undefined) { renderViewer(vp, tab); return; }
+    tab.loading = true;
+    vp.innerHTML = "";
+    vp.appendChild(el("div", { class: "result-empty" }, _t("result.viewerLoading")));
+    try {
+      const res = await window.emrg.readFile({ path });
+      tab.content = res && typeof res.content === "string" ? res.content : "";
+      tab.binary = !!(res && res.binary);
+      tab.readError = false;
+      tab.totalLines = (res && res.totalLines) || undefined;
+    } catch {
+      tab.content = "";
+      tab.binary = false;
+      tab.readError = true;
+    } finally {
+      tab.loading = false;
+    }
+    renderViewer(vp, tab);
+  }
+
+  function renderViewer(vp, tab) {
+    vp.innerHTML = "";
+    const head = el("div", { class: "viewer-head" });
+    head.appendChild(el("span", { class: "viewer-path" }, tab.path));
+    const openBtn = el("button", { class: "viewer-open", type: "button" }, _t("result.viewerOpen"));
+    openBtn.addEventListener("click", async () => {
+      try { await window.emrg.openFile({ filePath: tab.path }); } catch { /* ignore */ }
+    });
+    head.appendChild(openBtn);
+    vp.appendChild(head);
+    if (tab.readError) {
+      vp.appendChild(el("div", { class: "result-empty" }, _t("result.viewerError")));
+      return;
+    }
+    if (tab.binary) {
+      vp.appendChild(el("div", { class: "result-empty" }, _t("result.viewerBinary")));
+      return;
+    }
+    const pre = el("pre", { class: "viewer-pre" });
+    pre.appendChild(el("code", {}, tab.content));
+    vp.appendChild(pre);
   }
 
   /** 切换会话 → Tab/产物状态按 sid 隔离（缺口 5） */

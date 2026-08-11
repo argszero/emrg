@@ -124,13 +124,15 @@ function makeSandbox(overrides = {}) {
       triggerTask: async () => ({}),
       sendRant: async () => ({}),
       openFile: async () => ({ ok: true }),
+      listFiles: async () => ({ entries: [] }),
+      readFile: async () => ({ content: "", binary: false }),
       ...overrides,
     },
   };
   win.window = win;
   win.document = document;
   const ctx = vm.createContext(win);
-  for (const f of ["utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "app"]) {
+  for (const f of ["utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "file-tree", "app"]) {
     const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
     vm.runInContext(code, ctx, { filename: "renderer/js/" + f + ".js" });
   }
