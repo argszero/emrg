@@ -10,6 +10,10 @@ that the documented GUI breakdown sums to its headline number.
 after #580 added 3 GUI tests. Both checks now cover all three docs
 (README.md, README.cn.md, Agent.md); CJK full-width parens and the
 "项：" separator are normalized before matching.
+#697: rant 2026-08-11T19:50:37 — README.md/README.cn.md switched to the
+Tests badge (no hardcoded counts); the python-count check now guards
+Agent.md only, while the GUI-breakdown check still picks up any
+"(N: ...)" line it finds in any doc (Agent.md keeps the breakdown).
 """
 
 import re
@@ -60,21 +64,19 @@ def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
 
 def test_python_count_matches_docs() -> None:
     collected = _collected_pytest_count()
-    for doc in ("README.md", "README.cn.md", "Agent.md"):
-        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
-        # README: "run tests (currently N items)" | README.cn: "（当前 N 项）"
-        # Agent.md: "pytest tests/ -v` (N)"
-        m = re.search(r"currently (\d+) items", text) or re.search(
-            r"当前 (\d+) 项", text
-        ) or re.search(
-            r"uv run pytest tests/ -v` \((\d+)\)", text
-        )
-        assert m, f"no documented Python count found in {doc}"
-        documented = int(m.group(1))
-        assert documented == collected, (
-            f"{doc} documents {documented} Python tests but {collected} are collected "
-            f"(--collect-only). Sync the doc (and this guard) when adding/removing tests."
-        )
+    # rant 2026-08-11T19:50:37: README.md/README.cn.md dropped hardcoded counts in
+    # favor of the Tests badge (dynamic — no more doc drift). Agent.md keeps the
+    # number (project-context file, checked by the same guard).
+    doc = "Agent.md"
+    text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+    # Agent.md: "pytest tests/ -v` (N)"
+    m = re.search(r"uv run pytest tests/ -v` \((\d+)\)", text)
+    assert m, f"no documented Python count found in {doc}"
+    documented = int(m.group(1))
+    assert documented == collected, (
+        f"{doc} documents {documented} Python tests but {collected} are collected "
+        f"(--collect-only). Sync the doc (and this guard) when adding/removing tests."
+    )
 
 
 def test_gui_breakdown_sums_to_headline() -> None:

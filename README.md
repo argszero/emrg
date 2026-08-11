@@ -1,6 +1,10 @@
 # EMRG
 
 <p align="center">
+  <img src="packaging/assets/icon.svg" alt="EMRG" width="96" height="96">
+</p>
+
+<p align="center">
   <strong>The AI coding agent that writes code — and rewrites <em>itself</em>.</strong>
 </p>
 
@@ -35,9 +39,10 @@ EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps y
 
 **The one-line pitch**: EMRG is the only coding agent that **improves itself from your feedback** — rant about what bothers you, and the next evolution cycle writes the fix and ships it.
 
+> **The one feature: self-improvement.** Every `/rant` becomes a real PR — coded, tested, merged, unattended. No other coding agent does this.
+
 | What | Why it's different |
 |---|---|
-| **Gets better on its own** | **The core feature.** Your `/rant`s, GitHub issues, and competitor updates become real improvements — analyzed, coded, tested, PR'd, merged, unattended |
 | **Electron GUI (main entry)** | Install & go: first-run wizard, all slash commands, results panel, Ask/Auto modes, visible self-evolution. GUI configured = TUI ready |
 | **Full-featured TUI + daemon** | Streaming markdown, `/` autocomplete, sessions, shortcuts — on a persistent `emrgd` daemon you can reconnect to anytime |
 | **100% open source** | MIT — no walled garden, no vendor lock-in. English default, Chinese version available |
@@ -161,7 +166,7 @@ They're products. EMRG is an experiment in *closing the loop* — the AI improve
 
 Contributing, source installs, architecture, and the full FAQ → [DEVELOPMENT.md](DEVELOPMENT.md).
 
-Quick checks: `uv run pytest tests/ -v` (currently 694 items) · `cd emrg/gui && npm test` (212: 43 daemon_client + 19 conn-manager + 22 app-commands + 91 renderer smoke + 15 i18n + 7 integration + 3 commands + 5 build-config + 7 gui-state)
+Quick checks: `uv run pytest tests/ -v` · `cd emrg/gui && npm test` (tests: see badge above)
 
 ---
 
