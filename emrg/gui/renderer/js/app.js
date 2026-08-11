@@ -616,6 +616,12 @@ const App = (() => {
     input.style.height = Math.min(input.scrollHeight, 150) + "px";
   }
 
+  /** 会话的项目根目录（openSessions 优先，回退全局 projectDir；P3.1 文件树根） */
+  function projectPathFor(sid) {
+    const os = state.openSessions.find((s) => s.sid === sid);
+    return (os && os.projectPath) || state.projectDir || "";
+  }
+
   async function switchSession(sid, opts = {}) {    // G65：busy 即自有流进行中/发送中（IPC 往返窗口内 ownStreamRequestId 尚未赋值）
     if (state.busy) {
       Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy);
@@ -632,6 +638,7 @@ const App = (() => {
       // P3 slice 2：激活该会话容器（状态保留，不 Chat.clear——切回继续看到原消息/流式现场）
       activateSessionView(sid);
       ResultPanel.switchSession(sid); // P2 框架：右栏 Tab/产物状态按 sid 隔离
+      FileTree.setSession(sid, projectPathFor(sid)); // P3.1：文件树根跟随会话项目
       updateEmptyState();
       if (res.error === "session_not_found") {
         Chat.addSystemMessage(_t("app.deletedSwitch"));
@@ -673,6 +680,7 @@ const App = (() => {
       state.drafts.set(res.session_id, ""); // 新会话无草稿
       activateSessionView(state.sessionId); // P3 slice 2：新会话独立容器（空）
       ResultPanel.switchSession(state.sessionId); // P2 框架：新会话右栏状态复位
+      FileTree.setSession(state.sessionId, projectPathFor(state.sessionId)); // P3.1：文件树根跟随
       Chat.clear(state.sessionId); // 新会话从空开始（容器可能被复用）
       updateEmptyState(); // 欢迎屏即反馈
       await refreshSessions();
@@ -1474,6 +1482,7 @@ const App = (() => {
     initModelSwitcher();
     initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
     ResultPanel.init(); // WorkBuddy P1：结果面板（⌘\ 折叠 + 窄屏自动隐藏）
+    FileTree.setSession(state.sessionId, projectPathFor(state.sessionId)); // P3.1：文件树初始根
     initEvolutionToast(); // WorkBuddy P3：进化 toast 按钮绑定
   }
 

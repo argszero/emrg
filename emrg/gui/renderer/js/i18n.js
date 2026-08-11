@@ -51,6 +51,12 @@ const I18N = (() => {
       "result.tabArtifacts": "产物",
       "result.filesEmpty": "文件浏览器即将推出",
       "result.resize": "拖拽调整宽度",
+      "result.treeLoading": "加载中…",
+      "result.treeLoadFailed": "加载失败",
+      "result.viewerLoading": "读取文件…",
+      "result.viewerBinary": "二进制文件，用系统工具打开",
+      "result.viewerError": "无法读取文件（可能已被删除或无权限）",
+      "result.viewerOpen": "用系统工具打开",
 
       // 设置
       "settings.title": "设置",
@@ -385,6 +391,12 @@ const I18N = (() => {
       "result.tabArtifacts": "Artifacts",
       "result.filesEmpty": "File browser coming soon",
       "result.resize": "Drag to resize",
+      "result.treeLoading": "Loading…",
+      "result.treeLoadFailed": "Failed to load",
+      "result.viewerLoading": "Reading file…",
+      "result.viewerBinary": "Binary file — open with system tool",
+      "result.viewerError": "Cannot read file (deleted or no permission)",
+      "result.viewerOpen": "Open with system tool",
 
       // Settings
       "settings.title": "Settings",
