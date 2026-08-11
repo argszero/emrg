@@ -105,4 +105,14 @@ def test_no_duplicate_npm_test_command_lines() -> None:
             f"{doc} contains duplicated npm-test command line(s) — remove the "
             f"copy-paste duplicate: {dupes}"
         )
+    # rant 2026-08-11T17:58:11 (README emoji 泛滥 → 克制化)：节标题必须纯文本，
+    # 无 emoji（保留的 emoji 仅限对比表 ✅/❌、底部 ❤️、语言切换 🇬🇧/🇨🇳）。
+    emoji = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]")
+    for doc in ("README.md", "README.cn.md"):
+        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+        bad = [
+            ln for ln in text.splitlines()
+            if re.match(r"^#{1,3} ", ln) and emoji.search(ln)
+        ]
+        assert not bad, f"{doc}: heading(s) must not contain emoji: {bad}"
 
