@@ -28,6 +28,10 @@
       {
         "from": "../dist/runtime",
         "to": "runtime"
+      },
+      {
+        "from": "../packaging/assets/icon.png",
+        "to": "icon.png"
       }
     ],
     "files": [
@@ -41,7 +45,7 @@
       "package.json",
       "scripts/**"
     ],
-    "icon": "../packaging/assets/",
+    "icon": "../packaging/assets/icon.png",
     "mac": {
       "hardenedRuntime": true,
       "notarize": false,
@@ -54,7 +58,8 @@
           ]
         }
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "icon": "../packaging/assets/icon.icns"
     },
     "win": {
       "target": [
@@ -64,7 +69,8 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "icon": "../packaging/assets/icon.ico"
     },
     "linux": {
       "target": [
@@ -76,7 +82,8 @@
           "from": "../dist/runtime",
           "to": "runtime"
         }
-      ]
+      ],
+      "icon": "../packaging/assets/icon.png"
     },
     "nsis": {
       "oneClick": false,
