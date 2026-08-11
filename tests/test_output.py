@@ -216,11 +216,13 @@ def test_write_frame_cursor_left_no_clear_to_eol():
 
 
 def test_write_frame_spacer_tail_overwrites_stale_char():
-    """SPACER_TAIL over a stale ASCII char writes a space.
+    """SPACER_TAIL over a stale ASCII char needs no explicit space.
 
     "hello world" → "hello 世": cell 7 was 'o', now holds the SPACER_TAIL of
-    the wide char 世. The spacer's second column is inherently empty, so
-    writing a space clears the stale 'o' without breaking the wide glyph.
+    the wide char 世. The WIDE glyph advances the terminal cursor 2 columns
+    and its 2nd column inherently covers the stale 'o' — writing an extra
+    space would land one column PAST the spacer (cursor is at x+2, not x+1)
+    and shift subsequent characters (review 2026-08-11, off-by-one).
     """
     pool = _pool()
     diffs = [
@@ -233,8 +235,7 @@ def test_write_frame_spacer_tail_overwrites_stale_char():
     ]
     out = write_frame(diffs, style_pool=pool)
     assert "\x1b[0K" not in out
-    assert "世" in out  # the wide char is written
-    assert " " in out  # the stale 'o' at the spacer position is covered
+    assert out == "\x1b[1;7H世"  # wide glyph alone covers the stale 'o'
 
 
 def test_write_frame_spacer_tail_empty_prev_emits_nothing():

@@ -299,20 +299,14 @@ def write_frame(
         if not is_spacer:
             parts.append(curr_char if curr_char else " ")
             has_output = True
-        elif (prev_char := getattr(prev, "char", "")) and int(getattr(prev, "width", 0)) != 2:
-            # SPACER_TAIL precise handling (rant 2026-08-11T19:59:09): a wide
-            # char's second terminal column is inherently empty, so writing a
-            # space there only clears the previous cell's stale glyph (e.g. an
-            # ASCII char replaced by a wide char). This replaces the old
-            # whole-row CLEAR_TO_EOL cleanup that erased unchanged cells to
-            # the right of the last changed cell — the bug that made chars
-            # disappear when the cursor moved left in the composer.
-            parts.append(" ")
-            has_output = True
-            # After writing the space the terminal cursor sits one column past
-            # the spacer — sync last_x so subsequent diff positioning stays
-            # correct.
-            last_x = x
+        # SPACER_TAIL cells need no output: a wide char advances the terminal
+        # cursor 2 columns, and its 2nd column inherently covers any stale glyph
+        # from the previous frame. Wide-char removal is handled by the
+        # inline-shrink path (prev char → curr empty) which writes a space
+        # through the normal branch above (rant 2026-08-11T19:59:09 / review
+        # 2026-08-11: an explicit space here would land one column PAST the
+        # spacer — the cursor is at x+2 after the WIDE cell, not x+1 — shifting
+        # chars after CJK insertions).
 
     if sync:
         parts.append(CURSOR_SHOW)
