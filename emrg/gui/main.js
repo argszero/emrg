@@ -559,11 +559,17 @@ vision = false
       return { authenticated: Boolean(frame.authenticated), user: frame.user || null };
     });
 
-    ipcMain.handle("emrg:updateCheck", async () => {
+    ipcMain.handle("emrg:updateCheck", async (_e, { force } = {}) => {
       // Auto update-check prompt (rant 2026-08-10T07:12:12): query daemon's
       // cached latest release; display-only, no auto download/install.
+      // force=true (rant 2026-08-11T09:18:16): settings manual check button
+      // — daemon runs a fresh GitHub fetch instead of returning the cache.
       try {
-        const frame = await requireConn().sendCommandAndWait("update_check", {}, 10000);
+        const frame = await requireConn().sendCommandAndWait(
+          "update_check",
+          { force: Boolean(force) },
+          10000,
+        );
         return {
           current_version: frame.current_version || "",
           latest_version: frame.latest_version || "",

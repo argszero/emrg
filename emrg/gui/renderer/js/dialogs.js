@@ -234,6 +234,8 @@ const Dialogs = (() => {
       await refreshGithubStatus();
       // Auto update-check prompt (rant 2026-08-10T07:12:12): about area shows
       // a one-time non-intrusive line when a newer release exists.
+      // rant 2026-08-11T09:18:16：手动"检查更新"按钮（force 重新检查）
+      initUpdateCheckButton();
       await refreshUpdateCheck();
     } catch (e) {
       Chat.addSystemMessage(_t("settings.readFailed", { msg: e.message }));
@@ -490,19 +492,23 @@ const Dialogs = (() => {
 
   // Auto update-check prompt (rant 2026-08-10T07:12:12): display-only, one
   // line in the about area, never a modal — no auto download/install.
-  async function refreshUpdateCheck() {
-    const el = $("about-update");
-    if (!el) return; // 元素缺失（测试桩）时忽略
+  // force (rant 2026-08-11T09:18:16): settings manual check button — run a
+  // fresh GitHub fetch instead of returning the daemon's cached result.
+  // ⚠️ 局部变量命名 updEl（勿用 el——会遮蔽模块级 el() 元素工厂，el("a",…)
+  // 抛 TypeError → catch 吞掉 → 更新行永远 hidden，正是 #602 隐藏缺陷）
+  async function refreshUpdateCheck({ force = false } = {}) {
+    const updEl = $("about-update");
+    if (!updEl) return; // 元素缺失（测试桩）时忽略
     try {
-      const u = await window.emrg.updateCheck();
+      const u = await window.emrg.updateCheck({ force });
       if (!u || !u.enabled || !u.has_update || !u.latest_version) {
-        el.classList.add("hidden");
-        el.textContent = "";
+        updEl.classList.add("hidden");
+        updEl.textContent = "";
         return;
       }
       if (u.latest_version === u.prompted_version) {
-        el.classList.add("hidden");
-        el.textContent = "";
+        updEl.classList.add("hidden");
+        updEl.textContent = "";
         return;
       }
       const link = el("a", {
@@ -510,15 +516,49 @@ const Dialogs = (() => {
         target: "_blank",
         rel: "noopener",
       }, _t("settings.updateAvailable", { latest: u.latest_version }));
-      el.textContent = "";
-      el.appendChild(link);
-      el.classList.remove("hidden");
+      updEl.textContent = "";
+      updEl.appendChild(link);
+      updEl.classList.remove("hidden");
       // 幂等：同版本只提示一次
       try { await window.emrg.updateCheckPrompted({ version: u.latest_version }); } catch { /* ignore */ }
     } catch {
-      el.classList.add("hidden");
-      el.textContent = "";
+      updEl.classList.add("hidden");
+      updEl.textContent = "";
     }
+  }
+
+  // 设置页"检查更新"手动按钮（rant 2026-08-11T09:18:16）：点击立即强制
+  // 重新检查（不等 TTL 轮询），检查中显示"检查中…"，完成后恢复按钮。
+  function initUpdateCheckButton() {
+    const btn = $("about-update-check-btn");
+    if (!btn) return; // 元素缺失（测试桩）时忽略
+    btn.addEventListener("click", async () => {
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = _t("settings.checkingUpdate");
+      try {
+        await refreshUpdateCheck({ force: true });
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    });
+  }
+
+  // 启动主动更新提示（rant 2026-08-11T09:18:16）：GUI 启动成功路径调用，
+  // 不依赖打开设置对话框——有新版本且未提示过时输出一条非阻塞系统消息
+  // （对齐 TUI 启动 system 行）。boot 时 daemon 可能未就绪 → 静默失败。
+  async function promptUpdateAtStartup() {
+    try {
+      const u = await window.emrg.updateCheck({ force: false });
+      if (!u || !u.enabled || !u.has_update || !u.latest_version) return;
+      if (u.latest_version === u.prompted_version) return;
+      Chat.addSystemMessage(
+        _t("app.updateAvailable", { latest: u.latest_version }),
+      );
+      // 幂等：同版本只提示一次
+      try { await window.emrg.updateCheckPrompted({ version: u.latest_version }); } catch { /* ignore */ }
+    } catch { /* boot-time daemon may not be ready — silent */ }
   }
 
   // ── 确认对话框（替代 confirm/alert） ────
@@ -730,6 +770,9 @@ const Dialogs = (() => {
     initGithubSection,
     initDeviceDialog,
     refreshGithubStatus,
+    refreshUpdateCheck,
+    initUpdateCheckButton,
+    promptUpdateAtStartup,
     initOpenSessionDialog, // P5：打开会话对话框初始化
     showOpenSessionDialog, // P5：两步打开会话
     initNewSessionDialog, // P5 slice 2：新建会话对话框初始化
