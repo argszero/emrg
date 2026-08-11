@@ -39,6 +39,18 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_in_order():
     # 顺序：GUI 在 daemon 之前（GUI 不能复活 daemon）
     daemon_line = content.index('call "%INSTALL%\\bin\\emrg.cmd" server stop')
     assert content.index("taskkill /IM EMRG.exe") < daemon_line
+    # step 4（rant 2026-08-11T17:56:25）：按可执行文件路径杀 bundled git 孤儿
+    # （daemon 演化周期 git 操作中途被杀 → git/ssh/bash 孤儿锁 msys-2.0.dll → Inno
+    # DeleteFile code 5）。判别：ExecutablePath 前缀过滤只命中 %INSTALL%\git\，
+    # 不误杀系统 Git；daemon 停止之后、:verify 之前。
+    assert 'Get-CimInstance Win32_Process' in content
+    assert r'$env:USERPROFILE\.emrg\install\git\*' in content
+    # 锚定实际 kill 命令（$_.ExecutablePath 只在 step 4 出现——TUI 分支是
+    # -Filter Name='python.exe'，不共享此模式），勿用 index() 撞到 TUI/REM 注释
+    git_kill = content.index("$_.ExecutablePath -like")
+    daemon_line2 = content.index('call "%INSTALL%\\bin\\emrg.cmd" server stop')
+    verify_idx = content.index(':verify\nset "EXIT_CODE=0"')  # 标签定义处（goto :verify 在前，勿用裸 index(":verify")）
+    assert daemon_line2 < git_kill < verify_idx
     # 干净安装安全：无旧 install 目录时跳过
     assert 'set "INSTALL=%EMRG_DIR%\\install"' in content
     # 括号块内 pid 判定必须用延迟展开（!DPID!）——%DPID% 在块解析时展开，
@@ -50,6 +62,10 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_in_order():
     assert "PID eq !DPID!" in verify_block
     # 非延迟展开 %DPID% 不得出现在括号块内（块解析时展开=恒旧值）
     assert "%DPID%" not in verify_block
+    # :verify 的 bundled-git 存活判定：仍有进程在 install\git\ 下 → exit 1
+    assert "exit 1" in verify_block
+    assert r'ExecutablePath -like \"$env:USERPROFILE\.emrg\install\git\*\"' in verify_block
+    assert "if errorlevel 1 set \"EXIT_CODE=1\"" in verify_block
 
 
 def test_emrgd_cmd_has_stop_branch():
@@ -66,6 +82,8 @@ def test_make_installer_iss_has_prepare_to_install():
     assert "PrepareToInstall" in content
     assert "ExtractTemporaryFile('stop-emrg.cmd')" in content
     assert "SW_HIDE" in content  # 批处理执行不弹控制台窗口（#592 纪律）
+    # rant 2026-08-11T17:56:25：中止消息含重启兜底引导（杀不掉时宿主可重启后重试）
+    assert "restart the computer" in content
 
 
 def test_build_runtime_copies_stop_emrg_cmd():
