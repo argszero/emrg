@@ -19,6 +19,9 @@ const App = (() => {
     // （defineProperty getter/setter → sidState(sessionId)），既有调用点零改动；
     // 事件按 sid 路由时操作对应条目（后台会话的 done 不误清激活会话的 busy）。
     sessionsBySid: new Map(), // sid → { busy, ownStreamRequestId, mode, autoScroll }
+    // P2 queue-injection（#655）：busy 时发送的消息入 daemon 队列（task_queued），
+    // 此处按会话记录以便 queued_requeue 以原 requestId 重发（不重加用户行）。
+    queuedSends: new Map(), // sid → [{ requestId, text, mode }]
     // P4 slice 2（rant 15:07:19）：跨项目打开的会话（侧边栏数据源，main 广播）
     openSessions: [], // [{ sid, projectName, projectPath, lastActive }]，lastActive 倒序
     apiKeyConfigured: false,
@@ -133,7 +136,7 @@ const App = (() => {
   async function sendMessage() {
     const input = $("input");
     const text = input.value.trim();
-    if (!text || state.busy) return;
+    if (!text) return;
     // GUI / 指令（rant 19:44 P1）：/ 开头 → 路由到指令 handler，不走 sendMessage
     const parsed = Commands.parseInput(text);
     if (parsed.type !== "message") {
@@ -147,6 +150,9 @@ const App = (() => {
       Chat.addSystemMessage(_t("app.needSession"));
       return;
     }
+    // P2 queue-injection（#655）：busy 不再拦截——daemon 排队注入（task_queued），
+    // 回合结束未注入则 queued_requeue 以原 requestId 重发。busy 时记录待重发条目。
+    const wasBusy = state.busy;
     state.busy = true;
     setComposerDisabled(true);
     Chat.addUserMessage(text);
@@ -157,6 +163,11 @@ const App = (() => {
     // G143：send 前预生成 requestId 并标记自有流——消除 IPC 往返竞态窗口
     const requestId = genRequestId();
     state.ownStreamRequestId = requestId;
+    if (wasBusy) {
+      const sid = state.sessionId;
+      if (!state.queuedSends.has(sid)) state.queuedSends.set(sid, []);
+      state.queuedSends.get(sid).push({ requestId, text, mode: state.mode });
+    }
     try {
       const res = await window.emrg.sendMessage({ sessionId: state.sessionId, text, requestId, mode: state.mode });
       state.ownStreamRequestId = res.requestId || requestId; // G124：以 daemon 回显为准
@@ -1194,6 +1205,68 @@ const App = (() => {
           if (!sid || sid === state.sessionId) setComposerDisabled(false);
         }
         break;
+      // P2 queue-injection（#655）：4 个 daemon→client 广播帧（busy 排队注入协议）
+      case "task_queued":
+        Chat.addSystemMessage(_t("app.queued", { pos: data.position || 0 }), sid);
+        break;
+      case "steer_committed":
+        // 已注入当前回合——从待重发记录移除（回合内 deltas 会带上原 turn 的回复）
+        {
+          const q = state.queuedSends.get(sid);
+          if (q && data.request_id) {
+            const idx = q.findIndex((e) => e.requestId === data.request_id);
+            if (idx >= 0) q.splice(idx, 1);
+            if (q.length === 0) state.queuedSends.delete(sid);
+          }
+        }
+        break;
+      case "queued_requeue":
+        // 回合正常结束且消息从未注入——daemon 锁已释放，以原 requestId 静默重发
+        // （不重加用户行；后台会话按 sid 处理，只操作该会话条目）
+        {
+          const q = state.queuedSends.get(sid);
+          if (q && q.length) {
+            const ids = new Set(data.request_ids || []);
+            const toResend = q.filter((e) => ids.has(e.requestId));
+            const remaining = q.filter((e) => !ids.has(e.requestId));
+            if (toResend.length) {
+              // P2 审查 ❌ 同 #695：was_busy 在循环前捕获，单客户端时首条重发
+              // 开启新回合，M2+ 到达时 daemon busy 被再排队但客户端未跟踪 → 下个
+              // queued_requeue 找不到 → 静默丢失。修复=每条重发若 (wasBusy || i>0)
+              // 重新跟踪——steer_committed 移除已注入的，下个 queued_requeue 重发
+              // 其余，收敛。
+              const wasBusy = sidState(sid).busy;
+              for (let i = 0; i < toResend.length; i++) {
+                const item = toResend[i];
+                const sst = sidState(sid);
+                sst.busy = true;
+                sst.ownStreamRequestId = item.requestId;
+                if (!sid || sid === state.sessionId) setComposerDisabled(true);
+                try {
+                  const res = await window.emrg.sendMessage({ sessionId: sid, text: item.text, requestId: item.requestId, mode: item.mode });
+                  sst.ownStreamRequestId = res.requestId || item.requestId;
+                } catch (e) {
+                  sst.busy = false;
+                  sst.ownStreamRequestId = null;
+                  if (!sid || sid === state.sessionId) setComposerDisabled(false);
+                }
+                if (wasBusy || i > 0) {
+                  remaining.push({ requestId: item.requestId, text: item.text, mode: item.mode });
+                }
+              }
+              if (remaining.length) state.queuedSends.set(sid, remaining);
+              else state.queuedSends.delete(sid);
+              Chat.addSystemMessage(_t("app.queuedResent", { n: toResend.length }), sid);
+            }
+          }
+        }
+        break;
+      case "queued_cancelled":
+        // 回合被取消/异常/断连——daemon 丢弃队列
+        if (state.queuedSends.delete(sid)) {
+          Chat.addSystemMessage(_t("app.queuedCancelled"), sid);
+        }
+        break;
       case "error":
         handleError(data, sid);
         break;
@@ -1225,6 +1298,7 @@ const App = (() => {
           sst.busy = false;
           sst.ownStreamRequestId = null;
           sst.disconnected = true; // P3 finalize：该会话条目标断线（P4 恢复 UI 用）
+          state.queuedSends.delete(sid); // P2 queue-injection：断连 daemon 丢队列
           const isActive = !sid || sid === state.sessionId;
           if (isActive) {
             updateConnectionDot("red");
