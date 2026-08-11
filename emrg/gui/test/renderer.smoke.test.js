@@ -1025,6 +1025,45 @@ test("P2 框架：per-session Tab 状态隔离（切会话各显各的）", asyn
   assert.ok(els["result-tabbar"].children[0].classList.contains("active"), "s1 的激活 Tab 应保留");
 });
 
+test("P2 框架：后台会话 tool_finished 只入桶不渲染（防污染激活 pane）", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
+  // 后台会话 s2 的 tool_finished → 只入桶不渲染
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "write", content: "Wrote file: /bg.txt", elapsed: 0.2 }, "s2")', ctx);
+  assert.strictEqual(vm.runInContext('document.getElementById("result-list").children.length', ctx), 0, "后台会话产物不得渲染到激活 pane");
+  // 激活会话 s1 的 tool_finished → 渲染
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "write", content: "Wrote file: /active.txt", elapsed: 0.3 }, "s1")', ctx);
+  assert.strictEqual(vm.runInContext('document.getElementById("result-list").children.length', ctx), 1, "激活会话产物应渲染");
+});
+
+test("P2 框架：switchSession 按 sid 重渲染产物 pane（桶→DOM 恢复）", async () => {
+  const { ctx } = makeSandbox();
+  await tick();
+  // 两会话各自登记（初始非激活 → 只入桶）
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "bash", content: "s1-out", elapsed: 0.1 }, "s1")', ctx);
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "bash", content: "s2-out", elapsed: 0.2 }, "s2")', ctx);
+  // 递归收集 list 文本（mock 元素 textContent 是属性，不入 innerHTML）
+  const collectText = `(function(){
+    function collect(node) {
+      let out = node.textContent || "";
+      for (const c of node.children || []) out += collect(c);
+      return out;
+    }
+    return collect(document.getElementById("result-list"));
+  })()`;
+  // 切到 s2 → pane 只显示 s2 的记录
+  await vm.runInContext('ResultPanel.switchSession("s2")', ctx);
+  const text2 = vm.runInContext(collectText, ctx);
+  assert.ok(String(text2).includes("s2-out"), "s2 pane 应显示 s2 产物");
+  assert.ok(!String(text2).includes("s1-out"), "s2 pane 不得显示 s1 产物");
+  // 切回 s1 → pane 只显示 s1 的记录（s2 卡片不残留）
+  await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
+  const text1 = vm.runInContext(collectText, ctx);
+  assert.ok(String(text1).includes("s1-out"), "s1 pane 应显示 s1 产物");
+  assert.ok(!String(text1).includes("s2-out"), "s1 pane 不得显示 s2 产物");
+});
+
 test("工具调用上限中断 → 系统提示可继续（对齐 TUI，跨项目教训）", async () => {
   const { ctx, els } = makeSandbox({});
   await tick();
