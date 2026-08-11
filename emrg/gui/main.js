@@ -56,10 +56,22 @@ function main() {
 
   // ── 窗口 ────────────────────────────────────────────────
 
+  // rant 2026-08-11T17:37:03：打包版曾用 Electron 默认图标（蓝色原子球）。
+  // package.json build.mac/win/linux.icon 显式指向 packaging/assets 单文件修复主图标；
+  // 这里为 Windows/Linux 窗口标题栏提供运行时图标（打包版经 extraResources 落到 resources/icon.png）。
+  function windowIconPath() {
+    const candidates = [
+      path.join(__dirname, "..", "icon.png"), // packaged: resources/icon.png（extraResources）
+      path.join(__dirname, "..", "packaging", "assets", "icon.png"), // source: 仓库 packaging/assets/icon.png
+    ];
+    return candidates.find((p) => fs.existsSync(p)) || undefined;
+  }
+
   function createWindow() {
     win = new BrowserWindow({
       width: 1000,
       height: 700,
+      icon: windowIconPath(),
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
