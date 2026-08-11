@@ -414,13 +414,20 @@ async def interactive(init_auto_evolve: bool = False):
                         _request_start = time.time()
                         if _elapsed_task is None:
                             _elapsed_task = asyncio.create_task(_run_elapsed_timer())
-                        for q in to_resend:
+                        for i, q in enumerate(to_resend):
                             rid = await conn.send_task(
                                 session_id=session_id, cwd=cwd, prompt=q["prompt"],
                                 images=q.get("images"), id=q["id"],
                             )
-                            if was_busy:
-                                # A turn slipped in between — daemon re-queues.
+                            # Track every re-sent message the daemon will queue:
+                            # re-send #1 starts a new turn (busy=True above), so
+                            # re-sends #2+ arrive while busy and get queued
+                            # daemon-side (task_queued) — untracked they would be
+                            # silently lost at the next queued_requeue. Also
+                            # track all re-sends when a turn was already running
+                            # (multi-client). steer_committed removes ids that
+                            # get injected mid-turn, so the loop converges.
+                            if was_busy or i > 0:
                                 _queued_sends.append({"id": rid, "prompt": q["prompt"], "images": q.get("images")})
                         chat.add("system", f"→ Re-sending {len(to_resend)} queued message(s).")
                         chat.dirty = True; term.render()
