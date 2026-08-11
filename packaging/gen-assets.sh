@@ -36,6 +36,11 @@ render_svg_to_png() {
     return 0
   fi
   # 2) Chrome/Chromium headless --screenshot (full filter support)
+  # Windows (Git Bash): convert /c/... → file:///C:/... so Chrome resolves the URL.
+  SVG_URL="file://$SVG"
+  if command -v cygpath >/dev/null 2>&1; then
+    SVG_URL="file:///$(cygpath -m "$SVG")"
+  fi
   for chrome in \
     "${CHROME_BIN:-}" \
     "google-chrome" "google-chrome-stable" "chromium" "chromium-browser" \
@@ -47,7 +52,7 @@ render_svg_to_png() {
       echo "    renderer: $chrome (headless)"
       "$chrome" --headless --disable-gpu --hide-scrollbars \
         --screenshot="$OUT/icon.png" --window-size=1024,1024 \
-        --default-background-color=00000000 "file://$SVG" >/dev/null 2>&1
+        --default-background-color=00000000 "$SVG_URL" >/dev/null 2>&1
       return 0
     fi
   done
