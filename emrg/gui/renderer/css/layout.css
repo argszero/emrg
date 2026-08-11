@@ -550,6 +550,33 @@ body.sidebar-collapsed #app {
   white-space: pre;
   color: var(--text-1);
 }
+/* P3.3：查看器图片直显 + md 渲染 */
+.viewer-img {
+  flex: 1;
+  object-fit: contain;
+  max-width: 100%;
+  padding: var(--sp-3);
+  box-sizing: border-box;
+}
+.viewer-md {
+  flex: 1;
+  overflow: auto;
+  padding: var(--sp-3);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+  color: var(--text-1);
+}
+.viewer-md h1, .viewer-md h2, .viewer-md h3 { margin: var(--sp-2) 0; }
+.viewer-md code {
+  background: var(--bg-soft);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.viewer-md pre code {
+  display: block;
+  padding: var(--sp-3);
+  overflow-x: auto;
+}
 
 /* ── P3.2：产物文件行（write/edit 成功文件，点击打开查看器 Tab） ── */
 .artifact-row {
