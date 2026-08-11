@@ -551,6 +551,40 @@ body.sidebar-collapsed #app {
   color: var(--text-1);
 }
 
+/* ── P3.2：产物文件行（write/edit 成功文件，点击打开查看器 Tab） ── */
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: pointer;
+  overflow: hidden;
+}
+.artifact-row:hover {
+  border-color: var(--accent);
+  background: var(--bg-soft);
+}
+.artifact-name {
+  font-size: var(--fs-secondary);
+  font-weight: 600;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+  max-width: 55%;
+}
+.artifact-rel {
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .result-list {
   flex: 1;
   overflow-y: auto;

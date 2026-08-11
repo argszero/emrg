@@ -886,30 +886,30 @@ test("对话列表键盘导航：输入控件内不劫持（e.target 守卫，te
   assert.ok(src.includes("e.target.closest"), "应使用 e.target 守卫");
 });
 
-test("WorkBuddy P1：tool_finished → 产物卡片登记到结果面板", async () => {
+test("P3.2：tool_finished 只登记 write/edit 成功文件（bash 不登记）", async () => {
   const { ctx, els } = makeSandbox();
   await tick();
   // 空状态
   const empty = vm.runInContext('document.getElementById("result-list").innerHTML', ctx);
   assert.ok(String(empty).includes("还没有产物"), "应有空状态占位");
-  // tool_finished → ResultPanel.addToolResult
+  // write 成功 → 产物行登记（提取 /tmp/hello.py）
   await vm.runInContext(`
-    ResultPanel.addToolResult({ tool_call_id: "t1", tool_name: "write", content: "Wrote file: /tmp/hello.py\\nHello", elapsed: 0.5 });
+    ResultPanel.addToolResult({ tool_call_id: "t1", tool_name: "write", content: "Created /tmp/hello.py (12 characters)", elapsed: 0.5 });
   `, ctx);
   const items = vm.runInContext('document.getElementById("result-list").children.length', ctx);
-  assert.ok(items >= 1, `应登记产物卡片，实际 ${items}`);
-  // write 输出中的文件路径被识别（卡片 children 中含 .result-file）
-  const hasFile = vm.runInContext(`
-    (function(){
-      const list = document.getElementById("result-list");
-      for (const c of list.children) {
-        if (c.className && c.className.includes("result-file")) return true;
-        if (c.children) for (const g of c.children) if (g.className && g.className.includes("result-file")) return true;
-      }
-      return false;
-    })()
+  assert.strictEqual(items, 1, "write 成功应登记 1 条产物");
+  const rowPath = vm.runInContext('document.getElementById("result-list").children[0].dataset.path', ctx);
+  assert.strictEqual(rowPath, "/tmp/hello.py", "产物行应带提取的路径");
+  // bash 工具 → 不登记（决策点 3：产物 Tab 只留 write/edit 文件）
+  await vm.runInContext(`
+    ResultPanel.addToolResult({ tool_call_id: "t2", tool_name: "bash", content: "ls output here", elapsed: 0.3 });
   `, ctx);
-  assert.ok(hasFile, "write 产物应显示文件条目");
+  assert.strictEqual(vm.runInContext('document.getElementById("result-list").children.length', ctx), 1, "bash 工具不得登记为产物");
+  // 失败产物 → 不登记
+  await vm.runInContext(`
+    ResultPanel.addToolResult({ tool_call_id: "t3", tool_name: "write", content: "Error writing file: /x.py", error: true });
+  `, ctx);
+  assert.strictEqual(vm.runInContext('document.getElementById("result-list").children.length', ctx), 1, "失败产物不得登记");
 });
 
 test("WorkBuddy P1：ResultPanel 折叠切换（⌘\ 与按钮）", async () => {
@@ -1051,9 +1051,9 @@ test("P2 框架：后台会话 tool_finished 只入桶不渲染（防污染激�
 test("P2 框架：switchSession 按 sid 重渲染产物 pane（桶→DOM 恢复）", async () => {
   const { ctx } = makeSandbox();
   await tick();
-  // 两会话各自登记（初始非激活 → 只入桶）
-  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "bash", content: "s1-out", elapsed: 0.1 }, "s1")', ctx);
-  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "bash", content: "s2-out", elapsed: 0.2 }, "s2")', ctx);
+  // 两会话各自登记（初始非激活 → 只入桶；P3.2 只登记 write/edit 文件）
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "write", content: "Created /p1/a.py (5 characters)", elapsed: 0.1 }, "s1")', ctx);
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "write", content: "Created /p2/b.py (5 characters)", elapsed: 0.2 }, "s2")', ctx);
   // 递归收集 list 文本（mock 元素 textContent 是属性，不入 innerHTML）
   const collectText = `(function(){
     function collect(node) {
@@ -1066,13 +1066,48 @@ test("P2 框架：switchSession 按 sid 重渲染产物 pane（桶→DOM 恢复�
   // 切到 s2 → pane 只显示 s2 的记录
   await vm.runInContext('ResultPanel.switchSession("s2")', ctx);
   const text2 = vm.runInContext(collectText, ctx);
-  assert.ok(String(text2).includes("s2-out"), "s2 pane 应显示 s2 产物");
-  assert.ok(!String(text2).includes("s1-out"), "s2 pane 不得显示 s1 产物");
+  assert.ok(String(text2).includes("/p2/b.py"), "s2 pane 应显示 s2 产物");
+  assert.ok(!String(text2).includes("/p1/a.py"), "s2 pane 不得显示 s1 产物");
   // 切回 s1 → pane 只显示 s1 的记录（s2 卡片不残留）
   await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
   const text1 = vm.runInContext(collectText, ctx);
-  assert.ok(String(text1).includes("s1-out"), "s1 pane 应显示 s1 产物");
-  assert.ok(!String(text1).includes("s2-out"), "s1 pane 不得显示 s2 产物");
+  assert.ok(String(text1).includes("/p1/a.py"), "s1 pane 应显示 s1 产物");
+  assert.ok(!String(text1).includes("/p2/b.py"), "s1 pane 不得显示 s2 产物");
+});
+
+test("P3.2：同路径去重（更新既有条目移顶）+ per-session 上限 100", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "write", content: "Created /a.py (5 characters)", elapsed: 0.1 }, "s1")', ctx);
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "write", content: "Created /b.py (5 characters)", elapsed: 0.2 }, "s1")', ctx);
+  // 同路径再写 → 去重（2 条，/a.py 移到顶部）
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "write", content: "Created /a.py (9 characters)", elapsed: 0.3 }, "s1")', ctx);
+  const paths = vm.runInContext(`
+    (function(){ return [...document.getElementById("result-list").children].map(c => c.dataset.path); })()
+  `, ctx);
+  // vm 跨 realm 数组原型不同 → deepStrictEqual 失败；用 join 比较
+  assert.strictEqual(paths.join(","), "/a.py,/b.py", "同路径去重并移顶");
+  // 上限 100：填满后最旧被淘汰
+  for (let i = 0; i < 105; i++) {
+    await vm.runInContext(`ResultPanel.addToolResult({ tool_name: "write", content: "Created /f${i}.py (5 characters)", elapsed: 0.1 }, "s1")`, ctx);
+  }
+  const n = vm.runInContext('document.getElementById("result-list").children.length', ctx);
+  assert.ok(n <= 100, `per-session 上限 100，实际 ${n}`);
+});
+
+test("P3.2：无扩展名文件（Makefile/.env）提取 + 点击产物行打开查看器 Tab", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
+  // edit 输出 "Made 1 replacement in /proj/Makefile"（无扩展名也命中）
+  await vm.runInContext('ResultPanel.addToolResult({ tool_name: "edit", content: "Made 1 replacement in /proj/Makefile", elapsed: 0.2 }, "s1")', ctx);
+  const row = vm.runInContext('document.getElementById("result-list").children[0]', ctx);
+  assert.strictEqual(row.dataset.path, "/proj/Makefile", "无扩展名文件应提取");
+  // 点击 → 打开查看器 Tab（P2.2 框架）
+  row.click();
+  await tick();
+  assert.ok([...els["result-tabbar"].children].some((c) => c.dataset.path === "/proj/Makefile"), "点击产物行应打开查看器 Tab");
 });
 
 test("P3：文件树渲染根 + 根自动展开懒加载", async () => {

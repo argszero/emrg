@@ -10,8 +10,9 @@
  *   - per-session 容器状态（openedTabsBySid / artifactsBySid / activeTabBySid），
  *     切换会话隔离（缺口 5；对齐 app.js ensureSessionView 容器模式）
  *   - 拖拽期间 #result-panel.dragging 抑制 width transition（R1-①）
- * 产物卡片（WorkBuddy P1）暂保留在「产物」pane 内——P3.2 再改为 write/edit 文件登记，
- * 避免框架先于内容上线导致面板空窗。
+ * P3.2（PR #668）：产物 Tab 改为只登记 write/edit 成功文件（去重按 path、per-session 上限
+ * 100、点击打开查看器 Tab）；extractFilePath 改进（优先首个绝对路径段，去扩展名依赖 R4-①）；
+ * 移除工具输出卡片模式（决策点 3——bash/read 工具卡不再显示）。
  */
 
 const ResultPanel = (() => {
@@ -259,7 +260,7 @@ const ResultPanel = (() => {
     renderArtifacts(); // 产物 pane 按当前会话桶恢复（后台 tool_finished 只入桶不渲染）
   }
 
-  // ── 产物登记（P1 卡片渲染保留；P3.2 改 write/edit 文件登记） ──
+  // ── 产物登记（P3.2：只登记 write/edit 成功文件，per-session 去重，点击打开查看器 Tab） ──
   function renderEmpty() {
     const list = listEl();
     if (!list) return;
@@ -268,20 +269,34 @@ const ResultPanel = (() => {
     }
   }
 
-  /** 登记一个产物条目（tool_finished 事件；sid = 事件桥会话，P3.2 消费） */
+  /**
+   * 登记一个产物（tool_finished 事件；sid = 事件桥会话）。
+   * P3.2：只登记 write/edit 成功且提取到路径的文件（bash/read 工具卡不再显示）；
+   * 同路径去重（更新既有条目移顶）；per-session 上限 100（决策点 3 / R7-⑦）。
+   */
   function addToolResult(data, sid) {
-    const arr = artifactsFor(sid || currentSid);
-    const record = {
-      tool_name: data.tool_name || "tool",
-      content: String(data.content || ""),
-      error: !!data.error,
+    if (data.error) return; // 只登记成功产物
+    const tool = data.tool_name || "";
+    if (tool !== "write" && tool !== "edit") return; // 只留 write/edit 文件
+    const content = String(data.content || "");
+    const path = extractFilePath(tool, content);
+    if (!path) return;
+    const key = sid || currentSid;
+    const arr = artifactsFor(key);
+    const rec = {
+      path,
+      name: String(path).split(/[\\/]/).pop() || path,
+      tool_name: tool,
       elapsed: data.elapsed,
     };
-    arr.unshift(record);
+    // 去重：同路径更新既有条目并移顶
+    const idx = arr.findIndex((r) => r.path === path);
+    if (idx >= 0) arr.splice(idx, 1);
+    arr.unshift(rec);
     if (arr.length > 100) arr.pop();
     // 后台会话：只入桶不渲染（防污染激活会话产物 pane；切回时由 renderArtifacts 恢复）
-    if ((sid || null) !== currentSid) return;
-    renderCard(record);
+    if ((key || null) !== currentSid) return;
+    renderArtifacts();
   }
 
   /** 按当前会话桶重渲染产物 pane（switchSession/init 时从桶恢复 DOM，镜像 renderTabbar 模式） */
@@ -291,91 +306,35 @@ const ResultPanel = (() => {
     list.innerHTML = "";
     const arr = artifactsFor(currentSid);
     if (arr.length === 0) { renderEmpty(); return; }
-    for (const rec of arr.slice(0, MAX_ITEMS)) renderCard(rec);
+    for (const rec of arr.slice(0, MAX_ITEMS)) renderArtifactRow(rec);
   }
 
-  function renderCard(data) {
+  /** 产物行：文件名 + 相对路径；点击 → 打开查看器 Tab（P3.2，系统工具在查看器头部） */
+  function renderArtifactRow(rec) {
     const list = listEl();
     if (!list) return;
-    // 空状态占位清除
-    const empty = list.querySelector(".result-empty");
-    if (empty) empty.remove();
-
-    const card = el("div", { class: "result-item" });
-
-    // 标题行：工具名 + 耗时
-    const head = el("div", { class: "result-head" });
-    const name = el("span", { class: "result-tool" }, data.tool_name || "tool");
-    head.appendChild(name);
-    if (data.elapsed !== undefined) {
-      head.appendChild(el("span", { class: "result-elapsed" }, `${data.elapsed.toFixed(1)}s`));
-    }
-    head.appendChild(el("span", { class: "result-chevron" }, "⌄"));
-    card.appendChild(head);
-
-    const ok = !data.error;
-    card.classList.add(ok ? "done" : "failed");
-
-    // 尝试提取文件路径（write/bash 输出中的生成文件）
-    const content = String(data.content || "");
-    const filePath = extractFilePath(data.tool_name, content);
-
-    if (filePath) {
-      // 文件条目：点击打开
-      const fileRow = el("div", { class: "result-file" });
-      const namePart = el("span", { class: "result-filename" }, filePath.split(/[\\/]/).pop());
-      fileRow.appendChild(namePart);
-      fileRow.addEventListener("click", async () => {
-        const res = await window.emrg.openFile({ filePath });
-        if (res && res.ok === false) {
-          // 打开失败提示（文件可能已删除）
-          fileRow.title = res.error || (window.EMRG_I18N ? window.EMRG_I18N.t("panel.openFailed") : "无法打开文件");
-        }
-      });
-      card.appendChild(fileRow);
-    }
-
-    // 内容摘要（可展开）
-    const preview = content.slice(0, 200);
-    if (preview.trim()) {
-      const body = el("div", { class: "result-body hidden" }, preview);
-      card.appendChild(body);
-      // 复制按钮
-      const copyBtn = el("button", { class: "result-copy", type: "button" }, _t("chat.copyCode"));
-      copyBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        try {
-          navigator.clipboard.writeText(content).then(() => {
-            copyBtn.textContent = _t("panel.copied");
-            setTimeout(() => { copyBtn.textContent = _t("chat.copyCode"); }, 1500);
-          });
-        } catch { /* clipboard unavailable */ }
-      });
-      body.appendChild(copyBtn);
-      // 点击头部展开/收起
-      head.addEventListener("click", () => {
-        body.classList.toggle("hidden");
-        card.classList.toggle("expanded", !body.classList.contains("hidden"));
-      });
-    }
-
-    // 裁剪到 MAX_ITEMS
-    while (list.children.length >= MAX_ITEMS) {
-      list.removeChild(list.firstChild);
-    }
-    list.appendChild(card);
+    const row = el("div", { class: "artifact-row", dataset: { path: rec.path } });
+    const name = el("span", { class: "artifact-name" }, rec.name);
+    row.appendChild(name);
+    const rel = el("span", { class: "artifact-rel" }, rec.path);
+    row.appendChild(rel);
+    row.addEventListener("click", () => openFileTab(currentSid, rec.path));
+    list.appendChild(row);
   }
 
-  /** 从工具输出提取生成的文件路径（write 工具 / bash 中的 >> 重定向 / 路径模式） */
+  /** 从工具输出提取生成的文件路径（P3.2 改进 R4-①：优先首个绝对路径段，去扩展名依赖） */
   function extractFilePath(toolName, content) {
     if (!content) return "";
-    const lines = content.split("\n");
     if (toolName === "write" || toolName === "edit") {
-      // 常见格式：Wrote file: /path 或 /path/to/file.txt
-      const m = content.match(/(?:Wrote|wrote|Written|created|已写入|写入)[^\n:：]*[:：]\s*([^\s\n]+)/);
-      if (m) return cleanPath(m[1]);
-      const fm = content.match(/([^\s\n]+\/[^\s\n]+\.(?:py|js|ts|md|txt|json|yml|yaml|toml|sh|css|html|png|jpg|svg|log))/);
-      if (fm) return cleanPath(fm[1]);
+      // write: "Created /abs/path (N characters)" / "Updated /abs/path (N chars)"
+      // edit:  "Made 1 replacement in /abs/path" / "Made 3 replacements in /abs/path"
+      // 取首个 / 开头的绝对路径段（Makefile/.env/Dockerfile 等无扩展名文件也命中）
+      const m = content.match(/\/[^\s()]+/);
+      if (m) return cleanPath(m[0]);
+      // 兜底：旧关键词格式
+      const km = content.match(/(?:Wrote|wrote|Written|created|已写入|写入)[^\n:：]*[:：]\s*([^\s\n]+)/);
+      if (km) return cleanPath(km[1]);
+      return "";
     }
     if (toolName === "bash") {
       // bash 输出通常不带路径；带 "Created" 或重定向时尝试
