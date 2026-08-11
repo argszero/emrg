@@ -13,12 +13,13 @@ REM      fallback), excludes the daemon (pythonw.exe -m emrg.server)
 REM   3. daemon: `emrg server stop` protocol shutdown via the OLD install's CLI
 REM      (present since #364 -- version-safe), emrgd.pid poll (<=10s), then
 REM      taskkill /F /PID fallback
-REM   4. bundled git: kill ONLY EMRG-owned git/ssh/bash subprocess trees under
-REM      %INSTALL%\git\ (portable Git the daemon spawns for evolution-cycle ops).
-REM      Rant 2026-08-11T17:56:25: orphans hold msys-2.0.dll -> Inno code 5.
-REM      Rant 2026-08-11T18:56:58: blanket path kill also hit the HOST's Git Bash
-REM      sh/vim -> only EMRG trees (ancestor = daemon/TUI) are killed; host tools
-REM      are never touched (same class as R125).
+REM   4. bundled git: GUILT-BY-ASSOCIATION force-kill via stop-git.ps1
+REM      (host 2026-08-11T19:47:44 FINAL decision OVERRIDES #689: install success
+REM      has priority -- if sh/vim hold msys-2.0.dll and block the git-tree kill,
+REM      they are killed too; only the install\git\ prefix is touched, system Git
+REM      in Program Files is never affected). stop-git.ps1 is a standalone script
+REM      (no cmd inline-PowerShell quoting escapes). The installer passes the
+REM      {tmp}-extracted copy as %~1 when the OLD install lacks it.
 REM
 REM Returns 0 when nothing EMRG-related survives; 1 if a process could not be
 REM stopped (installer aborts with a clear message instead of hanging).
@@ -26,19 +27,7 @@ REM Safe on clean install: no old install dir -> everything is skipped -> 0.
 setlocal enabledelayedexpansion
 set "EMRG_DIR=%USERPROFILE%\.emrg"
 set "INSTALL=%EMRG_DIR%\install"
-REM PID snapshot file: EMRG-owned process tree captured BEFORE any kill, so dead
-REM parents are irrelevant (review 2026-08-11T19:03: ancestor walk cannot resolve
-REM dead daemon parents -- the #683 primary orphan case regresses).
-set "PIDFILE=%TEMP%\emrg-stop-pids.txt"
-del /q "%PIDFILE%" >nul 2>&1
-
-REM --- 0. snapshot EMRG-owned tree (daemon + TUI + GUI + descendants) ---
-REM    Walk DOWN from the roots (emrgd.pid, EMRG.exe, python.exe -m emrg) while they
-REM    are still alive, collecting the full descendant PID set. Step 4 / :verify use
-REM    ONLY this recorded set -> host Git Bash sh/vim (not descendants of EMRG roots)
-REM    are never touched (rant 2026-08-11T18:56:58), and orphans of an already-dead
-REM    daemon are still captured (their PID was recorded while the daemon lived).
-powershell -NoProfile -Command "$f=Get-CimInstance Win32_Process; $roots=New-Object System.Collections.Generic.List[int]; if(Test-Path \"%EMRG_DIR%\emrgd.pid\"){ $d=Get-Content \"%EMRG_DIR%\emrgd.pid\" -ErrorAction SilentlyContinue; if($d -match '^\d+$'){ $roots.Add([int]$d) } }; $f | Where-Object { $_.Name -eq 'EMRG.exe' -or ($_.Name -eq 'python.exe' -and $_.CommandLine -match '-m emrg' -and $_.CommandLine -notmatch 'emrg\.server') } | ForEach-Object { $roots.Add([int]$_.ProcessId) }; $set=New-Object 'System.Collections.Generic.HashSet[int]'; foreach($r in $roots){ [void]$set.Add($r) }; $changed=$true; while($changed){ $changed=$false; foreach($p in $f){ if($set.Contains([int]$p.ParentProcessId) -and -not $set.Contains([int]$p.ProcessId)){ [void]$set.Add([int]$p.ProcessId); $changed=$true } } }; $set | ForEach-Object { $_ } | Set-Content -Path \"%PIDFILE%\" -Encoding ascii" >nul 2>&1
+set "EXIT_CODE=0"
 
 REM --- 1. GUI: graceful WM_CLOSE, then unconditional /F after the grace window ---
 REM    (host report 2026-08-10T01:27:07Z: a long-lived ~15h GUI session deferred
@@ -80,20 +69,21 @@ set "DPID="
 for /f "usebackq delims=" %%p in ("%EMRG_DIR%\emrgd.pid") do set "DPID=%%p"
 if defined DPID taskkill /F /PID %DPID% >nul 2>&1
 
-REM --- 4. bundled git: kill only RECORDED EMRG-owned git/ssh/bash (snapshot step 0) ---
-REM    (rant 2026-08-11T17:56:25: daemon killed mid-git-op leaves orphans holding
-REM    install\git\usr\bin\msys-2.0.dll -> Inno DeleteFile code 5.)
-REM    (host 2026-08-11T18:56:58: blanket path kill also caught the HOST's Git Bash
-REM    sh/vim -- vim edits lost + installer aborted. Same class as R125.) Only PIDs
-REM    recorded in step 0 (EMRG tree captured while daemon/TUI were alive) are killed
-REM    when their executable is under install\git\. Host Git Bash sh/vim are not in
-REM    the recorded set -> never touched.
-if exist "%PIDFILE%" (
-  powershell -NoProfile -Command "$f=Get-CimInstance Win32_Process; $ids=@(Get-Content \"%PIDFILE%\" | ForEach-Object { [int]$_ }); $f | Where-Object { $ids -contains [int]$_.ProcessId -and $_.ExecutablePath -like \"$env:USERPROFILE\.emrg\install\git\*\" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+REM --- 4. bundled git: guilt-by-association force-kill via stop-git.ps1 ---
+REM    (host 2026-08-11T19:47:44 FINAL decision OVERRIDES #689's snapshot-only
+REM    approach -- "如果杀死git时，发现sh/vim导致杀不掉，则一起杀": install success
+REM    has priority; sh/vim holding msys-2.0.dll under install\git\ are killed too.
+REM    Only the install\git\ prefix is touched; system Git (Program Files) is never
+REM    matched. 0.2.26's cmd inline-PowerShell quoting escape is avoided by calling
+REM    the standalone stop-git.ps1 via -File.)
+set "GITSTOP=%INSTALL%\bin\stop-git.ps1"
+if not exist "%GITSTOP%" set "GITSTOP=%~1"
+if exist "%GITSTOP%" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%GITSTOP%" >nul 2>&1
+  if errorlevel 1 set "EXIT_CODE=1"
 )
 
 :verify
-set "EXIT_CODE=0"
 tasklist /FI "IMAGENAME eq EMRG.exe" 2>nul | findstr /i "EMRG.exe" >nul && set "EXIT_CODE=1"
 REM %-variables inside a parenthesized block expand at parse time (after set "DPID=" they hold the old/empty value) -> must use
 REM enabledelayedexpansion !DPID! (runtime expansion); if defined itself is a runtime check.
@@ -104,12 +94,10 @@ if exist "%EMRG_DIR%\emrgd.pid" (
     tasklist /FI "PID eq !DPID!" 2>nul | findstr /i "!DPID!" >nul && set "EXIT_CODE=1"
   )
 )
-REM EMRG-owned bundled-git survival check: only RECORDED EMRG git PIDs still alive
-REM -> exit 1 (installer aborts with a restart hint). Host Git Bash sh/vim alive is
-REM NOT a failure (rant 2026-08-11T18:56:58).
-if exist "%PIDFILE%" (
-  powershell -NoProfile -Command "$f=Get-CimInstance Win32_Process; $ids=@(Get-Content \"%PIDFILE%\" | ForEach-Object { [int]$_ }); $surv = $f | Where-Object { $ids -contains [int]$_.ProcessId -and $_.ExecutablePath -like \"$env:USERPROFILE\.emrg\install\git\*\" }; if ($surv) { exit 1 }" >nul 2>&1
-  if errorlevel 1 set "EXIT_CODE=1"
-)
-del /q "%PIDFILE%" >nul 2>&1
+REM Bundled-git survival check (plain prefix; guilt-by-association semantics):
+REM any process still under install\git\ -> exit 1 (installer aborts). This is the
+REM same condition stop-git.ps1 reports; kept as belt-and-braces for the case the
+REM script file could not be located (no old install, no {tmp} arg).
+powershell -NoProfile -Command "$p = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like \"$env:USERPROFILE\.emrg\install\git\*\" }; if ($p) { exit 1 }" >nul 2>&1
+if errorlevel 1 set "EXIT_CODE=1"
 endlocal & exit /b %EXIT_CODE%

@@ -69,6 +69,7 @@ cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
   cp "$ROOT/bin/emrg.cmd" emrg.cmd 2>/dev/null || true
   cp "$ROOT/bin/emrgd.cmd" emrgd.cmd 2>/dev/null || true
   cp "$ROOT/bin/stop-emrg.cmd" stop-emrg.cmd 2>/dev/null || true
+  cp "$ROOT/bin/stop-git.ps1" stop-git.ps1 2>/dev/null || true
   cp "$ROOT/bin/emrg-uninstall" emrg-uninstall
   chmod +x emrg emrgd emrg-uninstall
 )

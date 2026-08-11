@@ -1,6 +1,10 @@
 # EMRG
 
 <p align="center">
+  <img src="packaging/assets/icon.svg" alt="EMRG" width="96" height="96">
+</p>
+
+<p align="center">
   <strong>一个会写代码的 AI 编程助手——而且它还会<em>重写自己</em>。</strong>
 </p>
 
@@ -35,9 +39,10 @@ EMRG 是一个关于*自主进化*的实验：一个能帮你写代码的 AI 智
 
 **一句话定位**：EMRG 是唯一一个**会因你的反馈而自我改进**的编程智能体——吐槽哪里不好，下一个演化周期它就自己写代码修好并上线。
 
+> **唯一核心卖点：自我改进。** 每一条 `/rant` 都会变成真实的 PR——分析、编码、测试、合并，全程无人值守。没有其他编程智能体做得到。
+
 | 特性 | 差异点 |
 |---|---|
-| **越用越好（核心）** | 你的 `/rant`、GitHub Issues、竞品动态都会变成真实改进——分析、编码、测试、提 PR、合并，全自动无人值守 |
 | **Electron GUI（主入口）** | 安装即用：首次启动引导配置 API Key；全部 `/` 指令可用；结果面板、Ask/Auto 模式、自进化可见化。GUI 配好即 TUI 可用 |
 | **全功能 TUI + 守护进程** | 流式 Markdown、`/` 自动补全、会话管理、快捷键——跑在常驻的 `emrgd` 守护进程上，随时重连 |
 | **100% 开源** | MIT 协议——没有围墙，没有厂商锁定。默认英文，提供中文版 |
@@ -161,7 +166,7 @@ EMRG 不只是追赶——它自己追上来。
 
 贡献指南、源码安装、架构、详细 FAQ → [DEVELOPMENT.md](DEVELOPMENT.md)。
 
-快速检查：`uv run pytest tests/ -v`（当前 694 项）· `cd emrg/gui && npm test`（212 项：43 daemon_client + 19 conn-manager + 22 app-commands + 91 renderer smoke + 15 i18n + 7 integration + 3 commands + 5 build-config + 7 gui-state）
+快速检查：`uv run pytest tests/ -v` · `cd emrg/gui && npm test`（测试：见上方徽章）
 
 ---
 
