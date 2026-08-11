@@ -49,9 +49,10 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_and_calls_stop_git():
     assert "stop-git.ps1" in content
     assert "-ExecutionPolicy Bypass -File" in content
     assert r'"%GITSTOP%"' in content
-    # 旧安装可能没有 stop-git.ps1 → {tmp} 提取版（%~1）与 %TEMP% 兜底
+    # 旧安装可能没有 stop-git.ps1 → {tmp} 提取版（%~1）兜底
     assert 'set "GITSTOP=%~1"' in content
-    assert 'set "GITSTOP=%TEMP%\\emrg-stop-git.ps1"' in content
+    # %TEMP% 兜底已移除（review 2026-08-11T19:57: {tmp} 参数或已装副本恒胜出；缺失时 :verify 前缀检查兜底）
+    assert "GITSTOP=%TEMP%" not in content
     # #689 的 snapshot/step0/PIDFILE 机制已删除（宿主否决——误伤宿主工具的根源）
     assert "emrg-stop-pids.txt" not in content
     assert "ParentProcessId" not in content

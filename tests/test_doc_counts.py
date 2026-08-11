@@ -10,7 +10,7 @@ that the documented GUI breakdown sums to its headline number.
 after #580 added 3 GUI tests. Both checks now cover all three docs
 (README.md, README.cn.md, Agent.md); CJK full-width parens and the
 "项：" separator are normalized before matching.
-#697: rant 2026-08-11T19:50:37 — README.md/README.cn.md switched to the
+#692: rant 2026-08-11T19:50:37 — README.md/README.cn.md switched to the
 Tests badge (no hardcoded counts); the python-count check now guards
 Agent.md only, while the GUI-breakdown check still picks up any
 "(N: ...)" line it finds in any doc (Agent.md keeps the breakdown).

@@ -78,7 +78,6 @@ REM    matched. 0.2.26's cmd inline-PowerShell quoting escape is avoided by call
 REM    the standalone stop-git.ps1 via -File.)
 set "GITSTOP=%INSTALL%\bin\stop-git.ps1"
 if not exist "%GITSTOP%" set "GITSTOP=%~1"
-if not exist "%GITSTOP%" set "GITSTOP=%TEMP%\emrg-stop-git.ps1"
 if exist "%GITSTOP%" (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%GITSTOP%" >nul 2>&1
   if errorlevel 1 set "EXIT_CODE=1"
