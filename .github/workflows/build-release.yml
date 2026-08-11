@@ -171,7 +171,9 @@ jobs:
           bash packaging/gen-assets.sh
           # 产物必须存在（GUI 构建引用 ../packaging/assets/*.png/icns/ico）
           test -s packaging/assets/icon.png
-          test -s packaging/assets/icon.icns
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            test -s packaging/assets/icon.icns
+          fi
           test -s packaging/assets/icon.ico
 
       # ── GUI dist（electron-builder；linux extraResources runtime §5 R64）──

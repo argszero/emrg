@@ -146,12 +146,13 @@ for size in (512, 256):
     print("    wrote", p)
 PYEOF
 
-echo "==> iconutil → icon.icns (macOS)"
-ICONSET="$OUT/icon.iconset"
-mkdir -p "$ICONSET"
-# iconutil wants specific sizes
-for s in 16 32 128 256 512; do
-  python3 - "$OUT/icon.png" "$ICONSET/icon_${s}x${s}.png" "$s" <<'PYEOF'
+echo "==> iconutil → icon.icns (macOS only; skipped on Linux/Windows)"
+if command -v iconutil >/dev/null 2>&1; then
+  ICONSET="$OUT/icon.iconset"
+  mkdir -p "$ICONSET"
+  # iconutil wants specific sizes
+  for s in 16 32 128 256 512; do
+    python3 - "$OUT/icon.png" "$ICONSET/icon_${s}x${s}.png" "$s" <<'PYEOF'
 import sys, zlib, struct
 src, dst, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
 data = open(src, "rb").read(); pos, w, h, idat = 8, 0, 0, b""
@@ -185,12 +186,15 @@ raw2 = b"".join(b"\x00"+rgba[y*size*4:(y+1)*size*4] for y in range(size))
 png = b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))+chunk(b"IDAT", zlib.compress(raw2,9))+chunk(b"IEND", b"")
 open(dst, "wb").write(png)
 PYEOF
-  cp "$ICONSET/icon_${s}x${s}.png" "$ICONSET/icon_${s}x${s}@2x.png" 2>/dev/null || true
-done
-# icns needs exact 16/32/128/256/512 + @2x
-iconutil -c icns "$ICONSET" -o "$OUT/icon.icns"
-rm -rf "$ICONSET"
-echo "    wrote $OUT/icon.icns"
+    cp "$ICONSET/icon_${s}x${s}.png" "$ICONSET/icon_${s}x${s}@2x.png" 2>/dev/null || true
+  done
+  # icns needs exact 16/32/128/256/512 + @2x
+  iconutil -c icns "$ICONSET" -o "$OUT/icon.icns"
+  rm -rf "$ICONSET"
+  echo "    wrote $OUT/icon.icns"
+else
+  echo "    skipping icon.icns (iconutil unavailable — macOS only)"
+fi
 
 echo "==> icon.ico (multi-size, win)"
 python3 - "$OUT/icon.png" "$OUT/icon.ico" <<'PYEOF'
