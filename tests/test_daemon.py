@@ -1328,3 +1328,43 @@ def test_list_projects_ordered_by_latest_session_activity(tmp_path, monkeypatch)
     assert new_proj["latest_session_at"] == "2026-08-10T12:00:00"
     none_proj = next(p for p in reply["projects"] if p["name"] == "nosess")
     assert none_proj["latest_session_at"] == ""
+
+
+def test_update_check_force_runs_fresh_check(monkeypatch):
+    """update_check with force:true runs a fresh fetch; without force it
+    returns the cached state (rant 2026-08-11T09:18:16 manual check button)."""
+    import asyncio
+
+    server = _make_server()
+    writer = _FakeWriter()
+    calls = []
+
+    async def fake_run_once(state=None):
+        calls.append(state)
+        return {"checked": True, "latest_version": "9.9.9", "state": {}}
+
+    monkeypatch.setattr("emrg.update_check.run_update_check_once", fake_run_once)
+    monkeypatch.setattr(
+        "emrg.update_check.load_state",
+        lambda: {"latest_version": "9.9.9", "prompted_version": ""},
+    )
+    monkeypatch.setattr(
+        "emrg.update_check.is_newer",
+        lambda latest, current: latest != current,
+    )
+
+    # force:true → fresh check runs, reply carries the refreshed latest
+    asyncio.run(server._process_message({"type": "update_check", "force": True}, writer))
+    assert len(calls) == 1, "force:true must trigger one fresh check"
+    reply = json.loads(writer._frames[-1])
+    assert reply["type"] == "update_check"
+    assert reply["latest_version"] == "9.9.9"
+    assert reply["has_update"] is True
+
+    # no force → cached path, no fresh check
+    writer._frames.clear()
+    calls.clear()
+    asyncio.run(server._process_message({"type": "update_check"}, writer))
+    assert calls == [], "no force → must return cache without a fresh fetch"
+    reply = json.loads(writer._frames[-1])
+    assert reply["type"] == "update_check"

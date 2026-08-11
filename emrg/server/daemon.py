@@ -1416,10 +1416,22 @@ class EmrgServer:
             # latest_version (populated at startup + every TTL) plus a
             # has_update flag computed against the running version. No auto
             # download/install; the client shows a one-time prompt.
+            # force:true (rant 2026-08-11T09:18:16) — GUI manual check
+            # button: run a fresh GitHub fetch first instead of the cache.
             import emrg
             from emrg.config import load_update_config
-            from emrg.update_check import is_newer, load_state, parse_version
+            from emrg.update_check import (
+                is_newer,
+                load_state,
+                parse_version,
+                run_update_check_once,
+            )
 
+            if msg.get("force"):
+                try:
+                    await run_update_check_once()
+                except Exception:
+                    logger.debug("forced update check failed", exc_info=True)
             current = getattr(emrg, "__version__", "0")
             state = load_state()
             latest = state.get("latest_version") or ""

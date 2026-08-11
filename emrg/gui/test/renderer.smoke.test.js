@@ -126,6 +126,7 @@ const ELEMENT_IDS = [
   "tasks-dialog", "tasks-list", "tasks-close",
   "result-panel", "result-list", "result-toggle",
   "growth-card", "growth-count", "about-recent",
+  "about-update", "about-update-check-btn",
   "github-banner", "github-banner-msg", "github-banner-connect", "github-banner-dismiss",
 ];
 
@@ -1601,4 +1602,88 @@ test("B3: 发送消息清除该会话草稿；新会话从空草稿开始", asyn
   assert.strictEqual(els["input"].value, "", "new session input cleared");
   const newDraft = await vm.runInContext("App.state.drafts.get('s-new')", ctx);
   assert.strictEqual(newDraft, "", "new session starts with empty draft");
+});
+
+test("rant 09:18：启动主动更新提示——有新版本且未提示过 → 系统消息一次", async () => {
+  const { ctx } = makeSandbox({
+    updateCheck: async () => ({ enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "", current_version: "0.2.23" }),
+    updateCheckPrompted: async () => ({}),
+  });
+  await tick();
+  const r = await vm.runInContext(`(async function() {
+    let prompted = null;
+    window.emrg.updateCheckPrompted = async (p) => { prompted = p; };
+    await EMRG_Dialogs.promptUpdateAtStartup();
+    const texts = [];
+    for (let i = 0; i < $("chat-view").children.length; i++) texts.push($("chat-view").children[i].textContent);
+    return { n: texts.length, joined: texts.join("|"), prompted: JSON.stringify(prompted) };
+  })()`, ctx);
+  assert.ok(r.n >= 1, "应输出一条系统消息");
+  assert.ok(r.joined.includes("0.2.99"), `系统消息应含新版本号，实际 ${r.joined}`);
+  assert.ok(r.prompted.includes("0.2.99"), "应记录已提示版本（幂等）");
+});
+
+test("rant 09:18：启动提示幂等——已提示过/未启用/无更新 → 不提示", async () => {
+  const { ctx } = makeSandbox({
+    updateCheck: async () => ({ enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "0.2.99", current_version: "0.2.23" }),
+  });
+  await tick();
+  const r = await vm.runInContext(`(async function() {
+    await EMRG_Dialogs.promptUpdateAtStartup();
+    return { n: $("chat-view").children.length };
+  })()`, ctx);
+  assert.strictEqual(r.n, 0, "已提示过同版本 → 不得重复提示");
+});
+
+test("rant 09:18：设置页手动检查按钮——点击强制重新检查并显示检查中", async () => {
+  const { ctx } = makeSandbox({
+    updateCheck: async (payload) => ({ enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "", current_version: "0.2.23", _force: payload && payload.force }),
+    updateCheckPrompted: async () => ({}),
+  });
+  await tick();
+  const r = await vm.runInContext(`(async function() {
+    const calls = [];
+    window.emrg.updateCheck = async (payload) => {
+      calls.push(payload || {});
+      return { enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "" };
+    };
+    const btn = $("about-update-check-btn");
+    btn.textContent = "检查更新"; // 模拟 index.html 静态文案（沙箱不加载 HTML）
+    EMRG_Dialogs.initUpdateCheckButton();
+    btn.click();
+    const during = { text: btn.textContent, disabled: btn.disabled };
+    await new Promise((res) => setTimeout(res, 20));
+    return {
+      calls: JSON.stringify(calls),
+      duringText: during.text,
+      afterText: btn.textContent,
+      afterDisabled: btn.disabled,
+      updateShown: !$("about-update").classList.contains("hidden"),
+    };
+  })()`, ctx);
+  const calls = JSON.parse(r.calls);
+  assert.strictEqual(calls.length, 1, "点击按钮应触发一次 updateCheck");
+  assert.strictEqual(calls[0].force, true, "手动检查必须带 force:true（跳过 TTL 缓存）");
+  assert.strictEqual(r.duringText, "检查中…", "检查中按钮应显示“检查中…”");
+  assert.strictEqual(r.afterText, "检查更新", "完成后按钮文案恢复");
+  assert.strictEqual(r.afterDisabled, false, "完成后按钮恢复可用");
+  assert.strictEqual(r.updateShown, true, "有新版本应显示 about-update 行");
+});
+
+test("rant 09:18：refreshUpdateCheck 透传 force 参数", async () => {
+  const { ctx } = makeSandbox({
+    updateCheck: async (payload) => ({ enabled: false, has_update: false, latest_version: "", prompted_version: "" }),
+  });
+  await tick();
+  const r = await vm.runInContext(`(async function() {
+    const calls = [];
+    window.emrg.updateCheck = async (payload) => { calls.push(payload || {}); return { enabled: false, has_update: false, latest_version: "", prompted_version: "" }; };
+    await EMRG_Dialogs.refreshUpdateCheck({ force: true });
+    await EMRG_Dialogs.refreshUpdateCheck();
+    return JSON.stringify(calls);
+  })()`, ctx);
+  const calls = JSON.parse(r);
+  assert.strictEqual(calls.length, 2);
+  assert.strictEqual(calls[0].force, true, "refreshUpdateCheck({force:true}) 应透传 force");
+  assert.strictEqual(calls[1].force, false, "默认 refreshUpdateCheck() 不带 force");
 });
