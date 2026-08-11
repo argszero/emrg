@@ -23,6 +23,9 @@
 EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps you code — reading files, running commands, making edits — and **every `/rant` you send drives it to improve itself**. Tell it what bothers you, and the next evolution cycle writes the fix and ships it. Fully open source, fully transparent.
 
 > *"EMRG is an experiment in self-evolving AI agent architecture."* — [MANIFESTO](MANIFESTO.md)
+>
+> *Everyone is a product manager — every rant is a ticket for the next release.*
+> *Everyone is a host of silicon life — what you run is a digital organism that evolves with you.*
 
 ---
 
