@@ -201,14 +201,25 @@ const ResultPanel = (() => {
     if ((key || null) === currentSid) { renderTabbar(); activateTab(st.active, key); }
   }
 
-  // ── 文件查看器（P3.3 基础版：readFile 文本 / 二进制提示 / 系统工具打开） ──
+  // ── 文件查看器（P3.3：文本高亮 / md 渲染 / 图片直显 / 二进制提示） ──
+  const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp|ico)$/i;
+
+  function isImagePath(path) {
+    return IMAGE_EXT.test(String(path).split(/[?#]/)[0]);
+  }
+  function isMarkdownPath(path) {
+    return /\.(md|markdown|mdown)$/i.test(String(path));
+  }
+
   async function loadFileTab(path) {
     const vp = viewerEl();
     if (!vp) return;
     const st = stateFor(currentSid);
     const tab = st.tabs.find((t) => t.path === path);
     if (!tab || tab.loading) return;
-    if (tab.content !== undefined) { renderViewer(vp, tab); return; }
+    if (tab.content !== undefined || tab.image || tab.readError) { await renderViewer(vp, tab); return; }
+    // 图片不走 read_file（file:// 直显，P3.3）
+    if (isImagePath(path)) { tab.image = true; await renderViewer(vp, tab); return; }
     tab.loading = true;
     vp.innerHTML = "";
     vp.appendChild(el("div", { class: "result-empty" }, _t("result.viewerLoading")));
@@ -225,10 +236,10 @@ const ResultPanel = (() => {
     } finally {
       tab.loading = false;
     }
-    renderViewer(vp, tab);
+    await renderViewer(vp, tab);
   }
 
-  function renderViewer(vp, tab) {
+  async function renderViewer(vp, tab) {
     vp.innerHTML = "";
     const head = el("div", { class: "viewer-head" });
     head.appendChild(el("span", { class: "viewer-path" }, tab.path));
@@ -246,9 +257,57 @@ const ResultPanel = (() => {
       vp.appendChild(el("div", { class: "result-empty" }, _t("result.viewerBinary")));
       return;
     }
+    if (tab.image) {
+      const img = el("img", { class: "viewer-img", src: "file://" + tab.path, alt: tab.name || "" });
+      img.addEventListener("error", () => {
+        img.style.display = "none";
+        const hint = el("div", { class: "result-empty" }, _t("result.viewerError"));
+        vp.appendChild(hint);
+      });
+      vp.appendChild(img);
+      return;
+    }
+    // md → markdown 渲染（DOMPurify sanitize，与聊天区同源）
+    if (isMarkdownPath(tab.path)) {
+      try {
+        const html = await window.emrgMarkdown.renderMarkdown(tab.content);
+        const mdBox = el("div", { class: "viewer-md" });
+        mdBox.innerHTML = html;
+        vp.appendChild(mdBox);
+        return;
+      } catch { /* fall through to plain text */ }
+    }
+    // 文本：hljs 高亮（精确 lang，无 lang highlightAuto 兜底——与 markdown.js code renderer 同策略）
     const pre = el("pre", { class: "viewer-pre" });
-    pre.appendChild(el("code", {}, tab.content));
+    const code = el("code", {}, tab.content);
+    try {
+      const hljs = window.hljs;
+      if (hljs) {
+        const lang = detectLang(tab.path);
+        if (lang && hljs.getLanguage(lang)) {
+          code.innerHTML = hljs.highlight(tab.content, { language: lang, ignoreIllegals: true }).value;
+        } else {
+          code.innerHTML = hljs.highlightAuto(tab.content).value;
+        }
+        code.classList.add("hljs", "language-" + (lang || "plaintext"));
+      }
+    } catch { /* highlight failure → fall back to escaped text */ }
+    pre.appendChild(code);
     vp.appendChild(pre);
+  }
+
+  /** 按文件扩展名推断语言（对齐 highlight.custom.js 已注册语言） */
+  function detectLang(path) {
+    const ext = String(path).split(".").pop().toLowerCase();
+    const map = {
+      py: "python", js: "javascript", jsx: "javascript", ts: "typescript", tsx: "typescript",
+      sh: "bash", bash: "bash", zsh: "bash", css: "css", html: "html", htm: "html",
+      json: "json", yml: "yaml", yaml: "yaml", toml: "ini", md: "markdown",
+      go: "go", rs: "rust", java: "java", c: "c", h: "c", cpp: "cpp", cc: "cpp",
+      sql: "sql", xml: "xml", ini: "ini", dockerfile: "dockerfile", diff: "diff",
+    };
+    if (path.toLowerCase().includes("dockerfile")) return "dockerfile";
+    return map[ext] || "";
   }
 
   /** 切换会话 → Tab/产物状态按 sid 隔离（缺口 5） */

@@ -28,7 +28,7 @@ function makeEl(id) {
     classList: {
       // className 为唯一事实源：el() 直接赋值 className 后 classList 操作不得清空既有类
       _set() { node._cls = new Set((node.className || "").split(/\s+/).filter(Boolean)); },
-      add(c) { node.classList._set(); node._cls.add(c); node._update(); },
+      add(...cs) { node.classList._set(); for (const c of cs) node._cls.add(c); node._update(); },
       remove(c) { node.classList._set(); node._cls.delete(c); node._update(); },
       // 忠实 DOM：toggle(c, force)——force 指定时按 force 加/删（sidebar highlight 依赖）
       toggle(c, force) {
@@ -1169,9 +1169,9 @@ test("P3：点击文件行 → 打开文件 Tab + 查看器加载内容", async 
   await tick(); // openFileTab → activateTab → loadFileTab（async readFile）
   // 文件 Tab 打开
   assert.ok([...els["result-tabbar"].children].some((c) => c.dataset.path === "/proj/README.md"), "文件 Tab 应打开");
-  // 查看器 pane 激活 + 文本渲染
+  // 查看器 pane 激活 + 内容渲染（README.md → P3.3 markdown 渲染）
   assert.ok(els["result-viewer"].classList.contains("active"), "查看器 pane 应激活");
-  assert.ok(els["result-viewer"].querySelectorAll(".viewer-pre").length >= 1, "应渲染文本内容");
+  assert.ok(els["result-viewer"].querySelectorAll(".viewer-md").length >= 1, "md 文件应渲染 markdown 内容");
   // 静态 Tab 不被误激活
   assert.ok(!els["result-tab-files"].classList.contains("active"), "文件 Tab 不应激活");
 });
@@ -1179,12 +1179,62 @@ test("P3：点击文件行 → 打开文件 Tab + 查看器加载内容", async 
 test("P3：查看器二进制文件 → 提示用系统工具打开", async () => {
   const { ctx, els } = makeSandbox({ readFile: async () => ({ content: "", binary: true }) });
   await tick();
-  await vm.runInContext('ResultPanel.openFileTab(null, "/img/logo.png")', ctx);
+  await vm.runInContext('ResultPanel.openFileTab(null, "/data/blob.bin")', ctx); // 非图片扩展名（.bin）
   await tick();
   assert.ok(els["result-viewer"].classList.contains("active"), "查看器 pane 应激活");
   const empty = els["result-viewer"].querySelectorAll(".result-empty");
   assert.ok(empty.length >= 1, "二进制应显示提示而非文本");
   assert.ok(els["result-viewer"].querySelectorAll(".viewer-pre").length === 0, "二进制不渲染文本");
+});
+
+test("P3.3：图片文件不走 read_file（file:// 直显 img）", async () => {
+  let readCalled = false;
+  const { ctx, els } = makeSandbox({
+    readFile: async () => { readCalled = true; return { content: "", binary: false }; },
+  });
+  await tick();
+  await vm.runInContext('ResultPanel.openFileTab(null, "/img/logo.png")', ctx);
+  await tick();
+  assert.ok(els["result-viewer"].classList.contains("active"), "查看器 pane 应激活");
+  assert.ok(els["result-viewer"].querySelectorAll(".viewer-img").length === 1, "应渲染 img 元素");
+  assert.strictEqual(readCalled, false, "图片不得调用 read_file");
+  // CSP 允许 file:（源级断言防回归）
+  const html = fs.readFileSync(path.join(__dirname, "..", "renderer", "index.html"), "utf8");
+  assert.ok(/img-src 'self' data: file:/.test(html), "CSP img-src 应含 file:");
+});
+
+test("P3.3：markdown 文件走 renderMarkdown 渲染", async () => {
+  const { ctx, els } = makeSandbox({
+    readFile: async () => ({ content: "# Title\n\nbody", binary: false }),
+  });
+  await tick();
+  await vm.runInContext('ResultPanel.openFileTab(null, "/proj/README.md")', ctx);
+  await tick();
+  assert.ok(els["result-viewer"].querySelectorAll(".viewer-md").length >= 1, "md 应渲染 viewer-md 容器");
+  assert.ok(els["result-viewer"].querySelectorAll(".viewer-pre").length === 0, "md 不渲染纯文本 pre");
+});
+
+test("P3.3：文本代码文件 → hljs 高亮（.py → python）", async () => {
+  const sb = makeSandbox({
+    readFile: async () => ({ content: "def f():\n    return 1", binary: false }),
+  });
+  const { ctx, els } = sb;
+  // hljs 是 window 级全局（overrides 只进 emrg）→ 沙箱创建后注入
+  sb.win.hljs = {
+    getLanguage: (l) => (l === "python" ? {} : null),
+    highlight: (code, opts) => ({ value: "<span class=\"hljs-keyword\">def</span> f():" }),
+    highlightAuto: (code) => ({ value: code }),
+  };
+  await tick();
+  await vm.runInContext('ResultPanel.openFileTab(null, "/proj/main.py")', ctx);
+  await tick();
+  const pre = els["result-viewer"].querySelectorAll(".viewer-pre");
+  assert.ok(pre.length === 1, "应渲染高亮 pre");
+  // harness querySelector 只支持类选择器 → 直接取 pre 子元素（code）
+  const code = pre[0].children && pre[0].children[0];
+  assert.ok(code, "pre 内应有 code");
+  assert.ok((code.className || "").includes("hljs"), "code 应带 hljs 类");
+  assert.ok((code.className || "").includes("language-python"), "应带 language-python 类");
 });
 
 test("P3：切会话 → 文件树根跟随（per-session）", async () => {
