@@ -57,6 +57,7 @@ const I18N = (() => {
       "result.viewerBinary": "二进制文件，用系统工具打开",
       "result.viewerError": "无法读取文件（可能已被删除或无权限）",
       "result.viewerOpen": "用系统工具打开",
+      "result.htmlPreview": "HTML 预览（内嵌浏览器）",
 
       // 设置
       "settings.title": "设置",
@@ -397,6 +398,7 @@ const I18N = (() => {
       "result.viewerBinary": "Binary file — open with system tool",
       "result.viewerError": "Cannot read file (deleted or no permission)",
       "result.viewerOpen": "Open with system tool",
+      "result.htmlPreview": "HTML preview (embedded browser)",
 
       // Settings
       "settings.title": "Settings",

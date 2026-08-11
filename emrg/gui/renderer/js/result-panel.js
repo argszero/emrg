@@ -63,6 +63,7 @@ const ResultPanel = (() => {
     p.style.width = cw + "px";
     try { localStorage.setItem(LS_WIDTH, String(cw)); } catch { /* ignore */ }
     updateResizerPos();
+    notifyPanelResized(); // P2.3：宽度变化 → main 预览 bounds 同步
   }
   function isCollapsed() {
     const p = panel();
@@ -82,6 +83,7 @@ const ResultPanel = (() => {
     p.classList.toggle("collapsed", collapsed);
     try { localStorage.setItem(LS_COLLAPSED, collapsed ? "1" : "0"); } catch { /* ignore */ }
     updateResizerPos();
+    notifyPanelResized(); // P2.3：折叠/展开 → main 隐藏/恢复预览
   }
   function toggle() {
     setCollapsed(!isCollapsed());
@@ -172,6 +174,8 @@ const ResultPanel = (() => {
     if (lp) lp.classList.toggle("active", tabId === "artifacts");
     if (vp) vp.classList.toggle("active", isFileTab);
     renderTabbar();
+    // P2.3：激活 HTML tab → previewHtml；切走 → closePreview（bounds 同步随 panelResized）
+    syncPreview(tabId);
     if (isFileTab) loadFileTab(tabId.slice(5));
   }
 
@@ -201,7 +205,7 @@ const ResultPanel = (() => {
     if ((key || null) === currentSid) { renderTabbar(); activateTab(st.active, key); }
   }
 
-  // ── 文件查看器（P3.3：文本高亮 / md 渲染 / 图片直显 / 二进制提示） ──
+  // ── 文件查看器（P3.3：文本高亮 / md 渲染 / 图片直显 / 二进制提示；P3.4：HTML 预览） ──
   const IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp|ico)$/i;
 
   function isImagePath(path) {
@@ -210,6 +214,40 @@ const ResultPanel = (() => {
   function isMarkdownPath(path) {
     return /\.(md|markdown|mdown)$/i.test(String(path));
   }
+  /** P3.4：.html/.htm → WebContentsView 内嵌浏览器预览（不走 read_file） */
+  function isHtmlPath(path) {
+    return /\.(html?)$/i.test(String(path).split(/[?#]/)[0]);
+  }
+
+  // ── P2.3：面板布局上报（宽度/折叠/内容区顶部）→ main 侧 preview bounds 同步 ──
+  function panelLayout() {
+    const vp = viewerEl();
+    let contentTop = 0;
+    if (vp && typeof vp.getBoundingClientRect === "function") {
+      try { contentTop = Math.round(vp.getBoundingClientRect().top) || 0; } catch { contentTop = 0; }
+    }
+    return { width: getWidth(), collapsed: isCollapsed(), contentTop };
+  }
+  function notifyPanelResized() {
+    try {
+      const e = window.emrg;
+      if (e && typeof e.panelResized === "function") e.panelResized(panelLayout());
+    } catch { /* 测试沙箱无 IPC → 忽略 */ }
+  }
+
+  /** P2.3：HTML tab 激活/切走时同步 main 侧预览（预览内容切换 = 重新加载 R7-⑥） */
+  function syncPreview(tabId) {
+    try {
+      const e = window.emrg;
+      if (!e) return;
+      if (typeof tabId === "string" && tabId.startsWith("file:") && isHtmlPath(tabId.slice(5))) {
+        if (typeof e.previewHtml === "function") { e.previewHtml({ path: tabId.slice(5) }); notifyPanelResized(); }
+      } else if (typeof e.closePreview === "function") {
+        // 切到非 HTML（files/artifacts/其他文件）→ 隐藏预览（main 侧比对当前路径；无预览时 no-op）
+        e.closePreview({});
+      }
+    } catch { /* ignore */ }
+  }
 
   async function loadFileTab(path) {
     const vp = viewerEl();
@@ -217,7 +255,9 @@ const ResultPanel = (() => {
     const st = stateFor(currentSid);
     const tab = st.tabs.find((t) => t.path === path);
     if (!tab || tab.loading) return;
-    if (tab.content !== undefined || tab.image || tab.readError) { await renderViewer(vp, tab); return; }
+    if (tab.html || tab.content !== undefined || tab.image || tab.readError) { await renderViewer(vp, tab); return; }
+    // HTML → 内嵌浏览器预览（不走 read_file；loadURL 由 activateTab 的 syncPreview 触发）
+    if (isHtmlPath(path)) { tab.html = true; await renderViewer(vp, tab); return; }
     // 图片不走 read_file（file:// 直显，P3.3）
     if (isImagePath(path)) { tab.image = true; await renderViewer(vp, tab); return; }
     tab.loading = true;
@@ -251,6 +291,13 @@ const ResultPanel = (() => {
     vp.appendChild(head);
     if (tab.readError) {
       vp.appendChild(el("div", { class: "result-empty" }, _t("result.viewerError")));
+      return;
+    }
+    if (tab.html) {
+      // P3.4 混合模型：DOM 占位（WebContentsView 叠加其上；折叠时占位可见）
+      const ph = el("div", { class: "viewer-html" });
+      ph.appendChild(el("div", { class: "result-empty" }, _t("result.htmlPreview")));
+      vp.appendChild(ph);
       return;
     }
     if (tab.binary) {
@@ -317,6 +364,16 @@ const ResultPanel = (() => {
     renderTabbar();
     activateTab(stateFor(currentSid).active);
     renderArtifacts(); // 产物 pane 按当前会话桶恢复（后台 tool_finished 只入桶不渲染）
+  }
+
+  /** P2.3: renderer crash-reload recovery — reopen the preview file tab that main is still showing.
+   *  main is the source of truth; prevents preview/tab-bar mismatch (R5-④).
+   *  （renderer 崩溃 reload 后从 main 拉取预览状态，重开预览文件 Tab） */
+  function handlePreviewState(path, sid) {
+    const key = sid !== undefined ? sid : currentSid;
+    const st = stateFor(key);
+    if (st.tabs.some((t) => t.path === path)) { activateTab(tabIdFor(path), key); return; }
+    openFileTab(key, path);
   }
 
   // ── 产物登记（P3.2：只登记 write/edit 成功文件，per-session 去重，点击打开查看器 Tab） ──
@@ -443,9 +500,21 @@ const ResultPanel = (() => {
     renderTabbar();
     activateTab(stateFor(currentSid).active);
     renderArtifacts();
+    notifyPanelResized(); // P2.3：启动即上报布局（main 预览 bounds 初始同步）
+    // P2.3：renderer 崩溃 reload 后从 main 拉取预览状态恢复（main 是真相源；延迟到
+    // 当前同步初始化完成后执行，避免与 boot 的 switchSession 竞争）
+    setTimeout(async () => {
+      try {
+        const e = window.emrg;
+        if (e && typeof e.getPreviewState === "function") {
+          const st = await e.getPreviewState();
+          if (st && st.path && isHtmlPath(st.path)) handlePreviewState(st.path, currentSid);
+        }
+      } catch { /* ignore */ }
+    }, 0);
   }
 
-  return { init, addToolResult, toggle, isCollapsed, switchSession, openFileTab, closeFileTab, activateTab, getWidth, setWidth };
+  return { init, addToolResult, toggle, isCollapsed, switchSession, openFileTab, closeFileTab, activateTab, getWidth, setWidth, handlePreviewState };
 })();
 
 // ⚠️ 必须暴露到 window：app.js 作为独立 <script> 加载，模块级 const 不跨 script 共享。

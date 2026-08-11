@@ -577,6 +577,18 @@ body.sidebar-collapsed #app {
   padding: var(--sp-3);
   overflow-x: auto;
 }
+/* P3.4：HTML 预览占位（混合模型——WebContentsView 叠加其上；折叠/隐藏时占位可见） */
+.viewer-html {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-3);
+  box-sizing: border-box;
+}
+.viewer-html .result-empty {
+  max-width: 100%;
+}
 
 /* ── P3.2：产物文件行（write/edit 成功文件，点击打开查看器 Tab） ── */
 .artifact-row {

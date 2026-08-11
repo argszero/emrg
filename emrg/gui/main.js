@@ -5,10 +5,11 @@
  * 安全：contextIsolation + nodeIntegration:false + sandbox:true（renderer 零网络权限）。
  */
 
-const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell, WebContentsView } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
 const { generateSessionId, SESSION_ID_RE } = require("./daemon_client");
@@ -45,6 +46,13 @@ function main() {
   let openSessions = new Map();
   let guiStateTimer = null;
   const GUI_STATE_DEBOUNCE_MS = 1000;
+  // P2.3（rant 12:20:35）：HTML 预览 WebContentsView——懒创建、单实例复用、右对齐 bounds 同步。
+  // renderer 崩溃 reload 后由 renderer 侧拉取（emrg:getPreviewState）恢复（main 是真相源）。
+  let previewView = null;       // WebContentsView 实例（首次打开 HTML tab 才创建）
+  let previewAdded = false;     // 已 addChildView（防重复添加）
+  let previewPath = null;       // 当前加载的预览文件绝对路径（null = 无）
+  let previewVisible = false;   // 当前是否显示（激活 HTML tab）
+  let previewLayout = { width: 280, collapsed: false, contentTop: 0 }; // renderer 上报的面板布局
 
   // ── 窗口 ────────────────────────────────────────────────
 
@@ -61,12 +69,17 @@ function main() {
       },
     });
     win.loadFile(path.join(__dirname, "renderer", "index.html"));
+    // P2.3：窗口尺寸变化 → 预览 bounds 跟随（右对齐矩形）
+    win.on("resize", () => updatePreviewBounds());
     // G87：窗口状态持久化
     restoreWindowBounds(win);
     win.on("close", () => saveWindowBounds(win));
     // G101：renderer 崩溃恢复
     win.webContents.on("render-process-gone", () => {
       logger.warn("[gui] renderer gone — reloading");
+      // P2.3：预览 view 是独立 WebContents，崩溃不影响它；reload 完成后 renderer
+      // 经 emrg:getPreviewState 拉取当前预览路径重新开 Tab（恢复 bounds/loadURL 一致，
+      // 防预览与 Tab 栏不匹配，R5-④）
       win.loadFile(path.join(__dirname, "renderer", "index.html"));
     });
     win.webContents.on("unresponsive", () => {
@@ -461,6 +474,38 @@ vision = false
       if (frame.error) throw new Error(frame.error);
       return { content: frame.content || "", binary: !!frame.binary, truncated: !!frame.truncated, totalLines: frame.total_lines };
     });
+
+    // ── P2.3 + P3.4（rant 12:20:35）：HTML 预览 WebContentsView ──────────
+    // 混合模型：非 HTML 走 renderer DOM 查看器；.html/.htm 走内嵌浏览器预览。
+    // 懒创建（R7-⑤）+ 单实例复用（一次只显示一个预览，切换 = 重新加载 R7-⑥）。
+    ipcMain.handle("emrg:previewHtml", async (_e, { path: p } = {}) => showPreview(p));
+
+    ipcMain.handle("emrg:closePreview", async (_e, { path: p } = {}) => {
+      // 关闭/切走 HTML tab → 隐藏预览（懒销毁：窗口关闭自动回收，R5-⑤）
+      const target = typeof p === "string" && p.trim() ? path.resolve(p.trim()) : null;
+      if (previewVisible && (!target || previewPath === target)) {
+        previewVisible = false;
+        previewPath = null;
+        updatePreviewBounds();
+      }
+      return { ok: true };
+    });
+
+    // renderer 上报面板布局（宽度/折叠/内容区顶部 = Tab 栏高）→ main 调 setBounds（R2-⑧）
+    ipcMain.handle("emrg:panelResized", async (_e, { width, collapsed, contentTop } = {}) => {
+      previewLayout = {
+        width: typeof width === "number" && width > 0 ? width : previewLayout.width,
+        collapsed: collapsed === true,
+        contentTop: typeof contentTop === "number" && contentTop >= 0 ? contentTop : previewLayout.contentTop,
+      };
+      updatePreviewBounds();
+      return { ok: true };
+    });
+
+    // renderer 崩溃 reload 后拉取当前预览状态（main 是真相源，R5-④ 恢复通道）
+    ipcMain.handle("emrg:getPreviewState", async () => ({
+      path: previewVisible && previewPath ? previewPath : null,
+    }));
 
     ipcMain.handle("emrg:listSkills", async () => {
       // GUI / 指令 P3：/skills — 读取技能列表（TUI 本地 load_skills 等价物，daemon 无协议）
@@ -1017,6 +1062,72 @@ vision = false
     }
   }
 
+  // ── P2.3 + P3.4：HTML 预览 WebContentsView ────────────────────────
+
+  /** 懒创建预览 view（R7-⑤）：sandbox + contextIsolation 对齐主窗口；安全清单（缺口 8）：
+   *  setWindowOpenHandler 禁新窗 + will-frame-navigate 仅允许 file:// 主框架导航（防 HTML
+   *  内跳转远程 URL）。程序化 loadURL 不走 will-frame-navigate——入口只有 showPreview，
+   *  已校验扩展名 + 绝对路径 + 文件存在，无绕过路径。 */
+  function ensurePreviewView() {
+    if (previewView) return previewView;
+    previewView = new WebContentsView({
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+    });
+    previewView.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    previewView.webContents.on("will-frame-navigate", (event, url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !url.startsWith("file:")) event.preventDefault();
+    });
+    return previewView;
+  }
+
+  /** 右对齐矩形（R4-②）：x = winW - panelW、y = contentTop（Tab 栏高）、w = panelW、
+   *  h = winH - contentTop。折叠 → 置不可见区域（0 尺寸 + 不可见）。纯函数，便于单测。 */
+  function previewRect(winW, winH, layout) {
+    if (layout.collapsed) return { x: winW, y: 0, width: 0, height: 0 };
+    const width = Math.max(40, Math.min(layout.width || 280, winW));
+    const contentTop = layout.contentTop || 0;
+    return {
+      x: Math.max(0, winW - width),
+      y: contentTop,
+      width,
+      height: Math.max(0, winH - contentTop),
+    };
+  }
+
+  function updatePreviewBounds() {
+    if (!previewView || !win || win.isDestroyed()) return;
+    if (!previewVisible) { previewView.setVisible(false); return; }
+    const cb = win.getContentBounds();
+    const r = previewRect(cb.width, cb.height, previewLayout);
+    previewView.setBounds(r);
+    previewView.setVisible(true);
+  }
+
+  /** 显示 HTML 预览：校验 → 懒创建 → loadURL（切换 = 重新加载 R7-⑥）→ bounds 同步 */
+  async function showPreview(p) {
+    if (typeof p !== "string" || !p.trim()) return { ok: false, error: "invalid path" };
+    const abs = path.resolve(p.trim());
+    if (!/\.html?$/i.test(abs)) return { ok: false, error: "not_html" };
+    if (!fs.existsSync(abs)) return { ok: false, error: "file_not_found" };
+    try {
+      const view = ensurePreviewView();
+      if (!previewAdded && win && !win.isDestroyed()) {
+        win.contentView.addChildView(view);
+        previewAdded = true;
+      }
+      if (previewPath !== abs) {
+        await view.webContents.loadURL(pathToFileURL(abs).href);
+        previewPath = abs;
+      }
+      previewVisible = true;
+      updatePreviewBounds();
+      return { ok: true };
+    } catch (e) {
+      logger.warn(`[gui] preview load failed: ${e.message}`);
+      return { ok: false, error: String(e.message || "load_failed") };
+    }
+  }
+
   // ── 应用生命周期 ────────────────────────────────────────
 
   app.on("second-instance", () => {
@@ -1073,6 +1184,11 @@ vision = false
     cancelReconnect();
     persistGuiStateNow(); // P4：退出前冲刷未落盘的打开会话状态（防抖 timer 取消）
     connManager?.closeAll(); // P2：关闭全部会话连接 + daemon 级连接
+    // P2.3：窗口关闭自动销毁子 view（R5-⑤ 无需手动清理）；复位状态防二次使用
+    previewView = null;
+    previewAdded = false;
+    previewPath = null;
+    previewVisible = false;
     if (process.platform !== "darwin") app.quit();
   });
 
