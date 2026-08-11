@@ -27,6 +27,8 @@ EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps y
 > *Everyone is a product manager — every rant is a ticket for the next release.*
 > *Everyone is a host of silicon life — what you run is a digital organism that evolves with you.*
 
+**EMRG** — pronounced *"emerge"*: intelligence that *emerges* — from scale, and from use. The name expands to **E**volving **M**icro-kernel, **R**ant-driven **G**rowth.
+
 ---
 
 ## ✨ Why you'll love it
