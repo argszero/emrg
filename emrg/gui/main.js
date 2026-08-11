@@ -443,6 +443,25 @@ vision = false
       return frame.memory || { id: memoryId, content: "" };
     });
 
+    // 右栏工作区面板 P1（rant 2026-08-11T12:20:35）：list_files / read_file 透传
+    // 走 requireConn() = 当前会话连接天然认证；daemon list_files → files_list
+    ipcMain.handle("emrg:listFiles", async (_e, { path: p } = {}) => {
+      if (typeof p !== "string" || !p.trim()) throw new Error("invalid path");
+      const frame = await requireConn().sendCommandAndWait("list_files", { path: p.trim() }, 10000);
+      if (frame.error) throw new Error(frame.error);
+      return { entries: frame.entries || [], truncated: !!frame.truncated };
+    });
+
+    ipcMain.handle("emrg:readFile", async (_e, { path: p, startLine, lineLimit } = {}) => {
+      if (typeof p !== "string" || !p.trim()) throw new Error("invalid path");
+      const params = { path: p.trim() };
+      if (startLine !== undefined) params.start_line = startLine;
+      if (lineLimit !== undefined) params.line_limit = lineLimit;
+      const frame = await requireConn().sendCommandAndWait("read_file", params, 10000);
+      if (frame.error) throw new Error(frame.error);
+      return { content: frame.content || "", binary: !!frame.binary, truncated: !!frame.truncated, totalLines: frame.total_lines };
+    });
+
     ipcMain.handle("emrg:listSkills", async () => {
       // GUI / 指令 P3：/skills — 读取技能列表（TUI 本地 load_skills 等价物，daemon 无协议）
       // 技能在 ~/.emrg/skills/*.md（user）与 <projectDir>/.emrg/skills/*.md（project）

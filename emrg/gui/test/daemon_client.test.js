@@ -592,6 +592,7 @@ test("帧分类（G21+G58）：各帧事件分发正确", async () => {
   send({ error: "boom" });
   send({ identity: { instance_id: "i1" }, uptime_seconds: 10, evolution_count: 3, model: "m1" });
   send({ type: "sessions_list", sessions: [] });
+  send({ type: "files_list", path: "/tmp", entries: [] }); // 右栏工作区 P1：list_result 白名单
   send({ type: "resume_result", session_id: "s1" });
   send({ type: "model_set", model: "m2" });
   send({ type: "session_deleted", session_id: "s1" });
@@ -599,7 +600,7 @@ test("帧分类（G21+G58）：各帧事件分发正确", async () => {
   const types = seen.map(([t]) => t);
   assert.deepStrictEqual(types, [
     "tool_started", "tool_finished", "message_delta", "group_cleared", "done", "cancelled", "error", "pong",
-    "list_result", "command_result", "command_result", "command_result",
+    "list_result", "list_result", "command_result", "command_result", "command_result",
   ]);
   // pong 帧数据
   const pong = seen.find(([t]) => t === "pong")[1];
@@ -676,6 +677,20 @@ test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/t
   const r8 = await p8;
   assert.strictEqual(r8.type, "github_connect_web_result");
   assert.strictEqual(r8.code, "ABCD-1234");
+  // list_files → files_list（右栏工作区面板 P1，rant 2026-08-11T12:20:35）
+  const p9 = client.sendCommandAndWait("list_files", { path: "/tmp" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "files_list", path: "/tmp", entries: [], truncated: false })));
+  const r9 = await p9;
+  assert.strictEqual(r9.type, "files_list");
+  assert.deepStrictEqual(r9.entries, []);
+  // read_file → file_content（右栏工作区面板 P1）
+  const p10 = client.sendCommandAndWait("read_file", { path: "/tmp/a.txt" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "file_content", path: "/tmp/a.txt", content: "hi", binary: false })));
+  const r10 = await p10;
+  assert.strictEqual(r10.type, "file_content");
+  assert.strictEqual(r10.content, "hi");
 });
 
 test("命令-响应配对超时 → reject（G93）", async () => {

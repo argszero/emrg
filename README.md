@@ -23,6 +23,9 @@
 EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps you code — reading files, running commands, making edits — and **every `/rant` you send drives it to improve itself**. Tell it what bothers you, and the next evolution cycle writes the fix and ships it. Fully open source, fully transparent.
 
 > *"EMRG is an experiment in self-evolving AI agent architecture."* — [MANIFESTO](MANIFESTO.md)
+>
+> *Everyone is a product manager — every rant is a ticket for the next release.*
+> *Everyone is a host of silicon life — what you run is a digital organism that evolves with you.*
 
 ---
 
@@ -144,7 +147,7 @@ They're products. EMRG is an experiment in *closing the loop* — the AI improve
 
 Contributing, source installs, architecture, and the full FAQ → [DEVELOPMENT.md](DEVELOPMENT.md).
 
-Quick checks: `uv run pytest tests/ -v` (currently 688 items) · `cd emrg/gui && npm test` (187: 43 daemon_client + 19 conn-manager + 22 app-commands + 67 renderer smoke + 15 i18n + 7 integration + 3 commands + 4 build-config + 7 gui-state)
+Quick checks: `uv run pytest tests/ -v` (currently 694 items) · `cd emrg/gui && npm test` (188: 43 daemon_client + 19 conn-manager + 22 app-commands + 67 renderer smoke + 15 i18n + 7 integration + 3 commands + 5 build-config + 7 gui-state)
 
 ---
 

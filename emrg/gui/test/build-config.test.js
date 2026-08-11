@@ -91,3 +91,23 @@ test("every main.js/preload.js local require is covered by files whitelist", () 
   );
 });
 
+
+test("preload exposes workspace-panel APIs (listFiles/readFile)", () => {
+  // 右栏工作区面板 P1（rant 2026-08-11T12:20:35 P1.2）：preload 桥必须暴露两个新 API，
+  // 否则 renderer 无法触达 daemon 的 list_files/read_file 命令。
+  const preload = fs.readFileSync(path.join(GUI_ROOT, "preload.js"), "utf-8");
+  for (const [api, channel] of [
+    ["listFiles", "emrg:listFiles"],
+    ["readFile", "emrg:readFile"],
+  ]) {
+    assert.match(
+      preload,
+      new RegExp(`${api}: \\((payload)?\\) => ipcRenderer\\.invoke\\("${channel}"`),
+      `preload.js must expose ${api} → ${channel}`
+    );
+  }
+  const main = fs.readFileSync(path.join(GUI_ROOT, "main.js"), "utf-8");
+  for (const channel of ["emrg:listFiles", "emrg:readFile"]) {
+    assert.match(main, new RegExp(`ipcMain\\.handle\\("${channel}"`), `main.js must handle ${channel}`);
+  }
+});

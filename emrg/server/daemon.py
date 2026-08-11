@@ -1243,6 +1243,33 @@ class EmrgServer:
 
             await self._handle_read_memory(scope, memory_id, session_id, cwd, ws)
 
+        elif msg_type == "list_files":
+            # GUI right-panel workspace file browser (rant 2026-08-11T12:20:35 P1.1)
+            path_str = msg.get("path", "")
+            if not path_str:
+                await self._send(ws, {
+                    "type": "files_list",
+                    "error": "list_files requires path",
+                })
+                return
+            await self._handle_list_files(path_str, ws)
+
+        elif msg_type == "read_file":
+            # GUI right-panel file viewer (rant 2026-08-11T12:20:35 P1.1)
+            path_str = msg.get("path", "")
+            if not path_str:
+                await self._send(ws, {
+                    "type": "file_content",
+                    "error": "read_file requires path",
+                })
+                return
+            await self._handle_read_file(
+                path_str,
+                msg.get("start_line"),
+                msg.get("line_limit"),
+                ws,
+            )
+
         elif msg_type == "rant":
             # Store user rant/feedback for evolution analysis
             rant_message = msg.get("message", "").strip()
@@ -2768,6 +2795,150 @@ class EmrgServer:
                 "updated_at": session._updated_at,
                 "title": session.title,
             },
+        })
+
+    # ── GUI workspace panel: list_files / read_file (rant 2026-08-11T12:20:35 P1.1) ──
+    # 单目录条目上限：超出截断 + truncated 提示（与 ReadTool 的防爆理念一致）
+    _MAX_LIST_ENTRIES = 5000
+    # read_file 1MB 上限：更大文件引导用系统工具打开（避免 WebSocket 帧过大）
+    _MAX_READ_FILE_SIZE = 1 * 1024 * 1024
+    # 显式 line_limit 的上限（对齐 ReadTool.MAX_LINES）
+    _MAX_READ_LINES = 2000
+
+    async def _handle_list_files(self, path_str: str, ws) -> None:
+        """List one directory level (workspace file browser data source).
+
+        Returns {"type": "files_list", path, entries: [{name, path, type}],
+        truncated?} — fields deliberately limited to name/type/path (no
+        size/mtime: per-entry stat is expensive on 5000-entry directories).
+        """
+        raw = Path(path_str).expanduser()
+        if not raw.is_absolute():
+            await self._send(ws, {
+                "type": "files_list",
+                "error": "path must be absolute",
+            })
+            return
+        path = raw.resolve()
+        try:
+            if not path.exists():
+                await self._send(ws, {
+                    "type": "files_list",
+                    "error": f"path not found: {path}",
+                })
+                return
+            if not path.is_dir():
+                await self._send(ws, {
+                    "type": "files_list",
+                    "error": f"not a directory: {path}",
+                })
+                return
+            entries = sorted(
+                path.iterdir(),
+                # 目录在前、按名排序（对齐 ReadTool）；符号链接不跟随 →
+                # is_dir(follow_symlinks=False) 为 False → 归入 file 类不可展开
+                key=lambda p: (not p.is_dir(follow_symlinks=False), p.name),
+            )
+            result = []
+            truncated = False
+            for e in entries[: self._MAX_LIST_ENTRIES]:
+                is_dir = e.is_dir(follow_symlinks=False)
+                result.append({
+                    "name": e.name,
+                    "path": str(e),
+                    "type": "dir" if is_dir else "file",
+                })
+            if len(entries) > self._MAX_LIST_ENTRIES:
+                truncated = True
+            await self._send(ws, {
+                "type": "files_list",
+                "path": str(path),
+                "entries": result,
+                "truncated": truncated,
+            })
+        except OSError as exc:
+            await self._send(ws, {
+                "type": "files_list",
+                "error": f"cannot list directory: {exc}",
+            })
+
+    async def _handle_read_file(
+        self, path_str: str, start_line, line_limit, ws
+    ) -> None:
+        """Read a text file (workspace panel viewer data source).
+
+        Returns {"type": "file_content", path, content, truncated?, binary?,
+        error?}. Binary files report binary=True with empty content (image
+        preview is rendered via file:// URL in the renderer, no base64).
+        """
+        raw = Path(path_str).expanduser()
+        if not raw.is_absolute():
+            await self._send(ws, {
+                "type": "file_content",
+                "error": "path must be absolute",
+            })
+            return
+        path = raw.resolve()
+        try:
+            if not path.exists():
+                await self._send(ws, {
+                    "type": "file_content",
+                    "error": f"file not found: {path}",
+                })
+                return
+            if path.is_dir():
+                await self._send(ws, {
+                    "type": "file_content",
+                    "error": f"is a directory: {path}",
+                })
+                return
+            file_size = path.stat().st_size
+            if file_size > self._MAX_READ_FILE_SIZE:
+                await self._send(ws, {
+                    "type": "file_content",
+                    "path": str(path),
+                    "error": "文件过大，用系统工具打开",
+                })
+                return
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                await self._send(ws, {
+                    "type": "file_content",
+                    "path": str(path),
+                    "binary": True,
+                })
+                return
+        except OSError as exc:
+            await self._send(ws, {
+                "type": "file_content",
+                "error": f"cannot read file: {exc}",
+            })
+            return
+
+        all_lines = text.split("\n")
+        total = len(all_lines)
+        try:
+            start = max(1, int(start_line or 1))
+        except (TypeError, ValueError):
+            start = 1
+        try:
+            limit = int(line_limit) if line_limit is not None else None
+        except (TypeError, ValueError):
+            limit = None
+        if limit is not None:
+            limit = min(limit, self._MAX_READ_LINES)
+            selected = all_lines[start - 1 : start - 1 + limit]
+            truncated = start - 1 + limit < total
+        else:
+            selected = all_lines[start - 1 :]
+            truncated = False
+        await self._send(ws, {
+            "type": "file_content",
+            "path": str(path),
+            "content": "\n".join(selected),
+            "truncated": truncated,
+            "total_lines": total,
         })
 
     async def _handle_list_memories(

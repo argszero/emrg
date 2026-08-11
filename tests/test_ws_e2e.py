@@ -953,3 +953,177 @@ class TestWSQueueInjection:
                 finally:
                     await cleanup()
         asyncio.run(_test())
+
+
+class TestWSWorkspacePanel:
+    """GUI right-panel workspace commands (rant 2026-08-11T12:20:35 P1.1).
+
+    list_files → files_list (sorted, truncated, absolute-path-only,
+    symlinks not followed); read_file → file_content (paging, binary
+    detection, 1MB cap).
+    """
+
+    @staticmethod
+    async def _cmd(ws, payload):
+        await ws.send(json.dumps(payload))
+        return json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+
+    def test_list_files_sorted_dirs_first(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                (work / "zdir").mkdir()
+                (work / "afile.txt").write_text("x", encoding="utf-8")
+                (work / "adir").mkdir()
+                (work / "bfile.py").write_text("y", encoding="utf-8")
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {"type": "list_files", "path": str(work)})
+                        assert resp["type"] == "files_list"
+                        assert resp.get("error") is None
+                        # 目录在前（adir、zdir），文件在后（afile.txt、bfile.py）
+                        names = [e["name"] for e in resp["entries"]]
+                        types = [e["type"] for e in resp["entries"]]
+                        assert types == ["dir", "dir", "file", "file"], types
+                        assert names == ["adir", "zdir", "afile.txt", "bfile.py"], names
+                        # 字段只含 name/type/path（无 size/mtime）
+                        assert set(resp["entries"][0].keys()) == {"name", "path", "type"}
+                        assert resp["truncated"] is False
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_list_files_relative_path_rejected(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {"type": "list_files", "path": "."})
+                        assert resp["type"] == "files_list"
+                        assert "error" in resp
+                        assert "absolute" in resp["error"]
+                        resp2 = await self._cmd(ws, {"type": "list_files", "path": str(cwd / "nope")})
+                        assert "error" in resp2
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_list_files_symlink_not_followed(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                (work / "real").mkdir()
+                try:
+                    (work / "link").symlink_to(work / "real", target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    return  # 平台不支持符号链接 → 跳过
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {"type": "list_files", "path": str(work)})
+                        by_name = {e["name"]: e for e in resp["entries"]}
+                        assert "real" in by_name and by_name["real"]["type"] == "dir"
+                        assert "link" in by_name and by_name["link"]["type"] == "file", "symlink must not be expandable"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_list_files_truncated_at_5000(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                for i in range(5100):
+                    (work / f"f{i:05d}.txt").write_text("x", encoding="utf-8")
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {"type": "list_files", "path": str(work)})
+                        assert resp["type"] == "files_list"
+                        assert len(resp["entries"]) == 5000
+                        assert resp["truncated"] is True
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_read_file_text_and_paging(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                f = work / "doc.txt"
+                f.write_text("\n".join(f"line{i}" for i in range(1, 11)), encoding="utf-8")
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        # 全文（无分页参数）
+                        resp = await self._cmd(ws, {"type": "read_file", "path": str(f)})
+                        assert resp["type"] == "file_content"
+                        assert resp["content"].split("\n")[0] == "line1"
+                        assert resp["content"].split("\n")[-1] == "line10"
+                        assert resp["truncated"] is False
+                        assert resp["total_lines"] == 10
+                        # 分页 start_line=3, line_limit=2
+                        resp2 = await self._cmd(ws, {
+                            "type": "read_file", "path": str(f),
+                            "start_line": 3, "line_limit": 2,
+                        })
+                        assert resp2["content"].split("\n") == ["line3", "line4"]
+                        assert resp2["truncated"] is True
+                        # 相对路径拒绝
+                        resp3 = await self._cmd(ws, {"type": "read_file", "path": "doc.txt"})
+                        assert "error" in resp3
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_read_file_binary_and_large(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                work = cwd / "work"
+                work.mkdir()
+                bin_f = work / "img.png"
+                bin_f.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x01binary")
+                big_f = work / "big.bin"
+                big_f.write_bytes(b"0" * (1024 * 1024 + 1))
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {"type": "read_file", "path": str(bin_f)})
+                        assert resp["type"] == "file_content"
+                        assert resp.get("binary") is True
+                        assert not resp.get("content")
+                        resp2 = await self._cmd(ws, {"type": "read_file", "path": str(big_f)})
+                        assert "error" in resp2
+                        assert "系统工具" in resp2["error"]
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())

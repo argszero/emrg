@@ -23,6 +23,9 @@
 EMRG 是一个关于*自主进化*的实验：一个能帮你写代码的 AI 智能体——读文件、跑命令、做编辑——而**你的每一条吐槽 (`/rant`) 都会驱动它自我改进**。你说它哪里不好，下一个演化周期它就自己写代码修好并上线。完全开源，完全透明。
 
 > *"EMRG 是一个自我进化的 AI 智能体架构实验。"* — [MANIFESTO](MANIFESTO.md)
+>
+> *人人都是产品经理——你的每一条吐槽，都是下一版的需求单。*
+> *人人都是硅基生命的宿主——你运行的，是一个与你共生进化的数字生命。*
 
 ---
 
@@ -144,7 +147,7 @@ EMRG 不只是追赶——它自己追上来。
 
 贡献指南、源码安装、架构、详细 FAQ → [DEVELOPMENT.md](DEVELOPMENT.md)。
 
-快速检查：`uv run pytest tests/ -v`（当前 688 项）· `cd emrg/gui && npm test`（187 项：43 daemon_client + 19 conn-manager + 22 app-commands + 67 renderer smoke + 15 i18n + 7 integration + 3 commands + 4 build-config + 7 gui-state）
+快速检查：`uv run pytest tests/ -v`（当前 694 项）· `cd emrg/gui && npm test`（188 项：43 daemon_client + 19 conn-manager + 22 app-commands + 67 renderer smoke + 15 i18n + 7 integration + 3 commands + 5 build-config + 7 gui-state）
 
 ---
 
