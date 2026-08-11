@@ -1472,7 +1472,7 @@ test("P2 queue: steer_committed removes that request from queue", async () => {
   assert.strictEqual(q[0].requestId, "req-b");
 });
 
-test("P2 queue: queued_requeue re-sends with same requestId + clears queue", async () => {
+test("P2 queue: queued_requeue re-sends with same requestId + re-tracks (review ❌ fix)", async () => {
   const sent = [];
   const { ctx, els } = makeSandbox({
     sendMessage: async (p) => { sent.push(p); return { ok: true, requestId: p.requestId }; },
@@ -1480,7 +1480,7 @@ test("P2 queue: queued_requeue re-sends with same requestId + clears queue", asy
   await tick();
   await vm.runInContext(
     'App.state.sessionId = "sess-1";' +
-    'App.state.busy = true;' +
+    'App.state.busy = true;' + // wasBusy → re-send is re-tracked
     'App.state.queuedSends.set("sess-1", [{ requestId: "req-queue", text: "hi", mode: "auto" }]);' +
     'App.handleEvent({ type: "queued_requeue", sid: "sess-1", data: { request_ids: ["req-queue"] } });',
     ctx
@@ -1490,10 +1490,35 @@ test("P2 queue: queued_requeue re-sends with same requestId + clears queue", asy
   assert.strictEqual(sent[0].sessionId, "sess-1");
   assert.strictEqual(sent[0].text, "hi");
   assert.strictEqual(sent[0].requestId, "req-queue", "same requestId reused");
-  assert.strictEqual(ctx.App.state.queuedSends.has("sess-1"), false, "queue cleared after requeue");
+  // 审查 ❌ 修复：busy 时重发被再排队 → 重新跟踪（steer_committed 才移除）
+  assert.strictEqual(ctx.App.state.queuedSends.has("sess-1"), true, "re-tracked after requeue (daemon may re-queue)");
+  assert.strictEqual(ctx.App.state.queuedSends.get("sess-1")[0].requestId, "req-queue", "same requestId tracked");
   assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-1").busy, true, "requeue marks session busy");
   const texts = [...els["chat-view"].children].map((c) => c.textContent).join("|");
   assert.ok(texts.includes("重新发送 1"), "requeue note shown");
+});
+
+test("P2 queue: requeue with 2 msgs (idle turn end) re-tracks 2nd+ (review ❌ regression)", async () => {
+  const sent = [];
+  const { ctx } = makeSandbox({
+    sendMessage: async (p) => { sent.push(p); return { ok: true, requestId: p.requestId }; },
+  });
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-1";' +
+    'App.state.busy = false;' + // 单客户端：回合刚结束 → wasBusy=false
+    'App.state.queuedSends.set("sess-1", [' +
+    '  { requestId: "req-m1", text: "m1", mode: "auto" },' +
+    '  { requestId: "req-m2", text: "m2", mode: "auto" }]);' +
+    'App.handleEvent({ type: "queued_requeue", sid: "sess-1", data: { request_ids: ["req-m1", "req-m2"] } });',
+    ctx
+  );
+  await tick();
+  assert.strictEqual(sent.length, 2, "both queued messages re-sent");
+  // M1 开启新回合（不再跟踪）；M2 到达时 daemon busy 被再排队 → i>0 重新跟踪
+  const q = ctx.App.state.queuedSends.get("sess-1");
+  assert.ok(q && q.length === 1, "2nd message re-tracked");
+  assert.strictEqual(q[0].requestId, "req-m2", "M2 tracked for next queued_requeue");
 });
 
 test("P2 queue: queued_cancelled clears queue + note", async () => {

@@ -1228,9 +1228,16 @@ const App = (() => {
           if (q && q.length) {
             const ids = new Set(data.request_ids || []);
             const toResend = q.filter((e) => ids.has(e.requestId));
+            const remaining = q.filter((e) => !ids.has(e.requestId));
             if (toResend.length) {
-              state.queuedSends.delete(sid);
-              for (const item of toResend) {
+              // P2 审查 ❌ 同 #695：was_busy 在循环前捕获，单客户端时首条重发
+              // 开启新回合，M2+ 到达时 daemon busy 被再排队但客户端未跟踪 → 下个
+              // queued_requeue 找不到 → 静默丢失。修复=每条重发若 (wasBusy || i>0)
+              // 重新跟踪——steer_committed 移除已注入的，下个 queued_requeue 重发
+              // 其余，收敛。
+              const wasBusy = sidState(sid).busy;
+              for (let i = 0; i < toResend.length; i++) {
+                const item = toResend[i];
                 const sst = sidState(sid);
                 sst.busy = true;
                 sst.ownStreamRequestId = item.requestId;
@@ -1243,7 +1250,12 @@ const App = (() => {
                   sst.ownStreamRequestId = null;
                   if (!sid || sid === state.sessionId) setComposerDisabled(false);
                 }
+                if (wasBusy || i > 0) {
+                  remaining.push({ requestId: item.requestId, text: item.text, mode: item.mode });
+                }
               }
+              if (remaining.length) state.queuedSends.set(sid, remaining);
+              else state.queuedSends.delete(sid);
               Chat.addSystemMessage(_t("app.queuedResent", { n: toResend.length }), sid);
             }
           }
