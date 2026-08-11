@@ -26,6 +26,19 @@ REM Safe on clean install: no old install dir -> everything is skipped -> 0.
 setlocal enabledelayedexpansion
 set "EMRG_DIR=%USERPROFILE%\.emrg"
 set "INSTALL=%EMRG_DIR%\install"
+REM PID snapshot file: EMRG-owned process tree captured BEFORE any kill, so dead
+REM parents are irrelevant (review 2026-08-11T19:03: ancestor walk cannot resolve
+REM dead daemon parents -- the #683 primary orphan case regresses).
+set "PIDFILE=%TEMP%\emrg-stop-pids.txt"
+del /q "%PIDFILE%" >nul 2>&1
+
+REM --- 0. snapshot EMRG-owned tree (daemon + TUI + GUI + descendants) ---
+REM    Walk DOWN from the roots (emrgd.pid, EMRG.exe, python.exe -m emrg) while they
+REM    are still alive, collecting the full descendant PID set. Step 4 / :verify use
+REM    ONLY this recorded set -> host Git Bash sh/vim (not descendants of EMRG roots)
+REM    are never touched (rant 2026-08-11T18:56:58), and orphans of an already-dead
+REM    daemon are still captured (their PID was recorded while the daemon lived).
+powershell -NoProfile -Command "$f=Get-CimInstance Win32_Process; $roots=New-Object System.Collections.Generic.List[int]; if(Test-Path \"%EMRG_DIR%\emrgd.pid\"){ $d=Get-Content \"%EMRG_DIR%\emrgd.pid\" -ErrorAction SilentlyContinue; if($d -match '^\d+$'){ $roots.Add([int]$d) } }; $f | Where-Object { $_.Name -eq 'EMRG.exe' -or ($_.Name -eq 'python.exe' -and $_.CommandLine -match '-m emrg' -and $_.CommandLine -notmatch 'emrg\.server') } | ForEach-Object { $roots.Add([int]$_.ProcessId) }; $set=New-Object 'System.Collections.Generic.HashSet[int]'; foreach($r in $roots){ [void]$set.Add($r) }; $changed=$true; while($changed){ $changed=$false; foreach($p in $f){ if($set.Contains([int]$p.ParentProcessId) -and -not $set.Contains([int]$p.ProcessId)){ [void]$set.Add([int]$p.ProcessId); $changed=$true } } }; $set | ForEach-Object { $_ } | Set-Content -Path \"%PIDFILE%\" -Encoding ascii" >nul 2>&1
 
 REM --- 1. GUI: graceful WM_CLOSE, then unconditional /F after the grace window ---
 REM    (host report 2026-08-10T01:27:07Z: a long-lived ~15h GUI session deferred
@@ -67,17 +80,17 @@ set "DPID="
 for /f "usebackq delims=" %%p in ("%EMRG_DIR%\emrgd.pid") do set "DPID=%%p"
 if defined DPID taskkill /F /PID %DPID% >nul 2>&1
 
-REM --- 4. bundled git: kill ONLY EMRG-owned git/ssh/bash subprocess trees ---
+REM --- 4. bundled git: kill only RECORDED EMRG-owned git/ssh/bash (snapshot step 0) ---
 REM    (rant 2026-08-11T17:56:25: daemon killed mid-git-op leaves orphans holding
 REM    install\git\usr\bin\msys-2.0.dll -> Inno DeleteFile code 5.)
-REM    (host 2026-08-11T18:56:58: the old blanket ExecutablePath-prefix kill also
-REM    caught the HOST's own Git Bash sh/vim started from install\git\ -- killing
-REM    vim with unsaved edits and aborting the installer. Same class as R125:
-REM    non-EMRG processes must not be touched.) A process is EMRG-owned iff its
-REM    ancestor chain (<=5 levels, ParentProcessId walk) contains the daemon
-REM    (pythonw.exe -m emrg.server) or the TUI (python.exe -m emrg). Host Git Bash
-REM    sh/vim have explorer/terminal ancestors -> never matched, never killed.
-powershell -NoProfile -Command "$all = Get-CimInstance Win32_Process; $git = $all | Where-Object { $_.ExecutablePath -like \"$env:USERPROFILE\.emrg\install\git\*\" }; foreach ($p in $git) { $cur = $p; $emrg = $false; for ($i = 0; $i -le 5 -and $cur; $i++) { if ($cur.CommandLine -match '-m emrg') { $emrg = $true; break }; $cur = $all | Where-Object { $_.ProcessId -eq $cur.ParentProcessId } }; if ($emrg) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } }" >nul 2>&1
+REM    (host 2026-08-11T18:56:58: blanket path kill also caught the HOST's Git Bash
+REM    sh/vim -- vim edits lost + installer aborted. Same class as R125.) Only PIDs
+REM    recorded in step 0 (EMRG tree captured while daemon/TUI were alive) are killed
+REM    when their executable is under install\git\. Host Git Bash sh/vim are not in
+REM    the recorded set -> never touched.
+if exist "%PIDFILE%" (
+  powershell -NoProfile -Command "$f=Get-CimInstance Win32_Process; $ids=@(Get-Content \"%PIDFILE%\" | ForEach-Object { [int]$_ }); $f | Where-Object { $ids -contains [int]$_.ProcessId -and $_.ExecutablePath -like \"$env:USERPROFILE\.emrg\install\git\*\" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+)
 
 :verify
 set "EXIT_CODE=0"
@@ -91,9 +104,12 @@ if exist "%EMRG_DIR%\emrgd.pid" (
     tasklist /FI "PID eq !DPID!" 2>nul | findstr /i "!DPID!" >nul && set "EXIT_CODE=1"
   )
 )
-REM EMRG-owned bundled-git survival check: only an EMRG git subprocess tree that
-REM could not be killed -> exit 1 (installer aborts with a restart hint). Host Git
-REM Bash sh/vim still alive is NOT a failure (rant 2026-08-11T18:56:58).
-powershell -NoProfile -Command "$all = Get-CimInstance Win32_Process; $git = $all | Where-Object { $_.ExecutablePath -like \"$env:USERPROFILE\.emrg\install\git\*\" }; $emrg = $false; foreach ($p in $git) { $cur = $p; for ($i = 0; $i -le 5 -and $cur; $i++) { if ($cur.CommandLine -match '-m emrg') { $emrg = $true; break }; $cur = $all | Where-Object { $_.ProcessId -eq $cur.ParentProcessId } }; if ($emrg) { break } }; if ($emrg) { exit 1 }" >nul 2>&1
-if errorlevel 1 set "EXIT_CODE=1"
+REM EMRG-owned bundled-git survival check: only RECORDED EMRG git PIDs still alive
+REM -> exit 1 (installer aborts with a restart hint). Host Git Bash sh/vim alive is
+REM NOT a failure (rant 2026-08-11T18:56:58).
+if exist "%PIDFILE%" (
+  powershell -NoProfile -Command "$f=Get-CimInstance Win32_Process; $ids=@(Get-Content \"%PIDFILE%\" | ForEach-Object { [int]$_ }); $surv = $f | Where-Object { $ids -contains [int]$_.ProcessId -and $_.ExecutablePath -like \"$env:USERPROFILE\.emrg\install\git\*\" }; if ($surv) { exit 1 }" >nul 2>&1
+  if errorlevel 1 set "EXIT_CODE=1"
+)
+del /q "%PIDFILE%" >nul 2>&1
 endlocal & exit /b %EXIT_CODE%

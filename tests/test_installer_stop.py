@@ -39,22 +39,26 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_in_order():
     # 顺序：GUI 在 daemon 之前（GUI 不能复活 daemon）
     daemon_line = content.index('call "%INSTALL%\\bin\\emrg.cmd" server stop')
     assert content.index("taskkill /IM EMRG.exe") < daemon_line
-    # step 4（rant 2026-08-11T17:56:25 → 18:56:58 修正）：只杀 EMRG 自己 git 子进程树
-    # （祖先链含 daemon/TUI），不碰宿主 Git Bash sh/vim（R125 同族——宿主工具不干涉）。
-    # 判别：ExecutablePath 前缀过滤只命中 %INSTALL%\git\（不误杀系统 Git），
-    # 且用 ParentProcessId 祖先回溯（≤5 层）+ `-m emrg` 判定 EMRG 归属；
-    # daemon 停止之后、:verify 之前。
+    # step 4（rant 2026-08-11T17:56:25 → 18:56:58 修正）：只杀 EMRG 自己 git 子进程树，
+    # 不碰宿主 Git Bash sh/vim（R125 同族——宿主工具不干涉）。
+    # 判别：ExecutablePath 前缀过滤只命中 %INSTALL%\git\（不误杀系统 Git）。
+    # ⚡ review 2026-08-11T19:03：祖先回溯（ancestor walk）无法解析"已死父进程"——
+    # #683 主场景正是 daemon 已死后的孤儿 → 改为 step 0 **向下**快照
+    # （daemon/TUI/GUI 根 + BFS 子孙集，写入 %TEMP%\emrg-stop-pids.txt），
+    # step 4 / :verify 只作用于快照记录集。
     assert 'Get-CimInstance Win32_Process' in content
     assert r'$env:USERPROFILE\.emrg\install\git\*' in content
-    # 祖先回溯是 step 4 的核心判别（宿主 Git Bash sh/vim 的祖先链是 explorer/终端 → 不杀）
+    # step 0 快照：向下 BFS（ParentProcessId → 子进程加入集合）在杀任何进程之前
+    assert "emrg-stop-pids.txt" in content
     assert "ParentProcessId" in content
     assert "-match '-m emrg'" in content
-    # 锚定实际 kill 命令（$_.ExecutablePath 只在 step 4 出现——TUI 分支是
-    # -Filter Name='python.exe'，不共享此模式），勿用 index() 撞到 TUI/REM 注释
-    git_kill = content.index("$_.ExecutablePath -like")
+    assert "Set-Content" in content  # 快照写盘
+    # step 4 的 kill 必须基于快照记录集（$ids -contains）+ ExecutablePath 过滤
+    step4_idx = content.index("REM --- 4. bundled git: kill only RECORDED")
     daemon_line2 = content.index('call "%INSTALL%\\bin\\emrg.cmd" server stop')
     verify_idx = content.index(':verify\nset "EXIT_CODE=0"')  # 标签定义处（goto :verify 在前，勿用裸 index(":verify")）
-    assert daemon_line2 < git_kill < verify_idx
+    assert daemon_line2 < step4_idx < verify_idx
+    assert "$ids -contains [int]$_.ProcessId" in content
     # 干净安装安全：无旧 install 目录时跳过
     assert 'set "INSTALL=%EMRG_DIR%\\install"' in content
     # 括号块内 pid 判定必须用延迟展开（!DPID!）——%DPID% 在块解析时展开，
@@ -66,18 +70,19 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_in_order():
     assert "PID eq !DPID!" in verify_block
     # 非延迟展开 %DPID% 不得出现在括号块内（块解析时展开=恒旧值）
     assert "%DPID%" not in verify_block
-    # :verify 的 EMRG-owned bundled-git 存活判定：只有 EMRG git 子树残留 → exit 1；
-    # 宿主 sh/vim 存活不是失败（rant 2026-08-11T18:56:58）——判别：verify 块含
-    # 祖先回溯判定（ParentProcessId + -m emrg），但不再有无差别 ExecutablePath 存活检查
+    # :verify 的 EMRG-owned bundled-git 存活判定：只有快照记录集内的 EMRG git PID 残留
+    # → exit 1；宿主 sh/vim 存活不是失败（rant 2026-08-11T18:56:58）——判别：verify 块
+    # 含 $ids -contains（快照集过滤），但不再有无差别 ExecutablePath 存活检查
     assert "exit 1" in verify_block
     assert "if errorlevel 1 set \"EXIT_CODE=1\"" in verify_block
-    assert "ParentProcessId" in verify_block
-    assert "-match '-m emrg'" in verify_block
+    assert "$ids -contains" in verify_block
     # 无差别 bundled-git 存活检查必须已删除：verify 块里不得再有"任何 install\git\ 进程
     # 即 exit 1"的旧逻辑（旧式：if (Get-CimInstance ...) { exit 1 }）
     assert "}) { exit 1 }" not in verify_block
-    # 而 step 4 的 kill 命令必须保留（EMRG-owned 判定在 kill 与 verify 都出现）
+    # 而 step 4 的 kill 命令必须保留（快照集过滤 + ExecutablePath）
     assert "Stop-Process" in content
+    # 快照文件清理
+    assert 'del /q "%PIDFILE%"' in content
 
 
 def test_emrgd_cmd_has_stop_branch():
