@@ -237,6 +237,11 @@ async def interactive(init_auto_evolve: bool = False):
     _welcomed = False  # show welcome message once on first connect
     _request_start: float = 0.0  # timestamp when current request started
     _elapsed_task: asyncio.Task | None = None  # background timer task
+    # P1 queue-injection client side (daemon #655): messages sent while the
+    # session is busy are queued daemon-side (task_queued). Track them here so
+    # `queued_requeue` can re-send with the same request id (without re-adding
+    # chat rows) and `queued_cancelled` clears on abort/disconnect.
+    _queued_sends: list[dict] = []  # {"id", "prompt", "images"}
 
     def _short_path(p: str) -> str:
         home = os.path.expanduser("~")
@@ -303,6 +308,7 @@ async def interactive(init_auto_evolve: bool = False):
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
         nonlocal current_model
         nonlocal _last_center, _elapsed_task, conn
+        nonlocal _request_start
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
@@ -311,6 +317,7 @@ async def interactive(init_auto_evolve: bool = False):
             if _elapsed_task is not None:
                 _elapsed_task.cancel(); _elapsed_task = None
             busy = False  # pending request is lost
+            _queued_sends.clear()  # daemon drops the queue on disconnect (queued_cancelled)
             chat.add("system", "⏸ server connection lost — reconnecting...")
             status.update(center="reconnecting...")
             term.render()
@@ -373,6 +380,65 @@ async def interactive(init_auto_evolve: bool = False):
                     status.update(left=_status_left(session_title, session_id, current_model), center=server_id)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render(); continue
+
+                # P1 queue-injection client side (daemon #655): messages sent
+                # while the session is busy are queued daemon-side and injected
+                # at the next round boundary. The TUI tracks them so a
+                # queued_requeue re-sends with the same request id.
+                if data.get("type") == "task_queued":
+                    # Daemon queued our task (session busy). The user row is
+                    # already shown; confirm the queue position.
+                    pos = data.get("position", 0)
+                    chat.add("system", f"⏳ Queued (position {pos}) — will run after the current turn.")
+                    chat.dirty = True; term.render()
+                    continue
+
+                if data.get("type") == "steer_committed":
+                    # Injected into the running turn — no longer needs requeue.
+                    rid = data.get("request_id", "")
+                    if rid:
+                        _queued_sends[:] = [q for q in _queued_sends if q.get("id") != rid]
+                    continue
+
+                if data.get("type") == "queued_requeue":
+                    # Turn ended with queued messages never injected — re-send
+                    # them through the normal path (the daemon lock is released
+                    # now). Rows were already added at the original submit, so
+                    # do NOT re-add them or double-count msg_count.
+                    ids = set(data.get("request_ids", []) or [])
+                    to_resend = [q for q in _queued_sends if q.get("id") in ids]
+                    _queued_sends.clear()
+                    if to_resend:
+                        was_busy = busy
+                        busy = True; need_new_assistant = True; stream_buffer = ""
+                        _request_start = time.time()
+                        if _elapsed_task is None:
+                            _elapsed_task = asyncio.create_task(_run_elapsed_timer())
+                        for i, q in enumerate(to_resend):
+                            rid = await conn.send_task(
+                                session_id=session_id, cwd=cwd, prompt=q["prompt"],
+                                images=q.get("images"), id=q["id"],
+                            )
+                            # Track every re-sent message the daemon will queue:
+                            # re-send #1 starts a new turn (busy=True above), so
+                            # re-sends #2+ arrive while busy and get queued
+                            # daemon-side (task_queued) — untracked they would be
+                            # silently lost at the next queued_requeue. Also
+                            # track all re-sends when a turn was already running
+                            # (multi-client). steer_committed removes ids that
+                            # get injected mid-turn, so the loop converges.
+                            if was_busy or i > 0:
+                                _queued_sends.append({"id": rid, "prompt": q["prompt"], "images": q.get("images")})
+                        chat.add("system", f"→ Re-sending {len(to_resend)} queued message(s).")
+                        chat.dirty = True; term.render()
+                    continue
+
+                if data.get("type") == "queued_cancelled":
+                    if _queued_sends:
+                        _queued_sends.clear()
+                        chat.add("system", "⏹ Queued message(s) cancelled.")
+                        chat.dirty = True; term.render()
+                    continue
 
                 # Tool lifecycle: create a ToolCard on start, update on end.
                 if data.get("type") == "tool_start":
@@ -1834,9 +1900,11 @@ Streaming
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
-                if busy:
-                    logger.debug("ENTER blocked by busy")
-                    term.render(); return True
+                # P1 queue-injection (daemon #655): sending while busy no longer
+                # blocks — the daemon queues the task (task_queued) and injects
+                # it at the next round boundary, or re-sends via queued_requeue
+                # when the turn ends. Track the send for requeue.
+                was_busy = busy
 
                 busy = True; need_new_assistant = True  # rant #32: force new StreamingMarkdown per response
                 _request_start = time.time()
@@ -1860,8 +1928,10 @@ Streaming
                     _pending_images[:] = [img for img in _pending_images if img.get("label") in inp.text]
                 images = _pending_images or None
                 _pending_images = []
-                await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
-                                     images=images)
+                rid = await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
+                                           images=images)
+                if was_busy:
+                    _queued_sends.append({"id": rid, "prompt": text, "images": images})
                 logger.info("task sent, prompt_len=%d chars", len(text))
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):
