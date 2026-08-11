@@ -85,14 +85,26 @@
       </div>
     </main>
 
-    <!-- 结果面板（右栏 Artifacts，WorkBuddy P1） -->
+    <!-- 结果面板（右栏工作区，rant 2026-08-11T12:20:35；P2 框架：Tab 栏 + 可拖拽宽度） -->
     <aside id="result-panel">
       <div class="result-header">
-        <span class="result-title" data-i18n="result.title">产物</span>
+        <div class="result-tabs" id="result-tabs" role="tablist">
+          <button class="result-tab" id="result-tab-files" data-tab="files" data-i18n="result.tabFiles">文件</button>
+          <button class="result-tab active" id="result-tab-artifacts" data-tab="artifacts" data-i18n="result.tabArtifacts">产物</button>
+        </div>
         <button id="result-toggle" class="result-toggle" title="折叠/展开 (⌘\)" data-i18n-title="result.collapse">»</button>
       </div>
-      <div id="result-list" class="result-list"></div>
+      <!-- 打开文件 Tab 条（P3 查看器接入；框架已就绪） -->
+      <div id="result-tabbar" class="result-tabbar"></div>
+      <!-- 文件浏览 pane（P3.1 文件树接入；当前为空态占位） -->
+      <div id="result-files" class="result-pane result-files">
+        <div class="result-empty" data-i18n="result.filesEmpty">文件浏览器即将推出</div>
+      </div>
+      <!-- 产物 pane（WorkBuddy P1 工具卡片暂保留，P3.2 改为 write/edit 文件登记） -->
+      <div id="result-list" class="result-list result-pane active"></div>
     </aside>
+    <!-- 宽度拖拽手柄：绝对定位（不进 #app flex 流，防 WebContentsView bounds x 偏移） -->
+    <div id="result-resizer" title="拖拽调整宽度" data-i18n-title="result.resize"></div>
   </div>
 
   <!-- 设置对话框 -->

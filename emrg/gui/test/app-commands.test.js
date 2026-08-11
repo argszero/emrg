@@ -91,6 +91,10 @@ function makeSandbox(overrides = {}) {
     crypto: { randomUUID: () => "mock-uuid" },
     localStorage: { getItem: () => null, setItem() {} },
     matchMedia: () => ({ matches: false, addEventListener() {} }),
+    // P2 框架：window 级监听（result-panel resizer 拖拽 / resize）
+    _listeners: {},
+    addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const a = this._listeners[type]; if (a) { const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); } },
     DOMPurify: { sanitize: (x) => x },
     marked: null,
     hljs: null,
