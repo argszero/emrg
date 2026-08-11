@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-EMRG is a self-evolving AI agent architecture experiment. Python implementation, based on a micro-kernel design.
+EMRG is a self-evolving AI agent architecture experiment. Python implementation, based on a micro-kernel design. The name reads as "emerge" — intelligence that emerges from use — expanding to Evolving Micro-kernel, Rant-driven Growth.
 
 ## Architecture
 
