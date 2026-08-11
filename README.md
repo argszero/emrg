@@ -147,7 +147,7 @@ They're products. EMRG is an experiment in *closing the loop* — the AI improve
 
 Contributing, source installs, architecture, and the full FAQ → [DEVELOPMENT.md](DEVELOPMENT.md).
 
-Quick checks: `uv run pytest tests/ -v` (currently 694 items) · `cd emrg/gui && npm test` (193: 43 daemon_client + 19 conn-manager + 22 app-commands + 72 renderer smoke + 15 i18n + 7 integration + 3 commands + 5 build-config + 7 gui-state)
+Quick checks: `uv run pytest tests/ -v` (currently 694 items) · `cd emrg/gui && npm test` (198: 43 daemon_client + 19 conn-manager + 22 app-commands + 77 renderer smoke + 15 i18n + 7 integration + 3 commands + 5 build-config + 7 gui-state)
 
 ---
 

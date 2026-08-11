@@ -463,6 +463,94 @@ body.sidebar-collapsed #app {
   opacity: 0.5;
 }
 
+/* ── P3.1：文件浏览器（懒加载目录树） ── */
+.result-files {
+  overflow-y: auto;
+}
+.ft-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 2px var(--sp-2);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ft-row:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+.ft-dir {
+  color: var(--text-1);
+  font-weight: 500;
+}
+.ft-arrow {
+  width: 14px;
+  flex: none;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 10px;
+}
+.ft-kids {
+  margin-left: 12px;
+}
+.ft-kids.hidden {
+  display: none;
+}
+.ft-hint {
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-3);
+  font-size: var(--fs-small);
+}
+
+/* ── P3.3：文件查看器（基础版） ── */
+.result-viewer {
+  overflow: hidden;
+}
+.viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.viewer-path {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viewer-open {
+  flex: none;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  padding: 2px var(--sp-2);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.viewer-open:hover {
+  color: var(--text-1);
+  background: var(--bg-soft);
+}
+.viewer-pre {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: var(--sp-3);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-1);
+}
+
 .result-list {
   flex: 1;
   overflow-y: auto;
