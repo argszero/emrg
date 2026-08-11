@@ -47,6 +47,10 @@ const I18N = (() => {
       "result.title": "产物",
       "result.collapse": "折叠/展开 (⌘\\)",
       "result.empty": "还没有产物，对话中生成的文件会出现在这里",
+      "result.tabFiles": "文件",
+      "result.tabArtifacts": "产物",
+      "result.filesEmpty": "文件浏览器即将推出",
+      "result.resize": "拖拽调整宽度",
 
       // 设置
       "settings.title": "设置",
@@ -377,6 +381,10 @@ const I18N = (() => {
       "result.title": "Artifacts",
       "result.collapse": "Collapse/expand (⌘\\)",
       "result.empty": "No artifacts yet — files generated in the conversation will appear here",
+      "result.tabFiles": "Files",
+      "result.tabArtifacts": "Artifacts",
+      "result.filesEmpty": "File browser coming soon",
+      "result.resize": "Drag to resize",
 
       // Settings
       "settings.title": "Settings",

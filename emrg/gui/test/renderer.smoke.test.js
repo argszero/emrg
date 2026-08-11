@@ -61,6 +61,8 @@ function makeEl(id) {
     appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
     addEventListener(type, fn) { this._listeners = this._listeners || {}; (this._listeners[type] = this._listeners[type] || []).push(fn); },
     click() { (this._listeners && this._listeners.click || []).forEach((fn) => fn({ preventDefault() {} })); },
+    // P2 框架：通用事件派发（resizer mousedown 等非 click 事件）
+    dispatch(type, evt) { (this._listeners && this._listeners[type] || []).forEach((fn) => fn(evt || { preventDefault() {} })); },
     querySelector(sel) {
       // 最小类选择器搜索（chat.js 用 ".msg-body"/".tool-spinner"）：DFS 子节点
       if (!sel || !sel.startsWith(".")) return null;
@@ -125,6 +127,7 @@ const ELEMENT_IDS = [
   "rant-dialog", "rant-message", "rant-project", "rant-cancel", "rant-submit",
   "tasks-dialog", "tasks-list", "tasks-close",
   "result-panel", "result-list", "result-toggle",
+  "result-tabs", "result-tab-files", "result-tab-artifacts", "result-tabbar", "result-files", "result-resizer",
   "growth-card", "growth-count", "about-recent",
   "about-update", "about-update-check-btn",
   "github-banner", "github-banner-msg", "github-banner-connect", "github-banner-dismiss",
@@ -161,6 +164,13 @@ function makeSandbox(overrides = {}) {
     Promise,
     requestAnimationFrame: (cb) => cb(),
     navigator: { language: "zh-CN" }, // rant 21:19：沙箱固定 zh，断言保持确定性
+    // P2 框架：localStorage 功能 mock（宽度/折叠分离持久化断言）
+    localStorage: {
+      _d: {},
+      getItem(k) { return Object.prototype.hasOwnProperty.call(this._d, k) ? this._d[k] : null; },
+      setItem(k, v) { this._d[k] = String(v); },
+      removeItem(k) { delete this._d[k]; },
+    },
     requestIdleCallback: (cb) => cb(),
     crypto: { randomUUID: () => "mock-uuid" },
     DOMPurify: { sanitize: (x) => x },
@@ -185,6 +195,10 @@ function makeSandbox(overrides = {}) {
   };
   win.window = win;
   win.document = document;
+  // P2 框架：window 级监听（resizer 拖拽 mousemove/mouseup + resize）
+  win._listeners = {};
+  win.addEventListener = function (type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); };
+  win.removeEventListener = function (type, fn) { const a = this._listeners[type]; if (a) { const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); } };
   const ctx = vm.createContext(win);
   for (const f of ["utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "app"]) {
     const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
@@ -917,6 +931,98 @@ test("WorkBuddy P1：折叠后 toggle 按钮仍可见可点（rant 2026-08-10T14
   await vm.runInContext("ResultPanel.toggle()", ctx);
   const btnStillThere = vm.runInContext('document.getElementById("result-toggle") !== null', ctx);
   assert.ok(btnStillThere, "折叠后 toggle 按钮不得从 DOM 移除");
+});
+
+test("P2 框架：右栏 Tab 栏渲染 + 切换 pane 显隐", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  // 默认产物 Tab active，文件 pane 隐藏
+  assert.ok(els["result-tab-artifacts"].classList.contains("active"), "默认产物 Tab 应激活");
+  assert.ok(els["result-list"].classList.contains("active"), "产物 pane 应显示");
+  assert.ok(!els["result-files"].classList.contains("active"), "文件 pane 应隐藏");
+  // 点击文件 Tab → 切换
+  els["result-tab-files"].click();
+  assert.ok(els["result-tab-files"].classList.contains("active"), "文件 Tab 应激活");
+  assert.ok(els["result-files"].classList.contains("active"), "文件 pane 应显示");
+  assert.ok(!els["result-list"].classList.contains("active"), "产物 pane 应隐藏");
+  // 切回产物
+  els["result-tab-artifacts"].click();
+  assert.ok(els["result-list"].classList.contains("active"), "切回产物 pane");
+});
+
+test("P2 框架：resizer 拖拽改宽度 + .dragging 抑制 transition", async () => {
+  const { ctx, win, els } = makeSandbox();
+  await tick();
+  const startW = parseInt(els["result-panel"].style.width, 10) || 280;
+  // mousedown → 记录拖拽 + 加 .dragging
+  els["result-resizer"].dispatch("mousedown", { clientX: 400 });
+  assert.ok(els["result-panel"].classList.contains("dragging"), "拖拽中应有 .dragging（抑制 transition）");
+  // mousemove 右移 50 → 面板变窄 50
+  win._listeners.mousemove.at(-1)({ clientX: 450 });
+  const w = parseInt(els["result-panel"].style.width, 10);
+  assert.ok(w < startW, `拖拽右移应变窄：${startW} → ${w}`);
+  // 宽度持久化
+  assert.ok(win.localStorage.getItem("emrg.resultPanel.panelWidth") === String(w), "panelWidth 应持久化");
+  // mouseup → 清理拖拽态 + 解绑
+  win._listeners.mouseup.at(-1)({});
+  assert.ok(!els["result-panel"].classList.contains("dragging"), "mouseup 应移除 .dragging");
+  assert.strictEqual((win._listeners.mousemove || []).length, 0, "mouseup 应解绑 mousemove");
+});
+
+test("P2 框架：折叠/展开与宽度分离持久化", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  // 先调整宽度到 320
+  await vm.runInContext("ResultPanel.setWidth(320)", ctx);
+  assert.strictEqual(parseInt(els["result-panel"].style.width, 10), 320);
+  // 折叠：宽度固化到持久化 + 窄条 40px + resizer 隐藏
+  await vm.runInContext("ResultPanel.toggle()", ctx);
+  assert.ok(els["result-panel"].classList.contains("collapsed"), "toggle 后应折叠");
+  assert.strictEqual(els["result-panel"].style.width, "40px", "折叠窄条 40px");
+  assert.strictEqual(els["result-resizer"].style.display, "none", "折叠时 resizer 隐藏");
+  // 展开：恢复持久化宽度 320（非默认 280）
+  await vm.runInContext("ResultPanel.toggle()", ctx);
+  assert.ok(!els["result-panel"].classList.contains("collapsed"), "再次 toggle 应展开");
+  assert.strictEqual(parseInt(els["result-panel"].style.width, 10), 320, "展开应恢复 panelWidth 而非默认值");
+});
+
+test("P2 框架：打开文件 Tab 去重 / 上限 8 / 关闭", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  for (const p of ["/tmp/a.py", "/tmp/b.py", "/tmp/c.py"]) {
+    await vm.runInContext(`ResultPanel.openFileTab(null, ${JSON.stringify(p)})`, ctx);
+  }
+  assert.strictEqual(els["result-tabbar"].children.length, 3, "应渲染 3 个文件 Tab");
+  // 重复打开 a.py → 去重（仍是 3 个），激活既有
+  await vm.runInContext('ResultPanel.openFileTab(null, "/tmp/a.py")', ctx);
+  assert.strictEqual(els["result-tabbar"].children.length, 3, "同路径应去重");
+  assert.ok(els["result-tabbar"].children[0].classList.contains("active"), "重复打开应激活既有 Tab");
+  // 上限 8：连续打开 10 个 → 淘汰最旧（a/b 及 f1/f2 被淘汰）
+  for (const n of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+    await vm.runInContext(`ResultPanel.openFileTab(null, "/tmp/f${n}.js")`, ctx);
+  }
+  const tabs = els["result-tabbar"].children;
+  assert.ok(tabs.length <= 8, `上限 8，实际 ${tabs.length}`);
+  assert.strictEqual(tabs[0].dataset.path, "/tmp/f3.js", "最旧 Tab 应被淘汰");
+  // 关闭激活 Tab → 从条上移除
+  await vm.runInContext('ResultPanel.closeFileTab(null, "/tmp/f10.js")', ctx);
+  assert.ok(![...els["result-tabbar"].children].some((c) => c.dataset.path === "/tmp/f10.js"), "关闭后应移除");
+});
+
+test("P2 框架：per-session Tab 状态隔离（切会话各显各的）", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('ResultPanel.openFileTab("s1", "/proj1/a.py")', ctx);
+  await vm.runInContext('ResultPanel.openFileTab("s2", "/proj2/b.py")', ctx);
+  // s1 激活：只显示 s1 的 Tab
+  await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
+  assert.deepStrictEqual([...els["result-tabbar"].children].map((c) => c.dataset.path), ["/proj1/a.py"], "s1 只显示自己的 Tab");
+  // s2 激活：只显示 s2 的 Tab
+  await vm.runInContext('ResultPanel.switchSession("s2")', ctx);
+  assert.deepStrictEqual([...els["result-tabbar"].children].map((c) => c.dataset.path), ["/proj2/b.py"], "s2 只显示自己的 Tab");
+  // 切回 s1：激活状态保留（a.py 仍 active）
+  await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
+  assert.ok(els["result-tabbar"].children[0].classList.contains("active"), "s1 的激活 Tab 应保留");
 });
 
 test("工具调用上限中断 → 系统提示可继续（对齐 TUI，跨项目教训）", async () => {

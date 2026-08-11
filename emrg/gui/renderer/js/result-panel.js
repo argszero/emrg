@@ -1,42 +1,208 @@
 "use strict";
 /**
- * result-panel.js — 结果面板（右栏 Artifacts，WorkBuddy P1，rant 21:35）
+ * result-panel.js — 结果面板（右栏工作区，rant 2026-08-11T12:20:35 workspace panel）
  *
- * 监听 tool_finished 事件，把工具输出/生成文件登记为产物卡片：
- *   - 工具输出（bash/read/write）→ 折叠卡片，可展开 + 复制
- *   - 文件路径（write 产物）→ 文件条目，点击用系统默认程序打开
- * 三栏布局：sidebar | chat | result-panel；⌘\ 折叠/展开；窄屏自动隐藏。
+ * P2 slice 1（框架层，PR #664）：
+ *   - Tab 栏：文件 / 产物 两个静态 Tab + 打开文件 Tab（P3 查看器接入，API 已就绪：
+ *     openFileTab/closeFileTab/activateTab，上限 8 淘汰最旧、同路径去重复用）
+ *   - 可拖拽调整宽度（#result-resizer，绝对定位不进 flex 流 R6-②）；
+ *     panelWidth 与 collapsed 分离持久化（localStorage 两个键）
+ *   - per-session 容器状态（openedTabsBySid / artifactsBySid / activeTabBySid），
+ *     切换会话隔离（缺口 5；对齐 app.js ensureSessionView 容器模式）
+ *   - 拖拽期间 #result-panel.dragging 抑制 width transition（R1-①）
+ * 产物卡片（WorkBuddy P1）暂保留在「产物」pane 内——P3.2 再改为 write/edit 文件登记，
+ * 避免框架先于内容上线导致面板空窗。
  */
 
 const ResultPanel = (() => {
-  const MAX_ITEMS = 50;
+  const MAX_ITEMS = 50;           // 产物卡片上限（P1 遗留，P3.2 改 per-session 100）
+  const MAX_OPEN_TABS = 8;        // 打开文件 Tab 上限（决策点 6）
+  const DEFAULT_WIDTH = 280;
+  const MIN_WIDTH = 240;
+  const MAX_WIDTH_RATIO = 0.45;   // 不超过视口 45%
+  const LS_WIDTH = "emrg.resultPanel.panelWidth";
+  const LS_COLLAPSED = "emrg.resultPanel.collapsed";
 
-  function panel() {
-    return $("result-panel");
-  }
-  function listEl() {
-    return $("result-list");
-  }
+  // per-session 状态（P2.2 缺口 5：容器模式）
+  const openedTabsBySid = new Map();  // sid -> { tabs: [{path,name}], active: tabId }
+  const artifactsBySid = new Map();   // sid -> 登记记录（P3.2 消费）
+  let currentSid = null;
 
+  function panel() { return $("result-panel"); }
+  function listEl() { return $("result-list"); }
+  function filesEl() { return $("result-files"); }
+  function tabbarEl() { return $("result-tabbar"); }
+  function resizerEl() { return $("result-resizer"); }
+
+  // ── 宽度 / 折叠（分离持久化） ──
+  function getWidth() {
+    const p = panel();
+    if (p && p.style && p.style.width) {
+      const n = parseInt(p.style.width, 10);
+      if (!Number.isNaN(n)) return n;
+    }
+    return storedWidth();
+  }
+  function storedWidth() {
+    try {
+      const v = parseInt(localStorage.getItem(LS_WIDTH) || "", 10);
+      if (!Number.isNaN(v)) return clampWidth(v);
+    } catch { /* ignore */ }
+    return DEFAULT_WIDTH;
+  }
+  function clampWidth(w) {
+    const vw = (window.innerWidth || 1200) * MAX_WIDTH_RATIO;
+    return Math.round(Math.min(Math.max(w, MIN_WIDTH), Math.max(MIN_WIDTH, vw)));
+  }
+  function setWidth(w) {
+    const p = panel();
+    if (!p) return;
+    const cw = clampWidth(w);
+    p.style.width = cw + "px";
+    try { localStorage.setItem(LS_WIDTH, String(cw)); } catch { /* ignore */ }
+    updateResizerPos();
+  }
   function isCollapsed() {
     const p = panel();
     return p ? p.classList.contains("collapsed") : true;
   }
-
   function setCollapsed(collapsed) {
     const p = panel();
     if (!p) return;
+    if (collapsed) {
+      // 折叠：先固化当前宽度到持久化，再应用窄条（inline width 覆盖 CSS 的 40px 需显式设置）
+      setWidth(getWidth());
+      p.style.width = "40px";
+    } else {
+      // 展开：恢复持久化宽度（勿读 style.width——折叠时为 40px）
+      setWidth(storedWidth());
+    }
     p.classList.toggle("collapsed", collapsed);
-    try {
-      localStorage.setItem("emrg.resultPanel.collapsed", collapsed ? "1" : "0");
-    } catch { /* ignore */ }
+    try { localStorage.setItem(LS_COLLAPSED, collapsed ? "1" : "0"); } catch { /* ignore */ }
+    updateResizerPos();
   }
-
   function toggle() {
     setCollapsed(!isCollapsed());
   }
 
-  /** 空状态 */
+  // ── 拖拽调整宽度（R1-①：.dragging 抑制 transition） ──
+  function updateResizerPos() {
+    const r = resizerEl();
+    if (!r) return;
+    if (isCollapsed()) { r.style.display = "none"; return; }
+    r.style.display = "block";
+    r.style.right = (getWidth() - 3) + "px";
+  }
+  function initResizer() {
+    const r = resizerEl();
+    const p = panel();
+    if (!r || !p) return;
+    let drag = null;
+    r.addEventListener("mousedown", (e) => {
+      drag = { startX: e.clientX, startWidth: getWidth() };
+      p.classList.add("dragging");
+      r.classList.add("dragging");
+      const onMove = (ev) => {
+        if (!drag) return;
+        setWidth(drag.startWidth - (ev.clientX - drag.startX));
+      };
+      const onUp = () => {
+        drag = null;
+        p.classList.remove("dragging");
+        r.classList.remove("dragging");
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    });
+  }
+
+  // ── Tab 管理（静态 文件/产物 + 打开文件 Tab，per-session） ──
+  function tabIdFor(path) { return "file:" + path; }
+  function stateFor(sid) {
+    const key = sid || null;
+    let s = openedTabsBySid.get(key);
+    if (!s) { s = { tabs: [], active: "artifacts" }; openedTabsBySid.set(key, s); }
+    return s;
+  }
+  function artifactsFor(sid) {
+    const key = sid || null;
+    let a = artifactsBySid.get(key);
+    if (!a) { a = []; artifactsBySid.set(key, a); }
+    return a;
+  }
+
+  function renderTabbar() {
+    const bar = tabbarEl();
+    if (!bar) return;
+    const st = stateFor(currentSid);
+    bar.innerHTML = "";
+    if (st.tabs.length === 0) { bar.classList.remove("has-tabs"); return; }
+    bar.classList.add("has-tabs");
+    for (const t of st.tabs) {
+      const active = st.active === tabIdFor(t.path);
+      const btn = el("div", { class: "result-filetab" + (active ? " active" : ""), dataset: { path: t.path } }, t.name);
+      const close = el("span", { class: "filetab-close", dataset: { path: t.path } }, "×");
+      close.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeFileTab(currentSid, t.path);
+      });
+      btn.appendChild(close);
+      btn.addEventListener("click", () => activateTab(tabIdFor(t.path)));
+      bar.appendChild(btn);
+    }
+  }
+
+  /** 激活 Tab（"files" | "artifacts" | "file:<path>"）；sid 缺省 = 当前会话 */
+  function activateTab(tabId, sid) {
+    const st = stateFor(sid !== undefined ? sid : currentSid);
+    st.active = tabId;
+    // 后台会话：只更新状态，不动全局 DOM（切回时由 switchSession 恢复）
+    if ((sid !== undefined ? sid : currentSid) !== currentSid) return;
+    const filesBtn = $("result-tab-files");
+    const artBtn = $("result-tab-artifacts");
+    if (filesBtn) filesBtn.classList.toggle("active", tabId === "files");
+    if (artBtn) artBtn.classList.toggle("active", tabId === "artifacts");
+    const fp = filesEl(), lp = listEl();
+    if (fp) fp.classList.toggle("active", tabId === "files");
+    if (lp) lp.classList.toggle("active", tabId === "artifacts");
+    renderTabbar();
+  }
+
+  /** 打开文件 Tab：同路径去重（激活既有）/ 上限 8 淘汰最旧 */
+  function openFileTab(sid, path) {
+    const st = stateFor(sid);
+    const existing = st.tabs.find((t) => t.path === path);
+    if (existing) { activateTab(tabIdFor(path), sid); return existing; }
+    const name = String(path).split(/[\\/]/).pop() || path;
+    const tab = { path, name };
+    st.tabs.push(tab);
+    while (st.tabs.length > MAX_OPEN_TABS) st.tabs.shift();
+    if ((sid || null) === currentSid) renderTabbar();
+    activateTab(tabIdFor(path), sid);
+    return tab;
+  }
+  function closeFileTab(sid, path) {
+    const st = stateFor(sid);
+    const idx = st.tabs.findIndex((t) => t.path === path);
+    if (idx < 0) return;
+    st.tabs.splice(idx, 1);
+    if (st.active === tabIdFor(path)) {
+      st.active = st.tabs.length ? tabIdFor(st.tabs[st.tabs.length - 1].path) : "artifacts";
+    }
+    if ((sid || null) === currentSid) { renderTabbar(); activateTab(st.active, sid); }
+  }
+
+  /** 切换会话 → Tab 状态按 sid 隔离（缺口 5） */
+  function switchSession(sid) {
+    currentSid = sid || null;
+    stateFor(currentSid);
+    renderTabbar();
+    activateTab(stateFor(currentSid).active);
+  }
+
+  // ── 产物登记（P1 卡片渲染保留；P3.2 改 write/edit 文件登记） ──
   function renderEmpty() {
     const list = listEl();
     if (!list) return;
@@ -45,8 +211,20 @@ const ResultPanel = (() => {
     }
   }
 
-  /** 登记一个产物条目（tool_finished 事件） */
-  function addToolResult(data) {
+  /** 登记一个产物条目（tool_finished 事件；sid = 事件桥会话，P3.2 消费） */
+  function addToolResult(data, sid) {
+    const arr = artifactsFor(sid || currentSid);
+    arr.unshift({
+      tool_name: data.tool_name || "tool",
+      content: String(data.content || ""),
+      error: !!data.error,
+      elapsed: data.elapsed,
+    });
+    if (arr.length > 100) arr.pop();
+    renderCard(data);
+  }
+
+  function renderCard(data) {
     const list = listEl();
     if (!list) return;
     // 空状态占位清除
@@ -144,6 +322,11 @@ const ResultPanel = (() => {
   function init() {
     const p = panel();
     if (!p) return;
+    // 静态 Tab 点击（文件 / 产物）
+    const filesBtn = $("result-tab-files");
+    const artBtn = $("result-tab-artifacts");
+    if (filesBtn) filesBtn.addEventListener("click", () => activateTab("files"));
+    if (artBtn) artBtn.addEventListener("click", () => activateTab("artifacts"));
     // 折叠按钮
     const btn = $("result-toggle");
     if (btn) btn.addEventListener("click", toggle);
@@ -161,14 +344,20 @@ const ResultPanel = (() => {
       if (mq.addEventListener) mq.addEventListener("change", onMq);
       if (mq.matches) setCollapsed(true);
     }
-    // 恢复折叠状态
+    // 恢复折叠状态 + 宽度（分离持久化）
     try {
-      if (localStorage.getItem("emrg.resultPanel.collapsed") === "1") setCollapsed(true);
+      if (localStorage.getItem(LS_COLLAPSED) === "1") setCollapsed(true);
+      else setWidth(storedWidth());
     } catch { /* ignore */ }
+    // 拖拽手柄
+    initResizer();
+    window.addEventListener("resize", updateResizerPos);
+    renderTabbar();
+    activateTab(stateFor(currentSid).active);
     renderEmpty();
   }
 
-  return { init, addToolResult, toggle, isCollapsed };
+  return { init, addToolResult, toggle, isCollapsed, switchSession, openFileTab, closeFileTab, activateTab, getWidth, setWidth };
 })();
 
 // ⚠️ 必须暴露到 window：app.js 作为独立 <script> 加载，模块级 const 不跨 script 共享。

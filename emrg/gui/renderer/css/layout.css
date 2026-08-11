@@ -9,6 +9,7 @@
   display: flex;
   height: 100vh;
   width: 100vw;
+  position: relative; /* #result-resizer 绝对定位锚点（P2 框架） */
 }
 
 /* ── 侧边栏 ─────────────────────────────── */
@@ -317,15 +318,24 @@ body.sidebar-collapsed #app {
   min-width: 40px;
   border-left: 1px solid var(--border);
 }
+/* P2 框架：拖拽调整宽度期间抑制 width transition（R1-①：transition 与 mousemove 冲突） */
+#result-panel.dragging {
+  transition: none;
+}
 #result-panel.collapsed .result-list {
   display: none; /* 只藏内容区 */
+}
+#result-panel.collapsed .result-pane {
+  display: none; /* 折叠时所有 pane 隐藏（含激活中的文件 pane） */
 }
 #result-panel.collapsed .result-header {
   display: flex;
   justify-content: center;
   padding: var(--sp-3) 0;
 }
-#result-panel.collapsed .result-title {
+#result-panel.collapsed .result-title,
+#result-panel.collapsed .result-tabs,
+#result-panel.collapsed .result-tabbar {
   display: none; /* 窄条只留 toggle 按钮 */
 }
 #result-panel.collapsed .result-toggle {
@@ -357,6 +367,100 @@ body.sidebar-collapsed #app {
 .result-toggle:hover {
   color: var(--text-1);
   background: var(--bg-soft);
+}
+
+/* ── P2 框架：Tab 栏（文件 / 产物 + 打开文件 Tab） ── */
+.result-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.result-tabs::-webkit-scrollbar { display: none; }
+.result-tab {
+  background: none;
+  border: none;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-secondary);
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.result-tab:hover {
+  color: var(--text-1);
+  background: var(--bg-soft);
+}
+.result-tab.active {
+  color: var(--text-1);
+  background: var(--bg-soft);
+  font-weight: 600;
+}
+/* 打开文件 Tab 条（P3 查看器接入；每文件一个可关闭 Tab） */
+.result-tabbar {
+  display: none;
+  flex-direction: row;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.result-tabbar.has-tabs { display: flex; }
+.result-tabbar::-webkit-scrollbar { display: none; }
+.result-filetab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 2px var(--sp-2);
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+}
+.result-filetab.active {
+  color: var(--text-1);
+  border-color: var(--accent);
+}
+.filetab-close {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+.filetab-close:hover {
+  color: var(--text-1);
+  background: var(--bg-hover);
+}
+
+/* ── P2 框架：内容 pane 切换（激活 pane 显示） ── */
+.result-pane { display: none; }
+.result-pane.active { display: flex; flex-direction: column; }
+
+/* ── 宽度拖拽手柄 ── */
+#result-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  right: 277px; /* JS 随宽度更新（right = panelWidth - 3） */
+  cursor: col-resize;
+  z-index: 40;
+}
+#result-resizer:hover {
+  background: var(--accent);
+  opacity: 0.35;
+}
+#result-resizer.dragging {
+  background: var(--accent);
+  opacity: 0.5;
 }
 
 .result-list {

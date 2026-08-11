@@ -631,6 +631,7 @@ const App = (() => {
       // P3 slice 1：切换只移动激活指针——每会话条目保留自己的 busy/ownStreamRequestId
       // P3 slice 2：激活该会话容器（状态保留，不 Chat.clear——切回继续看到原消息/流式现场）
       activateSessionView(sid);
+      ResultPanel.switchSession(sid); // P2 框架：右栏 Tab/产物状态按 sid 隔离
       updateEmptyState();
       if (res.error === "session_not_found") {
         Chat.addSystemMessage(_t("app.deletedSwitch"));
@@ -671,6 +672,7 @@ const App = (() => {
       state.sessionId = res.session_id;
       state.drafts.set(res.session_id, ""); // 新会话无草稿
       activateSessionView(state.sessionId); // P3 slice 2：新会话独立容器（空）
+      ResultPanel.switchSession(state.sessionId); // P2 框架：新会话右栏状态复位
       Chat.clear(state.sessionId); // 新会话从空开始（容器可能被复用）
       updateEmptyState(); // 欢迎屏即反馈
       await refreshSessions();
@@ -1172,7 +1174,7 @@ const App = (() => {
         break;
       case "tool_finished":
         Chat.handleToolEnd(data, sid);
-        ResultPanel.addToolResult(data);
+        ResultPanel.addToolResult(data, sid); // P2 框架：产物登记按事件 sid 归类（P3.2 消费）
         break;
       case "cancelled":
         Chat.clearTyping(sid); // rant 14:11：取消时移除在途节点 typing 光标（无 request_id，全清）
