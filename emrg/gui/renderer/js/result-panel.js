@@ -250,12 +250,13 @@ const ResultPanel = (() => {
     vp.appendChild(pre);
   }
 
-  /** 切换会话 → Tab 状态按 sid 隔离（缺口 5） */
+  /** 切换会话 → Tab/产物状态按 sid 隔离（缺口 5） */
   function switchSession(sid) {
     currentSid = sid || null;
     stateFor(currentSid);
     renderTabbar();
     activateTab(stateFor(currentSid).active);
+    renderArtifacts(); // 产物 pane 按当前会话桶恢复（后台 tool_finished 只入桶不渲染）
   }
 
   // ── 产物登记（P1 卡片渲染保留；P3.2 改 write/edit 文件登记） ──
@@ -270,14 +271,27 @@ const ResultPanel = (() => {
   /** 登记一个产物条目（tool_finished 事件；sid = 事件桥会话，P3.2 消费） */
   function addToolResult(data, sid) {
     const arr = artifactsFor(sid || currentSid);
-    arr.unshift({
+    const record = {
       tool_name: data.tool_name || "tool",
       content: String(data.content || ""),
       error: !!data.error,
       elapsed: data.elapsed,
-    });
+    };
+    arr.unshift(record);
     if (arr.length > 100) arr.pop();
-    renderCard(data);
+    // 后台会话：只入桶不渲染（防污染激活会话产物 pane；切回时由 renderArtifacts 恢复）
+    if ((sid || null) !== currentSid) return;
+    renderCard(record);
+  }
+
+  /** 按当前会话桶重渲染产物 pane（switchSession/init 时从桶恢复 DOM，镜像 renderTabbar 模式） */
+  function renderArtifacts() {
+    const list = listEl();
+    if (!list) return;
+    list.innerHTML = "";
+    const arr = artifactsFor(currentSid);
+    if (arr.length === 0) { renderEmpty(); return; }
+    for (const rec of arr.slice(0, MAX_ITEMS)) renderCard(rec);
   }
 
   function renderCard(data) {
@@ -410,7 +424,7 @@ const ResultPanel = (() => {
     window.addEventListener("resize", updateResizerPos);
     renderTabbar();
     activateTab(stateFor(currentSid).active);
-    renderEmpty();
+    renderArtifacts();
   }
 
   return { init, addToolResult, toggle, isCollapsed, switchSession, openFileTab, closeFileTab, activateTab, getWidth, setWidth };
