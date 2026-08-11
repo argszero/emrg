@@ -153,6 +153,27 @@ jobs:
         shell: bash
         run: bash packaging/build-runtime.sh
 
+      # ── 图标资产生成（rant 2026-08-11T18:28:09：仓库只保留 icon.svg 设计源，
+      #     png/icns/ico 由 CI 构建时现生成，必须先于 GUI 构建执行）──
+      - name: Generate icon assets (icon.svg → png/icns/ico)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v rsvg-convert >/dev/null 2>&1; then
+            echo "rsvg-convert already available"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install librsvg
+          else
+            echo "no rsvg-convert; gen-assets.sh will fall back to Chrome/Edge headless"
+          fi
+          bash packaging/gen-assets.sh
+          # 产物必须存在（GUI 构建引用 ../packaging/assets/*.png/icns/ico）
+          test -s packaging/assets/icon.png
+          test -s packaging/assets/icon.icns
+          test -s packaging/assets/icon.ico
+
       # ── GUI dist（electron-builder；linux extraResources runtime §5 R64）──
       - name: Build GUI (electron-builder)
         working-directory: emrg/gui

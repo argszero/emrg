@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- EMRG app icon — "Branch Emergence" (分支涌现), Gemini design B minimal.
+       Design source (rant 2026-08-11T18:28:09):
+       one stem rising from bottom soil → central hub → 5 branches fanning out
+       → glowing nodes (breathing feel). Green family gradient (#00FF87→#047857)
+       + single cyan accent (#60EFFF), dark green-tinted background
+       (#111c16→#070b08). Hexagon + dashed grid removed (noise at small sizes). -->
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#111c16"/>
+      <stop offset="1" stop-color="#070b08"/>
+    </linearGradient>
+    <linearGradient id="branchGrad" x1="0" y1="1" x2="0.5" y2="0">
+      <stop offset="0" stop-color="#047857"/>
+      <stop offset="1" stop-color="#00FF87"/>
+    </linearGradient>
+    <linearGradient id="stemGrad" x1="0" y1="1" x2="0.3" y2="0">
+      <stop offset="0" stop-color="#047857"/>
+      <stop offset="1" stop-color="#00C97F"/>
+    </linearGradient>
+    <radialGradient id="nodeGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#00FF87" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#00FF87" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#00FF87" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cyanGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#60EFFF" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#60EFFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#60EFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="nodeBody" cx="0.35" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#00FF87"/>
+      <stop offset="0.65" stop-color="#00D97F"/>
+      <stop offset="1" stop-color="#047857"/>
+    </radialGradient>
+    <radialGradient id="cyanBody" cx="0.35" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#D8FBFF"/>
+      <stop offset="0.5" stop-color="#60EFFF"/>
+      <stop offset="1" stop-color="#0E7490"/>
+    </radialGradient>
+    <radialGradient id="hubGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#00FF87" stop-opacity="0.6"/>
+      <stop offset="0.6" stop-color="#00FF87" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#00FF87" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="softBlur" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="10"/>
+    </filter>
+    <filter id="soilBlur" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="26"/>
+    </filter>
+  </defs>
+
+  <!-- background: dark green-tinted gradient, rounded square (app icon shape) -->
+  <rect x="56" y="56" width="912" height="912" rx="206" fill="url(#bgGrad)"/>
+
+  <!-- soil glow at the base -->
+  <ellipse cx="512" cy="936" rx="330" ry="72" fill="#00C97F" opacity="0.16" filter="url(#soilBlur)"/>
+  <ellipse cx="512" cy="938" rx="210" ry="40" fill="#047857" opacity="0.5"/>
+
+  <!-- stem: rising from bottom soil diagonally to the central hub -->
+  <path d="M 470 950 C 452 862 466 780 512 690"
+        fill="none" stroke="#00FF87" stroke-width="30" stroke-linecap="round" opacity="0.14" filter="url(#softBlur)"/>
+  <path d="M 470 950 C 452 862 466 780 512 690"
+        fill="none" stroke="url(#stemGrad)" stroke-width="22" stroke-linecap="round"/>
+
+  <!-- central hub (三层圆: glow halo + body + bright core) -->
+  <circle cx="512" cy="650" r="150" fill="url(#hubGlow)"/>
+  <circle cx="512" cy="650" r="58" fill="url(#nodeBody)"/>
+  <circle cx="505" cy="642" r="20" fill="#E4FFF2"/>
+
+  <!-- 5 branches fanning out from the hub (扇形破出) -->
+  <!-- branch 1: leftmost (-72°) -->
+  <path d="M 512 650 C 436 618 362 568 316 508"
+        fill="none" stroke="#00FF87" stroke-width="22" stroke-linecap="round" opacity="0.13" filter="url(#softBlur)"/>
+  <path d="M 512 650 C 436 618 362 568 316 508"
+        fill="none" stroke="url(#branchGrad)" stroke-width="16" stroke-linecap="round"/>
+  <!-- branch 2: (-36°) -->
+  <path d="M 512 650 C 470 576 448 492 444 414"
+        fill="none" stroke="#00FF87" stroke-width="22" stroke-linecap="round" opacity="0.13" filter="url(#softBlur)"/>
+  <path d="M 512 650 C 470 576 448 492 444 414"
+        fill="none" stroke="url(#branchGrad)" stroke-width="16" stroke-linecap="round"/>
+  <!-- branch 3: top (0°) -->
+  <path d="M 512 650 C 512 566 512 478 512 396"
+        fill="none" stroke="#00FF87" stroke-width="22" stroke-linecap="round" opacity="0.13" filter="url(#softBlur)"/>
+  <path d="M 512 650 C 512 566 512 478 512 396"
+        fill="none" stroke="url(#branchGrad)" stroke-width="16" stroke-linecap="round"/>
+  <!-- branch 4: (36°) -->
+  <path d="M 512 650 C 554 576 576 492 580 414"
+        fill="none" stroke="#00FF87" stroke-width="22" stroke-linecap="round" opacity="0.13" filter="url(#softBlur)"/>
+  <path d="M 512 650 C 554 576 576 492 580 414"
+        fill="none" stroke="url(#branchGrad)" stroke-width="16" stroke-linecap="round"/>
+  <!-- branch 5: rightmost (72°) -->
+  <path d="M 512 650 C 588 618 662 568 708 508"
+        fill="none" stroke="#00FF87" stroke-width="22" stroke-linecap="round" opacity="0.13" filter="url(#softBlur)"/>
+  <path d="M 512 650 C 588 618 662 568 708 508"
+        fill="none" stroke="url(#branchGrad)" stroke-width="16" stroke-linecap="round"/>
+
+  <!-- 5 glowing nodes (each 3 layers: glow halo + body + bright core) -->
+  <!-- node 1: leftmost -->
+  <circle cx="316" cy="508" r="88" fill="url(#nodeGlow)"/>
+  <circle cx="316" cy="508" r="42" fill="url(#nodeBody)"/>
+  <circle cx="310" cy="500" r="15" fill="#E4FFF2"/>
+  <!-- node 2: left -->
+  <circle cx="444" cy="414" r="88" fill="url(#nodeGlow)"/>
+  <circle cx="444" cy="414" r="42" fill="url(#nodeBody)"/>
+  <circle cx="438" cy="406" r="15" fill="#E4FFF2"/>
+  <!-- node 3: top (cyan accent — 单青色点缀) -->
+  <circle cx="512" cy="396" r="92" fill="url(#cyanGlow)"/>
+  <circle cx="512" cy="396" r="44" fill="url(#cyanBody)"/>
+  <circle cx="506" cy="388" r="16" fill="#F0FEFF"/>
+  <!-- node 4: right -->
+  <circle cx="580" cy="414" r="88" fill="url(#nodeGlow)"/>
+  <circle cx="580" cy="414" r="42" fill="url(#nodeBody)"/>
+  <circle cx="574" cy="406" r="15" fill="#E4FFF2"/>
+  <!-- node 5: rightmost -->
+  <circle cx="708" cy="508" r="88" fill="url(#nodeGlow)"/>
+  <circle cx="708" cy="508" r="42" fill="url(#nodeBody)"/>
+  <circle cx="702" cy="500" r="15" fill="#E4FFF2"/>
+</svg>
