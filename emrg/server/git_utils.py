@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 # restarted without PATH git and cycles were silently skipped for 18 min).
 _GIT_MISSING_WARNED = False
 
+# In-process memo of the last (git, gh) paths written to install-info.json —
+# resolve_git_gh() is called on every git_cmd(), and each call used to do an
+# atomic tmp+os.replace disk write even when nothing changed. Tool paths are
+# stable within a process lifetime, so write once and skip the rest.
+_LAST_CACHED_PATHS: tuple[str, str] | None = None
+
 
 # ── Non-interactive subprocess environment (rant 2026-08-07T10:17:27) ──
 #
@@ -228,6 +234,7 @@ def resolve_git_gh() -> tuple[str, str]:
     Returns (git_path, gh_path). Missing executables yield '' (callers decide
     how to degrade).
     """
+    global _LAST_CACHED_PATHS
     git = _cached_tool_path("git")
     gh = _cached_tool_path("gh")
     if git and Path(git).exists():
@@ -240,7 +247,12 @@ def resolve_git_gh() -> tuple[str, str]:
         gh = _tool_in_install("gh") or (shutil.which("gh") or "")
 
     if git:
-        _cache_tool_paths(git, gh)
+        # Write the cache only when the resolved pair changed since the last
+        # write (or nothing cached yet) — avoids an atomic install-info.json
+        # write on every git_cmd() call. Paths are stable per process.
+        if _LAST_CACHED_PATHS != (git, gh):
+            _cache_tool_paths(git, gh)
+            _LAST_CACHED_PATHS = (git, gh)
     else:
         # git is the failure mode that silently disables evolution (2026-08-12
         # incident) — warn regardless of whether gh resolved. Also skip the
