@@ -693,6 +693,58 @@ test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/t
   assert.strictEqual(r10.content, "hi");
 });
 
+test("rant 18:23:15 P2/P3：RESPONSE_TYPES 覆盖任务/模板 CRUD（task_result / templates_list / template_result）", async () => {
+  const client = new DaemonClient({ projectDir: tmpHome });
+  await connectClient(client);
+  const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
+  // task_create → task_result
+  const p1 = client.sendCommandAndWait("task_create", { name: "t1", type: "evolution", project: "emrg", interval: 600 }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "task_result", ok: true, task: { name: "t1" }, summary: { added: ["t1"] } });
+  const r1 = await p1;
+  assert.strictEqual(r1.type, "task_result");
+  assert.strictEqual(r1.ok, true);
+  assert.deepStrictEqual(r1.summary.added, ["t1"]);
+  // task_update → task_result
+  const p2 = client.sendCommandAndWait("task_update", { name: "t1", interval: 1200 }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "task_result", ok: true, task: { name: "t1", interval: 1200 } });
+  const r2 = await p2;
+  assert.strictEqual(r2.type, "task_result");
+  assert.strictEqual(r2.task.interval, 1200);
+  // task_delete → task_result
+  const p3 = client.sendCommandAndWait("task_delete", { name: "t1" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "task_result", ok: true, summary: { removed: ["t1"] } });
+  const r3 = await p3;
+  assert.strictEqual(r3.type, "task_result");
+  assert.deepStrictEqual(r3.summary.removed, ["t1"]);
+  // task_template_list → templates_list
+  const p4 = client.sendCommandAndWait("task_template_list", {}, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "templates_list", templates: [{ name: "evolution", builtin: true }, { name: "sync", builtin: false }] });
+  const r4 = await p4;
+  assert.strictEqual(r4.type, "templates_list");
+  assert.strictEqual(r4.templates.length, 2);
+  // task_template_create / update / delete → template_result
+  const p5 = client.sendCommandAndWait("task_template_create", { name: "sync", prompt: "# s" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "template_result", ok: true });
+  const r5 = await p5;
+  assert.strictEqual(r5.type, "template_result");
+  assert.strictEqual(r5.ok, true);
+  const p6 = client.sendCommandAndWait("task_template_update", { name: "sync", prompt: "# s2" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  send({ type: "template_result", ok: true });
+  const r6 = await p6;
+  assert.strictEqual(r6.type, "template_result");
+  const p7 = client.sendCommandAndWait("task_template_delete", { name: "sync" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  // G103：带 error 键的帧 reject 未决命令（daemon template_result 错误形态）
+  send({ type: "template_result", ok: false, error: "builtin task type is read-only" });
+  await assert.rejects(p7, /read-only/);
+});
+
 test("命令-响应配对超时 → reject（G93）", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);

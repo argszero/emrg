@@ -232,6 +232,11 @@ const Dialogs = (() => {
       } catch { /* 元素缺失（测试桩）时忽略 */ }
       // Windows GCM rant Stage 2：GitHub 连接状态随设置面板打开时刷新
       await refreshGithubStatus();
+      // 定时任务管理（rant 2026-08-12T18:23:15 P3）：任务/类型列表随设置面板打开时刷新
+      try {
+        await loadTaskMeta();
+        await renderTaskList();
+      } catch { /* 元素缺失（测试桩）时忽略 */ }
       // Auto update-check prompt (rant 2026-08-10T07:12:12): about area shows
       // a one-time non-intrusive line when a newer release exists.
       // rant 2026-08-11T09:18:16：手动"检查更新"按钮（force 重新检查）
@@ -611,6 +616,298 @@ const Dialogs = (() => {
     } catch { /* boot-time daemon may not be ready — silent */ }
   }
 
+  // ── 定时任务管理（rant 2026-08-12T18:23:15 P3：GUI 任务/自定义类型 CRUD） ──
+  // 决策点执行：①内置类型只读 ②被任务引用的自定义类型拒绝删除 ③项目仅限已注册
+  // ④热重载（daemon apply_tasks）⑤间隔 ≥60 ⑥内置模板只读。
+  let taskTypes = []; // [{name, builtin}] — 类型下拉选项（内置 + 自定义）
+  let taskProjects = []; // listProjects 结果 — 项目下拉仅已注册项目（决策点③）
+  let editingTask = null; // 正在编辑的任务名（null = 新增；daemon 以 name 定位 → 名称不可改）
+  let editingTemplate = null; // 正在编辑的自定义类型名（null = 新增；名称不可改）
+
+  async function loadTaskMeta() {
+    try {
+      const templates = await window.emrg.taskTemplateList();
+      taskTypes = Array.isArray(templates)
+        ? templates.map((t) => ({ name: t.name, builtin: Boolean(t.builtin) }))
+        : [];
+    } catch { taskTypes = []; }
+    try {
+      const projects = await window.emrg.listProjects();
+      taskProjects = Array.isArray(projects) ? projects : [];
+    } catch { taskProjects = []; }
+  }
+
+  async function renderTaskList() {
+    const list = $("task-list");
+    if (!list) return; // 元素缺失（测试桩）时忽略
+    list.innerHTML = "";
+    let tasks = [];
+    try {
+      tasks = await window.emrg.listTasks();
+    } catch (e) {
+      list.innerHTML = `<div class="task-empty">${_t("settings.taskEmpty")}</div>`;
+      return;
+    }
+    if (!tasks || tasks.length === 0) {
+      list.innerHTML = `<div class="task-empty">${_t("settings.taskEmpty")}</div>`;
+      return;
+    }
+    for (const t of tasks) {
+      const row = el("div", { class: "task-row" });
+      row.appendChild(el("span", { class: "task-name" }, t.name || "?"));
+      row.appendChild(el("span", { class: "task-badge" }, t.type || "evolution"));
+      const cfg = (t.config && typeof t.config === "object") ? t.config : {};
+      const hints = [];
+      if (cfg.project) hints.push(cfg.project);
+      if (t.interval != null) hints.push(_t("app.taskInterval", { n: t.interval ?? "-" }));
+      if (t.enabled === false) hints.push(_t("app.taskDisabled"));
+      row.appendChild(el("span", { class: "task-hint" }, hints.join(" · ")));
+      const actions = el("span", { class: "task-actions" });
+      // 触发（复用 /trigger 语义）
+      const trigBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.taskTrigger") }, _t("settings.taskTrigger"));
+      trigBtn.addEventListener("click", async () => {
+        try {
+          const res = await window.emrg.triggerTask({ name: t.name });
+          if (res && res.error) Chat.addSystemMessage(_t("app.triggerFailed", { msg: res.error }));
+          else Chat.addSystemMessage(_t("app.triggered", { n: t.name }));
+        } catch (e) {
+          Chat.addSystemMessage(_t("app.triggerFailed", { msg: e.message }));
+        }
+      });
+      actions.appendChild(trigBtn);
+      // 编辑（表单预填 → taskUpdate）
+      const editBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.taskEdit") }, _t("settings.taskEdit"));
+      editBtn.addEventListener("click", () => openTaskForm(t));
+      actions.appendChild(editBtn);
+      // 删除（确认弹窗 → taskDelete → 热重载由 daemon apply_tasks 完成）
+      const delBtn = el("button", { type: "button", class: "model-action-btn danger", title: _t("settings.taskDelete") }, _t("settings.taskDelete"));
+      delBtn.addEventListener("click", () => {
+        showConfirm(_t("settings.taskDelete"), _t("settings.taskDeleteConfirm", { name: t.name }), {
+          okText: _t("settings.taskDelete"),
+          danger: true,
+          onOk: async () => {
+            try {
+              await window.emrg.taskDelete({ name: t.name });
+              Chat.addSystemMessage(_t("settings.taskDeleted"));
+              await renderTaskList();
+            } catch (e) {
+              Chat.addSystemMessage(_t("app.tasksFailed", { msg: e.message }));
+            }
+          },
+        });
+      });
+      actions.appendChild(delBtn);
+      row.appendChild(actions);
+      list.appendChild(row);
+    }
+  }
+
+  function openTaskForm(task = null) {
+    editingTask = task ? task.name : null;
+    $("task-form-name").value = task ? task.name : "";
+    $("task-form-name").disabled = Boolean(task); // 决策点：daemon 以 name 定位 → 不可改名
+    // 类型下拉（内置 + 自定义；决策点⑥内置模板只读体现在模板管理区）
+    const typeSel = $("task-form-type");
+    typeSel.innerHTML = "";
+    for (const tp of taskTypes) {
+      const opt = el("option", { value: tp.name }, tp.name);
+      typeSel.appendChild(opt);
+    }
+    const curType = (task && task.type) || (taskTypes[0] && taskTypes[0].name) || "evolution";
+    typeSel.value = taskTypes.some((tp) => tp.name === curType) ? curType : (taskTypes[0] ? taskTypes[0].name : "evolution");
+    // 项目下拉（决策点③：仅已注册项目）
+    const projSel = $("task-form-project");
+    projSel.innerHTML = "";
+    for (const p of taskProjects) {
+      const pv = p.name || p.path || "";
+      projSel.appendChild(el("option", { value: pv }, pv));
+    }
+    const cfg = (task && task.config && typeof task.config === "object") ? task.config : {};
+    const curProj = cfg.project || (taskProjects[0] ? taskProjects[0].name || taskProjects[0].path || "" : "");
+    projSel.value = taskProjects.some((p) => (p.name || p.path || "") === curProj)
+      ? curProj
+      : (taskProjects[0] ? taskProjects[0].name || taskProjects[0].path || "" : "");
+    $("task-form-interval").value = task && task.interval != null ? task.interval : 1800;
+    $("task-form-enabled").checked = task ? task.enabled !== false : true;
+    $("task-form-repo").value = cfg.repo || "";
+    $("task-form").classList.remove("hidden");
+    $("task-form-name").focus();
+  }
+
+  function closeTaskForm() {
+    $("task-form").classList.add("hidden");
+    editingTask = null;
+    $("task-form-name").disabled = false;
+  }
+
+  async function saveTaskForm() {
+    const name = $("task-form-name").value.trim();
+    if (!name) {
+      showConfirm(_t("dlg.stepTitle"), _t("dlg.nameRequiredBody"), { okText: _t("dlg.gotIt"), danger: false });
+      return;
+    }
+    // 决策点⑤：间隔最小值 60s（客户端先行校验，daemon 兜底）
+    const interval = parseInt($("task-form-interval").value, 10);
+    if (!Number.isFinite(interval) || interval < 60) {
+      showConfirm(_t("dlg.stepTitle"), _t("settings.taskIntervalInvalid"), { okText: _t("dlg.gotIt"), danger: false });
+      return;
+    }
+    const payload = {
+      name,
+      type: $("task-form-type").value,
+      project: $("task-form-project").value,
+      interval,
+      enabled: $("task-form-enabled").checked,
+      repo: $("task-form-repo").value.trim() || undefined,
+    };
+    try {
+      if (editingTask === null) await window.emrg.taskCreate(payload);
+      else await window.emrg.taskUpdate(payload);
+      Chat.addSystemMessage(_t("settings.taskSaved"));
+      closeTaskForm();
+      await renderTaskList();
+    } catch (e) {
+      Chat.addSystemMessage(_t("app.tasksFailed", { msg: e.message }));
+    }
+  }
+
+  // ── 自定义类型管理（决策点①⑥：内置只读；决策点②：被引用拒绝删除） ──
+  async function renderTemplateList() {
+    const wrap = $("task-template-list");
+    if (!wrap) return;
+    wrap.innerHTML = "";
+    let templates = [];
+    try {
+      templates = await window.emrg.taskTemplateList();
+    } catch (e) {
+      wrap.innerHTML = `<div class="task-empty">${_t("settings.templateEmpty")}</div>`;
+      return;
+    }
+    if (!templates || templates.length === 0) {
+      wrap.innerHTML = `<div class="task-empty">${_t("settings.templateEmpty")}</div>`;
+      return;
+    }
+    for (const t of templates) {
+      const row = el("div", { class: "task-row" });
+      row.appendChild(el("span", { class: "task-name" }, t.name));
+      row.appendChild(el("span", { class: "task-badge" }, t.builtin ? _t("settings.taskBuiltin") : _t("settings.taskCustom")));
+      const body = t.prompt || t.template || "";
+      row.appendChild(el("span", { class: "task-hint" }, body.length > 60 ? body.slice(0, 60) + "…" : body));
+      // 内置只读（决策点①⑥）：不渲染任何操作按钮
+      if (!t.builtin) {
+        const actions = el("span", { class: "task-actions" });
+        const editBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.templateEdit") }, _t("settings.templateEdit"));
+        editBtn.addEventListener("click", () => openTemplateForm(t));
+        actions.appendChild(editBtn);
+        const delBtn = el("button", { type: "button", class: "model-action-btn danger", title: _t("settings.templateDelete") }, _t("settings.templateDelete"));
+        delBtn.addEventListener("click", () => {
+          showConfirm(_t("settings.templateDelete"), _t("settings.templateDeleteConfirm", { name: t.name }), {
+            okText: _t("settings.templateDelete"),
+            danger: true,
+            onOk: async () => {
+              try {
+                await window.emrg.taskTemplateDelete({ name: t.name });
+                Chat.addSystemMessage(_t("settings.templateDeleted"));
+                await loadTaskMeta(); // 刷新类型选项（任务表单下拉）
+                await renderTemplateList();
+              } catch (e) {
+                // 决策点②：被任务引用的类型 daemon 拒绝删除（错误信息含任务数）
+                Chat.addSystemMessage(_t("settings.templateDeleteFailed", { msg: e.message }));
+              }
+            },
+          });
+        });
+        actions.appendChild(delBtn);
+        row.appendChild(actions);
+      }
+      wrap.appendChild(row);
+    }
+    // 底部"＋ 添加类型"（仅自定义类型可增删改）
+    const addRow = el("div", { style: "display:flex;justify-content:center;margin-top:6px;" });
+    const addBtn = el("button", { type: "button", class: "btn btn-ghost", style: "padding:4px 12px;" }, _t("settings.templateAdd"));
+    addBtn.addEventListener("click", () => openTemplateForm(null));
+    addRow.appendChild(addBtn);
+    wrap.appendChild(addRow);
+  }
+
+  function openTemplateForm(tpl = null) {
+    editingTemplate = tpl ? tpl.name : null;
+    $("task-template-name").value = tpl ? tpl.name : "";
+    $("task-template-name").disabled = Boolean(tpl); // daemon 以 name 定位 → 不可改名
+    $("task-template-prompt").value = tpl ? (tpl.prompt || "") : "";
+    $("task-template-form").classList.remove("hidden");
+    $("task-template-name").focus();
+  }
+
+  function closeTemplateForm() {
+    $("task-template-form").classList.add("hidden");
+    editingTemplate = null;
+    $("task-template-name").disabled = false;
+    $("task-template-name").value = "";
+    $("task-template-prompt").value = "";
+  }
+
+  async function saveTemplateForm() {
+    const name = $("task-template-name").value.trim();
+    const prompt = $("task-template-prompt").value;
+    if (!name || !prompt.trim()) {
+      showConfirm(_t("dlg.stepTitle"), _t("settings.templateInvalid"), { okText: _t("dlg.gotIt"), danger: false });
+      return;
+    }
+    try {
+      if (editingTemplate === null) await window.emrg.taskTemplateCreate({ name, prompt });
+      else await window.emrg.taskTemplateUpdate({ name, prompt });
+      Chat.addSystemMessage(_t("settings.templateSaved"));
+      closeTemplateForm();
+      await loadTaskMeta();
+      await renderTemplateList();
+    } catch (e) {
+      Chat.addSystemMessage(_t("settings.templateSaveFailed", { msg: e.message }));
+    }
+  }
+
+  function initTaskManagement() {
+    const addBtn = $("task-add-btn");
+    if (addBtn) addBtn.addEventListener("click", () => openTaskForm(null));
+    const saveBtn = $("task-form-save");
+    if (saveBtn) saveBtn.addEventListener("click", saveTaskForm);
+    const cancelBtn = $("task-form-cancel");
+    if (cancelBtn) cancelBtn.addEventListener("click", closeTaskForm);
+    const tmgrBtn = $("task-template-mgr-btn");
+    if (tmgrBtn) {
+      tmgrBtn.addEventListener("click", async () => {
+        const wrap = $("task-template-list");
+        if (!wrap) return;
+        if (wrap.classList.contains("hidden")) {
+          wrap.classList.remove("hidden");
+          closeTemplateForm(); // 收起表单，避免与列表并列
+          await loadTaskMeta();
+          await renderTemplateList();
+        } else {
+          wrap.classList.add("hidden");
+        }
+      });
+    }
+    const tSave = $("task-template-save");
+    if (tSave) tSave.addEventListener("click", saveTemplateForm);
+    const tCancel = $("task-template-cancel");
+    if (tCancel) tCancel.addEventListener("click", closeTemplateForm);
+    const nameInput = $("task-form-name");
+    if (nameInput) {
+      nameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); saveTaskForm(); }
+        else if (e.key === "Escape") { e.preventDefault(); closeTaskForm(); }
+      });
+    }
+    const tplInput = $("task-template-name");
+    if (tplInput) {
+      tplInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); saveTemplateForm(); }
+        else if (e.key === "Escape") { e.preventDefault(); closeTemplateForm(); }
+      });
+    }
+  }
+
   // ── 确认对话框（替代 confirm/alert） ────
   let confirmCb = null;
   function showConfirm(title, message, opts = {}) {
@@ -828,6 +1125,10 @@ const Dialogs = (() => {
     showOpenSessionDialog, // P5：两步打开会话
     initNewSessionDialog, // P5 slice 2：新建会话对话框初始化
     showNewSessionDialog, // P5 slice 2：新建会话（选项目）
+    initTaskManagement, // rant 18:23:15 P3：定时任务/自定义类型管理初始化
+    renderTaskList, // rant 18:23:15 P3：任务列表渲染（测试/刷新复用）
+    saveTaskForm, // rant 18:23:15 P3：任务表单提交（测试复用）
+    saveTemplateForm, // rant 18:23:15 P3：类型表单提交（测试复用）
     showRename,
     submitRename,
     showSettings,

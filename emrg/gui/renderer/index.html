@@ -180,6 +180,64 @@
         </label>
       </div>
       <div class="settings-group">
+        <div class="settings-group-title" data-i18n="settings.groupTasks">定时任务</div>
+        <div class="hint" style="margin-bottom:6px;" data-i18n="settings.tasksHint">管理定时任务与自定义任务类型（内置类型只读）</div>
+        <!-- 任务列表 -->
+        <div id="task-list" class="task-list"></div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button type="button" id="task-add-btn" class="btn btn-ghost" style="flex:1;" data-i18n="settings.taskAdd">＋ 添加任务</button>
+          <button type="button" id="task-template-mgr-btn" class="btn btn-ghost" style="flex:1;" data-i18n="settings.taskTemplates">自定义类型</button>
+        </div>
+        <!-- 任务表单（添加/编辑） -->
+        <div id="task-form" class="task-form hidden">
+          <label class="model-form-label" data-i18n="settings.taskName">任务名
+            <input type="text" id="task-form-name" maxlength="32" placeholder="daily-report" />
+          </label>
+          <div class="model-form-row">
+            <label class="model-form-label" data-i18n="settings.taskType">类型
+              <select id="task-form-type"></select>
+            </label>
+            <label class="model-form-label" data-i18n="settings.taskProject">项目
+              <select id="task-form-project"></select>
+            </label>
+          </div>
+          <div class="model-form-row">
+            <label class="model-form-label" data-i18n="settings.taskInterval">间隔（秒，≥60）
+              <input type="number" id="task-form-interval" min="60" step="1" value="1800" />
+            </label>
+            <label class="model-form-vision" style="align-self:flex-end;margin-bottom:8px;">
+              <input type="checkbox" id="task-form-enabled" checked /> <span data-i18n="settings.taskEnabled">启用</span>
+            </label>
+          </div>
+          <label class="model-form-label" data-i18n="settings.taskRepo">仓库（选填 owner/repo）
+            <input type="text" id="task-form-repo" maxlength="80" placeholder="acme/repo" />
+          </label>
+          <div class="model-form-footer">
+            <div style="display:flex;gap:8px;margin-left:auto;">
+              <button type="button" id="task-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
+              <button type="button" id="task-form-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.taskSave">保存任务</button>
+            </div>
+          </div>
+        </div>
+        <!-- 自定义类型表单 -->
+        <div id="task-template-form" class="task-form hidden">
+          <label class="model-form-label" data-i18n="settings.templateName">类型名
+            <input type="text" id="task-template-name" maxlength="32" placeholder="report" />
+          </label>
+          <label class="model-form-label" data-i18n="settings.templatePrompt">提示词模板
+            <textarea id="task-template-prompt" rows="6" style="width:100%;min-height:120px;" placeholder="# {{ instance_id }} ..."></textarea>
+          </label>
+          <div class="model-form-footer">
+            <div style="display:flex;gap:8px;margin-left:auto;">
+              <button type="button" id="task-template-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
+              <button type="button" id="task-template-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.templateSave">保存类型</button>
+            </div>
+          </div>
+        </div>
+        <!-- 自定义类型列表 -->
+        <div id="task-template-list" class="task-list hidden" style="margin-top:8px;"></div>
+      </div>
+      <div class="settings-group">
         <div class="settings-group-title" data-i18n="settings.aboutTitle">关于</div>
         <div class="about-box">
           <div class="about-line">EMRG <span id="about-version">v0.2.8</span> · <span id="about-evolutions">🌱 <span data-i18n="copy.growthCountPrefix">已自我进化</span> 0 <span data-i18n="copy.times">次</span></span></div>

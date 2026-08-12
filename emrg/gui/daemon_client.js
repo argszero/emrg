@@ -69,6 +69,14 @@ const RESPONSE_TYPES = {
   github_connect_web: "github_connect_web_result", // Stage 2b：device flow（daemon.py github_connect_web）
   list_files: "files_list", // 右栏工作区面板 P1：目录树（daemon.py list_files）
   read_file: "file_content", // 右栏工作区面板 P1：文件查看器（daemon.py read_file）
+  // rant 2026-08-12T18:23:15 P2/P3：任务 + 自定义类型 CRUD（daemon.py task_create 等）
+  task_create: "task_result",
+  task_update: "task_result",
+  task_delete: "task_result",
+  task_template_list: "templates_list",
+  task_template_create: "template_result",
+  task_template_update: "template_result",
+  task_template_delete: "template_result",
 };
 
 class DaemonClient {

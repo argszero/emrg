@@ -1559,6 +1559,7 @@ const App = (() => {
     Dialogs.initRenameDialog();
     Dialogs.initGithubSection(); // Windows GCM rant Stage 2：设置页 GitHub 连接
     Dialogs.initDeviceDialog(); // Windows GCM rant Stage 2b：device flow 对话框
+    Dialogs.initTaskManagement(); // rant 18:23:15 P3：定时任务/自定义类型管理
     initGithubBanner(); // Windows GCM rant Stage 2：演化需 GitHub 但未认证时的连接横幅
     initModelSwitcher();
     initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
