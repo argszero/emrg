@@ -42,3 +42,17 @@ jobs:
             [ -f "$f" ] || continue
             node --check "$f" || exit 1
           done
+
+  # v0.2.29 教训：Windows pytest 此前只在 tag 触发的 Build Release 跑
+  # （test.yml 仅 ubuntu）——FakeGitRun git.EXE 大小写 bug（#723）等 Windows-only
+  # 测试回归要到发版构建才暴露。每个 PR 都应在 Windows 上跑 pytest 门禁。
+  test-windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - name: Python tests (Windows)
+        run: uv run pytest tests/ -v
