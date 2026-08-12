@@ -20,6 +20,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT="$ROOT/packaging/assets"
 SVG="$OUT/icon.svg"
+# pngutil.py (filter-aware PNG decode) lives next to this script — the inline
+# python heredocs below import it via PNGUTIL_DIR.
+export PNGUTIL_DIR="$ROOT/packaging"
 mkdir -p "$OUT"
 
 if [ ! -f "$SVG" ]; then
@@ -122,42 +125,27 @@ HTMLEOF
 #    alpha channel; if >90% of pixels are transparent, the renderer failed.
 #    Returns 0 when the icon is opaque enough (accepted), 1 when blank (caller
 #    falls back to the next renderer).
+#    ⚡ Filter-aware decode (v0.2.29 Build Release lesson): rsvg-convert /
+#    Chrome emit adaptively-filtered PNG rows (Sub/Up/Average/Paeth). A naive
+#    "strip filter byte" read returns deltas, not pixels — a fully opaque icon
+#    falsely read as "99.2% transparent" (and the area-average resize produced
+#    garbage hues). pngutil.read_png reverses filters, so the check sees real
+#    alpha and the derived icon-512/256/icns/ico are correct.
 check_icon_opaque() {
   python3 - "$OUT/icon.png" <<'PYEOF'
-import sys, struct, zlib
+import os, sys
+sys.path.insert(0, os.environ.get("PNGUTIL_DIR", os.path.join(os.path.dirname(sys.argv[1]), "..")))
+import pngutil
 
-data = open(sys.argv[1], "rb").read()
-assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
-pos, w, h, idat, colortype = 8, 0, 0, b"", 0
-while pos < len(data):
-    ln = struct.unpack(">I", data[pos:pos+4])[0]
-    tag = data[pos+4:pos+8]
-    chunk = data[pos+8:pos+8+ln]
-    if tag == b"IHDR":
-        w, h = struct.unpack(">II", chunk[:8])
-        colortype = chunk[9]
-    elif tag == b"IDAT":
-        idat += chunk
-    pos += 12 + ln
-
+w, h, bpp, px = pngutil.read_png(sys.argv[1])
 if (w, h) != (1024, 1024):
     sys.stderr.write(f"ERROR: expected 1024x1024 PNG, got {w}x{h} — renderer failed\n")
     sys.exit(1)
 print(f"    icon.png OK: {w}x{h}")
 
-if colortype == 6:  # RGBA — only then is transparency meaningful
-    raw = zlib.decompress(idat)
-    stride0 = w * 4 + 1
-    raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
-    total = opaque = 0
-    for y in range(0, h, 8):
-        for x in range(0, w, 8):
-            a = raw[y*w*4 + x*4 + 3]
-            total += 1
-            if a > 0:
-                opaque += 1
-    ratio = opaque / total
-    print(f"    icon.png alpha: {ratio:.1%} opaque ({opaque}/{total} sampled)")
+if bpp == 4:
+    ratio = pngutil.opaque_ratio(w, h, bpp, px)
+    print(f"    icon.png alpha: {ratio:.1%} opaque")
     if ratio < 0.10:
         sys.stderr.write(
             f"ERROR: icon.png is {1-ratio:.1%} transparent — renderer failed to paint "
@@ -165,7 +153,7 @@ if colortype == 6:  # RGBA — only then is transparency meaningful
         )
         sys.exit(1)
 else:
-    print(f"    icon.png alpha: colortype={colortype} (no alpha channel) — assumed opaque")
+    print(f"    icon.png alpha: colortype={'RGB' if bpp == 3 else bpp} (no alpha channel) — assumed opaque")
 PYEOF
 }
 
@@ -173,78 +161,17 @@ render_svg_to_png || exit 1
 
 echo "==> resizing to 512/256 (stdlib area-average box filter)"
 python3 - "$OUT/icon.png" "$OUT" <<'PYEOF'
-import sys, zlib, struct
+import os, sys
+sys.path.insert(0, os.environ.get("PNGUTIL_DIR", os.path.join(os.path.dirname(sys.argv[1]), "..")))
+import pngutil
 
 src, outdir = sys.argv[1], sys.argv[2]
-
-def read_png(path):
-    data = open(path, "rb").read()
-    assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    pos, w, h, idat, ct = 8, 0, 0, b"", 0
-    while pos < len(data):
-        ln = struct.unpack(">I", data[pos:pos+4])[0]
-        tag = data[pos+4:pos+8]
-        chunk = data[pos+8:pos+8+ln]
-        if tag == b"IHDR":
-            w, h = struct.unpack(">II", chunk[:8])
-            ct = chunk[9]
-        elif tag == b"IDAT":
-            idat += chunk
-        pos += 12 + ln
-    raw = zlib.decompress(idat)
-    # PNG scanlines each have a leading filter byte (0 for None); strip them.
-    # Chrome headless emits RGB (ct=2) when the page bg is opaque; rsvg-convert
-    # emits RGBA (ct=6). Normalize to RGBA so downstream code can assume 4 bpp.
-    if ct == 6:
-        stride0 = w * 4 + 1
-        raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
-    elif ct == 2:
-        stride0 = w * 3 + 1
-        rows = [raw[y*stride0+1:(y+1)*stride0] for y in range(h)]
-        out = bytearray()
-        for row in rows:
-            for i in range(0, len(row), 3):
-                out += row[i:i+3] + b"\xff"
-        raw = bytes(out)
-    else:
-        raise SystemExit(f"unsupported PNG colortype {ct}")
-    return w, h, raw
-
-w, h, raw = read_png(src)
-stride = w * 4
-
-def resize_area(nw, nh):
-    """Area-average (box filter) downscale — better antialiasing than nearest."""
-    out = bytearray([0, 0, 0, 0]) * (nw * nh)
-    for yy in range(nh):
-        y0 = yy * h // nh
-        y1 = max(y0 + 1, (yy + 1) * h // nh)
-        for xx in range(nw):
-            x0 = xx * w // nw
-            x1 = max(x0 + 1, (xx + 1) * w // nw)
-            r = g = b = a = 0
-            n = 0
-            for sy in range(y0, y1):
-                for sx in range(x0, x1):
-                    i = sy * stride + sx * 4
-                    r += raw[i]; g += raw[i+1]; b += raw[i+2]; a += raw[i+3]
-                    n += 1
-            o = (yy * nw + xx) * 4
-            out[o] = r // n; out[o+1] = g // n; out[o+2] = b // n; out[o+3] = a // n
-    return bytes(out)
-
-def write_png(path, nw, nh, rgba):
-    def chunk(tag, data):
-        c = struct.pack(">I", len(data)) + tag + data
-        c += struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
-        return c
-    raw = b"".join(b"\x00" + rgba[y*nw*4:(y+1)*nw*4] for y in range(nh))
-    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", nw, nh, 8, 6, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
-    open(path, "wb").write(png)
+w, h, bpp, px = pngutil.read_png(src)
+rgba = pngutil.to_rgba(w, h, bpp, px)
 
 for size in (512, 256):
     p = f"{outdir}/icon-{size}.png"
-    write_png(p, size, size, resize_area(size, size))
+    pngutil.write_png(p, size, size, pngutil.resize_area(rgba, w, h, size, size))
     print("    wrote", p)
 PYEOF
 
@@ -255,47 +182,14 @@ if command -v iconutil >/dev/null 2>&1; then
   # iconutil wants specific sizes
   for s in 16 32 128 256 512; do
     python3 - "$OUT/icon.png" "$ICONSET/icon_${s}x${s}.png" "$s" <<'PYEOF'
-import sys, zlib, struct
+import os, sys
+sys.path.insert(0, os.environ.get("PNGUTIL_DIR", os.path.join(os.path.dirname(sys.argv[1]), "..")))
+import pngutil
+
 src, dst, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
-data = open(src, "rb").read(); pos, w, h, idat, ct = 8, 0, 0, b"", 0
-while pos < len(data):
-    ln = struct.unpack(">I", data[pos:pos+4])[0]; tag = data[pos+4:pos+8]; chunk = data[pos+8:pos+8+ln]
-    if tag == b"IHDR": w, h = struct.unpack(">II", chunk[:8]); ct = chunk[9]
-    elif tag == b"IDAT": idat += chunk
-    pos += 12 + ln
-raw = zlib.decompress(idat)
-if ct == 6:
-    stride0 = w*4 + 1
-    raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
-else:  # ct==2 RGB → expand to RGBA
-    stride0 = w*3 + 1
-    rows = [raw[y*stride0+1:(y+1)*stride0] for y in range(h)]
-    out = bytearray()
-    for row in rows:
-        for i in range(0, len(row), 3):
-            out += row[i:i+3] + b"\xff"
-    raw = bytes(out)
-stride = w*4
-def resize_area(nw, nh):
-    out = bytearray([0,0,0,0])*(nw*nh)
-    for yy in range(nh):
-        y0 = yy*h//nh; y1 = max(y0+1, (yy+1)*h//nh)
-        for xx in range(nw):
-            x0 = xx*w//nw; x1 = max(x0+1, (xx+1)*w//nw)
-            r = g = b = a = n = 0
-            for sy in range(y0, y1):
-                for sx in range(x0, x1):
-                    i = sy*stride + sx*4
-                    r += raw[i]; g += raw[i+1]; b += raw[i+2]; a += raw[i+3]; n += 1
-            o = (yy*nw+xx)*4
-            out[o] = r//n; out[o+1] = g//n; out[o+2] = b//n; out[o+3] = a//n
-    return bytes(out)
-def chunk(tag, data):
-    c = struct.pack(">I", len(data))+tag+data; c += struct.pack(">I", zlib.crc32(tag+data)&0xffffffff); return c
-rgba = resize_area(size, size)
-raw2 = b"".join(b"\x00"+rgba[y*size*4:(y+1)*size*4] for y in range(size))
-png = b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))+chunk(b"IDAT", zlib.compress(raw2,9))+chunk(b"IEND", b"")
-open(dst, "wb").write(png)
+w, h, bpp, px = pngutil.read_png(src)
+rgba = pngutil.to_rgba(w, h, bpp, px)
+pngutil.write_png(dst, size, size, pngutil.resize_area(rgba, w, h, size, size))
 PYEOF
     cp "$ICONSET/icon_${s}x${s}.png" "$ICONSET/icon_${s}x${s}@2x.png" 2>/dev/null || true
   done
@@ -309,57 +203,23 @@ fi
 
 echo "==> icon.ico (multi-size, win)"
 python3 - "$OUT/icon.png" "$OUT/icon.ico" <<'PYEOF'
-import sys, zlib, struct
+import os, sys
+sys.path.insert(0, os.environ.get("PNGUTIL_DIR", os.path.join(os.path.dirname(sys.argv[1]), "..")))
+import struct
+import pngutil
+
 src, dst = sys.argv[1], sys.argv[2]
-data = open(src, "rb").read(); pos, w, h, idat, ct = 8, 0, 0, b"", 0
-while pos < len(data):
-    ln = struct.unpack(">I", data[pos:pos+4])[0]; tag = data[pos+4:pos+8]; chunk = data[pos+8:pos+8+ln]
-    if tag == b"IHDR": w, h = struct.unpack(">II", chunk[:8]); ct = chunk[9]
-    elif tag == b"IDAT": idat += chunk
-    pos += 12 + ln
-raw = zlib.decompress(idat)
-if ct == 6:
-    stride0 = w*4 + 1
-    raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
-else:  # ct==2 RGB → expand to RGBA
-    stride0 = w*3 + 1
-    rows = [raw[y*stride0+1:(y+1)*stride0] for y in range(h)]
-    out = bytearray()
-    for row in rows:
-        for i in range(0, len(row), 3):
-            out += row[i:i+3] + b"\xff"
-    raw = bytes(out)
-stride = w*4
-
-def resize_area(nw, nh):
-    out = bytearray([0,0,0,0])*(nw*nh)
-    for yy in range(nh):
-        y0 = yy*h//nh; y1 = max(y0+1, (yy+1)*h//nh)
-        for xx in range(nw):
-            x0 = xx*w//nw; x1 = max(x0+1, (xx+1)*w//nw)
-            r = g = b = a = n = 0
-            for sy in range(y0, y1):
-                for sx in range(x0, x1):
-                    i = sy*stride + sx*4
-                    r += raw[i]; g += raw[i+1]; b += raw[i+2]; a += raw[i+3]; n += 1
-            o = (yy*nw+xx)*4
-            out[o] = r//n; out[o+1] = g//n; out[o+2] = b//n; out[o+3] = a//n
-    return bytes(out)
-
-def png_bytes(nw, nh, rgba):
-    def chunk(tag, data):
-        c = struct.pack(">I", len(data))+tag+data; c += struct.pack(">I", zlib.crc32(tag+data)&0xffffffff); return c
-    raw2 = b"".join(b"\x00"+rgba[y*nw*4:(y+1)*nw*4] for y in range(nh))
-    return b"\x89PNG\r\n\x1a\n"+chunk(b"IHDR", struct.pack(">IIBBBBB", nw, nh, 8, 6, 0, 0, 0))+chunk(b"IDAT", zlib.compress(raw2,9))+chunk(b"IEND", b"")
+w, h, bpp, px = pngutil.read_png(src)
+rgba = pngutil.to_rgba(w, h, bpp, px)
 
 # ICO: header + directory + PNG-embedded entries
 sizes = [16, 24, 32, 48, 64, 128, 256]
-imgs = [(s, png_bytes(s, s, resize_area(s, s))) for s in sizes]
+imgs = [(s, pngutil.write_png_bytes(s, s, pngutil.resize_area(rgba, w, h, s, s))) for s in sizes]
 header = struct.pack("<HHH", 0, 1, len(imgs))
-offset = 6 + 16*len(imgs)
+offset = 6 + 16 * len(imgs)
 entries = b""
 for s, png in imgs:
-    entries += struct.pack("<BBBBHHII", s if s<256 else 0, s if s<256 else 0, 0, 0, 1, 32, len(png), offset)
+    entries += struct.pack("<BBBBHHII", s if s < 256 else 0, s if s < 256 else 0, 0, 0, 1, 32, len(png), offset)
     offset += len(png)
 with open(dst, "wb") as f:
     f.write(header + entries + b"".join(p for _, p in imgs))
