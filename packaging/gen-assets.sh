@@ -60,6 +60,15 @@ render_svg_to_png() {
     if [ -n "$chrome" ] && command -v "$chrome" >/dev/null 2>&1 || [ -x "$chrome" ] 2>/dev/null; then
       echo "    renderer: $chrome (headless, HTML wrapper, opaque white bg)"
       HTML="$OUT/.icon-render.html"
+      # cygpath the wrapper page URL too — on Windows Git Bash $HTML is an MSYS
+      # path (/c/Users/...), and file:///c/Users/... (missing drive colon) fails
+      # to load in Chrome/Edge, silently rendering a blank opaque icon that the
+      # alpha check below cannot catch (white wrapper bg → colortype 2 "assumed
+      # opaque"). Same conversion as SVG_URL above. (empirically verified)
+      PAGE_URL="file://$HTML"
+      if command -v cygpath >/dev/null 2>&1; then
+        PAGE_URL="file:///$(cygpath -m "$HTML")"
+      fi
       cat > "$HTML" <<HTMLEOF
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <style>html,body{margin:0;padding:0;background:#fff}</style></head>
@@ -68,7 +77,7 @@ HTMLEOF
       "$chrome" --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
         --allow-file-access-from-files \
         --screenshot="$OUT/icon.png" --window-size=1024,1024 \
-        "file://$HTML" >/dev/null 2>&1
+        "$PAGE_URL" >/dev/null 2>&1
       rm -f "$HTML"
       return 0
     fi
