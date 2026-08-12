@@ -1111,6 +1111,8 @@ def test_evolution_cycle_complete_unchanged_head_still_empty(tmp_path):
         "unchanged-HEAD complete cycle is still counted as empty (existing behavior)"
     impact = captured["log"].impact
     assert any(i.endswith("-complete") for i in impact), impact
+    assert any(i.startswith("cycle-") for i in impact), \
+        f"impact tag uses new cycle- prefix (rant 2026-08-12T18:03:26), got {impact}"
     assert "truncated=max-tool-rounds" not in impact, impact
 
 
