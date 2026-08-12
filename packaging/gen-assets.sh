@@ -37,6 +37,15 @@ render_svg_to_png() {
   fi
   # 2) Chrome/Chromium headless --screenshot (full filter support)
   # Windows (Git Bash): convert /c/... → file:///C:/... so Chrome resolves the URL.
+  # ⚠️ rant 2026-08-12T17:25:28: two failure modes confirmed by local testing —
+  #    (a) screenshotting the raw file:// SVG yields an unpainted (fully transparent)
+  #        image; (b) `--default-background-color=00000000` alone makes Chrome emit an
+  #        all-transparent PNG even from a working HTML wrapper (verified empirically:
+  #        without the flag the same page paints correctly as opaque RGB).
+  #    Fix: wrap the SVG in a local HTML <img> page with an OPAQUE white background,
+  #    never pass the transparent-background flag, and add --allow-file-access-from-files
+  #    so the file:// img can load from the file:// page. The transparency check below
+  #    then fails loudly if a future change regresses to a blank render.
   SVG_URL="file://$SVG"
   if command -v cygpath >/dev/null 2>&1; then
     SVG_URL="file:///$(cygpath -m "$SVG")"
@@ -49,10 +58,18 @@ render_svg_to_png() {
     "/c/Program Files/Google/Chrome/Application/chrome.exe" \
     "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"; do
     if [ -n "$chrome" ] && command -v "$chrome" >/dev/null 2>&1 || [ -x "$chrome" ] 2>/dev/null; then
-      echo "    renderer: $chrome (headless)"
-      "$chrome" --headless --disable-gpu --hide-scrollbars \
+      echo "    renderer: $chrome (headless, HTML wrapper, opaque white bg)"
+      HTML="$OUT/.icon-render.html"
+      cat > "$HTML" <<HTMLEOF
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<style>html,body{margin:0;padding:0;background:#fff}</style></head>
+<body><img src="$SVG_URL" width="1024" height="1024"></body></html>
+HTMLEOF
+      "$chrome" --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+        --allow-file-access-from-files \
         --screenshot="$OUT/icon.png" --window-size=1024,1024 \
-        --default-background-color=00000000 "$SVG_URL" >/dev/null 2>&1
+        "file://$HTML" >/dev/null 2>&1
+      rm -f "$HTML"
       return 0
     fi
   done
@@ -83,6 +100,49 @@ while pos < len(data):
     pos += 12 + ln
 PYEOF
 
+# ⚡ transparency check (rant 2026-08-12T17:25:28): Chrome headless can silently
+#    produce a fully-transparent PNG (SVG not painted). Fail loudly instead of
+#    shipping a blank icon. Sample the alpha channel; if >90% of pixels are
+#    transparent, the renderer failed → exit 1.
+python3 - "$OUT/icon.png" <<'PYEOF'
+import sys, struct, zlib
+
+data = open(sys.argv[1], "rb").read()
+pos, w, h, idat, colortype = 8, 0, 0, b"", 0
+while pos < len(data):
+    ln = struct.unpack(">I", data[pos:pos+4])[0]
+    tag = data[pos+4:pos+8]
+    chunk = data[pos+8:pos+8+ln]
+    if tag == b"IHDR":
+        w, h = struct.unpack(">II", chunk[:8])
+        colortype = chunk[9]
+    elif tag == b"IDAT":
+        idat += chunk
+    pos += 12 + ln
+
+if colortype == 6:  # RGBA — only then is transparency meaningful
+    raw = zlib.decompress(idat)
+    stride0 = w * 4 + 1
+    raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
+    total = opaque = 0
+    for y in range(0, h, 8):
+        for x in range(0, w, 8):
+            a = raw[y*w*4 + x*4 + 3]
+            total += 1
+            if a > 0:
+                opaque += 1
+    ratio = opaque / total
+    print(f"    icon.png alpha: {ratio:.1%} opaque ({opaque}/{total} sampled)")
+    if ratio < 0.10:
+        sys.stderr.write(
+            f"ERROR: icon.png is {1-ratio:.1%} transparent — renderer failed to paint "
+            "the SVG. Fix the rsvg-convert/Chrome headless path (see rant 2026-08-12T17:25:28).\n"
+        )
+        sys.exit(1)
+else:
+    print(f"    icon.png alpha: colortype={colortype} (no alpha channel) — assumed opaque")
+PYEOF
+
 echo "==> resizing to 512/256 (stdlib area-average box filter)"
 python3 - "$OUT/icon.png" "$OUT" <<'PYEOF'
 import sys, zlib, struct
@@ -92,20 +152,34 @@ src, outdir = sys.argv[1], sys.argv[2]
 def read_png(path):
     data = open(path, "rb").read()
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    pos, w, h, idat = 8, 0, 0, b""
+    pos, w, h, idat, ct = 8, 0, 0, b"", 0
     while pos < len(data):
         ln = struct.unpack(">I", data[pos:pos+4])[0]
         tag = data[pos+4:pos+8]
         chunk = data[pos+8:pos+8+ln]
         if tag == b"IHDR":
             w, h = struct.unpack(">II", chunk[:8])
+            ct = chunk[9]
         elif tag == b"IDAT":
             idat += chunk
         pos += 12 + ln
     raw = zlib.decompress(idat)
-    # PNG scanlines each have a leading filter byte (0 for None); strip them
-    stride0 = w * 4 + 1
-    raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
+    # PNG scanlines each have a leading filter byte (0 for None); strip them.
+    # Chrome headless emits RGB (ct=2) when the page bg is opaque; rsvg-convert
+    # emits RGBA (ct=6). Normalize to RGBA so downstream code can assume 4 bpp.
+    if ct == 6:
+        stride0 = w * 4 + 1
+        raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
+    elif ct == 2:
+        stride0 = w * 3 + 1
+        rows = [raw[y*stride0+1:(y+1)*stride0] for y in range(h)]
+        out = bytearray()
+        for row in rows:
+            for i in range(0, len(row), 3):
+                out += row[i:i+3] + b"\xff"
+        raw = bytes(out)
+    else:
+        raise SystemExit(f"unsupported PNG colortype {ct}")
     return w, h, raw
 
 w, h, raw = read_png(src)
@@ -155,15 +229,24 @@ if command -v iconutil >/dev/null 2>&1; then
     python3 - "$OUT/icon.png" "$ICONSET/icon_${s}x${s}.png" "$s" <<'PYEOF'
 import sys, zlib, struct
 src, dst, size = sys.argv[1], sys.argv[2], int(sys.argv[3])
-data = open(src, "rb").read(); pos, w, h, idat = 8, 0, 0, b""
+data = open(src, "rb").read(); pos, w, h, idat, ct = 8, 0, 0, b"", 0
 while pos < len(data):
     ln = struct.unpack(">I", data[pos:pos+4])[0]; tag = data[pos+4:pos+8]; chunk = data[pos+8:pos+8+ln]
-    if tag == b"IHDR": w, h = struct.unpack(">II", chunk[:8])
+    if tag == b"IHDR": w, h = struct.unpack(">II", chunk[:8]); ct = chunk[9]
     elif tag == b"IDAT": idat += chunk
     pos += 12 + ln
 raw = zlib.decompress(idat)
-stride0 = w*4 + 1
-raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
+if ct == 6:
+    stride0 = w*4 + 1
+    raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
+else:  # ct==2 RGB → expand to RGBA
+    stride0 = w*3 + 1
+    rows = [raw[y*stride0+1:(y+1)*stride0] for y in range(h)]
+    out = bytearray()
+    for row in rows:
+        for i in range(0, len(row), 3):
+            out += row[i:i+3] + b"\xff"
+    raw = bytes(out)
 stride = w*4
 def resize_area(nw, nh):
     out = bytearray([0,0,0,0])*(nw*nh)
@@ -200,15 +283,24 @@ echo "==> icon.ico (multi-size, win)"
 python3 - "$OUT/icon.png" "$OUT/icon.ico" <<'PYEOF'
 import sys, zlib, struct
 src, dst = sys.argv[1], sys.argv[2]
-data = open(src, "rb").read(); pos, w, h, idat = 8, 0, 0, b""
+data = open(src, "rb").read(); pos, w, h, idat, ct = 8, 0, 0, b"", 0
 while pos < len(data):
     ln = struct.unpack(">I", data[pos:pos+4])[0]; tag = data[pos+4:pos+8]; chunk = data[pos+8:pos+8+ln]
-    if tag == b"IHDR": w, h = struct.unpack(">II", chunk[:8])
+    if tag == b"IHDR": w, h = struct.unpack(">II", chunk[:8]); ct = chunk[9]
     elif tag == b"IDAT": idat += chunk
     pos += 12 + ln
 raw = zlib.decompress(idat)
-stride0 = w*4 + 1
-raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
+if ct == 6:
+    stride0 = w*4 + 1
+    raw = b"".join(raw[y*stride0+1:(y+1)*stride0] for y in range(h))
+else:  # ct==2 RGB → expand to RGBA
+    stride0 = w*3 + 1
+    rows = [raw[y*stride0+1:(y+1)*stride0] for y in range(h)]
+    out = bytearray()
+    for row in rows:
+        for i in range(0, len(row), 3):
+            out += row[i:i+3] + b"\xff"
+    raw = bytes(out)
 stride = w*4
 
 def resize_area(nw, nh):

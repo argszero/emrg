@@ -166,7 +166,16 @@ jobs:
           elif [ "$RUNNER_OS" = "macOS" ]; then
             brew install librsvg
           else
-            echo "no rsvg-convert; gen-assets.sh will fall back to Chrome/Edge headless"
+            # Windows: try to install librsvg (best effort); the fixed Chrome/Edge
+            # headless HTML-wrapper path in gen-assets.sh is the fallback
+            # (rant 2026-08-12T17:25:28: raw SVG screenshot was fully transparent).
+            if command -v choco >/dev/null 2>&1 && choco install -y librsvg >/dev/null 2>&1; then
+              echo "choco installed librsvg"
+            elif command -v winget >/dev/null 2>&1 && winget install --silent --accept-package-agreements librsvg >/dev/null 2>&1; then
+              echo "winget installed librsvg"
+            else
+              echo "no rsvg-convert; gen-assets.sh will fall back to Chrome/Edge headless (HTML wrapper)"
+            fi
           fi
           bash packaging/gen-assets.sh
           # 产物必须存在（GUI 构建引用 ../packaging/assets/*.png/icns/ico）
