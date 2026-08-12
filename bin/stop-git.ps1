@@ -32,4 +32,11 @@ Get-CimInstance Win32_Process |
 Start-Sleep -Milliseconds 300
 
 $left = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like $prefix })
-if ($left.Count -gt 0) { exit 1 } else { exit 0 }
+if ($left.Count -gt 0) {
+  # Truthful failure (rant 2026-08-12T12:30:41): never report success while a
+  # process still holds the prefix. Name the survivors so the installer can
+  # show a useful message instead of a silent bogus exit=0.
+  $left | ForEach-Object { Write-Host ("still running: {0} (pid {1})" -f $_.Name, $_.ProcessId) }
+  exit 1
+}
+exit 0
