@@ -1258,6 +1258,110 @@ test("P3：切会话 → 文件树根跟随（per-session）", async () => {
   assert.strictEqual(rootName2, "other", "s2 根 = other");
 });
 
+test("P3.5（rant 17:28）：VS Code 风格图标 — 目录折叠/展开 + 文件类型映射", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  const pathCount = (ic) => (ic ? (ic.innerHTML.match(/<path/g) || []).length : 0);
+  // 根目录展开态 → dirOpen 图标（双 path：含开口 flap）
+  const rootIcon = els["result-files"].querySelectorAll(".ft-root")[0].querySelector(".ft-icon");
+  assert.ok(rootIcon, "目录行应有 .ft-icon");
+  assert.strictEqual(pathCount(rootIcon), 2, "展开目录图标 = dirOpen（两个 path）");
+  // src 目录默认折叠 → dirClosed（单 path）
+  const srcRow = els["result-files"].querySelectorAll(".ft-dir")[1];
+  const srcIcon = srcRow.querySelector(".ft-icon");
+  assert.strictEqual(pathCount(srcIcon), 1, "折叠目录图标 = dirClosed（单 path）");
+  // 点击展开 src → 图标切换为 dirOpen（两个 path）+ 子项懒加载出现
+  srcRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  assert.strictEqual(pathCount(srcRow.querySelector(".ft-icon")), 2, "展开后图标应切换 dirOpen");
+  // 文件图标映射：README.md → fileMd（内联横线 path）；main.py → fileCode（尖括号 path）
+  const mdRow = [...els["result-files"].querySelectorAll(".ft-file")].find((r) => r.dataset.path === "/proj/README.md");
+  const mdIcon = mdRow.querySelector(".ft-icon");
+  assert.ok(mdIcon, "文件行应有 .ft-icon");
+  assert.ok(mdIcon.innerHTML.includes("M4.5 6h7M4.5 8.5h7M4.5 11h4.5"), "md → fileMd 横线组");
+  const pyRow = [...els["result-files"].querySelectorAll(".ft-file")].find((r) => r.dataset.path === "/proj/src/main.py");
+  assert.ok(pyRow.querySelector(".ft-icon").innerHTML.includes("M6.5 6.5L4.5 8.5l2 2"), "py → fileCode 尖括号");
+});
+
+test("P3.5（rant 17:28）：文件行选中态 — 点击选中 + 单选切换", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('ResultPanel.switchSession("s1")', ctx);
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  const mdRow = [...els["result-files"].querySelectorAll(".ft-file")].find((r) => r.dataset.path === "/proj/README.md");
+  // 点击 → active
+  mdRow.dispatch("click", { stopPropagation() {} });
+  assert.ok(mdRow.classList.contains("active"), "点击文件行应加 .active");
+  // 点击 src 目录 → 选中不移除（目录不高亮），展开目录
+  const srcRow = els["result-files"].querySelectorAll(".ft-dir")[1];
+  srcRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  assert.ok(mdRow.classList.contains("active"), "目录行点击不应清除文件选中");
+  assert.ok(!srcRow.classList.contains("active"), "目录行不应有 active");
+  // 点击另一个文件 → 单选切换
+  const pyRow = [...els["result-files"].querySelectorAll(".ft-file")].find((r) => r.dataset.path === "/proj/src/main.py");
+  pyRow.dispatch("click", { stopPropagation() {} });
+  assert.ok(pyRow.classList.contains("active"), "新点击文件应 active");
+  assert.ok(!mdRow.classList.contains("active"), "旧选中应移除（单选）");
+});
+
+test("P3.5（rant 17:28）：深度缩进 — 子行 padding-left 递增 16px", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  const rootRow = els["result-files"].querySelectorAll(".ft-root")[0];
+  assert.strictEqual(rootRow.style.paddingLeft, "8px", "根 depth=0 → 8px");
+  // 根子项 README.md（depth 1）
+  const mdRow = [...els["result-files"].querySelectorAll(".ft-file")].find((r) => r.dataset.path === "/proj/README.md");
+  assert.strictEqual(mdRow.style.paddingLeft, "24px", "根子项 depth=1 → 24px");
+  // 展开 src → main.py（depth 2）
+  const srcRow = els["result-files"].querySelectorAll(".ft-dir")[1];
+  srcRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  const pyRow = [...els["result-files"].querySelectorAll(".ft-file")].find((r) => r.dataset.path === "/proj/src/main.py");
+  assert.strictEqual(pyRow.style.paddingLeft, "40px", "src 子项 depth=2 → 40px");
+  // 结构契约（修复布局 bug）：.ft-head 包装图标+名称，.ft-kids 紧随其后——块级排布，
+  // 兄弟行不再与展开子项重叠（headless Chrome 像素实证：定高 flex-wrap 下行遮挡子项）
+  const srcHead = srcRow.children[0];
+  assert.ok(srcHead && srcHead.classList.contains("ft-head"), "目录行第一个子元素应为 .ft-head 包装");
+  assert.ok(srcHead.querySelector(".ft-icon"), "图标在 .ft-head 内");
+  assert.strictEqual(srcRow.children[1], srcRow.querySelector(".ft-kids"), ".ft-kids 紧随 .ft-head");
+});
+
+test("P3.5（rant 17:28）：展开态持久 + 滚动条 hover 样式（CSS 源级断言）", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  const srcRow = els["result-files"].querySelectorAll(".ft-dir")[1];
+  // 展开 src → 折叠 → 再展开：缓存命中 + 展开态持久（expandDir 不重复拉取已由既有测试覆盖，这里验证 DOM 状态往返）
+  srcRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  assert.ok(!srcRow.querySelector(".ft-kids").classList.contains("hidden"), "展开后 kids 可见");
+  srcRow.dispatch("click", { stopPropagation() {} });
+  assert.ok(srcRow.querySelector(".ft-kids").classList.contains("hidden"), "折叠后 kids 隐藏");
+  srcRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  assert.ok(!srcRow.querySelector(".ft-kids").classList.contains("hidden"), "再次展开恢复可见");
+  const iconHtml = srcRow.querySelector(".ft-icon").innerHTML;
+  assert.strictEqual((iconHtml.match(/<path/g) || []).length, 2, "展开态图标 dirOpen");
+  // 滚动条 hover 显示 CSS（VS Code 行为）
+  const css = fs.readFileSync(path.join(RENDERER_CSS, "layout.css"), "utf8");
+  assert.ok(/\.result-files:hover::-webkit-scrollbar-thumb/.test(css), "hover 才显示滚动条 thumb");
+  assert.ok(/background: transparent/.test(css) || /var\(--scrollbar-thumb\)/.test(css), "默认透明/悬停 var thumb");
+  // 文件 tab 同排并入 .result-tabs（rant 17:28 项 10）：tabbar 在 result-toggle 之前（同一行内）
+  const html = fs.readFileSync(path.join(__dirname, "..", "renderer", "index.html"), "utf8");
+  const tabsIdx = html.indexOf('id="result-tabs"');
+  const tabbarIdx = html.indexOf('id="result-tabbar"');
+  const toggleIdx = html.indexOf('id="result-toggle"');
+  assert.ok(tabsIdx >= 0 && tabbarIdx >= 0 && toggleIdx >= 0, "三个锚点都应存在");
+  assert.ok(tabsIdx < tabbarIdx && tabbarIdx < toggleIdx, "tabbar 应嵌套在 result-tabs 内（同排），旧布局 toggle 在 tabbar 之前");
+});
+
 test("工具调用上限中断 → 系统提示可继续（对齐 TUI，跨项目教训）", async () => {
   const { ctx, els } = makeSandbox({});
   await tick();
