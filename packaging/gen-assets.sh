@@ -28,12 +28,25 @@ if [ ! -f "$SVG" ]; then
 fi
 
 echo "==> rendering icon.svg → 1024x1024 icon.png"
+# Renderer priority: rsvg-convert → Chrome/Chromium headless → sips.
+# ⚡ v0.2.29 CI lesson (Build Release 31604108964): rsvg-convert (librsvg 2.58 on
+#    Ubuntu 24.04 / Homebrew / Windows) renders icon.svg 99.2% transparent — even
+#    the opaque background rect does not paint. The #705 opacity gate correctly
+#    caught it, but the script exited instead of falling back to the next
+#    renderer. Fix: each renderer's output is validated by the opacity check
+#    BEFORE being accepted; a blank render falls through to the next renderer.
+#    Only when ALL renderers produce blank output do we fail loudly.
 render_svg_to_png() {
+  local renderer_found=0
   # 1) rsvg-convert (librsvg) — full SVG + filter support
   if command -v rsvg-convert >/dev/null 2>&1; then
+    renderer_found=1
     echo "    renderer: rsvg-convert"
-    rsvg-convert -w 1024 -h 1024 "$SVG" -o "$OUT/icon.png"
-    return 0
+    if rsvg-convert -w 1024 -h 1024 "$SVG" -o "$OUT/icon.png" \
+        && check_icon_opaque; then
+      return 0
+    fi
+    echo "    ⚠️ rsvg-convert produced a blank/transparent icon — falling back to Chrome headless" >&2
   fi
   # 2) Chrome/Chromium headless --screenshot (full filter support)
   # Windows (Git Bash): convert /c/... → file:///C:/... so Chrome resolves the URL.
@@ -58,6 +71,7 @@ render_svg_to_png() {
     "/c/Program Files/Google/Chrome/Application/chrome.exe" \
     "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"; do
     if [ -n "$chrome" ] && command -v "$chrome" >/dev/null 2>&1 || [ -x "$chrome" ] 2>/dev/null; then
+      renderer_found=1
       echo "    renderer: $chrome (headless, HTML wrapper, opaque white bg)"
       HTML="$OUT/.icon-render.html"
       # cygpath the wrapper page URL too — on Windows Git Bash $HTML is an MSYS
@@ -74,49 +88,46 @@ render_svg_to_png() {
 <style>html,body{margin:0;padding:0;background:#fff}</style></head>
 <body><img src="$SVG_URL" width="1024" height="1024"></body></html>
 HTMLEOF
-      "$chrome" --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
-        --allow-file-access-from-files \
-        --screenshot="$OUT/icon.png" --window-size=1024,1024 \
-        "$PAGE_URL" >/dev/null 2>&1
+      if "$chrome" --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
+          --allow-file-access-from-files \
+          --screenshot="$OUT/icon.png" --window-size=1024,1024 \
+          "$PAGE_URL" >/dev/null 2>&1 \
+          && check_icon_opaque; then
+        rm -f "$HTML"
+        return 0
+      fi
       rm -f "$HTML"
-      return 0
+      echo "    ⚠️ $chrome produced a blank/transparent icon — trying next renderer" >&2
     fi
   done
   # 3) sips (macOS last resort) — 辉光（feGaussianBlur）可能丢失
   if command -v sips >/dev/null 2>&1; then
+    renderer_found=1
     echo "    ⚠️ renderer: sips (last resort) — glow may be lost (feGaussianBlur unsupported)" >&2
-    sips -s format png "$SVG" --out "$OUT/icon.png" >/dev/null 2>&1
-    return 0
+    if sips -s format png "$SVG" --out "$OUT/icon.png" >/dev/null 2>&1 \
+        && check_icon_opaque; then
+      return 0
+    fi
+    echo "    ⚠️ sips produced a blank/transparent icon — all renderers failed" >&2
   fi
-  echo "ERROR: no SVG renderer found (rsvg-convert / chrome / sips)" >&2
+  if [ "$renderer_found" -eq 0 ]; then
+    echo "ERROR: no SVG renderer found (rsvg-convert / chrome / sips)" >&2
+  fi
   return 1
 }
-render_svg_to_png || exit 1
-# sanity: non-empty 1024x1024 PNG
-python3 - "$OUT/icon.png" <<'PYEOF'
-import sys, struct
-data = open(sys.argv[1], "rb").read()
-assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
-pos = 8
-while pos < len(data):
-    ln = struct.unpack(">I", data[pos:pos+4])[0]
-    tag = data[pos+4:pos+8]
-    if tag == b"IHDR":
-        w, h = struct.unpack(">II", data[pos+8:pos+16])
-        assert (w, h) == (1024, 1024), f"expected 1024x1024, got {w}x{h}"
-        print(f"    icon.png OK: {w}x{h}")
-        break
-    pos += 12 + ln
-PYEOF
 
-# ⚡ transparency check (rant 2026-08-12T17:25:28): Chrome headless can silently
-#    produce a fully-transparent PNG (SVG not painted). Fail loudly instead of
-#    shipping a blank icon. Sample the alpha channel; if >90% of pixels are
-#    transparent, the renderer failed → exit 1.
-python3 - "$OUT/icon.png" <<'PYEOF'
+# ⚡ transparency check (rant 2026-08-12T17:25:28 + v0.2.29 CI lesson): Chrome
+#    headless / rsvg-convert can silently produce a fully-transparent PNG (SVG
+#    not painted). Fail loudly instead of shipping a blank icon. Sample the
+#    alpha channel; if >90% of pixels are transparent, the renderer failed.
+#    Returns 0 when the icon is opaque enough (accepted), 1 when blank (caller
+#    falls back to the next renderer).
+check_icon_opaque() {
+  python3 - "$OUT/icon.png" <<'PYEOF'
 import sys, struct, zlib
 
 data = open(sys.argv[1], "rb").read()
+assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
 pos, w, h, idat, colortype = 8, 0, 0, b"", 0
 while pos < len(data):
     ln = struct.unpack(">I", data[pos:pos+4])[0]
@@ -128,6 +139,11 @@ while pos < len(data):
     elif tag == b"IDAT":
         idat += chunk
     pos += 12 + ln
+
+if (w, h) != (1024, 1024):
+    sys.stderr.write(f"ERROR: expected 1024x1024 PNG, got {w}x{h} — renderer failed\n")
+    sys.exit(1)
+print(f"    icon.png OK: {w}x{h}")
 
 if colortype == 6:  # RGBA — only then is transparency meaningful
     raw = zlib.decompress(idat)
@@ -145,12 +161,15 @@ if colortype == 6:  # RGBA — only then is transparency meaningful
     if ratio < 0.10:
         sys.stderr.write(
             f"ERROR: icon.png is {1-ratio:.1%} transparent — renderer failed to paint "
-            "the SVG. Fix the rsvg-convert/Chrome headless path (see rant 2026-08-12T17:25:28).\n"
+            "the SVG. Falling back to next renderer (see rant 2026-08-12T17:25:28).\n"
         )
         sys.exit(1)
 else:
     print(f"    icon.png alpha: colortype={colortype} (no alpha channel) — assumed opaque")
 PYEOF
+}
+
+render_svg_to_png || exit 1
 
 echo "==> resizing to 512/256 (stdlib area-average box filter)"
 python3 - "$OUT/icon.png" "$OUT" <<'PYEOF'
