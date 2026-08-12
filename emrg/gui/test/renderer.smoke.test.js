@@ -205,6 +205,7 @@ function makeSandbox(overrides = {}) {
       closePreview: async () => ({ ok: true }),
       panelResized: async () => ({ ok: true }),
       getPreviewState: async () => ({ path: null }), // P2.3：崩溃恢复拉取
+      updateInstall: async () => ({ ok: true }), // rant 12:10：一键安装 IPC 默认桩
       ...overrides,
     },
   };
@@ -2261,4 +2262,75 @@ test("P2.3：handlePreviewState 幂等——已打开路径仅激活不重复开
   await vm.runInContext('ResultPanel.handlePreviewState("/proj/index.html", null)', ctx);
   assert.strictEqual(els["result-tabbar"].children.length, before, "已打开路径不得重复开 Tab");
   assert.ok(calls.previewHtml.length >= 2, "恢复激活应重新 previewHtml（bounds/loadURL 同步）");
+});
+
+// ── rant 2026-08-12T12:10:12：自动下载 + GUI 一键安装 ──
+
+test("rant 12:10：已下载安装包 → 设置页一键安装按钮 → 确认 → updateInstall", async () => {
+  const installCalls = [];
+  const { ctx, els } = makeSandbox({
+    updateCheck: async () => ({
+      enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "",
+      current_version: "0.2.27",
+      downloaded_version: "0.2.99",
+      downloaded_path: "/home/u/.emrg/updates/EMRG-0.2.99-windows-x64.exe",
+    }),
+    updateInstall: async (p) => { installCalls.push(p); return { ok: true }; },
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.refreshUpdateCheck()", ctx);
+  await tick();
+  const updEl = els["about-update"];
+  assert.strictEqual(updEl.classList.contains("hidden"), false, "update row visible");
+  assert.ok(updEl.children.length >= 1, "install button rendered");
+  const btn = updEl.children[0];
+  assert.ok((btn.textContent || "").includes("0.2.99"), `button text has version: "${btn.textContent}"`);
+  assert.ok(btn.className.includes("btn"), `button styled as button: "${btn.className}"`);
+  btn.click(); // → 确认对话框
+  await tick();
+  assert.strictEqual(els["confirm-dialog"].open, true, "confirm dialog shown");
+  assert.ok((els["confirm-message"].textContent || "").includes("0.2.99"), "confirm mentions version");
+  await vm.runInContext("EMRG_Dialogs.confirmOk()", ctx);
+  await tick();
+  assert.strictEqual(installCalls.length, 1, "updateInstall called once");
+  assert.strictEqual(installCalls[0].path, "/home/u/.emrg/updates/EMRG-0.2.99-windows-x64.exe", "downloaded path passed");
+  assert.strictEqual(installCalls[0].version, "0.2.99", "version passed");
+});
+
+test("rant 12:10：启动提示——已下载 → 系统消息“已就绪”（非更新链接）", async () => {
+  const { ctx } = makeSandbox({
+    updateCheck: async () => ({
+      enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "",
+      current_version: "0.2.27",
+      downloaded_version: "0.2.99",
+      downloaded_path: "/home/u/.emrg/updates/EMRG-0.2.99-macos-arm64.pkg",
+    }),
+  });
+  await tick();
+  const r = await vm.runInContext(`(async function() {
+    await EMRG_Dialogs.promptUpdateAtStartup();
+    const texts = [];
+    for (let i = 0; i < $("chat-view").children.length; i++) texts.push($("chat-view").children[i].textContent);
+    return texts.join("|");
+  })()`, ctx);
+  assert.ok(r.includes("0.2.99"), `ready message contains version: "${r}"`);
+  assert.ok(r.includes("已下载") || r.includes("downloaded"), `ready wording: "${r}"`);
+});
+
+test("rant 12:10：downloaded_version == 当前版本 → 无安装按钮（退化更新链接）", async () => {
+  const { ctx, els } = makeSandbox({
+    updateCheck: async () => ({
+      enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "",
+      current_version: "0.2.27", downloaded_version: "0.2.27",
+    }),
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.refreshUpdateCheck()", ctx);
+  await tick();
+  const updEl = els["about-update"];
+  assert.strictEqual(updEl.classList.contains("hidden"), false, "update row visible");
+  assert.strictEqual(updEl.children.length, 1, "single element (no install button)");
+  const child = updEl.children[0];
+  assert.ok(!child.className.includes("btn"), "not a button when downloaded == current");
+  assert.ok((child.attributes.href || "").includes("releases"), "falls back to the Releases link");
 });

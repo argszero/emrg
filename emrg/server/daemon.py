@@ -381,13 +381,15 @@ class EmrgServer:
             await asyncio.sleep(_UPDATE_TTL_SECONDS)
 
     async def _update_check_loop(self) -> None:
-        """Background auto update-check prompt (rant 2026-08-10T07:12:12).
+        """Background auto update-check + auto-download (rants 07:12:12, 12:10:12).
 
-        Runs at startup + every [update] ttl_hours (default 24h). ONLY checks
-        the latest release via api.github.com and persists state to
-        ~/.emrg/.last_update_check.json — no auto download/install. Failures
-        are silent (never crash, never log noise); the next TTL retries.
-        Disabled entirely when [update] check = false in config.toml.
+        Runs at startup + every [update] ttl_hours (default 1h). Checks the
+        latest release via api.github.com and persists state to
+        ~/.emrg/.last_update_check.json. When a newer version exists and
+        [update] auto_download is enabled, the installer is downloaded in a
+        background task (stream + Range resume + SHA256 verify) — NEVER
+        auto-installed. Failures are silent (never crash, never log noise);
+        the next TTL retries. Disabled entirely when [update] check = false.
         """
         from emrg.config import load_update_config
         from emrg.update_check import (
@@ -401,7 +403,7 @@ class EmrgServer:
             logger.debug("auto update-check disabled by config ([update] check=false)")
             return
 
-        ttl = max(3600, int(update_cfg.ttl_hours or 24) * 3600)
+        ttl = max(3600, int(update_cfg.ttl_hours or 1) * 3600)
         while True:
             state = load_state()
             if should_check(state, ttl):
@@ -410,7 +412,72 @@ class EmrgServer:
                     logger.debug(
                         "update check: latest=%s", result.get("latest_version")
                     )
+                    await self._maybe_auto_download(
+                        result.get("latest_version"), update_cfg.auto_download
+                    )
             await asyncio.sleep(ttl)
+
+    async def _maybe_auto_download(self, latest_version: str, auto_download: bool) -> None:
+        """Kick off a background installer download when a newer version exists.
+
+        rant 2026-08-12T12:10:12: auto-download runs in its own task so the
+        check loop / chat is never blocked. Skipped when auto_download is
+        disabled, the version is not newer than the running one, or the same
+        version is already downloaded (and verified).
+        """
+        if not auto_download or not latest_version:
+            return
+        import emrg
+        from emrg.update_check import (
+            is_newer,
+            load_state,
+            parse_version,
+        )
+
+        state = load_state()
+        current = getattr(emrg, "__version__", "0")
+        if not is_newer(parse_version(latest_version), parse_version(current)):
+            return
+        if state.get("downloaded_version") == latest_version:
+            return  # already downloaded + verified
+        asyncio.create_task(self._auto_download_update(latest_version))
+
+    async def _auto_download_update(self, version: str) -> None:
+        """Background installer download + state persist + client notify.
+
+        Never raises; failures are silent and retried at the next TTL. On
+        success the downloaded_* fields are persisted to the update state
+        file and connected clients get an update_downloaded broadcast so the
+        GUI can show the "ready to install" prompt (rant 2026-08-12T12:10:12).
+        """
+        from emrg.update_check import (
+            download_release_asset,
+            load_state,
+            save_state,
+        )
+
+        try:
+            result = await download_release_asset(version)
+        except Exception:
+            logger.debug("update auto-download failed (retry next TTL)", exc_info=True)
+            return
+        if not result:
+            return  # silent — next TTL retries
+        try:
+            state = load_state()
+            state.update(result)
+            save_state(state)
+        except Exception:
+            pass
+        logger.info(
+            "update auto-downloaded: %s -> %s",
+            result.get("downloaded_version"),
+            result.get("downloaded_path"),
+        )
+        try:
+            await self._broadcast_all({"type": "update_downloaded", **result})
+        except Exception:
+            pass
 
     def _evolution_count(self) -> int:
         """Total completed evolution cycles across scheduler handlers + disk.
@@ -1471,6 +1538,11 @@ class EmrgServer:
                 "latest_version": latest,
                 "has_update": has_update,
                 "prompted_version": state.get("prompted_version") or "",
+                # rant 2026-08-12T12:10:12: auto-download state — GUI shows the
+                # "ready to install" button when downloaded_version is newer.
+                "downloaded_version": state.get("downloaded_version") or "",
+                "downloaded_path": state.get("downloaded_path") or "",
+                "downloaded_sha": state.get("downloaded_sha") or "",
                 "enabled": load_update_config().check,
             })
 

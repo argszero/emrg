@@ -39,15 +39,21 @@ class LlmConfig:
 
 @dataclass
 class UpdateConfig:
-    """Auto update-check settings (rant 2026-08-10T07:12:12).
+    """Auto update-check settings (rants 2026-08-10T07:12:12, 2026-08-12T12:10:12).
 
-    check: master switch — when false, the daemon never queries GitHub.
-    ttl_hours: how often to re-check the latest release (default 24h).
-    Prompting is always display-only (no auto download/install).
+    check: master switch — when false, the daemon never queries GitHub
+        (checking, downloading and prompting are all disabled).
+    ttl_hours: how often to re-check the latest release (default 1h;
+        rant 2026-08-12T12:10:12: host 指示 24h → 1h).
+    auto_download: when a newer version exists, download the current
+        platform's installer into ~/.emrg/updates/ in the background
+        (stream + Range resume + SHA256 verify). Installation is ALWAYS
+        user-initiated — never auto-installed.
     """
 
     check: bool = True
-    ttl_hours: int = 24
+    ttl_hours: int = 1
+    auto_download: bool = True
 
 
 @dataclass
@@ -109,7 +115,8 @@ def load_config() -> EmrgConfig:
     update_data = data.get("update", {})
     update = UpdateConfig(
         check=update_data.get("check", True),
-        ttl_hours=update_data.get("ttl_hours", 24),
+        ttl_hours=update_data.get("ttl_hours", 1),
+        auto_download=update_data.get("auto_download", True),
     )
 
     return EmrgConfig(llm=llm, update=update)
@@ -120,7 +127,7 @@ def load_update_config() -> UpdateConfig:
 
     The daemon is constructed with just LlmConfig; this helper lets it read
     the update-check switch without parsing the full config. Missing config
-    file or missing section → defaults (check=True, ttl=24h).
+    file or missing section → defaults (check=True, ttl=1h, auto_download=True).
     """
     cfg_path = config_path()
     if not cfg_path.exists():
@@ -132,7 +139,8 @@ def load_update_config() -> UpdateConfig:
     update_data = data.get("update", {})
     return UpdateConfig(
         check=update_data.get("check", True),
-        ttl_hours=update_data.get("ttl_hours", 24),
+        ttl_hours=update_data.get("ttl_hours", 1),
+        auto_download=update_data.get("auto_download", True),
     )
 
 
