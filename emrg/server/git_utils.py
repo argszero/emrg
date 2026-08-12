@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,6 +15,19 @@ from emrg.config import config_dir
 
 INSTALL_BIN = Path.home() / ".emrg" / "install" / "bin"
 INSTALL_INFO = config_dir() / "install-info.json"
+
+logger = logging.getLogger(__name__)
+
+# One-shot guard: when no git executable can be resolved at all, log the
+# root cause once per process (2026-08-12 incident follow-up — the daemon
+# restarted without PATH git and cycles were silently skipped for 18 min).
+_GIT_MISSING_WARNED = False
+
+# In-process memo of the last (git, gh) paths written to install-info.json —
+# resolve_git_gh() is called on every git_cmd(), and each call used to do an
+# atomic tmp+os.replace disk write even when nothing changed. Tool paths are
+# stable within a process lifetime, so write once and skip the rest.
+_LAST_CACHED_PATHS: tuple[str, str] | None = None
 
 
 # ── Non-interactive subprocess environment (rant 2026-08-07T10:17:27) ──
@@ -220,6 +234,7 @@ def resolve_git_gh() -> tuple[str, str]:
     Returns (git_path, gh_path). Missing executables yield '' (callers decide
     how to degrade).
     """
+    global _LAST_CACHED_PATHS
     git = _cached_tool_path("git")
     gh = _cached_tool_path("gh")
     if git and Path(git).exists():
@@ -231,9 +246,41 @@ def resolve_git_gh() -> tuple[str, str]:
     else:
         gh = _tool_in_install("gh") or (shutil.which("gh") or "")
 
-    if git or gh:
-        _cache_tool_paths(git, gh)
+    if git:
+        # Write the cache only when the resolved pair changed since the last
+        # write (or nothing cached yet) — avoids an atomic install-info.json
+        # write on every git_cmd() call. Paths are stable per process.
+        if _LAST_CACHED_PATHS != (git, gh):
+            _cache_tool_paths(git, gh)
+            _LAST_CACHED_PATHS = (git, gh)
+    else:
+        # git is the failure mode that silently disables evolution (2026-08-12
+        # incident) — warn regardless of whether gh resolved. Also skip the
+        # cache write so a previously valid cached git_path is not clobbered
+        # with '' (review #714 note).
+        _warn_git_missing_once()
     return git, gh
+
+
+def _warn_git_missing_once() -> None:
+    """Log one actionable WARNING when no git executable can be resolved.
+
+    2026-08-12 incident follow-up: a daemon restart in an environment with
+    neither bundled nor PATH git made every evolution git call raise
+    FileNotFoundError; _is_usable_git_repo() swallowed the OSError and the
+    cycle log only said "workspace not ready — skipping cycle" for 18
+    minutes. Log the root cause once per process so the daemon log is
+    diagnosable.
+    """
+    global _GIT_MISSING_WARNED
+    if _GIT_MISSING_WARNED:
+        return
+    _GIT_MISSING_WARNED = True
+    logger.warning(
+        "git executable not found (install-info / ~/.emrg/install / PATH all "
+        "empty) — evolution cycles will be skipped as 'not a git repo'; "
+        "install git or add it to PATH, then restart the daemon"
+    )
 
 
 def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess.CompletedProcess:

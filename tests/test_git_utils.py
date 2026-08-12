@@ -288,3 +288,88 @@ def test_git_origin_url_missing_remote(tmp_path):
 
     real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     assert git_origin_url(str(tmp_path)) == ""
+
+
+def test_resolve_git_gh_warns_once_when_git_missing(monkeypatch, caplog):
+    """Total git absence logs one actionable WARNING (2026-08-12 incident).
+
+    A daemon restart with neither bundled nor PATH git used to fail silently
+    (FileNotFoundError swallowed by _is_usable_git_repo → cycles skipped as
+    "not a git repo"). The one-shot warning makes the root cause visible.
+    """
+    import logging
+
+    from emrg.server import git_utils as gu
+
+    # Force all three resolution sources empty (no install-info / bundled / PATH).
+    monkeypatch.setattr(gu, "_cached_tool_path", lambda tool: None)
+    monkeypatch.setattr(gu, "_tool_in_install", lambda tool: None)
+    monkeypatch.setattr(gu.shutil, "which", lambda tool: None)
+    monkeypatch.setattr(gu, "_GIT_MISSING_WARNED", False)
+
+    with caplog.at_level(logging.WARNING, logger="emrg.server.git_utils"):
+        git, gh = gu.resolve_git_gh()
+        assert git == "" and gh == ""
+        gu.resolve_git_gh()  # second call must NOT re-warn
+
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1
+    assert "git executable not found" in warns[0].getMessage()
+
+
+def test_resolve_git_gh_warns_when_git_missing_but_gh_present(monkeypatch, caplog):
+    """Git-missing must warn even when gh resolves (review #714 finding).
+
+    The failure mode is git-specific: a dev box with gh on PATH but no git
+    would previously skip the warning entirely (the old `else` of `if git or
+    gh`) yet still silently disable evolution. The warning is gated on git
+    alone; the cache write is skipped so a previously valid cached git_path
+    is not clobbered with ''.
+    """
+    import logging
+
+    from emrg.server import git_utils as gu
+
+    def fake_cache(git: str, gh: str) -> None:
+        assert git == "", f"cache must not be written with empty git, got {git=} {gh=}"
+        raise AssertionError("_cache_tool_paths should not be called when git is missing")
+
+    monkeypatch.setattr(gu, "_cached_tool_path", lambda tool: None)
+    monkeypatch.setattr(gu, "_tool_in_install", lambda tool: None)
+    # gh resolves via PATH, git does not.
+    monkeypatch.setattr(gu.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
+    monkeypatch.setattr(gu, "_cache_tool_paths", fake_cache)
+    monkeypatch.setattr(gu, "_GIT_MISSING_WARNED", False)
+
+    with caplog.at_level(logging.WARNING, logger="emrg.server.git_utils"):
+        git, gh = gu.resolve_git_gh()
+        assert git == "" and gh == "/usr/bin/gh"
+        gu.resolve_git_gh()  # second call must NOT re-warn
+
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1
+    assert "git executable not found" in warns[0].getMessage()
+
+
+def test_resolve_git_gh_writes_cache_once_per_process(monkeypatch):
+    """Cache write happens once per process, not on every git_cmd() call.
+
+    resolve_git_gh() runs on every git_cmd(); before this fix each call did an
+    atomic install-info.json write even when the resolved paths were unchanged.
+    Tool paths are stable within a process lifetime — write once, skip the rest.
+    """
+    from emrg.server import git_utils as gu
+
+    calls = []
+    monkeypatch.setattr(gu, "_cached_tool_path", lambda tool: None)
+    monkeypatch.setattr(gu, "_tool_in_install", lambda tool: None)
+    monkeypatch.setattr(gu.shutil, "which", lambda tool: "/usr/bin/git" if tool == "git" else "/usr/bin/gh")
+    monkeypatch.setattr(gu, "_cache_tool_paths", lambda g, h: calls.append((g, h)))
+    monkeypatch.setattr(gu, "_LAST_CACHED_PATHS", None)
+
+    gu.resolve_git_gh()
+    gu.resolve_git_gh()  # unchanged paths → no second write
+    gu.resolve_git_gh()
+
+    assert len(calls) == 1, f"expected exactly 1 cache write, got {len(calls)}: {calls}"
+    assert calls[0] == ("/usr/bin/git", "/usr/bin/gh")
