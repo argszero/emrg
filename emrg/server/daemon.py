@@ -1465,7 +1465,7 @@ class EmrgServer:
         elif msg_type == "evolution_summary":
             # WorkBuddy P3 (rant 21:35): self-evolution visibility.
             # Low-cost: read evolution log files (~/.emrg/logs/evolution-*.json)
-            # written by EvolutionHandler; return count + recent N summaries.
+            # written by TaskHandler; return count + recent N summaries.
             limit = msg.get("limit", 5)
             try:
                 logs_dir = config_dir() / "logs"

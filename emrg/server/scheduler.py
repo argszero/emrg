@@ -54,6 +54,24 @@ TASK_TEMPLATES: dict[str, str] = {
 }
 
 
+def _resolve_task_template(task_type: str) -> Path:
+    """Resolve the prompt template for a task type.
+
+    Built-in TASK_TEMPLATES take priority; custom task types (rant
+    2026-08-12T18:14:46 P2) fall back to a user template in
+    ``~/.emrg/task-templates/<type>.md``, then to the generic
+    evolution prompt. Pure helper so P2 can unit-test lookup without
+    a scheduler instance.
+    """
+    builtin = TASK_TEMPLATES.get(task_type)
+    if builtin:
+        return Path(__file__).parent / builtin
+    user_tpl = config_dir() / "task-templates" / f"{task_type}.md"
+    if user_tpl.exists():
+        return user_tpl
+    return Path(__file__).parent / "evolution_prompt.md"
+
+
 def _resolve_project_path(name: str) -> str | None:
     """Resolve a project name to its path from projects.yml."""
     projects_file = config_dir() / "projects.yml"
@@ -98,10 +116,10 @@ def _load_project_config(name: str, source_dir: str) -> dict:
     return {}
 
 
-# ── EvolutionHandler ────────────────────────────────────────────
+# ── TaskHandler ────────────────────────────────────────────
 
 
-class EvolutionHandler:
+class TaskHandler:
     """Self-contained evolution loop for one project (or emrg itself).
 
     Each handler runs its own while+sleep(interval) coroutine,
@@ -161,15 +179,27 @@ class EvolutionHandler:
         path = _resolve_project_path(project_name) if project_name else config.get("path", "")
         self.project_path = path or name  # default to name for emrg itself
 
-        # Derive owner/repo/git from path
+        # Derive owner/repo/git from config override → path git remote → defaults.
+        # _repo_configured gates the workspace self-heal (rant 2026-08-12T18:14:46):
+        # any task with a real repo (config owner/repo, or a git remote in its
+        # project path) gets clone/align self-heal; the emrg evolution task
+        # always counts as configured (defaults to argszero/emrg).
         repo_spec = _detect_git_remote(path) if path else ""
-        if repo_spec and "/" in repo_spec:
+        cfg_owner = config.get("owner")
+        cfg_repo = config.get("repo")
+        if cfg_owner and cfg_repo:
+            self._owner, self._repo = cfg_owner, cfg_repo
+            self._repo_url = f"https://github.com/{self._owner}/{self._repo}.git"
+            self._repo_configured = True
+        elif repo_spec and "/" in repo_spec:
             self._owner, self._repo = repo_spec.split("/", 1)
             self._repo_url = f"https://github.com/{self._owner}/{self._repo}.git"
+            self._repo_configured = True
         else:
             self._owner = self.OWNER
             self._repo = self.REPO
             self._repo_url = self.EMRG_REPO_URL
+            self._repo_configured = project_name == "emrg"
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
         # One-shot https-origin probe per handler lifetime (see
@@ -305,12 +335,12 @@ class EvolutionHandler:
                     **win32_no_window_kwargs(),
                 )
                 logger.info(
-                    "EvolutionHandler[%s]: evolution workspace aligned to %s",
+                    "TaskHandler[%s]: evolution workspace aligned to %s",
                     self.name, tag,
                 )
         except (subprocess.CalledProcessError, OSError) as e:
             logger.warning(
-                "EvolutionHandler[%s]: tag checkout %s failed (stay on master): %s",
+                "TaskHandler[%s]: tag checkout %s failed (stay on master): %s",
                 self.name, tag, e,
             )
 
@@ -331,7 +361,7 @@ class EvolutionHandler:
                         entry["last_active"] = datetime.now().isoformat()
                         atomic_write_yaml(entries, projects_file, prefix=".projects_")
                         logger.info(
-                            "EvolutionHandler[%s]: projects.yml self-heal — emrg → %s",
+                            "TaskHandler[%s]: projects.yml self-heal — emrg → %s",
                             self.name, new_path,
                         )
                     return
@@ -342,29 +372,31 @@ class EvolutionHandler:
             })
             atomic_write_yaml(entries, projects_file, prefix=".projects_")
             logger.info(
-                "EvolutionHandler[%s]: projects.yml self-heal — added emrg → %s",
+                "TaskHandler[%s]: projects.yml self-heal — added emrg → %s",
                 self.name, new_path,
             )
         except (yaml.YAMLError, OSError) as e:
             logger.warning(
-                "EvolutionHandler[%s]: projects.yml self-heal failed: %s",
+                "TaskHandler[%s]: projects.yml self-heal failed: %s",
                 self.name, e,
             )
 
     def _ensure_evolution_workspace(self) -> bool:
-        """Self-heal the evolution workspace; returns False to skip the cycle.
+        """Self-heal the task workspace; returns False to skip the cycle.
 
-        Only applies to the EMRG self-evolution task (config.project == emrg).
+        Applies to any task that has a repo configured (the emrg evolution
+        task, or a paper/open-source/promote task with config owner/repo or
+        a git remote in its project path — rant 2026-08-12T18:14:46).
         Returns True when the workspace is usable (existing dev repo, or a
-        successful clone into ``~/.emrg/evolution/emrg/``).
+        successful clone into ``~/.emrg/evolution/<repo>/``).
         """
-        if self._project_name != "emrg" or self._repo != self.REPO:
-            return True  # paper/open-source/promote tasks: not our concern
+        if not self._repo_configured:
+            return True  # no repo configured for this task — nothing to self-heal
         if self._is_usable_git_repo(self._source_dir):
             self._ensure_origin_reachable()
             return True  # dev machine — use the existing repo as-is
         repo_url = self._repo_url_from_install_info() or self._repo_url
-        evolve_dir = EVOLUTION_CWD / self.REPO
+        evolve_dir = EVOLUTION_CWD / self._repo
         if evolve_dir.exists():
             if self._is_usable_git_repo(str(evolve_dir)):
                 self._source_dir = str(evolve_dir)
@@ -372,14 +404,14 @@ class EvolutionHandler:
                 self._ensure_origin_reachable()
                 return True
             logger.warning(
-                "EvolutionHandler[%s]: %s exists but is not a git repo — "
+                "TaskHandler[%s]: %s exists but is not a git repo — "
                 "skipping self-heal to avoid data loss",
                 self.name, evolve_dir,
             )
             return False
         try:
             logger.info(
-                "EvolutionHandler[%s]: cloning %s → %s (workspace self-heal)",
+                "TaskHandler[%s]: cloning %s → %s (workspace self-heal)",
                 self.name, repo_url, evolve_dir,
             )
             self._clone_workspace(repo_url, evolve_dir)
@@ -391,7 +423,7 @@ class EvolutionHandler:
             return True
         except (subprocess.CalledProcessError, OSError) as e:
             logger.warning(
-                "EvolutionHandler[%s]: evolution workspace self-heal failed "
+                "TaskHandler[%s]: evolution workspace self-heal failed "
                 "(network down?): %s — skipping cycle",
                 self.name, e,
             )
@@ -423,7 +455,7 @@ class EvolutionHandler:
             # NB: `e` is deleted when the except block exits — capture first.
             reason = (e.stderr.strip() or str(e))[:80]
         logger.warning(
-            "EvolutionHandler[%s]: https clone failed (%s) — retrying via SSH",
+            "TaskHandler[%s]: https clone failed (%s) — retrying via SSH",
             self.name, reason,
         )
         subprocess.run(
@@ -478,7 +510,7 @@ class EvolutionHandler:
         )
         if switch.returncode == 0:
             logger.warning(
-                "EvolutionHandler[%s]: https origin unreachable (%s) — "
+                "TaskHandler[%s]: https origin unreachable (%s) — "
                 "switched origin to %s",
                 self.name, (result.stderr.strip() or "")[:80], ssh_url,
             )
@@ -491,7 +523,7 @@ class EvolutionHandler:
                 count = data.get("empty_cycles", 0)
                 if count > 0:
                     logger.debug(
-                        "EvolutionHandler[%s]: restored saturation state (%d empty cycles)",
+                        "TaskHandler[%s]: restored saturation state (%d empty cycles)",
                         self.name, count,
                     )
                 return count
@@ -518,7 +550,7 @@ class EvolutionHandler:
         self._running = True
         self._start_time = time.time()
         logger.info(
-            "EvolutionHandler[%s] started — every %ds", self.name, self.interval
+            "TaskHandler[%s] started — every %ds", self.name, self.interval
         )
 
         while self._running:
@@ -544,7 +576,7 @@ class EvolutionHandler:
                 self._trigger_event.clear()
                 manual_trigger = True
                 logger.debug(
-                    "EvolutionHandler[%s] manually triggered", self.name
+                    "TaskHandler[%s] manually triggered", self.name
                 )
             except asyncio.TimeoutError:
                 # Normal scheduled run
@@ -555,28 +587,28 @@ class EvolutionHandler:
             if manual_trigger:
                 if self._empty_cycles >= self._IDLE_HALT_THRESHOLD:
                     logger.info(
-                        "EvolutionHandler[%s]: resumed via manual trigger "
+                        "TaskHandler[%s]: resumed via manual trigger "
                         "(was in saturation at %d empty cycles)",
                         self.name, self._empty_cycles,
                     )
                 self._empty_cycles = 0
                 self._save_saturation_state()
 
-            logger.debug("EvolutionHandler[%s] tick", self.name)
+            logger.debug("TaskHandler[%s] tick", self.name)
             self._cycle_running = True
             self._next_run_at = None  # running — no next time yet
             try:
                 await self._run_evolution_cycle()
             except Exception:
                 logger.warning(
-                    "EvolutionHandler[%s] crashed", self.name, exc_info=True
+                    "TaskHandler[%s] crashed", self.name, exc_info=True
                 )
             finally:
                 self._cycle_running = False
                 self._trigger_event.clear()  # clear any spurious set during cycle
 
         await self._write_final_summary()
-        logger.info("EvolutionHandler[%s] stopped", self.name)
+        logger.info("TaskHandler[%s] stopped", self.name)
 
     def stop(self) -> None:
         self._running = False
@@ -699,14 +731,14 @@ class EvolutionHandler:
             return False
         if self._remote_advanced():
             logger.info(
-                "EvolutionHandler[%s]: upstream advanced — resuming normal frequency from saturation",
+                "TaskHandler[%s]: upstream advanced — resuming normal frequency from saturation",
                 self.name,
             )
             self._empty_cycles = 0
             self._save_saturation_state()
             return False
         logger.info(
-            "EvolutionHandler[%s]: saturation (%d empty cycles) — "
+            "TaskHandler[%s]: saturation (%d empty cycles) — "
             "running full cycle at heartbeat interval (%ds) — never halting",
             self.name, self._empty_cycles, self._heartbeat_interval(),
         )
@@ -718,7 +750,7 @@ class EvolutionHandler:
         # packaged installs lack a writable git repo; clone on demand.
         if not self._ensure_evolution_workspace():
             logger.warning(
-                "EvolutionHandler[%s]: workspace not ready — skipping cycle",
+                "TaskHandler[%s]: workspace not ready — skipping cycle",
                 self.name,
             )
             return
@@ -726,7 +758,7 @@ class EvolutionHandler:
         cycle_time = datetime.now()
         prompt = self._build_evolution_prompt()
         logger.info(
-            "EvolutionHandler[%s]: prompt built (%d chars), connecting ...",
+            "TaskHandler[%s]: prompt built (%d chars), connecting ...",
             self.name, len(prompt),
         )
         start_time = cycle_time
@@ -736,7 +768,7 @@ class EvolutionHandler:
 
         try:
             ws = await connect_to_server()
-            logger.info("EvolutionHandler[%s]: connected", self.name)
+            logger.info("TaskHandler[%s]: connected", self.name)
             self._connect_failures = 0
         except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
             # G129 (rant 2026-08-09T08:03:46): 连接失败不得静默吞掉——GUI 测试曾把
@@ -747,7 +779,7 @@ class EvolutionHandler:
             port_path = config_dir() / "emrgd.port"
             if self._connect_failures >= self._CONNECT_FAIL_ALERT:
                 logger.error(
-                    "EvolutionHandler[%s]: cannot connect for %d consecutive cycles "
+                    "TaskHandler[%s]: cannot connect for %d consecutive cycles "
                     "(%s) — daemon unreachable. Check %s (may have been overwritten "
                     "by GUI tests or stale after daemon restart); run 'emrg server' "
                     "or restart the daemon to recover.",
@@ -755,7 +787,7 @@ class EvolutionHandler:
                 )
             else:
                 logger.warning(
-                    "EvolutionHandler[%s]: cannot connect (%d/%d): %s",
+                    "TaskHandler[%s]: cannot connect (%d/%d): %s",
                     self.name, self._connect_failures, self._CONNECT_FAIL_ALERT, e,
                 )
             return
@@ -798,12 +830,12 @@ class EvolutionHandler:
                     truncated = "exceeded" in content.lower()
                     if truncated:
                         logger.warning(
-                            "EvolutionHandler[%s] truncated (max tool rounds, tools=%d, duration=%ds)",
+                            "TaskHandler[%s] truncated (max tool rounds, tools=%d, duration=%ds)",
                             self.name, tool_count, duration,
                         )
                     else:
                         logger.info(
-                            "EvolutionHandler[%s] complete (tools=%d, duration=%ds)",
+                            "TaskHandler[%s] complete (tools=%d, duration=%ds)",
                             self.name, tool_count, duration,
                         )
                     break
@@ -815,12 +847,12 @@ class EvolutionHandler:
                 if isinstance(resp_error, str):
                     error = str(resp_error)
                     logger.warning(
-                        "EvolutionHandler[%s] server error: %s",
+                        "TaskHandler[%s] server error: %s",
                         self.name, error,
                     )
                     break
         except Exception as e:
-            logger.exception("EvolutionHandler[%s] error", self.name)
+            logger.exception("TaskHandler[%s] error", self.name)
             error = str(e)
         finally:
             try:
@@ -844,7 +876,7 @@ class EvolutionHandler:
             self._empty_cycles += 1
             self._save_saturation_state()
             logger.debug(
-                "EvolutionHandler[%s]: empty cycle #%d (HEAD=%s)",
+                "TaskHandler[%s]: empty cycle #%d (HEAD=%s)",
                 self.name, self._empty_cycles, git_head_after[:8],
             )
         else:
@@ -853,7 +885,7 @@ class EvolutionHandler:
                 if error:
                     reason = f"aborted cycle ({error[:80]})"
                 logger.info(
-                    "EvolutionHandler[%s]: %s, resetting empty streak",
+                    "TaskHandler[%s]: %s, resetting empty streak",
                     self.name, reason,
                 )
             self._empty_cycles = 0
@@ -865,7 +897,7 @@ class EvolutionHandler:
         # busy" aborts observed when interactive sessions hold the daemon.
         if error:
             logger.warning(
-                "EvolutionHandler[%s]: cycle aborted (%s) — not counted as evolution",
+                "TaskHandler[%s]: cycle aborted (%s) — not counted as evolution",
                 self.name, error[:200],
             )
             return
@@ -984,23 +1016,23 @@ class TaskScheduler:
     """
 
     HANDLERS: dict[str, type] = {
-        "evolution": EvolutionHandler,
-        "paper": EvolutionHandler,  # same handler, different template
-        "open-source": EvolutionHandler,  # same handler, different template
-        "promote": EvolutionHandler,  # same handler, different template
+        "evolution": TaskHandler,
+        "paper": TaskHandler,  # same handler, different template
+        "open-source": TaskHandler,  # same handler, different template
+        "promote": TaskHandler,  # same handler, different template
     }
 
     def __init__(self, identity: InstanceIdentity) -> None:
         self.identity = identity
         self._tasks_file = config_dir() / "tasks.yml"
-        self._handlers: list[EvolutionHandler] = []
+        self._handlers: list[TaskHandler] = []
         self._coros: list[asyncio.Task] = []
 
     def load_and_start(self) -> list[asyncio.Task]:
         """Load tasks.yml, start all enabled tasks, return coroutine list."""
         # Self-heal: packaged installs may lack the emrg self-evolution task.
         # This must run here (not inside the handler) because a missing task
-        # means no EvolutionHandler is ever started (rant 20:42 方案 C).
+        # means no TaskHandler is ever started (rant 20:42 方案 C).
         self._ensure_self_evolution_task()
 
         tasks_config = self._load_tasks()
@@ -1020,8 +1052,7 @@ class TaskScheduler:
                     cfg["type"], cfg["name"],
                 )
                 continue
-            template_name = TASK_TEMPLATES.get(cfg["type"], "evolution_prompt.md")
-            template_path = Path(__file__).parent / template_name
+            template_path = _resolve_task_template(cfg["type"])
             handler = handler_cls(
                 name=cfg["name"],
                 config=cfg.get("config", {}),
@@ -1128,7 +1159,7 @@ class TaskScheduler:
         """Ensure projects.yml has an emrg entry and tasks.yml has the task.
 
         Packaged installs (or first runs) may lack tasks.yml entirely, or lack
-        the emrg-task entry. Without it, no EvolutionHandler is ever created,
+        the emrg-task entry. Without it, no TaskHandler is ever created,
         so the workspace self-heal (which lives inside the handler) cannot run.
 
         The projects.yml emrg entry is ensured here too (rant 02:58): the only

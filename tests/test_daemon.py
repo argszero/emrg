@@ -17,16 +17,16 @@ import yaml
 from emrg.config import LlmConfig
 from emrg.protocol import InstanceIdentity
 from emrg.server.daemon import EmrgServer
-from emrg.server.scheduler import EvolutionHandler, TaskScheduler
+from emrg.server.scheduler import TaskHandler, TaskScheduler
 from emrg.session import Session
 
 
-# ── EvolutionHandler._build_evolution_prompt ─────────────────────
+# ── TaskHandler._build_evolution_prompt ─────────────────────
 
 
 def test_build_prompt_emrg_self():
     """Builds prompt for emrg self-evolution."""
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -45,7 +45,7 @@ def test_build_prompt_emrg_self():
 
 def test_build_prompt_with_project():
     """Builds prompt for a custom project — derives owner/repo via git remote."""
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="myproject", config={"path": "/home/user/src/myproject"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -66,7 +66,7 @@ def test_build_prompt_all_variables_substituted():
     """No raw template placeholders ({var}) should remain in output."""
     import re
 
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -83,7 +83,7 @@ def test_build_prompt_step22_uses_fetch_head():
     stripped `remote.origin.fetch`), where `git log origin/master` fails
     with "unknown revision" (observed 2026-08-08, cycles 09:15 & 09:30).
     """
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
