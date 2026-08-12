@@ -270,6 +270,11 @@ class TaskHandler:
             self._repo_configured = project_name == "emrg"
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
+        # 解析一次 git 可执行路径（install-info.json → bundled → PATH 回退）。
+        # 2026-08-12 事故：daemon 从无 PATH git 的环境重启后，裸 `git` 调用
+        # FileNotFoundError → _is_usable_git_repo() 误判 "not a git repo" →
+        # 演化周期全部跳过。此后所有 git 调用走 resolve_git_gh() 的确定性解析。
+        self._git_exe = resolve_git_gh()[0] or "git"
         # One-shot https-origin probe per handler lifetime (see
         # _ensure_origin_reachable) — avoids re-probing every cycle.
         self._origin_probed = False
@@ -278,7 +283,7 @@ class TaskHandler:
         """Return current git HEAD hash, or None if not a git repo."""
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
+                [self._git_exe, "rev-parse", "HEAD"],
                 cwd=self._source_dir,
                 capture_output=True,
                 text=True,
@@ -317,7 +322,7 @@ class TaskHandler:
             return False
         try:
             result = subprocess.run(
-                ["git", "rev-parse", "--is-inside-work-tree"],
+                [self._git_exe, "rev-parse", "--is-inside-work-tree"],
                 cwd=path,
                 capture_output=True,
                 text=True,
@@ -339,7 +344,7 @@ class TaskHandler:
         try:
             for key, default in (("user.name", name), ("user.email", email)):
                 result = subprocess.run(
-                    ["git", "config", key],
+                    [self._git_exe, "config", key],
                     cwd=repo_dir,
                     capture_output=True,
                     text=True,
@@ -350,7 +355,7 @@ class TaskHandler:
                 )
                 if not result.stdout.strip():
                     subprocess.run(
-                        ["git", "config", key, default],
+                        [self._git_exe, "config", key, default],
                         cwd=repo_dir,
                         capture_output=True,
                         timeout=5,
@@ -381,7 +386,7 @@ class TaskHandler:
             return
         try:
             result = subprocess.run(
-                ["git", "tag", "-l", tag],
+                [self._git_exe, "tag", "-l", tag],
                 cwd=repo_dir,
                 capture_output=True,
                 text=True,
@@ -392,7 +397,7 @@ class TaskHandler:
             )
             if result.returncode == 0 and tag in result.stdout.split():
                 subprocess.run(
-                    ["git", "checkout", "-B", "master", tag],
+                    [self._git_exe, "checkout", "-B", "master", tag],
                     cwd=repo_dir,
                     capture_output=True,
                     text=True,
@@ -507,7 +512,7 @@ class TaskHandler:
         block https git transport (observed on the packaged host). Other
         failures (auth / 404 / repo-specific) propagate unchanged.
         """
-        cmd = ["git", "-c", "http.connectTimeout=10", "clone", repo_url, str(target)]
+        cmd = [self._git_exe, "-c", "http.connectTimeout=10", "clone", repo_url, str(target)]
         reason = ""
         try:
             subprocess.run(
@@ -527,7 +532,7 @@ class TaskHandler:
             self.name, reason,
         )
         subprocess.run(
-            ["git", "clone", ssh_url, str(target)],
+            [self._git_exe, "clone", ssh_url, str(target)],
             capture_output=True, text=True, encoding="utf-8",
             timeout=120, check=True, env=no_prompt_env(),
             **win32_no_window_kwargs(),
@@ -553,7 +558,7 @@ class TaskHandler:
         if not ssh_url:
             return  # not a github.com https origin — nothing to switch
         result = subprocess.run(
-            ["git", "-c", "http.connectTimeout=4", "ls-remote", origin, "HEAD"],
+            [self._git_exe, "-c", "http.connectTimeout=4", "ls-remote", origin, "HEAD"],
             cwd=self._source_dir,
             capture_output=True,
             text=True,
@@ -567,7 +572,7 @@ class TaskHandler:
         if not is_git_connection_error(result.stderr):
             return  # auth/404 etc — switching would not help
         switch = subprocess.run(
-            ["git", "remote", "set-url", "origin", ssh_url],
+            [self._git_exe, "remote", "set-url", "origin", ssh_url],
             cwd=self._source_dir,
             capture_output=True,
             text=True,
@@ -731,7 +736,7 @@ class TaskHandler:
             if not local:
                 return False
             result = subprocess.run(
-                ["git", "-c", "http.connectTimeout=4", "ls-remote", "origin", "master"],
+                [self._git_exe, "-c", "http.connectTimeout=4", "ls-remote", "origin", "master"],
                 cwd=self._source_dir,
                 capture_output=True,
                 text=True,
@@ -745,7 +750,7 @@ class TaskHandler:
                 ssh_url = https_to_ssh_url(git_origin_url(self._source_dir))
                 if ssh_url and is_git_connection_error(result.stderr):
                     result = subprocess.run(
-                        ["git", "ls-remote", ssh_url, "master"],
+                        [self._git_exe, "ls-remote", ssh_url, "master"],
                         cwd=self._source_dir,
                         capture_output=True,
                         text=True,

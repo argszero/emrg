@@ -633,7 +633,11 @@ class FakeGitRun:
     def __call__(self, cmd, *args, **kwargs):
         self.calls.append((list(cmd), kwargs.get("cwd")))
         cwd = kwargs.get("cwd") or ""
-        if cmd[0] == "git":
+        # cmd[0] 可能是字面 "git"（dev 环境）或 resolve_git_gh() 解析出的
+        # 绝对路径（bundled git，2026-08-12 workspace-not-ready 事故修复后）——
+        # 统一按 basename 判断，避免测试在两种环境下行为不一致。
+        cmd_head = Path(cmd[0]).name
+        if cmd_head in ("git", "git.exe"):
             sub = self._norm(cmd)
             if sub and sub[0] == "rev-parse":
                 if "--is-inside-work-tree" in sub:
@@ -971,7 +975,7 @@ def test_ensure_origin_reachable_switches_to_ssh_when_https_blocked(tmp_path):
 
     set_url_calls = [
         c for c in fake.calls
-        if c[0][0] == "git" and c[0][1] == "remote" and c[0][2] == "set-url"
+        if Path(c[0][0]).name in ("git", "git.exe") and c[0][1] == "remote" and c[0][2] == "set-url"
     ]
     assert len(set_url_calls) == 1, f"expected one set-url, got {fake.calls}"
     assert set_url_calls[0][0][4] == "git@github.com:argszero/emrg.git"
@@ -1000,7 +1004,7 @@ def test_ensure_origin_reachable_probes_only_once(tmp_path):
 
     set_url_calls = [
         c for c in fake.calls
-        if c[0][0] == "git" and c[0][1] == "remote" and c[0][2] == "set-url"
+        if Path(c[0][0]).name in ("git", "git.exe") and c[0][1] == "remote" and c[0][2] == "set-url"
     ]
     assert len(set_url_calls) == 1
 
@@ -1024,7 +1028,7 @@ def test_ensure_origin_reachable_keeps_https_when_reachable(tmp_path):
 
     set_url_calls = [
         c for c in fake.calls
-        if c[0][0] == "git" and c[0][1] == "remote" and c[0][2] == "set-url"
+        if Path(c[0][0]).name in ("git", "git.exe") and c[0][1] == "remote" and c[0][2] == "set-url"
     ]
     assert set_url_calls == []
 
@@ -1051,7 +1055,7 @@ def test_ensure_origin_reachable_ignores_non_connection_errors(tmp_path):
 
     set_url_calls = [
         c for c in fake.calls
-        if c[0][0] == "git" and c[0][1] == "remote" and c[0][2] == "set-url"
+        if Path(c[0][0]).name in ("git", "git.exe") and c[0][1] == "remote" and c[0][2] == "set-url"
     ]
     assert set_url_calls == []
 

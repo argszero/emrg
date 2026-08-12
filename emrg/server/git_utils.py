@@ -133,11 +133,9 @@ def _detect_git_remote(cwd: str) -> str:
     Returns '' if detection fails.
     """
     try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=cwd, capture_output=True, text=True, encoding="utf-8", timeout=5,
-            **win32_no_window_kwargs(),
-        )
+        # 用解析后的 git（install-info → bundled → PATH 回退，见 git_cmd），
+        # 防 daemon 启动环境无 PATH git 时误判 "not a git repo"（2026-08-12 事故）。
+        result = git_cmd("remote", "get-url", "origin", cwd=cwd, timeout=5)
         if result.returncode == 0:
             url = result.stdout.strip()
             # Extract owner/repo from various URL formats:
