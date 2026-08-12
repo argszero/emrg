@@ -610,6 +610,63 @@ vision = false
       return frame;
     });
 
+    // ── Task/template CRUD IPC (rant 2026-08-12T18:23:15 P3) ──────────
+    ipcMain.handle("emrg:taskCreate", async (_e, payload) => {
+      const { name, type, project, interval, enabled, repo, description } = payload || {};
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
+      if (typeof type !== "string" || !type.trim()) throw new Error("invalid task type");
+      if (typeof project !== "string" || !project.trim()) throw new Error("invalid project");
+      const frame = await requireConn().sendCommandAndWait("task_create", {
+        name: name.trim(), type: type.trim(), project: project.trim(),
+        interval, enabled, repo, description,
+      }, 8000);
+      if (!frame.ok && frame.error) throw new Error(frame.error);
+      return frame;
+    });
+
+    ipcMain.handle("emrg:taskUpdate", async (_e, payload) => {
+      const { name, ...fields } = payload || {};
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
+      const frame = await requireConn().sendCommandAndWait("task_update", { name: name.trim(), ...fields }, 8000);
+      if (!frame.ok && frame.error) throw new Error(frame.error);
+      return frame;
+    });
+
+    ipcMain.handle("emrg:taskDelete", async (_e, { name }) => {
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
+      const frame = await requireConn().sendCommandAndWait("task_delete", { name: name.trim() }, 8000);
+      if (!frame.ok && frame.error) throw new Error(frame.error);
+      return frame;
+    });
+
+    ipcMain.handle("emrg:taskTemplateList", async () => {
+      const frame = await requireConn().sendCommandAndWait("task_template_list", {}, 5000);
+      return frame.templates || [];
+    });
+
+    ipcMain.handle("emrg:taskTemplateCreate", async (_e, { name, prompt }) => {
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid template name");
+      if (typeof prompt !== "string" || !prompt.trim()) throw new Error("invalid template prompt");
+      const frame = await requireConn().sendCommandAndWait("task_template_create", { name: name.trim(), prompt }, 8000);
+      if (!frame.ok && frame.error) throw new Error(frame.error);
+      return frame;
+    });
+
+    ipcMain.handle("emrg:taskTemplateUpdate", async (_e, { name, prompt }) => {
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid template name");
+      if (typeof prompt !== "string" || !prompt.trim()) throw new Error("invalid template prompt");
+      const frame = await requireConn().sendCommandAndWait("task_template_update", { name: name.trim(), prompt }, 8000);
+      if (!frame.ok && frame.error) throw new Error(frame.error);
+      return frame;
+    });
+
+    ipcMain.handle("emrg:taskTemplateDelete", async (_e, { name }) => {
+      if (typeof name !== "string" || !name.trim()) throw new Error("invalid template name");
+      const frame = await requireConn().sendCommandAndWait("task_template_delete", { name: name.trim() }, 8000);
+      if (!frame.ok && frame.error) throw new Error(frame.error);
+      return frame;
+    });
+
     ipcMain.handle("emrg:sendRant", async (_e, { message, project = "" } = {}) => {
       // GUI / 指令 P4：/rant — 提交反馈到演化系统（daemon rant 协议，字段序与 rants.jsonl 一致）
       if (typeof message !== "string" || !message.trim()) throw new Error("invalid rant message");

@@ -745,6 +745,75 @@ dialog::backdrop {
 .model-form-vision input {
   accent-color: var(--accent);
 }
+
+/* 定时任务管理（rant 2026-08-12T18:23:15 P3：GUI 任务/自定义类型 CRUD） */
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+.task-name {
+  font-weight: 600;
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-hint {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-badge {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+.task-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.task-empty {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  text-align: center;
+  padding: var(--sp-2);
+}
+.task-form {
+  margin-top: 8px;
+  padding: var(--sp-3);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+.task-form select,
+.task-form textarea {
+  width: 100%;
+  margin-top: 2px;
+  padding: 6px 10px;
+  font-size: var(--fs-secondary);
+}
+
 .theme-options {
   display: flex;
   gap: var(--sp-2);

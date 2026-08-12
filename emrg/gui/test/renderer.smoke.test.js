@@ -131,6 +131,13 @@ const ELEMENT_IDS = [
   "growth-card", "growth-count", "about-recent",
   "about-update", "about-update-check-btn",
   "github-banner", "github-banner-msg", "github-banner-connect", "github-banner-dismiss",
+  // rant 18:23:15 P3：定时任务/自定义类型管理（settings 区）
+  "task-list", "task-add-btn", "task-template-mgr-btn",
+  "task-form", "task-form-name", "task-form-type", "task-form-project",
+  "task-form-interval", "task-form-enabled", "task-form-repo",
+  "task-form-cancel", "task-form-save",
+  "task-template-form", "task-template-name", "task-template-prompt",
+  "task-template-cancel", "task-template-save", "task-template-list",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
@@ -2437,4 +2444,159 @@ test("rant 12:10：downloaded_version == 当前版本 → 无安装按钮（退�
   const child = updEl.children[0];
   assert.ok(!child.className.includes("btn"), "not a button when downloaded == current");
   assert.ok((child.attributes.href || "").includes("releases"), "falls back to the Releases link");
+});
+
+// ── rant 18:23:15 P3：定时任务/自定义类型管理（settings 区） ──
+test("P3：设置面板打开 → 任务列表渲染（名称/类型/项目/间隔）+ 编辑预填 → taskUpdate", async () => {
+  let updated = null;
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [
+      { name: "daily-report", type: "evolution", config: { project: "emrg" }, interval: 1800, enabled: true },
+      { name: "nightly-sync", type: "sync", config: { project: "docs", repo: "acme/docs" }, interval: 3600, enabled: false },
+    ],
+    taskTemplateList: async () => [
+      { name: "evolution", builtin: true, template: "evolution_prompt.md" },
+      { name: "sync", builtin: false, template: "sync.md", prompt: "# sync\nrun the sync" },
+    ],
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }, { name: "docs", path: "/p/docs" }],
+    taskUpdate: async (payload) => { updated = payload; return { ok: true }; },
+    triggerTask: async () => ({}),
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showSettings()", ctx);
+  await tick();
+  // 任务行渲染：2 行 + 空态兜底（无）
+  const rows = vm.runInContext('document.getElementById("task-list").children.length', ctx);
+  assert.strictEqual(rows, 2, `任务列表应渲染 2 行，实际 ${rows}`);
+  const names = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => r.querySelector(".task-name") ? r.querySelector(".task-name").textContent : "")`, ctx);
+  assert.deepStrictEqual(names, ["daily-report", "nightly-sync"]);
+  const hints = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => r.querySelector(".task-hint") ? r.querySelector(".task-hint").textContent : "")`, ctx);
+  assert.ok(hints[0].includes("emrg") && hints[0].includes("1800"), `任务1 hint: ${hints[0]}`);
+  assert.ok(hints[1].includes("docs") && hints[1].includes("3600") && hints[1].includes("已停用"), `任务2 hint: ${hints[1]}`);
+  // 点击编辑 → 表单预填（名称只读、类型/项目下拉、间隔、enabled）
+  els["task-form"].classList.add("hidden"); // 镜像 index.html 初始态（task-form hidden）
+  await vm.runInContext(`(function() {
+    const row = document.getElementById("task-list").children[0];
+    const btns = row.querySelectorAll(".model-action-btn");
+    btns[1].click(); // 0=触发 1=编辑
+  })()`, ctx);
+  assert.strictEqual(vm.runInContext('document.getElementById("task-form").classList.contains("hidden")', ctx), false, "编辑应展开表单");
+  assert.strictEqual(els["task-form-name"].value, "daily-report");
+  assert.strictEqual(els["task-form-name"].disabled, true, "编辑时名称只读");
+  assert.strictEqual(els["task-form-interval"].value, 1800);
+  assert.strictEqual(els["task-form-enabled"].checked, true);
+  assert.strictEqual(els["task-form-repo"].value, "");
+  // 修改后保存 → taskUpdate
+  vm.runInContext('document.getElementById("task-form-interval").value = "600"', ctx);
+  await vm.runInContext("EMRG_Dialogs.saveTaskForm()", ctx);
+  await tick();
+  assert.ok(updated, "taskUpdate 应被调用");
+  assert.strictEqual(updated.name, "daily-report");
+  assert.strictEqual(updated.interval, 600);
+  assert.strictEqual(updated.type, "evolution");
+  assert.strictEqual(updated.project, "emrg");
+  assert.strictEqual(updated.enabled, true);
+});
+
+test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 taskCreate", async () => {
+  let created = null;
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [],
+    taskTemplateList: async () => [
+      { name: "evolution", builtin: true, template: "evolution_prompt.md" },
+      { name: "custom-a", builtin: false, template: "custom-a.md", prompt: "# a" },
+    ],
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
+    taskCreate: async (payload) => { created = payload; return { ok: true }; },
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showSettings()", ctx);
+  await tick();
+  // 点"＋ 添加任务" → 空表单
+  els["task-form"].classList.add("hidden"); // 镜像 index.html 初始态（task-form hidden）
+  await vm.runInContext('document.getElementById("task-add-btn").click()', ctx);
+  assert.strictEqual(els["task-form-name"].disabled, false, "新增时名称可编辑");
+  // 类型下拉含内置 + 自定义
+  const typeOpts = vm.runInContext('Array.from(document.getElementById("task-form-type").children).map((o) => o.value)', ctx);
+  assert.deepStrictEqual(typeOpts.sort(), ["custom-a", "evolution"]);
+  const projOpts = vm.runInContext('Array.from(document.getElementById("task-form-project").children).map((o) => o.value)', ctx);
+  assert.deepStrictEqual(projOpts, ["emrg"], "项目下拉仅已注册项目（决策点③）");
+  // 间隔 30 → 拒绝（决策点⑤：≥60）
+  vm.runInContext(`(function() {
+    document.getElementById("task-form-name").value = "new-task";
+    document.getElementById("task-form-type").value = "custom-a";
+    document.getElementById("task-form-project").value = "emrg";
+    document.getElementById("task-form-interval").value = "30";
+  })()`, ctx);
+  await vm.runInContext("EMRG_Dialogs.saveTaskForm()", ctx);
+  await tick();
+  assert.strictEqual(els["confirm-dialog"].open, true, "间隔 <60 应弹错误确认框");
+  assert.ok((els["confirm-message"].textContent || "").includes("60"), `错误提示含 60：${els["confirm-message"].textContent}`);
+  assert.strictEqual(created, null, "非法间隔不应提交 taskCreate");
+  await vm.runInContext("EMRG_Dialogs.closeConfirm()", ctx);
+  // 间隔 600 → 提交（含自定义类型 + 启用勾选）
+  vm.runInContext('document.getElementById("task-form-interval").value = "600"', ctx);
+  await vm.runInContext("EMRG_Dialogs.saveTaskForm()", ctx);
+  await tick();
+  assert.ok(created, "合法输入应提交 taskCreate");
+  assert.strictEqual(created.name, "new-task");
+  assert.strictEqual(created.type, "custom-a");
+  assert.strictEqual(created.project, "emrg");
+  assert.strictEqual(created.interval, 600);
+  assert.strictEqual(created.enabled, true);
+  assert.strictEqual(vm.runInContext('document.getElementById("task-form").classList.contains("hidden")', ctx), true, "保存后表单收起");
+});
+
+test("P3：自定义类型管理 —— 内置只读；自定义增删改走模板 CRUD", async () => {
+  let createdTpl = null;
+  let deletedTpl = null;
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [],
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
+    taskTemplateList: async () => [
+      { name: "evolution", builtin: true, template: "evolution_prompt.md" },
+      { name: "sync", builtin: false, template: "sync.md", prompt: "# sync prompt" },
+    ],
+    taskTemplateCreate: async (payload) => { createdTpl = payload; return { ok: true }; },
+    taskTemplateDelete: async (payload) => { deletedTpl = payload; return { ok: true }; },
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showSettings()", ctx);
+  await tick();
+  // 打开自定义类型列表（镜像 index.html 初始态：task-template-list hidden）
+  els["task-template-list"].classList.add("hidden");
+  await vm.runInContext('document.getElementById("task-template-mgr-btn").click()', ctx);
+  await tick();
+  const wrap = els["task-template-list"];
+  assert.strictEqual(wrap.classList.contains("hidden"), false, "类型列表应展开");
+  const rows = wrap.children.filter((c) => c.className.includes("task-row"));
+  assert.strictEqual(rows.length, 2, `内置 + 自定义各一行，实际 ${rows.length}`);
+  // 内置行无操作按钮（决策点①⑥）；自定义行有编辑/删除
+  const builtinActions = rows[0].querySelectorAll(".model-action-btn").length;
+  const customActions = rows[1].querySelectorAll(".model-action-btn").length;
+  assert.strictEqual(builtinActions, 0, "内置类型只读（无操作按钮）");
+  assert.strictEqual(customActions, 2, "自定义类型有编辑+删除");
+  // 删除自定义 → 确认 → taskTemplateDelete（决策点②：daemon 拒绝被引用类型）
+  const delBtn = rows[1].querySelectorAll(".model-action-btn")[1];
+  delBtn.click();
+  await tick();
+  assert.strictEqual(els["confirm-dialog"].open, true, "删除需确认");
+  await vm.runInContext("EMRG_Dialogs.confirmOk()", ctx);
+  await tick();
+  assert.ok(deletedTpl, "taskTemplateDelete 应被调用");
+  assert.strictEqual(deletedTpl.name, "sync");
+  // 新增自定义类型（底部"＋ 添加类型"）→ 表单 → taskTemplateCreate
+  const addBtn = wrap.children[wrap.children.length - 1];
+  addBtn.click();
+  await tick();
+  assert.strictEqual(els["task-template-name"].disabled, false, "新增类型名称可编辑");
+  vm.runInContext(`(function() {
+    document.getElementById("task-template-name").value = "nightly";
+    document.getElementById("task-template-prompt").value = "# nightly\\nrun at night";
+  })()`, ctx);
+  await vm.runInContext("EMRG_Dialogs.saveTemplateForm()", ctx);
+  await tick();
+  assert.ok(createdTpl, "taskTemplateCreate 应被调用");
+  assert.strictEqual(createdTpl.name, "nightly");
+  assert.ok(createdTpl.prompt.includes("nightly"), "prompt 原样提交");
 });
