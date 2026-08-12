@@ -239,9 +239,13 @@ def resolve_git_gh() -> tuple[str, str]:
     else:
         gh = _tool_in_install("gh") or (shutil.which("gh") or "")
 
-    if git or gh:
+    if git:
         _cache_tool_paths(git, gh)
     else:
+        # git is the failure mode that silently disables evolution (2026-08-12
+        # incident) — warn regardless of whether gh resolved. Also skip the
+        # cache write so a previously valid cached git_path is not clobbered
+        # with '' (review #714 note).
         _warn_git_missing_once()
     return git, gh
 

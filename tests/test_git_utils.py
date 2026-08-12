@@ -315,3 +315,37 @@ def test_resolve_git_gh_warns_once_when_git_missing(monkeypatch, caplog):
     warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warns) == 1
     assert "git executable not found" in warns[0].getMessage()
+
+
+def test_resolve_git_gh_warns_when_git_missing_but_gh_present(monkeypatch, caplog):
+    """Git-missing must warn even when gh resolves (review #714 finding).
+
+    The failure mode is git-specific: a dev box with gh on PATH but no git
+    would previously skip the warning entirely (the old `else` of `if git or
+    gh`) yet still silently disable evolution. The warning is gated on git
+    alone; the cache write is skipped so a previously valid cached git_path
+    is not clobbered with ''.
+    """
+    import logging
+
+    from emrg.server import git_utils as gu
+
+    def fake_cache(git: str, gh: str) -> None:
+        assert git == "", f"cache must not be written with empty git, got {git=} {gh=}"
+        raise AssertionError("_cache_tool_paths should not be called when git is missing")
+
+    monkeypatch.setattr(gu, "_cached_tool_path", lambda tool: None)
+    monkeypatch.setattr(gu, "_tool_in_install", lambda tool: None)
+    # gh resolves via PATH, git does not.
+    monkeypatch.setattr(gu.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
+    monkeypatch.setattr(gu, "_cache_tool_paths", fake_cache)
+    monkeypatch.setattr(gu, "_GIT_MISSING_WARNED", False)
+
+    with caplog.at_level(logging.WARNING, logger="emrg.server.git_utils"):
+        git, gh = gu.resolve_git_gh()
+        assert git == "" and gh == "/usr/bin/gh"
+        gu.resolve_git_gh()  # second call must NOT re-warn
+
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1
+    assert "git executable not found" in warns[0].getMessage()
