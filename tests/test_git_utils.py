@@ -349,3 +349,27 @@ def test_resolve_git_gh_warns_when_git_missing_but_gh_present(monkeypatch, caplo
     warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warns) == 1
     assert "git executable not found" in warns[0].getMessage()
+
+
+def test_resolve_git_gh_writes_cache_once_per_process(monkeypatch):
+    """Cache write happens once per process, not on every git_cmd() call.
+
+    resolve_git_gh() runs on every git_cmd(); before this fix each call did an
+    atomic install-info.json write even when the resolved paths were unchanged.
+    Tool paths are stable within a process lifetime — write once, skip the rest.
+    """
+    from emrg.server import git_utils as gu
+
+    calls = []
+    monkeypatch.setattr(gu, "_cached_tool_path", lambda tool: None)
+    monkeypatch.setattr(gu, "_tool_in_install", lambda tool: None)
+    monkeypatch.setattr(gu.shutil, "which", lambda tool: "/usr/bin/git" if tool == "git" else "/usr/bin/gh")
+    monkeypatch.setattr(gu, "_cache_tool_paths", lambda g, h: calls.append((g, h)))
+    monkeypatch.setattr(gu, "_LAST_CACHED_PATHS", None)
+
+    gu.resolve_git_gh()
+    gu.resolve_git_gh()  # unchanged paths → no second write
+    gu.resolve_git_gh()
+
+    assert len(calls) == 1, f"expected exactly 1 cache write, got {len(calls)}: {calls}"
+    assert calls[0] == ("/usr/bin/git", "/usr/bin/gh")
