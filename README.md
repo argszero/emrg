@@ -45,6 +45,7 @@ EMRG is an experiment in *autonomous self-improvement*: an AI agent that helps y
 |---|---|
 | **Electron GUI (main entry)** | Install & go: first-run wizard, all slash commands, results panel, Ask/Auto modes, visible self-evolution. GUI configured = TUI ready |
 | **Full-featured TUI + daemon** | Streaming markdown, `/` autocomplete, sessions, shortcuts — on a persistent `emrgd` daemon you can reconnect to anytime |
+| **Scheduled tasks** | Built-in + custom task types with prompt templates (`~/.emrg/task-templates/`), CRUD + hot reload from the GUI settings, `/trigger` any task on demand |
 | **100% open source** | MIT — no walled garden, no vendor lock-in. English default, Chinese version available |
 
 ---
@@ -118,7 +119,7 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 | `/image` | Insert clipboard image into the input field |
 | `/delete [id]` | Delete a session — no args for interactive picker |
 | `/rewind` | Rewind conversation to a history point |
-| `/trigger` | Trigger an evolution task — interactive picker |
+| `/trigger` | Trigger an evolution task — interactive picker (manage tasks in GUI Settings → Scheduled tasks) |
 | `/skills` | List loaded skills; `/skills available|install|update` |
 | `/version` | Show EMRG version and instance info |
 | `Esc` | Interrupt a running response mid-stream |
