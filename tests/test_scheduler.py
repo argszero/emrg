@@ -11,7 +11,7 @@ import yaml
 
 from emrg.protocol import InstanceIdentity
 from emrg.server.scheduler import (
-    EvolutionHandler,
+    TaskHandler,
     TaskScheduler,
     _resolve_project_path,
 )
@@ -372,7 +372,7 @@ def test_task_templates_cover_all_handlers():
 
 
 def test_load_and_start_promote_task(tmp_path):
-    """Promote tasks start an EvolutionHandler with the promote template."""
+    """Promote tasks start an TaskHandler with the promote template."""
     tasks_yml = tmp_path / "tasks.yml"
     tasks_yml.write_text(yaml.safe_dump([
         {"name": "olr-promote", "type": "promote",
@@ -403,12 +403,56 @@ def test_load_and_start_promote_task(tmp_path):
         c.cancel()
 
 
-# ── EvolutionHandler core ─────────────────────────────────────────
+def test_resolve_task_template_custom_user_file(tmp_path):
+    """Custom type with a user template resolves to ~/.emrg/task-templates/<type>.md."""
+    from emrg.server import scheduler as mod
+    (tmp_path / "task-templates").mkdir()
+    user_tpl = tmp_path / "task-templates" / "report.md"
+    user_tpl.write_text("# Custom {{ instance_id }}\n", encoding="utf-8")
+
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        assert mod._resolve_task_template("report") == user_tpl
+    finally:
+        mod.config_dir = orig_config
+
+
+def test_resolve_task_template_custom_missing_falls_back(tmp_path):
+    """Custom type without a user template falls back to evolution_prompt.md."""
+    from emrg.server import scheduler as mod
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        resolved = mod._resolve_task_template("no-such-type")
+        assert resolved.name == "evolution_prompt.md"
+    finally:
+        mod.config_dir = orig_config
+
+
+def test_resolve_task_template_builtin_unchanged(tmp_path):
+    """Built-in types keep resolving to emrg/server/<builtin>.md regardless of user dir."""
+    from emrg.server import scheduler as mod
+    (tmp_path / "task-templates").mkdir()
+    (tmp_path / "task-templates" / "evolution.md").write_text(
+        "# evil override\n", encoding="utf-8"
+    )
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        resolved = mod._resolve_task_template("evolution")
+        assert resolved.name == "evolution_prompt.md"
+        assert "task-templates" not in str(resolved)
+    finally:
+        mod.config_dir = orig_config
+
+
+# ── TaskHandler core ─────────────────────────────────────────
 
 
 def test_evolution_handler_project_path_fallback():
     """Without config.project or config.path, name is the fallback path."""
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg",
         config={},
         interval=1800,
@@ -419,7 +463,7 @@ def test_evolution_handler_project_path_fallback():
 
 def test_evolution_handler_project_path_from_config():
     """config.path is used when config.project is empty."""
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg",
         config={"path": "/custom/path"},
         interval=1800,
@@ -430,7 +474,7 @@ def test_evolution_handler_project_path_from_config():
 
 def test_evolution_handler_stop():
     """stop() sets _running to False."""
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="test", config={}, interval=60,
         identity=InstanceIdentity(),
     )
@@ -441,7 +485,7 @@ def test_evolution_handler_stop():
 
 def test_evolution_handler_default_owner():
     """When no git remote is detectable, falls back to EMRG defaults."""
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="unknown-project",
         config={"path": "/nonexistent/path"},
         interval=1800,
@@ -450,6 +494,46 @@ def test_evolution_handler_default_owner():
     assert handler._owner == "argszero"
     assert handler._repo == "emrg"
     assert handler._repo_url == "https://github.com/argszero/emrg.git"
+    # No repo configured (non-emrg project, no remote, no config) → no self-heal
+    assert handler._repo_configured is False
+
+
+def test_task_handler_emrg_configured_by_default():
+    """The emrg evolution task is always repo-configured (defaults to argszero/emrg)."""
+    handler = TaskHandler(
+        name="emrg-task",
+        config={"project": "emrg"},
+        interval=1800,
+        identity=InstanceIdentity(),
+    )
+    assert handler._repo_configured is True
+    assert handler._repo == "emrg"
+
+
+def test_task_handler_repo_configured_from_config():
+    """config owner/repo overrides the default and enables self-heal (rant 18:14:46 P1)."""
+    handler = TaskHandler(
+        name="paper-x",
+        config={"project": "some-proj", "owner": "acme", "repo": "paper-x"},
+        interval=1800,
+        identity=InstanceIdentity(),
+    )
+    assert handler._repo_configured is True
+    assert handler._owner == "acme"
+    assert handler._repo == "paper-x"
+    assert handler._repo_url == "https://github.com/acme/paper-x.git"
+
+
+def test_task_handler_no_repo_skips_self_heal():
+    """Non-emrg task without any repo config → _ensure_evolution_workspace no-ops."""
+    handler = TaskHandler(
+        name="docs-task",
+        config={"path": "/tmp/plain-folder"},
+        interval=1800,
+        identity=InstanceIdentity(),
+    )
+    assert handler._repo_configured is False
+    assert handler._ensure_evolution_workspace() is True  # skip, not block
 
 
 def test_task_scheduler_total_evolutions():
@@ -457,8 +541,8 @@ def test_task_scheduler_total_evolutions():
     from emrg.protocol import EvolutionLog
 
     sched = TaskScheduler(InstanceIdentity())
-    h1 = EvolutionHandler(name="a", config={}, interval=60, identity=InstanceIdentity())
-    h2 = EvolutionHandler(name="b", config={}, interval=60, identity=InstanceIdentity())
+    h1 = TaskHandler(name="a", config={}, interval=60, identity=InstanceIdentity())
+    h2 = TaskHandler(name="b", config={}, interval=60, identity=InstanceIdentity())
     sched._handlers = [h1, h2]
 
     assert sched.total_evolutions() == 0
@@ -493,11 +577,11 @@ def test_paper_template_renders_with_context():
 
 
 def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
-    """Build an EvolutionHandler pointed at a tmp config dir."""
+    """Build an TaskHandler pointed at a tmp config dir."""
     from emrg.server import scheduler as mod
     orig_config = mod.config_dir
     mod.config_dir = lambda: tmp_path
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name=name,
         config={"project": project} if project else {},
         interval=60,
@@ -750,7 +834,7 @@ def test_ensure_evolution_workspace_dev_repo_untouched(tmp_path):
     orig_config = mod.config_dir
     mod.config_dir = lambda: tmp_path
     try:
-        handler = EvolutionHandler(
+        handler = TaskHandler(
             name="emrg-task",
             config={"project": "emrg"},
             interval=60,
@@ -1040,7 +1124,7 @@ def test_remote_advanced_ssh_fallback_when_https_blocked(tmp_path):
     assert "git@github.com:argszero/emrg.git" in ls_calls[1][0]
 
 
-# ── EvolutionHandler cycle truncation detection ──────────────────
+# ── TaskHandler cycle truncation detection ──────────────────
 # mem-repo lesson (tool-call truncation must be flagged, not silently
 # treated as a successful/empty cycle — #523 applied it to the chat UI;
 # this covers EMRG's own evolution task loop).
@@ -1202,9 +1286,9 @@ def test_evolution_cycle_connect_failure_resets_on_success(tmp_path, caplog):
 
 def test_connect_backoff_zero_failures_returns_interval():
     """No consecutive failures → normal interval (no backoff)."""
-    from emrg.server.scheduler import EvolutionHandler
+    from emrg.server.scheduler import TaskHandler
 
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg-task", config={"project": "emrg"}, interval=60,
         identity=InstanceIdentity(),
     )
@@ -1214,9 +1298,9 @@ def test_connect_backoff_zero_failures_returns_interval():
 
 def test_connect_backoff_grows_exponentially_capped(tmp_path):
     """Consecutive failures grow the wait, capped at 10 minutes."""
-    from emrg.server.scheduler import EvolutionHandler
+    from emrg.server.scheduler import TaskHandler
 
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg-task", config={"project": "emrg"}, interval=60,
         identity=InstanceIdentity(),
     )
@@ -1231,9 +1315,9 @@ def test_connect_backoff_grows_exponentially_capped(tmp_path):
 
 def test_connect_backoff_floor_30s_for_small_interval(tmp_path):
     """Backoff never drops below 30s even for very fast intervals."""
-    from emrg.server.scheduler import EvolutionHandler
+    from emrg.server.scheduler import TaskHandler
 
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg-task", config={"project": "emrg"}, interval=10,
         identity=InstanceIdentity(),
     )
