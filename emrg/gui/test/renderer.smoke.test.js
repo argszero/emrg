@@ -1324,6 +1324,12 @@ test("P3.5（rant 17:28）：深度缩进 — 子行 padding-left 递增 16px", 
   await tick();
   const pyRow = [...els["result-files"].querySelectorAll(".ft-file")].find((r) => r.dataset.path === "/proj/src/main.py");
   assert.strictEqual(pyRow.style.paddingLeft, "40px", "src 子项 depth=2 → 40px");
+  // 结构契约（修复布局 bug）：.ft-head 包装图标+名称，.ft-kids 紧随其后——块级排布，
+  // 兄弟行不再与展开子项重叠（headless Chrome 像素实证：定高 flex-wrap 下行遮挡子项）
+  const srcHead = srcRow.children[0];
+  assert.ok(srcHead && srcHead.classList.contains("ft-head"), "目录行第一个子元素应为 .ft-head 包装");
+  assert.ok(srcHead.querySelector(".ft-icon"), "图标在 .ft-head 内");
+  assert.strictEqual(srcRow.children[1], srcRow.querySelector(".ft-kids"), ".ft-kids 紧随 .ft-head");
 });
 
 test("P3.5（rant 17:28）：展开态持久 + 滚动条 hover 样式（CSS 源级断言）", async () => {

@@ -120,8 +120,12 @@ const FileTree = (() => {
       dataset: { path: entry.path },
     });
     row.style.paddingLeft = (8 + depth * 16) + "px";
-    row.appendChild(iconSvg(iconFor(entry)));
-    row.appendChild(el("span", { class: "ft-name" }, entry.name));
+    // 行头（图标+名称）单独包装：.ft-row 为块级容器（head + kids 纵向排布），
+    // 修复定高 flex-wrap 下兄弟行与展开子项重叠的布局 bug（headless Chrome 像素实证）
+    const head = el("div", { class: "ft-head" });
+    head.appendChild(iconSvg(iconFor(entry)));
+    head.appendChild(el("span", { class: "ft-name" }, entry.name));
+    row.appendChild(head);
     if (entry.type === "dir") {
       const kids = el("div", { class: "ft-kids" + (expanded.get(entry.path) ? "" : " hidden") });
       row.appendChild(kids);
@@ -193,8 +197,10 @@ const FileTree = (() => {
     expanded.set(root, true); // 根默认展开
     const rootRow = el("div", { class: "ft-row ft-dir ft-root", dataset: { path: root } });
     rootRow.style.paddingLeft = "8px";
-    rootRow.appendChild(iconSvg(ICON.dirOpen));
-    rootRow.appendChild(el("span", { class: "ft-name" }, rootName));
+    const rootHead = el("div", { class: "ft-head" });
+    rootHead.appendChild(iconSvg(ICON.dirOpen));
+    rootHead.appendChild(el("span", { class: "ft-name" }, rootName));
+    rootRow.appendChild(rootHead);
     const kids = el("div", { class: "ft-kids" });
     rootRow.appendChild(kids);
     c.appendChild(rootRow);

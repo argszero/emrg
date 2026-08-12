@@ -476,23 +476,27 @@ body.sidebar-collapsed #app {
 .result-files::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
 .ft-row {
-  display: flex;
-  flex-wrap: wrap;          /* kids（flex-basis:100%）换行到下一行，DOM 仍嵌套在行内 */
-  align-items: center;
-  height: 24px;             /* VS Code 紧凑行高（默认 22px，取 24px 适配 14px 图标） */
+  display: block;           /* 块级排布：.ft-head 行 + .ft-kids 子树纵向排列，行高自适应
+                               （修复布局 bug：定高 flex-wrap 使下一兄弟行与展开目录首个子项
+                                重叠，headless Chrome 像素实证——兄弟行遮挡子项） */
   cursor: pointer;
-  border-radius: 4px;
   font-size: var(--fs-small);
   color: var(--text-2);
   white-space: nowrap;
   overflow: hidden;
 }
-.ft-row:hover {
+.ft-head {
+  display: flex;
+  align-items: center;
+  height: 24px;             /* VS Code 紧凑行高（默认 22px，取 24px 适配 14px 图标） */
+  border-radius: 4px;
+}
+.ft-row:hover > .ft-head {
   background: var(--bg-soft);
   color: var(--text-1);
 }
 /* 选中态：背景 + 左侧 2px accent 竖条（VS Code active 行） */
-.ft-row.active {
+.ft-row.active > .ft-head {
   background: var(--bg-soft);
   color: var(--text-1);
   box-shadow: inset 2px 0 0 var(--accent);
@@ -517,8 +521,7 @@ body.sidebar-collapsed #app {
   white-space: nowrap;
 }
 .ft-kids {
-  flex-basis: 100%;         /* 子项换行到行下（独立一行），保持 .ft-row 内 DOM 嵌套 */
-  position: relative;
+  position: relative;       /* 正常流布局：位于 .ft-head 之下（不再作为 flex 行溢出） */
 }
 .ft-kids.hidden {
   display: none;
