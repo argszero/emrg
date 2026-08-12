@@ -41,6 +41,7 @@ const api = {
   githubStatus: () => ipcRenderer.invoke("emrg:githubStatus"),
   updateCheck: (payload) => ipcRenderer.invoke("emrg:updateCheck", payload),
   updateCheckPrompted: (payload) => ipcRenderer.invoke("emrg:updateCheckPrompted", payload),
+  updateInstall: (payload) => ipcRenderer.invoke("emrg:updateInstall", payload),
   githubConnect: (payload) => ipcRenderer.invoke("emrg:githubConnect", payload),
   githubDisconnect: () => ipcRenderer.invoke("emrg:githubDisconnect"),
   githubConnectWeb: () => ipcRenderer.invoke("emrg:githubConnectWeb"),

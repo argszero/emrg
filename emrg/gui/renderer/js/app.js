@@ -1325,6 +1325,13 @@ const App = (() => {
           }
         }
         break;
+      case "update_downloaded":
+        // rant 2026-08-12T12:10:12：daemon 后台自动下载 + 校验完新安装包 →
+        // 非阻塞提示"已就绪，点击安装"（设置 → 关于显示安装按钮）
+        Chat.addSystemMessage(
+          _t("app.updateReady", { latest: data.downloaded_version || "" }),
+        );
+        break;
       case "group_cleared":
         Chat.groupNodes.delete(data.requestId);
         break;

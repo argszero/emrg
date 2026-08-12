@@ -636,10 +636,11 @@ vision = false
     });
 
     ipcMain.handle("emrg:updateCheck", async (_e, { force } = {}) => {
-      // Auto update-check prompt (rant 2026-08-10T07:12:12): query daemon's
-      // cached latest release; display-only, no auto download/install.
-      // force=true (rant 2026-08-11T09:18:16): settings manual check button
-      // — daemon runs a fresh GitHub fetch instead of returning the cache.
+      // Auto update-check (rant 2026-08-10T07:12:12): query daemon's cached
+      // latest release; force=true (rant 2026-08-11T09:18:16): settings
+      // manual check button — daemon runs a fresh GitHub fetch.
+      // rant 2026-08-12T12:10:12: response also carries the auto-download
+      // state (downloaded_version/path/sha) for the "ready to install" UI.
       try {
         const frame = await requireConn().sendCommandAndWait(
           "update_check",
@@ -651,10 +652,47 @@ vision = false
           latest_version: frame.latest_version || "",
           has_update: Boolean(frame.has_update),
           prompted_version: frame.prompted_version || "",
+          downloaded_version: frame.downloaded_version || "",
+          downloaded_path: frame.downloaded_path || "",
+          downloaded_sha: frame.downloaded_sha || "",
           enabled: Boolean(frame.enabled),
         };
       } catch {
         return { has_update: false, enabled: false, latest_version: "", current_version: "" };
+      }
+    });
+
+    ipcMain.handle("emrg:updateInstall", async (_e, { path: p, version } = {}) => {
+      // Auto-update one-click install (rant 2026-08-12T12:10:12): the daemon
+      // already downloaded + SHA256-verified the installer into
+      // ~/.emrg/updates/. The user clicked "install" — launch the installer,
+      // then quit EMRG (the installer stops any remaining EMRG processes
+      // itself — stop-emrg.cmd / pkg install logic). Install is ALWAYS
+      // user-initiated; the download itself was automatic.
+      try {
+        if (!p || typeof p !== "string") return { ok: false, error: "missing path" };
+        if (!fs.existsSync(p)) return { ok: false, error: "downloaded installer not found" };
+        const platform = process.platform;
+        if (platform === "win32") {
+          // PrivilegesRequired=lowest → no UAC prompt for the exe itself.
+          const child = spawn(p, [], { detached: true, stdio: "ignore", windowsHide: true });
+          child.unref();
+        } else if (platform === "darwin") {
+          // `open <pkg>` mounts + launches the Installer.app flow.
+          const child = spawn("open", [p], { detached: true, stdio: "ignore" });
+          child.unref();
+        } else if (platform === "linux") {
+          fs.chmodSync(p, 0o755);
+          const child = spawn(p, [], { detached: true, stdio: "ignore" });
+          child.unref();
+        } else {
+          return { ok: false, error: `unsupported platform: ${platform}` };
+        }
+        // Let the IPC reply flush, then close the GUI — the installer takes over.
+        setTimeout(() => { try { app.quit(); } catch { /* ignore */ } }, 500);
+        return { ok: true, version: String(version || "") };
+      } catch (err) {
+        return { ok: false, error: String((err && err.message) || err) };
       }
     });
 
