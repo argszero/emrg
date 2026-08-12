@@ -397,17 +397,16 @@ body.sidebar-collapsed #app {
   background: var(--bg-soft);
   font-weight: 600;
 }
-/* 打开文件 Tab 条（P3 查看器接入；每文件一个可关闭 Tab） */
+/* 打开文件 Tab 条（P3 查看器接入；rant 17:28 并入 .result-tabs 同排，每文件一个可关闭 Tab） */
 .result-tabbar {
   display: none;
   flex-direction: row;
+  align-items: center;
   gap: var(--sp-1);
-  padding: var(--sp-1) var(--sp-3);
-  border-bottom: 1px solid var(--border);
   overflow-x: auto;
   scrollbar-width: none;
 }
-.result-tabbar.has-tabs { display: flex; }
+.result-tabbar.has-tabs { display: inline-flex; }
 .result-tabbar::-webkit-scrollbar { display: none; }
 .result-filetab {
   display: inline-flex;
@@ -423,6 +422,7 @@ body.sidebar-collapsed #app {
   white-space: nowrap;
   max-width: 160px;
   overflow: hidden;
+  height: 22px; /* 与静态 tab 同高（同排并列） */
 }
 .result-filetab.active {
   color: var(--text-1);
@@ -463,15 +463,23 @@ body.sidebar-collapsed #app {
   opacity: 0.5;
 }
 
-/* ── P3.1：文件浏览器（懒加载目录树） ── */
+/* ── P3.1：文件浏览器（懒加载目录树，VS Code 风格 rant 2026-08-12T17:28:19） ── */
 .result-files {
   overflow-y: auto;
+  /* 滚动条 hover 显示（VS Code 行为：平时隐藏，移入文件树区域显示） */
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
 }
+.result-files::-webkit-scrollbar { width: 8px; }
+.result-files::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+.result-files:hover::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
+.result-files::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+
 .ft-row {
   display: flex;
+  flex-wrap: wrap;          /* kids（flex-basis:100%）换行到下一行，DOM 仍嵌套在行内 */
   align-items: center;
-  gap: var(--sp-1);
-  padding: 2px var(--sp-2);
+  height: 24px;             /* VS Code 紧凑行高（默认 22px，取 24px 适配 14px 图标） */
   cursor: pointer;
   border-radius: 4px;
   font-size: var(--fs-small);
@@ -483,22 +491,46 @@ body.sidebar-collapsed #app {
   background: var(--bg-soft);
   color: var(--text-1);
 }
+/* 选中态：背景 + 左侧 2px accent 竖条（VS Code active 行） */
+.ft-row.active {
+  background: var(--bg-soft);
+  color: var(--text-1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 .ft-dir {
   color: var(--text-1);
   font-weight: 500;
 }
-.ft-arrow {
-  width: 14px;
+.ft-icon {
   flex: none;
-  text-align: center;
-  color: var(--text-3);
-  font-size: 10px;
+  width: 14px;
+  height: 14px;
+  margin-right: 4px;
+  color: currentColor;      /* mono：图标颜色跟随文字色 */
+  fill: currentColor;
+}
+.ft-icon path { fill: currentColor; }
+.ft-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;  /* 超长名省略号 */
+  white-space: nowrap;
 }
 .ft-kids {
-  margin-left: 12px;
+  flex-basis: 100%;         /* 子项换行到行下（独立一行），保持 .ft-row 内 DOM 嵌套 */
+  position: relative;
 }
 .ft-kids.hidden {
   display: none;
+}
+/* 缩进引导线：嵌套结构天然对齐父行图标列（left:2px ≈ 父行图标起点） */
+.ft-kids::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--border);
 }
 .ft-hint {
   padding: var(--sp-2) var(--sp-3);

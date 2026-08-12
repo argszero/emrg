@@ -91,11 +91,11 @@
         <div class="result-tabs" id="result-tabs" role="tablist">
           <button class="result-tab" id="result-tab-files" data-tab="files" data-i18n="result.tabFiles">文件</button>
           <button class="result-tab active" id="result-tab-artifacts" data-tab="artifacts" data-i18n="result.tabArtifacts">产物</button>
+          <!-- 打开文件 Tab 条（P3 查看器接入；rant 17:28 与「文件/产物」同排并列，VS Code 工作区 tab 风格） -->
+          <div id="result-tabbar" class="result-tabbar"></div>
         </div>
         <button id="result-toggle" class="result-toggle" title="折叠/展开 (⌘\)" data-i18n-title="result.collapse">»</button>
       </div>
-      <!-- 打开文件 Tab 条（P3 查看器接入；框架已就绪） -->
-      <div id="result-tabbar" class="result-tabbar"></div>
       <!-- 文件浏览 pane（P3.1 文件树，file-tree.js 渲染） -->
       <div id="result-files" class="result-pane result-files">
         <div class="result-empty" data-i18n="result.filesEmpty">文件浏览器即将推出</div>
