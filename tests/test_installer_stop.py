@@ -93,7 +93,11 @@ def test_stop_git_ps1_guilt_by_association():
     assert "Stop-Process -Id $_.ProcessId -Force" in content
     # 退出码语义：无残留（或本来无进程）→ 0；仍有存活 → 1
     assert "exit 1" in content and "exit 0" in content
-    assert 'if ($left.Count -gt 0) { exit 1 } else { exit 0 }' in content
+    # rant 2026-08-12T12:30:41（spec B）：存活检查用最新快照 + 如实报失败——
+    # 幸存进程必须点名输出（不静默吞掉），有存活即 exit 1，绝不误报成功
+    assert 'if ($left.Count -gt 0) {' in content
+    assert "still running: {0} (pid {1})" in content
+    assert "Write-Host" in content
     # 独立脚本 + 非交互（无 cmd 内联转义问题，0.2.26 转义 bug 根因规避）
     assert "$ErrorActionPreference = 'SilentlyContinue'" in content
 

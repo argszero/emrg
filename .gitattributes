@@ -1,0 +1,9 @@
+# Windows launcher scripts MUST be CRLF (rant 2026-08-12T12:30:41).
+# LF-only .cmd files are misparsed by cmd.exe: the whole file is joined into
+# one serial command stream (@echo off ignored, PATH collisions produce
+# arbitrary errors, exit code non-zero) → the installer aborts with
+# "stop-emrg.cmd exit code 1". .ps1 is PowerShell (LF-tolerant) but kept CRLF
+# for consistency. Git normalizes checkout to CRLF on every platform.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
