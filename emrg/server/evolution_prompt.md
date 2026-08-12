@@ -150,6 +150,7 @@ cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
     and `gh api repos/{{ owner }}/{{ repo }}/pulls/<N>/reviews --jq '.[] | "\(.user.login) [\(.state)]: \(.body)"'`
   - If there are already 2 ✅, this cycle is the 3rd → approve then merge
   - If satisfied → `gh pr merge <N> -R {{ owner }}/{{ repo }} --squash`
+  - **⚠️ Parallel-cycle merge race**: multiple cycles can see 2 ✅ and both call `gh pr merge` — the loser gets `gh: Pull request #N is not mergeable` or `already merged` error. That is NOT a failure: re-check `gh pr view <N> --json state,mergedAt` — if `mergedAt` is set (or the error says already merged), the merge succeeded (possibly by a parallel cycle); fetch master and verify the PR's commit is on `FETCH_HEAD`. Only treat a genuine rejection (merge conflict, CI failing, ❌) as blocking.
   - On merge conflict → `gh pr checkout <N> && git fetch origin master && git merge FETCH_HEAD`, resolve conflicts, push, then merge. **⚠️ Fork PRs: `git push` to `origin` will be REJECTED** (origin is the upstream repo, not the author's fork) — instead fetch `refs/pull/N/head` on a local branch, resolve, and push to the fork remote (`git push git@github.com:<author>/<repo>.git <branch>:<fork-branch>`) when `maintainer_can_modify: true` (the #716 path); if the author didn't grant maintainer edits, post the resolution commit hash and ask them to pull it.
   - Not satisfied → keep waiting
 
@@ -343,6 +344,7 @@ When reading rants, follow these rules:
 > - CI-check pre-LGTM gate (#645 #644 教训：PR push 事件可被丢弃——branch 零 checks 而本地双跑绿 + 并行周期已 LGTM，`gh pr checks <N>` 才暴露；LGTM 前必须确认 CI checks 存在，无则 workflow_dispatch 重触发（#527/#529）等成功后再说；本地验证必要但不充分——actionlint gate #444 + doc-count guard #511 只在 CI 跑) ✅
 > - Fork-PR conflict CI unblock (#716 教训：**冲突中的 fork PR 零 CI checks**——`mergeable: CONFLICTING`/`mergeable_state: dirty` 时 GitHub 拒跑 CI，close/reopen 与 workflow_dispatch（无法 target fork ref）均无效；唯一解=maintainer push：`maintainer_can_modify:true` → fetch `refs/pull/N/head` → 本地 merge master 解冲突 → push 到 fork 分支 → `pull_request` synchronize 触发 CI；Committer 可直接代解冲突，不必等作者反复 rebase) ✅
 > - Fork-PR conflict merge push guidance (#718 续：合并冲突指引区分 fork PR——`gh pr checkout` 后 `git push origin` 必被拒（origin=上游非 fork）；fork PR 须 push 到作者 fork remote（`git push git@github.com:<author>/<repo>.git <branch>:<fork-branch>`），`maintainer_can_modify:false` 时把解决 commit 号贴给作者拉取) ✅
+> - Parallel-cycle merge race handling (#720 教训：多周期可同时看到 2 ✅ 并同时 `gh pr merge`——败者报 "already merged"/"not mergeable" 是**成功信号非失败**：复查 `gh pr view --json mergedAt` 确认后 fetch master 验证 commit 已在；仅真实拒绝（冲突/CI 红/❌）才阻塞) ✅
 > - saturation halt auto-resume (#531 scheduler _saturation_halt_active：停机（≥30 空循环）后 scheduled run 全 skip → handler 无法自检 HEAD 变化，只有手动 /trigger 能恢复；_remote_advanced 用 git ls-remote 对比 origin/master，上游推进即自动恢复+计数清零；+4 测试正反两态/边界/无 git 仓库不崩) ✅
 > - README MANIFESTO intro anglicized (#533 README.md 行 25 MANIFESTO 中文引言→英文；MANIFESTO.md 零改动（宿主方案 C）；行 16 语言切换器 + 行 71 `卸载 EMRG.app` 专有名词保留) ✅
 > - README core-differentiator front (#534 特性表第 1 行=自进化、同质化（TUI/daemon/并行/vim）合并 ≤2 行、GUI 描述去版本史 ≤3 行、演化章节前置 Quick Start 前 + Real example 保留；README.md/README.cn.md 同步) ✅
