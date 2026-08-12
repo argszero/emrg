@@ -776,9 +776,12 @@ def test_ensure_self_evolution_task_preserves_existing_project_entry(tmp_path):
     from emrg.server import scheduler as mod
     from emrg.server.scheduler import TaskScheduler
 
+    # A real existing checkout dir (dev machine) — preserved, never repaired.
+    dev_path = tmp_path / "dev" / "emrg"
+    dev_path.mkdir(parents=True)
     projects_yml = tmp_path / "projects.yml"
     projects_yml.write_text(yaml.safe_dump([
-        {"name": "emrg", "path": "/dev/machine/custom/emrg",
+        {"name": "emrg", "path": str(dev_path),
          "last_active": "2026-01-01T00:00:00"},
     ]))
 
@@ -794,7 +797,39 @@ def test_ensure_self_evolution_task_preserves_existing_project_entry(tmp_path):
     data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
     assert len(data) == 1
     assert data[0]["name"] == "emrg"
-    assert data[0]["path"] == "/dev/machine/custom/emrg"  # untouched
+    assert data[0]["path"] == str(dev_path)  # untouched
+
+
+def test_ensure_self_evolution_task_repairs_stale_project_entry(tmp_path):
+    """A dead emrg path (deleted pytest-temp dir) is repaired to the canonical
+    workspace (2026-08-12 incident: a test run leaked a pytest temp path into
+    the real ~/.emrg/projects.yml; the dir is gone after the suite, leaving a
+    dangling entry that list_projects/GUI pickers would show forever)."""
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import EVOLUTION_CWD, TaskScheduler
+
+    stale = tmp_path / "gone" / "emrg"  # never created → dead path
+    projects_yml = tmp_path / "projects.yml"
+    projects_yml.write_text(yaml.safe_dump([
+        {"name": "emrg", "path": str(stale),
+         "last_active": "2026-08-12T18:44:50"},
+        {"name": "other", "path": str(tmp_path / "other")},
+    ]))
+
+    sched = TaskScheduler(InstanceIdentity())
+
+    orig_config = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        sched._ensure_self_evolution_task()
+    finally:
+        mod.config_dir = orig_config
+
+    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    by_name = {e["name"]: e for e in data}
+    assert by_name["emrg"]["path"] == str(EVOLUTION_CWD / "emrg")  # repaired
+    assert by_name["other"]["path"] == str(tmp_path / "other")  # untouched
+    assert len(data) == 2
 
 
 def test_ensure_self_evolution_task_other_entries_preserved(tmp_path):
@@ -844,6 +879,9 @@ def test_ensure_evolution_workspace_dev_repo_untouched(tmp_path):
 
     orig_config = mod.config_dir
     mod.config_dir = lambda: tmp_path
+    fake = FakeGitRun()
+    orig_run = mod.subprocess.run
+    mod.subprocess.run = fake
     try:
         handler = TaskHandler(
             name="emrg-task",
@@ -851,18 +889,17 @@ def test_ensure_evolution_workspace_dev_repo_untouched(tmp_path):
             interval=60,
             identity=InstanceIdentity(),
         )
-    finally:
-        mod.config_dir = orig_config
-    handler._source_dir = str(repo)
-    handler.project_path = str(repo)
-
-    fake = FakeGitRun()
-    orig_run = mod.subprocess.run
-    mod.subprocess.run = fake
-    try:
+        # config_dir must stay patched through _ensure_evolution_workspace():
+        # its clone branch calls _ensure_project_entry(), which writes
+        # config_dir()/projects.yml — an unpatched call would pollute the real
+        # ~/.emrg/projects.yml (2026-08-12 incident: pytest temp path leaked
+        # into real home).
+        handler._source_dir = str(repo)
+        handler.project_path = str(repo)
         ok = handler._ensure_evolution_workspace()
     finally:
         mod.subprocess.run = orig_run
+        mod.config_dir = orig_config
 
     assert ok is True
     assert handler._source_dir == str(repo)  # unchanged
@@ -933,12 +970,19 @@ def test_ensure_evolution_workspace_clone_failure_skips(tmp_path):
     fake = FakeGitRun(git_repo=False, clone_fails=True)
     orig_run = mod.subprocess.run
     orig_evolve = mod.EVOLUTION_CWD
+    orig_config = mod.config_dir
     mod.subprocess.run = fake
+    # config_dir patched through the call: the clone branch would call
+    # _ensure_project_entry() and write config_dir()/projects.yml — keep it
+    # hermetic so a future fake change can't pollute real ~/.emrg/projects.yml
+    # (2026-08-12 pytest-temp-path leak incident).
+    mod.config_dir = lambda: tmp_path
     try:
         ok = handler._ensure_evolution_workspace()
     finally:
         mod.subprocess.run = orig_run
         mod.EVOLUTION_CWD = orig_evolve
+        mod.config_dir = orig_config
 
     assert ok is False
     assert handler._source_dir != str(mod.EVOLUTION_CWD / "emrg")

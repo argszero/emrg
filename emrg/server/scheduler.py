@@ -1282,6 +1282,28 @@ class TaskScheduler:
                 logger.info(
                     "TaskScheduler: self-heal — added emrg entry to projects.yml"
                 )
+            else:
+                # Repair a stale emrg entry whose path no longer exists
+                # (2026-08-12 incident: a pytest temp dir leaked into
+                # projects.yml by a test run; the dir is deleted after the
+                # suite, leaving the entry pointing at a dead path forever —
+                # list_projects/GUI pickers show a wrong path and the handler
+                # re-resolves a dangling dir every cycle). Dev machines with a
+                # real custom checkout keep their path (is_dir() True).
+                for entry in entries:
+                    if entry.get("name") != "emrg":
+                        continue
+                    existing = entry.get("path")
+                    if existing and Path(existing).is_dir():
+                        break  # real checkout — preserved as-is
+                    entry["path"] = str(EVOLUTION_CWD / "emrg")
+                    entry["last_active"] = datetime.now().isoformat()
+                    atomic_write_yaml(entries, projects_file, prefix=".projects_")
+                    logger.info(
+                        "TaskScheduler: self-heal — repaired stale emrg entry "
+                        "%r -> %s", existing, entry["path"],
+                    )
+                    break
         except (yaml.YAMLError, OSError) as e:
             logger.warning(
                 "TaskScheduler: projects.yml self-heal failed: %s", e
