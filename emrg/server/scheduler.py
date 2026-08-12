@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -53,6 +54,57 @@ TASK_TEMPLATES: dict[str, str] = {
     "promote": "promote_prompt.md",
 }
 
+# ── Task CRUD constants (rant 2026-08-12T18:23:15 P2) ─────────────
+TASK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+TASK_NAME_MAX = 32
+MIN_INTERVAL = 60
+DEFAULT_INTERVAL = 1800
+
+
+def _task_templates_dir() -> Path:
+    """Directory holding user-defined task type templates."""
+    return config_dir() / "task-templates"
+
+
+def _custom_templates() -> list[str]:
+    """Names of user-defined task types (sorted, *.md basenames)."""
+    d = _task_templates_dir()
+    if not d.is_dir():
+        return []
+    try:
+        return sorted(p.stem for p in d.glob("*.md"))
+    except OSError:
+        return []
+
+
+def _read_custom_template(name: str) -> str | None:
+    """Read a user template's prompt text; None if missing."""
+    p = _task_templates_dir() / f"{name}.md"
+    try:
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return None
+
+
+def _write_custom_template(name: str, prompt: str) -> None:
+    """Atomically write a user template."""
+    d = _task_templates_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{name}.md"
+    tmp = p.with_suffix(".md.tmp")
+    tmp.write_text(prompt, encoding="utf-8")
+    tmp.replace(p)
+
+
+def _delete_custom_template(name: str) -> None:
+    p = _task_templates_dir() / f"{name}.md"
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
 
 def _resolve_task_template(task_type: str) -> Path:
     """Resolve the prompt template for a task type.
@@ -70,6 +122,22 @@ def _resolve_task_template(task_type: str) -> Path:
     if user_tpl.exists():
         return user_tpl
     return Path(__file__).parent / "evolution_prompt.md"
+
+
+def _task_cfg_signature(cfg: dict) -> tuple:
+    """Stable signature of a task cfg for hot-reload diffing.
+
+    Any change to type / config / interval / enabled marks the task
+    as needing a handler restart.
+    """
+    conf = cfg.get("config") if isinstance(cfg.get("config"), dict) else {}
+    return (
+        cfg.get("name"),
+        cfg.get("type"),
+        json.dumps(conf, sort_keys=True),
+        cfg.get("interval", DEFAULT_INTERVAL),
+        bool(cfg.get("enabled", True)),
+    )
 
 
 def _resolve_project_path(name: str) -> str | None:
@@ -1027,6 +1095,37 @@ class TaskScheduler:
         self._tasks_file = config_dir() / "tasks.yml"
         self._handlers: list[TaskHandler] = []
         self._coros: list[asyncio.Task] = []
+        # cfg (from tasks.yml) used to start each handler — for hot-reload diffing.
+        self._handler_cfgs: dict[str, dict] = {}
+
+    def _start_handler_for(self, cfg: dict) -> TaskHandler:
+        """Create + start a handler for a task cfg; returns the handler."""
+        template_path = _resolve_task_template(cfg["type"])
+        handler = TaskHandler(
+            name=cfg["name"],
+            config=cfg.get("config", {}),
+            interval=cfg.get("interval", DEFAULT_INTERVAL),
+            identity=self.identity,
+            template_path=template_path,
+        )
+        self._handlers.append(handler)
+        self._handler_cfgs[handler.name] = cfg
+        self._coros.append(asyncio.create_task(handler.run()))
+        return handler
+
+    def _stop_handler(self, handler: TaskHandler) -> None:
+        """Stop a handler and cancel its coroutine (hot-reload removal/restart)."""
+        handler.stop()
+        try:
+            idx = self._handlers.index(handler)
+        except ValueError:
+            idx = -1
+        if idx >= 0:
+            coro = self._coros[idx]
+            coro.cancel()
+            del self._coros[idx]
+            del self._handlers[idx]
+        self._handler_cfgs.pop(handler.name, None)
 
     def load_and_start(self) -> list[asyncio.Task]:
         """Load tasks.yml, start all enabled tasks, return coroutine list."""
@@ -1045,27 +1144,17 @@ class TaskScheduler:
         for cfg in tasks_config:
             if not cfg.get("enabled", True):
                 continue
-            handler_cls = self.HANDLERS.get(cfg["type"])
+            handler_cls = self.HANDLERS.get(cfg["type"], TaskHandler)
             if handler_cls is None:
                 logger.warning(
                     "TaskScheduler: unknown type %r for task %r",
                     cfg["type"], cfg["name"],
                 )
                 continue
-            template_path = _resolve_task_template(cfg["type"])
-            handler = handler_cls(
-                name=cfg["name"],
-                config=cfg.get("config", {}),
-                interval=cfg.get("interval", 1800),
-                identity=self.identity,
-                template_path=template_path,
-            )
-            self._handlers.append(handler)
-            coro = asyncio.create_task(handler.run())
-            self._coros.append(coro)
+            self._start_handler_for(cfg)
             logger.info(
                 "TaskScheduler: started %s[%s] every %ds",
-                cfg["type"], cfg["name"], cfg.get("interval", 1800),
+                cfg["type"], cfg["name"], cfg.get("interval", DEFAULT_INTERVAL),
             )
 
         return self._coros
@@ -1238,3 +1327,195 @@ class TaskScheduler:
         })
         self._save_tasks(tasks)
         logger.info("TaskScheduler: created task %s", name)
+
+    # ── Task CRUD + hot reload (rant 2026-08-12T18:23:15 P2) ────────
+
+    @staticmethod
+    def _validate_task_fields(
+        name: str, task_type: str, project: str, interval: int,
+    ) -> str | None:
+        """Return an error string, or None when the fields are valid."""
+        if not TASK_NAME_RE.match(name) or len(name) > TASK_NAME_MAX:
+            return f"invalid task name {name!r} (^[a-z0-9][a-z0-9-]*$, <= {TASK_NAME_MAX} chars)"
+        if task_type not in TASK_TEMPLATES and task_type not in _custom_templates():
+            return f"unknown task type {task_type!r} (not builtin, no custom template)"
+        if not project or _resolve_project_path(project) is None:
+            return f"project {project!r} is not registered in projects.yml"
+        if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
+            return f"interval must be an integer >= {MIN_INTERVAL}"
+        return None
+
+    def task_create(
+        self, name: str, task_type: str, project: str,
+        interval: int | None = None, enabled: bool = True,
+        repo: str | None = None, description: str | None = None,
+    ) -> tuple[bool, str | dict]:
+        """Create a task. Returns (ok, error) or (ok, task-dict)."""
+        interval = DEFAULT_INTERVAL if interval is None else interval
+        err = self._validate_task_fields(name, task_type, project, interval)
+        if err:
+            return False, err
+        tasks = self._load_tasks()
+        if any(t.get("name") == name for t in tasks):
+            return False, f"task {name!r} already exists"
+        cfg: dict = {"project": project}
+        if repo:
+            cfg["repo"] = repo
+        task: dict = {
+            "name": name,
+            "type": task_type,
+            "config": cfg,
+            "interval": interval,
+            "enabled": bool(enabled),
+            "last_run": None,
+        }
+        if description:
+            task["description"] = description
+        tasks.append(task)
+        self._save_tasks(tasks)
+        logger.info("TaskScheduler: task %s created (type=%s)", name, task_type)
+        return True, task
+
+    def task_update(self, name: str, **fields) -> tuple[bool, str | dict]:
+        """Update a task's fields. Returns (ok, error) or (ok, task-dict)."""
+        tasks = self._load_tasks()
+        task = next((t for t in tasks if t.get("name") == name), None)
+        if task is None:
+            return False, f"task {name!r} not found"
+        new_type = fields.get("type", task.get("type", "evolution"))
+        new_project = fields.get("project")
+        if new_project is None:
+            cfg = task.get("config") if isinstance(task.get("config"), dict) else {}
+            new_project = cfg.get("project", "")
+        new_interval = fields.get("interval", task.get("interval", DEFAULT_INTERVAL))
+        err = self._validate_task_fields(name, new_type, new_project, new_interval)
+        if err:
+            return False, err
+        if "type" in fields:
+            task["type"] = fields["type"]
+        if "project" in fields or "repo" in fields:
+            cfg = task.get("config") if isinstance(task.get("config"), dict) else {}
+            if "project" in fields:
+                cfg["project"] = fields["project"]
+            if "repo" in fields:
+                if fields["repo"]:
+                    cfg["repo"] = fields["repo"]
+                else:
+                    cfg.pop("repo", None)
+            task["config"] = cfg
+        if "interval" in fields:
+            task["interval"] = fields["interval"]
+        if "enabled" in fields:
+            task["enabled"] = bool(fields["enabled"])
+        if "description" in fields:
+            task["description"] = fields["description"]
+        self._save_tasks(tasks)
+        logger.info("TaskScheduler: task %s updated", name)
+        return True, task
+
+    def task_delete(self, name: str) -> tuple[bool, str]:
+        """Delete a task by name. Returns (ok, error)."""
+        tasks = self._load_tasks()
+        before = len(tasks)
+        tasks = [t for t in tasks if t.get("name") != name]
+        if len(tasks) == before:
+            return False, f"task {name!r} not found"
+        self._save_tasks(tasks)
+        logger.info("TaskScheduler: task %s deleted", name)
+        return True, ""
+
+    async def apply_tasks(self, tasks: list[dict]) -> dict:
+        """Hot-reload tasks from a new config list (rant 2026-08-12T18:23:15 P2).
+
+        Writes tasks.yml atomically, diffs against running handlers, and
+        starts/stops/restarts handlers as needed — no daemon restart.
+        Idempotent; returns {"added": [...], "removed": [...], "updated": [...]}.
+        """
+        self._save_tasks(tasks)
+        enabled = {
+            t.get("name"): t for t in tasks
+            if isinstance(t, dict) and t.get("enabled", True)
+        }
+        current = {h.name: h for h in list(self._handlers)}
+        added: list[str] = []
+        removed: list[str] = []
+        updated: list[str] = []
+        for name, handler in list(current.items()):
+            if name not in enabled:
+                removed.append(name)
+                self._stop_handler(handler)
+        for name, cfg in enabled.items():
+            if name not in current:
+                added.append(name)
+                self._start_handler_for(cfg)
+            else:
+                old = self._handler_cfgs.get(name)
+                if old is not None and _task_cfg_signature(old) != _task_cfg_signature(cfg):
+                    updated.append(name)
+                    self._stop_handler(current[name])
+                    self._start_handler_for(cfg)
+        return {"added": added, "removed": removed, "updated": updated}
+
+    def list_templates(self) -> list[dict]:
+        """List all task types: builtin (read-only) + custom (with prompt preview)."""
+        result: list[dict] = []
+        for name in sorted(TASK_TEMPLATES):
+            result.append({
+                "name": name,
+                "builtin": True,
+                "template": TASK_TEMPLATES[name],
+            })
+        for name in _custom_templates():
+            result.append({
+                "name": name,
+                "builtin": False,
+                "template": f"{name}.md",
+                "prompt": _read_custom_template(name) or "",
+            })
+        return result
+
+    def template_create(self, name: str, prompt: str) -> tuple[bool, str]:
+        """Create a custom task type template. Returns (ok, error)."""
+        if not TASK_NAME_RE.match(name) or len(name) > TASK_NAME_MAX:
+            return False, f"invalid template name {name!r} (^[a-z0-9][a-z0-9-]*$, <= {TASK_NAME_MAX} chars)"
+        if name in TASK_TEMPLATES:
+            return False, f"builtin task type {name!r} is read-only"
+        if not prompt or not prompt.strip():
+            return False, "template prompt must not be empty"
+        if _read_custom_template(name) is not None:
+            return False, f"template {name!r} already exists"
+        _write_custom_template(name, prompt)
+        logger.info("TaskScheduler: custom template %s created", name)
+        return True, ""
+
+    def template_update(self, name: str, prompt: str) -> tuple[bool, str]:
+        """Update a custom task type template. Returns (ok, error)."""
+        if name in TASK_TEMPLATES:
+            return False, f"builtin task type {name!r} is read-only"
+        if _read_custom_template(name) is None:
+            return False, f"template {name!r} not found"
+        if not prompt or not prompt.strip():
+            return False, "template prompt must not be empty"
+        _write_custom_template(name, prompt)
+        logger.info("TaskScheduler: custom template %s updated", name)
+        return True, ""
+
+    def template_delete(self, name: str) -> tuple[bool, str]:
+        """Delete a custom task type template. Returns (ok, error).
+
+        Refuses when tasks reference the type (host decision, rant 18:23:15).
+        """
+        if name in TASK_TEMPLATES:
+            return False, f"builtin task type {name!r} is read-only"
+        if _read_custom_template(name) is None:
+            return False, f"template {name!r} not found"
+        tasks = self._load_tasks()
+        refs = [t.get("name") for t in tasks if t.get("type") == name]
+        if refs:
+            return False, (
+                f"cannot delete type {name!r}: {len(refs)} task(s) use it "
+                f"({', '.join(str(r) for r in refs[:5])})"
+            )
+        _delete_custom_template(name)
+        logger.info("TaskScheduler: custom template %s deleted", name)
+        return True, ""

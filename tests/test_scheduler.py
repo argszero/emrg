@@ -320,7 +320,13 @@ def test_load_and_start_skips_disabled(tmp_path):
 
 
 def test_load_and_start_unknown_type(tmp_path):
-    """Tasks with unknown handler type are skipped; self-heal still adds emrg-task."""
+    """Custom/unknown types start as TaskHandler with the fallback template (P2).
+
+    rant 2026-08-12T18:23:15: types not in TASK_TEMPLATES are treated as
+    user-defined task types — resolved via ~/.emrg/task-templates/<type>.md,
+    falling back to evolution_prompt.md with a warning. Self-heal still adds
+    emrg-task.
+    """
     tasks_yml = tmp_path / "tasks.yml"
     tasks_yml.write_text(yaml.safe_dump([
         {"name": "bad", "type": "nonexistent_handler", "config": {}, "enabled": True},
@@ -339,8 +345,9 @@ def test_load_and_start_unknown_type(tmp_path):
     finally:
         mod.config_dir = orig_config
 
-    assert len(coros) == 1  # the self-healed emrg-task
-    assert sched._handlers[0].name == "emrg-task"
+    by_name = {h.name: h for h in sched._handlers}
+    assert set(by_name) == {"bad", "emrg-task"}  # custom type + self-healed
+    assert by_name["bad"]._template_path.name == "evolution_prompt.md"  # fallback
     sched.stop_all()
     for c in coros:
         c.cancel()
@@ -1472,3 +1479,238 @@ def test_remote_advanced_false_without_git_repo(tmp_path):
         assert handler._remote_advanced() is False
     finally:
         mod.subprocess.run = orig_run
+
+
+# ── Task CRUD + hot reload + templates (rant 2026-08-12T18:23:15 P2) ──
+
+
+def _p2_env(tmp_path):
+    """Point config_dir at tmp_path with a registered project."""
+    from emrg.server import scheduler as mod
+    projects_yml = tmp_path / "projects.yml"
+    projects_yml.write_text(yaml.safe_dump([
+        {"name": "emrg", "path": str(tmp_path / "emrg")},
+        {"name": "mem", "path": str(tmp_path / "mem")},
+    ]))
+    orig = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    return mod, orig
+
+
+def test_task_create_validation(tmp_path):
+    """Invalid name / unknown type / unregistered project / interval<60 rejected."""
+    from emrg.server import scheduler as mod
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        ok, err = sched.task_create("Bad Name", "evolution", "emrg", 60)
+        assert not ok and "invalid task name" in err
+        ok, err = sched.task_create("good", "no-such-type", "emrg", 60)
+        assert not ok and "unknown task type" in err
+        ok, err = sched.task_create("good", "evolution", "not-registered", 60)
+        assert not ok and "not registered" in err
+        ok, err = sched.task_create("good", "evolution", "emrg", 30)
+        assert not ok and ">= 60" in err
+        ok, err = sched.task_create("good", "evolution", "emrg", "abc")
+        assert not ok and ">= 60" in err
+    finally:
+        mod.config_dir = orig
+
+
+def test_task_create_and_duplicate(tmp_path):
+    """Valid task create persists to tasks.yml; duplicate rejected."""
+    from emrg.server import scheduler as mod
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        tasks_file = tmp_path / "tasks.yml"
+        sched._tasks_file = tasks_file
+        ok, task = sched.task_create("daily", "evolution", "mem", 300, repo="acme/x")
+        assert ok and task["name"] == "daily" and task["interval"] == 300
+        assert task["config"] == {"project": "mem", "repo": "acme/x"}
+        saved = yaml.safe_load(tasks_file.read_text(encoding="utf-8"))
+        assert any(t["name"] == "daily" for t in saved)
+        ok, err = sched.task_create("daily", "evolution", "emrg", 60)
+        assert not ok and "already exists" in err
+    finally:
+        mod.config_dir = orig
+
+
+def test_task_update_and_delete(tmp_path):
+    """Update changes fields; delete removes the entry; not-found errors."""
+    from emrg.server import scheduler as mod
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        sched.task_create("daily", "evolution", "mem", 300)
+        ok, task = sched.task_update("daily", interval=600, enabled=False, repo="acme/y")
+        assert ok and task["interval"] == 600 and task["enabled"] is False
+        assert task["config"]["repo"] == "acme/y"
+        ok, err = sched.task_update("nope", interval=60)
+        assert not ok and "not found" in err
+        ok, err = sched.task_delete("daily")
+        assert ok and err == ""
+        ok, err = sched.task_delete("daily")
+        assert not ok and "not found" in err
+    finally:
+        mod.config_dir = orig
+
+
+def test_apply_tasks_hot_reload(tmp_path):
+    """apply_tasks diffs handlers: add / remove / restart on change (no daemon restart)."""
+    from emrg.server import scheduler as mod
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        sched._save_tasks([
+            {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
+            {"name": "b", "type": "evolution", "config": {"project": "mem"}, "interval": 300, "enabled": True},
+        ])
+
+        async def _load_and_diff(new_tasks):
+            sched.load_and_start()
+            assert {h.name for h in sched._handlers} == {"a", "b"}
+            summary = await sched.apply_tasks(new_tasks)
+            return summary
+
+        summary = asyncio.run(_load_and_diff([
+            {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
+            {"name": "c", "type": "evolution", "config": {"project": "mem"}, "interval": 900, "enabled": True},
+        ]))
+        assert summary["removed"] == ["b"]
+        assert summary["added"] == ["c"]
+        assert summary["updated"] == []
+        names = {h.name for h in sched._handlers}
+        assert names == {"a", "c"}
+        c = next(h for h in sched._handlers if h.name == "c")
+        assert c.interval == 900
+        sched.stop_all()
+    finally:
+        mod.config_dir = orig
+
+
+def test_apply_tasks_update_restart(tmp_path):
+    """Changing a task's interval restarts (stops + starts) its handler."""
+    from emrg.server import scheduler as mod
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+
+        async def _run():
+            sched._save_tasks([
+                {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
+            ])
+            sched.load_and_start()
+            h_old = sched._handlers[0]
+            summary = await sched.apply_tasks([
+                {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 600, "enabled": True},
+            ])
+            return h_old, summary
+
+        h_old, summary = asyncio.run(_run())
+        assert summary["updated"] == ["a"]
+        assert summary["added"] == [] and summary["removed"] == []
+        assert len(sched._handlers) == 1
+        assert sched._handlers[0] is not h_old  # restarted
+        assert sched._handlers[0].interval == 600
+        sched.stop_all()
+    finally:
+        mod.config_dir = orig
+
+
+def test_apply_tasks_idempotent(tmp_path):
+    """Applying the same tasks is a no-op (no add/remove/update)."""
+    from emrg.server import scheduler as mod
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        tasks = [
+            {"name": "a", "type": "evolution", "config": {"project": "emrg"}, "interval": 300, "enabled": True},
+        ]
+
+        async def _run():
+            sched._save_tasks(tasks)
+            sched.load_and_start()
+            return await sched.apply_tasks(tasks)
+
+        summary = asyncio.run(_run())
+        assert summary == {"added": [], "removed": [], "updated": []}
+        assert len(sched._handlers) == 1
+        sched.stop_all()
+    finally:
+        mod.config_dir = orig
+
+
+def test_template_crud_and_guards(tmp_path):
+    """Custom templates: create/list/update/delete; builtin read-only; delete-refused guard."""
+    from emrg.server import scheduler as mod
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        # builtin read-only
+        ok, err = sched.template_create("evolution", "x")
+        assert not ok and "read-only" in err
+        ok, err = sched.template_update("evolution", "x")
+        assert not ok and "read-only" in err
+        ok, err = sched.template_delete("evolution")
+        assert not ok and "read-only" in err
+        # create
+        ok, err = sched.template_create("report", "# Report {{ instance_id }}")
+        assert ok and err == ""
+        ok, err = sched.template_create("report", "dup")
+        assert not ok and "already exists" in err
+        ok, err = sched.template_create("Bad Name", "x")
+        assert not ok and "invalid template name" in err
+        ok, err = sched.template_create("empty", "   ")
+        assert not ok and "must not be empty" in err
+        # list
+        templates = {t["name"]: t for t in sched.list_templates()}
+        assert templates["evolution"]["builtin"] is True
+        assert templates["report"]["builtin"] is False
+        assert "instance_id" in templates["report"]["prompt"]
+        # update
+        ok, err = sched.template_update("report", "# New")
+        assert ok
+        assert mod._read_custom_template("report") == "# New"
+        ok, err = sched.template_update("missing", "x")
+        assert not ok and "not found" in err
+        # delete referenced → refused (host decision)
+        sched.task_create("uses-report", "report", "mem", 300)
+        ok, err = sched.template_delete("report")
+        assert not ok and "1 task(s) use it" in err
+        # delete after removing reference → ok
+        sched.task_delete("uses-report")
+        ok, err = sched.template_delete("report")
+        assert ok and err == ""
+        assert mod._read_custom_template("report") is None
+    finally:
+        mod.config_dir = orig
+
+
+def test_task_create_custom_type(tmp_path):
+    """A custom template type can be used to create a runnable task."""
+    from emrg.server import scheduler as mod
+    mod, orig = _p2_env(tmp_path)
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        sched.template_create("report", "# Report {{ instance_id }}")
+
+        async def _run():
+            ok, task = sched.task_create("daily-report", "report", "mem", 300)
+            assert ok and task["type"] == "report"
+            sched._save_tasks([task])
+            sched.load_and_start()
+            h = next(h for h in sched._handlers if h.name == "daily-report")
+            assert h._template_path == tmp_path / "task-templates" / "report.md"
+            sched.stop_all()
+
+        asyncio.run(_run())
+    finally:
+        mod.config_dir = orig

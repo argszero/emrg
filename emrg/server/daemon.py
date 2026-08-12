@@ -1217,6 +1217,83 @@ class EmrgServer:
                     "error": "scheduler not running",
                 })
 
+        elif msg_type == "task_create":
+            # rant 2026-08-12T18:23:15 P2 — task CRUD with hot reload
+            if not self._scheduler:
+                await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
+                return
+            ok, res = self._scheduler.task_create(
+                name=msg.get("name", "").strip(),
+                task_type=msg.get("type", "").strip(),
+                project=msg.get("project", "").strip(),
+                interval=msg.get("interval"),
+                enabled=msg.get("enabled", True),
+                repo=msg.get("repo"),
+                description=msg.get("description"),
+            )
+            if not ok:
+                await self._send(ws, {"type": "task_result", "error": res})
+                return
+            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
+            await self._send(ws, {"type": "task_result", "ok": True, "task": res, "summary": summary})
+
+        elif msg_type == "task_update":
+            if not self._scheduler:
+                await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
+                return
+            fields = {k: msg[k] for k in ("type", "project", "interval", "enabled", "repo", "description") if k in msg}
+            ok, res = self._scheduler.task_update(msg.get("name", "").strip(), **fields)
+            if not ok:
+                await self._send(ws, {"type": "task_result", "error": res})
+                return
+            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
+            await self._send(ws, {"type": "task_result", "ok": True, "task": res, "summary": summary})
+
+        elif msg_type == "task_delete":
+            if not self._scheduler:
+                await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
+                return
+            ok, err = self._scheduler.task_delete(msg.get("name", "").strip())
+            if not ok:
+                await self._send(ws, {"type": "task_result", "error": err})
+                return
+            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
+            await self._send(ws, {"type": "task_result", "ok": True, "summary": summary})
+
+        elif msg_type == "task_template_list":
+            if not self._scheduler:
+                await self._send(ws, {"type": "templates_list", "templates": []})
+                return
+            await self._send(ws, {
+                "type": "templates_list",
+                "templates": self._scheduler.list_templates(),
+            })
+
+        elif msg_type == "task_template_create":
+            if not self._scheduler:
+                await self._send(ws, {"type": "template_result", "error": "scheduler not running"})
+                return
+            ok, err = self._scheduler.template_create(
+                msg.get("name", "").strip(), msg.get("prompt", "")
+            )
+            await self._send(ws, {"type": "template_result", "ok": ok, **({"error": err} if not ok else {})})
+
+        elif msg_type == "task_template_update":
+            if not self._scheduler:
+                await self._send(ws, {"type": "template_result", "error": "scheduler not running"})
+                return
+            ok, err = self._scheduler.template_update(
+                msg.get("name", "").strip(), msg.get("prompt", "")
+            )
+            await self._send(ws, {"type": "template_result", "ok": ok, **({"error": err} if not ok else {})})
+
+        elif msg_type == "task_template_delete":
+            if not self._scheduler:
+                await self._send(ws, {"type": "template_result", "error": "scheduler not running"})
+                return
+            ok, err = self._scheduler.template_delete(msg.get("name", "").strip())
+            await self._send(ws, {"type": "template_result", "ok": ok, **({"error": err} if not ok else {})})
+
         elif msg_type == "compact":
             cwd = msg.get("cwd", "")
             session_id = msg.get("session_id", "")
