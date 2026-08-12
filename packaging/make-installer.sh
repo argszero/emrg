@@ -251,10 +251,6 @@ Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createa
 ; pythonw daemon 锁文件导致卡在"停止已有进程"）。正常安装时该文件仍由上方通配符
 ; 装入 {app}\bin\stop-emrg.cmd。
 Source: "$STAGE_WIN/payload\\bin\\stop-emrg.cmd"; DestDir: "{tmp}"; Flags: dontcopy
-; R128: dontcopy — 供 [Code] PrepareToInstall 在覆盖文件前 ExtractTemporaryFile 取出并
-; 作为 %~1 传给 stop-emrg.cmd step 4（连坐强杀 bundled git，宿主 2026-08-11T19:47:44
-; 拍板覆盖 #689：旧安装 %INSTALL%\bin\stop-git.ps1 不存在时用 {tmp} 提取版）。
-Source: "$STAGE_WIN/payload\\bin\\stop-git.ps1"; DestDir: "{tmp}"; Flags: dontcopy
 [Icons]
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
 [UninstallRun]
@@ -376,26 +372,23 @@ end;
 // -m emrg.server 常驻锁文件），覆盖 ~/.emrg\install 时卡在"停止已有进程"。
 // PrepareToInstall 在安装开始前运行 bin\stop-emrg.cmd：taskkill EMRG.exe
 // 优雅→/F 兜底、wmic/PowerShell 命令行过滤 TUI、emrg server stop 协议关闭
-// daemon + emrgd.pid 轮询兜底、step 4 调 stop-git.ps1 连坐强杀 bundled git
+// daemon + emrgd.pid 轮询兜底、step 4 内联 PowerShell 连坐强杀 bundled git
 // （宿主 2026-08-11T19:47:44 拍板覆盖 #689：sh/vim 锁 install\git\usr\bin\
 // msys-2.0.dll 导致 Inno DeleteFile code 5 时一并强杀，安装成功优先；只碰
-// install\git\ 前缀，系统 Git 不受影响）。旧安装可能没有 stop-git.ps1 →
-// {tmp} dontcopy 提取版作为 %~1 传入（cmd 内先查 %INSTALL%\bin，缺失才用
-// 参数）。干净安装（无旧 install）脚本自行跳过。返回非空字符串 = 中止安装
+// install\git\ 前缀，系统 Git 不受影响；rant 2026-08-12T14:00:05 合并为
+// 单文件——stop-git.ps1 已删除，逻辑内联进 stop-emrg.cmd step 4）。
+// 干净安装（无旧 install）脚本自行跳过。返回非空字符串 = 中止安装
 // 并显示该消息（宁可中止也不卡死）。
 // {cmd} = cmd.exe（Inno 预定义常量，批处理文件须经 cmd 启动）。
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
   StopScript: string;
-  GitStopScript: string;
 begin
   Result := '';
   ExtractTemporaryFile('stop-emrg.cmd');
-  ExtractTemporaryFile('stop-git.ps1');
   StopScript := ExpandConstant('{tmp}\\stop-emrg.cmd');
-  GitStopScript := ExpandConstant('{tmp}\\stop-git.ps1');
-  if Exec(ExpandConstant('{cmd}'), '/c "' + StopScript + '" "' + GitStopScript + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  if Exec(ExpandConstant('{cmd}'), '/c "' + StopScript + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     if ResultCode <> 0 then
       Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).';

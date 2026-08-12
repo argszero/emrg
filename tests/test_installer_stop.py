@@ -1,17 +1,20 @@
-"""Windows 安装器预停止接线回归测试（rant 2026-08-10T08:50:44 + 宿主 2026-08-11T19:47:44 连坐强杀拍板）。
+"""Windows 安装器预停止接线回归测试（rant 2026-08-10T08:50:44 + 宿主 2026-08-11T19:47:44 连坐强杀拍板
++ rant 2026-08-12T14:00:05 合并单文件）。
 
 安装器（Inno Setup，make-installer.sh 生成 emrg.iss）覆盖 ~/.emrg/install 前必须
 先优雅关闭 GUI/TUI/daemon/bundled-git，否则无窗口的 pythonw daemon 独占锁文件 → 卡在
 "停止已有进程"（宿主只能重启系统）。本测试纯文本断言（不执行 iscc/cmd ——
 macOS/CI 无 Windows），钉死接线：
-  1. bin/stop-emrg.cmd 覆盖三步 + step 4 调 stop-git.ps1：GUI 优雅关闭+/F 兜底、
-     TUI 命令行过滤、daemon 协议关闭 + emrgd.pid 轮询兜底（顺序 GUI → daemon）
-  2. bin/stop-git.ps1 独立脚本：install\\git\\ 前缀收集 → 先杀 git 树 → 连坐强杀全部
-     残留（sh/vim 一并杀，宿主拍板覆盖 #689）→ 无残留 exit 0 / 有残留 exit 1
+  1. bin/stop-emrg.cmd 单文件覆盖全流程：GUI 优雅关闭+/F 兜底、TUI 命令行过滤、
+     daemon 协议关闭 + emrgd.pid 轮询兜底（顺序 GUI → daemon）、step 4 内联
+     PowerShell 连坐强杀 bundled git（stop-git.ps1 已删除合并，rant 2026-08-12T14:00:05）
+  2. bin/stop-git.ps1 不存在；内联逻辑：install\\git\\ 前缀收集 → 先杀 git 树 →
+     连坐强杀全部残留（sh/vim 一并杀）→ 每次枚举最新 Get-CimInstance → 无残留
+     exit 0 / 有残留 exit 1（truthful failure，#701）
   3. bin/emrgd.cmd 含 stop 分支（复用 `emrg server stop`）
-  4. make-installer.sh 的 .iss 模板含 [Files] dontcopy（stop-emrg.cmd + stop-git.ps1）
-     + [Code] PrepareToInstall 传 {tmp} 提取版作 %~1
-  5. build-runtime.sh 把 stop-emrg.cmd / stop-git.ps1 复制进 runtime bin/
+  4. make-installer.sh 的 .iss 模板含 [Files] dontcopy（stop-emrg.cmd）+ [Code]
+     PrepareToInstall 运行 {tmp} 提取版
+  5. build-runtime.sh 把 stop-emrg.cmd 复制进 runtime bin/
 """
 
 from pathlib import Path
@@ -19,7 +22,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_stop_emrg_cmd_covers_gui_tui_daemon_and_calls_stop_git():
+def test_stop_emrg_cmd_covers_gui_tui_daemon_and_inline_step4():
     content = (REPO_ROOT / "bin" / "stop-emrg.cmd").read_text(encoding="utf-8")
     # GUI：无 /F 优雅 WM_CLOSE 优先，/F 兜底
     assert "taskkill /IM EMRG.exe" in content
@@ -41,26 +44,26 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_and_calls_stop_git():
     # 顺序：GUI 在 daemon 之前（GUI 不能复活 daemon）
     daemon_line = content.index('call "%INSTALL%\\bin\\emrg.cmd" server stop')
     assert content.index("taskkill /IM EMRG.exe") < daemon_line
-    # step 4（宿主 2026-08-11T19:47:44 拍板覆盖 #689）：调独立 stop-git.ps1 连坐强杀。
-    # 判别：powershell -File 调用（无 cmd 内联转义）+ -ExecutionPolicy Bypass。
-    step4_idx = content.index("REM --- 4. bundled git: guilt-by-association")
+    # step 4（rant 2026-08-12T14:00:05 合并单文件）：内联 PowerShell 连坐强杀。
+    # 判别：-Command 内联（无 -File 独立脚本），\" 转义与 TUI/verify 段同模式。
+    step4_idx = content.index("REM --- 4. bundled git: inline guilt-by-association")
     verify_idx = content.index("\n:verify\n")  # 标签定义处（\n 前缀排除前面 goto :verify 行）
     assert daemon_line < step4_idx < verify_idx
-    assert "stop-git.ps1" in content
-    assert "-ExecutionPolicy Bypass -File" in content
-    assert r'"%GITSTOP%"' in content
-    # 旧安装可能没有 stop-git.ps1 → {tmp} 提取版（%~1）兜底
-    assert 'set "GITSTOP=%~1"' in content
-    # %TEMP% 兜底已移除（review 2026-08-11T19:57: {tmp} 参数或已装副本恒胜出；缺失时 :verify 前缀检查兜底）
-    assert "GITSTOP=%TEMP%" not in content
-    # #689 的 snapshot/step0/PIDFILE 机制已删除（宿主否决——误伤宿主工具的根源）
-    assert "emrg-stop-pids.txt" not in content
-    assert "ParentProcessId" not in content
-    assert "PIDFILE" not in content
-    assert "Set-Content" not in content  # 快照写盘命令不复存在
+    assert "-ExecutionPolicy Bypass -Command" in content
+    assert "-ExecutionPolicy Bypass -File" not in content  # 独立脚本已删除
+    assert "GITSTOP" not in content  # %~1/{tmp} 传递机制随 stop-git.ps1 一并移除
+    # pass 1：先杀 git 树（git/ssh/plink/bash）
+    assert "-in @('git.exe','ssh.exe','plink.exe','bash.exe')" in content
+    # 前缀过滤：只碰 %USERPROFILE%\.emrg\install\git\*（系统 Git 永不命中）；
+    # cmd 内联转义形态（\" 包裹 PS 字符串字面量）
+    assert r'\"$env:USERPROFILE\.emrg\install\git\*\"' in content
+    # 存活检查基于最新枚举（Get-CimInstance 每次重新查询，无旧快照）
+    assert content.count("Get-CimInstance Win32_Process") >= 4  # pass1 + pass2 + $left + verify
+    # truthful failure：幸存进程点名输出 + exit 1（rant 2026-08-12T12:30:41 语义）
+    assert r'Write-Host (\"still running: {0} (pid {1})\" -f $_.Name, $_.ProcessId)' in content
     # step 4 失败必须传导到退出码（EXIT_CODE 初始化在 setlocal 之后、verify 不再清零）
     assert 'set "EXIT_CODE=0"' in content
-    assert "if errorlevel 1 set \"EXIT_CODE=1\"" in content
+    assert 'if errorlevel 1 set "EXIT_CODE=1"' in content
     assert content.index('set "EXIT_CODE=0"') < step4_idx
     # 干净安装安全：无旧 install 目录时跳过
     assert 'set "INSTALL=%EMRG_DIR%\\install"' in content
@@ -75,31 +78,29 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_and_calls_stop_git():
     assert "%DPID%" not in verify_block
     # :verify 的 bundled-git 存活判定：无差别前缀检查（连坐语义——连坐杀后仍存活才中止）
     assert "exit 1" in verify_block
-    assert "if errorlevel 1 set \"EXIT_CODE=1\"" in verify_block
+    assert 'if errorlevel 1 set "EXIT_CODE=1"' in verify_block
     assert r'$env:USERPROFILE\.emrg\install\git\*' in verify_block
     assert "Get-CimInstance" in verify_block
 
 
-def test_stop_git_ps1_guilt_by_association():
-    content = (REPO_ROOT / "bin" / "stop-git.ps1").read_text(encoding="utf-8")
-    # 前缀过滤：只碰 %USERPROFILE%\.emrg\install\git\*（系统 Git 永不命中）
-    assert r'$env:USERPROFILE\.emrg\install\git\*' in content
-    # pass 1：先杀 git 树（git/ssh/plink/bash）
-    assert "-in @('git.exe', 'ssh.exe', 'plink.exe', 'bash.exe')" in content
-    # pass 2：连坐强杀——前缀内全部残留（sh/vim 一并杀，宿主拍板）
-    # 判别：第二次 Get-CimInstance 无 Name 过滤（不再区分工具类型）
-    assert content.count("Get-CimInstance Win32_Process") >= 3
-    pass2_idx = content.index("# pass 2")
-    assert "Stop-Process -Id $_.ProcessId -Force" in content
+def test_stop_git_merged_single_file():
+    # rant 2026-08-12T14:00:05 验收：bin/ 下无 stop-git.ps1；grep stop-git 仅历史注释
+    assert not (REPO_ROOT / "bin" / "stop-git.ps1").exists()
+    cmd = (REPO_ROOT / "bin" / "stop-emrg.cmd").read_text(encoding="utf-8")
+    step4 = cmd[cmd.index("REM --- 4. bundled git:"):cmd.index("\n:verify\n")]
+    # pass 2：连坐强杀——前缀内全部残留（sh/vim 一并杀，宿主 2026-08-11T19:47:44 拍板）
+    assert "Start-Sleep -Milliseconds 300" in step4
+    # 每次枚举重新 Get-CimInstance（不用旧快照）——pass1/pass2/$left 共 3 次
+    assert step4.count("Get-CimInstance Win32_Process") == 3
     # 退出码语义：无残留（或本来无进程）→ 0；仍有存活 → 1
-    assert "exit 1" in content and "exit 0" in content
-    # rant 2026-08-12T12:30:41（spec B）：存活检查用最新快照 + 如实报失败——
-    # 幸存进程必须点名输出（不静默吞掉），有存活即 exit 1，绝不误报成功
-    assert 'if ($left.Count -gt 0) {' in content
-    assert "still running: {0} (pid {1})" in content
-    assert "Write-Host" in content
-    # 独立脚本 + 非交互（无 cmd 内联转义问题，0.2.26 转义 bug 根因规避）
-    assert "$ErrorActionPreference = 'SilentlyContinue'" in content
+    assert "exit 1" in step4 and "exit 0" in step4
+    # 打包链路无功能引用：make-installer.sh / build-runtime.sh 不再处理 stop-git.ps1
+    mi = (REPO_ROOT / "packaging" / "make-installer.sh").read_text(encoding="utf-8")
+    assert '"$STAGE_WIN/payload\\\\bin\\\\stop-git.ps1"' not in mi
+    assert "ExtractTemporaryFile('stop-git.ps1')" not in mi
+    assert "GitStopScript" not in mi
+    br = (REPO_ROOT / "packaging" / "build-runtime.sh").read_text(encoding="utf-8")
+    assert 'cp "$ROOT/bin/stop-git.ps1"' not in br
 
 
 def test_emrgd_cmd_has_stop_branch():
@@ -113,13 +114,11 @@ def test_make_installer_iss_has_prepare_to_install():
     content = (REPO_ROOT / "packaging" / "make-installer.sh").read_text(encoding="utf-8")
     assert "dontcopy" in content
     assert "stop-emrg.cmd" in content
-    assert "stop-git.ps1" in content
     assert "PrepareToInstall" in content
     assert "ExtractTemporaryFile('stop-emrg.cmd')" in content
-    assert "ExtractTemporaryFile('stop-git.ps1')" in content
-    # {tmp} 提取版 stop-git.ps1 作为 %~1 传给 stop-emrg.cmd（旧安装可能无此文件）
-    assert "GitStopScript" in content
-    assert "'/c \"' + StopScript + '\" \"' + GitStopScript" in content
+    # 单文件：只提取/执行 stop-emrg.cmd（stop-git.ps1 已删除）
+    assert "ExtractTemporaryFile('stop-git.ps1')" not in content
+    assert "/c \"' + StopScript + '\"" in content
     assert "SW_HIDE" in content  # 批处理执行不弹控制台窗口（#592 纪律）
     # rant 2026-08-11T17:56:25：中止消息含重启兜底引导（杀不掉时宿主可重启后重试）
     assert "restart the computer" in content
@@ -128,4 +127,4 @@ def test_make_installer_iss_has_prepare_to_install():
 def test_build_runtime_copies_stop_scripts():
     content = (REPO_ROOT / "packaging" / "build-runtime.sh").read_text(encoding="utf-8")
     assert 'cp "$ROOT/bin/stop-emrg.cmd" stop-emrg.cmd' in content
-    assert 'cp "$ROOT/bin/stop-git.ps1" stop-git.ps1' in content
+    assert 'cp "$ROOT/bin/stop-git.ps1"' not in content
