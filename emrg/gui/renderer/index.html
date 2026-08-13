@@ -401,17 +401,6 @@
   </dialog>
 
   <!-- 会话列表对话框（/sessions /resume，GUI / 指令 P2） -->
-  <dialog id="sessions-dialog">
-    <div class="dialog-card" style="min-width:420px;">
-      <h2 data-i18n="sessions.title">切换对话</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="sessions.desc">点击切换，或输入 /resume &lt;id&gt; 直接切换。</p>
-      <div id="sessions-list" class="help-list"></div>
-      <div class="dialog-actions">
-        <button type="button" id="sessions-close" class="btn btn-ghost" data-i18n="help.close">关闭</button>
-      </div>
-    </div>
-  </dialog>
-
   <!-- P5：打开会话对话框（两步：选项目 → 选会话；跨项目） -->
   <dialog id="open-session-dialog">
     <div class="dialog-card" style="min-width:440px;">
@@ -491,23 +480,6 @@
   </dialog>
 
   <!-- 进化对话框（/rant，GUI / 指令 P4） -->
-  <dialog id="rant-dialog">
-    <div class="dialog-card" style="min-width:460px;">
-      <h2 data-i18n="rant.title">🧬 进化 — 告诉 EMRG 往哪里走</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="rant.desc">你的输入会驱动 EMRG 的自我进化——它会认真读，并据此改进自己。</p>
-      <label><span data-i18n="rant.project">项目（可选）</span>
-        <select id="rant-project"></select>
-      </label>
-      <label><span data-i18n="rant.message">你的想法</span>
-        <textarea id="rant-message" rows="4" maxlength="10000" placeholder="哪里不好用、想要什么新功能、或者希望它怎么改进…" data-i18n-placeholder="rant.placeholder"></textarea>
-      </label>
-      <div class="dialog-actions">
-        <button type="button" id="rant-cancel" class="btn btn-ghost" data-i18n="settings.cancel">取消</button>
-        <button type="button" id="rant-submit" class="btn btn-primary" data-i18n="rant.submit">驱动进化</button>
-      </div>
-    </div>
-  </dialog>
-
   <!-- 进化完成 toast（WorkBuddy P3：进化发生时温和提示） -->
   <div id="evolution-toast" class="evolution-toast hidden">
     <div class="evolution-toast-title" data-i18n="copy.evolutionToastTitle">🌱 EMRG 刚刚完成一次自我进化！</div>

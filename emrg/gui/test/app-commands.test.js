@@ -46,6 +46,8 @@ function makeEl(id) {
       if (frag) this.innerHTML += frag;
     },
     removeChild() {},
+    setAttribute() {},
+    removeAttribute() {},
     querySelectorAll: () => [],
     getBoundingClientRect: () => ({ left: 0, right: 100, top: 0, bottom: 100, width: 100, height: 100 }),
     showModal() { this.__open = true; },
@@ -207,24 +209,29 @@ test("P3：/skills 打开技能列表对话框并调用 listSkills", async () =>
   assert.ok(els["skills-dialog"] && els["skills-dialog"].__open === true, "skills dialog opened");
 });
 
-test("P4：/rant 无参数打开进化对话框（项目下拉加载）", async () => {
+test("P4：/rant 无参数打开 Rant 面板 + 新建表单（rant 14:10:14 P6：rant-dialog 移除）", async () => {
   const { ctx, els } = makeSandbox({
     listProjects: async () => [{ name: "emrg" }],
     sendRant: async () => ({ ok: true, count: 5 }),
   });
   await tick();
+  vm.runInContext('document.getElementById("rant-form").classList.add("hidden")', ctx); // 镜像 index.html 初始态
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/rant', args: [] })", ctx);
-  assert.ok(els["rant-dialog"] && els["rant-dialog"].__open === true, "rant dialog opened");
+  await tick();
+  const panel = els["panel-rants"];
+  assert.ok(panel && !panel.classList.contains("hidden"), "rants panel should be open");
+  assert.ok(els["rant-form"] && !els["rant-form"].classList.contains("hidden"), "rant form should be open");
 });
 
-test("P4：/rant 直接跟内容快速提交（不打开对话框）", async () => {
+test("P4：/rant 直接跟内容快速提交（不打开面板）", async () => {
   const { ctx, els } = makeSandbox({
     listProjects: async () => [{ name: "emrg" }],
     sendRant: async () => ({ ok: true, count: 5 }),
   });
   await tick();
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/rant', args: ['希望支持主题切换'] })", ctx);
-  assert.ok(!(els["rant-dialog"] && els["rant-dialog"].__open), "direct rant submit should not open dialog");
+  const panel = els["panel-rants"];
+  assert.ok(!(panel && !panel.classList.contains("hidden")), "direct rant submit should not open panel");
 });
 
 test("P4：/trigger 无参数打开任务面板", async () => {

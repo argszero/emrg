@@ -222,11 +222,11 @@ const App = (() => {
           break;
         case "/sessions":
         case "/resume":
-          // P2：/resume <id> 直接切换；无参数 → 会话列表对话框
+          // P2：/resume <id> 直接切换；无参数 → 现代两步弹窗（rant 14:10:14 P6：sessions-dialog 移除，侧边栏会话区 + /open 已覆盖）
           if (parsed.args.length > 0) {
             await switchSession(parsed.args[0]);
           } else {
-            showSessionsDialog();
+            Dialogs.showOpenSessionDialog();
           }
           break;
         case "/open":
@@ -271,11 +271,12 @@ const App = (() => {
           showSkillsDialog();
           break;
         case "/rant":
-          // P4：/rant 直接跟内容 → 快速提交；无参数 → 进化对话框
+          // P4：/rant 直接跟内容 → 快速提交；无参数 → 打开 Rant 面板 + 新建表单（rant 14:10:14 P6：rant-dialog 移除）
           if (parsed.args.length > 0) {
             await submitRant(parsed.args.join(" "), "");
           } else {
-            showRantDialog();
+            await openRantsPanel();
+            Dialogs.openRantForm();
           }
           break;
         case "/trigger":
@@ -292,31 +293,6 @@ const App = (() => {
     } catch (e) {
       Chat.addSystemMessage(_t("app.cmdFailed", { cmd, msg: e.message }));
     }
-  }
-
-  // /sessions /resume：会话列表对话框（复用 help-list 样式）
-  async function showSessionsDialog() {
-    const list = $("sessions-list");
-    const dialog = $("sessions-dialog");
-    if (!list || !dialog) return;
-    await refreshSessions(); // 确保 state.sessions 最新
-    list.innerHTML = "";
-    if (state.sessions.length === 0) {
-      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.helpNoSessions")}</span></div>`;
-    }
-    state.sessions.forEach((s) => {
-      const row = el("button", { class: "help-row", type: "button", style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;" });
-      const name = el("span", { class: "help-cmd" }, s.title || _t("app.unnamed"));
-      const hint = el("span", { class: "help-hint" }, s.session_id === state.sessionId ? _t("app.current") : "");
-      row.appendChild(name);
-      row.appendChild(hint);
-      row.addEventListener("click", async () => {
-        dialog.close();
-        await switchSession(s.session_id);
-      });
-      list.appendChild(row);
-    });
-    dialog.showModal();
   }
 
   // /rewind：历史消息点选择对话框（daemon list_history → 选择 → rewind_session）
@@ -444,26 +420,6 @@ const App = (() => {
     } catch (e) {
       list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.skillsFailed", { msg: escapeHtml(e.message) })}</span></div>`;
     }
-  }
-
-  // /rant：进化对话框（项目下拉 + 文本输入 → daemon rant 协议）
-  async function showRantDialog() {
-    const dialog = $("rant-dialog");
-    const msgInput = $("rant-message");
-    const projSel = $("rant-project");
-    if (!dialog || !msgInput) return;
-    // 加载项目列表填充下拉
-    try {
-      const projects = await window.emrg.listProjects();
-      projSel.innerHTML = `<option value="">${_t("app.globalAll")}</option>`;
-      for (const p of projects) {
-        const name = typeof p === "string" ? p : (p.name || "");
-        if (name) projSel.appendChild(el("option", { value: name }, name));
-      }
-    } catch { /* 项目加载失败则只留全局项 */ }
-    msgInput.value = "";
-    dialog.showModal();
-    msgInput.focus();
   }
 
   async function submitRant(message, project) {
@@ -1545,17 +1501,10 @@ const App = (() => {
     $("confirm-cancel").addEventListener("click", Dialogs.closeConfirm);
     $("confirm-ok").addEventListener("click", Dialogs.confirmOk);
     $("help-close").addEventListener("click", () => $("help-dialog").close());
-    $("sessions-close").addEventListener("click", () => $("sessions-dialog").close());
     $("rewind-close").addEventListener("click", () => $("rewind-dialog").close());
     $("memory-close").addEventListener("click", () => $("memory-dialog").close());
     $("skills-close").addEventListener("click", () => $("skills-dialog").close());
-    $("rant-cancel").addEventListener("click", () => $("rant-dialog").close());
-    $("rant-submit").addEventListener("click", async () => {
-      const msg = $("rant-message")?.value || "";
-      const proj = $("rant-project")?.value || "";
-      $("rant-dialog").close();
-      await submitRant(msg, proj);
-    });
+    // rant 14:10:14 P6：sessions-dialog / rant-dialog 已移除（侧边栏会话区 + /open + Rant 面板覆盖）
 
     // rant 14:10:14 P2：设置面板 tab 切换（模型服务/工作目录/GitHub/外观/语言/关于）
     document.querySelectorAll("#settings-tabs .panel-tab").forEach((tab) => {
