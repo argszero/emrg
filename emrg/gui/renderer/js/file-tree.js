@@ -203,9 +203,16 @@ const FileTree = (() => {
     rootRow.appendChild(rootHead);
     const kids = el("div", { class: "ft-kids" });
     rootRow.appendChild(kids);
+    // 根目录行与普通目录行一致的可展开/收起（rant 2026-08-13T12:47:18：render() 手写根行漏绑
+    // click → 点击根目录无反应永远展开；toggleDir 已负责 expanded Map 持久 + 图标切换）
+    const st = ensure(root);
+    rootRow.addEventListener("click", (e) => {
+      if (e && e.stopPropagation) e.stopPropagation();
+      toggleDir(root, kids, st, 1);
+    });
     c.appendChild(rootRow);
     // 根自动展开（fire-and-forget；根子项 depth=1）
-    expandDir(root, kids, ensure(root), 1);
+    expandDir(root, kids, st, 1);
   }
 
   return { setRoot, setSession };
