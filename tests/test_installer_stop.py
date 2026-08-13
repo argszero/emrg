@@ -118,7 +118,12 @@ def test_make_installer_iss_has_prepare_to_install():
     assert "ExtractTemporaryFile('stop-emrg.cmd')" in content
     # 单文件：只提取/执行 stop-emrg.cmd（stop-git.ps1 已删除）
     assert "ExtractTemporaryFile('stop-git.ps1')" not in content
-    assert "/c \"' + StopScript + '\"" in content
+    # R125: rant 2026-08-13T09:24:37 — 输出重定向到 {tmp}\stop-emrg.log（2>&1），
+    # 失败时 LoadStringFromFile 读日志展示杀不掉的进程，不再让宿主手动跑诊断
+    assert '/c ""\' + StopScript + \'" > "\' + LogFile + \'" 2>&1"' in content
+    assert "LoadStringFromFile(LogFile)" in content
+    assert "Length(LogText) > 2000" in content
+    assert "Details from stop-emrg.cmd:" in content
     assert "SW_HIDE" in content  # 批处理执行不弹控制台窗口（#592 纪律）
     # rant 2026-08-11T17:56:25：中止消息含重启兜底引导（杀不掉时宿主可重启后重试）
     assert "restart the computer" in content
