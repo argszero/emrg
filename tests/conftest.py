@@ -51,3 +51,21 @@ def _guard_real_config_files(monkeypatch):
 
     monkeypatch.setattr(sched_mod, "atomic_write_yaml", guarded)
     monkeypatch.setattr(daemon_mod, "atomic_write_yaml", guarded)
+
+
+@pytest.fixture(autouse=True)
+def _redirect_sessions_index(monkeypatch, tmp_path):
+    """Redirect the global session index to a per-test tmp file.
+
+    Rant 2026-08-13T16:42:22 added a global ~/.emrg/sessions_index.json that
+    Session._save_meta_with_title / Session.delete write to on every session
+    create/append/delete. Without redirection, the whole session test suite
+    would pollute the host's real index with pytest temp paths (same class as
+    the projects.yml leak guarded above).
+    """
+    import emrg.sessions_index as sidx
+
+    monkeypatch.setattr(
+        sidx, "sessions_index_path",
+        lambda: tmp_path / "sessions_index.json",
+    )

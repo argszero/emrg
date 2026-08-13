@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from emrg.memory import SessionMemoryStore
+from emrg.sessions_index import remove_session_index, upsert_session_index
 
 logger = logging.getLogger(__name__)
 
@@ -490,6 +491,11 @@ class Session:
                 except (json.JSONDecodeError, OSError):
                     pass
         self._meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Global cross-project index (rant 2026-08-13T16:42:22): record this
+        # session so other projects can locate it. Idempotent (no-op when the
+        # path is unchanged) and never raises — a failed index write must not
+        # break session creation or message persistence.
+        upsert_session_index(self.session_id, self._dir)
 
     # ── Clear ──────────────────────────────────────────────────
 
@@ -526,6 +532,8 @@ class Session:
         if session_dir.exists():
             shutil.rmtree(session_dir)
             logger.info("session deleted: %s", session_id)
+            # Global index (rant 2026-08-13T16:42:22): drop the deleted session.
+            remove_session_index(session_id)
             return True
         logger.warning("session not found for deletion: %s", session_id)
         return False
