@@ -384,14 +384,31 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
   StopScript: string;
+  LogFile: string;
+  LogText: string;
 begin
   Result := '';
   ExtractTemporaryFile('stop-emrg.cmd');
   StopScript := ExpandConstant('{tmp}\\stop-emrg.cmd');
-  if Exec(ExpandConstant('{cmd}'), '/c "' + StopScript + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  // R125: rant 2026-08-13T09:24:37 — stop-emrg.cmd 输出重定向到日志，失败时
+  // 直接展示日志内容（列出杀不掉的进程），宿主不再需要手动跑诊断。
+  // cmd 引号嵌套：外层 /c "..."，内层脚本路径用双引号包裹，重定向在外、
+  // 仍在内层引号外（SW_HIDE 隐藏窗口后 stdout/stderr 经 > log 2>&1 落盘）。
+  LogFile := ExpandConstant('{tmp}\\stop-emrg.log');
+  if Exec(ExpandConstant('{cmd}'), '/c ""' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     if ResultCode <> 0 then
-      Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).';
+    begin
+      LogText := '';
+      if FileExists(LogFile) then
+        LogText := LoadStringFromFile(LogFile);
+      if Length(LogText) > 2000 then
+        LogText := Copy(LogText, 1, 2000);
+      if LogText <> '' then
+        Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Details from stop-emrg.cmd:' + #13#10 + #13#10 + LogText + #13#10 + #13#10 + 'Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).'
+      else
+        Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).';
+    end;
   end
   else
     Result := 'EMRG could not run the process-stop helper (stop-emrg.cmd). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry.';
