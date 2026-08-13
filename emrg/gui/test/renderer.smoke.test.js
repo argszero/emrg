@@ -114,6 +114,7 @@ const ELEMENT_IDS = [
   "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn", "open-chat-btn",
   "side-nav", "nav-sessions", "nav-projects", "nav-tasks", "nav-rants", "nav-settings",
   "panel-sessions", "panel-projects", "panel-tasks", "panel-rants", "panel-settings",
+  "project-list", "project-add-btn",
   "settings-tabs", "settings-tab-model", "settings-tab-workdir", "settings-tab-github", "settings-tab-appearance", "settings-tab-language", "settings-tab-about",
   "settings-body-model", "settings-body-workdir", "settings-body-github", "settings-body-appearance", "settings-body-language", "settings-body-about",
   "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",  "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
@@ -2725,4 +2726,60 @@ test("rant 14:10:14 P2：设置面板 tab 切换（6 tab 独立显隐 + 高亮�
   await vm.runInContext("App.switchSettingsTab('bogus')", ctx);
   await tick();
   assert.strictEqual(visible("settings-body-about"), true, "非法 tab 名应保持当前 tab");
+});
+
+test("rant 14:10:14 P5：项目面板列表（auto_evolve 徽标 + 最近活跃）+ 查看会话 + 删除刷新", async () => {
+  let removed = null;
+  const { ctx, els } = makeSandbox({
+    listProjects: async () => [
+      { name: "emrg", path: "/p/emrg", latest_session_at: "2026-08-13T07:00:00+08:00" },
+      { name: "docs", path: "/p/docs", latest_session_at: null },
+    ],
+    listTasks: async () => [
+      { name: "emrg-task", type: "evolution", config: { project: "emrg" }, interval: 1800, enabled: true },
+      // docs 无任何任务 → 无 auto_evolve 徽标（负态）
+    ],
+    listProjectSessions: async ({ projectPath }) => ({
+      sessions: projectPath === "/p/docs"
+        ? [{ session_id: "s-docs", title: "文档会话" }]
+        : [],
+    }),
+    removeProject: async (payload) => { removed = payload; return { ok: true, removed: true, closed: [] }; },
+  });
+  await tick();
+  await vm.runInContext("App.openProjectsPanel()", ctx);
+  await tick();
+  const list = els["project-list"];
+  // 2 行项目 + auto_evolve 徽标只出现在 emrg 行（有 evolution 任务）
+  const rows = list.children.filter((c) => c.className.includes("task-row"));
+  assert.strictEqual(rows.length, 2, `项目应渲染 2 行，实际 ${rows.length}`);
+  const names = rows.map((r) => r.querySelector(".task-name") ? r.querySelector(".task-name").textContent : "");
+  assert.deepStrictEqual(names, ["emrg", "docs"]);
+  const badges = rows.map((r) => r.querySelectorAll(".task-badge").length);
+  assert.strictEqual(badges[0], 1, "emrg（有 evolution 任务）应显示 auto_evolve 徽标");
+  assert.strictEqual(badges[1], 0, "docs（无 evolution 任务）不应显示徽标");
+  // 查看会话 → 点击 docs 行「会话」→ 内嵌会话列表
+  const docsRow = rows[1];
+  const sessBtns = docsRow.querySelectorAll(".model-action-btn");
+  assert.strictEqual(sessBtns.length, 2, "每行应有 查看会话 + 删除 两个操作");
+  sessBtns[0].click();
+  await tick();
+  const rows2 = list.children.filter((c) => c.className.includes("task-row"));
+  assert.ok(rows2.length >= 2, "会话视图应含 返回行 + 会话行");
+  const names2 = rows2.map((r) => r.querySelector(".task-name") ? r.querySelector(".task-name").textContent : "");
+  assert.ok(names2.some((n) => n.includes("文档会话")), `会话行应显示会话标题，实际 ${names2.join(",")}`);
+  // 返回 → 列表
+  const backBtn = rows2[0].querySelector(".model-action-btn");
+  backBtn.click();
+  await tick();
+  assert.strictEqual(list.children.filter((c) => c.className.includes("task-row")).length, 2, "返回后回到项目列表");
+  // 删除 → confirmDeleteProject（非受保护 docs）→ removeProject + 刷新
+  const docsRow2 = list.children.filter((c) => c.className.includes("task-row"))[1];
+  const delBtns = docsRow2.querySelectorAll(".model-action-btn");
+  delBtns[1].click();
+  assert.strictEqual(els["confirm-dialog"].open, true, "删除应弹确认框");
+  await vm.runInContext("EMRG_Dialogs.confirmOk()", ctx);
+  await tick();
+  assert.ok(removed, "removeProject 应被调用");
+  assert.strictEqual(removed.name, "docs");
 });

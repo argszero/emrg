@@ -38,6 +38,20 @@ const I18N = (() => {
       "nav.settingsPanel": "设置",
       "nav.placeholder": "面板内容将在后续版本填充",
 
+      // 项目面板（rant 14:10:14 P5）
+      "projects.hint": "查看会话 / 添加项目 / 删除（保留磁盘数据）",
+      "projects.add": "＋ 添加项目",
+      "projects.empty": "暂无项目（点击「添加项目」注册工作目录）",
+      "projects.added": "项目已添加：{path}",
+      "projects.addFailed": "添加项目失败：{msg}",
+      "projects.sessions": "会话",
+      "projects.autoEvolve": "演化",
+      "projects.viewSessions": "查看会话",
+      "projects.noSessions": "该项目暂无会话",
+      "projects.sessionsOf": "{project} 的会话",
+      "projects.back": "← 返回项目列表",
+      "projects.current": "当前",
+
       // 空状态欢迎屏
       "empty.hello": "你好，我是 EMRG",
       "empty.sub": "你的 AI 工作伙伴。问我任何事——写东西、整理文件、规划任务，都可以。",
@@ -439,6 +453,20 @@ const I18N = (() => {
       "nav.rantsPanel": "Rant",
       "nav.settingsPanel": "Settings",
       "nav.placeholder": "Panel content arrives in a later stage",
+
+      // Projects panel (rant 14:10:14 P5)
+      "projects.hint": "View sessions / add / remove (disk data kept)",
+      "projects.add": "＋ Add project",
+      "projects.empty": "No projects yet (click “Add project” to register a working directory)",
+      "projects.added": "Project added: {path}",
+      "projects.addFailed": "Failed to add project: {msg}",
+      "projects.sessions": "Sessions",
+      "projects.autoEvolve": "Evolve",
+      "projects.viewSessions": "Sessions",
+      "projects.noSessions": "No sessions for this project yet",
+      "projects.sessionsOf": "Sessions of {project}",
+      "projects.back": "← Back to project list",
+      "projects.current": "Current",
 
       // Empty state
       "empty.hello": "Hi, I'm EMRG",

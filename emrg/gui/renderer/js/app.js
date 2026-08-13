@@ -491,6 +491,16 @@ const App = (() => {
     }
   }
 
+  // 项目面板（rant 14:10:14 P5：打开即加载项目列表）
+  async function openProjectsPanel() {
+    if (state.activePanel !== "projects") switchPanel("projects");
+    try {
+      await Dialogs.renderProjectList();
+    } catch (e) {
+      Chat.addSystemMessage(_t("projects.addFailed", { msg: e.message }));
+    }
+  }
+
   async function doTrigger(name) {
     const n = String(name || "").trim();
     if (!n) return;
@@ -1487,12 +1497,14 @@ const App = (() => {
     for (const p of SIDE_PANELS) {
       $(`nav-${p}`)?.addEventListener("click", () => {
         switchPanel(p);
-        // P2：面板打开时加载对应数据（settings 走 showSettings 刷新全部；tasks 走任务加载）
+        // P2：面板打开时加载对应数据（settings 走 showSettings 刷新全部；tasks/projects 走各自加载）
         if (p === "settings" && state.activePanel === "settings") {
           loadEvolutionSummary();
           Dialogs.showSettings();
         } else if (p === "tasks" && state.activePanel === "tasks") {
           openTasksPanel();
+        } else if (p === "projects" && state.activePanel === "projects") {
+          openProjectsPanel();
         }
       });
     }
@@ -1536,6 +1548,19 @@ const App = (() => {
     // rant 14:10:14 P2：设置面板 tab 切换（模型服务/工作目录/GitHub/外观/语言/关于）
     document.querySelectorAll("#settings-tabs .panel-tab").forEach((tab) => {
       tab.addEventListener("click", () => switchSettingsTab(tab.dataset.settingsTab));
+    });
+    // rant 14:10:14 P5：项目面板「添加项目」→ 选目录 → 注册
+    $("project-add-btn")?.addEventListener("click", async () => {
+      try {
+        const res = await window.emrg.pickProjectDir();
+        if (res && res.path) {
+          await window.emrg.registerProject({ path: res.path });
+          Chat.addSystemMessage(_t("projects.added", { path: res.path }));
+          await Dialogs.renderProjectList();
+        }
+      } catch (e) {
+        Chat.addSystemMessage(_t("projects.addFailed", { msg: e.message }));
+      }
     });
 
     // 设置/首启对话框：Enter 提交（与重命名/模型表单一致的交互）
@@ -1695,6 +1720,7 @@ const App = (() => {
     switchPanel, // rant 14:10:14 P1：侧边栏面板切换（导出供测试）
     switchSettingsTab, // rant 14:10:14 P2：设置面板 tab 切换（导出供测试）
     openTasksPanel, // rant 14:10:14 P3：任务面板打开 + 加载（导出供测试）
+    openProjectsPanel, // rant 14:10:14 P5：项目面板打开 + 加载（导出供测试）
     refreshSessions,
     showConvMenu,
     handleEvent,
