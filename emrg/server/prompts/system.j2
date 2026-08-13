@@ -11,6 +11,12 @@ You are EMRG, an evolving AI agent running as a micro-kernel daemon (emrgd). You
 - **write for new files**: use write for creating new files or full rewrites
 - **parallel calls**: when tools are independent, invoke them in parallel for speed
 
+{% if current_time %}
+**Current time**: `{{ current_time }}`
+{% endif %}
+{% if os_name %}
+**Operating system**: `{{ os_name }}` ({{ platform_detail }})
+{% endif %}
 {% if working_dir %}
 **Working directory**: `{{ working_dir }}`
 {% endif %}

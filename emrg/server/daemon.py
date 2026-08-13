@@ -1038,6 +1038,11 @@ class EmrgServer:
         """
         ctx: dict[str, Any] = {}
 
+        # ── Environment ──
+        ctx["current_time"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        ctx["os_name"] = platform.system()
+        ctx["platform_detail"] = platform.platform()
+
         # ── Working Directory ──
         if session:
             ctx["working_dir"] = str(session.cwd)

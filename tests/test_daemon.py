@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -223,6 +225,42 @@ def test_context_section_no_files(tmp_path):
     session = Session.create_with_id("ctx-test", tmp_path)
     result = server._collect_project_context(session)
     assert result == []
+
+
+def test_system_prompt_environment_time_and_os(tmp_path):
+    """system.j2 renders Current time + Operating system env info.
+
+    Rant 2026-08-13T14:01:46: agent must know "what time it is now"
+    (tz-aware local time, not UTC) and what platform it runs on.
+    """
+    server = _make_server()
+    session = Session.create_with_id("env-test", tmp_path)
+    rendered = server._build_system_prompt(session)
+
+    # Current time: tz-aware local ISO, seconds precision
+    assert "**Current time**: `" in rendered
+    m = re.search(r"\*\*Current time\*\*: `([^`]+)`", rendered)
+    assert m is not None
+    parsed = datetime.fromisoformat(m.group(1))
+    assert parsed.tzinfo is not None  # local tz-aware, never naive UTC
+
+    # OS name + platform detail present
+    assert "**Operating system**: `" in rendered
+    assert "Darwin" in rendered or "Windows" in rendered or "Linux" in rendered
+
+    # system.md debug output written
+    assert (session.dir_path / "system.md").exists()
+    md = (session.dir_path / "system.md").read_text(encoding="utf-8")
+    assert "Current time" in md and "Operating system" in md
+
+
+def test_system_prompt_environment_without_session(tmp_path):
+    """Env info renders even with no session (current_time/os always known)."""
+    server = _make_server()
+    rendered = server._build_system_prompt()
+    assert "**Current time**: `" in rendered
+    assert "**Operating system**: `" in rendered
+    assert "**Working directory**" not in rendered
 
 
 def test_context_section_single_file(tmp_path):
