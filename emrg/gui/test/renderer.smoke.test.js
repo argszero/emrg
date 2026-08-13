@@ -990,6 +990,19 @@ test("P2 框架：右栏 Tab 栏渲染 + 切换 pane 显隐", async () => {
   assert.ok(els["result-list"].classList.contains("active"), "切回产物 pane");
 });
 
+test("rant 20:49:45：产物 pane 显示由 .result-pane 控制——.result-list 不得重声明 display", () => {
+  // CSS 源级断言（沙箱无 CSS 引擎）。根因：.result-list 曾声明 display:flex（同特异性 0,1,0
+  // 后定义胜出）覆盖 .result-pane{display:none}，导致文件 tab 下产物 pane 恒显示。
+  const css = fs.readFileSync(path.join(RENDERER_CSS, "layout.css"), "utf8");
+  // 定位独立 .result-list 规则（行首选择器，排除 #result-panel.collapsed .result-list 前缀形态）
+  const start = css.indexOf("\n.result-list {") + 1;
+  const end = css.indexOf("\n.result-empty {", start); // 下一个独立规则
+  const block = css.slice(start, end > start ? end : start + 400);
+  assert.ok(start > 0, ".result-list 独立规则应存在");
+  assert.ok(!/display\s*:/.test(block), ".result-list 不得重声明 display（显隐由 .result-pane/.result-pane.active 控制）");
+  assert.ok(!/flex-direction\s*:/.test(block), ".result-list 不得重声明 flex-direction（.result-pane.active 已提供）");
+});
+
 test("P2 框架：resizer 拖拽改宽度 + .dragging 抑制 transition", async () => {
   const { ctx, win, els } = makeSandbox();
   await tick();
