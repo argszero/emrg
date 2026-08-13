@@ -74,6 +74,11 @@
 .workspace-view.active {
   display: flex;
 }
+/* 面板视图内容包装（v0.1 .side-panel-body 视觉对等：正文级字号 + 次级文字色） */
+.workspace-view-body {
+  font-size: var(--fs-secondary);
+  color: var(--text-3);
+}
 
 /* rant 14:10:14 P2：设置面板 tab（模型服务/工作目录/GitHub/外观/语言/关于） */
 .panel-tabs {

@@ -31,12 +31,6 @@ const I18N = (() => {
       "nav.tasks": "任务",
       "nav.rants": "Rant",
       "nav.settings": "设置",
-      "nav.sessionsPanel": "会话",
-      "nav.projectsPanel": "项目",
-      "nav.tasksPanel": "任务",
-      "nav.rantsPanel": "Rant",
-      "nav.settingsPanel": "设置",
-      "nav.placeholder": "面板内容将在后续版本填充",
 
       // 项目面板（rant 14:10:14 P5）
       "projects.hint": "查看会话 / 添加项目 / 删除（保留磁盘数据）",
@@ -460,12 +454,6 @@ const I18N = (() => {
       "nav.tasks": "Tasks",
       "nav.rants": "Rant",
       "nav.settings": "Settings",
-      "nav.sessionsPanel": "Sessions",
-      "nav.projectsPanel": "Projects",
-      "nav.tasksPanel": "Tasks",
-      "nav.rantsPanel": "Rant",
-      "nav.settingsPanel": "Settings",
-      "nav.placeholder": "Panel content arrives in a later stage",
 
       // Projects panel (rant 14:10:14 P5)
       "projects.hint": "View sessions / add / remove (disk data kept)",
