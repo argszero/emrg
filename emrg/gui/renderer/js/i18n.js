@@ -218,8 +218,6 @@ const I18N = (() => {
       "help.close": "关闭",
 
       // 会话 / 回退 / 记忆 / 技能对话框
-      "sessions.title": "切换对话",
-      "sessions.desc": "点击切换，或输入 /resume <id> 直接切换。",
       "openSession.title": "打开会话",
       "openSession.desc": "选择项目后选择要打开的会话（跨项目多开）。",
       "openSession.titleProject": "打开会话 — {project}",
@@ -254,12 +252,6 @@ const I18N = (() => {
       "skills.desc": "EMRG 已加载的技能。",
 
       // 进化 / 任务
-      "rant.title": "🧬 进化 — 告诉 EMRG 往哪里走",
-      "rant.desc": "你的输入会驱动 EMRG 的自我进化——它会认真读，并据此改进自己。",
-      "rant.project": "项目（可选）",
-      "rant.message": "你的想法",
-      "rant.placeholder": "哪里不好用、想要什么新功能、或者希望它怎么改进…",
-      "rant.submit": "驱动进化",
 
       // Rant 面板（rant 14:10:14 P4）
       "rants.filterAll": "全部",
@@ -655,8 +647,6 @@ const I18N = (() => {
       "help.close": "Close",
 
       // Sessions / rewind / memory / skills dialogs
-      "sessions.title": "Switch conversation",
-      "sessions.desc": "Click to switch, or type /resume <id> to switch directly.",
       "openSession.title": "Open session",
       "openSession.desc": "Pick a project, then pick a session to open (multi-project tabs).",
       "openSession.titleProject": "Open session — {project}",
@@ -691,12 +681,6 @@ const I18N = (() => {
       "skills.desc": "Skills EMRG has loaded.",
 
       // Evolution / tasks
-      "rant.title": "🧬 Evolve — tell EMRG where to go",
-      "rant.desc": "Your input drives EMRG's self-evolution — it reads carefully and improves itself.",
-      "rant.project": "Project (optional)",
-      "rant.message": "Your thoughts",
-      "rant.placeholder": "What's not working, what features you want, or how it should improve…",
-      "rant.submit": "Evolve",
 
       // Rant panel (rant 14:10:14 P4)
       "rants.filterAll": "All",
