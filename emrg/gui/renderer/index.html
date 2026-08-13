@@ -61,7 +61,7 @@
       <section class="workspace-view" id="panel-projects" data-view="projects">
         <div class="workspace-view-body">
           <!-- rant 14:10:14 P5：项目面板（复用 listProjects/listProjectSessions/registerProject/removeProject IPC） -->
-          <div class="hint" style="margin-bottom:6px;" data-i18n="projects.hint">查看会话 / 添加项目 / 删除（保留磁盘数据）</div>
+          <h2 class="workspace-view-title" data-i18n="projects.title">项目管理</h2>
           <div id="project-list" class="task-list"></div>
           <div style="display:flex;gap:8px;margin-top:8px;">
             <button type="button" id="project-add-btn" class="btn btn-ghost" style="flex:1;" data-i18n="projects.add">＋ 添加项目</button>
@@ -71,6 +71,7 @@
       <section class="workspace-view" id="panel-tasks" data-view="tasks">
         <div class="workspace-view-body">
           <!-- rant 14:10:14 P3：任务管理从设置迁出（替代 settings 内任务区 + tasks-dialog） -->
+          <h2 class="workspace-view-title" data-i18n="tasks.title">任务管理</h2>
           <div class="hint" style="margin-bottom:6px;" data-i18n="settings.tasksHint">管理定时任务与自定义任务类型（内置类型只读）</div>
           <div id="task-list" class="task-list"></div>
           <div style="display:flex;gap:8px;margin-top:8px;">
@@ -130,11 +131,19 @@
       <section class="workspace-view" id="panel-rants" data-view="rants">
         <div class="workspace-view-body">
           <!-- rant 14:10:14 P4：rant 面板（列表筛选 + 详情 + 新建） -->
+          <h2 class="workspace-view-title" data-i18n="rants.title">Rant 管理</h2>
           <div class="panel-tabs" id="rant-filter-tabs" role="tablist" style="margin-bottom:var(--sp-2);">
             <button type="button" class="panel-tab active" id="rant-filter-all" data-rant-filter="" data-i18n="rants.filterAll">全部</button>
             <button type="button" class="panel-tab" id="rant-filter-pending" data-rant-filter="pending" data-i18n="rants.filterPending">待处理</button>
             <button type="button" class="panel-tab" id="rant-filter-inprogress" data-rant-filter="in_progress" data-i18n="rants.filterInProgress">进行中</button>
             <button type="button" class="panel-tab" id="rant-filter-completed" data-rant-filter="completed" data-i18n="rants.filterCompleted">已完成</button>
+          </div>
+          <div class="rant-head">
+            <span class="rant-col-time" data-i18n="rants.colTime">时间</span>
+            <span class="rant-col-project" data-i18n="rants.colProject">项目</span>
+            <span class="rant-col-status" data-i18n="rants.colStatus">状态</span>
+            <span class="rant-col-progress" data-i18n="rants.colProgress">进度</span>
+            <span class="rant-col-content" data-i18n="rants.colContent">内容</span>
           </div>
           <div id="rant-list" class="task-list"></div>
           <div style="display:flex;gap:8px;margin-top:8px;">

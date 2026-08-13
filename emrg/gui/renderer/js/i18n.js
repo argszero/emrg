@@ -32,7 +32,7 @@ const I18N = (() => {
       "nav.settings": "设置",
 
       // 项目面板（rant 14:10:14 P5）
-      "projects.hint": "查看会话 / 添加项目 / 删除（保留磁盘数据）",
+      "projects.title": "项目管理",
       "projects.add": "＋ 添加项目",
       "projects.empty": "暂无项目（点击「添加项目」注册工作目录）",
       "projects.added": "项目已添加：{path}",
@@ -91,6 +91,7 @@ const I18N = (() => {
       "settings.aboutTitle": "关于",
       "settings.aboutDesc": "EMRG 是一个会自我进化的 AI 智能体——每次改进都会自动汇报，你可以随时在这里看到它的成长。",
       "settings.recentTitle": "最近改进",
+      "tasks.title": "任务管理",
       "settings.tasksHint": "管理定时任务与自定义任务类型（内置类型只读）",
       "settings.taskAdd": "＋ 添加任务",
       "settings.taskTemplates": "自定义类型",
@@ -241,6 +242,12 @@ const I18N = (() => {
       // 进化 / 任务
 
       // Rant 面板（rant 14:10:14 P4）
+      "rants.title": "Rant 管理",
+      "rants.colTime": "时间",
+      "rants.colProject": "项目",
+      "rants.colStatus": "状态",
+      "rants.colProgress": "进度",
+      "rants.colContent": "内容",
       "rants.filterAll": "全部",
       "rants.filterPending": "待处理",
       "rants.filterInProgress": "进行中",
@@ -258,7 +265,6 @@ const I18N = (() => {
       "rants.statusPending": "待处理",
       "rants.statusInProgress": "进行中",
       "rants.statusCompleted": "已完成",
-      "rants.detail": "完整内容",
       "rants.noProgress": "（无进度说明）",
 
       // / 指令 hint（commands.js 补全菜单）
@@ -440,7 +446,7 @@ const I18N = (() => {
       "nav.settings": "Settings",
 
       // Projects panel (rant 14:10:14 P5)
-      "projects.hint": "View sessions / add / remove (disk data kept)",
+      "projects.title": "Project Management",
       "projects.add": "＋ Add project",
       "projects.empty": "No projects yet (click “Add project” to register a working directory)",
       "projects.added": "Project added: {path}",
@@ -499,6 +505,7 @@ const I18N = (() => {
       "settings.aboutTitle": "About",
       "settings.aboutDesc": "EMRG is a self-evolving AI agent — it reports every improvement, and you can watch it grow right here.",
       "settings.recentTitle": "Recent improvements",
+      "tasks.title": "Task Management",
       "settings.tasksHint": "Manage scheduled tasks and custom task types (builtin types are read-only)",
       "settings.taskAdd": "＋ Add task",
       "settings.taskTemplates": "Custom types",
@@ -649,6 +656,12 @@ const I18N = (() => {
       // Evolution / tasks
 
       // Rant panel (rant 14:10:14 P4)
+      "rants.title": "Rant Management",
+      "rants.colTime": "Time",
+      "rants.colProject": "Project",
+      "rants.colStatus": "Status",
+      "rants.colProgress": "Progress",
+      "rants.colContent": "Content",
       "rants.filterAll": "All",
       "rants.filterPending": "Pending",
       "rants.filterInProgress": "In progress",
@@ -666,7 +679,6 @@ const I18N = (() => {
       "rants.statusPending": "Pending",
       "rants.statusInProgress": "In progress",
       "rants.statusCompleted": "Completed",
-      "rants.detail": "Full content",
       "rants.noProgress": "(no progress note)",
 
       // / command hints
@@ -877,7 +889,14 @@ const I18N = (() => {
       if (typeof document === "undefined" || !document.querySelectorAll) return;
       document.querySelectorAll("[data-i18n]").forEach((node) => {
         const key = node.getAttribute("data-i18n");
-        if (key) node.textContent = t(key);
+        if (!key) return;
+        const text = t(key);
+        // rant 21:46:53：只替换首个文本节点，保留 label 内的子元素控件（input/select/textarea）
+        // ——整体 textContent 赋值会清空含控件 label（如 <label data-i18n>任务名 <input/></label>）的子元素，
+        //    导致任务/模板表单控件消失、「添加任务」点击无响应。
+        const first = node.firstChild;
+        if (first && first.nodeType === 3) first.nodeValue = text;
+        else node.textContent = text;
       });
       document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
         const key = node.getAttribute("data-i18n-placeholder");
