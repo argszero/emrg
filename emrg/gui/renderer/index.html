@@ -41,7 +41,6 @@
       <nav id="conv-list"></nav>
       <div class="sidebar-footer">
         <span id="status-dot" class="status-dot gray" title="连接状态" data-i18n-title="sidebar.statusTitle"></span>
-        <button id="settings-btn" class="btn btn-ghost" style="margin-left:auto;padding:6px 12px;min-height:30px;" data-i18n="sidebar.settings">设置</button>
       </div>
     </aside>
 
@@ -159,7 +158,8 @@
         </div>
       </section>
       <section class="workspace-view" id="panel-settings" data-view="settings">
-        <!-- rant 14:10:14 P2：设置改为面板，6 tab（模型服务/工作目录/GitHub/外观/语言/关于） -->
+        <!-- rant 21:49:51：设置面板加标题（对齐 Rant/项目/任务面板）；rant 14:10:14 P2：设置改为面板，6 tab -->
+        <h2 class="workspace-view-title" data-i18n="settings.title">设置</h2>
         <div class="panel-tabs" id="settings-tabs" role="tablist">
           <button type="button" class="panel-tab active" id="settings-tab-model" data-settings-tab="model" data-i18n="settings.groupModel">模型服务</button>
           <button type="button" class="panel-tab" id="settings-tab-workdir" data-settings-tab="workdir" data-i18n="settings.groupWorkdir">工作目录</button>
