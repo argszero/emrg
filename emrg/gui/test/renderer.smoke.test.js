@@ -116,12 +116,12 @@ function makeEl(id) {
 }
 
 const ELEMENT_IDS = [
-  "chat-view", "input", "send-btn", "stop-btn", "conv-list", "open-sessions", "open-sessions-label", "status-dot", "settings-btn",
+  "workspace", "input", "send-btn", "stop-btn", "conv-list", "open-sessions", "open-sessions-label", "status-dot", "settings-btn",
   "open-session-dialog", "open-session-list", "open-session-title", "open-session-desc", "open-session-new", "open-session-cancel", "open-session-new-session",
   "new-session-dialog", "new-session-list", "new-session-new", "new-session-cancel",
   "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn", "open-chat-btn",
   "side-nav", "nav-sessions", "nav-projects", "nav-tasks", "nav-rants", "nav-settings",
-  "panel-sessions", "panel-projects", "panel-tasks", "panel-rants", "panel-settings",
+  "panel-projects", "panel-tasks", "panel-rants", "panel-settings",
   "project-list", "project-add-btn",
   "rant-filter-tabs", "rant-filter-all", "rant-filter-pending", "rant-filter-inprogress", "rant-filter-completed",
   "rant-list", "rant-new-btn", "rant-form", "rant-form-project", "rant-form-message", "rant-form-cancel", "rant-form-submit",
@@ -129,7 +129,7 @@ const ELEMENT_IDS = [
   "settings-body-model", "settings-body-workdir", "settings-body-github", "settings-body-appearance", "settings-body-language", "settings-body-about",
   "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",  "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
   "welcome-model", "welcome-project-dir", "welcome-pick-btn", "welcome-save", "confirm-dialog",
-  "confirm-title", "confirm-message", "confirm-cancel", "confirm-ok", "main",
+  "confirm-title", "confirm-message", "confirm-cancel", "confirm-ok", "main", "composer-wrap",
   "rename-dialog", "rename-input", "rename-cancel", "rename-ok", "ctx-menu",
   "model-list", "add-model-btn", "model-form", "model-form-name", "model-form-id",
   "model-form-vision", "model-form-save", "model-form-cancel", "back-to-bottom",
@@ -302,8 +302,8 @@ test("流式 delta 追加 + 工具行 running→done 状态流转", async () => 
     EMRG_Chat.handleToolEnd({ tool_call_id: "t1", tool_name: "read", content: "file contents", elapsed: 0.3 });
     EMRG_Chat.handleDone({ request_id: "rid-1" });
     return {
-      chatChildren: $("chat-view").children.length,
-      toolRowClass: $("chat-view").children[1] ? $("chat-view").children[1].className : "none",
+      chatChildren: $("workspace").children.length,
+      toolRowClass: $("workspace").children[1] ? $("workspace").children[1].className : "none",
     };
   })()`, ctx);
   assert.strictEqual(r.chatChildren, 2, "用户流 + 工具行 2 个节点");
@@ -324,7 +324,7 @@ test("rant 21:57:10：交替文本/工具按顺序交错展示（每段文本独
     EMRG_Chat.handleToolStart({ request_id: "rid-1", tool_call_id: "t2", tool_name: "bash" });
     EMRG_Chat.handleToolEnd({ tool_call_id: "t2", tool_name: "bash", content: "out2", elapsed: 0.2 });
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "文本段3" }]);
-    const children = $("chat-view").children;
+    const children = $("workspace").children;
     const kinds = [];
     const texts = [];
     const isToolRow = (c) =>
@@ -342,8 +342,8 @@ test("rant 21:57:10：交替文本/工具按顺序交错展示（每段文本独
     // done 后该 rid 的所有文本段都应渲染（typing 移除）
     EMRG_Chat.handleDone({ request_id: "rid-1" });
     let typingAfter = 0;
-    for (let i = 0; i < $("chat-view").children.length; i++) {
-      const c = $("chat-view").children[i];
+    for (let i = 0; i < $("workspace").children.length; i++) {
+      const c = $("workspace").children[i];
       if (c.className.includes("typing")) typingAfter++;
     }
     return {
@@ -367,7 +367,7 @@ test("rant 21:08：工具完成后 spinner 停止（元素移除，不再转圈�
     App.state.sessionId = "s1";
     App.state.ownStreamRequestId = "rid-1";
     EMRG_Chat.handleToolStart({ request_id: "rid-1", tool_call_id: "t1", tool_name: "read" });
-    const row = $("chat-view").children[1]; // children[0] 是助手文本节点，[1] 是工具行
+    const row = $("workspace").children[1]; // children[0] 是助手文本节点，[1] 是工具行
     const spinnerBefore = (row.querySelector(".tool-spinner") !== null);
     EMRG_Chat.handleToolEnd({ tool_call_id: "t1", tool_name: "read", content: "ok", elapsed: 0.3 });
     const spinnerAfter = (row.querySelector(".tool-spinner") !== null);
@@ -385,7 +385,7 @@ test("rant 21:09：文本段被工具封存后 typing 光标移除（只留最�
     App.state.sessionId = "s1";
     App.state.ownStreamRequestId = "rid-1";
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "第一段" }]);
-    const firstNode = $("chat-view").children[0];
+    const firstNode = $("workspace").children[0];
     const firstBody = firstNode.querySelector(".msg-body") || firstNode;
     const typingBefore = firstBody.classList.contains("typing");
     EMRG_Chat.handleToolStart({ request_id: "rid-1", tool_call_id: "t1", tool_name: "read" });
@@ -403,7 +403,7 @@ test("rant 21:10：done 渲染剥离 ✦ 前缀（标题/列表/代码围栏不�
     App.state.sessionId = "s1";
     App.state.ownStreamRequestId = "rid-1";
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "# 标题\\n- 列表项\\n\\n\\u0060\\u0060\\u0060python\\nprint(1)\\n\\u0060\\u0060\\u0060" }]);
-    const node = $("chat-view").children[0];
+    const node = $("workspace").children[0];
     const body = node.querySelector(".msg-body") || node;
     // 模拟真实 DOM：body 内先有 ✦ 标记 span（textContent 含前缀）
     body.textContent = "✦ " + body.textContent;
@@ -436,7 +436,7 @@ test("rant 14:11：首条消息后欢迎屏立即隐藏（append 同步 updateEm
     EMRG_Chat.addUserMessage("hello");
     return {
       emptyHidden: $("empty-state").classList.contains("hidden"),
-      msgCount: $("chat-view").children.length,
+      msgCount: $("workspace").children.length,
     };
   })()`, ctx);
   assert.strictEqual(r.msgCount, 1, "消息应已追加");
@@ -466,7 +466,7 @@ test("rant 21:00:28：块投影——流式中标题即时渲染，稳定块缓�
       },
     };
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "# 标题" }]);
-    const body = $("chat-view").children[0].querySelector(".msg-body");
+    const body = $("workspace").children[0].querySelector(".msg-body");
     const stream = body.querySelector(".md-stream");
     const live1 = stream.children[stream.children.length - 1]; // 尾部 live 块
     const h2WhileStreaming = live1.className.includes("live") && live1.innerHTML.includes("<h2>");
@@ -503,7 +503,7 @@ test("rant 21:00:28：代码块围栏未闭合纯文本不高亮，闭合后转�
       },
     };
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "before\\n\\\`\\\`\\\`python\\nprint(1)" }]);
-    const body = $("chat-view").children[0].querySelector(".msg-body");
+    const body = $("workspace").children[0].querySelector(".msg-body");
     const live = body.querySelector(".md-stream");
     const liveDiv = live.children[live.children.length - 1]; // 尾部 live 块（单类选择器 mock 限制）
     const unclosedPlain = liveDiv.className.includes("live") && liveDiv.innerHTML.startsWith("<pre class=\\"stream-code\\">") && !liveDiv.innerHTML.includes("hljs");
@@ -529,7 +529,7 @@ test("rant 21:00:28：done 收尾 live 块转 full（mark span 保留，typing �
       lexer: (text) => [{ type: "paragraph", raw: text, text }],
     };
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "部分" }]);
-    const node = $("chat-view").children[0];
+    const node = $("workspace").children[0];
     const body = node.querySelector(".msg-body");
     EMRG_Chat.handleDone({ request_id: "rid-1" });
     await new Promise((res) => setTimeout(res, 10)); // 等 streamFinalize microtask
@@ -552,7 +552,7 @@ test("rant 21:00:28：真实 marked 集成——块投影与真实分词一致�
   const r = await vm.runInContext(`(async function() {
     App.state.sessionId = "s1";
     App.state.ownStreamRequestId = "rid-1";
-    const bodyOf = () => $("chat-view").children[0].querySelector(".msg-body");
+    const bodyOf = () => $("workspace").children[0].querySelector(".msg-body");
     const liveOf = (b) => {
       const s = b.querySelector(".md-stream");
       return s.children[s.children.length - 1]; // 尾部 live 块（单类选择器 mock 限制）
@@ -609,10 +609,10 @@ test("rant 14:11：done 后残留 delta 被丢弃，不建孤儿节点", async (
     App.state.ownStreamRequestId = "rid-1";
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "你" }]);
     EMRG_Chat.handleDone({ request_id: "rid-1" });
-    const afterDone = $("chat-view").children.length;
+    const afterDone = $("workspace").children.length;
     // 模拟 16ms 批量定时器在 done 之后才 flush 的残留 delta（G122 竞态）
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "残留" }]);
-    const afterStale = $("chat-view").children.length;
+    const afterStale = $("workspace").children.length;
     return { afterDone, afterStale };
   })()`, ctx);
   assert.strictEqual(r.afterDone, 1, "done 前 1 个节点");
@@ -626,7 +626,7 @@ test("rant 14:11：cancelled 事件清除在途节点 typing 光标", async () =
     App.state.sessionId = "s1";
     App.state.ownStreamRequestId = "rid-1";
     EMRG_Chat.handleDelta([{ request_id: "rid-1", content: "部分" }]);
-    const node = $("chat-view").children[0];
+    const node = $("workspace").children[0];
     const body = node.querySelector(".msg-body") || node;
     body.classList.add("typing");
     const typingBefore = body.classList.contains("typing");
@@ -1419,7 +1419,7 @@ test("工具调用上限中断 → 系统提示可继续（对齐 TUI，跨项�
     'EMRG_Chat.handleDone({ request_id: "rid-max", content: "Exceeded maximum tool call rounds (30).", done: true })',
     ctx
   );
-  const texts = (els["chat-view"].children || []).map((c) => c.textContent).join("|");
+  const texts = (els["workspace"].children || []).map((c) => c.textContent).join("|");
   assert.ok(/继续/.test(texts), `应提示可继续，实际: ${texts}`);
 });
 
@@ -1430,7 +1430,7 @@ test("正常 done 帧不触发上限提示（无假阳性）", async () => {
     'EMRG_Chat.handleDone({ request_id: "rid-ok", content: "完成了！", done: true })',
     ctx
   );
-  const texts = (els["chat-view"].children || []).map((c) => c.textContent).join("|");
+  const texts = (els["workspace"].children || []).map((c) => c.textContent).join("|");
   assert.ok(!/继续/.test(texts), "正常完成不应出现继续提示");
 });
 
@@ -1490,19 +1490,19 @@ test("P3: registerContainer 后该会话渲染进独立容器；无 sid 回退�
   await tick();
   // 注册独立容器（P4 openSessions 语义）——直接经 ctx 导出的 API 挂 Node 侧元素
   const extra = document.createElement("div");
-  extra.id = "chat-view-sess-c";
+  extra.id = "session-view-sess-c";
   els["main"].appendChild(extra);
   ctx.EMRG_Chat.registerContainer("sess-c", extra);
   ctx.EMRG_Chat.addSystemMessage("hello-c", "sess-c");
   ctx.EMRG_Chat.addSystemMessage("hello-default");
   assert.strictEqual(extra.children.length, 1, "registered container receives its session's nodes");
   assert.strictEqual(extra.children[0].textContent, "hello-c");
-  assert.strictEqual(els["chat-view"].children.length, 1, "default container receives un-sid'd nodes");
+  assert.strictEqual(els["workspace"].children.length, 1, "default container receives un-sid'd nodes");
   // unregister → 状态释放，再发同 sid 消息回落默认容器
   ctx.EMRG_Chat.unregisterContainer("sess-c");
   ctx.EMRG_Chat.addSystemMessage("after-unreg", "sess-c");
   assert.strictEqual(extra.children.length, 1, "unregistered container no longer receives");
-  assert.strictEqual(els["chat-view"].children.length, 2, "falls back to default container");
+  assert.strictEqual(els["workspace"].children.length, 2, "falls back to default container");
 });
 
 // ── P3 slice 1（rant 15:07:19）：renderer sessionsBySid 会话级状态表 ─────
@@ -1608,7 +1608,7 @@ test("P2 queue: task_queued shows queued position note", async () => {
     'App.handleEvent({ type: "task_queued", sid: "sess-1", data: { position: 2 } });',
     ctx
   );
-  const texts = [...els["chat-view"].children].map((c) => c.textContent).join("|");
+  const texts = [...els["workspace"].children].map((c) => c.textContent).join("|");
   assert.ok(texts.includes("位置 2"), "task_queued shows position note");
 });
 
@@ -1648,7 +1648,7 @@ test("P2 queue: queued_requeue re-sends with same requestId + re-tracks (review 
   assert.strictEqual(ctx.App.state.queuedSends.has("sess-1"), true, "re-tracked after requeue (daemon may re-queue)");
   assert.strictEqual(ctx.App.state.queuedSends.get("sess-1")[0].requestId, "req-queue", "same requestId tracked");
   assert.strictEqual(ctx.App.state.sessionsBySid.get("sess-1").busy, true, "requeue marks session busy");
-  const texts = [...els["chat-view"].children].map((c) => c.textContent).join("|");
+  const texts = [...els["workspace"].children].map((c) => c.textContent).join("|");
   assert.ok(texts.includes("重新发送 1"), "requeue note shown");
 });
 
@@ -1685,7 +1685,7 @@ test("P2 queue: queued_cancelled clears queue + note", async () => {
     ctx
   );
   assert.strictEqual(ctx.App.state.queuedSends.has("sess-1"), false, "queue cleared");
-  const texts = [...els["chat-view"].children].map((c) => c.textContent).join("|");
+  const texts = [...els["workspace"].children].map((c) => c.textContent).join("|");
   assert.ok(texts.includes("排队消息已取消"), "cancelled note shown");
 });
 
@@ -1707,7 +1707,7 @@ test("P3 s2: activateSessionView 建独立容器并切换 display（仅激活可
   assert.notStrictEqual(va, vb, "two distinct per-session views");
   assert.strictEqual(va.classList.contains("active"), false, "sess-a deactivated after switch");
   assert.strictEqual(vb.classList.contains("active"), true, "sess-b is the active view");
-  assert.strictEqual(els["chat-view"].children.length, 2, "both views live under the #chat-view wrapper");
+  assert.strictEqual(els["workspace"].children.length, 2, "both views live under the #workspace wrapper");
   // 无 sid 渲染 → 落激活会话容器（slice 2 回退链第二跳）
   ctx.EMRG_Chat.addSystemMessage("to-active");
   assert.strictEqual(vb.children.length, 1, "unsid'd node goes to active session view");
@@ -1887,7 +1887,7 @@ test("P4 s2: closeOpenSession 关闭激活会话 → 切到剩余打开会话 + 
   await tick();
   assert.strictEqual(closed && closed.sessionId, "sess-a", "closeSession IPC called with sid");
   assert.strictEqual(
-    els["chat-view"].children.some((c) => c.dataset && c.dataset.sid === "sess-a"),
+    els["workspace"].children.some((c) => c.dataset && c.dataset.sid === "sess-a"),
     false,
     "closed session container removed from wrapper"
   );
@@ -2068,8 +2068,8 @@ test("P6: switchSession 超限（too many open sessions）→ 本地化提示（
   await tick();
   await vm.runInContext('App.switchSession("s-over", { projectPath: "/p/x" })', ctx);
   await tick();
-  // Chat.addSystemMessage 渲染进 chat-view 容器（系统消息节点 textContent）
-  const texts = els["chat-view"].children.map((c) => c.textContent || "");
+  // Chat.addSystemMessage 渲染进 workspace 容器（系统消息节点 textContent）
+  const texts = els["workspace"].children.map((c) => c.textContent || "");
   const last = texts[texts.length - 1] || "";
   assert.ok(
     last.includes("上限") || last.includes("Too many open sessions"),
@@ -2089,11 +2089,11 @@ test("P6: model_set 多连接重复广播幂等 — 状态一致、无副作用�
   await vm.runInContext('App.handleEvent({ type: "command_result", sid: "conn-a", data: { type: "model_set", model: "m2" } });', ctx);
   assert.strictEqual(ctx.App.state.model, "m2", "model updated after first broadcast");
   assert.strictEqual(els["model-switcher-label"].textContent, "m2", "switcher label updated");
-  const msgsAfterA = els["chat-view"].children.length;
+  const msgsAfterA = els["workspace"].children.length;
   // 连接 B（另一会话连接）重复收同一 model_set → 无副作用（无新系统消息/无崩）
   await vm.runInContext('App.handleEvent({ type: "command_result", sid: "conn-b", data: { type: "model_set", model: "m2" } });', ctx);
   assert.strictEqual(ctx.App.state.model, "m2", "idempotent: same value, no change");
-  assert.strictEqual(els["chat-view"].children.length, msgsAfterA, "no extra system messages from duplicate broadcast");
+  assert.strictEqual(els["workspace"].children.length, msgsAfterA, "no extra system messages from duplicate broadcast");
   // 再次重复（三连接场景）仍稳定
   await vm.runInContext('App.handleEvent({ type: "command_result", sid: "conn-c", data: { type: "model_set", model: "m2" } });', ctx);
   assert.strictEqual(ctx.App.state.model, "m2", "still idempotent after third broadcast");
@@ -2215,7 +2215,7 @@ test("rant 09:18：启动主动更新提示——有新版本且未提示过 →
     window.emrg.updateCheckPrompted = async (p) => { prompted = p; };
     await EMRG_Dialogs.promptUpdateAtStartup();
     const texts = [];
-    for (let i = 0; i < $("chat-view").children.length; i++) texts.push($("chat-view").children[i].textContent);
+    for (let i = 0; i < $("workspace").children.length; i++) texts.push($("workspace").children[i].textContent);
     return { n: texts.length, joined: texts.join("|"), prompted: JSON.stringify(prompted) };
   })()`, ctx);
   assert.ok(r.n >= 1, "应输出一条系统消息");
@@ -2230,7 +2230,7 @@ test("rant 09:18：启动提示幂等——已提示过/未启用/无更新 → 
   await tick();
   const r = await vm.runInContext(`(async function() {
     await EMRG_Dialogs.promptUpdateAtStartup();
-    return { n: $("chat-view").children.length };
+    return { n: $("workspace").children.length };
   })()`, ctx);
   assert.strictEqual(r.n, 0, "已提示过同版本 → 不得重复提示");
 });
@@ -2463,7 +2463,7 @@ test("rant 12:10：启动提示——已下载 → 系统消息“已就绪”�
   const r = await vm.runInContext(`(async function() {
     await EMRG_Dialogs.promptUpdateAtStartup();
     const texts = [];
-    for (let i = 0; i < $("chat-view").children.length; i++) texts.push($("chat-view").children[i].textContent);
+    for (let i = 0; i < $("workspace").children.length; i++) texts.push($("workspace").children[i].textContent);
     return texts.join("|");
   })()`, ctx);
   assert.ok(r.includes("0.2.99"), `ready message contains version: "${r}"`);
@@ -2661,49 +2661,78 @@ test("rant 14:15:12：切会话加载最近历史（只读气泡 + 加载条）�
   assert.strictEqual(calls.length, 1, "切会话应加载最近一页历史");
   assert.strictEqual(calls[0].limit, 50);
   assert.strictEqual(calls[0].offset, 0);
-  const historyNodes = vm.runInContext('document.getElementById("chat-view").querySelectorAll(".history").length', ctx);
+  const historyNodes = vm.runInContext('document.getElementById("workspace").querySelectorAll(".history").length', ctx);
   assert.strictEqual(historyNodes, 2, "应渲染 2 条只读历史气泡");
-  const loadBar = vm.runInContext('document.getElementById("chat-view").querySelector(".history-load-bar")', ctx);
+  const loadBar = vm.runInContext('document.getElementById("workspace").querySelector(".history-load-bar")', ctx);
   assert.ok(loadBar, "hasMore 时应显示加载条");
   // 模拟滚动到顶 → 触发加载更早（防抖 150ms；mock 的 scroll 事件需带 .session-view target）
-  const view = vm.runInContext('document.getElementById("chat-view").querySelector(".session-view")', ctx);
+  const view = vm.runInContext('document.getElementById("workspace").querySelector(".session-view")', ctx);
   view.scrollTop = 0;
-  els["chat-view"].dispatch("scroll", { target: view });
+  els["workspace"].dispatch("scroll", { target: view });
   await new Promise((r) => setTimeout(r, 200));
   await tick();
   assert.strictEqual(calls.length, 2, "滚动到顶应加载更早一页");
   assert.strictEqual(calls[1].offset, 2, "第二次加载 offset=已加载数");
-  const historyNodes2 = vm.runInContext('document.getElementById("chat-view").querySelectorAll(".history").length', ctx);
+  const historyNodes2 = vm.runInContext('document.getElementById("workspace").querySelectorAll(".history").length', ctx);
   assert.strictEqual(historyNodes2, 3, "prepend 后共 3 条历史气泡");
-  const noMore = vm.runInContext('document.getElementById("chat-view").querySelector(".history-load-bar")', ctx);
+  const noMore = vm.runInContext('document.getElementById("workspace").querySelector(".history-load-bar")', ctx);
   assert.ok(noMore, "无更多历史时加载条仍在（显示没有更多）");
 });
 
-test("rant 14:10:14 P1：侧边栏导航切换面板 + 高亮（点同项关闭）", async () => {
-  const { ctx } = makeSandbox();
+test("rant 18:55:09 v0.2：导航点击 → 工作区视图切换（面板整块显示 + 互斥 + 点同项关闭回会话）", async () => {
+  const { ctx } = makeSandbox({
+    init: async () => ({
+      config_exists: true,
+      api_key_configured: true,
+      project_dir: "/tmp",
+      project_dir_valid: true,
+      server_id: "srv-1",
+      model: "m",
+      evolution_count: 0,
+      sessions: [{ session_id: "s1", title: "测试对话", updated_at: "2026-08-05T10:00:00Z" }],
+      open_sessions: [],
+      active_sid: "s1",
+    }),
+    switchSession: async () => ({}),
+  });
   await vm.runInContext("App.boot()", ctx);
   await tick();
-  const visible = (id) => vm.runInContext(`document.getElementById("${id}").classList.contains("hidden") === false`, ctx);
   const active = (id) => vm.runInContext(`document.getElementById("${id}").classList.contains("active")`, ctx);
-  // 默认：全部面板隐藏、无高亮（保持既有会话列表常驻，纯增量框架）
-  assert.strictEqual(vm.runInContext("App.state.activePanel", ctx), null, "默认无激活面板");
-  // 点项目导航 → 面板打开 + 高亮
+  const visible = (id) => vm.runInContext(`document.getElementById("${id}").classList.contains("hidden") === false`, ctx);
+  // 默认：会话视图激活、composer 可见、成果面板可见、无导航高亮
+  assert.strictEqual(vm.runInContext("App.state.activeView", ctx), "sessions", "默认会话视图");
+  assert.strictEqual(active("nav-projects"), false, "默认无导航高亮");
+  assert.strictEqual(visible("composer-wrap"), true, "会话视图下 composer 可见");
+  assert.strictEqual(visible("result-panel"), true, "会话视图下成果面板可见");
+  // 点项目导航 → 项目视图整块显示（工作区内 .active）+ 高亮 + composer/成果面板隐藏
   await vm.runInContext('document.getElementById("nav-projects").click()', ctx);
   await tick();
-  assert.strictEqual(visible("panel-projects"), true, "点击项目导航应打开项目面板");
+  assert.strictEqual(active("panel-projects"), true, "项目视图应激活");
   assert.strictEqual(active("nav-projects"), true, "项目导航应高亮");
-  // 点设置导航 → 项目关闭、设置打开
+  assert.strictEqual(active("panel-tasks"), false, "其他面板视图不激活");
+  assert.strictEqual(active("panel-settings"), false, "设置视图不激活");
+  assert.strictEqual(vm.runInContext("App.state.activeView", ctx), "projects", "activeView=projects");
+  assert.strictEqual(visible("composer-wrap"), false, "面板视图下 composer 隐藏");
+  assert.strictEqual(visible("result-panel"), false, "面板视图下成果面板隐藏");
+  // 点设置导航 → 项目关、设置开
   await vm.runInContext('document.getElementById("nav-settings").click()', ctx);
   await tick();
-  assert.strictEqual(visible("panel-projects"), false, "切换后项目面板应关闭");
-  assert.strictEqual(visible("panel-settings"), true, "设置面板应打开");
-  assert.strictEqual(active("nav-projects"), false, "项目导航应取消高亮");
-  assert.strictEqual(active("nav-settings"), true, "设置导航应高亮");
-  // 点同一项 → 关闭
+  assert.strictEqual(active("panel-projects"), false, "切换后项目视图关闭");
+  assert.strictEqual(active("panel-settings"), true, "设置视图打开");
+  assert.strictEqual(active("nav-projects"), false, "项目导航取消高亮");
+  assert.strictEqual(active("nav-settings"), true, "设置导航高亮");
+  // 点同一项 → 关闭回会话视图（composer/成果面板恢复）
   await vm.runInContext('document.getElementById("nav-settings").click()', ctx);
   await tick();
-  assert.strictEqual(visible("panel-settings"), false, "点同项应关闭面板");
+  assert.strictEqual(active("panel-settings"), false, "点同项应关闭面板视图");
   assert.strictEqual(active("nav-settings"), false, "关闭后导航取消高亮");
+  assert.strictEqual(vm.runInContext("App.state.activeView", ctx), "sessions", "关闭回会话视图");
+  assert.strictEqual(visible("composer-wrap"), true, "回会话视图后 composer 恢复");
+  assert.strictEqual(visible("result-panel"), true, "回会话视图后成果面板恢复");
+  // 点 💬 会话导航 → 会话视图（幂等，保持会话视图）
+  await vm.runInContext('document.getElementById("nav-sessions").click()', ctx);
+  await tick();
+  assert.strictEqual(vm.runInContext("App.state.activeView", ctx), "sessions", "💬 导航回到会话视图");
 });
 
 test("rant 14:10:14 P2：设置面板 tab 切换（6 tab 独立显隐 + 高亮）", async () => {

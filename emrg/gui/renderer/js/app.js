@@ -41,8 +41,8 @@ const App = (() => {
     // B3（rant 21:59:11）：每会话输入框草稿（浏览器 tab 式状态保留）——切换会话保存旧
     // sid 草稿、恢复新 sid 草稿；发送成功即清除该 sid 草稿
     drafts: new Map(), // sid → 草稿文本
-    // rant 14:10:14 P1：侧边栏面板导航（null=无面板打开；sessions/projects/tasks/rants/settings）
-    activePanel: null,
+    // rant 18:55:09 v0.2：工作区视图导航（null/undefined=会话视图；projects/tasks/rants/settings=面板视图）
+    activeView: null,
   };
 
   // P3 slice 1：会话条目访问器（get-or-create）。无 sid/未激活 → 归入当前激活会话。
@@ -438,7 +438,7 @@ const App = (() => {
 
   // /trigger：任务面板（rant 14:10:14 P3：替代 tasks-dialog；点击行立即触发）
   async function openTasksPanel() {
-    if (state.activePanel !== "tasks") switchPanel("tasks");
+    if (state.activeView !== "tasks") switchView("tasks");
     try {
       await Dialogs.loadTaskMeta();
       await Dialogs.renderTaskList();
@@ -449,7 +449,7 @@ const App = (() => {
 
   // 项目面板（rant 14:10:14 P5：打开即加载项目列表）
   async function openProjectsPanel() {
-    if (state.activePanel !== "projects") switchPanel("projects");
+    if (state.activeView !== "projects") switchView("projects");
     try {
       await Dialogs.renderProjectList();
     } catch (e) {
@@ -459,7 +459,7 @@ const App = (() => {
 
   // Rant 面板（rant 14:10:14 P4：打开即加载 rant 列表）
   async function openRantsPanel() {
-    if (state.activePanel !== "rants") switchPanel("rants");
+    if (state.activeView !== "rants") switchView("rants");
     try {
       await Dialogs.renderRantList();
     } catch (e) {
@@ -547,25 +547,34 @@ const App = (() => {
   // ── 会话 ─────────────────────────────────
   // P3 slice 2：每会话一个 .session-view 容器（浏览器 tab 效果——切换 display 保留状态）
   function ensureSessionView(sid) {
-    if (!sid) return $("chat-view");
+    if (!sid) return $("workspace");
     // 在 wrapper 内按 dataset.sid 查找既有容器（不依赖 getElementById——测试沙箱对
     // 未知 id 返回新 mock，且 mock 的 .id 不入 attributes；dataset 双端一致）
-    let view = [...$("chat-view").children].find((c) => c.dataset?.sid === sid);
+    let view = [...$("workspace").children].find((c) => c.dataset?.sid === sid);
     if (!view) {
-      view = el("div", { class: "session-view", id: "chat-view-" + sid, dataset: { sid } });
-      $("chat-view").appendChild(view);
+      view = el("div", { class: "session-view", id: "session-view-" + sid, dataset: { sid } });
+      $("workspace").appendChild(view);
     }
     Chat.registerContainer(sid, view); // 幂等：重复注册覆盖同一元素
     return view;
   }
 
+  // rant 18:55:09 v0.2：工作区视图互斥（激活会话视图 → 同步隐藏所有面板视图 + 清导航高亮）
   function activateSessionView(sid) {
+    for (const p of VIEWS) {
+      const btn = $(`nav-${p}`);
+      if (btn) btn.classList.toggle("active", false);
+      const panel = $(`panel-${p}`);
+      if (panel) panel.classList.remove("active");
+    }
     const view = ensureSessionView(sid);
-    for (const child of $("chat-view").children) {
+    for (const child of $("workspace").children) {
       if (child.classList) child.classList.remove("active");
     }
     view.classList.add("active");
     Chat.scrollToBottom(sid);
+    setWorkspaceChrome("sessions"); // 恢复输入区 + 成果面板
+    state.activeView = "sessions";
     return view;
   }
 
@@ -633,25 +642,70 @@ const App = (() => {
     }
   }
 
-  // ── 侧边栏导航（rant 14:10:14 P1：5 入口面板框架，P2-P5 填充内容）──
-  const SIDE_PANELS = ["sessions", "projects", "tasks", "rants", "settings"];
+  // ── 工作区视图导航（rant 18:55:09 v0.2：面板 → 工作区视图；sessions=会话视图）──
+  const VIEWS = ["sessions", "projects", "tasks", "rants", "settings"];
 
-  /** 切换侧边栏面板：点同一项关闭，点其他项切换；高亮当前导航。 */
-  function switchPanel(name) {
-    if (!SIDE_PANELS.includes(name)) return;
-    const isOpen = state.activePanel === name;
-    for (const p of SIDE_PANELS) {
+  /** 切换工作区视图：点当前激活项关闭回会话视图，点其他项切换；高亮当前导航（DOM 显隐 .active 互斥，状态保留）。 */
+  function switchView(name) {
+    if (!VIEWS.includes(name)) return;
+    const isOpen = state.activeView === name;
+    for (const p of VIEWS) {
       const btn = $(`nav-${p}`);
-      const panel = $(`panel-${p}`);
       if (btn) btn.classList.toggle("active", false);
-      if (panel) panel.classList.add("hidden");
     }
-    state.activePanel = isOpen ? null : name;
-    if (!isOpen) {
+    if (!isOpen && name !== "sessions") {
+      // 打开面板视图：隐藏全部会话视图 + 全部面板视图（互斥——显式清面板，不依赖 DOM 树），激活目标面板
+      state.activeView = name;
+      for (const child of $("workspace").children) {
+        if (child.classList) child.classList.remove("active");
+      }
+      for (const p of VIEWS) {
+        const v = $(`panel-${p}`);
+        if (v) v.classList.remove("active");
+      }
+      const view = $(`panel-${name}`);
+      if (view) view.classList.add("active");
       const btn = $(`nav-${name}`);
-      const panel = $(`panel-${name}`);
       if (btn) btn.classList.add("active");
+      setWorkspaceChrome("panel"); // 隐藏输入区 + 成果面板 + 空状态
+    } else {
+      // 点当前激活项（toggle 关闭）/ 点 💬 会话 → 回会话视图
+      showSessionsView();
+    }
+  }
+
+  /** 回会话视图：激活当前 sid 的会话视图（无会话 → 仅恢复工作区 chrome） */
+  function showSessionsView() {
+    state.activeView = "sessions";
+    if (state.sessionId) {
+      activateSessionView(state.sessionId);
+    } else {
+      for (const child of $("workspace").children) {
+        if (child.classList) child.classList.remove("active");
+      }
+      setWorkspaceChrome("sessions");
+    }
+    updateEmptyState();
+  }
+
+  /** 工作区外围 chrome（输入区 + 空状态 + 成果面板 + 拖拽手柄）按视图模式显隐：panel 隐藏，sessions 恢复。 */
+  function setWorkspaceChrome(mode) {
+    const composer = $("composer-wrap");
+    const empty = $("empty-state");
+    const panel = $("result-panel");
+    const resizer = $("result-resizer");
+    if (mode === "panel") {
+      composer.classList.add("hidden");
+      empty.classList.add("hidden");
+      if (panel) panel.classList.add("hidden");
+      if (resizer) resizer.classList.add("hidden");
+      // HTML 预览（WebContentsView）随面板隐藏（main 侧比对路径；无预览时 no-op）
+      try { if (window.emrg && typeof window.emrg.closePreview === "function") window.emrg.closePreview({}); } catch { /* ignore */ }
+    } else {
+      composer.classList.remove("hidden");
       if (panel) panel.classList.remove("hidden");
+      if (resizer) resizer.classList.remove("hidden");
+      updateEmptyState();
     }
   }
 
@@ -773,7 +827,7 @@ const App = (() => {
       await window.emrg.deleteSession({ sessionId: sid });
       // P3 slice 2：删除会话 → 释放其容器（若已打开）
       Chat.unregisterContainer(sid);
-      const view = [...$("chat-view").children].find((c) => c.dataset?.sid === sid);
+      const view = [...$("workspace").children].find((c) => c.dataset?.sid === sid);
       if (view) view.remove();
       if (state.sessionId === sid) {
         const remaining = state.sessions.filter((s) => s.session_id !== sid);
@@ -807,7 +861,7 @@ const App = (() => {
     try {
       await window.emrg.closeSession({ sessionId: sid });
       Chat.unregisterContainer(sid); // 释放容器（若已打开）
-      const view = [...$("chat-view").children].find((c) => c.dataset?.sid === sid);
+      const view = [...$("workspace").children].find((c) => c.dataset?.sid === sid);
       if (view) view.remove();
       if (state.sessionId === sid) {
         // 关闭激活会话 → 切到剩余打开会话中最近激活的，否则新建
@@ -1432,7 +1486,7 @@ const App = (() => {
       hideBanner();
       // P3 finalize：重连成功 → 清全部会话断线标记 + 容器 .disconnected 类
       for (const entry of state.sessionsBySid.values()) entry.disconnected = false;
-      for (const child of $("chat-view").children) {
+      for (const child of $("workspace").children) {
         if (child.classList && child.classList.contains("disconnected")) child.classList.remove("disconnected");
       }
       if (data.server_id) state.serverId = data.server_id;
@@ -1459,19 +1513,19 @@ const App = (() => {
   function bindUi() {
     $("send-btn").addEventListener("click", sendMessage);
     $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {}));
-    // rant 14:10:14 P1：侧边栏导航点击切换面板
-    for (const p of SIDE_PANELS) {
+    // rant 18:55:09 v0.2：侧边栏导航点击 → 工作区视图切换（data-view）
+    for (const p of VIEWS) {
       $(`nav-${p}`)?.addEventListener("click", () => {
-        switchPanel(p);
-        // P2：面板打开时加载对应数据（settings 走 showSettings 刷新全部；tasks/projects/rants 走各自加载）
-        if (p === "settings" && state.activePanel === "settings") {
+        switchView(p);
+        // 面板视图打开时加载对应数据（settings 走 showSettings 刷新全部；tasks/projects/rants 走各自加载）
+        if (p === "settings" && state.activeView === "settings") {
           loadEvolutionSummary();
           Dialogs.showSettings();
-        } else if (p === "tasks" && state.activePanel === "tasks") {
+        } else if (p === "tasks" && state.activeView === "tasks") {
           openTasksPanel();
-        } else if (p === "projects" && state.activePanel === "projects") {
+        } else if (p === "projects" && state.activeView === "projects") {
           openProjectsPanel();
-        } else if (p === "rants" && state.activePanel === "rants") {
+        } else if (p === "rants" && state.activeView === "rants") {
           openRantsPanel();
         }
       });
@@ -1487,7 +1541,7 @@ const App = (() => {
       Dialogs.showSettings();
     });
     Dialogs.initLangButtons(); // rant 21:19：设置语言选择器
-    $("settings-cancel").addEventListener("click", () => switchPanel("settings")); // P2：取消=关闭设置面板
+    $("settings-cancel").addEventListener("click", () => switchView("settings")); // P2：取消=关闭设置视图
     $("settings-save").addEventListener("click", Dialogs.saveSettings);
     $("pick-dir-btn").addEventListener("click", async () => {
       const dir = await window.emrg.pickProjectDir();
@@ -1583,7 +1637,7 @@ const App = (() => {
       }
     });
 
-    const chatView = $("chat-view");
+    const chatView = $("workspace");
     const updateBackToBottom = () => {
       const btn = $("back-to-bottom");
       const atBottom = chatView.scrollTop + chatView.clientHeight >= chatView.scrollHeight - 40;
@@ -1679,7 +1733,7 @@ const App = (() => {
     closeOpenSession, // P4 slice 2：关闭打开会话（保留数据）
     showOpenSessionsMenu, // P4 slice 2：打开会话右键菜单
     activateSessionView, // P3 slice 2：激活会话容器（display 切换；导出供测试）
-    switchPanel, // rant 14:10:14 P1：侧边栏面板切换（导出供测试）
+    switchView, // rant 18:55:09 v0.2：工作区视图切换（导出供测试）
     switchSettingsTab, // rant 14:10:14 P2：设置面板 tab 切换（导出供测试）
     openTasksPanel, // rant 14:10:14 P3：任务面板打开 + 加载（导出供测试）
     openProjectsPanel, // rant 14:10:14 P5：项目面板打开 + 加载（导出供测试）

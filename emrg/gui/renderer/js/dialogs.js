@@ -240,8 +240,8 @@ const Dialogs = (() => {
     } catch (e) {
       Chat.addSystemMessage(_t("settings.readFailed", { msg: e.message }));
     }
-    // rant 14:10:14 P2：设置改为面板（不再弹窗）；已在面板内（nav 打开后刷新）则不再 toggle
-    if (App.state.activePanel !== "settings") App.switchPanel("settings");
+    // rant 18:55:09 v0.2：设置改为工作区视图（不再弹窗）；已在视图内（nav 打开后刷新）则不再 toggle
+    if (App.state.activeView !== "settings") App.switchView("settings");
   }
 
   async function saveSettings() {

@@ -219,7 +219,7 @@ test("P4：/rant 无参数打开 Rant 面板 + 新建表单（rant 14:10:14 P6�
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/rant', args: [] })", ctx);
   await tick();
   const panel = els["panel-rants"];
-  assert.ok(panel && !panel.classList.contains("hidden"), "rants panel should be open");
+  assert.ok(panel && panel.classList.contains("active"), "rants workspace view should be active");
   assert.ok(els["rant-form"] && !els["rant-form"].classList.contains("hidden"), "rant form should be open");
 });
 
@@ -231,7 +231,7 @@ test("P4：/rant 直接跟内容快速提交（不打开面板）", async () => 
   await tick();
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/rant', args: ['希望支持主题切换'] })", ctx);
   const panel = els["panel-rants"];
-  assert.ok(!(panel && !panel.classList.contains("hidden")), "direct rant submit should not open panel");
+  assert.ok(!(panel && panel.classList.contains("active")), "direct rant submit should not open panel");
 });
 
 test("P4：/trigger 无参数打开任务面板", async () => {
@@ -242,7 +242,7 @@ test("P4：/trigger 无参数打开任务面板", async () => {
   await tick();
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/trigger', args: [] })", ctx);
   const panel = els["panel-tasks"];
-  assert.ok(panel && !panel.classList.contains("hidden"), "tasks panel should be open");
+  assert.ok(panel && panel.classList.contains("active"), "tasks workspace view should be active");
 });
 
 test("P4：/trigger <name> 直接触发（不打开对话框）", async () => {
