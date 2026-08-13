@@ -1105,11 +1105,31 @@ class TaskScheduler:
 
     def __init__(self, identity: InstanceIdentity) -> None:
         self.identity = identity
-        self._tasks_file = config_dir() / "tasks.yml"
+        self._tasks_file_override: Path | None = None
         self._handlers: list[TaskHandler] = []
         self._coros: list[asyncio.Task] = []
         # cfg (from tasks.yml) used to start each handler — for hot-reload diffing.
         self._handler_cfgs: dict[str, dict] = {}
+
+    @property
+    def _tasks_file(self) -> Path:
+        """Resolve tasks.yml at call time, never capture it at construction.
+
+        Previously the path was computed in __init__ (scheduler.py:1108). PR
+        #738's hermeticity guard exposed the consequence: tests that construct
+        a TaskScheduler BEFORE patching config_dir caused part 2 of
+        _ensure_self_evolution_task (and any _load_tasks/_save_tasks) to read
+        and write the REAL ~/.emrg/tasks.yml. Lazy resolution makes the
+        capture impossible — the current config_dir always wins. An explicit
+        assignment (setter) still overrides for tests that pin a custom file.
+        """
+        if self._tasks_file_override is not None:
+            return self._tasks_file_override
+        return config_dir() / "tasks.yml"
+
+    @_tasks_file.setter
+    def _tasks_file(self, value: Path) -> None:
+        self._tasks_file_override = value
 
     def _start_handler_for(self, cfg: dict) -> TaskHandler:
         """Create + start a handler for a task cfg; returns the handler."""

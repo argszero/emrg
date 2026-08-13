@@ -67,6 +67,31 @@ def test_resolve_project_path_invalid_yaml(tmp_path):
 
 # ── TaskScheduler._save_tasks ─────────────────────────────────────
 
+def test_tasks_file_resolves_config_dir_at_call_time(tmp_path):
+    """#738 root cause: _tasks_file must not capture config_dir at __init__.
+
+    A TaskScheduler constructed BEFORE config_dir is patched must still read
+    and write tasks.yml from the CURRENT config_dir (tmp), never the real
+    ~/.emrg/tasks.yml. The path assertion comes first, so the old captured
+    behavior fails red before any write reaches the real file.
+    """
+    from emrg.server import scheduler as mod
+    from emrg.server.scheduler import TaskScheduler
+
+    sched = TaskScheduler(InstanceIdentity())  # constructed pre-patch (the bug)
+    orig_config = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        # Property must resolve to tmp even though __init__ ran pre-patch.
+        assert str(sched._tasks_file) == str(tmp_path / "tasks.yml")
+        # Reads and writes land in tmp, not the real ~/.emrg/tasks.yml.
+        assert sched._load_tasks() == []
+        sched._save_tasks([{"name": "x"}])
+        assert (tmp_path / "tasks.yml").exists()
+    finally:
+        mod.config_dir = orig_config
+
+
 
 def test_save_tasks_atomic_write(tmp_path):
     """_save_tasks writes YAML atomically via tempfile + rename."""
