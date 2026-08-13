@@ -336,6 +336,7 @@ const I18N = (() => {
       "chat.maxRoundsHint": "⚠️ 这次任务因为工具调用次数上限中断了，结果可能不完整——输入“继续”我可以接着做。",
       "chat.elapsed": "耗时 {s}",
       "chat.expand": "展开全文",
+      "chat.toolGroupSummary": "{count} 个工具执行 · {time}",
       // 时间分组（utils.js/sidebar.js）
       "util.groupToday": "今天",
       "util.groupYesterday": "昨天",
@@ -759,6 +760,7 @@ const I18N = (() => {
       "chat.maxRoundsHint": "⚠️ This task hit the tool-call limit and may be incomplete — type \"continue\" and I'll keep going.",
       "chat.elapsed": "took {s}",
       "chat.expand": "Expand full text",
+      "chat.toolGroupSummary": "{count} tool calls · {time}",
       // Time groups (utils.js/sidebar.js)
       "util.groupToday": "Today",
       "util.groupYesterday": "Yesterday",

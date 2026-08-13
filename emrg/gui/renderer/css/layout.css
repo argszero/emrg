@@ -253,9 +253,10 @@
   overflow-y: auto;
   display: none;
   flex-direction: column;
-  gap: var(--sp-5);
+  gap: var(--sp-3);
   padding: var(--sp-5) var(--sp-5) var(--sp-4);
-  scroll-behavior: smooth;
+  /* rant 21:28:49：去掉 smooth——JS scrollTop=scrollHeight 也走平滑动画，工具行快速
+     连续追加时滚不到底 → 最新内容不可见。JS 跳转全部即时；用户手动滚动不受影响。 */
 }
 .session-view.active {
   display: flex;
