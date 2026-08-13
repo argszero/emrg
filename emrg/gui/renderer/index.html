@@ -46,7 +46,14 @@
       </section>
       <section class="side-panel hidden" id="panel-projects" data-panel-body="projects">
         <div class="side-panel-title" data-i18n="nav.projectsPanel">项目</div>
-        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+        <div class="side-panel-body">
+          <!-- rant 14:10:14 P5：项目面板（复用 listProjects/listProjectSessions/registerProject/removeProject IPC） -->
+          <div class="hint" style="margin-bottom:6px;" data-i18n="projects.hint">查看会话 / 添加项目 / 删除（保留磁盘数据）</div>
+          <div id="project-list" class="task-list"></div>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button type="button" id="project-add-btn" class="btn btn-ghost" style="flex:1;" data-i18n="projects.add">＋ 添加项目</button>
+          </div>
+        </div>
       </section>
       <section class="side-panel hidden" id="panel-tasks" data-panel-body="tasks">
         <div class="side-panel-title" data-i18n="nav.tasksPanel">任务</div>

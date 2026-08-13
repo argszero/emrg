@@ -959,7 +959,7 @@ const Dialogs = (() => {
     return p && (p.name === "emrg" || p.name === "emrg-task");
   }
 
-  function confirmDeleteProject(p) {
+  function confirmDeleteProject(p, onDone) {
     if (isProtectedProject(p)) {
       showConfirm(_t("deleteProject.title"), _t("deleteProject.protectedBody", { name: p.name }), { okText: _t("dlg.gotIt"), danger: false });
       return;
@@ -982,7 +982,8 @@ const Dialogs = (() => {
             if (remaining.length > 0) await App.switchSession(remaining[0].sid, { silent: true });
             else await App.newSession();
           }
-          showOpenSessionDialog(); // 刷新项目列表
+          if (typeof onDone === "function") onDone();
+          else showOpenSessionDialog(); // 刷新项目列表
         } catch (e) {
           Chat.addSystemMessage(_t("deleteProject.failed", { msg: e.message }));
         }
@@ -1036,6 +1037,92 @@ const Dialogs = (() => {
         Chat.addSystemMessage(_t("openSession.projectFailed", { msg: e.message }));
       }
     });
+  }
+
+  // ── 项目面板（rant 14:10:14 P5：侧边栏项目入口，复用项目 IPC） ──
+  /** 项目面板：列表（名称/路径/auto_evolve 徽标/最近活跃）+ 查看会话 + 删除 + 添加。 */
+  async function renderProjectList() {
+    const list = $("project-list");
+    if (!list) return;
+    list.innerHTML = ""; // 显式清空（测试沙箱 innerHTML 非空赋值不清 children；真实 DOM 语义一致）
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
+    try {
+      // auto_evolve 徽标：tasks.yml 中有 config.project === 项目名的任务（含 evolution 类型）
+      const [projects, tasks] = await Promise.all([
+        window.emrg.listProjects(),
+        window.emrg.listTasks().catch(() => []),
+      ]);
+      list.innerHTML = "";
+      if (!projects || projects.length === 0) {
+        list.innerHTML = `<div class="task-empty">${_t("projects.empty")}</div>`;
+        return;
+      }
+      const evolveProjects = new Set(
+        (tasks || []).filter((t) => t && t.config && t.config.project).map((t) => t.config.project)
+      );
+      projects.forEach((p) => {
+        const row = el("div", { class: "task-row" });
+        row.appendChild(el("span", { class: "task-name" }, p.name || p.path || "?"));
+        if (evolveProjects.has(p.name)) {
+          row.appendChild(el("span", { class: "task-badge" }, `⚡ ${_t("projects.autoEvolve")}`));
+        }
+        const hints = [];
+        if (p.path) hints.push(p.path);
+        const act = relTime(p.latest_session_at);
+        if (act) hints.push(act);
+        row.appendChild(el("span", { class: "task-hint" }, hints.join(" · ")));
+        const actions = el("span", { class: "task-actions" });
+        // 查看会话（复用 listProjectSessions）
+        const sessBtn = el("button", { type: "button", class: "model-action-btn", title: _t("projects.viewSessions") }, _t("projects.viewSessions"));
+        sessBtn.addEventListener("click", () => showProjectSessionsInPanel(p));
+        actions.appendChild(sessBtn);
+        // 删除（受保护守卫 + 确认；删除后刷新面板）
+        const delBtn = el("button", { type: "button", class: "model-action-btn danger", title: _t("deleteProject.delete") }, _t("deleteProject.delete"));
+        delBtn.addEventListener("click", () => confirmDeleteProject(p, () => renderProjectList()));
+        actions.appendChild(delBtn);
+        row.appendChild(actions);
+        list.appendChild(row);
+      });
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("projects.addFailed", { msg: e.message })}</span></div>`;
+    }
+  }
+
+  /** 项目面板内嵌：该项目会话列表（created_at 倒序）→ 点击切换会话（带项目 cwd）。 */
+  async function showProjectSessionsInPanel(project) {
+    const list = $("project-list");
+    if (!list) return;
+    list.innerHTML = ""; // 显式清空（测试沙箱 innerHTML 非空赋值不清 children；真实 DOM 语义一致）
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
+    // 返回按钮 + 标题
+    const title = el("div", { class: "task-row" });
+    const backBtn = el("button", { type: "button", class: "model-action-btn", style: "flex-shrink:0;" }, _t("projects.back"));
+    backBtn.addEventListener("click", () => renderProjectList());
+    title.appendChild(backBtn);
+    title.appendChild(el("span", { class: "task-name" }, _t("projects.sessionsOf", { project: project.name || project.path || "" })));
+    list.appendChild(title);
+    try {
+      const frame = await window.emrg.listProjectSessions({ projectPath: project.path });
+      const sessions = frame.sessions || [];
+      if (sessions.length === 0) {
+        list.appendChild(el("div", { class: "task-empty" }, _t("projects.noSessions")));
+        return;
+      }
+      sessions.forEach((s) => {
+        const row = el("div", { class: "task-row", style: "cursor:pointer;" });
+        row.appendChild(el("span", { class: "task-name" }, s.title || _t("app.unnamed")));
+        if (s.session_id === App.state.sessionId) row.appendChild(el("span", { class: "task-badge" }, _t("projects.current")));
+        const hint = el("span", { class: "task-hint" }, s.session_id || "");
+        row.appendChild(hint);
+        row.addEventListener("click", async () => {
+          // 带项目路径切换（resume 用该项目 cwd，非全局 projectDir）
+          await App.switchSession(s.session_id, { projectPath: project.path });
+        });
+        list.appendChild(row);
+      });
+    } catch (e) {
+      list.appendChild(el("div", { class: "task-empty" }, _t("openSession.loadFailed", { msg: e.message })));
+    }
   }
 
   // ── P5 slice 2：新建会话对话框（选已有项目 → 新建；或新建项目 → 新建） ──
@@ -1123,6 +1210,8 @@ const Dialogs = (() => {
     initTaskManagement, // rant 18:23:15 P3：定时任务/自定义类型管理初始化
     loadTaskMeta, // rant 18:23:15 P3：任务/类型元数据加载（面板打开/测试复用）
     renderTaskList, // rant 18:23:15 P3：任务列表渲染（测试/刷新复用）
+    renderProjectList, // rant 14:10:14 P5：项目面板列表渲染（测试/刷新复用）
+    showProjectSessionsInPanel, // rant 14:10:14 P5：项目面板内嵌会话列表（测试复用）
     saveTaskForm, // rant 18:23:15 P3：任务表单提交（测试复用）
     saveTemplateForm, // rant 18:23:15 P3：类型表单提交（测试复用）
     showRename,
