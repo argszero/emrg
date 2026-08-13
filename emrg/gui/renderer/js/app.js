@@ -553,10 +553,39 @@ const App = (() => {
     let view = [...$("workspace").children].find((c) => c.dataset?.sid === sid);
     if (!view) {
       view = el("div", { class: "session-view", id: "session-view-" + sid, dataset: { sid } });
+      // 顶部标题栏（项目/名称(id) 或 项目/id）；Chat.clear 保留它，消息节点在其后追加
+      view.appendChild(el("div", { class: "session-header" }));
       $("workspace").appendChild(view);
     }
     Chat.registerContainer(sid, view); // 幂等：重复注册覆盖同一元素
     return view;
+  }
+
+  /** 会话标题栏显示的项目名：openSessions 优先，回退全局 projectDir 的 basename */
+  function sessionProjectName(sid) {
+    const os = state.openSessions.find((s) => s.sid === sid);
+    if (os && os.projectName) return os.projectName;
+    const dir = state.projectDir || "";
+    const parts = dir.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] || dir;
+  }
+
+  // 会话视图顶部标题栏：项目/名称(id) 或 项目/id（有 title 时带 (id) 后缀）
+  function renderSessionHeader(sid) {
+    if (!sid) return;
+    const view = [...$("workspace").children].find((c) => c.dataset?.sid === sid);
+    if (!view) return;
+    let header = view.querySelector(".session-header");
+    if (!header) {
+      header = el("div", { class: "session-header" });
+      view.insertBefore(header, view.firstChild);
+    }
+    const cur = state.sessions.find((s) => s.session_id === sid) || {};
+    const project = sessionProjectName(sid);
+    const title = cur.title && cur.title !== sid ? cur.title : "";
+    const text = title ? `${project}/${title}(${sid})` : `${project}/${sid}`;
+    header.textContent = text;
+    header.title = text; // 悬停完整信息
   }
 
   // rant 18:55:09 v0.2：工作区视图互斥（激活会话视图 → 同步隐藏所有面板视图 + 清导航高亮）
@@ -575,6 +604,7 @@ const App = (() => {
       if (child.classList) child.classList.remove("active");
     }
     view.classList.add("active");
+    renderSessionHeader(sid); // 标题栏随激活/重命名刷新
     if (!existed) Chat.scrollToBottom(sid);
     setWorkspaceChrome("sessions"); // 恢复输入区 + 成果面板（含 back-to-bottom 按位置恢复）
     state.activeView = "sessions";
@@ -875,6 +905,8 @@ const App = (() => {
       const sessions = await window.emrg.listSessions();
       state.sessions = sessions;
       Sidebar.render(sessions);
+      Sidebar.renderOpenSessions(state.openSessions); // 打开会话区 title 同步刷新
+      renderSessionHeader(state.sessionId); // 激活会话标题栏同步刷新
     } catch { /* 忽略 */ }
   }
 

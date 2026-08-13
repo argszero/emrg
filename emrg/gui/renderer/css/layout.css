@@ -260,6 +260,21 @@
 .session-view.active {
   display: flex;
 }
+/* 会话标题栏：项目/名称(id) 或 项目/id，滚动置顶、全宽贴边（负 margin 抵消 .session-view padding） */
+.session-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  flex-shrink: 0;
+  margin: calc(-1 * var(--sp-5)) calc(-1 * var(--sp-5)) var(--sp-3) !important;
+  padding: var(--sp-3) var(--sp-5);
+  width: auto !important;
+  max-width: none !important;
+  font-size: var(--fs-secondary);
+  color: var(--text-2);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
 /* P3 finalize：会话连接断开标记（P4 每会话容器可见；激活会话另走全局横幅） */
 .session-view.disconnected {
   opacity: 0.55;
@@ -756,8 +771,6 @@ body.sidebar-collapsed #app {
   flex: 1;
   overflow-y: auto;
   padding: var(--sp-3);
-  display: flex;
-  flex-direction: column;
   gap: var(--sp-2);
 }
 .result-empty {
