@@ -449,6 +449,7 @@ When reading rants, follow these rules:
 > - daemon list_history pagination (#737 宿主 rant 2026-08-13T14:15:12 后端：GUI 会话历史分页加载 limit/offset/has_more——user_messages 最旧在前，end=total-offset; start=max(0,end-limit) 正确返回最新在前分页 + has_more 标志；+4 测试；合并 d855ef6) ✅
 > - tests hermeticity guard (#738 外部贡献 pm25coder：pytest 全量跑会偶发写真实 `~/.emrg/projects.yml`/`tasks.yml`（e2e `_boot_server` 漏 patch scheduler config_dir → serve() 建真 TaskScheduler → `_ensure_self_evolution_task` 写真实 projects.yml；CI fresh runner 必触发）→ conftest autouse 守卫包装 scheduler+daemon 的 atomic_write_yaml 拒绝真实配置文件写入（失败测试点名肇事者）+ `_make_server` tmp `_projects_log` + `_tasks_file` 惰性解析（config_dir 补丁生效）+ 4 测试；Agent.md 773→777；合并 1378eb7) ✅
 > - GUI session history on-demand loading (#739 宿主 rant 2026-08-13T14:15:12 前端：chat.js + app.js 消费 #737 分页接口按需加载会话历史（加载更多按钮/滚动触发），i18n + CSS；+3 renderer.smoke（107→110）GUI 229→232；合并 0cc5b8f) ✅
+> - GUI sidebar navigation framework (#743 宿主 rant 2026-08-13T14:10:14 P1：侧边栏 activity-bar 式 5 入口导航（会话/项目/任务/Rant/设置）——.side-nav + .side-panel 占位框架（不遮聊天区，纯增量：默认全部隐藏、会话列表常驻）；app.js SIDE_PANELS + switchPanel（点同项关闭/点其他切换/高亮 active）；i18n zh/en 12 键；+1 renderer.smoke（GUI 232→233）；P2-P5 逐面板填充，P6 移除老弹窗；合并 05c2053) ✅
 
 #### 2.2 Latest GitHub code changes
 
