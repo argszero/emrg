@@ -83,6 +83,50 @@
   color: var(--text-3);
 }
 
+/* rant 14:10:14 P2：设置面板 tab（模型服务/工作目录/GitHub/外观/语言/关于） */
+.panel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: var(--sp-3);
+}
+.panel-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-secondary);
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.panel-tab:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+.panel-tab.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+.panel-tab-body .settings-group {
+  margin-bottom: var(--sp-3);
+}
+.panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+}
+
 /* 成长状态卡（WorkBuddy P3：自进化可见化） */
 .growth-card {
   margin: 0 var(--sp-3) var(--sp-3);

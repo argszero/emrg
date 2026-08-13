@@ -232,11 +232,6 @@ const Dialogs = (() => {
       } catch { /* 元素缺失（测试桩）时忽略 */ }
       // Windows GCM rant Stage 2：GitHub 连接状态随设置面板打开时刷新
       await refreshGithubStatus();
-      // 定时任务管理（rant 2026-08-12T18:23:15 P3）：任务/类型列表随设置面板打开时刷新
-      try {
-        await loadTaskMeta();
-        await renderTaskList();
-      } catch { /* 元素缺失（测试桩）时忽略 */ }
       // Auto update-check prompt (rant 2026-08-10T07:12:12): about area shows
       // a one-time non-intrusive line when a newer release exists.
       // rant 2026-08-11T09:18:16：手动"检查更新"按钮（force 重新检查）
@@ -245,7 +240,8 @@ const Dialogs = (() => {
     } catch (e) {
       Chat.addSystemMessage(_t("settings.readFailed", { msg: e.message }));
     }
-    $("settings-dialog").showModal();
+    // rant 14:10:14 P2：设置改为面板（不再弹窗）；已在面板内（nav 打开后刷新）则不再 toggle
+    if (App.state.activePanel !== "settings") App.switchPanel("settings");
   }
 
   async function saveSettings() {
@@ -266,7 +262,6 @@ const Dialogs = (() => {
     }
     try {
       await window.emrg.saveSettings(config);
-      if ($("settings-dialog").open) $("settings-dialog").close();
       Chat.addSystemMessage(_t("dlg.saved"));
       App.state.apiKeyConfigured = true;
       App.state.projectDir = config.projectDir || App.state.projectDir;
@@ -1126,6 +1121,7 @@ const Dialogs = (() => {
     initNewSessionDialog, // P5 slice 2：新建会话对话框初始化
     showNewSessionDialog, // P5 slice 2：新建会话（选项目）
     initTaskManagement, // rant 18:23:15 P3：定时任务/自定义类型管理初始化
+    loadTaskMeta, // rant 18:23:15 P3：任务/类型元数据加载（面板打开/测试复用）
     renderTaskList, // rant 18:23:15 P3：任务列表渲染（测试/刷新复用）
     saveTaskForm, // rant 18:23:15 P3：任务表单提交（测试复用）
     saveTemplateForm, // rant 18:23:15 P3：类型表单提交（测试复用）
