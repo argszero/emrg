@@ -252,8 +252,6 @@ const I18N = (() => {
       "skills.desc": "EMRG 已加载的技能。",
 
       // 进化 / 任务
-      "rant.project": "项目（可选）",
-      "rant.submit": "驱动进化",
 
       // Rant 面板（rant 14:10:14 P4）
       "rants.filterAll": "全部",
@@ -683,8 +681,6 @@ const I18N = (() => {
       "skills.desc": "Skills EMRG has loaded.",
 
       // Evolution / tasks
-      "rant.project": "Project (optional)",
-      "rant.submit": "Evolve",
 
       // Rant panel (rant 14:10:14 P4)
       "rants.filterAll": "All",
