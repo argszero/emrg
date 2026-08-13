@@ -146,7 +146,13 @@ def test_make_installer_iss_has_prepare_to_install():
     # R125: rant 2026-08-13T09:24:37 — 输出重定向到 {tmp}\stop-emrg.log（2>&1），
     # 失败时 LoadStringFromFile 读日志展示杀不掉的进程，不再让宿主手动跑诊断
     assert '/c ""\' + StopScript + \'" > "\' + LogFile + \'" 2>&1"' in content
-    assert "LoadStringFromFile(LogFile)" in content
+    # ⚡ LoadStringFromFile 的 Inno Pascal Script 签名是 2 参数 out-param 形式
+    # `(const FileName: String; var S: AnsiString): Boolean`（6.7.1 → 7.x 一致，
+    # issrc Shared.ScriptFunc.pas）——单参数字符串返回形式不存在，iscc 编译报
+    # "Invalid number of parameters"（v0.2.30 Build Release 31661378619 实际失败，
+    # Test CI 不编译 .iss 未拦住）。正反两态钉死正确调用形态。
+    assert "LoadStringFromFile(LogFile, LogText)" in content  # 正：out-param 形式
+    assert ":= LoadStringFromFile(LogFile)" not in content  # 反：1 参数形式不存在
     assert "Length(LogText) > 2000" in content
     assert "Details from stop-emrg.cmd:" in content
     assert "SW_HIDE" in content  # 批处理执行不弹控制台窗口（#592 纪律）
