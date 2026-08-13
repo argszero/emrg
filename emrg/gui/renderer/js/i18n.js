@@ -25,6 +25,19 @@ const I18N = (() => {
       "sidebar.statusTitle": "连接状态",
       "sidebar.backToBottom": "回到底部",
 
+      // 侧边栏导航（rant 14:10:14 P1）
+      "nav.sessions": "会话",
+      "nav.projects": "项目",
+      "nav.tasks": "任务",
+      "nav.rants": "Rant",
+      "nav.settings": "设置",
+      "nav.sessionsPanel": "会话",
+      "nav.projectsPanel": "项目",
+      "nav.tasksPanel": "任务",
+      "nav.rantsPanel": "Rant",
+      "nav.settingsPanel": "设置",
+      "nav.placeholder": "面板内容将在后续版本填充",
+
       // 空状态欢迎屏
       "empty.hello": "你好，我是 EMRG",
       "empty.sub": "你的 AI 工作伙伴。问我任何事——写东西、整理文件、规划任务，都可以。",
@@ -413,6 +426,19 @@ const I18N = (() => {
       "sidebar.settings": "Settings",
       "sidebar.statusTitle": "Connection status",
       "sidebar.backToBottom": "Back to bottom",
+
+      // Sidebar navigation (rant 14:10:14 P1)
+      "nav.sessions": "Sessions",
+      "nav.projects": "Projects",
+      "nav.tasks": "Tasks",
+      "nav.rants": "Rant",
+      "nav.settings": "Settings",
+      "nav.sessionsPanel": "Sessions",
+      "nav.projectsPanel": "Projects",
+      "nav.tasksPanel": "Tasks",
+      "nav.rantsPanel": "Rant",
+      "nav.settingsPanel": "Settings",
+      "nav.placeholder": "Panel content arrives in a later stage",
 
       // Empty state
       "empty.hello": "Hi, I'm EMRG",
