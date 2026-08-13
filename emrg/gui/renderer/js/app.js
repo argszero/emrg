@@ -41,6 +41,8 @@ const App = (() => {
     // B3（rant 21:59:11）：每会话输入框草稿（浏览器 tab 式状态保留）——切换会话保存旧
     // sid 草稿、恢复新 sid 草稿；发送成功即清除该 sid 草稿
     drafts: new Map(), // sid → 草稿文本
+    // rant 14:10:14 P1：侧边栏面板导航（null=无面板打开；sessions/projects/tasks/rants/settings）
+    activePanel: null,
   };
 
   // P3 slice 1：会话条目访问器（get-or-create）。无 sid/未激活 → 归入当前激活会话。
@@ -676,6 +678,28 @@ const App = (() => {
     } catch (e) {
       // P6（rant 15:07:19 上限 20）：超限提示本地化（main 抛 too many open sessions）
       Chat.addSystemMessage(/too many open sessions/i.test(e.message || "") ? _t("app.tooManyOpenSessions") : _t("app.switchFailed", { msg: e.message }));
+    }
+  }
+
+  // ── 侧边栏导航（rant 14:10:14 P1：5 入口面板框架，P2-P5 填充内容）──
+  const SIDE_PANELS = ["sessions", "projects", "tasks", "rants", "settings"];
+
+  /** 切换侧边栏面板：点同一项关闭，点其他项切换；高亮当前导航。 */
+  function switchPanel(name) {
+    if (!SIDE_PANELS.includes(name)) return;
+    const isOpen = state.activePanel === name;
+    for (const p of SIDE_PANELS) {
+      const btn = $(`nav-${p}`);
+      const panel = $(`panel-${p}`);
+      if (btn) btn.classList.toggle("active", false);
+      if (panel) panel.classList.add("hidden");
+    }
+    state.activePanel = isOpen ? null : name;
+    if (!isOpen) {
+      const btn = $(`nav-${name}`);
+      const panel = $(`panel-${name}`);
+      if (btn) btn.classList.add("active");
+      if (panel) panel.classList.remove("hidden");
     }
   }
 
@@ -1471,6 +1495,10 @@ const App = (() => {
   function bindUi() {
     $("send-btn").addEventListener("click", sendMessage);
     $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {}));
+    // rant 14:10:14 P1：侧边栏导航点击切换面板
+    for (const p of SIDE_PANELS) {
+      $(`nav-${p}`)?.addEventListener("click", () => switchPanel(p));
+    }
     // B1（rant 21:59:11）：侧边栏"＋ 新对话"→ 项目选择弹窗（选项目新建 / 新建项目），不再直接新建
     $("new-chat-btn").addEventListener("click", () => Dialogs.showNewSessionDialog());
     // B2（rant 21:59:11）：侧边栏"打开会话"入口 → 两步弹窗（选项目 → 选会话）
@@ -1664,6 +1692,7 @@ const App = (() => {
     closeOpenSession, // P4 slice 2：关闭打开会话（保留数据）
     showOpenSessionsMenu, // P4 slice 2：打开会话右键菜单
     activateSessionView, // P3 slice 2：激活会话容器（display 切换；导出供测试）
+    switchPanel, // rant 14:10:14 P1：侧边栏面板切换（导出供测试）
     refreshSessions,
     showConvMenu,
     handleEvent,

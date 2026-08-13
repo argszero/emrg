@@ -36,6 +36,53 @@
   font-size: 18px;
 }
 
+/* 侧边栏导航（rant 14:10:14 P1：5 入口 activity-bar 式） */
+.side-nav {
+  display: flex;
+  gap: 2px;
+  padding: 0 var(--sp-3) var(--sp-2);
+}
+.side-nav-item {
+  flex: 1;
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-card);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.side-nav-item:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+.side-nav-item.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+/* 面板容器（不遮聊天区，占用侧边栏内空间） */
+.side-panel {
+  margin: 0 var(--sp-3) var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel);
+  overflow-y: auto;
+  min-height: 80px;
+}
+.side-panel-title {
+  font-size: var(--fs-secondary);
+  font-weight: 600;
+  color: var(--text-1);
+  margin-bottom: var(--sp-2);
+}
+.side-panel-body {
+  font-size: var(--fs-secondary);
+  color: var(--text-3);
+}
+
 /* 成长状态卡（WorkBuddy P3：自进化可见化） */
 .growth-card {
   margin: 0 var(--sp-3) var(--sp-3);

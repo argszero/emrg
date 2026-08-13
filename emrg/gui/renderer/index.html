@@ -24,6 +24,14 @@
         <div class="growth-line">🌱 <span data-i18n="copy.growthCountPrefix">已自我进化</span> <b id="growth-count">0</b> <span data-i18n="copy.times">次</span></div>
         <div class="growth-note" id="growth-note" data-i18n="copy.growthNote">边工作边学习，越用越懂你</div>
       </div>
+      <!-- 侧边栏导航（rant 14:10:14 P1：5 入口 activity-bar 式；P2-P5 逐面板填充，P6 移除老弹窗） -->
+      <nav id="side-nav" class="side-nav" aria-label="Navigation">
+        <button type="button" id="nav-sessions" class="side-nav-item" data-panel="sessions" title="会话" data-i18n-title="nav.sessions">💬</button>
+        <button type="button" id="nav-projects" class="side-nav-item" data-panel="projects" title="项目" data-i18n-title="nav.projects">📁</button>
+        <button type="button" id="nav-tasks" class="side-nav-item" data-panel="tasks" title="任务" data-i18n-title="nav.tasks">⏱️</button>
+        <button type="button" id="nav-rants" class="side-nav-item" data-panel="rants" title="Rant" data-i18n-title="nav.rants">📣</button>
+        <button type="button" id="nav-settings" class="side-nav-item" data-panel="settings" title="设置" data-i18n-title="nav.settings">⚙️</button>
+      </nav>
       <button id="new-chat-btn" class="new-chat-btn" title="新对话 (⌘N)" data-i18n="sidebar.newChat" data-i18n-title="sidebar.newChatTitle">＋ 新对话</button>
       <!-- B2（rant 21:59:11）：侧边栏"打开会话"显式入口（两步弹窗：选项目 → 选会话，跨项目） -->
       <button id="open-chat-btn" class="open-chat-btn" title="打开会话" data-i18n="sidebar.openChat" data-i18n-title="sidebar.openChatTitle">打开会话</button>
@@ -31,6 +39,27 @@
       <div class="conv-group-label open-sessions-label" id="open-sessions-label" data-i18n="sidebar.openSessions" hidden>打开的会话</div>
       <nav id="open-sessions" class="open-sessions"></nav>
       <nav id="conv-list"></nav>
+      <!-- 侧边栏面板容器（rant 14:10:14 P1 框架：点击导航切换，不遮聊天区；P2-P5 填充内容） -->
+      <section class="side-panel hidden" id="panel-sessions" data-panel-body="sessions">
+        <div class="side-panel-title" data-i18n="nav.sessionsPanel">会话</div>
+        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+      </section>
+      <section class="side-panel hidden" id="panel-projects" data-panel-body="projects">
+        <div class="side-panel-title" data-i18n="nav.projectsPanel">项目</div>
+        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+      </section>
+      <section class="side-panel hidden" id="panel-tasks" data-panel-body="tasks">
+        <div class="side-panel-title" data-i18n="nav.tasksPanel">任务</div>
+        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+      </section>
+      <section class="side-panel hidden" id="panel-rants" data-panel-body="rants">
+        <div class="side-panel-title" data-i18n="nav.rantsPanel">Rant</div>
+        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+      </section>
+      <section class="side-panel hidden" id="panel-settings" data-panel-body="settings">
+        <div class="side-panel-title" data-i18n="nav.settingsPanel">设置</div>
+        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+      </section>
       <div class="sidebar-footer">
         <span id="status-dot" class="status-dot gray" title="连接状态" data-i18n-title="sidebar.statusTitle"></span>
         <button id="settings-btn" class="btn btn-ghost" style="margin-left:auto;padding:6px 12px;min-height:30px;" data-i18n="sidebar.settings">设置</button>

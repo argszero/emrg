@@ -112,6 +112,8 @@ const ELEMENT_IDS = [
   "open-session-dialog", "open-session-list", "open-session-title", "open-session-desc", "open-session-new", "open-session-cancel", "open-session-new-session",
   "new-session-dialog", "new-session-list", "new-session-new", "new-session-cancel",
   "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn", "open-chat-btn",
+  "side-nav", "nav-sessions", "nav-projects", "nav-tasks", "nav-rants", "nav-settings",
+  "panel-sessions", "panel-projects", "panel-tasks", "panel-rants", "panel-settings",
   "settings-dialog", "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",
   "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
   "welcome-model", "welcome-project-dir", "welcome-pick-btn", "welcome-save", "confirm-dialog",
@@ -2664,4 +2666,31 @@ test("rant 14:15:12：切会话加载最近历史（只读气泡 + 加载条）�
   assert.strictEqual(historyNodes2, 3, "prepend 后共 3 条历史气泡");
   const noMore = vm.runInContext('document.getElementById("chat-view").querySelector(".history-load-bar")', ctx);
   assert.ok(noMore, "无更多历史时加载条仍在（显示没有更多）");
+});
+
+test("rant 14:10:14 P1：侧边栏导航切换面板 + 高亮（点同项关闭）", async () => {
+  const { ctx } = makeSandbox();
+  await vm.runInContext("App.boot()", ctx);
+  await tick();
+  const visible = (id) => vm.runInContext(`document.getElementById("${id}").classList.contains("hidden") === false`, ctx);
+  const active = (id) => vm.runInContext(`document.getElementById("${id}").classList.contains("active")`, ctx);
+  // 默认：全部面板隐藏、无高亮（保持既有会话列表常驻，纯增量框架）
+  assert.strictEqual(vm.runInContext("App.state.activePanel", ctx), null, "默认无激活面板");
+  // 点项目导航 → 面板打开 + 高亮
+  await vm.runInContext('document.getElementById("nav-projects").click()', ctx);
+  await tick();
+  assert.strictEqual(visible("panel-projects"), true, "点击项目导航应打开项目面板");
+  assert.strictEqual(active("nav-projects"), true, "项目导航应高亮");
+  // 点设置导航 → 项目关闭、设置打开
+  await vm.runInContext('document.getElementById("nav-settings").click()', ctx);
+  await tick();
+  assert.strictEqual(visible("panel-projects"), false, "切换后项目面板应关闭");
+  assert.strictEqual(visible("panel-settings"), true, "设置面板应打开");
+  assert.strictEqual(active("nav-projects"), false, "项目导航应取消高亮");
+  assert.strictEqual(active("nav-settings"), true, "设置导航应高亮");
+  // 点同一项 → 关闭
+  await vm.runInContext('document.getElementById("nav-settings").click()', ctx);
+  await tick();
+  assert.strictEqual(visible("panel-settings"), false, "点同项应关闭面板");
+  assert.strictEqual(active("nav-settings"), false, "关闭后导航取消高亮");
 });
