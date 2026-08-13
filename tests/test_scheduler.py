@@ -580,6 +580,32 @@ def test_paper_template_renders_with_context():
     assert "literature" in out, "文献去重指引应渲染"
 
 
+def test_open_source_template_renders_with_context():
+    """open_source_prompt.md renders without Jinja2 errors (rant-scan section)."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260813",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, evolution_count=0, git_path="git", gh_path="gh",
+    )
+    assert "0.5 Rant scan" in out, "rant-scan 0.5 节应渲染"
+    assert "rants.jsonl" in out, "rant 扫描命令应渲染"
+    assert "config.project" in out, "project 匹配过滤应渲染"
+    assert "B.1b Rant-driven mode" in out, "rant 驱动模式应渲染"
+    assert "ROLE LOCK" in out, "既有 ROLE LOCK 应保留"
+    assert "json.dumps(..., ensure_ascii=False)" in out, "rant 状态写入要求应渲染"
+
+
 # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
 
 
