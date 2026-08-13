@@ -80,6 +80,14 @@
   color: var(--text-3);
 }
 
+/* rant 21:49:51：面板视图标题（设置/Rant/项目/任务面板统一） */
+.workspace-view-title {
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--text-1);
+  margin: 0 0 var(--sp-3);
+}
+
 /* rant 14:10:14 P2：设置面板 tab（模型服务/工作目录/GitHub/外观/语言/关于） */
 .panel-tabs {
   display: flex;

@@ -1595,10 +1595,6 @@ const App = (() => {
     Dialogs.initOpenSessionDialog(); // P5：打开会话对话框绑定
     Dialogs.initNewSessionDialog(); // P5 slice 2：新建会话对话框绑定
     $("open-session-new-session")?.addEventListener("click", () => Dialogs.showNewSessionDialog()); // P5 slice 2：打开弹窗 → 新建会话
-    $("settings-btn").addEventListener("click", () => {
-      loadEvolutionSummary(); // WorkBuddy P3（#502）：打开设置时加载最近改进
-      Dialogs.showSettings();
-    });
     Dialogs.initLangButtons(); // rant 21:19：设置语言选择器
     $("settings-cancel").addEventListener("click", () => switchView("settings")); // P2：取消=关闭设置视图
     $("settings-save").addEventListener("click", Dialogs.saveSettings);

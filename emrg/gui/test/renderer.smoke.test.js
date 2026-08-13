@@ -2964,3 +2964,23 @@ test("rant 14:10:14 P4：rant 面板列表（状态徽标 + 筛选）+ 详情展
   assert.ok(sent, "sendRant 应被调用");
   assert.strictEqual(sent.message, "希望支持 X");
 });
+
+test("rant 21:49:51 settings panel title + sidebar settings-btn removed", async () => {
+  const htmlSrc = fs.readFileSync(path.join(__dirname, "..", "renderer", "index.html"), "utf-8");
+  // 设置面板应有标题（对齐 Rant/项目/任务面板 .workspace-view-title）
+  const settingsSection = htmlSrc.match(/id="panel-settings"([\s\S]*?)(?:<section|<\/section>)/);
+  assert.ok(settingsSection, "index.html 应有设置面板 section");
+  assert.ok(settingsSection[1].includes('class="workspace-view-title" data-i18n="settings.title"'),
+    "设置面板应有 .workspace-view-title 标题（data-i18n=settings.title）");
+  // 侧边栏底部 settings-btn 已删除（与导航 ⚙ 重复入口），status-dot 保留
+  const footer = htmlSrc.match(/class="sidebar-footer"([\s\S]*?)<\/div>/);
+  assert.ok(footer, "index.html 应有 sidebar-footer");
+  assert.ok(!footer[1].includes("settings-btn"), "sidebar-footer 不应再有 settings-btn");
+  assert.ok(footer[1].includes("status-dot"), "sidebar-footer 应保留 status-dot（连接状态指示）");
+  // 对应 JS 绑定已删除
+  const appSrc = fs.readFileSync(path.join(__dirname, "..", "renderer", "js", "app.js"), "utf-8");
+  assert.ok(!appSrc.includes('$("settings-btn")'), "app.js 不应再有 settings-btn 绑定");
+  // i18n 无孤儿 sidebar.settings
+  const i18nSrc = fs.readFileSync(path.join(__dirname, "..", "renderer", "js", "i18n.js"), "utf-8");
+  assert.ok(!i18nSrc.includes('"sidebar.settings"'), "i18n 不应再有 sidebar.settings 孤儿键");
+});
