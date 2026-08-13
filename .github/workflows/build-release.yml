@@ -153,6 +153,26 @@ jobs:
         shell: bash
         run: bash packaging/build-runtime.sh
 
+      # ── CRLF 断言（rant 2026-08-13T09:44:32）────────────────
+      # git blob 的 *.cmd 是 LF，工作区 CRLF 靠 .gitattributes checkout 转换；
+      # 若 CI 检出未应用 .gitattributes，build-runtime 拷到的就是 LF →
+      # cmd.exe 整文件串行拼接 → 安装器 "stop-emrg.cmd exit code 1"。
+      # build-runtime.sh 已强制转 CRLF（R126），此步双保险验证产物确实是纯 CRLF。
+      - name: Verify runtime *.cmd are pure CRLF
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in dist/runtime/bin/emrg.cmd dist/runtime/bin/emrgd.cmd dist/runtime/bin/stop-emrg.cmd; do
+            [ -f "$f" ] || continue
+            cr=$(tr -cd '\r' < "$f" | wc -c)
+            lf=$(tr -cd '\n' < "$f" | wc -c)
+            if [ "$cr" -ne "$lf" ] || [ "$lf" -eq 0 ]; then
+              echo "::error::$f has bare-LF line(s) ($((lf-cr)) of $lf) — cmd.exe misparses LF → installer exit 1"
+              exit 1
+            fi
+            echo "OK $f: pure CRLF ($lf lines)"
+          done
+
       # ── 图标资产生成（rant 2026-08-11T18:28:09：仓库只保留 icon.svg 设计源，
       #     png/icns/ico 由 CI 构建时现生成，必须先于 GUI 构建执行）──
       - name: Generate icon assets (icon.svg → png/icns/ico)

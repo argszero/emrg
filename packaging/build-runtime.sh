@@ -71,6 +71,21 @@ cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
   cp "$ROOT/bin/stop-emrg.cmd" stop-emrg.cmd 2>/dev/null || true
   cp "$ROOT/bin/emrg-uninstall" emrg-uninstall
   chmod +x emrg emrgd emrg-uninstall
+  # R126: rant 2026-08-13T09:44:32 — 打包强制 CRLF，不依赖 .gitattributes 在 CI
+  # 检出是否生效（git blob 是 LF；工作区 CRLF 靠 checkout 转换，CI 打包若拿到
+  # LF → cmd.exe 整文件串行拼接 → 安装器 "stop-emrg.cmd exit code 1"）。
+  # 拷贝后统一为纯 CRLF（幂等：先归 LF 再转 CRLF），并断言纯 CRLF 才继续。
+  for f in emrg.cmd emrgd.cmd stop-emrg.cmd; do
+    [ -f "$f" ] || continue
+    python3 - "$f" <<'PY'
+import sys
+p = sys.argv[1]
+b = open(p, 'rb').read()
+b = b.replace(b'\r\n', b'\n').replace(b'\n', b'\r\n')
+assert b.count(b'\r\n') == b.count(b'\n') and b.count(b'\n') > 0, f'{p} CRLF normalization failed'
+open(p, 'wb').write(b)
+PY
+  done
 )
 
 # ── 3. source/（只读，排除 gui node_modules R14；⚠️ 只含 emrg/ 源码，不含 bin/ ——

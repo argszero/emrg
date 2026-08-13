@@ -133,3 +133,23 @@ def test_build_runtime_copies_stop_scripts():
     content = (REPO_ROOT / "packaging" / "build-runtime.sh").read_text(encoding="utf-8")
     assert 'cp "$ROOT/bin/stop-emrg.cmd" stop-emrg.cmd' in content
     assert 'cp "$ROOT/bin/stop-git.ps1"' not in content
+
+
+def test_build_runtime_forces_crlf():
+    """R126 / rant 2026-08-13T09:44:32 — build-runtime.sh must force pure CRLF
+    on the packaged *.cmd files (git blob is LF; .gitattributes checkout
+    conversion may not apply in CI → LF .cmd misparsed by cmd.exe → installer
+    "exit code 1")."""
+    content = (REPO_ROOT / "packaging" / "build-runtime.sh").read_text(encoding="utf-8")
+    # Normalization loop covers all three Windows launchers
+    assert "for f in emrg.cmd emrgd.cmd stop-emrg.cmd" in content
+    # Pure-CRLF assertion gates the build (LF-only → build fails)
+    assert "b.count(b'\\r\\n') == b.count(b'\\n')" in content
+
+
+def test_build_release_workflow_verifies_crlf():
+    """R126 companion — build-release.yml must assert packaged *.cmd are pure
+    CRLF after the Build runtime step (CI red on LF)."""
+    wf = (REPO_ROOT / ".github" / "workflows" / "build-release.yml").read_text(encoding="utf-8")
+    assert "Verify runtime *.cmd are pure CRLF" in wf
+    assert "bare-LF" in wf
