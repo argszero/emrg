@@ -193,6 +193,7 @@ function makeSandbox(overrides = {}) {
       pickProjectDir: async () => null,
       listSessions: async () => [],
       switchSession: async () => ({}),
+      listHistory: async () => ({ messages: [], hasMore: false }),
       newSession: async () => ({ session_id: "s2" }),
       deleteSession: async () => ({}),
       setModel: async () => ({}),
@@ -2627,4 +2628,40 @@ test("P3：自定义类型管理 —— 内置只读；自定义增删改走模�
   assert.ok(createdTpl, "taskTemplateCreate 应被调用");
   assert.strictEqual(createdTpl.name, "nightly");
   assert.ok(createdTpl.prompt.includes("nightly"), "prompt 原样提交");
+});
+
+test("rant 14:15:12：切会话加载最近历史（只读气泡 + 加载条），滚动到顶加载更早", async () => {
+  const calls = [];
+  const { ctx, els } = makeSandbox({
+    switchSession: async () => ({}),
+    listHistory: async ({ limit, offset } = {}) => {
+      calls.push({ limit, offset });
+      if (offset === 0) return { messages: [{ content: "msg-49", preview: "msg-49" }, { content: "msg-50", preview: "msg-50" }], hasMore: true };
+      return { messages: [{ content: "msg-00", preview: "msg-00" }], hasMore: false };
+    },
+  });
+  await vm.runInContext('App.boot()', ctx);
+  await tick();
+  // 切到 s1 → 应调 listHistory(limit=50, offset=0) 并渲染 2 条历史气泡 + 加载条
+  await vm.runInContext('App.switchSession("s1")', ctx);
+  await tick();
+  assert.strictEqual(calls.length, 1, "切会话应加载最近一页历史");
+  assert.strictEqual(calls[0].limit, 50);
+  assert.strictEqual(calls[0].offset, 0);
+  const historyNodes = vm.runInContext('document.getElementById("chat-view").querySelectorAll(".history").length', ctx);
+  assert.strictEqual(historyNodes, 2, "应渲染 2 条只读历史气泡");
+  const loadBar = vm.runInContext('document.getElementById("chat-view").querySelector(".history-load-bar")', ctx);
+  assert.ok(loadBar, "hasMore 时应显示加载条");
+  // 模拟滚动到顶 → 触发加载更早（防抖 150ms；mock 的 scroll 事件需带 .session-view target）
+  const view = vm.runInContext('document.getElementById("chat-view").querySelector(".session-view")', ctx);
+  view.scrollTop = 0;
+  els["chat-view"].dispatch("scroll", { target: view });
+  await new Promise((r) => setTimeout(r, 200));
+  await tick();
+  assert.strictEqual(calls.length, 2, "滚动到顶应加载更早一页");
+  assert.strictEqual(calls[1].offset, 2, "第二次加载 offset=已加载数");
+  const historyNodes2 = vm.runInContext('document.getElementById("chat-view").querySelectorAll(".history").length', ctx);
+  assert.strictEqual(historyNodes2, 3, "prepend 后共 3 条历史气泡");
+  const noMore = vm.runInContext('document.getElementById("chat-view").querySelector(".history-load-bar")', ctx);
+  assert.ok(noMore, "无更多历史时加载条仍在（显示没有更多）");
 });
