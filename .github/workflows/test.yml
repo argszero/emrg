@@ -90,7 +90,8 @@ jobs:
           STAGE_WIN="$(cygpath -m "$STAGE")"
           ROOT_WIN="$(cygpath -m "$PWD")"
           export VERSION DIST_WIN STAGE_WIN ROOT_WIN STAGE
-          sed -n '/cat > "\$STAGE\/emrg.iss" <<EOF/,/^EOF$/p' packaging/make-installer.sh > "$STAGE/gen.sh"
+          # 单引号内避免 \$ 字面量（shellcheck SC2016），用无 $ 的锚定模式
+          sed -n '/cat > .*emrg\.iss.*<</,/^EOF$/p' packaging/make-installer.sh > "$STAGE/gen.sh"
           bash "$STAGE/gen.sh"
           command -v iscc >/dev/null 2>&1 || { echo "::error::iscc not on PATH (runner image regression)"; exit 1; }
           iscc "$STAGE/emrg.iss"

@@ -406,8 +406,8 @@ begin
       // 字符串返回形式！v0.2.30 Build Release 31661378619 因此编译失败
       // （iscc "Invalid number of parameters"，Test CI 不编译 .iss 未拦住）。
       // 正确用法：out-param 写入 LogText，返回 Boolean 表示成功。
-      // 注意：本注释位于未加引号 heredoc（<<EOF）内，禁用反引号/$( ) 以免触发
-      // 命令替换破坏渲染（iscc compile gate 实证捕获）。
+      // 注意：本注释位于未加引号 heredoc 内，禁用反引号与命令替换语法
+      // （iscc compile gate 实证捕获），以免破坏 .iss 渲染。
       if FileExists(LogFile) then
         LoadStringFromFile(LogFile, LogText);
       if Length(LogText) > 2000 then
