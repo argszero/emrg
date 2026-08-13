@@ -279,11 +279,11 @@ const App = (() => {
           }
           break;
         case "/trigger":
-          // P4：/trigger <name> 直接触发；无参数 → 任务列表对话框
+          // P4：/trigger <name> 直接触发；无参数 → 打开任务面板（rant 14:10:14 P3：替代 tasks-dialog）
           if (parsed.args.length > 0) {
             await doTrigger(parsed.args[0]);
           } else {
-            showTasksDialog();
+            openTasksPanel();
           }
           break;
         default:
@@ -480,38 +480,14 @@ const App = (() => {
     }
   }
 
-  // /trigger：任务列表对话框（点击立即触发）
-  async function showTasksDialog() {
-    const list = $("tasks-list");
-    const dialog = $("tasks-dialog");
-    if (!list || !dialog) return;
-    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
-    dialog.showModal();
+  // /trigger：任务面板（rant 14:10:14 P3：替代 tasks-dialog；点击行立即触发）
+  async function openTasksPanel() {
+    if (state.activePanel !== "tasks") switchPanel("tasks");
     try {
-      const tasks = await window.emrg.listTasks();
-      list.innerHTML = "";
-      if (!tasks || tasks.length === 0) {
-        list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.noTasks")}</span></div>`;
-        return;
-      }
-      for (const t of tasks) {
-        const row = el("button", {
-          class: "help-row",
-          type: "button",
-          style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;",
-        });
-        const name = el("span", { class: "help-cmd" }, t.name || t.type || _t("app.unnamed"));
-        const hint = el("span", { class: "help-hint" }, t.enabled === false ? _t("app.taskDisabled") : _t("app.taskInterval", { n: t.interval ?? "-" }));
-        row.appendChild(name);
-        row.appendChild(hint);
-        row.addEventListener("click", async () => {
-          dialog.close();
-          await doTrigger(t.name);
-        });
-        list.appendChild(row);
-      }
+      await Dialogs.loadTaskMeta();
+      await Dialogs.renderTaskList();
     } catch (e) {
-      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("app.tasksFailed", { msg: escapeHtml(e.message) })}</span></div>`;
+      Chat.addSystemMessage(_t("app.tasksFailed", { msg: e.message }));
     }
   }
 
@@ -700,6 +676,18 @@ const App = (() => {
       const panel = $(`panel-${name}`);
       if (btn) btn.classList.add("active");
       if (panel) panel.classList.remove("hidden");
+    }
+  }
+
+  /** rant 14:10:14 P2：设置面板 tab 切换（模型服务/工作目录/GitHub/外观/语言/关于）。 */
+  const SETTINGS_TABS = ["model", "workdir", "github", "appearance", "language", "about"];
+  function switchSettingsTab(name) {
+    if (!SETTINGS_TABS.includes(name)) return;
+    for (const t of SETTINGS_TABS) {
+      const tabBtn = $(`settings-tab-${t}`);
+      const body = $(`settings-body-${t}`);
+      if (tabBtn) tabBtn.classList.toggle("active", t === name);
+      if (body) body.classList.toggle("hidden", t !== name);
     }
   }
 
@@ -1497,9 +1485,17 @@ const App = (() => {
     $("stop-btn").addEventListener("click", () => window.emrg.cancel().catch(() => {}));
     // rant 14:10:14 P1：侧边栏导航点击切换面板
     for (const p of SIDE_PANELS) {
-      $(`nav-${p}`)?.addEventListener("click", () => switchPanel(p));
+      $(`nav-${p}`)?.addEventListener("click", () => {
+        switchPanel(p);
+        // P2：面板打开时加载对应数据（settings 走 showSettings 刷新全部；tasks 走任务加载）
+        if (p === "settings" && state.activePanel === "settings") {
+          loadEvolutionSummary();
+          Dialogs.showSettings();
+        } else if (p === "tasks" && state.activePanel === "tasks") {
+          openTasksPanel();
+        }
+      });
     }
-    // B1（rant 21:59:11）：侧边栏"＋ 新对话"→ 项目选择弹窗（选项目新建 / 新建项目），不再直接新建
     $("new-chat-btn").addEventListener("click", () => Dialogs.showNewSessionDialog());
     // B2（rant 21:59:11）：侧边栏"打开会话"入口 → 两步弹窗（选项目 → 选会话）
     $("open-chat-btn")?.addEventListener("click", () => Dialogs.showOpenSessionDialog());
@@ -1511,7 +1507,7 @@ const App = (() => {
       Dialogs.showSettings();
     });
     Dialogs.initLangButtons(); // rant 21:19：设置语言选择器
-    $("settings-cancel").addEventListener("click", () => $("settings-dialog").close());
+    $("settings-cancel").addEventListener("click", () => switchPanel("settings")); // P2：取消=关闭设置面板
     $("settings-save").addEventListener("click", Dialogs.saveSettings);
     $("pick-dir-btn").addEventListener("click", async () => {
       const dir = await window.emrg.pickProjectDir();
@@ -1536,7 +1532,11 @@ const App = (() => {
       $("rant-dialog").close();
       await submitRant(msg, proj);
     });
-    $("tasks-close").addEventListener("click", () => $("tasks-dialog").close());
+
+    // rant 14:10:14 P2：设置面板 tab 切换（模型服务/工作目录/GitHub/外观/语言/关于）
+    document.querySelectorAll("#settings-tabs .panel-tab").forEach((tab) => {
+      tab.addEventListener("click", () => switchSettingsTab(tab.dataset.settingsTab));
+    });
 
     // 设置/首启对话框：Enter 提交（与重命名/模型表单一致的交互）
     const enterToSave = (fn) => (e) => {
@@ -1693,6 +1693,8 @@ const App = (() => {
     showOpenSessionsMenu, // P4 slice 2：打开会话右键菜单
     activateSessionView, // P3 slice 2：激活会话容器（display 切换；导出供测试）
     switchPanel, // rant 14:10:14 P1：侧边栏面板切换（导出供测试）
+    switchSettingsTab, // rant 14:10:14 P2：设置面板 tab 切换（导出供测试）
+    openTasksPanel, // rant 14:10:14 P3：任务面板打开 + 加载（导出供测试）
     refreshSessions,
     showConvMenu,
     handleEvent,

@@ -50,7 +50,63 @@
       </section>
       <section class="side-panel hidden" id="panel-tasks" data-panel-body="tasks">
         <div class="side-panel-title" data-i18n="nav.tasksPanel">任务</div>
-        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+        <div class="side-panel-body">
+          <!-- rant 14:10:14 P3：任务管理从设置迁出（替代 settings 内任务区 + tasks-dialog） -->
+          <div class="hint" style="margin-bottom:6px;" data-i18n="settings.tasksHint">管理定时任务与自定义任务类型（内置类型只读）</div>
+          <div id="task-list" class="task-list"></div>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button type="button" id="task-add-btn" class="btn btn-ghost" style="flex:1;" data-i18n="settings.taskAdd">＋ 添加任务</button>
+            <button type="button" id="task-template-mgr-btn" class="btn btn-ghost" style="flex:1;" data-i18n="settings.taskTemplates">自定义类型</button>
+          </div>
+          <!-- 任务表单（添加/编辑） -->
+          <div id="task-form" class="task-form hidden">
+            <label class="model-form-label" data-i18n="settings.taskName">任务名
+              <input type="text" id="task-form-name" maxlength="32" placeholder="daily-report" />
+            </label>
+            <div class="model-form-row">
+              <label class="model-form-label" data-i18n="settings.taskType">类型
+                <select id="task-form-type"></select>
+              </label>
+              <label class="model-form-label" data-i18n="settings.taskProject">项目
+                <select id="task-form-project"></select>
+              </label>
+            </div>
+            <div class="model-form-row">
+              <label class="model-form-label" data-i18n="settings.taskInterval">间隔（秒，≥60）
+                <input type="number" id="task-form-interval" min="60" step="1" value="1800" />
+              </label>
+              <label class="model-form-vision" style="align-self:flex-end;margin-bottom:8px;">
+                <input type="checkbox" id="task-form-enabled" checked /> <span data-i18n="settings.taskEnabled">启用</span>
+              </label>
+            </div>
+            <label class="model-form-label" data-i18n="settings.taskRepo">仓库（选填 owner/repo）
+              <input type="text" id="task-form-repo" maxlength="80" placeholder="acme/repo" />
+            </label>
+            <div class="model-form-footer">
+              <div style="display:flex;gap:8px;margin-left:auto;">
+                <button type="button" id="task-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
+                <button type="button" id="task-form-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.taskSave">保存任务</button>
+              </div>
+            </div>
+          </div>
+          <!-- 自定义类型表单 -->
+          <div id="task-template-form" class="task-form hidden">
+            <label class="model-form-label" data-i18n="settings.templateName">类型名
+              <input type="text" id="task-template-name" maxlength="32" placeholder="report" />
+            </label>
+            <label class="model-form-label" data-i18n="settings.templatePrompt">提示词模板
+              <textarea id="task-template-prompt" rows="6" style="width:100%;min-height:120px;" placeholder="# {{ instance_id }} ..."></textarea>
+            </label>
+            <div class="model-form-footer">
+              <div style="display:flex;gap:8px;margin-left:auto;">
+                <button type="button" id="task-template-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
+                <button type="button" id="task-template-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.templateSave">保存类型</button>
+              </div>
+            </div>
+          </div>
+          <!-- 自定义类型列表 -->
+          <div id="task-template-list" class="task-list hidden" style="margin-top:8px;"></div>
+        </div>
       </section>
       <section class="side-panel hidden" id="panel-rants" data-panel-body="rants">
         <div class="side-panel-title" data-i18n="nav.rantsPanel">Rant</div>
@@ -58,7 +114,106 @@
       </section>
       <section class="side-panel hidden" id="panel-settings" data-panel-body="settings">
         <div class="side-panel-title" data-i18n="nav.settingsPanel">设置</div>
-        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+        <!-- rant 14:10:14 P2：设置改为面板，6 tab（模型服务/工作目录/GitHub/外观/语言/关于） -->
+        <div class="panel-tabs" id="settings-tabs" role="tablist">
+          <button type="button" class="panel-tab active" id="settings-tab-model" data-settings-tab="model" data-i18n="settings.groupModel">模型服务</button>
+          <button type="button" class="panel-tab" id="settings-tab-workdir" data-settings-tab="workdir" data-i18n="settings.groupWorkdir">工作目录</button>
+          <button type="button" class="panel-tab" id="settings-tab-github" data-settings-tab="github" data-i18n="settings.groupGithub">GitHub</button>
+          <button type="button" class="panel-tab" id="settings-tab-appearance" data-settings-tab="appearance" data-i18n="settings.groupAppearance">外观</button>
+          <button type="button" class="panel-tab" id="settings-tab-language" data-settings-tab="language" data-i18n="settings.groupLanguage">语言</button>
+          <button type="button" class="panel-tab" id="settings-tab-about" data-settings-tab="about" data-i18n="settings.aboutTitle">关于</button>
+        </div>
+        <div class="panel-tab-body" id="settings-body-model" data-settings-body="model">
+          <div class="settings-group">
+            <label><span data-i18n="settings.apiKey">API Key</span> <input type="password" id="set-api-key" /></label>
+            <label><span data-i18n="settings.baseUrl">接口地址</span> <input type="text" id="set-base-url" placeholder="https://api.deepseek.com" /></label>
+            <div class="settings-group-title" style="margin-top:14px;" data-i18n="settings.availableModels">可用模型</div>
+            <div id="model-list"></div>
+            <button type="button" id="add-model-btn" class="btn btn-ghost" style="width:100%;margin-top:6px;" data-i18n="settings.addModel">＋ 添加模型</button>
+            <!-- 行内添加/编辑模型表单 -->
+            <div id="model-form" class="model-form hidden">
+              <div class="model-form-row">
+                <label class="model-form-label" data-i18n="settings.name">名称
+                  <input type="text" id="model-form-name" placeholder="如 deepseek-v3" maxlength="40" data-i18n-placeholder="settings.modelNamePlaceholder" />
+                </label>
+                <label class="model-form-label" data-i18n="settings.modelId">模型 ID（选填）
+                  <input type="text" id="model-form-id" placeholder="默认同名称" maxlength="60" data-i18n-placeholder="settings.modelIdPlaceholder" />
+                </label>
+              </div>
+              <div class="model-form-footer">
+                <label class="model-form-vision"><input type="checkbox" id="model-form-vision" /> <span data-i18n="settings.vision">支持图片</span></label>
+                <div style="display:flex;gap:8px;margin-left:auto;">
+                  <button type="button" id="model-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
+                  <button type="button" id="model-form-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.saveModel">保存模型</button>
+                </div>
+              </div>
+            </div>
+            <div class="hint" style="margin-top:8px;" data-i18n="settings.defaultHint">点左侧圆点可设为默认模型，切换后下一条消息即生效</div>
+          </div>
+        </div>
+        <div class="panel-tab-body hidden" id="settings-body-workdir" data-settings-body="workdir">
+          <div class="settings-group">
+            <label><span data-i18n="settings.workdirDesc">EMRG 在哪里帮你干活</span>
+              <div class="dir-row">
+                <input type="text" id="set-project-dir" readonly />
+                <button type="button" id="pick-dir-btn" class="btn btn-ghost" data-i18n="settings.choose">选择…</button>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div class="panel-tab-body hidden" id="settings-body-github" data-settings-body="github">
+          <div class="settings-group">
+            <div id="github-status" class="hint" style="margin-bottom:6px;">—</div>
+            <div id="github-auth-row" style="display:flex;gap:8px;">
+              <input type="password" id="set-github-token" placeholder="GitHub Personal Access Token" style="flex:1;min-width:0;" data-i18n-placeholder="settings.githubTokenPlaceholder" />
+              <button type="button" id="github-connect-btn" class="btn btn-primary" data-i18n="settings.githubConnect">连接</button>
+              <button type="button" id="github-disconnect-btn" class="btn btn-ghost hidden" data-i18n="settings.githubDisconnect">断开</button>
+            </div>
+            <div class="hint" style="margin-top:6px;" data-i18n="settings.githubHint">用于自进化推送 PR；授权后自动执行 gh auth setup-git，git 操作不再弹 GCM</div>
+          </div>
+        </div>
+        <div class="panel-tab-body hidden" id="settings-body-appearance" data-settings-body="appearance">
+          <div class="settings-group">
+            <label><span data-i18n="settings.theme">主题</span>
+              <div class="theme-options" id="theme-options">
+                <button type="button" class="theme-option" data-theme="light" data-i18n="settings.themeLight">浅色</button>
+                <button type="button" class="theme-option" data-theme="dark" data-i18n="settings.themeDark">深色</button>
+                <button type="button" class="theme-option" data-theme="system" data-i18n="settings.themeSystem">跟随系统</button>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div class="panel-tab-body hidden" id="settings-body-language" data-settings-body="language">
+          <div class="settings-group">
+            <label><span data-i18n="settings.groupLanguage">语言</span>
+              <div class="theme-options" id="lang-options">
+                <button type="button" class="theme-option" data-lang="" data-i18n="settings.langFollowSystem">跟随系统</button>
+                <button type="button" class="theme-option" data-lang="zh" data-i18n="settings.langZh">中文</button>
+                <button type="button" class="theme-option" data-lang="en" data-i18n="settings.langEn">English</button>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div class="panel-tab-body hidden" id="settings-body-about" data-settings-body="about">
+          <div class="settings-group">
+            <div class="about-box">
+              <div class="about-line">EMRG <span id="about-version">v0.2.8</span> · <span id="about-evolutions">🌱 <span data-i18n="copy.growthCountPrefix">已自我进化</span> 0 <span data-i18n="copy.times">次</span></span></div>
+              <div class="about-line hidden" id="about-update"></div>
+              <div class="about-line">
+                <button type="button" class="btn btn-sm" id="about-update-check-btn" data-i18n="settings.checkUpdate">检查更新</button>
+              </div>
+              <div class="hint" style="margin-top:6px;" data-i18n="settings.aboutDesc">EMRG 是一个会自我进化的 AI 智能体——每次改进都会自动汇报，你可以随时在这里看到它的成长。</div>
+            </div>
+          </div>
+          <div class="settings-group">
+            <div class="settings-group-title" data-i18n="settings.recentTitle">最近改进</div>
+            <div id="about-recent" class="about-recent"></div>
+          </div>
+        </div>
+        <div class="panel-actions">
+          <button type="button" id="settings-cancel" class="btn btn-ghost" data-i18n="settings.cancel">取消</button>
+          <button type="button" id="settings-save" class="btn btn-primary" data-i18n="settings.save">保存</button>
+        </div>
       </section>
       <div class="sidebar-footer">
         <span id="status-dot" class="status-dot gray" title="连接状态" data-i18n-title="sidebar.statusTitle"></span>
@@ -137,157 +292,6 @@
     <!-- 宽度拖拽手柄：绝对定位（不进 #app flex 流，防 WebContentsView bounds x 偏移） -->
     <div id="result-resizer" title="拖拽调整宽度" data-i18n-title="result.resize"></div>
   </div>
-
-  <!-- 设置对话框 -->
-  <dialog id="settings-dialog">
-    <div class="dialog-card">
-      <h2 data-i18n="settings.title">设置</h2>
-      <div class="settings-group">
-        <div class="settings-group-title" data-i18n="settings.groupModel">模型服务</div>
-        <label><span data-i18n="settings.apiKey">API Key</span> <input type="password" id="set-api-key" /></label>
-        <label><span data-i18n="settings.baseUrl">接口地址</span> <input type="text" id="set-base-url" placeholder="https://api.deepseek.com" /></label>
-        <div class="settings-group-title" style="margin-top:14px;" data-i18n="settings.availableModels">可用模型</div>
-        <div id="model-list"></div>
-        <button type="button" id="add-model-btn" class="btn btn-ghost" style="width:100%;margin-top:6px;" data-i18n="settings.addModel">＋ 添加模型</button>
-        <!-- 行内添加/编辑模型表单 -->
-        <div id="model-form" class="model-form hidden">
-          <div class="model-form-row">
-            <label class="model-form-label" data-i18n="settings.name">名称
-              <input type="text" id="model-form-name" placeholder="如 deepseek-v3" maxlength="40" data-i18n-placeholder="settings.modelNamePlaceholder" />
-            </label>
-            <label class="model-form-label" data-i18n="settings.modelId">模型 ID（选填）
-              <input type="text" id="model-form-id" placeholder="默认同名称" maxlength="60" data-i18n-placeholder="settings.modelIdPlaceholder" />
-            </label>
-          </div>
-          <div class="model-form-footer">
-            <label class="model-form-vision"><input type="checkbox" id="model-form-vision" /> <span data-i18n="settings.vision">支持图片</span></label>
-            <div style="display:flex;gap:8px;margin-left:auto;">
-              <button type="button" id="model-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
-              <button type="button" id="model-form-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.saveModel">保存模型</button>
-            </div>
-          </div>
-        </div>
-        <div class="hint" style="margin-top:8px;" data-i18n="settings.defaultHint">点左侧圆点可设为默认模型，切换后下一条消息即生效</div>
-      </div>
-      <div class="settings-group">
-        <div class="settings-group-title" data-i18n="settings.groupWorkdir">工作目录</div>
-        <label><span data-i18n="settings.workdirDesc">EMRG 在哪里帮你干活</span>
-          <div class="dir-row">
-            <input type="text" id="set-project-dir" readonly />
-            <button type="button" id="pick-dir-btn" class="btn btn-ghost" data-i18n="settings.choose">选择…</button>
-          </div>
-        </label>
-      </div>
-      <div class="settings-group">
-        <div class="settings-group-title" data-i18n="settings.groupGithub">GitHub 连接</div>
-        <div id="github-status" class="hint" style="margin-bottom:6px;">—</div>
-        <div id="github-auth-row" style="display:flex;gap:8px;">
-          <input type="password" id="set-github-token" placeholder="GitHub Personal Access Token" style="flex:1;min-width:0;" data-i18n-placeholder="settings.githubTokenPlaceholder" />
-          <button type="button" id="github-connect-btn" class="btn btn-primary" data-i18n="settings.githubConnect">连接</button>
-          <button type="button" id="github-disconnect-btn" class="btn btn-ghost hidden" data-i18n="settings.githubDisconnect">断开</button>
-        </div>
-        <div class="hint" style="margin-top:6px;" data-i18n="settings.githubHint">用于自进化推送 PR；授权后自动执行 gh auth setup-git，git 操作不再弹 GCM</div>
-      </div>
-      <div class="settings-group">
-        <div class="settings-group-title" data-i18n="settings.groupAppearance">外观</div>
-        <label><span data-i18n="settings.theme">主题</span>
-          <div class="theme-options" id="theme-options">
-            <button type="button" class="theme-option" data-theme="light" data-i18n="settings.themeLight">浅色</button>
-            <button type="button" class="theme-option" data-theme="dark" data-i18n="settings.themeDark">深色</button>
-            <button type="button" class="theme-option" data-theme="system" data-i18n="settings.themeSystem">跟随系统</button>
-          </div>
-        </label>
-      </div>
-      <div class="settings-group">
-        <div class="settings-group-title" data-i18n="settings.groupLanguage">语言</div>
-        <label><span data-i18n="settings.groupLanguage">语言</span>
-          <div class="theme-options" id="lang-options">
-            <button type="button" class="theme-option" data-lang="" data-i18n="settings.langFollowSystem">跟随系统</button>
-            <button type="button" class="theme-option" data-lang="zh" data-i18n="settings.langZh">中文</button>
-            <button type="button" class="theme-option" data-lang="en" data-i18n="settings.langEn">English</button>
-          </div>
-        </label>
-      </div>
-      <div class="settings-group">
-        <div class="settings-group-title" data-i18n="settings.groupTasks">定时任务</div>
-        <div class="hint" style="margin-bottom:6px;" data-i18n="settings.tasksHint">管理定时任务与自定义任务类型（内置类型只读）</div>
-        <!-- 任务列表 -->
-        <div id="task-list" class="task-list"></div>
-        <div style="display:flex;gap:8px;margin-top:8px;">
-          <button type="button" id="task-add-btn" class="btn btn-ghost" style="flex:1;" data-i18n="settings.taskAdd">＋ 添加任务</button>
-          <button type="button" id="task-template-mgr-btn" class="btn btn-ghost" style="flex:1;" data-i18n="settings.taskTemplates">自定义类型</button>
-        </div>
-        <!-- 任务表单（添加/编辑） -->
-        <div id="task-form" class="task-form hidden">
-          <label class="model-form-label" data-i18n="settings.taskName">任务名
-            <input type="text" id="task-form-name" maxlength="32" placeholder="daily-report" />
-          </label>
-          <div class="model-form-row">
-            <label class="model-form-label" data-i18n="settings.taskType">类型
-              <select id="task-form-type"></select>
-            </label>
-            <label class="model-form-label" data-i18n="settings.taskProject">项目
-              <select id="task-form-project"></select>
-            </label>
-          </div>
-          <div class="model-form-row">
-            <label class="model-form-label" data-i18n="settings.taskInterval">间隔（秒，≥60）
-              <input type="number" id="task-form-interval" min="60" step="1" value="1800" />
-            </label>
-            <label class="model-form-vision" style="align-self:flex-end;margin-bottom:8px;">
-              <input type="checkbox" id="task-form-enabled" checked /> <span data-i18n="settings.taskEnabled">启用</span>
-            </label>
-          </div>
-          <label class="model-form-label" data-i18n="settings.taskRepo">仓库（选填 owner/repo）
-            <input type="text" id="task-form-repo" maxlength="80" placeholder="acme/repo" />
-          </label>
-          <div class="model-form-footer">
-            <div style="display:flex;gap:8px;margin-left:auto;">
-              <button type="button" id="task-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
-              <button type="button" id="task-form-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.taskSave">保存任务</button>
-            </div>
-          </div>
-        </div>
-        <!-- 自定义类型表单 -->
-        <div id="task-template-form" class="task-form hidden">
-          <label class="model-form-label" data-i18n="settings.templateName">类型名
-            <input type="text" id="task-template-name" maxlength="32" placeholder="report" />
-          </label>
-          <label class="model-form-label" data-i18n="settings.templatePrompt">提示词模板
-            <textarea id="task-template-prompt" rows="6" style="width:100%;min-height:120px;" placeholder="# {{ instance_id }} ..."></textarea>
-          </label>
-          <div class="model-form-footer">
-            <div style="display:flex;gap:8px;margin-left:auto;">
-              <button type="button" id="task-template-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
-              <button type="button" id="task-template-save" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="settings.templateSave">保存类型</button>
-            </div>
-          </div>
-        </div>
-        <!-- 自定义类型列表 -->
-        <div id="task-template-list" class="task-list hidden" style="margin-top:8px;"></div>
-      </div>
-      <div class="settings-group">
-        <div class="settings-group-title" data-i18n="settings.aboutTitle">关于</div>
-        <div class="about-box">
-          <div class="about-line">EMRG <span id="about-version">v0.2.8</span> · <span id="about-evolutions">🌱 <span data-i18n="copy.growthCountPrefix">已自我进化</span> 0 <span data-i18n="copy.times">次</span></span></div>
-          <div class="about-line hidden" id="about-update"></div>
-          <div class="about-line">
-            <button type="button" class="btn btn-sm" id="about-update-check-btn" data-i18n="settings.checkUpdate">检查更新</button>
-          </div>
-          <div class="hint" style="margin-top:6px;" data-i18n="settings.aboutDesc">EMRG 是一个会自我进化的 AI 智能体——每次改进都会自动汇报，你可以随时在这里看到它的成长。</div>
-        </div>
-      </div>
-      <!-- WorkBuddy P3：最近改进列表（daemon evolution_summary） -->
-      <div class="settings-group">
-        <div class="settings-group-title" data-i18n="settings.recentTitle">最近改进</div>
-        <div id="about-recent" class="about-recent"></div>
-      </div>
-      <div class="dialog-actions">
-        <button type="button" id="settings-cancel" class="btn btn-ghost" data-i18n="settings.cancel">取消</button>
-        <button type="button" id="settings-save" class="btn btn-primary" data-i18n="settings.save">保存</button>
-      </div>
-    </div>
-  </dialog>
 
   <!-- 首启引导 -->
   <dialog id="welcome-dialog">
@@ -466,18 +470,6 @@
       <div class="dialog-actions">
         <button type="button" id="rant-cancel" class="btn btn-ghost" data-i18n="settings.cancel">取消</button>
         <button type="button" id="rant-submit" class="btn btn-primary" data-i18n="rant.submit">驱动进化</button>
-      </div>
-    </div>
-  </dialog>
-
-  <!-- 任务列表对话框（/trigger，GUI / 指令 P4） -->
-  <dialog id="tasks-dialog">
-    <div class="dialog-card" style="min-width:440px;">
-      <h2 data-i18n="tasks.title">后台任务</h2>
-      <p style="color:var(--text-2);font-size:var(--fs-secondary);margin:0 0 var(--sp-3);" data-i18n="tasks.desc">点击任务立即触发一次运行。</p>
-      <div id="tasks-list" class="help-list"></div>
-      <div class="dialog-actions">
-        <button type="button" id="tasks-close" class="btn btn-ghost" data-i18n="help.close">关闭</button>
       </div>
     </div>
   </dialog>

@@ -114,8 +114,9 @@ const ELEMENT_IDS = [
   "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn", "open-chat-btn",
   "side-nav", "nav-sessions", "nav-projects", "nav-tasks", "nav-rants", "nav-settings",
   "panel-sessions", "panel-projects", "panel-tasks", "panel-rants", "panel-settings",
-  "settings-dialog", "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",
-  "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
+  "settings-tabs", "settings-tab-model", "settings-tab-workdir", "settings-tab-github", "settings-tab-appearance", "settings-tab-language", "settings-tab-about",
+  "settings-body-model", "settings-body-workdir", "settings-body-github", "settings-body-appearance", "settings-body-language", "settings-body-about",
+  "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",  "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
   "welcome-model", "welcome-project-dir", "welcome-pick-btn", "welcome-save", "confirm-dialog",
   "confirm-title", "confirm-message", "confirm-cancel", "confirm-ok", "main",
   "rename-dialog", "rename-input", "rename-cancel", "rename-ok", "ctx-menu",
@@ -127,7 +128,6 @@ const ELEMENT_IDS = [
   "memory-dialog", "memory-list", "memory-detail", "memory-close",
   "skills-dialog", "skills-list", "skills-close",
   "rant-dialog", "rant-message", "rant-project", "rant-cancel", "rant-submit",
-  "tasks-dialog", "tasks-list", "tasks-close",
   "result-panel", "result-list", "result-toggle",
   "result-tabs", "result-tab-files", "result-tab-artifacts", "result-tabbar", "result-files", "result-viewer", "result-resizer",
   "growth-card", "growth-count", "about-recent",
@@ -2494,7 +2494,7 @@ test("P3：设置面板打开 → 任务列表渲染（名称/类型/项目/间�
     triggerTask: async () => ({}),
   });
   await tick();
-  await vm.runInContext("EMRG_Dialogs.showSettings()", ctx);
+  await vm.runInContext("App.openTasksPanel()", ctx);
   await tick();
   // 任务行渲染：2 行 + 空态兜底（无）
   const rows = vm.runInContext('document.getElementById("task-list").children.length', ctx);
@@ -2541,7 +2541,7 @@ test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 t
     taskCreate: async (payload) => { created = payload; return { ok: true }; },
   });
   await tick();
-  await vm.runInContext("EMRG_Dialogs.showSettings()", ctx);
+  await vm.runInContext("App.openTasksPanel()", ctx);
   await tick();
   // 点"＋ 添加任务" → 空表单
   els["task-form"].classList.add("hidden"); // 镜像 index.html 初始态（task-form hidden）
@@ -2592,7 +2592,7 @@ test("P3：自定义类型管理 —— 内置只读；自定义增删改走模�
     taskTemplateDelete: async (payload) => { deletedTpl = payload; return { ok: true }; },
   });
   await tick();
-  await vm.runInContext("EMRG_Dialogs.showSettings()", ctx);
+  await vm.runInContext("App.openTasksPanel()", ctx);
   await tick();
   // 打开自定义类型列表（镜像 index.html 初始态：task-template-list hidden）
   els["task-template-list"].classList.add("hidden");
@@ -2693,4 +2693,36 @@ test("rant 14:10:14 P1：侧边栏导航切换面板 + 高亮（点同项关闭�
   await tick();
   assert.strictEqual(visible("panel-settings"), false, "点同项应关闭面板");
   assert.strictEqual(active("nav-settings"), false, "关闭后导航取消高亮");
+});
+
+test("rant 14:10:14 P2：设置面板 tab 切换（6 tab 独立显隐 + 高亮）", async () => {
+  const { ctx } = makeSandbox();
+  await vm.runInContext("App.boot()", ctx);
+  await tick();
+  const visible = (id) => vm.runInContext(`document.getElementById("${id}").classList.contains("hidden") === false`, ctx);
+  const active = (id) => vm.runInContext(`document.getElementById("${id}").classList.contains("active")`, ctx);
+  // 归一化初始态（index.html 标记 hidden 由 switchSettingsTab 全量重设，mock 需显式触发）
+  await vm.runInContext("App.switchSettingsTab('model')", ctx);
+  await tick();
+  // 默认：model tab 激活且可见，其余 tab body 隐藏
+  assert.strictEqual(visible("settings-body-model"), true, "默认显示模型服务 tab");
+  for (const t of ["workdir", "github", "appearance", "language", "about"]) {
+    assert.strictEqual(visible(`settings-body-${t}`), false, `默认隐藏 ${t} tab`);
+  }
+  // 切到 GitHub tab → 只有它可见 + 高亮
+  await vm.runInContext("App.switchSettingsTab('github')", ctx);
+  await tick();
+  assert.strictEqual(visible("settings-body-github"), true, "GitHub tab 应显示");
+  assert.strictEqual(active("settings-tab-github"), true, "GitHub tab 应高亮");
+  assert.strictEqual(visible("settings-body-model"), false, "模型服务 tab 应隐藏");
+  assert.strictEqual(active("settings-tab-model"), false, "模型服务 tab 取消高亮");
+  // 切到关于 → GitHub 关、关于开
+  await vm.runInContext("App.switchSettingsTab('about')", ctx);
+  await tick();
+  assert.strictEqual(visible("settings-body-about"), true, "关于 tab 应显示");
+  assert.strictEqual(visible("settings-body-github"), false, "GitHub tab 应隐藏");
+  // 非法 tab 名 → 忽略（不抛）
+  await vm.runInContext("App.switchSettingsTab('bogus')", ctx);
+  await tick();
+  assert.strictEqual(visible("settings-body-about"), true, "非法 tab 名应保持当前 tab");
 });

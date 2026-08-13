@@ -227,14 +227,15 @@ test("P4：/rant 直接跟内容快速提交（不打开对话框）", async () 
   assert.ok(!(els["rant-dialog"] && els["rant-dialog"].__open), "direct rant submit should not open dialog");
 });
 
-test("P4：/trigger 无参数打开任务列表对话框", async () => {
+test("P4：/trigger 无参数打开任务面板", async () => {
   const { ctx, els } = makeSandbox({
     listTasks: async () => [{ name: "emrg-task", type: "evolution", interval: 60 }],
     triggerTask: async () => ({ ok: true }),
   });
   await tick();
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/trigger', args: [] })", ctx);
-  assert.ok(els["tasks-dialog"] && els["tasks-dialog"].__open === true, "tasks dialog opened");
+  const panel = els["panel-tasks"];
+  assert.ok(panel && !panel.classList.contains("hidden"), "tasks panel should be open");
 });
 
 test("P4：/trigger <name> 直接触发（不打开对话框）", async () => {
