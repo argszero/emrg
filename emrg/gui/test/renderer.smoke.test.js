@@ -2918,9 +2918,9 @@ test("rant 14:10:14 P5：项目面板列表（auto_evolve 徽标 + 最近活跃�
   assert.strictEqual(removed.name, "docs");
 });
 
-test("rant 14:10:14 P4：rant 面板列表（状态徽标 + 筛选）+ 详情展开 + 新建提交", async () => {
+test("rant 14:10:14 P4：rant 面板列表（5 列 + 状态徽标三态 + 筛选）+ 详情 markdown 渲染 + 新建提交", async () => {
   const rants = [
-    { timestamp: "2026-08-13T14:10:14.854793", project: "emrg", status: "in_progress", progress: "P1 done", message: "GUI 重设计" },
+    { timestamp: "2026-08-13T14:10:14.854793", project: "emrg", status: "in_progress", progress: "P1 done", message: "## GUI 重设计\n**加粗** 与 `code`" },
     { timestamp: "2026-08-12T09:00:00", project: "", status: "completed", progress: null, message: "旧 rant" },
     { timestamp: "2026-08-13T10:00:00", project: "", status: "pending", progress: null, message: "新想法" },
   ];
@@ -2935,21 +2935,45 @@ test("rant 14:10:14 P4：rant 面板列表（状态徽标 + 筛选）+ 详情展
   await vm.runInContext("App.openRantsPanel()", ctx);
   await tick();
   const list = els["rant-list"];
-  // 3 行 rant，全部含时间戳 + 状态徽标
+  // 3 行 rant（.task-row.rant-row），状态徽标三态配色 + 5 列
   const rows = list.children.filter((c) => c.className.includes("task-row"));
   assert.strictEqual(rows.length, 3, `rant 应渲染 3 行，实际 ${rows.length}`);
   const badges = rows.map((r) => r.querySelector(".task-badge") ? r.querySelector(".task-badge").textContent : "");
   assert.ok(badges[0].includes("进行中"), `行0 徽标应含进行中，实际 ${badges[0]}`);
   assert.ok(badges[1].includes("已完成"), `行1 徽标应含已完成，实际 ${badges[1]}`);
   assert.ok(badges[2].includes("待处理"), `行2 徽标应含待处理，实际 ${badges[2]}`);
-  // 点击行 → 详情展开（完整内容 + progress）
+  // 三态配色类：in_progress→badge-warn / completed→badge-done / pending→badge-muted
+  const badgeCls = rows.map((r) => r.querySelector(".task-badge") ? r.querySelector(".task-badge").className : "");
+  assert.ok(badgeCls[0].includes("badge-warn"), `行0 徽标应为 badge-warn，实际 ${badgeCls[0]}`);
+  assert.ok(badgeCls[1].includes("badge-done"), `行1 徽标应为 badge-done，实际 ${badgeCls[1]}`);
+  assert.ok(badgeCls[2].includes("badge-muted"), `行2 徽标应为 badge-muted，实际 ${badgeCls[2]}`);
+  // 5 列：时间/项目/状态/进度/内容（内容列去 md 标题符号后的摘要）
+  const timeCells = rows.map((r) => r.querySelector(".rant-col-time") ? r.querySelector(".rant-col-time").textContent : "");
+  assert.ok(timeCells[0].includes("2026-08-13 14:10"), `时间列应含截断时间戳，实际 ${timeCells[0]}`);
+  const projCells = rows.map((r) => r.querySelector(".rant-col-project") ? r.querySelector(".rant-col-project").textContent : "");
+  assert.strictEqual(projCells[0], "emrg", "项目列应显示项目名");
+  assert.strictEqual(projCells[1], "—", "无项目行应显示 —");
+  const contentCells = rows.map((r) => r.querySelector(".rant-col-content") ? r.querySelector(".rant-col-content").textContent : "");
+  assert.ok(contentCells[0].includes("GUI 重设计"), `内容列应去 ## 后含标题摘要，实际 ${contentCells[0]}`);
+  assert.strictEqual(contentCells[0].includes("##"), false, "内容列摘要不应含 md 标题符号");
+  const progCells = rows.map((r) => r.querySelector(".rant-col-progress") ? r.querySelector(".rant-col-progress").textContent : "");
+  assert.strictEqual(progCells[0], "P1 done", "进度列应显示 progress");
+  // 点击行 → 详情展开：meta 行 + markdown 渲染（注入真实 marked）+ progress
+  const markedReal = require(path.join(__dirname, "..", "vendor", "marked.min.js")).marked;
+  ctx.marked = markedReal; // 注入真实 marked 到 vm 全局（window.marked）
   rows[0].click();
   await tick();
   const detail = list.querySelector(".rant-detail");
   assert.ok(detail, "点击行应展开详情");
-  const detailText = (detail.children || []).map((c) => c.textContent || "").join(" ");
-  assert.ok(detailText.includes("GUI 重设计"), `详情应含完整 message，实际 ${detailText}`);
-  assert.ok(detailText.includes("P1 done"), `详情应含 progress，实际 ${detailText}`);
+  const metaText = (detail.querySelector(".rant-meta") || {}).textContent || "";
+  assert.ok(metaText.includes("emrg"), `meta 应含项目，实际 ${metaText}`);
+  const detailMd = detail.querySelector(".rant-md");
+  assert.ok(detailMd, "详情应有 .rant-md 容器");
+  assert.ok((detailMd._html || "").includes("<h2"), `详情 markdown 应渲染 h2，实际 ${detailMd._html}`);
+  assert.ok((detailMd._html || "").includes("<strong"), `详情 markdown 应渲染 strong，实际 ${detailMd._html}`);
+  assert.ok((detailMd._html || "").includes("<code"), `详情 markdown 应渲染 code，实际 ${detailMd._html}`);
+  const progText = (detail.querySelector(".rant-progress") || {}).textContent || "";
+  assert.ok(progText.includes("P1 done"), `详情应含 progress，实际 ${progText}`);
   // 筛选 tab → setRantFilter('completed') → listRants 带 status 调用
   await vm.runInContext("EMRG_Dialogs.setRantFilter('completed')", ctx);
   await tick();
@@ -2963,6 +2987,42 @@ test("rant 14:10:14 P4：rant 面板列表（状态徽标 + 筛选）+ 详情展
   await tick();
   assert.ok(sent, "sendRant 应被调用");
   assert.strictEqual(sent.message, "希望支持 X");
+});
+
+test("rant 21:36:01/21:38:25/21:46:53：三面板标题 + Rant 列头 + 项目 hint 移除 + i18n.apply 保留控件", async () => {
+  const htmlSrc = fs.readFileSync(path.join(__dirname, "..", "renderer", "index.html"), "utf-8");
+  const i18nSrc = fs.readFileSync(path.join(__dirname, "..", "renderer", "js", "i18n.js"), "utf-8");
+  // Rant 面板：标题 + 5 列头
+  const rantSection = htmlSrc.match(/id="panel-rants"([\s\S]*?)(?:<section|<div id="workspace"|\Z)/);
+  assert.ok(rantSection, "index.html 应有 rant 面板 section");
+  assert.ok(rantSection[1].includes('class="workspace-view-title" data-i18n="rants.title"'),
+    "Rant 面板应有 .workspace-view-title 标题（data-i18n=rants.title）");
+  assert.ok(rantSection[1].includes('class="rant-head"'), "Rant 面板应有 .rant-head 列头行");
+  for (const key of ["rants.colTime", "rants.colProject", "rants.colStatus", "rants.colProgress", "rants.colContent"]) {
+    assert.ok(rantSection[1].includes(`data-i18n="${key}"`), `Rant 列头应含 ${key}`);
+  }
+  // 项目面板：标题 + 移除 hint
+  const projSection = htmlSrc.match(/id="panel-projects"([\s\S]*?)(?:<section|<\/section>)/);
+  assert.ok(projSection, "index.html 应有项目面板 section");
+  assert.ok(projSection[1].includes('class="workspace-view-title" data-i18n="projects.title"'),
+    "项目面板应有 .workspace-view-title 标题（data-i18n=projects.title）");
+  assert.ok(!projSection[1].includes("projects.hint"), "项目面板不应再有顶部操作说明 hint");
+  // 任务面板：标题
+  const taskSection = htmlSrc.match(/id="panel-tasks"([\s\S]*?)(?:<section|<\/section>)/);
+  assert.ok(taskSection, "index.html 应有任务面板 section");
+  assert.ok(taskSection[1].includes('class="workspace-view-title" data-i18n="tasks.title"'),
+    "任务面板应有 .workspace-view-title 标题（data-i18n=tasks.title）");
+  // i18n：三面板标题键存在（zh/en）
+  for (const key of ['"rants.title"', '"projects.title"', '"tasks.title"', '"rants.colTime"', '"rants.colProject"', '"rants.colStatus"', '"rants.colProgress"', '"rants.colContent"']) {
+    assert.ok(i18nSrc.includes(key), `i18n.js 应定义 ${key}`);
+  }
+  // i18n.apply 修复（rant 21:46:53）：不再整体 textContent 清子元素，只替换首个文本节点
+  const i18nApplySrc = i18nSrc;
+  assert.ok(!i18nApplySrc.includes("node.textContent = t(key)"), "i18n.apply 不应整体 textContent 赋值（会清空含控件 label 子元素）");
+  assert.ok(i18nApplySrc.includes("first.nodeValue = text"), "i18n.apply 应只替换首个文本节点（first.nodeValue = text）");
+  // 孤儿键清理：rants.detail / projects.hint 已随本改动删除
+  assert.ok(!i18nSrc.includes('"rants.detail"'), "i18n 不应再有孤儿 rants.detail");
+  assert.ok(!i18nSrc.includes('"projects.hint"'), "i18n 不应再有孤儿 projects.hint");
 });
 
 test("rant 21:49:51 settings panel title + sidebar settings-btn removed", async () => {

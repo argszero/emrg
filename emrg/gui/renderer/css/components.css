@@ -844,6 +844,89 @@ dialog::backdrop {
   padding: 0 4px;
   flex-shrink: 0;
 }
+/* rant 21:36:01：Rant 面板 5 列 + 状态徽标三态配色（已完成绿 / 进行中琥珀 / 待处理灰） */
+.rant-head {
+  display: flex;
+  gap: 8px;
+  padding: 2px 8px 6px;
+  font-size: var(--fs-aux);
+  font-weight: 600;
+  color: var(--text-3);
+}
+.rant-head .rant-col-time,
+.rant-row .rant-col-time {
+  flex: 0 0 150px;
+}
+.rant-head .rant-col-project,
+.rant-row .rant-col-project {
+  flex: 0 0 90px;
+}
+.rant-head .rant-col-status,
+.rant-row .rant-col-status {
+  flex: 0 0 76px;
+}
+.rant-head .rant-col-progress,
+.rant-row .rant-col-progress {
+  flex: 1.2;
+  min-width: 0;
+}
+.rant-head .rant-col-content,
+.rant-row .rant-col-content {
+  flex: 2;
+  min-width: 0;
+}
+.rant-head span,
+.rant-row .rant-col-time,
+.rant-row .rant-col-project,
+.rant-row .rant-col-progress,
+.rant-row .rant-col-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rant-row .rant-col-time,
+.rant-row .rant-col-project,
+.rant-row .rant-col-progress,
+.rant-row .rant-col-content {
+  font-size: var(--fs-aux);
+  color: var(--text-2);
+}
+.task-badge.badge-done {
+  color: #16a34a;
+  border-color: #16a34a;
+  background: color-mix(in srgb, #16a34a 10%, transparent);
+}
+.task-badge.badge-warn {
+  color: #d97706;
+  border-color: #d97706;
+  background: color-mix(in srgb, #d97706 10%, transparent);
+}
+.task-badge.badge-muted {
+  color: var(--text-3);
+  border-color: var(--border);
+  background: transparent;
+}
+.rant-detail {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-secondary);
+}
+.rant-meta {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+.rant-md {
+  margin-top: 4px;
+}
+.rant-progress {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  word-break: break-all;
+}
 .task-actions {
   display: flex;
   gap: 4px;

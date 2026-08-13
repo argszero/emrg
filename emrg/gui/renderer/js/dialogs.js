@@ -1065,27 +1065,40 @@ const Dialogs = (() => {
         return;
       }
       for (const r of rants) {
-        const row = el("div", { class: "task-row" });
+        // rant 21:36:01：5 列对齐（时间/项目/状态/进度/内容），与 .rant-head 列头同列宽类
+        const row = el("div", { class: "task-row rant-row" });
         const ts = String(r.timestamp || "").slice(0, 16).replace("T", " ");
-        row.appendChild(el("span", { class: "task-name" }, ts));
-        // 状态徽标
+        row.appendChild(el("span", { class: "rant-col-time" }, ts || "—"));
+        row.appendChild(el("span", { class: "rant-col-project" }, r.project || "—"));
+        // 状态徽标三态配色（completed 绿 / in_progress 琥珀 / pending 灰）
         const st = r.status || "pending";
         const stText = st === "completed" ? _t("rants.statusCompleted") : st === "in_progress" ? _t("rants.statusInProgress") : _t("rants.statusPending");
-        row.appendChild(el("span", { class: `task-badge ${st === "completed" ? "badge-done" : ""}` }, stText));
-        // 项目 + 进度摘要
-        const hints = [];
-        if (r.project) hints.push(r.project);
-        if (r.progress) hints.push(String(r.progress).slice(0, 40) + (String(r.progress).length > 40 ? "…" : ""));
-        row.appendChild(el("span", { class: "task-hint" }, hints.join(" · ") || "—"));
-        // 详情展开（完整内容 + progress）
+        const badgeCls = st === "completed" ? "badge-done" : st === "in_progress" ? "badge-warn" : "badge-muted";
+        row.appendChild(el("span", { class: `task-badge ${badgeCls}` }, stText));
+        row.appendChild(el("span", { class: "rant-col-progress" }, r.progress ? String(r.progress) : "—"));
+        // 内容列：message 首行摘要（去 md 标题/列表标记）
         const msg = r.message || "";
-        row.addEventListener("click", () => {
+        const firstLine = (msg.split("\n").find((l) => l.trim() !== "") || "").replace(/^#{1,6}\s+/, "").replace(/^[>*\-\s]+/, "");
+        row.appendChild(el("span", { class: "rant-col-content" }, firstLine || "—"));
+        // 详情展开（rant 21:36:01：完整 message 按 markdown 渲染 + 进度显示）
+        row.addEventListener("click", async () => {
           const detail = list.querySelector(".rant-detail");
           if (detail) detail.remove();
           const detailRow = el("div", { class: "rant-detail", style: "padding:6px 8px;border-top:1px solid var(--border);font-size:var(--fs-secondary);" });
-          detailRow.appendChild(el("div", {}, `${_t("rants.detail")}: ${msg}`));
-          if (r.progress) detailRow.appendChild(el("div", {}, `${_t("rants.statusInProgress")}: ${r.progress}`));
-          else detailRow.appendChild(el("div", {}, _t("rants.noProgress")));
+          detailRow.appendChild(el("div", { class: "rant-meta" }, `${ts || "—"} · ${r.project || "—"} · ${stText}`));
+          const md = el("div", { class: "msg-body rant-md" });
+          try {
+            if (window.emrgMarkdown && window.emrgMarkdown.renderMarkdown) {
+              md.innerHTML = await window.emrgMarkdown.renderMarkdown(msg);
+            } else {
+              md.textContent = msg;
+            }
+          } catch {
+            md.textContent = msg;
+          }
+          detailRow.appendChild(md);
+          if (r.progress) detailRow.appendChild(el("div", { class: "rant-progress" }, `${_t("rants.statusInProgress")}: ${r.progress}`));
+          else detailRow.appendChild(el("div", { class: "rant-progress" }, _t("rants.noProgress")));
           row.after(detailRow);
         });
         list.appendChild(row);
