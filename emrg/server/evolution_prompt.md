@@ -447,6 +447,7 @@ When reading rants, follow these rules:
 > - system prompt time + OS (#735 宿主 rant 2026-08-13T14:01:46：agent system prompt 增加当前时间 + 操作系统，避免使用错误的命令/路径分隔符——system.j2 在 Working directory 前渲染 **Current time**（tz-aware 本地 ISO 秒）+ **Operating system**（platform.system + platform.platform），Jinja2 条件门控；合并 4e8607a) ✅
 > - TUI status bar version (#736 宿主 rant 2026-08-13T14:11:03：TUI 状态栏左段显示 v<__version__>，无需 /version 也能看到运行版本——_format_status_left 提取 +5 测试；合并 e419875) ✅
 > - daemon list_history pagination (#737 宿主 rant 2026-08-13T14:15:12 后端：GUI 会话历史分页加载 limit/offset/has_more——user_messages 最旧在前，end=total-offset; start=max(0,end-limit) 正确返回最新在前分页 + has_more 标志；+4 测试；合并 d855ef6) ✅
+> - tests hermeticity guard (#738 外部贡献 pm25coder：pytest 全量跑会偶发写真实 `~/.emrg/projects.yml`/`tasks.yml`（e2e `_boot_server` 漏 patch scheduler config_dir → serve() 建真 TaskScheduler → `_ensure_self_evolution_task` 写真实 projects.yml；CI fresh runner 必触发）→ conftest autouse 守卫包装 scheduler+daemon 的 atomic_write_yaml 拒绝真实配置文件写入（失败测试点名肇事者）+ `_make_server` tmp `_projects_log` + `_tasks_file` 惰性解析（config_dir 补丁生效）+ 4 测试；Agent.md 773→777；合并 1378eb7) ✅
 > - GUI session history on-demand loading (#739 宿主 rant 2026-08-13T14:15:12 前端：chat.js + app.js 消费 #737 分页接口按需加载会话历史（加载更多按钮/滚动触发），i18n + CSS；+3 renderer.smoke（107→110）GUI 229→232；合并 0cc5b8f) ✅
 
 #### 2.2 Latest GitHub code changes
