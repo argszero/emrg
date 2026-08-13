@@ -73,13 +73,16 @@ async def _boot_server(tmp: Path):
     wait for the port file to appear. Returns (server, serve_task).
     """
     import emrg.server.daemon as daemon_mod
+    import emrg.server.scheduler as sched_mod
     import emrg.connect as connect_mod
 
     _orig_daemon_cfg = daemon_mod.config_dir
+    _orig_sched_cfg = sched_mod.config_dir
     _orig_connect_cfg = connect_mod.config_dir
 
-    # Isolate config dir to tmp (port file, tasks.yml, etc.)
+    # Isolate config dir to tmp (port file, tasks.yml, projects.yml, etc.)
     daemon_mod.config_dir = lambda: tmp
+    sched_mod.config_dir = lambda: tmp  # scheduler builds its own projects_file (#738)
     connect_mod.config_dir = lambda: tmp
 
     server = daemon_mod.EmrgServer(_make_config())
@@ -108,6 +111,7 @@ async def _boot_server(tmp: Path):
         except asyncio.CancelledError:
             pass
         daemon_mod.config_dir = _orig_daemon_cfg
+        sched_mod.config_dir = _orig_sched_cfg
         connect_mod.config_dir = _orig_connect_cfg
 
     return server, task, _cleanup

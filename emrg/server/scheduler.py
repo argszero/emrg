@@ -1105,11 +1105,24 @@ class TaskScheduler:
 
     def __init__(self, identity: InstanceIdentity) -> None:
         self.identity = identity
-        self._tasks_file = config_dir() / "tasks.yml"
+        self._tasks_file: Path | None = None
         self._handlers: list[TaskHandler] = []
         self._coros: list[asyncio.Task] = []
         # cfg (from tasks.yml) used to start each handler — for hot-reload diffing.
         self._handler_cfgs: dict[str, dict] = {}
+
+    @property
+    def _tasks_file(self) -> Path:
+        """tasks.yml path — resolved lazily so config_dir() patches work
+        (hermeticity guard #738: tests patch config_dir after construction,
+        and tests may override _tasks_file directly with a tmp path)."""
+        if self.__tasks_file is None:
+            self.__tasks_file = config_dir() / "tasks.yml"
+        return self.__tasks_file
+
+    @_tasks_file.setter
+    def _tasks_file(self, value: Path | None) -> None:
+        self.__tasks_file = value
 
     def _start_handler_for(self, cfg: dict) -> TaskHandler:
         """Create + start a handler for a task cfg; returns the handler."""
