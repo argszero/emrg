@@ -860,6 +860,57 @@ def test_ensure_self_evolution_task_other_entries_preserved(tmp_path):
     assert len(names) == 2
 
 
+def test_ensure_evolution_workspace_persists_repaired_emrg_path(tmp_path):
+    """Long-running daemon: a stale emrg path (deleted pytest-temp dir) is
+    healed in-memory to the canonical workspace AND persisted back to
+    projects.yml on the next cycle — not only at scheduler startup (#716
+    follow-up: startup-only repair leaves a dangling entry forever when the
+    daemon never restarts; list_projects/GUI pickers keep showing a dead path)."""
+    from emrg.server import scheduler as mod
+
+    evolve_dir = tmp_path / "evolution" / "emrg"
+    evolve_dir.mkdir(parents=True)
+
+    # Stale emrg entry pointing at a path that no longer exists on disk
+    # (exactly the 2026-08-12 pytest-temp-leak shape).
+    stale = tmp_path / "gone" / "emrg"
+    projects_yml = tmp_path / "projects.yml"
+    projects_yml.write_text(yaml.safe_dump([
+        {"name": "emrg", "path": str(stale), "last_active": "2026-08-12T18:44:50"},
+        {"name": "other", "path": str(tmp_path / "other")},
+    ]))
+
+    fake = FakeGitRun(git_repo=True)
+    orig_run = mod.subprocess.run
+    orig_evolve = mod.EVOLUTION_CWD
+    orig_config = mod.config_dir
+    mod.subprocess.run = fake
+    mod.EVOLUTION_CWD = tmp_path / "evolution"
+    mod.config_dir = lambda: tmp_path
+    try:
+        handler = TaskHandler(
+            name="emrg-task",
+            config={"project": "emrg"},
+            interval=60,
+            identity=InstanceIdentity(),
+        )
+        handler._source_dir = str(stale)  # stale as resolved at handler start
+        handler.project_path = str(stale)
+        ok = handler._ensure_evolution_workspace()
+    finally:
+        mod.subprocess.run = orig_run
+        mod.EVOLUTION_CWD = orig_evolve
+        mod.config_dir = orig_config
+
+    assert ok is True
+    assert handler._source_dir == str(evolve_dir)  # in-memory heal (pre-existing)
+    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
+    by_name = {e["name"]: e for e in data}
+    assert by_name["emrg"]["path"] == str(evolve_dir)  # NEW: persisted this cycle
+    assert by_name["other"]["path"] == str(tmp_path / "other")  # untouched
+    assert len(data) == 2
+
+
 def test_ensure_evolution_workspace_dev_repo_untouched(tmp_path):
     """A real writable git repo (dev machine) is used as-is — no clone."""
     import subprocess as real_subprocess
