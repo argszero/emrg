@@ -37,7 +37,7 @@ def _format_status_left(title: str, sid: str, model: str = "") -> str:
     ver = getattr(emrg, "__version__", "dev")
     parts = [f"v{ver}"]
     if title:
-        parts.append(f"{title} ({sid[:8]})")
+        parts.append(f"{title} ({sid})")
     else:
         parts.append(sid)
     if model:
