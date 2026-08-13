@@ -661,9 +661,10 @@ const App = (() => {
         }
         return;
       }
-      // G13：v1 不加载历史（G12）
+      // G13：v1 不加载历史（G12）→ rant 14:15:12：非 silent 切换加载最近 50 条 + 滚动分页
       if (!opts.silent) {
         Chat.addSystemMessage(_t("app.switched"), sid);
+        await loadHistory(sid);
       }
       // P3 finalize：切入断线会话 → 提示自动重连中（状态保留，不打断输入——G89）
       if (sidState(sid).disconnected) {
@@ -677,6 +678,78 @@ const App = (() => {
       Chat.addSystemMessage(/too many open sessions/i.test(e.message || "") ? _t("app.tooManyOpenSessions") : _t("app.switchFailed", { msg: e.message }));
     }
   }
+
+  // ── 历史按需加载（rant 14:15:12：切会话恢复最近 N 条 + 滚动到顶加载更早）──
+  const historyPages = new Map(); // sid → { offset, hasMore, loading }
+  const HISTORY_PAGE = 50;
+
+  function historyPageState(sid) {
+    if (!historyPages.has(sid)) {
+      historyPages.set(sid, { offset: 0, hasMore: false, loading: false });
+    }
+    return historyPages.get(sid);
+  }
+
+  /** 渲染历史消息到该会话容器（只读 user 气泡，不触发工具/交互）。 */
+  function renderHistoryMessages(sid, messages) {
+    for (const m of messages || []) {
+      Chat.addHistoryMessage(m.preview || m.content || "", sid);
+    }
+  }
+
+  /** 加载最近一页历史（offset 从最新往回数）——切会话时调用。 */
+  async function loadHistory(sid) {
+    const st2 = historyPageState(sid);
+    st2.loading = true;
+    try {
+      const res = await window.emrg.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st2.offset });
+      renderHistoryMessages(sid, res.messages || []);
+      st2.offset += (res.messages || []).length;
+      st2.hasMore = !!res.hasMore;
+      if (st2.hasMore) {
+        Chat.setLoadBar(sid, _t("app.historyLoadMore"));
+      }
+    } catch (e) {
+      Chat.addSystemMessage(_t("app.historyFailed", { msg: e.message }), sid);
+    } finally {
+      st2.loading = false;
+    }
+  }
+
+  /** 滚动到顶 → 加载更早一页（prepend，保持滚动位置）。 */
+  async function loadOlderHistory(sid) {
+    const st2 = historyPageState(sid);
+    if (!st2.hasMore || st2.loading) return;
+    st2.loading = true;
+    const view = Chat.chatContainer(sid);
+    const prevScrollTop = view.scrollTop;
+    const prevHeight = view.scrollHeight;
+    try {
+      const res = await window.emrg.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st2.offset });
+      const msgs = res.messages || [];
+      // prepend：先清加载条，再逐条插到顶部（addHistoryMessage prepend 会插在加载条之后）
+      for (const m of msgs) {
+        Chat.addHistoryMessage(m.preview || m.content || "", sid, { prepend: true });
+      }
+      st2.offset += msgs.length;
+      st2.hasMore = !!res.hasMore;
+      if (msgs.length === 0) st2.hasMore = false;
+      if (st2.hasMore) {
+        Chat.setLoadBar(sid, _t("app.historyLoadMore"));
+      } else {
+        Chat.setLoadBar(sid, _t("app.historyNoMore"));
+      }
+      // 保持视觉位置：新内容插到顶部后滚差补偿
+      view.scrollTop = prevScrollTop + (view.scrollHeight - prevHeight);
+    } catch (e) {
+      Chat.addSystemMessage(_t("app.historyFailed", { msg: e.message }), sid);
+    } finally {
+      st2.loading = false;
+    }
+  }
+
+  /** 会话视图滚动：到顶且有更早 → 加载（防抖 150ms，绑定在 bindUi 内）。 */
+  let historyScrollTimer = null;
 
   async function newSession(opts = {}) {
     if (state.busy) {
@@ -1510,6 +1583,17 @@ const App = (() => {
       state.autoScroll = true;
       $("back-to-bottom").classList.add("hidden");
     });
+    // rant 14:15:12：会话视图滚动到顶 → 加载更早历史（防抖 150ms）
+    chatView.addEventListener("scroll", (e) => {
+      const t = e.target;
+      const isView = t && t.classList && t.classList.contains("session-view");
+      if (!isView || !state.sessionId) return;
+      const st2 = historyPageState(state.sessionId);
+      if (t.scrollTop <= 2 && st2.hasMore && !st2.loading) {
+        clearTimeout(historyScrollTimer);
+        historyScrollTimer = setTimeout(() => loadOlderHistory(state.sessionId), 150);
+      }
+    }, { passive: true });
 
     // 空状态示例问题卡片 → 填入输入框
     $("empty-state").addEventListener("click", (e) => {

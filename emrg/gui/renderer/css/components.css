@@ -90,6 +90,19 @@
   font-size: var(--fs-aux);
   color: var(--text-3);
 }
+/* 历史消息（rant 14:15:12：只读展示，视觉弱化区分于实时消息） */
+.msg.user.history {
+  opacity: 0.72;
+  animation: none;
+}
+.history-load-bar {
+  text-align: center;
+  font-size: var(--fs-secondary);
+  color: var(--accent);
+  padding: var(--sp-2) 0;
+  cursor: pointer;
+  user-select: none;
+}
 
 /* Markdown 内容排版 */
 .msg-body p {
