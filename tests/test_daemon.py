@@ -216,7 +216,12 @@ def test_migrate_auto_evolve_entries(tmp_path):
 
 def _make_server() -> EmrgServer:
     """Create a minimal EmrgServer for testing."""
-    return EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    # Point the project log at a tmp file by default so context/message tests
+    # can never write the real ~/.emrg/projects.yml (2026-08-13 leak). Tests
+    # that exercise _projects_log override it explicitly afterwards.
+    server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
+    return server
 
 
 def test_context_section_no_files(tmp_path):
