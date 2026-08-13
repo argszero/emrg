@@ -94,6 +94,14 @@ function makeEl(id) {
     setAttribute(k, v) { this.attributes[k] = v; if (k === "value") this.value = v; },
     removeAttribute(k) { delete this.attributes[k]; },
     insertBefore(c) { c.parentNode = this; this.children.unshift(c); return c; },
+    after(c) {
+      // 真实 DOM：插到兄弟节点之后（rant 14:10:14 P4 详情展开用 row.after(detail)）
+      if (!this.parentNode) return;
+      c.parentNode = this.parentNode;
+      const i = this.parentNode.children.indexOf(this);
+      if (i >= 0) this.parentNode.children.splice(i + 1, 0, c);
+      else this.parentNode.children.push(c);
+    },
     remove() {
       // 真实脱离父节点（chat.js handleToolEnd 移除 .tool-spinner）
       if (this.parentNode) {
@@ -115,6 +123,8 @@ const ELEMENT_IDS = [
   "side-nav", "nav-sessions", "nav-projects", "nav-tasks", "nav-rants", "nav-settings",
   "panel-sessions", "panel-projects", "panel-tasks", "panel-rants", "panel-settings",
   "project-list", "project-add-btn",
+  "rant-filter-tabs", "rant-filter-all", "rant-filter-pending", "rant-filter-inprogress", "rant-filter-completed",
+  "rant-list", "rant-new-btn", "rant-form", "rant-form-project", "rant-form-message", "rant-form-cancel", "rant-form-submit",
   "settings-tabs", "settings-tab-model", "settings-tab-workdir", "settings-tab-github", "settings-tab-appearance", "settings-tab-language", "settings-tab-about",
   "settings-body-model", "settings-body-workdir", "settings-body-github", "settings-body-appearance", "settings-body-language", "settings-body-about",
   "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",  "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
@@ -217,6 +227,8 @@ function makeSandbox(overrides = {}) {
       panelResized: async () => ({ ok: true }),
       getPreviewState: async () => ({ path: null }), // P2.3：崩溃恢复拉取
       updateInstall: async () => ({ ok: true }), // rant 12:10：一键安装 IPC 默认桩
+      sendRant: async () => ({}),
+      listRants: async () => [],
       ...overrides,
     },
   };
@@ -2782,4 +2794,51 @@ test("rant 14:10:14 P5：项目面板列表（auto_evolve 徽标 + 最近活跃�
   await tick();
   assert.ok(removed, "removeProject 应被调用");
   assert.strictEqual(removed.name, "docs");
+});
+
+test("rant 14:10:14 P4：rant 面板列表（状态徽标 + 筛选）+ 详情展开 + 新建提交", async () => {
+  const rants = [
+    { timestamp: "2026-08-13T14:10:14.854793", project: "emrg", status: "in_progress", progress: "P1 done", message: "GUI 重设计" },
+    { timestamp: "2026-08-12T09:00:00", project: "", status: "completed", progress: null, message: "旧 rant" },
+    { timestamp: "2026-08-13T10:00:00", project: "", status: "pending", progress: null, message: "新想法" },
+  ];
+  let lastFilter = null;
+  let sent = null;
+  const { ctx, els } = makeSandbox({
+    listRants: async (payload) => { lastFilter = payload; return rants; },
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
+    sendRant: async (payload) => { sent = payload; return { ok: true, count: 4 }; },
+  });
+  await tick();
+  await vm.runInContext("App.openRantsPanel()", ctx);
+  await tick();
+  const list = els["rant-list"];
+  // 3 行 rant，全部含时间戳 + 状态徽标
+  const rows = list.children.filter((c) => c.className.includes("task-row"));
+  assert.strictEqual(rows.length, 3, `rant 应渲染 3 行，实际 ${rows.length}`);
+  const badges = rows.map((r) => r.querySelector(".task-badge") ? r.querySelector(".task-badge").textContent : "");
+  assert.ok(badges[0].includes("进行中"), `行0 徽标应含进行中，实际 ${badges[0]}`);
+  assert.ok(badges[1].includes("已完成"), `行1 徽标应含已完成，实际 ${badges[1]}`);
+  assert.ok(badges[2].includes("待处理"), `行2 徽标应含待处理，实际 ${badges[2]}`);
+  // 点击行 → 详情展开（完整内容 + progress）
+  rows[0].click();
+  await tick();
+  const detail = list.querySelector(".rant-detail");
+  assert.ok(detail, "点击行应展开详情");
+  const detailText = (detail.children || []).map((c) => c.textContent || "").join(" ");
+  assert.ok(detailText.includes("GUI 重设计"), `详情应含完整 message，实际 ${detailText}`);
+  assert.ok(detailText.includes("P1 done"), `详情应含 progress，实际 ${detailText}`);
+  // 筛选 tab → setRantFilter('completed') → listRants 带 status 调用
+  await vm.runInContext("EMRG_Dialogs.setRantFilter('completed')", ctx);
+  await tick();
+  assert.strictEqual(lastFilter.status, "completed", "筛选应透传 status 到 listRants");
+  // 新建 → 表单展开 → 提交 → sendRant + 列表刷新
+  els["rant-form"].classList.add("hidden"); // 镜像 index.html 初始态
+  await vm.runInContext('document.getElementById("rant-new-btn").click()', ctx);
+  assert.strictEqual(els["rant-form"].classList.contains("hidden"), false, "新建应展开表单");
+  vm.runInContext('document.getElementById("rant-form-message").value = "希望支持 X"', ctx);
+  await vm.runInContext("EMRG_Dialogs.submitRantForm()", ctx);
+  await tick();
+  assert.ok(sent, "sendRant 应被调用");
+  assert.strictEqual(sent.message, "希望支持 X");
 });

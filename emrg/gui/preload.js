@@ -45,6 +45,7 @@ const api = {
   taskTemplateUpdate: (payload) => ipcRenderer.invoke("emrg:taskTemplateUpdate", payload),
   taskTemplateDelete: (payload) => ipcRenderer.invoke("emrg:taskTemplateDelete", payload),
   sendRant: (payload) => ipcRenderer.invoke("emrg:sendRant", payload),
+  listRants: (payload) => ipcRenderer.invoke("emrg:listRants", payload),
   evolutionSummary: (payload) => ipcRenderer.invoke("emrg:evolutionSummary", payload),
   githubStatus: () => ipcRenderer.invoke("emrg:githubStatus"),
   updateCheck: (payload) => ipcRenderer.invoke("emrg:updateCheck", payload),

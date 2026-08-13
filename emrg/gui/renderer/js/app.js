@@ -501,6 +501,16 @@ const App = (() => {
     }
   }
 
+  // Rant 面板（rant 14:10:14 P4：打开即加载 rant 列表）
+  async function openRantsPanel() {
+    if (state.activePanel !== "rants") switchPanel("rants");
+    try {
+      await Dialogs.renderRantList();
+    } catch (e) {
+      Chat.addSystemMessage(_t("rants.loadFailed", { msg: e.message }));
+    }
+  }
+
   async function doTrigger(name) {
     const n = String(name || "").trim();
     if (!n) return;
@@ -1497,7 +1507,7 @@ const App = (() => {
     for (const p of SIDE_PANELS) {
       $(`nav-${p}`)?.addEventListener("click", () => {
         switchPanel(p);
-        // P2：面板打开时加载对应数据（settings 走 showSettings 刷新全部；tasks/projects 走各自加载）
+        // P2：面板打开时加载对应数据（settings 走 showSettings 刷新全部；tasks/projects/rants 走各自加载）
         if (p === "settings" && state.activePanel === "settings") {
           loadEvolutionSummary();
           Dialogs.showSettings();
@@ -1505,6 +1515,8 @@ const App = (() => {
           openTasksPanel();
         } else if (p === "projects" && state.activePanel === "projects") {
           openProjectsPanel();
+        } else if (p === "rants" && state.activePanel === "rants") {
+          openRantsPanel();
         }
       });
     }
@@ -1697,6 +1709,7 @@ const App = (() => {
     Dialogs.initGithubSection(); // Windows GCM rant Stage 2：设置页 GitHub 连接
     Dialogs.initDeviceDialog(); // Windows GCM rant Stage 2b：device flow 对话框
     Dialogs.initTaskManagement(); // rant 18:23:15 P3：定时任务/自定义类型管理
+    Dialogs.initRantPanel(); // rant 14:10:14 P4：rant 面板（筛选/新建）
     initGithubBanner(); // Windows GCM rant Stage 2：演化需 GitHub 但未认证时的连接横幅
     initModelSwitcher();
     initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
@@ -1721,6 +1734,7 @@ const App = (() => {
     switchSettingsTab, // rant 14:10:14 P2：设置面板 tab 切换（导出供测试）
     openTasksPanel, // rant 14:10:14 P3：任务面板打开 + 加载（导出供测试）
     openProjectsPanel, // rant 14:10:14 P5：项目面板打开 + 加载（导出供测试）
+    openRantsPanel, // rant 14:10:14 P4：rant 面板打开 + 加载（导出供测试）
     refreshSessions,
     showConvMenu,
     handleEvent,

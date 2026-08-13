@@ -1472,6 +1472,35 @@ class EmrgServer:
                 count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
             await self._send(ws, {"ok": True, "count": count})
 
+        elif msg_type == "list_rants":
+            # Rant panel (rant 2026-08-13T14:10:14 P4): read ~/.emrg/rants.jsonl,
+            # optional status filter (pending/in_progress/completed/"" = all).
+            try:
+                filter_status = str(msg.get("status", "") or "").strip()
+                rants = []
+                if self._rants_log.exists():
+                    with open(self._rants_log, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                r = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if filter_status and r.get("status", "pending") != filter_status:
+                                continue
+                            rants.append(r)
+                # 时间倒序（最新在前，面板列表惯例）
+                rants.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+                await self._send(ws, {
+                    "type": "rants_list",
+                    "rants": rants,
+                })
+            except OSError as e:
+                logger.exception("list_rants: failed to read %s", self._rants_log)
+                await self._send(ws, {"type": "rants_list", "rants": [], "error": str(e)})
+
         elif msg_type == "skills_available":
             # Installable-skills catalog (rant 2026-08-08T10:14:29): list
             # catalog skills with installed/managed status.

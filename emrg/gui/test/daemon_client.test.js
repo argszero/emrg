@@ -691,6 +691,13 @@ test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/t
   const r10 = await p10;
   assert.strictEqual(r10.type, "file_content");
   assert.strictEqual(r10.content, "hi");
+  // list_rants → rants_list（rant 14:10:14 P4：rant 面板）
+  const p11 = client.sendCommandAndWait("list_rants", { status: "completed" }, 2000);
+  await new Promise((r) => setTimeout(r, 10));
+  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "rants_list", rants: [{ timestamp: "x", status: "completed", message: "m" }] })));
+  const r11 = await p11;
+  assert.strictEqual(r11.type, "rants_list");
+  assert.strictEqual(r11.rants.length, 1);
 });
 
 test("rant 18:23:15 P2/P3：RESPONSE_TYPES 覆盖任务/模板 CRUD（task_result / templates_list / template_result）", async () => {

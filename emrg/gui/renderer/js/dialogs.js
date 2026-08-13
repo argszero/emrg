@@ -1039,6 +1039,114 @@ const Dialogs = (() => {
     });
   }
 
+  // ── Rant 面板（rant 14:10:14 P4：列表筛选 + 详情 + 新建） ──
+  let rantFilter = ""; // "" | pending | in_progress | completed
+
+  function setRantFilter(status) {
+    rantFilter = status || "";
+    // tab 高亮
+    for (const f of ["all", "pending", "inprogress", "completed"]) {
+      const btn = $(`rant-filter-${f}`);
+      if (btn) btn.classList.toggle("active", f === (status === "" ? "all" : status === "in_progress" ? "inprogress" : status));
+    }
+    renderRantList();
+  }
+
+  async function renderRantList() {
+    const list = $("rant-list");
+    if (!list) return;
+    list.innerHTML = "";
+    list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("dlg.loading")}</span></div>`;
+    try {
+      const rants = await window.emrg.listRants({ status: rantFilter });
+      list.innerHTML = "";
+      if (!rants || rants.length === 0) {
+        list.innerHTML = `<div class="task-empty">${_t(rantFilter ? "rants.emptyFiltered" : "rants.empty")}</div>`;
+        return;
+      }
+      for (const r of rants) {
+        const row = el("div", { class: "task-row" });
+        const ts = String(r.timestamp || "").slice(0, 16).replace("T", " ");
+        row.appendChild(el("span", { class: "task-name" }, ts));
+        // 状态徽标
+        const st = r.status || "pending";
+        const stText = st === "completed" ? _t("rants.statusCompleted") : st === "in_progress" ? _t("rants.statusInProgress") : _t("rants.statusPending");
+        row.appendChild(el("span", { class: `task-badge ${st === "completed" ? "badge-done" : ""}` }, stText));
+        // 项目 + 进度摘要
+        const hints = [];
+        if (r.project) hints.push(r.project);
+        if (r.progress) hints.push(String(r.progress).slice(0, 40) + (String(r.progress).length > 40 ? "…" : ""));
+        row.appendChild(el("span", { class: "task-hint" }, hints.join(" · ") || "—"));
+        // 详情展开（完整内容 + progress）
+        const msg = r.message || "";
+        row.addEventListener("click", () => {
+          const detail = list.querySelector(".rant-detail");
+          if (detail) detail.remove();
+          const detailRow = el("div", { class: "rant-detail", style: "padding:6px 8px;border-top:1px solid var(--border);font-size:var(--fs-secondary);" });
+          detailRow.appendChild(el("div", {}, `${_t("rants.detail")}: ${msg}`));
+          if (r.progress) detailRow.appendChild(el("div", {}, `${_t("rants.statusInProgress")}: ${r.progress}`));
+          else detailRow.appendChild(el("div", {}, _t("rants.noProgress")));
+          row.after(detailRow);
+        });
+        list.appendChild(row);
+      }
+    } catch (e) {
+      list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("rants.loadFailed", { msg: e.message })}</span></div>`;
+    }
+  }
+
+  function openRantForm() {
+    const form = $("rant-form");
+    if (!form) return;
+    if (!form.classList.contains("hidden")) { form.classList.add("hidden"); return; }
+    $("rant-form-message").value = "";
+    // 项目下拉（复用 listProjects）
+    const sel = $("rant-form-project");
+    sel.innerHTML = "";
+    const opt = el("option", { value: "" }, _t("rants.project"));
+    sel.appendChild(opt);
+    window.emrg.listProjects().then((projects) => {
+      for (const p of projects || []) {
+        const o = el("option", { value: p.name || p.path || "" }, p.name || p.path || "");
+        sel.appendChild(o);
+      }
+    }).catch(() => {});
+    form.classList.remove("hidden");
+    $("rant-form-message").focus();
+  }
+
+  async function submitRantForm() {
+    const msg = $("rant-form-message").value.trim();
+    const proj = $("rant-form-project").value;
+    if (!msg) {
+      showConfirm(_t("dlg.stepTitle"), _t("rants.message"), { okText: _t("dlg.gotIt"), danger: false });
+      return;
+    }
+    try {
+      const res = await window.emrg.sendRant({ message: msg, project: proj });
+      Chat.addSystemMessage(_t("rants.sent", { count: res && res.count ? res.count : "" }));
+      $("rant-form").classList.add("hidden");
+      $("rant-form-message").value = "";
+      await renderRantList();
+    } catch (e) {
+      Chat.addSystemMessage(_t("rants.sendFailed", { msg: e.message }));
+    }
+  }
+
+  function initRantPanel() {
+    // 状态筛选 tab
+    for (const f of ["all", "pending", "inprogress", "completed"]) {
+      const btn = $(`rant-filter-${f}`);
+      if (btn) btn.addEventListener("click", () => setRantFilter(btn.dataset.rantFilter));
+    }
+    const newBtn = $("rant-new-btn");
+    if (newBtn) newBtn.addEventListener("click", openRantForm);
+    const submit = $("rant-form-submit");
+    if (submit) submit.addEventListener("click", submitRantForm);
+    const cancel = $("rant-form-cancel");
+    if (cancel) cancel.addEventListener("click", () => $("rant-form").classList.add("hidden"));
+  }
+
   // ── 项目面板（rant 14:10:14 P5：侧边栏项目入口，复用项目 IPC） ──
   /** 项目面板：列表（名称/路径/auto_evolve 徽标/最近活跃）+ 查看会话 + 删除 + 添加。 */
   async function renderProjectList() {
@@ -1212,6 +1320,11 @@ const Dialogs = (() => {
     renderTaskList, // rant 18:23:15 P3：任务列表渲染（测试/刷新复用）
     renderProjectList, // rant 14:10:14 P5：项目面板列表渲染（测试/刷新复用）
     showProjectSessionsInPanel, // rant 14:10:14 P5：项目面板内嵌会话列表（测试复用）
+    initRantPanel, // rant 14:10:14 P4：rant 面板初始化
+    renderRantList, // rant 14:10:14 P4：rant 列表渲染（测试/刷新复用）
+    setRantFilter, // rant 14:10:14 P4：rant 状态筛选（测试复用）
+    openRantForm, // rant 14:10:14 P4：新建 rant 表单（测试复用）
+    submitRantForm, // rant 14:10:14 P4：rant 表单提交（测试复用）
     saveTaskForm, // rant 18:23:15 P3：任务表单提交（测试复用）
     saveTemplateForm, // rant 18:23:15 P3：类型表单提交（测试复用）
     showRename,
