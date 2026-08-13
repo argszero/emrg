@@ -28,6 +28,23 @@ from emrg.skills.loader import load_skills
 logger = logging.getLogger(__name__)
 
 
+def _format_status_left(title: str, sid: str, model: str = "") -> str:
+    """Format left status: version + session title + short ID + model.
+
+    Module-level so it is unit-testable (rant 2026-08-13T14:11:03).
+    """
+    import emrg
+    ver = getattr(emrg, "__version__", "dev")
+    parts = [f"v{ver}"]
+    if title:
+        parts.append(f"{title} ({sid[:8]})")
+    else:
+        parts.append(sid)
+    if model:
+        parts.append(f"[{model}]")
+    return " ".join(parts)
+
+
 # ── Clipboard image support (platform-adaptive) ─────────────
 
 def _detect_clipboard_image() -> tuple[bool, str | None]:
@@ -212,15 +229,8 @@ async def interactive(init_auto_evolve: bool = False):
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
     def _status_left(title: str, sid: str, model: str = "") -> str:
-        """Format left status: session title + short ID + current model."""
-        parts = []
-        if title:
-            parts.append(f"{title} ({sid[:8]})")
-        else:
-            parts.append(sid)
-        if model:
-            parts.append(f"[{model}]")
-        return " ".join(parts)
+        """Format left status: version + session title + short ID + model."""
+        return _format_status_left(title, sid, model)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
     current_model = ""  # model name tracked independently of server_id (rant 2026-08-11T20:02:43)
 
