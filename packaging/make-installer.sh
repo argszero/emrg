@@ -385,7 +385,7 @@ var
   ResultCode: Integer;
   StopScript: string;
   LogFile: string;
-  LogText: string;
+  LogText: AnsiString;
 begin
   Result := '';
   ExtractTemporaryFile('stop-emrg.cmd');

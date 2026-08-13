@@ -153,6 +153,10 @@ def test_make_installer_iss_has_prepare_to_install():
     # Test CI 不编译 .iss 未拦住）。正反两态钉死正确调用形态。
     assert "LoadStringFromFile(LogFile, LogText)" in content  # 正：out-param 形式
     assert ":= LoadStringFromFile(LogFile)" not in content  # 反：1 参数形式不存在
+    # ⚡ 2 参形式第 2 参是 var S: AnsiString——LogText 必须声明 AnsiString（Inno 6
+    # 的 string=UnicodeString，传 string 变量 → iscc "Type mismatch"，门禁实测拦截）。
+    assert "LogText: AnsiString;" in content  # 正：AnsiString 变量
+    assert "LogText: string;" not in content  # 反：UnicodeString 不匹配 var AnsiString
     assert "Length(LogText) > 2000" in content
     assert "Details from stop-emrg.cmd:" in content
     assert "SW_HIDE" in content  # 批处理执行不弹控制台窗口（#592 纪律）
