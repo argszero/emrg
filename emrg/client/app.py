@@ -556,7 +556,14 @@ async def interactive(init_auto_evolve: bool = False):
                     _last_center = server_id or "emrg"
                     status.update(center=_last_center)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
-                    msg_count += 1; _update_left_extra()
+                    # rant 21:52:18: daemon's done frame reports the authoritative
+                    # current-context message count (system + history + tool results);
+                    # fall back to the local +1 approximation when absent.
+                    if data.get("context_messages") is not None:
+                        msg_count = int(data["context_messages"])
+                    else:
+                        msg_count += 1
+                    _update_left_extra()
                     term.render()
                 if "error" in data:
                     err = data["error"]; logger.error("server error: %s", err)

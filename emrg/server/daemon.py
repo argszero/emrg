@@ -2274,6 +2274,8 @@ class EmrgServer:
                     "done": True,
                     "delta": False,
                     "session_id": session.session_id,
+                    # rant 21:52:18: authoritative current-context message count.
+                    "context_messages": len(messages),
                 })
 
                 # Fire-and-forget: reflect on whether to save memories
@@ -2448,6 +2450,10 @@ class EmrgServer:
                 "done": True,
                 "delta": False,
                 "session_id": session.session_id,
+                # rant 21:52:18: current LLM context size (system + history +
+                # user + all tool results + assistant replies) — authoritative
+                # for the TUI status bar message count.
+                "context_messages": len(messages),
             })
 
             # Fire-and-forget: reflect on whether to save memories
