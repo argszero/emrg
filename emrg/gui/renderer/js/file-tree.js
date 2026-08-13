@@ -32,6 +32,8 @@ const FileTree = (() => {
 
   // ── mono 内联 SVG 图标（16x16 viewBox，fill: currentColor 跟随文字色） ──
   const ICON = {
+    chevronRight: '<path d="M6 3l5 5-5 5z"/>',  // 折叠 ▸（目录可展开提示）
+    chevronDown: '<path d="M3 6l5 5 5-5z"/>',   // 展开 ▾
     dirClosed: '<path d="M1.5 2.5h4.1c.32 0 .62.13.84.36l1.1 1.14h6.96c.83 0 1.5.67 1.5 1.5V12.5c0 .83-.67 1.5-1.5 1.5H1.5A1.5 1.5 0 0 1 0 12.5V4c0-.83.67-1.5 1.5-1.5z"/>',
     dirOpen: '<path d="M1.5 2.5h4.1c.32 0 .62.13.84.36l1.1 1.14h6.96c.83 0 1.5.67 1.5 1.5V6H2.1c-.6 0-1.13.36-1.34.92L0 12.8V4c0-.83.67-1.5 1.5-1.5z"/><path d="M14.6 6.5H2.3c-.42 0-.8.27-.94.66L0 13.5h14.5c.83 0 1.5-.67 1.5-1.5V8c0-.83-.67-1.5-1.5-1.5z"/>',
     fileDefault: '<path d="M3 1h6.5l3.5 3.5V15H3V1z"/><path d="M9.5 1v3.5H13" fill="none" stroke="currentColor" stroke-width="1.5"/>',
@@ -55,10 +57,13 @@ const FileTree = (() => {
     txt: "fileTxt", log: "fileTxt", csv: "fileTxt", tsv: "fileTxt",
   };
 
-  function iconSvg(d) {
-    const svg = el("svg", { class: "ft-icon", viewBox: "0 0 16 16", width: 14, height: 14, "aria-hidden": "true" });
+  function iconSvg(d, cls) {
+    const svg = el("svg", { class: cls || "ft-icon", viewBox: "0 0 16 16", width: 14, height: 14, "aria-hidden": "true" });
     svg.innerHTML = d; // 静态白名单路径，无注入风险
     return svg;
+  }
+  function chevronFor(entry) {
+    return expanded.get(entry.path) ? ICON.chevronDown : ICON.chevronRight;
   }
   function iconFor(entry) {
     if (entry.type === "dir") return expanded.get(entry.path) ? ICON.dirOpen : ICON.dirClosed;
@@ -123,6 +128,9 @@ const FileTree = (() => {
     // 行头（图标+名称）单独包装：.ft-row 为块级容器（head + kids 纵向排布），
     // 修复定高 flex-wrap 下兄弟行与展开子项重叠的布局 bug（headless Chrome 像素实证）
     const head = el("div", { class: "ft-head" });
+    if (entry.type === "dir") {
+      head.appendChild(iconSvg(chevronFor(entry), "ft-chevron"));
+    }
     head.appendChild(iconSvg(iconFor(entry)));
     head.appendChild(el("span", { class: "ft-name" }, entry.name));
     row.appendChild(head);
@@ -162,6 +170,8 @@ const FileTree = (() => {
     if (row) {
       const ic = row.querySelector(".ft-icon");
       if (ic) ic.innerHTML = expanded.get(path) ? ICON.dirOpen : ICON.dirClosed;
+      const chev = row.querySelector(".ft-chevron");
+      if (chev) chev.innerHTML = expanded.get(path) ? ICON.chevronDown : ICON.chevronRight;
     }
   }
 
@@ -198,6 +208,7 @@ const FileTree = (() => {
     const rootRow = el("div", { class: "ft-row ft-dir ft-root", dataset: { path: root } });
     rootRow.style.paddingLeft = "8px";
     const rootHead = el("div", { class: "ft-head" });
+    rootHead.appendChild(iconSvg(ICON.chevronDown, "ft-chevron")); // 根默认展开 → ▾
     rootHead.appendChild(iconSvg(ICON.dirOpen));
     rootHead.appendChild(el("span", { class: "ft-name" }, rootName));
     rootRow.appendChild(rootHead);
