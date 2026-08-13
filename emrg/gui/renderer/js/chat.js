@@ -265,6 +265,33 @@ const Chat = (() => {
     }
   }
 
+  /** rant 21:28:49：工具合并组 —— 组内工具行容器 + 状态 */
+  function updateToolGroup(group, sid) {
+    const rowsEl = group.querySelector(".tool-group-rows");
+    const bar = group.querySelector(".tool-group-bar");
+    if (!rowsEl || !bar) return;
+    const rows = rowsEl.children.filter((c) => c.classList && c.classList.contains("tool-row"));
+    const running = rows.some((r) => r.classList.contains("running"));
+    const userExpanded = group.dataset.userExpanded === "1";
+    if (rows.length >= 2 && !running) {
+      // ≥2 行全部完成 → bar 显示 + 摘要（数量 + 总耗时）；非手动展开则收起
+      const total = rows.reduce((acc, r) => acc + (parseFloat(r.dataset.elapsed) || 0), 0);
+      const summary = bar.querySelector(".tool-group-summary");
+      if (summary) {
+        summary.textContent = EMRG_Copy._t("chat.toolGroupSummary", {
+          count: rows.length,
+          time: total.toFixed(1) + "s",
+        });
+      }
+      bar.classList.remove("hidden");
+      group.classList.toggle("collapsed", !userExpanded);
+    } else {
+      // 组内仅 1 行 或 存在 running 行 → bar 隐藏、rows 展开（进行中工具实时可见）
+      bar.classList.add("hidden");
+      group.classList.remove("collapsed");
+    }
+  }
+
   /** 工具友好状态行（进行中 → 完成/失败，默认折叠，点开展示原始输出） */
   function handleToolStart(data, sid) {
     const { groupNodes, toolRows } = st(sid);
@@ -300,7 +327,59 @@ const Chat = (() => {
         row.classList.toggle("expanded", !out.classList.contains("hidden"));
       }
     });
-    append(row, sid);
+
+    // rant 21:28:49：连续工具合并 —— 会话容器最后一个子节点判定
+    // 1) 前一工具已完成（.tool-row:not(.running)）→ 新建 .tool-group，把旧行移入 rows，新行也入 rows
+    // 2) 已是 .tool-group → 新行直接入其 rows（组收起时新工具 start 自动展开显示 running）
+    // 3) 其他（文本/用户消息/无节点）→ 独立 .tool-row（现状不变；文本穿插不合并）
+    const cv = chatContainer(sid);
+    const last = cv.children.length ? cv.children[cv.children.length - 1] : null;
+    let appendedToGroup = false;
+    if (last && last.classList) {
+      if (last.classList.contains("tool-row") && !last.classList.contains("running")) {
+        const rowsEl = el("div", { class: "tool-group-rows" });
+        const bar = el("div", { class: "tool-group-bar hidden" });
+        bar.appendChild(el("span", { class: "tool-group-chev" }, "⌄"));
+        bar.appendChild(el("span", { class: "tool-group-summary" }, ""));
+        const grp = el("div", { class: "tool-group" });
+        grp.appendChild(bar);
+        grp.appendChild(rowsEl);
+        // bar 点击 → 展开/收起 rows + chevron 旋转 + 组标 user-expanded（手动展开后不再自动收起）
+        bar.addEventListener("click", () => {
+          const wasCollapsed = grp.classList.contains("collapsed");
+          if (wasCollapsed) {
+            grp.classList.remove("collapsed");
+            grp.dataset.userExpanded = "1";
+          } else {
+            grp.classList.add("collapsed");
+            delete grp.dataset.userExpanded; // 手动收起后新工具完成仍自动收起（rule 5）
+          }
+        });
+        // 移旧行入组（真实 DOM appendChild 即移动；mock 需先 remove 防残留）
+        if (last.parentNode) last.remove();
+        rowsEl.appendChild(last);
+        rowsEl.appendChild(row);
+        cv.appendChild(grp);
+        appendedToGroup = true;
+      } else if (last.classList.contains("tool-group")) {
+        const rowsEl = last.querySelector(".tool-group-rows");
+        if (rowsEl) {
+          rowsEl.appendChild(row);
+          last.classList.remove("collapsed"); // 组收起后新工具 start → 自动展开显示 running 行
+          appendedToGroup = true;
+        }
+      }
+    }
+    if (appendedToGroup) {
+      scrollToBottom(sid);
+      App.updateEmptyState?.();
+      const rowsEl = row.parentNode;
+      if (rowsEl && rowsEl.classList.contains("tool-group-rows")) {
+        updateToolGroup(rowsEl.parentNode, sid);
+      }
+    } else {
+      append(row, sid);
+    }
     toolRows.set(data.tool_call_id, row);
   }
 
@@ -327,6 +406,10 @@ const Chat = (() => {
     const elapsed = data.elapsed !== undefined ? `${data.elapsed.toFixed(1)}s` : "";
     if (elapsed && ok) {
       row.title = EMRG_Copy._t("chat.elapsed", { s: elapsed });
+      // rant 21:28:49：工具耗时可见 —— label 后 · 3.2s（失败不加）
+      const time = el("span", { class: "tool-time" }, `· ${elapsed}`);
+      if (label) label.after(time);
+      row.dataset.elapsed = String(data.elapsed); // 供合并组摘要求和
     }
     // G91/G131：content 截断 2000 字符 + 展开全文
     const content = data.content || "";
@@ -344,6 +427,11 @@ const Chat = (() => {
       }
     }
     scrollToBottom(sid);
+    // rant 21:28:49：该行在合并组内 → 更新组摘要（数量 + 总耗时）与收起状态
+    const rowsEl = row.parentNode;
+    if (rowsEl && rowsEl.classList && rowsEl.classList.contains("tool-group-rows")) {
+      updateToolGroup(rowsEl.parentNode, sid);
+    }
   }
 
   return {

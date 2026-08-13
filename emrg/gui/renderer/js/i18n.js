@@ -33,6 +33,7 @@ const I18N = (() => {
       "nav.settings": "设置",
 
       // 项目面板（rant 14:10:14 P5）
+      "projects.title": "项目管理",
       "projects.hint": "查看会话 / 添加项目 / 删除（保留磁盘数据）",
       "projects.add": "＋ 添加项目",
       "projects.empty": "暂无项目（点击「添加项目」注册工作目录）",
@@ -252,6 +253,12 @@ const I18N = (() => {
       "rants.filterPending": "待处理",
       "rants.filterInProgress": "进行中",
       "rants.filterCompleted": "已完成",
+      "rants.title": "Rant 管理",
+      "rants.colTime": "时间",
+      "rants.colProject": "项目",
+      "rants.colStatus": "状态",
+      "rants.colProgress": "进度",
+      "rants.colContent": "内容",
       "rants.new": "＋ 新建 Rant",
       "rants.message": "内容",
       "rants.placeholder": "给 EMRG 的反馈或改进建议…",
@@ -336,6 +343,7 @@ const I18N = (() => {
       "chat.maxRoundsHint": "⚠️ 这次任务因为工具调用次数上限中断了，结果可能不完整——输入“继续”我可以接着做。",
       "chat.elapsed": "耗时 {s}",
       "chat.expand": "展开全文",
+      "chat.toolGroupSummary": "{count} 个工具执行 · {time}",
       // 时间分组（utils.js/sidebar.js）
       "util.groupToday": "今天",
       "util.groupYesterday": "昨天",
@@ -456,6 +464,7 @@ const I18N = (() => {
       "nav.settings": "Settings",
 
       // Projects panel (rant 14:10:14 P5)
+      "projects.title": "Project Management",
       "projects.hint": "View sessions / add / remove (disk data kept)",
       "projects.add": "＋ Add project",
       "projects.empty": "No projects yet (click “Add project” to register a working directory)",
@@ -675,6 +684,12 @@ const I18N = (() => {
       "rants.filterPending": "Pending",
       "rants.filterInProgress": "In progress",
       "rants.filterCompleted": "Completed",
+      "rants.title": "Rant Management",
+      "rants.colTime": "Time",
+      "rants.colProject": "Project",
+      "rants.colStatus": "Status",
+      "rants.colProgress": "Progress",
+      "rants.colContent": "Content",
       "rants.new": "＋ New rant",
       "rants.message": "Message",
       "rants.placeholder": "Feedback or improvement ideas for EMRG…",
@@ -759,6 +774,7 @@ const I18N = (() => {
       "chat.maxRoundsHint": "⚠️ This task hit the tool-call limit and may be incomplete — type \"continue\" and I'll keep going.",
       "chat.elapsed": "took {s}",
       "chat.expand": "Expand full text",
+      "chat.toolGroupSummary": "{count} tool calls · {time}",
       // Time groups (utils.js/sidebar.js)
       "util.groupToday": "Today",
       "util.groupYesterday": "Yesterday",
