@@ -457,6 +457,7 @@ When reading rants, follow these rules:
 > - GUI session history on-demand loading (#739 宿主 rant 2026-08-13T14:15:12 前端：chat.js + app.js 消费 #737 分页接口按需加载会话历史（加载更多按钮/滚动触发），i18n + CSS；+3 renderer.smoke（107→110）GUI 229→232；合并 0cc5b8f) ✅
 > - GUI sidebar navigation framework (#743 宿主 rant 2026-08-13T14:10:14 P1：侧边栏 activity-bar 式 5 入口导航（会话/项目/任务/Rant/设置）——.side-nav + .side-panel 占位框架（不遮聊天区，纯增量：默认全部隐藏、会话列表常驻）；app.js SIDE_PANELS + switchPanel（点同项关闭/点其他切换/高亮 active）；i18n zh/en 12 键；+1 renderer.smoke（GUI 232→233）；P2-P5 逐面板填充，P6 移除老弹窗；合并 05c2053) ✅
 > - GUI settings panel 6 tabs + tasks panel (#746 宿主 rant 2026-08-13T14:10:14 P2+P3：#743 续——`#settings-dialog` 删除改 `#panel-settings` 内 6 tab（模型服务/工作目录/GitHub/外观/语言/关于，`switchSettingsTab` SETTINGS_TABS 白名单 + .hidden/.active 切换，非法 tab 名忽略；`settings-cancel`=关面板）；任务管理从设置对话框迁出 + `#tasks-dialog` 删除 → `#panel-tasks`（`/trigger` 无参数改开任务面板，`Dialogs.loadTaskMeta/renderTaskList` 共享复用，错误改 Chat.addSystemMessage）；nav 点击 settings/tasks 打开时按需加载（loadEvolutionSummary+showSettings / openTasksPanel，同项点击关闭不重复加载）；i18n 键全部复用无新键；+1 renderer.smoke（P2 tab 切换正反两态）GUI 233→234；合并 09b31dc) ✅
+> - GUI projects panel (#747 宿主 rant 2026-08-13T14:10:14 P5：#746 续——侧边栏项目面板 `#panel-projects`：项目列表（auto_evolve 徽标 + 最近活跃提示 + 查看会话/删除按钮）；`showProjectSessionsInPanel` 内嵌项目会话列表（点击切换会话，复用既有 switchSession IPC）；删除项目=受保护守卫（emrg/emrg-task 系统项目不可删）+ 确认弹窗 + removeProject 刷新列表；i18n zh/en 新增 deleteProject.* 键；+3 renderer.smoke（renderer 110→113）GUI 234→235；合并 f5eeadd) ✅
 
 #### 2.2 Latest GitHub code changes
 
