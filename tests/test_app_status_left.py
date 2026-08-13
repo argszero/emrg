@@ -39,9 +39,14 @@ class TestFormatStatusLeft:
         out = _format_status_left("main", "s_260727", "")
         assert "[" not in out
 
-    def test_sid_truncated_to_8_chars(self):
-        """Long session ids are truncated to 8 chars in the title form."""
+    def test_sid_full_in_title_form(self):
+        """Full session id is shown in the title form (rant 2026-08-13T16:14:12).
+
+        Host request: when a session name exists, the status bar must show the
+        complete session id (previously truncated to 8 chars, inconsistent with
+        the no-title form which always showed the full id).
+        """
         from emrg.client.app import _format_status_left
 
         out = _format_status_left("main", "s_260727abcdef", "")
-        assert "main (s_260727)" in out
+        assert "main (s_260727abcdef)" in out
