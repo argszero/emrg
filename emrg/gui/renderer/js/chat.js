@@ -95,7 +95,12 @@ const Chat = (() => {
 
   function clear(sid) {
     const key = sid || null;
-    chatContainer(key).innerHTML = "";
+    const cv = chatContainer(key);
+    // 清空消息节点但保留 .session-header 标题栏（app.js 每个 .session-view 顶部固定）
+    for (const node of [...cv.children]) {
+      if (node.classList && node.classList.contains("session-header")) continue;
+      node.remove();
+    }
     st(key).groupNodes.clear();
     st(key).toolRows.clear();
     st(key).doneRids.clear();

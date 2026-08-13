@@ -247,6 +247,9 @@ function makeSandbox(overrides = {}) {
 /** 等 microtask 完成 */
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
+/** 消息节点数：排除 .session-header 标题栏（app.js 每会话视图顶部固定） */
+const msgCount = (el) => (el.children || []).filter((c) => !(c.className || "").split(/\s+/).includes("session-header")).length;
+
 test("8 模块按序加载且全局符号解析", () => {
   const { ctx } = makeSandbox();
   const out = vm.runInContext(
@@ -987,6 +990,19 @@ test("P2 框架：右栏 Tab 栏渲染 + 切换 pane 显隐", async () => {
   assert.ok(els["result-list"].classList.contains("active"), "切回产物 pane");
 });
 
+test("rant 20:49:45：产物 pane 显示由 .result-pane 控制——.result-list 不得重声明 display", () => {
+  // CSS 源级断言（沙箱无 CSS 引擎）。根因：.result-list 曾声明 display:flex（同特异性 0,1,0
+  // 后定义胜出）覆盖 .result-pane{display:none}，导致文件 tab 下产物 pane 恒显示。
+  const css = fs.readFileSync(path.join(RENDERER_CSS, "layout.css"), "utf8");
+  // 定位独立 .result-list 规则（行首选择器，排除 #result-panel.collapsed .result-list 前缀形态）
+  const start = css.indexOf("\n.result-list {") + 1;
+  const end = css.indexOf("\n.result-empty {", start); // 下一个独立规则
+  const block = css.slice(start, end > start ? end : start + 400);
+  assert.ok(start > 0, ".result-list 独立规则应存在");
+  assert.ok(!/display\s*:/.test(block), ".result-list 不得重声明 display（显隐由 .result-pane/.result-pane.active 控制）");
+  assert.ok(!/flex-direction\s*:/.test(block), ".result-list 不得重声明 flex-direction（.result-pane.active 已提供）");
+});
+
 test("P2 框架：resizer 拖拽改宽度 + .dragging 抑制 transition", async () => {
   const { ctx, win, els } = makeSandbox();
   await tick();
@@ -1710,8 +1726,8 @@ test("P3 s2: activateSessionView 建独立容器并切换 display（仅激活可
   assert.strictEqual(els["workspace"].children.length, 2, "both views live under the #workspace wrapper");
   // 无 sid 渲染 → 落激活会话容器（slice 2 回退链第二跳）
   ctx.EMRG_Chat.addSystemMessage("to-active");
-  assert.strictEqual(vb.children.length, 1, "unsid'd node goes to active session view");
-  assert.strictEqual(va.children.length, 0, "inactive view untouched (state preserved)");
+  assert.strictEqual(msgCount(vb), 1, "unsid'd node goes to active session view");
+  assert.strictEqual(msgCount(va), 0, "inactive view untouched (state preserved)");
 });
 
 test("P3 s2: Chat.clear 只清目标容器——无 sid 清激活，带 sid 定向清", async () => {
@@ -1728,15 +1744,15 @@ test("P3 s2: Chat.clear 只清目标容器——无 sid 清激活，带 sid 定�
   );
   const va = ctx.EMRG_Chat.chatContainer("sess-a");
   const vb = ctx.EMRG_Chat.chatContainer("sess-b");
-  assert.strictEqual(va.children.length, 1, "sess-a has its node");
-  assert.strictEqual(vb.children.length, 1, "sess-b has its node");
+  assert.strictEqual(msgCount(va), 1, "sess-a has its node");
+  assert.strictEqual(msgCount(vb), 1, "sess-b has its node");
   // 无 sid clear（/clear 的既有调用形态）→ 只清激活容器
   ctx.EMRG_Chat.clear();
-  assert.strictEqual(vb.children.length, 0, "active view cleared");
-  assert.strictEqual(va.children.length, 1, "inactive view retained (切回继续看到原消息)");
+  assert.strictEqual(msgCount(vb), 0, "active view cleared");
+  assert.strictEqual(msgCount(va), 1, "inactive view retained (切回继续看到原消息)");
   // 带 sid clear → 定向清
   ctx.EMRG_Chat.clear("sess-a");
-  assert.strictEqual(va.children.length, 0, "targeted clear empties sess-a");
+  assert.strictEqual(msgCount(va), 0, "targeted clear empties sess-a");
 });
 
 test("P3 s2: 未注册 sid 的事件落激活容器，状态桶仍按 sid 隔离", async () => {
@@ -1750,7 +1766,7 @@ test("P3 s2: 未注册 sid 的事件落激活容器，状态桶仍按 sid 隔离
   const vx = ctx.EMRG_Chat.chatContainer("sess-x");
   // 广播流（sid=sess-other 无独立容器，P4 前过渡）→ 节点落激活容器、状态入自己桶
   ctx.EMRG_Chat.handleDelta([{ request_id: "r1", content: "fallback", done: false, delta: true }], "sess-other");
-  assert.strictEqual(vx.children.length, 1, "unregistered sid renders into active view");
+  assert.strictEqual(msgCount(vx), 1, "unregistered sid renders into active view");
   assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-other").size, 1, "state bucket keyed by own sid");
   assert.strictEqual(ctx.EMRG_Chat.groupNodesFor("sess-x").size, 0, "active bucket untouched by other sid");
 });
