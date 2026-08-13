@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from emrg.session import Session
@@ -138,16 +139,41 @@ class TestRebuild:
         assert count == 0
 
     def test_rebuild_preserves_manual_entries(self, tmp_path):
+        """Manual entries pointing to a live directory survive the rebuild."""
         cfg = tmp_path / "cfg"
         cfg.mkdir(parents=True, exist_ok=True)
+        manual_dir = tmp_path / "manual_dir"
+        manual_dir.mkdir(parents=True, exist_ok=True)
         (cfg / "sessions_index.json").write_text(
-            json.dumps({"s_manual": "/tmp/manual"}), encoding="utf-8"
+            json.dumps({"s_manual": str(manual_dir)}), encoding="utf-8"
         )
         self._make_session(cfg, "s_scanned")
         count = rebuild_sessions_index(cfg)
         assert count == 2
         data = _load(cfg / "sessions_index.json")
-        assert data["s_manual"] == "/tmp/manual"
+        assert data["s_manual"] == str(manual_dir)
+        assert "s_scanned" in data
+
+    def test_rebuild_prunes_stale_entries(self, tmp_path):
+        """Index entries whose session dir was deleted out-of-band are dropped."""
+        cfg = tmp_path / "cfg"
+        cfg.mkdir(parents=True, exist_ok=True)
+        live_dir = tmp_path / "live"
+        live_dir.mkdir(parents=True, exist_ok=True)
+        dead_dir = tmp_path / "dead"
+        dead_dir.mkdir(parents=True, exist_ok=True)
+        (cfg / "sessions_index.json").write_text(
+            json.dumps({"s_live": str(live_dir), "s_dead": str(dead_dir)}),
+            encoding="utf-8",
+        )
+        # Delete the dead session's directory out-of-band (no Session.delete hook).
+        shutil.rmtree(dead_dir)
+        self._make_session(cfg, "s_scanned")
+        count = rebuild_sessions_index(cfg)
+        assert count == 2
+        data = _load(cfg / "sessions_index.json")
+        assert "s_dead" not in data
+        assert data["s_live"] == str(live_dir)
         assert "s_scanned" in data
 
 

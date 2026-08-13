@@ -158,6 +158,9 @@ def rebuild_sessions_index(
     Scans ``config_root`` recursively (covers ~/.emrg and anything nested under
     it) plus each explicit project path (covers projects outside ~/.emrg), and
     upserts every discovered session into ``config_root/sessions_index.json``.
+    Entries whose session directory no longer exists on disk are pruned (e.g.
+    sessions deleted out-of-band); entries pointing to live directories are
+    preserved even when the scan did not rediscover them.
     Returns the number of distinct sessions indexed.
     """
     index_path = config_root / _INDEX_FILENAME
@@ -177,5 +180,21 @@ def rebuild_sessions_index(
 
     for sid, sdir in found.items():
         data[sid] = sdir
+
+    # Prune stale entries whose session directory no longer exists on disk
+    # (removed out-of-band, outside the Session.delete hook). Rebuild stays a
+    # pure backfill for everything still alive — manual entries that point to a
+    # live directory are preserved.
+    stale = []
+    for sid, sdir in data.items():
+        try:
+            alive = Path(sdir).exists()
+        except (OSError, ValueError):
+            alive = False
+        if not alive:
+            stale.append(sid)
+    for sid in stale:
+        del data[sid]
+
     _write(data, index_path)
     return len(data)
