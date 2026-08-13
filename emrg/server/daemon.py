@@ -1747,10 +1747,23 @@ class EmrgServer:
                         "preview": preview,
                         "timestamp": r.get("timestamp", ""),
                     })
+            # Optional pagination (rant 2026-08-13T14:15:12): limit/offset
+            # count from the NEWEST message backwards (offset=0 = latest).
+            # Absent limit = full list (backward compatible, used by /rewind).
+            limit = msg.get("limit")
+            offset = msg.get("offset", 0)
+            has_more = False
+            if limit is not None:
+                total = len(user_messages)
+                end = max(0, total - offset)
+                start = max(0, end - limit)
+                has_more = start > 0
+                user_messages = user_messages[start:end]
             await self._send(ws, {
                 "type": "history_list",
                 "session_id": session_id,
                 "messages": user_messages,
+                "has_more": has_more,
             })
 
         elif msg_type == "rewind_session":
