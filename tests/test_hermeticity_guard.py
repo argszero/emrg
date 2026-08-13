@@ -4,8 +4,9 @@ Verifies the autouse conftest fixture is wired (both server modules
 carry the guarded wrapper) and that the discriminator is reliable in
 BOTH states (#455 lesson):
 - tmp projects.yml writes pass through unchanged (negative state);
-- the real ~/.emrg/projects.yml path raises AssertionError (positive
-  state) — the raise happens before any write, so this test is safe.
+- the real ~/.emrg/projects.yml / tasks.yml paths raise AssertionError
+  (positive state) — the raise happens before any write, so this test
+  is safe.
 """
 from __future__ import annotations
 
@@ -46,3 +47,12 @@ def test_guard_rejects_real_projects_yml():
     real = (Path.home() / ".emrg" / "projects.yml").resolve()
     with pytest.raises(AssertionError, match="hermetic"):
         sched_mod.atomic_write_yaml([], real, prefix=".projects_")
+
+
+def test_guard_rejects_real_tasks_yml():
+    """Writing the real ~/.emrg/tasks.yml is a hard error (same class)."""
+    import emrg.server.scheduler as sched_mod
+
+    real = (Path.home() / ".emrg" / "tasks.yml").resolve()
+    with pytest.raises(AssertionError, match="hermetic"):
+        sched_mod.atomic_write_yaml([], real, prefix=".tasks_")
