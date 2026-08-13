@@ -1,8 +1,8 @@
-/* layout.css — 整体布局：左侧边栏 + 主区（居中单栏聊天 + 输入卡片）
+/* layout.css — 整体布局：左侧边栏 + 工作区（#workspace 会话/面板视图 + 输入卡片）
  * 结构：
  *   #app
  *     #sidebar（品牌区 + 新对话 + 分组列表 + 底部设置/连接圆点）
- *     #main（#chat-view 滚动区 + #empty-state 欢迎屏 + #composer-wrap 输入卡片）
+ *     #main（#workspace 视图容器 + #empty-state 欢迎屏 + #composer-wrap 输入卡片）
  */
 
 #app {
@@ -62,25 +62,17 @@
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent);
 }
-/* 面板容器（不遮聊天区，占用侧边栏内空间） */
-.side-panel {
-  margin: 0 var(--sp-3) var(--sp-2);
-  padding: var(--sp-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-card);
-  background: var(--bg-panel);
+/* 工作区视图（rant 18:55:09 v0.2：面板从侧边栏移入 #workspace，整块工作区显示）——
+ * 默认隐藏；.active 时填充整个工作区（宽布局，不再受侧边栏 264px 限制） */
+.workspace-view {
+  display: none;
+  flex-direction: column;
+  height: 100%;
   overflow-y: auto;
-  min-height: 80px;
+  padding: var(--sp-4);
 }
-.side-panel-title {
-  font-size: var(--fs-secondary);
-  font-weight: 600;
-  color: var(--text-1);
-  margin-bottom: var(--sp-2);
-}
-.side-panel-body {
-  font-size: var(--fs-secondary);
-  color: var(--text-3);
+.workspace-view.active {
+  display: flex;
 }
 
 /* rant 14:10:14 P2：设置面板 tab（模型服务/工作目录/GitHub/外观/语言/关于） */
@@ -239,8 +231,9 @@
   background: var(--bg);
 }
 
-/* 聊天区包装（P3 slice 2：多会话容器——每会话一个 .session-view，display 切换） */
-#chat-view {
+/* 工作区包装（rant 18:55:09 v0.2 起：#chat-view 更名 #workspace——会话视图 + 面板视图的
+ * 公共父容器；每会话一个 .session-view，每面板一个 .workspace-view，display 互斥切换） */
+#workspace {
   flex: 1;
   position: relative;
   overflow: hidden;
@@ -273,7 +266,7 @@
   pointer-events: none;
   background: repeating-linear-gradient(45deg, transparent 0 8px, rgba(128, 128, 128, 0.08) 8px 16px);
 }
-#chat-view > *:not(.session-view),
+#workspace > *:not(.session-view):not(.workspace-view),
 .session-view > * {
   width: 100%;
   max-width: 760px;
@@ -383,7 +376,7 @@ body.sidebar-collapsed #app {
   #sidebar {
     display: none;
   }
-  /* #chat-view 现为绝对定位包装（padding 移入 .session-view，避免滚动条内缩） */
+  /* #workspace 现为绝对定位包装（padding 移入 .session-view，避免滚动条内缩） */
   .session-view {
     padding: var(--sp-4) var(--sp-4) var(--sp-3);
   }

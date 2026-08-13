@@ -7,10 +7,10 @@
 const Chat = (() => {
   // P3（rant 15:07:19）：会话级状态隔离——每会话一份 groupNodes/toolRows/doneRids。
   // sid=null 为旧版单会话桶（无 sid 事件/旧调用方 → 行为与改造前完全一致）。
-  // 容器路由：registerContainer(sid, el) 后该 sid 渲染进独立容器；未注册 → 默认 $("chat-view")
+  // 容器路由：registerContainer(sid, el) 后该 sid 渲染进独立容器；未注册 → 默认 $("workspace")
   // （P4 openSessions 前实际只存在一个激活会话，容器切换随 P4 落地）。
   const sessionState = new Map(); // sid|null → { groupNodes, toolRows, doneRids }
-  const containers = new Map(); // sid → 容器元素（P4 起每会话一个 chat-view）
+  const containers = new Map(); // sid → 容器元素（P4 起每会话一个 .session-view）
 
   function st(sid) {
     const key = sid || null;
@@ -25,7 +25,7 @@ const Chat = (() => {
     if (containers.has(sid)) return containers.get(sid);
     const active = App.state?.sessionId;
     if (active && containers.has(active)) return containers.get(active);
-    return $("chat-view");
+    return $("workspace");
   }
 
   /** P4 起：为新打开的会话注册独立容器；关闭时 unregister 清引用 */
@@ -43,7 +43,7 @@ const Chat = (() => {
 
   /** 复制代码按钮（设计 §3.3）：事件委托在聊天区，CSP 无内联 handler */
   function initCodeCopy() {
-    const cv = $("chat-view");
+    const cv = $("workspace");
     cv.addEventListener("click", (e) => {
       const btn = e.target.closest(".code-copy");
       if (!btn) return;
