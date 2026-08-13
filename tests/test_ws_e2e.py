@@ -222,6 +222,7 @@ class TestWSProtocol:
                         }
                         await ws.send(json.dumps(task, ensure_ascii=False))
                         got_delta = got_tool = got_done = False
+                        context_messages = None
                         while True:
                             frame = await asyncio.wait_for(ws.recv(), timeout=10)
                             resp = json.loads(frame)
@@ -231,8 +232,14 @@ class TestWSProtocol:
                                 got_tool = True
                             if resp.get("done"):
                                 got_done = True
+                                # rant 21:52:18: done frame must report the
+                                # current LLM context size — system(1) + user(1)
+                                # + assistant(tool_calls)(1) + tool result(1) +
+                                # final assistant(1) = 5 for this one-round flow.
+                                context_messages = resp.get("context_messages")
                                 break
                         assert got_delta and got_tool and got_done
+                        assert context_messages == 5
                     finally:
                         await ws.close()
                 finally:
