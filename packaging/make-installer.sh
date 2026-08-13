@@ -385,7 +385,7 @@ var
   ResultCode: Integer;
   StopScript: string;
   LogFile: string;
-  LogText: string;
+  LogText: AnsiString;
 begin
   Result := '';
   ExtractTemporaryFile('stop-emrg.cmd');
@@ -400,8 +400,16 @@ begin
     if ResultCode <> 0 then
     begin
       LogText := '';
+      // LoadStringFromFile 的 Inno Pascal Script 签名是
+      // function LoadStringFromFile(const FileName: String; var S: AnsiString): Boolean;
+      // （6.7.1 → 7.x 全版本一致，见 issrc Shared.ScriptFunc.pas）——不存在单参数
+      // 字符串返回形式！v0.2.30 Build Release 31661378619 因此编译失败
+      // （iscc "Invalid number of parameters"，Test CI 不编译 .iss 未拦住）。
+      // 正确用法：out-param 写入 LogText，返回 Boolean 表示成功。
+      // 注意：本注释位于未加引号 heredoc 内，禁用反引号与命令替换语法
+      // （iscc compile gate 实证捕获），以免破坏 .iss 渲染。
       if FileExists(LogFile) then
-        LogText := LoadStringFromFile(LogFile);
+        LoadStringFromFile(LogFile, LogText);
       if Length(LogText) > 2000 then
         LogText := Copy(LogText, 1, 2000);
       if LogText <> '' then

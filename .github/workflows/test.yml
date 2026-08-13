@@ -56,3 +56,42 @@ jobs:
       - run: uv sync
       - name: Python tests (Windows)
         run: uv run pytest tests/ -v
+      # v0.2.30 教训（Build Release 31661378619）：Test 全绿 ≠ .iss 能编译。
+      # make-installer.sh 的 emrg.iss 只在 tag 触发 Build Release 时经 iscc 编译，
+      # #727 误用 LoadStringFromFile 单参数形式（Inno 真实签名是 2 参数 out-param）
+      # → iscc "Invalid number of parameters" 发版才暴露。此处用 runner 预装的
+      # iscc 编译渲染出的 emrg.iss（stub payload），PR CI 即拦截 .iss 语法/签名错误。
+      - name: Inno Setup script compile smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="$(mktemp -d)"
+          mkdir -p "$STAGE/payload/bin" "$STAGE/dist/artifacts"
+          touch "$STAGE/payload/bin/stop-emrg.cmd"
+          # icon.ico 是 gen-assets 产物（未入库）——生成最小合法 .ico 供 iscc 编译期
+          # SetupIconFile 检查；{app}（={%USERPROFILE}\.emrg\install）引用的文件
+          # （UninstallDisplayIcon/[Icons]/[UninstallRun]）也需存在。
+          uv run python - <<'PY'
+          import struct
+          def write_ico(path):
+              hdr = struct.pack('<HHH', 0, 1, 1)
+              entry = struct.pack('<BBBBHHII', 1, 1, 0, 0, 1, 32, 44, 22)
+              bih = struct.pack('<IiiHHIIiiII', 40, 1, 1, 1, 32, 0, 4, 0, 0, 0, 0)
+              open(path, 'wb').write(hdr + entry + bih + b'\x00\x00\x00\x00')
+          write_ico('packaging/assets/icon.ico')
+          PY
+          APP="$USERPROFILE/.emrg/install"
+          mkdir -p "$APP/bin" "$APP/emrg-gui/EMRG"
+          touch "$APP/bin/emrg.cmd" "$APP/bin/python.exe" "$APP/emrg-gui/EMRG/EMRG.exe"
+          # 渲染 make-installer.sh 的 emrg.iss heredoc（变量展开与真实构建一致）。
+          # 先赋值再统一 export（单行 export 内自引用触发 shellcheck SC2318/SC2097/SC2098）。
+          VERSION="0.0.0-smoke"
+          DIST_WIN="$(cygpath -m "$STAGE/dist")"
+          STAGE_WIN="$(cygpath -m "$STAGE")"
+          ROOT_WIN="$(cygpath -m "$PWD")"
+          export VERSION DIST_WIN STAGE_WIN ROOT_WIN STAGE
+          # 单引号内避免 \$ 字面量（shellcheck SC2016），用无 $ 的锚定模式
+          sed -n '/cat > .*emrg\.iss.*<</,/^EOF$/p' packaging/make-installer.sh > "$STAGE/gen.sh"
+          bash "$STAGE/gen.sh"
+          command -v iscc >/dev/null 2>&1 || { echo "::error::iscc not on PATH (runner image regression)"; exit 1; }
+          iscc "$STAGE/emrg.iss"
