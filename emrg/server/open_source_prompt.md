@@ -128,6 +128,43 @@ State file format:
 - 阻塞: <什么在阻止进展？空=无阻塞>
 ```
 
+#### 0.5 Rant scan (host development instructions)
+
+**Rants are the host's development work orders.** A rant whose `project` field equals this task's `config.project` (tasks.yml) is a development instruction for THIS repository.
+
+```bash
+cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip rant scan]"
+```
+
+Filter rules (aligned with evolution_prompt.md):
+
+- Only rants whose `project` field == this task's `config.project`; **ignore rants without a `project` field entirely**
+- Only consider rants with status `pending` or `in_progress`
+
+**Dedup check — before treating any candidate rant as actionable** (run for each candidate):
+
+```bash
+cd {{ source_dir }} && git log --oneline -20
+```
+
+- Search the log for the rant's timestamp or message keywords
+- ⚠️ A commit referencing the rant timestamp is only evidence the rant was **touched** — NOT sufficient proof of completion. It counts as already handled only when: all its acceptance items are satisfied AND all related branches/PRs are merged. Otherwise treat it as actionable.
+
+**Rant status management** (aligned with evolution_prompt.md):
+
+| status | meaning |
+|--------|---------|
+| `pending` | waiting to be handled (default for new rants) |
+| `in_progress` | being handled — set when starting work; write `progress` (e.g. "implementing X (PR #N)") |
+| `completed` | done — all PRs for the rant merged + self-verification passes (project test suite, e.g. `cargo test` / `pytest` / `npm test`); write the `completed` ISO timestamp. Host verification is NOT a precondition — host feedback arrives as new rants |
+
+- State transitions: pending → in_progress → completed. **Never jump directly from pending to completed**
+- Host opens a new rant saying a fix is insufficient → revert the old rant to `in_progress`, note the reason in `progress`
+- Cleanup: keep all pending/in_progress rants; keep only the 10 most recent completed
+- When rewriting: sort by `timestamp` ascending; field order `timestamp → project → status → progress → completed → message` (message last); write with `json.dumps(..., ensure_ascii=False)`
+
+**Language policy**: rant-driven outputs (PR title/body, review comments, issue replies) MUST be written in English; keep rant content verbatim when quoting it. Internal artifacts (state file, reflection, memory) may stay in the author's language.
+
 ---
 
 ### 1. State Assessment (decide which phase this cycle enters, based on the state file)
@@ -135,6 +172,9 @@ State file format:
 **Decision logic**:
 
 ```
+Unhandled rant found in 0.5 (project matches, pending/in_progress, dedup check passed)?
+  → Phase Contribution (handle the rant — host instruction, highest priority)
+
 Is "进行中" (in progress) in the state file non-empty?
   → Phase Contribution (continue the unfinished implementation)
 
@@ -197,6 +237,20 @@ cd {{ source_dir }} && gh issue view <N> -R {{ owner }}/{{ repo }} --json state,
 ```
 
 - If claimed by someone else or closed → return to Phase Recon
+
+#### B.1b Rant-driven mode (host rant as development instruction)
+
+When Phase Contribution is entered because an **unhandled rant** (project-matching, pending/in_progress) was found in the 0.5 scan:
+
+- The rant is the host's explicit development instruction — **priority over issues**
+- Before implementing: mark the rant `in_progress` in `~/.emrg/rants.jsonl` with a `progress` description (e.g. "implementing X (PR #N)")
+- One rant may be split into multiple PRs (one acceptance item per PR, small iterations); reference the rant (timestamp + keywords) in the PR description
+- Flow continues with B.2–B.6 below (read conventions → fork/branch → implement → test → commit + PR)
+- After a PR is submitted: update the rant's `progress` (e.g. "PR #N submitted, awaiting review")
+- When ALL the rant's PRs are merged and self-verification passes (the project's test suite, per B.5): set status `completed` and write the `completed` timestamp
+- Language policy: PR title/body in English; quote the rant verbatim when referencing it
+
+> ⚠️ The dedup check is already done in 0.5 — never start work on a rant whose acceptance items are already satisfied and branches merged.
 
 #### B.2 Study project conventions (MUST do before implementing)
 
@@ -395,7 +449,7 @@ Each round must answer these 7 questions (cannot be omitted):
 
 1. **What was this round's goal?** — Which Phase did this round enter (recon/contribution/tracking/review)? What specific task to complete? If there's rant feedback, list the rants considered this round (write "no new rant feedback" if none)
 2. **What does success look like?** — What would "done" look like? (PR merged? Issue claimed? Review completed? Contribution accepted?)
-3. **What was actually done?** — Concrete actions: which issues scanned, what code written, which PRs reviewed, what discussions replied to, what waited on
+3. **What was actually done?** — Concrete actions: which issues scanned, what code written, which PRs reviewed, what discussions replied to, what waited on. **If this round submitted a PR for a rant, record the PR number and the rant it addresses (timestamp/keywords).**
 4. **What is the current progress?** — Compared to the ideal outcome, how far along? What's missing? (How many more reviews does the PR need? Which part of the code is unfinished? Was the issue claimed by someone else?)
 5. **What pitfalls were hit?** — Which attempts failed, what CI broke, why reviews were rejected, network/permission blockers, platform CLI or browser unavailability. Record honestly, don't gloss over
 6. **What opportunities were discovered?** — Which issues are worth doing, which PRs have potential, what new directions in community activity, which project conventions deserve attention?
