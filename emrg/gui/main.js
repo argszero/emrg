@@ -424,11 +424,14 @@ vision = false
       return { ok: true };
     });
 
-    ipcMain.handle("emrg:listHistory", async (_e, { sessionId }) => {
-      // GUI / 指令 P2：/rewind — 获取会话历史消息点（daemon 协议 list_history 已存在）
+    ipcMain.handle("emrg:listHistory", async (_e, { sessionId, limit, offset } = {}) => {
+      // GUI / 指令 P2：/rewind + rant 14:15:12 历史按需加载（limit/offset 可选）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      const frame = await requireConn().sendCommandAndWait("list_history", { session_id: sessionId, cwd: projectDir }, 5000);
-      return { messages: frame.messages || [] };
+      const payload = { session_id: sessionId, cwd: projectDir };
+      if (limit != null) payload.limit = limit;
+      if (offset != null) payload.offset = offset;
+      const frame = await requireConn().sendCommandAndWait("list_history", payload, 5000);
+      return { messages: frame.messages || [], hasMore: !!frame.has_more };
     });
 
     ipcMain.handle("emrg:rewindSession", async (_e, { sessionId, recordIndex }) => {

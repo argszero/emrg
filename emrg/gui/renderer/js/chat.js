@@ -128,6 +128,38 @@ const Chat = (() => {
     append(el("div", { class: "msg system" }, text), sid);
   }
 
+  /** Read-only history user message (rant 14:15:12: restore recent history on
+   *  session switch; not interactive). Reuses the user-bubble style plus a
+   *  history class; prepend inserts after the load bar keeping scroll pos. */
+  function addHistoryMessage(text, sid, { prepend = false } = {}) {
+    const node = el("div", { class: "msg user history" }, text);
+    const cv = chatContainer(sid);
+    if (prepend) {
+      const bar = cv.querySelector(".history-load-bar");
+      cv.insertBefore(node, bar ? bar.nextSibling : cv.firstChild);
+    } else {
+      cv.appendChild(node);
+    }
+    App.updateEmptyState?.();
+    return node;
+  }
+
+  /** Top history load bar (rant 14:15:12): text=null removes it; otherwise
+   *  it becomes the first child of the session container. */
+  function setLoadBar(sid, text) {
+    const cv = chatContainer(sid);
+    let bar = cv.querySelector(".history-load-bar");
+    if (text == null) {
+      if (bar) bar.remove();
+      return;
+    }
+    if (!bar) {
+      bar = el("div", { class: "history-load-bar" });
+      cv.insertBefore(bar, cv.firstChild);
+    }
+    bar.textContent = text;
+  }
+
   /** 流式 delta（G122 main 已按 chunks 批量）——按会话隔离分组/已 done 集合 */
   function handleDelta(chunks, sid) {
     const { groupNodes, doneRids } = st(sid);
@@ -313,6 +345,8 @@ const Chat = (() => {
     addUserMessage,
     addSystemMessage,
     createAssistantNode,
+    addHistoryMessage,
+    setLoadBar,
     clear,
     scrollToBottom,
     handleDelta,
