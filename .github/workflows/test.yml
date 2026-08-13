@@ -56,3 +56,25 @@ jobs:
       - run: uv sync
       - name: Python tests (Windows)
         run: uv run pytest tests/ -v
+      # v0.2.30 教训（Build Release 31661378619）：Test 全绿 ≠ .iss 能编译。
+      # make-installer.sh 的 emrg.iss 只在 tag 触发 Build Release 时经 iscc 编译，
+      # #727 误用 LoadStringFromFile 单参数形式（Inno 真实签名是 2 参数 out-param）
+      # → iscc "Invalid number of parameters" 发版才暴露。此处用 runner 预装的
+      # iscc 编译渲染出的 emrg.iss（stub payload），PR CI 即拦截 .iss 语法/签名错误。
+      - name: Inno Setup script compile smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="$(mktemp -d)"
+          mkdir -p "$STAGE/payload/bin" "$STAGE/dist/artifacts"
+          touch "$STAGE/payload/bin/stop-emrg.cmd"
+          # 渲染 make-installer.sh 的 emrg.iss heredoc（变量展开与真实构建一致）
+          sed -n '/cat > "\$STAGE\/emrg.iss" <<EOF/,/^EOF$/p' packaging/make-installer.sh > "$STAGE/gen.sh"
+          VERSION="0.0.0-smoke" \
+          DIST_WIN="$(cygpath -m "$STAGE/dist")" \
+          STAGE_WIN="$(cygpath -m "$STAGE")" \
+          ROOT_WIN="$(cygpath -m "$PWD")" \
+          STAGE="$STAGE" \
+          bash "$STAGE/gen.sh"
+          command -v iscc >/dev/null 2>&1 || { echo "::error::iscc not on PATH (runner image regression)"; exit 1; }
+          iscc "$STAGE/emrg.iss"
