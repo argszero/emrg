@@ -2679,6 +2679,54 @@ test("rant 14:15:12：切会话加载最近历史（只读气泡 + 加载条）�
   assert.ok(noMore, "无更多历史时加载条仍在（显示没有更多）");
 });
 
+test("rant 18:55:09 v0.2 回归：back-to-bottom 跟随会话视图滚动（scroll 不冒泡 → capture 捕获子 .session-view）", async () => {
+  const { ctx, els } = makeSandbox({
+    init: async () => ({
+      config_exists: true,
+      api_key_configured: true,
+      project_dir: "/tmp",
+      project_dir_valid: true,
+      server_id: "srv-1",
+      model: "m",
+      evolution_count: 0,
+      sessions: [{ session_id: "s1", title: "测试对话", updated_at: "2026-08-05T10:00:00Z" }],
+      open_sessions: [],
+      active_sid: "s1",
+    }),
+    switchSession: async () => ({}),
+  });
+  await vm.runInContext("App.boot()", ctx);
+  await tick();
+  const view = vm.runInContext('document.getElementById("workspace").querySelector(".session-view")', ctx);
+  const btn = els["back-to-bottom"];
+  // 初始：在底部 → 按钮隐藏、autoScroll=true
+  view.scrollTop = 100;
+  view.scrollHeight = 1000;
+  view.clientHeight = 100; // 100+100 >= 960? no → 不在底部
+  els["workspace"].dispatch("scroll", { target: view });
+  await tick();
+  assert.strictEqual(btn.classList.contains("hidden"), false, "上滑（不在底部）→ back-to-bottom 显示");
+  assert.strictEqual(vm.runInContext("App.state.autoScroll", ctx), false, "上滑 → autoScroll=false");
+  // 点按钮 → 回到底部：scrollTop=scrollHeight、按钮隐藏
+  vm.runInContext('document.getElementById("back-to-bottom").click()', ctx);
+  await tick();
+  assert.strictEqual(view.scrollTop, view.scrollHeight, "点击后滚动容器回到底部");
+  assert.strictEqual(btn.classList.contains("hidden"), true, "回到底部后按钮隐藏");
+  assert.strictEqual(vm.runInContext("App.state.autoScroll", ctx), true, "回到底部后 autoScroll=true");
+  // 面板视图激活 → 按钮强制隐藏（不悬浮覆盖面板）
+  view.scrollTop = 0;
+  els["workspace"].dispatch("scroll", { target: view });
+  await tick();
+  assert.strictEqual(btn.classList.contains("hidden"), false, "再次上滑 → 按钮复现");
+  await vm.runInContext('document.getElementById("nav-projects").click()', ctx);
+  await tick();
+  assert.strictEqual(btn.classList.contains("hidden"), true, "面板视图下 back-to-bottom 隐藏");
+  // 回会话视图 → 按钮按滚动位置恢复（仍在上滑位置 → 复现）
+  await vm.runInContext('document.getElementById("nav-projects").click()', ctx);
+  await tick();
+  assert.strictEqual(btn.classList.contains("hidden"), false, "回会话视图后按位置恢复按钮");
+});
+
 test("rant 18:55:09 v0.2：导航点击 → 工作区视图切换（面板整块显示 + 互斥 + 点同项关闭回会话）", async () => {
   const { ctx } = makeSandbox({
     init: async () => ({

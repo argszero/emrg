@@ -567,13 +567,16 @@ const App = (() => {
       const panel = $(`panel-${p}`);
       if (panel) panel.classList.remove("active");
     }
+    // 浏览器 tab 语义：仅**新建**容器滚到底；既有容器保留滚动位置（rant 18:55:09 验收
+    // "回会话视图滚动位置保留"——面板往返/会话切换不跳底）
+    const existed = [...$("workspace").children].some((c) => c.dataset?.sid === sid);
     const view = ensureSessionView(sid);
     for (const child of $("workspace").children) {
       if (child.classList) child.classList.remove("active");
     }
     view.classList.add("active");
-    Chat.scrollToBottom(sid);
-    setWorkspaceChrome("sessions"); // 恢复输入区 + 成果面板
+    if (!existed) Chat.scrollToBottom(sid);
+    setWorkspaceChrome("sessions"); // 恢复输入区 + 成果面板（含 back-to-bottom 按位置恢复）
     state.activeView = "sessions";
     return view;
   }
@@ -694,19 +697,43 @@ const App = (() => {
     const empty = $("empty-state");
     const panel = $("result-panel");
     const resizer = $("result-resizer");
+    const btb = $("back-to-bottom");
     if (mode === "panel") {
       composer.classList.add("hidden");
       empty.classList.add("hidden");
       if (panel) panel.classList.add("hidden");
       if (resizer) resizer.classList.add("hidden");
+      if (btb) btb.classList.add("hidden"); // 回到底部按钮属会话视图，面板视图下隐藏
       // HTML 预览（WebContentsView）随面板隐藏（main 侧比对路径；无预览时 no-op）
       try { if (window.emrg && typeof window.emrg.closePreview === "function") window.emrg.closePreview({}); } catch { /* ignore */ }
     } else {
       composer.classList.remove("hidden");
       if (panel) panel.classList.remove("hidden");
       if (resizer) resizer.classList.remove("hidden");
+      updateBackToBottomState(); // 回会话视图：按当前滚动位置恢复按钮
       updateEmptyState();
     }
+  }
+
+  /** 当前滚动容器：激活会话的 .session-view（#workspace overflow:hidden 自身不滚动） */
+  function activeScrollEl() {
+    const ws = $("workspace");
+    if (state.sessionId) {
+      const v = [...(ws.children || [])].find((c) => c.dataset?.sid === state.sessionId);
+      if (v) return v;
+    }
+    const active = [...(ws.children || [])].find((c) => c.classList && c.classList.contains("active"));
+    return active || ws;
+  }
+
+  /** 更新"回到底部"按钮 + autoScroll（scroll 事件不冒泡 → 需 capture 捕获子 .session-view 滚动） */
+  function updateBackToBottomState() {
+    const btn = $("back-to-bottom");
+    const el = activeScrollEl();
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+    state.autoScroll = atBottom;
+    // 上滑阅读（不在底部）→ 显示"回到底部"悬浮按钮（不打扰）
+    if (btn) btn.classList.toggle("hidden", atBottom);
   }
 
   /** rant 14:10:14 P2：设置面板 tab 切换（模型服务/工作目录/GitHub/外观/语言/关于）。 */
@@ -1638,16 +1665,12 @@ const App = (() => {
     });
 
     const chatView = $("workspace");
-    const updateBackToBottom = () => {
-      const btn = $("back-to-bottom");
-      const atBottom = chatView.scrollTop + chatView.clientHeight >= chatView.scrollHeight - 40;
-      state.autoScroll = atBottom;
-      // 上滑阅读（不在底部）→ 显示"回到底部"悬浮按钮（不打扰）
-      if (btn) btn.classList.toggle("hidden", atBottom);
-    };
-    chatView.addEventListener("scroll", updateBackToBottom);
+    // scroll 事件不冒泡 → 必须用 capture 捕获子 .session-view 的滚动（#634 起滚动容器下移；
+    // 此前监听挂在 #workspace 上从不触发，back-to-bottom 与滚动加载历史在真实 GUI 静默失效）
+    chatView.addEventListener("scroll", updateBackToBottomState, true);
     $("back-to-bottom").addEventListener("click", () => {
-      chatView.scrollTop = chatView.scrollHeight;
+      const el = activeScrollEl();
+      el.scrollTop = el.scrollHeight;
       state.autoScroll = true;
       $("back-to-bottom").classList.add("hidden");
     });
@@ -1661,7 +1684,7 @@ const App = (() => {
         clearTimeout(historyScrollTimer);
         historyScrollTimer = setTimeout(() => loadOlderHistory(state.sessionId), 150);
       }
-    }, { passive: true });
+    }, { capture: true, passive: true });
 
     // 空状态示例问题卡片 → 填入输入框
     $("empty-state").addEventListener("click", (e) => {
