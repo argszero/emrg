@@ -53,6 +53,7 @@ const RESPONSE_TYPES = {
   list_projects: "projects_list",
   list_history: "history_list",
   list_tasks: "tasks_list",
+  list_rants: "rants_list",
   list_memories: "memories_list",
   resume_session: "resume_result",
   delete_session: "session_deleted",

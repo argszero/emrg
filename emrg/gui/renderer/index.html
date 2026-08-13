@@ -117,7 +117,34 @@
       </section>
       <section class="side-panel hidden" id="panel-rants" data-panel-body="rants">
         <div class="side-panel-title" data-i18n="nav.rantsPanel">Rant</div>
-        <div class="side-panel-body" data-i18n="nav.placeholder">面板内容将在后续版本填充</div>
+        <div class="side-panel-body">
+          <!-- rant 14:10:14 P4：rant 面板（列表筛选 + 详情 + 新建） -->
+          <div class="panel-tabs" id="rant-filter-tabs" role="tablist" style="margin-bottom:var(--sp-2);">
+            <button type="button" class="panel-tab active" id="rant-filter-all" data-rant-filter="" data-i18n="rants.filterAll">全部</button>
+            <button type="button" class="panel-tab" id="rant-filter-pending" data-rant-filter="pending" data-i18n="rants.filterPending">待处理</button>
+            <button type="button" class="panel-tab" id="rant-filter-inprogress" data-rant-filter="in_progress" data-i18n="rants.filterInProgress">进行中</button>
+            <button type="button" class="panel-tab" id="rant-filter-completed" data-rant-filter="completed" data-i18n="rants.filterCompleted">已完成</button>
+          </div>
+          <div id="rant-list" class="task-list"></div>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button type="button" id="rant-new-btn" class="btn btn-ghost" style="flex:1;" data-i18n="rants.new">＋ 新建 Rant</button>
+          </div>
+          <!-- 新建 rant 表单 -->
+          <div id="rant-form" class="task-form hidden">
+            <label class="model-form-label" data-i18n="rants.project">项目（选填）
+              <select id="rant-form-project"></select>
+            </label>
+            <label class="model-form-label" data-i18n="rants.message">内容
+              <textarea id="rant-form-message" rows="4" style="width:100%;min-height:80px;" placeholder="给 EMRG 的反馈或改进建议…" data-i18n-placeholder="rants.placeholder"></textarea>
+            </label>
+            <div class="model-form-footer">
+              <div style="display:flex;gap:8px;margin-left:auto;">
+                <button type="button" id="rant-form-cancel" class="btn btn-ghost" style="padding:6px 12px;min-height:30px;" data-i18n="settings.cancel">取消</button>
+                <button type="button" id="rant-form-submit" class="btn btn-primary" style="padding:6px 12px;min-height:30px;" data-i18n="rants.submit">发送</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
       <section class="side-panel hidden" id="panel-settings" data-panel-body="settings">
         <div class="side-panel-title" data-i18n="nav.settingsPanel">设置</div>

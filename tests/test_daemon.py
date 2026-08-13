@@ -594,6 +594,68 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert abs((_dt.datetime.now(ts.tzinfo) - ts).total_seconds()) < 60
 
 
+def _last_frame(writer: "_FakeWriter") -> dict:
+    """Parse the last WebSocket frame the daemon sent (daemon._send → ws.send → _frames)."""
+    import json as _json
+    raw = writer._frames[-1]
+    return _json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+
+
+def test_list_rants_filter_and_order(tmp_path, monkeypatch):
+    """list_rants reads rants.jsonl: optional status filter + newest-first order."""
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+
+    # 写入 3 条（乱序），覆盖三状态
+    entries = [
+        {"timestamp": "2026-08-13T10:00:00+08:00", "project": "", "status": "pending", "progress": None, "completed": None, "message": "new idea"},
+        {"timestamp": "2026-08-13T14:10:14+08:00", "project": "emrg", "status": "in_progress", "progress": "P1 done", "completed": None, "message": "GUI redesign"},
+        {"timestamp": "2026-08-12T09:00:00+08:00", "project": "", "status": "completed", "progress": None, "completed": "2026-08-12T12:00:00+08:00", "message": "old rant"},
+    ]
+    with open(tmp_path / "rants.jsonl", "w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+    # 无筛选 → 全部，时间倒序（最新在前）
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "rants_list"
+    assert [r["message"] for r in frame["rants"]] == ["GUI redesign", "new idea", "old rant"]
+
+    # status=completed 筛选
+    asyncio.run(server._process_message({"type": "list_rants", "status": "completed"}, writer))
+    frame = _last_frame(writer)
+    assert [r["message"] for r in frame["rants"]] == ["old rant"]
+
+    # status=in_progress 筛选
+    asyncio.run(server._process_message({"type": "list_rants", "status": "in_progress"}, writer))
+    frame = _last_frame(writer)
+    assert [r["message"] for r in frame["rants"]] == ["GUI redesign"]
+
+    # 损坏行跳过（corrupt JSON 不崩）
+    with open(tmp_path / "rants.jsonl", "a", encoding="utf-8") as f:
+        f.write("{not json}\n")
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))
+    frame = _last_frame(writer)
+    assert len(frame["rants"]) == 3  # 损坏行被跳过
+
+
+def test_list_rants_missing_file_returns_empty(tmp_path, monkeypatch):
+    """list_rants with no rants.jsonl → empty list (no crash)."""
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "rants_list"
+    assert frame["rants"] == []
+
+
 # ── Port-file self-heal (rant 2026-08-09T13:16:36 root cause) ─────────
 # G43 stale-port logic once deleted a healthy daemon's emrgd.port after a
 # transient ws failure → daemon's own scheduler lost the file (93× "cannot

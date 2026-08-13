@@ -670,6 +670,13 @@ vision = false
       return frame;
     });
 
+    // rant 14:10:14 P4：rant 面板 — 读取 rants.jsonl（可选 status 筛选）
+    ipcMain.handle("emrg:listRants", async (_e, { status = "" } = {}) => {
+      if (typeof status !== "string") throw new Error("invalid status");
+      const frame = await requireConn().sendCommandAndWait("list_rants", { status: status.trim() }, 5000);
+      return frame.rants || [];
+    });
+
     ipcMain.handle("emrg:sendRant", async (_e, { message, project = "" } = {}) => {
       // GUI / 指令 P4：/rant — 提交反馈到演化系统（daemon rant 协议，字段序与 rants.jsonl 一致）
       if (typeof message !== "string" || !message.trim()) throw new Error("invalid rant message");
