@@ -68,13 +68,14 @@ jobs:
           STAGE="$(mktemp -d)"
           mkdir -p "$STAGE/payload/bin" "$STAGE/dist/artifacts"
           touch "$STAGE/payload/bin/stop-emrg.cmd"
-          # 渲染 make-installer.sh 的 emrg.iss heredoc（变量展开与真实构建一致）
+          # 渲染 make-installer.sh 的 emrg.iss heredoc（变量展开与真实构建一致）。
+          # 先赋值再统一 export（单行 export 内自引用触发 shellcheck SC2318/SC2097/SC2098）。
+          VERSION="0.0.0-smoke"
+          DIST_WIN="$(cygpath -m "$STAGE/dist")"
+          STAGE_WIN="$(cygpath -m "$STAGE")"
+          ROOT_WIN="$(cygpath -m "$PWD")"
+          export VERSION DIST_WIN STAGE_WIN ROOT_WIN STAGE
           sed -n '/cat > "\$STAGE\/emrg.iss" <<EOF/,/^EOF$/p' packaging/make-installer.sh > "$STAGE/gen.sh"
-          VERSION="0.0.0-smoke" \
-          DIST_WIN="$(cygpath -m "$STAGE/dist")" \
-          STAGE_WIN="$(cygpath -m "$STAGE")" \
-          ROOT_WIN="$(cygpath -m "$PWD")" \
-          STAGE="$STAGE" \
           bash "$STAGE/gen.sh"
           command -v iscc >/dev/null 2>&1 || { echo "::error::iscc not on PATH (runner image regression)"; exit 1; }
           iscc "$STAGE/emrg.iss"
