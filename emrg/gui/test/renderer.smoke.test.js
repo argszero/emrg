@@ -1199,6 +1199,37 @@ test("P3：点击目录行懒加载展开子项（缓存，折叠再展开不重
   assert.strictEqual(calls, 2, "缓存命中不重复拉取");
 });
 
+test("P3.5：目录行 chevron 展开/收起指示（rant 20:58:57）", async () => {
+  const { ctx, els } = makeSandbox({
+    listFiles: async ({ path } = {}) => {
+      if (path === "/proj") return { entries: [{ name: "src", path: "/proj/src", type: "dir" }] };
+      return { entries: [] };
+    },
+  });
+  await tick();
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  // 根默认展开 → chevronDown ▾
+  const rootRow = els["result-files"].querySelectorAll(".ft-root")[0];
+  const rootChev = rootRow.querySelector(".ft-chevron");
+  assert.ok(rootChev, "根目录行应有 chevron");
+  assert.ok(rootChev.innerHTML.includes("M3 6l5 5 5-5z"), "根展开态 chevronDown");
+  // src 目录折叠 → chevronRight ▸
+  const srcRow = els["result-files"].querySelectorAll(".ft-dir")[1];
+  const srcChev = srcRow.querySelector(".ft-chevron");
+  assert.ok(srcChev, "目录行应有 chevron");
+  assert.ok(srcChev.innerHTML.includes("M6 3l5 5-5 5z"), "折叠态 chevronRight");
+  // 点击展开 → 切 chevronDown
+  srcRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  assert.ok(srcChev.innerHTML.includes("M3 6l5 5 5-5z"), "展开后 chevronDown");
+  // 文件行无 chevron
+  const files = els["result-files"].querySelectorAll(".ft-file");
+  for (const f of files) {
+    assert.strictEqual(f.querySelector(".ft-chevron"), null, "文件行不应有 chevron");
+  }
+});
+
 test("P3：点击文件行 → 打开文件 Tab + 查看器加载内容", async () => {
   const { ctx, els } = makeSandbox();
   await tick();
