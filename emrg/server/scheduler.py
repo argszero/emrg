@@ -474,6 +474,14 @@ class TaskHandler:
             if self._is_usable_git_repo(str(evolve_dir)):
                 self._source_dir = str(evolve_dir)
                 self.project_path = str(evolve_dir)
+                # Persist the corrected path (idempotent — writes only when the
+                # emrg entry differs). #716 repairs a stale emrg entry (deleted
+                # pytest-temp dir leaked into projects.yml) at scheduler startup
+                # only; this re-persists every cycle so a mid-run pollution on a
+                # long-running daemon self-heals within one cycle without a
+                # restart (list_projects/GUI pickers stay correct).
+                if self._project_name == "emrg":
+                    self._ensure_project_entry()
                 self._ensure_origin_reachable()
                 return True
             logger.warning(
