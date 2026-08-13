@@ -46,7 +46,7 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_and_inline_step4():
     assert content.index("taskkill /IM EMRG.exe") < daemon_line
     # step 4（rant 2026-08-12T14:00:05 合并单文件）：内联 PowerShell 连坐强杀。
     # 判别：-Command 内联（无 -File 独立脚本），\" 转义与 TUI/verify 段同模式。
-    step4_idx = content.index("REM --- 4. bundled git: inline guilt-by-association")
+    step4_idx = content.index("\n:step4\n")  # v2 label（宿主 2026-08-13 真机验证版：标签结构替代注释头）
     verify_idx = content.index("\n:verify\n")  # 标签定义处（\n 前缀排除前面 goto :verify 行）
     assert daemon_line < step4_idx < verify_idx
     assert "-ExecutionPolicy Bypass -Command" in content
@@ -87,7 +87,7 @@ def test_stop_git_merged_single_file():
     # rant 2026-08-12T14:00:05 验收：bin/ 下无 stop-git.ps1；grep stop-git 仅历史注释
     assert not (REPO_ROOT / "bin" / "stop-git.ps1").exists()
     cmd = (REPO_ROOT / "bin" / "stop-emrg.cmd").read_text(encoding="utf-8")
-    step4 = cmd[cmd.index("REM --- 4. bundled git:"):cmd.index("\n:verify\n")]
+    step4 = cmd[cmd.index("\n:step4\n"):cmd.index("\n:verify\n")]
     # pass 2：连坐强杀——前缀内全部残留（sh/vim 一并杀，宿主 2026-08-11T19:47:44 拍板）
     assert "Start-Sleep -Milliseconds 300" in step4
     # 每次枚举重新 Get-CimInstance（不用旧快照）——pass1/pass2/$left 共 3 次
@@ -101,6 +101,31 @@ def test_stop_git_merged_single_file():
     assert "GitStopScript" not in mi
     br = (REPO_ROOT / "packaging" / "build-runtime.sh").read_text(encoding="utf-8")
     assert 'cp "$ROOT/bin/stop-git.ps1"' not in br
+
+
+def test_stop_emrg_v2_step4_always_runs():
+    """R127 / rant 2026-08-13T09:56:47 + 10:00:33 — host-verified v2 (EXIT_CODE=0):
+    step 4 (kill bundled git) must ALWAYS run before :verify. The old
+    `if not exist emrgd.pid goto :verify` skipped step 4 when the daemon was
+    down → orphaned evolution-spawned git/sh/vim processes locked install\\git
+    → verify reported them → exit 1 → installer aborted."""
+    content = (REPO_ROOT / "bin" / "stop-emrg.cmd").read_text(encoding="utf-8")
+    # step 4 unconditional: daemon section falls through via goto :step4, never to :verify
+    daemon_end = content.index("goto :step4")
+    verify_idx = content.index("\n:verify\n")
+    step4_idx = content.index("\n:step4\n")
+    assert daemon_end < step4_idx < verify_idx
+    # no direct daemon→verify jump exists (only the :verify label, no early goto :verify)
+    # (v1 had `if not exist "%EMRG_DIR%\\emrgd.pid" goto :verify` — must be gone)
+    assert 'goto :verify' not in content
+    # paren-block %VAR% parse-time expansion fixed: !TRIES! delayed expansion for the loop guard
+    assert "if !TRIES! geq 10 goto :kill_pid" in content
+    # label structure replaces nested parens for TUI (wmic/PowerShell) + daemon stop
+    assert ":tui_wmic" in content and ":tui_done" in content
+    assert ":daemon_stop" in content and ":daemon_pid" in content
+    # host diagnostics preserved (每步 echo [N] check/kill/result)
+    assert "echo [4] check+kill bundled git" in content
+    assert "echo [verify] git residual" in content
 
 
 def test_emrgd_cmd_has_stop_branch():
