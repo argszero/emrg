@@ -1127,3 +1127,127 @@ class TestWSWorkspacePanel:
                 finally:
                     await cleanup()
         asyncio.run(_test())
+
+
+class TestWSHistoryPagination:
+    """list_history pagination (rant 2026-08-13T14:15:12).
+
+    limit/offset count from the NEWEST message backwards (offset=0 = latest);
+    absent limit keeps the full list (backward compatible, used by /rewind);
+    response includes has_more.
+    """
+
+    @staticmethod
+    async def _cmd(ws, payload):
+        await ws.send(json.dumps(payload))
+        return json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+
+    @staticmethod
+    def _seed_history(cwd: Path, sid: str, n: int) -> None:
+        from emrg.session import Session
+        sess = Session(sid, cwd)
+        records = []
+        for i in range(n):
+            records.append({
+                "type": "message",
+                "role": "user",
+                "content": f"msg-{i:02d}",
+                "timestamp": f"2026-08-13T{i:02d}:00:00",
+            })
+        sess._write_history(records)
+
+    def test_full_list_without_limit(self):
+        """Absent limit → full list (backward compatible)."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_hist"
+                self._seed_history(cwd, sid, 3)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid, "cwd": str(cwd),
+                        })
+                        assert resp["type"] == "history_list"
+                        msgs = resp["messages"]
+                        assert [m["content"] for m in msgs] == ["msg-00", "msg-01", "msg-02"]
+                        # has_more present (False for full list), no error
+                        assert resp.get("has_more") is False
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_limit_returns_newest(self):
+        """limit=2 → newest 2 messages in time order."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_hist"
+                self._seed_history(cwd, sid, 5)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "limit": 2,
+                        })
+                        msgs = resp["messages"]
+                        assert [m["content"] for m in msgs] == ["msg-03", "msg-04"]
+                        assert resp.get("has_more") is True
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_offset_pages_older(self):
+        """limit=2 offset=2 → the 2 messages before the newest 2."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_hist"
+                self._seed_history(cwd, sid, 5)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "limit": 2, "offset": 2,
+                        })
+                        msgs = resp["messages"]
+                        assert [m["content"] for m in msgs] == ["msg-01", "msg-02"]
+                        assert resp.get("has_more") is True
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_offset_beyond_all_has_more_false(self):
+        """offset beyond available messages → empty + has_more False."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_hist"
+                self._seed_history(cwd, sid, 3)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "limit": 10, "offset": 5,
+                        })
+                        assert resp["messages"] == []
+                        assert resp.get("has_more") is False
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
