@@ -1369,6 +1369,34 @@ test("P3.5（rant 17:28）：展开态持久 + 滚动条 hover 样式（CSS 源�
   assert.ok(tabsIdx < tabbarIdx && tabbarIdx < toggleIdx, "tabbar 应嵌套在 result-tabs 内（同排），旧布局 toggle 在 tabbar 之前");
 });
 
+test("P3.5（rant 2026-08-13T12:46:12）：.result-files 滚动 CSS flex:1 + min-height:0", async () => {
+  // #result-panel 是 flex column；.result-list 有 flex:1 所以滚动正常，.result-files 缺 flex:1/min-height:0
+  // → 高度随内容增长永不压缩，overflow-y:auto 永不触发（有滚动条槽但滚不动）
+  const css = fs.readFileSync(path.join(RENDERER_CSS, "layout.css"), "utf8").replace(/\n/g, " ");
+  const m = css.match(/\.result-files\s*\{([^}]*)\}/);
+  assert.ok(m, ".result-files 规则存在");
+  assert.ok(/flex:\s*1/.test(m[1]), ".result-files 应 flex:1（对齐 .result-list）");
+  assert.ok(/min-height:\s*0/.test(m[1]), ".result-files 应 min-height:0（允许压缩触发滚动）");
+  assert.ok(/overflow-y:\s*auto/.test(m[1]), ".result-files 保留 overflow-y:auto");
+});
+
+test("P3.5（rant 2026-08-13T12:47:18）：根目录行可收起/展开", async () => {
+  const { ctx, els } = makeSandbox();
+  await tick();
+  await vm.runInContext('FileTree.setSession("s1", "/proj")', ctx);
+  await tick();
+  const rootRow = els["result-files"].querySelectorAll(".ft-root")[0];
+  assert.ok(rootRow, "根目录行存在");
+  const kids = rootRow.querySelector(".ft-kids");
+  assert.ok(kids, "根目录 kids 容器存在");
+  assert.ok(!kids.classList.contains("hidden"), "默认展开（ft-kids 无 hidden）");
+  rootRow.dispatch("click", { stopPropagation() {} });
+  assert.ok(kids.classList.contains("hidden"), "点击根目录应收起");
+  rootRow.dispatch("click", { stopPropagation() {} });
+  await tick();
+  assert.ok(!kids.classList.contains("hidden"), "再次点击应展开");
+});
+
 test("工具调用上限中断 → 系统提示可继续（对齐 TUI，跨项目教训）", async () => {
   const { ctx, els } = makeSandbox({});
   await tick();

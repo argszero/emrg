@@ -465,6 +465,10 @@ body.sidebar-collapsed #app {
 
 /* ── P3.1：文件浏览器（懒加载目录树，VS Code 风格 rant 2026-08-12T17:28:19） ── */
 .result-files {
+  /* flex:1 + min-height:0（rant 2026-08-13T12:46:12）：flex 子项默认 flex:0 1 auto 高度随内容
+     增长永不压缩进容器 → overflow-y:auto 永不触发（有滚动条槽但滚不动）；与 .result-list 对齐 */
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   /* 滚动条 hover 显示（VS Code 行为：平时隐藏，移入文件树区域显示） */
   scrollbar-width: thin;
