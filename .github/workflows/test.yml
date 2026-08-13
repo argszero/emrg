@@ -68,6 +68,21 @@ jobs:
           STAGE="$(mktemp -d)"
           mkdir -p "$STAGE/payload/bin" "$STAGE/dist/artifacts"
           touch "$STAGE/payload/bin/stop-emrg.cmd"
+          # icon.ico 是 gen-assets 产物（未入库）——生成最小合法 .ico 供 iscc 编译期
+          # SetupIconFile 检查；{app}（={%USERPROFILE}\.emrg\install）引用的文件
+          # （UninstallDisplayIcon/[Icons]/[UninstallRun]）也需存在。
+          uv run python - <<'PY'
+          import struct
+          def write_ico(path):
+              hdr = struct.pack('<HHH', 0, 1, 1)
+              entry = struct.pack('<BBBBHHII', 1, 1, 0, 0, 1, 32, 44, 22)
+              bih = struct.pack('<IiiHHIIiiII', 40, 1, 1, 1, 32, 0, 4, 0, 0, 0, 0)
+              open(path, 'wb').write(hdr + entry + bih + b'\x00\x00\x00\x00')
+          write_ico('packaging/assets/icon.ico')
+          PY
+          APP="$USERPROFILE/.emrg/install"
+          mkdir -p "$APP/bin" "$APP/emrg-gui/EMRG"
+          touch "$APP/bin/emrg.cmd" "$APP/bin/python.exe" "$APP/emrg-gui/EMRG/EMRG.exe"
           # 渲染 make-installer.sh 的 emrg.iss heredoc（变量展开与真实构建一致）。
           # 先赋值再统一 export（单行 export 内自引用触发 shellcheck SC2318/SC2097/SC2098）。
           VERSION="0.0.0-smoke"
