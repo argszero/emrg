@@ -290,6 +290,13 @@ class EmrgServer:
         self._scheduler = TaskScheduler(self.identity)
         self._scheduler.load_and_start()
 
+        # Global cross-project session index (rant 2026-08-13T16:42:22):
+        # backfill the index from every on-disk session (registered projects +
+        # unregistered ones under ~/.emrg) so sessions created before this
+        # feature are discoverable by other projects. Best-effort — never
+        # crashes startup.
+        self._rebuild_sessions_index()
+
         # Background deterministic skill update check (rant 2026-08-08T10:14:29):
         # runs at startup + every 24h — refreshes managed skills to their
         # latest GitHub releases. Never installs a CLI silently, never touches
@@ -360,6 +367,34 @@ class EmrgServer:
             config_dir() / "emrgd.port",
             mode=0o600,
         )
+
+    def _rebuild_sessions_index(self) -> None:
+        """Backfill the global cross-project session index at startup.
+
+        Rant 2026-08-13T16:42:22: sessions created before this feature (or in
+        projects not registered in projects.yml) would otherwise be invisible
+        to other projects. Best-effort — failures are logged at debug level
+        and never crash the daemon.
+        """
+        from emrg.sessions_index import rebuild_sessions_index
+
+        try:
+            project_paths: list[str] = []
+            if self._projects_log.exists():
+                try:
+                    data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        project_paths = [
+                            e.get("path", "")
+                            for e in data
+                            if isinstance(e, dict) and e.get("path")
+                        ]
+                except (yaml.YAMLError, OSError):
+                    pass
+            count = rebuild_sessions_index(config_dir(), project_paths)
+            logger.info("sessions index rebuilt: %d sessions indexed", count)
+        except Exception:
+            logger.debug("sessions index rebuild failed", exc_info=True)
 
     async def _skills_ttl_loop(self) -> None:
         """Background deterministic skill update check (startup + every 24h).
@@ -1042,6 +1077,9 @@ class EmrgServer:
         ctx["current_time"] = datetime.now().astimezone().isoformat(timespec="seconds")
         ctx["os_name"] = platform.system()
         ctx["platform_detail"] = platform.platform()
+        # Global config dir (~/.emrg) — injected so system.j2 can reference the
+        # cross-project sessions index and other global data files by path.
+        ctx["config_dir"] = str(config_dir())
 
         # ── Working Directory ──
         if session:

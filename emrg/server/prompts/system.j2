@@ -83,6 +83,21 @@ Each line is a JSON record with `type`, `role`, `content`, `timestamp` fields.
 Message records: `type=message`, tool calls: `type=tool_call`/`tool_result`, compacted summaries: `type=summary`.
 {% endif %}
 
+{% if config_dir %}
+## Cross-Session Discovery (read other projects' sessions)
+
+A global index of all sessions across all projects lives at `{{ config_dir }}/sessions_index.json`.
+It maps `session_id` → absolute session directory path (one JSON object).
+
+To learn what another project's session has been discussing:
+1. read the index file to find the session's directory path
+2. read `<session_dir>/meta.json` for basics (title, message_count, updated_at)
+3. read `<session_dir>/history.jsonl` (or history_YYMMDD.jsonl) for the actual conversation
+4. read `<session_dir>/memory/MEMORY.md` for that session's memory summary
+
+Use this whenever the host asks you to read or understand another session's (or another project's) conversation.
+{% endif %}
+
 ## Memory Management
 
 After each response, briefly consider whether anything from this exchange should be remembered. If so, create or update a memory file in the appropriate memory directory.
