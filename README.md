@@ -103,7 +103,7 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 
 EMRG is a terminal app at heart — the Electron GUI is a convenience shell on the same engine.
 
-**Install**: `emrg` in any terminal (Windows: `emrg.cmd`, PATH auto-registered by the installer).
+**Run**: open a terminal, type `emrg`, press Enter — that's it. The installer puts `emrg` on your PATH (including Windows), and the first run auto-starts the background daemon and drops you into the interactive TUI.
 
 The first `emrg` run starts a background daemon (`emrgd`) and drops you into the interactive TUI. The daemon stays alive so you can reconnect anytime.
 
