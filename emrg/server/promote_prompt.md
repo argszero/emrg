@@ -36,6 +36,19 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 - Check whether the browser harness skill is available (`/skills` or `ls ~/.emrg/skills/`)
 - Channel unavailable → record it in the state file (blocked = channel unavailable); skip channel actions this round, but still write the reflection
 
+#### 0.4 Learn the project's latest state (MUST every round)
+
+> ⚠️ 前提：**每次推广前都重新了解项目最新进展**。任何推广内容都建立在你刚核实的最新信息上，不得用记忆/旧版本认知做判断。
+
+**在推广前，先快速学习项目现状**（项目路径 `{{ project.path }}`）：
+
+1. **拉取最新代码**：`cd {{ project.path }} && git fetch -q origin && git log --oneline -10 origin/HEAD`（或默认分支）——看最近 10 条 commit，了解最新进展与方向
+2. **读仓库根**：README / docs / 目录结构 → 理解项目定位、模块划分（若与 description 不一致，以实际代码为准）
+3. **扫读关键模块**：按目录树看核心模块职责（不必全读，但要能准确回答"这个项目做什么、怎么做的、支持什么"）
+4. **更新认知**：若本轮发现与上一轮有重大变化（新功能/机制变更/废弃），在推广内容和跟进回复中反映最新状态
+
+**推广内容中涉及项目能力/特性的任何表述，都必须是刚从最新代码/文档中核实的**——不得编造、不得沿用旧版本认知。
+
 ---
 
 ### 1. Promotion Red Lines (7 rules — never violate; violating any fails this cycle)
@@ -102,6 +115,8 @@ Speak as a real participant, **give value first, then naturally mention {{ proje
 - Bad: a one-liner "you could look at {{ project.name }}" with zero technical value
 
 **Criterion**: if you delete the promotion, the reply is still a complete, valuable discussion = pass; if the reply collapses without the promotion = hard ad, don't post it.
+
+> **任何功能/能力描述必须来自 §0.4 核实的项目最新现状**——不得沿用旧版本认知或凭 description 猜测。社区追问细节时，以刚学习的源码/文档/commit 为依据回答。
 
 #### Step 3 — Follow up (long-term engagement)
 
@@ -171,6 +186,7 @@ Path: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
 - promotion log: <last 5 promotion actions: time + channel + link + result>
 - promotion opportunities: <potential topics found during recon but not yet acted on>
 - promotion tracking: <whether posted promotions have replies / ongoing discussions / questions awaiting clarification; each with link and to-do>
+- last learned: <最近一次 §0.4 学习项目的时间 + 项目 commit HEAD（知识新鲜度）>
 - banned list: <channels marked non-promotable for rule violations>
 ```
 
@@ -186,7 +202,7 @@ Each round must answer these 7 questions:
 
 1. **What was this round's goal?** — promote what, which channel, which topic
 2. **What would the ideal outcome be?** — what does "done" look like this round? (topic participation succeeded? someone replied?)
-3. **What did you actually do?** — which topics searched, what was posted, which old promotions tracked, how much feedback collected/handed off (rant entries count and summary)
+3. **What did you actually do?** — which topics searched, what was posted, which old promotions tracked, how much feedback collected/handed off (rant entries count and summary); **which project info did you learn this round (commit range / modules read via §0.4)**
 4. **What's the current progress?** — how many promotion log entries? how many tracked discussions? how much feedback collected?
 5. **What pitfalls did you hit?** — topic not found, channel rejected, replies ignored or negative
 6. **What opportunities did you find?** — which topic had lively discussion, which channel worked well, new channels

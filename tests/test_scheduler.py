@@ -677,6 +677,43 @@ def test_open_source_template_full_code_study_b2b():
     assert "只有当你理解了作者的设计意图" in out, "理解设计意图后才可贡献应渲染"
 
 
+def test_promote_template_learn_latest_state_04():
+    """promote_prompt.md §0.4 requires learning the project's latest state
+    before promoting (rant 2026-08-14T22:13:57, mirrors open-source B.2b #790)."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "promote_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260814",
+        task={"project": "aitokenpool"},
+        project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+        evolution_count=0, git_path="git", gh_path="gh",
+    )
+    # 1) the new section exists (positive discrimination: absent section → red)
+    assert "0.4 Learn the project's latest state" in out, "0.4 节应渲染"
+    # 2) MUST every round
+    assert "每次推广前都重新了解项目最新进展" in out, "每轮 MUST 前提应渲染"
+    # 3) latest commit inspection command with project.path
+    assert "git fetch -q origin" in out, "git fetch 最新代码应渲染"
+    assert "git log --oneline -10 origin/HEAD" in out, "最近 commit 检视应渲染"
+    # 4) claims must come from just-verified state, not stale memory
+    assert "不得编造、不得沿用旧版本认知" in out, "不得沿用旧认知应渲染"
+    # 5) Step 2 feature descriptions must come from §0.4 verification
+    assert "任何功能/能力描述必须来自 §0.4 核实的项目最新现状" in out, "Step 2 功能描述来源应渲染"
+    # 6) state file records knowledge freshness
+    assert "last learned" in out, "状态文件 last learned 字段应渲染"
+    # 7) reflection Q3 records what was learned (commit range / modules)
+    assert "commit range / modules read via §0.4" in out, "反思 Q3 学习记录应渲染"
+
+
 # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
 
 
