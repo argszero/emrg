@@ -99,6 +99,30 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 
 ---
 
+## Running the TUI
+
+EMRG is a terminal app at heart — the Electron GUI is a convenience shell on the same engine.
+
+**Install**: `emrg` in any terminal (Windows: `emrg.cmd`, PATH auto-registered by the installer).
+
+**From source**: `uv run emrg` (or `uv run python -m emrg`).
+
+The first `emrg` run starts a background daemon (`emrgd`) and drops you into the interactive TUI. The daemon stays alive so you can reconnect anytime.
+
+Daemon management:
+| Command | What it does |
+|---|---|
+| `emrg` | Start the TUI (auto-starts the daemon if needed) |
+| `emrg server` | Run the daemon in the foreground |
+| `emrg server stop` | Stop the background daemon |
+| `emrg server restart` | Restart the daemon |
+| `emrg rant <msg> [@project]` | Send feedback from the CLI (no TUI needed) |
+| `emrg update` | Pull latest source + reinstall (source installs) |
+
+In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is shared with the GUI — set your API key once in either).
+
+---
+
 ## Commands
 
 > All commands work in both the GUI (type `/` for autocomplete) and the TUI (`/help` lists everything).
