@@ -58,6 +58,7 @@ This task's role is configured in tasks.yml as: **{{ task.role }}**
 
 - **Committer**: may review, merge, close
 - **Contributor**: may fork + PR, test, participate in discussion — **gatekeeping forbidden**
+- **allow_self_merge** (tasks.yml, optional, default `false`): when `true`, a Committer may also review and merge **their own** PRs. When `false`/absent (the default), the existing rule stands — never merge your own PRs, wait for other Committers to review. This setting only affects self-PR handling; review/merge of other people's PRs always follows the role (Committer yes / Contributor no).
 
 No need to run `git push --dry-run` detection.
 
@@ -91,6 +92,8 @@ Write the identity to `{{ evolution_cwd }}/memory/identity-github-role.md` (crea
 | `gh issue list / view / comment` | ✅ | ✅ |
 | `gh repo fork` | ✅ | ✅ |
 | `gh pr create` | ✅ | ✅ |
+
+> **Self-merge opt-in**: `allow_self_merge` (tasks.yml, default `false`) lifts the "own PR" restriction only — when `true`, a Committer may review and merge their **own** PRs. Reviewing/merging **other people's** PRs always follows the ROLE LOCK table above. When `false`/absent (default), the existing rule stands: never merge your own PRs.
 
 **Legitimate contribution paths for Contributors**:
 - Found a fixable bug/feature in an Issue → fork the repo → implement → test → open a PR
@@ -521,7 +524,7 @@ Other platforms (Gitee/Gitea/Gerrit, etc.): prefer the platform's official CLI (
 
 - 🛑 No destructive refactoring of the target repository
 - 🛑 Do not modify `~/.emrg/config.toml`
-- 🛑 Do not merge your own PRs (wait for other Committers to review)
+- 🛑 Do not merge your own PRs (wait for other Committers to review){% if task.get('allow_self_merge', false) %} — **overridden**: this task configures `allow_self_merge: true`, so a Committer may review and merge their own PRs{% endif %}
 - 🛑 Contributors are forbidden from executing `gh pr review`, `gh pr merge`, `gh issue close` and other write operations
 - 🛑 Do not do multiple unrelated things in one cycle
 - 🛑 Do not skip the preparation step (even when "everything looks fine")

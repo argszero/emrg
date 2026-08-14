@@ -606,6 +606,46 @@ def test_open_source_template_renders_with_context():
     assert "json.dumps(..., ensure_ascii=False)" in out, "rant 状态写入要求应渲染"
 
 
+def test_open_source_template_allow_self_merge_conditional():
+    """open_source_prompt.md renders allow_self_merge conditional (rant 2026-08-14T12:47:25)."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+
+    base = dict(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260814",
+        project={}, evolution_count=0, git_path="git", gh_path="gh",
+    )
+
+    # default (allow_self_merge absent) → rule stands, no override
+    out_default = template.render(task={"role": "committer", "project": "aitokenpool"}, **base)
+    assert "Do not merge your own PRs (wait for other Committers to review)" in out_default
+    assert "allow_self_merge: true" not in out_default
+
+    # explicit true → override text appears + opt-in note in role section
+    out_true = template.render(
+        task={"role": "committer", "project": "aitokenpool", "allow_self_merge": True}, **base
+    )
+    assert "allow_self_merge" in out_true, "allow_self_merge 说明应渲染"
+    assert "may review and merge their own PRs" in out_true, "self-merge 允许说明应渲染"
+    assert "**overridden**: this task configures" in out_true, "Forbidden 条件化覆盖应渲染"
+
+    # explicit false → same as default
+    out_false = template.render(
+        task={"role": "committer", "project": "aitokenpool", "allow_self_merge": False}, **base
+    )
+    assert "Do not merge your own PRs (wait for other Committers to review)" in out_false
+    assert "**overridden**" not in out_false
+
+
 # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
 
 
