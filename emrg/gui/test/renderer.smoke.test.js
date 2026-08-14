@@ -1913,6 +1913,30 @@ test("P4 s2: open_sessions 事件 → 渲染打开会话区（项目名/标题 +
   assert.strictEqual(els["open-sessions-label"].hidden, true, "label hidden when no open sessions");
 });
 
+test("P4 s2: 跨项目打开会话（entry.title 优先，state.sessions 无该 sid）→ 显示 entry.title 而非 sid", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-x";' +
+    'App.state.sessions = [{ session_id: "sess-local", title: "Local" }];' + // 当前项目会话；无 sess-x / sess-other
+    'App.handleEvent({ type: "open_sessions", data: { openSessions: [' + // main 已按 lastActive 倒序
+    '  { sid: "sess-x", projectName: "evolution", projectPath: "/p/evolution", lastActive: "t3", title: "Evolution Task" },' + // 跨项目 + title
+    '  { sid: "sess-other", projectName: "mem", projectPath: "/p/mem", lastActive: "t2" },' + // 跨项目无 title → sid 兜底
+    '  { sid: "sess-local", projectName: "emrg", projectPath: "/p/emrg", lastActive: "t1" }' + // 当前项目 → state.sessions title
+    '] } });',
+    ctx
+  );
+  const nav = els["open-sessions"];
+  assert.strictEqual(nav.children.length, 3, "three open-session items rendered");
+  const t0 = nav.children[0].children[0] || nav.children[0];
+  assert.ok((t0.textContent || "").includes("Evolution Task"), "cross-project entry shows entry.title");
+  assert.ok(!(t0.textContent || "").includes("sess-x"), "does NOT fall back to sid when entry.title present");
+  const t1 = nav.children[1].children[0] || nav.children[1];
+  assert.ok((t1.textContent || "").includes("sess-other"), "cross-project no title + not in state.sessions → sid fallback");
+  const t2 = nav.children[2].children[0] || nav.children[2];
+  assert.ok((t2.textContent || "").includes("Local"), "current-project entry still resolves via state.sessions title");
+});
+
 test("P4 s2: closeOpenSession 关闭激活会话 → 切到剩余打开会话 + 容器释放", async () => {
   let closed = null;
   const { ctx, els } = makeSandbox({
