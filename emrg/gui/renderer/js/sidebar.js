@@ -27,7 +27,7 @@ const Sidebar = (() => {
     const known = (App.state && App.state.sessions) || [];
     for (const entry of openSessions) {
       const cur = known.find((s) => s.session_id === entry.sid) || {};
-      const title = cur.title || entry.sid; // G27：title 优先
+      const title = entry.title || cur.title || entry.sid; // entry.title 优先（跨项目），再 cur.title（当前项目），最后 sid
       const item = el("div", { class: "conv-item open-session-item" });
       item.dataset.sid = entry.sid;
       item.appendChild(el("span", { class: "conv-title" }, _t("sidebar.openSessionOf", { project: entry.projectName || "", title })));

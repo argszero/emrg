@@ -375,6 +375,12 @@ vision = false
       const clean = String(title || "").trim().slice(0, 80); // 截断超长标题
       if (!clean) throw new Error("empty title");
       const frame = await requireConn().sendCommandAndWait("rename_session", { session_id: sessionId, cwd: projectDir, title: clean }, 5000);
+      // 跨项目会话重命名成功后立即同步侧边栏标题（rant 12:01:44）
+      const v = openSessions.get(sessionId);
+      if (v) {
+        v.title = frame.title || clean;
+        broadcastOpenSessions();
+      }
       return { ok: true, title: frame.title || clean };
     });
 
@@ -978,6 +984,19 @@ vision = false
       lastActive: new Date().toISOString(),
     });
     broadcastOpenSessions();
+    // 跨项目标题（rant 12:01:44）：异步拉该会话所在项目列表取 title——
+    // 找到则 v.title = s.title 并广播（失败/无 title → 保持 undefined → 侧边栏 sid 兜底）
+    listSessions(projectPath)
+      .then((sessions) => {
+        const v = openSessions.get(sid);
+        if (!v) return; // 会话已关闭/移除
+        const s = sessions.find((x) => x.session_id === sid);
+        if (s && s.title) {
+          v.title = s.title;
+          broadcastOpenSessions();
+        }
+      })
+      .catch(() => { /* 拉取失败保持 undefined → sid 兜底 */ });
   }
 
   // 激活会话变化（切换/新会话/发送）→ 更新 lastActive + activeSid → 防抖写盘
@@ -1084,7 +1103,7 @@ vision = false
 
   function openSessionsList() {
     return [...openSessions.entries()]
-      .map(([sid, v]) => ({ sid, projectName: v.projectName, projectPath: v.projectPath, lastActive: v.lastActive }))
+      .map(([sid, v]) => ({ sid, projectName: v.projectName, projectPath: v.projectPath, lastActive: v.lastActive, title: v.title }))
       .sort((a, b) => String(b.lastActive || "").localeCompare(String(a.lastActive || "")));
   }
 
@@ -1163,9 +1182,9 @@ vision = false
     });
   }
 
-  async function listSessions() {
+  async function listSessions(cwd = projectDir) {
     try {
-      const frame = await requireConn().sendCommandAndWait("list_sessions", { cwd: projectDir }, 5000);
+      const frame = await requireConn().sendCommandAndWait("list_sessions", { cwd }, 5000);
       return frame.sessions || [];
     } catch (e) {
       logger.warn(`[gui] list_sessions failed: ${e.message}`);
