@@ -626,7 +626,7 @@ vision = false
       if (typeof type !== "string" || !type.trim()) throw new Error("invalid task type");
       if (typeof project !== "string" || !project.trim()) throw new Error("invalid project");
       const frame = await requireConn().sendCommandAndWait("task_create", {
-        name: name.trim(), type: type.trim(), project: project.trim(),
+        name: name.trim(), task_type: type.trim(), project: project.trim(),
         interval, enabled, repo, description,
       }, 8000);
       if (!frame.ok && frame.error) throw new Error(frame.error);
@@ -634,8 +634,10 @@ vision = false
     });
 
     ipcMain.handle("emrg:taskUpdate", async (_e, payload) => {
-      const { name, ...fields } = payload || {};
+      const { name, type, ...fields } = payload || {};
       if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
+      if (type !== undefined && typeof type !== "string") throw new Error("invalid task type");
+      if (type !== undefined && type.trim()) fields.task_type = type.trim();
       const frame = await requireConn().sendCommandAndWait("task_update", { name: name.trim(), ...fields }, 8000);
       if (!frame.ok && frame.error) throw new Error(frame.error);
       return frame;

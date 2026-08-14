@@ -523,7 +523,9 @@ class DaemonClient {
   }
 
   sendCommand(type, params = {}) {
-    this.ws.send(JSON.stringify({ type, ...params }));
+    // Wire message type last: a payload field named "type" (e.g. the task type in
+    // task CRUD) must never override the wire message type (rant 2026-08-14T21:48:00).
+    this.ws.send(JSON.stringify({ ...params, type }));
   }
 
   // G93/G103：命令-响应配对（pending FIFO，按响应帧 type 配对）。

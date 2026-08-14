@@ -576,6 +576,18 @@ test("sendCommand payload + cancel 无多余字段（G24）", async () => {
   assert.deepStrictEqual(f2, { type: "set_model", model: "gpt-4o" });
 });
 
+test("sendCommand 帧形状：payload 带 type 字段不覆盖消息类型（rant 2026-08-14T21:48）", async () => {
+  // task CRUD payload 含任务类型字段 type（如 "evolution"）——消息类型必须保留，
+  // 否则 daemon 路由失败返回 unknown message type，GUI 保存无响应。
+  const client = new DaemonClient({ projectDir: tmpHome });
+  await connectClient(client);
+  client.sendCommand("task_create", { type: "evolution", name: "t1", project: "p1" });
+  const frame = JSON.parse(currentMockWs.sent.at(-1));
+  assert.strictEqual(frame.type, "task_create", "wire 消息类型必须保留，不被 payload 的 type 覆盖");
+  assert.strictEqual(frame.name, "t1");
+  assert.strictEqual(frame.type, "task_create");
+});
+
 test("帧分类（G21+G58）：各帧事件分发正确", async () => {
   const client = new DaemonClient({ projectDir: tmpHome });
   await connectClient(client);
