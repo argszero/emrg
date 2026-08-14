@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from emrg.client.python_tui.buffer import Buffer, CharPool, HyperlinkPool, StylePool, diff_buffers
 from emrg.client.python_tui.output import (
+    CLEAR_SCREEN,
     CURSOR_HIDE,
     CURSOR_SHOW,
     CURSOR_HOME,
@@ -142,6 +143,10 @@ class Terminal:
         )
         self._rendered_cache: dict[str, list[object]] = {}
         self._scrollback_lines_pushed: int = 0
+        # 上次渲染宽度（rant 2026-08-14T11:47:11）：窗口缩窄时终端屏幕每行右侧的旧字符
+        # 不会被 diff 清除（diff_buffers 只比较 min(prev_w, curr_w) 列，且 Buffer.resize
+        # 缩窄已物理截断旧宽度信息）→ render 检测到缩窄时先 CLEAR_SCREEN 再全量重绘。
+        self._last_render_width: int = self.caps.width
 
     @property
     def viewport_height(self) -> int:
@@ -214,6 +219,16 @@ class Terminal:
 
         width = self.viewport.viewport_width
         ctx = RenderContext(width=width)
+
+        # 宽度缩窄 → 终端屏幕右侧残留旧字符（diff 只覆盖新宽度；Buffer.resize 缩窄已
+        # 丢弃旧宽度信息，diff_buffers 无从清除）。先清屏 + 清 front buffer 强制全量
+        # 重绘，杜绝残留叠加（rant 2026-08-14T11:47:11）。
+        if width < self._last_render_width:
+            sys.stdout.write(CLEAR_SCREEN)
+            if self._front_buffer:
+                self._front_buffer.clear()
+            full = True
+        self._last_render_width = width
 
         # Cache last rendered output per widget so dirty=False doesn't blank it
 
