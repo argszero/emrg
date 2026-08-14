@@ -1262,3 +1262,120 @@ class TestWSHistoryPagination:
                 finally:
                     await cleanup()
         asyncio.run(_test())
+
+
+class TestWSTaskWire:
+    """GUI task CRUD wire frames — task type field contract (rant 2026-08-14T21:48:00).
+
+    The GUI sends the task type under `task_type` (never `type`) so it cannot
+    collide with the wire message type. The daemon must read `task_type` —
+    reading `msg["type"]` would swallow the wire message type after the
+    sendCommand fix (`{ ...params, type }`), e.g. writing "task_update" as the
+    task type.
+    """
+
+    @staticmethod
+    async def _cmd(ws, payload):
+        await ws.send(json.dumps(payload))
+        return json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+
+    @staticmethod
+    def _mock_scheduler(create_side_effect=None, update_side_effect=None):
+        """Scheduler mock with async methods the daemon awaits (apply_tasks/wait_all)."""
+        from unittest.mock import AsyncMock, Mock
+        sched = Mock()
+        sched.task_create = Mock(side_effect=create_side_effect or (lambda **kw: (True, {"name": "x"})))
+        sched.task_update = Mock(side_effect=update_side_effect or (lambda name, **fields: (True, {"name": name})))
+        sched.apply_tasks = AsyncMock(return_value="")
+        sched.wait_all = AsyncMock()
+        sched.stop_all = Mock()
+        sched._load_tasks = Mock(return_value=[])
+        return sched
+
+    def test_task_create_reads_task_type(self):
+        """task_create with task_type → scheduler receives task_type, not the wire type."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    calls = {}
+
+                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None):
+                        calls.update(name=name, task_type=task_type, project=project)
+                        return True, {"name": name, "type": task_type}
+
+                    server._scheduler = self._mock_scheduler(create_side_effect=fake_create)
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "task_create", "name": "daily",
+                            "task_type": "evolution", "project": "emrg",
+                        })
+                        assert resp["type"] == "task_result"
+                        assert resp.get("ok") is True
+                        assert calls["task_type"] == "evolution", "daemon must read task_type"
+                        assert calls["project"] == "emrg"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_task_create_missing_task_type_not_read_from_wire_type(self):
+        """Missing task_type → scheduler receives '' (never the wire type 'task_create')."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    calls = {}
+
+                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None):
+                        calls.update(name=name, task_type=task_type, project=project)
+                        return True, {"name": name, "type": task_type}
+
+                    server._scheduler = self._mock_scheduler(create_side_effect=fake_create)
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "task_create", "name": "daily", "project": "emrg",
+                        })
+                        assert resp["type"] == "task_result"
+                        assert calls["task_type"] == "", "must not fall back to wire type 'task_create'"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_task_update_maps_task_type_to_type(self):
+        """task_update with task_type → scheduler receives fields['type'] (its internal name)."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    calls = {}
+
+                    def fake_update(name, **fields):
+                        calls.update(name=name, fields=fields)
+                        return True, {"name": name, "type": fields.get("type", "evolution")}
+
+                    server._scheduler = self._mock_scheduler(update_side_effect=fake_update)
+                    ws = await connect_to_server()
+                    try:
+                        resp = await self._cmd(ws, {
+                            "type": "task_update", "name": "daily",
+                            "task_type": "open-source", "interval": 300,
+                        })
+                        assert resp["type"] == "task_result"
+                        assert resp.get("ok") is True
+                        assert calls["fields"]["type"] == "open-source", "task_type mapped to scheduler type field"
+                        assert "task_type" not in calls["fields"]
+                        assert calls["fields"]["interval"] == 300
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
