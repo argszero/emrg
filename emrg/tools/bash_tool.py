@@ -6,7 +6,9 @@ import asyncio
 import locale
 import logging
 import os
+import re
 import signal
+import tempfile
 
 from emrg._win import win32_no_window_kwargs
 from emrg.server.git_utils import no_prompt_env
@@ -17,6 +19,79 @@ logger = logging.getLogger(__name__)
 
 
 MAX_OUTPUT_CHARS = 200_000  # Truncate large outputs (framing supports up to 16MB)
+
+# Heredoc start: `cmd <<'EOF'` / `cmd <<EOF` / `cmd <<-EOF` (quote optional,
+# matched symmetrically via backreference). MULTILINE so ^/$ bound the first
+# command line, not the whole command string. cmd.exe cannot parse this.
+_HEREDOC_START_RE = re.compile(
+    r"^(?P<head>.*?)(?P<op><<-?)(?P<quote>['\"]?)(?P<name>[A-Za-z_][A-Za-z0-9_.-]*)(?P=quote)\s*$",
+    re.MULTILINE,
+)
+
+
+def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
+    """Translate the first bash heredoc into a stdin redirect for cmd.exe.
+
+    The bash tool's subprocess shell on Windows is cmd.exe (via COMSPEC),
+    which cannot parse ``cmd <<'EOF' ... EOF`` heredocs — commands documented
+    with heredoc syntax (e.g. ``browser-harness <<'PY' ... PY``) fail with
+    ``<< is not recognized`` / ``此时不应有 <<``, forcing agents into temp-file
+    workarounds. Rewriting the heredoc to ``cmd < tempfile`` feeds the same
+    bytes via stdin redirect, so Windows agents run the identical commands as
+    POSIX (host sessions 2026-08-14T21:26/21:36 observed the failure twice).
+
+    Only the FIRST heredoc is translated (multiple heredocs in one command are
+    rare); an unterminated heredoc is left untouched so cmd.exe reports the
+    original error. ``<<-`` (tab-stripping) strips leading tabs from the body,
+    mirroring bash. Content is written literally (quoted ``<<'EOF'``
+    semantics; unquoted heredocs containing ``$`` expansion keep literal
+    content — a documented approximation). Everything before the opener line
+    (e.g. ``cd /tmp\n`` in a multi-line command) is preserved verbatim in the
+    rewritten command, so the heredoc feeds the same stdin into the same
+    command line as POSIX (review #797 ❌).
+
+    Returns ``(rewritten_cmd, temp_path)`` — the caller must unlink temp_path
+    after the subprocess finishes (normal or timeout path).
+    """
+    m = _HEREDOC_START_RE.search(cmd)
+    if not m:
+        return cmd, None
+    head, op, name = m.group("head"), m.group("op"), m.group("name")
+    strip_tabs = op.endswith("-")
+    # Terminator: a line containing exactly the delimiter (optionally indented
+    # with tabs when the opener used `<<-`, mirroring bash tab-stripping).
+    term = re.compile(rf"(?m)^[ \t]*{re.escape(name)}\s*$" if strip_tabs
+                      else rf"(?m)^{re.escape(name)}\s*$")
+    tm = term.search(cmd, m.end())
+    if not tm:
+        return cmd, None  # unterminated — let cmd.exe report it
+    body = cmd[m.end():tm.start()]
+    if body.startswith("\r\n"):
+        body = body[2:]  # opener-line newline is not part of the body
+    elif body.startswith("\n"):
+        body = body[1:]
+    if strip_tabs:
+        body = "\n".join(line.lstrip("\t") for line in body.split("\n"))
+    # bash keeps the newline that precedes the terminator line as part of the
+    # body (a heredoc always ends with exactly one newline) — keep it verbatim.
+    tail = cmd[tm.end():].strip()
+    fd, path = tempfile.mkstemp(suffix=".heredoc", text=True)
+    try:
+        # newline="" keeps LF verbatim (no CRLF conversion of the body)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(body)
+    except Exception:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise
+    # Keep everything before the opener line (multi-line commands such as
+    # `cd /tmp\npython <<'PY'` must not lose their prefix — review #797 ❌).
+    rewritten = f"{cmd[:m.start()]}{head}< \"{path}\""
+    if tail:
+        rewritten += f" {tail}"
+    return rewritten.rstrip(), path
 
 
 def _decode_output(data: bytes, os_name: str | None = None) -> str:
@@ -65,7 +140,9 @@ class BashTool(ToolExecutor):
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The shell command to execute.",
+                        "description": "The shell command to execute. Bash heredocs "
+                        "(cmd <<'EOF' ... EOF) are supported on all platforms "
+                        "— on Windows they are auto-translated to stdin redirects.",
                     },
                     "timeout": {
                         "type": "integer",
@@ -89,6 +166,13 @@ class BashTool(ToolExecutor):
             return ToolResult(name="bash", content="Error: no command provided", error=True)
 
         logger.debug("bash: running %r (timeout=%ds)", cmd[:100], timeout)
+
+        # Windows: cmd.exe cannot parse bash heredocs — translate the first
+        # one to a stdin redirect (host sessions 2026-08-14T21:26/21:36 hit
+        # "此时不应有 <<" with browser-harness <<'PY'). POSIX unchanged.
+        temp_path = None
+        if os.name == "nt":
+            cmd, temp_path = _translate_windows_heredocs(cmd)
 
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -125,6 +209,12 @@ class BashTool(ToolExecutor):
                     content=f"Command timed out after {timeout}s: {cmd[:100]}",
                     error=True,
                 )
+            finally:
+                if temp_path:
+                    try:
+                        os.unlink(temp_path)
+                    except OSError:
+                        pass
 
             out = _decode_output(stdout).rstrip()
             err = _decode_output(stderr).rstrip()
