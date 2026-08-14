@@ -1,5 +1,7 @@
 """Tests for connect module — WebSocket IPC connection layer (Phase 1)."""
 
+import asyncio
+import json
 from pathlib import Path
 
 from emrg.connect import CONNECT_ID, AuthError, cleanup_server, get_server_path, is_server_running_sync
@@ -77,3 +79,42 @@ class TestIsServerRunningSync:
         (tmp_path / f"{CONNECT_ID}.port").write_text("1\nno-token", encoding="utf-8")
 
         assert is_server_running_sync(timeout=0.1) is False
+
+
+class TestConnectToServer:
+    def test_connect_uses_proxy_none(self, monkeypatch, tmp_path):
+        """Loopback WS must never route through a system proxy.
+
+        websockets 17 defaults proxy=True and reads the OS proxy settings; when a
+        Windows system proxy is configured, the ws://127.0.0.1 handshake is sent
+        to the proxy → InvalidMessage → Python clients cannot reach the local
+        daemon (2026-08-14 incident). proxy=None pins direct loopback.
+        """
+        from emrg import connect as connect_mod
+
+        captured = {}
+
+        class FakeWS:
+            async def send(self, data):
+                self.sent = data
+
+            async def recv(self):
+                return json.dumps({"type": "auth_ok"})
+
+            async def close(self):
+                pass
+
+        async def fake_connect(uri, **kwargs):
+            captured["uri"] = uri
+            captured["kwargs"] = kwargs
+            return FakeWS()
+
+        monkeypatch.setattr(connect_mod, "config_dir", lambda: tmp_path)
+        monkeypatch.setattr(connect_mod, "connect", fake_connect)
+        (tmp_path / f"{CONNECT_ID}.port").write_text("49152\ntoken", encoding="utf-8")
+
+        asyncio.run(connect_mod.connect_to_server())
+
+        assert captured["uri"] == "ws://127.0.0.1:49152"
+        assert captured["kwargs"]["proxy"] is None
+        assert captured["kwargs"]["max_size"] == 16 * 1024 * 1024

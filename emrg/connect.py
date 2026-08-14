@@ -60,8 +60,16 @@ async def connect_to_server():
     """
     port_path = Path(get_server_path())
     port, token = port_path.read_text(encoding="utf-8").split()
+    # proxy=None: loopback connections must never go through a system proxy.
+    # websockets 17 defaults proxy=True and reads the OS proxy settings — when a
+    # Windows system proxy is enabled (e.g. 10.10.0.28:6501 for HN/Reddit access),
+    # the ws://127.0.0.1 handshake is sent to the proxy → InvalidMessage → all
+    # Python clients (TUI `emrg`, scheduler internal connections) cannot reach the
+    # local daemon, while the Node.js GUI is unaffected (2026-08-14 incident; root
+    # cause of continuous emrg-task/emrg-promote-task crashes since 2026-08-13).
     ws = await connect(
         f"ws://127.0.0.1:{port}",
+        proxy=None,
         max_size=16 * 1024 * 1024,
     )
     await ws.send(json.dumps({"type": "auth", "token": token}))
