@@ -105,8 +105,6 @@ EMRG 骨子里是个终端应用——Electron GUI 只是同一引擎上的便�
 
 **安装版**：任意终端运行 `emrg`（Windows 为 `emrg.cmd`，安装器已自动注册 PATH）。
 
-**源码版**：`uv run emrg`（或 `uv run python -m emrg`）。
-
 首次运行 `emrg` 会自动拉起后台守护进程（`emrgd`）并进入交互式 TUI。守护进程常驻后台，可随时重连。
 
 守护进程管理：
@@ -117,7 +115,7 @@ EMRG 骨子里是个终端应用——Electron GUI 只是同一引擎上的便�
 | `emrg server stop` | 停止后台 daemon |
 | `emrg server restart` | 重启 daemon |
 | `emrg rant <msg> [@project]` | 从命令行发反馈（无需进 TUI） |
-| `emrg update` | 拉取最新源码并重装（源码安装） |
+| `emrg update` | 更新到最新版本 |
 
 TUI 内：`Esc` 中断流式输出，`Ctrl+C` / `exit` 退出（配置与 GUI 共享——API Key 只需在一处设置一次）。
 
