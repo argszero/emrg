@@ -105,8 +105,6 @@ EMRG is a terminal app at heart — the Electron GUI is a convenience shell on t
 
 **Install**: `emrg` in any terminal (Windows: `emrg.cmd`, PATH auto-registered by the installer).
 
-**From source**: `uv run emrg` (or `uv run python -m emrg`).
-
 The first `emrg` run starts a background daemon (`emrgd`) and drops you into the interactive TUI. The daemon stays alive so you can reconnect anytime.
 
 Daemon management:
@@ -117,7 +115,7 @@ Daemon management:
 | `emrg server stop` | Stop the background daemon |
 | `emrg server restart` | Restart the daemon |
 | `emrg rant <msg> [@project]` | Send feedback from the CLI (no TUI needed) |
-| `emrg update` | Pull latest source + reinstall (source installs) |
+| `emrg update` | Update to the latest version |
 
 In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is shared with the GUI — set your API key once in either).
 
