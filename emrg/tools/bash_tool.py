@@ -45,7 +45,10 @@ def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
     original error. ``<<-`` (tab-stripping) strips leading tabs from the body,
     mirroring bash. Content is written literally (quoted ``<<'EOF'``
     semantics; unquoted heredocs containing ``$`` expansion keep literal
-    content — a documented approximation).
+    content — a documented approximation). Everything before the opener line
+    (e.g. ``cd /tmp\n`` in a multi-line command) is preserved verbatim in the
+    rewritten command, so the heredoc feeds the same stdin into the same
+    command line as POSIX (review #797 ❌).
 
     Returns ``(rewritten_cmd, temp_path)`` — the caller must unlink temp_path
     after the subprocess finishes (normal or timeout path).
@@ -83,7 +86,9 @@ def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
         except OSError:
             pass
         raise
-    rewritten = f'{head}< "{path}"'
+    # Keep everything before the opener line (multi-line commands such as
+    # `cd /tmp\npython <<'PY'` must not lose their prefix — review #797 ❌).
+    rewritten = f"{cmd[:m.start()]}{head}< \"{path}\""
     if tail:
         rewritten += f" {tail}"
     return rewritten.rstrip(), path

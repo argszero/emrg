@@ -266,6 +266,49 @@ def test_heredoc_empty_body():
         os.unlink(path)
 
 
+def test_heredoc_multiline_prefix_preserved_opener_line2():
+    """Multi-line commands keep everything before the opener line (review #797 ❌).
+
+    `echo a\necho b <<'PY'` previously rewrote to `echo b < temp`, silently
+    dropping `echo a`. The identical POSIX command shape must be preserved.
+    """
+    cmd = "echo a\necho b <<'PY'\nbody\nPY\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    assert rewritten.startswith("echo a\necho b < \"")
+    try:
+        with open(path, encoding="utf-8") as f:
+            assert f.read() == "body\n"
+    finally:
+        os.unlink(path)
+
+
+def test_heredoc_multiline_prefix_preserved_opener_line3():
+    """Opener on line 3 — both preceding lines survive the rewrite."""
+    cmd = "echo a\necho b\necho c <<'PY'\nbody\nPY\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    assert rewritten.startswith("echo a\necho b\necho c < \"")
+    try:
+        with open(path, encoding="utf-8") as f:
+            assert f.read() == "body\n"
+    finally:
+        os.unlink(path)
+
+
+def test_heredoc_cd_prefix_workdir_pattern():
+    """The plausible agent pattern `cd /tmp\\npython <<'PY'` keeps its cd."""
+    cmd = "cd /tmp\npython -X utf8 <<'PY'\nprint('ok')\nPY\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    assert rewritten.startswith("cd /tmp\npython -X utf8 < \"")
+    try:
+        with open(path, encoding="utf-8") as f:
+            assert f.read() == "print('ok')\n"
+    finally:
+        os.unlink(path)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe heredoc translation is Windows-only")
 def test_bash_heredoc_integration_windows():
     """On Windows, `python <<'PY'` executes via the temp-file stdin redirect."""
