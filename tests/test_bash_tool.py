@@ -1,11 +1,12 @@
 """Tests for the bash tool."""
 
 import asyncio
+import os
 import sys
 
 import pytest
 
-from emrg.tools.bash_tool import BashTool, _decode_output
+from emrg.tools.bash_tool import BashTool, _decode_output, _translate_windows_heredocs
 
 
 def _run(coro):
@@ -168,3 +169,114 @@ def test_client_log_handler_uses_utf8_encoding():
             main_mod._run_client()
     assert captured["kwargs"]["encoding"] == "utf-8"
     assert captured["kwargs"]["errors"] == "backslashreplace"
+
+
+# ── Windows heredoc translation (host sessions 2026-08-14T21:26/21:36) ──
+# cmd.exe (the bash tool's subprocess shell on Windows) cannot parse bash
+# heredocs: `browser-harness <<'PY' ... PY` fails with "此时不应有 <<". The
+# translation rewrites the first heredoc to `cmd < tempfile` so Windows agents
+# run the identical commands as POSIX. All tests are pure-function (no
+# subprocess) and run on every platform; a real cmd.exe integration test is
+# gated to Windows.
+
+def test_heredoc_no_heredoc_unchanged():
+    cmd, path = _translate_windows_heredocs("echo hello & dir")
+    assert cmd == "echo hello & dir"
+    assert path is None
+
+
+def test_heredoc_quoted_delimiter():
+    cmd = "browser-harness <<'PY'\nnew_tab(\"https://example.com\")\nprint(page_info())\nPY\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    assert rewritten.startswith("browser-harness < \"")
+    assert rewritten.endswith('"')
+    try:
+        with open(path, encoding="utf-8") as f:
+            # bash keeps the newline before the terminator line in the body
+            assert f.read() == 'new_tab("https://example.com")\nprint(page_info())\n'
+    finally:
+        os.unlink(path)
+
+
+def test_heredoc_unquoted_delimiter():
+    cmd = "cat <<EOF\nline1\nline2\nEOF\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    assert rewritten.startswith("cat < \"")
+    try:
+        with open(path, encoding="utf-8") as f:
+            assert f.read() == "line1\nline2\n"
+    finally:
+        os.unlink(path)
+
+
+def test_heredoc_tab_stripping():
+    cmd = "cat <<-EOF\n\talpha\n\t\tbeta\nEOF\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    try:
+        with open(path, encoding="utf-8") as f:
+            # bash <<- strips ALL leading tabs from each body line (verified
+            # empirically: "alpha\n\t\tbeta" -> "alpha\nbeta")
+            assert f.read() == "alpha\nbeta\n"
+    finally:
+        os.unlink(path)
+
+
+def test_heredoc_unterminated_left_untouched():
+    cmd = "browser-harness <<'PY'\nprint('never closed')\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert rewritten == cmd
+    assert path is None
+
+
+def test_heredoc_tail_preserved():
+    cmd = "cat <<EOF\nbody\nEOF\n& echo after\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    assert rewritten.endswith('" & echo after')
+    try:
+        with open(path, encoding="utf-8") as f:
+            assert f.read() == "body\n"
+    finally:
+        os.unlink(path)
+
+
+def test_heredoc_body_word_does_not_terminate():
+    cmd = "cat <<EOF\nEOF is just a word here\nreal EOF\nEOF\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    try:
+        with open(path, encoding="utf-8") as f:
+            assert f.read() == "EOF is just a word here\nreal EOF\n"
+    finally:
+        os.unlink(path)
+
+
+def test_heredoc_empty_body():
+    cmd = "cat <<EOF\nEOF\n"
+    rewritten, path = _translate_windows_heredocs(cmd)
+    assert path is not None
+    try:
+        with open(path, encoding="utf-8") as f:
+            # verified empirically: bash delivers 0 bytes for an empty heredoc
+            assert f.read() == ""
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe heredoc translation is Windows-only")
+def test_bash_heredoc_integration_windows():
+    """On Windows, `python <<'PY'` executes via the temp-file stdin redirect."""
+    tool = BashTool()
+    result = _run(tool.execute({
+        "command": (
+            f"\"{sys.executable}\" -X utf8 <<'PY'\n"
+            "import sys\n"
+            "print('HEREDOC_OK')\n"
+            "PY\n"
+        ),
+    }))
+    assert not result.error
+    assert "HEREDOC_OK" in result.content
