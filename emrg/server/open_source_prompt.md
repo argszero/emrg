@@ -280,6 +280,21 @@ Extract from these files and strictly follow:
 
 **Submitting without reading the conventions = wasted time.** Requirements found in the conventions override this prompt's defaults (e.g., if the project requires PRs to target `dev`, follow the project convention).
 
+#### B.2b Read the full codebase (MUST before contributing)
+
+> ⚠️ 前提：**每次贡献前都重新读取最新代码**（0.3 Source sync 已保证 `git pull` 到最新；任何贡献思路都建立在你刚拉取的最新代码上，不得用记忆/旧版本代码做判断）。
+
+**读完整代码**（不止是目标文件）：
+- 先看仓库根：README / docs / 目录结构 → 理解项目定位、模块划分
+- 通读核心模块源码（按目录树从上到下，理解每个模块职责）
+- 定位到与本次 Issue/目标相关的代码时，**精读相关文件全文**（不只看改动点附近）
+
+**以 repository 作者的视角理解设计意图**：
+- 问自己：作者为什么这样设计？这个函数/模块解决什么问题？为什么用这个模式（而非别的方式）？
+- 读提交历史 / git blame：理解代码演化脉络，不臆测作者意图
+- 设计意图不明 → 读测试（测试即文档），读 Issue/讨论记录
+- **只有当你理解了作者的设计意图，才考虑怎么贡献** —— 贡献必须顺应既有设计，而不是另起炉灶
+
 #### B.3 Fork and branch
 
 ```bash
