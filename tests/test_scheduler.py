@@ -646,6 +646,37 @@ def test_open_source_template_allow_self_merge_conditional():
     assert "**overridden**" not in out_false
 
 
+def test_open_source_template_full_code_study_b2b():
+    """open_source_prompt.md B.2b requires full-code study before contributing
+    (rant 2026-08-14T15:53:39)."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260814",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, evolution_count=0, git_path="git", gh_path="gh",
+    )
+    # 1) the new section exists (positive discrimination: absent section → red)
+    assert "B.2b Read the full codebase" in out, "B.2b 全代码研读节应渲染"
+    # 2) must read the complete codebase, not just the target file
+    assert "读完整代码" in out, "读完整代码要求应渲染"
+    # 3) must always re-read the latest code before each contribution
+    assert "每次贡献前都重新读取最新代码" in out, "每次读取最新代码要求应渲染"
+    # 4) understand design intent from the repository author's perspective
+    assert "以 repository 作者的视角理解设计意图" in out, "作者视角设计意图要求应渲染"
+    # 5) only after understanding the design may one contribute — align with it
+    assert "只有当你理解了作者的设计意图" in out, "理解设计意图后才可贡献应渲染"
+
+
 # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
 
 
