@@ -99,6 +99,30 @@ EMRG 不只是一个工具——它是一个**会听吐槽、会自我改进**�
 
 ---
 
+## 运行 TUI（终端版）
+
+EMRG 骨子里是个终端应用——Electron GUI 只是同一引擎上的便捷外壳。
+
+**安装版**：任意终端运行 `emrg`（Windows 为 `emrg.cmd`，安装器已自动注册 PATH）。
+
+**源码版**：`uv run emrg`（或 `uv run python -m emrg`）。
+
+首次运行 `emrg` 会自动拉起后台守护进程（`emrgd`）并进入交互式 TUI。守护进程常驻后台，可随时重连。
+
+守护进程管理：
+| 命令 | 作用 |
+|---|---|
+| `emrg` | 启动 TUI（必要时自动启动 daemon） |
+| `emrg server` | 前台运行 daemon |
+| `emrg server stop` | 停止后台 daemon |
+| `emrg server restart` | 重启 daemon |
+| `emrg rant <msg> [@project]` | 从命令行发反馈（无需进 TUI） |
+| `emrg update` | 拉取最新源码并重装（源码安装） |
+
+TUI 内：`Esc` 中断流式输出，`Ctrl+C` / `exit` 退出（配置与 GUI 共享——API Key 只需在一处设置一次）。
+
+---
+
 ## 命令一览
 
 > 全部命令在 GUI 与 TUI 均可使用（GUI 输入框敲 `/` 弹出补全菜单；TUI `/help` 列出全部）。
