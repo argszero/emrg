@@ -672,7 +672,7 @@ const Dialogs = (() => {
       actions.appendChild(trigBtn);
       // 编辑（表单预填 → taskUpdate）
       const editBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.taskEdit") }, _t("settings.taskEdit"));
-      editBtn.addEventListener("click", () => openTaskForm(t));
+      editBtn.addEventListener("click", () => { openTaskForm(t).catch(() => {}); });
       actions.appendChild(editBtn);
       // 删除（确认弹窗 → taskDelete → 热重载由 daemon apply_tasks 完成）
       const delBtn = el("button", { type: "button", class: "model-action-btn danger", title: _t("settings.taskDelete") }, _t("settings.taskDelete"));
@@ -697,7 +697,12 @@ const Dialogs = (() => {
     }
   }
 
-  function openTaskForm(task = null) {
+  async function openTaskForm(task = null) {
+    // rant 2026-08-14T15:41:52：点"＋ 添加任务"时元数据未加载完 → 下拉为空 → 保存报 invalid type
+    // 幂等快路径：openTasksPanel/保存刷新已加载过 → 同步填（无闪烁）；未完成 → 等 IPC 返回再填
+    if (taskTypes.length === 0 && taskProjects.length === 0) {
+      await loadTaskMeta();
+    }
     editingTask = task ? task.name : null;
     $("task-form-name").value = task ? task.name : "";
     $("task-form-name").disabled = Boolean(task); // 决策点：daemon 以 name 定位 → 不可改名
@@ -863,7 +868,7 @@ const Dialogs = (() => {
 
   function initTaskManagement() {
     const addBtn = $("task-add-btn");
-    if (addBtn) addBtn.addEventListener("click", () => openTaskForm(null));
+    if (addBtn) addBtn.addEventListener("click", () => { openTaskForm(null).catch(() => {}); });
     const saveBtn = $("task-form-save");
     if (saveBtn) saveBtn.addEventListener("click", saveTaskForm);
     const cancelBtn = $("task-form-cancel");

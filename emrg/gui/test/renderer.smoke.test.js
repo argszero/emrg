@@ -2660,6 +2660,48 @@ test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 t
   assert.strictEqual(vm.runInContext('document.getElementById("task-form").classList.contains("hidden")', ctx), true, "保存后表单收起");
 });
 
+test("rant 2026-08-14T15:41:52：快速点击添加任务 —— 元数据未加载完也填充下拉 + 保存成功", async () => {
+  let created = null;
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [],
+    // 延迟返回（50ms）→ 复现"打开面板后立即点添加"竞态（loadTaskMeta 未完成）
+    taskTemplateList: async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      return [
+        { name: "evolution", builtin: true, template: "evolution_prompt.md" },
+        { name: "custom-a", builtin: false, template: "custom-a.md", prompt: "# a" },
+      ];
+    },
+    listProjects: async () => {
+      await new Promise((r) => setTimeout(r, 50));
+      return [{ name: "emrg", path: "/p/emrg" }];
+    },
+    taskCreate: async (payload) => { created = payload; return { ok: true }; },
+  });
+  await tick();
+  // 打开任务面板（fire-and-forget，不等 loadTaskMeta —— 复现宿主"点 ⏱ 立即点添加"）
+  vm.runInContext("App.openTasksPanel()", ctx);
+  els["task-form"].classList.add("hidden"); // 镜像 index.html 初始态
+  // 元数据还在加载（50ms 未到）就点"＋ 添加任务"
+  await vm.runInContext('document.getElementById("task-add-btn").click()', ctx);
+  // 等 openTaskForm 内 await loadTaskMeta() 完成（50ms 延迟 + 缓冲）
+  await new Promise((r) => setTimeout(r, 120));
+  await tick();
+  // 下拉应有选项（修复前：0 个选项 → 保存报 invalid type → 界面"没反应"）
+  const typeOpts = vm.runInContext('Array.from(document.getElementById("task-form-type").children).map((o) => o.value)', ctx);
+  assert.deepStrictEqual(typeOpts.sort(), ["custom-a", "evolution"]);
+  const projOpts = vm.runInContext('Array.from(document.getElementById("task-form-project").children).map((o) => o.value)', ctx);
+  assert.deepStrictEqual(projOpts, ["emrg"], "项目下拉应含已注册项目");
+  // 填任务名 → 保存 → taskCreate payload type/project 非空
+  vm.runInContext('document.getElementById("task-form-name").value = "quick-task"', ctx);
+  await vm.runInContext("EMRG_Dialogs.saveTaskForm()", ctx);
+  await tick();
+  assert.ok(created, "快速点击保存应成功（不报 invalid type）");
+  assert.ok(created.type && created.project, `type/project 非空：${JSON.stringify(created)}`);
+  assert.strictEqual(created.type, "evolution");
+  assert.strictEqual(created.project, "emrg");
+});
+
 test("P3：自定义类型管理 —— 内置只读；自定义增删改走模板 CRUD", async () => {
   let createdTpl = null;
   let deletedTpl = null;
