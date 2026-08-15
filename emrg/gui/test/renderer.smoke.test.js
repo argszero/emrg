@@ -2726,13 +2726,24 @@ test("P3：自定义类型管理 —— 内置只读；自定义增删改走模�
   assert.strictEqual(wrap.classList.contains("hidden"), false, "类型列表应展开");
   const rows = wrap.children.filter((c) => c.className.includes("task-row"));
   assert.strictEqual(rows.length, 2, `内置 + 自定义各一行，实际 ${rows.length}`);
-  // 内置行无操作按钮（决策点①⑥）；自定义行有编辑/删除
+  // rant 09:17:45：内置行只有只读"查看"按钮；自定义行有查看+编辑+删除
   const builtinActions = rows[0].querySelectorAll(".model-action-btn").length;
   const customActions = rows[1].querySelectorAll(".model-action-btn").length;
-  assert.strictEqual(builtinActions, 0, "内置类型只读（无操作按钮）");
-  assert.strictEqual(customActions, 2, "自定义类型有编辑+删除");
+  assert.strictEqual(builtinActions, 1, "内置类型只读（仅查看按钮）");
+  assert.strictEqual(customActions, 3, "自定义类型有查看+编辑+删除");
+  // 内置查看 → 只读表单（编辑器 shim readOnly + 保存按钮隐藏 + 提示词载入）
+  rows[0].querySelectorAll(".model-action-btn")[0].click();
+  await tick();
+  assert.strictEqual(els["task-template-form"].classList.contains("hidden"), false, "查看按钮应展开表单");
+  assert.strictEqual(els["task-template-save"].classList.contains("hidden"), true, "内置只读应隐藏保存按钮");
+  assert.strictEqual(els["task-template-name"].disabled, true, "内置类型名称不可改名");
+  const viewPrompt = vm.runInContext('document.getElementById("task-template-prompt").value', ctx);
+  assert.ok(String(viewPrompt).includes("prompt"), "只读查看应载入内置提示词内容");
+  vm.runInContext("EMRG_Dialogs.closeTemplateForm()", ctx);
+  await tick();
+  assert.strictEqual(els["task-template-save"].classList.contains("hidden"), false, "关闭后恢复保存按钮");
   // 删除自定义 → 确认 → taskTemplateDelete（决策点②：daemon 拒绝被引用类型）
-  const delBtn = rows[1].querySelectorAll(".model-action-btn")[1];
+  const delBtn = rows[1].querySelectorAll(".model-action-btn")[2];
   delBtn.click();
   await tick();
   assert.strictEqual(els["confirm-dialog"].open, true, "删除需确认");

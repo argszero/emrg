@@ -7,6 +7,9 @@
  *   vendor/dompurify.min.js         — DOMPurify UMD 构建
  *   vendor/highlight.custom.js      — highlight.js 核心 + ~20 常用语言子集（mini CJS loader 包装）
  *   vendor/highlight.github-dark.css— 代码高亮主题（本地 CSS）
+ *   vendor/monaco/vs/**             — monaco-editor min/vs（rant 09:17:45 提示词编辑器；
+ *                                     排除 language/ 与 assets/：仅用 markdown，无语言 worker，
+ *                                     file:// worker 由 no-op getWorkerUrl 兜底 → 体积 24M → ~6.7M）
  *
  * 重新生成：cd emrg/gui && node scripts/build-vendor.js（需先 npm install）
  */
@@ -69,6 +72,28 @@ fs.copyFileSync(
   path.join(NM, "highlight.js", "styles", "github-dark.css"),
   path.join(VENDOR, "highlight.github-dark.css")
 );
+
+// 5. Monaco Editor（rant 2026-08-15T09:17:45/09:20:12 方案 A）：
+//    拷 min/vs（排除 language/ 语言服务与 assets/ 独立 worker —— markdown 不需要）
+function copyDir(src, dst) {
+  fs.mkdirSync(dst, { recursive: true });
+  for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, ent.name);
+    const d = path.join(dst, ent.name);
+    if (ent.isDirectory()) copyDir(s, d);
+    else fs.copyFileSync(s, d);
+  }
+}
+const MONACO_SRC = path.join(NM, "monaco-editor", "min", "vs");
+const MONACO_DST = path.join(VENDOR, "monaco", "vs");
+fs.rmSync(MONACO_DST, { recursive: true, force: true });
+copyDir(MONACO_SRC, MONACO_DST);
+for (const drop of ["language", "assets"]) {
+  fs.rmSync(path.join(MONACO_DST, drop), { recursive: true, force: true });
+}
+const monoMain = path.join(MONACO_DST, "editor", "editor.main.js");
+if (!fs.existsSync(monoMain)) throw new Error("[vendor] monaco editor.main.js missing — run `npm install` first");
+console.log("[vendor] monaco vendored:", MONACO_DST, `(${(fs.readdirSync(MONACO_DST, { recursive: true }).length)} files)`);
 
 console.log("[vendor] built:", fs.readdirSync(VENDOR).sort().join(", "));
 console.log(`[vendor] highlight langs: ${loaded.length} (${loaded.join("/")})`);

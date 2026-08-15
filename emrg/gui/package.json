@@ -19,7 +19,8 @@
   },
   "devDependencies": {
     "electron": "^31.3.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "monaco-editor": "^0.56.0"
   },
   "build": {
     "appId": "com.emrg.gui",
