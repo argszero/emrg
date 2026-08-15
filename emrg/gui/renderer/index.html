@@ -387,6 +387,10 @@
   <!-- 右键菜单（对话列表：重命名 / 删除） -->
   <div id="ctx-menu" class="ctx-menu" hidden></div>
 
+  <!-- rant 2026-08-15T10:48:58: marked/dompurify/highlight MUST load BEFORE monaco loader.js — loader.js defines global AMD define/require (L1347 u.global.define=p); UMD marked sees AMD -> define branch -> window.marked never set -> chat/rant markdown degrades to plain text. UMD-first order fixes it (no AMD present -> UMD branch). -->
+  <script src="../vendor/marked.min.js"></script>
+  <script src="../vendor/dompurify.min.js"></script>
+  <script src="../vendor/highlight.custom.js"></script>
   <script src="../vendor/monaco/vs/loader.js"></script>
   <script>
     // Monaco (local vendor, zero network; rant 2026-08-15T09:20:12 option A).
@@ -400,9 +404,6 @@
       }
     };
   </script>
-  <script src="../vendor/marked.min.js"></script>
-  <script src="../vendor/dompurify.min.js"></script>
-  <script src="../vendor/highlight.custom.js"></script>
   <!-- 帮助对话框（/help，GUI / 指令 P1） -->
   <dialog id="help-dialog">
     <div class="dialog-card" style="min-width:420px;">
