@@ -754,6 +754,47 @@ def test_promote_template_homework_first_dehardening():
     assert "mention stats" in out, "状态文件提及统计字段应渲染"
 
 
+def test_promote_template_registration_blog_sections():
+    """promote_prompt.md §2.x host-authorized account registration + §2.y
+    blog publishing (rants 2026-08-15T09:04:28 / 09:06:12)."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "promote_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260815",
+        task={"project": "aitokenpool"},
+        project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+        evolution_count=0, git_path="git", gh_path="gh",
+    )
+    # A. Account Registration (host-authorized) section with 3 preconditions
+    assert "Account Registration (host-authorized)" in out, "账号注册授权节应渲染"
+    assert "Never register a duplicate" in out, "禁止重复注册应渲染"
+    assert "blocked (registration needs human)" in out, "需人工验证→blocked 应渲染"
+    # A. blanket Forbidden ban removed (negative discrimination)
+    assert "No auto-creating/managing social accounts" not in out, "Forbidden 不应再有 blanket 禁止注册"
+    # A. §0.3 registration-aware flow + channel accounts state field
+    assert "channel accounts" in out, "状态文件 channel accounts 字段应渲染"
+    assert "REUSE it" in out, "已有账号复用应渲染"
+    # B. Blog Publishing section
+    assert "Blog Publishing (deep content output)" in out, "Blog Publishing 节应渲染"
+    assert "blogger.com / Dev.to / Medium" in out, "博客渠道应渲染"
+    assert "≤1 post/week" in out, "发布节奏 ≤1 篇/周 应渲染"
+    # B. blog state fields + §0.4 linkage
+    assert "blog posts" in out, "状态文件 blog posts 字段应渲染"
+    assert "blog drafts" in out, "状态文件 blog drafts 字段应渲染"
+    assert "联动 Blog 选题" in out, "§0.4 新 release → blog drafts 联动应渲染"
+    # B. red line 7 account asset maintenance
+    assert "Registered accounts are long-term assets" in out, "红线 7 账号长期资产应渲染"
+
+
 # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
 
 

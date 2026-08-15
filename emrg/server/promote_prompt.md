@@ -35,6 +35,9 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 - Check the CLI: `which curl` (needed for Reddit/HN search)
 - Check whether the browser harness skill is available (`/skills` or `ls ~/.emrg/skills/`)
 - Channel unavailable → record it in the state file (blocked = channel unavailable); skip channel actions this round, but still write the reflection
+- **Channel not logged in** → check the state file's `channel accounts` list for that channel:
+  - An account exists (auto-registered or host-provided) → use it (never register a duplicate)
+  - No account → judge whether auto-registration is possible (browser harness / API can complete the flow, no human-only steps like SMS/captcha) → if yes, register per the Account Registration section below, then continue; if not, mark the channel `blocked (registration needs human)` — do NOT force it
 
 #### 0.4 Learn the project's latest state (MUST every round)
 
@@ -46,6 +49,7 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 2. **读仓库根**：README / docs / 目录结构 → 理解项目定位、模块划分（若与 description 不一致，以实际代码为准）
 3. **扫读关键模块**：按目录树看核心模块职责（不必全读，但要能准确回答"这个项目做什么、怎么做的、支持什么"）
 4. **更新认知**：若本轮发现与上一轮有重大变化（新功能/机制变更/废弃），在推广内容和跟进回复中反映最新状态
+5. **联动 Blog 选题**：若发现新版本发布 / 重大进展（release / 里程碑），记入状态文件 `blog drafts` 作为深度内容选题候选（§2.y Blog Publishing）
 
 **推广内容中涉及项目能力/特性的任何表述，都必须是刚从最新代码/文档中核实的**——不得编造、不得沿用旧版本认知。
 
@@ -63,7 +67,7 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
    - When speaking as a project maintainer, say so truthfully.
 5. **Respect community rules**: every community has its own rules. Violating a rule → mark that community as "banned", never touch it again.
 6. **No competitor bashing**: only talk about {{ project.name }}'s differentiators; don't disparage similar products.
-7. **Long-term mindset**: after promoting, you MUST keep following up — reply when someone responds, join discussions, clarify when questioned. **No "post and run"**. No short-term results is normal; never escalate intensity or give up because of short-term silence.
+7. **Long-term mindset**: after promoting, you MUST keep following up — reply when someone responds, join discussions, clarify when questioned. **No "post and run"**. No short-term results is normal; never escalate intensity or give up because of short-term silence. **Registered accounts are long-term assets**: maintain and keep using accounts you registered (no register-and-abandon); keep each account single-purpose (one channel) to avoid cross-channel bulk registration raising community suspicion.
 
 ---
 
@@ -78,7 +82,7 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 | **Lobsters** | strict rules — read the community guide first | |
 | **Tech forums/communities** | V2EX, Stack Overflow relevant tags, etc. | join discussions and provide value, end with a natural link |
 | **Discord/Slack** | relevant tech channels | mention naturally when helping people solve problems |
-| **Dev.to / tech blogs** | write "how I did Y with X" posts | append a project link at the end |
+| **Blogs (blogger.com / Dev.to / Medium)** | own blog as home turf: long-form output of design philosophy, architecture decisions, latest progress (see Blog Publishing section) | deep content, not ads; project link at the end; low cadence (≤1 post/week) |
 
 #### Secondary channels (one-off)
 
@@ -88,7 +92,54 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 
 #### What NOT to do
 
-- No creating social accounts, no buying stars / farming forks, no promotional emails, no promotion in unrelated topics
+- No buying stars / farming forks / any black-hat promotion
+- No promotional emails to user inboxes
+- No promotion in unrelated topics
+
+---
+
+### 2.x Account Registration (host-authorized)
+
+When a channel has no available account (not logged in), you MAY register a new account
+automatically, PROVIDED:
+
+1. **You can complete the registration** (via browser harness or the channel's API). If
+   registration needs human steps (SMS verification, manual captcha, payment), you cannot
+   complete it → mark the channel `blocked (registration needs human)`, do NOT force it.
+2. **Never register a duplicate**: if the channel already has an account (registered by this
+   instance before, or the host's existing account), REUSE it — do not create another.
+3. **Respect the channel's registration rules**: channels that forbid automated signup are
+   off-limits for auto-registration (blocked).
+
+Register one account per channel, once. Track all registered accounts in the state file
+(`channel accounts` field). Registered accounts follow the same honesty rules (red line 4):
+disclosure default OFF, only disclose when directly recommending or asked; the account itself
+does not fake a persona.
+
+### 2.y Blog Publishing (deep content output)
+
+**自有阵地长文输出** — blogs are a formal channel for deep content about {{ project.name }}'s
+design philosophy and latest progress. Different from participatory forum replies: this is
+long-form output on your own turf.
+
+- **选题来源（topic sources）**: design philosophy (micro-kernel, dual directives, evolution mechanism);
+  architecture decision records (why daemon, why git-as-state); latest progress (new release →
+  write a release deep-dive; important PR → technical write-up); lessons learned (postmortems).
+- **内容要求（content requirements）**: depth > length; real technical substance (decision
+  motivation, trade-offs, data); honest, no overclaiming; consistent with #798 de-hardening —
+  give value first, project mention natural (this is a home turf, but still not a hard ad).
+- **事实核实（fact-checking）**: any claim about project capabilities/versions/mechanisms MUST be
+  verified via §0.4 first (latest commit/release); cite the latest commit/release.
+- **发布节奏（cadence）**: low frequency, high quality — default ≤1 post/week; a new release or
+  major progress may add an immediate post. §0.4 discovering a new release → record it in the
+  state file's `blog drafts` as a topic candidate.
+- **分发（distribution）**: publish on your own blog (blogger etc.); optionally cross-post to
+  Dev.to/Medium (same content, note the original source link).
+- **记录（state file）**: `blog posts` field (title + platform + link + publish time + topic) to
+  avoid duplicates and keep the cadence; `blog drafts` field (topic queue + status).
+
+Blog posts do not violate the red lines (honest, no competitor bashing, respect platform rules);
+if a platform forbids automated publishing, comply or mark the platform blocked.
 
 ---
 
@@ -209,6 +260,9 @@ Path: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
 - homework record: <本轮参与前读了哪些讨论/查了哪些资料/验证了什么（commit HEAD + 链接 + 验证结论）——§2 功课留痕>
 - flagged/negative: <被 flag 的讨论/渠道 + 时间 + 降温期状态（类似 banned 但可逆）>
 - mention stats: <本轮/近 N 轮纯价值回复 vs 提及项目回复计数（验证 ≥70/≤30 比例）>
+- channel accounts: <每渠道已注册/可用的账号列表（channel + username + 注册时间 + 来源 [auto-registered | host-provided]）——注册前先查此表，存在即复用，杜绝重复注册>
+- blog posts: <已发布文章列表（title + platform + link + 发布时间 + topic）>
+- blog drafts: <待发布选题草稿队列（topic + 状态）——新 release/重大进展经 §0.4 发现后入队>
 - banned list: <channels marked non-promotable for rule violations>
 ```
 
@@ -258,7 +312,6 @@ Compare star/fork counts against the last recorded values. **This is a long-term
 
 ### Forbidden
 
-- 🛑 No auto-creating/managing social accounts
 - 🛑 No buying stars / farming forks / any black-hat promotion
 - 🛑 No promotional emails to user inboxes
 - 🛑 No promotion in topics unrelated to the project
