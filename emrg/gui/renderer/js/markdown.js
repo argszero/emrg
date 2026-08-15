@@ -45,10 +45,33 @@ function ensureConfigured() {
   window.__emrgMarkedConfigured = true;
 }
 
+/** AMD-hijack recovery (rant 2026-08-15T10:48:58) — fallback layer:
+ *  monaco loader 的全局 AMD define 会让 UMD marked/dompurify 走 define 分支而非挂 window；
+ *  顺序修复（index.html marked 先于 loader.js）后正常路径不触发，此处兜底 + 可诊断。 */
+function recoverAmdModule(name) {
+  try {
+    // monaco loader 的 require 内部模块表: require.s[name] = { exports }
+    if (window.require && window.require.s && window.require.s[name]) {
+      const mod = window.require.s[name].exports;
+      if (mod) return mod;
+    }
+    // 部分打包器形态: define.amd.modules
+    if (window.define && window.define.amd && window.define.amd.modules && window.define.amd.modules[name]) {
+      return window.define.amd.modules[name].exports;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 renderer.renderMarkdown = async function (mdText) {
   if (!window.marked) {
-    console.warn("markdown vendor missing (marked not loaded)");
-    return escapeHtml(mdText || "");
+    const amdMarked = recoverAmdModule("marked");
+    if (amdMarked && typeof amdMarked.parse === "function") {
+      window.marked = amdMarked; // 兜底取回：AMD 劫持场景仍可渲染
+    } else {
+      console.error("markdown vendor missing (marked not loaded — check index.html order: marked must load before monaco loader.js, which defines global AMD define/require)");
+      return escapeHtml(mdText || "");
+    }
   }
   try {
     ensureConfigured();

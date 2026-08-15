@@ -824,6 +824,28 @@ test("代码块复制按钮：codeRenderer 输出容器 + 点击复制（设计 
   assert.ok(chatSrc.includes(".code-copy"), "chat.js 应含复制按钮事件委托");
 });
 
+test("rant 10:48:58：window.marked 缺失时从 Monaco AMD 模块表兜底取回（防退化纯文本）", async () => {
+  const { ctx, win } = makeSandbox({});
+  // 模拟 #801 Monaco 全局 AMD define 劫持后 marked 未挂 window 的场景：
+  // window.marked = null（沙箱默认），但 monaco require 模块表里有 marked
+  win.marked = undefined; // 强制缺失（沙箱默认 null → 触发兜底路径）
+  win.require = {
+    s: {
+      marked: { exports: { use: () => {}, parse: async () => "<p><strong>ok</strong></p>" } },
+    },
+  };
+  win.DOMPurify = { sanitize: (x) => x };
+  const html = await vm.runInContext('window.emrgMarkdown.renderMarkdown("**ok**")', ctx);
+  assert.ok(String(html).includes("<strong>ok</strong>"), `AMD 兜底应渲染 marked：${html}`);
+  assert.ok(win.marked && typeof win.marked.parse === "function", "兜底取回后 window.marked 应被赋值");
+  // 无 AMD 表也无 marked → 降级转义 + 可诊断错误（不崩）
+  const { ctx: ctx2, win: win2 } = makeSandbox({});
+  win2.marked = undefined;
+  win2.require = undefined;
+  const html2 = await vm.runInContext('window.emrgMarkdown.renderMarkdown("<b>x</b>")', ctx2);
+  assert.strictEqual(html2, "&lt;b&gt;x&lt;/b&gt;", "双缺失 → escapeHtml 降级");
+});
+
 test("模型切换器：菜单项构建 + 键盘导航 handler 注册", async () => {
   const { ctx } = makeSandbox({
     getSettings: async () => ({
