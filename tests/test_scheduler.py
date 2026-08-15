@@ -714,6 +714,46 @@ def test_promote_template_learn_latest_state_04():
     assert "commit range / modules read via §0.4" in out, "反思 Q3 学习记录应渲染"
 
 
+def test_promote_template_homework_first_dehardening():
+    """promote_prompt.md §2 homework-before-participating + red line 4
+    disclosure-default-OFF (rant 2026-08-15T08:40:25, 2× HN [flagged] 反例)."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "promote_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260815",
+        task={"project": "aitokenpool"},
+        project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+        evolution_count=0, git_path="git", gh_path="gh",
+    )
+    # A. homework-before-participating section exists (positive discrimination)
+    assert "参与前做足功课（MUST — 宿主核心要求）" in out, "§2 功课先行节应渲染"
+    assert "读完整讨论" in out, "读完整讨论要求应渲染"
+    assert "本地写测试代码/跑脚本验证后再发言" in out, "本地验证要求应渲染"
+    assert "宁可不参与该讨论" in out, "做不好功课宁可跳过应渲染"
+    # B. red line 4 disclosure default OFF
+    assert "disclosure default OFF" in out, "红线 4 披露默认关闭应渲染"
+    assert "NO disclosure, NO project mention" in out, "普通参与不披露应渲染"
+    assert "one sentence at the END" in out, "披露一句话后置应渲染"
+    assert "fixed-formula disclosure as the first sentence" in out, "禁止固定句式开头披露应渲染"
+    # B. mention density ≥70/≤30 + de-template + flagged cool-down
+    assert "≥70%" in out, "纯价值回复 ≥70% 应渲染"
+    assert "≤30%" in out, "提及项目 ≤30% 应渲染"
+    assert "cool-down period" in out, "被 flag 降温期应渲染"
+    # C. state file supplementary fields
+    assert "homework record" in out, "状态文件功课记录字段应渲染"
+    assert "flagged/negative" in out, "状态文件 flagged/negative 字段应渲染"
+    assert "mention stats" in out, "状态文件提及统计字段应渲染"
+
+
 # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──────
 
 

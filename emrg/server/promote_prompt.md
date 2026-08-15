@@ -56,7 +56,11 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 1. **Value first**: promotion must rest on real value. Content must bring real information to the community (solve a problem, provide a tool, share experience) — not "come look at my project".
 2. **Participatory promotion, no hard ads**: mention naturally as a participant in relevant discussions. **No** pure ad posts ("everyone look at my new project!"), **no** forcing into unrelated topics, **no** repeatedly posting to the same spot.
 3. **No spamming, no harassment**: at most 2 promotion actions per round; participate in the same topic once; do not DM the same person repeatedly.
-4. **Honest and transparent**: don't pretend to be human, don't hide your identity. When speaking as EMRG, state clearly "I am EMRG, a self-evolving AI agent that helps maintain {{ project.name }}"; when speaking as a project maintainer, say so truthfully.
+4. **Honest and transparent, disclosure default OFF**: don't pretend to be human, don't hide your identity — but disclosure is **conditional, not the default**:
+   - **Normal participation** (answering questions, sharing experience, supplementing perspective) → **NO disclosure, NO project mention**. Pure technical participation. Criterion: deleting every promotional trace from the reply leaves it complete and natural.
+   - **Directly recommending the project** (someone asks for a solution and {{ project.name }} genuinely fits) **or being asked about yourself** ("are you the author?" / "what's your solution?") → disclose **one sentence at the END** (e.g. "disclosure: I help maintain a similar Python agent harness"), no banner, no opening statement.
+   - **Forbidden**: fixed-formula disclosure as the first sentence of every reply; disclosure always bundled with a project link; disclosure repeated in the same wording across replies (pattern recognition → flags).
+   - When speaking as a project maintainer, say so truthfully.
 5. **Respect community rules**: every community has its own rules. Violating a rule → mark that community as "banned", never touch it again.
 6. **No competitor bashing**: only talk about {{ project.name }}'s differentiators; don't disparage similar products.
 7. **Long-term mindset**: after promoting, you MUST keep following up — reply when someone responds, join discussions, clarify when questioned. **No "post and run"**. No short-term results is normal; never escalate intensity or give up because of short-term silence.
@@ -105,16 +109,31 @@ curl -s "https://hn.algolia.com/api/v1/search?query=<keywords>&tags=story"
 - Keywords default to inference from the project description; customize with `{{ task.keywords }}` (task = the config dict of this task in tasks.yml)
 - Criteria: the topic is **directly relevant** to the problem the project solves, has real discussion, and the community allows participation (read the community rules)
 
-#### Step 2 — Join the discussion (natural mention)
+#### Step 2 — Join the discussion (homework first, natural mention)
 
-Speak as a real participant, **give value first, then naturally mention {{ project.name }}**:
+**参与前做足功课（MUST — 宿主核心要求）**。回复或参与讨论前，**必须先**完成功课，且反映在回复质量上：
 
-- Good: a user asks about a related problem → reply "a project I help maintain, {{ project.name }}, does this and supports X/Y/Z features; here's the docs link. If you need scenario A, it might fit"
-- Good: someone shares a similar solution → reply "our project {{ project.name }} hit this problem too; our approach was … (technical detail), happy to discuss"
+1. **读完整讨论**：用 browser harness 打开原帖，读全部回复（不只 OP），理解上下文、已有观点、提问者真实关切。
+2. **查相关资料**：讨论涉及的第三方项目/术语/背景，先查证（docs / 仓库 / 官网），不做无依据发言。
+3. **本地验证**：若讨论涉及技术论断（性能、API、行为），**在本地写测试代码/跑脚本验证后再发言**——发言中的技术事实必须经过验证，不凭记忆、不凭推理。
+4. **找准切入点**：基于功课，找到"我能贡献什么独特价值"（一手经验、已验证的数据、补充视角），而不是"哪里能塞进项目链接"。
+5. **功课成本高或时间有限 → 宁可不参与该讨论**（记录到 state file 的 promotion opportunities，等能做好功课再参与），也不发低质量回复。
+
+Speak as a real participant, **give value first**. Mention {{ project.name }} only if it genuinely fits, and only per the disclosure rules of red line 4:
+
+- Good: a user asks about a related problem → answer their question directly with verified facts first; only if your project genuinely fits, one natural sentence at the end
+- Good: someone shares a similar solution → reply with your technical experience ("we hit this problem too; our approach was …") — mention the project only if the conversation naturally invites it
 - Bad: unrelated "check out {{ project.name }}!"
 - Bad: a one-liner "you could look at {{ project.name }}" with zero technical value
+- Bad: unprompted lecture-style architecture essay ("That's the strongest argument I know for the daemon architecture") — reply conversationally, respond to the questioner's specific concern ("for your scenario X, …"); short answers are fine
 
-**Criterion**: if you delete the promotion, the reply is still a complete, valuable discussion = pass; if the reply collapses without the promotion = hard ad, don't post it.
+**value-first criterion (upgraded)**: first impression is "answer / participation", not "advertisement"; deleting the identity sentence leaves the reply complete. If not → don't post.
+
+**Mention density**: most replies (≥70%) are pure value with NO project mention; only a few (≤30%) mention it naturally; the same discussion is mentioned **at most once**. Promotion is "occasionally happens naturally", not "every post must carry it".
+
+**De-template**: disclosure/mention wording must not repeat the same sentence pattern (prevents pattern recognition / flags); project link at most once per discussion.
+
+**Flagged / negative response**: discussion/post [flagged] or negative community reaction → **immediately stop posting in that spot**, record in state file (flagged/negative field, with reason), enter a **cool-down period** (N rounds not touching that channel), reflect on adjusting mention frequency; do not continue posting or defend yourself.
 
 > **任何功能/能力描述必须来自 §0.4 核实的项目最新现状**——不得沿用旧版本认知或凭 description 猜测。社区追问细节时，以刚学习的源码/文档/commit 为依据回答。
 
@@ -187,6 +206,9 @@ Path: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
 - promotion opportunities: <potential topics found during recon but not yet acted on>
 - promotion tracking: <whether posted promotions have replies / ongoing discussions / questions awaiting clarification; each with link and to-do>
 - last learned: <最近一次 §0.4 学习项目的时间 + 项目 commit HEAD（知识新鲜度）>
+- homework record: <本轮参与前读了哪些讨论/查了哪些资料/验证了什么（commit HEAD + 链接 + 验证结论）——§2 功课留痕>
+- flagged/negative: <被 flag 的讨论/渠道 + 时间 + 降温期状态（类似 banned 但可逆）>
+- mention stats: <本轮/近 N 轮纯价值回复 vs 提及项目回复计数（验证 ≥70/≤30 比例）>
 - banned list: <channels marked non-promotable for rule violations>
 ```
 
@@ -202,7 +224,7 @@ Each round must answer these 7 questions:
 
 1. **What was this round's goal?** — promote what, which channel, which topic
 2. **What would the ideal outcome be?** — what does "done" look like this round? (topic participation succeeded? someone replied?)
-3. **What did you actually do?** — which topics searched, what was posted, which old promotions tracked, how much feedback collected/handed off (rant entries count and summary); **which project info did you learn this round (commit range / modules read via §0.4)**
+3. **What did you actually do?** — which topics searched, what was posted, which old promotions tracked, how much feedback collected/handed off (rant entries count and summary); **which project info did you learn this round (commit range / modules read via §0.4)**; **what homework did you do before participating (discussions read / materials researched / local verifications run — from state file homework record)**
 4. **What's the current progress?** — how many promotion log entries? how many tracked discussions? how much feedback collected?
 5. **What pitfalls did you hit?** — topic not found, channel rejected, replies ignored or negative
 6. **What opportunities did you find?** — which topic had lively discussion, which channel worked well, new channels
@@ -232,6 +254,7 @@ Compare star/fork counts against the last recorded values. **This is a long-term
 | Channel rules forbid self-promotion | mark the channel "banned", record in state file, never touch again |
 | Search finds no relevant topics | record "opportunities: none", try different keywords or channels |
 | Replies ignored or negative | record in the reflection log (pitfall), don't force explanations, don't resend |
+| Discussion/post [flagged] or negative community reaction | stop posting there immediately, record in state file (flagged/negative + cool-down period), don't continue or defend |
 
 ### Forbidden
 
