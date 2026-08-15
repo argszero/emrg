@@ -1988,6 +1988,8 @@ def test_template_crud_and_guards(tmp_path):
         # list
         templates = {t["name"]: t for t in sched.list_templates()}
         assert templates["evolution"]["builtin"] is True
+        # rant 09:17:45：builtin 附带 prompt 正文（GUI 只读 Monaco 查看器）
+        assert templates["evolution"]["prompt"] and "instance_id" in templates["evolution"]["prompt"]
         assert templates["report"]["builtin"] is False
         assert "instance_id" in templates["report"]["prompt"]
         # update

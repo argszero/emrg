@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="css/components.css" />
   <link rel="stylesheet" href="css/animations.css" />
   <link rel="stylesheet" href="../vendor/highlight.github-dark.css" />
+  <link rel="stylesheet" href="../vendor/monaco/vs/editor/editor.main.css" />
 </head>
 <body>
   <div id="app">
@@ -115,7 +116,7 @@
               <input type="text" id="task-template-name" maxlength="32" placeholder="report" />
             </label>
             <label class="model-form-label" data-i18n="settings.templatePrompt">提示词模板
-              <textarea id="task-template-prompt" rows="6" style="width:100%;min-height:120px;" placeholder="# {{ instance_id }} ..."></textarea>
+              <div id="task-template-prompt" class="monaco-host" aria-label="prompt template"></div>
             </label>
             <div class="model-form-footer">
               <div style="display:flex;gap:8px;margin-left:auto;">
@@ -386,6 +387,19 @@
   <!-- 右键菜单（对话列表：重命名 / 删除） -->
   <div id="ctx-menu" class="ctx-menu" hidden></div>
 
+  <script src="../vendor/monaco/vs/loader.js"></script>
+  <script>
+    // Monaco (local vendor, zero network; rant 2026-08-15T09:20:12 option A).
+    // Prompt templates only use markdown - no language worker. The editor worker
+    // falls back to a no-op blob worker (sandbox:true renderer blocks file://
+    // workers; markdown highlight/line-numbers/editing all run on the main thread).
+    self.MonacoEnvironment = {
+      getWorkerUrl: function () {
+        return "data:text/javascript;charset=utf-8," +
+          encodeURIComponent("self.onmessage=function(){};");
+      }
+    };
+  </script>
   <script src="../vendor/marked.min.js"></script>
   <script src="../vendor/dompurify.min.js"></script>
   <script src="../vendor/highlight.custom.js"></script>

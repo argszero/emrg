@@ -1505,13 +1505,25 @@ class TaskScheduler:
         return {"added": added, "removed": removed, "updated": updated}
 
     def list_templates(self) -> list[dict]:
-        """List all task types: builtin (read-only) + custom (with prompt preview)."""
+        """List all task types: builtin (read-only) + custom (with prompt preview).
+
+        rant 2026-08-15T09:17:45/09:20:12：builtin 也附带 ``prompt`` 正文，
+        GUI 只读 Monaco 查看器得以展示真实提示词（读失败回退文件名占位）。
+        """
         result: list[dict] = []
         for name in sorted(TASK_TEMPLATES):
+            prompt = ""
+            try:
+                p = Path(__file__).parent / TASK_TEMPLATES[name]
+                if p.exists():
+                    prompt = p.read_text(encoding="utf-8")
+            except OSError:
+                pass
             result.append({
                 "name": name,
                 "builtin": True,
                 "template": TASK_TEMPLATES[name],
+                "prompt": prompt,
             })
         for name in _custom_templates():
             result.append({

@@ -27,6 +27,7 @@ const Dialogs = (() => {
       if (!btn) return;
       theme = btn.dataset.theme || "system";
       applyTheme(theme);
+      syncTemplateEditorTheme(); // Monaco vs/vs-dark 跟随（rant 09:17:45 验收 6）
       renderThemeOptions();
     });
   }
@@ -772,6 +773,117 @@ const Dialogs = (() => {
   }
 
   // ── 自定义类型管理（决策点①⑥：内置只读；决策点②：被引用拒绝删除） ──
+  // rant 2026-08-15T09:17:45/09:20:12：提示词编辑器升级 Monaco（本地 vendor，零网络）。
+  // 测试/无 monaco 环境回退轻量 shim（读写 host 元素的 .value），行为等价。
+  let templateEditor = null; // monaco.editor 实例或 shim
+  let templateMonacoInit = false;
+  const templateEditorWaiters = [];
+
+  function currentMonacoTheme() {
+    try {
+      const root = document.documentElement;
+      const t = root && root.getAttribute ? root.getAttribute("data-theme") : null;
+      if (t === "light") return "vs";
+      if (t === "dark") return "vs-dark";
+      return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "vs-dark" : "vs";
+    } catch { return "vs"; }
+  }
+
+  function createTemplateEditorShim() {
+    const host = $("task-template-prompt");
+    return {
+      setValue(v) { if (host) host.value = v || ""; },
+      getValue() { return host ? (host.value || "") : ""; },
+      setReadOnly() {},
+      focus() { if (host && host.focus) host.focus(); },
+      layout() {},
+      dispose() {},
+    };
+  }
+
+  function flushTemplateEditorWaiters() {
+    const waiters = templateEditorWaiters.splice(0);
+    waiters.forEach((fn) => { try { fn(templateEditor); } catch { /* ignore */ } });
+  }
+
+  function fallbackTemplateEditorShim(reason) {
+    // eslint-disable-next-line no-console
+    console.warn("[dialogs] Monaco unavailable (" + reason + ") — using textarea shim");
+    templateEditor = createTemplateEditorShim();
+    flushTemplateEditorWaiters();
+  }
+
+  function initTemplateMonaco() {
+    if (templateMonacoInit) return;
+    templateMonacoInit = true;
+    try {
+      // preferScriptTags: sandboxed renderer (sandbox:true, nodeIntegration:false) exposes
+      // process.versions.electron + process.type==='renderer' → loader would pick the Node
+      // loader branch which needs nodeRequire (undefined in sandbox) → load fails silently.
+      // Script-tag loader needs no eval/nodeRequire and works under CSP 'self' + file://.
+      // (pm25coder Windows host review, #801)
+      window.require.config({ paths: { vs: "../vendor/monaco/vs" }, preferScriptTags: true });
+      // errback + timeout: if editor.main fails to load, degrade to the shim instead of
+      // leaving a dead empty .monaco-host (waiters would accumulate, save reads "" → confusing
+      // "templateInvalid" toast). (#801 review finding 2)
+      const t = setTimeout(() => {
+        if (!templateEditor) fallbackTemplateEditorShim("timeout");
+      }, 8000);
+      window.require(["vs/editor/editor.main"], () => {
+        clearTimeout(t);
+        const host = $("task-template-prompt");
+        if (!host || !window.monaco || !window.monaco.editor) {
+          fallbackTemplateEditorShim("editor.main missing");
+          return;
+        }
+        templateEditor = window.monaco.editor.create(host, {
+          value: "",
+          language: "markdown",
+          theme: currentMonacoTheme(),
+          lineNumbers: "on",
+          wordWrap: "on",
+          minimap: { enabled: false },
+          scrollBeyondLastLine: false,
+          automaticLayout: true,
+          fontSize: 13,
+          lineHeight: 20,
+          padding: { top: 6, bottom: 6 },
+        });
+        // system 主题下跟随 OS 深浅切换（settings 内切换走 initThemeButtons → sync）
+        if (window.matchMedia) {
+          try {
+            window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncTemplateEditorTheme);
+          } catch { /* ignore */ }
+        }
+        flushTemplateEditorWaiters();
+      }, (err) => {
+        clearTimeout(t);
+        fallbackTemplateEditorShim(String(err || "module load error"));
+      });
+    } catch (e) {
+      fallbackTemplateEditorShim(String(e));
+    }
+  }
+
+  function withTemplateEditor(fn) {
+    if (templateEditor) return fn(templateEditor);
+    if (!(window.monaco && window.monaco.editor) && !window.require) {
+      // 无 monaco（测试沙箱等）→ 立即用 shim，行为与 textarea 时代等价
+      templateEditor = createTemplateEditorShim();
+      return fn(templateEditor);
+    }
+    templateEditorWaiters.push(fn);
+    initTemplateMonaco();
+    return null;
+  }
+
+  function syncTemplateEditorTheme() {
+    const ed = templateEditor;
+    if (ed && window.monaco && window.monaco.editor) {
+      try { window.monaco.editor.setTheme(currentMonacoTheme()); } catch { /* ignore */ }
+    }
+  }
+
   async function renderTemplateList() {
     const wrap = $("task-template-list");
     if (!wrap) return;
@@ -793,9 +905,13 @@ const Dialogs = (() => {
       row.appendChild(el("span", { class: "task-badge" }, t.builtin ? _t("settings.taskBuiltin") : _t("settings.taskCustom")));
       const body = t.prompt || t.template || "";
       row.appendChild(el("span", { class: "task-hint" }, body.length > 60 ? body.slice(0, 60) + "…" : body));
-      // 内置只读（决策点①⑥）：不渲染任何操作按钮
+      // rant 09:17:45：内置类型提供只读"查看"（Monaco readOnly 同样高亮/行号/滚动）；
+      // 自定义类型在查看之外保留编辑/删除（决策点①⑥：内置不可增删改）
+      const actions = el("span", { class: "task-actions" });
+      const viewBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.templateView") }, _t("settings.templateView"));
+      viewBtn.addEventListener("click", () => openTemplateForm(t));
+      actions.appendChild(viewBtn);
       if (!t.builtin) {
-        const actions = el("span", { class: "task-actions" });
         const editBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.templateEdit") }, _t("settings.templateEdit"));
         editBtn.addEventListener("click", () => openTemplateForm(t));
         actions.appendChild(editBtn);
@@ -818,8 +934,8 @@ const Dialogs = (() => {
           });
         });
         actions.appendChild(delBtn);
-        row.appendChild(actions);
       }
+      row.appendChild(actions);
       wrap.appendChild(row);
     }
     // 底部"＋ 添加类型"（仅自定义类型可增删改）
@@ -832,11 +948,23 @@ const Dialogs = (() => {
 
   function openTemplateForm(tpl = null) {
     editingTemplate = tpl ? tpl.name : null;
+    const readOnly = Boolean(tpl && tpl.builtin);
     $("task-template-name").value = tpl ? tpl.name : "";
     $("task-template-name").disabled = Boolean(tpl); // daemon 以 name 定位 → 不可改名
-    $("task-template-prompt").value = tpl ? (tpl.prompt || "") : "";
     $("task-template-form").classList.remove("hidden");
-    $("task-template-name").focus();
+    // 内置类型只读查看：隐藏保存按钮（编辑器 readOnly 高亮/行号照常）
+    const saveBtn = $("task-template-save");
+    if (saveBtn) saveBtn.classList.toggle("hidden", readOnly);
+    const applyEditor = (ed) => {
+      ed.setValue(tpl ? (tpl.prompt || tpl.template || "") : "");
+      ed.setReadOnly(readOnly);
+      syncTemplateEditorTheme();
+      try { ed.focus(); } catch { /* ignore */ }
+    };
+    const ed = templateEditor;
+    if (ed) applyEditor(ed);
+    else withTemplateEditor(applyEditor);
+    if (!readOnly) $("task-template-name").focus();
   }
 
   function closeTemplateForm() {
@@ -844,12 +972,26 @@ const Dialogs = (() => {
     editingTemplate = null;
     $("task-template-name").disabled = false;
     $("task-template-name").value = "";
-    $("task-template-prompt").value = "";
+    const saveBtn = $("task-template-save");
+    if (saveBtn) saveBtn.classList.remove("hidden");
+    const ed = templateEditor;
+    if (ed) {
+      try { ed.setValue(""); ed.setReadOnly(false); } catch { /* ignore */ }
+    } else if ($("task-template-prompt")) {
+      $("task-template-prompt").value = "";
+    }
+  }
+
+  function getTemplateEditorValue() {
+    const ed = templateEditor;
+    if (ed) return ed.getValue();
+    const host = $("task-template-prompt");
+    return host ? (host.value || "") : "";
   }
 
   async function saveTemplateForm() {
     const name = $("task-template-name").value.trim();
-    const prompt = $("task-template-prompt").value;
+    const prompt = getTemplateEditorValue();
     if (!name || !prompt.trim()) {
       showConfirm(_t("dlg.stepTitle"), _t("settings.templateInvalid"), { okText: _t("dlg.gotIt"), danger: false });
       return;
@@ -1345,6 +1487,8 @@ const Dialogs = (() => {
     submitRantForm, // rant 14:10:14 P4：rant 表单提交（测试复用）
     saveTaskForm, // rant 18:23:15 P3：任务表单提交（测试复用）
     saveTemplateForm, // rant 18:23:15 P3：类型表单提交（测试复用）
+    openTemplateForm, // rant 09:17:45：类型表单打开（内置只读查看 / 自定义编辑，测试复用）
+    closeTemplateForm, // rant 09:17:45：类型表单关闭（测试复用）
     showRename,
     submitRename,
     showSettings,

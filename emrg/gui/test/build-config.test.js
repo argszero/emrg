@@ -25,6 +25,12 @@ const PKG = JSON.parse(fs.readFileSync(path.join(GUI_ROOT, "package.json"), "utf
 const VENDOR_DIR = path.join(GUI_ROOT, "vendor");
 
 const REQUIRED_VENDOR_FILES = ["marked.min.js", "dompurify.min.js", "highlight.custom.js"];
+// rant 09:17:45：Monaco Editor 本地 vendor（loader + 入口 js/css 必须入库）
+const REQUIRED_MONACO_FILES = [
+  "monaco/vs/loader.js",
+  "monaco/vs/editor/editor.main.js",
+  "monaco/vs/editor/editor.main.css",
+];
 
 /** 判断文件名是否被 electron-builder files 白名单覆盖（支持 "x.js" 与 "dir/**" 形态） */
 function whitelistCovers(whitelist, relPath) {
@@ -51,6 +57,14 @@ test("vendor directory ships all runtime scripts", () => {
     const p = path.join(VENDOR_DIR, f);
     assert.ok(fs.existsSync(p), `missing vendored script: ${f}`);
     assert.ok(fs.statSync(p).size > 0, `vendored script is empty: ${f}`);
+  }
+});
+
+test("vendor ships Monaco editor (loader + editor.main js/css)", () => {
+  for (const f of REQUIRED_MONACO_FILES) {
+    const p = path.join(VENDOR_DIR, f);
+    assert.ok(fs.existsSync(p), `missing monaco file: ${f} — run \`node scripts/build-vendor.js\``);
+    assert.ok(fs.statSync(p).size > 0, `monaco file is empty: ${f}`);
   }
 });
 
