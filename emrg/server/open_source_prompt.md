@@ -38,11 +38,11 @@ gh auth status 2>&1 || {
     TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2-)
     if [ -n "$TOKEN" ]; then
       export GH_TOKEN="$TOKEN"
-      echo "gh 未认证 — 已从 git 凭据提取 token (GH_TOKEN)"
+      echo "gh not authenticated — token extracted from git credentials (GH_TOKEN)"
       gh auth status 2>&1
     fi
   else
-    echo "gh 未认证 — 请在 EMRG GUI 设置页连接 GitHub（无需终端）"
+    echo "gh not authenticated — connect GitHub from the EMRG GUI settings page (no terminal needed)"
   fi
 }
 ```
@@ -115,20 +115,20 @@ cd {{ source_dir }} && git status --short --branch 2>&1
 #### 0.4 Read the state file
 
 ```bash
-cat {{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md 2>/dev/null || echo "[新状态文件]" > {{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md
+cat {{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md 2>/dev/null || echo "[new state file]" > {{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md
 ```
 
 State file format:
 
 ```markdown
 # Open-Source State: {{ owner }}/{{ repo }}
-- 角色: Committer | Contributor
-- 当前阶段: 准备 | 侦察 | 贡献 | 追踪 | 审查
-- 上次完成: <上一轮做了什么>
-- 活跃PR: <自己的 open PR 列表，每行一个>
-- 进行中: <正在实现的内容 | 无>
-- 下一步: <本轮计划做什么>
-- 阻塞: <什么在阻止进展？空=无阻塞>
+- role: Committer | Contributor
+- current stage: Prep | Recon | Contribute | Track | Review
+- last completed: <what was done last round>
+- active PRs: <own open PR list, one per line>
+- in progress: <what is being implemented | none>
+- next step: <what this round plans to do>
+- blocked: <what is blocking progress? empty = no blocker>
 ```
 
 #### 0.5 Rant scan (host development instructions)
@@ -178,10 +178,10 @@ cd {{ source_dir }} && git log --oneline -20
 Unhandled rant found in 0.5 (project matches, pending/in_progress, dedup check passed)?
   → Phase Contribution (handle the rant — host instruction, highest priority)
 
-Is "进行中" (in progress) in the state file non-empty?
+Is "in progress" non-empty in the state file?
   → Phase Contribution (continue the unfinished implementation)
 
-Are there open items in "活跃PR" (active PRs)?
+Are there open items in "active PRs"?
   → Phase Tracking (check PR status, respond to reviews)
 
 No active work?
@@ -262,11 +262,11 @@ When Phase Contribution is entered because an **unhandled rant** (project-matchi
 ```bash
 cd {{ source_dir }}
 # Read the contributing guide (if present)
-cat CONTRIBUTING.md 2>/dev/null || echo "[无 CONTRIBUTING.md]"
+cat CONTRIBUTING.md 2>/dev/null || echo "[no CONTRIBUTING.md]"
 # Read the PR template (if present)
-cat .github/pull_request_template.md 2>/dev/null || echo "[无 PR 模板]"
+cat .github/pull_request_template.md 2>/dev/null || echo "[no PR template]"
 # Check for other convention files
-ls .github/ 2>/dev/null || echo "[无 .github 目录]"
+ls .github/ 2>/dev/null || echo "[no .github directory]"
 ```
 
 Extract from these files and strictly follow:
@@ -282,18 +282,18 @@ Extract from these files and strictly follow:
 
 #### B.2b Read the full codebase (MUST before contributing)
 
-> ⚠️ 前提：**每次贡献前都重新读取最新代码**（0.3 Source sync 已保证 `git pull` 到最新；任何贡献思路都建立在你刚拉取的最新代码上，不得用记忆/旧版本代码做判断）。
+> ⚠️ Prerequisite: **re-read the latest code before every contribution** (0.3 Source sync guarantees `git pull` to latest; any contribution idea must be built on the code you just pulled — never on memory or stale code).
 
-**读完整代码**（不止是目标文件）：
-- 先看仓库根：README / docs / 目录结构 → 理解项目定位、模块划分
-- 通读核心模块源码（按目录树从上到下，理解每个模块职责）
-- 定位到与本次 Issue/目标相关的代码时，**精读相关文件全文**（不只看改动点附近）
+**Read the full codebase** (not just the target files):
+- Start at the repo root: README / docs / directory structure → understand the project's positioning and module layout
+- Read through the core module sources (top-down through the directory tree, understanding each module's responsibility)
+- When you locate the code relevant to this Issue/goal, **read the full relevant files closely** (not just around the change point)
 
-**以 repository 作者的视角理解设计意图**：
-- 问自己：作者为什么这样设计？这个函数/模块解决什么问题？为什么用这个模式（而非别的方式）？
-- 读提交历史 / git blame：理解代码演化脉络，不臆测作者意图
-- 设计意图不明 → 读测试（测试即文档），读 Issue/讨论记录
-- **只有当你理解了作者的设计意图，才考虑怎么贡献** —— 贡献必须顺应既有设计，而不是另起炉灶
+**Understand the design intent from the repository author's perspective**:
+- Ask yourself: why did the author design it this way? What problem does this function/module solve? Why this pattern (vs. another way)?
+- Read commit history / git blame: understand the code's evolution, don't guess the author's intent
+- Unclear intent → read the tests (tests are docs), read Issues/discussion records
+- **Only when you understand the author's design intent should you consider how to contribute** — contributions must follow the existing design, not start from scratch
 
 #### B.3 Fork and branch
 
@@ -323,7 +323,7 @@ cd {{ source_dir }}
 #    - Go: go test ./... 2>&1 || echo "⚠️ test failures"
 #
 # 2. If the project has no tests → at least manually verify the change:
-python -c "<验证代码片段>" 2>&1 || echo "⚠️ verification failed"
+python -c "<verification code snippet>" 2>&1 || echo "⚠️ verification failed"
 ```
 
 - Tests failing → fix the code → re-test → until passing. **Never submit code that fails tests.**
