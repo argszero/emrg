@@ -129,7 +129,7 @@ Speak as a real participant, **give value first**. Mention {{ project.name }} on
 
 **value-first criterion (upgraded)**: first impression is "answer / participation", not "advertisement"; deleting the identity sentence leaves the reply complete. If not → don't post.
 
-**Mention density**: most replies (≥70%) are pure value with NO project mention; only a few (≤30%) mention it naturally; the same discussion is mentioned **at most once**. Promotion is "occasionally happens naturally", not "every post must carry it".
+**Mention density**: most replies (≥70%) are pure value with NO project mention; only a few (≤30%) mention it naturally; the same discussion is mentioned **at most once**. Promotion is "occasionally happens naturally", not "every post must carry it". **Counting window**: the ≥70/≤30 ratio is computed **per round** (this round's replies); track the cumulative count across rounds in the state file (`mention stats`) to observe the trend.
 
 **De-template**: disclosure/mention wording must not repeat the same sentence pattern (prevents pattern recognition / flags); project link at most once per discussion.
 
@@ -208,7 +208,7 @@ Path: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
 - last learned: <最近一次 §0.4 学习项目的时间 + 项目 commit HEAD（知识新鲜度）>
 - homework record: <本轮参与前读了哪些讨论/查了哪些资料/验证了什么（commit HEAD + 链接 + 验证结论）——§2 功课留痕>
 - flagged/negative: <被 flag 的讨论/渠道 + 时间 + 降温期状态（类似 banned 但可逆）>
-- mention stats: <本轮/近 N 轮纯价值回复 vs 提及项目回复计数（验证 ≥70/≤30 比例）>
+- mention stats: <本轮回复计数：纯价值 vs 提及项目（每轮单独计算 ≥70/≤30 比例）+ 跨轮累计计数（观察趋势）>
 - banned list: <channels marked non-promotable for rule violations>
 ```
 
