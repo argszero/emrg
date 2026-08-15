@@ -964,6 +964,28 @@ dialog::backdrop {
   margin-left: 4px;
 }
 
+/* rant 10:36:39：任务状态徽标（待运行/待调度）+ 下次运行倒计时 */
+.task-pending-badge,
+.task-idle-badge {
+  background: var(--bg-soft);
+  color: var(--text-3);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 4px;
+}
+.task-pending-badge {
+  color: var(--accent);
+  background: var(--accent-soft, var(--bg-soft));
+}
+.task-next-run {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums; /* 倒计时走秒不抖动 */
+}
+
 /* rant 09:17:45：提示词编辑器 Monaco 挂载容器（长提示词 300px 起步） */
 .monaco-host {
   width: 100%;

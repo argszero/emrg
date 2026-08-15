@@ -170,6 +170,10 @@ function makeSandbox(overrides = {}) {
     console,
     setTimeout,
     clearTimeout,
+    // rant 10:36:39：任务倒计时 setInterval 桩（返回递增 id，永不触发 → 测试不泄漏真实定时器）；
+    // 走秒由测试显式调用 EMRG_Dialogs.updateTaskCountdowns() 模拟
+    setInterval: () => { win._intervalCount = (win._intervalCount || 0) + 1; return win._intervalCount; },
+    clearInterval: () => { win._clearCount = (win._clearCount || 0) + 1; },
     Date,
     Math,
     JSON,
@@ -2704,6 +2708,97 @@ test("rant 2026-08-15T09:20:27/09:23:10：面板操作反馈走全局 toast（�
   vm.runInContext('App.doTrigger("missing")', ctx);
   await tick();
   assert.strictEqual(els["toast"].classList.contains("toast-error"), true, "error → error toast");
+});
+
+// ── rant 2026-08-15T10:36:39：任务状态 + 下次运行倒计时 ──
+test("rant 10:36:39：formatCountdown 格式边界（0s/59s/60s/1h05m/负数钳制）", () => {
+  const { ctx } = makeSandbox();
+  const fmt = (n) => vm.runInContext(`EMRG_Dialogs.formatCountdown(${JSON.stringify(n)})`, ctx);
+  assert.strictEqual(fmt(0), "0s");
+  assert.strictEqual(fmt(43), "43s");
+  assert.strictEqual(fmt(59), "59s");
+  assert.strictEqual(fmt(60), "1m00s");
+  assert.strictEqual(fmt(83), "1m23s");
+  assert.strictEqual(fmt(3599), "59m59s");
+  assert.strictEqual(fmt(3600), "1h00m");
+  assert.strictEqual(fmt(3900), "1h05m");
+  assert.strictEqual(fmt(-5), "0s", "负数钳制为 0");
+  assert.strictEqual(fmt(1.9), "1s", "小数向下取整");
+});
+
+test("rant 10:36:39：任务行状态展示 —— 运行中/待运行+倒计时/待调度/已停用 + 每秒递减", async () => {
+  const { ctx, win } = makeSandbox({
+    listTasks: async () => [
+      { name: "running-task", type: "evolution", running: true, interval: 60, next_run_in_seconds: null },
+      { name: "waiting-task", type: "evolution", running: false, interval: 1800, next_run_in_seconds: 43 },
+      { name: "idle-task", type: "custom", running: false, interval: 3600, next_run_in_seconds: null, enabled: true },
+      { name: "disabled-task", type: "custom", running: false, interval: 3600, next_run_in_seconds: null, enabled: false },
+    ],
+    listProjects: async () => [],
+  });
+  let nowMs = 1_700_000_000_000;
+  win.Date = class extends Date { static now() { return nowMs; } };
+  await tick();
+  await vm.runInContext("App.openTasksPanel()", ctx);
+  await tick();
+  const texts = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => {
+    const name = r.querySelector(".task-name") ? r.querySelector(".task-name").textContent : "";
+    const badges = Array.from(r.querySelectorAll(".task-badge")).map((b) => b.textContent).join(",");
+    const next = r.querySelector(".task-next-run") ? r.querySelector(".task-next-run").textContent : "";
+    const hint = r.querySelector(".task-hint") ? r.querySelector(".task-hint").textContent : "";
+    return name + "|" + badges + "|" + next + "|" + hint;
+  })`, ctx);
+  assert.strictEqual(texts.length, 4, "4 任务各一行");
+  assert.ok(texts[0].includes("运行中"), `running 徽标：${texts[0]}`);
+  assert.ok(texts[0].includes("运行中") && !texts[0].includes("下次运行"), "running 无倒计时");
+  assert.ok(texts[1].includes("待运行") && texts[1].includes("下次运行 43s"), `等待任务：${texts[1]}`);
+  assert.ok(texts[2].includes("待调度") && !texts[2].includes("下次运行"), `空闲任务：${texts[2]}`);
+  assert.ok(texts[3].includes("已停用") && !texts[3].includes("待调度"), `禁用任务：${texts[3]}`);
+  // 每秒递减：快进 1s → updateTaskCountdowns（等效 setInterval tick）
+  nowMs += 1000;
+  await vm.runInContext("EMRG_Dialogs.updateTaskCountdowns()", ctx);
+  let nextRuns = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => { const s = r.querySelector(".task-next-run"); return s ? s.textContent : ""; }).filter(Boolean)`, ctx);
+  assert.deepStrictEqual(nextRuns, ["下次运行 42s"], "1s 后递减为 42s");
+  // 快进到 deadline 之后 → 负数钳制为 0s（不显示负数）
+  nowMs += 50_000;
+  await vm.runInContext("EMRG_Dialogs.updateTaskCountdowns()", ctx);
+  nextRuns = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => { const s = r.querySelector(".task-next-run"); return s ? s.textContent : ""; }).filter(Boolean)`, ctx);
+  assert.deepStrictEqual(nextRuns, ["下次运行 0s"], "deadline 过后钳制为 0s");
+});
+
+test("rant 10:36:39：倒计时生命周期 —— 渲染启动 interval、离开任务视图清理（无泄漏）", async () => {
+  const { ctx, win } = makeSandbox({
+    listTasks: async () => [
+      { name: "waiting-task", type: "evolution", running: false, interval: 1800, next_run_in_seconds: 43 },
+    ],
+    listProjects: async () => [],
+  });
+  await tick();
+  const start = win._intervalCount || 0;
+  await vm.runInContext("App.openTasksPanel()", ctx);
+  await tick();
+  assert.ok((win._intervalCount || 0) > start, "渲染含倒计时的任务 → 启动 setInterval");
+  // 打开其他面板 → 停止倒计时（clearInterval 被调用）
+  const clearBefore = win._clearCount || 0;
+  await vm.runInContext("App.switchView('projects')", ctx);
+  assert.ok((win._clearCount || 0) > clearBefore, "离开任务视图 → clearInterval 防泄漏");
+  // 重新打开 → 再次启动（renderTaskList 幂等重启）
+  const start2 = win._intervalCount || 0;
+  await vm.runInContext("App.openTasksPanel()", ctx);
+  await tick();
+  assert.ok((win._intervalCount || 0) > start2, "重开任务面板 → 倒计时重新启动");
+  // 无倒计时的任务（全 running）→ 不启动 interval
+  const { ctx: ctx2, win: win2 } = makeSandbox({
+    listTasks: async () => [
+      { name: "r1", type: "evolution", running: true, interval: 60, next_run_in_seconds: null },
+    ],
+    listProjects: async () => [],
+  });
+  await tick();
+  const s2 = win2._intervalCount || 0;
+  await vm.runInContext("App.openTasksPanel()", ctx2);
+  await tick();
+  assert.strictEqual(win2._intervalCount || 0, s2, "全 running 无倒计时 → 不启动 interval");
 });
 
 test("rant 2026-08-14T15:41:52：快速点击添加任务 —— 元数据未加载完也填充下拉 + 保存成功", async () => {
