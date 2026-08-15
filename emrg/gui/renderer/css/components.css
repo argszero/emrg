@@ -927,6 +927,16 @@ dialog::backdrop {
   color: var(--text-3);
   word-break: break-all;
 }
+/* rant 10:41:43：rant 详情 markdown —— 【】标题预处理后的 h4 层次 + 嵌套列表缩进可见 */
+.rant-md h4 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  color: var(--text-1);
+}
+.rant-md li > ul,
+.rant-md li > ol {
+  margin-left: 1em;
+}
 .task-actions {
   display: flex;
   gap: 4px;

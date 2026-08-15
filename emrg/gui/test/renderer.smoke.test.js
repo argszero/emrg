@@ -102,6 +102,13 @@ function makeEl(id) {
       if (i >= 0) this.parentNode.children.splice(i + 1, 0, c);
       else this.parentNode.children.push(c);
     },
+    get nextElementSibling() {
+      // 忠实 DOM：下一兄弟节点（rant 10:41:43 点击收起依赖 row.nextElementSibling）
+      if (!this.parentNode) return null;
+      const i = this.parentNode.children.indexOf(this);
+      if (i < 0) return null;
+      return this.parentNode.children[i + 1] || null;
+    },
     remove() {
       // 真实脱离父节点（chat.js handleToolEnd 移除 .tool-spinner）
       if (this.parentNode) {
@@ -3268,6 +3275,56 @@ test("rant 14:10:14 P4：rant 面板列表（5 列 + 状态徽标三态 + 筛选
   await tick();
   assert.ok(sent, "sendRant 应被调用");
   assert.strictEqual(sent.message, "希望支持 X");
+});
+
+test("rant 10:41:43：preprocessRantMarkdown —— 【】段标记映射标题 + 原文保留 + 长行不转", () => {
+  const { ctx } = makeSandbox();
+  const pp = (s) => vm.runInContext(`EMRG_Dialogs.preprocessRantMarkdown(${JSON.stringify(s)})`, ctx);
+  // 短行 【xxx】 → #### 标题（原文保留，仅加前缀）
+  const out1 = pp("【任务】\n宿主要求：显示任务状态。\n【修改方案】\n加倒计时。");
+  assert.ok(out1.includes("#### 【任务】"), `【任务】应转 h4 标题：${out1}`);
+  assert.ok(out1.includes("#### 【修改方案】"), `【修改方案】应转 h4：${out1}`);
+  assert.ok(out1.includes("宿主要求：显示任务状态。"), "正文行保持原文");
+  // 长行（>60 字符，如带完整设计的 rant 标题）→ 不转标题，保持正文
+  const longLine = "【GUI 任务管理：显示任务当前状态 + 下次运行倒计时——完整设计如下，照抄实施，勿需再读文档】";
+  const out2 = pp(longLine);
+  assert.strictEqual(out2, longLine, "长行不应转标题");
+  // 空/非字符串安全
+  assert.strictEqual(pp(""), "", "空串安全");
+  assert.strictEqual(pp(null), "", "null 安全");
+});
+
+test("rant 10:41:43：rant 详情点击收起 —— 再点已展开行 → 收起；点其他行 → 换展开", async () => {
+  const rants = [
+    { timestamp: "2026-08-15T10:00:00", project: "emrg", status: "pending", progress: null, message: "【任务】\n第一条" },
+    { timestamp: "2026-08-15T11:00:00", project: "emrg", status: "pending", progress: null, message: "【任务】\n第二条" },
+  ];
+  const { ctx, els } = makeSandbox({
+    listRants: async () => rants,
+    listProjects: async () => [],
+  });
+  await tick();
+  await vm.runInContext("App.openRantsPanel()", ctx);
+  await tick();
+  const list = els["rant-list"];
+  const rows = list.children.filter((c) => c.className.includes("task-row"));
+  assert.strictEqual(rows.length, 2);
+  // 点行0 → 展开
+  rows[0].click();
+  await tick();
+  assert.ok(list.querySelector(".rant-detail"), "点行0应展开详情");
+  // 再点行0 → 收起（修复前：删+建 → 永远展开）
+  rows[0].click();
+  await tick();
+  assert.strictEqual(list.querySelector(".rant-detail"), null, "再点已展开行应收起");
+  // 点行0 → 展开；点行1 → 旧的收起、行1 展开（行为保持）
+  rows[0].click();
+  await tick();
+  assert.ok(list.querySelector(".rant-detail"), "行0展开");
+  rows[1].click();
+  await tick();
+  const details = list.children.filter((c) => c.className.includes("rant-detail"));
+  assert.strictEqual(details.length, 1, "切换查看不同 rant → 旧的收起新的展开（仅 1 个详情）");
 });
 
 test("rant 21:36:01/21:38:25/21:46:53：三面板标题 + Rant 列头 + 项目 hint 移除 + i18n.apply 保留控件", async () => {
