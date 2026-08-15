@@ -1305,16 +1305,20 @@ const Dialogs = (() => {
         const msg = r.message || "";
         const firstLine = (msg.split("\n").find((l) => l.trim() !== "") || "").replace(/^#{1,6}\s+/, "").replace(/^[>*\-\s]+/, "");
         row.appendChild(el("span", { class: "rant-col-content" }, firstLine || "—"));
-        // 详情展开（rant 21:36:01：完整 message 按 markdown 渲染 + 进度显示）
+        // 详情展开/收起（rant 10:41:43：点击已展开的本行 → 收起，不再无条件重建）
         row.addEventListener("click", async () => {
-          const detail = list.querySelector(".rant-detail");
-          if (detail) detail.remove();
+          const existing = row.nextElementSibling;
+          const isSelfDetail = existing && existing.classList.contains("rant-detail");
+          // 先移除所有已展开的详情（含其他行的）
+          list.querySelectorAll(".rant-detail").forEach((d) => d.remove());
+          if (isSelfDetail) return; // 点自己已展开 → 收起
           const detailRow = el("div", { class: "rant-detail", style: "padding:6px 8px;border-top:1px solid var(--border);font-size:var(--fs-secondary);" });
           detailRow.appendChild(el("div", { class: "rant-meta" }, `${ts || "—"} · ${r.project || "—"} · ${stText}`));
           const md = el("div", { class: "msg-body rant-md" });
           try {
             if (window.emrgMarkdown && window.emrgMarkdown.renderMarkdown) {
-              md.innerHTML = await window.emrgMarkdown.renderMarkdown(msg);
+              // rant 10:41:43：【】标题预处理（markdown 视觉层次；不破坏原文）
+              md.innerHTML = await window.emrgMarkdown.renderMarkdown(preprocessRantMarkdown(msg));
             } else {
               md.textContent = msg;
             }
@@ -1331,6 +1335,20 @@ const Dialogs = (() => {
     } catch (e) {
       list.innerHTML = `<div class="help-row"><span class="help-hint">${_t("rants.loadFailed", { msg: e.message })}</span></div>`;
     }
+  }
+
+  // rant 10:41:43：rant 详情 markdown 预处理 —— 行首 【xxx】 段标记映射为标题级
+  // （【任务】→####），让整篇有视觉层次；仅短行（≤60 字符）转标题，长内容行保持正文。
+  // 原文保留（只加 #### 前缀，不删除/改写原文）。
+  function preprocessRantMarkdown(text) {
+    if (!text) return text || "";
+    return String(text).split("\n").map((line) => {
+      const t = line.trim();
+      if (/^【[^】]{1,24}】/.test(t) && t.length <= 60) {
+        return `#### ${t}`;
+      }
+      return line;
+    }).join("\n");
   }
 
   function openRantForm() {
@@ -1564,6 +1582,7 @@ const Dialogs = (() => {
     showProjectSessionsInPanel, // rant 14:10:14 P5：项目面板内嵌会话列表（测试复用）
     initRantPanel, // rant 14:10:14 P4：rant 面板初始化
     renderRantList, // rant 14:10:14 P4：rant 列表渲染（测试/刷新复用）
+    preprocessRantMarkdown, // rant 10:41:43：rant 详情 markdown 【】标题预处理（测试复用）
     setRantFilter, // rant 14:10:14 P4：rant 状态筛选（测试复用）
     openRantForm, // rant 14:10:14 P4：新建 rant 表单（测试复用）
     submitRantForm, // rant 14:10:14 P4：rant 表单提交（测试复用）
