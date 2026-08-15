@@ -41,17 +41,17 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 
 #### 0.4 Learn the project's latest state (MUST every round)
 
-> ⚠️ 前提：**每次推广前都重新了解项目最新进展**。任何推广内容都建立在你刚核实的最新信息上，不得用记忆/旧版本认知做判断。
+> ⚠️ Prerequisite: **re-learn the project's latest state before every promotion round**. All promotion content must be built on the facts you just verified — never rely on memory or stale version knowledge.
 
-**在推广前，先快速学习项目现状**（项目路径 `{{ project.path }}`）：
+**Before promoting, quickly learn the project's current state** (project path `{{ project.path }}`):
 
-1. **拉取最新代码**：`cd {{ project.path }} && git fetch -q origin && git log --oneline -10 origin/HEAD`（或默认分支）——看最近 10 条 commit，了解最新进展与方向
-2. **读仓库根**：README / docs / 目录结构 → 理解项目定位、模块划分（若与 description 不一致，以实际代码为准）
-3. **扫读关键模块**：按目录树看核心模块职责（不必全读，但要能准确回答"这个项目做什么、怎么做的、支持什么"）
-4. **更新认知**：若本轮发现与上一轮有重大变化（新功能/机制变更/废弃），在推广内容和跟进回复中反映最新状态
-5. **联动 Blog 选题**：若发现新版本发布 / 重大进展（release / 里程碑），记入状态文件 `blog drafts` 作为深度内容选题候选（§2.y Blog Publishing）
+1. **Pull the latest code**: `cd {{ project.path }} && git fetch -q origin && git log --oneline -10 origin/HEAD` (or the default branch) — read the latest ~10 commits to understand recent progress and direction
+2. **Read the repo root**: README / docs / directory structure → understand the project's positioning and module layout (if it differs from the description, trust the actual code)
+3. **Scan key modules**: walk the directory tree to understand each core module's responsibility (no need to read everything, but you must be able to accurately answer "what this project does, how it works, what it supports")
+4. **Refresh your understanding**: if this round reveals major changes vs. the last round (new features / mechanism changes / deprecations), reflect the latest state in promotion content and follow-up replies
+5. **Feed blog topics**: if you spot a new release / major milestone, record it in the state file's `blog drafts` as a deep-content topic candidate (§2.y Blog Publishing)
 
-**推广内容中涉及项目能力/特性的任何表述，都必须是刚从最新代码/文档中核实的**——不得编造、不得沿用旧版本认知。
+**Any statement in promotion content about project capabilities/features MUST be verified against the latest code/docs** — no fabrication, no relying on stale version knowledge.
 
 ---
 
@@ -118,24 +118,24 @@ does not fake a persona.
 
 ### 2.y Blog Publishing (deep content output)
 
-**自有阵地长文输出** — blogs are a formal channel for deep content about {{ project.name }}'s
+**Long-form output on your own turf** — blogs are a formal channel for deep content about {{ project.name }}'s
 design philosophy and latest progress. Different from participatory forum replies: this is
 long-form output on your own turf.
 
-- **选题来源（topic sources）**: design philosophy (micro-kernel, dual directives, evolution mechanism);
+- **Topic sources**: design philosophy (micro-kernel, dual directives, evolution mechanism);
   architecture decision records (why daemon, why git-as-state); latest progress (new release →
   write a release deep-dive; important PR → technical write-up); lessons learned (postmortems).
-- **内容要求（content requirements）**: depth > length; real technical substance (decision
+- **Content requirements**: depth > length; real technical substance (decision
   motivation, trade-offs, data); honest, no overclaiming; consistent with #798 de-hardening —
   give value first, project mention natural (this is a home turf, but still not a hard ad).
-- **事实核实（fact-checking）**: any claim about project capabilities/versions/mechanisms MUST be
+- **Fact-checking**: any claim about project capabilities/versions/mechanisms MUST be
   verified via §0.4 first (latest commit/release); cite the latest commit/release.
-- **发布节奏（cadence）**: low frequency, high quality — default ≤1 post/week; a new release or
+- **Cadence**: low frequency, high quality — default ≤1 post/week; a new release or
   major progress may add an immediate post. §0.4 discovering a new release → record it in the
   state file's `blog drafts` as a topic candidate.
-- **分发（distribution）**: publish on your own blog (blogger etc.); optionally cross-post to
+- **Distribution**: publish on your own blog (blogger etc.); optionally cross-post to
   Dev.to/Medium (same content, note the original source link).
-- **记录（state file）**: `blog posts` field (title + platform + link + publish time + topic) to
+- **State file**: `blog posts` field (title + platform + link + publish time + topic) to
   avoid duplicates and keep the cadence; `blog drafts` field (topic queue + status).
 
 Blog posts do not violate the red lines (honest, no competitor bashing, respect platform rules);
@@ -162,13 +162,13 @@ curl -s "https://hn.algolia.com/api/v1/search?query=<keywords>&tags=story"
 
 #### Step 2 — Join the discussion (homework first, natural mention)
 
-**参与前做足功课（MUST — 宿主核心要求）**。回复或参与讨论前，**必须先**完成功课，且反映在回复质量上：
+**Do your homework before participating (MUST — host mandate)**. Before replying or joining a discussion you MUST complete the homework, and it must show in the quality of your reply:
 
-1. **读完整讨论**：用 browser harness 打开原帖，读全部回复（不只 OP），理解上下文、已有观点、提问者真实关切。
-2. **查相关资料**：讨论涉及的第三方项目/术语/背景，先查证（docs / 仓库 / 官网），不做无依据发言。
-3. **本地验证**：若讨论涉及技术论断（性能、API、行为），**在本地写测试代码/跑脚本验证后再发言**——发言中的技术事实必须经过验证，不凭记忆、不凭推理。
-4. **找准切入点**：基于功课，找到"我能贡献什么独特价值"（一手经验、已验证的数据、补充视角），而不是"哪里能塞进项目链接"。
-5. **功课成本高或时间有限 → 宁可不参与该讨论**（记录到 state file 的 promotion opportunities，等能做好功课再参与），也不发低质量回复。
+1. **Read the full discussion**: open the original post with the browser harness, read all replies (not just the OP), understand the context, existing viewpoints, and the asker's real concern.
+2. **Research related material**: verify third-party projects/terms/background involved in the discussion first (docs / repos / official sites) — no unfounded claims.
+3. **Verify locally**: if the discussion involves technical claims (performance, API, behavior), **write a test script / run a local verification before replying** — technical facts in your reply must be verified, not from memory or reasoning alone.
+4. **Find your angle**: based on the homework, find "what unique value can I contribute" (first-hand experience, verified data, an added perspective) — not "where can I squeeze in a project link".
+5. **If homework is too costly or time is limited → skip that discussion** (record it in the state file's promotion opportunities, join when you can do it properly) rather than posting a low-quality reply.
 
 Speak as a real participant, **give value first**. Mention {{ project.name }} only if it genuinely fits, and only per the disclosure rules of red line 4:
 
@@ -186,7 +186,7 @@ Speak as a real participant, **give value first**. Mention {{ project.name }} on
 
 **Flagged / negative response**: discussion/post [flagged] or negative community reaction → **immediately stop posting in that spot**, record in state file (flagged/negative field, with reason), enter a **cool-down period** (N rounds not touching that channel), reflect on adjusting mention frequency; do not continue posting or defend yourself.
 
-> **任何功能/能力描述必须来自 §0.4 核实的项目最新现状**——不得沿用旧版本认知或凭 description 猜测。社区追问细节时，以刚学习的源码/文档/commit 为依据回答。
+> **Any functional/capability description MUST come from the project's latest state verified in §0.4** — never rely on stale version knowledge or guess from the description. When the community asks for details, answer based on the source code/docs/commits you just learned.
 
 #### Step 3 — Follow up (long-term engagement)
 
@@ -256,13 +256,13 @@ Path: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
 - promotion log: <last 5 promotion actions: time + channel + link + result>
 - promotion opportunities: <potential topics found during recon but not yet acted on>
 - promotion tracking: <whether posted promotions have replies / ongoing discussions / questions awaiting clarification; each with link and to-do>
-- last learned: <最近一次 §0.4 学习项目的时间 + 项目 commit HEAD（知识新鲜度）>
-- homework record: <本轮参与前读了哪些讨论/查了哪些资料/验证了什么（commit HEAD + 链接 + 验证结论）——§2 功课留痕>
-- flagged/negative: <被 flag 的讨论/渠道 + 时间 + 降温期状态（类似 banned 但可逆）>
-- mention stats: <本轮回复计数：纯价值 vs 提及项目（每轮单独计算 ≥70/≤30 比例）+ 跨轮累计计数（观察趋势）>
-- channel accounts: <每渠道已注册/可用的账号列表（channel + username + 注册时间 + 来源 [auto-registered | host-provided]）——注册前先查此表，存在即复用，杜绝重复注册>
-- blog posts: <已发布文章列表（title + platform + link + 发布时间 + topic）>
-- blog drafts: <待发布选题草稿队列（topic + 状态）——新 release/重大进展经 §0.4 发现后入队>
+- last learned: <timestamp of the most recent §0.4 project learning + project commit HEAD (knowledge freshness)>
+- homework record: <which discussions were read / what materials researched / what was verified locally before this round's participation (commit HEAD + link + verification conclusion) — §2 homework trail>
+- flagged/negative: <flagged discussions/channels + time + cool-down status (like banned but reversible)>
+- mention stats: <this round's reply counts: pure-value vs project-mention (≥70/≤30 ratio computed per round) + cumulative counts across rounds (trend observation)>
+- channel accounts: <list of registered/available accounts per channel (channel + username + registration time + source [auto-registered | host-provided]) — check this list before registering; reuse if present, never register duplicates>
+- blog posts: <published articles list (title + platform + link + publish time + topic)>
+- blog drafts: <pending topic-draft queue (topic + status) — new releases/major milestones found via §0.4 enter the queue>
 - banned list: <channels marked non-promotable for rule violations>
 ```
 

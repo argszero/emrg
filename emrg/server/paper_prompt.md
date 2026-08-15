@@ -66,11 +66,11 @@ At the start of every cycle, you MUST read `{{ source_dir }}/.emrg/sessions/{{ s
 
 ```markdown
 # Paper State
-- 当前阶段: Phase 2 | 3 | 4
-- 上次完成: <上一轮做了什么>
-- 下一步: <本轮计划做什么>
-- 阻塞: <什么在阻止进展？空=无阻塞>
-- 未处理 Rant: <相关 rant 的时间戳和摘要，无则写"无">
+- current phase: Phase 2 | 3 | 4
+- last completed: <what was done last round>
+- next step: <what this round plans to do>
+- blocked: <what is blocking progress? empty = no blocker>
+- unhandled rants: <timestamps and summaries of relevant rants, "none" if none>
 ```
 
 At the end of every cycle, update `{{ source_dir }}/.emrg/sessions/{{ session_id }}/paper_state.md`. This solves the cross-cycle memory problem — each new conversation gets "where we left off" from the state file instead of guessing from memory.
@@ -115,7 +115,7 @@ Handling rules:
 **Read the state file** (MUST run first):
 
 ```bash
-cat {{ source_dir }}/.emrg/sessions/{{ session_id }}/paper_state.md 2>/dev/null || echo "## Paper State\n- 当前阶段: Phase 1\n- 上次完成: 无\n- 下一步: 探索研究方向\n- 阻塞: 无" > {{ source_dir }}/.emrg/sessions/{{ session_id }}/paper_state.md
+cat {{ source_dir }}/.emrg/sessions/{{ session_id }}/paper_state.md 2>/dev/null || echo "## Paper State\n- current phase: Phase 1\n- last completed: none\n- next step: explore research direction\n- blocked: none" > {{ source_dir }}/.emrg/sessions/{{ session_id }}/paper_state.md
 ```
 
 Perform different review operations based on the current phase:
@@ -139,7 +139,7 @@ Check paper-related files under the project directory `{{ source_dir }}`:
 
 1. **First list already-read literature** (avoid duplicates):
    ```bash
-   ls {{ source_dir }}/literature/ 2>/dev/null || echo "无 literature/ 目录（尚未开始文献工作）"
+   ls {{ source_dir }}/literature/ 2>/dev/null || echo "[no literature/ directory — literature work has not started]"
    ```
 2. **Prefer the browser harness skill** to access arXiv (cs.LG, cs.CL, cs.AI) and search for new preprints from the last 6 months related to the research direction
 3. **If browser harness is unavailable**, fall back to bash + curl calling the arXiv API. Keywords MUST derive from the project's research direction (read Agent.md / abstract / state file to determine direction terms, e.g. mutual learning, co-teaching, self-play, knowledge distillation); using generic broad terms is forbidden:
@@ -182,7 +182,7 @@ Based on the current phase and review results, determine this round's goal:
 if which latexmk >/dev/null 2>&1; then
   cd {{ source_dir }} && latexmk -pdf -interaction=nonstopmode main.tex 2>&1 | tail -20
 else
-  echo "latexmk 不可用——跳过编译，改为文本级检查（交叉引用/参考文献编号一致性）"
+  echo "latexmk unavailable — skipping compilation, falling back to text-level checks (cross-reference / bibliography numbering consistency)"
 fi
 ```
 
@@ -197,10 +197,10 @@ import json, os
 rants_file = os.path.expanduser("~/.emrg/rants.jsonl")
 rants = [json.loads(l) for l in open(rants_file) if l.strip()]
 for i, r in enumerate(rants):
-    if r.get("status") == "pending" and "本轮已处理的 rant 的 timestamp":
+    if r.get("status") == "pending" and "<timestamp of the rant handled this round>":
         r["status"] = "acknowledged"
         r["completed"] = "<ISO timestamp>"
-        # 重建字段顺序：timestamp → project → status → progress → completed → message
+        # Rebuild field order: timestamp → project → status → progress → completed → message
         rants[i] = {
             "timestamp": r.get("timestamp"),
             "project": r.get("project"),

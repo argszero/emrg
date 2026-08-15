@@ -668,13 +668,13 @@ def test_open_source_template_full_code_study_b2b():
     # 1) the new section exists (positive discrimination: absent section → red)
     assert "B.2b Read the full codebase" in out, "B.2b 全代码研读节应渲染"
     # 2) must read the complete codebase, not just the target file
-    assert "读完整代码" in out, "读完整代码要求应渲染"
+    assert "(not just the target files)" in out, "读完整代码要求应渲染"
     # 3) must always re-read the latest code before each contribution
-    assert "每次贡献前都重新读取最新代码" in out, "每次读取最新代码要求应渲染"
+    assert "re-read the latest code before every contribution" in out, "每次读取最新代码要求应渲染"
     # 4) understand design intent from the repository author's perspective
-    assert "以 repository 作者的视角理解设计意图" in out, "作者视角设计意图要求应渲染"
+    assert "Understand the design intent from the repository author's perspective" in out, "作者视角设计意图要求应渲染"
     # 5) only after understanding the design may one contribute — align with it
-    assert "只有当你理解了作者的设计意图" in out, "理解设计意图后才可贡献应渲染"
+    assert "Only when you understand the author's design intent should you consider how to contribute" in out, "理解设计意图后才可贡献应渲染"
 
 
 def test_promote_template_learn_latest_state_04():
@@ -700,14 +700,14 @@ def test_promote_template_learn_latest_state_04():
     # 1) the new section exists (positive discrimination: absent section → red)
     assert "0.4 Learn the project's latest state" in out, "0.4 节应渲染"
     # 2) MUST every round
-    assert "每次推广前都重新了解项目最新进展" in out, "每轮 MUST 前提应渲染"
+    assert "re-learn the project's latest state before every promotion round" in out, "每轮 MUST 前提应渲染"
     # 3) latest commit inspection command with project.path
     assert "git fetch -q origin" in out, "git fetch 最新代码应渲染"
     assert "git log --oneline -10 origin/HEAD" in out, "最近 commit 检视应渲染"
     # 4) claims must come from just-verified state, not stale memory
-    assert "不得编造、不得沿用旧版本认知" in out, "不得沿用旧认知应渲染"
+    assert "no fabrication, no relying on stale version knowledge" in out, "不得沿用旧认知应渲染"
     # 5) Step 2 feature descriptions must come from §0.4 verification
-    assert "任何功能/能力描述必须来自 §0.4 核实的项目最新现状" in out, "Step 2 功能描述来源应渲染"
+    assert "MUST come from the project's latest state verified in §0.4" in out, "Step 2 功能描述来源应渲染"
     # 6) state file records knowledge freshness
     assert "last learned" in out, "状态文件 last learned 字段应渲染"
     # 7) reflection Q3 records what was learned (commit range / modules)
@@ -735,10 +735,10 @@ def test_promote_template_homework_first_dehardening():
         evolution_count=0, git_path="git", gh_path="gh",
     )
     # A. homework-before-participating section exists (positive discrimination)
-    assert "参与前做足功课（MUST — 宿主核心要求）" in out, "§2 功课先行节应渲染"
-    assert "读完整讨论" in out, "读完整讨论要求应渲染"
-    assert "本地写测试代码/跑脚本验证后再发言" in out, "本地验证要求应渲染"
-    assert "宁可不参与该讨论" in out, "做不好功课宁可跳过应渲染"
+    assert "Do your homework before participating (MUST — host mandate)" in out, "§2 功课先行节应渲染"
+    assert "Read the full discussion" in out, "读完整讨论要求应渲染"
+    assert "write a test script / run a local verification before replying" in out, "本地验证要求应渲染"
+    assert "skip that discussion" in out, "做不好功课宁可跳过应渲染"
     # B. red line 4 disclosure default OFF
     assert "disclosure default OFF" in out, "红线 4 披露默认关闭应渲染"
     assert "NO disclosure, NO project mention" in out, "普通参与不披露应渲染"
@@ -790,7 +790,7 @@ def test_promote_template_registration_blog_sections():
     # B. blog state fields + §0.4 linkage
     assert "blog posts" in out, "状态文件 blog posts 字段应渲染"
     assert "blog drafts" in out, "状态文件 blog drafts 字段应渲染"
-    assert "联动 Blog 选题" in out, "§0.4 新 release → blog drafts 联动应渲染"
+    assert "deep-content topic candidate" in out, "§0.4 新 release → blog drafts 联动应渲染"
     # B. red line 7 account asset maintenance
     assert "Registered accounts are long-term assets" in out, "红线 7 账号长期资产应渲染"
 
