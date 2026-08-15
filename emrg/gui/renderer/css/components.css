@@ -964,6 +964,21 @@ dialog::backdrop {
   margin-left: 4px;
 }
 
+/* rant 09:17:45：提示词编辑器 Monaco 挂载容器（长提示词 300px 起步） */
+.monaco-host {
+  width: 100%;
+  min-height: 300px;
+  margin-top: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-1);
+}
+.task-form .hidden,
+.monaco-host.hidden {
+  display: none;
+}
+
 .theme-options {
   display: flex;
   gap: var(--sp-2);
