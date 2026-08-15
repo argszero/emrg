@@ -801,14 +801,41 @@ const Dialogs = (() => {
     };
   }
 
+  function flushTemplateEditorWaiters() {
+    const waiters = templateEditorWaiters.splice(0);
+    waiters.forEach((fn) => { try { fn(templateEditor); } catch { /* ignore */ } });
+  }
+
+  function fallbackTemplateEditorShim(reason) {
+    // eslint-disable-next-line no-console
+    console.warn("[dialogs] Monaco unavailable (" + reason + ") — using textarea shim");
+    templateEditor = createTemplateEditorShim();
+    flushTemplateEditorWaiters();
+  }
+
   function initTemplateMonaco() {
     if (templateMonacoInit) return;
     templateMonacoInit = true;
     try {
-      window.require.config({ paths: { vs: "../vendor/monaco/vs" } });
+      // preferScriptTags: sandboxed renderer (sandbox:true, nodeIntegration:false) exposes
+      // process.versions.electron + process.type==='renderer' → loader would pick the Node
+      // loader branch which needs nodeRequire (undefined in sandbox) → load fails silently.
+      // Script-tag loader needs no eval/nodeRequire and works under CSP 'self' + file://.
+      // (pm25coder Windows host review, #801)
+      window.require.config({ paths: { vs: "../vendor/monaco/vs" }, preferScriptTags: true });
+      // errback + timeout: if editor.main fails to load, degrade to the shim instead of
+      // leaving a dead empty .monaco-host (waiters would accumulate, save reads "" → confusing
+      // "templateInvalid" toast). (#801 review finding 2)
+      const t = setTimeout(() => {
+        if (!templateEditor) fallbackTemplateEditorShim("timeout");
+      }, 8000);
       window.require(["vs/editor/editor.main"], () => {
+        clearTimeout(t);
         const host = $("task-template-prompt");
-        if (!host || !window.monaco || !window.monaco.editor) return;
+        if (!host || !window.monaco || !window.monaco.editor) {
+          fallbackTemplateEditorShim("editor.main missing");
+          return;
+        }
         templateEditor = window.monaco.editor.create(host, {
           value: "",
           language: "markdown",
@@ -828,13 +855,13 @@ const Dialogs = (() => {
             window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", syncTemplateEditorTheme);
           } catch { /* ignore */ }
         }
-        const waiters = templateEditorWaiters.splice(0);
-        waiters.forEach((fn) => { try { fn(templateEditor); } catch { /* ignore */ } });
+        flushTemplateEditorWaiters();
+      }, (err) => {
+        clearTimeout(t);
+        fallbackTemplateEditorShim(String(err || "module load error"));
       });
     } catch (e) {
-      templateEditor = createTemplateEditorShim();
-      const waiters = templateEditorWaiters.splice(0);
-      waiters.forEach((fn) => { try { fn(templateEditor); } catch { /* ignore */ } });
+      fallbackTemplateEditorShim(String(e));
     }
   }
 

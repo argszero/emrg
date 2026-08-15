@@ -2767,6 +2767,47 @@ test("P3：自定义类型管理 —— 内置只读；自定义增删改走模�
   assert.ok(createdTpl.prompt.includes("nightly"), "prompt 原样提交");
 });
 
+test("rant 09:17:45 review：#801 Monaco 加载失败 errback→shim + preferScriptTags 配置", async () => {
+  // pm25coder Windows 实测反馈（#801 review）：
+  // ① sandbox renderer 下 loader 会走 Node 分支（nodeRequire undefined）→ 必须 preferScriptTags:true
+  // ② editor.main 加载失败时若无 errback，waiters 永久堆积 + 表单空白死区 → 必须 errback→shim
+  const configCaptured = {};
+  const { ctx, win, els } = makeSandbox({
+    listTasks: async () => [],
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
+    taskTemplateList: async () => [
+      { name: "evolution", builtin: true, template: "evolution_prompt.md" },
+      { name: "sync", builtin: false, template: "sync.md", prompt: "# sync prompt" },
+    ],
+  });
+  win.require = (deps, ok, err) => {
+    assert.ok(Array.isArray(deps) && deps[0] === "vs/editor/editor.main", "应加载 editor.main");
+    setTimeout(() => err && err(new Error("mock load failure")), 0); // 模拟加载失败
+  };
+  win.require.config = (cfg) => { Object.assign(configCaptured, cfg); };
+  await vm.runInContext("App.openTasksPanel()", ctx);
+  await tick();
+  els["task-template-list"].classList.add("hidden");
+  await vm.runInContext('document.getElementById("task-template-mgr-btn").click()', ctx);
+  await tick();
+  const rows = els["task-template-list"].children.filter((c) => c.className.includes("task-row"));
+  assert.strictEqual(rows.length, 2, "内置 + 自定义各一行");
+  // 内置"查看"→ withTemplateEditor：window.require 存在 → 不走立即 shim 分支 → initTemplateMonaco
+  rows[0].querySelectorAll(".model-action-btn")[0].click();
+  await tick();
+  await tick();
+  assert.strictEqual(configCaptured.preferScriptTags, true, "sandbox 环境必须 preferScriptTags:true（Node loader 分支需 nodeRequire）");
+  assert.strictEqual(els["task-template-form"].classList.contains("hidden"), false, "errback 后表单应正常展开（shim 接管，非空白死区）");
+  assert.strictEqual(els["task-template-save"].classList.contains("hidden"), true, "内置只读仍隐藏保存按钮");
+  const promptVal = vm.runInContext('document.getElementById("task-template-prompt").value', ctx);
+  assert.ok(String(promptVal).includes("prompt"), "errback→shim 后内置提示词仍载入（shim 写 host.value）");
+  // 保存路径读 shim 值不返回空 → 无误导性 templateInvalid
+  vm.runInContext('document.getElementById("task-template-name").value = "sync"', ctx);
+  await vm.runInContext("EMRG_Dialogs.saveTemplateForm()", ctx);
+  await tick();
+  assert.ok(String(promptVal).length > 0, "shim getValue 非空");
+});
+
 test("rant 14:15:12：切会话加载最近历史（只读气泡 + 加载条），滚动到顶加载更早", async () => {
   const calls = [];
   const { ctx, els } = makeSandbox({
