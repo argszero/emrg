@@ -142,6 +142,7 @@ const ELEMENT_IDS = [
   "growth-card", "growth-count", "about-recent",
   "about-update", "about-update-check-btn",
   "github-banner", "github-banner-msg", "github-banner-connect", "github-banner-dismiss",
+  "toast", "toast-msg",
   // rant 18:23:15 P3：定时任务/自定义类型管理（settings 区）
   "task-list", "task-add-btn", "task-template-mgr-btn",
   "task-form", "task-form-name", "task-form-type", "task-form-project",
@@ -2658,6 +2659,51 @@ test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 t
   assert.strictEqual(created.interval, 600);
   assert.strictEqual(created.enabled, true);
   assert.strictEqual(vm.runInContext('document.getElementById("task-form").classList.contains("hidden")', ctx), true, "保存后表单收起");
+});
+
+test("rant 2026-08-15T09:20:27/09:23:10：面板操作反馈走全局 toast（任意视图可见）+ Trigger 三态语义", async () => {
+  const triggerCalls = [];
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [
+      { name: "emrg-task", type: "evolution", running: true, interval: 60 },
+      { name: "nightly", type: "custom", running: false, interval: 3600 },
+    ],
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
+    triggerTask: async (payload) => {
+      triggerCalls.push(payload);
+      if (payload.name === "emrg-task") return { name: "emrg-task", result: "running", detail: "task is currently executing" };
+      if (payload.name === "missing") return { error: "task 'missing' not found" };
+      return { name: "nightly", result: "triggered", detail: "next run moved to immediately" };
+    },
+  });
+  await tick();
+  await vm.runInContext("App.openTasksPanel()", ctx);
+  await tick();
+  const rows = vm.runInContext('Array.from(document.getElementById("task-list").children).filter((c) => c.className.includes("task-row"))', ctx);
+  assert.strictEqual(rows.length, 2, "两个任务各一行");
+  // running 徽标 + 触发按钮禁用（rant 09:23:10 从源头减少误点）
+  const runBadges = rows[0].querySelectorAll(".task-running-badge").length;
+  assert.strictEqual(runBadges, 1, "running 任务应有徽标");
+  const btns0 = rows[0].querySelectorAll(".model-action-btn");
+  const btns1 = rows[1].querySelectorAll(".model-action-btn");
+  assert.strictEqual(btns0[0].disabled, true, "running 任务触发按钮应禁用");
+  assert.strictEqual(btns1[0].disabled, false, "空闲任务触发按钮可用");
+  // 触发空闲任务 → triggered → success toast（面板视图下 toast 可见）
+  btns1[0].click();
+  await tick();
+  assert.strictEqual(triggerCalls.length, 1, "触发应调用 triggerTask");
+  assert.strictEqual(triggerCalls[0].name, "nightly");
+  assert.strictEqual(els["toast"].classList.contains("toast-success"), true, "triggered → success toast");
+  assert.ok(String(els["toast-msg"].textContent).includes("nightly"), "toast 消息含任务名");
+  // /trigger 路径：running → info toast（不再假成功）
+  await vm.runInContext('App.doTrigger("emrg-task")', ctx);
+  await tick();
+  assert.strictEqual(els["toast"].classList.contains("toast-info"), true, "running → info toast");
+  assert.ok(String(els["toast-msg"].textContent).includes("emrg-task"), "info toast 含任务名");
+  // 触发失败 → error toast
+  vm.runInContext('App.doTrigger("missing")', ctx);
+  await tick();
+  assert.strictEqual(els["toast"].classList.contains("toast-error"), true, "error → error toast");
 });
 
 test("rant 2026-08-14T15:41:52：快速点击添加任务 —— 元数据未加载完也填充下拉 + 保存成功", async () => {
