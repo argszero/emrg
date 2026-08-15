@@ -688,6 +688,8 @@ const App = (() => {
   function switchView(name) {
     if (!VIEWS.includes(name)) return;
     const isOpen = state.activeView === name;
+    // rant 10:36:39：离开任务视图 → 停倒计时（防泄漏；重开由 renderTaskList 重新启动）
+    if (state.activeView === "tasks" && name !== "tasks") Dialogs.stopTaskCountdown?.();
     for (const p of VIEWS) {
       const btn = $(`nav-${p}`);
       if (btn) btn.classList.toggle("active", false);
@@ -709,6 +711,8 @@ const App = (() => {
       setWorkspaceChrome("panel"); // 隐藏输入区 + 成果面板 + 空状态
     } else {
       // 点当前激活项（toggle 关闭）/ 点 💬 会话 → 回会话视图
+      // rant 10:36:39：从任务面板 toggle 关闭同样要停倒计时（activeView 即将离开 tasks）
+      if (state.activeView === "tasks") Dialogs.stopTaskCountdown?.();
       showSessionsView();
     }
   }

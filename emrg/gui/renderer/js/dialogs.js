@@ -619,6 +619,49 @@ const Dialogs = (() => {
   let taskProjects = []; // listProjects 结果 — 项目下拉仅已注册项目（决策点③）
   let editingTask = null; // 正在编辑的任务名（null = 新增；daemon 以 name 定位 → 名称不可改）
   let editingTemplate = null; // 正在编辑的自定义类型名（null = 新增；名称不可改）
+  // rant 2026-08-15T10:36:39：任务状态 + 下次运行倒计时
+  // 倒计时以"渲染时快照的 deadline"为基准每秒递减（直接改 DOM 文本，不重渲染整行防闪烁/滚动丢失）
+  let taskCountdownTimer = null; // setInterval id（面板激活时启动，离开视图时清除防泄漏）
+  let taskCountdowns = []; // [{name, deadline, span}] — 每 1s 由 updateTaskCountdowns 更新
+
+  // 倒计时格式化：≤60s "43s"；≤1h "1m23s"；>1h "1h05m"；负数/非数钳制为 0
+  function formatCountdown(totalSeconds) {
+    const s = Math.max(0, Math.floor(Number(totalSeconds) || 0));
+    if (s < 60) return `${s}s`;
+    if (s < 3600) {
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return `${m}m${String(sec).padStart(2, "0")}s`;
+    }
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    return `${h}h${String(m).padStart(2, "0")}m`;
+  }
+
+  function updateTaskCountdowns() {
+    for (const e of taskCountdowns) {
+      const rem = Math.max(0, Math.ceil((e.deadline - Date.now()) / 1000));
+      e.span.textContent = _t("app.taskNextRun", { n: formatCountdown(rem) });
+    }
+  }
+
+  function stopTaskCountdown() {
+    if (taskCountdownTimer !== null) {
+      clearInterval(taskCountdownTimer);
+      taskCountdownTimer = null;
+    }
+    taskCountdowns = [];
+  }
+
+  function startTaskCountdown() {
+    // 幂等重启：只清旧计时器，不清 taskCountdowns（stopTaskCountdown 会清引用，供离开视图用）
+    if (taskCountdownTimer !== null) {
+      clearInterval(taskCountdownTimer);
+      taskCountdownTimer = null;
+    }
+    if (taskCountdowns.length === 0) return;
+    taskCountdownTimer = setInterval(updateTaskCountdowns, 1000);
+  }
 
   async function loadTaskMeta() {
     try {
@@ -636,6 +679,7 @@ const Dialogs = (() => {
   async function renderTaskList() {
     const list = $("task-list");
     if (!list) return; // 元素缺失（测试桩）时忽略
+    stopTaskCountdown(); // 清旧计时器 + 旧倒计时引用（空列表/失败路径也不会泄漏）
     list.innerHTML = "";
     let tasks = [];
     try {
@@ -648,14 +692,23 @@ const Dialogs = (() => {
       list.innerHTML = `<div class="task-empty">${_t("settings.taskEmpty")}</div>`;
       return;
     }
+    const countdowns = []; // 本地收集 → 渲染完成后一次性挂载（startTaskCountdown 幂等重启）
     for (const t of tasks) {
       const row = el("div", { class: "task-row" });
       row.appendChild(el("span", { class: "task-name" }, t.name || "?"));
       row.appendChild(el("span", { class: "task-badge" }, t.type || "evolution"));
       // rant 09:23:10：running 状态徽标（演化任务 60s 一轮几乎常驻 running，从源头减少误点）
+      // rant 10:36:39：等待中 → "待运行"淡色徽标 + 下次运行倒计时；无 next 且启用 → "待调度"
       if (t.running) {
         const runBadge = el("span", { class: "task-badge task-running-badge" }, _t("app.taskRunningBadge"));
         row.appendChild(runBadge);
+      } else if (t.next_run_in_seconds != null) {
+        row.appendChild(el("span", { class: "task-badge task-pending-badge" }, _t("app.taskPendingBadge")));
+        const nextSpan = el("span", { class: "task-next-run" }, _t("app.taskNextRun", { n: formatCountdown(t.next_run_in_seconds) }));
+        row.appendChild(nextSpan);
+        countdowns.push({ name: t.name, deadline: Date.now() + Math.max(0, t.next_run_in_seconds) * 1000, span: nextSpan });
+      } else if (t.enabled !== false) {
+        row.appendChild(el("span", { class: "task-badge task-idle-badge" }, _t("app.taskIdleBadge")));
       }
       const cfg = (t.config && typeof t.config === "object") ? t.config : {};
       const hints = [];
@@ -713,6 +766,8 @@ const Dialogs = (() => {
       row.appendChild(actions);
       list.appendChild(row);
     }
+    taskCountdowns = countdowns;
+    startTaskCountdown(); // rant 10:36:39：面板激活即启动 1s 倒计时（离开视图由 app.js stopTaskCountdown）
   }
 
   async function openTaskForm(task = null) {
@@ -1501,6 +1556,10 @@ const Dialogs = (() => {
     initTaskManagement, // rant 18:23:15 P3：定时任务/自定义类型管理初始化
     loadTaskMeta, // rant 18:23:15 P3：任务/类型元数据加载（面板打开/测试复用）
     renderTaskList, // rant 18:23:15 P3：任务列表渲染（测试/刷新复用）
+    formatCountdown, // rant 10:36:39：倒计时格式化（≤60s "43s" / ≤1h "1m23s" / >1h "1h05m"；测试复用）
+    updateTaskCountdowns, // rant 10:36:39：1s tick 更新倒计时文本（测试直接调用模拟走秒）
+    startTaskCountdown, // rant 10:36:39：启动 1s 倒计时（幂等；renderTaskList 自动调用）
+    stopTaskCountdown, // rant 10:36:39：停止并清引用（离开任务视图时 app.js 调用防泄漏）
     renderProjectList, // rant 14:10:14 P5：项目面板列表渲染（测试/刷新复用）
     showProjectSessionsInPanel, // rant 14:10:14 P5：项目面板内嵌会话列表（测试复用）
     initRantPanel, // rant 14:10:14 P4：rant 面板初始化
