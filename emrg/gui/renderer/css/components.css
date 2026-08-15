@@ -954,6 +954,16 @@ dialog::backdrop {
   font-size: var(--fs-secondary);
 }
 
+/* rant 09:23:10：任务 running 徽标（常驻运行的任务从源头减少误点） */
+.task-running-badge {
+  background: var(--bg-soft);
+  color: var(--text-3);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 4px;
+}
+
 /* rant 09:17:45：提示词编辑器 Monaco 挂载容器（长提示词 300px 起步） */
 .monaco-host {
   width: 100%;
@@ -1155,6 +1165,30 @@ dialog::backdrop {
 .mode-btn:hover:not(.active) {
   color: var(--text-1);
 }
+
+/* ── 通用 toast（rant 2026-08-15T09:20:27：面板操作反馈全局可见） ── */
+.toast {
+  position: fixed;
+  top: 16px;
+  right: 20px;
+  z-index: 1100;
+  max-width: calc(100vw - 40px);
+  padding: 10px 16px;
+  border-radius: var(--radius-btn);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.18));
+  animation: toast-in 0.22s var(--ease);
+  pointer-events: none;
+}
+.toast-msg {
+  font-size: var(--fs-secondary);
+  color: var(--text-1);
+  white-space: pre-wrap;
+}
+.toast-success { border-left: 4px solid var(--ok, #2e9e5b); }
+.toast-error { border-left: 4px solid var(--danger, #d64545); }
+.toast-info { border-left: 4px solid var(--accent, #4a7dff); }
 
 /* ── 进化完成 toast（WorkBuddy P3）────────────────── */
 .evolution-toast {

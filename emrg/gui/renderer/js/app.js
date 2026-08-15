@@ -474,11 +474,17 @@ const App = (() => {
       const res = await window.emrg.triggerTask({ name: n });
       if (res.error) {
         Chat.addSystemMessage(_t("app.triggerFailed", { msg: res.error }));
+        showToast(_t("app.triggerFailed", { msg: res.error }), { type: "error" });
+      } else if (res.result === "running") {
+        Chat.addSystemMessage(_t("app.taskRunning", { n }));
+        showToast(_t("app.taskRunning", { n }), { type: "info", durationMs: 4000 });
       } else {
         Chat.addSystemMessage(_t("app.triggered", { n }));
+        showToast(_t("app.triggered", { n }), { type: "success" });
       }
     } catch (e) {
       Chat.addSystemMessage(_t("app.triggerFailed", { msg: e.message }));
+      showToast(_t("app.triggerFailed", { msg: e.message }), { type: "error" });
     }
   }
 
@@ -1787,6 +1793,7 @@ const App = (() => {
     switchView, // rant 18:55:09 v0.2：工作区视图切换（导出供测试）
     switchSettingsTab, // rant 14:10:14 P2：设置面板 tab 切换（导出供测试）
     openTasksPanel, // rant 14:10:14 P3：任务面板打开 + 加载（导出供测试）
+    doTrigger, // rant 09:23:10：/trigger 三态语义（running → info；导出供测试）
     openProjectsPanel, // rant 14:10:14 P5：项目面板打开 + 加载（导出供测试）
     openRantsPanel, // rant 14:10:14 P4：rant 面板打开 + 加载（导出供测试）
     refreshSessions,

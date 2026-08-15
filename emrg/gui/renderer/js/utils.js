@@ -74,6 +74,25 @@ function applyTheme(mode) {
 }
 
 /**
+ * 通用 toast（rant 2026-08-15T09:20:27：面板操作反馈全局可见——tasks/settings
+ * 面板视图下聊天流不可见，Chat.addSystemMessage 的反馈=看不见的"没反应"）。
+ * 右上角短暂显示、自动消失；type: success|error|info 决定左侧色条。
+ */
+let _toastTimer = null;
+function showToast(message, opts = {}) {
+  const { type = "info", durationMs = 3000 } = opts;
+  const toast = document.getElementById("toast");
+  if (!toast) return;
+  const msg = document.getElementById("toast-msg");
+  if (msg) msg.textContent = message;
+  // 逐个 remove（沙箱 classList.remove 单参；DOM 语义等价）
+  ["hidden", "toast-success", "toast-error", "toast-info"].forEach((c) => toast.classList.remove(c));
+  toast.classList.add("toast-" + type);
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => toast.classList.add("hidden"), durationMs);
+}
+
+/**
  * 相对时间（P6 验收补完：项目行"最近活跃"提示，消费 daemon list_projects 的
  * latest_session_at）。ISO 时间串 → "刚刚 / {n} 分钟前 / {n} 小时前 / {n} 天前"，
  * 走 i18n（zh/en）；缺失/非法输入返回空串（调用点自行隐藏）。
@@ -100,3 +119,4 @@ window.genRequestId = genRequestId;
 window.groupLabel = groupLabel;
 window.applyTheme = applyTheme;
 window.relTime = relTime;
+window.showToast = showToast;

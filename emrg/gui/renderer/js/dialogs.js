@@ -652,6 +652,11 @@ const Dialogs = (() => {
       const row = el("div", { class: "task-row" });
       row.appendChild(el("span", { class: "task-name" }, t.name || "?"));
       row.appendChild(el("span", { class: "task-badge" }, t.type || "evolution"));
+      // rant 09:23:10：running 状态徽标（演化任务 60s 一轮几乎常驻 running，从源头减少误点）
+      if (t.running) {
+        const runBadge = el("span", { class: "task-badge task-running-badge" }, _t("app.taskRunningBadge"));
+        row.appendChild(runBadge);
+      }
       const cfg = (t.config && typeof t.config === "object") ? t.config : {};
       const hints = [];
       if (cfg.project) hints.push(cfg.project);
@@ -659,15 +664,25 @@ const Dialogs = (() => {
       if (t.enabled === false) hints.push(_t("app.taskDisabled"));
       row.appendChild(el("span", { class: "task-hint" }, hints.join(" · ")));
       const actions = el("span", { class: "task-actions" });
-      // 触发（复用 /trigger 语义）
+      // 触发（复用 /trigger 语义；rant 09:23:10：running 时给 info 反馈而非假成功）
       const trigBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.taskTrigger") }, _t("settings.taskTrigger"));
+      if (t.running) trigBtn.disabled = true;
       trigBtn.addEventListener("click", async () => {
         try {
           const res = await window.emrg.triggerTask({ name: t.name });
-          if (res && res.error) Chat.addSystemMessage(_t("app.triggerFailed", { msg: res.error }));
-          else Chat.addSystemMessage(_t("app.triggered", { n: t.name }));
+          if (res && res.error) {
+            Chat.addSystemMessage(_t("app.triggerFailed", { msg: res.error }));
+            showToast(_t("app.triggerFailed", { msg: res.error }), { type: "error" });
+          } else if (res && res.result === "running") {
+            Chat.addSystemMessage(_t("app.taskRunning", { n: t.name }));
+            showToast(_t("app.taskRunning", { n: t.name }), { type: "info", durationMs: 4000 });
+          } else {
+            Chat.addSystemMessage(_t("app.triggered", { n: t.name }));
+            showToast(_t("app.triggered", { n: t.name }), { type: "success" });
+          }
         } catch (e) {
           Chat.addSystemMessage(_t("app.triggerFailed", { msg: e.message }));
+          showToast(_t("app.triggerFailed", { msg: e.message }), { type: "error" });
         }
       });
       actions.appendChild(trigBtn);
@@ -685,9 +700,11 @@ const Dialogs = (() => {
             try {
               await window.emrg.taskDelete({ name: t.name });
               Chat.addSystemMessage(_t("settings.taskDeleted"));
+              showToast(_t("settings.taskDeleted"), { type: "success" });
               await renderTaskList();
             } catch (e) {
               Chat.addSystemMessage(_t("app.tasksFailed", { msg: e.message }));
+              showToast(_t("app.tasksFailed", { msg: e.message }), { type: "error" });
             }
           },
         });
@@ -765,10 +782,12 @@ const Dialogs = (() => {
       if (editingTask === null) await window.emrg.taskCreate(payload);
       else await window.emrg.taskUpdate(payload);
       Chat.addSystemMessage(_t("settings.taskSaved"));
+      showToast(_t("settings.taskSaved"), { type: "success" });
       closeTaskForm();
       await renderTaskList();
     } catch (e) {
       Chat.addSystemMessage(_t("app.tasksFailed", { msg: e.message }));
+      showToast(_t("app.tasksFailed", { msg: e.message }), { type: "error" });
     }
   }
 
@@ -924,11 +943,13 @@ const Dialogs = (() => {
               try {
                 await window.emrg.taskTemplateDelete({ name: t.name });
                 Chat.addSystemMessage(_t("settings.templateDeleted"));
+                showToast(_t("settings.templateDeleted"), { type: "success" });
                 await loadTaskMeta(); // 刷新类型选项（任务表单下拉）
                 await renderTemplateList();
               } catch (e) {
                 // 决策点②：被任务引用的类型 daemon 拒绝删除（错误信息含任务数）
                 Chat.addSystemMessage(_t("settings.templateDeleteFailed", { msg: e.message }));
+                showToast(_t("settings.templateDeleteFailed", { msg: e.message }), { type: "error" });
               }
             },
           });
@@ -1000,11 +1021,13 @@ const Dialogs = (() => {
       if (editingTemplate === null) await window.emrg.taskTemplateCreate({ name, prompt });
       else await window.emrg.taskTemplateUpdate({ name, prompt });
       Chat.addSystemMessage(_t("settings.templateSaved"));
+      showToast(_t("settings.templateSaved"), { type: "success" });
       closeTemplateForm();
       await loadTaskMeta();
       await renderTemplateList();
     } catch (e) {
       Chat.addSystemMessage(_t("settings.templateSaveFailed", { msg: e.message }));
+      showToast(_t("settings.templateSaveFailed", { msg: e.message }), { type: "error" });
     }
   }
 
