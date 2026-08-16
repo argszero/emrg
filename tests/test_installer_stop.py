@@ -83,6 +83,29 @@ def test_stop_emrg_cmd_covers_gui_tui_daemon_and_inline_step4():
     assert "Get-CimInstance" in verify_block
 
 
+def test_stop_emrg_cmd_step0_calls_emrg_stop():
+    """Host request 2026-08-15 (session s_260815_0844): stop-emrg.cmd must call
+    `emrg stop` at the very beginning (step [0]) — it stops daemon+TUI+GUI in one
+    shot. First-time install may not have the `emrg` command on PATH → skip
+    without error and continue with the rest of the script."""
+    content = (REPO_ROOT / "bin" / "stop-emrg.cmd").read_text(encoding="utf-8")
+    # step [0] runs before step [1] (GUI taskkill)
+    step0_idx = content.index("echo [0] call emrg stop")
+    gui_idx = content.index("taskkill /IM EMRG.exe")
+    assert step0_idx < gui_idx
+    # preferred: installed launcher path (upgrade case — PATH may lack install\bin)
+    assert 'call "%INSTALL%\\bin\\emrg.cmd" stop' in content
+    # fallback: `emrg` on PATH; missing → continue without error (first-time install)
+    assert "where emrg >nul 2>&1" in content
+    assert "emrg command not found -- continue" in content
+    # both paths fall through to :step1 (never to :verify — step 4 must still run)
+    assert content.index("goto :step1") < gui_idx
+    # no %VAR% inside the new paren block (v1 parse-time expansion lesson)
+    block = content[step0_idx:gui_idx]
+    assert "%VAR%" not in block
+    assert "%errorlevel%" in block  # echo-only use, never gates on it
+
+
 def test_stop_git_merged_single_file():
     # rant 2026-08-12T14:00:05 验收：bin/ 下无 stop-git.ps1；grep stop-git 仅历史注释
     assert not (REPO_ROOT / "bin" / "stop-git.ps1").exists()
