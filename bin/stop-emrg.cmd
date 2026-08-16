@@ -11,6 +11,21 @@ echo [stop-emrg] ============ begin ============
 echo [stop-emrg] EMRG_DIR=%EMRG_DIR%
 echo [stop-emrg] INSTALL=%INSTALL%
 
+echo [0] call emrg stop (all processes, best-effort)...
+if exist "%INSTALL%\bin\emrg.cmd" goto :stop_all_installed
+where emrg >nul 2>&1
+if errorlevel 1 (
+  echo [0] emrg command not found -- continue (first-time install)
+  goto :step1
+)
+call emrg stop
+echo [0] emrg stop done (exit=%errorlevel%)
+goto :step1
+:stop_all_installed
+call "%INSTALL%\bin\emrg.cmd" stop
+echo [0] emrg stop done (exit=%errorlevel%)
+:step1
+
 echo [1] check GUI (EMRG.exe)...
 taskkill /IM EMRG.exe >nul 2>&1
 if not errorlevel 1 (
