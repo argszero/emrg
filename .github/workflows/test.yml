@@ -67,7 +67,7 @@ jobs:
           set -euo pipefail
           STAGE="$(mktemp -d)"
           mkdir -p "$STAGE/payload/bin" "$STAGE/dist/artifacts"
-          touch "$STAGE/payload/bin/stop-emrg.cmd"
+          touch "$STAGE/payload/bin/stop_all.py"
           # icon.ico 是 gen-assets 产物（未入库）——生成最小合法 .ico 供 iscc 编译期
           # SetupIconFile 检查；{app}（={%USERPROFILE}\.emrg\install）引用的文件
           # （UninstallDisplayIcon/[Icons]/[UninstallRun]）也需存在。

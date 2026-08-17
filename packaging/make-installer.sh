@@ -239,7 +239,7 @@ ChangesEnvironment=yes
 DisableProgramGroupPage=yes
 ; R125: CloseApplications=no — Inno Restart Manager (CloseApplications=yes default) 会误报
 ; 任何占用 install 目录文件的非 EMRG 进程（sh/vim/explorer/Defender）弹 "unable to automatically
-; close all applications" 选择框，且 Try again 反复失败；EMRG 进程关闭由 R124 stop-emrg.cmd 精确负责
+; close all applications" 选择框，且 Try again 反复失败；EMRG 进程关闭由 R130 stop_all.py 精确负责
 CloseApplications=no
 OutputDir=$DIST_WIN/artifacts
 OutputBaseFilename=EMRG-$VERSION-windows-x64
@@ -249,11 +249,12 @@ Compression=lzma2
 SolidCompression=yes
 [Files]
 Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
-; R124: dontcopy — 供 [Code] PrepareToInstall 在覆盖文件前 ExtractTemporaryFile 取出并
-; 运行 bin\stop-emrg.cmd（升级安装前优雅关闭 GUI/TUI/daemon，rant 2026-08-10T08:50:44：
-; pythonw daemon 锁文件导致卡在"停止已有进程"）。正常安装时该文件仍由上方通配符
-; 装入 {app}\bin\stop-emrg.cmd。
-Source: "$STAGE_WIN/payload\\bin\\stop-emrg.cmd"; DestDir: "{tmp}"; Flags: dontcopy
+; R130: dontcopy — 供 [Code] PrepareToInstall 在覆盖文件前 ExtractTemporaryFile 取出
+; bin\stop_all.py 并用 runtime python 执行（升级安装前优雅关闭 GUI/TUI/daemon/bundled
+; git，rant 2026-08-17T10:32:27：停止逻辑全部收敛到 Python，stop-emrg.cmd 已删除）。
+; stop_all.py 是纯标准库单文件（emrg/_stop_all.py 的副本），不依赖 emrg 包可导入。
+; 正常安装时该文件仍由上方通配符装入 {app}\bin\stop_all.py。
+Source: "$STAGE_WIN/payload\\bin\\stop_all.py"; DestDir: "{tmp}"; Flags: dontcopy
 [Icons]
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
 [UninstallRun]
@@ -370,35 +371,43 @@ begin
     RemoveBinDirFromPath;
 end;
 
-// R124: 升级安装前优雅关闭运行中的 EMRG 进程（rant 2026-08-10T08:50:44）——
+// R130: 升级安装前优雅关闭运行中的 EMRG 进程（rant 2026-08-10T08:50:44 起，
+// 2026-08-17T10:32:27 收敛：stop-emrg.cmd 删除，全部停止逻辑进 emrg/_stop_all.py）——
 // Inno CloseApplications 看不到无窗口的 pythonw daemon（emrgd.cmd → pythonw.exe
 // -m emrg.server 常驻锁文件），覆盖 ~/.emrg\install 时卡在"停止已有进程"。
-// PrepareToInstall 在安装开始前运行 bin\stop-emrg.cmd：taskkill EMRG.exe
-// 优雅→/F 兜底、wmic/PowerShell 命令行过滤 TUI、emrg server stop 协议关闭
-// daemon + emrgd.pid 轮询兜底、step 4 内联 PowerShell 连坐强杀 bundled git
-// （宿主 2026-08-11T19:47:44 拍板覆盖 #689：sh/vim 锁 install\git\usr\bin\
-// msys-2.0.dll 导致 Inno DeleteFile code 5 时一并强杀，安装成功优先；只碰
-// install\git\ 前缀，系统 Git 不受影响；rant 2026-08-12T14:00:05 合并为
-// 单文件——stop-git.ps1 已删除，逻辑内联进 stop-emrg.cmd step 4）。
-// 干净安装（无旧 install）脚本自行跳过。返回非空字符串 = 中止安装
-// 并显示该消息（宁可中止也不卡死）。
-// {cmd} = cmd.exe（Inno 预定义常量，批处理文件须经 cmd 启动）。
+// PrepareToInstall 在安装开始前用 runtime 的 python 运行 bin\stop_all.py：
+// ws 协议关闭 daemon → emrgd.pid 兜底 → taskkill /F、taskkill EMRG.exe 优雅→/F、
+// CIM 命令行过滤 TUI、install\git\ 前缀连坐强杀 bundled git、verify 残留检查；
+// 有残留 exit 1（脚本打印残留清单）→ 中止安装。干净安装（无旧 install）直接跳过。
+// {app} 是旧版安装目录——不能依赖旧版 emrg 命令（可能无 stop 子命令），所以用
+// 单文件脚本 + runtime python（{app}\bin\python-dist\python.exe，R90 布局，
+// 与 DLL 同目录；回退 python3.13.exe，与 emrg.cmd 探测链一致）。
+// 返回非空字符串 = 中止安装并显示该消息（宁可中止也不卡死）。
+// 重定向必须经 {cmd}（cmd.exe）——CreateProcess 不解释 > 重定向，直接 Exec
+// python.exe 会把 ">" "log" 2>&1 当脚本参数静默吞掉（R125 日志展示失效）。
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
+  PythonExe: string;
   StopScript: string;
   LogFile: string;
   LogText: AnsiString;
 begin
   Result := '';
-  ExtractTemporaryFile('stop-emrg.cmd');
-  StopScript := ExpandConstant('{tmp}\\stop-emrg.cmd');
-  // R125: rant 2026-08-13T09:24:37 — stop-emrg.cmd 输出重定向到日志，失败时
-  // 直接展示日志内容（列出杀不掉的进程），宿主不再需要手动跑诊断。
+  // 干净安装：{app} 尚不存在或旧版无 python-dist 布局 → 无进程需停止
+  PythonExe := ExpandConstant('{app}\bin\python-dist\python.exe');
+  if not FileExists(PythonExe) then
+    PythonExe := ExpandConstant('{app}\bin\python-dist\python3.13.exe');
+  if not FileExists(PythonExe) then
+    Exit;
+  ExtractTemporaryFile('stop_all.py');
+  StopScript := ExpandConstant('{tmp}\stop_all.py');
+  // R125: rant 2026-08-13T09:24:37 — 输出重定向到日志，失败时直接展示日志内容
+  // （列出杀不掉的进程），宿主不再需要手动跑诊断。
   // cmd 引号嵌套：外层 /c "..."，内层脚本路径用双引号包裹，重定向在外、
   // 仍在内层引号外（SW_HIDE 隐藏窗口后 stdout/stderr 经 > log 2>&1 落盘）。
-  LogFile := ExpandConstant('{tmp}\\stop-emrg.log');
-  if Exec(ExpandConstant('{cmd}'), '/c ""' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  LogFile := ExpandConstant('{tmp}\stop_all.log');
+  if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" "' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     if ResultCode <> 0 then
     begin
@@ -416,13 +425,13 @@ begin
       if Length(LogText) > 2000 then
         LogText := Copy(LogText, 1, 2000);
       if LogText <> '' then
-        Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Details from stop-emrg.cmd:' + #13#10 + #13#10 + LogText + #13#10 + #13#10 + 'Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).'
+        Result := 'EMRG could not stop all running processes (emrg stop exit code ' + IntToStr(ResultCode) + '). Details from the stop script:' + #13#10 + #13#10 + LogText + #13#10 + #13#10 + 'Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).'
       else
-        Result := 'EMRG could not stop all running processes (stop-emrg.cmd exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).';
+        Result := 'EMRG could not stop all running processes (emrg stop exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).';
     end;
   end
   else
-    Result := 'EMRG could not run the process-stop helper (stop-emrg.cmd). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry.';
+    Result := 'EMRG could not run the process-stop script (stop_all.py). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry.';
 end;
 EOF
     # Windows 路径转义（iscc 需要 Windows 路径，但在 bash/msys 下用当前路径）
