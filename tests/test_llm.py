@@ -207,6 +207,7 @@ class _FakeResponse:
         self.status_code = status_code
         self.content = content
         self.headers = headers or {}
+        self.text = content.decode("utf-8", "replace")
 
 
 class _FakeHttpClient:
@@ -267,4 +268,148 @@ def test_chat_malformed_body_exhausts_retries(monkeypatch, client):
     client._client = fake
     with pytest.raises(RuntimeError, match="unparseable"):
         asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
-    assert fake.calls == 4  # 1 initial + 3 retries
+
+
+class _FakeStreamResponse:
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def aread(self):
+        return b"stream body"
+
+
+class _FakeStreamClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def stream(self, method, url, headers=None, json=None):
+        self.calls += 1
+        return self.responses.pop(0)
+
+
+def _drain_stream(client, fake) -> list[str]:
+    """Run one chat_stream call to exhaustion, returning accumulated chunks."""
+    import asyncio
+    parts: list[str] = []
+
+    async def _run():
+        async for chunk in client.chat_stream([{"role": "user", "content": "hi"}]):
+            if chunk.get("content"):
+                parts.append(chunk["content"])
+
+    asyncio.run(_run())
+    return parts
+
+
+def test_first_attempt_silent_no_retry(monkeypatch, client, caplog):
+    """First-attempt (normal) requests log NO attempt line (rant
+    2026-08-17T14:27:39) — 1/4 on every request was noise."""
+    import logging
+    import asyncio
+    caplog.set_level(logging.DEBUG, logger="emrg.server.llm")
+    body = b'{"choices": [{"message": {"content": "ok"}}]}'
+    fake = _FakeHttpClient([_FakeResponse(200, body)])
+    client._client = fake
+    asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert fake.calls == 1
+    # no attempt counter for the first attempt
+    assert "attempt 1/4" not in caplog.text
+    assert "LLM request: url=" not in caplog.text
+    assert "LLM stream attempt" not in caplog.text
+
+
+def test_retry_logs_attempt_counter(monkeypatch, client, caplog):
+    """Retries DO log the attempt counter (attempt 2/4+) alongside the
+    existing transient-error warning — the retry path stays traceable."""
+    import logging
+    import asyncio
+    _patch_fast_sleep(monkeypatch)
+    caplog.set_level(logging.DEBUG, logger="emrg.server.llm")
+    good = b'{"choices": [{"message": {"content": "recovered"}}]}'
+    fake = _FakeHttpClient([
+        _FakeResponse(500, b"boom"),
+        _FakeResponse(200, good),
+    ])
+    client._client = fake
+    asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert fake.calls == 2
+    # first attempt silent; retry logs the attempt counter + transient warning
+    assert "attempt 1/4" not in caplog.text
+    assert "LLM transient error 500" in caplog.text
+    assert "attempt 2/4" in caplog.text
+
+
+def test_stream_first_attempt_silent(monkeypatch, client, caplog):
+    """chat_stream's first attempt is also silent (rant 2026-08-17T14:27:39)."""
+    import logging
+    _patch_fast_sleep(monkeypatch)
+    caplog.set_level(logging.DEBUG, logger="emrg.server.llm")
+
+    class _GoodStream:
+        status_code = 200
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def aiter_lines(self):
+            import json
+            for obj in (
+                {"choices": [{"delta": {"content": "hi"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            ):
+                yield "data: " + json.dumps(obj)
+
+    fake = _FakeStreamClient([_GoodStream()])
+    client._client = fake
+    parts = _drain_stream(client, fake)
+    assert parts == ["hi"]
+    assert fake.calls == 1
+    assert "LLM stream attempt" not in caplog.text
+
+
+def test_stream_retry_logs_attempt_counter(monkeypatch, client, caplog):
+    """chat_stream retry logs the attempt counter (attempt 2/4)."""
+    import logging
+    _patch_fast_sleep(monkeypatch)
+    caplog.set_level(logging.DEBUG, logger="emrg.server.llm")
+
+    class _GoodStream:
+        status_code = 200
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def aiter_lines(self):
+            import json
+            for obj in (
+                {"choices": [{"delta": {"content": "hi"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            ):
+                yield "data: " + json.dumps(obj)
+
+    fake = _FakeStreamClient([
+        _FakeStreamResponse(500),  # first attempt → retry
+        _GoodStream(),             # second attempt → success
+    ])
+    client._client = fake
+    parts = _drain_stream(client, fake)
+    assert parts == ["hi"]
+    assert fake.calls == 2
+    assert "LLM stream attempt 2/4" in caplog.text
+    assert "attempt 1/4" not in caplog.text
+    assert "LLM stream transient error 500" in caplog.text
