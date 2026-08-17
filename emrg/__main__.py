@@ -261,7 +261,7 @@ def _run_daemon() -> None:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     # Suppress noisy httpcore/httpx DEBUG logs (rant #24)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -336,7 +336,7 @@ def _run_client(init_auto_evolve: bool = False) -> None:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
             RotatingFileHandler(
                 str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3,
