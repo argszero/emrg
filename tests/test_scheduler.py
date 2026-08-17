@@ -601,10 +601,12 @@ def test_open_source_template_renders_with_context():
     assert "0.5 Rant scan" in out, "rant-scan 0.5 节应渲染"
     assert "rants.jsonl" in out, "rant 扫描命令应渲染"
     assert "config.project" in out, "project 匹配过滤应渲染"
-    # Rant 2026-08-17T12:09:57: dual-compatible project matching (config.project
-    # OR owner/repo) must be rendered with the actual values.
+    # Rant 2026-08-17T14:17:03: rant project matching is the SINGLE value
+    # config.project — owner/repo dual-compat removed (host decision).
     assert "aitokenpool" in out, "task.project 值应渲染进 0.5 节"
-    assert "x/y" in out, "owner/repo 形式应渲染进 0.5 节"
+    assert "does **NOT** match" in out, "owner/repo 形式明确不匹配"
+    # the unmatched-rant hint may still mention the owner/repo form for
+    # detecting rants the host should fix — that is a hint, not a match rule
     assert "Unmatched-rant hint" in out, "未匹配疑似 rant 提示应渲染"
     assert "B.1b Rant-driven mode" in out, "rant 驱动模式应渲染"
     assert "ROLE LOCK" in out, "既有 ROLE LOCK 应保留"
