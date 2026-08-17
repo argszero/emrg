@@ -137,8 +137,13 @@ class LlmClient:
 
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
-            logger.debug("LLM request: url=%s model=%s (attempt %d/%d)",
-                         _redact_text(url), self.config.model, attempt + 1, MAX_RETRIES + 1)
+            # First attempt is the normal path — log nothing (rant
+            # 2026-08-17T14:27:39: 1/4 on every request is noise); retries
+            # already log via the "transient error ... retrying" warning,
+            # this debug line only adds the attempt counter for retries.
+            if attempt > 0:
+                logger.debug("LLM request: url=%s model=%s (attempt %d/%d)",
+                             _redact_text(url), self.config.model, attempt + 1, MAX_RETRIES + 1)
 
             resp = await client.post(url, headers=headers, json=payload)
 
@@ -236,7 +241,10 @@ class LlmClient:
 
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
-            logger.debug("LLM stream attempt %d/%d", attempt + 1, MAX_RETRIES + 1)
+            # First attempt silent (rant 2026-08-17T14:27:39) — the retrying
+            # warning already logs the retry; this adds the attempt counter.
+            if attempt > 0:
+                logger.debug("LLM stream attempt %d/%d", attempt + 1, MAX_RETRIES + 1)
             # Reset accumulators before each attempt
             content_parts[:] = []
             tc_by_index.clear()
