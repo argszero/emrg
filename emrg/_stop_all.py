@@ -19,16 +19,23 @@ It runs in three contexts, which is why it must stay pure-stdlib:
 
 Steps (mirroring the old stop-emrg.cmd flow, all best-effort):
 
-- daemon:     ws protocol ``shutdown`` → ``~/.emrg/emrgd.pid`` → SIGTERM /
-              ``taskkill /F /PID`` → 3s poll; port file removed once dead
 - GUI:        Windows ``taskkill /IM EMRG.exe`` graceful → unconditional
               ``/F``; POSIX ps-scan (``EMRG.app`` / ``EMRG-*.AppImage``)
 - TUI:        Windows CIM filter ``python.exe|pythonw.exe -m emrg`` (not
               ``emrg.server``); POSIX ps-scan
+- daemon:     ws protocol ``shutdown`` → ``~/.emrg/emrgd.pid`` → SIGTERM /
+              ``taskkill /F /PID`` → 3s poll; port file removed once dead
 - bundled git: Windows ``install\\git\\`` prefix kill (git/ssh/plink/bash
               + fallback prefix full-kill — port of stop-emrg.cmd step 4)
 - verify:     residual scan; any survivor → ``exit 1`` with a named list
               (installer aborts and shows the log, R125 semantics)
+
+Order is deliberate: **clients (GUI/TUI) first, daemon LAST** (host rant
+2026-08-17T14:15:33). Both GUI and TUI auto-spawn the daemon when they
+detect it missing — stopping the daemon first while clients are alive makes
+them immediately re-spawn it, so the stop "stops nothing" and the installer
+still hits locked files. With the daemon last, no client remains to bring
+it back, and verify() sees the true final state.
 """
 
 from __future__ import annotations
@@ -453,13 +460,19 @@ def verify() -> list[str]:
 # ── Orchestration ───────────────────────────────────────────────
 
 def stop_all() -> int:
-    """Run every stop step, then verify. Returns 0 (clean) or 1 (residuals)."""
-    print("emrg stop: stopping daemon ...")
-    stop_daemon()
+    """Run every stop step, then verify. Returns 0 (clean) or 1 (residuals).
+
+    Clients (GUI/TUI) are stopped FIRST and the daemon LAST (rant
+    2026-08-17T14:15:33): both clients auto-spawn the daemon when it
+    disappears, so stopping the daemon first would let a live client
+    immediately bring it back — leaving locked files for the installer.
+    """
     print("emrg stop: stopping GUI ...")
     stop_gui()
     print("emrg stop: stopping TUI clients ...")
     stop_tui()
+    print("emrg stop: stopping daemon ...")
+    stop_daemon()
     if is_win():
         print("emrg stop: stopping bundled git under install\\git ...")
         stop_bundled_git()
