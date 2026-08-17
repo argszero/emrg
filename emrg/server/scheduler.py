@@ -221,16 +221,22 @@ class TaskHandler:
         self.evolutions: list[EvolutionLog] = []
 
         # ── Saturation — slow down, never stop (rant 2026-08-09T09:35:55) ──
-        # Track consecutive cycles where git HEAD didn't advance (NTE).
-        # After _IDLE_HALT_THRESHOLD empty cycles, switch to low-frequency
+        # Track consecutive empty cycles (rant 2026-08-17T11:39:19: the agent
+        # itself answers whether a round was meaningful — git HEAD compares
+        # commits, not value, so it was removed as the empty-cycle oracle).
+        # After the threshold of empty cycles, switch to low-frequency
         # heartbeat full cycles instead of the old complete halt:
         #   - Scheduled runs continue at heartbeat interval (never skipped)
         #   - heartbeat = max(interval, min(interval*8, 8h)) — 60s task → 8min
         #   - Manual trigger (/trigger) or upstream git HEAD advance restores
         #     the normal frequency immediately (counter reset to 0)
+        #   - The agent's recommend_slowdown votes (3) tighten the threshold
+        #     from 30 to 10 (host 2026-08-17T11:39:19)
         #
         # Counter is persisted to disk to survive daemon restarts.
         self._IDLE_HALT_THRESHOLD = 30
+        self._SLOWDOWN_VOTES_TO_TIGHTEN = 3
+        self._TIGHTENED_THRESHOLD = 10
         # G129: 连续连接失败告警阈值——达到后升级为 ERROR（防静默吞掉，
         # rant 2026-08-09T08:03:46：GUI 测试覆盖真实 emrgd.port 致 10h 连不上）。
         self._CONNECT_FAIL_ALERT = 3
@@ -238,7 +244,7 @@ class TaskHandler:
         self._saturation_dir = config_dir() / "saturation"
         self._saturation_dir.mkdir(parents=True, exist_ok=True)
         self._saturation_file = self._saturation_dir / f"{self.name}.json"
-        self._empty_cycles = self._load_saturation_state()
+        self._empty_cycles, self._slowdown_hits = self._load_saturation_state()
 
         # Resolve project path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
@@ -596,31 +602,46 @@ class TaskHandler:
                 self.name, (result.stderr.strip() or "")[:80], ssh_url,
             )
 
-    def _load_saturation_state(self) -> int:
-        """Restore _empty_cycles counter from disk (survives daemon restarts)."""
+    def _load_saturation_state(self) -> tuple[int, int]:
+        """Restore (empty_cycles, slowdown_hits) from disk (daemon restarts)."""
         try:
             if self._saturation_file.exists():
                 data = json.loads(self._saturation_file.read_text(encoding="utf-8"))
-                count = data.get("empty_cycles", 0)
-                if count > 0:
+                count = int(data.get("empty_cycles", 0) or 0)
+                slowdown = int(data.get("slowdown_hits", 0) or 0)
+                if count > 0 or slowdown > 0:
                     logger.debug(
-                        "TaskHandler[%s]: restored saturation state (%d empty cycles)",
-                        self.name, count,
+                        "TaskHandler[%s]: restored saturation state (%d empty cycles, %d slowdown votes)",
+                        self.name, count, slowdown,
                     )
-                return count
+                return count, slowdown
         except Exception:
             pass
-        return 0
+        return 0, 0
 
     def _save_saturation_state(self) -> None:
-        """Persist _empty_cycles counter to disk."""
+        """Persist (empty_cycles, slowdown_hits) to disk."""
         try:
             self._saturation_file.write_text(
-                json.dumps({"empty_cycles": self._empty_cycles}, ensure_ascii=False),
+                json.dumps(
+                    {"empty_cycles": self._empty_cycles,
+                     "slowdown_hits": self._slowdown_hits},
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
         except Exception:
             pass
+
+    def _saturation_threshold(self) -> int:
+        """Empty-cycle threshold before dropping to heartbeat cadence.
+
+        The agent's recommend_slowdown votes (3) tighten the threshold from
+        30 to 10 — the agent itself keeps reporting the task has no value
+        (rant 2026-08-17T11:39:19)."""
+        if self._slowdown_hits >= self._SLOWDOWN_VOTES_TO_TIGHTEN:
+            return self._TIGHTENED_THRESHOLD
+        return self._IDLE_HALT_THRESHOLD
 
     async def run(self) -> None:
         """Run evolution cycles at configured interval.
@@ -666,13 +687,14 @@ class TaskHandler:
             # Manual triggers always reset the saturation counter; otherwise
             # saturated ticks keep running full cycles at heartbeat cadence.
             if manual_trigger:
-                if self._empty_cycles >= self._IDLE_HALT_THRESHOLD:
+                if self._empty_cycles >= self._saturation_threshold():
                     logger.info(
                         "TaskHandler[%s]: resumed via manual trigger "
                         "(was in saturation at %d empty cycles)",
                         self.name, self._empty_cycles,
                     )
                 self._empty_cycles = 0
+                self._slowdown_hits = 0
                 self._save_saturation_state()
 
             logger.debug("TaskHandler[%s] tick", self.name)
@@ -808,7 +830,7 @@ class TaskHandler:
         auto-resumes (counter reset, normal frequency), so a saturated handler
         does not miss new work forever.
         """
-        if self._empty_cycles < self._IDLE_HALT_THRESHOLD:
+        if self._empty_cycles < self._saturation_threshold():
             return False
         if self._remote_advanced():
             logger.info(
@@ -824,6 +846,48 @@ class TaskHandler:
             self.name, self._empty_cycles, self._heartbeat_interval(),
         )
         return True
+
+    async def _request_vibe_check(self, ws, prompt: str, completion_summary: str) -> dict | None:
+        """Ask the daemon for a structured vibe check on the SAME connection.
+
+        Sends ``task_vibe_check`` and waits for ``vibe_check_result`` (~20s).
+        Fully defensive — any failure/timeout returns None; the caller
+        conservatively leaves the empty-cycle counter unchanged.
+        """
+        try:
+            await ws.send(json.dumps({
+                "type": "task_vibe_check",
+                "session_id": self._session_id,
+                "task_name": self.name,
+                "prompt": (prompt or "")[:2000],
+                "completion_summary": (completion_summary or "")[:3000],
+            }, ensure_ascii=False))
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                remaining = max(0.5, deadline - time.monotonic())
+                try:
+                    frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
+                except asyncio.TimeoutError:
+                    break
+                except ConnectionClosed:
+                    break
+                if frame.get("type") != "vibe_check_result":
+                    continue
+                if not frame.get("ok"):
+                    logger.warning(
+                        "TaskHandler[%s]: vibe check error: %s",
+                        self.name, (frame.get("error") or "")[:120],
+                    )
+                    return None
+                result = frame.get("result") or {}
+                return {
+                    "meaningful": result.get("meaningful"),
+                    "recommend_slowdown": result.get("recommend_slowdown"),
+                    "reason": result.get("reason", ""),
+                }
+        except Exception:
+            logger.debug("TaskHandler[%s]: vibe check failed", self.name, exc_info=True)
+        return None
 
     async def _run_evolution_cycle(self) -> None:
 
@@ -843,9 +907,6 @@ class TaskHandler:
             self.name, len(prompt),
         )
         start_time = cycle_time
-
-        # Track git HEAD to detect empty (NTE) cycles
-        git_head_before = self._get_git_head()
 
         try:
             ws = await connect_to_server()
@@ -889,6 +950,7 @@ class TaskHandler:
         tool_count = 0
         error = None
         truncated = False
+        completion_content = ""
 
         try:
             await ws.send(task_msg)
@@ -908,6 +970,7 @@ class TaskHandler:
                     # wrongly advancing the idle-halt backoff (mem repo lesson:
                     # truncation must be flagged, not silently treated as done).
                     content = resp.get("content") or ""
+                    completion_content = content
                     truncated = "exceeded" in content.lower()
                     if truncated:
                         logger.warning(
@@ -932,6 +995,17 @@ class TaskHandler:
                         self.name, error,
                     )
                     break
+
+            # Empty-cycle detection (rant 2026-08-17T11:39:19): after a clean
+            # completion, ask the agent via task_vibe_check whether the round
+            # was meaningful. Done on the SAME ws connection (daemon replies
+            # with vibe_check_result). Any failure → None → counter untouched.
+            vibe_result = None
+            if not error and not truncated:
+                vibe_result = await self._request_vibe_check(
+                    ws, prompt=prompt,
+                    completion_summary=completion_content[:3000],
+                )
         except Exception as e:
             logger.exception("TaskHandler[%s] error", self.name)
             error = str(e)
@@ -941,28 +1015,56 @@ class TaskHandler:
             except Exception:
                 pass
 
-        # Detect empty cycles: git HEAD unchanged → no work was done.
-        # A truncated cycle is NOT empty — the agent wanted to work but hit
-        # the tool-round cap; counting it would wrongly back off the handler.
+        # Empty-cycle accounting (rant 2026-08-17T11:39:19): the AGENT decides
+        # whether the round was meaningful (task_vibe_check structured answer),
+        # not git HEAD — HEAD compares commits, so an agent that did analysis /
+        # memory work without a commit was miscounted as empty, and a no-op
+        # round over someone else's push counted as work.
+        #   - meaningful: false → empty cycle (advance the backoff)
+        #   - meaningful: true  → reset the empty streak (+ slowdown votes)
+        #   - recommend_slowdown: true → +1 slowdown vote (3 votes tighten
+        #     the saturation threshold from 30 to 10)
+        #   - vibe check unavailable (ok=false / timeout / parse error) →
+        #     conservative: count unchanged (neither advance nor reset)
+        # A truncated cycle is NOT empty — the agent wanted to work but hit the
+        # tool-round cap; counting it would wrongly back off the handler.
         # An aborted cycle (server error like "session busy", or an exception)
         # is NOT empty either — the agent was blocked before reaching an NTE
         # conclusion; counting it would also advance the idle-halt backoff.
-        git_head_after = self._get_git_head()
-        if (
-            not error
-            and not truncated
-            and git_head_before and git_head_after
-            and git_head_before == git_head_after
-        ):
-            self._empty_cycles += 1
-            self._save_saturation_state()
-            logger.debug(
-                "TaskHandler[%s]: empty cycle #%d (HEAD=%s)",
-                self.name, self._empty_cycles, git_head_after[:8],
+        if not error and not truncated and vibe_result is not None:
+            meaningful = vibe_result.get("meaningful")
+            recommend = bool(vibe_result.get("recommend_slowdown"))
+            if meaningful is False:
+                self._empty_cycles += 1
+                if recommend:
+                    self._slowdown_hits += 1
+                self._save_saturation_state()
+                logger.info(
+                    "TaskHandler[%s]: empty cycle #%d (agent: %s%s)",
+                    self.name, self._empty_cycles,
+                    (vibe_result.get("reason") or "")[:100],
+                    f"; slowdown votes {self._slowdown_hits}/{self._SLOWDOWN_VOTES_TO_TIGHTEN}"
+                    if recommend else "",
+                )
+            elif meaningful is True:
+                if self._empty_cycles > 0 or self._slowdown_hits > 0:
+                    logger.info(
+                        "TaskHandler[%s]: agent reported meaningful work, "
+                        "resetting empty streak (%d) + slowdown votes (%d)",
+                        self.name, self._empty_cycles, self._slowdown_hits,
+                    )
+                self._empty_cycles = 0
+                self._slowdown_hits = 0
+                self._save_saturation_state()
+        elif not error and not truncated:
+            # vibe check failed/timeout — conservative: don't count, don't reset
+            logger.info(
+                "TaskHandler[%s]: vibe check unavailable — empty streak unchanged",
+                self.name,
             )
         else:
-            if self._empty_cycles > 0:
-                reason = "truncated cycle" if truncated else "git HEAD changed"
+            if self._empty_cycles > 0 or self._slowdown_hits > 0:
+                reason = "truncated cycle" if truncated else "aborted cycle"
                 if error:
                     reason = f"aborted cycle ({error[:80]})"
                 logger.info(
@@ -970,6 +1072,7 @@ class TaskHandler:
                     self.name, reason,
                 )
             self._empty_cycles = 0
+            self._slowdown_hits = 0
             self._save_saturation_state()
 
         # Aborted cycles are not evolutions: no log file, no count. Writing

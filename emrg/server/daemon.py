@@ -1066,6 +1066,52 @@ class EmrgServer:
             except (OSError, ValueError):
                 pass
 
+    async def _task_vibe_check(self, task_name: str, prompt: str, completion_summary: str) -> dict:
+        """One-shot structured LLM ask (Ask mode, no tools, no history).
+
+        Asks whether a just-finished scheduled task produced meaningful value.
+        The agent must answer in strict JSON:
+        ``{"meaningful": bool, "recommend_slowdown": bool, "reason": str}``.
+
+        Raises on any failure (caller sends ``ok: false``); the scheduler
+        conservatively leaves its empty-cycle counter unchanged then.
+        """
+        system = (
+            "你是 EMRG 定时任务调度助手。刚完成一次定时任务「" + (task_name or "") + "」，"
+            "任务要求与最终回复摘要如下。\n"
+            "请用 JSON 严格回答（不要任何其他文字），格式：\n"
+            '{"meaningful": true|false, "recommend_slowdown": true|false, '
+            '"reason": "一句话原因"}\n'
+            "- meaningful：这轮是否对项目产生了有意义的价值（产出/提交/分析/决策/"
+            "维护动作都算；纯空转/无可做=NTE 算 false）\n"
+            "- recommend_slowdown：若本任务长期无有意义产出，是否建议降频省 token"
+            "（true=建议降低检查频率）\n"
+            "- reason：简短中文原因"
+        )
+        user = (
+            "任务名称：" + (task_name or "") + "\n"
+            "任务要求：" + (prompt or "")[:2000] + "\n"
+            "任务最终回复摘要：" + (completion_summary or "")[:3000]
+        )
+        msg = await self.llm.chat(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            tools=[],
+        )
+        content = (msg.get("content") or "").strip()
+        # Tolerate markdown fences if the model wraps the JSON in ```json ... ```
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content).strip()
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            raise ValueError("vibe check response is not a JSON object")
+        return {
+            "meaningful": bool(data.get("meaningful")),
+            "recommend_slowdown": bool(data.get("recommend_slowdown")),
+            "reason": str(data.get("reason", ""))[:200],
+        }
+
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt via Jinja2 template.
 
@@ -1871,6 +1917,32 @@ class EmrgServer:
             })
             logger.info("session rewound: %s at index %d (removed %d records)",
                         session_id, record_index, len(records) - len(truncated))
+
+        elif msg_type == "task_vibe_check":
+            # Rant 2026-08-17T11:39:19: scheduler asks the agent, after a
+            # scheduled task completes, whether the round produced meaningful
+            # value — replacing the git-HEAD empty-cycle heuristic (HEAD
+            # measures commits, not value: analysis/memory work without a
+            # commit was miscounted as empty, and a no-op round over someone
+            # else's push counted as work). One-shot Ask-mode LLM call (no
+            # tools, no session history) with a strict JSON contract.
+            task_name = msg.get("task_name", "")
+            prompt = msg.get("prompt", "")
+            summary = msg.get("completion_summary", "")
+            try:
+                result = await self._task_vibe_check(task_name, prompt, summary)
+                await self._send(ws, {
+                    "type": "vibe_check_result",
+                    "ok": True,
+                    "result": result,
+                })
+            except Exception as e:  # noqa: BLE001 — best-effort, never fatal
+                logger.warning("task_vibe_check failed: %s", e)
+                await self._send(ws, {
+                    "type": "vibe_check_result",
+                    "ok": False,
+                    "error": str(e)[:200],
+                })
 
         elif msg_type == "shutdown":
             logger.info("shutdown requested by client")
