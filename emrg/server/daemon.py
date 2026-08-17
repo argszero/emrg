@@ -3445,7 +3445,12 @@ class EmrgServer:
                             "tool_call_id": tc_id,
                             "content": result_text,
                         })
-                        logger.debug("memory reflection tool: %s → %s", tc_name, _redact_string(result_text[:100]))
+                        logger.debug(
+                            "memory reflection: id=%s round=%d tool %s → %s%s",
+                            session.session_id, _round + 1, tc_name,
+                            _redact_string(result_text[:100]),
+                            "…" if len(result_text) > 100 else "",
+                        )
 
             except Exception:
                 logger.debug("memory reflection failed", exc_info=True)
