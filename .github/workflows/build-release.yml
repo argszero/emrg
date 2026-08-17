@@ -5,12 +5,15 @@ name: Build Release
 #
 # matrix:
 #   macos-15(arm64)        → EMRG-<ver>-macos-arm64.pkg
-#   ubuntu-24.04(x86_64)   → EMRG-<ver>-linux-x86_64.AppImage + tar.gz
-#   ubuntu-24.04-arm(aarch64) → EMRG-<ver>-linux-aarch64.AppImage + tar.gz
+#   ubuntu-24.04(x86_64)   → EMRG-<ver>-linux-x86_64.AppImage + tar.gz + .run
+#   ubuntu-24.04-arm(aarch64) → EMRG-<ver>-linux-aarch64.AppImage + tar.gz + .run
 #   windows-2025(x64)      → EMRG-<ver>-windows-x64.exe
 #
 # 冒烟在无 Python runner 上跑（R111 验证干净机器承诺）；离线冒烟（R96）
 # 在 Linux job 用 iptables 断网执行。
+#
+# .run = Linux 无头服务器离线一键安装器（rant 2026-08-17T10:16:54）：
+# bash 自解压头 + runtime tarball payload，零网络零依赖。
 
 on:
   push:
@@ -356,6 +359,7 @@ jobs:
             dist/artifacts/*.AppImage
             dist/artifacts/*.tar.gz
             dist/artifacts/*.zip
+            dist/artifacts/*.run
 
   release:
     needs: build

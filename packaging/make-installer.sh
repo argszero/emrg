@@ -176,7 +176,7 @@ EOF
     ;;
 
   linux)
-    echo "==> Linux tar.gz + AppImage (AppImage built by electron-builder, collected R116)"
+    echo "==> Linux tar.gz + AppImage + .run (AppImage built by electron-builder, collected R116)"
     tar -czf "$DIST/artifacts/EMRG-$VERSION-linux-$(uname -m).tar.gz" -C "$(dirname "$RUNTIME")" runtime
     # R116: 收集 electron-builder 产出的 AppImage（emrg/gui/dist/*.AppImage）到
     # dist/artifacts/ —— 之前只生成 tar.gz，release 缺 linux AppImage（rant #13 Step 5）。
@@ -188,6 +188,9 @@ EOF
     else
       echo "!! AppImage not found in emrg/gui/dist — Linux release 缺 AppImage（有 tar.gz 兜底）" >&2
     fi
+    # .run 自解压离线安装器（rant 2026-08-17T10:16:54）：Linux 无头服务器
+    # SSH/无桌面/普通用户场景一键安装。payload = 同一 runtime/ 目录，零网络。
+    bash "$ROOT/packaging/make-run-installer.sh"
     ;;
 
   windows|win32|mingw*|msys*)
