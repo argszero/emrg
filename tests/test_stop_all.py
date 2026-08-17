@@ -165,6 +165,40 @@ class TestStopAllExitCode:
         assert exc.value.code == 1
 
 
+class TestStopTuiPsTemplate:
+    """Windows stop_tui() must render its PowerShell template without raising.
+
+    Regression: the template's literal script-block braces (``Where-Object {``
+    / ``ForEach-Object {``) were fed to str.format() unescaped, raising
+    ValueError: unexpected '{' in field name at runtime on Windows — crashing
+    `emrg stop` before stop_bundled_git + verify ever ran. The existing
+    TestStopAllExitCode monkeypatches stop_tui entirely, so CI never rendered
+    the template; this test pins the render path itself.
+    """
+
+    def test_stop_tui_renders_ps_template_win(self, monkeypatch):
+        import os
+
+        calls: list = []
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: calls.append(cmd) or type("CP", (), {})(),
+        )
+
+        _stop_all.stop_tui()  # must not raise ValueError
+
+        assert len(calls) == 1
+        cmd = calls[0]
+        assert cmd[0] == "powershell"
+        ps = cmd[-1]
+        # invoking-PID exclusion substituted into the template
+        assert f"-ne {os.getpid()}" in ps
+        # literal PowerShell script-block braces survived the format() call
+        assert "Where-Object { $_.ProcessId" in ps
+        assert "ForEach-Object { Stop-Process" in ps
+
+
 class TestMainDelegatesToStopAll:
     def test_emrg_stop_cli_exits_nonzero(self):
         """`emrg stop` must sys.exit with the stop_all() code (installer gate)."""
