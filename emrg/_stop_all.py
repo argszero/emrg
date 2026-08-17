@@ -478,27 +478,45 @@ public static class RM {
   [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint h);
   [StructLayout(LayoutKind.Sequential)] struct RM_UNIQUE_PROCESS { public int dwProcessId; public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime; }
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct RM_PROCESS_INFO { public RM_UNIQUE_PROCESS Process; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=256)] public string strAppName; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=64)] public string strServiceShortName; public int ApplicationType; public uint AppStatus; public uint TSSessionId; public bool bRestartable; }
+  public static int LastRegFail = 0;
   public static int[] Who(string[] files) {
     uint h;
     if (RmStartSession(out h, 0, Guid.NewGuid().ToString()) != 0) return new int[0];
     try {
       const int BATCH = 500;
+      int regFail = 0;
       for (int i = 0; i < files.Length; i += BATCH) {
         int cnt = Math.Min(BATCH, files.Length - i);
         string[] batch = new string[cnt];
         Array.Copy(files, i, batch, 0, cnt);
-        RmRegisterResources(h, (uint)cnt, batch, 0, IntPtr.Zero, 0, IntPtr.Zero);
+        // Check the return value — a failed batch must be visible, never
+        // silently ignored (rant 2026-08-17T21:04:32).
+        if (RmRegisterResources(h, (uint)cnt, batch, 0, IntPtr.Zero, 0, IntPtr.Zero) != 0) regFail++;
       }
-      uint n = 0, m = 0, reason = 0;
-      RM_PROCESS_INFO[] infos = null;
-      int rc;
-      do {
+      LastRegFail = regFail;
+      uint n = 0, reason = 0;
+      int rc = 0;
+      const int MAX_ATTEMPTS = 3;
+      // RmGetList's pdwProcCount (m) is IN/OUT: input = buffer capacity,
+      // output = number of entries written. The old code passed m=0 forever,
+      // so every call returned ERROR_MORE_DATA(234) -> infinite loop -> zero
+      // owners reported -> installer still hit DeleteFile code 5. Fix:
+      // preallocate 50 entries (m=50), on 234 resize to n and retry, hard
+      // capped at MAX_ATTEMPTS so an abnormal API can NEVER dead-loop
+      // (rant 2026-08-17T21:04:32).
+      uint m = 50;
+      RM_PROCESS_INFO[] infos = new RM_PROCESS_INFO[50];
+      for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         rc = RmGetList(h, out n, ref m, infos, ref reason);
-        if (rc == 234) infos = new RM_PROCESS_INFO[n];
-      } while (rc == 234);
+        if (rc != 234) break;
+        m = n;
+        infos = new RM_PROCESS_INFO[n];
+      }
       List<int> res = new List<int>();
       if (rc == 0) {
-        for (uint i = 0; i < Math.Min(n, m); i++) res.Add(infos[i].Process.dwProcessId);
+        uint count = Math.Min(n, m);
+        if (count > (uint)infos.Length) count = (uint)infos.Length;
+        for (uint i = 0; i < count; i++) res.Add(infos[i].Process.dwProcessId);
       }
       return res.ToArray();
     } finally {
@@ -510,10 +528,12 @@ public static class RM {
 $root = Join-Path $env:USERPROFILE '.emrg\install'
 if (-not (Test-Path $root)) { exit 0 }
 $files = @(Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
 $owners = New-Object 'System.Collections.Generic.HashSet[int]'
 if ($files.Length -gt 0) {
   foreach ($p in [RM]::Who([string[]]$files)) { [void]$owners.Add($p) }
 }
+$sw.Stop()
 # Exclude self + the full ancestor chain: stop_all runs from
 # install\python-dist\python.exe, which itself loads install\python313.dll
 # etc. and would be reported as an owner; the chain also contains the Inno
@@ -548,6 +568,9 @@ foreach ($pid in $targets) {
 if ($kill -and $killedHint) {
   Write-Output 'hint: browser-harness daemon stopped - restart it after the installer completes'
 }
+# Structured diagnostics so the Python side can log files/owners/elapsed and
+# RmRegisterResources failures — no more silent idle scans (rant 2026-08-17T21:04:32).
+Write-Output ("rm-diag`t{0}`t{1}`t{2}`t{3}" -f $files.Length, $owners.Count, $sw.ElapsedMilliseconds, [RM]::LastRegFail)
 """
 
 
@@ -573,10 +596,55 @@ def _lock_owner_ps(kill: bool) -> str:
         return ""
 
 
-def _windows_lock_owners(kill: bool) -> list[tuple[int, str, str]]:
-    """Parse ``_lock_owner_ps`` output → ``[(pid, name, cmdline_150), ...]``."""
+def _lock_owner_diag(stdout: str) -> dict | None:
+    """Parse the ``rm-diag`` line emitted by ``_LOCK_OWNER_PS``.
+
+    Shape: ``rm-diag<TAB>files<TAB>owners<TAB>elapsed_ms<TAB>reg_fail``.
+    Returns a dict or None when absent/unparseable (e.g. RM unavailable).
+    """
+    for line in stdout.splitlines():
+        parts = line.split("\t")
+        if parts and parts[0] == "rm-diag" and len(parts) >= 5:
+            try:
+                return {
+                    "files": int(parts[1]),
+                    "owners": int(parts[2]),
+                    "elapsed_ms": int(parts[3]),
+                    "reg_fail": int(parts[4]),
+                }
+            except ValueError:
+                return None
+    return None
+
+
+def _print_rm_diag(stdout: str) -> None:
+    """Log the Restart Manager scan summary (files scanned / owners found /
+    elapsed / registration failures) so a scan can never be silently idle
+    (rant 2026-08-17T21:04:32)."""
+    d = _lock_owner_diag(stdout)
+    if not d:
+        return
+    print(
+        f"emrg stop: rm-scan files={d['files']} owners={d['owners']} "
+        f"elapsed={d['elapsed_ms']}ms reg_fail={d['reg_fail']}"
+    )
+    if d["reg_fail"]:
+        print(
+            f"emrg stop: WARNING {d['reg_fail']} resource-batch registration(s) "
+            "failed - some file-lock owners may be missed"
+        )
+
+
+def _windows_lock_owners(kill: bool, stdout: str | None = None) -> list[tuple[int, str, str]]:
+    """Parse ``_lock_owner_ps`` output → ``[(pid, name, cmdline_150), ...]``.
+
+    ``stdout`` may be supplied by the caller (avoids a second PowerShell
+    invocation when the diag line is needed too); None → run the scan.
+    """
+    if stdout is None:
+        stdout = _lock_owner_ps(kill)
     owners: list[tuple[int, str, str]] = []
-    for line in _lock_owner_ps(kill).splitlines():
+    for line in stdout.splitlines():
         parts = line.split("\t")
         if not parts or not parts[0].strip().isdigit():
             continue
@@ -599,10 +667,12 @@ def stop_lock_owners() -> None:
     """
     if not is_win():
         return
-    for line in _lock_owner_ps(kill=True).splitlines():
+    stdout = _lock_owner_ps(kill=True)
+    for line in stdout.splitlines():
         line = line.strip()
         if line:
             print(f"emrg stop: {line}")
+    _print_rm_diag(stdout)
 
 
 # ── Verify + exit code ──────────────────────────────────────────
@@ -631,8 +701,10 @@ def _verify_windows() -> list[str]:
     # file-lock owners under install\ (Restart Manager — generic code-5 fix:
     # covers ANY process holding locked files, incl. non-EMRG ones such as the
     # browser-harness daemon; self + ancestor chain excluded; rant 2026-08-17T17:55:42)
-    for pid, name, _cmd in _windows_lock_owners(kill=False):
+    rm_out = _lock_owner_ps(kill=False)
+    for pid, name, _cmd in _windows_lock_owners(kill=False, stdout=rm_out):
         residuals.append(f"file-lock owner (pid {pid}, {name or 'unknown'})")
+    _print_rm_diag(rm_out)
     # bundled-git residual
     try:
         out = subprocess.run(

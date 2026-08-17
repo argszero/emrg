@@ -414,6 +414,143 @@ class TestLockOwners:
         assert "Stop-Process" in ps                      # kill
         assert "browser" in ps                           # browser-harness hint
 
+    def test_ps_template_rm_get_list_cannot_deadloop(self):
+        """Rant 2026-08-17T21:04:32 — the old C# loop passed m=0 forever
+        (RmGetList's pdwProcCount is in/out: input=capacity, output=written)
+        → every call returned ERROR_MORE_DATA(234) → infinite loop → zero
+        owners killed → installer still hit DeleteFile code 5."""
+        ps = _stop_all._LOCK_OWNER_PS
+        # Preallocated capacity on the first call (not 0)
+        assert "uint m = 50;" in ps
+        assert "new RM_PROCESS_INFO[50]" in ps
+        # Resize to n on 234, m passed as array capacity (ref in/out)
+        assert "m = n;" in ps
+        assert "new RM_PROCESS_INFO[n]" in ps
+        # Hard loop cap — an abnormal API can never spin forever
+        assert "MAX_ATTEMPTS" in ps and "attempt < MAX_ATTEMPTS" in ps
+        assert "const int MAX_ATTEMPTS = 3;" in ps
+        # No unbounded do/while(rc == 234) construct remains
+        assert "while (rc == 234);" not in ps
+        # Result capped by buffer length as well as n/m
+        assert "Math.Min(n, m)" in ps
+        assert "infos.Length" in ps
+        # RmRegisterResources failure is checked, not silent
+        assert "RmRegisterResources(h, (uint)cnt, batch, 0, IntPtr.Zero, 0, IntPtr.Zero) != 0" in ps
+        assert "LastRegFail" in ps
+        # Structured diagnostics line (files/owners/elapsed/reg_fail)
+        assert "rm-diag" in ps
+        assert "$sw.ElapsedMilliseconds" in ps
+
+    @pytest.mark.parametrize(
+        "scenario",
+        [
+            # (needed_seq, expected_rc, expected_count)
+            # no owners at all
+            ([0], 0, 0),
+            # few owners fit in the initial 50-slot buffer
+            ([3], 0, 3),
+            # exactly the buffer capacity
+            ([50], 0, 50),
+            # one resize: 120 owners > 50 → 234 → resize to 120 → success
+            ([120], 0, 120),
+            # two resizes then success: 60→234(resize 60), 80→234(resize 80),
+            # then 40 fits → rc=0, count 40
+            ([60, 80, 40], 0, 40),
+            # monotonic growth past capacity: 3 attempts all 234 → hard cap
+            # terminates with rc=234 (no owners), NEVER dead-loops
+            ([60, 80, 120], 234, 0),
+            # pathological: API always returns 234 → cap terminates, empty result
+            ([234, 234, 234, 234], 234, 0),
+        ],
+    )
+    def test_rm_get_list_loop_logic(self, scenario):
+        """Pure-Python model of the fixed C# RmGetList loop (rant
+        2026-08-17T21:04:32) — parameterized over real RM behaviors. The loop
+        must terminate in EVERY case (never dead-loop) and return the right
+        owner count."""
+        needed_seq, expected_rc, expected_count = scenario
+        MAX_ATTEMPTS = 3
+        calls = 0
+
+        def get_list(infos_cap):
+            """Mirror rstrtmgr.dll: m (input capacity) vs n (needed).
+            rc=234 (ERROR_MORE_DATA) when needed > capacity; else rc=0 with
+            m = written count = min(capacity, needed). After the sequence is
+            exhausted the needed count stabilizes at its last value."""
+            nonlocal calls
+            idx = min(calls, len(needed_seq) - 1)
+            calls += 1
+            needed = needed_seq[idx]
+            if needed == 234:  # pathological: API never converges
+                return 234, needed, 0
+            if needed > infos_cap:
+                return 234, needed, 0
+            return 0, needed, min(infos_cap, needed)
+
+        n, reason = 0, 0
+        rc = 0
+        m = 50
+        infos_len = 50
+        attempts = 0
+        for attempt in range(MAX_ATTEMPTS):
+            attempts += 1
+            rc, n, m = get_list(infos_len)
+            if rc != 234:
+                break
+            infos_len = n
+            m = n
+        count = min(n, m) if rc == 0 else 0
+        if count > infos_len:
+            count = infos_len
+        assert rc == expected_rc
+        assert count == expected_count
+        assert attempts <= MAX_ATTEMPTS  # hard cap — never dead-loops
+
+    def test_lock_owner_diag_parsed(self):
+        stdout = (
+            "9400\tpython.exe\tC:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon\n"
+            "rm-diag\t1234\t2\t1500\t0\n"
+        )
+        assert _stop_all._lock_owner_diag(stdout) == {
+            "files": 1234, "owners": 2, "elapsed_ms": 1500, "reg_fail": 0,
+        }
+        # no diag line / malformed → None
+        assert _stop_all._lock_owner_diag("9400\tpython.exe\tx\n") is None
+        assert _stop_all._lock_owner_diag("rm-diag\tabc\t2\t3\t0\n") is None
+        assert _stop_all._lock_owner_diag("") is None
+
+    def test_stop_lock_owners_logs_diag(self, monkeypatch, capsys):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all, "_lock_owner_ps", lambda kill: (
+                "killed file-lock owner: PID 9400 python.exe | C:\\...\\browser_harness\n"
+                "rm-diag\t1234\t1\t900\t1\n"
+            ),
+        )
+        _stop_all.stop_lock_owners()
+        out = capsys.readouterr().out
+        assert "killed file-lock owner: PID 9400 python.exe" in out
+        assert "rm-scan files=1234 owners=1 elapsed=900ms reg_fail=1" in out
+        assert "WARNING 1 resource-batch registration(s) failed" in out
+
+    def test_verify_windows_logs_rm_diag(self, monkeypatch, capsys):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        monkeypatch.setattr(
+            _stop_all, "_lock_owner_ps", lambda kill: (
+                "9400\tpython.exe\tC:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon\n"
+                "rm-diag\t1234\t1\t900\t0\n"
+            ),
+        )
+        out = _stop_all._verify_windows()
+        assert any("file-lock owner (pid 9400, python.exe)" in r for r in out)
+        assert "rm-scan files=1234 owners=1 elapsed=900ms reg_fail=0" in capsys.readouterr().out
+
     def test_ps_template_renders_without_valueerror(self, monkeypatch):
         """The template must render without raising — braces are literal (no
         str.format), so the {{ }} escaping contract does not apply here."""
@@ -434,8 +571,8 @@ class TestLockOwners:
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
         monkeypatch.setattr(
             _stop_all, "_windows_lock_owners",
-            lambda kill: [(9400, "python.exe",
-                           "C:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon")],
+            lambda kill, stdout=None: [(9400, "python.exe",
+                                        "C:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon")],
         )
         monkeypatch.setattr(
             _stop_all.subprocess, "run",

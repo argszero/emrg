@@ -125,8 +125,10 @@ def test_stop_all_py_restart_manager_lock_owners():
     assert stop_all_src.index("stop_bundled_git()") < stop_all_src.index("stop_lock_owners()")
     # verify 接入：残留 file-lock owner → 点名 + exit 1（R125 中止语义不变）
     verify_src = content.split("def _verify_windows")[1].split("def _verify_posix")[0]
-    assert "_windows_lock_owners(kill=False)" in verify_src
+    assert "_windows_lock_owners(kill=False, stdout=rm_out)" in verify_src
     assert "file-lock owner" in verify_src
+    # rant 2026-08-17T21:04:32：verify 也要打印 RM 扫描摘要（防静默空转）
+    assert "_print_rm_diag(rm_out)" in verify_src
 
 
 def test_main_delegates_stop_to_stop_all():
