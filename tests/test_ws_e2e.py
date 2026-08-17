@@ -167,6 +167,109 @@ class TestWSAuth:
         asyncio.run(_test())
 
 
+class TestWSVibeCheck:
+    """task_vibe_check — one-shot structured LLM ask (rant 2026-08-17T11:39:19).
+
+    The scheduler replaces its git-HEAD empty-cycle heuristic with an agent
+    answer: the daemon runs a single Ask-mode LLM call (no tools, no history)
+    and returns a strict-JSON {meaningful, recommend_slowdown, reason} result.
+    """
+
+    def test_vibe_check_returns_structured_result(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                server, _, cleanup = await _boot_server(Path(tmp))
+                try:
+                    async def fake_chat(messages, tools=None):
+                        # echo back a strict-JSON answer; fenced JSON tolerated
+                        return {"content": '```json\n{"meaningful": false, "recommend_slowdown": true, "reason": "长期无产出"}\n```'}
+                    server.llm.chat = fake_chat
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task_vibe_check",
+                            "session_id": "s-vibe",
+                            "task_name": "emrg-task",
+                            "prompt": "run the evolution cycle",
+                            "completion_summary": "nothing to evolve",
+                        }, ensure_ascii=False))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        data = json.loads(frame)
+                        assert data.get("type") == "vibe_check_result"
+                        assert data.get("ok") is True
+                        result = data.get("result", {})
+                        assert result.get("meaningful") is False
+                        assert result.get("recommend_slowdown") is True
+                        assert result.get("reason") == "长期无产出"
+                        # the ask must carry the fixed system prompt + no tools
+                        sent = server.llm.chat
+                        assert sent is fake_chat
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_vibe_check_bad_llm_answer_returns_ok_false(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                server, _, cleanup = await _boot_server(Path(tmp))
+                try:
+                    async def fake_chat(messages, tools=None):
+                        return {"content": "not json at all"}
+                    server.llm.chat = fake_chat
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task_vibe_check",
+                            "session_id": "s-vibe",
+                            "task_name": "t",
+                            "prompt": "p",
+                            "completion_summary": "c",
+                        }))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        data = json.loads(frame)
+                        assert data.get("type") == "vibe_check_result"
+                        assert data.get("ok") is False
+                        assert "error" in data
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_vibe_check_llm_raises_returns_ok_false(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                server, _, cleanup = await _boot_server(Path(tmp))
+                try:
+                    async def fake_chat(messages, tools=None):
+                        raise RuntimeError("llm down")
+                    server.llm.chat = fake_chat
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task_vibe_check",
+                            "session_id": "s-vibe",
+                            "task_name": "t",
+                            "prompt": "p",
+                            "completion_summary": "c",
+                        }))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        data = json.loads(frame)
+                        assert data.get("type") == "vibe_check_result"
+                        assert data.get("ok") is False
+                        assert "llm down" in data.get("error", "")
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+
 class TestWSProtocol:
     def test_bad_json_message_gets_error_frame(self):
         async def _test():
@@ -692,6 +795,10 @@ class TestWSQueueInjection:
                             return ToolResult(tool_call_id="call_1", name="bash",
                                               content="hi", error=False)
 
+                        def definition(self):
+                            from emrg.server.tool_types import ToolDefinition
+                            return ToolDefinition(name="bash", purpose="slow bash for tests")
+
                     orig_get = server.tools.get
                     server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)
 
@@ -773,6 +880,10 @@ class TestWSQueueInjection:
                             await asyncio.sleep(0.5)
                             return ToolResult(tool_call_id="call_1", name="bash",
                                               content="hi", error=False)
+
+                        def definition(self):
+                            from emrg.server.tool_types import ToolDefinition
+                            return ToolDefinition(name="bash", purpose="slow bash for tests")
 
                     orig_get = server.tools.get
                     server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)

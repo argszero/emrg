@@ -268,6 +268,25 @@ def test_system_prompt_environment_without_session(tmp_path):
     assert "**Working directory**" not in rendered
 
 
+def test_system_prompt_rant_handling_section(tmp_path):
+    """Rant Handling section renders (rant 2026-08-17T11:51:59): agent must
+    know to detect rants in normal conversation, confirm with the user, and
+    only then call submit_rant."""
+    server = _make_server()
+    rendered = server._build_system_prompt()
+    assert "## Rant Handling" in rendered
+    assert "submit_rant" in rendered
+    assert "explicit" in rendered.lower()  # consent-before-call contract
+    assert "/rant" in rendered
+
+
+def test_submit_rant_tool_registered():
+    """submit_rant is in the daemon tool registry (available in all sessions)."""
+    server = _make_server()
+    assert "submit_rant" in server.tools.names
+    assert server.tools.get("submit_rant") is not None
+
+
 def test_context_section_single_file(tmp_path):
     """When CLAUDE.md exists, it's returned as a dict entry."""
     server = _make_server()

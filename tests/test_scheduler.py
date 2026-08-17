@@ -1512,20 +1512,98 @@ def test_evolution_cycle_truncated_not_empty_not_complete(tmp_path):
     assert not any(i.endswith("-complete") for i in impact), impact
 
 
-def test_evolution_cycle_complete_unchanged_head_still_empty(tmp_path):
-    """Normal completion with unchanged HEAD keeps the existing empty-cycle semantics."""
+def test_evolution_cycle_complete_agent_says_not_meaningful_is_empty(tmp_path):
+    """Clean completion + agent vibe check meaningful=false → empty cycle.
+
+    Rant 2026-08-17T11:39:19: the AGENT (task_vibe_check structured answer)
+    decides emptiness, not git HEAD.
+    """
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"meaningful": False, "recommend_slowdown": False,
+                    "reason": "nothing to evolve"}},
     ])
     asyncio.run(handler._run_evolution_cycle())
     assert handler._empty_cycles == 1, \
-        "unchanged-HEAD complete cycle is still counted as empty (existing behavior)"
+        "agent-reported meaningless complete cycle is counted as empty"
     impact = captured["log"].impact
     assert any(i.endswith("-complete") for i in impact), impact
     assert any(i.startswith("cycle-") for i in impact), \
         f"impact tag uses new cycle- prefix (rant 2026-08-12T18:03:26), got {impact}"
     assert "truncated=max-tool-rounds" not in impact, impact
+
+
+def test_evolution_cycle_complete_agent_says_meaningful_resets_streak(tmp_path):
+    """Agent reports meaningful work → empty streak + slowdown votes reset.
+
+    A round that produced value (analysis/memory/decision without a commit)
+    must NOT count as empty — the git-HEAD heuristic's core false positive.
+    """
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Analyzed the issue and wrote memory",
+         "done": True, "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"meaningful": True, "recommend_slowdown": False,
+                    "reason": "completed analysis"}},
+    ])
+    handler._empty_cycles = 5
+    handler._slowdown_hits = 2
+    asyncio.run(handler._run_evolution_cycle())
+    assert handler._empty_cycles == 0, "meaningful work resets the empty streak"
+    assert handler._slowdown_hits == 0, "meaningful work resets slowdown votes"
+    assert "log" in captured
+
+
+def test_evolution_cycle_vibe_unavailable_streak_unchanged(tmp_path):
+    """Vibe check unavailable (timeout/failure) → counter neither advances nor resets.
+
+    Conservative: a failed question must not cause a wrong slowdown NOR a
+    wrong reset (rant 2026-08-17T11:39:19)."""
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+        # no vibe_check_result frame → helper times out / connection closed
+    ])
+    handler._empty_cycles = 3
+    handler._slowdown_hits = 1
+    asyncio.run(handler._run_evolution_cycle())
+    assert handler._empty_cycles == 3, "vibe check failure must not advance the counter"
+    assert handler._slowdown_hits == 1, "vibe check failure must not reset votes"
+    assert "log" in captured, "main task still completed normally"
+
+
+def test_evolution_cycle_agent_recommend_slowdown_accumulates(tmp_path):
+    """recommend_slowdown votes accumulate; 3 votes tighten the threshold.
+
+    The saturation threshold drops from 30 to 10 when the agent keeps saying
+    the task has no value (rant 2026-08-17T11:39:19)."""
+    for i in range(3):
+        handler, _ = _make_cycle_handler(tmp_path, frames=[
+            {"request_id": "r1", "content": "Done", "done": True,
+             "delta": False, "session_id": "s"},
+            {"type": "vibe_check_result", "ok": True,
+             "result": {"meaningful": False, "recommend_slowdown": True,
+                        "reason": "long-term no value"}},
+        ])
+        asyncio.run(handler._run_evolution_cycle())
+        assert handler._slowdown_hits == i + 1, handler._slowdown_hits
+        assert handler._empty_cycles == i + 1, handler._empty_cycles
+    # 3 votes → tightened threshold (30 → 10)
+    assert handler._saturation_threshold() == 10, "3 slowdown votes must tighten the threshold"
+    assert handler._saturation_threshold() < handler._IDLE_HALT_THRESHOLD
+
+
+def test_saturation_threshold_defaults_to_idle_halt(tmp_path):
+    """Below 3 slowdown votes the threshold stays at _IDLE_HALT_THRESHOLD (30)."""
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    assert handler._slowdown_hits == 0
+    assert handler._saturation_threshold() == handler._IDLE_HALT_THRESHOLD
+    handler._slowdown_hits = 2
+    assert handler._saturation_threshold() == handler._IDLE_HALT_THRESHOLD
+    handler._slowdown_hits = 3
+    assert handler._saturation_threshold() == 10
 
 
 def test_evolution_cycle_aborted_error_not_counted(tmp_path):
@@ -1774,6 +1852,9 @@ def test_saturated_tick_still_runs_full_cycle(tmp_path):
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"meaningful": False, "recommend_slowdown": False,
+                    "reason": "nothing to evolve"}},
     ])
     handler._empty_cycles = 30  # saturated
     fake = FakeGitRun(remote_head="abc123")  # unchanged → stay saturated
