@@ -12,7 +12,7 @@ _log_file = _log_dir / "emrgd.log"
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
+    datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         RotatingFileHandler(
             str(_log_file), maxBytes=10 * 1024 * 1024, backupCount=3,
