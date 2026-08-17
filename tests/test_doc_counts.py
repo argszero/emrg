@@ -118,3 +118,21 @@ def test_no_duplicate_npm_test_command_lines() -> None:
         ]
         assert not bad, f"{doc}: heading(s) must not contain emoji: {bad}"
 
+
+def test_evolution_prompt_no_quick_ref_block() -> None:
+    """evolution_prompt.md must not contain the implemented-features quick
+    reference block (rant 2026-08-17T14:22:21 — removed in #822).
+
+    pm25coder follow-up on #822: cheap insurance against accidental
+    re-insertion of the static in-prompt history table. The memory system
+    + git log handle dedup instead.
+    """
+    prompt = (REPO_ROOT / "emrg" / "server" / "evolution_prompt.md").read_text(
+        encoding="utf-8"
+    )
+    assert "implemented-features quick reference" not in prompt, (
+        "evolution_prompt.md must not contain the implemented-features quick "
+        "reference block — dedup is handled by the memory system + git log "
+        "(rant 2026-08-17T14:22:21, #822)"
+    )
+
