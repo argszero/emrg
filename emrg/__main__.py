@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -75,8 +74,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "stop",
         help="Stop ALL running emrg processes (daemon, TUI, GUI)",
         description="Stop every running emrg process: the daemon, TUI clients and "
-        "the GUI app. Graceful stop first, force-kill stragglers. Used by the "
-        "Windows installer pre-stop (stop-emrg.cmd step [0]).",
+        "the GUI app. Graceful stop first, force-kill stragglers. Also kills the "
+        "bundled git tree on Windows and exits non-zero when residual processes "
+        "remain (used by the Windows installer pre-stop).",
     )
 
     # emrg update
@@ -121,7 +121,9 @@ def main() -> None:
     elif parsed.command == "rant":
         _send_rant(" ".join(parsed.message), project=parsed.project)
     elif parsed.command == "stop":
-        _stop_all()
+        # Windows installer pre-stop depends on the non-zero exit code when
+        # residual processes remain (emrg/_stop_all.py owns the full logic).
+        sys.exit(_stop_all())
     elif parsed.command == "update":
         _run_update()
     else:
@@ -208,137 +210,37 @@ def _stop_daemon() -> None:
 
 # ── Stop everything (`emrg stop`) ──────────────────────────────
 
-_EMRG_CLIENT_RE = re.compile(r"-m\s+emrg(\.server)?(\s|$)")
-
-
 def _match_emrg_client(cmd: str) -> bool:
     """True if a process command line belongs to an emrg process (TUI/daemon/GUI).
 
-    Matches:
-      - `python -m emrg`              (TUI client)
-      - `python -m emrg.server`       (daemon; protocol/pid stop may have missed it)
-      - `/Applications/EMRG.app/...`  (macOS GUI)
-    Does NOT match lookalikes like `-m emrg.serverless` or `-m emrgx`.
+    Delegates to ``emrg._stop_all.match_cmdline`` — the single source of truth
+    shared with the standalone installer script (bin/stop_all.py).
     """
-    if "EMRG.app" in cmd:
-        return True
-    return bool(_EMRG_CLIENT_RE.search(cmd))
+    from emrg._stop_all import match_cmdline
+    return match_cmdline(cmd)
 
 
 def _scan_emrg_client_pids(ps_output: str, own_pid: int) -> list[int]:
     """Parse `ps -axww -o pid=,command=` output → pids of emrg processes.
 
     `own_pid` is excluded so `emrg stop` (itself `python -m emrg stop`) never
-    kills the CLI that is running it.
+    kills the CLI that is running it. Delegates to ``emrg._stop_all.scan_pids``.
     """
-    pids: list[int] = []
-    for line in ps_output.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        if len(parts) != 2:
-            continue
-        try:
-            pid = int(parts[0])
-        except ValueError:
-            continue
-        if pid == own_pid:
-            continue
-        if _match_emrg_client(parts[1]):
-            pids.append(pid)
-    return pids
+    from emrg._stop_all import scan_pids
+    return scan_pids(ps_output, own_pid)
 
 
-def _stop_pids(pids: list[int]) -> list[int]:
-    """Graceful SIGTERM → short grace → SIGKILL. Returns pids that survived."""
-    for pid in pids:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-    alive: list[int] = []
-    for _ in range(20):  # ~3s grace window
-        alive = []
-        for pid in pids:
-            try:
-                os.kill(pid, 0)
-                alive.append(pid)
-            except (ProcessLookupError, PermissionError):
-                pass
-        if not alive:
-            break
-        time.sleep(0.15)
-    for pid in alive:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    return alive
+def _stop_all() -> int:
+    """Stop every running emrg process: daemon, TUI, GUI (+ bundled git on
+    Windows) and verify. Returns 0 on clean stop, 1 when residual processes
+    remain — the Windows installer aborts on the non-zero exit.
 
-
-def _stop_posix_clients() -> None:
-    """Kill TUI/GUI emrg client processes on POSIX (ps scan + SIGTERM/SIGKILL)."""
-    try:
-        out = subprocess.run(
-            ["ps", "-axww", "-o", "pid=,command="],
-            capture_output=True, text=True, timeout=10,
-            **win32_no_window_kwargs(),
-        ).stdout
-    except (OSError, subprocess.SubprocessError, TimeoutError):
-        print("emrg stop: could not scan processes (ps unavailable).")
-        return
-    pids = _scan_emrg_client_pids(out, os.getpid())
-    if not pids:
-        print("emrg stop: no other emrg client processes found.")
-        return
-    print(f"emrg stop: found {len(pids)} client process(es), stopping ...")
-    survivors = _stop_pids(pids)
-    if survivors:
-        print(f"emrg stop: WARNING {len(survivors)} process(es) survived SIGKILL: {survivors}")
-    else:
-        print("emrg stop: client processes stopped.")
-
-
-def _stop_windows_clients() -> None:
-    """Kill GUI (EMRG.exe) + TUI (python -m emrg, excluding daemon) on Windows.
-
-    Mirrors bin/stop-emrg.cmd steps [1]/[2]: graceful GUI stop then unconditional
-    /F fallback (host 2026-08-10T01:27:07Z lesson), TUI via PowerShell command
-    line filter (wmic-free, Win11 24H2+ safe).
+    All logic lives in ``emrg/_stop_all.py`` (pure stdlib) so the installer
+    can also run it standalone with the runtime's Python; this function is
+    the ``emrg stop`` CLI entry point that propagates the exit code.
     """
-    kw = win32_no_window_kwargs()
-    # GUI: graceful first, then unconditional force (no survivor gate)
-    subprocess.run(["taskkill", "/IM", "EMRG.exe"], capture_output=True, **kw)
-    time.sleep(0.5)
-    subprocess.run(["taskkill", "/F", "/IM", "EMRG.exe"], capture_output=True, **kw)
-    # TUI: python.exe running `-m emrg` but NOT `emrg.server` (daemon)
-    ps_cmd = (
-        "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-        "Where-Object { $_.CommandLine -match '-m emrg' -and "
-        "$_.CommandLine -notmatch 'emrg\\.server' } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-    )
-    subprocess.run(
-        ["powershell", "-NoProfile", "-Command", ps_cmd],
-        capture_output=True, **kw,
-    )
-
-
-def _stop_all() -> None:
-    """Stop every running emrg process: daemon, TUI, GUI.
-
-    Graceful stop first, force-kill stragglers — the CLI counterpart of
-    bin/stop-emrg.cmd (host request 2026-08-15: `emrg stop` must check all
-    open emrg TUI/GUI/server processes and stop them all).
-    """
-    print("emrg stop: stopping daemon ...")
-    _stop_daemon()
-    if sys.platform == "win32":
-        _stop_windows_clients()
-    else:
-        _stop_posix_clients()
-    print("emrg stop: done.")
+    from emrg._stop_all import stop_all
+    return stop_all()
 
 
 def _restart_daemon() -> None:
