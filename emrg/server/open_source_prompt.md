@@ -141,8 +141,14 @@ cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip rant scan]
 
 Filter rules (aligned with evolution_prompt.md):
 
-- Only rants whose `project` field == this task's `config.project`; **ignore rants without a `project` field entirely**
+- Match the rant's `project` field against **either** of these two values — equal to either counts as a match:
+  - this task's `config.project` (tasks.yml): **`{{ task.project }}`**
+  - owner/repo form: **`{{ owner }}/{{ repo }}`**
+- Example: if `config.project` is `aitokenpool` and the repo is `argszero/aitokenpool`, then a rant with `project: aitokenpool` **or** `project: argszero/aitokenpool` both match.
+- **Ignore rants without a `project` field entirely**
 - Only consider rants with status `pending` or `in_progress`
+
+**⚠️ Unmatched-rant hint**: after the scan, if there exist rants with status `pending`/`in_progress` whose `project` starts with `{{ task.project }}` or `{{ owner }}/{{ repo }}` but did NOT match the filter above, record the count in the state file / reflection (e.g. "存在 N 条 project 疑似本项目但未匹配的 rant" / "N rants with a project resembling this repo were not matched") — never silently skip them.
 
 **Dedup check — before treating any candidate rant as actionable** (run for each candidate):
 

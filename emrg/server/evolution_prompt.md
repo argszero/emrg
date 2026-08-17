@@ -268,7 +268,7 @@ Old entries without a `status` field are treated as pending.
 
 When reading rants, follow these rules:
 - Any unhandled rants? Previously skipped? Large changes can be staged
-- Only read rants whose `project` field matches the current task's `config.project`; **ignore rants without a `project` field entirely**
+- Match the rant's `project` field against **either** this task's `config.project` (**`{{ task.project }}`**) or the owner/repo form (**`{{ owner }}/{{ repo }}`**) — equal to either counts as a match; **ignore rants without a `project` field entirely** (rant 2026-08-17T12:09:57: the two forms must both match — a rant written with one form must never silently fail to match the other)
 
 > **Note**: first check whether a rant was already handled, to avoid duplicate work:
 > 1. Check `git log --oneline -20` for commits referencing the rant (search the rant's timestamp or message keywords) — **note: a commit referencing the rant timestamp is only evidence the rant was touched, NOT sufficient proof of completion**. You must further verify: does the rant have unmet acceptance items? Are there unmerged branches? An early PR merge in a multi-stage effort does not mean the rant is done.

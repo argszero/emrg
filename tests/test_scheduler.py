@@ -601,6 +601,11 @@ def test_open_source_template_renders_with_context():
     assert "0.5 Rant scan" in out, "rant-scan 0.5 节应渲染"
     assert "rants.jsonl" in out, "rant 扫描命令应渲染"
     assert "config.project" in out, "project 匹配过滤应渲染"
+    # Rant 2026-08-17T12:09:57: dual-compatible project matching (config.project
+    # OR owner/repo) must be rendered with the actual values.
+    assert "aitokenpool" in out, "task.project 值应渲染进 0.5 节"
+    assert "x/y" in out, "owner/repo 形式应渲染进 0.5 节"
+    assert "Unmatched-rant hint" in out, "未匹配疑似 rant 提示应渲染"
     assert "B.1b Rant-driven mode" in out, "rant 驱动模式应渲染"
     assert "ROLE LOCK" in out, "既有 ROLE LOCK 应保留"
     assert "json.dumps(..., ensure_ascii=False)" in out, "rant 状态写入要求应渲染"
@@ -2113,3 +2118,28 @@ def test_task_create_custom_type(tmp_path):
         asyncio.run(_run())
     finally:
         mod.config_dir = orig
+
+
+def test_evolution_template_renders_dual_project_match():
+    """evolution_prompt.md renders the dual-compatible rant project match
+    (rant 2026-08-17T12:09:57): both config.project AND owner/repo forms
+    must be accepted when scanning rants."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "evolution_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/argszero/emrg.git", owner="argszero",
+        repo="emrg", local_source="/tmp/evo", source_dir="/tmp/evo",
+        session_id="s1", evolution_cwd="/tmp/evo", timestamp="20260817",
+        task={"role": "committer", "project": "emrg"},
+        project={}, evolution_count=0, git_path="git", gh_path="gh",
+    )
+    assert "emrg" in out, "task.project 值应渲染"
+    assert "argszero/emrg" in out, "owner/repo 形式应渲染"
+    assert "ignore rants without a `project` field entirely" in out
