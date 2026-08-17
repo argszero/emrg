@@ -88,7 +88,7 @@ def test_stop_all_py_cmdline_scan_fallback():
     # verify() 增加 python emrg 进程残留检查（不依赖 pid 文件）
     verify_src = content.split("def _verify_windows")[1].split("def _verify_posix")[0]
     assert "_scan_windows_python_emrg(os.getpid())" in verify_src
-    assert 'residuals.append(f"python emrg process (pid {pid})")' in verify_src
+    assert 'f"python emrg process (pid {p})"' in verify_src
 
 
 def test_stop_all_py_restart_manager_lock_owners():
@@ -118,15 +118,20 @@ def test_stop_all_py_restart_manager_lock_owners():
     assert "Substring(0, 150)" in content
     assert "Stop-Process" in content
     assert "browser" in content
-    # stop_all() 顺序：bundled git 之后、verify 之前
-    stop_all_src = content.split("def stop_all")[1]
-    assert "stop_bundled_git()" in stop_all_src
-    assert "stop_lock_owners()" in stop_all_src
-    assert stop_all_src.index("stop_bundled_git()") < stop_all_src.index("stop_lock_owners()")
+    # stop_all() 顺序：bundled git 之后、verify 之前（步骤计划表 _step_plan，
+    # rant 2026-08-17T21:06:31 日志规范重构后 stop_all 从计划表驱动）
+    step_src = content.split("def _step_plan")[1].split("def stop_all")[0]
+    assert "stop_bundled_git" in step_src
+    assert "stop_lock_owners" in step_src
+    assert step_src.index("stop_bundled_git") < step_src.index("stop_lock_owners")
+    assert '"GUI", stop_gui' in step_src
+    assert '"daemon", stop_daemon' in step_src
     # verify 接入：残留 file-lock owner → 点名 + exit 1（R125 中止语义不变）
     verify_src = content.split("def _verify_windows")[1].split("def _verify_posix")[0]
-    assert "_windows_lock_owners(kill=False)" in verify_src
+    assert "_windows_lock_owners(kill=False, stdout=rm_out)" in verify_src
     assert "file-lock owner" in verify_src
+    # rant 2026-08-17T21:04:32：verify 也要打印 RM 扫描摘要（防静默空转）
+    assert "_print_rm_diag(rm_out)" in verify_src
 
 
 def test_main_delegates_stop_to_stop_all():

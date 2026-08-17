@@ -38,8 +38,8 @@ class TestPureStdlib:
         tree = ast.parse(src)
         allowed = {
             "base64", "json", "os", "re", "secrets", "signal", "socket",
-            "subprocess", "sys", "time", "pathlib", "ast", "pytest", "annotations",
-            "__future__",
+            "subprocess", "sys", "time", "pathlib", "platform", "ctypes", "ast",
+            "pytest", "annotations", "__future__",
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -143,12 +143,17 @@ class TestStopAllExitCode:
         monkeypatch.setattr(_stop_all, "stop_tui", lambda: None)
         monkeypatch.setattr(_stop_all, "stop_bundled_git", lambda: None)
         monkeypatch.setattr(_stop_all, "verify", lambda: residuals)
+        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
+        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
 
     def test_clean_returns_0(self, monkeypatch, capsys):
         self._patch_steps(monkeypatch, residuals=[])
         assert stop_all() == 0
         out = capsys.readouterr().out
         assert "all emrg processes stopped" in out
+        assert "exit code 0 (clean)" in out
+        assert "stop_all.py built" in out          # header (rant 21:06:31 #1)
+        assert "[1/" in out and "-> done" in out    # per-step [N/T] (rant #2)
 
     def test_residual_returns_1_and_lists_them(self, monkeypatch, capsys):
         self._patch_steps(monkeypatch, residuals=["EMRG.exe (pid 1234)", "daemon (pid 99)"])
@@ -157,6 +162,20 @@ class TestStopAllExitCode:
         assert "WARNING residual process(es) still running" in out
         assert "EMRG.exe (pid 1234)" in out
         assert "daemon (pid 99)" in out
+        assert "exit code 1 (2 residual)" in out
+
+    def test_step_exception_not_silent(self, monkeypatch, capsys):
+        """A crashing step must print ERROR <step> and still reach the final
+        exit code (rant 2026-08-17T21:06:31 #4 — never silent)."""
+        self._patch_steps(monkeypatch, residuals=[])
+
+        def boom():
+            raise RuntimeError("taskkill failed")
+
+        monkeypatch.setattr(_stop_all, "stop_gui", boom)
+        assert stop_all() == 0
+        out = capsys.readouterr().out
+        assert "ERROR [1/" in out and "GUI" in out and "taskkill failed" in out
 
     def test_main_exits_with_code(self, monkeypatch):
         monkeypatch.setattr(_stop_all, "stop_all", lambda: 1)
@@ -185,6 +204,8 @@ class TestStopAllOrder:
         monkeypatch.setattr(_stop_all, "stop_bundled_git", _rec("stop_bundled_git"))
         monkeypatch.setattr(_stop_all, "stop_lock_owners", _rec("stop_lock_owners"))
         monkeypatch.setattr(_stop_all, "verify", lambda: [])
+        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
+        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         return order
 
@@ -414,6 +435,143 @@ class TestLockOwners:
         assert "Stop-Process" in ps                      # kill
         assert "browser" in ps                           # browser-harness hint
 
+    def test_ps_template_rm_get_list_cannot_deadloop(self):
+        """Rant 2026-08-17T21:04:32 — the old C# loop passed m=0 forever
+        (RmGetList's pdwProcCount is in/out: input=capacity, output=written)
+        → every call returned ERROR_MORE_DATA(234) → infinite loop → zero
+        owners killed → installer still hit DeleteFile code 5."""
+        ps = _stop_all._LOCK_OWNER_PS
+        # Preallocated capacity on the first call (not 0)
+        assert "uint m = 50;" in ps
+        assert "new RM_PROCESS_INFO[50]" in ps
+        # Resize to n on 234, m passed as array capacity (ref in/out)
+        assert "m = n;" in ps
+        assert "new RM_PROCESS_INFO[n]" in ps
+        # Hard loop cap — an abnormal API can never spin forever
+        assert "MAX_ATTEMPTS" in ps and "attempt < MAX_ATTEMPTS" in ps
+        assert "const int MAX_ATTEMPTS = 3;" in ps
+        # No unbounded do/while(rc == 234) construct remains
+        assert "while (rc == 234);" not in ps
+        # Result capped by buffer length as well as n/m
+        assert "Math.Min(n, m)" in ps
+        assert "infos.Length" in ps
+        # RmRegisterResources failure is checked, not silent
+        assert "RmRegisterResources(h, (uint)cnt, batch, 0, IntPtr.Zero, 0, IntPtr.Zero) != 0" in ps
+        assert "LastRegFail" in ps
+        # Structured diagnostics line (files/owners/elapsed/reg_fail)
+        assert "rm-diag" in ps
+        assert "$sw.ElapsedMilliseconds" in ps
+
+    @pytest.mark.parametrize(
+        "scenario",
+        [
+            # (needed_seq, expected_rc, expected_count)
+            # no owners at all
+            ([0], 0, 0),
+            # few owners fit in the initial 50-slot buffer
+            ([3], 0, 3),
+            # exactly the buffer capacity
+            ([50], 0, 50),
+            # one resize: 120 owners > 50 → 234 → resize to 120 → success
+            ([120], 0, 120),
+            # two resizes then success: 60→234(resize 60), 80→234(resize 80),
+            # then 40 fits → rc=0, count 40
+            ([60, 80, 40], 0, 40),
+            # monotonic growth past capacity: 3 attempts all 234 → hard cap
+            # terminates with rc=234 (no owners), NEVER dead-loops
+            ([60, 80, 120], 234, 0),
+            # pathological: API always returns 234 → cap terminates, empty result
+            ([234, 234, 234, 234], 234, 0),
+        ],
+    )
+    def test_rm_get_list_loop_logic(self, scenario):
+        """Pure-Python model of the fixed C# RmGetList loop (rant
+        2026-08-17T21:04:32) — parameterized over real RM behaviors. The loop
+        must terminate in EVERY case (never dead-loop) and return the right
+        owner count."""
+        needed_seq, expected_rc, expected_count = scenario
+        MAX_ATTEMPTS = 3
+        calls = 0
+
+        def get_list(infos_cap):
+            """Mirror rstrtmgr.dll: m (input capacity) vs n (needed).
+            rc=234 (ERROR_MORE_DATA) when needed > capacity; else rc=0 with
+            m = written count = min(capacity, needed). After the sequence is
+            exhausted the needed count stabilizes at its last value."""
+            nonlocal calls
+            idx = min(calls, len(needed_seq) - 1)
+            calls += 1
+            needed = needed_seq[idx]
+            if needed == 234:  # pathological: API never converges
+                return 234, needed, 0
+            if needed > infos_cap:
+                return 234, needed, 0
+            return 0, needed, min(infos_cap, needed)
+
+        n, reason = 0, 0
+        rc = 0
+        m = 50
+        infos_len = 50
+        attempts = 0
+        for attempt in range(MAX_ATTEMPTS):
+            attempts += 1
+            rc, n, m = get_list(infos_len)
+            if rc != 234:
+                break
+            infos_len = n
+            m = n
+        count = min(n, m) if rc == 0 else 0
+        if count > infos_len:
+            count = infos_len
+        assert rc == expected_rc
+        assert count == expected_count
+        assert attempts <= MAX_ATTEMPTS  # hard cap — never dead-loops
+
+    def test_lock_owner_diag_parsed(self):
+        stdout = (
+            "9400\tpython.exe\tC:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon\n"
+            "rm-diag\t1234\t2\t1500\t0\n"
+        )
+        assert _stop_all._lock_owner_diag(stdout) == {
+            "files": 1234, "owners": 2, "elapsed_ms": 1500, "reg_fail": 0,
+        }
+        # no diag line / malformed → None
+        assert _stop_all._lock_owner_diag("9400\tpython.exe\tx\n") is None
+        assert _stop_all._lock_owner_diag("rm-diag\tabc\t2\t3\t0\n") is None
+        assert _stop_all._lock_owner_diag("") is None
+
+    def test_stop_lock_owners_logs_diag(self, monkeypatch, capsys):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all, "_lock_owner_ps", lambda kill: (
+                "killed file-lock owner: PID 9400 python.exe | C:\\...\\browser_harness\n"
+                "rm-diag\t1234\t1\t900\t1\n"
+            ),
+        )
+        _stop_all.stop_lock_owners()
+        out = capsys.readouterr().out
+        assert "killed file-lock owner: PID 9400 python.exe" in out
+        assert "rm-scan files=1234 owners=1 elapsed=900ms reg_fail=1" in out
+        assert "WARNING 1 resource-batch registration(s) failed" in out
+
+    def test_verify_windows_logs_rm_diag(self, monkeypatch, capsys):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        monkeypatch.setattr(
+            _stop_all, "_lock_owner_ps", lambda kill: (
+                "9400\tpython.exe\tC:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon\n"
+                "rm-diag\t1234\t1\t900\t0\n"
+            ),
+        )
+        out = _stop_all._verify_windows()
+        assert any("file-lock owner (pid 9400, python.exe)" in r for r in out)
+        assert "rm-scan files=1234 owners=1 elapsed=900ms reg_fail=0" in capsys.readouterr().out
+
     def test_ps_template_renders_without_valueerror(self, monkeypatch):
         """The template must render without raising — braces are literal (no
         str.format), so the {{ }} escaping contract does not apply here."""
@@ -434,8 +592,8 @@ class TestLockOwners:
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
         monkeypatch.setattr(
             _stop_all, "_windows_lock_owners",
-            lambda kill: [(9400, "python.exe",
-                           "C:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon")],
+            lambda kill, stdout=None: [(9400, "python.exe",
+                                        "C:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon")],
         )
         monkeypatch.setattr(
             _stop_all.subprocess, "run",
@@ -443,6 +601,129 @@ class TestLockOwners:
         )
         out = _stop_all._verify_windows()
         assert any("file-lock owner (pid 9400, python.exe)" in r for r in out)
+
+
+class TestIndependentLockProbe:
+    """check_install_writable — INDEPENDENT of Restart Manager (rant
+    2026-08-17T21:06:05): simulates the installer's overwrite with an
+    exclusive open, so a broken RM detector can never blind verify."""
+
+    def _mk_root(self, tmp_path, files=("a.txt", "sub/b.txt")):
+        root = tmp_path / "install"
+        for f in files:
+            p = root / f
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x", encoding="utf-8")
+        return str(root)
+
+    def test_check_locked_files_collects_unopenable(self, tmp_path):
+        root = self._mk_root(tmp_path)
+        opened = set()
+
+        def try_open(path):
+            opened.add(path)
+            if path.endswith("b.txt"):
+                raise OSError("locked")
+
+        assert _stop_all._check_locked_files(root, try_open=try_open) == [
+            str(tmp_path / "install" / "sub" / "b.txt")
+        ]
+        assert opened == {
+            str(tmp_path / "install" / "a.txt"),
+            str(tmp_path / "install" / "sub" / "b.txt"),
+        }
+
+    def test_check_locked_files_clean(self, tmp_path):
+        root = self._mk_root(tmp_path)
+        assert _stop_all._check_locked_files(root, try_open=lambda p: None) == []
+
+    def test_check_locked_files_empty_root(self, tmp_path):
+        root = tmp_path / "empty-install"
+        root.mkdir()
+        assert _stop_all._check_locked_files(str(root), try_open=lambda p: None) == []
+
+    def test_check_install_writable_posix_noop(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        assert _stop_all.check_install_writable() == []
+
+    def test_check_install_writable_no_install_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        assert _stop_all.check_install_writable() == []
+
+    def test_check_install_writable_returns_locked(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        emrg_root = str(tmp_path / ".emrg" / "install")
+        self._mk_root(tmp_path / ".emrg", files=("a.txt",))  # creates ~/.emrg/install
+        monkeypatch.setattr(_stop_all, "_check_locked_files", lambda r: [emrg_root + "/a.txt"])
+        assert _stop_all.check_install_writable() == [emrg_root + "/a.txt"]
+
+    def test_check_install_writable_probe_error_returns_empty(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        self._mk_root(tmp_path)
+
+        def boom(root):
+            raise RuntimeError("ctypes unavailable")
+
+        monkeypatch.setattr(_stop_all, "_check_locked_files", boom)
+        assert _stop_all.check_install_writable() == []  # best-effort, never raise
+
+    def test_verify_categories_include_lock_probe(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(_stop_all, "_lock_owner_ps", lambda kill: "")
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        monkeypatch.setattr(
+            _stop_all, "check_install_writable",
+            lambda: [r"C:\\Users\\me\\.emrg\\install\\lib\\websockets\\speedups.cp313-win_amd64.pyd"],
+        )
+        cats = _stop_all._verify_windows_categories()
+        names = [n for n, _ in cats]
+        assert names == ["GUI", "daemon", "cmdline-scan", "RM re-scan", "lock-probe", "bundled-git"]
+        locked = dict(cats)["lock-probe"]
+        assert any("locked file" in r and "speedups" in r for r in locked)
+        summary = _stop_all._verify_windows_summary()
+        assert "lock-probe 1" in summary
+        assert "GUI 0" in summary
+
+    def test_stop_all_retries_lock_kill(self, monkeypatch, capsys):
+        """RM killed owners but locks linger → re-probe + retry up to 2×,
+        then verify still surfaces the locked file → exit 1 (rant 21:06:05 #3:
+        installer aborts with a named list instead of a code-5 dialog)."""
+        calls: list[str] = []
+
+        def rec(name):
+            def _fn(*a, **k):
+                calls.append(name)
+            return _fn
+
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "stop_gui", rec("gui"))
+        monkeypatch.setattr(_stop_all, "stop_tui", rec("tui"))
+        monkeypatch.setattr(_stop_all, "stop_daemon", rec("daemon"))
+        monkeypatch.setattr(_stop_all, "stop_bundled_git", rec("bundled_git"))
+        monkeypatch.setattr(_stop_all, "stop_lock_owners", rec("lock_owners"))
+        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
+        locked = iter([[r"C:\\locked.pyd"], [r"C:\\locked.pyd"], []])
+        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: next(locked))
+        monkeypatch.setattr(
+            _stop_all, "verify",
+            lambda: ["locked file (installer overwrite would fail): C:\\locked.pyd"],
+        )
+        assert _stop_all.stop_all() == 1
+        out = capsys.readouterr().out
+        # initial kill + 2 retries
+        assert calls.count("lock_owners") == 3
+        assert "still locked after kill (retry 1/2)" in out
+        assert "retry 2/2" in out
+        assert "locked file (installer overwrite would fail): C:\\locked.pyd" in out
+        assert "exit code 1 (1 residual)" in out
 
 
 class TestMainDelegatesToStopAll:
