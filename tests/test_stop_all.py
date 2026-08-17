@@ -183,6 +183,7 @@ class TestStopAllOrder:
         monkeypatch.setattr(_stop_all, "stop_tui", _rec("stop_tui"))
         monkeypatch.setattr(_stop_all, "stop_daemon", _rec("stop_daemon"))
         monkeypatch.setattr(_stop_all, "stop_bundled_git", _rec("stop_bundled_git"))
+        monkeypatch.setattr(_stop_all, "stop_lock_owners", _rec("stop_lock_owners"))
         monkeypatch.setattr(_stop_all, "verify", lambda: [])
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         return order
@@ -190,11 +191,17 @@ class TestStopAllOrder:
     def test_clients_before_daemon(self, monkeypatch):
         order = self._record_order(monkeypatch)
         assert stop_all() == 0
-        assert order == ["stop_gui", "stop_tui", "stop_daemon", "stop_bundled_git"]
+        assert order == [
+            "stop_gui", "stop_tui", "stop_daemon", "stop_bundled_git",
+            "stop_lock_owners",
+        ]
         # daemon MUST come after both clients — a client alive when the
         # daemon dies would re-spawn it (auto-spawn mechanisms in GUI/TUI)
         assert order.index("stop_daemon") > order.index("stop_gui")
         assert order.index("stop_daemon") > order.index("stop_tui")
+        # Restart Manager lock-owner kill must run AFTER bundled-git and
+        # BEFORE verify (it is the last cleanup before the residual check)
+        assert order.index("stop_lock_owners") > order.index("stop_bundled_git")
 
     def test_posix_skips_bundled_git(self, monkeypatch):
         order = self._record_order(monkeypatch)
@@ -336,6 +343,106 @@ class TestVerifyWindowsPythonResidual:
             lambda cmd, **kw: type("CP", (), {"stdout": ""}),
         )
         assert _stop_all._verify_windows() == []
+
+
+class TestLockOwners:
+    """stop_lock_owners — Restart Manager generic file-lock fix
+    (rant 2026-08-17T17:55:42: 0.2.43 DeleteFile code 5 root cause = an
+    EXTERNAL browser-harness daemon locking install\\ files; emrgd.pid/port
+    empty and no -m emrg process, so the cmdline scan could never see it)."""
+
+    def test_posix_noop(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        called: list = []
+        monkeypatch.setattr(
+            _stop_all, "_lock_owner_ps", lambda kill: called.append(kill) or "x"
+        )
+        _stop_all.stop_lock_owners()
+        assert called == []
+
+    def test_parses_tab_separated_output(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all, "_lock_owner_ps",
+            lambda kill: (
+                "9400\tpython.exe\tC:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon\n"
+                "not-a-line\n"
+                "555\tpythonw.exe\tsome -m emrg.server cmdline\n"
+            ),
+        )
+        owners = _stop_all._windows_lock_owners(kill=False)
+        assert owners == [
+            (9400, "python.exe",
+             "C:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon"),
+            (555, "pythonw.exe", "some -m emrg.server cmdline"),
+        ]
+
+    def test_subprocess_failure_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+
+        def boom(*a, **k):
+            raise OSError("no powershell")
+
+        monkeypatch.setattr(_stop_all.subprocess, "run", boom)
+        assert _stop_all._lock_owner_ps(kill=False) == ""
+        assert _stop_all._windows_lock_owners(kill=False) == []
+
+    def test_kill_flag_rendered(self, monkeypatch):
+        calls: list = []
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: calls.append(cmd) or type("CP", (), {"stdout": ""}),
+        )
+        _stop_all._lock_owner_ps(kill=True)
+        ps = calls[0][-1]
+        assert ps.startswith("& {")
+        assert ps.rstrip().endswith("$true")
+        _stop_all._lock_owner_ps(kill=False)
+        assert calls[1][-1].rstrip().endswith("$false")
+
+    def test_ps_template_contains_rm_key_elements(self):
+        ps = _stop_all._LOCK_OWNER_PS
+        assert "rstrtmgr.dll" in ps                      # Restart Manager API
+        assert "RmRegisterResources" in ps
+        assert "RmGetList" in ps
+        assert "234" in ps                               # ERROR_MORE_DATA retry
+        assert "BATCH" in ps and "500" in ps             # batch registration (perf)
+        assert "$env:USERPROFILE" in ps                  # no hardcoded user
+        assert "ParentProcessId" in ps                   # ancestor-chain exclusion
+        assert "Substring(0, 150)" in ps                 # cmdline truncation
+        assert "Stop-Process" in ps                      # kill
+        assert "browser" in ps                           # browser-harness hint
+
+    def test_ps_template_renders_without_valueerror(self, monkeypatch):
+        """The template must render without raising — braces are literal (no
+        str.format), so the {{ }} escaping contract does not apply here."""
+        calls: list = []
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: calls.append(cmd) or type("CP", (), {"stdout": ""}),
+        )
+        _stop_all._lock_owner_ps(kill=False)  # must not raise ValueError
+        ps = calls[0][-1]
+        assert "Where-Object { " in ps       # literal PowerShell braces intact
+        assert "{0}" in ps                   # -f format placeholders intact
+
+    def test_verify_reports_lock_owner_residual(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(
+            _stop_all, "_windows_lock_owners",
+            lambda kill: [(9400, "python.exe",
+                           "C:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon")],
+        )
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        out = _stop_all._verify_windows()
+        assert any("file-lock owner (pid 9400, python.exe)" in r for r in out)
 
 
 class TestMainDelegatesToStopAll:
