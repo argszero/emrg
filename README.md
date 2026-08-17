@@ -87,7 +87,7 @@ Download from [GitHub Releases](https://github.com/argszero/emrg/releases) and d
 |----------|-----------|
 | macOS | `EMRG-<ver>-macos-arm64.pkg` / `-x64.pkg` (user-level, no admin password) |
 | Windows | `EMRG-<ver>-windows-x64.exe` (no UAC, PATH auto-registered) |
-| Linux | `EMRG-<ver>-linux-x86_64.AppImage` / `-aarch64.AppImage` |
+| Linux | `EMRG-<ver>-linux-x86_64.run` / `-aarch64.run` (headless server, one command) · `-x86_64.AppImage` / `-aarch64.AppImage` (desktop) |
 
 > **Windows SmartScreen notice**: the installer isn't Authenticode-signed — if SmartScreen prompts, click **Keep** / **More info → Run anyway**. EMRG is fully open source and auditable.
 

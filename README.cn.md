@@ -87,7 +87,7 @@ EMRG 不只是一个工具——它是一个**会听吐槽、会自我改进**�
 |------|---------|
 | macOS | `EMRG-<ver>-macos-arm64.pkg` / `-x64.pkg`（用户级安装，无需管理员密码） |
 | Windows | `EMRG-<ver>-windows-x64.exe`（免 UAC，PATH 自动注册） |
-| Linux | `EMRG-<ver>-linux-x86_64.AppImage` / `-aarch64.AppImage` |
+| Linux | `EMRG-<ver>-linux-x86_64.run` / `-aarch64.run`（无头服务器，一条命令）· `-x86_64.AppImage` / `-aarch64.AppImage`（桌面） |
 
 > **Windows SmartScreen 提示**：安装包未做 Authenticode 签名——如 SmartScreen 提示，点**保留** / **更多信息 → 仍要运行**。EMRG 完全开源，源码可审计。
 

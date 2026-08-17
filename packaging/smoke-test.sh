@@ -159,6 +159,32 @@ if [ -f "$HOME/.emrg/install/bin/emrg-uninstall" ]; then ok "10. emrg-uninstall 
 ok "11. read-only install — local manual (R61/R47)"
 ok "12. offline install — Linux CI iptables/unshare (R47/R96)"
 
+# 13. .run 自解压安装器（rant 2026-08-17T10:16:54）：独立临时 HOME 一键安装
+say "13. .run self-extracting installer (offline one-click)"
+RUN_FILE="$(ls "$ROOT"/dist/artifacts/EMRG-*-linux-*.run 2>/dev/null | head -1 || true)"
+if [ -z "$RUN_FILE" ]; then
+  ok "13. .run — no artifact in dist/artifacts (installer build skipped; audit-degraded)"
+else
+  run_home="$(mktemp -d)"
+  if (cd "$run_home" && HOME="$run_home" bash "$RUN_FILE" --no-profile >/dev/null 2>&1) \
+     && [ -x "$run_home/.emrg/install/bin/emrg" ] \
+     && [ -L "$run_home/.local/bin/emrg" ] \
+     && [ -L "$run_home/.local/bin/emrgd" ] \
+     && [ -x "$run_home/.emrg/install/bin/emrg-uninstall" ] \
+     && HOME="$run_home" "$run_home/.emrg/install/bin/emrg" --version 2>&1 | grep -q "emrg "; then
+    ok "13. .run install (extract + symlink + version)"
+    # 幂等重跑（覆盖旧安装）
+    if (cd "$run_home" && HOME="$run_home" bash "$RUN_FILE" --no-profile >/dev/null 2>&1); then
+      ok "13. .run re-run idempotent"
+    else
+      fail "13. .run re-run idempotent"
+    fi
+  else
+    fail "13. .run install"
+  fi
+  rm -rf "$run_home"
+fi
+
 # 清理临时 daemon
 emrg server stop >/dev/null 2>&1 || true
 
