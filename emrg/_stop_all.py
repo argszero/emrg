@@ -82,6 +82,17 @@ def _no_window() -> dict:
 
 # ── Process matching ────────────────────────────────────────────
 
+# Windows python interpreter image names (TUI `python.exe` / daemon
+# `pythonw.exe`, plus versioned launchers `python3.exe` / `python3.13.exe` /
+# `pythonw3.13.exe` / `python3.13w.exe` — bin/emrgd.cmd's fallback chain ends
+# at `python-dist\python3.13.exe`, #576). Loose on purpose: the `-m emrg`
+# command-line filter is the strong discriminator; the name only pre-filters
+# the process list (degraded installs where the pid file is missing/stale are
+# exactly the DeleteFile-code-5 scenario #826 targets — a versioned launcher
+# must not slip past the scan and keep locking install\ files).
+_WIN_PY_NAME_RE = r"^python.*\.exe$"
+
+
 def match_cmdline(cmd: str) -> bool:
     """True if a command line belongs to an emrg process.
 
@@ -184,10 +195,10 @@ def _scan_windows_python_emrg(own_pid: int) -> list[int]:
     ps_cmd = (
         "Get-CimInstance Win32_Process | "
         "Where-Object {{ $_.ProcessId -ne {own} -and "
-        "$_.Name -match '^python(\\.exe|w\\.exe)?$' -and "
+        "$_.Name -match '{name_re}' -and "
         "$_.CommandLine -match '-m emrg' }} | "
         "ForEach-Object {{ Write-Output $_.ProcessId }}"
-    ).format(own=own_pid)
+    ).format(own=own_pid, name_re=_WIN_PY_NAME_RE)
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
@@ -412,11 +423,11 @@ def stop_tui() -> None:
         ps_cmd = (
             "Get-CimInstance Win32_Process | "
             "Where-Object {{ $_.ProcessId -ne {own} -and "
-            "$_.Name -match '^python(\\.exe|w\\.exe)?$' -and "
+            "$_.Name -match '{name_re}' -and "
             "$_.CommandLine -match '-m emrg' -and "
             "$_.CommandLine -notmatch 'emrg\\.server' }} | "
             "ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
-        ).format(own=own)
+        ).format(own=own, name_re=_WIN_PY_NAME_RE)
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
             capture_output=True, **_no_window(),

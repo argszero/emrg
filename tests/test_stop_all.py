@@ -302,6 +302,49 @@ class TestScanWindowsPythonEmrg:
         )
         assert _stop_all._scan_windows_python_emrg(os.getpid()) == []
 
+    def test_name_re_matches_versioned_python_launchers(self):
+        """The Windows name pre-filter must match versioned launchers too.
+
+        #826 follow-up (pm25coder finding): bin/emrgd.cmd's daemon fallback
+        chain ends at ``python-dist\python3.13.exe`` (#576), but the original
+        ``^python(\.exe|w\.exe)?$`` pattern missed every versioned name —
+        a degraded install would run the daemon under a name both stop_daemon()
+        and verify() ignore, reproducing DeleteFile code 5 with verify clean.
+        The pattern is loose (the ``-m emrg`` cmdline filter is the strong
+        discriminator) but must still reject non-python images.
+        """
+        import re
+
+        pat = re.compile(_stop_all._WIN_PY_NAME_RE)
+        for name in (
+            "python.exe",
+            "pythonw.exe",
+            "python3.exe",
+            "python3w.exe",
+            "python3.13.exe",
+            "pythonw3.13.exe",
+            "python3.13w.exe",
+        ):
+            assert pat.match(name), f"versioned launcher not matched: {name}"
+        for name in ("py.exe", "node.exe", "git.exe", "python3.dll"):
+            assert not pat.match(name), f"non-python image wrongly matched: {name}"
+
+    def test_ps_template_embeds_name_re(self, monkeypatch):
+        """The rendered PowerShell must actually use the widened pattern."""
+        calls: list = []
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return type("CP", (), {"stdout": ""})()
+
+        monkeypatch.setattr(_stop_all.subprocess, "run", fake_run)
+        _stop_all._scan_windows_python_emrg(1)
+        ps = calls[0][-1]
+        assert f"$_.Name -match '{_stop_all._WIN_PY_NAME_RE}'" in ps
+        # the old narrow pattern must be gone
+        assert "^python(\\.exe|w\\.exe)?$" not in ps
+
     def test_posix_returns_empty(self, monkeypatch):
         monkeypatch.setattr(_stop_all, "is_win", lambda: False)
         assert _stop_all._scan_windows_python_emrg(1) == []
@@ -363,6 +406,13 @@ class TestVerifyWindowsPythonResidual:
             _stop_all.subprocess, "run",
             lambda cmd, **kw: type("CP", (), {"stdout": ""}),
         )
+        # hermeticity (#738): check_install_writable() probes the REAL
+        # ~/.emrg/install (hardcoded expanduser path) — on a machine where EMRG
+        # is installed+running this would report real locked files and the
+        # "clean" assertion would fail. Isolate it (verified pre-existing on
+        # master dba96a7, #829's lock-probe addition).
+        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
+        monkeypatch.setattr(_stop_all, "_windows_lock_owners", lambda kill, stdout=None: [])
         assert _stop_all._verify_windows() == []
 
 
