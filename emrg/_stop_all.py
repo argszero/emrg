@@ -353,13 +353,16 @@ def stop_tui() -> None:
     (same contract as the POSIX branch's ``own_pid`` exclusion)."""
     if is_win():
         own = os.getpid()
+        # Literal PowerShell script-block braces must be escaped as {{ }} —
+        # otherwise str.format() treats them as replacement fields and raises
+        # ValueError: unexpected '{' in field name at runtime on Windows.
         ps_cmd = (
             "Get-CimInstance Win32_Process | "
-            "Where-Object { $_.ProcessId -ne {own} -and "
+            "Where-Object {{ $_.ProcessId -ne {own} -and "
             "$_.Name -match '^python(\\.exe|w\\.exe)?$' -and "
             "$_.CommandLine -match '-m emrg' -and "
-            "$_.CommandLine -notmatch 'emrg\\.server' } | "
-            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+            "$_.CommandLine -notmatch 'emrg\\.server' }} | "
+            "ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
         ).format(own=own)
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
