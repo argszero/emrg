@@ -6,6 +6,7 @@
 #   bin/python         软链 → ../python-dist/bin/python3.13（R82 相对软链）
 #   bin/python3        软链（同规则）
 #   bin/emrg bin/emrgd bin/emrg.cmd bin/emrgd.cmd bin/emrg-uninstall  启动/卸载脚本
+#   bin/stop_all.py            Windows 安装器预停止单文件（纯标准库，emrg/_stop_all.py 副本）
 #   source/            emrg 源码（只读，排除 gui node_modules）
 #   lib/               pip --target 依赖（全量含传递依赖，R3 禁 --no-deps）
 #   assets/ LICENSE version.txt
@@ -68,14 +69,18 @@ cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
   cp "$ROOT/bin/emrgd" emrgd
   cp "$ROOT/bin/emrg.cmd" emrg.cmd 2>/dev/null || true
   cp "$ROOT/bin/emrgd.cmd" emrgd.cmd 2>/dev/null || true
-  cp "$ROOT/bin/stop-emrg.cmd" stop-emrg.cmd 2>/dev/null || true
+  # R130: rant 2026-08-17T10:32:27 — stop-emrg.cmd 删除，Windows 安装器预停止收敛到
+  # Python。emrg/_stop_all.py 是纯标准库单文件（不 import emrg），复制到 bin/ 顶层
+  # 供 Inno [Code] ExtractTemporaryFile 提取后用 runtime python 直接执行。
+  cp "$ROOT/emrg/_stop_all.py" stop_all.py
   cp "$ROOT/bin/emrg-uninstall" emrg-uninstall
   chmod +x emrg emrgd emrg-uninstall
   # R126: rant 2026-08-13T09:44:32 — 打包强制 CRLF，不依赖 .gitattributes 在 CI
   # 检出是否生效（git blob 是 LF；工作区 CRLF 靠 checkout 转换，CI 打包若拿到
   # LF → cmd.exe 整文件串行拼接 → 安装器 "stop-emrg.cmd exit code 1"）。
   # 拷贝后统一为纯 CRLF（幂等：先归 LF 再转 CRLF），并断言纯 CRLF 才继续。
-  for f in emrg.cmd emrgd.cmd stop-emrg.cmd; do
+  # stop_all.py 是 .py 文件（python 解析，无 cmd.exe 换行问题），不需 CRLF。
+  for f in emrg.cmd emrgd.cmd; do
     [ -f "$f" ] || continue
     python3 - "$f" <<'PY'
 import sys
