@@ -130,7 +130,11 @@ def test_evolution_prompt_no_quick_ref_block() -> None:
     prompt = (REPO_ROOT / "emrg" / "server" / "evolution_prompt.md").read_text(
         encoding="utf-8"
     )
-    assert "implemented-features quick reference" not in prompt, (
+    # Case-insensitive match (pm25coder note): the original block's header was
+    # capitalized ("Implemented-features quick reference") — the lowercase
+    # body phrase is the guaranteed substring, but lowercasing the whole file
+    # catches a header-only re-insertion too.
+    assert "implemented-features quick reference" not in prompt.lower(), (
         "evolution_prompt.md must not contain the implemented-features quick "
         "reference block — dedup is handled by the memory system + git log "
         "(rant 2026-08-17T14:22:21, #822)"
