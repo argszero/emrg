@@ -113,8 +113,10 @@ from emrg.tools.write_tool import WriteTool
 from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
+from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
+from emrg.server.rants import append_rant
 from emrg.server.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
@@ -196,6 +198,7 @@ class EmrgServer:
         self.tools.register(EditTool())
         self.tools.register(GlobTool())
         self.tools.register(GrepTool())
+        self.tools.register(SubmitRantTool())
         logger.info("tools registered: %s", self.tools.names)
 
         # Load skills
@@ -1515,44 +1518,11 @@ class EmrgServer:
             # Optional project targeting (multi-project support)
             project = msg.get("project", "").strip()
 
-            # Field order: timestamp → project → status → progress → completed → message
-            # (project right after timestamp per user feedback; message last)
-            # Timestamp is daemon-authoritative local time (rant 2026-08-07T13:34Z):
-            # clients previously supplied timestamps — GUI sent new Date().toISOString()
-            # (UTC, 8h behind on UTC+8 hosts), TUI sent naive local time. A tz-aware
-            # local ISO timestamp (+08:00) is self-describing, sorts correctly, and is
-            # consistent regardless of which client submitted the rant.
-            entry = {
-                "timestamp": datetime.now().astimezone().isoformat(),
-                "project": project,
-                "status": "pending",
-                "progress": None,
-                "completed": None,
-            }
-            # message last, so status fields stay visible when scanning the file
-            entry["message"] = rant_message
-
-            self._rants_log.parent.mkdir(parents=True, exist_ok=True)
-
-            # Read existing rants, append new, sort by timestamp, rewrite sorted
-            rants: list[dict] = []
-            if self._rants_log.exists():
-                with open(self._rants_log, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            try:
-                                rants.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                pass
-            rants.append(entry)
-            rants.sort(key=lambda r: r.get("timestamp", ""))
-
-            with open(self._rants_log, "w", encoding="utf-8") as f:
-                for r in rants:
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-            count = len(rants)
+            # Shared write logic (rant 2026-08-17T11:51:59): daemon ``rant``
+            # command and the submit_rant tool use the same append_rant, so
+            # the file format / sort / daemon-authoritative timestamp stay
+            # consistent no matter which path recorded the rant.
+            count = append_rant(self._rants_log, rant_message, project)
 
             logger.info("rant recorded (%d total)%s: %s",
                 count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
@@ -2418,7 +2388,13 @@ class EmrgServer:
                     except json.JSONDecodeError:
                         args = {}
 
-                    logger.info("tool call: %s(%s)", tc_name,
+                    # Rant 2026-08-17T12:03:13: log the human-readable purpose
+                    # alongside the tool name so background/reflection calls
+                    # (memory reflection / consolidation) are understandable
+                    # without context.
+                    tool_obj = self.tools.get(tc_name)
+                    purpose = tool_obj.definition().purpose if tool_obj else "unknown tool"
+                    logger.info("tool call: %s — %s (%s)", tc_name, purpose,
                                 json.dumps(_redact(args), ensure_ascii=False)[:200])
 
                     # Notify client (broadcast to all session subscribers)
@@ -3517,7 +3493,14 @@ class EmrgServer:
                             "tool_call_id": tc_id,
                             "content": result_text,
                         })
-                        logger.debug("memory reflection tool: %s → %s", tc_name, _redact_string(result_text[:100]))
+                        # Rant 2026-08-17T12:03:13: include the human-readable purpose
+                        purpose = tool.definition().purpose if tool else "unknown tool"
+                        logger.debug(
+                            "memory reflection: id=%s round=%d tool %s — %s → %s%s",
+                            session.session_id, _round + 1, tc_name, purpose,
+                            _redact_string(result_text[:100]),
+                            "…" if len(result_text) > 100 else "",
+                        )
 
             except Exception:
                 logger.debug("memory reflection failed", exc_info=True)
@@ -3621,7 +3604,13 @@ class EmrgServer:
                         "tool_call_id": tc_id,
                         "content": result_text,
                     })
-                    logger.debug("consolidation tool: %s → %s", tc_name, _redact_string(result_text[:100]))
+                    # Rant 2026-08-17T12:03:13: include the human-readable purpose
+                    purpose = tool.definition().purpose if tool else "unknown tool"
+                    logger.debug(
+                        "consolidation tool: %s — %s → %s%s",
+                        tc_name, purpose, _redact_string(result_text[:100]),
+                        "…" if len(result_text) > 100 else "",
+                    )
         except Exception:
             logger.debug("memory consolidation failed", exc_info=True)
 

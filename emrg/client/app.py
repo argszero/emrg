@@ -1554,11 +1554,24 @@ async def interactive(init_auto_evolve: bool = False):
                 if text.lower() in ("quit", "exit"): return False
 
                 # If a rant project was selected, use this message as the rant
+                # (rant 2026-08-17T11:51:59: routes through the agent for
+                # polish/confirm, then the submit_rant tool records it)
                 if _rant_project:
-                    await conn.send_command("rant", message=text, project=_rant_project,
-                                            timestamp=datetime.now().isoformat())
-
-                    chat.add("system", f"Rant recorded (@{_rant_project}). The evolution system will review it.")
+                    hint = (
+                        f"[Host wants to submit this rant — polish it, ask for "
+                        f"confirmation if needed, then call submit_rant "
+                        f"(project: {_rant_project})]\n{text}"
+                    )
+                    chat.add("user", f"/rant @{_rant_project} {text}")
+                    chat.add("assistant", "")
+                    msg_count += 1; _update_left_extra()
+                    _last_center = "thinking..."
+                    status.update(center=_last_center)
+                    term.render()
+                    rid = await conn.send_task(session_id=session_id, cwd=cwd,
+                                               prompt=hint)
+                    if was_busy:
+                        _queued_sends.append({"id": rid, "prompt": hint, "images": None})
                     _rant_project = None
                     status.update(center=server_id or "emrg")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
@@ -1829,6 +1842,10 @@ Streaming
                     return True
 
                 # Handle /rant command
+                # Rant 2026-08-17T11:51:59: /rant is no longer a direct write —
+                # it is a hint that the user wants to submit a rant. The text
+                # goes through the normal conversation so the agent can
+                # clarify / polish / confirm, then call the submit_rant tool.
                 if text.lower().startswith("/rant"):
                     parts = text.split(None, 2)
                     message = parts[1].strip() if len(parts) > 1 else ""
@@ -1850,16 +1867,22 @@ Streaming
                         status.update(center="loading projects...")
                         inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                         return True
-                    payload = {
-                        "message": message,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                    if project:
-                        payload["project"] = project
-                    await conn.send_command("rant", **payload)
-
                     target = f" (@{project})" if project else ""
-                    chat.add("system", f"Rant recorded{target}. The evolution system will review it.")
+                    hint = (
+                        f"[Host wants to submit this rant — polish it, ask for "
+                        f"confirmation if needed, then call submit_rant "
+                        f"(project: {project if project else 'emrg'})]\n{message}"
+                    )
+                    chat.add("user", f"/rant{target} {message}")
+                    chat.add("assistant", "")
+                    msg_count += 1; _update_left_extra()
+                    _last_center = "thinking..."
+                    status.update(center=_last_center)
+                    term.render()
+                    rid = await conn.send_task(session_id=session_id, cwd=cwd,
+                                               prompt=hint)
+                    if was_busy:
+                        _queued_sends.append({"id": rid, "prompt": hint, "images": None})
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 

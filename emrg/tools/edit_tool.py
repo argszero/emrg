@@ -22,6 +22,7 @@ class EditTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="edit",
+            purpose="Precisely replace a text fragment in an existing file (shows diff)",
             description=(
                 "Replace old_string with new_string in an existing file. "
                 "old_string must appear exactly once in the file — use the "

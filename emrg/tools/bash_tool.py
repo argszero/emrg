@@ -128,6 +128,7 @@ class BashTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="bash",
+            purpose="Execute a shell command and return its output (run tests, inspect files, git operations, etc.)",
             description=(
                 "Execute a shell command and return stdout and stderr. "
                 "Use for running tests, git commands, listing files, "
