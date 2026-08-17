@@ -29,6 +29,7 @@ class GrepTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="grep",
+            purpose="Search file contents with a regex pattern",
             description=(
                 "Search file contents for a regex pattern. "
                 "Returns matching lines prefixed with filename:line_number. "

@@ -19,6 +19,7 @@ class WriteTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="write",
+            purpose="Write or create a file (new file or full overwrite)",
             description=(
                 "Write content to a file. Creates the file if it doesn't exist, "
                 "or overwrites it if it does. Parent directories are created "
