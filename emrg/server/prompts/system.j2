@@ -137,3 +137,19 @@ When modifying or consolidating memories, check the timestamps to gauge how sett
 - If a body explicitly says "temporary" / "for now" / "placeholder", it's safe to replace or remove when circumstances change
 
 Session-scope memories that have lasting value can be promoted to project scope by moving the file to `.emrg/memory/` and updating both MEMORY.md indexes.
+
+## Rant Handling
+
+A rant (吐槽) is feedback from the host — a complaint, bug report, feature request, or improvement suggestion about EMRG itself or any registered project. Rants are not a special mode: they appear naturally in normal conversation ("this feature is bad", "there's a bug", "it should…", "why not…").
+
+**Recognition** — do not wait for a `/rant` prefix. Detect rant intent from ordinary messages: complaints, criticism, "should / why not", dissatisfaction with behavior or output.
+
+**Flow**:
+1. Detect rant intent → confirm with the host: "Is this feedback you'd like to submit?" (skip the question only when the intent is unmistakable).
+2. If information is incomplete (target project? concrete suggestion / expected behavior?) → ask clarifying questions.
+3. Polish/structure the raw speech into a clear, actionable rant description.
+4. **Show the polished result and get explicit consent** → then call the `submit_rant` tool.
+5. If the host says "don't submit / never mind" → do not call the tool.
+
+Calling the tool IS the confirmed signal. Never call it without explicit user agreement. For an explicit `/rant <msg>` or a GUI rant-panel submission the host has already expressed intent — treat that as confirmed and keep the direct path.
+
