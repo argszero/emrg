@@ -64,6 +64,33 @@ def test_stop_all_py_covers_daemon_gui_tui_git_verify():
     assert "__name__ == \"__main__\"" in content
 
 
+def test_stop_all_py_cmdline_scan_fallback():
+    """rant 2026-08-17T17:03:38 — DeleteFile code 5: pid 文件盲区兜底。
+
+    stop_daemon() 只杀 emrgd.pid 里的 pid（文件丢失/过时/不匹配 → 实际活着的
+    pythonw daemon 漏杀，锁住 websockets C 扩展），stop_tui() 刻意排除
+    emrg.server，verify() 不扫 python 进程 → 漏杀时 exit 0 → Inno 继续覆盖。
+    修复 = Windows 侧按命令行扫描 python.exe|pythonw.exe -m emrg(.server)
+    兜底（cmdline 是唯一可靠身份），daemon 步与 verify 步都接入。
+    """
+    content = _read("emrg/_stop_all.py")
+    # 扫描辅助：python.exe|pythonw.exe + CommandLine 匹配 -m emrg（含 emrg.server），
+    # 排除自身；不排除 emrg.server（那是 stop_tui 的盲区）
+    assert "def _scan_windows_python_emrg" in content
+    assert r"python(\\.exe|w\\.exe)?" in content
+    assert r"-match '-m emrg'" in content
+    assert "Write-Output $_.ProcessId" in content
+    assert "emrg\\.server" not in content  # 绝不能 -notmatch emrg.server
+    # stop_daemon() 在 pid 路径后追加 cmdline 兜底
+    daemon_src = content.split("def stop_daemon")[1].split("def stop_gui")[0]
+    assert "_scan_windows_python_emrg(os.getpid())" in daemon_src
+    assert "_kill_pid_windows(pid)" in daemon_src
+    # verify() 增加 python emrg 进程残留检查（不依赖 pid 文件）
+    verify_src = content.split("def _verify_windows")[1].split("def _verify_posix")[0]
+    assert "_scan_windows_python_emrg(os.getpid())" in verify_src
+    assert 'residuals.append(f"python emrg process (pid {pid})")' in verify_src
+
+
 def test_main_delegates_stop_to_stop_all():
     content = _read("emrg/__main__.py")
     # stop 子命令帮助文案不再引用 stop-emrg.cmd

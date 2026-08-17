@@ -24,7 +24,9 @@ Steps (mirroring the old stop-emrg.cmd flow, all best-effort):
 - TUI:        Windows CIM filter ``python.exe|pythonw.exe -m emrg`` (not
               ``emrg.server``); POSIX ps-scan
 - daemon:     ws protocol ``shutdown`` → ``~/.emrg/emrgd.pid`` → SIGTERM /
-              ``taskkill /F /PID`` → 3s poll; port file removed once dead
+              ``taskkill /F /PID`` → 3s poll → cmdline-scan fallback
+              (missing/stale pid file → kill any ``python*.exe -m emrg(.server)``,
+              rant 2026-08-17T17:03:38); port file removed once dead
 - bundled git: Windows ``install\\git\\`` prefix kill (git/ssh/plink/bash
               + fallback prefix full-kill — port of stop-emrg.cmd step 4)
 - verify:     residual scan; any survivor → ``exit 1`` with a named list
@@ -157,6 +159,38 @@ def _kill_pid_posix(pid: int, grace: float = 3.0) -> None:
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
+
+
+def _scan_windows_python_emrg(own_pid: int) -> list[int]:
+    """Scan python.exe/pythonw.exe whose command line matches ``-m emrg`` /
+    ``-m emrg.server`` (TUI + daemon), excluding ``own_pid``.
+
+    Command line is the only reliable identity on Windows (rant
+    2026-08-17T17:03:38): the daemon's ``emrgd.pid`` can be missing/stale/
+    mismatched (GUI spawn, crash restart, external unlink — #593 family), so a
+    live daemon would otherwise survive the pid-file path and keep locking the
+    ``websockets`` C extensions under ``install\\`` — the installer then fails
+    with ``DeleteFile failed; code 5`` while verify() reports clean.
+    """
+    if not is_win():
+        return []
+    # Literal PowerShell script-block braces must be escaped as {{ }} — same
+    # contract as stop_tui() (str.format() would raise on unescaped braces).
+    ps_cmd = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object {{ $_.ProcessId -ne {own} -and "
+        "$_.Name -match '^python(\\.exe|w\\.exe)?$' -and "
+        "$_.CommandLine -match '-m emrg' }} | "
+        "ForEach-Object {{ Write-Output $_.ProcessId }}"
+    ).format(own=own_pid)
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=10, **_no_window(),
+        ).stdout
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        return []
+    return [int(p) for p in out.split() if p.strip().isdigit()]
 
 
 # ── Minimal WebSocket client (RFC 6455, stdlib only) ────────────
@@ -304,6 +338,13 @@ def stop_daemon() -> None:
                 break
             time.sleep(0.15)
 
+    # Fallback: pid file missing/stale/mismatched → the live daemon (or any
+    # TUI client stop_tui could not reach) would otherwise survive and keep
+    # locking files under install\. Scan the command line — the only reliable
+    # identity on Windows (rant 2026-08-17T17:03:38; returns [] on POSIX).
+    for pid in _scan_windows_python_emrg(os.getpid()):
+        _kill_pid_windows(pid)
+
     # Port file cleanup: the daemon removes it on graceful shutdown; a
     # force-killed daemon cannot, so remove it once the pid is confirmed gone
     # (the next daemon start re-asserts both files).
@@ -428,6 +469,11 @@ def _verify_windows() -> list[str]:
     pid = _read_pid_file()
     if pid is not None and _pid_alive(pid):
         residuals.append(f"daemon (pid {pid})")
+    # python emrg process residual (TUI/daemon by command line — covers the
+    # pid-file blind spot: a live daemon with a missing/stale pid file would
+    # otherwise pass verify and the installer would overwrite locked files)
+    for pid in _scan_windows_python_emrg(os.getpid()):
+        residuals.append(f"python emrg process (pid {pid})")
     # bundled-git residual
     try:
         out = subprocess.run(

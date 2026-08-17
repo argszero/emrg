@@ -237,6 +237,107 @@ class TestStopTuiPsTemplate:
         assert "ForEach-Object { Stop-Process" in ps
 
 
+class TestScanWindowsPythonEmrg:
+    """_scan_windows_python_emrg — the cmdline fallback (rant 2026-08-17T17:03:38).
+
+    Windows installer hit DeleteFile code 5 because a live python process
+    holding websockets' C extension was missed: stop_daemon() only trusted the
+    pid file, stop_tui() deliberately excluded emrg.server, and verify() never
+    scanned python processes. The command line is the only reliable identity.
+    """
+
+    def test_parses_pids_from_cim_output(self, monkeypatch):
+        calls: list = []
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return type("CP", (), {"stdout": "  101\n  202\nnot-a-pid\n\n"})()
+
+        monkeypatch.setattr(_stop_all.subprocess, "run", fake_run)
+        assert _stop_all._scan_windows_python_emrg(9999) == [101, 202]
+        ps = calls[0][-1]
+        # matches `-m emrg` AND `-m emrg.server` (daemon), excludes own pid
+        assert "-match '-m emrg'" in ps
+        assert "-ne 9999" in ps
+        assert "Write-Output $_.ProcessId" in ps
+        # must NOT exclude emrg.server (that was stop_tui's blind spot)
+        assert "emrg\\.server" not in ps
+
+    def test_renders_template_without_valueerror(self, monkeypatch):
+        import os
+
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        assert _stop_all._scan_windows_python_emrg(os.getpid()) == []
+
+    def test_posix_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        assert _stop_all._scan_windows_python_emrg(1) == []
+
+    def test_subprocess_failure_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+
+        def boom(*a, **k):
+            raise OSError("powershell unavailable")
+
+        monkeypatch.setattr(_stop_all.subprocess, "run", boom)
+        assert _stop_all._scan_windows_python_emrg(1) == []
+
+
+class TestStopDaemonCmdlineFallback:
+    """stop_daemon() must kill a live daemon even when emrgd.pid is missing
+    (rant 2026-08-17T17:03:38 acceptance #1: delete the pid file but keep the
+    pythonw -m emrg.server process alive → cmdline scan still kills it)."""
+
+    def test_kills_python_emrg_when_pid_file_missing(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_stop_all, "config_dir", lambda: tmp_path)
+        killed: list[int] = []
+        monkeypatch.setattr(_stop_all, "_kill_pid_windows", lambda pid: killed.append(pid))
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [777])
+        monkeypatch.setattr(_stop_all, "_pid_alive", lambda pid: False)
+        _stop_all.stop_daemon()
+        assert killed == [777]
+
+    def test_no_pids_no_kill(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_stop_all, "config_dir", lambda: tmp_path)
+        killed: list[int] = []
+        monkeypatch.setattr(_stop_all, "_kill_pid_windows", lambda pid: killed.append(pid))
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(_stop_all, "_pid_alive", lambda pid: False)
+        _stop_all.stop_daemon()
+        assert killed == []
+
+
+class TestVerifyWindowsPythonResidual:
+    """verify() must report a live python emrg process even without a pid file
+    (rant 2026-08-17T17:03:38 acceptance #2: residual → named list + exit 1)."""
+
+    def test_reports_python_emrg_residual(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [555])
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        out = _stop_all._verify_windows()
+        assert any("python emrg process (pid 555)" in r for r in out)
+
+    def test_no_python_residual_when_clean(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        assert _stop_all._verify_windows() == []
+
+
 class TestMainDelegatesToStopAll:
     def test_emrg_stop_cli_exits_nonzero(self):
         """`emrg stop` must sys.exit with the stop_all() code (installer gate)."""
