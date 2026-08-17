@@ -16,11 +16,16 @@ from emrg.tools.submit_rant_tool import SubmitRantTool
 
 def test_append_rant_writes_sorted_entry(tmp_path):
     """New rant appended, sorted by timestamp, field order message last."""
-    # pre-existing rant (older timestamp) must stay before the new one
+    import datetime as _dt
+    # pre-existing rant (older timestamp) must stay before the new one —
+    # use the same tz-aware local offset as the daemon so the lexicographic
+    # string sort matches chronological order (all rants share the host
+    # timezone in production; mixing offsets would mis-sort on UTC hosts)
+    older_ts = (_dt.datetime.now().astimezone() - _dt.timedelta(hours=1)).isoformat()
     rants_file = tmp_path / "rants.jsonl"
     rants_file.write_text(
         json.dumps({
-            "timestamp": "2026-08-17T08:00:00+08:00",
+            "timestamp": older_ts,
             "project": "emrg",
             "status": "completed",
             "progress": None,
@@ -46,7 +51,6 @@ def test_append_rant_writes_sorted_entry(tmp_path):
     assert entries[1]["status"] == "pending"
     assert entries[1]["completed"] is None
     # daemon-authoritative tz-aware timestamp
-    import datetime as _dt
     ts = _dt.datetime.fromisoformat(entries[1]["timestamp"])
     assert ts.tzinfo is not None
     assert abs((_dt.datetime.now(ts.tzinfo) - ts).total_seconds()) < 60
