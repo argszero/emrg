@@ -306,8 +306,8 @@ class TestScanWindowsPythonEmrg:
         """The Windows name pre-filter must match versioned launchers too.
 
         #826 follow-up (pm25coder finding): bin/emrgd.cmd's daemon fallback
-        chain ends at ``python-dist\python3.13.exe`` (#576), but the original
-        ``^python(\.exe|w\.exe)?$`` pattern missed every versioned name —
+        chain ends at ``python-dist\\python3.13.exe`` (#576), but the original
+        ``^python(\\.exe|w\\.exe)?$`` pattern missed every versioned name —
         a degraded install would run the daemon under a name both stop_daemon()
         and verify() ignore, reproducing DeleteFile code 5 with verify clean.
         The pattern is loose (the ``-m emrg`` cmdline filter is the strong
