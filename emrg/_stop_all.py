@@ -45,6 +45,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import platform
 import re
 import secrets
 import signal
@@ -53,6 +54,10 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+
+# Build stamp printed at the start of every run so the operator can tell at a
+# glance which stop_all.py generation executed (rant 2026-08-17T21:06:31).
+_STOP_ALL_STAMP = "built 2026-08-17 (rm-deadloop-fix + lock-probe)"
 
 _EMRG_CLIENT_RE = re.compile(r"-m\s+emrg(\.server)?(\s|$)")
 _APPIMAGE_RE = re.compile(r"EMRG-[\w.\-]*AppImage(\s|$)")
@@ -655,6 +660,75 @@ def _windows_lock_owners(kill: bool, stdout: str | None = None) -> list[tuple[in
     return owners
 
 
+# ── Independent lock probe (rant 2026-08-17T21:06:05) ─────────────
+# The RM scan and verify previously shared the same _windows_lock_owners
+# function — when the detector broke (RmGetList dead-loop → empty result),
+# verify went blind too and the installer overwrote locked files. This probe
+# simulates the installer's overwrite directly (exclusive open = DeleteFile
+# would fail) and is INDEPENDENT of Restart Manager, so a broken RM can never
+# silently pass verify.
+
+def _iter_install_files(root: str) -> list[str]:
+    """All files under ``root`` (``~/.emrg/install``) — deterministic order."""
+    files: list[str] = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fn in filenames:
+            files.append(os.path.join(dirpath, fn))
+    return files
+
+
+def _win_exclusive_open(path: str) -> None:
+    """Open an existing file with ``dwShareMode=0`` (FileShare.None) — the exact
+    semantic the Inno installer needs to overwrite/delete it. Raises OSError
+    when another process holds the file (DeleteFile code 5 would occur)."""
+    import ctypes
+
+    GENERIC_READ = 0x80000000
+    OPEN_EXISTING = 3
+    FILE_SHARE_NONE = 0
+    kernel32 = ctypes.windll.kernel32
+    h = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_NONE, None,
+                             OPEN_EXISTING, 0, None)
+    if h == 0 or h == -1:
+        raise OSError(f"CreateFileW failed for {path} (file is locked)")
+    kernel32.CloseHandle(h)
+
+
+def _check_locked_files(root: str, try_open=None) -> list[str]:
+    """Return files under ``root`` that cannot be opened exclusively.
+
+    ``try_open`` is injectable so the traversal/collection logic is testable on
+    POSIX (default: Windows FileShare.None via :func:`_win_exclusive_open`).
+    """
+    if try_open is None:
+        try_open = _win_exclusive_open
+    locked: list[str] = []
+    for path in _iter_install_files(root):
+        try:
+            try_open(path)
+        except OSError:
+            locked.append(path)
+    return locked
+
+
+def check_install_writable() -> list[str]:
+    """Windows: probe ``install\\`` for files locked against overwrite.
+
+    Independent of Restart Manager — the installer's DeleteFile would fail on
+    every returned path. Returns [] when the probe is unavailable (POSIX, no
+    install dir, or probe error) — best-effort like every other stop step.
+    """
+    if not is_win():
+        return []
+    root = os.path.join(os.path.expanduser("~"), ".emrg", "install")
+    if not os.path.isdir(root):
+        return []
+    try:
+        return _check_locked_files(root)
+    except Exception:
+        return []
+
+
 def stop_lock_owners() -> None:
     """Windows only: stop every process holding a lock on files under install\\.
 
@@ -677,35 +751,56 @@ def stop_lock_owners() -> None:
 
 # ── Verify + exit code ──────────────────────────────────────────
 
-def _verify_windows() -> list[str]:
-    residuals: list[str] = []
+def _verify_windows_categories() -> list[tuple[str, list[str]]]:
+    """Windows residual scan, one ``(category, residual_strings)`` entry per
+    check — so the operator can see each check's result instead of guessing
+    (rant 2026-08-17T21:06:31 #3)."""
+    cats: list[tuple[str, list[str]]] = []
+
     # GUI residual
+    gui: list[str] = []
     try:
         out = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq EMRG.exe"],
             capture_output=True, text=True, timeout=10, **_no_window(),
         ).stdout
         for m in re.finditer(r"EMRG\.exe\s+(\d+)", out):
-            residuals.append(f"EMRG.exe (pid {m.group(1)})")
+            gui.append(f"EMRG.exe (pid {m.group(1)})")
     except (OSError, subprocess.SubprocessError, TimeoutError):
         pass
+    cats.append(("GUI", gui))
+
     # daemon residual (emrgd.pid still alive)
+    daemon: list[str] = []
     pid = _read_pid_file()
     if pid is not None and _pid_alive(pid):
-        residuals.append(f"daemon (pid {pid})")
+        daemon.append(f"daemon (pid {pid})")
+    cats.append(("daemon", daemon))
+
     # python emrg process residual (TUI/daemon by command line — covers the
     # pid-file blind spot: a live daemon with a missing/stale pid file would
     # otherwise pass verify and the installer would overwrite locked files)
-    for pid in _scan_windows_python_emrg(os.getpid()):
-        residuals.append(f"python emrg process (pid {pid})")
+    py = [f"python emrg process (pid {p})" for p in _scan_windows_python_emrg(os.getpid())]
+    cats.append(("cmdline-scan", py))
+
     # file-lock owners under install\ (Restart Manager — generic code-5 fix:
     # covers ANY process holding locked files, incl. non-EMRG ones such as the
     # browser-harness daemon; self + ancestor chain excluded; rant 2026-08-17T17:55:42)
     rm_out = _lock_owner_ps(kill=False)
-    for pid, name, _cmd in _windows_lock_owners(kill=False, stdout=rm_out):
-        residuals.append(f"file-lock owner (pid {pid}, {name or 'unknown'})")
+    rm = [
+        f"file-lock owner (pid {o_pid}, {name or 'unknown'})"
+        for o_pid, name, _cmd in _windows_lock_owners(kill=False, stdout=rm_out)
+    ]
+    cats.append(("RM re-scan", rm))
     _print_rm_diag(rm_out)
+
+    # install-writability probe — INDEPENDENT of Restart Manager so a broken
+    # detector can never blind verify (rant 2026-08-17T21:06:05)
+    locked = check_install_writable()
+    cats.append(("lock-probe", [f"locked file (installer overwrite would fail): {p}" for p in locked]))
+
     # bundled-git residual
+    bg: list[str] = []
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
@@ -718,9 +813,25 @@ def _verify_windows() -> list[str]:
         for line in out.splitlines():
             line = line.strip()
             if line:
-                residuals.append(f"bundled-git {line}")
+                bg.append(f"bundled-git {line}")
     except (OSError, subprocess.SubprocessError, TimeoutError):
         pass
+    cats.append(("bundled-git", bg))
+    return cats
+
+
+def _verify_windows_summary() -> str:
+    """One-line per-category verify summary, e.g.
+    ``GUI 0 / daemon 0 / cmdline-scan 0 / RM re-scan 0 / lock-probe 0 locked /
+    bundled-git 0`` (rant 2026-08-17T21:06:31 #3)."""
+    cats = _verify_windows_categories()
+    return " / ".join(f"{name} {len(items)}" for name, items in cats)
+
+
+def _verify_windows() -> list[str]:
+    residuals: list[str] = []
+    for _name, items in _verify_windows_categories():
+        residuals.extend(items)
     return residuals
 
 
@@ -736,32 +847,95 @@ def verify() -> list[str]:
 
 # ── Orchestration ───────────────────────────────────────────────
 
-def stop_all() -> int:
-    """Run every stop step, then verify. Returns 0 (clean) or 1 (residuals).
-
-    Clients (GUI/TUI) are stopped FIRST and the daemon LAST (rant
+def _step_plan() -> list[tuple[str, object]]:
+    """Ordered stop steps. Clients (GUI/TUI) FIRST, daemon LAST (rant
     2026-08-17T14:15:33): both clients auto-spawn the daemon when it
     disappears, so stopping the daemon first would let a live client
     immediately bring it back — leaving locked files for the installer.
-    """
-    print("emrg stop: stopping GUI ...")
-    stop_gui()
-    print("emrg stop: stopping TUI clients ...")
-    stop_tui()
-    print("emrg stop: stopping daemon ...")
-    stop_daemon()
+    Bundled git + RM lock-owner kill are Windows-only."""
     if is_win():
-        print("emrg stop: stopping bundled git under install\\git ...")
-        stop_bundled_git()
-        print("emrg stop: stopping file-lock owners under install\\ (Restart Manager) ...")
-        stop_lock_owners()
+        return [
+            ("GUI", stop_gui),
+            ("TUI", stop_tui),
+            ("daemon", stop_daemon),
+            ("bundled git", stop_bundled_git),
+            ("file-lock owners", stop_lock_owners),
+        ]
+    return [
+        ("GUI", stop_gui),
+        ("TUI", stop_tui),
+        ("daemon", stop_daemon),
+    ]
+
+
+def stop_all() -> int:
+    """Run every stop step, then verify. Returns 0 (clean) or 1 (residuals).
+
+    Logging follows the standard from rant 2026-08-17T21:06:31: header with
+    build stamp / python / platform / pid, ``[N/T] step -> result (elapsed)``
+    per step, per-category verify summary, exit-code line with total elapsed,
+    and NO silent failures (every step is wrapped so an exception still shows
+    ``ERROR <step>: <reason>`` and the run continues to the final exit code).
+    """
+    t0 = time.monotonic()
+    print(
+        f"emrg stop: stop_all.py {_STOP_ALL_STAMP} | "
+        f"python {platform.python_version()} {platform.system()}-{platform.machine()} "
+        f"| pid {os.getpid()}"
+    )
+    steps = _step_plan()
+    for i, (name, fn) in enumerate(steps, 1):
+        s = time.monotonic()
+        try:
+            fn()
+            print(f"emrg stop: [{i}/{len(steps)}] {name} -> done ({time.monotonic() - s:.1f}s)")
+        except Exception as e:  # never silent (rant 2026-08-17T21:06:31 #4)
+            print(
+                f"emrg stop: ERROR [{i}/{len(steps)}] {name}: {e} "
+                f"({type(e).__name__}) ({time.monotonic() - s:.1f}s)"
+            )
+    # Kill retry: RM may have killed owners but locks can linger — re-probe
+    # with the INDEPENDENT writability check and retry (Try-again semantics,
+    # rant 2026-08-17T21:06:05 #3); anything still locked flows into verify →
+    # installer aborts with a named list instead of a code-5 dialog.
+    if is_win():
+        for attempt in range(1, 3):
+            locked = check_install_writable()
+            if not locked:
+                break
+            print(
+                f"emrg stop: {len(locked)} file(s) still locked after kill "
+                f"(retry {attempt}/2) ..."
+            )
+            s = time.monotonic()
+            try:
+                stop_lock_owners()
+            except Exception as e:
+                print(f"emrg stop: ERROR retry {attempt}/2: {e} ({type(e).__name__})")
+            time.sleep(0.3)
+            print(f"emrg stop: retry {attempt}/2 done ({time.monotonic() - s:.1f}s)")
     residuals = verify()
     if residuals:
         print("emrg stop: WARNING residual process(es) still running:")
         for r in residuals:
             print(f"  - {r}")
+        if is_win():
+            try:
+                print("emrg stop: verify: " + _verify_windows_summary() + " -> RESIDUAL")
+            except Exception:
+                pass
+        print(
+            f"emrg stop: exit code 1 ({len(residuals)} residual) "
+            f"({time.monotonic() - t0:.1f}s)"
+        )
         return 1
+    if is_win():
+        try:
+            print("emrg stop: verify: " + _verify_windows_summary() + " -> CLEAN")
+        except Exception:
+            pass
     print("emrg stop: all emrg processes stopped.")
+    print(f"emrg stop: exit code 0 (clean) ({time.monotonic() - t0:.1f}s)")
     return 0
 
 

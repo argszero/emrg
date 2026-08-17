@@ -38,8 +38,8 @@ class TestPureStdlib:
         tree = ast.parse(src)
         allowed = {
             "base64", "json", "os", "re", "secrets", "signal", "socket",
-            "subprocess", "sys", "time", "pathlib", "ast", "pytest", "annotations",
-            "__future__",
+            "subprocess", "sys", "time", "pathlib", "platform", "ctypes", "ast",
+            "pytest", "annotations", "__future__",
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -143,12 +143,17 @@ class TestStopAllExitCode:
         monkeypatch.setattr(_stop_all, "stop_tui", lambda: None)
         monkeypatch.setattr(_stop_all, "stop_bundled_git", lambda: None)
         monkeypatch.setattr(_stop_all, "verify", lambda: residuals)
+        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
+        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
 
     def test_clean_returns_0(self, monkeypatch, capsys):
         self._patch_steps(monkeypatch, residuals=[])
         assert stop_all() == 0
         out = capsys.readouterr().out
         assert "all emrg processes stopped" in out
+        assert "exit code 0 (clean)" in out
+        assert "stop_all.py built" in out          # header (rant 21:06:31 #1)
+        assert "[1/" in out and "-> done" in out    # per-step [N/T] (rant #2)
 
     def test_residual_returns_1_and_lists_them(self, monkeypatch, capsys):
         self._patch_steps(monkeypatch, residuals=["EMRG.exe (pid 1234)", "daemon (pid 99)"])
@@ -157,6 +162,20 @@ class TestStopAllExitCode:
         assert "WARNING residual process(es) still running" in out
         assert "EMRG.exe (pid 1234)" in out
         assert "daemon (pid 99)" in out
+        assert "exit code 1 (2 residual)" in out
+
+    def test_step_exception_not_silent(self, monkeypatch, capsys):
+        """A crashing step must print ERROR <step> and still reach the final
+        exit code (rant 2026-08-17T21:06:31 #4 — never silent)."""
+        self._patch_steps(monkeypatch, residuals=[])
+
+        def boom():
+            raise RuntimeError("taskkill failed")
+
+        monkeypatch.setattr(_stop_all, "stop_gui", boom)
+        assert stop_all() == 0
+        out = capsys.readouterr().out
+        assert "ERROR [1/" in out and "GUI" in out and "taskkill failed" in out
 
     def test_main_exits_with_code(self, monkeypatch):
         monkeypatch.setattr(_stop_all, "stop_all", lambda: 1)
@@ -185,6 +204,8 @@ class TestStopAllOrder:
         monkeypatch.setattr(_stop_all, "stop_bundled_git", _rec("stop_bundled_git"))
         monkeypatch.setattr(_stop_all, "stop_lock_owners", _rec("stop_lock_owners"))
         monkeypatch.setattr(_stop_all, "verify", lambda: [])
+        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
+        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         return order
 
@@ -580,6 +601,129 @@ class TestLockOwners:
         )
         out = _stop_all._verify_windows()
         assert any("file-lock owner (pid 9400, python.exe)" in r for r in out)
+
+
+class TestIndependentLockProbe:
+    """check_install_writable — INDEPENDENT of Restart Manager (rant
+    2026-08-17T21:06:05): simulates the installer's overwrite with an
+    exclusive open, so a broken RM detector can never blind verify."""
+
+    def _mk_root(self, tmp_path, files=("a.txt", "sub/b.txt")):
+        root = tmp_path / "install"
+        for f in files:
+            p = root / f
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x", encoding="utf-8")
+        return str(root)
+
+    def test_check_locked_files_collects_unopenable(self, tmp_path):
+        root = self._mk_root(tmp_path)
+        opened = set()
+
+        def try_open(path):
+            opened.add(path)
+            if path.endswith("b.txt"):
+                raise OSError("locked")
+
+        assert _stop_all._check_locked_files(root, try_open=try_open) == [
+            str(tmp_path / "install" / "sub" / "b.txt")
+        ]
+        assert opened == {
+            str(tmp_path / "install" / "a.txt"),
+            str(tmp_path / "install" / "sub" / "b.txt"),
+        }
+
+    def test_check_locked_files_clean(self, tmp_path):
+        root = self._mk_root(tmp_path)
+        assert _stop_all._check_locked_files(root, try_open=lambda p: None) == []
+
+    def test_check_locked_files_empty_root(self, tmp_path):
+        root = tmp_path / "empty-install"
+        root.mkdir()
+        assert _stop_all._check_locked_files(str(root), try_open=lambda p: None) == []
+
+    def test_check_install_writable_posix_noop(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        assert _stop_all.check_install_writable() == []
+
+    def test_check_install_writable_no_install_dir(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        assert _stop_all.check_install_writable() == []
+
+    def test_check_install_writable_returns_locked(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        emrg_root = str(tmp_path / ".emrg" / "install")
+        self._mk_root(tmp_path / ".emrg", files=("a.txt",))  # creates ~/.emrg/install
+        monkeypatch.setattr(_stop_all, "_check_locked_files", lambda r: [emrg_root + "/a.txt"])
+        assert _stop_all.check_install_writable() == [emrg_root + "/a.txt"]
+
+    def test_check_install_writable_probe_error_returns_empty(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        self._mk_root(tmp_path)
+
+        def boom(root):
+            raise RuntimeError("ctypes unavailable")
+
+        monkeypatch.setattr(_stop_all, "_check_locked_files", boom)
+        assert _stop_all.check_install_writable() == []  # best-effort, never raise
+
+    def test_verify_categories_include_lock_probe(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(_stop_all, "_lock_owner_ps", lambda kill: "")
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        monkeypatch.setattr(
+            _stop_all, "check_install_writable",
+            lambda: [r"C:\\Users\\me\\.emrg\\install\\lib\\websockets\\speedups.cp313-win_amd64.pyd"],
+        )
+        cats = _stop_all._verify_windows_categories()
+        names = [n for n, _ in cats]
+        assert names == ["GUI", "daemon", "cmdline-scan", "RM re-scan", "lock-probe", "bundled-git"]
+        locked = dict(cats)["lock-probe"]
+        assert any("locked file" in r and "speedups" in r for r in locked)
+        summary = _stop_all._verify_windows_summary()
+        assert "lock-probe 1" in summary
+        assert "GUI 0" in summary
+
+    def test_stop_all_retries_lock_kill(self, monkeypatch, capsys):
+        """RM killed owners but locks linger → re-probe + retry up to 2×,
+        then verify still surfaces the locked file → exit 1 (rant 21:06:05 #3:
+        installer aborts with a named list instead of a code-5 dialog)."""
+        calls: list[str] = []
+
+        def rec(name):
+            def _fn(*a, **k):
+                calls.append(name)
+            return _fn
+
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "stop_gui", rec("gui"))
+        monkeypatch.setattr(_stop_all, "stop_tui", rec("tui"))
+        monkeypatch.setattr(_stop_all, "stop_daemon", rec("daemon"))
+        monkeypatch.setattr(_stop_all, "stop_bundled_git", rec("bundled_git"))
+        monkeypatch.setattr(_stop_all, "stop_lock_owners", rec("lock_owners"))
+        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
+        locked = iter([[r"C:\\locked.pyd"], [r"C:\\locked.pyd"], []])
+        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: next(locked))
+        monkeypatch.setattr(
+            _stop_all, "verify",
+            lambda: ["locked file (installer overwrite would fail): C:\\locked.pyd"],
+        )
+        assert _stop_all.stop_all() == 1
+        out = capsys.readouterr().out
+        # initial kill + 2 retries
+        assert calls.count("lock_owners") == 3
+        assert "still locked after kill (retry 1/2)" in out
+        assert "retry 2/2" in out
+        assert "locked file (installer overwrite would fail): C:\\locked.pyd" in out
+        assert "exit code 1 (1 residual)" in out
 
 
 class TestMainDelegatesToStopAll:
