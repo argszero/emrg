@@ -165,6 +165,44 @@ class TestStopAllExitCode:
         assert exc.value.code == 1
 
 
+class TestStopAllOrder:
+    """stop_all() must stop clients FIRST and the daemon LAST (rant
+    2026-08-17T14:15:33): GUI/TUI auto-spawn the daemon when they notice it
+    missing, so stopping the daemon first would let a live client re-spawn
+    it — the installer then still hits locked files."""
+
+    def _record_order(self, monkeypatch):
+        order: list[str] = []
+
+        def _rec(name: str):
+            def _fn(*a, **k):
+                order.append(name)
+            return _fn
+
+        monkeypatch.setattr(_stop_all, "stop_gui", _rec("stop_gui"))
+        monkeypatch.setattr(_stop_all, "stop_tui", _rec("stop_tui"))
+        monkeypatch.setattr(_stop_all, "stop_daemon", _rec("stop_daemon"))
+        monkeypatch.setattr(_stop_all, "stop_bundled_git", _rec("stop_bundled_git"))
+        monkeypatch.setattr(_stop_all, "verify", lambda: [])
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        return order
+
+    def test_clients_before_daemon(self, monkeypatch):
+        order = self._record_order(monkeypatch)
+        assert stop_all() == 0
+        assert order == ["stop_gui", "stop_tui", "stop_daemon", "stop_bundled_git"]
+        # daemon MUST come after both clients — a client alive when the
+        # daemon dies would re-spawn it (auto-spawn mechanisms in GUI/TUI)
+        assert order.index("stop_daemon") > order.index("stop_gui")
+        assert order.index("stop_daemon") > order.index("stop_tui")
+
+    def test_posix_skips_bundled_git(self, monkeypatch):
+        order = self._record_order(monkeypatch)
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        assert stop_all() == 0
+        assert order == ["stop_gui", "stop_tui", "stop_daemon"]
+
+
 class TestStopTuiPsTemplate:
     """Windows stop_tui() must render its PowerShell template without raising.
 
