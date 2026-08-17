@@ -91,6 +91,44 @@ def test_stop_all_py_cmdline_scan_fallback():
     assert 'residuals.append(f"python emrg process (pid {pid})")' in verify_src
 
 
+def test_stop_all_py_restart_manager_lock_owners():
+    """rant 2026-08-17T17:55:42 — DeleteFile code 5 通用解（Restart Manager）。
+
+    0.2.43 安装实测根因：占用 install\\ 下文件的是【外来进程】（browser-harness
+    daemon，独立 uv CPython，AppData\\Roaming\\uv\\tools），emrgd.pid/emrgd.port
+    全空、无任何 -m emrg 进程 → 命令行扫描永远找不到。修复 = Restart Manager
+    （rstrtmgr.dll）扫 install\\ 全部文件收集占用者 → 排除自身+祖先进程链
+    （stop_all 由 install\\python-dist\\python.exe 执行，自身加载 install\\python313.dll；
+    祖先含 Inno setup.exe 绝不能杀）→ Stop-Process -Force，打印 PID/名称/命令行
+    （截断 150）；verify 用同一扫描复查残留 → exit 1。
+    """
+    content = _read("emrg/_stop_all.py")
+    # 扫描+击杀步骤与辅助
+    assert "def stop_lock_owners" in content
+    assert "def _lock_owner_ps" in content
+    assert "def _windows_lock_owners" in content
+    # Restart Manager API + 批注册 + ERROR_MORE_DATA(234) 重试
+    assert "rstrtmgr.dll" in content
+    assert "RmRegisterResources" in content
+    assert "RmGetList" in content
+    assert "234" in content
+    # 不硬编码用户名 + 祖先链排除 + 命令行截断 150 + 击杀 + browser-harness 提示
+    assert "$env:USERPROFILE" in content
+    assert "ParentProcessId" in content
+    assert "Substring(0, 150)" in content
+    assert "Stop-Process" in content
+    assert "browser" in content
+    # stop_all() 顺序：bundled git 之后、verify 之前
+    stop_all_src = content.split("def stop_all")[1]
+    assert "stop_bundled_git()" in stop_all_src
+    assert "stop_lock_owners()" in stop_all_src
+    assert stop_all_src.index("stop_bundled_git()") < stop_all_src.index("stop_lock_owners()")
+    # verify 接入：残留 file-lock owner → 点名 + exit 1（R125 中止语义不变）
+    verify_src = content.split("def _verify_windows")[1].split("def _verify_posix")[0]
+    assert "_windows_lock_owners(kill=False)" in verify_src
+    assert "file-lock owner" in verify_src
+
+
 def test_main_delegates_stop_to_stop_all():
     content = _read("emrg/__main__.py")
     # stop 子命令帮助文案不再引用 stop-emrg.cmd

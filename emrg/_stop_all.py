@@ -451,6 +451,160 @@ def stop_bundled_git() -> None:
     )
 
 
+# ── Restart Manager lock-owner scan (rant 2026-08-17T17:55:42) ─────
+#
+# Generic DeleteFile-code-5 fix. The 0.2.43 install failure was traced (via a
+# verified find_lock_owner.ps1) to an EXTERNAL process — the browser-harness
+# daemon, a standalone uv CPython under AppData\Roaming\uv\tools — locking
+# files under install\. emrgd.pid/emrgd.port were empty and no `-m emrg`
+# process existed, so the EMRG cmdline scan (17:03:38) could never see it.
+# Restart Manager (rstrtmgr.dll) reports the ACTUAL owners of locked files,
+# which covers both EMRG and foreign processes. The template is fully static
+# (no str.format on the Python side) so the literal PowerShell/C# braces need
+# no ``{{ }}`` escaping — the ``& { ... }`` wrapper only receives the kill
+# flag as a positional argument.
+
+_LOCK_OWNER_PS = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$kill = ($args[0] -eq $true)
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Collections.Generic;
+public static class RM {
+  [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern int RmStartSession(out uint h, int f, string k);
+  [DllImport("rstrtmgr.dll", CharSet=CharSet.Unicode)] static extern int RmRegisterResources(uint h, uint n, string[] r, uint a, IntPtr p, uint b, IntPtr q);
+  [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint h, out uint n, ref uint m, [In,Out] RM_PROCESS_INFO[] i, ref uint r);
+  [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint h);
+  [StructLayout(LayoutKind.Sequential)] struct RM_UNIQUE_PROCESS { public int dwProcessId; public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct RM_PROCESS_INFO { public RM_UNIQUE_PROCESS Process; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=256)] public string strAppName; [MarshalAs(UnmanagedType.ByValTStr, SizeConst=64)] public string strServiceShortName; public int ApplicationType; public uint AppStatus; public uint TSSessionId; public bool bRestartable; }
+  public static int[] Who(string[] files) {
+    uint h;
+    if (RmStartSession(out h, 0, Guid.NewGuid().ToString()) != 0) return new int[0];
+    try {
+      const int BATCH = 500;
+      for (int i = 0; i < files.Length; i += BATCH) {
+        int cnt = Math.Min(BATCH, files.Length - i);
+        string[] batch = new string[cnt];
+        Array.Copy(files, i, batch, 0, cnt);
+        RmRegisterResources(h, (uint)cnt, batch, 0, IntPtr.Zero, 0, IntPtr.Zero);
+      }
+      uint n = 0, m = 0, reason = 0;
+      RM_PROCESS_INFO[] infos = null;
+      int rc;
+      do {
+        rc = RmGetList(h, out n, ref m, infos, ref reason);
+        if (rc == 234) infos = new RM_PROCESS_INFO[n];
+      } while (rc == 234);
+      List<int> res = new List<int>();
+      if (rc == 0) {
+        for (uint i = 0; i < Math.Min(n, m); i++) res.Add(infos[i].Process.dwProcessId);
+      }
+      return res.ToArray();
+    } finally {
+      RmEndSession(h);
+    }
+  }
+}
+'@
+$root = Join-Path $env:USERPROFILE '.emrg\install'
+if (-not (Test-Path $root)) { exit 0 }
+$files = @(Get-ChildItem $root -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+$owners = New-Object 'System.Collections.Generic.HashSet[int]'
+if ($files.Length -gt 0) {
+  foreach ($p in [RM]::Who([string[]]$files)) { [void]$owners.Add($p) }
+}
+# Exclude self + the full ancestor chain: stop_all runs from
+# install\python-dist\python.exe, which itself loads install\python313.dll
+# etc. and would be reported as an owner; the chain also contains the Inno
+# installer setup.exe — NEVER kill it (rant 2026-08-17T17:55:42 safety).
+$exclude = New-Object 'System.Collections.Generic.HashSet[int]'
+$cur = [int]$PID
+for ($g = 0; $g -lt 64 -and $cur -gt 0; $g++) {
+  [void]$exclude.Add($cur)
+  $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
+  if (-not $proc) { break }
+  $cur = [int]$proc.ParentProcessId
+}
+$targets = @($owners | Where-Object { -not $exclude.Contains($_) })
+$killedHint = $false
+foreach ($pid in $targets) {
+  $p = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
+  $name = ''
+  $cmd = ''
+  if ($p) {
+    $name = [string]$p.Name
+    if ($p.CommandLine) { $cmd = [string]$p.CommandLine }
+  }
+  if ($cmd.Length -gt 150) { $cmd = $cmd.Substring(0, 150) }
+  if ($kill) {
+    Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+    Write-Output ("killed file-lock owner: PID {0} {1} | {2}" -f $pid, $name, $cmd)
+    if ($cmd -match 'browser[-_]?harness') { $killedHint = $true }
+  } else {
+    Write-Output ("{0}`t{1}`t{2}" -f $pid, $name, $cmd)
+  }
+}
+if ($kill -and $killedHint) {
+  Write-Output 'hint: browser-harness daemon stopped - restart it after the installer completes'
+}
+"""
+
+
+def _lock_owner_ps(kill: bool) -> str:
+    """Run the Restart Manager lock-owner scan under ``install\\`` (Windows only).
+
+    ``kill=True`` stops every non-EMRG/ancestor owner (stop_lock_owners);
+    ``kill=False`` emits ``PID<TAB>name<TAB>cmdline`` lines for the verify
+    step. Returns "" on POSIX or when PowerShell/RM is unavailable (best-effort,
+    like every other stop step). The script is fully static — no str.format() —
+    so the literal PowerShell/C# braces need no ``{{ }}`` escaping.
+    """
+    if not is_win():
+        return ""
+    ps_cmd = "& { " + _LOCK_OWNER_PS + " } " + ("$true" if kill else "$false")
+    try:
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=60, **_no_window(),
+        ).stdout
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        return ""
+
+
+def _windows_lock_owners(kill: bool) -> list[tuple[int, str, str]]:
+    """Parse ``_lock_owner_ps`` output → ``[(pid, name, cmdline_150), ...]``."""
+    owners: list[tuple[int, str, str]] = []
+    for line in _lock_owner_ps(kill).splitlines():
+        parts = line.split("\t")
+        if not parts or not parts[0].strip().isdigit():
+            continue
+        pid = int(parts[0])
+        name = parts[1] if len(parts) > 1 else ""
+        cmd = parts[2] if len(parts) > 2 else ""
+        owners.append((pid, name, cmd))
+    return owners
+
+
+def stop_lock_owners() -> None:
+    """Windows only: stop every process holding a lock on files under install\\.
+
+    The generic DeleteFile-code-5 fix (rant 2026-08-17T17:55:42): Restart
+    Manager finds ANY owner — including non-EMRG processes (e.g. the
+    browser-harness daemon) that the cmdline scan can never see. Self + the
+    ancestor chain (the running python + Inno setup.exe) are excluded. Prints
+    PID/name/cmdline of every stopped process. Best-effort: RM unavailable →
+    silently skipped, verify() surfaces any survivor.
+    """
+    if not is_win():
+        return
+    for line in _lock_owner_ps(kill=True).splitlines():
+        line = line.strip()
+        if line:
+            print(f"emrg stop: {line}")
+
+
 # ── Verify + exit code ──────────────────────────────────────────
 
 def _verify_windows() -> list[str]:
@@ -474,6 +628,11 @@ def _verify_windows() -> list[str]:
     # otherwise pass verify and the installer would overwrite locked files)
     for pid in _scan_windows_python_emrg(os.getpid()):
         residuals.append(f"python emrg process (pid {pid})")
+    # file-lock owners under install\ (Restart Manager — generic code-5 fix:
+    # covers ANY process holding locked files, incl. non-EMRG ones such as the
+    # browser-harness daemon; self + ancestor chain excluded; rant 2026-08-17T17:55:42)
+    for pid, name, _cmd in _windows_lock_owners(kill=False):
+        residuals.append(f"file-lock owner (pid {pid}, {name or 'unknown'})")
     # bundled-git residual
     try:
         out = subprocess.run(
@@ -522,6 +681,8 @@ def stop_all() -> int:
     if is_win():
         print("emrg stop: stopping bundled git under install\\git ...")
         stop_bundled_git()
+        print("emrg stop: stopping file-lock owners under install\\ (Restart Manager) ...")
+        stop_lock_owners()
     residuals = verify()
     if residuals:
         print("emrg stop: WARNING residual process(es) still running:")
