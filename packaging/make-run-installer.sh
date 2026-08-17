@@ -52,7 +52,10 @@ cat > "$HEADER" <<'HEADER_EOF'
 set -euo pipefail
 
 VERSION="__EMRG_VERSION__"
-PREFIX="${PREFIX:-$HOME/.emrg/install}"
+# Default from HOME unconditionally — never inherit an ambient PREFIX env var
+# (common on build servers / containers: make install PREFIX=..., SDKs, CI
+# images). --prefix= is the only override.
+PREFIX="$HOME/.emrg/install"
 WRITE_PROFILE=1
 START=0
 
