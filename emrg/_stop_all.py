@@ -275,7 +275,9 @@ def stop_daemon() -> None:
         if len(port_tok) == 2:
             if ws_graceful_shutdown(int(port_tok[0]), port_tok[1]):
                 # wait for the daemon to exit + remove its pid file
-                for _ in range(20):
+                # (~10s grace: old stop-emrg.cmd v2 polled emrgd.pid up to
+                # 10s; a busy daemon mid-tool-loop needs the full window)
+                for _ in range(60):
                     pid = _read_pid_file()
                     if pid is None or not _pid_alive(pid):
                         break
@@ -289,8 +291,8 @@ def stop_daemon() -> None:
             _kill_pid_windows(pid)
         else:
             _kill_pid_posix(pid)
-        # poll up to 3s for it to disappear
-        for _ in range(20):
+        # poll up to 10s for it to disappear (matches old v2 grace window)
+        for _ in range(60):
             if not _pid_alive(pid):
                 break
             time.sleep(0.15)
@@ -343,15 +345,22 @@ def stop_gui() -> None:
 
 def stop_tui() -> None:
     """Stop TUI clients: Windows CIM filter (python.exe|pythonw.exe running
-    ``-m emrg`` but NOT ``emrg.server``); POSIX ps-scan."""
+    ``-m emrg`` but NOT ``emrg.server``); POSIX ps-scan.
+
+    On Windows the invoking PID (a user-run ``emrg stop`` = ``python.exe
+    -m emrg stop``) matches the ``-m emrg`` filter and would kill the CLI
+    itself before ``stop_bundled_git`` + ``verify`` run — exclude it
+    (same contract as the POSIX branch's ``own_pid`` exclusion)."""
     if is_win():
+        own = os.getpid()
         ps_cmd = (
             "Get-CimInstance Win32_Process | "
-            "Where-Object { $_.Name -match '^python(\\.exe|w\\.exe)?$' -and "
+            "Where-Object { $_.ProcessId -ne {own} -and "
+            "$_.Name -match '^python(\\.exe|w\\.exe)?$' -and "
             "$_.CommandLine -match '-m emrg' -and "
             "$_.CommandLine -notmatch 'emrg\\.server' } | "
             "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-        )
+        ).format(own=own)
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
             capture_output=True, **_no_window(),

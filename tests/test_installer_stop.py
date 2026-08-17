@@ -45,6 +45,10 @@ def test_stop_all_py_covers_daemon_gui_tui_git_verify():
     # TUI：CIM 命令行过滤 python.exe|pythonw.exe，排除 emrg.server
     assert r"python(\\.exe|w\\.exe)?" in content
     assert r"-notmatch 'emrg\\.server'" in content
+    # 调用方自身 PID 排除（`emrg stop` CLI 本身匹配 -m emrg 过滤，会自杀于
+    # stop_bundled_git + verify 之前 — pm25coder #811 review finding 1）
+    assert r"$_.ProcessId -ne {own}" in content
+    assert ".format(own=own)" in content
     # bundled git：install\\git\\ 前缀（系统 Git 永不命中）
     assert r'\"$env:USERPROFILE\\.emrg\\install\\git\\*\"' in content
     assert "stop_bundled_git" in content
