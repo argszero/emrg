@@ -87,6 +87,15 @@ def test_submit_rant_tool_requires_message():
     assert "requires a message" in result.content
 
 
+def test_submit_rant_tool_requires_project():
+    """Missing project → error telling the agent to ask the user (rant 12:03:13)."""
+    tool = SubmitRantTool()
+    result = __import__("asyncio").run(tool.execute({"message": "some complaint"}))
+    assert result.error is True
+    assert "project is required" in result.content
+    assert "ask the user" in result.content
+
+
 def test_submit_rant_definition_exposes_consent_contract():
     """The tool description must require explicit user consent before calling."""
     tool = SubmitRantTool()
@@ -94,3 +103,21 @@ def test_submit_rant_definition_exposes_consent_contract():
     assert d.name == "submit_rant"
     assert "consent" in d.description.lower() or "confirm" in d.description.lower()
     assert "message" in d.parameters["required"]
+    assert "project" in d.parameters["required"]  # required since rant 12:03:13
+    assert d.purpose  # human-readable purpose (rant 12:03:13)
+
+
+def test_all_tools_have_purpose():
+    """Every registered tool carries a non-empty human-readable purpose."""
+    from emrg.tools.bash_tool import BashTool
+    from emrg.tools.read_tool import ReadTool
+    from emrg.tools.write_tool import WriteTool
+    from emrg.tools.edit_tool import EditTool
+    from emrg.tools.glob_tool import GlobTool
+    from emrg.tools.grep_tool import GrepTool
+
+    for tool in (BashTool(), ReadTool(), WriteTool(), EditTool(),
+                 GlobTool(), GrepTool(), SubmitRantTool()):
+        d = tool.definition()
+        assert d.name, "tool name missing"
+        assert d.purpose, f"{d.name} has no purpose"

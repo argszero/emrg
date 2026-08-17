@@ -25,6 +25,7 @@ class SubmitRantTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="submit_rant",
+            purpose="Write a user-confirmed rant/feedback into rants.jsonl for evolution",
             description=(
                 "Write a user rant/feedback/improvement suggestion into "
                 "rants.jsonl so the evolution system can act on it. "
@@ -38,8 +39,10 @@ class SubmitRantTool(ToolExecutor):
                     "project": {
                         "type": "string",
                         "description": (
-                            "Target project name, e.g. 'argszero/aitokenpool'. "
-                            "Omit (empty) for EMRG itself."
+                            "REQUIRED — target project name (e.g. 'emrg', "
+                            "'argszero/aitokenpool'). If you cannot determine "
+                            "which project the rant targets, ask the user "
+                            "before calling."
                         ),
                     },
                     "message": {
@@ -50,7 +53,7 @@ class SubmitRantTool(ToolExecutor):
                         ),
                     },
                 },
-                "required": ["message"],
+                "required": ["project", "message"],
             },
         )
 
@@ -63,6 +66,15 @@ class SubmitRantTool(ToolExecutor):
                 error=True,
             )
         project = str(arguments.get("project", "") or "").strip()
+        if not project:
+            return ToolResult(
+                name="submit_rant",
+                content=(
+                    "Error: project is required — ask the user which project "
+                    "this rant targets before submitting"
+                ),
+                error=True,
+            )
         try:
             from emrg.config import config_dir
             count = append_rant(config_dir() / "rants.jsonl", message, project)

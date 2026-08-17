@@ -16,11 +16,14 @@ class ToolDefinition:
 
     name: tool name exposed to the model
     description: what the tool does (used by the model for routing)
+    purpose: human-friendly one-line purpose (used in logs/UI — what is
+        this tool for, in plain words; rant 2026-08-17T12:03:13)
     parameters: JSON Schema dict for the tool's arguments
     """
 
     name: str = ""
     description: str = ""
+    purpose: str = ""
     parameters: dict = field(default_factory=dict)
 
 

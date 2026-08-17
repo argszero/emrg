@@ -2316,7 +2316,13 @@ class EmrgServer:
                     except json.JSONDecodeError:
                         args = {}
 
-                    logger.info("tool call: %s(%s)", tc_name,
+                    # Rant 2026-08-17T12:03:13: log the human-readable purpose
+                    # alongside the tool name so background/reflection calls
+                    # (memory reflection / consolidation) are understandable
+                    # without context.
+                    tool_obj = self.tools.get(tc_name)
+                    purpose = tool_obj.definition().purpose if tool_obj else "unknown tool"
+                    logger.info("tool call: %s — %s (%s)", tc_name, purpose,
                                 json.dumps(_redact(args), ensure_ascii=False)[:200])
 
                     # Notify client (broadcast to all session subscribers)
@@ -3415,7 +3421,14 @@ class EmrgServer:
                             "tool_call_id": tc_id,
                             "content": result_text,
                         })
-                        logger.debug("memory reflection tool: %s → %s", tc_name, _redact_string(result_text[:100]))
+                        # Rant 2026-08-17T12:03:13: include the human-readable purpose
+                        purpose = tool.definition().purpose if tool else "unknown tool"
+                        logger.debug(
+                            "memory reflection: id=%s round=%d tool %s — %s → %s%s",
+                            session.session_id, _round + 1, tc_name, purpose,
+                            _redact_string(result_text[:100]),
+                            "…" if len(result_text) > 100 else "",
+                        )
 
             except Exception:
                 logger.debug("memory reflection failed", exc_info=True)
@@ -3519,7 +3532,13 @@ class EmrgServer:
                         "tool_call_id": tc_id,
                         "content": result_text,
                     })
-                    logger.debug("consolidation tool: %s → %s", tc_name, _redact_string(result_text[:100]))
+                    # Rant 2026-08-17T12:03:13: include the human-readable purpose
+                    purpose = tool.definition().purpose if tool else "unknown tool"
+                    logger.debug(
+                        "consolidation tool: %s — %s → %s%s",
+                        tc_name, purpose, _redact_string(result_text[:100]),
+                        "…" if len(result_text) > 100 else "",
+                    )
         except Exception:
             logger.debug("memory consolidation failed", exc_info=True)
 

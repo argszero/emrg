@@ -692,6 +692,10 @@ class TestWSQueueInjection:
                             return ToolResult(tool_call_id="call_1", name="bash",
                                               content="hi", error=False)
 
+                        def definition(self):
+                            from emrg.server.tool_types import ToolDefinition
+                            return ToolDefinition(name="bash", purpose="slow bash for tests")
+
                     orig_get = server.tools.get
                     server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)
 
@@ -773,6 +777,10 @@ class TestWSQueueInjection:
                             await asyncio.sleep(0.5)
                             return ToolResult(tool_call_id="call_1", name="bash",
                                               content="hi", error=False)
+
+                        def definition(self):
+                            from emrg.server.tool_types import ToolDefinition
+                            return ToolDefinition(name="bash", purpose="slow bash for tests")
 
                     orig_get = server.tools.get
                     server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)

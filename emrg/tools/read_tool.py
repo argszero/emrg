@@ -29,6 +29,7 @@ class ReadTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="read",
+            purpose="Read file content (line-numbered, chunked)",
             description=(
                 "Read a file from the filesystem. Returns content with "
                 "line numbers prefixing each line (format: '  LINE_NUMBER\\tCONTENT'). "

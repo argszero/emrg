@@ -23,6 +23,7 @@ class GlobTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="glob",
+            purpose="Find files by name pattern (e.g. '**/*.py')",
             description=(
                 "Find files matching a glob pattern. "
                 "Supports standard glob patterns: *, ?, [seq], ** for recursive. "
