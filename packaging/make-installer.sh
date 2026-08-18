@@ -413,6 +413,32 @@ begin
   // （从不杀自己），#847 self-held 归属已处理自身锁，且 stop_all 纯标准库从不加载
   // websockets。恢复 v0.2.49 的 "{PythonExe}" "{StopScript}"，无需任何替代 flag。
   LogFile := ExpandConstant('{tmp}\stop_all.log');
+  // rant 2026-08-19T00:44:52 — 安装器韧性：旧版 runtime python 可能已被早期失败安装
+  // （v0.2.49/v0.2.50 的 -I 事故）损坏，启动即崩 "Failed to import encodings"（连
+  // stop_all.log 都没有）→ 用坏 python 跑 stop_all 必然失败 → 升级安装被硬中止。
+  // 宿主实测：删除旧 install\bin 后走"干净安装"分支即成功 —— v0.2.51 包本身完好，
+  // 脆弱点在升级路径。修复：跑 stop_all 前先健康检查旧 python 能否启动
+  // （-c "import encodings, sys"，python-build-standalone 启动即加载 encodings），
+  // 启动失败 → 跳过 stop_all 继续安装（宁可旧进程锁文件让安装器报 DeleteFile、
+  // 可重试可重启恢复，也不能因坏 python 卡死升级）。健康检查与 stop_all 同款：
+  // 经 {cmd} 重定向到日志，失败信息进日志 + Setup log。
+  if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" -c "import encodings, sys" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode <> 0 then
+    begin
+      LogText := '';
+      if FileExists(LogFile) then
+        LoadStringFromFile(LogFile, LogText);
+      Log('PrepareToInstall: old runtime python failed health check (exit ' + IntToStr(ResultCode) + '), skipping stop_all and continuing install. ' + LogText);
+      Exit;
+    end;
+  end
+  else
+  begin
+    Log('PrepareToInstall: could not run old runtime python health check, skipping stop_all and continuing install.');
+    Exit;
+  end;
+  // 健康检查通过：旧 python 可启动 → 正常跑 stop_all（保留现有逻辑）
   if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" "' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     if ResultCode <> 0 then

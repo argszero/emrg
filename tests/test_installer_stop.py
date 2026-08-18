@@ -15,6 +15,9 @@ iscc/cmd/python —— macOS/CI 无 Windows），钉死接线：
      PrepareToInstall 用 runtime python 运行 {tmp} 提取版
   5. build-runtime.sh 把 emrg/_stop_all.py 复制进 runtime bin/stop_all.py
      （stop-emrg.cmd 不再打包；CRLF 转换循环只剩 emrg.cmd emrgd.cmd）
+  6. PrepareToInstall 旧 python 健康检查（rant 2026-08-19T00:44:52）：
+     stop_all 前先 -c "import encodings, sys" 验证旧 runtime python 可启动，
+     损坏（encodings 崩）→ 跳过 stop_all 继续安装（不硬中止升级）
 """
 
 from pathlib import Path
@@ -277,6 +280,30 @@ def test_make_installer_iss_has_prepare_to_install():
     assert "SW_HIDE" in content  # 不弹控制台窗口（#592 纪律）
     # 中止消息含重启兜底引导
     assert "restart the computer" in content
+
+
+def test_make_installer_iss_old_python_health_check():
+    """rant 2026-08-19T00:44:52 — 安装器韧性：旧版 python-dist 损坏（encodings 崩，
+    v0.2.49/v0.2.50 -I 事故遗留）时，升级安装不得因坏 python 硬中止。
+
+    宿主实测：v0.2.51 升级报 `ModuleNotFoundError: No module named 'encodings'`
+    （连 stop_all.log 都没有，启动即崩）；删除旧 install\\bin 后走干净安装分支
+    即成功 —— 包本身完好，脆弱点在 PrepareToInstall 用旧 python 跑 stop_all。
+    修复 = 跑 stop_all 前先健康检查旧 python 可启动（-c "import encodings, sys"），
+    失败 → 跳过 stop_all（干净安装路径，不中止）。
+    """
+    content = _read("packaging/make-installer.sh")
+    # 健康检查命令与 stop_all 同款：经 {cmd} 重定向到日志（2>&1）
+    assert '''""' + PythonExe + '" -c "import encodings, sys"''' in content
+    assert content.count("2>&1") >= 2  # 健康检查 + stop_all 两处 Exec 重定向
+    # 失败 → 跳过 stop_all 继续安装（Result 保持 '' → 不中止），信息进日志
+    assert "skipping stop_all" in content
+    assert "health check" in content
+    assert "Log('PrepareToInstall: old runtime python failed health check" in content
+    # 健康检查必须先于 stop_all 执行
+    assert content.index("import encodings, sys") < content.index('''""' + PythonExe + '" "' + StopScript''')
+    # 健康检查通过后仍保留原 stop_all 调用
+    assert '''""' + PythonExe + '" "' + StopScript''' in content
 
 
 def test_build_runtime_copies_stop_all_not_stop_emrg():
