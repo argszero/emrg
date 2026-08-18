@@ -154,13 +154,20 @@ def _write_rant_lines(tmp_path, entries: list[dict]):
 def test_read_tolerates_legacy_array_rows(tmp_path):
     """Legacy array rows ([ts, project, status, progress, completed, message])
     are converted back to dicts; corrupt rows skipped (rant 16:42:52)."""
+    # Relative timestamps — CI runs on UTC, so hardcoded +08:00 strings would
+    # mis-sort against the now()-generated append timestamp (existing lesson
+    # in test_append_rant_writes_sorted_entry: mixing offsets mis-sorts).
+    import datetime as _dt
+    now = _dt.datetime.now().astimezone()
+    older = (now - _dt.timedelta(hours=2)).isoformat()
+    newer = (now - _dt.timedelta(hours=1)).isoformat()
     f = tmp_path / "rants.jsonl"
     f.write_text(
-        '["2026-08-18T10:00:00+08:00", "emrg", "pending", null, null, "array rant"]\n'
+        f'["{older}", "emrg", "pending", null, null, "array rant"]\n'
         "not-json\n"
-        '{"timestamp": "2026-08-18T11:00:00+08:00", "project": "emrg", '
+        f'{{"timestamp": "{newer}", "project": "emrg", '
         '"status": "completed", "progress": null, '
-        '"completed": "2026-08-18T10:30:00+08:00", "message": "dict rant", '
+        f'"completed": "{newer}", "message": "dict rant", '
         '"unknown": "ignored"}\n',
         encoding="utf-8",
     )
