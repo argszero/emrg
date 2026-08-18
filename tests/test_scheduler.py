@@ -1855,6 +1855,34 @@ def test_saturated_tick_still_runs_full_cycle(tmp_path):
         "NTE cycle during saturation keeps incrementing (heartbeat continues)"
 
 
+def test_list_tasks_logs_slow_handler(tmp_path, caplog):
+    """list_tasks must be pure in-memory; a slow handler.status() (>200ms)
+    surfaces as a WARNING with a per-handler breakdown so the culprit is
+    identifiable without manual profiling (rant 2026-08-18T20:48:45)."""
+    import logging
+    import time as _time
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    orig_status = handler.status
+
+    def slow_status():
+        _time.sleep(0.3)
+        return orig_status()
+
+    handler.status = slow_status
+    sched = mod.TaskScheduler(InstanceIdentity())
+    sched._handlers = [handler]
+    with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
+        tasks = sched.list_tasks()
+    assert len(tasks) == 1
+    assert tasks[0]["name"] == handler.name
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "list_tasks took" in msgs, msgs
+    assert ">200ms" in msgs, msgs
+    assert handler.name in msgs, "per-handler breakdown must name the slow handler"
+
+
 # ── Task CRUD + hot reload + templates (rant 2026-08-12T18:23:15 P2) ──
 
 
