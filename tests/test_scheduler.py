@@ -2193,6 +2193,38 @@ def test_apply_tasks_idempotent(tmp_path):
         mod.config_dir = orig
 
 
+def test_hot_reload_offloads_handler_construction_to_thread():
+    """rant 2026-08-19T01:05:47 — apply_tasks (hot reload, on the event loop
+    while serving websockets) must not run TaskHandler's sync git probe on
+    the loop. Construction goes through _start_handler_async →
+    asyncio.to_thread(_build_handler); the boot path keeps the sync
+    _start_handler_for (no clients connected yet)."""
+    import inspect
+
+    from emrg.server import scheduler as mod
+
+    sched_src = inspect.getsource(mod.TaskScheduler)
+    # apply_tasks awaits the async start path
+    assert "await self._start_handler_async(cfg)" in sched_src
+    # async start path offloads the sync construction
+    assert "asyncio.to_thread(self._build_handler, cfg)" in sched_src
+    # boot path unchanged (sync, pre-serve)
+    assert "handler = self._build_handler(cfg)" in sched_src
+    assert "def _start_handler_for(self, cfg: dict) -> TaskHandler:" in sched_src
+
+
+def test_daemon_projects_list_offloads_git_probe_to_thread():
+    """rant 2026-08-19T01:05:47 — the daemon's projects_list handler probes
+    each project's git remote with a sync subprocess; it must run in worker
+    threads (asyncio.to_thread) so a slow git probe never freezes the loop."""
+    from pathlib import Path as _Path
+
+    src = _Path(__file__).resolve().parent.parent / "emrg" / "server" / "daemon.py"
+    content = src.read_text(encoding="utf-8")
+    assert "asyncio.to_thread(_detect_git_remote, p.get(\"path\", \"\"))" in content
+    assert "repos = await asyncio.gather(*(" in content
+
+
 def test_template_crud_and_guards(tmp_path):
     """Custom templates: create/list/update/delete; builtin read-only; delete-refused guard."""
     from emrg.server import scheduler as mod

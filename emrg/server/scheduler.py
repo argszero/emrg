@@ -1270,16 +1270,40 @@ class TaskScheduler:
     def _tasks_file(self, value: Path | None) -> None:
         self.__tasks_file = value
 
-    def _start_handler_for(self, cfg: dict) -> TaskHandler:
-        """Create + start a handler for a task cfg; returns the handler."""
+    def _build_handler(self, cfg: dict) -> TaskHandler:
+        """Construct a TaskHandler for a task cfg (pure sync construction).
+
+        May block briefly (git remote detection in ``TaskHandler.__init__``
+        + template lookup) — callers in the event loop must offload via
+        ``asyncio.to_thread`` (rant 2026-08-19T01:05:47: no blocking calls
+        in the loop).
+        """
         template_path = _resolve_task_template(cfg["type"])
-        handler = TaskHandler(
+        return TaskHandler(
             name=cfg["name"],
             config=cfg.get("config", {}),
             interval=cfg.get("interval", DEFAULT_INTERVAL),
             identity=self.identity,
             template_path=template_path,
         )
+
+    def _start_handler_for(self, cfg: dict) -> TaskHandler:
+        """Create + start a handler for a task cfg; returns the handler.
+
+        Boot path (no websocket clients connected yet) — sync construction
+        is acceptable here.
+        """
+        handler = self._build_handler(cfg)
+        self._handlers.append(handler)
+        self._handler_cfgs[handler.name] = cfg
+        self._coros.append(asyncio.create_task(handler.run()))
+        return handler
+
+    async def _start_handler_async(self, cfg: dict) -> TaskHandler:
+        """Hot-reload path (apply_tasks, on the event loop while serving):
+        offload the sync handler construction to a worker thread so a slow
+        git probe never freezes the loop (rant 2026-08-19T01:05:47)."""
+        handler = await asyncio.to_thread(self._build_handler, cfg)
         self._handlers.append(handler)
         self._handler_cfgs[handler.name] = cfg
         self._coros.append(asyncio.create_task(handler.run()))
@@ -1666,13 +1690,13 @@ class TaskScheduler:
         for name, cfg in enabled.items():
             if name not in current:
                 added.append(name)
-                self._start_handler_for(cfg)
+                await self._start_handler_async(cfg)
             else:
                 old = self._handler_cfgs.get(name)
                 if old is not None and _task_cfg_signature(old) != _task_cfg_signature(cfg):
                     updated.append(name)
                     self._stop_handler(current[name])
-                    self._start_handler_for(cfg)
+                    await self._start_handler_async(cfg)
         return {"added": added, "removed": removed, "updated": updated}
 
     def list_templates(self) -> list[dict]:
