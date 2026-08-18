@@ -921,6 +921,11 @@ def _check_locked_files(root: str, try_open=None) -> list[str]:
 _lock_probe_error: str | None = None
 
 
+def _install_root() -> str:
+    """Windows install dir (``~/.emrg/install``) — single source of truth."""
+    return os.path.join(os.path.expanduser("~"), ".emrg", "install")
+
+
 def check_install_writable() -> list[str]:
     """Windows: probe ``install\\`` for files locked against overwrite.
 
@@ -937,7 +942,7 @@ def check_install_writable() -> list[str]:
     _lock_probe_error = None
     if not is_win():
         return []
-    root = os.path.join(os.path.expanduser("~"), ".emrg", "install")
+    root = _install_root()
     if not os.path.isdir(root):
         return []
     files = _iter_install_files(root)
@@ -1027,6 +1032,53 @@ def stop_lock_owners() -> None:
 _windows_cats_cache: list[tuple[str, list[str]]] | None = None
 
 
+def _classify_locked_files(
+    locked: list[str],
+    mh_holders: list[tuple[int, str, str, int, list[str], str]],
+    root: str,
+) -> tuple[list[str], list[str]]:
+    """Split createfile-probe locked files into self-held vs residual.
+
+    Rant 2026-08-18T18:57:09: when stop_all itself runs from
+    install\\python-dist\\python.exe, the probe reports the interpreter's own
+    DLLs (python313.dll, select.pyd, ...) as locked — but those locks belong
+    to the stop_all process (module-holder tag ``excluded``) and are released
+    the moment stop_all exits, BEFORE the installer overwrites (installer runs
+    stop_all synchronously via ewWaitUntilTerminated). Counting them as
+    residuals aborts a perfectly fine install.
+
+    Returns ``(self_held, residual)`` install-relative paths:
+    - self_held: locked file attributed ONLY to excluded (self/ancestor) holders
+    - residual:  locked file with an external (``target``) holder, or one that
+      cannot be attributed to any known holder (conservative — could be a
+      plain non-DLL lock held by an external process that loaded no module).
+    """
+    if not locked or not root:
+        return [], list(locked)
+    # Separator-agnostic: module-holder files arrive with backslashes (PS
+    # Substring), locked paths are native. Normalize both to forward slashes
+    # so the attribution works identically on Windows and in POSIX unit tests.
+    def _norm(p: str) -> str:
+        return p.replace("\\", "/")
+
+    root_n = _norm(root)
+    tag_by_rel: dict[str, set[str]] = {}
+    for _pid, _name, _exe, _parent, files, tag in mh_holders:
+        for f in files:
+            tag_by_rel.setdefault(_norm(f), set()).add(tag)
+    self_held: list[str] = []
+    residual: list[str] = []
+    for p in locked:
+        rel = _norm(os.path.relpath(_norm(p), root_n))
+        tags = tag_by_rel.get(rel, set())
+        if tags == {"excluded"}:
+            self_held.append(rel)
+        else:
+            # No tags (unattributable) OR has an external target holder.
+            residual.append(rel)
+    return self_held, residual
+
+
 def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     """Windows residual scan, one ``(category, residual_strings)`` entry per
     check — so the operator can see each check's result instead of guessing
@@ -1066,9 +1118,10 @@ def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     # section locks; RM missed the browser-harness child, CreateFileW probes
     # cannot see module locks at all). Any external holder = residual.
     mh_out = _module_holder_ps()
+    mh_holders = _parse_module_holders(mh_out)
     mh = [
         f"install-module holder (pid {pid}, {name or 'unknown'}, loads {', '.join(files[:3])})"
-        for pid, name, _exe, _parent, files, tag in _parse_module_holders(mh_out)
+        for pid, name, _exe, _parent, files, tag in mh_holders
         if tag == "target"
     ]
     cats.append(("module-holder", mh))
@@ -1095,9 +1148,29 @@ def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     global _lock_probe_error
     _lock_probe_error = None
     locked = check_install_writable()
-    probe_items = [f"locked file (createfile-probe): {p}" for p in locked]
+    probe_items = []
     if _lock_probe_error:
         probe_items.append(f"lock-probe failed (error: {_lock_probe_error})")
+    # Self-held attribution (rant 2026-08-18T18:57:09): when stop_all runs
+    # from install\python-dist\python.exe, that interpreter MUST load its own
+    # python-dist DLLs (python313.dll, select.pyd, ...) — those image-section
+    # locks are held by the stop_all process itself (module-holder tag
+    # ``excluded`` = self + ancestor chain) and are RELEASED when stop_all
+    # exits, before the installer starts overwriting (make-installer.sh uses
+    # ewWaitUntilTerminated). They are NOT residuals — counting them aborts
+    # the install while nothing is actually wrong. A locked file is residual
+    # only when an EXTERNAL holder (module-holder ``target`` / RM owner)
+    # exists or the lock cannot be attributed to any known holder (conservative).
+    self_held, residual_locked = _classify_locked_files(
+        locked, mh_holders, _install_root() if is_win() else ""
+    )
+    probe_items.extend(f"locked file (createfile-probe): {p}" for p in residual_locked)
+    if self_held:
+        print(
+            f"emrg stop: WARNING {len(self_held)} file(s) locked by stop_all "
+            f"runtime itself (python-dist DLL) — self-held, released when "
+            f"stop_all exits; installer continues"
+        )
     cats.append(("createfile-probe", probe_items))
 
     # bundled-git residual
@@ -1347,19 +1420,20 @@ def stop_all() -> int:
                 print(f"emrg stop: ERROR retry {attempt}/2: {e} ({type(e).__name__})")
             time.sleep(0.3)
             print(f"emrg stop: retry {attempt}/2 done ({time.monotonic() - s:.1f}s)")
-        # Self-lock final guard (rant 2026-08-18T16:09:45 + 16:24:01): after
-        # both kill retries the probe still reports locked files but neither
-        # the module-holder enumeration nor RM found an EXTERNAL owner — the
-        # lock holder is stop_all's own runtime (python-dist loaded
-        # install\lib modules) or an undetectable handle. The installer
-        # cannot win; a freshly launched installer process holds no locks.
-        # Exit 1 so the install aborts with this explanation instead of a
-        # code-5 dialog.
+        # Self-lock final guard (rant 2026-08-18T16:09:45 + 16:24:01, refined
+        # 18:57:09): after both kill retries the probe still reports locked
+        # files but neither the module-holder enumeration nor RM found an
+        # EXTERNAL owner — the lock holder is stop_all's own runtime
+        # (python-dist loaded install\lib modules). The installer runs stop_all
+        # synchronously (ewWaitUntilTerminated), so these locks are released
+        # when stop_all exits and the overwrite proceeds — advisory only, NOT
+        # a hard abort (the pre-18:57:09 guard wrongly blocked installs whose
+        # only locks were python-dist DLLs held by stop_all itself).
         if locked and not _module_holder_external_found and _rm_no_external_owner:
             print(
-                "emrg stop: WARNING lock holder is the stop_all runtime itself "
-                "(no external module-holder / RM owner) - installer will fail; "
-                "re-run installer (fresh process won't hold the lock)"
+                f"emrg stop: WARNING {len(locked)} file(s) locked by the "
+                f"stop_all runtime itself (python-dist DLL) — released when "
+                f"stop_all exits; installer continues"
             )
     residuals = verify()
     if residuals:
