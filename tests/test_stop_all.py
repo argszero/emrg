@@ -746,9 +746,10 @@ class TestIndependentLockProbe:
         assert "GUI 0" in summary
 
     def test_stop_all_retries_lock_kill(self, monkeypatch, capsys):
-        """RM killed owners but locks linger → re-probe + retry up to 2×,
-        then verify still surfaces the locked file → exit 1 (rant 21:06:05 #3:
-        installer aborts with a named list instead of a code-5 dialog)."""
+        """RM killed owners but locks linger → re-probe + retry up to 2×;
+        lock residuals after escalation are ADVISORY — the install continues
+        and the overwrite is the final arbiter (rant 2026-08-18T21:24:48 #2c/#5,
+        superseding the pre-21:24:48 abort-on-lock behavior)."""
         calls: list[str] = []
 
         def rec(name):
@@ -769,14 +770,90 @@ class TestIndependentLockProbe:
             _stop_all, "verify",
             lambda: ["locked file (installer overwrite would fail): C:\\locked.pyd"],
         )
-        assert _stop_all.stop_all() == 1
+        # lock residual only → exit 0 (advisory), not 1
+        assert _stop_all.stop_all() == 0
         out = capsys.readouterr().out
         # initial kill + 2 retries
         assert calls.count("lock_owners") == 3
         assert "still locked after kill (retry 1/2)" in out
         assert "retry 2/2" in out
-        assert "locked file (installer overwrite would fail): C:\\locked.pyd" in out
+        # advisory, install continues
+        assert "lock-related residual" in out
+        assert "install continues" in out
+        assert "exit code 0 (clean)" in out
+
+    def test_stop_all_process_residual_still_aborts(self, monkeypatch, capsys):
+        """Only EMRG PROCESS residuals (daemon/gui/python/git) abort; lock
+        residuals do not (rant 2026-08-18T21:24:48 #2c/#5)."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
+        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
+        monkeypatch.setattr(
+            _stop_all, "verify",
+            lambda: ["daemon (pid 1234)", "file-lock owner (pid 9400, python.exe)"],
+        )
+        assert _stop_all.stop_all() == 1
+        out = capsys.readouterr().out
         assert "exit code 1 (1 residual)" in out
+        assert "daemon (pid 1234)" in out
+        assert "lock-related residual" not in out
+
+
+class TestClassifyLockedFilesRelaxation:
+    """python-dist self-held relaxation (rant 2026-08-18T21:24:48 #3): a
+    locked file under python-dist\\ with no external target holder is
+    self-held — stop_all runs from python-dist and lazily-loaded stdlib
+    modules hold DLL locks the enumeration misses."""
+
+    def _root(self):
+        return r"C:\Users\me\.emrg\install"
+
+    def _locked(self, rel):
+        return [rf"C:\Users\me\.emrg\install\{rel}"]
+
+    def test_pydist_unattributable_is_self_held(self):
+        # select.pyd locked, enumeration lists NO holder for it → self-held
+        self_held, residual = _stop_all._classify_locked_files(
+            self._locked(r"python-dist\select.pyd"), [], self._root()
+        )
+        assert self_held == ["python-dist/select.pyd"]
+        assert residual == []
+
+    def test_pydist_excluded_holder_is_self_held(self):
+        # python313.dll locked, holder = self (tag excluded) → self-held
+        mh = [(11572, "python.exe", r"C:\...\python-dist\python.exe", 0,
+               [r"C:\Users\me\.emrg\install\python-dist\python313.dll"], "excluded")]
+        self_held, residual = _stop_all._classify_locked_files(
+            self._locked(r"python-dist\python313.dll"), mh, self._root()
+        )
+        assert self_held == ["python-dist/python313.dll"]
+        assert residual == []
+
+    def test_pydist_external_target_is_residual(self):
+        # python-dist DLL held by an EXTERNAL target → residual (strict)
+        mh = [(9280, "python.exe", r"C:\...\browser_harness\python.exe", 0,
+               [r"C:\Users\me\.emrg\install\python-dist\_socket.pyd"], "target")]
+        self_held, residual = _stop_all._classify_locked_files(
+            self._locked(r"python-dist\_socket.pyd"), mh, self._root()
+        )
+        assert self_held == []
+        assert residual == ["python-dist/_socket.pyd"]
+
+    def test_lib_unattributable_is_residual(self):
+        # lib\ lock with no holder → residual (relaxation is python-dist only)
+        self_held, residual = _stop_all._classify_locked_files(
+            self._locked(r"lib\websockets\speedups.cp313-win_amd64.pyd"), [], self._root()
+        )
+        assert self_held == []
+        assert residual == ["lib/websockets/speedups.cp313-win_amd64.pyd"]
+
+    def test_is_lock_residual_prefixes(self):
+        assert _stop_all._is_lock_residual("locked file (advisory): x")
+        assert _stop_all._is_lock_residual("install-module holder (pid 1, x)")
+        assert _stop_all._is_lock_residual("file-lock owner (pid 1, x)")
+        assert not _stop_all._is_lock_residual("daemon (pid 1)")
+        assert not _stop_all._is_lock_residual("EMRG.exe (pid 1)")
+        assert not _stop_all._is_lock_residual("lock-probe failed (error: x)")
 
 
 class TestMainDelegatesToStopAll:

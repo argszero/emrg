@@ -782,6 +782,113 @@ def _kill_tree_windows(pid: int) -> None:
         pass
 
 
+def _escalate_kill_windows(pid: int) -> str:
+    """Escalation kill for a lock-holder that survived the stop phase (rant
+    2026-08-18T21:24:48 #2c): ``taskkill /F /T`` first → ancestor chain
+    (parent tree) kill → ``Stop-Process -Force`` fallback. Returns a one-line
+    outcome for the per-file disposition log."""
+    log: list[str] = []
+    try:
+        r = subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True, text=True, timeout=10, **_no_window(),
+        )
+        log.append(f"taskkill /F /T rc={getattr(r, 'returncode', '?')}")
+        if getattr(r, "returncode", 1) == 0 and not _pid_alive(pid):
+            return "; ".join(log) + " => killed"
+    except (OSError, subprocess.SubprocessError, TimeoutError) as e:
+        log.append(f"taskkill err={type(e).__name__}")
+    # Ancestor chain (parent tree): walk ProcessId → ParentProcessId via CIM
+    # and kill each ancestor with its own tree (the holder may be a child
+    # whose parent keeps it / the lock alive).
+    try:
+        ps = (
+            "powershell -NoProfile -Command "
+            '"$p=Get-CimInstance Win32_Process -Filter \\"ProcessId=' + str(pid) + '\\"; '
+            '$chain=@(); while($p -and $p.ParentProcessId -and $p.ParentProcessId -ne 0){'
+            '$par=Get-CimInstance Win32_Process -Filter ("ProcessId="+$p.ParentProcessId); '
+            'if(-not $par){break}; $chain+=$par; $p=$par}; '
+            '$chain | ForEach-Object { Write-Output ("{0} {1}" -f $_.ProcessId,$_.Name) }"'
+        )
+        out = subprocess.run(ps, capture_output=True, text=True, timeout=15, **_no_window()).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if not parts or not parts[0].strip().isdigit():
+                continue
+            apid, aname = int(parts[0]), " ".join(parts[1:])
+            r = subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(apid)],
+                capture_output=True, text=True, timeout=10, **_no_window(),
+            )
+            log.append(f"parent {apid} ({aname}) rc={getattr(r, 'returncode', '?')}")
+    except (OSError, subprocess.SubprocessError, TimeoutError) as e:
+        log.append(f"parent-tree err={type(e).__name__}")
+    if not _pid_alive(pid):
+        return "; ".join(log) + " => killed"
+    # Final fallback: Stop-Process -Force (CIM/WMIC-class stop).
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"],
+            capture_output=True, text=True, timeout=10, **_no_window(),
+        )
+        log.append(f"Stop-Process rc={getattr(r, 'returncode', '?')}")
+        if not _pid_alive(pid):
+            return "; ".join(log) + " => killed"
+    except (OSError, subprocess.SubprocessError, TimeoutError) as e:
+        log.append(f"Stop-Process err={type(e).__name__}")
+    return "; ".join(log) + " => SURVIVED"
+
+
+def _escalate_locked_files(
+    locked: list[str],
+    mh_holders: list[tuple[int, str, str, int, list[str], str]],
+    root: str,
+) -> None:
+    """Final escalation + per-file disposition log (rant 2026-08-18T21:24:48
+    #2c/#4): for each still-locked file, attribute holders from the three data
+    sources (module-holder enumeration / Restart Manager / self), kill
+    external holders with escalation, and log the full chain — file path /
+    holder PIDs / attribution source / action / result. Never raises; any
+    survivors are logged as advisory and the install continues (the installer's
+    own overwrite is the final arbiter)."""
+    if not is_win() or not locked or not root:
+        return
+    try:
+        root_n = os.path.normpath(root).replace("\\", "/").rstrip("/")
+        holders_by_rel: dict[str, list[tuple[str, int, str]]] = {}
+        for pid, name, _exe, _parent, files, tag in mh_holders:
+            for f in files:
+                rel = os.path.normpath(f).replace("\\", "/")
+                if root_n and rel.startswith(root_n + "/"):
+                    rel = rel[len(root_n) + 1:]
+                src = "self/excluded" if tag == "excluded" else "module-holder"
+                holders_by_rel.setdefault(rel, []).append((src, pid, name or ""))
+        rm_owners = _windows_lock_owners(kill=False)
+        print("emrg stop: escalation — locks surviving the stop phase:")
+        for p in locked:
+            rel = os.path.normpath(p).replace("\\", "/")
+            if root_n and rel.startswith(root_n + "/"):
+                rel = rel[len(root_n) + 1:]
+            holders = list(holders_by_rel.get(rel, []))
+            for o_pid, o_name, _cmd in rm_owners:  # RM reports actual owners
+                if not any(h[1] == o_pid for h in holders):
+                    holders.append(("rm", o_pid, o_name))
+            chain = ", ".join(f"{src}:{pid}:{name}" for src, pid, name in holders) or "none found"
+            actions: list[str] = []
+            for src, pid, name in holders:
+                if src == "self/excluded":
+                    actions.append(f"self pid {pid} — released on stop_all exit")
+                    continue
+                actions.append(f"pid {pid} ({name}): " + _escalate_kill_windows(pid))
+            print(
+                f"emrg stop:   locked {rel} | holders [{chain}] | "
+                + (" | ".join(actions) if actions else "no external holder")
+            )
+    except Exception as e:  # best-effort — never break the stop flow
+        print(f"emrg stop: ERROR escalation: {e} ({type(e).__name__})")
+
+
 # Any EXTERNAL (non-self/ancestor) module holder was found and killed —
 # evidence for the self-lock final guard: when lock-probe still reports
 # locked files but no external holder exists, the lock is stop_all's own
@@ -1048,7 +1155,13 @@ def _classify_locked_files(
     residuals aborts a perfectly fine install.
 
     Returns ``(self_held, residual)`` install-relative paths:
-    - self_held: locked file attributed ONLY to excluded (self/ancestor) holders
+    - self_held: locked file attributed ONLY to excluded (self/ancestor) holders,
+      or (rant 2026-08-18T21:24:48 #3) a file under ``python-dist\\`` with no
+      external target holder — stop_all always runs from
+      install\\python-dist\\python.exe, whose interpreter + lazily-loaded
+      stdlib modules (select/_ctypes/_hashlib/_socket, ...) hold DLL locks
+      that module-holder enumeration does NOT list (v0.2.49: 12 locked vs 5
+      enumerated modules); such locks release when stop_all exits.
     - residual:  locked file with an external (``target``) holder, or one that
       cannot be attributed to any known holder (conservative — could be a
       plain non-DLL lock held by an external process that loaded no module).
@@ -1062,16 +1175,44 @@ def _classify_locked_files(
         return p.replace("\\", "/")
 
     root_n = _norm(root)
+    def _to_rel(p: str) -> str:
+        n = _norm(p)
+        if n.startswith(root_n + "/"):
+            # Normalize again: on Windows os.path.relpath() returns
+            # backslash-separated results, but the locked-file lookup keys are
+            # forward-slash — an un-normalized key would miss (external target
+            # holder misclassified as self-held on Windows).
+            return _norm(os.path.relpath(n, root_n))
+        return n  # already install-relative (PS Substring / fixture form)
+
     tag_by_rel: dict[str, set[str]] = {}
     for _pid, _name, _exe, _parent, files, tag in mh_holders:
         for f in files:
-            tag_by_rel.setdefault(_norm(f), set()).add(tag)
+            # Key by the SAME rel path the locked-file lookup uses below —
+            # full-path keys never matched the rel lookup, so holder tags
+            # (esp. ``target``) were lost and every python-dist file was
+            # mis-attributed as self-held (test_pydist_external_target_is_residual).
+            # Holder files may already be install-relative: os.path.relpath()
+            # against root would mangle those on POSIX (CWD prefix), so only
+            # convert genuine absolute paths.
+            rel_f = _to_rel(f)
+            tag_by_rel.setdefault(rel_f, set()).add(tag)
     self_held: list[str] = []
     residual: list[str] = []
     for p in locked:
         rel = _norm(os.path.relpath(_norm(p), root_n))
         tags = tag_by_rel.get(rel, set())
         if tags == {"excluded"}:
+            self_held.append(rel)
+        elif "/python-dist/" in "/" + rel and "target" not in tags:
+            # Rant 2026-08-18T21:24:48 #3 — self-held relaxation: stop_all
+            # itself runs from install\python-dist\python.exe; its runtime +
+            # lazily-loaded stdlib modules hold python-dist DLL locks that the
+            # module-holder enumeration does not cover (v0.2.49: 12 locked vs
+            # 5 enumerated modules → 7 falsely "unattributable" → old
+            # self-held check misjudged them as residual and aborted a fine
+            # install). python-dist\ + no external target holder ⇒ self-held:
+            # released when stop_all exits, installer continues.
             self_held.append(rel)
         else:
             # No tags (unattributable) OR has an external target holder.
@@ -1151,20 +1292,37 @@ def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     probe_items = []
     if _lock_probe_error:
         probe_items.append(f"lock-probe failed (error: {_lock_probe_error})")
-    # Self-held attribution (rant 2026-08-18T18:57:09): when stop_all runs
-    # from install\python-dist\python.exe, that interpreter MUST load its own
-    # python-dist DLLs (python313.dll, select.pyd, ...) — those image-section
-    # locks are held by the stop_all process itself (module-holder tag
-    # ``excluded`` = self + ancestor chain) and are RELEASED when stop_all
+    # Self-held attribution (rant 2026-08-18T18:57:09 + 21:24:48 #3): when
+    # stop_all runs from install\python-dist\python.exe, that interpreter MUST
+    # load its own python-dist DLLs (python313.dll, select.pyd, ...) — those
+    # image-section locks are held by the stop_all process itself (module-holder
+    # tag ``excluded`` = self + ancestor chain) and are RELEASED when stop_all
     # exits, before the installer starts overwriting (make-installer.sh uses
     # ewWaitUntilTerminated). They are NOT residuals — counting them aborts
-    # the install while nothing is actually wrong. A locked file is residual
-    # only when an EXTERNAL holder (module-holder ``target`` / RM owner)
-    # exists or the lock cannot be attributed to any known holder (conservative).
+    # the install while nothing is actually wrong. Since 21:24:48 the same
+    # holds for ANY locked file under python-dist\ with no external target
+    # holder (lazily-loaded stdlib modules enumeration misses).
     self_held, residual_locked = _classify_locked_files(
         locked, mh_holders, _install_root() if is_win() else ""
     )
-    probe_items.extend(f"locked file (createfile-probe): {p}" for p in residual_locked)
+    # Final escalation (rant 2026-08-18T21:24:48 #2c): locks that survive the
+    # stop phase get a hard re-kill of their external holders (taskkill /F /T →
+    # parent tree → Stop-Process), then the probe + classification run again.
+    # Only TRULY unkillable locks are logged — the install CONTINUES and the
+    # installer's own overwrite is the final arbiter (21:24:48 #2c/#5).
+    if residual_locked and is_win():
+        _escalate_locked_files(locked, mh_holders, _install_root())
+        locked = check_install_writable()
+        if not _lock_probe_error:
+            _self2, residual_locked = _classify_locked_files(
+                locked, mh_holders, _install_root()
+            )
+            self_held = sorted(set(self_held + _self2))
+    # Advisory (non-aborting) after escalation — detailed chain already logged
+    # per file by _escalate_locked_files; exit stays 0 unless EMRG process
+    # residuals exist (rant 2026-08-18T21:24:48).
+    for p in residual_locked:
+        probe_items.append(f"locked file (advisory, install continues): {p}")
     if self_held:
         print(
             f"emrg stop: WARNING {len(self_held)} file(s) locked by stop_all "
@@ -1348,6 +1506,18 @@ def _step_plan() -> list[tuple[str, object]]:
     ]
 
 
+def _is_lock_residual(r: str) -> bool:
+    """True when a verify residual is lock-related (external lock holder or
+    locked file) rather than an EMRG process residual (rant 2026-08-18T21:24:48
+    #2c/#5: lock residuals are advisory after escalation — install continues;
+    process residuals still abort)."""
+    return r.startswith((
+        "locked file",
+        "install-module holder",
+        "file-lock owner",
+    ))
+
+
 def stop_all() -> int:
     """Run every stop step, then verify. Returns 0 (clean) or 1 (residuals).
 
@@ -1436,9 +1606,27 @@ def stop_all() -> int:
                 f"stop_all exits; installer continues"
             )
     residuals = verify()
-    if residuals:
+    # Lock-related residuals are ADVISORY after escalation (rant
+    # 2026-08-18T21:24:48 #2c/#5): an unkillable external lock holder is
+    # logged in detail and the install CONTINUES — the installer's own
+    # overwrite is the final arbiter ("若仍有杀不掉的锁：日志详细记录但安装
+    # 继续，最终成功与否以实际覆盖为准"). Only EMRG process residuals
+    # (GUI / daemon / python-emrg / bundled-git) and probe failures abort.
+    lock_res = [r for r in residuals if _is_lock_residual(r)]
+    proc_res = [r for r in residuals if not _is_lock_residual(r)]
+    # Advisory only when the install ACTUALLY continues: a process residual
+    # below returns exit 1, so the "install continues" message would be a lie.
+    if lock_res and not proc_res:
+        print(
+            f"emrg stop: WARNING {len(lock_res)} lock-related residual(s) "
+            f"after escalation — install continues, overwrite is the final "
+            f"arbiter (rant 21:24:48):"
+        )
+        for r in lock_res:
+            print(f"  - {r}")
+    if proc_res:
         print("emrg stop: WARNING residual process(es) still running:")
-        for r in residuals:
+        for r in proc_res:
             print(f"  - {r}")
         if is_win():
             try:
@@ -1446,7 +1634,7 @@ def stop_all() -> int:
             except Exception:
                 pass
         print(
-            f"emrg stop: exit code 1 ({len(residuals)} residual) "
+            f"emrg stop: exit code 1 ({len(proc_res)} residual) "
             f"({time.monotonic() - t0:.1f}s)"
         )
         return 1
