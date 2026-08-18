@@ -1631,14 +1631,15 @@ def test_evolution_cycle_log_summary_falls_back_to_completion(tmp_path):
         "missing done → completion first line fallback"
     assert log.meaningful is True
 
-    # vibe check entirely unavailable → summary empty, flags None/False
+    # vibe check entirely unavailable → summary falls back to the first line
+    # of the completion content (per rant design), flags None/False
     handler2, captured2 = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ])
     asyncio.run(handler2._run_evolution_cycle())
     log2 = captured2["log"]
-    assert log2.summary == "", "vibe unavailable → empty summary"
+    assert log2.summary == "Done", "vibe unavailable → completion first line fallback"
     assert log2.meaningful is None
     assert log2.recommend_slowdown is False
     assert log2.tool_count == 0
