@@ -413,3 +413,121 @@ def test_stream_retry_logs_attempt_counter(monkeypatch, client, caplog):
     assert "LLM stream attempt 2/4" in caplog.text
     assert "attempt 1/4" not in caplog.text
     assert "LLM stream transient error 500" in caplog.text
+
+
+# ── Reasoning / think-block capture (rant 2026-08-18T09:43:23) ──
+
+def _make_stream(*objs):
+    """Build a one-shot 200 stream yielding the given SSE chunk objects."""
+
+    class _GoodStream:
+        status_code = 200
+        headers = {}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def aiter_lines(self):
+            import json
+            for obj in objs:
+                yield "data: " + json.dumps(obj)
+
+    return _GoodStream()
+
+
+def _collect_chunks(client, fake):
+    import asyncio
+    chunks = []
+
+    async def _run():
+        async for chunk in client.chat_stream([{"role": "user", "content": "hi"}]):
+            chunks.append(chunk)
+
+    asyncio.run(_run())
+    return chunks
+
+
+def test_stream_accumulates_reasoning_content(monkeypatch, client):
+    """DeepSeek-style `reasoning_content` deltas accumulate into the yielded
+    `reasoning` field; the final chunk carries the full think text."""
+    _patch_fast_sleep(monkeypatch)
+    fake = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"reasoning_content": "Let me "}}]},
+        {"choices": [{"delta": {"reasoning_content": "think step by step"}}]},
+        {"choices": [{"delta": {"content": "final answer"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )])
+    client._client = fake
+    chunks = _collect_chunks(client, fake)
+    last = chunks[-1]
+    assert last["reasoning"] == "Let me think step by step"
+    # content is unaffected
+    assert "".join(c.get("content") or "" for c in chunks) == "final answer"
+    assert fake.calls == 1
+
+
+def test_stream_accumulates_openai_reasoning(monkeypatch, client):
+    """OpenAI-style `reasoning` field name is also accepted."""
+    _patch_fast_sleep(monkeypatch)
+    fake = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"reasoning": "think 1"}}]},
+        {"choices": [{"delta": {"reasoning": " think 2"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )])
+    client._client = fake
+    chunks = _collect_chunks(client, fake)
+    assert chunks[-1]["reasoning"] == "think 1 think 2"
+
+
+def test_stream_no_reasoning_means_none(monkeypatch, client):
+    """A model that does not reason → `reasoning` stays None (regression-safe:
+    no think block, no field pollution in llm.jsonl)."""
+    _patch_fast_sleep(monkeypatch)
+    fake = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"content": "plain"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )])
+    client._client = fake
+    chunks = _collect_chunks(client, fake)
+    assert all(c.get("reasoning") is None for c in chunks)
+
+
+def test_stream_usage_reasoning_tokens_top_level_and_nested(monkeypatch, client):
+    """usage.reasoning_tokens is captured from the top level AND from the
+    completion_tokens_details nesting (two provider conventions)."""
+    _patch_fast_sleep(monkeypatch)
+
+    # top-level reasoning_tokens
+    fake = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"reasoning_content": "x"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 10, "completion_tokens": 20,
+                   "reasoning_tokens": 7}},
+    )])
+    client._client = fake
+    chunks = _collect_chunks(client, fake)
+    assert chunks[-1]["usage"]["reasoning_tokens"] == 7
+    assert chunks[-1]["usage"]["prompt_tokens"] == 10
+
+    # nested under completion_tokens_details
+    fake2 = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"reasoning_content": "x"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 1, "completion_tokens": 2,
+                   "completion_tokens_details": {"reasoning_tokens": 9}}},
+    )])
+    client._client = fake2
+    chunks2 = _collect_chunks(client, fake2)
+    assert chunks2[-1]["usage"]["reasoning_tokens"] == 9
+
+    # no usage → None (unchanged behavior)
+    fake3 = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"content": "hi"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+    )])
+    client._client = fake3
+    chunks3 = _collect_chunks(client, fake3)
+    assert chunks3[-1]["usage"] is None
