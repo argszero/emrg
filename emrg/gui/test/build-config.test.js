@@ -147,3 +147,31 @@ test("preload exposes workspace-panel APIs (listFiles/readFile)", () => {
     assert.match(main, new RegExp(`ipcMain\\.handle\\("${channel}"`), `main.js must handle ${channel}`);
   }
 });
+
+
+// ── rant 2026-08-18T12:45:47 (v0.2.47 Build Release) ──
+// #836 把 buildResources 放在 electron-builder config 根级 → schema 校验失败
+// （"configuration has an unknown property 'buildResources'"）→ 4/4 build jobs 全红。
+// 正确位置是 directories.buildResources。Test CI 不跑 electron-builder，只有打包会炸 ——
+// 本守卫在 PR 阶段钉死该 schema 约束，防止再次放行。
+test("electron-builder config: buildResources lives under directories (schema guard, rant 12:45:47)", () => {
+  const build = PKG.build || {};
+  assert.ok(
+    !Object.prototype.hasOwnProperty.call(build, "buildResources"),
+    `buildResources must NOT be at config root — electron-builder rejects unknown property ` +
+      `(v0.2.47 Build Release 4/4 failure). Place it under directories.buildResources. ` +
+      `Actual root keys: ${JSON.stringify(Object.keys(build))}`
+  );
+  assert.strictEqual(
+    build.directories && build.directories.buildResources,
+    "../packaging/assets",
+    "directories.buildResources must point at ../packaging/assets (icon.icns/ico/png sources)"
+  );
+  // icon.icns/ico/png are gen-assets products (gitignored, generated at build time from
+  // icon.svg by packaging/gen-assets.sh) — only the committed design source must exist in CI.
+  const assetsDir = path.join(GUI_ROOT, "..", "..", "packaging", "assets");
+  assert.ok(
+    fs.existsSync(path.join(assetsDir, "icon.svg")),
+    `buildResources dir missing design source icon.svg (committed) — gen-assets can't render icons`
+  );
+});
