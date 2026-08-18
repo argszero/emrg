@@ -564,6 +564,9 @@ class TaskHandler:
             **win32_no_window_kwargs(),
         )
         if result.returncode == 0:
+            logger.debug(
+                "TaskHandler[%s]: origin probe: https OK", self.name,
+            )
             return  # reachable — keep https
         if not is_git_connection_error(result.stderr):
             return  # auth/404 etc — switching would not help
@@ -647,6 +650,19 @@ class TaskHandler:
                 # Rant 2026-08-09T13:16:36: exponential backoff while the
                 # daemon is unreachable — stops the retry/window storm.
                 else self._connect_backoff()
+            )
+            # Diagnostic log (rant 2026-08-18T20:48:45): expose which
+            # scheduling mode drove the wait — normal | heartbeat | backoff —
+            # so the saturation/backoff state machine is traceable end-to-end.
+            if self._empty_cycles >= self._saturation_threshold():
+                _mode = "heartbeat"
+            elif self._connect_failures > 0:
+                _mode = "backoff"
+            else:
+                _mode = "normal"
+            logger.debug(
+                "TaskHandler[%s]: next run in %ds (mode=%s)",
+                self.name, int(wait_timeout), _mode,
             )
             # Wait for interval or manual trigger (interruptible)
             self._next_run_at = time.time() + wait_timeout
@@ -1255,8 +1271,33 @@ class TaskScheduler:
         return None
 
     def list_tasks(self) -> list[dict]:
-        """Return status for all running handlers."""
-        return [handler.status() for handler in self._handlers]
+        """Return status for all running handlers.
+
+        MUST stay pure in-memory (rant 2026-08-18T20:48:45): this is the
+        /trigger + tasks-panel request path — any I/O here stalls every WS
+        message. The per-handler timing below exists to catch exactly that:
+        total >200ms → WARNING with a per-handler breakdown, >50ms → DEBUG.
+        """
+        start = time.monotonic()
+        results = []
+        per_handler: list[str] = []
+        for handler in self._handlers:
+            h_start = time.monotonic()
+            results.append(handler.status())
+            per_handler.append(f"{handler.name}={1000 * (time.monotonic() - h_start):.1f}ms")
+        elapsed_ms = 1000 * (time.monotonic() - start)
+        if elapsed_ms > 200:
+            logger.warning(
+                "TaskScheduler: list_tasks took %.1fms (>200ms — "
+                "status() must stay in-memory) — per-handler: %s",
+                elapsed_ms, ", ".join(per_handler),
+            )
+        elif elapsed_ms > 50:
+            logger.debug(
+                "TaskScheduler: list_tasks took %.1fms — per-handler: %s",
+                elapsed_ms, ", ".join(per_handler),
+            )
+        return results
 
     def total_evolutions(self) -> int:
         """Total completed evolution cycles across all running handlers."""
