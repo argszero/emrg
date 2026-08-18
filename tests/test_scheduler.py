@@ -1456,34 +1456,6 @@ def test_ensure_evolution_workspace_clone_falls_back_to_ssh(tmp_path):
     assert clone_calls[1][0][-2] == "git@github.com:argszero/emrg.git"
 
 
-def test_remote_advanced_ssh_fallback_when_https_blocked(tmp_path):
-    """ls-remote over a blocked https origin → retried via the SSH URL."""
-    from emrg.server import scheduler as mod
-
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    fake = FakeGitRun(
-        origin_url="https://github.com/argszero/emrg.git",
-        ls_remote_stderr=(
-            "fatal: unable to access 'https://github.com/argszero/emrg.git/': "
-            "Failed to connect to github.com port 443"
-        ),
-        remote_head="9f8e7d6",  # != local abc123 → advanced
-    )
-    orig_run = mod.subprocess.run
-    orig_origin = mod.git_origin_url
-    mod.subprocess.run = fake
-    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
-    try:
-        assert handler._remote_advanced() is True
-    finally:
-        mod.subprocess.run = orig_run
-        mod.git_origin_url = orig_origin
-
-    ls_calls = [c for c in fake.calls if "ls-remote" in c[0]]
-    assert len(ls_calls) == 2, f"expected https + ssh ls-remote, got {fake.calls}"
-    assert "git@github.com:argszero/emrg.git" in ls_calls[1][0]
-
-
 # ── TaskHandler cycle truncation detection ──────────────────
 # mem-repo lesson (tool-call truncation must be flagged, not silently
 # treated as a successful/empty cycle — #523 applied it to the chat UI;
@@ -1519,7 +1491,6 @@ def _make_cycle_handler(tmp_path, frames):
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     handler._ensure_evolution_workspace = lambda: True
     handler._build_evolution_prompt = lambda: "test prompt"
-    handler._get_git_head = lambda: "abc123"  # HEAD unchanged
     captured = {}
     async def _fake_write_log(log):
         captured["log"] = log
@@ -1815,58 +1786,49 @@ def test_heartbeat_interval_formula(tmp_path):
         assert handler._heartbeat_interval() == expected, (interval, expected)
 
 
-def test_saturation_heartbeat_active_true_when_remote_unchanged(tmp_path):
-    """At/above threshold + unchanged remote → heartbeat cadence (not skip)."""
-    from emrg.server import scheduler as mod
-
+def test_saturation_heartbeat_active_true_at_threshold(tmp_path):
+    """At/above threshold → heartbeat cadence (not skip), no network (rant
+    2026-08-18T20:32:07 — upstream check removed)."""
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     handler._empty_cycles = 30  # == _IDLE_HALT_THRESHOLD
-    fake = FakeGitRun(remote_head="abc123")  # == local HEAD → not advanced
-    orig_run = mod.subprocess.run
-    mod.subprocess.run = fake
-    try:
-        assert handler._saturation_heartbeat_active() is True
-        assert handler._empty_cycles == 30  # counter untouched
-        assert handler._heartbeat_interval() == 480  # 60s task → 8 min
-    finally:
-        mod.subprocess.run = orig_run
+    assert handler._saturation_heartbeat_active() is True
+    assert handler._empty_cycles == 30  # counter untouched
+    assert handler._heartbeat_interval() == 480  # 60s task → 8 min
 
 
 def test_saturation_heartbeat_log_message_no_skip(tmp_path, caplog):
     """Saturation log must say heartbeat, never 'skipping scheduled run'."""
     import logging
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler._empty_cycles = 30
+    with caplog.at_level(logging.INFO, logger="emrg.server.scheduler"):
+        assert handler._saturation_heartbeat_active() is True
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "skipping scheduled run" not in msgs, \
+        "old complete-halt log must not appear (rant 09:35:55)"
+    assert "heartbeat" in msgs and "never halting" in msgs, msgs
+
+
+def test_saturation_heartbeat_makes_no_network_calls(tmp_path):
+    """Saturation judgment never touches the network (rant 2026-08-18T20:32:07
+    — the old _remote_advanced ls-remote blocked the event loop; the check is
+    gone entirely, recovery happens via cycle output resetting the counter)."""
     from emrg.server import scheduler as mod
 
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     handler._empty_cycles = 30
-    fake = FakeGitRun(remote_head="abc123")
+
+    def boom(*a, **kw):
+        raise AssertionError("subprocess.run must not be called from saturation")
+
     orig_run = mod.subprocess.run
-    mod.subprocess.run = fake
+    mod.subprocess.run = boom
     try:
-        with caplog.at_level(logging.INFO, logger="emrg.server.scheduler"):
-            assert handler._saturation_heartbeat_active() is True
-        msgs = " ".join(r.message for r in caplog.records)
-        assert "skipping scheduled run" not in msgs, \
-            "old complete-halt log must not appear (rant 09:35:55)"
-        assert "heartbeat" in msgs and "never halting" in msgs, msgs
+        assert handler._saturation_heartbeat_active() is True
     finally:
         mod.subprocess.run = orig_run
-
-
-def test_saturation_heartbeat_resumes_and_resets_when_remote_advanced(tmp_path):
-    """At/above threshold + remote advanced → normal frequency, counter reset."""
-    from emrg.server import scheduler as mod
-
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    handler._empty_cycles = 30
-    fake = FakeGitRun(remote_head="9f8e7d6")  # != local abc123 → advanced
-    orig_run = mod.subprocess.run
-    mod.subprocess.run = fake
-    try:
-        assert handler._saturation_heartbeat_active() is False
-        assert handler._empty_cycles == 0  # reset → normal frequency resumes
-    finally:
-        mod.subprocess.run = orig_run
+    assert handler._empty_cycles == 30
 
 
 def test_saturation_heartbeat_false_below_threshold(tmp_path):
@@ -1879,8 +1841,6 @@ def test_saturation_heartbeat_false_below_threshold(tmp_path):
 
 def test_saturated_tick_still_runs_full_cycle(tmp_path):
     """Saturated handler runs a full cycle (never skipped) at heartbeat."""
-    from emrg.server import scheduler as mod
-
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
@@ -1889,30 +1849,10 @@ def test_saturated_tick_still_runs_full_cycle(tmp_path):
                     "reason": "nothing to evolve"}},
     ])
     handler._empty_cycles = 30  # saturated
-    fake = FakeGitRun(remote_head="abc123")  # unchanged → stay saturated
-    orig_run = mod.subprocess.run
-    mod.subprocess.run = fake
-    try:
-        asyncio.run(handler._run_evolution_cycle())
-    finally:
-        mod.subprocess.run = orig_run
+    asyncio.run(handler._run_evolution_cycle())
     assert "log" in captured, "saturated tick must still run a full cycle"
     assert handler._empty_cycles == 31, \
         "NTE cycle during saturation keeps incrementing (heartbeat continues)"
-
-
-def test_remote_advanced_false_without_git_repo(tmp_path):
-    """Not a git repo / ls-remote fails → False (stay saturated, no crash)."""
-    from emrg.server import scheduler as mod
-
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    fake = FakeGitRun(git_repo=False)
-    orig_run = mod.subprocess.run
-    mod.subprocess.run = fake
-    try:
-        assert handler._remote_advanced() is False
-    finally:
-        mod.subprocess.run = orig_run
 
 
 # ── Task CRUD + hot reload + templates (rant 2026-08-12T18:23:15 P2) ──
