@@ -91,6 +91,8 @@
       "allowToChangeInstallationDirectory": true,
       "perMachine": false
     },
-    "buildResources": "../packaging/assets"
+    "directories": {
+      "buildResources": "../packaging/assets"
+    }
   }
 }
