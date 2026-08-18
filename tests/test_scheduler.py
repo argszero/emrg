@@ -931,7 +931,7 @@ class FakeGitRun:
         return out
 
     def __call__(self, cmd, *args, **kwargs):
-        self.calls.append((list(cmd), kwargs.get("cwd")))
+        self.calls.append((list(cmd), kwargs.get("cwd"), kwargs.get("env")))
         cwd = kwargs.get("cwd") or ""
         # cmd[0] 可能是字面 "git"（dev 环境）或 resolve_git_gh() 解析出的
         # 绝对路径（bundled git，2026-08-12 workspace-not-ready 事故修复后）——
@@ -1498,10 +1498,69 @@ def test_ensure_evolution_workspace_clone_falls_back_to_ssh(tmp_path):
 
     assert ok is True
     assert handler._source_dir == str(evolve_dir)
+    assert handler._workspace_heal_failures == 0  # success resets backoff
     clone_calls = [c for c in fake.calls if "clone" in c[0]]
     assert len(clone_calls) == 2, f"expected https + ssh clone, got {fake.calls}"
     assert clone_calls[0][0][-2] == "https://github.com/argszero/emrg.git"
     assert clone_calls[1][0][-2] == "git@github.com:argszero/emrg.git"
+    # rant 2026-08-19T00:54:32 — short connect timeouts on both transports:
+    # https bounded by http.connectTimeout=5, SSH by GIT_SSH_COMMAND
+    # ConnectTimeout=5 (a blocked port must fail fast, not eat ~30s per cycle).
+    assert any("http.connectTimeout=5" in str(c) for c in clone_calls[0][0]), clone_calls
+    ssh_env = clone_calls[1][2] or {}
+    assert ssh_env.get("GIT_SSH_COMMAND") == "ssh -o ConnectTimeout=5", ssh_env
+
+
+def test_workspace_heal_backoff_skips_retries(tmp_path):
+    """rant 2026-08-19T00:54:32 — clone/self-heal failure arms exponential
+    backoff; cycles before the window skip the self-heal entirely (no
+    blocking git attempt), so a network-down daemon stops wedging websocket
+    clients every 60s."""
+    from emrg.server import scheduler as mod
+
+    mod.EVOLUTION_CWD = tmp_path / "evolution"
+    handler = _make_handler(tmp_path, path=str(tmp_path / "nonexistent"))
+    handler._repo_url = "https://github.com/argszero/emrg.git"
+
+    fake = FakeGitRun(git_repo=False, clone_fails=True)
+    orig_run = mod.subprocess.run
+    orig_evolve = mod.EVOLUTION_CWD
+    orig_config = mod.config_dir
+    mod.subprocess.run = fake
+    mod.config_dir = lambda: tmp_path
+    try:
+        ok = handler._ensure_evolution_workspace()
+        assert ok is False
+        assert handler._workspace_heal_failures == 1
+        assert handler._workspace_heal_next_retry_at > 0
+        # Within the backoff window → skipped, no git attempted again
+        before = len(fake.calls)
+        ok2 = handler._ensure_evolution_workspace()
+        assert ok2 is False
+        assert len(fake.calls) == before, f"git retried during backoff: {fake.calls}"
+        # Window expires (simulated) → retries, failure re-arms with 2x delay
+        handler._workspace_heal_next_retry_at = 0
+        ok3 = handler._ensure_evolution_workspace()
+        assert ok3 is False
+        assert handler._workspace_heal_failures == 2
+        assert len(fake.calls) > before
+    finally:
+        mod.subprocess.run = orig_run
+        mod.EVOLUTION_CWD = orig_evolve
+        mod.config_dir = orig_config
+
+
+def test_run_evolution_cycle_offloads_workspace_heal_to_thread():
+    """rant 2026-08-19T00:54:32 — the workspace self-heal runs synchronous
+    git subprocesses (clone/ls-remote/config); it must be offloaded with
+    asyncio.to_thread so the event loop is never blocked (a slow/failing
+    clone previously wedged every websocket client for ~30s per cycle)."""
+    import inspect
+
+    from emrg.server import scheduler as mod
+
+    src = inspect.getsource(mod.TaskHandler._run_evolution_cycle)
+    assert "await asyncio.to_thread(self._ensure_evolution_workspace)" in src
 
 
 # ── TaskHandler cycle truncation detection ──────────────────

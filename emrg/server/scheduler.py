@@ -241,6 +241,13 @@ class TaskHandler:
         # rant 2026-08-09T08:03:46：GUI 测试覆盖真实 emrgd.port 致 10h 连不上）。
         self._CONNECT_FAIL_ALERT = 3
         self._connect_failures = 0
+        # ── Workspace self-heal backoff (rant 2026-08-19T00:54:32) ──
+        # clone/self-heal failure (network down) must not retry every cycle:
+        # each failed clone blocks up to ~30s and (on Windows) wedges the
+        # websocket clients. Exponential backoff 5min → 10min → 20min → 30min
+        # cap; reset on success.
+        self._workspace_heal_failures = 0
+        self._workspace_heal_next_retry_at = 0.0
         self._saturation_dir = config_dir() / "saturation"
         self._saturation_dir.mkdir(parents=True, exist_ok=True)
         self._saturation_file = self._saturation_dir / f"{self.name}.json"
@@ -478,6 +485,19 @@ class TaskHandler:
                 self.name, evolve_dir,
             )
             return False
+        # Backoff gate (rant 2026-08-19T00:54:32): after a failed clone /
+        # self-heal (network down), don't retry every cycle — each failed
+        # clone blocks up to ~30s and wedges websocket clients. Skip until
+        # the backoff window expires.
+        if self._workspace_heal_failures > 0:
+            remaining = self._workspace_heal_next_retry_at - time.time()
+            if remaining > 0:
+                logger.debug(
+                    "TaskHandler[%s]: workspace self-heal backoff "
+                    "(%ds left) — skipping cycle",
+                    self.name, int(remaining),
+                )
+                return False
         try:
             logger.info(
                 "TaskHandler[%s]: cloning %s → %s (workspace self-heal)",
@@ -489,12 +509,17 @@ class TaskHandler:
             self._source_dir = str(evolve_dir)
             self.project_path = str(evolve_dir)
             self._ensure_project_entry()
+            self._workspace_heal_failures = 0
+            self._workspace_heal_next_retry_at = 0.0
             return True
         except (subprocess.CalledProcessError, OSError) as e:
+            self._workspace_heal_failures += 1
+            delay = min(300 * (2 ** (self._workspace_heal_failures - 1)), 1800)
+            self._workspace_heal_next_retry_at = time.time() + delay
             logger.warning(
                 "TaskHandler[%s]: evolution workspace self-heal failed "
-                "(network down?): %s — skipping cycle",
-                self.name, e,
+                "(network down?): %s — skipping cycle; next retry in %ds",
+                self.name, e, delay,
             )
             return False
 
@@ -508,7 +533,7 @@ class TaskHandler:
         block https git transport (observed on the packaged host). Other
         failures (auth / 404 / repo-specific) propagate unchanged.
         """
-        cmd = [self._git_exe, "-c", "http.connectTimeout=10", "clone", repo_url, str(target)]
+        cmd = [self._git_exe, "-c", "http.connectTimeout=5", "clone", repo_url, str(target)]
         reason = ""
         try:
             subprocess.run(
@@ -527,10 +552,14 @@ class TaskHandler:
             "TaskHandler[%s]: https clone failed (%s) — retrying via SSH",
             self.name, reason,
         )
+        # rant 2026-08-19T00:54:32 — bound the SSH connect too (GIT_SSH_COMMAND
+        # ConnectTimeout=5), so a blocked SSH port fails fast instead of eating
+        # the full timeout while blocking the event loop offload thread.
         subprocess.run(
             [self._git_exe, "clone", ssh_url, str(target)],
             capture_output=True, text=True, encoding="utf-8",
-            timeout=120, check=True, env=no_prompt_env(),
+            timeout=120, check=True,
+            env={**no_prompt_env(), "GIT_SSH_COMMAND": "ssh -o ConnectTimeout=5"},
             **win32_no_window_kwargs(),
         )
 
@@ -879,7 +908,11 @@ class TaskHandler:
 
         # Self-heal the evolution workspace first (rant 20:42 方案 C):
         # packaged installs lack a writable git repo; clone on demand.
-        if not self._ensure_evolution_workspace():
+        # rant 2026-08-19T00:54:32 — the self-heal runs git subprocesses
+        # (clone/ls-remote/config) synchronously; offload to a worker thread
+        # so the asyncio event loop is never blocked (a slow/failing git
+        # clone used to wedge every websocket client for ~30s per cycle).
+        if not await asyncio.to_thread(self._ensure_evolution_workspace):
             logger.warning(
                 "TaskHandler[%s]: workspace not ready — skipping cycle",
                 self.name,
