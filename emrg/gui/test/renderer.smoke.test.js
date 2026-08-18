@@ -2645,6 +2645,61 @@ test("P3：设置面板打开 → 任务列表渲染（名称/类型/项目/间�
   assert.strictEqual(updated.enabled, true);
 });
 
+test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什么/降频徽章）", async () => {
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [
+      {
+        name: "emrg-task", type: "evolution", config: { project: "emrg" },
+        interval: 60, enabled: true, last_run_at: "2026-08-18T10:00:00",
+        last_cycle_summary: "修了双实例根因",
+        recent_runs: [
+          { timestamp: "2026-08-18T10:00:00", summary: "修了双实例根因，提交 PR #854",
+            impact: ["cycle-ts-complete", "tools-executed=26"], meaningful: true,
+            recommend_slowdown: false, tool_count: 26 },
+          { timestamp: "2026-08-18T09:00:00", summary: "",
+            impact: ["cycle-ts-complete", "tools-executed=3"], meaningful: false,
+            recommend_slowdown: false, tool_count: 3 },
+          { timestamp: "2026-08-18T08:00:00", summary: "NTE",
+            impact: ["cycle-ts-complete"], meaningful: false,
+            recommend_slowdown: true, tool_count: 0 },
+        ],
+      },
+      { name: "fresh-task", type: "sync", config: { project: "docs" }, interval: 3600, enabled: true },
+    ],
+    taskTemplateList: async () => [],
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
+  });
+  await tick();
+  await vm.runInContext("App.openTasksPanel()", ctx);
+  await tick();
+  // 初始：子表隐藏（行内含 .task-run-detail.hidden）
+  const hiddenBefore = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-detail")).every((d) => d.classList.contains("hidden"))`, ctx);
+  assert.strictEqual(hiddenBefore, true, "子表初始应隐藏");
+  // 点击任务卡 → 展开
+  await vm.runInContext(`document.getElementById("task-list").children[0].click()`, ctx);
+  await tick();
+  const detail = vm.runInContext(`document.getElementById("task-list").children[0].querySelector(".task-run-detail")`, ctx);
+  assert.strictEqual(detail.classList.contains("hidden"), false, "点击后子表应展开");
+  // 第一行 run：Agent 总结展示（自然语言）
+  const doneTxt = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")[0].textContent`, ctx);
+  assert.strictEqual(doneTxt, "修了双实例根因，提交 PR #854", `子表应显示 Agent 总结，实际: ${doneTxt}`);
+  // 降频徽章：recommend_slowdown=true → 建议降频；meaningful=false → 空转
+  const warnCount = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-badge-warn").length`, ctx);
+  assert.ok(warnCount >= 1, "recommend_slowdown=true 应显示建议降频徽章");
+  const idleCount = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-badge-idle").length`, ctx);
+  assert.ok(idleCount >= 1, "meaningful=false 应显示空转徽章");
+  // 旧数据无 summary → fallback impact 拼接（第二行 run）
+  const doneTexts = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")).map((n) => n.textContent)`, ctx);
+  assert.ok(doneTexts[1].includes("cycle-ts-complete"), `无 summary 应 fallback impact，实际: ${doneTexts[1]}`);
+  // 再次点击 → 折叠
+  await vm.runInContext(`document.getElementById("task-list").children[0].click()`, ctx);
+  await tick();
+  assert.strictEqual(vm.runInContext(`document.getElementById("task-list").children[0].querySelector(".task-run-detail").classList.contains("hidden")`, ctx), true, "再次点击应折叠");
+  // 无 recent_runs → 占位文案
+  const emptyTxt = vm.runInContext(`document.getElementById("task-list").children[1].querySelector(".task-run-empty").textContent`, ctx);
+  assert.ok(emptyTxt.includes("暂无运行记录"), `无 recent_runs 应显示占位，实际: ${emptyTxt}`);
+});
+
 test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 taskCreate", async () => {
   let created = null;
   const { ctx, els } = makeSandbox({

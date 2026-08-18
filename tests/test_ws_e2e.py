@@ -182,7 +182,7 @@ class TestWSVibeCheck:
                 try:
                     async def fake_chat(messages, tools=None):
                         # echo back a strict-JSON answer; fenced JSON tolerated
-                        return {"content": '```json\n{"meaningful": false, "recommend_slowdown": true, "reason": "长期无产出"}\n```'}
+                        return {"content": '```json\n{"meaningful": false, "recommend_slowdown": true, "reason": "长期无产出", "done": "分析了双实例根因，提交 PR #854"}\n```'}
                     server.llm.chat = fake_chat
 
                     ws = await connect_to_server()
@@ -202,9 +202,44 @@ class TestWSVibeCheck:
                         assert result.get("meaningful") is False
                         assert result.get("recommend_slowdown") is True
                         assert result.get("reason") == "长期无产出"
+                        # rant 2026-08-18T21:32:32: natural-language "done"
+                        # summary of what meaningful work was done this cycle
+                        assert result.get("done") == "分析了双实例根因，提交 PR #854"
                         # the ask must carry the fixed system prompt + no tools
                         sent = server.llm.chat
                         assert sent is fake_chat
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_vibe_check_missing_done_field_is_compatible(self):
+        """Old models / old parsing omit 'done' → empty string, no crash."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                server, _, cleanup = await _boot_server(Path(tmp))
+                try:
+                    async def fake_chat(messages, tools=None):
+                        return {"content": '{"meaningful": true, "recommend_slowdown": false, "reason": "ok"}'}
+                    server.llm.chat = fake_chat
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task_vibe_check",
+                            "session_id": "s-vibe",
+                            "task_name": "t",
+                            "prompt": "p",
+                            "completion_summary": "c",
+                        }))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        data = json.loads(frame)
+                        assert data.get("type") == "vibe_check_result"
+                        assert data.get("ok") is True
+                        result = data.get("result", {})
+                        assert result.get("done") == ""
+                        assert result.get("meaningful") is True
                     finally:
                         await ws.close()
                 finally:

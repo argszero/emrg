@@ -750,9 +750,26 @@ class TaskHandler:
         if self.evolutions:
             last = self.evolutions[-1]
             last_run_at = last.timestamp
-            # brief summary: tools-executed / cycle-complete etc. from impact
-            parts = [str(i) for i in last.impact if i]
-            last_cycle_summary = ", ".join(parts[:3]) if parts else None
+            # brief summary: agent's natural-language "done" summary preferred
+            # (rant 2026-08-18T21:32:32), fallback to machine impact tags.
+            if last.summary:
+                last_cycle_summary = last.summary
+            else:
+                parts = [str(i) for i in last.impact if i]
+                last_cycle_summary = ", ".join(parts[:3]) if parts else None
+        # rant 2026-08-18T21:32:32: last 5 run records for the GUI accordion
+        # subtable — {timestamp, summary, impact, meaningful,
+        # recommend_slowdown, tool_count}; all in-memory, no extra I/O.
+        recent_runs = []
+        for log in self.evolutions[-5:]:
+            recent_runs.append({
+                "timestamp": log.timestamp,
+                "summary": log.summary,
+                "impact": list(log.impact),
+                "meaningful": log.meaningful,
+                "recommend_slowdown": log.recommend_slowdown,
+                "tool_count": log.tool_count,
+            })
         saturation = {
             "empty_cycles": self._empty_cycles,
             "threshold": self._saturation_threshold(),
@@ -766,6 +783,7 @@ class TaskHandler:
             "interval": self.interval,
             "last_run_at": last_run_at,
             "last_cycle_summary": last_cycle_summary,
+            "recent_runs": recent_runs,
             "saturation": saturation,
         }
 
@@ -851,6 +869,7 @@ class TaskHandler:
                     "meaningful": result.get("meaningful"),
                     "recommend_slowdown": result.get("recommend_slowdown"),
                     "reason": result.get("reason", ""),
+                    "done": result.get("done", ""),
                 }
         except Exception:
             logger.debug("TaskHandler[%s]: vibe check failed", self.name, exc_info=True)
@@ -1065,11 +1084,31 @@ class TaskHandler:
         if truncated:
             impact.append("truncated=max-tool-rounds")
 
+        # rant 2026-08-18T21:32:32: persist the agent's own summary of what
+        # meaningful work was done (vibe check "done" field) + the vibe flags,
+        # so the GUI task recent-runs table shows real value, not a machine
+        # string. Fallbacks: vibe unavailable → None flags + first line of the
+        # completion summary as a rough summary (never crash).
+        summary = ""
+        meaningful = None
+        recommend = False
+        if vibe_result is not None:
+            summary = str(vibe_result.get("done") or "")[:500]
+            meaningful = vibe_result.get("meaningful")
+            recommend = bool(vibe_result.get("recommend_slowdown"))
+        if not summary and completion_content:
+            first = completion_content.strip().splitlines()[0] if completion_content.strip() else ""
+            summary = first[:500]
+
         log = EvolutionLog(
             timestamp=cycle_ts,
             trigger=f"evolution-{self.name}-{cycle_ts}",
             impact=impact,
             operations=["llm-reflection", "tool-execution", "self-improvement"],
+            summary=summary,
+            meaningful=meaningful,
+            recommend_slowdown=recommend,
+            tool_count=tool_count,
         )
         await self._write_evolution_log(log)
         self.evolutions.append(log)
@@ -1126,6 +1165,10 @@ class TaskHandler:
             "trigger": entry.trigger,
             "impact": entry.impact,
             "operations": entry.operations,
+            "summary": entry.summary,
+            "meaningful": entry.meaningful,
+            "recommend_slowdown": entry.recommend_slowdown,
+            "tool_count": entry.tool_count,
         }
         path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
