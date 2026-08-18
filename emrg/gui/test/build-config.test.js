@@ -167,11 +167,11 @@ test("electron-builder config: buildResources lives under directories (schema gu
     "../packaging/assets",
     "directories.buildResources must point at ../packaging/assets (icon.icns/ico/png sources)"
   );
+  // icon.icns/ico/png are gen-assets products (gitignored, generated at build time from
+  // icon.svg by packaging/gen-assets.sh) — only the committed design source must exist in CI.
   const assetsDir = path.join(GUI_ROOT, "..", "..", "packaging", "assets");
-  for (const icon of ["icon.icns", "icon.ico", "icon.png"]) {
-    assert.ok(
-      fs.existsSync(path.join(assetsDir, icon)),
-      `buildResources dir missing ${icon} — icons resolve to empty/electron default`
-    );
-  }
+  assert.ok(
+    fs.existsSync(path.join(assetsDir, "icon.svg")),
+    `buildResources dir missing design source icon.svg (committed) — gen-assets can't render icons`
+  );
 });
