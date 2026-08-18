@@ -46,7 +46,7 @@
       "package.json",
       "scripts/**"
     ],
-    "icon": "../packaging/assets/icon.png",
+    "icon": "icon.png",
     "mac": {
       "hardenedRuntime": true,
       "notarize": false,
@@ -60,7 +60,7 @@
         }
       ],
       "category": "public.app-category.developer-tools",
-      "icon": "../packaging/assets/icon.icns"
+      "icon": "icon.icns"
     },
     "win": {
       "target": [
@@ -71,7 +71,7 @@
           ]
         }
       ],
-      "icon": "../packaging/assets/icon.ico"
+      "icon": "icon.ico"
     },
     "linux": {
       "target": [
@@ -84,12 +84,13 @@
           "to": "runtime"
         }
       ],
-      "icon": "../packaging/assets/icon.png"
+      "icon": "icon.png"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "perMachine": false
-    }
+    },
+    "buildResources": "../packaging/assets"
   }
 }
