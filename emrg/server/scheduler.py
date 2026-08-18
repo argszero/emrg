@@ -284,6 +284,11 @@ class TaskHandler:
         # One-shot https-origin probe per handler lifetime (see
         # _ensure_origin_reachable) — avoids re-probing every cycle.
         self._origin_probed = False
+        # Last upstream-advance probe result (bool) or None before the
+        # first probe (rant 2026-08-18T20:25:23): status()/list_tasks()
+        # read this cache so the daemon event loop is never blocked by a
+        # slow network ls-remote; the async heartbeat path refreshes it.
+        self._last_remote_advanced: bool | None = None
 
     def _get_git_head(self) -> str | None:
         """Return current git HEAD hash, or None if not a git repo."""
@@ -661,7 +666,7 @@ class TaskHandler:
             # Manual trigger wakes immediately either way. Never skip a cycle.
             wait_timeout = (
                 self._heartbeat_interval()
-                if self._saturation_heartbeat_active()
+                if await self._saturation_heartbeat_active()
                 # Rant 2026-08-09T13:16:36: exponential backoff while the
                 # daemon is unreachable — stops the retry/window storm.
                 else self._connect_backoff()
@@ -759,7 +764,9 @@ class TaskHandler:
             "empty_cycles": self._empty_cycles,
             "threshold": self._saturation_threshold(),
             "heartbeat_interval": self._heartbeat_interval(),
-            "heartbeat_active": self._saturation_heartbeat_active(),
+            # Non-blocking: never touches the network on the request path
+            # (rant 2026-08-18T20:25:23 — sync ls-remote stalled /trigger).
+            "heartbeat_active": self._saturation_heartbeat_active_cached(),
         }
         return {
             "name": self.name,
@@ -771,7 +778,7 @@ class TaskHandler:
             "saturation": saturation,
         }
 
-    def _remote_advanced(self) -> bool:
+    def _remote_advanced_blocking(self) -> bool:
         """True if origin/master differs from the local HEAD (new upstream work).
 
         A saturation-halted handler never runs scheduled cycles, so it can
@@ -781,6 +788,10 @@ class TaskHandler:
         would go unnoticed indefinitely. This cheap check (one ``git
         ls-remote`` — no fetch, no working-tree mutation) lets the halt
         auto-resume on genuine upstream activity.
+
+        SYNC body — must be run off the event loop (see
+        _remote_advanced / _remote_advanced_cached, rant 2026-08-18T20:25:23):
+        a slow network ls-remote here would block every WS request.
         """
         try:
             local = self._get_git_head()
@@ -816,6 +827,25 @@ class TaskHandler:
         except Exception:
             return False
 
+    async def _remote_advanced(self) -> bool:
+        """Async upstream-advance probe (rant 2026-08-18T20:25:23).
+
+        Runs the blocking git ls-remote in a worker thread so the daemon
+        event loop is never stalled by a slow/blocked network; the result
+        is cached for the non-blocking status()/list_tasks() path.
+        """
+        result = await asyncio.to_thread(self._remote_advanced_blocking)
+        self._last_remote_advanced = result
+        return result
+
+    def _remote_advanced_cached(self) -> bool:
+        """Non-blocking probe result for status()/list_tasks() (no network).
+
+        Returns the last probe outcome; before any probe has run, False
+        (assume unchanged — the async heartbeat path will refresh it).
+        """
+        return bool(self._last_remote_advanced)
+
     def _heartbeat_interval(self) -> int:
         """Low-frequency heartbeat interval (rant 2026-08-09T09:35:55):
         heartbeat = max(task_interval, min(task_interval * 8, 8 hours)).
@@ -841,7 +871,7 @@ class TaskHandler:
         backoff = max(30.0, float(self.interval) * (2 ** n))
         return min(backoff, 600.0)  # never wait longer than 10 minutes
 
-    def _saturation_heartbeat_active(self) -> bool:
+    async def _saturation_heartbeat_active(self) -> bool:
         """Whether this tick should run at the low-frequency heartbeat interval
         instead of the normal interval.
 
@@ -853,7 +883,7 @@ class TaskHandler:
         """
         if self._empty_cycles < self._saturation_threshold():
             return False
-        if self._remote_advanced():
+        if await self._remote_advanced():
             logger.info(
                 "TaskHandler[%s]: upstream advanced — resuming normal frequency from saturation",
                 self.name,
@@ -866,6 +896,18 @@ class TaskHandler:
             "running full cycle at heartbeat interval (%ds) — never halting",
             self.name, self._empty_cycles, self._heartbeat_interval(),
         )
+        return True
+
+    def _saturation_heartbeat_active_cached(self) -> bool:
+        """Non-blocking status() variant of _saturation_heartbeat_active.
+
+        Uses the cached upstream-advance probe (no network — rant
+        2026-08-18T20:25:23); the async heartbeat path refreshes it.
+        """
+        if self._empty_cycles < self._saturation_threshold():
+            return False
+        if self._remote_advanced_cached():
+            return False
         return True
 
     async def _request_vibe_check(self, ws, prompt: str, completion_summary: str) -> dict | None:

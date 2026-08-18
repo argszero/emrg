@@ -1474,7 +1474,7 @@ def test_remote_advanced_ssh_fallback_when_https_blocked(tmp_path):
     mod.subprocess.run = fake
     mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
     try:
-        assert handler._remote_advanced() is True
+        assert asyncio.run(handler._remote_advanced()) is True
     finally:
         mod.subprocess.run = orig_run
         mod.git_origin_url = orig_origin
@@ -1825,7 +1825,7 @@ def test_saturation_heartbeat_active_true_when_remote_unchanged(tmp_path):
     orig_run = mod.subprocess.run
     mod.subprocess.run = fake
     try:
-        assert handler._saturation_heartbeat_active() is True
+        assert asyncio.run(handler._saturation_heartbeat_active()) is True
         assert handler._empty_cycles == 30  # counter untouched
         assert handler._heartbeat_interval() == 480  # 60s task → 8 min
     finally:
@@ -1844,7 +1844,7 @@ def test_saturation_heartbeat_log_message_no_skip(tmp_path, caplog):
     mod.subprocess.run = fake
     try:
         with caplog.at_level(logging.INFO, logger="emrg.server.scheduler"):
-            assert handler._saturation_heartbeat_active() is True
+            assert asyncio.run(handler._saturation_heartbeat_active()) is True
         msgs = " ".join(r.message for r in caplog.records)
         assert "skipping scheduled run" not in msgs, \
             "old complete-halt log must not appear (rant 09:35:55)"
@@ -1863,7 +1863,7 @@ def test_saturation_heartbeat_resumes_and_resets_when_remote_advanced(tmp_path):
     orig_run = mod.subprocess.run
     mod.subprocess.run = fake
     try:
-        assert handler._saturation_heartbeat_active() is False
+        assert asyncio.run(handler._saturation_heartbeat_active()) is False
         assert handler._empty_cycles == 0  # reset → normal frequency resumes
     finally:
         mod.subprocess.run = orig_run
@@ -1873,7 +1873,7 @@ def test_saturation_heartbeat_false_below_threshold(tmp_path):
     """Below threshold → normal interval (remote state irrelevant)."""
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     handler._empty_cycles = 10
-    assert handler._saturation_heartbeat_active() is False
+    assert asyncio.run(handler._saturation_heartbeat_active()) is False
     assert handler._empty_cycles == 10
 
 
@@ -1910,9 +1910,40 @@ def test_remote_advanced_false_without_git_repo(tmp_path):
     orig_run = mod.subprocess.run
     mod.subprocess.run = fake
     try:
-        assert handler._remote_advanced() is False
+        assert asyncio.run(handler._remote_advanced()) is False
     finally:
         mod.subprocess.run = orig_run
+
+
+def test_status_does_not_block_on_slow_remote_probe(tmp_path):
+    """status()/list_tasks() must never run the network probe on the request
+    path — a slow ls-remote used to stall /trigger for seconds (rant
+    2026-08-18T20:25:23). The probe now lives in a worker thread (async
+    heartbeat path) and status() reads a cached result."""
+    import time as _time
+    from emrg.server import scheduler as mod
+
+    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
+    handler._empty_cycles = 30  # saturated → heartbeat path would probe
+
+    def slow_probe():
+        _time.sleep(3)
+        return False
+
+    orig_blocking = handler._remote_advanced_blocking
+    handler._remote_advanced_blocking = slow_probe
+    try:
+        start = _time.monotonic()
+        st = handler.status()
+        elapsed = _time.monotonic() - start
+    finally:
+        handler._remote_advanced_blocking = orig_blocking
+
+    assert elapsed < 1.0, f"status() blocked {elapsed:.2f}s on network probe"
+    assert st["saturation"]["heartbeat_active"] is True  # cached: unchanged
+    # The async probe path still works and refreshes the cache.
+    assert asyncio.run(handler._remote_advanced()) is False
+    assert handler._remote_advanced_cached() is False
 
 
 # ── Task CRUD + hot reload + templates (rant 2026-08-12T18:23:15 P2) ──
