@@ -801,7 +801,7 @@ class TestIndependentLockProbe:
 
 class TestClassifyLockedFilesRelaxation:
     """python-dist self-held relaxation (rant 2026-08-18T21:24:48 #3): a
-    locked file under python-dist\ with no external target holder is
+    locked file under python-dist\\ with no external target holder is
     self-held — stop_all runs from python-dist and lazily-loaded stdlib
     modules hold DLL locks the enumeration misses."""
 

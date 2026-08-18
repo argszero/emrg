@@ -1175,6 +1175,12 @@ def _classify_locked_files(
         return p.replace("\\", "/")
 
     root_n = _norm(root)
+    def _to_rel(p: str) -> str:
+        n = _norm(p)
+        if n.startswith(root_n + "/"):
+            return os.path.relpath(n, root_n)
+        return n  # already install-relative (PS Substring / fixture form)
+
     tag_by_rel: dict[str, set[str]] = {}
     for _pid, _name, _exe, _parent, files, tag in mh_holders:
         for f in files:
@@ -1182,7 +1188,10 @@ def _classify_locked_files(
             # full-path keys never matched the rel lookup, so holder tags
             # (esp. ``target``) were lost and every python-dist file was
             # mis-attributed as self-held (test_pydist_external_target_is_residual).
-            rel_f = _norm(os.path.relpath(_norm(f), root_n))
+            # Holder files may already be install-relative: os.path.relpath()
+            # against root would mangle those on POSIX (CWD prefix), so only
+            # convert genuine absolute paths.
+            rel_f = _to_rel(f)
             tag_by_rel.setdefault(rel_f, set()).add(tag)
     self_held: list[str] = []
     residual: list[str] = []
@@ -1191,7 +1200,7 @@ def _classify_locked_files(
         tags = tag_by_rel.get(rel, set())
         if tags == {"excluded"}:
             self_held.append(rel)
-        elif rel.startswith("python-dist/") and "target" not in tags:
+        elif "/python-dist/" in "/" + rel and "target" not in tags:
             # Rant 2026-08-18T21:24:48 #3 — self-held relaxation: stop_all
             # itself runs from install\python-dist\python.exe; its runtime +
             # lazily-loaded stdlib modules hold python-dist DLL locks that the
