@@ -701,7 +701,8 @@ const Dialogs = (() => {
 
   // rant 2026-08-18T21:32:32：任务卡点击 → 手风琴展开最近运行子表
   // （时间 / 干了什么 / 降频）。数据来自 daemon handler.status().recent_runs
-  // （最多 5 条）；旧数据无 summary → fallback impact 拼接；无记录 → 占位文案。
+  // （最多 5 条）。Rant 2026-08-19T07:06:45（宿主定稿）：无 summary 不再
+  // fallback impact 机器串——空则显示 "-"；无记录 → 占位文案。
   function buildTaskRunDetail(t) {
     const wrap = el("div", { class: "task-run-detail hidden" });
     const runs = Array.isArray(t.recent_runs) ? t.recent_runs : [];
@@ -718,7 +719,6 @@ const Dialogs = (() => {
       const row = el("div", { class: "task-run-row" });
       row.appendChild(el("span", { class: "task-run-time" }, formatRelativeTime(r.timestamp)));
       let done = (typeof r.summary === "string" && r.summary) ? r.summary : "";
-      if (!done && Array.isArray(r.impact) && r.impact.length) done = r.impact.join(", ");
       row.appendChild(el("span", { class: "task-run-done" }, done || "-"));
       const flagCell = el("span", { class: "task-run-flag" });
       if (r.recommend_slowdown) {

@@ -2688,9 +2688,9 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   assert.ok(warnCount >= 1, "recommend_slowdown=true 应显示建议降频徽章");
   const idleCount = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-badge-idle").length`, ctx);
   assert.ok(idleCount >= 1, "meaningful=false 应显示空转徽章");
-  // 旧数据无 summary → fallback impact 拼接（第二行 run）
+  // 无 summary → 显示 "-"（rant 2026-08-19T07:06:45 宿主定稿：不再 fallback impact 机器串）
   const doneTexts = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")).map((n) => n.textContent)`, ctx);
-  assert.ok(doneTexts[1].includes("cycle-ts-complete"), `无 summary 应 fallback impact，实际: ${doneTexts[1]}`);
+  assert.strictEqual(doneTexts[1], "-", `无 summary 应显示 "-"，实际: ${doneTexts[1]}`);
   // 再次点击 → 折叠
   await vm.runInContext(`document.getElementById("task-list").children[0].click()`, ctx);
   await tick();
