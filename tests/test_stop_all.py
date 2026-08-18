@@ -39,7 +39,7 @@ class TestPureStdlib:
         allowed = {
             "base64", "json", "os", "re", "secrets", "signal", "socket",
             "subprocess", "sys", "time", "pathlib", "platform", "ctypes", "ast",
-            "pytest", "annotations", "__future__", "winreg",
+            "pytest", "annotations", "__future__", "winreg", "datetime",
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -956,3 +956,62 @@ class TestPythonPathObservability:
         # unrelated install\lib path must NOT warn (pm25coder review note, PR #832)
         assert _stop_all._pythonpath_install_warning(
             r"PYTHONPATH(User)=C:\python\install\lib") is None
+
+
+# ── Fixed-path dual-write log (rant 2026-08-18T11:20:54) ────────
+
+class TestTeeDualWrite:
+    def test_tee_writes_to_both(self):
+        class _FakeFile:
+            def __init__(self):
+                self.data = []
+
+            def write(self, d):
+                self.data.append(d)
+
+            def flush(self):
+                pass
+
+        orig = _FakeFile()
+        logf = _FakeFile()
+        tee = _stop_all._Tee(orig, logf)
+        tee.write("line1\n")
+        tee.write("line2\n")
+        tee.flush()
+        assert orig.data == ["line1\n", "line2\n"]
+        assert logf.data == ["line1\n", "line2\n"]
+
+    def test_open_stop_log_creates_logs_dir(self, monkeypatch, tmp_path):
+        """~/.emrg/logs is created and the file matches the timestamp pattern
+        (stop_all-YYYYMMDD-HHMMSS.log)."""
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        f = _stop_all._open_stop_log()
+        assert f is not None
+        name = f.name
+        f.close()
+        assert str(tmp_path / ".emrg" / "logs") in name
+        import re
+        assert re.search(r"stop_all-\d{8}-\d{6}\.log$", name), name
+
+    def test_open_stop_log_oserror_returns_none(self, monkeypatch, tmp_path):
+        def boom(*a, **k):
+            raise OSError("cannot create logs dir")
+
+        monkeypatch.setattr(_stop_all.os, "makedirs", boom)
+        assert _stop_all._open_stop_log() is None
+
+    def test_stop_all_prints_tee_path(self, monkeypatch, tmp_path, capsys):
+        """stop_all() with a tee open prints the fixed-path line; stdout output
+        still flows (POSIX regression: emrg stop output unchanged)."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        monkeypatch.setattr(_stop_all, "stop_gui", lambda: None)
+        monkeypatch.setattr(_stop_all, "stop_tui", lambda: None)
+        monkeypatch.setattr(_stop_all, "stop_daemon", lambda: None)
+        monkeypatch.setattr(_stop_all, "_stop_scan_pids", lambda own: [])
+        monkeypatch.setattr(_stop_all, "verify", lambda: [])
+        assert _stop_all.stop_all() == 0
+        out = capsys.readouterr().out
+        assert "log also written to" in out
+        assert str(tmp_path / ".emrg" / "logs") in out
+        assert "exit code 0 (clean)" in out
