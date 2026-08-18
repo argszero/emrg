@@ -58,7 +58,7 @@ from pathlib import Path
 
 # Build stamp printed at the start of every run so the operator can tell at a
 # glance which stop_all.py generation executed (rant 2026-08-17T21:06:31).
-_STOP_ALL_STAMP = "built 2026-08-18 (owner-detail + lock-probe-fail-closed + single-scan)"
+_STOP_ALL_STAMP = "built 2026-08-18 (isolated -I + module-holder enumeration + createfile-probe + taskkill RM + self-lock guard)"
 
 _EMRG_CLIENT_RE = re.compile(r"-m\s+emrg(\.server)?(\s|$)")
 _APPIMAGE_RE = re.compile(r"EMRG-[\w.\-]*AppImage(\s|$)")
@@ -580,7 +580,10 @@ foreach ($pid in $owners) {
   }
   if ($cmd.Length -gt 150) { $cmd = $cmd.Substring(0, 150) }
   if ($kill -and -not $exclude.Contains($pid)) {
-    Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+    # taskkill /F /PID = TerminateProcess, returns immediately (rant
+    # 2026-08-18T16:09:45): Stop-Process hangs on refusing/waiting targets
+    # → the kill-mode RM scan blew its 60s timeout. Matches _kill_pid_windows.
+    & taskkill /F /PID $pid 2>$null | Out-Null
     Write-Output ("killed file-lock owner: PID {0} {1} | {2}" -f $pid, $name, $cmd)
     if ($cmd -match 'browser[-_]?harness') { $killedHint = $true }
   } else {
@@ -645,22 +648,145 @@ def _lock_owner_diag(stdout: str) -> dict | None:
     return None
 
 
+# Last Restart-Manager scan found NO external (non-self) lock owner — the
+# evidence for the self-lock final guard (rant 2026-08-18T16:09:45): when
+# lock-probe reports locked files but every RM owner is the stop_all runtime
+# itself / its ancestor chain (or RM found nobody), the installer cannot win
+# and the operator should re-run (a fresh installer process holds no locks).
+_rm_no_external_owner: bool = False
+
+
 def _print_rm_diag(stdout: str) -> None:
     """Log the Restart Manager scan summary (files scanned / owners found /
     elapsed / registration failures) so a scan can never be silently idle
-    (rant 2026-08-17T21:04:32)."""
+    (rant 2026-08-17T21:04:32). Also records whether NO external (non-self)
+    owner was found — the self-lock evidence for the final guard
+    (rant 2026-08-18T16:09:45: stop_all runs from install\\python-dist so its
+    own interpreter is the only lock holder → installer would still fail)."""
+    global _rm_no_external_owner
+    _rm_no_external_owner = False  # one scan per call — no stale evidence
     d = _lock_owner_diag(stdout)
-    if not d:
-        return
-    print(
-        f"emrg stop: rm-scan files={d['files']} owners={d['owners']} "
-        f"elapsed={d['elapsed_ms']}ms reg_fail={d['reg_fail']}"
-    )
-    if d["reg_fail"]:
+    if d:
+        if d["owners"] == 0 or "owner(s) excluded" in stdout:
+            _rm_no_external_owner = True
         print(
-            f"emrg stop: WARNING {d['reg_fail']} resource-batch registration(s) "
-            "failed - some file-lock owners may be missed"
+            f"emrg stop: rm-scan files={d['files']} owners={d['owners']} "
+            f"elapsed={d['elapsed_ms']}ms reg_fail={d['reg_fail']}"
         )
+        if d["reg_fail"]:
+            print(
+                f"emrg stop: WARNING {d['reg_fail']} resource-batch registration(s) "
+                "failed - some file-lock owners may be missed"
+            )
+
+
+# ── Module-holder enumeration (rant 2026-08-18T16:24:01) ─────────
+#
+# Diagnostic-script proof: the v0.2.48 DeleteFile code 5 lock holder was
+# PID 9280 — a browser-harness CHILD process that loaded install\lib's
+# websockets speedups.pyd (inherited PYTHONPATH). Restart Manager never
+# reported it (the 2 owners it found were excluded ancestors) and a
+# CreateFileW probe reports OK even when DeleteFile fails — LoadLibrary
+# image-section locks are only visible via Process.Modules enumeration.
+# This scan names the real holders; taskkill /F /T kills their tree.
+
+_MODULE_HOLDER_PS = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+$root = Join-Path $env:USERPROFILE '.emrg\install'
+if (-not (Test-Path $root)) { exit 0 }
+$cut = $root.Length + 1
+# Self + full ancestor chain (stop_all runs from install\python-dist\python.exe
+# → itself loads install\python313.dll; ancestors include Inno setup.exe —
+# NEVER kill them, same safety as the RM scan).
+$exclude = New-Object 'System.Collections.Generic.HashSet[int]'
+$cur = [int]$PID
+for ($g = 0; $g -lt 64 -and $cur -gt 0; $g++) {
+  [void]$exclude.Add($cur)
+  $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$cur" -ErrorAction SilentlyContinue
+  if (-not $proc) { break }
+  $cur = [int]$proc.ParentProcessId
+}
+Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+  $p = $_
+  try {
+    $mods = @($p.Modules | Where-Object { $_.FileName -like "$root\*" })
+  } catch { $mods = @() }
+  if ($mods.Count -eq 0) { return }
+  $files = @($mods | ForEach-Object { $_.FileName.Substring($cut) })
+  $parent = ''
+  $pp = Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)" -ErrorAction SilentlyContinue
+  if ($pp) { $parent = [string]$pp.ParentProcessId }
+  $tag = if ($exclude.Contains([int]$p.Id)) { 'excluded' } else { 'target' }
+  Write-Output ("holder`t{0}`t{1}`t{2}`t{3}`t{4}`t{5}" -f $p.Id, $p.ProcessName, $p.Path, $parent, ($files -join '|'), $tag)
+}
+"""
+
+
+def _module_holder_ps() -> str:
+    """Run the module-holder enumeration (Windows only). Returns "" on POSIX
+    or when PowerShell is unavailable (best-effort like every other step)."""
+    if not is_win():
+        return ""
+    ps_cmd = "& { " + _MODULE_HOLDER_PS + " }"
+    try:
+        return subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=60, **_no_window(),
+        ).stdout
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        return ""
+
+
+def _parse_module_holders(stdout: str) -> list[tuple[int, str, str, int, list[str], str]]:
+    """Parse ``holder<TAB>pid<TAB>name<TAB>exe<TAB>parent<TAB>files<TAB>tag``
+    lines → ``[(pid, name, exe, parent_pid, [files...], tag), ...]``."""
+    holders: list[tuple[int, str, str, int, list[str], str]] = []
+    for line in stdout.splitlines():
+        parts = line.split("\t")
+        if not parts or parts[0] != "holder" or len(parts) < 7:
+            continue
+        try:
+            pid = int(parts[1])
+        except ValueError:
+            continue
+        files = [f for f in parts[5].split("|") if f]
+        try:
+            parent = int(parts[4]) if parts[4] else 0
+        except ValueError:
+            parent = 0
+        holders.append((pid, parts[2], parts[3], parent, files, parts[6]))
+    return holders
+
+
+def find_install_module_holders() -> list[tuple[int, str, str, int, list[str], str]]:
+    """Windows: enumerate processes that loaded modules from ``install\\`` —
+    the ONLY detector that can see DLL/.pyd image-section locks (rant
+    2026-08-18T16:24:01). Returns [] on POSIX / when unavailable."""
+    if not is_win():
+        return []
+    return _parse_module_holders(_module_holder_ps())
+
+
+def _kill_tree_windows(pid: int) -> None:
+    """Kill a process and its whole tree on Windows (taskkill /F /T —
+    TerminateProcess, returns immediately; /T also kills children so a
+    holder that is a child of a daemon releases its modules when the tree
+    dies, rant 2026-08-18T16:24:01)."""
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True, timeout=10, **_no_window(),
+        )
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        pass
+
+
+# Any EXTERNAL (non-self/ancestor) module holder was found and killed —
+# evidence for the self-lock final guard: when lock-probe still reports
+# locked files but no external holder exists, the lock is stop_all's own
+# runtime (rant 2026-08-18T16:09:45) and the installer cannot win.
+_module_holder_external_found: bool = False
 
 
 def _windows_lock_owners(kill: bool, stdout: str | None = None) -> list[tuple[int, str, str]]:
@@ -710,14 +836,26 @@ def _iter_install_files(root: str) -> list[str]:
 
 
 def _win_exclusive_open(path: str) -> None:
-    """Open an existing file with ``dwShareMode=0`` (FileShare.None) — the exact
-    semantic the Inno installer needs to overwrite/delete it. Raises OSError
-    when another process holds the file (DeleteFile code 5 would occur)."""
+    """Open an existing file with DELETE access + FILE_FLAG_DELETE_ON_CLOSE —
+    the exact semantic the Inno installer's DeleteFile needs. Raises OSError
+    when another process holds the file (DeleteFile code 5 would occur).
+
+    DeleteFile semantics (rant 2026-08-18T16:09:45): a DLL loaded via
+    LoadLibrary holds the file with FILE_SHARE_READ only — GENERIC_READ +
+    FILE_SHARE_NONE probing succeeds (read sharing is granted) → false
+    "0 locked" while the installer's DeleteFile still fails (the image
+    section handle does not share FILE_SHARE_DELETE). Requesting DELETE
+    access (+ delete-on-close disposition, the probe = "would DeleteFile
+    succeed right now?") fails with ERROR_SHARING_VIOLATION on exactly the
+    files DeleteFile would fail on. FILE_SHARE_NONE is kept as a complement
+    — either condition failing means locked."""
     import ctypes
 
-    GENERIC_READ = 0x80000000
+    GENERIC_DELETE = 0x00010000
     OPEN_EXISTING = 3
     FILE_SHARE_NONE = 0
+    FILE_FLAG_DELETE_ON_CLOSE = 0x04000000
+    FILE_DISPOSITION_INFO = 2
     kernel32 = ctypes.windll.kernel32
     # 64-bit handle truncation fix (rant 2026-08-18T09:40:40): ctypes defaults
     # the restype of a foreign function to c_int — a 64-bit HANDLE gets
@@ -731,14 +869,32 @@ def _win_exclusive_open(path: str) -> None:
     ]
     kernel32.CloseHandle.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    h = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_NONE, None,
-                             OPEN_EXISTING, 0, None)
+    # SetFileInformationByHandle — after a SUCCESSFUL probe the delete-on-close
+    # mark must be cleared so the probe never actually deletes the file it
+    # verified as deletable (it only asks "would DeleteFile succeed?").
+    kernel32.SetFileInformationByHandle.restype = ctypes.c_int
+    kernel32.SetFileInformationByHandle.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
+    ]
+
+    class _FileDisposition(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]  # BOOLEAN
+
+    h = kernel32.CreateFileW(path, GENERIC_DELETE, FILE_SHARE_NONE, None,
+                             OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE, None)
     # With restype=c_void_p a NULL handle arrives as None (not 0) — cover both
     # forms; INVALID_HANDLE_VALUE is c_void_p(-1).value (pm25coder review note,
-    # PR #832). A failed exclusive open = the installer's overwrite would fail.
+    # PR #832). A failed DELETE open = the installer's DeleteFile would fail.
     if not h or h == ctypes.c_void_p(-1).value:
         raise OSError(f"CreateFileW failed for {path} (file is locked)")
-    kernel32.CloseHandle(h)
+    try:
+        # Undo the delete-on-close disposition (DeleteFile=FALSE). We hold
+        # DELETE access, so this clear always succeeds; best-effort otherwise.
+        _fd = _FileDisposition(0)
+        kernel32.SetFileInformationByHandle(
+            h, FILE_DISPOSITION_INFO, ctypes.byref(_fd), ctypes.sizeof(_fd))
+    finally:
+        kernel32.CloseHandle(h)
 
 
 def _check_locked_files(root: str, try_open=None) -> list[str]:
@@ -800,8 +956,9 @@ def check_install_writable() -> list[str]:
     # Scanned-file count / elapsed observability (rant 2026-08-18T09:40:40):
     # "0 locked" is only trustworthy when the probe actually scanned files.
     print(
-        f"emrg stop: lock-probe scanned {len(files)} files "
-        f"-> {len(locked)} locked ({elapsed:.0f}ms)"
+        f"emrg stop: createfile-probe scanned {len(files)} files "
+        f"-> {len(locked)} locked ({elapsed:.0f}ms) [supplementary — DLL "
+        "module locks need the module-holder scan (rant 2026-08-18T16:24:01)]"
     )
     return locked
 
@@ -809,21 +966,54 @@ def check_install_writable() -> list[str]:
 def stop_lock_owners() -> None:
     """Windows only: stop every process holding a lock on files under install\\.
 
-    The generic DeleteFile-code-5 fix (rant 2026-08-17T17:55:42): Restart
-    Manager finds ANY owner — including non-EMRG processes (e.g. the
-    browser-harness daemon) that the cmdline scan can never see. Self + the
-    ancestor chain (the running python + Inno setup.exe) are excluded. Prints
-    PID/name/cmdline of every stopped process. Best-effort: RM unavailable →
-    silently skipped, verify() surfaces any survivor.
+    Two detectors, in order (rant 2026-08-18T16:24:01 — diagnostic-script
+    proof that neither RM nor CreateFileW probing can see DLL module locks):
+
+    1. **module-holder enumeration** (PRIMARY): ``Get-Process`` +
+       ``$_.Modules.FileName`` filtered by the install prefix names the
+       actual processes that loaded DLLs/.pyd from install\\ (e.g. a
+       browser-harness child that inherited install\\lib in PYTHONPATH →
+       loaded websockets speedups). Each holder is killed with
+       ``taskkill /F /T /PID`` (tree kill — the holder may be a child
+       whose parent also must go).
+    2. **Restart Manager** (auxiliary, rant 2026-08-17T17:55:42): finds ANY
+       owner incl. non-EMRG processes. Self + ancestor chain excluded.
     """
     if not is_win():
         return
+    # 1. module-holder enumeration — the only detector that can see DLL
+    #    image-section locks (CreateFileW probes cannot, RM missed PID 9280).
+    holders = find_install_module_holders()
+    _module_holder_external = False
+    for pid, name, exe, parent, files, tag in holders:
+        _module_holder_external = _module_holder_external or tag == "target"
+        if tag == "excluded":
+            print(
+                f"emrg stop: module-holder excluded PID {pid} {name} | exe {exe} "
+                f"| parent {parent} | loads [{', '.join(files[:5])}]"
+            )
+            continue
+        print(
+            f"emrg stop: killing module-holder PID {pid} {name} | exe {exe} "
+            f"| parent {parent} | loads [{', '.join(files[:5])}]"
+        )
+        _kill_tree_windows(pid)
+        if "browser" in (name + " " + (exe or "")).lower():
+            print("emrg stop: hint: browser-harness daemon stopped - restart it after the installer completes")
+    if holders:
+        print(
+            f"emrg stop: module-holders {len(holders)} "
+            f"(external targets: {int(_module_holder_external)})"
+        )
+    # 2. Restart Manager — auxiliary (catches non-DLL file locks).
     stdout = _lock_owner_ps(kill=True)
     for line in stdout.splitlines():
         line = line.strip()
         if line:
             print(f"emrg stop: {line}")
     _print_rm_diag(stdout)
+    global _module_holder_external_found
+    _module_holder_external_found = _module_holder_external
 
 
 # ── Verify + exit code ──────────────────────────────────────────
@@ -871,9 +1061,22 @@ def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     py = [f"python emrg process (pid {p})" for p in _scan_windows_python_emrg(os.getpid())]
     cats.append(("cmdline-scan", py))
 
-    # file-lock owners under install\ (Restart Manager — generic code-5 fix:
-    # covers ANY process holding locked files, incl. non-EMRG ones such as the
-    # browser-harness daemon; self + ancestor chain excluded; rant 2026-08-17T17:55:42)
+    # file-lock owners under install\ — module-holder enumeration (PRIMARY,
+    # rant 2026-08-18T16:24:01: the only detector that sees DLL/.pyd image-
+    # section locks; RM missed the browser-harness child, CreateFileW probes
+    # cannot see module locks at all). Any external holder = residual.
+    mh_out = _module_holder_ps()
+    mh = [
+        f"install-module holder (pid {pid}, {name or 'unknown'}, loads {', '.join(files[:3])})"
+        for pid, name, _exe, _parent, files, tag in _parse_module_holders(mh_out)
+        if tag == "target"
+    ]
+    cats.append(("module-holder", mh))
+
+    # file-lock owners under install\ (Restart Manager — auxiliary generic
+    # code-5 fix: covers ANY process holding locked files, incl. non-EMRG
+    # ones such as the browser-harness daemon; self + ancestor chain
+    # excluded; rant 2026-08-17T17:55:42)
     rm_out = _lock_owner_ps(kill=False)
     rm = [
         f"file-lock owner (pid {o_pid}, {name or 'unknown'})"
@@ -882,17 +1085,20 @@ def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     cats.append(("RM re-scan", rm))
     _print_rm_diag(rm_out)
 
-    # install-writability probe — INDEPENDENT of Restart Manager so a broken
-    # detector can never blind verify (rant 2026-08-17T21:06:05). A probe
+    # install-writability probe — SUPPLEMENTARY ONLY (rant 2026-08-18T16:24:01:
+    # a CreateFileW probe cannot see DLL module locks — DELETE+SHARE_NONE
+    # reported OK yet DeleteFile still failed on the speedups pyd; the real
+    # verdict comes from the module-holder category above). Kept because it
+    # still catches plain (non-DLL) file locks and a broken RM. A probe
     # FAILURE is not "0 locked": it becomes a residual → installer aborts
     # (rant 2026-08-18T09:40:40 fail-closed).
     global _lock_probe_error
     _lock_probe_error = None
     locked = check_install_writable()
-    probe_items = [f"locked file (installer overwrite would fail): {p}" for p in locked]
+    probe_items = [f"locked file (createfile-probe): {p}" for p in locked]
     if _lock_probe_error:
         probe_items.append(f"lock-probe failed (error: {_lock_probe_error})")
-    cats.append(("lock-probe", probe_items))
+    cats.append(("createfile-probe", probe_items))
 
     # bundled-git residual
     bg: list[str] = []
@@ -1093,6 +1299,14 @@ def stop_all() -> int:
         f"python {platform.python_version()} {platform.system()}-{platform.machine()} "
         f"| pid {os.getpid()}"
     )
+    # Self-lock observability (rant 2026-08-18T16:09:45): when the installer
+    # runs stop_all with install\python-dist\python.exe, that interpreter's
+    # site config (._pth/.pth) may import install\lib modules → the runtime
+    # itself locks the very files it was asked to delete. Print the runtime
+    # so the operator can tell at a glance whether the probe's locked files
+    # are self-inflicted.
+    _pydist = is_win() and "python-dist" in sys.executable.lower()
+    print(f"emrg stop: self pid {os.getpid()} (python-dist runtime: {_pydist})")
     # User/Machine PYTHONPATH observability (rant 2026-08-18T09:40:40) — a
     # polluted PYTHONPATH makes any python process import from install\lib
     # and lock C extensions; surface it before any stop/kill logic.
@@ -1117,6 +1331,7 @@ def stop_all() -> int:
     # rant 2026-08-17T21:06:05 #3); anything still locked flows into verify →
     # installer aborts with a named list instead of a code-5 dialog.
     if is_win():
+        locked: list[str] = []
         for attempt in range(1, 3):
             locked = check_install_writable()
             if not locked:
@@ -1132,6 +1347,20 @@ def stop_all() -> int:
                 print(f"emrg stop: ERROR retry {attempt}/2: {e} ({type(e).__name__})")
             time.sleep(0.3)
             print(f"emrg stop: retry {attempt}/2 done ({time.monotonic() - s:.1f}s)")
+        # Self-lock final guard (rant 2026-08-18T16:09:45 + 16:24:01): after
+        # both kill retries the probe still reports locked files but neither
+        # the module-holder enumeration nor RM found an EXTERNAL owner — the
+        # lock holder is stop_all's own runtime (python-dist loaded
+        # install\lib modules) or an undetectable handle. The installer
+        # cannot win; a freshly launched installer process holds no locks.
+        # Exit 1 so the install aborts with this explanation instead of a
+        # code-5 dialog.
+        if locked and not _module_holder_external_found and _rm_no_external_owner:
+            print(
+                "emrg stop: WARNING lock holder is the stop_all runtime itself "
+                "(no external module-holder / RM owner) - installer will fail; "
+                "re-run installer (fresh process won't hold the lock)"
+            )
     residuals = verify()
     if residuals:
         print("emrg stop: WARNING residual process(es) still running:")
