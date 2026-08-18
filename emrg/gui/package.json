@@ -1,6 +1,6 @@
 {
   "name": "emrg-gui",
-  "version": "0.2.50",
+  "version": "0.2.51",
   "description": "EMRG GUI — Electron client for the EMRG self-evolving AI agent (Phase 3)",
   "main": "main.js",
   "scripts": {
