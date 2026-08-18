@@ -1154,7 +1154,11 @@ class EmrgServer:
 
         Asks whether a just-finished scheduled task produced meaningful value.
         The agent must answer in strict JSON:
-        ``{"meaningful": bool, "recommend_slowdown": bool, "reason": str}``.
+        ``{"meaningful": bool, "recommend_slowdown": bool, "reason": str, "done": str}``.
+
+        ``done`` (rant 2026-08-18T21:32:32) is a natural-language summary of
+        what meaningful work was done this cycle, for humans to read in the
+        GUI task recent-runs table. Old models / old parsing omit it → "".
 
         Raises on any failure (caller sends ``ok: false``); the scheduler
         conservatively leaves its empty-cycle counter unchanged then.
@@ -1164,12 +1168,14 @@ class EmrgServer:
             "任务要求与最终回复摘要如下。\n"
             "请用 JSON 严格回答（不要任何其他文字），格式：\n"
             '{"meaningful": true|false, "recommend_slowdown": true|false, '
-            '"reason": "一句话原因"}\n'
+            '"reason": "一句话原因", "done": "这次干了哪些有意义有价值的事"}\n'
             "- meaningful：这轮是否对项目产生了有意义的价值（产出/提交/分析/决策/"
             "维护动作都算；纯空转/无可做=NTE 算 false）\n"
             "- recommend_slowdown：若本任务长期无有意义产出，是否建议降频省 token"
             "（true=建议降低检查频率）\n"
-            "- reason：简短中文原因"
+            "- reason：简短中文原因（给降频判断用）\n"
+            "- done：这次干了哪些有意义有价值的事（自然语言列举，如：修了 XX bug / "
+            "加了 XX 功能 / 分析了 XX；没有则空字符串）"
         )
         user = (
             "任务名称：" + (task_name or "") + "\n"
@@ -1193,6 +1199,7 @@ class EmrgServer:
             "meaningful": bool(data.get("meaningful")),
             "recommend_slowdown": bool(data.get("recommend_slowdown")),
             "reason": str(data.get("reason", ""))[:200],
+            "done": str(data.get("done", ""))[:500],
         }
 
     def _build_system_prompt(self, session: Session | None = None) -> str:

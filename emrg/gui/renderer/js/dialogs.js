@@ -699,6 +699,39 @@ const Dialogs = (() => {
     } catch { taskProjects = []; }
   }
 
+  // rant 2026-08-18T21:32:32：任务卡点击 → 手风琴展开最近运行子表
+  // （时间 / 干了什么 / 降频）。数据来自 daemon handler.status().recent_runs
+  // （最多 5 条）；旧数据无 summary → fallback impact 拼接；无记录 → 占位文案。
+  function buildTaskRunDetail(t) {
+    const wrap = el("div", { class: "task-run-detail hidden" });
+    const runs = Array.isArray(t.recent_runs) ? t.recent_runs : [];
+    if (runs.length === 0) {
+      wrap.appendChild(el("div", { class: "task-run-empty" }, _t("app.taskRunsEmpty")));
+      return wrap;
+    }
+    const head = el("div", { class: "task-run-head" });
+    head.appendChild(el("span", {}, _t("app.taskRunsColTime")));
+    head.appendChild(el("span", {}, _t("app.taskRunsColDone")));
+    head.appendChild(el("span", {}, _t("app.taskRunsColThrottle")));
+    wrap.appendChild(head);
+    for (const r of runs) {
+      const row = el("div", { class: "task-run-row" });
+      row.appendChild(el("span", { class: "task-run-time" }, formatRelativeTime(r.timestamp)));
+      let done = (typeof r.summary === "string" && r.summary) ? r.summary : "";
+      if (!done && Array.isArray(r.impact) && r.impact.length) done = r.impact.join(", ");
+      row.appendChild(el("span", { class: "task-run-done" }, done || "-"));
+      const flagCell = el("span", { class: "task-run-flag" });
+      if (r.recommend_slowdown) {
+        flagCell.appendChild(el("span", { class: "task-badge task-run-badge-warn" }, _t("app.taskRunThrottle")));
+      } else if (r.meaningful === false) {
+        flagCell.appendChild(el("span", { class: "task-badge task-run-badge-idle" }, _t("app.taskRunIdle")));
+      }
+      row.appendChild(flagCell);
+      wrap.appendChild(row);
+    }
+    return wrap;
+  }
+
   async function renderTaskList() {
     const list = $("task-list");
     if (!list) return; // 元素缺失（测试桩）时忽略
@@ -804,6 +837,17 @@ const Dialogs = (() => {
       });
       actions.appendChild(delBtn);
       row.appendChild(actions);
+      // rant 2026-08-18T21:32:32：点击任务卡（非按钮）→ 手风琴展开最近运行子表。
+      // 真实 DOM 中按钮点击通过 e.target.closest("button") 拦截（不触发展开）；
+      // 测试沙箱的 click() 无 target → 直接切换（沙箱中按钮点击不冒泡，互不影响）。
+      const runDetail = buildTaskRunDetail(t);
+      row.appendChild(runDetail);
+      let runDetailOpen = false;
+      row.addEventListener("click", (e) => {
+        if (e && e.target && typeof e.target.closest === "function" && e.target.closest("button")) return;
+        runDetailOpen = !runDetailOpen;
+        runDetail.classList.toggle("hidden", !runDetailOpen);
+      });
       list.appendChild(row);
     }
     taskCountdowns = countdowns;

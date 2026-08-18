@@ -506,6 +506,8 @@ def test_evolution_handler_status_last_run_fields():
     assert "threshold" in st["saturation"]
     assert "heartbeat_interval" in st["saturation"]
     assert "heartbeat_active" in st["saturation"]
+    # rant 2026-08-18T21:32:32: recent_runs present, empty before any run
+    assert st["recent_runs"] == []
     # after one evolution → last-run populated from the latest log
     handler.evolutions.append(EvolutionLog(
         timestamp="2026-08-18T10:00:00",
@@ -518,6 +520,52 @@ def test_evolution_handler_status_last_run_fields():
     assert st["last_run_at"] == "2026-08-18T10:00:00"
     assert st["last_cycle_summary"] == "tools-executed=24, cycle-complete"
     assert st["saturation"]["empty_cycles"] == 3
+    assert len(st["recent_runs"]) == 1
+    r0 = st["recent_runs"][0]
+    assert r0["timestamp"] == "2026-08-18T10:00:00"
+    assert r0["summary"] == ""
+    assert r0["impact"] == ["tools-executed=24", "cycle-complete"]
+    assert r0["meaningful"] is None
+    assert r0["recommend_slowdown"] is False
+    assert r0["tool_count"] == 0
+    # agent summary preferred over machine impact tags
+    handler.evolutions.append(EvolutionLog(
+        timestamp="2026-08-18T11:00:00",
+        trigger="evolution-test-ts",
+        impact=["tools-executed=5", "cycle-complete"],
+        operations=[],
+        summary="修了 stop_all 双实例根因，提交 PR #854",
+        meaningful=True,
+        recommend_slowdown=False,
+        tool_count=5,
+    ))
+    st = handler.status()
+    assert st["last_cycle_summary"] == "修了 stop_all 双实例根因，提交 PR #854"
+    assert len(st["recent_runs"]) == 2, "recent_runs holds last 5 runs"
+    assert st["recent_runs"][1]["summary"] == "修了 stop_all 双实例根因，提交 PR #854"
+    assert st["recent_runs"][1]["meaningful"] is True
+    assert st["recent_runs"][1]["tool_count"] == 5
+    assert st["recent_runs"][0]["meaningful"] is None
+
+
+def test_evolution_handler_recent_runs_capped_at_five():
+    """recent_runs keeps only the last 5 evolutions (rant 2026-08-18T21:32:32)."""
+    from emrg.protocol import EvolutionLog
+    handler = TaskHandler(
+        name="test", config={}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    for i in range(7):
+        handler.evolutions.append(EvolutionLog(
+            timestamp=f"2026-08-18T10:0{i}:00",
+            trigger=f"t{i}",
+            impact=[f"cycle-{i}-complete"],
+        ))
+    st = handler.status()
+    runs = st["recent_runs"]
+    assert len(runs) == 5
+    assert runs[0]["timestamp"] == "2026-08-18T10:02:00"
+    assert runs[-1]["timestamp"] == "2026-08-18T10:06:00"
 
 
 def test_evolution_handler_default_owner():
@@ -1549,7 +1597,8 @@ def test_evolution_cycle_complete_agent_says_meaningful_resets_streak(tmp_path):
          "done": True, "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
          "result": {"meaningful": True, "recommend_slowdown": False,
-                    "reason": "completed analysis"}},
+                    "reason": "completed analysis",
+                    "done": "分析了 scheduler 空转判定 bug，写了 memory 记录"}},
     ])
     handler._empty_cycles = 5
     handler._slowdown_hits = 2
@@ -1557,6 +1606,42 @@ def test_evolution_cycle_complete_agent_says_meaningful_resets_streak(tmp_path):
     assert handler._empty_cycles == 0, "meaningful work resets the empty streak"
     assert handler._slowdown_hits == 0, "meaningful work resets slowdown votes"
     assert "log" in captured
+    # rant 2026-08-18T21:32:32: agent's natural-language summary persisted
+    log = captured["log"]
+    assert log.summary == "分析了 scheduler 空转判定 bug，写了 memory 记录"
+    assert log.meaningful is True
+    assert log.recommend_slowdown is False
+    assert log.tool_count == 0
+
+
+def test_evolution_cycle_log_summary_falls_back_to_completion(tmp_path):
+    """Vibe check ok but missing 'done' → log.summary falls back to the first
+    line of the completion content; vibe unavailable → empty summary (never
+    crash). Rant 2026-08-18T21:32:32."""
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Reviewed PR and posted LGTM",
+         "done": True, "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"meaningful": True, "recommend_slowdown": False,
+                    "reason": "reviewed"}},
+    ])
+    asyncio.run(handler._run_evolution_cycle())
+    log = captured["log"]
+    assert log.summary == "Reviewed PR and posted LGTM", \
+        "missing done → completion first line fallback"
+    assert log.meaningful is True
+
+    # vibe check entirely unavailable → summary empty, flags None/False
+    handler2, captured2 = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+    ])
+    asyncio.run(handler2._run_evolution_cycle())
+    log2 = captured2["log"]
+    assert log2.summary == "", "vibe unavailable → empty summary"
+    assert log2.meaningful is None
+    assert log2.recommend_slowdown is False
+    assert log2.tool_count == 0
 
 
 def test_evolution_cycle_vibe_unavailable_streak_unchanged(tmp_path):

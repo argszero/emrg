@@ -125,6 +125,13 @@ class EvolutionLog:
     impact: list[str] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)
     upstream_contribution: Optional[dict] = None
+    # rant 2026-08-18T21:32:32: the agent's own natural-language summary of
+    # what meaningful work was done this cycle (from the vibe check "done"
+    # field) + the vibe result flags, surfaced in GUI task recent-runs.
+    summary: str = ""
+    meaningful: Optional[bool] = None
+    recommend_slowdown: bool = False
+    tool_count: int = 0
 
 
 @dataclass
