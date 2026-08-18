@@ -2839,6 +2839,39 @@ test("rant 10:36:39：倒计时生命周期 —— 渲染启动 interval、离�
   assert.strictEqual(win2._intervalCount || 0, s2, "全 running 无倒计时 → 不启动 interval");
 });
 
+test("rant 10:45:52：任务行显示上次执行元信息 + 降频标识", async () => {
+  const nowMs = 1_700_000_000_000;
+  const { ctx, win } = makeSandbox({
+    listTasks: async () => [
+      { name: "with-run", type: "evolution", running: false, interval: 1800,
+        next_run_in_seconds: 43,
+        last_run_at: new Date(nowMs - 5 * 60_000).toISOString(),
+        last_cycle_summary: "tools-executed=24, cycle-complete",
+        saturation: { empty_cycles: 3, threshold: 5, heartbeat_interval: 7200, heartbeat_active: true } },
+      { name: "never-run", type: "evolution", running: false, interval: 3600,
+        next_run_in_seconds: null, enabled: true, last_run_at: null, last_cycle_summary: null,
+        saturation: { empty_cycles: 0, threshold: 5, heartbeat_interval: 7200, heartbeat_active: false } },
+    ],
+    listProjects: async () => [],
+  });
+  win.Date = class extends Date { static now() { return nowMs; } };
+  await tick();
+  await vm.runInContext("App.openTasksPanel()", ctx);
+  await tick();
+  const rows = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => {
+    const name = r.querySelector(".task-name").textContent;
+    const meta = r.querySelector(".task-meta");
+    const metaText = meta ? Array.from(meta.querySelectorAll(".task-meta-item")).map((e) => e.textContent).join("|") : "";
+    const satText = meta && meta.querySelector(".task-saturation-badge") ? meta.querySelector(".task-saturation-badge").textContent : "";
+    return name + " => " + metaText + " ## " + satText;
+  })`, ctx);
+  assert.ok(rows[0].includes("上次运行：5m ago"), `运行时间相对显示：${rows[0]}`);
+  assert.ok(rows[0].includes("干了：tools-executed=24, cycle-complete"), `执行摘要：${rows[0]}`);
+  assert.ok(rows[0].includes("空转 3 轮"), `降频徽标：${rows[0]}`);
+  assert.ok(rows[1].includes("尚未运行"), `未运行提示：${rows[1]}`);
+  assert.ok(!rows[1].includes("空转"), `无降频时无徽标：${rows[1]}`);
+});
+
 test("rant 2026-08-14T15:41:52：快速点击添加任务 —— 元数据未加载完也填充下拉 + 保存成功", async () => {
   let created = null;
   const { ctx, els } = makeSandbox({

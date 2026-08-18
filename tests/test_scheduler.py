@@ -490,6 +490,36 @@ def test_evolution_handler_stop():
     assert handler._running is False
 
 
+def test_evolution_handler_status_last_run_fields():
+    """status() exposes last-run + saturation (rant 2026-08-18T10:45:52)."""
+    from emrg.protocol import EvolutionLog
+    handler = TaskHandler(
+        name="test", config={}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    # no evolutions yet → null last-run fields, saturation defaults
+    st = handler.status()
+    assert st["name"] == "test"
+    assert st["last_run_at"] is None
+    assert st["last_cycle_summary"] is None
+    assert st["saturation"]["empty_cycles"] == 0
+    assert "threshold" in st["saturation"]
+    assert "heartbeat_interval" in st["saturation"]
+    assert "heartbeat_active" in st["saturation"]
+    # after one evolution → last-run populated from the latest log
+    handler.evolutions.append(EvolutionLog(
+        timestamp="2026-08-18T10:00:00",
+        trigger="evolution-test-ts",
+        impact=["tools-executed=24", "cycle-complete"],
+        operations=["llm-reflection", "tool-execution"],
+    ))
+    handler._empty_cycles = 3
+    st = handler.status()
+    assert st["last_run_at"] == "2026-08-18T10:00:00"
+    assert st["last_cycle_summary"] == "tools-executed=24, cycle-complete"
+    assert st["saturation"]["empty_cycles"] == 3
+
+
 def test_evolution_handler_default_owner():
     """When no git remote is detectable, falls back to EMRG defaults."""
     handler = TaskHandler(

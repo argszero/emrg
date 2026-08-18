@@ -743,11 +743,32 @@ class TaskHandler:
         remaining = None
         if self._next_run_at is not None:
             remaining = max(0, int(self._next_run_at - time.time()))
+        # rant 2026-08-18T10:45:52: expose the LAST-execution dimension so the
+        # GUI tasks panel can show when a task last ran, what it did, and
+        # whether it is being throttled (saturation). All data is in-memory /
+        # on disk already — no extra I/O beyond the in-memory evolutions list.
+        last_run_at: str | None = None
+        last_cycle_summary: str | None = None
+        if self.evolutions:
+            last = self.evolutions[-1]
+            last_run_at = last.timestamp
+            # brief summary: tools-executed / cycle-complete etc. from impact
+            parts = [str(i) for i in last.impact if i]
+            last_cycle_summary = ", ".join(parts[:3]) if parts else None
+        saturation = {
+            "empty_cycles": self._empty_cycles,
+            "threshold": self._saturation_threshold(),
+            "heartbeat_interval": self._heartbeat_interval(),
+            "heartbeat_active": self._saturation_heartbeat_active(),
+        }
         return {
             "name": self.name,
             "running": self._cycle_running,
             "next_run_in_seconds": remaining,
             "interval": self.interval,
+            "last_run_at": last_run_at,
+            "last_cycle_summary": last_cycle_summary,
+            "saturation": saturation,
         }
 
     def _remote_advanced(self) -> bool:
