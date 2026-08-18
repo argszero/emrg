@@ -57,7 +57,7 @@ from pathlib import Path
 
 # Build stamp printed at the start of every run so the operator can tell at a
 # glance which stop_all.py generation executed (rant 2026-08-17T21:06:31).
-_STOP_ALL_STAMP = "built 2026-08-17 (rm-deadloop-fix + lock-probe)"
+_STOP_ALL_STAMP = "built 2026-08-18 (owner-detail + lock-probe-fail-closed + single-scan)"
 
 _EMRG_CLIENT_RE = re.compile(r"-m\s+emrg(\.server)?(\s|$)")
 _APPIMAGE_RE = re.compile(r"EMRG-[\w.\-]*AppImage(\s|$)")
@@ -564,7 +564,12 @@ for ($g = 0; $g -lt 64 -and $cur -gt 0; $g++) {
 }
 $targets = @($owners | Where-Object { -not $exclude.Contains($_) })
 $killedHint = $false
-foreach ($pid in $targets) {
+# Detail per OWNER (not just targets): each line carries a 4th column tagging
+# whether the owner was excluded by the ancestor chain (self + Inno setup.exe)
+# or is a real target — so the operator can see WHO the owners were and WHY
+# nothing was killed (rant 2026-08-18T09:40:40: 3 owners found but all
+# excluded → targets=0 with zero output = detector looked blind).
+foreach ($pid in $owners) {
   $p = Get-CimInstance Win32_Process -Filter "ProcessId=$pid" -ErrorAction SilentlyContinue
   $name = ''
   $cmd = ''
@@ -573,13 +578,19 @@ foreach ($pid in $targets) {
     if ($p.CommandLine) { $cmd = [string]$p.CommandLine }
   }
   if ($cmd.Length -gt 150) { $cmd = $cmd.Substring(0, 150) }
-  if ($kill) {
+  if ($kill -and -not $exclude.Contains($pid)) {
     Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
     Write-Output ("killed file-lock owner: PID {0} {1} | {2}" -f $pid, $name, $cmd)
     if ($cmd -match 'browser[-_]?harness') { $killedHint = $true }
   } else {
-    Write-Output ("{0}`t{1}`t{2}" -f $pid, $name, $cmd)
+    $tag = if ($exclude.Contains($pid)) { 'excluded' } else { 'target' }
+    Write-Output ("{0}`t{1}`t{2}`t{3}" -f $pid, $name, $cmd, $tag)
   }
+}
+# The excluded ancestor chain (incl. self PID) — answers "who was skipped?".
+Write-Output ("excluded-chain`t{0}" -f ($exclude -join ','))
+if ($kill -and $owners.Count -gt 0 -and $targets.Count -eq 0) {
+  Write-Output ("WARNING all {0} owner(s) excluded: {1}" -f $owners.Count, ($owners -join ','))
 }
 if ($kill -and $killedHint) {
   Write-Output 'hint: browser-harness daemon stopped - restart it after the installer completes'
@@ -656,6 +667,12 @@ def _windows_lock_owners(kill: bool, stdout: str | None = None) -> list[tuple[in
 
     ``stdout`` may be supplied by the caller (avoids a second PowerShell
     invocation when the diag line is needed too); None → run the scan.
+
+    Since v0.2.45+ the owner lines carry a 4th ``excluded|target`` column
+    (rant 2026-08-18T09:40:40) — ancestors (self + Inno setup.exe) are
+    tagged ``excluded`` and are NOT returned here (verify must never list
+    the running stop process itself as a residual); the full detail with
+    tags stays visible in the raw log via stop_lock_owners.
     """
     if stdout is None:
         stdout = _lock_owner_ps(kill)
@@ -663,6 +680,9 @@ def _windows_lock_owners(kill: bool, stdout: str | None = None) -> list[tuple[in
     for line in stdout.splitlines():
         parts = line.split("\t")
         if not parts or not parts[0].strip().isdigit():
+            continue
+        tag = parts[3] if len(parts) > 3 else "target"
+        if tag == "excluded":
             continue
         pid = int(parts[0])
         name = parts[1] if len(parts) > 1 else ""
@@ -698,9 +718,24 @@ def _win_exclusive_open(path: str) -> None:
     OPEN_EXISTING = 3
     FILE_SHARE_NONE = 0
     kernel32 = ctypes.windll.kernel32
+    # 64-bit handle truncation fix (rant 2026-08-18T09:40:40): ctypes defaults
+    # the restype of a foreign function to c_int — a 64-bit HANDLE gets
+    # truncated, INVALID_HANDLE_VALUE(-1) becomes 0xFFFFFFFF and a valid
+    # handle can alias a failure → probe reports "0 locked" when files ARE
+    # locked. Pin the full signature explicitly.
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+    ]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     h = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_NONE, None,
                              OPEN_EXISTING, 0, None)
-    if h == 0 or h == -1:
+    # With restype=c_void_p a NULL handle arrives as None (not 0) — cover both
+    # forms; INVALID_HANDLE_VALUE is c_void_p(-1).value (pm25coder review note,
+    # PR #832). A failed exclusive open = the installer's overwrite would fail.
+    if not h or h == ctypes.c_void_p(-1).value:
         raise OSError(f"CreateFileW failed for {path} (file is locked)")
     kernel32.CloseHandle(h)
 
@@ -722,22 +757,52 @@ def _check_locked_files(root: str, try_open=None) -> list[str]:
     return locked
 
 
+# Last lock-probe failure (rant 2026-08-18T09:40:40): a probe exception is
+# NO LONGER silently swallowed as "clean" — it is recorded here, printed as
+# `lock-probe ERROR`, and surfaced as a verify residual so the installer
+# aborts instead of overwriting locked files. Reset on every probe attempt.
+_lock_probe_error: str | None = None
+
+
 def check_install_writable() -> list[str]:
     """Windows: probe ``install\\`` for files locked against overwrite.
 
     Independent of Restart Manager — the installer's DeleteFile would fail on
     every returned path. Returns [] when the probe is unavailable (POSIX, no
-    install dir, or probe error) — best-effort like every other stop step.
+    install dir) — best-effort like every other stop step. On a PROBE ERROR
+    (exception) it also returns [] (never raises) but records the failure in
+    ``_lock_probe_error`` and prints ``lock-probe ERROR`` — verify() then
+    surfaces it as a residual and the installer aborts (fail-closed), instead
+    of the old silent ``except Exception: return []`` that reported
+    ``0 locked`` while files were actually locked (rant 2026-08-18T09:40:40).
     """
+    global _lock_probe_error
+    _lock_probe_error = None
     if not is_win():
         return []
     root = os.path.join(os.path.expanduser("~"), ".emrg", "install")
     if not os.path.isdir(root):
         return []
+    files = _iter_install_files(root)
+    t0 = time.monotonic()
     try:
-        return _check_locked_files(root)
-    except Exception:
+        locked = _check_locked_files(root)
+    except Exception as e:
+        elapsed = (time.monotonic() - t0) * 1000
+        _lock_probe_error = f"{type(e).__name__}: {e}"
+        print(
+            f"emrg stop: lock-probe ERROR: {_lock_probe_error} "
+            f"(scanned {len(files)} files, {elapsed:.0f}ms) — FAIL CLOSED"
+        )
         return []
+    elapsed = (time.monotonic() - t0) * 1000
+    # Scanned-file count / elapsed observability (rant 2026-08-18T09:40:40):
+    # "0 locked" is only trustworthy when the probe actually scanned files.
+    print(
+        f"emrg stop: lock-probe scanned {len(files)} files "
+        f"-> {len(locked)} locked ({elapsed:.0f}ms)"
+    )
+    return locked
 
 
 def stop_lock_owners() -> None:
@@ -762,10 +827,21 @@ def stop_lock_owners() -> None:
 
 # ── Verify + exit code ──────────────────────────────────────────
 
+# Cache of the last _verify_windows_categories() result (rant
+# 2026-08-18T09:40:40 #4): stop_all previously ran the FULL Windows verify
+# TWICE per run — once via verify() and again via _verify_windows_summary()
+# (two rm-scan PowerShell invocations, ~2s+ wasted, duplicated log lines).
+# verify() always refreshes; _verify_windows_summary() reuses the freshest
+# result when available.
+_windows_cats_cache: list[tuple[str, list[str]]] | None = None
+
+
 def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     """Windows residual scan, one ``(category, residual_strings)`` entry per
     check — so the operator can see each check's result instead of guessing
-    (rant 2026-08-17T21:06:31 #3)."""
+    (rant 2026-08-17T21:06:31 #3). Result is cached in ``_windows_cats_cache``
+    so _verify_windows_summary() does not re-run the expensive scan."""
+    global _windows_cats_cache
     cats: list[tuple[str, list[str]]] = []
 
     # GUI residual
@@ -806,9 +882,16 @@ def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     _print_rm_diag(rm_out)
 
     # install-writability probe — INDEPENDENT of Restart Manager so a broken
-    # detector can never blind verify (rant 2026-08-17T21:06:05)
+    # detector can never blind verify (rant 2026-08-17T21:06:05). A probe
+    # FAILURE is not "0 locked": it becomes a residual → installer aborts
+    # (rant 2026-08-18T09:40:40 fail-closed).
+    global _lock_probe_error
+    _lock_probe_error = None
     locked = check_install_writable()
-    cats.append(("lock-probe", [f"locked file (installer overwrite would fail): {p}" for p in locked]))
+    probe_items = [f"locked file (installer overwrite would fail): {p}" for p in locked]
+    if _lock_probe_error:
+        probe_items.append(f"lock-probe failed (error: {_lock_probe_error})")
+    cats.append(("lock-probe", probe_items))
 
     # bundled-git residual
     bg: list[str] = []
@@ -828,14 +911,20 @@ def _verify_windows_categories() -> list[tuple[str, list[str]]]:
     except (OSError, subprocess.SubprocessError, TimeoutError):
         pass
     cats.append(("bundled-git", bg))
+    _windows_cats_cache = cats
     return cats
 
 
 def _verify_windows_summary() -> str:
     """One-line per-category verify summary, e.g.
     ``GUI 0 / daemon 0 / cmdline-scan 0 / RM re-scan 0 / lock-probe 0 locked /
-    bundled-git 0`` (rant 2026-08-17T21:06:31 #3)."""
-    cats = _verify_windows_categories()
+    bundled-git 0`` (rant 2026-08-17T21:06:31 #3).
+
+    Reuses the freshest ``_verify_windows_categories()`` result when present
+    (single-scan, rant 2026-08-18T09:40:40 #4); falls back to a fresh scan
+    only when nothing has been cached yet.
+    """
+    cats = _windows_cats_cache if _windows_cats_cache is not None else _verify_windows_categories()
     return " / ".join(f"{name} {len(items)}" for name, items in cats)
 
 
@@ -857,6 +946,58 @@ def verify() -> list[str]:
 
 
 # ── Orchestration ───────────────────────────────────────────────
+
+def _pythonpath_env() -> str:
+    """User/Machine PYTHONPATH on Windows (registry), else the process env —
+    observability for the "an unrelated python imports from install\\lib and
+    locks C extensions" root-cause (rant 2026-08-18T09:40:40: browser-harness
+    uses its own uv python but loaded install\\lib\\websockets — PYTHONPATH
+    pollution would make ANY python process import from install\\lib)."""
+    if not is_win():
+        p = os.environ.get("PYTHONPATH", "")
+        return f"PYTHONPATH={p or '(unset)'}"
+    try:
+        import winreg
+
+        entries: list[str] = []
+        for hive, key, label in (
+            (winreg.HKEY_CURRENT_USER, r"Environment", "User"),
+            (winreg.HKEY_LOCAL_MACHINE,
+             r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", "Machine"),
+        ):
+            try:
+                with winreg.OpenKey(hive, key) as k:
+                    val, _ = winreg.QueryValueEx(k, "PYTHONPATH")
+                    entries.append(f"PYTHONPATH({label})={val}")
+            except OSError:
+                entries.append(f"PYTHONPATH({label})=(unset)")
+        proc = os.environ.get("PYTHONPATH")
+        if proc:
+            entries.append(f"PYTHONPATH(process)={proc}")
+        return " | ".join(entries)
+    except Exception as e:  # registry read is best-effort
+        return f"PYTHONPATH(registry read failed: {type(e).__name__}: {e})"
+
+
+def _pythonpath_install_warning(line: str) -> str | None:
+    """Warn when any PYTHONPATH references the install dir (C-extension lock
+    root cause, rant 2026-08-18T09:40:40). Pure function → unit-testable.
+
+    Matches only the install dir anchored on ``~/.emrg/install`` (both path
+    separators) — bare ``install\\lib`` substrings are NOT matched, so an
+    unrelated ``C:\\python\\install\\lib`` never warns spuriously (pm25coder
+    review note, PR #832).
+    """
+    if not line or "PYTHONPATH" not in line or "(unset)" in line:
+        return None
+    lowered = line.lower()
+    for marker in (r".emrg\install", r"/.emrg/install"):
+        if marker in lowered:
+            return ("PYTHONPATH references ~/.emrg/install — any python "
+                    "process may import from install\\lib and lock C "
+                    "extensions; clear it before running the installer")
+    return None
+
 
 def _step_plan() -> list[tuple[str, object]]:
     """Ordered stop steps. Clients (GUI/TUI) FIRST, daemon LAST (rant
@@ -894,6 +1035,14 @@ def stop_all() -> int:
         f"python {platform.python_version()} {platform.system()}-{platform.machine()} "
         f"| pid {os.getpid()}"
     )
+    # User/Machine PYTHONPATH observability (rant 2026-08-18T09:40:40) — a
+    # polluted PYTHONPATH makes any python process import from install\lib
+    # and lock C extensions; surface it before any stop/kill logic.
+    _pp = _pythonpath_env()
+    print(f"emrg stop: {_pp}")
+    _pp_warn = _pythonpath_install_warning(_pp)
+    if _pp_warn:
+        print(f"emrg stop: WARNING {_pp_warn}")
     steps = _step_plan()
     for i, (name, fn) in enumerate(steps, 1):
         s = time.monotonic()
