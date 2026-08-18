@@ -3000,12 +3000,20 @@ class EmrgServer:
 
                     ats = await asyncio.gather(*(_latest_session_at(e) for e in entries))
                     ordered = sorted(zip(entries, ats), key=lambda t: t[1], reverse=True)
+                    # rant 2026-08-19T01:05:47 — _detect_git_remote runs a sync
+                    # git subprocess per project; offload to worker threads so a
+                    # slow git probe never freezes the event loop (websocket
+                    # clients would otherwise time out during list_projects).
+                    repos = await asyncio.gather(*(
+                        asyncio.to_thread(_detect_git_remote, p.get("path", ""))
+                        for p, _ in ordered
+                    ))
                     projects = [
                         {"name": p.get("name", ""),
-                         "repo": _detect_git_remote(p.get("path", "")),
+                         "repo": repo,
                          "path": p.get("path", ""),
                          "latest_session_at": at}
-                        for p, at in ordered
+                        for (p, at), repo in zip(ordered, repos)
                     ]
         except (yaml.YAMLError, OSError):
             logger.exception("Failed to read projects.yml")
