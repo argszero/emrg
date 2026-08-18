@@ -2755,17 +2755,19 @@ test("rant 10:36:39：formatCountdown 格式边界（0s/59s/60s/1h05m/负数钳�
   assert.strictEqual(fmt(1.9), "1s", "小数向下取整");
 });
 
-test("rant 10:36:39：任务行状态展示 —— 运行中/待运行+倒计时/待调度/已停用 + 每秒递减", async () => {
+test("rant 10:36:39：任务行状态展示 —— 运行中/待运行+倒计时/待调度/已停用 + 每秒递减 + 归零自动刷新", async () => {
+  let nowMs = 1_700_000_000_000;
   const { ctx, win } = makeSandbox({
+    // rant 11:16:32：mock 有状态 —— deadline（50s 后）已过 → waiting-task 转为 running，
+    // 验证归零后 updateTaskCountdowns 自动重拉任务状态（pending → running 徽标）
     listTasks: async () => [
       { name: "running-task", type: "evolution", running: true, interval: 60, next_run_in_seconds: null },
-      { name: "waiting-task", type: "evolution", running: false, interval: 1800, next_run_in_seconds: 43 },
+      { name: "waiting-task", type: "evolution", running: nowMs >= 1_700_000_050_000, interval: 1800, next_run_in_seconds: 43 },
       { name: "idle-task", type: "custom", running: false, interval: 3600, next_run_in_seconds: null, enabled: true },
       { name: "disabled-task", type: "custom", running: false, interval: 3600, next_run_in_seconds: null, enabled: false },
     ],
     listProjects: async () => [],
   });
-  let nowMs = 1_700_000_000_000;
   win.Date = class extends Date { static now() { return nowMs; } };
   await tick();
   await vm.runInContext("App.openTasksPanel()", ctx);
@@ -2788,11 +2790,18 @@ test("rant 10:36:39：任务行状态展示 —— 运行中/待运行+倒计时
   await vm.runInContext("EMRG_Dialogs.updateTaskCountdowns()", ctx);
   let nextRuns = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => { const s = r.querySelector(".task-next-run"); return s ? s.textContent : ""; }).filter(Boolean)`, ctx);
   assert.deepStrictEqual(nextRuns, ["下次运行 42s"], "1s 后递减为 42s");
-  // 快进到 deadline 之后 → 负数钳制为 0s（不显示负数）
+  // 快进到 deadline 之后 → rant 11:16:32：归零触发自动 renderTaskList 重拉状态（异步），
+  // mock 此刻返回 running → UI 从"待运行+倒计时"刷新为 running 徽标（无倒计时）
   nowMs += 50_000;
   await vm.runInContext("EMRG_Dialogs.updateTaskCountdowns()", ctx);
-  nextRuns = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => { const s = r.querySelector(".task-next-run"); return s ? s.textContent : ""; }).filter(Boolean)`, ctx);
-  assert.deepStrictEqual(nextRuns, ["下次运行 0s"], "deadline 过后钳制为 0s");
+  await tick();
+  const refreshed = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => {
+    const name = r.querySelector(".task-name") ? r.querySelector(".task-name").textContent : "";
+    const badges = Array.from(r.querySelectorAll(".task-badge")).map((b) => b.textContent).join(",");
+    return name + "|" + badges;
+  })`, ctx);
+  assert.ok(refreshed.some((t) => t.startsWith("waiting-task") && t.includes("运行中") && !t.includes("下次运行")),
+    `归零后自动刷新为 running 徽标：${JSON.stringify(refreshed)}`);
 });
 
 test("rant 10:36:39：倒计时生命周期 —— 渲染启动 interval、离开任务视图清理（无泄漏）", async () => {
