@@ -39,7 +39,7 @@ class TestPureStdlib:
         allowed = {
             "base64", "json", "os", "re", "secrets", "signal", "socket",
             "subprocess", "sys", "time", "pathlib", "platform", "ctypes", "ast",
-            "pytest", "annotations", "__future__",
+            "pytest", "annotations", "__future__", "winreg",
         }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -785,3 +785,171 @@ class TestMainDelegatesToStopAll:
         src = Path(m.__file__).read_text(encoding="utf-8")
         assert "sys.exit(_stop_all())" in src
         assert "from emrg._stop_all import stop_all" in src
+
+
+# ── Owner detail + excluded annotation (rant 2026-08-18T09:40:40) ──
+
+class TestLockOwnerDetailAnnotation:
+    def test_ps_template_has_owner_detail_annotation(self):
+        """kill=False owner lines carry a 4th excluded|target column; the
+        excluded ancestor chain + WARNING-all-excluded are emitted."""
+        ps = _stop_all._LOCK_OWNER_PS
+        assert "{0}`t{1}`t{2}`t{3}" in ps        # 4-col owner line
+        assert "'excluded'" in ps and "'target'" in ps  # tag literals
+        assert "excluded-chain" in ps             # chain dump (incl. self PID)
+        assert "WARNING all" in ps and "$targets.Count" in ps
+        assert "$exclude -join" in ps or "$exclude)" in ps
+
+    def test_parser_filters_excluded_owners(self, monkeypatch):
+        """Owners tagged `excluded` (self + ancestor chain) must NOT surface
+        as verify residuals; `target` owners (and legacy 3-col lines) do."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all, "_lock_owner_ps",
+            lambda kill: (
+                "9400\tpython.exe\tC:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon\ttarget\n"
+                "555\tpythonw.exe\tsome -m emrg.server cmdline\texcluded\n"
+                "666\tsetup.exe\tC:\\...\\inno setup.exe\texcluded\n"
+            ),
+        )
+        owners = _stop_all._windows_lock_owners(kill=False)
+        assert owners == [
+            (9400, "python.exe",
+             "C:\\...\\browser_harness\\Scripts\\python.exe -m browser_harness.daemon"),
+        ]
+
+    def test_parser_legacy_3col_lines_still_parsed(self, monkeypatch):
+        """Backward compatibility: pre-annotation 3-column lines default to
+        target (existing verify output must keep working)."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all, "_lock_owner_ps",
+            lambda kill: "9400\tpython.exe\tC:\\...\\browser_harness\\Scripts\\python.exe\n",
+        )
+        owners = _stop_all._windows_lock_owners(kill=False)
+        assert owners == [(9400, "python.exe",
+                           "C:\\...\\browser_harness\\Scripts\\python.exe")]
+
+
+# ── Lock-probe fail-closed (rant 2026-08-18T09:40:40) ────────────
+
+class TestLockProbeFailClosed:
+    def test_probe_error_sets_global_and_prints_error(self, monkeypatch, tmp_path, capsys):
+        """A probe exception is NOT silently swallowed as 'clean': it records
+        _lock_probe_error + prints `lock-probe ERROR ... FAIL CLOSED`."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        root = tmp_path / ".emrg" / "install"
+        root.mkdir(parents=True)
+        (root / "a.txt").write_text("x", encoding="utf-8")
+
+        def boom(root_dir):
+            raise RuntimeError("ctypes unavailable")
+
+        monkeypatch.setattr(_stop_all, "_check_locked_files", boom)
+        _stop_all._lock_probe_error = None
+        assert _stop_all.check_install_writable() == []  # never raises
+        assert _stop_all._lock_probe_error == "RuntimeError: ctypes unavailable"
+        out = capsys.readouterr().out
+        assert "lock-probe ERROR: RuntimeError: ctypes unavailable" in out
+        assert "FAIL CLOSED" in out
+
+    def test_probe_prints_scanned_count(self, monkeypatch, tmp_path, capsys):
+        """Scan stats: `lock-probe scanned N files -> M locked (Xms)` — a
+        bare `0 locked` without a scan count is untrustworthy."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        root = tmp_path / ".emrg" / "install"
+        (root / "sub").mkdir(parents=True)
+        (root / "a.txt").write_text("x", encoding="utf-8")
+        (root / "sub" / "b.txt").write_text("x", encoding="utf-8")
+        monkeypatch.setattr(_stop_all, "_check_locked_files", lambda root_dir: [])
+        _stop_all._lock_probe_error = None
+        assert _stop_all.check_install_writable() == []
+        out = capsys.readouterr().out
+        assert "lock-probe scanned 2 files -> 0 locked" in out
+
+    def test_verify_surfaces_probe_error_as_residual(self, monkeypatch, tmp_path):
+        """探测失败 ≠ 干净: a failed probe becomes a verify residual → exit 1
+        (installer aborts instead of overwriting locked files)."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        root = tmp_path / ".emrg" / "install"
+        root.mkdir(parents=True)
+        (root / "a.txt").write_text("x", encoding="utf-8")
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(_stop_all, "_lock_owner_ps", lambda kill: "")
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+
+        def boom(root_dir):
+            raise OSError("probe exploded")
+
+        monkeypatch.setattr(_stop_all, "_check_locked_files", boom)
+        _stop_all._windows_cats_cache = None
+        try:
+            out = _stop_all._verify_windows()
+            assert any("lock-probe failed (error: OSError: probe exploded)" in r for r in out)
+        finally:
+            _stop_all._windows_cats_cache = None
+
+
+# ── Verify single-scan (rant 2026-08-18T09:40:40 #4) ─────────────
+
+class TestVerifySingleScan:
+    def test_summary_reuses_cache_no_second_scan(self, monkeypatch, tmp_path, capsys):
+        """verify() + _verify_windows_summary() must run the PowerShell RM
+        scan ONCE — the previous code ran it twice (~2s+ wasted, duplicated
+        rm-scan log lines)."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        calls = {"n": 0}
+
+        def fake_ps(kill):
+            calls["n"] += 1
+            return "rm-diag\t3\t0\t10\t0\n"
+
+        monkeypatch.setattr(_stop_all, "_lock_owner_ps", fake_ps)
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": ""}),
+        )
+        _stop_all._windows_cats_cache = None
+        try:
+            assert _stop_all._verify_windows() == []
+            assert calls["n"] == 1
+            summary = _stop_all._verify_windows_summary()
+            assert "RM re-scan 0" in summary
+            assert calls["n"] == 1  # cached — no second PowerShell scan
+            # a fresh categories() call refreshes the cache
+            _stop_all._verify_windows_categories()
+            assert calls["n"] == 2
+        finally:
+            _stop_all._windows_cats_cache = None
+
+
+# ── PYTHONPATH observability (rant 2026-08-18T09:40:40) ──────────
+
+class TestPythonPathObservability:
+    def test_env_posix(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        monkeypatch.setattr(_stop_all.os, "environ", {"PYTHONPATH": "C:/x"})
+        assert _stop_all._pythonpath_env() == "PYTHONPATH=C:/x"
+        monkeypatch.setattr(_stop_all.os, "environ", {})
+        assert _stop_all._pythonpath_env() == "PYTHONPATH=(unset)"
+
+    def test_install_warning_positive_and_negative(self):
+        # install-dir references → warn (both Windows and POSIX separators)
+        assert _stop_all._pythonpath_install_warning(
+            r"PYTHONPATH(User)=C:\Users\me\.emrg\install\lib") is not None
+        assert _stop_all._pythonpath_install_warning(
+            "PYTHONPATH(process)=/home/me/.emrg/install") is not None
+        assert _stop_all._pythonpath_install_warning(
+            "PYTHONPATH(Machine)=C:\\python313;C:\\tools") is None
+        assert _stop_all._pythonpath_install_warning("PYTHONPATH(User)=(unset)") is None
+        assert _stop_all._pythonpath_install_warning("") is None
