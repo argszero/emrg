@@ -592,6 +592,7 @@ class TestLockOwners:
 
     def test_stop_lock_owners_logs_diag(self, monkeypatch, capsys):
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(_stop_all, "find_install_module_holders", lambda: [])
         monkeypatch.setattr(
             _stop_all, "_lock_owner_ps", lambda kill: (
                 "killed file-lock owner: PID 9400 python.exe | C:\\...\\browser_harness\n"
@@ -735,11 +736,13 @@ class TestIndependentLockProbe:
         )
         cats = _stop_all._verify_windows_categories()
         names = [n for n, _ in cats]
-        assert names == ["GUI", "daemon", "cmdline-scan", "RM re-scan", "lock-probe", "bundled-git"]
-        locked = dict(cats)["lock-probe"]
+        # rant 2026-08-18T16:24:01 — module-holder 枚举是主检测（DLL 模块锁
+        # 只能靠 Modules 枚举点名），createfile-probe 降级为补充
+        assert names == ["GUI", "daemon", "cmdline-scan", "module-holder", "RM re-scan", "createfile-probe", "bundled-git"]
+        locked = dict(cats)["createfile-probe"]
         assert any("locked file" in r and "speedups" in r for r in locked)
         summary = _stop_all._verify_windows_summary()
-        assert "lock-probe 1" in summary
+        assert "createfile-probe 1" in summary
         assert "GUI 0" in summary
 
     def test_stop_all_retries_lock_kill(self, monkeypatch, capsys):
@@ -855,8 +858,10 @@ class TestLockProbeFailClosed:
         assert "FAIL CLOSED" in out
 
     def test_probe_prints_scanned_count(self, monkeypatch, tmp_path, capsys):
-        """Scan stats: `lock-probe scanned N files -> M locked (Xms)` — a
-        bare `0 locked` without a scan count is untrustworthy."""
+        """Scan stats: `createfile-probe scanned N files -> M locked (Xms)` — a
+        bare `0 locked` without a scan count is untrustworthy. The probe is
+        supplementary (rant 2026-08-18T16:24:01); DLL module locks need the
+        module-holder scan."""
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
         root = tmp_path / ".emrg" / "install"
@@ -867,7 +872,7 @@ class TestLockProbeFailClosed:
         _stop_all._lock_probe_error = None
         assert _stop_all.check_install_writable() == []
         out = capsys.readouterr().out
-        assert "lock-probe scanned 2 files -> 0 locked" in out
+        assert "createfile-probe scanned 2 files -> 0 locked" in out
 
     def test_verify_surfaces_probe_error_as_residual(self, monkeypatch, tmp_path):
         """探测失败 ≠ 干净: a failed probe becomes a verify residual → exit 1

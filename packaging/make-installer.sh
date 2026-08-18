@@ -406,8 +406,11 @@ begin
   // （列出杀不掉的进程），宿主不再需要手动跑诊断。
   // cmd 引号嵌套：外层 /c "..."，内层脚本路径用双引号包裹，重定向在外、
   // 仍在内层引号外（SW_HIDE 隐藏窗口后 stdout/stderr 经 > log 2>&1 落盘）。
+  // -I（isolated mode，rant 2026-08-18T16:09:45）：忽略 PYTHONPATH / site-packages /
+  // .pth / ._pth，纯标准库即可跑 —— python-dist 的 site 配置不再加载 install\lib 的
+  // websockets → 不再自锁要删的 speedups pyd（v0.2.48 DeleteFile code 5 根因2）。
   LogFile := ExpandConstant('{tmp}\stop_all.log');
-  if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" "' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" -I "' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     if ResultCode <> 0 then
     begin

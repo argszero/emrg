@@ -122,6 +122,10 @@ def test_stop_all_py_restart_manager_lock_owners():
     assert "Substring(0, 150)" in content
     assert "Stop-Process" in content
     assert "browser" in content
+    # rant 2026-08-18T16:09:45 — kill 版 RM 用 taskkill /F /PID（TerminateProcess
+    # 立即返回）替代 Stop-Process：PowerShell Stop-Process 对拒绝/等待场景挂起
+    # → kill 版 RM 扫描 60s 超时（Stop-Process 挂起）实证见 v0.2.48 stop_all.log。
+    assert "& taskkill /F /PID $pid" in content
     # stop_all() 顺序：bundled git 之后、verify 之前（步骤计划表 _step_plan，
     # rant 2026-08-17T21:06:31 日志规范重构后 stop_all 从计划表驱动）
     step_src = content.split("def _step_plan")[1].split("def stop_all")[0]
@@ -136,6 +140,84 @@ def test_stop_all_py_restart_manager_lock_owners():
     assert "file-lock owner" in verify_src
     # rant 2026-08-17T21:04:32：verify 也要打印 RM 扫描摘要（防静默空转）
     assert "_print_rm_diag(rm_out)" in verify_src
+
+
+def test_stop_all_py_deletefile_semantic_lock_probe():
+    """rant 2026-08-18T16:09:45 — lock-probe 假阴性根因 + 修复。
+
+    v0.2.48 实证：GENERIC_READ + FILE_SHARE_NONE 探测对 DLL 锁永远假阴性——
+    LoadLibrary 持有句柄允许读共享 → 探测显示 0 locked，而安装器 DeleteFile
+    需要句柄共享 FILE_SHARE_DELETE → 覆盖时 code 5。修复 = DELETE 访问
+    （GENERIC_DELETE=0x10000）+ FILE_FLAG_DELETE_ON_CLOSE=0x04000000 +
+    OPEN_EXISTING，与安装器 DeleteFile 完全同语义；FILE_SHARE_NONE 保留补充；
+    探测成功后用 SetFileInformationByHandle 清除 delete-on-close（探测不真删）。
+    """
+    content = _read("emrg/_stop_all.py")
+    assert "GENERIC_DELETE = 0x00010000" in content
+    assert "FILE_FLAG_DELETE_ON_CLOSE = 0x04000000" in content
+    assert "GENERIC_READ = 0x80000000" not in content  # 旧常量赋值已移除
+    assert "SetFileInformationByHandle" in content
+    assert "FILE_DISPOSITION_INFO = 2" in content
+    # 自锁防护（rant 2026-08-18T16:09:45）：开头打印 python-dist 运行时 + 兜底
+    # WARNING（lock holder 是 stop_all 自身 → 提示重跑安装器）
+    assert "python-dist runtime:" in content
+    assert "lock holder is the stop_all runtime itself" in content
+    assert "re-run installer (fresh process won't hold the lock)" in content
+
+
+def test_stop_all_py_rm_no_external_owner_flag():
+    """rant 2026-08-18T16:09:45 — _print_rm_diag 记录"无外部 owner"证据。
+
+    RM owners==0 或全部 owner 被祖先链排除 → _rm_no_external_owner=True，
+    stop_all 重试循环后据此输出自锁 WARNING 并 exit 1。
+    """
+    content = _read("emrg/_stop_all.py")
+    assert "_rm_no_external_owner" in content
+    assert 'd["owners"] == 0 or "owner(s) excluded" in stdout' in content
+    assert "re-run installer (fresh process won't hold the lock)" in content
+
+
+def test_stop_all_py_module_holder_enumeration():
+    """rant 2026-08-18T16:24:01 — 诊断脚本铁证：DLL 模块锁只有
+    Process.Modules 枚举能点名（RM 漏报 browser-harness 子进程 PID 9280；
+    CreateFileW 探测 DELETE+SHARE_NONE OK 但 DeleteFile 仍失败）。
+
+    find_install_module_holders(): Get-Process + $_.Modules.FileName 过滤
+    install 前缀 → 输出 holder<TAB>pid<TAB>name<TAB>exe<TAB>parent<TAB>files<TAB>tag
+    （祖先链排除 tag=excluded）；stop_lock_owners 先跑 module-holder 枚举，
+    对 target 用 taskkill /F /T /PID（进程树击杀），browser-harness hint；
+    verify 的 module-holder 分类把外部持有者列为残留。
+    """
+    content = _read("emrg/_stop_all.py")
+    # 枚举 + 解析 + 击杀辅助
+    assert "def find_install_module_holders" in content
+    assert "def _parse_module_holders" in content
+    assert "def _kill_tree_windows" in content
+    # PowerShell 核心：Modules.FileName 过滤 install 前缀 + 祖先链排除
+    assert "Get-Process" in content
+    assert '$_.Modules.FileName' in content
+    assert "like \"$root\\*\"" in content or 'like "$root\\*"' in content
+    assert "ParentProcessId" in content
+    assert "holder`t" in content
+    # 击杀用 taskkill /F /T /PID（进程树，TerminateProcess 立即返回）
+    assert '["taskkill", "/F", "/T", "/PID", str(pid)]' in content
+    # stop_lock_owners 先 module-holder 后 RM；browser-harness hint
+    stop_src = content.split("def stop_lock_owners")[1].split("# ── Verify")[0]
+    assert "find_install_module_holders()" in stop_src
+    assert "_lock_owner_ps(kill=True)" in stop_src
+    assert "restart it after the installer completes" in stop_src
+    # verify：module-holder 分类（主检测）在 RM re-scan 之前
+    verify_src = content.split("def _verify_windows_categories")[1].split("def _verify_windows_summary")[0]
+    assert '"module-holder", mh' in verify_src
+    assert '"RM re-scan", rm' in verify_src
+    assert verify_src.index('"module-holder"') < verify_src.index('"RM re-scan"')
+    assert "install-module holder" in verify_src
+    # 自锁兜底：外部 module-holder 与 RM owner 都无 → WARNING
+    assert "_module_holder_external_found" in content
+    assert "no external module-holder / RM owner" in content
+    # createfile-probe 降级为补充（CreateFileW 探测对 DLL 模块锁假阴性）
+    assert "createfile-probe" in content
+    assert "module locks need the module-holder scan" in content
 
 
 def test_main_delegates_stop_to_stop_all():
@@ -175,6 +257,11 @@ def test_make_installer_iss_has_prepare_to_install():
     assert "stop_all.log" in content
     assert '''" > "' + LogFile + '" 2>&1"''' in content
     assert content.count("2>&1") >= 1
+    # rant 2026-08-18T16:09:45 — python-dist 的 site 配置会加载 install\lib 模块
+    # （websockets → speedups pyd）→ stop_all 自锁要删的文件。修复 = -I isolated
+    # mode（忽略 PYTHONPATH/site-packages/.pth/._pth，纯标准库即可跑）。
+    assert '''""' + PythonExe + '" -I "' + StopScript''' in content
+    assert "isolated mode" in content
     # ⚡ LoadStringFromFile 的 Inno Pascal Script 签名是 2 参数 out-param 形式
     assert "LoadStringFromFile(LogFile, LogText)" in content  # 正：out-param 形式
     assert ":= LoadStringFromFile(LogFile)" not in content  # 反：1 参数形式不存在
