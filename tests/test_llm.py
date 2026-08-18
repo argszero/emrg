@@ -438,7 +438,7 @@ def _make_stream(*objs):
     return _GoodStream()
 
 
-def _collect_chunks(client, fake):
+def _collect_chunks(client):
     import asyncio
     chunks = []
 
@@ -461,7 +461,7 @@ def test_stream_accumulates_reasoning_content(monkeypatch, client):
         {"choices": [{"delta": {}, "finish_reason": "stop"}]},
     )])
     client._client = fake
-    chunks = _collect_chunks(client, fake)
+    chunks = _collect_chunks(client)
     last = chunks[-1]
     assert last["reasoning"] == "Let me think step by step"
     # content is unaffected
@@ -478,7 +478,7 @@ def test_stream_accumulates_openai_reasoning(monkeypatch, client):
         {"choices": [{"delta": {}, "finish_reason": "stop"}]},
     )])
     client._client = fake
-    chunks = _collect_chunks(client, fake)
+    chunks = _collect_chunks(client)
     assert chunks[-1]["reasoning"] == "think 1 think 2"
 
 
@@ -491,7 +491,7 @@ def test_stream_no_reasoning_means_none(monkeypatch, client):
         {"choices": [{"delta": {}, "finish_reason": "stop"}]},
     )])
     client._client = fake
-    chunks = _collect_chunks(client, fake)
+    chunks = _collect_chunks(client)
     assert all(c.get("reasoning") is None for c in chunks)
 
 
@@ -508,7 +508,7 @@ def test_stream_usage_reasoning_tokens_top_level_and_nested(monkeypatch, client)
                    "reasoning_tokens": 7}},
     )])
     client._client = fake
-    chunks = _collect_chunks(client, fake)
+    chunks = _collect_chunks(client)
     assert chunks[-1]["usage"]["reasoning_tokens"] == 7
     assert chunks[-1]["usage"]["prompt_tokens"] == 10
 
@@ -520,7 +520,7 @@ def test_stream_usage_reasoning_tokens_top_level_and_nested(monkeypatch, client)
                    "completion_tokens_details": {"reasoning_tokens": 9}}},
     )])
     client._client = fake2
-    chunks2 = _collect_chunks(client, fake2)
+    chunks2 = _collect_chunks(client)
     assert chunks2[-1]["usage"]["reasoning_tokens"] == 9
 
     # no usage → None (unchanged behavior)
@@ -529,5 +529,5 @@ def test_stream_usage_reasoning_tokens_top_level_and_nested(monkeypatch, client)
         {"choices": [{"delta": {}, "finish_reason": "stop"}]},
     )])
     client._client = fake3
-    chunks3 = _collect_chunks(client, fake3)
+    chunks3 = _collect_chunks(client)
     assert chunks3[-1]["usage"] is None
