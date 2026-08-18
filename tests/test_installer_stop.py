@@ -259,11 +259,14 @@ def test_make_installer_iss_has_prepare_to_install():
     assert "stop_all.log" in content
     assert '''" > "' + LogFile + '" 2>&1"''' in content
     assert content.count("2>&1") >= 1
-    # rant 2026-08-18T16:09:45 — python-dist 的 site 配置会加载 install\lib 模块
-    # （websockets → speedups pyd）→ stop_all 自锁要删的文件。修复 = -I isolated
-    # mode（忽略 PYTHONPATH/site-packages/.pth/._pth，纯标准库即可跑）。
-    assert '''""' + PythonExe + '" -I "' + StopScript''' in content
-    assert "isolated mode" in content
+    # rants 2026-08-18T21:13:03 / 21:14:16 — 移除 -I isolated mode：
+    # python-build-standalone 靠目录结构 / ._pth 定位 stdlib，-I 忽略之 →
+    # v0.2.50 Windows 安装 "Failed to import encodings" 启动即崩（无 stop_all.log）。
+    # -I 防的"自锁"假设被证伪：excluded-chain 已排除自身 + 祖先进程链（从不杀自己），
+    # #847 self-held 归属已处理自身锁，且 stop_all 纯标准库从不加载 websockets。
+    # 恢复 v0.2.49 的 "{PythonExe}" "{StopScript}"，无替代 flag。
+    assert '''""' + PythonExe + '" "' + StopScript''' in content
+    assert '''""' + PythonExe + '" -I "' + StopScript''' not in content
     # ⚡ LoadStringFromFile 的 Inno Pascal Script 签名是 2 参数 out-param 形式
     assert "LoadStringFromFile(LogFile, LogText)" in content  # 正：out-param 形式
     assert ":= LoadStringFromFile(LogFile)" not in content  # 反：1 参数形式不存在

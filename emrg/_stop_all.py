@@ -58,7 +58,7 @@ from pathlib import Path
 
 # Build stamp printed at the start of every run so the operator can tell at a
 # glance which stop_all.py generation executed (rant 2026-08-17T21:06:31).
-_STOP_ALL_STAMP = "built 2026-08-18 (isolated -I + module-holder enumeration + createfile-probe + taskkill RM + self-lock guard)"
+_STOP_ALL_STAMP = "built 2026-08-18 (module-holder enumeration + createfile-probe + taskkill RM + excluded-chain self-exclusion + self-lock guard)"
 
 _EMRG_CLIENT_RE = re.compile(r"-m\s+emrg(\.server)?(\s|$)")
 _APPIMAGE_RE = re.compile(r"EMRG-[\w.\-]*AppImage(\s|$)")

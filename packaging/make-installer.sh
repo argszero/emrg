@@ -406,11 +406,14 @@ begin
   // （列出杀不掉的进程），宿主不再需要手动跑诊断。
   // cmd 引号嵌套：外层 /c "..."，内层脚本路径用双引号包裹，重定向在外、
   // 仍在内层引号外（SW_HIDE 隐藏窗口后 stdout/stderr 经 > log 2>&1 落盘）。
-  // -I（isolated mode，rant 2026-08-18T16:09:45）：忽略 PYTHONPATH / site-packages /
-  // .pth / ._pth，纯标准库即可跑 —— python-dist 的 site 配置不再加载 install\lib 的
-  // websockets → 不再自锁要删的 speedups pyd（v0.2.48 DeleteFile code 5 根因2）。
+  // -I（isolated mode，v0.2.50 引入）已移除（rants 2026-08-18T21:13:03 / 21:14:16）：
+  // python-build-standalone 定位 stdlib 依赖目录结构 / ._pth 机制，-I 忽略之 →
+  // v0.2.50 Windows 安装 "Failed to import encodings" 启动即崩（连 stop_all.log 都没有）。
+  // -I 防的"自锁"假设已被证伪：stop_all 的 excluded-chain 已排除自身 + 祖先进程链
+  // （从不杀自己），#847 self-held 归属已处理自身锁，且 stop_all 纯标准库从不加载
+  // websockets。恢复 v0.2.49 的 "{PythonExe}" "{StopScript}"，无需任何替代 flag。
   LogFile := ExpandConstant('{tmp}\stop_all.log');
-  if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" -I "' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" "' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
   begin
     if ResultCode <> 0 then
     begin
