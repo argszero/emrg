@@ -953,3 +953,6 @@ class TestPythonPathObservability:
             "PYTHONPATH(Machine)=C:\\python313;C:\\tools") is None
         assert _stop_all._pythonpath_install_warning("PYTHONPATH(User)=(unset)") is None
         assert _stop_all._pythonpath_install_warning("") is None
+        # unrelated install\lib path must NOT warn (pm25coder review note, PR #832)
+        assert _stop_all._pythonpath_install_warning(
+            r"PYTHONPATH(User)=C:\python\install\lib") is None

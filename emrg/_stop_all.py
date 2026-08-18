@@ -732,7 +732,10 @@ def _win_exclusive_open(path: str) -> None:
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     h = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_NONE, None,
                              OPEN_EXISTING, 0, None)
-    if h == 0 or h == ctypes.c_void_p(-1).value:
+    # With restype=c_void_p a NULL handle arrives as None (not 0) — cover both
+    # forms; INVALID_HANDLE_VALUE is c_void_p(-1).value (pm25coder review note,
+    # PR #832). A failed exclusive open = the installer's overwrite would fail.
+    if not h or h == ctypes.c_void_p(-1).value:
         raise OSError(f"CreateFileW failed for {path} (file is locked)")
     kernel32.CloseHandle(h)
 
@@ -978,12 +981,17 @@ def _pythonpath_env() -> str:
 
 def _pythonpath_install_warning(line: str) -> str | None:
     """Warn when any PYTHONPATH references the install dir (C-extension lock
-    root cause, rant 2026-08-18T09:40:40). Pure function → unit-testable."""
+    root cause, rant 2026-08-18T09:40:40). Pure function → unit-testable.
+
+    Matches only the install dir anchored on ``~/.emrg/install`` (both path
+    separators) — bare ``install\\lib`` substrings are NOT matched, so an
+    unrelated ``C:\\python\\install\\lib`` never warns spuriously (pm25coder
+    review note, PR #832).
+    """
     if not line or "PYTHONPATH" not in line or "(unset)" in line:
         return None
     lowered = line.lower()
-    for marker in (r".emrg\install", r"/.emrg/install",
-                   "install\\lib", "install/lib"):
+    for marker in (r".emrg\install", r"/.emrg/install"):
         if marker in lowered:
             return ("PYTHONPATH references ~/.emrg/install — any python "
                     "process may import from install\\lib and lock C "
