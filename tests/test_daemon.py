@@ -1492,3 +1492,51 @@ def test_update_check_force_runs_fresh_check(monkeypatch):
     assert calls == [], "no force → must return cache without a fresh fetch"
     reply = json.loads(writer._frames[-1])
     assert reply["type"] == "update_check"
+
+
+# ── rant 2026-08-18T12:49:09 ③：单 daemon 准入（端口活性探测）──────────
+def test_serve_refuses_duplicate_when_daemon_alive(tmp_path):
+    """serve() must refuse to start when another emrgd is already listening.
+
+    Multi-client (GUI + TUI, possibly different installs) stale-restart
+    sequences can leave the pid file missing while an old daemon is still
+    alive — the port-file liveness probe catches this and exits cleanly
+    instead of binding a second port (observed: 4 emrg.server processes).
+    """
+    from unittest.mock import AsyncMock, patch
+
+    server = _make_server()
+    with patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=True), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock) as mock_serve:
+        import asyncio
+        asyncio.run(server.serve())
+
+    assert server._running is False, "duplicate daemon must not keep running"
+    mock_serve.assert_not_awaited(), "must not bind a second socket when one daemon is alive"
+    # no pid file written by the refused instance
+    assert not (tmp_path / "emrgd.pid").exists(), "refused instance must not claim the pid file"
+
+
+def test_serve_proceeds_when_no_live_daemon(tmp_path):
+    """Negative path: no live daemon on the port file → the admission probe
+    must NOT block startup (the flow reaches the pid-file section)."""
+    from unittest.mock import AsyncMock, patch
+
+    server = _make_server()
+    with patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock,
+               side_effect=RuntimeError("abort after probe — not reached in this test")):
+        import asyncio
+        # Let the probe run but abort at the websockets bind via a side_effect
+        # on the module-level serve; the pid file write happens between the
+        # probe and the bind, proving the probe let us through.
+        try:
+            asyncio.run(server.serve())
+        except RuntimeError as e:
+            assert "abort after probe" in str(e), f"unexpected abort: {e}"
+        else:
+            raise AssertionError("expected the websockets serve abort (probe passed)")
+    assert (tmp_path / "emrgd.pid").exists(), (
+        "no-live-daemon probe must proceed to pid-file write (admission is liveness-based)")

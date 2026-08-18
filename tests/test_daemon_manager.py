@@ -8,6 +8,7 @@ emrg.client.daemon_manager.asyncio.create_subprocess_exec。
 
 import asyncio
 import json
+import signal
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -155,12 +156,78 @@ class TestCheckAndRestartIfStale:
         # started_at in the past → source mtime (1e12) > server_start
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
 
+        def fake_kill(pid, sig):
+            # liveness probe (sig=0) → old daemon already dead → no wait
+            if sig == 0:
+                raise ProcessLookupError(pid)
+
+        mock_kill.side_effect = fake_kill
+
         with patch("emrg.client.daemon_manager.get_server_path",
                    return_value=str(port_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # SIGTERM sent to pid 9999
         kill_calls = [c.args for c in mock_kill.call_args_list]
         assert any(9999 in call and call[0] == 9999 for call in kill_calls)
+        # rant 12:49:09 ②：port file cleanup happens only AFTER old pid confirmed dead
+        assert mock_cleanup.called
+
+    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
+    @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_restart_waits_until_old_pid_dead_before_cleanup(
+            self, mock_connect, mock_kill, mock_cleanup, mock_running,
+            mock_src, mock_cfg, tmp_path):
+        """rant 12:49:09 ② — old daemon takes ~0.4s to die: cleanup_server()
+        must NOT run while the old pid is still alive (multi-instance guard)."""
+        port_file = tmp_path / "emrgd.port"
+        port_file.write_text("12345\ntoken\n")
+        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+
+        probe_calls = {"n": 0}
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                probe_calls["n"] += 1
+                if probe_calls["n"] < 3:
+                    return  # still alive (no exception = process exists)
+                raise ProcessLookupError(pid)  # dies on 3rd probe
+
+        mock_kill.side_effect = fake_kill
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(port_file)):
+            asyncio.run(daemon_manager.check_and_restart_if_stale())
+        # waited ≥2 probe rounds (old pid alive → no cleanup yet), then cleanup after death
+        assert probe_calls["n"] >= 3, f"should probe liveness ≥3 times, got {probe_calls['n']}"
+        assert mock_cleanup.called
+
+    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
+    @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_restart_force_kills_stuck_old_pid(
+            self, mock_connect, mock_kill, mock_cleanup, mock_running,
+            mock_src, mock_cfg, tmp_path):
+        """rant 12:49:09 ② — old daemon never dies on SIGTERM → SIGKILL fallback,
+        and cleanup still happens after the kill."""
+        port_file = tmp_path / "emrgd.port"
+        port_file.write_text("12345\ntoken\n")
+        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+        mock_kill.side_effect = lambda pid, sig: None  # pid stays "alive" forever
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(port_file)):
+            asyncio.run(daemon_manager.check_and_restart_if_stale())
+        kill_calls = [c.args for c in mock_kill.call_args_list]
+        assert any(c[1] == signal.SIGKILL for c in kill_calls), (
+            "stuck old pid must be SIGKILLed after the SIGTERM grace window")
+        assert mock_cleanup.called
 
     @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
