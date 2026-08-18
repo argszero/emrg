@@ -1160,32 +1160,27 @@ class EmrgServer:
         what meaningful work was done this cycle, for humans to read in the
         GUI task recent-runs table. Old models / old parsing omit it → "".
 
+        Rant 2026-08-19T07:10:40 (root cause): the done frame used to carry an
+        empty ``content``, so ``completion_summary`` here was empty and the
+        memoryless LLM could not judge what happened. The done frame now
+        carries the agent's full final reply (daemon.py done broadcast), so
+        this prompt is evidence-driven: judge from the real final reply, not
+        from an empty shell. System + user messages live in
+        ``prompts/vibe_check.j2`` (same live-reload mechanism as system.j2).
+
         Raises on any failure (caller sends ``ok: false``); the scheduler
         conservatively leaves its empty-cycle counter unchanged then.
         """
-        system = (
-            "你是 EMRG 定时任务调度助手。刚完成一次定时任务「" + (task_name or "") + "」，"
-            "任务要求与最终回复摘要如下。\n"
-            "请用 JSON 严格回答（不要任何其他文字），格式：\n"
-            '{"meaningful": true|false, "recommend_slowdown": true|false, '
-            '"reason": "一句话原因", "done": "这次干了哪些有意义有价值的事"}\n'
-            "- meaningful：这轮是否对项目产生了有意义的价值（产出/提交/分析/决策/"
-            "维护动作都算；纯空转/无可做=NTE 算 false）\n"
-            "- recommend_slowdown：若本任务长期无有意义产出，是否建议降频省 token"
-            "（true=建议降低检查频率）\n"
-            "- reason：简短中文原因（给降频判断用）\n"
-            "- done：这次干了哪些有意义有价值的事（自然语言列举，如：修了 XX bug / "
-            "加了 XX 功能 / 分析了 XX；没有则空字符串）"
-        )
-        user = (
-            "任务名称：" + (task_name or "") + "\n"
-            "任务要求：" + (prompt or "")[:2000] + "\n"
-            "任务最终回复摘要：" + (completion_summary or "")[:3000]
+        template = _get_jinja_env().get_template("vibe_check.j2")
+        system = template.render(
+            task_name=task_name or "",
+            prompt=(prompt or "")[:2000],
+            completion_summary=(completion_summary or "")[:3000],
         )
         msg = await self.llm.chat(
             [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "user", "content": "请基于以上任务信息，严格按 system 中要求的 JSON 格式回答。"},
             ],
             tools=[],
         )
@@ -2411,7 +2406,7 @@ class EmrgServer:
 
                 await self._broadcast(session.session_id, {
                     "request_id": req.id,
-                    "content": "",
+                    "content": full_content or "",
                     "done": True,
                     "delta": False,
                     "session_id": session.session_id,

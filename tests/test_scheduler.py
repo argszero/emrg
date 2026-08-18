@@ -518,7 +518,8 @@ def test_evolution_handler_status_last_run_fields():
     handler._empty_cycles = 3
     st = handler.status()
     assert st["last_run_at"] == "2026-08-18T10:00:00"
-    assert st["last_cycle_summary"] == "tools-executed=24, cycle-complete"
+    # rant 2026-08-19T07:06:45: empty summary → None (no machine impact fallback)
+    assert st["last_cycle_summary"] is None
     assert st["saturation"]["empty_cycles"] == 3
     assert len(st["recent_runs"]) == 1
     r0 = st["recent_runs"][0]
@@ -1673,10 +1674,10 @@ def test_evolution_cycle_complete_agent_says_meaningful_resets_streak(tmp_path):
     assert log.tool_count == 0
 
 
-def test_evolution_cycle_log_summary_falls_back_to_completion(tmp_path):
-    """Vibe check ok but missing 'done' → log.summary falls back to the first
-    line of the completion content; vibe unavailable → empty summary (never
-    crash). Rant 2026-08-18T21:32:32."""
+def test_evolution_cycle_log_summary_no_completion_fallback(tmp_path):
+    """Rant 2026-08-19T07:06:45 (host-finalized): the summary uses ONLY the
+    vibe check "done" field — NO fallback to the completion first line. Empty
+    stays empty (GUI renders "-"), never a machine/rough fallback."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Reviewed PR and posted LGTM",
          "done": True, "delta": False, "session_id": "s"},
@@ -1686,19 +1687,18 @@ def test_evolution_cycle_log_summary_falls_back_to_completion(tmp_path):
     ])
     asyncio.run(handler._run_evolution_cycle())
     log = captured["log"]
-    assert log.summary == "Reviewed PR and posted LGTM", \
-        "missing done → completion first line fallback"
+    assert log.summary == "", \
+        "missing done → summary stays empty (no completion fallback)"
     assert log.meaningful is True
 
-    # vibe check entirely unavailable → summary falls back to the first line
-    # of the completion content (per rant design), flags None/False
+    # vibe check entirely unavailable → summary stays empty, flags None/False
     handler2, captured2 = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ])
     asyncio.run(handler2._run_evolution_cycle())
     log2 = captured2["log"]
-    assert log2.summary == "Done", "vibe unavailable → completion first line fallback"
+    assert log2.summary == "", "vibe unavailable → summary stays empty (no fallback)"
     assert log2.meaningful is None
     assert log2.recommend_slowdown is False
     assert log2.tool_count == 0
