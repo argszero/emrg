@@ -168,25 +168,51 @@ async def check_and_restart_if_stale() -> None:
                 logger.info(
                     "%s, restarting (old pid=%d)", restart_reason, server_pid,
                 )
-                # Kill old server: SIGTERM first, SIGKILL if still alive
+                # Kill old server: SIGTERM first, SIGKILL if still alive.
+                # ⚠️ (rant 2026-08-18T12:49:09 ②) The old daemon must be TRULY
+                # dead before the port file is removed and a new daemon spawns.
+                # Previously cleanup_server() deleted the port file BEFORE the
+                # wait, so is_running() (a port-file probe) returned False
+                # instantly and a new daemon spawned while the old one was still
+                # shutting down → multiple emrg.server instances on different
+                # ports. Wait on the old PID itself (POSIX os.kill(pid,0) probe),
+                # then remove the port file only after it is gone.
                 try:
                     os.kill(server_pid, signal.SIGTERM)
                 except (ProcessLookupError, OSError):
                     pass
-                cleanup_server()
-                # Wait for old server to die
-                for _ in range(10):
+
+                def _old_pid_alive() -> bool:
+                    if sys.platform == "win32":
+                        # os.kill(pid, 0) would TerminateProcess on Windows —
+                        # never use it as a liveness probe. Windows SIGTERM is
+                        # an immediate hard kill, so the port probe suffices.
+                        return is_running()
+                    try:
+                        os.kill(server_pid, 0)
+                        return True
+                    except ProcessLookupError:
+                        return False
+                    except OSError:
+                        return True  # EPERM → process exists
+
+                for _ in range(50):  # up to 10s for graceful shutdown
                     await asyncio.sleep(0.2)
-                    if not is_running():
+                    if not _old_pid_alive():
                         break
                 else:
                     # SIGTERM didn't work — force kill
                     logger.warning("old daemon (pid=%d) didn't die, sending SIGKILL", server_pid)
                     try:
                         os.kill(server_pid, signal.SIGKILL)
-                        await asyncio.sleep(0.3)
                     except (ProcessLookupError, OSError):
                         pass
+                    for _ in range(10):  # up to 2s for SIGKILL to land
+                        await asyncio.sleep(0.2)
+                        if not _old_pid_alive():
+                            break
+                # Old daemon is gone — now safe to remove its port file
+                cleanup_server()
     except (ConnectionRefusedError, FileNotFoundError, OSError, json.JSONDecodeError,
             asyncio.TimeoutError, ConnectionClosed):
         # G129 (rant 2026-08-09T08:03:46): only genuinely transient connection

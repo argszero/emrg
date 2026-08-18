@@ -29,7 +29,7 @@ from websockets.exceptions import ConnectionClosed
 
 from emrg._win import win32_no_window_kwargs
 from emrg.config import LlmConfig, config_dir
-from emrg.connect import cleanup_server
+from emrg.connect import cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.llm import LlmClient
 from emrg.server.git_utils import (
@@ -213,6 +213,27 @@ class EmrgServer:
         # ── PID file: prevent duplicate daemon instances ───
         runtime_dir = config_dir()
         pid_file = runtime_dir / "emrgd.pid"
+
+        # ── Single-instance admission: port-file liveness probe ───
+        # (rant 2026-08-18T12:49:09 ③) Multiple resident clients (GUI + TUI,
+        # possibly different installs) each spawn/restart the daemon on their
+        # own schedule; stale-restart sequences can leave the pid file missing
+        # while an old daemon is still alive, so the pid-file check alone lets
+        # a second instance start (observed: 4 emrg.server processes
+        # coexisting on different ports). Probe the port file first — if a
+        # live daemon already answers, do NOT start a duplicate.
+        try:
+            if is_server_running_sync(timeout=1.0):
+                logger.error(
+                    "another emrgd instance is already listening (port file %s) — "
+                    "refusing to start a duplicate (single-instance admission)",
+                    runtime_dir / "emrgd.port",
+                )
+                self._running = False
+                return
+        except Exception:
+            logger.debug("single-instance port probe failed — continuing startup", exc_info=True)
+
         try:
             # Atomic create — fails if file already exists
             fd = os.open(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
