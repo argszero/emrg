@@ -47,6 +47,43 @@ class Markdown(Widget):
         return lines
 
 
+class UserMarkdown(Markdown):
+    """User message rendered as markdown with the role prefix preserved.
+
+    Plan B (rant 2026-08-18T18:52:45, superseding 18:50:14): user messages
+    go through the same Rich markdown pipeline as assistant messages — free
+    width-based wrapping, CJK wide-char handling — while keeping the
+    ``> `` prefix + bold cyan role visual. The markdown is rendered at
+    ``ctx.width - len(prefix)`` so the prefix on the first line never
+    overflows the buffer width (continuation lines get a same-width indent).
+    """
+
+    _ROLE_PREFIX = "> "
+    _ROLE_STYLE = "bold cyan"
+
+    def render(self, ctx: RenderContext) -> list[Line]:
+        from rich.style import Style
+
+        from emrg.client.python_tui.rich_bridge import rich_renderable_to_lines
+        from emrg.client.python_tui.widgets.base import Span
+
+        prefix = self._ROLE_PREFIX
+        indent = " " * len(prefix)
+        role_style = Style.parse(self._ROLE_STYLE)
+        avail = max(1, ctx.width - len(prefix))
+
+        md = RichMarkdown(self.text, code_theme="monokai")
+        md_lines = rich_renderable_to_lines(md, avail)
+        lines: list[Line] = []
+        for i, line in enumerate(md_lines):
+            lead = prefix if i == 0 else indent
+            line.spans.insert(0, Span(text=lead, style=role_style))
+            line.style = ctx.style
+            lines.append(line)
+        self._dirty = False
+        return lines
+
+
 @dataclass
 class StreamingMarkdown(Widget):
     """Incremental markdown renderer for token-by-token streaming.

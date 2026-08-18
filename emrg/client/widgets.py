@@ -10,7 +10,7 @@ from rich.cells import cell_len
 from rich.style import Style
 from emrg.client.python_tui import ChatRow, ToolCard
 from emrg.client.python_tui.widgets.base import Line, Span, Widget
-from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
+from emrg.client.python_tui.widgets.markdown import StreamingMarkdown, UserMarkdown
 
 
 class InputWidget(Widget):
@@ -670,6 +670,11 @@ class ChatHistory(Widget):
     def add(self, role_or_widget, content=None):
         if isinstance(role_or_widget, Widget):
             self.rows.append(role_or_widget)
+        elif role_or_widget == "user":
+            # Plan B (rant 2026-08-18T18:52:45, superseding 18:50:14): user
+            # messages render as markdown (free width wrap, CJK handling)
+            # while keeping the "> " prefix + cyan role visual.
+            self.rows.append(UserMarkdown(content or ""))
         else:
             self.rows.append(ChatRow(role=role_or_widget, content=content or ""))
         self._line_cache.append(None)  # 新 row 无缓存
@@ -690,6 +695,11 @@ class ChatHistory(Widget):
         for row in reversed(self.rows):
             if isinstance(row, ChatRow):
                 row.content = content
+                row.dirty = True
+                self._dirty = True
+                return
+            if isinstance(row, UserMarkdown):
+                row.text = content
                 row.dirty = True
                 self._dirty = True
                 return

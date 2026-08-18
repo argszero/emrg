@@ -158,23 +158,24 @@ def test_stop_all_py_deletefile_semantic_lock_probe():
     assert "GENERIC_READ = 0x80000000" not in content  # 旧常量赋值已移除
     assert "SetFileInformationByHandle" in content
     assert "FILE_DISPOSITION_INFO = 2" in content
-    # 自锁防护（rant 2026-08-18T16:09:45）：开头打印 python-dist 运行时 + 兜底
-    # WARNING（lock holder 是 stop_all 自身 → 提示重跑安装器）
+    # 自锁防护（rant 2026-08-18T16:09:45，18:57:09 改为提示性）：开头打印
+    # python-dist 运行时 + verify 对 self-held 锁不中止安装（stop_all 退出即释放）
     assert "python-dist runtime:" in content
-    assert "lock holder is the stop_all runtime itself" in content
-    assert "re-run installer (fresh process won't hold the lock)" in content
+    assert "self-held" in content
+    assert "installer continues" in content
+    assert "re-run installer (fresh process won't hold the lock)" not in content  # 旧文案已移除
 
 
 def test_stop_all_py_rm_no_external_owner_flag():
     """rant 2026-08-18T16:09:45 — _print_rm_diag 记录"无外部 owner"证据。
 
     RM owners==0 或全部 owner 被祖先链排除 → _rm_no_external_owner=True，
-    stop_all 重试循环后据此输出自锁 WARNING 并 exit 1。
+    stop_all 重试循环后据此输出自锁提示（18:57:09 改为 advisory，不再 exit 1）。
     """
     content = _read("emrg/_stop_all.py")
     assert "_rm_no_external_owner" in content
     assert 'd["owners"] == 0 or "owner(s) excluded" in stdout' in content
-    assert "re-run installer (fresh process won't hold the lock)" in content
+    assert "installer continues" in content
 
 
 def test_stop_all_py_module_holder_enumeration():
@@ -212,9 +213,10 @@ def test_stop_all_py_module_holder_enumeration():
     assert '"RM re-scan", rm' in verify_src
     assert verify_src.index('"module-holder"') < verify_src.index('"RM re-scan"')
     assert "install-module holder" in verify_src
-    # 自锁兜底：外部 module-holder 与 RM owner 都无 → WARNING
+    # 自锁兜底：外部 module-holder 与 RM owner 都无 → 提示性 WARNING（18:57:09
+    # 改为 advisory —— stop_all 退出即释放，安装继续）
     assert "_module_holder_external_found" in content
-    assert "no external module-holder / RM owner" in content
+    assert "installer continues" in content
     # createfile-probe 降级为补充（CreateFileW 探测对 DLL 模块锁假阴性）
     assert "createfile-probe" in content
     assert "module locks need the module-holder scan" in content
@@ -302,3 +304,73 @@ def test_agent_md_no_stop_emrg_cmd_refs():
     """No stale stop-emrg.cmd references in docs."""
     for rel in ("README.md", "README.cn.md", "Agent.md"):
         assert "stop-emrg.cmd" not in _read(rel), rel
+
+
+def test_classify_locked_files_self_held_only():
+    """rant 2026-08-18T18:57:09 — python-dist DLLs locked by stop_all's own
+    runtime (module-holder tag=excluded) are self-held → NOT residuals."""
+    from emrg._stop_all import _classify_locked_files
+
+    root = "C:\\Users\\x\\.emrg\\install"
+    locked = [
+        root + "\\bin\\python-dist\\python313.dll",
+        root + "\\bin\\python-dist\\select.pyd",
+    ]
+    holders = [
+        (11572, "python.exe", "python-dist", 1,
+         ["bin/python-dist/python313.dll", "bin/python-dist/select.pyd"], "excluded"),
+    ]
+    self_held, residual = _classify_locked_files(locked, holders, root)
+    assert sorted(self_held) == ["bin/python-dist/python313.dll", "bin/python-dist/select.pyd"]
+    assert residual == []
+
+
+def test_classify_locked_files_external_holder_residual():
+    """A locked file held by an EXTERNAL (target) module-holder stays residual."""
+    from emrg._stop_all import _classify_locked_files
+
+    root = "C:\\Users\\x\\.emrg\\install"
+    locked = [root + "\\lib\\websockets\\speedups.cp313-win_amd64.pyd"]
+    holders = [
+        (9280, "python.exe", "browser_harness", 9556,
+         ["lib/websockets/speedups.cp313-win_amd64.pyd"], "target"),
+    ]
+    self_held, residual = _classify_locked_files(locked, holders, root)
+    assert self_held == []
+    assert residual == ["lib/websockets/speedups.cp313-win_amd64.pyd"]
+
+
+def test_classify_locked_files_unattributable_residual_conservative():
+    """A locked file with NO known module-holder stays residual (conservative —
+    could be a plain non-DLL lock held by an external process)."""
+    from emrg._stop_all import _classify_locked_files
+
+    root = "C:\\Users\\x\\.emrg\\install"
+    locked = [root + "\\bin\\some-data-file.dat"]
+    self_held, residual = _classify_locked_files(locked, [], root)
+    assert self_held == []
+    assert residual == ["bin/some-data-file.dat"]
+
+
+def test_classify_locked_files_mixed():
+    """Mixed: self-held python-dist + external pyd + unattributable data."""
+    from emrg._stop_all import _classify_locked_files
+
+    root = "C:\\Users\\x\\.emrg\\install"
+    locked = [
+        root + "\\bin\\python-dist\\python313.dll",
+        root + "\\lib\\websockets\\speedups.cp313-win_amd64.pyd",
+        root + "\\bin\\data.dat",
+    ]
+    holders = [
+        (11572, "python.exe", "python-dist", 1,
+         ["bin/python-dist/python313.dll"], "excluded"),
+        (9280, "python.exe", "browser_harness", 9556,
+         ["lib/websockets/speedups.cp313-win_amd64.pyd"], "target"),
+    ]
+    self_held, residual = _classify_locked_files(locked, holders, root)
+    assert self_held == ["bin/python-dist/python313.dll"]
+    assert sorted(residual) == [
+        "bin/data.dat",
+        "lib/websockets/speedups.cp313-win_amd64.pyd",
+    ]
