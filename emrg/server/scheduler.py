@@ -285,24 +285,6 @@ class TaskHandler:
         # _ensure_origin_reachable) — avoids re-probing every cycle.
         self._origin_probed = False
 
-    def _get_git_head(self) -> str | None:
-        """Return current git HEAD hash, or None if not a git repo."""
-        try:
-            result = subprocess.run(
-                [self._git_exe, "rev-parse", "HEAD"],
-                cwd=self._source_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=no_prompt_env(),
-                **win32_no_window_kwargs(),
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return None
-
     # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──
     #
     # Packaged installs run the daemon from ~/.emrg/install/source/emrg — a
@@ -771,51 +753,6 @@ class TaskHandler:
             "saturation": saturation,
         }
 
-    def _remote_advanced(self) -> bool:
-        """True if origin/master differs from the local HEAD (new upstream work).
-
-        A saturation-halted handler never runs scheduled cycles, so it can
-        never detect a HEAD change on its own — only a manual /trigger
-        could resume it. If every instance halted during an idle stretch,
-        new upstream work (PRs/commits from other instances or the host)
-        would go unnoticed indefinitely. This cheap check (one ``git
-        ls-remote`` — no fetch, no working-tree mutation) lets the halt
-        auto-resume on genuine upstream activity.
-        """
-        try:
-            local = self._get_git_head()
-            if not local:
-                return False
-            result = subprocess.run(
-                [self._git_exe, "-c", "http.connectTimeout=4", "ls-remote", "origin", "master"],
-                cwd=self._source_dir,
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=no_prompt_env(),
-                **win32_no_window_kwargs(),
-            )
-            if result.returncode != 0:
-                # https github.com may be blocked while SSH port 22 works —
-                # retry with the SSH form of the origin before giving up.
-                ssh_url = https_to_ssh_url(git_origin_url(self._source_dir))
-                if ssh_url and is_git_connection_error(result.stderr):
-                    result = subprocess.run(
-                        [self._git_exe, "ls-remote", ssh_url, "master"],
-                        cwd=self._source_dir,
-                        capture_output=True,
-                        text=True,
-                        timeout=15,
-                        env=no_prompt_env(),
-                        **win32_no_window_kwargs(),
-                    )
-            if result.returncode != 0:
-                return False
-            remote = result.stdout.strip().split()
-            return bool(remote) and remote[0] != local
-        except Exception:
-            return False
-
     def _heartbeat_interval(self) -> int:
         """Low-frequency heartbeat interval (rant 2026-08-09T09:35:55):
         heartbeat = max(task_interval, min(task_interval * 8, 8 hours)).
@@ -847,19 +784,12 @@ class TaskHandler:
 
         Replaces the old complete saturation halt (rant 2026-08-09T09:35:55):
         at/above the empty-cycle threshold the handler keeps running full
-        cycles, just at a reduced cadence — never skipping. Upstream advance
-        auto-resumes (counter reset, normal frequency), so a saturated handler
-        does not miss new work forever.
+        cycles, just at a reduced cadence — never skipping. Saturation
+        judgment depends ONLY on the empty-cycle count (rant 2026-08-18T20:32:07):
+        no upstream network check — recovery happens naturally when a cycle
+        produces output and the empty counter resets.
         """
         if self._empty_cycles < self._saturation_threshold():
-            return False
-        if self._remote_advanced():
-            logger.info(
-                "TaskHandler[%s]: upstream advanced — resuming normal frequency from saturation",
-                self.name,
-            )
-            self._empty_cycles = 0
-            self._save_saturation_state()
             return False
         logger.info(
             "TaskHandler[%s]: saturation (%d empty cycles) — "
