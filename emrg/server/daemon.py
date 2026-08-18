@@ -2221,6 +2221,7 @@ class EmrgServer:
 
             # Streaming call to LLM
             content_parts: list[str] = []
+            reasoning_parts: list[str] = []  # think block, llm.jsonl only (rant 2026-08-18T09:43:23)
             tc_by_index: dict[int, dict] = {}
             final_finish = None
             final_usage: dict | None = None
@@ -2241,6 +2242,13 @@ class EmrgServer:
                             "delta": True,
                             "session_id": session.session_id,
                         })
+
+                    # Accumulate reasoning (think) — NOT broadcast, NOT persisted
+                    # into session messages; only lands in the llm.jsonl response
+                    # record via _log_llm_exchange (rant 2026-08-18T09:43:23).
+                    r = delta.get("reasoning")
+                    if r:
+                        reasoning_parts.append(r)
 
                     # Track accumulated tool calls for finalization
                     tcs = delta.get("tool_calls")
@@ -2280,6 +2288,7 @@ class EmrgServer:
                 return
 
             full_content = "".join(content_parts)
+            full_reasoning = "".join(reasoning_parts) or None
             logger.debug("round %d finish: %s, tool_calls=%d, content_len=%d",
                          round_num, final_finish, len(tc_by_index), len(full_content))
 
@@ -2289,6 +2298,7 @@ class EmrgServer:
                 self._log_llm_exchange(
                     session, [dict(m) for m in messages], tools_openai,
                     full_content, final_finish, final_usage,
+                    reasoning=full_reasoning,
                 )
 
                 # Persist assistant message
@@ -2340,6 +2350,7 @@ class EmrgServer:
                                       "arguments": tc.get("function", {}).get("arguments", "")}}
                         for tc in tool_calls
                     ],
+                    reasoning=full_reasoning,
                 )
 
                 # Build the assistant message with tool_calls
@@ -2473,6 +2484,7 @@ class EmrgServer:
             self._log_llm_exchange(
                 session, [dict(m) for m in messages], tools_openai,
                 full_content, final_finish, final_usage,
+                reasoning=full_reasoning,
             )
 
             session.append_message({
@@ -2514,11 +2526,16 @@ class EmrgServer:
         self, session: Session, messages, tools,
         content: str, finish_reason: str = "stop",
         usage=None, tool_calls=None,
+        reasoning: str | None = None,
     ) -> None:
         """Log a complete LLM request/response exchange to the session.
 
         Centralizes the identical append_llm patterns from _run_tool_loop,
         ensuring consistent logging format.
+
+        ``reasoning`` (rant 2026-08-18T09:43:23) is written ONLY into the
+        response record (when the model produced a think block); the request
+        record stays untouched so llm.jsonl history/context is not bloated.
         """
         session.append_llm({
             "type": "request",
@@ -2538,6 +2555,8 @@ class EmrgServer:
             response["usage"] = usage
         if tool_calls is not None:
             response["tool_calls"] = tool_calls
+        if reasoning is not None:
+            response["reasoning"] = reasoning
         session.append_llm(response)
 
     # ── Token estimation helpers ──────────────────────────────
