@@ -42,13 +42,15 @@ def test_stop_all_py_covers_daemon_gui_tui_git_verify():
     assert '"taskkill", "/IM", "EMRG.exe"' in content
     assert '"taskkill", "/F", "/IM", "EMRG.exe"' in content
     assert content.index('"/IM", "EMRG.exe"') < content.index('"/F", "/IM", "EMRG.exe"')
-    # TUI：CIM 命令行过滤 python.exe|pythonw.exe，排除 emrg.server
-    assert r"python(\\.exe|w\\.exe)?" in content
+    # TUI：CIM 命令行过滤 python 解释器镜像（python.exe|pythonw.exe|python3.13.exe
+    # 等版本化启动器，_WIN_PY_NAME_RE 宽松匹配），排除 emrg.server
+    assert "_WIN_PY_NAME_RE" in content
+    assert r'^python.*\.exe$' in content
     assert r"-notmatch 'emrg\\.server'" in content
     # 调用方自身 PID 排除（`emrg stop` CLI 本身匹配 -m emrg 过滤，会自杀于
     # stop_bundled_git + verify 之前 — pm25coder #811 review finding 1）
     assert r"$_.ProcessId -ne {own}" in content
-    assert ".format(own=own)" in content
+    assert ".format(own=own, name_re=_WIN_PY_NAME_RE)" in content
     # bundled git：install\\git\\ 前缀（系统 Git 永不命中）
     assert r'\"$env:USERPROFILE\\.emrg\\install\\git\\*\"' in content
     assert "stop_bundled_git" in content
@@ -74,10 +76,12 @@ def test_stop_all_py_cmdline_scan_fallback():
     兜底（cmdline 是唯一可靠身份），daemon 步与 verify 步都接入。
     """
     content = _read("emrg/_stop_all.py")
-    # 扫描辅助：python.exe|pythonw.exe + CommandLine 匹配 -m emrg（含 emrg.server），
-    # 排除自身；不排除 emrg.server（那是 stop_tui 的盲区）
+    # 扫描辅助：python 解释器镜像（_WIN_PY_NAME_RE 宽松匹配版本化启动器）
+    # + CommandLine 匹配 -m emrg（含 emrg.server），排除自身；不排除
+    # emrg.server（那是 stop_tui 的盲区）
     assert "def _scan_windows_python_emrg" in content
-    assert r"python(\\.exe|w\\.exe)?" in content
+    assert "_WIN_PY_NAME_RE" in content
+    assert r'^python.*\.exe$' in content
     assert r"-match '-m emrg'" in content
     assert "Write-Output $_.ProcessId" in content
     assert "emrg\\.server" not in content  # 绝不能 -notmatch emrg.server
