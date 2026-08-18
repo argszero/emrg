@@ -19,6 +19,7 @@ import platform
 import re
 import secrets
 import signal
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -142,6 +143,56 @@ def _get_jinja_env() -> "jinja2.Environment":
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
 
+def _find_emrg_server_processes(own_pid: int) -> list[int]:
+    """Return PIDs of other live ``emrg.server`` daemon processes.
+
+    Host rant 2026-08-18T22:15:04 (process-name detection, host's chosen root
+    fix for the dual-instance restart storm): pid/port files can be missing,
+    stale, or mismatched (GUI spawn, crash restart, #593 family), so the
+    single-instance gate must ask the OS "is an earlier emrg.server already
+    alive?" and refuse to start if so. The process name is the ground truth —
+    the port file is not (observed 22:04: pids 23863/23864 coexisting while
+    the port file pointed at only one).
+    """
+    pids: list[int] = []
+    try:
+        if platform.system() == "Windows":
+            # PowerShell CIM scan (same contract as
+            # _stop_all._scan_windows_python_emrg — literal braces escaped).
+            ps_cmd = (
+                "Get-CimInstance Win32_Process | "
+                "Where-Object {{ $_.ProcessId -ne {own} -and "
+                "$_.Name -match 'python' -and "
+                "$_.CommandLine -match '-m emrg\\.server' }} | "
+                "ForEach-Object {{ Write-Output $_.ProcessId }}"
+            ).format(own=own_pid)
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_cmd],
+                capture_output=True, text=True, timeout=10, **win32_no_window_kwargs(),
+            ).stdout
+        else:
+            out = subprocess.run(
+                ["ps", "-axo", "pid=,command="],
+                capture_output=True, text=True, timeout=10,
+            ).stdout
+            for line in out.splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) != 2:
+                    continue
+                try:
+                    pid = int(parts[0])
+                except ValueError:
+                    continue
+                if pid == own_pid:
+                    continue
+                # daemon cmdline: `python -m emrg.server` (installed python or
+                # uv run) — match the module path only (TUI is `-m emrg`).
+                if "-m emrg.server" in parts[1] or "emrg/server" in parts[1]:
+                    pids.append(pid)
+        return pids
+    except (OSError, subprocess.SubprocessError, TimeoutError):
+        logger.debug("process-name scan failed — falling back to port probe", exc_info=True)
+        return []
 
 
 class EmrgServer:
@@ -210,17 +261,37 @@ class EmrgServer:
         """Start listening for IPC connections (platform-adaptive)."""
         self._running = True
 
+        # ── Single-instance admission: process-name detection (PRIMARY) ───
+        # (host rant 2026-08-18T22:15:04 — root fix for the dual-instance
+        # restart storm) pid/port files are unreliable (missing/stale/
+        # mismatched → two emrg.server processes coexisting, observed 22:04
+        # pids 23863/23864), so first ask the OS: if an earlier emrg.server
+        # process is already alive, THIS new instance exits itself — never
+        # force-kill the old one (that is what caused the restart storm).
+        try:
+            existing = _find_emrg_server_processes(os.getpid())
+        except Exception:
+            existing = []
+        if existing:
+            logger.error(
+                "another emrg.server process(es) already running (pids %s) — "
+                "new instance exiting itself (process-name admission)",
+                existing,
+            )
+            self._running = False
+            return
+
         # ── PID file: prevent duplicate daemon instances ───
         runtime_dir = config_dir()
         pid_file = runtime_dir / "emrgd.pid"
 
-        # ── Single-instance admission: port-file liveness probe ───
+        # ── Single-instance admission (secondary): port-file liveness probe ───
         # (rant 2026-08-18T12:49:09 ③) Multiple resident clients (GUI + TUI,
         # possibly different installs) each spawn/restart the daemon on their
         # own schedule; stale-restart sequences can leave the pid file missing
         # while an old daemon is still alive, so the pid-file check alone lets
         # a second instance start (observed: 4 emrg.server processes
-        # coexisting on different ports). Probe the port file first — if a
+        # coexisting on different ports). Probe the port file next — if a
         # live daemon already answers, do NOT start a duplicate.
         try:
             if is_server_running_sync(timeout=1.0):
@@ -246,31 +317,19 @@ class EmrgServer:
                 old_pid_s = pid_file.read_text(encoding="utf-8").strip()
                 old_pid = int(old_pid_s)
                 os.kill(old_pid, 0)
-                # Old process is alive — but is its port file still there?
-                port_path = runtime_dir / "emrgd.port"
-                if not port_path.exists():
-                    # Port file gone → zombie daemon, force-kill and take over
-                    logger.warning(
-                        "old daemon (pid=%d) alive but port file gone — force-killing", old_pid
-                    )
-                    os.kill(old_pid, signal.SIGKILL)
-                    try:
-                        os.waitpid(old_pid, 0)
-                    except ChildProcessError:
-                        pass
-                    pid_file.unlink()
-                    fd = os.open(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    os.write(fd, str(os.getpid()).encode())
-                    os.close(fd)
-                    logger.debug("pid file written: %s (pid=%d)", pid_file, os.getpid())
-                else:
-                    logger.error(
-                        "emrgd already running (pid=%d). "
-                        "Stop it first or remove %s if stale.",
-                        old_pid, pid_file,
-                    )
-                    self._running = False
-                    return
+                # Old process is alive. Host rant 2026-08-18T22:15:04: a new
+                # instance NEVER force-kills the old one (that takeover path
+                # caused the 22:04 dual-instance restart storm) — it exits
+                # itself. The process-name scan above already refused when an
+                # emrg.server cmdline was found; this pid-file branch is the
+                # fallback for a live-but-scan-missed process.
+                logger.error(
+                    "emrgd already running (pid=%d). "
+                    "Stop it first (emrg server stop) — new instance exiting itself.",
+                    old_pid,
+                )
+                self._running = False
+                return
             except (ValueError, OSError):
                 # Stale PID file — remove and retry
                 logger.warning("stale pid file (pid %s gone), removing", old_pid_s)

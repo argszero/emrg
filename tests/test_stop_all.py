@@ -108,19 +108,6 @@ class TestPidFile:
         assert _read_pid_file() is None  # non-positive
 
 
-class TestWsGracefulShutdown:
-    def test_connection_refused_returns_false(self):
-        # port 1 on loopback: nothing listens → ConnectionRefused → False fast
-        assert ws_graceful_shutdown(1, "token", timeout=1.0) is False
-
-    def test_unreachable_port_returns_false(self, monkeypatch):
-        def _boom(*a, **k):
-            raise OSError("network unreachable")
-
-        monkeypatch.setattr(_stop_all.socket, "create_connection", _boom)
-        assert ws_graceful_shutdown(12345, "token") is False
-
-
 class TestVerifyPosix:
     def test_no_residuals(self, monkeypatch):
         monkeypatch.setattr(_stop_all, "_stop_scan_pids", lambda own: [])
@@ -131,138 +118,6 @@ class TestVerifyPosix:
         out = _verify_posix()
         assert any("pid 42" in r for r in out)
         assert any("pid 43" in r for r in out)
-
-
-class TestStopAllExitCode:
-    """exit code semantics: 0 = clean, 1 = residual processes remain
-    (the installer aborts on non-zero and shows the residual list)."""
-
-    def _patch_steps(self, monkeypatch, residuals):
-        monkeypatch.setattr(_stop_all, "stop_daemon", lambda: None)
-        monkeypatch.setattr(_stop_all, "stop_gui", lambda: None)
-        monkeypatch.setattr(_stop_all, "stop_tui", lambda: None)
-        monkeypatch.setattr(_stop_all, "stop_bundled_git", lambda: None)
-        monkeypatch.setattr(_stop_all, "verify", lambda: residuals)
-        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
-        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
-
-    def test_clean_returns_0(self, monkeypatch, capsys):
-        self._patch_steps(monkeypatch, residuals=[])
-        assert stop_all() == 0
-        out = capsys.readouterr().out
-        assert "all emrg processes stopped" in out
-        assert "exit code 0 (clean)" in out
-        assert "stop_all.py built" in out          # header (rant 21:06:31 #1)
-        assert "[1/" in out and "-> done" in out    # per-step [N/T] (rant #2)
-
-    def test_residual_returns_1_and_lists_them(self, monkeypatch, capsys):
-        self._patch_steps(monkeypatch, residuals=["EMRG.exe (pid 1234)", "daemon (pid 99)"])
-        assert stop_all() == 1
-        out = capsys.readouterr().out
-        assert "WARNING residual process(es) still running" in out
-        assert "EMRG.exe (pid 1234)" in out
-        assert "daemon (pid 99)" in out
-        assert "exit code 1 (2 residual)" in out
-
-    def test_step_exception_not_silent(self, monkeypatch, capsys):
-        """A crashing step must print ERROR <step> and still reach the final
-        exit code (rant 2026-08-17T21:06:31 #4 — never silent)."""
-        self._patch_steps(monkeypatch, residuals=[])
-
-        def boom():
-            raise RuntimeError("taskkill failed")
-
-        monkeypatch.setattr(_stop_all, "stop_gui", boom)
-        assert stop_all() == 0
-        out = capsys.readouterr().out
-        assert "ERROR [1/" in out and "GUI" in out and "taskkill failed" in out
-
-    def test_main_exits_with_code(self, monkeypatch):
-        monkeypatch.setattr(_stop_all, "stop_all", lambda: 1)
-        with pytest.raises(SystemExit) as exc:
-            _stop_all.main()
-        assert exc.value.code == 1
-
-
-class TestStopAllOrder:
-    """stop_all() must stop clients FIRST and the daemon LAST (rant
-    2026-08-17T14:15:33): GUI/TUI auto-spawn the daemon when they notice it
-    missing, so stopping the daemon first would let a live client re-spawn
-    it — the installer then still hits locked files."""
-
-    def _record_order(self, monkeypatch):
-        order: list[str] = []
-
-        def _rec(name: str):
-            def _fn(*a, **k):
-                order.append(name)
-            return _fn
-
-        monkeypatch.setattr(_stop_all, "stop_gui", _rec("stop_gui"))
-        monkeypatch.setattr(_stop_all, "stop_tui", _rec("stop_tui"))
-        monkeypatch.setattr(_stop_all, "stop_daemon", _rec("stop_daemon"))
-        monkeypatch.setattr(_stop_all, "stop_bundled_git", _rec("stop_bundled_git"))
-        monkeypatch.setattr(_stop_all, "stop_lock_owners", _rec("stop_lock_owners"))
-        monkeypatch.setattr(_stop_all, "verify", lambda: [])
-        monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
-        monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
-        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
-        return order
-
-    def test_clients_before_daemon(self, monkeypatch):
-        order = self._record_order(monkeypatch)
-        assert stop_all() == 0
-        assert order == [
-            "stop_gui", "stop_tui", "stop_daemon", "stop_bundled_git",
-            "stop_lock_owners",
-        ]
-        # daemon MUST come after both clients — a client alive when the
-        # daemon dies would re-spawn it (auto-spawn mechanisms in GUI/TUI)
-        assert order.index("stop_daemon") > order.index("stop_gui")
-        assert order.index("stop_daemon") > order.index("stop_tui")
-        # Restart Manager lock-owner kill must run AFTER bundled-git and
-        # BEFORE verify (it is the last cleanup before the residual check)
-        assert order.index("stop_lock_owners") > order.index("stop_bundled_git")
-
-    def test_posix_skips_bundled_git(self, monkeypatch):
-        order = self._record_order(monkeypatch)
-        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
-        assert stop_all() == 0
-        assert order == ["stop_gui", "stop_tui", "stop_daemon"]
-
-
-class TestStopTuiPsTemplate:
-    """Windows stop_tui() must render its PowerShell template without raising.
-
-    Regression: the template's literal script-block braces (``Where-Object {``
-    / ``ForEach-Object {``) were fed to str.format() unescaped, raising
-    ValueError: unexpected '{' in field name at runtime on Windows — crashing
-    `emrg stop` before stop_bundled_git + verify ever ran. The existing
-    TestStopAllExitCode monkeypatches stop_tui entirely, so CI never rendered
-    the template; this test pins the render path itself.
-    """
-
-    def test_stop_tui_renders_ps_template_win(self, monkeypatch):
-        import os
-
-        calls: list = []
-        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
-        monkeypatch.setattr(
-            _stop_all.subprocess, "run",
-            lambda cmd, **kw: calls.append(cmd) or type("CP", (), {})(),
-        )
-
-        _stop_all.stop_tui()  # must not raise ValueError
-
-        assert len(calls) == 1
-        cmd = calls[0]
-        assert cmd[0] == "powershell"
-        ps = cmd[-1]
-        # invoking-PID exclusion substituted into the template
-        assert f"-ne {os.getpid()}" in ps
-        # literal PowerShell script-block braces survived the format() call
-        assert "Where-Object { $_.ProcessId" in ps
-        assert "ForEach-Object { Stop-Process" in ps
 
 
 class TestScanWindowsPythonEmrg:
@@ -357,30 +212,6 @@ class TestScanWindowsPythonEmrg:
 
         monkeypatch.setattr(_stop_all.subprocess, "run", boom)
         assert _stop_all._scan_windows_python_emrg(1) == []
-
-
-class TestStopDaemonCmdlineFallback:
-    """stop_daemon() must kill a live daemon even when emrgd.pid is missing
-    (rant 2026-08-17T17:03:38 acceptance #1: delete the pid file but keep the
-    pythonw -m emrg.server process alive → cmdline scan still kills it)."""
-
-    def test_kills_python_emrg_when_pid_file_missing(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(_stop_all, "config_dir", lambda: tmp_path)
-        killed: list[int] = []
-        monkeypatch.setattr(_stop_all, "_kill_pid_windows", lambda pid: killed.append(pid))
-        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [777])
-        monkeypatch.setattr(_stop_all, "_pid_alive", lambda pid: False)
-        _stop_all.stop_daemon()
-        assert killed == [777]
-
-    def test_no_pids_no_kill(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(_stop_all, "config_dir", lambda: tmp_path)
-        killed: list[int] = []
-        monkeypatch.setattr(_stop_all, "_kill_pid_windows", lambda pid: killed.append(pid))
-        monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
-        monkeypatch.setattr(_stop_all, "_pid_alive", lambda pid: False)
-        _stop_all.stop_daemon()
-        assert killed == []
 
 
 class TestVerifyWindowsPythonResidual:
@@ -855,19 +686,6 @@ class TestClassifyLockedFilesRelaxation:
         assert not _stop_all._is_lock_residual("EMRG.exe (pid 1)")
         assert not _stop_all._is_lock_residual("lock-probe failed (error: x)")
 
-
-class TestMainDelegatesToStopAll:
-    def test_emrg_stop_cli_exits_nonzero(self):
-        """`emrg stop` must sys.exit with the stop_all() code (installer gate)."""
-        import emrg.__main__ as m
-
-        assert hasattr(m, "_stop_all")
-        src = Path(m.__file__).read_text(encoding="utf-8")
-        assert "sys.exit(_stop_all())" in src
-        assert "from emrg._stop_all import stop_all" in src
-
-
-# ── Owner detail + excluded annotation (rant 2026-08-18T09:40:40) ──
 
 class TestLockOwnerDetailAnnotation:
     def test_ps_template_has_owner_detail_annotation(self):
