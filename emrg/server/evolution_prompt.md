@@ -265,6 +265,7 @@ Old entries without a `status` field are treated as pending.
 - **⚡ Sort constraint**: every rewrite must be ordered by `timestamp` ascending (oldest first, newest last). Do not group by category (handled/unhandled); do not change chronological order. Read all entries → modify (mark completed / delete old entries) → `sorted(..., key=lambda r: r.get("timestamp", ""))` → write
 - **⚡ Field order constraint**: each JSON line's field order MUST be `timestamp → project → status → progress → completed → message` (**message last**). Build the dict in this order and `json.dumps` preserves it. The message is long; putting it last makes manual review of status fields easier.
 - **Always write with `json.dumps(..., ensure_ascii=False)`**
+- **⚡ Unified rant tool** (rant 2026-08-18T16:42:52): all reads/writes of `~/.emrg/rants.jsonl` MUST go through the `submit_rant` tool's actions — `submit` (write new), `list` (view), `update` (mark status/progress/completed, state machine enforced), `cleanup` (keep-10 rule). **Never rewrite the file with hand-written bash/python** — the 2026-08-18 incident (format drift to array rows, field loss, history pruning) was caused by inline scripts. Curation flow: `list` → `update` → `cleanup`.
 
 When reading rants, follow these rules:
 - Any unhandled rants? Previously skipped? Large changes can be staged
