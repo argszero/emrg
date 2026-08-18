@@ -1178,7 +1178,11 @@ def _classify_locked_files(
     def _to_rel(p: str) -> str:
         n = _norm(p)
         if n.startswith(root_n + "/"):
-            return os.path.relpath(n, root_n)
+            # Normalize again: on Windows os.path.relpath() returns
+            # backslash-separated results, but the locked-file lookup keys are
+            # forward-slash — an un-normalized key would miss (external target
+            # holder misclassified as self-held on Windows).
+            return _norm(os.path.relpath(n, root_n))
         return n  # already install-relative (PS Substring / fixture form)
 
     tag_by_rel: dict[str, set[str]] = {}
