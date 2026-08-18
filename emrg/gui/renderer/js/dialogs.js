@@ -638,6 +638,19 @@ const Dialogs = (() => {
     return `${h}h${String(m).padStart(2, "0")}m`;
   }
 
+  // rant 2026-08-18T10:45:52：相对时间显示（"5m ago" / "3h ago" / 日期）——
+  // 用于任务行"上次运行"元信息。ISO 时间戳解析失败时回退为原文。
+  function formatRelativeTime(isoStr) {
+    if (!isoStr) return "";
+    const t = Date.parse(isoStr);
+    if (Number.isNaN(t)) return String(isoStr);
+    const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+    if (diffSec < 60) return `${diffSec}s ago`;
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+    if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+    return `${Math.floor(diffSec / 86400)}d ago`;
+  }
+
   function updateTaskCountdowns() {
     let expired = false;
     for (const e of taskCountdowns) {
@@ -726,6 +739,23 @@ const Dialogs = (() => {
       if (t.interval != null) hints.push(_t("app.taskInterval", { n: t.interval ?? "-" }));
       if (t.enabled === false) hints.push(_t("app.taskDisabled"));
       row.appendChild(el("span", { class: "task-hint" }, hints.join(" · ")));
+      // rant 2026-08-18T10:45:52：上次执行维度 —— 最近一次运行时间 + 摘要 + 降频（saturation）标识。
+      // 数据来自 daemon list_tasks → handler.status()（last_run_at/last_cycle_summary/saturation）。
+      const meta = el("div", { class: "task-meta" });
+      if (t.last_run_at) {
+        const runTxt = el("span", { class: "task-meta-item" }, _t("app.taskLastRun", { n: formatRelativeTime(t.last_run_at) }));
+        meta.appendChild(runTxt);
+        if (t.last_cycle_summary) {
+          meta.appendChild(el("span", { class: "task-meta-item task-meta-summary" }, _t("app.taskLastRunSummary", { n: t.last_cycle_summary })));
+        }
+      } else {
+        meta.appendChild(el("span", { class: "task-meta-item" }, _t("app.taskNoRunYet")));
+      }
+      const sat = (t.saturation && typeof t.saturation === "object") ? t.saturation : null;
+      if (sat && sat.empty_cycles > 0 && sat.heartbeat_active) {
+        meta.appendChild(el("span", { class: "task-badge task-saturation-badge" }, _t("app.taskSaturation", { n: sat.empty_cycles, m: formatCountdown(sat.heartbeat_interval) })));
+      }
+      row.appendChild(meta);
       const actions = el("span", { class: "task-actions" });
       // 触发（复用 /trigger 语义；rant 09:23:10：running 时给 info 反馈而非假成功）
       const trigBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.taskTrigger") }, _t("settings.taskTrigger"));
