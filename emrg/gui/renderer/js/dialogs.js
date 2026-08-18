@@ -639,9 +639,19 @@ const Dialogs = (() => {
   }
 
   function updateTaskCountdowns() {
+    let expired = false;
     for (const e of taskCountdowns) {
       const rem = Math.max(0, Math.ceil((e.deadline - Date.now()) / 1000));
       e.span.textContent = _t("app.taskNextRun", { n: formatCountdown(rem) });
+      // rant 2026-08-18T11:16:32：倒计时归零后任务状态不会自动更新（pending → running 永不反映到 UI）。
+      // 检测到 deadline 已过 → 重新拉取任务状态；e.expired 防止同一任务重复触发。
+      if (rem <= 0 && !e.expired) {
+        e.expired = true;
+        expired = true;
+      }
+    }
+    if (expired) {
+      renderTaskList().catch(() => {});
     }
   }
 
