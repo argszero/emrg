@@ -53,6 +53,7 @@ import socket
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 # Build stamp printed at the start of every run so the operator can tell at a
@@ -999,6 +1000,54 @@ def _pythonpath_install_warning(line: str) -> str | None:
     return None
 
 
+class _Tee:
+    """Duplicate write()/flush() to BOTH the original stdout and a log file
+    (rant 2026-08-18T11:20:54). The Inno installer redirects stop_all stdout
+    to a random temp dir ({tmp}\\stop_all.log) that is deleted when the
+    install ends or is cancelled — the tee keeps a persistent fixed-path copy
+    (~/.emrg/logs/stop_all-<ts>.log) for post-mortem forensics. All existing
+    print() calls keep working untouched (they write to sys.stdout, which is
+    replaced with a _Tee during stop_all)."""
+
+    def __init__(self, orig, f):
+        self.orig = orig
+        self.f = f
+
+    def write(self, data):
+        self.orig.write(data)
+        self.f.write(data)
+        # Crash-safe: if the installer force-kills this process mid-write,
+        # append-mode + per-write flush guarantees the fixed-path copy has
+        # everything printed so far (rant: 不依赖 finally).
+        self.f.flush()
+        return len(data)
+
+    def flush(self):
+        self.orig.flush()
+        self.f.flush()
+
+    def isatty(self):
+        return self.orig.isatty() if hasattr(self.orig, "isatty") else False
+
+    def fileno(self):
+        return self.orig.fileno()
+
+
+def _open_stop_log() -> object | None:
+    """Open the fixed-path dual-write log (rant 2026-08-18T11:20:54):
+    ``~/.emrg/logs/stop_all-YYYYMMDD-HHMMSS.log`` (local time; the timestamp
+    name makes concurrent stop_all runs naturally isolated). Returns the file
+    object or None on any failure — best-effort, never breaks the stop flow.
+    The handle closes naturally at process exit (no finally dependency)."""
+    try:
+        d = os.path.join(os.path.expanduser("~"), ".emrg", "logs")
+        os.makedirs(d, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return open(os.path.join(d, f"stop_all-{ts}.log"), "a", encoding="utf-8")
+    except OSError:
+        return None
+
+
 def _step_plan() -> list[tuple[str, object]]:
     """Ordered stop steps. Clients (GUI/TUI) FIRST, daemon LAST (rant
     2026-08-17T14:15:33): both clients auto-spawn the daemon when it
@@ -1030,6 +1079,15 @@ def stop_all() -> int:
     ``ERROR <step>: <reason>`` and the run continues to the final exit code).
     """
     t0 = time.monotonic()
+    # Dual-write log to a fixed path (rant 2026-08-18T11:20:54): the Inno
+    # {tmp} redirect vanishes when the install ends/cancels — tee a persistent
+    # copy to ~/.emrg/logs/stop_all-<ts>.log. Every print below automatically
+    # lands in both. The line is also printed so the Inno-side log and the
+    # operator both see the fixed location.
+    _log_f = _open_stop_log()
+    if _log_f is not None:
+        sys.stdout = _Tee(sys.stdout, _log_f)
+        print(f"emrg stop: log also written to {_log_f.name}")
     print(
         f"emrg stop: stop_all.py {_STOP_ALL_STAMP} | "
         f"python {platform.python_version()} {platform.system()}-{platform.machine()} "
