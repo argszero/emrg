@@ -1494,19 +1494,21 @@ def test_update_check_force_runs_fresh_check(monkeypatch):
     assert reply["type"] == "update_check"
 
 
-# ── rant 2026-08-18T12:49:09 ③：单 daemon 准入（端口活性探测）──────────
+# ── rant 2026-08-18T12:49:09 ③：单 daemon 准入（进程名 + 端口活性探测）──
 def test_serve_refuses_duplicate_when_daemon_alive(tmp_path):
     """serve() must refuse to start when another emrgd is already listening.
 
     Multi-client (GUI + TUI, possibly different installs) stale-restart
     sequences can leave the pid file missing while an old daemon is still
-    alive — the port-file liveness probe catches this and exits cleanly
-    instead of binding a second port (observed: 4 emrg.server processes).
+    alive — the process-name admission (rant 2026-08-18T22:15:04) and the
+    port-file liveness probe catch this and exit cleanly instead of binding
+    a second port (observed: 4 emrg.server processes).
     """
     from unittest.mock import AsyncMock, patch
 
     server = _make_server()
     with patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon._find_emrg_server_processes", return_value=[999]), \
          patch("emrg.server.daemon.is_server_running_sync", return_value=True), \
          patch("emrg.server.daemon.serve", new_callable=AsyncMock) as mock_serve:
         import asyncio
@@ -1525,6 +1527,7 @@ def test_serve_proceeds_when_no_live_daemon(tmp_path):
 
     server = _make_server()
     with patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon._find_emrg_server_processes", return_value=[]), \
          patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
          patch("emrg.server.daemon.serve", new_callable=AsyncMock,
                side_effect=RuntimeError("abort after probe — not reached in this test")):

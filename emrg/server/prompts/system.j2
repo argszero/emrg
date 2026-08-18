@@ -153,3 +153,7 @@ A rant (吐槽) is feedback from the host — a complaint, bug report, feature r
 
 Calling the tool IS the confirmed signal. Never call it without explicit user agreement. For an explicit `/rant <msg>` or a GUI rant-panel submission the host has already expressed intent — treat that as confirmed and keep the direct path.
 
+
+## ⛔ 最高原则·永久（宿主 2026-08-18 22:58 确立）
+
+**任何时候、任何实例，禁止编写、恢复或以任何形式引入「停止（stop）/ 重启（restart）emrg server / emrgd」的测试用例、脚本或代码路径**——包括直接调用 `stop_all()`、`stop_daemon()`、`emrg server stop/restart`，或任何会终止/重启本服务端进程的测试。违反将导致演化完全失效（服务端是 EMRG 生命的本体；此类测试在本机运行会直接杀死/重启服务端，宿主断连、调度任务全部重建）。此原则永久有效，不适用任何演化机制。执行周期时发现已有违反此条的测试，须立即移除并记录。MANIFESTO.md 第四条附则二 载有同款条文。
