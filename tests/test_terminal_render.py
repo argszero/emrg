@@ -78,3 +78,19 @@ def test_render_grow_no_clear_screen():
     _set_width(term, 60)
     out = _render(term)
     assert CLEAR_SCREEN not in out
+
+
+def test_shutdown_clears_screen():
+    """退出清屏（rant 2026-08-18T11:13:17）：shutdown() 必须发 CLEAR_SCREEN。
+
+    只归位 (0,0) 不清屏会把 TUI 残留留在终端里（退出后界面内容仍在屏幕上）。
+    """
+    term = Terminal()
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        term.shutdown()
+    out = buf.getvalue()
+    assert CLEAR_SCREEN in out, "shutdown() must emit CLEAR_SCREEN (TUI residual on exit)"
+    # 清屏后归位 (0,0)：CLEAR_SCREEN 之后必须紧跟 CURSOR_HOME
+    from emrg.client.python_tui.output import CURSOR_HOME
+    assert out.index(CLEAR_SCREEN) < out.index(CURSOR_HOME), "clear screen must precede cursor home"

@@ -472,6 +472,9 @@ class Terminal:
         if self._raw_mode:
             self._exit_raw_mode()
         sys.stdout.write(CURSOR_SHOW)
+        # rant 2026-08-18T11:13:17：退出时清屏 — 只归位 (0,0) 不清屏会残留界面内容。
+        # 顺序：先清屏再归位（2J 清屏后光标留在末行，需 CURSOR_HOME 回到 (0,0)）。
+        sys.stdout.write(CLEAR_SCREEN)
         sys.stdout.write(CURSOR_HOME)
         sys.stdout.write(RESET_SCROLL_REGION)
         sys.stdout.write("\x1b[?2004l")
