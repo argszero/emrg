@@ -157,7 +157,7 @@ async def _send_shutdown() -> bool:
         return False
 
     try:
-        await ws.send(json.dumps({"type": "shutdown"}, ensure_ascii=False))
+        await ws.send(json.dumps({"type": "shutdown", "source": "emrg server stop"}, ensure_ascii=False))
         frame = await asyncio.wait_for(ws.recv(), timeout=3)
         try:
             await ws.close()
