@@ -569,6 +569,24 @@ class Session:
         return results
 
 
+def last_n_messages(messages: list[dict], n: int) -> list[dict]:
+    """Take the last ``n`` messages of a validated LLM message list.
+
+    The list must already be OpenAI-valid (e.g. produced by
+    ``_validate_tool_messages``). Slicing a valid list can still orphan a
+    leading ``role: "tool"`` message: its matching assistant message with
+    ``tool_calls`` lies just before the window boundary, so the API rejects
+    it with "Messages with role 'tool' must be a response to a preceding
+    message with 'tool_calls'" (observed on task_vibe_check, 2026-08-19).
+    Leading orphaned tool messages are dropped; the remaining window keeps
+    its original order.
+    """
+    window = messages[-n:]
+    while window and window[0].get("role") == "tool":
+        window.pop(0)
+    return window
+
+
 def _validate_tool_messages(messages: list[dict]) -> list[dict]:
     """Post-process messages to ensure OpenAI API validity.
 

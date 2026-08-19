@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from emrg.session import Session, _validate_tool_messages, generate_session_id
+from emrg.session import (
+    Session,
+    _validate_tool_messages,
+    generate_session_id,
+    last_n_messages,
+)
 
 
 class TestValidateToolMessages:
@@ -165,6 +170,82 @@ class TestValidateToolMessages:
 
 
 # ── Session core operations ────────────────────────────────────
+
+
+class TestLastNMessages:
+    """Tests for last_n_messages — window slicing that drops boundary
+    orphans (rant 2026-08-19T19:25:56: task_vibe_check LLM 400)."""
+
+    def test_plain_window_unchanged(self):
+        """Normal window with no leading tool message passes through."""
+        msgs = [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+        ]
+        assert last_n_messages(msgs, 2) == [
+            {"role": "assistant", "content": "b"},
+            {"role": "user", "content": "c"},
+        ]
+
+    def test_leading_tool_orphan_dropped(self):
+        """A window starting with role:'tool' (its assistant lies before the
+        boundary) has the orphan dropped so the API accepts the request."""
+        msgs = [
+            {"role": "user", "content": "start"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "x", "type": "function",
+                             "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "x", "content": "out"},
+            {"role": "user", "content": "next"},
+            {"role": "assistant", "content": "final"},
+        ]
+        window = last_n_messages(msgs, 3)
+        assert window == [
+            {"role": "user", "content": "next"},
+            {"role": "assistant", "content": "final"},
+        ]
+
+    def test_consecutive_leading_tool_orphans_all_dropped(self):
+        """Multiple consecutive leading tool orphans are all dropped."""
+        msgs = [
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "x", "type": "function",
+                             "function": {"name": "bash", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "x", "content": "1"},
+            {"role": "tool", "tool_call_id": "x", "content": "2"},
+            {"role": "user", "content": "after"},
+        ]
+        window = last_n_messages(msgs, 3)
+        assert [m["role"] for m in window] == ["user"]
+
+    def test_all_tool_window_empties(self):
+        """Window of only tool orphans returns empty list (caller guards)."""
+        msgs = [
+            {"role": "tool", "tool_call_id": "x", "content": "1"},
+            {"role": "tool", "tool_call_id": "y", "content": "2"},
+        ]
+        assert last_n_messages(msgs, 2) == []
+
+    def test_reproduced_real_session_case(self):
+        """Regression: a 172-message valid history whose [-100:] slice starts
+        with role:'tool' (real aitokenpool session, 2026-08-19) must no longer
+        produce a leading tool message."""
+        hist = []
+        for i in range(172):
+            if i % 2 == 0:
+                hist.append({"role": "user", "content": f"u{i}"})
+            else:
+                hist.append({"role": "assistant", "content": None,
+                             "tool_calls": [{"id": f"t{i}", "type": "function",
+                                             "function": {"name": "bash", "arguments": "{}"}}]})
+                hist.append({"role": "tool", "tool_call_id": f"t{i}", "content": "r"})
+        # force the 100-window to start with a tool message: insert a trailing
+        # tool cluster right before position len-100 like the real history
+        hist = hist[:72] + [{"role": "tool", "tool_call_id": "orphan", "content": "o"}] + hist[72:]
+        window = last_n_messages(hist, 100)
+        assert len(window) <= 100
+        assert window[0]["role"] != "tool"
 
 
 class TestSessionCreate:

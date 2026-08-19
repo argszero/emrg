@@ -50,7 +50,7 @@ from emrg.protocol import (
     ServerPong,
     TaskRequest,
 )
-from emrg.session import Session
+from emrg.session import Session, last_n_messages
 
 # ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
 # tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
@@ -1259,7 +1259,12 @@ class EmrgServer:
                 session = Session.load(session_id, Path(cwd))
                 history = session.get_messages_for_llm()
                 if history:
-                    messages.extend(history[-100:])
+                    # Rant 2026-08-19T19:25:56 (root cause): slicing the
+                    # validated list can orphan a leading role:"tool" message
+                    # whose matching assistant(tool_calls) lies before the
+                    # window → LLM 400 "tool must follow tool_calls". Use
+                    # last_n_messages to drop window-boundary orphans.
+                    messages.extend(last_n_messages(history, 100))
             except Exception:
                 logger.warning(
                     "task_vibe_check: session history load failed (%s/%s)",
