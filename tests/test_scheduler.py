@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 import tempfile
 from pathlib import Path
@@ -18,6 +19,47 @@ from emrg.server.scheduler import (
 
 
 # ── _resolve_project_path ─────────────────────────────────────────
+
+
+def test_task_handler_logger_adapter_carries_task_column(tmp_path):
+    """Rant 2026-08-19T10:18:44: TaskHandler logs carry a dedicated `task`
+    extra (LoggerAdapter) so the daemon's Formatter can render a [task]
+    column — scheduler lines are otherwise indistinguishable in emrgd.log."""
+    from emrg.server import scheduler as mod
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        handler = TaskHandler(
+            name="emrg-task",
+            config={"project": "emrg"},
+            interval=60,
+            identity=InstanceIdentity(),
+        )
+    finally:
+        mod.config_dir = orig_config
+
+    # The per-task logger is a LoggerAdapter that injects the task name.
+    assert isinstance(handler._logger, logging.LoggerAdapter)
+    assert handler._logger.extra == {"task": "emrg-task"}
+
+    # A record emitted through it carries the `task` attribute (Formatter
+    # renders it as the [task] column; missing → "-").
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    cap = _Capture()
+    logger = logging.getLogger("emrg.server.scheduler")
+    logger.addHandler(cap)
+    try:
+        logger.setLevel(logging.DEBUG)
+        handler._logger.info("TaskHandler[%s] tick", handler.name)
+    finally:
+        logger.removeHandler(cap)
+    assert records, "expected at least one captured log record"
+    assert getattr(records[0], "task", None) == "emrg-task"
 
 
 def test_resolve_project_path_found(tmp_path):
