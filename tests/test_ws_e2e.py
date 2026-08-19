@@ -297,6 +297,74 @@ class TestWSVibeCheck:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_vibe_check_long_session_window_leading_tool_stripped(self):
+        """Rant 2026-08-19T19:25:56 (root cause): slicing a validated session
+        history to the last 100 messages can orphan a leading role:'tool'
+        message whose matching assistant(tool_calls) lies before the window →
+        the LLM rejects the request with 400 "tool must follow tool_calls"
+        (observed on every task_vibe_check for long sessions). The daemon
+        must strip window-boundary orphans before calling the LLM."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                sess_dir = tmp / ".emrg" / "sessions" / "emrg-evolution-emrg-task"
+                sess_dir.mkdir(parents=True, exist_ok=True)
+                lines = []
+                # 60 user → assistant(tool_calls) → tool_result triples:
+                # 180 llm messages → [-100:] starts at an index ≡ 2 (mod 3) = tool.
+                for i in range(60):
+                    lines.append(json.dumps({
+                        "type": "message", "role": "user", "content": f"cycle {i}",
+                    }, ensure_ascii=False))
+                    lines.append(json.dumps({
+                        "type": "message", "role": "assistant", "content": None,
+                        "tool_calls": [{
+                            "id": f"x{i}", "type": "function",
+                            "function": {"name": "bash", "arguments": "{}"},
+                        }],
+                    }, ensure_ascii=False))
+                    lines.append(json.dumps({
+                        "type": "tool_result", "tool_call_id": f"x{i}",
+                        "content": "ok",
+                    }, ensure_ascii=False))
+                (sess_dir / "history.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+                server, _, cleanup = await _boot_server(tmp)
+                try:
+                    seen = {}
+
+                    async def fake_chat(messages, tools=None):
+                        seen["messages"] = messages
+                        return {"content": '{"meaningful": false, "recommend_slowdown": false, "reason": "nt", "done": ""}'}
+                    server.llm.chat = fake_chat
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task_vibe_check",
+                            "session_id": "emrg-evolution-emrg-task",
+                            "cwd": str(tmp),
+                            "task_name": "emrg-task",
+                            "prompt": "run cycle",
+                            "completion_summary": "aux",
+                        }, ensure_ascii=False))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        data = json.loads(frame)
+                        assert data.get("ok") is True, data
+                        msgs = seen.get("messages", [])
+                        assert msgs[0]["role"] == "system"
+                        assert msgs[-1]["role"] == "user"
+                        # no leading tool orphan after system; history portion
+                        # must start with a non-tool role
+                        first_hist = next(m for m in msgs[1:] if m["role"] != "system")
+                        assert first_hist["role"] != "tool", [m["role"] for m in msgs[:6]]
+                        assert len(msgs) <= 2 + 100, len(msgs)
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_vibe_check_missing_done_field_is_compatible(self):
         """Old models / old parsing omit 'done' → empty string, no crash."""
         async def _test():
