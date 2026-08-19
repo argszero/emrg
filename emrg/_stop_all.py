@@ -307,7 +307,7 @@ def ws_graceful_shutdown(port: int, token: str, timeout: float = 3.0) -> bool:
         except json.JSONDecodeError:
             return False
         # shutdown → shutdown_ack
-        _ws_send_text(sock, json.dumps({"type": "shutdown"}))
+        _ws_send_text(sock, json.dumps({"type": "shutdown", "source": "stop_all"}))
         ack = _ws_recv_text(sock, timeout)
         if not ack:
             return False

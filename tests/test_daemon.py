@@ -1641,3 +1641,120 @@ def test_assert_port_file_writes_fixed_port(tmp_path):
     lines = port_file.read_text(encoding="utf-8").split()
     assert lines[0] == "56031"
     assert lines[1] == "tok-123"
+
+
+# ── Daemon stop-path logging (rant 2026-08-19T14:02:37) ──────────────
+# Any reason / any path the daemon stops must leave a detailed emrgd.log:
+# when, why, who triggered, what was cleaned up. These are PURE-MOCK tests
+# (mock the scheduler/llm/background tasks, never boot or stop a real
+# daemon) — the highest principle forbids stop/restart server tests.
+
+def _make_shutdown_server(tmp_path) -> EmrgServer:
+    """EmrgServer with all teardown dependencies mocked for _shutdown_all."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    server = _make_server()
+    server._stop_reason = "cancel"
+    server._skills_ttl_task = None
+    server._update_check_task = None
+    server._port_keepalive_task = None
+    server._scheduler = AsyncMock()  # stop_all + wait_all, no real handlers
+    server._scheduler.stop_all = MagicMock()  # real API is sync
+    server._scheduler.wait_all = AsyncMock()
+    server.llm = AsyncMock()         # close() awaitable
+    server._server = _ShutdownFakeServer()  # sync .close(), no unawaited coroutine
+    return server
+
+
+class _ShutdownFakeServer:
+    """Minimal stand-in for the websockets Server in shutdown-message tests."""
+
+    def close(self) -> None:
+        pass
+
+
+def test_shutdown_all_logs_reason_and_cleanup_steps(tmp_path, caplog):
+    """_shutdown_all logs the stop reason + every cleanup step + final line."""
+    import logging
+
+    server = _make_shutdown_server(tmp_path)
+    pid_file = tmp_path / "emrgd.pid"
+    pid_file.write_text(str(os.getpid()), encoding="utf-8")
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    asyncio.run(server._shutdown_all(pid_file))
+
+    text = caplog.text
+    assert "daemon stopping (reason=cancel, handlers=0) — cleaning up" in text
+    assert "cancelled skills-ttl loop" in text
+    assert "cancelled update-check loop" in text
+    assert "cancelled port-keepalive loop" in text
+    assert "stopped scheduler" in text
+    assert "closed llm client" in text
+    assert "removed port file" in text
+    assert "removed pid file" in text
+    assert "daemon stopped (reason=cancel, uptime=" in text
+    assert "all_ok=True" in text
+    assert not pid_file.exists()  # our own pid → unlinked
+
+
+def test_shutdown_all_handles_failing_cleanup(tmp_path, caplog):
+    """A failing cleanup step is recorded (all_ok=False), never raises."""
+    import logging
+    from unittest.mock import AsyncMock
+
+    server = _make_shutdown_server(tmp_path)
+    server.llm.close = AsyncMock(side_effect=RuntimeError("boom"))
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    asyncio.run(server._shutdown_all(tmp_path / "missing.pid"))
+
+    text = caplog.text
+    assert "daemon stopping (reason=cancel" in text
+    assert "closed llm client" in text  # step listed even on failure
+    assert "daemon stopped (reason=cancel" in text
+    assert "all_ok=False" in text
+
+
+def test_shutdown_all_reason_crash_and_sigint(tmp_path, caplog):
+    """_stop_reason is echoed in both the start and final log lines."""
+    import logging
+
+    for reason in ("crash", "sigint", "shutdown_msg"):
+        server = _make_shutdown_server(tmp_path)
+        server._stop_reason = reason
+        caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+        asyncio.run(server._shutdown_all(tmp_path / "missing.pid"))
+        assert f"daemon stopping (reason={reason}" in caplog.text
+        assert f"daemon stopped (reason={reason}" in caplog.text
+        caplog.clear()
+
+
+def test_shutdown_message_logs_peer_and_source(tmp_path, caplog):
+    """shutdown msg logs peer + source and sets _stop_reason=shutdown_msg."""
+    import logging
+
+    server = _make_shutdown_server(tmp_path)
+    writer = _FakeWriter()
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    asyncio.run(server._process_message({"type": "shutdown", "source": "stop_all"}, writer))
+
+    assert "shutdown requested by client (peer=unknown peer, source=stop_all)" in caplog.text
+    assert server._stop_reason == "shutdown_msg"
+    # shutdown_ack is sent back
+    assert _last_frame(writer) == {"type": "shutdown_ack"}
+
+
+def test_shutdown_message_missing_source_degrades(tmp_path, caplog):
+    """Legacy shutdown msg without source logs source=unknown (backward compat)."""
+    import logging
+
+    server = _make_shutdown_server(tmp_path)
+    writer = _FakeWriter()
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    asyncio.run(server._process_message({"type": "shutdown"}, writer))
+
+    assert "shutdown requested by client (peer=unknown peer, source=unknown)" in caplog.text
+    assert server._stop_reason == "shutdown_msg"
