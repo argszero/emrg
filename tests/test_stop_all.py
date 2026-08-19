@@ -19,6 +19,7 @@ import pytest
 
 from emrg import _stop_all
 from emrg._stop_all import (
+    _caller_context,
     _read_pid_file,
     _verify_posix,
     match_cmdline,
@@ -106,6 +107,56 @@ class TestPidFile:
         assert _read_pid_file() is None  # invalid
         (tmp_path / "emrgd.pid").write_text("-5\n", encoding="utf-8")
         assert _read_pid_file() is None  # non-positive
+
+
+class TestCallerContext:
+    """_caller_context — stop-chain forensics (rant 2026-08-19T13:11:34):
+    every stop run must record who invoked it (parent pid/cmdline + argv) so
+    "谁杀 daemon / 谁删文件" is traceable from the stop log alone."""
+
+    def test_posix_queries_parent_cmdline(self, monkeypatch):
+        calls: list = []
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+
+        class CP:
+            stdout = "python -m emrg stop\n"
+
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: calls.append(cmd) or CP(),
+        )
+        out = _caller_context()
+        assert calls and "ps" in calls[0]  # POSIX parent probe
+        assert "caller pid" in out
+        assert "python -m emrg stop" in out
+        assert "argv" in out
+
+    def test_windows_queries_powershell_cim(self, monkeypatch):
+        calls: list = []
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+
+        class CP:
+            stdout = "C:\\Python313\\python.exe -m emrg stop\n"
+
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: calls.append(cmd) or CP(),
+        )
+        out = _caller_context()
+        assert calls and "Get-CimInstance" in calls[0][-1]  # Windows parent probe
+        assert "caller pid" in out
+        assert "-m emrg stop" in out
+
+    def test_probe_failure_degrades_gracefully(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: (_ for _ in ()).throw(RuntimeError("no ps")),
+        )
+        out = _caller_context()
+        assert "caller pid" in out
+        assert "unknown parent" in out
+        assert "argv" in out
 
 
 class TestVerifyPosix:

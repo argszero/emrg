@@ -58,7 +58,7 @@ from pathlib import Path
 
 # Build stamp printed at the start of every run so the operator can tell at a
 # glance which stop_all.py generation executed (rant 2026-08-17T21:06:31).
-_STOP_ALL_STAMP = "built 2026-08-19 (fixed-port daemon shutdown — rant 08:05:21)"
+_STOP_ALL_STAMP = "built 2026-08-19 (read-only lock probe + stop-chain caller log — rants 13:08:41 + 13:11:34)"
 
 # Fixed daemon port (host rant 2026-08-19T08:05:21): the daemon binds a fixed
 # loopback port as its single-instance admission. This module is pure stdlib
@@ -952,26 +952,36 @@ def _iter_install_files(root: str) -> list[str]:
 
 
 def _win_exclusive_open(path: str) -> None:
-    """Open an existing file with DELETE access + FILE_FLAG_DELETE_ON_CLOSE —
-    the exact semantic the Inno installer's DeleteFile needs. Raises OSError
-    when another process holds the file (DeleteFile code 5 would occur).
+    """Open an existing file with DELETE access + FILE_SHARE_NONE — the
+    exact sharing semantic the Inno installer's DeleteFile needs. Raises
+    OSError when another process holds the file (DeleteFile code 5 would
+    occur).
 
     DeleteFile semantics (rant 2026-08-18T16:09:45): a DLL loaded via
     LoadLibrary holds the file with FILE_SHARE_READ only — GENERIC_READ +
     FILE_SHARE_NONE probing succeeds (read sharing is granted) → false
     "0 locked" while the installer's DeleteFile still fails (the image
     section handle does not share FILE_SHARE_DELETE). Requesting DELETE
-    access (+ delete-on-close disposition, the probe = "would DeleteFile
-    succeed right now?") fails with ERROR_SHARING_VIOLATION on exactly the
-    files DeleteFile would fail on. FILE_SHARE_NONE is kept as a complement
-    — either condition failing means locked."""
+    access fails with ERROR_SHARING_VIOLATION on exactly the files
+    DeleteFile would fail on. FILE_SHARE_NONE is kept as a complement —
+    either condition failing means locked.
+
+    ⚠️ NO delete-on-close disposition (rant 2026-08-19T13:08:41 — data-loss
+    bug): the v0.2.4x probe opened with the delete-on-close flag and cleared
+    it afterwards via the file-disposition-info API — but that clear only
+    works on Windows 10 1903+; on older systems (or any failed/best-effort
+    clear) the disposition stays set and closing the handle DELETES the
+    probed file. The disposition flag adds nothing to the access check
+    (DELETE access + share-none alone reproduces DeleteFile's sharing
+    semantics), so the probe now opens with plain FILE_ATTRIBUTE_NORMAL and
+    never sets a delete disposition — it can never delete anything, only
+    ask "would DeleteFile succeed?"."""
     import ctypes
 
     GENERIC_DELETE = 0x00010000
     OPEN_EXISTING = 3
     FILE_SHARE_NONE = 0
-    FILE_FLAG_DELETE_ON_CLOSE = 0x04000000
-    FILE_DISPOSITION_INFO = 2
+    FILE_ATTRIBUTE_NORMAL = 0x80
     kernel32 = ctypes.windll.kernel32
     # 64-bit handle truncation fix (rant 2026-08-18T09:40:40): ctypes defaults
     # the restype of a foreign function to c_int — a 64-bit HANDLE gets
@@ -985,32 +995,15 @@ def _win_exclusive_open(path: str) -> None:
     ]
     kernel32.CloseHandle.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-    # SetFileInformationByHandle — after a SUCCESSFUL probe the delete-on-close
-    # mark must be cleared so the probe never actually deletes the file it
-    # verified as deletable (it only asks "would DeleteFile succeed?").
-    kernel32.SetFileInformationByHandle.restype = ctypes.c_int
-    kernel32.SetFileInformationByHandle.argtypes = [
-        ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32,
-    ]
-
-    class _FileDisposition(ctypes.Structure):
-        _fields_ = [("DeleteFile", ctypes.c_ubyte)]  # BOOLEAN
 
     h = kernel32.CreateFileW(path, GENERIC_DELETE, FILE_SHARE_NONE, None,
-                             OPEN_EXISTING, FILE_FLAG_DELETE_ON_CLOSE, None)
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
     # With restype=c_void_p a NULL handle arrives as None (not 0) — cover both
     # forms; INVALID_HANDLE_VALUE is c_void_p(-1).value (pm25coder review note,
     # PR #832). A failed DELETE open = the installer's DeleteFile would fail.
     if not h or h == ctypes.c_void_p(-1).value:
         raise OSError(f"CreateFileW failed for {path} (file is locked)")
-    try:
-        # Undo the delete-on-close disposition (DeleteFile=FALSE). We hold
-        # DELETE access, so this clear always succeeds; best-effort otherwise.
-        _fd = _FileDisposition(0)
-        kernel32.SetFileInformationByHandle(
-            h, FILE_DISPOSITION_INFO, ctypes.byref(_fd), ctypes.sizeof(_fd))
-    finally:
-        kernel32.CloseHandle(h)
+    kernel32.CloseHandle(h)
 
 
 def _check_locked_files(root: str, try_open=None) -> list[str]:
@@ -1494,6 +1487,33 @@ def _open_stop_log() -> object | None:
         return None
 
 
+def _caller_context() -> str:
+    """Best-effort "who called emrg stop" line (rant 2026-08-19T13:11:34):
+    parent pid + parent command line + our argv — so a post-mortem can
+    answer "谁杀 daemon / 谁删文件" (which process invoked the stop chain).
+    Pure stdlib; any failure degrades to the pid-only form, never raises."""
+    ppid = os.getppid()
+    parent = ""
+    try:
+        if is_win():
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter 'ProcessId={ppid}').CommandLine"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+        else:
+            out = subprocess.run(
+                ["ps", "-o", "command=", "-p", str(ppid)],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+        if out:
+            parent = out.splitlines()[0][:160]
+    except Exception:
+        pass
+    argv = " ".join(sys.argv) or "(none)"
+    return f"caller pid {ppid} ({parent or 'unknown parent'}) | argv: {argv}"
+
+
 def _step_plan() -> list[tuple[str, object]]:
     """Ordered stop steps. Clients (GUI/TUI) FIRST, daemon LAST (rant
     2026-08-17T14:15:33): both clients auto-spawn the daemon when it
@@ -1551,6 +1571,11 @@ def stop_all() -> int:
         f"python {platform.python_version()} {platform.system()}-{platform.machine()} "
         f"| pid {os.getpid()}"
     )
+    # Who called + when (rant 2026-08-19T13:11:34): every stop run must be
+    # attributable — parent pid/parent cmdline/argv + wall-clock start. This
+    # is the forensics trail for "谁杀 daemon / 谁删文件".
+    print(f"emrg stop: started {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"emrg stop: {_caller_context()}")
     # Self-lock observability (rant 2026-08-18T16:09:45): when the installer
     # runs stop_all with install\python-dist\python.exe, that interpreter's
     # site config (._pth/.pth) may import install\lib modules → the runtime

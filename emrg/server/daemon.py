@@ -2024,7 +2024,15 @@ class EmrgServer:
                 })
 
         elif msg_type == "shutdown":
-            logger.info("shutdown requested by client")
+            # Rant 2026-08-19T13:11:34 — every daemon kill must be attributable:
+            # log the requesting peer (loopback client) alongside the action so
+            # "谁杀 daemon" can be traced from emrgd.log alone.
+            peer = ""
+            try:
+                peer = str(ws.remote_address)
+            except Exception:
+                peer = "unknown peer"
+            logger.info("shutdown requested by client (%s)", peer)
             await self._send(ws, {"type": "shutdown_ack"})
             try:
                 await ws.close()
