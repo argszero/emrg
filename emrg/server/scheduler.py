@@ -218,6 +218,16 @@ class TaskHandler:
         self._logs_dir = config_dir() / "logs"
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         self.evolutions: list[EvolutionLog] = []
+        # Rant 2026-08-19T20:50:36 (host Plan B): execution records persist to
+        # disk (~/.emrg/logs/task-runs/<task>.jsonl, append-only JSONL) so the
+        # GUI task recent-runs survive daemon restarts. In-memory
+        # self.evolutions stays the primary source (status() reads it); the
+        # JSONL is a durable copy restored on init (bounded to the last N).
+        self._task_runs_dir = self._logs_dir / "task-runs"
+        self._task_runs_file = self._task_runs_dir / f"{self.name}.jsonl"
+        restored = self._load_task_runs()
+        if restored:
+            self.evolutions = restored
 
         # ── Saturation — slow down, never stop (rant 2026-08-09T09:35:55) ──
         # Track consecutive empty cycles (rant 2026-08-17T11:39:19: the agent
@@ -307,6 +317,92 @@ class TaskHandler:
             )
         except Exception:
             pass
+
+    # ── Task-run persistence (rant 2026-08-19T20:50:36, host Plan B) ──
+    # Execution records persist to ~/.emrg/logs/task-runs/<task>.jsonl
+    # (append-only JSONL, one line per cycle) so the GUI task recent-runs
+    # secondary list survives daemon restarts. self.evolutions (in-memory)
+    # stays the primary source for status(); the JSONL is a durable copy
+    # restored on init, bounded to the most recent _TASK_RUNS_MAX records.
+    _TASK_RUNS_MAX = 50
+
+    def _load_task_runs(self) -> list[EvolutionLog]:
+        """Restore the most recent execution records from the task JSONL.
+
+        Fault-tolerant (rant 2026-08-19T20:50:36): a missing or corrupt file
+        yields an empty list (never raises); a single corrupt line is skipped
+        while the rest is kept.
+        """
+        records: list[EvolutionLog] = []
+        try:
+            if self._task_runs_file.exists():
+                lines = self._task_runs_file.read_text(encoding="utf-8").splitlines()
+                for line in lines[-self._TASK_RUNS_MAX:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except (ValueError, TypeError):
+                        self._logger.warning(
+                            "TaskHandler[%s]: skipping corrupt task-run line in %s",
+                            self.name, self._task_runs_file,
+                        )
+                        continue
+                    records.append(EvolutionLog(
+                        timestamp=str(data.get("timestamp") or ""),
+                        summary=str(data.get("summary") or ""),
+                        meaningful=data.get("meaningful"),
+                        recommend_slowdown=bool(data.get("recommend_slowdown")),
+                        reason=str(data.get("reason") or ""),
+                        tool_count=int(data.get("tool_count") or 0),
+                    ))
+                if records:
+                    self._logger.info(
+                        "TaskHandler[%s]: restored %d execution record(s) from %s",
+                        self.name, len(records), self._task_runs_file,
+                    )
+        except Exception:
+            # unreadable file → start empty, never crash the handler
+            records = []
+            self._logger.warning(
+                "TaskHandler[%s]: failed to read task-run file %s (starting empty)",
+                self.name, self._task_runs_file,
+            )
+        return records
+
+    def _append_task_run(self, log: EvolutionLog) -> None:
+        """Append one execution record to the task JSONL (bounded append).
+
+        Writes a JSON line for the completed cycle, then trims the file to the
+        most recent _TASK_RUNS_MAX records. Fault-tolerant: a write failure
+        only logs a warning and never affects the running cycle.
+        """
+        try:
+            self._task_runs_dir.mkdir(parents=True, exist_ok=True)
+            with open(self._task_runs_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "timestamp": log.timestamp,
+                    "summary": log.summary,
+                    "meaningful": log.meaningful,
+                    "recommend_slowdown": log.recommend_slowdown,
+                    "reason": log.reason,
+                    "tool_count": log.tool_count,
+                }, ensure_ascii=False) + "\n")
+            # Trim to the last _TASK_RUNS_MAX records (rewrite in place only
+            # when over the cap, mirroring the old 27-file rotation).
+            try:
+                lines = self._task_runs_file.read_text(encoding="utf-8").splitlines()
+                if len(lines) > self._TASK_RUNS_MAX:
+                    with open(self._task_runs_file, "w", encoding="utf-8") as f:
+                        f.write("\n".join(lines[-self._TASK_RUNS_MAX:]) + "\n")
+            except Exception:
+                pass  # trimming is best-effort; the append already succeeded
+        except Exception as exc:
+            self._logger.warning(
+                "TaskHandler[%s]: failed to persist task-run record: %s",
+                self.name, exc,
+            )
 
     def _saturation_threshold(self) -> int:
         """Empty-cycle threshold before dropping to heartbeat cadence.
@@ -797,10 +893,14 @@ class TaskHandler:
             reason=reason,
             tool_count=tool_count,
         )
-        # Rant 2026-08-19T14:18:40 — no disk archival: the evolution log lives
-        # in the in-memory list only (GUI recent-runs + evolution_count both
-        # read self.evolutions); evolution-*.json was never consumed.
+        # Rant 2026-08-19T14:18:40 — no more evolution-*.json single-file
+        # archival (unconsumed). Rant 2026-08-19T20:50:36 (host Plan B):
+        # execution records persist as append-only JSONL per task
+        # (~/.emrg/logs/task-runs/<task>.jsonl) so the GUI recent-runs
+        # secondary list survives daemon restarts — a durable copy of the
+        # in-memory self.evolutions list, restored on init.
         self.evolutions.append(log)
+        self._append_task_run(log)
 
     def _build_evolution_prompt(self) -> str:
         """Build evolution prompt from a Jinja2 template.

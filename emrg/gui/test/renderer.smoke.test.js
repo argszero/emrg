@@ -2706,6 +2706,13 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   // 无 recent_runs → 占位文案
   const emptyTxt = vm.runInContext(`document.getElementById("task-list").children[1].querySelector(".task-run-empty").textContent`, ctx);
   assert.ok(emptyTxt.includes("暂无运行记录"), `无 recent_runs 应显示占位，实际: ${emptyTxt}`);
+  // rant 2026-08-19T20:49:52：.task-row 必须 flex-wrap —— 否则子表
+  // (flex-basis:100%) 被压到同一行右边，宿主实测"跑到右边了"
+  const taskCss = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "components.css"), "utf8");
+  const rowRule = taskCss.slice(taskCss.indexOf(".task-row"), taskCss.indexOf(".task-name"));
+  assert.ok(rowRule.includes("flex-wrap: wrap"), "task-row 应含 flex-wrap: wrap（子表换行到任务卡下方）");
+  const detailRule = taskCss.slice(taskCss.indexOf(".task-run-detail"), taskCss.indexOf(".task-run-detail.hidden"));
+  assert.ok(detailRule.includes("flex-basis: 100%"), "task-run-detail 应保持 flex-basis:100%（配合 flex-wrap 换行）");
 });
 
 test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 taskCreate", async () => {
