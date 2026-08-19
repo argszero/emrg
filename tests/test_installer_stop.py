@@ -146,21 +146,31 @@ def test_stop_all_py_restart_manager_lock_owners():
 
 
 def test_stop_all_py_deletefile_semantic_lock_probe():
-    """rant 2026-08-18T16:09:45 — lock-probe 假阴性根因 + 修复。
+    """rant 2026-08-18T16:09:45 — lock-probe 假阴性根因 + 修复；
+    rant 2026-08-19T13:08:41 — 数据删除 bug 修复（去掉 FILE_FLAG_DELETE_ON_CLOSE）。
 
     v0.2.48 实证：GENERIC_READ + FILE_SHARE_NONE 探测对 DLL 锁永远假阴性——
     LoadLibrary 持有句柄允许读共享 → 探测显示 0 locked，而安装器 DeleteFile
     需要句柄共享 FILE_SHARE_DELETE → 覆盖时 code 5。修复 = DELETE 访问
-    （GENERIC_DELETE=0x10000）+ FILE_FLAG_DELETE_ON_CLOSE=0x04000000 +
-    OPEN_EXISTING，与安装器 DeleteFile 完全同语义；FILE_SHARE_NONE 保留补充；
-    探测成功后用 SetFileInformationByHandle 清除 delete-on-close（探测不真删）。
+    （GENERIC_DELETE=0x10000）+ OPEN_EXISTING + FILE_SHARE_NONE，与安装器
+    DeleteFile 的共享语义一致；探测成功即"DeleteFile 会成功"，仅关闭句柄，
+    永不设置删除 disposition。
+
+    ⚠️ 数据删除 bug（rant 2026-08-19T13:08:41）：旧实现用
+    FILE_FLAG_DELETE_ON_CLOSE=0x04000000 打开后再用 SetFileInformationByHandle
+    清除 disposition——但该清除仅 Windows 10 1903+ 支持，旧系统/清除失败时
+    disposition 残留，CloseHandle 会真删文件。现探测用普通
+    FILE_ATTRIBUTE_NORMAL 打开，永不设置 disposition → 只问不删。
     """
     content = _read("emrg/_stop_all.py")
     assert "GENERIC_DELETE = 0x00010000" in content
-    assert "FILE_FLAG_DELETE_ON_CLOSE = 0x04000000" in content
     assert "GENERIC_READ = 0x80000000" not in content  # 旧常量赋值已移除
-    assert "SetFileInformationByHandle" in content
-    assert "FILE_DISPOSITION_INFO = 2" in content
+    # 数据删除 bug 修复：不得再出现 delete-on-close / disposition 清除
+    assert "FILE_FLAG_DELETE_ON_CLOSE" not in content
+    assert "SetFileInformationByHandle" not in content
+    assert "FILE_DISPOSITION_INFO" not in content
+    assert "FILE_ATTRIBUTE_NORMAL = 0x80" in content
+    assert "never sets a delete disposition" in content or "never set a delete disposition" in content
     # 自锁防护（rant 2026-08-18T16:09:45，18:57:09 改为提示性）：开头打印
     # python-dist 运行时 + verify 对 self-held 锁不中止安装（stop_all 退出即释放）
     assert "python-dist runtime:" in content
