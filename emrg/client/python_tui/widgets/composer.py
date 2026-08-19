@@ -140,28 +140,55 @@ class Composer(Widget):
         return text
 
     def render(self, ctx: RenderContext) -> list[Line]:
-        """Render the composer with prompt, text, and cursor indicator."""
+        """Render the composer with prompt, text, and cursor indicator.
+
+        Multi-line text (pasted input) renders as one Line per logical line:
+        the first line carries the prompt, continuation lines a same-width
+        indent, and the cursor is drawn on the line it currently sits in
+        (rant 2026-08-19T14:25:55 — a single Line with embedded ``\\n`` was
+        flattened by the buffer, which skips newline characters).
+        """
         is_placeholder = not self._text
 
-        # Show cursor position
-        if self._text and self._cursor < len(self._text):
-            cursor_char = self._text[self._cursor]
-            prefix = self._text[:self._cursor]
-            suffix = self._text[self._cursor + 1:]
-        else:
-            cursor_char = " "
-            prefix = self._text
-            suffix = ""
+        if self._text:
+            content_lines = self._text.split("\n")
+            indent = " " * len(self.prompt)
+            lines_out: list[Line] = []
+            line_start = 0
+            for i, line_text in enumerate(content_lines):
+                line_end = line_start + len(line_text)
+                # Cursor lives in this line iff it is within [line_start, line_end].
+                cursor_here = line_start <= self._cursor <= line_end
+                if cursor_here:
+                    rel = self._cursor - line_start
+                    if rel < len(line_text):
+                        cursor_char = line_text[rel]
+                        prefix = line_text[:rel]
+                        suffix = line_text[rel + 1:]
+                    else:  # cursor at end of this line (incl. on the newline)
+                        cursor_char = " "
+                        prefix = line_text
+                        suffix = ""
+                else:
+                    cursor_char = " "
+                    prefix = line_text
+                    suffix = ""
+                lines_out.append(Line(spans=[
+                    Span(text=self.prompt if i == 0 else indent,
+                         style="bold cyan" if i == 0 else "dim"),
+                    Span(text=prefix, style="" if not is_placeholder else "dim"),
+                    Span(text=cursor_char, style="reverse"),
+                    Span(text=suffix, style="" if not is_placeholder else "dim"),
+                ], style=ctx.style))
+                line_start = line_end + 1  # skip the newline separator
+            self._dirty = False
+            return lines_out
 
-        cursor_style = "reverse" if self._text else "dim"
-        style = "dim" if is_placeholder else ""
-
+        # Empty / placeholder: single line with prompt + dim cursor block.
         spans = [
             Span(text=self.prompt, style="bold cyan"),
-            Span(text=prefix, style=style),
-            Span(text=cursor_char, style=cursor_style),
-            Span(text=suffix, style=style),
+            Span(text=" ", style="dim"),
+            Span(text=" ", style="dim"),
         ]
-
         self._dirty = False
         return [Line(spans=spans, style=ctx.style)]
