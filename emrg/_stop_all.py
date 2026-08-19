@@ -58,7 +58,13 @@ from pathlib import Path
 
 # Build stamp printed at the start of every run so the operator can tell at a
 # glance which stop_all.py generation executed (rant 2026-08-17T21:06:31).
-_STOP_ALL_STAMP = "built 2026-08-18 (module-holder enumeration + createfile-probe + taskkill RM + excluded-chain self-exclusion + self-lock guard)"
+_STOP_ALL_STAMP = "built 2026-08-19 (fixed-port daemon shutdown — rant 08:05:21)"
+
+# Fixed daemon port (host rant 2026-08-19T08:05:21): the daemon binds a fixed
+# loopback port as its single-instance admission. This module is pure stdlib
+# (runs standalone inside the installer) so it cannot import emrg.connect —
+# keep in sync with emrg.connect.EMRGD_PORT.
+_EMRGD_PORT = 56031
 
 _EMRG_CLIENT_RE = re.compile(r"-m\s+emrg(\.server)?(\s|$)")
 _APPIMAGE_RE = re.compile(r"EMRG-[\w.\-]*AppImage(\s|$)")
@@ -328,20 +334,23 @@ def stop_daemon() -> None:
     cannot, so we clean it up — the next daemon start re-asserts both files).
     """
     port_path = config_dir() / "emrgd.port"
+    # Fixed-port shutdown (rant 2026-08-19T08:05:21): the daemon always
+    # listens on _EMRGD_PORT; the port file only supplies the auth token. If
+    # the file is missing/stale, fall through to the pid + cmdline paths.
     try:
-        port_tok = port_path.read_text(encoding="utf-8").split()
-        if len(port_tok) == 2:
-            if ws_graceful_shutdown(int(port_tok[0]), port_tok[1]):
-                # wait for the daemon to exit + remove its pid file
-                # (~10s grace: old stop-emrg.cmd v2 polled emrgd.pid up to
-                # 10s; a busy daemon mid-tool-loop needs the full window)
-                for _ in range(60):
-                    pid = _read_pid_file()
-                    if pid is None or not _pid_alive(pid):
-                        break
-                    time.sleep(0.15)
+        text = port_path.read_text(encoding="utf-8").split()
+        token = text[1] if len(text) == 2 else ""
     except (OSError, ValueError):
-        pass  # port file missing/corrupt → fall through to pid path
+        token = ""
+    if token and ws_graceful_shutdown(_EMRGD_PORT, token):
+        # wait for the daemon to exit + remove its pid file
+        # (~10s grace: old stop-emrg.cmd v2 polled emrgd.pid up to
+        # 10s; a busy daemon mid-tool-loop needs the full window)
+        for _ in range(60):
+            pid = _read_pid_file()
+            if pid is None or not _pid_alive(pid):
+                break
+            time.sleep(0.15)
 
     pid = _read_pid_file()
     if pid is not None and _pid_alive(pid):

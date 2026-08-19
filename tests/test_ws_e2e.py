@@ -80,6 +80,21 @@ async def _boot_server(tmp: Path):
     _orig_sched_cfg = sched_mod.config_dir
     _orig_connect_cfg = connect_mod.config_dir
 
+    # Fixed-port admission (rant 2026-08-19T08:05:21): the daemon now binds a
+    # fixed port, but tests must never fight a real daemon (or each other) on
+    # the well-known EMRGD_PORT — point BOTH the daemon's serve() and the
+    # connect layer at a free loopback port for the duration of the test.
+    import socket as _socket
+
+    _probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    _probe.bind(("127.0.0.1", 0))
+    _test_port = _probe.getsockname()[1]
+    _probe.close()
+    _orig_daemon_port = daemon_mod.EMRGD_PORT
+    _orig_connect_port = connect_mod.EMRGD_PORT
+    daemon_mod.EMRGD_PORT = _test_port
+    connect_mod.EMRGD_PORT = _test_port
+
     # Isolate config dir to tmp (port file, tasks.yml, projects.yml, etc.)
     daemon_mod.config_dir = lambda: tmp
     sched_mod.config_dir = lambda: tmp  # scheduler builds its own projects_file (#738)
@@ -113,6 +128,8 @@ async def _boot_server(tmp: Path):
         daemon_mod.config_dir = _orig_daemon_cfg
         sched_mod.config_dir = _orig_sched_cfg
         connect_mod.config_dir = _orig_connect_cfg
+        daemon_mod.EMRGD_PORT = _orig_daemon_port
+        connect_mod.EMRGD_PORT = _orig_connect_port
 
     return server, task, _cleanup
 
