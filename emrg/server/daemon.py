@@ -224,6 +224,7 @@ class EmrgServer:
         self.evolutions: list[EvolutionLog] = []
         self.llm = LlmClient(llm_config)
         self._running = False
+        self._stop_reason: str = "unknown"  # shutdown_msg|cancel|sigint|bind_exit|crash (rant 2026-08-19T14:02:37)
         self._scheduler: Optional[TaskScheduler] = None
         self._max_tool_rounds = llm_config.max_tool_rounds
         self._projects_log = runtime_dir / "projects.yml"
@@ -289,6 +290,7 @@ class EmrgServer:
                     EMRGD_PORT,
                 )
                 self._running = False
+                self._stop_reason = "bind_exit"
                 return
             # No listener behind the port → TIME_WAIT remnant. Retry the bind
             # for a bounded window so a crashed daemon restarts without a
@@ -314,6 +316,7 @@ class EmrgServer:
                             EMRGD_PORT,
                         )
                         self._running = False
+                        self._stop_reason = "bind_exit"
                         return
             else:
                 logger.error(
@@ -322,6 +325,7 @@ class EmrgServer:
                     EMRGD_PORT, _TIME_WAIT_RETRIES,
                 )
                 self._running = False
+                self._stop_reason = "bind_exit"
                 return
 
         # ── PID file: diagnostics only (rant 08-05:21 — no longer an
@@ -391,30 +395,95 @@ class EmrgServer:
         try:
             await self._server.serve_forever()
         except asyncio.CancelledError:
-            pass
+            self._stop_reason = "cancel"
+            logger.info("daemon serve cancelled (asyncio.CancelledError) — cleanup started")
+        except Exception:
+            self._stop_reason = "crash"
+            logger.error("daemon serve crashed — cleanup started", exc_info=True)
         finally:
-            self._skills_ttl_task.cancel()
-            self._update_check_task.cancel()
+            await self._shutdown_all(pid_file)
+
+    async def _shutdown_all(self, pid_file: Path) -> None:
+        """Best-effort teardown with per-step logging (rant 2026-08-19T14:02:37).
+
+        Every daemon stop path funnels through here: shutdown message,
+        asyncio cancel (Ctrl+C / parent kill), crash. Logs the stop reason
+        + each cleanup step's success/failure so a post-mortem can answer
+        "why did the daemon stop / what was cleaned up" from emrgd.log
+        alone. Never raises.
+        """
+        try:
+            n_handlers = (
+                len(self._scheduler._handlers)
+                if self._scheduler is not None
+                and isinstance(getattr(self._scheduler, "_handlers", None), list)
+                else 0
+            )
+        except Exception:
+            n_handlers = 0
+        logger.info(
+            "daemon stopping (reason=%s, handlers=%d) — cleaning up",
+            self._stop_reason, n_handlers,
+        )
+
+        steps: list[tuple[str, bool]] = []
+        # 1. Background task loops (skills TTL, update check, port keepalive)
+        for task, name in (
+            (self._skills_ttl_task, "skills-ttl loop"),
+            (self._update_check_task, "update-check loop"),
+            (self._port_keepalive_task, "port-keepalive loop"),
+        ):
             try:
-                await self._skills_ttl_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._port_keepalive_task.cancel()
-            try:
-                await self._port_keepalive_task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._scheduler.stop_all()
-            await self._scheduler.wait_all()
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                steps.append((f"cancelled {name}", True))
+            except Exception:
+                steps.append((f"cancelled {name}", False))
+        # 2. Scheduler
+        try:
+            if self._scheduler is not None:
+                self._scheduler.stop_all()
+                await self._scheduler.wait_all()
+                steps.append(("stopped scheduler", True))
+            else:
+                steps.append(("stopped scheduler (none)", True))
+        except Exception:
+            logger.warning("scheduler stop failed", exc_info=True)
+            steps.append(("stopped scheduler", False))
+        # 3. LLM client
+        try:
             await self.llm.close()
+            steps.append(("closed llm client", True))
+        except Exception:
+            steps.append(("closed llm client", False))
+        # 4. Port file
+        try:
             cleanup_server()
-            # Remove PID file
-            try:
-                if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                    pid_file.unlink()
-                    logger.debug("pid file removed: %s", pid_file)
-            except OSError:
-                pass
+            steps.append(("removed port file", True))
+        except Exception:
+            steps.append(("removed port file", False))
+        # 5. PID file (diagnostic)
+        try:
+            if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                pid_file.unlink()
+                logger.debug("pid file removed: %s", pid_file)
+                steps.append(("removed pid file", True))
+            else:
+                steps.append(("removed pid file (absent)", True))
+        except OSError:
+            steps.append(("removed pid file", False))
+
+        uptime = max(0, int((datetime.now() - self.start_time).total_seconds()))
+        all_ok = all(ok for _, ok in steps)
+        logger.info(
+            "daemon stopped (reason=%s, uptime=%ds, steps=%s, all_ok=%s)",
+            self._stop_reason, uptime,
+            ", ".join(s for s, _ in steps), all_ok,
+        )
 
     async def _port_keepalive_loop(self) -> None:
         """Re-assert the port file if it was deleted or overwritten.
@@ -2027,12 +2096,18 @@ class EmrgServer:
             # Rant 2026-08-19T13:11:34 — every daemon kill must be attributable:
             # log the requesting peer (loopback client) alongside the action so
             # "谁杀 daemon" can be traced from emrgd.log alone.
+            # Rant 2026-08-19T14:02:37 — loopback peers are indistinguishable
+            # (all 127.0.0.1:*), so senders tag the message with a `source`
+            # (emrg server stop / stop_all) to tell emrg stop / GUI /
+            # installer apart; missing source degrades to "unknown".
             peer = ""
             try:
                 peer = str(ws.remote_address)
             except Exception:
                 peer = "unknown peer"
-            logger.info("shutdown requested by client (%s)", peer)
+            source = str(msg.get("source") or "unknown")
+            self._stop_reason = "shutdown_msg"
+            logger.info("shutdown requested by client (peer=%s, source=%s)", peer, source)
             await self._send(ws, {"type": "shutdown_ack"})
             try:
                 await ws.close()
@@ -3766,4 +3841,7 @@ async def run_server(llm_config: LlmConfig) -> None:
     try:
         await server.serve()
     except KeyboardInterrupt:
-        logger.info("shutdown signal received")
+        # Rant 2026-08-19T14:02:37 — attribute the stop: serve()'s teardown
+        # already logged the full cleanup; this line identifies the trigger.
+        server._stop_reason = "sigint"
+        logger.info("shutdown signal received (SIGINT), cleanup started")
