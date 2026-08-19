@@ -1527,7 +1527,7 @@ def test_serve_proceeds_when_fixed_port_free(tmp_path):
     """Negative path: fixed port free → bind passes → pid diagnostic written
     and the websockets serve is reached with the pre-bound socket."""
     import asyncio
-    from unittest.mock import MagicMock, patch
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     server = _make_server()
     fake_sock = MagicMock()
@@ -1570,6 +1570,8 @@ def test_serve_rethrows_non_bind_errors(tmp_path):
 
 def test_assert_port_file_writes_fixed_port(tmp_path):
     """_assert_port_file persists the FIXED port (56031) + auth token."""
+    from unittest.mock import patch
+
     server = _make_server()
     server._auth_token = "tok-123"
     with patch("emrg.server.daemon.config_dir", return_value=tmp_path):
