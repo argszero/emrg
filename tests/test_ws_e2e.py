@@ -477,21 +477,32 @@ class TestWSProtocol:
                 server, _, cleanup = await _boot_server(cwd)
                 try:
                     seen_args = {}
+                    # One chat_stream call per tool-loop round: round 1 emits
+                    # the tool call (finish "tool_calls"), round 2 the final
+                    # answer (finish "stop"). A "stop" delta in the same
+                    # stream as the tool call would make the daemon's Case-1
+                    # branch treat the round as a final text answer and drop
+                    # the tool calls (established pattern in
+                    # _make_fake_chat_stream).
+                    state = {"round": 0}
 
                     async def fake_chat_stream(messages, tools=None):
-                        yield {"content": "先跑命令", "tool_calls": None, "finish_reason": None, "usage": None}
-                        yield {
-                            "content": None,
-                            "tool_calls": [{
-                                "index": 0, "id": "call_i1",
-                                "function": {"name": "bash",
-                                             "arguments": '{"command": "echo intent-ok", "intent": "验证 intent 日志"}',
-                                             },
-                            }],
-                            "finish_reason": "tool_calls", "usage": None,
-                        }
-                        yield {"content": "完成", "tool_calls": None, "finish_reason": "stop",
-                               "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+                        state["round"] += 1
+                        if state["round"] == 1:
+                            yield {"content": "先跑命令", "tool_calls": None, "finish_reason": None, "usage": None}
+                            yield {
+                                "content": None,
+                                "tool_calls": [{
+                                    "index": 0, "id": "call_i1",
+                                    "function": {"name": "bash",
+                                                 "arguments": '{"command": "echo intent-ok", "intent": "验证 intent 日志"}',
+                                                 },
+                                }],
+                                "finish_reason": "tool_calls", "usage": None,
+                            }
+                        else:
+                            yield {"content": "完成", "tool_calls": None, "finish_reason": "stop",
+                                   "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
 
                     server.llm.chat_stream = fake_chat_stream
                     # Capture what the real BashTool executor receives.
