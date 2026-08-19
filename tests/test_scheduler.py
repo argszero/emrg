@@ -653,7 +653,7 @@ def test_task_handler_repo_configured_from_config():
 
 
 def test_task_handler_no_repo_skips_self_heal():
-    """Non-emrg task without any repo config → _ensure_evolution_workspace no-ops."""
+    """Non-emrg task without any repo config → no repo override (defaults)."""
     handler = TaskHandler(
         name="docs-task",
         config={"path": "/tmp/plain-folder"},
@@ -661,7 +661,7 @@ def test_task_handler_no_repo_skips_self_heal():
         identity=InstanceIdentity(),
     )
     assert handler._repo_configured is False
-    assert handler._ensure_evolution_workspace() is True  # skip, not block
+    assert handler._source_dir == "/tmp/plain-folder"
 
 
 def test_task_scheduler_total_evolutions():
@@ -944,93 +944,6 @@ def _make_handler(tmp_path, name="emrg-task", project="emrg", path=None):
     return handler
 
 
-class FakeGitRun:
-    """Controllable subprocess.run fake for git commands."""
-
-    def __init__(self, git_repo=True, tags="v0.2.7", clone_fails=False, remote_head="abc123",
-                 origin_url="", ls_remote_stderr="", clone_stderr="", clone_fail_once=False):
-        self.calls = []
-        self.git_repo = git_repo
-        self.tags = tags
-        self.clone_fails = clone_fails
-        self.remote_head = remote_head
-        self.origin_url = origin_url
-        self.ls_remote_stderr = ls_remote_stderr
-        self.clone_stderr = clone_stderr
-        self.clone_fail_once = clone_fail_once
-        self._clone_calls = 0
-
-    @staticmethod
-    def _norm(cmd):
-        """Strip `git -c key=value` config pairs (http.connectTimeout=…)."""
-        out, i = [], 1
-        args = list(cmd)
-        while i < len(args):
-            if args[i] == "-c" and i + 1 < len(args):
-                i += 2
-                continue
-            out.append(args[i])
-            i += 1
-        return out
-
-    def __call__(self, cmd, *args, **kwargs):
-        self.calls.append((list(cmd), kwargs.get("cwd"), kwargs.get("env")))
-        cwd = kwargs.get("cwd") or ""
-        # cmd[0] 可能是字面 "git"（dev 环境）或 resolve_git_gh() 解析出的
-        # 绝对路径（bundled git，2026-08-12 workspace-not-ready 事故修复后）——
-        # 统一按 basename 判断，避免测试在两种环境下行为不一致。
-        # Windows 上 resolve_git_gh() 返回 git.EXE（大写后缀，2026-08-12 v0.2.29
-        # Build Release Windows gate 实测）→ 比较必须大小写不敏感。
-        cmd_head = Path(cmd[0]).name.lower()
-        if cmd_head in ("git", "git.exe"):
-            sub = self._norm(cmd)
-            if sub and sub[0] == "rev-parse":
-                if "--is-inside-work-tree" in sub:
-                    return _R(0, "true\n" if self.git_repo else "false\n")
-                if "HEAD" in sub:
-                    return _R(0, "abc123\n")
-            if sub and sub[0] == "remote":
-                if sub[1] == "get-url":
-                    return _R(0, self.origin_url + "\n")
-                if sub[1] == "set-url":
-                    return _R(0, "")
-            if sub and sub[0] == "ls-remote":
-                # `git ls-remote origin master` → "<sha>\trefs/heads/master".
-                # When ls_remote_stderr is set, only the https-origin form
-                # fails — the SSH retry (git@github.com:…) succeeds.
-                # NB: list `in` is element-equality — use substring scan.
-                ssh_retry = any("git@github.com" in str(c) for c in cmd)
-                if self.ls_remote_stderr and not ssh_retry:
-                    return _R(128, "", self.ls_remote_stderr)
-                return _R(0, f"{self.remote_head}\trefs/heads/master\n")
-            if sub and sub[0] == "clone":
-                self._clone_calls += 1
-                if self.clone_fails and (not self.clone_fail_once or self._clone_calls == 1):
-                    raise _CalledProcessErrorStub(self.clone_stderr or "clone failed",
-                                                  stderr=self.clone_stderr)
-                target = Path(cmd[-1])
-                target.mkdir(parents=True, exist_ok=True)
-                return _R(0, "")
-            if sub and sub[0] == "tag":
-                return _R(0, self.tags + "\n")
-            if sub and sub[0] == "checkout":
-                return _R(0, "")
-            if sub and sub[0] == "config":
-                return _R(0, "")  # getter → empty → setter will run
-        return _R(0, "")
-
-
-class _R:
-    def __init__(self, returncode, stdout, stderr=""):
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-class _CalledProcessErrorStub(subprocess.CalledProcessError):
-    def __init__(self, msg, stderr=""):
-        super().__init__(returncode=1, cmd=["git", "clone"], output=msg, stderr=stderr)
-
 
 def test_ensure_self_evolution_task_adds_when_missing(tmp_path):
     """tasks.yml without an emrg evolution task gets emrg-task appended."""
@@ -1202,410 +1115,6 @@ def test_ensure_self_evolution_task_other_entries_preserved(tmp_path):
     assert "emrg" in names
     assert len(names) == 2
 
-
-def test_ensure_evolution_workspace_persists_repaired_emrg_path(tmp_path):
-    """Long-running daemon: a stale emrg path (deleted pytest-temp dir) is
-    healed in-memory to the canonical workspace AND persisted back to
-    projects.yml on the next cycle — not only at scheduler startup (#716
-    follow-up: startup-only repair leaves a dangling entry forever when the
-    daemon never restarts; list_projects/GUI pickers keep showing a dead path)."""
-    from emrg.server import scheduler as mod
-
-    evolve_dir = tmp_path / "evolution" / "emrg"
-    evolve_dir.mkdir(parents=True)
-
-    # Stale emrg entry pointing at a path that no longer exists on disk
-    # (exactly the 2026-08-12 pytest-temp-leak shape).
-    stale = tmp_path / "gone" / "emrg"
-    projects_yml = tmp_path / "projects.yml"
-    projects_yml.write_text(yaml.safe_dump([
-        {"name": "emrg", "path": str(stale), "last_active": "2026-08-12T18:44:50"},
-        {"name": "other", "path": str(tmp_path / "other")},
-    ]))
-
-    fake = FakeGitRun(git_repo=True)
-    orig_run = mod.subprocess.run
-    orig_evolve = mod.EVOLUTION_CWD
-    orig_config = mod.config_dir
-    mod.subprocess.run = fake
-    mod.EVOLUTION_CWD = tmp_path / "evolution"
-    mod.config_dir = lambda: tmp_path
-    try:
-        handler = TaskHandler(
-            name="emrg-task",
-            config={"project": "emrg"},
-            interval=60,
-            identity=InstanceIdentity(),
-        )
-        handler._source_dir = str(stale)  # stale as resolved at handler start
-        handler.project_path = str(stale)
-        ok = handler._ensure_evolution_workspace()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.EVOLUTION_CWD = orig_evolve
-        mod.config_dir = orig_config
-
-    assert ok is True
-    assert handler._source_dir == str(evolve_dir)  # in-memory heal (pre-existing)
-    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
-    by_name = {e["name"]: e for e in data}
-    assert by_name["emrg"]["path"] == str(evolve_dir)  # NEW: persisted this cycle
-    assert by_name["other"]["path"] == str(tmp_path / "other")  # untouched
-    assert len(data) == 2
-
-
-def test_ensure_evolution_workspace_dev_repo_untouched(tmp_path):
-    """A real writable git repo (dev machine) is used as-is — no clone."""
-    import subprocess as real_subprocess
-
-    from emrg.server import scheduler as mod
-
-    repo = tmp_path / "dev-emrg"
-    repo.mkdir()
-    real_subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    real_subprocess.run(
-        ["git", "-C", str(repo), "config", "user.email", "t@t"], check=True)
-    real_subprocess.run(
-        ["git", "-C", str(repo), "config", "user.name", "t"], check=True)
-    (repo / "f.txt").write_text("x", encoding="utf-8")
-    real_subprocess.run(
-        ["git", "-C", str(repo), "add", "."], check=True)
-    real_subprocess.run(
-        ["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
-
-    orig_config = mod.config_dir
-    mod.config_dir = lambda: tmp_path
-    fake = FakeGitRun()
-    orig_run = mod.subprocess.run
-    mod.subprocess.run = fake
-    try:
-        handler = TaskHandler(
-            name="emrg-task",
-            config={"project": "emrg"},
-            interval=60,
-            identity=InstanceIdentity(),
-        )
-        # config_dir must stay patched through _ensure_evolution_workspace():
-        # its clone branch calls _ensure_project_entry(), which writes
-        # config_dir()/projects.yml — an unpatched call would pollute the real
-        # ~/.emrg/projects.yml (2026-08-12 incident: pytest temp path leaked
-        # into real home).
-        handler._source_dir = str(repo)
-        handler.project_path = str(repo)
-        ok = handler._ensure_evolution_workspace()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.config_dir = orig_config
-
-    assert ok is True
-    assert handler._source_dir == str(repo)  # unchanged
-    assert not any("clone" in c[0] for c in fake.calls), f"unexpected clone: {fake.calls}"
-
-
-def test_ensure_evolution_workspace_clones_and_aligns(tmp_path):
-    """Non-git source_dir → clone into evolution workspace + align + projects.yml self-heal."""
-    from emrg.server import scheduler as mod
-
-    evolve_dir = tmp_path / "evolution" / "emrg"
-    mod.EVOLUTION_CWD = tmp_path / "evolution"
-
-    projects_yml = tmp_path / "projects.yml"
-    projects_yml.write_text(yaml.safe_dump([]))
-
-    handler = _make_handler(tmp_path, path=str(tmp_path / "install" / "source" / "emrg"))
-
-    # Installed version hint → tag alignment. The code reads
-    # Path.home()/.emrg/install/version.txt — patch home so the test is
-    # hermetic (CI hosts don't have ~/.emrg/install).
-    import pathlib as _pathlib
-    install_dir = tmp_path / ".emrg" / "install"
-    install_dir.mkdir(parents=True)
-    (install_dir / "version.txt").write_text("0.2.7", encoding="utf-8")
-
-    fake = FakeGitRun(git_repo=False, tags="v0.2.7")
-    orig_run = mod.subprocess.run
-    orig_evolve = mod.EVOLUTION_CWD
-    orig_config = mod.config_dir
-    orig_home = _pathlib.Path.home
-    mod.subprocess.run = fake
-    mod.config_dir = lambda: tmp_path
-    _pathlib.Path.home = classmethod(lambda cls: tmp_path)
-    try:
-        ok = handler._ensure_evolution_workspace()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.config_dir = orig_config
-        mod.EVOLUTION_CWD = orig_evolve
-        _pathlib.Path.home = orig_home
-
-    assert ok is True
-    assert handler._source_dir == str(evolve_dir)
-    # clone called with repo URL + target
-    clone_calls = [c for c in fake.calls if "clone" in c[0]]
-    assert len(clone_calls) == 1
-    # tag alignment: checkout -B master v0.2.7
-    checkout_calls = [c for c in fake.calls if c[0][1] == "checkout"]
-    assert any("v0.2.7" in c[0] for c in checkout_calls), f"no tag checkout: {checkout_calls}"
-    # git identity configured
-    config_calls = [c for c in fake.calls if c[0][1] == "config"]
-    assert any("user.name" in c[0] for c in config_calls)
-    assert any("user.email" in c[0] for c in config_calls)
-    # projects.yml self-heal
-    data = yaml.safe_load(projects_yml.read_text(encoding="utf-8"))
-    assert any(e.get("name") == "emrg" and e.get("path") == str(evolve_dir) for e in data)
-
-
-def test_ensure_evolution_workspace_clone_failure_skips(tmp_path):
-    """Clone failure (no network) → returns False so the cycle is skipped."""
-    from emrg.server import scheduler as mod
-
-    mod.EVOLUTION_CWD = tmp_path / "evolution"
-    handler = _make_handler(tmp_path, path=str(tmp_path / "nonexistent"))
-    handler._repo_url = "https://github.com/argszero/emrg.git"
-
-    fake = FakeGitRun(git_repo=False, clone_fails=True)
-    orig_run = mod.subprocess.run
-    orig_evolve = mod.EVOLUTION_CWD
-    orig_config = mod.config_dir
-    mod.subprocess.run = fake
-    # config_dir patched through the call: the clone branch would call
-    # _ensure_project_entry() and write config_dir()/projects.yml — keep it
-    # hermetic so a future fake change can't pollute real ~/.emrg/projects.yml
-    # (2026-08-12 pytest-temp-path leak incident).
-    mod.config_dir = lambda: tmp_path
-    try:
-        ok = handler._ensure_evolution_workspace()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.EVOLUTION_CWD = orig_evolve
-        mod.config_dir = orig_config
-
-    assert ok is False
-    assert handler._source_dir != str(mod.EVOLUTION_CWD / "emrg")
-
-
-# ── HTTPS→SSH fallback for blocked github.com:443 (2026-08-08) ─────
-# Some networks block github.com:443 while SSH port 22 stays open — the
-# self-heal clone and the saturation auto-resume (ls-remote) must not
-# hard-depend on https reaching github.com.
-
-def test_ensure_origin_reachable_switches_to_ssh_when_https_blocked(tmp_path):
-    """https origin unreachable (connection error) → origin switched to SSH."""
-    from emrg.server import scheduler as mod
-
-    handler = _make_handler(tmp_path, path=str(tmp_path))
-    handler._origin_probed = False
-    fake = FakeGitRun(
-        origin_url="https://github.com/argszero/emrg.git",
-        ls_remote_stderr=(
-            "fatal: unable to access 'https://github.com/argszero/emrg.git/': "
-            "Failed to connect to github.com port 443 after 4004 ms: "
-            "Couldn't connect to server"
-        ),
-    )
-    orig_run = mod.subprocess.run
-    orig_origin = mod.git_origin_url
-    mod.subprocess.run = fake
-    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
-    try:
-        handler._ensure_origin_reachable()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.git_origin_url = orig_origin
-
-    set_url_calls = [
-        c for c in fake.calls
-        if Path(c[0][0]).name.lower() in ("git", "git.exe") and c[0][1] == "remote" and c[0][2] == "set-url"
-    ]
-    assert len(set_url_calls) == 1, f"expected one set-url, got {fake.calls}"
-    assert set_url_calls[0][0][4] == "git@github.com:argszero/emrg.git"
-
-
-def test_ensure_origin_reachable_probes_only_once(tmp_path):
-    """One-shot probe: a second call never re-runs git."""
-    from emrg.server import scheduler as mod
-
-    handler = _make_handler(tmp_path, path=str(tmp_path))
-    handler._origin_probed = False
-    fake = FakeGitRun(
-        origin_url="https://github.com/argszero/emrg.git",
-        ls_remote_stderr="fatal: unable to access: Failed to connect",
-    )
-    orig_run = mod.subprocess.run
-    orig_origin = mod.git_origin_url
-    mod.subprocess.run = fake
-    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
-    try:
-        handler._ensure_origin_reachable()
-        handler._ensure_origin_reachable()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.git_origin_url = orig_origin
-
-    set_url_calls = [
-        c for c in fake.calls
-        if Path(c[0][0]).name.lower() in ("git", "git.exe") and c[0][1] == "remote" and c[0][2] == "set-url"
-    ]
-    assert len(set_url_calls) == 1
-
-
-def test_ensure_origin_reachable_keeps_https_when_reachable(tmp_path):
-    """ls-remote succeeds → origin untouched."""
-    from emrg.server import scheduler as mod
-
-    handler = _make_handler(tmp_path, path=str(tmp_path))
-    handler._origin_probed = False
-    fake = FakeGitRun(origin_url="https://github.com/argszero/emrg.git")
-    orig_run = mod.subprocess.run
-    orig_origin = mod.git_origin_url
-    mod.subprocess.run = fake
-    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
-    try:
-        handler._ensure_origin_reachable()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.git_origin_url = orig_origin
-
-    set_url_calls = [
-        c for c in fake.calls
-        if Path(c[0][0]).name.lower() in ("git", "git.exe") and c[0][1] == "remote" and c[0][2] == "set-url"
-    ]
-    assert set_url_calls == []
-
-
-def test_ensure_origin_reachable_ignores_non_connection_errors(tmp_path):
-    """Auth/404 failures never switch the origin."""
-    from emrg.server import scheduler as mod
-
-    handler = _make_handler(tmp_path, path=str(tmp_path))
-    handler._origin_probed = False
-    fake = FakeGitRun(
-        origin_url="https://github.com/argszero/emrg.git",
-        ls_remote_stderr="remote: Repository not found.",
-    )
-    orig_run = mod.subprocess.run
-    orig_origin = mod.git_origin_url
-    mod.subprocess.run = fake
-    mod.git_origin_url = lambda cwd: "https://github.com/argszero/emrg.git"
-    try:
-        handler._ensure_origin_reachable()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.git_origin_url = orig_origin
-
-    set_url_calls = [
-        c for c in fake.calls
-        if Path(c[0][0]).name.lower() in ("git", "git.exe") and c[0][1] == "remote" and c[0][2] == "set-url"
-    ]
-    assert set_url_calls == []
-
-
-def test_ensure_evolution_workspace_clone_falls_back_to_ssh(tmp_path):
-    """https clone connection failure → retried via SSH, workspace usable."""
-    import pathlib as _pathlib
-
-    from emrg.server import scheduler as mod
-
-    evolve_dir = tmp_path / "evolution" / "emrg"
-    mod.EVOLUTION_CWD = tmp_path / "evolution"
-    handler = _make_handler(tmp_path, path=str(tmp_path / "nonexistent"))
-    handler._repo_url = "https://github.com/argszero/emrg.git"
-
-    install_dir = tmp_path / ".emrg" / "install"
-    install_dir.mkdir(parents=True)
-    (install_dir / "version.txt").write_text("0.2.7", encoding="utf-8")
-
-    fake = FakeGitRun(
-        git_repo=False, tags="v0.2.7",
-        clone_fails=True, clone_fail_once=True,
-        clone_stderr=(
-            "fatal: unable to access 'https://github.com/argszero/emrg.git/': "
-            "Failed to connect to github.com port 443 after 10013 ms: "
-            "Couldn't connect to server"
-        ),
-    )
-    orig_run = mod.subprocess.run
-    orig_evolve = mod.EVOLUTION_CWD
-    orig_config = mod.config_dir
-    orig_home = _pathlib.Path.home
-    mod.subprocess.run = fake
-    mod.config_dir = lambda: tmp_path
-    _pathlib.Path.home = classmethod(lambda cls: tmp_path)
-    try:
-        ok = handler._ensure_evolution_workspace()
-    finally:
-        mod.subprocess.run = orig_run
-        mod.config_dir = orig_config
-        mod.EVOLUTION_CWD = orig_evolve
-        _pathlib.Path.home = orig_home
-
-    assert ok is True
-    assert handler._source_dir == str(evolve_dir)
-    assert handler._workspace_heal_failures == 0  # success resets backoff
-    clone_calls = [c for c in fake.calls if "clone" in c[0]]
-    assert len(clone_calls) == 2, f"expected https + ssh clone, got {fake.calls}"
-    assert clone_calls[0][0][-2] == "https://github.com/argszero/emrg.git"
-    assert clone_calls[1][0][-2] == "git@github.com:argszero/emrg.git"
-    # rant 2026-08-19T00:54:32 — short connect timeouts on both transports:
-    # https bounded by http.connectTimeout=5, SSH by GIT_SSH_COMMAND
-    # ConnectTimeout=5 (a blocked port must fail fast, not eat ~30s per cycle).
-    assert any("http.connectTimeout=5" in str(c) for c in clone_calls[0][0]), clone_calls
-    ssh_env = clone_calls[1][2] or {}
-    assert ssh_env.get("GIT_SSH_COMMAND") == "ssh -o ConnectTimeout=5", ssh_env
-
-
-def test_workspace_heal_backoff_skips_retries(tmp_path):
-    """rant 2026-08-19T00:54:32 — clone/self-heal failure arms exponential
-    backoff; cycles before the window skip the self-heal entirely (no
-    blocking git attempt), so a network-down daemon stops wedging websocket
-    clients every 60s."""
-    from emrg.server import scheduler as mod
-
-    mod.EVOLUTION_CWD = tmp_path / "evolution"
-    handler = _make_handler(tmp_path, path=str(tmp_path / "nonexistent"))
-    handler._repo_url = "https://github.com/argszero/emrg.git"
-
-    fake = FakeGitRun(git_repo=False, clone_fails=True)
-    orig_run = mod.subprocess.run
-    orig_evolve = mod.EVOLUTION_CWD
-    orig_config = mod.config_dir
-    mod.subprocess.run = fake
-    mod.config_dir = lambda: tmp_path
-    try:
-        ok = handler._ensure_evolution_workspace()
-        assert ok is False
-        assert handler._workspace_heal_failures == 1
-        assert handler._workspace_heal_next_retry_at > 0
-        # Within the backoff window → skipped, no git attempted again
-        before = len(fake.calls)
-        ok2 = handler._ensure_evolution_workspace()
-        assert ok2 is False
-        assert len(fake.calls) == before, f"git retried during backoff: {fake.calls}"
-        # Window expires (simulated) → retries, failure re-arms with 2x delay
-        handler._workspace_heal_next_retry_at = 0
-        ok3 = handler._ensure_evolution_workspace()
-        assert ok3 is False
-        assert handler._workspace_heal_failures == 2
-        assert len(fake.calls) > before
-    finally:
-        mod.subprocess.run = orig_run
-        mod.EVOLUTION_CWD = orig_evolve
-        mod.config_dir = orig_config
-
-
-def test_run_evolution_cycle_offloads_workspace_heal_to_thread():
-    """rant 2026-08-19T00:54:32 — the workspace self-heal runs synchronous
-    git subprocesses (clone/ls-remote/config); it must be offloaded with
-    asyncio.to_thread so the event loop is never blocked (a slow/failing
-    clone previously wedged every websocket client for ~30s per cycle)."""
-    import inspect
-
-    from emrg.server import scheduler as mod
-
-    src = inspect.getsource(mod.TaskHandler._run_evolution_cycle)
-    assert "await asyncio.to_thread(self._ensure_evolution_workspace)" in src
-
-
 # ── TaskHandler cycle truncation detection ──────────────────
 # mem-repo lesson (tool-call truncation must be flagged, not silently
 # treated as a successful/empty cycle — #523 applied it to the chat UI;
@@ -1639,14 +1148,28 @@ def _make_cycle_handler(tmp_path, frames):
         return _FakeWS(frames)
 
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    handler._ensure_evolution_workspace = lambda: True
     handler._build_evolution_prompt = lambda: "test prompt"
-    captured = {}
-    async def _fake_write_log(log):
-        captured["log"] = log
-    handler._write_evolution_log = _fake_write_log
     mod.connect_to_server = _fake_connect
-    return handler, captured
+
+    class _CapturedLog(dict):
+        """Lazily resolves `captured["log"]` to handler.evolutions[-1].
+
+        The cycle now keeps logs in the in-memory list only (rant
+        2026-08-19T14:18:40 — _write_evolution_log deleted); `"log" not in
+        captured` stays True while no cycle completed.
+        """
+
+        def __contains__(self, key):
+            if key == "log":
+                return bool(handler.evolutions)
+            return super().__contains__(key)
+
+        def __getitem__(self, key):
+            if key == "log":
+                return handler.evolutions[-1]
+            return super().__getitem__(key)
+
+    return handler, _CapturedLog()
 
 
 def test_evolution_cycle_truncated_not_empty_not_complete(tmp_path):
@@ -2000,21 +1523,17 @@ def test_saturation_heartbeat_log_message_no_skip(tmp_path, caplog):
 def test_saturation_heartbeat_makes_no_network_calls(tmp_path):
     """Saturation judgment never touches the network (rant 2026-08-18T20:32:07
     — the old _remote_advanced ls-remote blocked the event loop; the check is
-    gone entirely, recovery happens via cycle output resetting the counter)."""
+    gone entirely, recovery happens via cycle output resetting the counter).
+    scheduler no longer imports subprocess at all (rant 2026-08-19T14:20:52
+    deleted the self-heal git machinery) — no subprocess can be called."""
     from emrg.server import scheduler as mod
 
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
     handler._empty_cycles = 30
 
-    def boom(*a, **kw):
-        raise AssertionError("subprocess.run must not be called from saturation")
-
-    orig_run = mod.subprocess.run
-    mod.subprocess.run = boom
-    try:
-        assert handler._saturation_heartbeat_active() is True
-    finally:
-        mod.subprocess.run = orig_run
+    assert not hasattr(mod, "subprocess"), \
+        "scheduler must not import subprocess anymore (self-heal deleted)"
+    assert handler._saturation_heartbeat_active() is True
     assert handler._empty_cycles == 30
 
 
