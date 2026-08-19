@@ -60,23 +60,46 @@ class TestCleanupServer:
 
 
 class TestIsServerRunningSync:
-    def test_false_when_port_file_missing(self, monkeypatch, tmp_path):
-        """Returns False when the port file doesn't exist (daemon not started)."""
-        monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
+    """Probes the FIXED daemon port (rant 2026-08-19T08:05:21) — no port-file
+    read, so a missing/stale emrgd.port never hides a live daemon."""
 
-        assert is_server_running_sync() is False
+    def _free_port(self) -> int:
+        """Bind a probe socket to port 0 to get a free port (avoids colliding
+        with a real daemon on the well-known EMRGD_PORT)."""
+        import socket as _socket
 
-    def test_false_when_port_file_corrupt(self, monkeypatch, tmp_path):
-        """Returns False when the port file is unparseable."""
-        monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
-        (tmp_path / f"{CONNECT_ID}.port").write_text("garbage", encoding="utf-8")
+        probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        try:
+            probe.bind(("127.0.0.1", 0))
+            return probe.getsockname()[1]
+        finally:
+            probe.close()
 
-        assert is_server_running_sync() is False
+    def test_false_when_fixed_port_closed(self, monkeypatch):
+        """Returns False when nothing listens on the fixed port (no daemon)."""
+        monkeypatch.setattr("emrg.connect.EMRGD_PORT", self._free_port())
 
-    def test_false_when_connection_refused(self, monkeypatch, tmp_path):
-        """Returns False when nothing listens on the port."""
-        monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
-        (tmp_path / f"{CONNECT_ID}.port").write_text("1\nno-token", encoding="utf-8")
+        assert is_server_running_sync(timeout=0.1) is False
+
+    def test_true_when_fixed_port_listening(self, monkeypatch):
+        """Returns True when a daemon owns the fixed port — even with NO port
+        file present (the dual-instance root cause the probe must catch)."""
+        import socket as _socket
+
+        port = self._free_port()
+        monkeypatch.setattr("emrg.connect.EMRGD_PORT", port)
+        srv = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        srv.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", port))
+        srv.listen(1)
+        try:
+            assert is_server_running_sync(timeout=1.0) is True
+        finally:
+            srv.close()
+
+    def test_false_when_connection_refused(self, monkeypatch):
+        """Returns False when the fixed port is closed."""
+        monkeypatch.setattr("emrg.connect.EMRGD_PORT", self._free_port())
 
         assert is_server_running_sync(timeout=0.1) is False
 
@@ -115,6 +138,8 @@ class TestConnectToServer:
 
         asyncio.run(connect_mod.connect_to_server())
 
-        assert captured["uri"] == "ws://127.0.0.1:49152"
+        # Fixed daemon port (rant 2026-08-19T08:05:21) — the URI no longer
+        # depends on the port file's port value, only the token is read from it.
+        assert captured["uri"] == f"ws://127.0.0.1:{connect_mod.EMRGD_PORT}"
         assert captured["kwargs"]["proxy"] is None
         assert captured["kwargs"]["max_size"] == 16 * 1024 * 1024

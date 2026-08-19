@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import tempfile
 from datetime import datetime
@@ -1494,52 +1495,149 @@ def test_update_check_force_runs_fresh_check(monkeypatch):
     assert reply["type"] == "update_check"
 
 
-# ── rant 2026-08-18T12:49:09 ③：单 daemon 准入（进程名 + 端口活性探测）──
-def test_serve_refuses_duplicate_when_daemon_alive(tmp_path):
-    """serve() must refuse to start when another emrgd is already listening.
+# ── rant 2026-08-19T08:05:21：固定端口 bind 排斥 = 唯一单 daemon 准入 ──
+def test_serve_refuses_duplicate_when_fixed_port_bound(tmp_path):
+    """serve() must exit when another LIVE daemon owns the fixed port.
 
-    Multi-client (GUI + TUI, possibly different installs) stale-restart
-    sequences can leave the pid file missing while an old daemon is still
-    alive — the process-name admission (rant 2026-08-18T22:15:04) and the
-    port-file liveness probe catch this and exit cleanly instead of binding
-    a second port (observed: 4 emrg.server processes).
+    The fixed-port bind (EADDRINUSE) is the ONLY single-instance admission
+    (rant 2026-08-19T08:05:21): kernel-level resource exclusivity — no PID
+    file to forge/delete, no race window. A refused instance must not claim
+    the pid file nor reach the websockets bind.
     """
+    import errno as _errno
     from unittest.mock import AsyncMock, patch
 
     server = _make_server()
-    with patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
-         patch("emrg.server.daemon._find_emrg_server_processes", return_value=[999]), \
+
+    def _deny(port):
+        raise OSError(_errno.EADDRINUSE, "Address already in use")
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_deny), \
          patch("emrg.server.daemon.is_server_running_sync", return_value=True), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
          patch("emrg.server.daemon.serve", new_callable=AsyncMock) as mock_serve:
         import asyncio
         asyncio.run(server.serve())
 
     assert server._running is False, "duplicate daemon must not keep running"
-    mock_serve.assert_not_awaited(), "must not bind a second socket when one daemon is alive"
-    # no pid file written by the refused instance
+    mock_serve.assert_not_awaited(), "must not bind when the fixed port is taken"
     assert not (tmp_path / "emrgd.pid").exists(), "refused instance must not claim the pid file"
 
 
-def test_serve_proceeds_when_no_live_daemon(tmp_path):
-    """Negative path: no live daemon on the port file → the admission probe
-    must NOT block startup (the flow reaches the pid-file section)."""
-    from unittest.mock import AsyncMock, patch
+def test_serve_proceeds_when_fixed_port_free(tmp_path):
+    """Negative path: fixed port free → bind passes → pid diagnostic written
+    and the websockets serve is reached with the pre-bound socket."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
 
     server = _make_server()
-    with patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
-         patch("emrg.server.daemon._find_emrg_server_processes", return_value=[]), \
-         patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
+    fake_sock = MagicMock()
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", return_value=fake_sock), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
          patch("emrg.server.daemon.serve", new_callable=AsyncMock,
-               side_effect=RuntimeError("abort after probe — not reached in this test")):
-        import asyncio
-        # Let the probe run but abort at the websockets bind via a side_effect
-        # on the module-level serve; the pid file write happens between the
-        # probe and the bind, proving the probe let us through.
+               side_effect=RuntimeError("abort after admission — bind already verified")):
         try:
             asyncio.run(server.serve())
         except RuntimeError as e:
-            assert "abort after probe" in str(e), f"unexpected abort: {e}"
+            assert "abort after admission" in str(e), f"unexpected abort: {e}"
         else:
-            raise AssertionError("expected the websockets serve abort (probe passed)")
-    assert (tmp_path / "emrgd.pid").exists(), (
-        "no-live-daemon probe must proceed to pid-file write (admission is liveness-based)")
+            raise AssertionError("expected the websockets serve abort (admission passed)")
+    assert (tmp_path / "emrgd.pid").exists(), "bind success must write the diagnostic pid file"
+    assert (tmp_path / "emrgd.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+
+
+def test_serve_timewait_retry_recovers_bind(tmp_path):
+    """EADDRINUSE with NO live listener = TIME_WAIT remnant (Windows
+    SO_EXCLUSIVEADDRUSE) → serve() retries the bind and recovers."""
+    import asyncio
+    import errno as _errno
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    server = _make_server()
+    fake_sock = MagicMock()
+    bind_calls = {"n": 0}
+
+    def _flaky(port):
+        bind_calls["n"] += 1
+        if bind_calls["n"] == 1:
+            raise OSError(_errno.EADDRINUSE, "Address already in use")
+        return fake_sock
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_flaky), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRIES", 3), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRY_DELAY", 0.01), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock,
+               side_effect=RuntimeError("abort after retry recovered the bind")):
+        try:
+            asyncio.run(server.serve())
+        except RuntimeError as e:
+            assert "abort after retry" in str(e), f"unexpected abort: {e}"
+        else:
+            raise AssertionError("expected the websockets serve abort (retry recovered)")
+    assert bind_calls["n"] == 2, f"expected 2 bind attempts, got {bind_calls['n']}"
+    assert (tmp_path / "emrgd.pid").exists(), "recovered bind must write the diagnostic pid file"
+
+
+def test_serve_timewait_retry_exhausted(tmp_path):
+    """EADDRINUSE with no listener that never clears → serve() gives up
+    gracefully (no pid claim, no websockets bind)."""
+    import asyncio
+    import errno as _errno
+    from unittest.mock import AsyncMock, patch
+
+    server = _make_server()
+
+    def _always_busy(port):
+        raise OSError(_errno.EADDRINUSE, "Address already in use")
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_always_busy), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRIES", 2), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRY_DELAY", 0.01), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock) as mock_serve:
+        asyncio.run(server.serve())
+
+    assert server._running is False, "must give up after retries"
+    mock_serve.assert_not_awaited()
+    assert not (tmp_path / "emrgd.pid").exists(), "failed instance must not claim the pid file"
+
+
+def test_serve_rethrows_non_bind_errors(tmp_path):
+    """A non-EADDRINUSE socket error must propagate — only 'address in use'
+    means 'already running'."""
+    import asyncio
+    import errno as _errno
+    from unittest.mock import patch
+
+    server = _make_server()
+
+    def _boom(port):
+        raise OSError(_errno.EACCES, "Permission denied")
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_boom), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path):
+        try:
+            asyncio.run(server.serve())
+        except OSError as e:
+            assert e.errno == _errno.EACCES, f"unexpected errno: {e.errno}"
+        else:
+            raise AssertionError("expected OSError(EACCES) to propagate")
+
+
+def test_assert_port_file_writes_fixed_port(tmp_path):
+    """_assert_port_file persists the FIXED port (56031) + auth token."""
+    from unittest.mock import patch
+
+    server = _make_server()
+    server._auth_token = "tok-123"
+    with patch("emrg.server.daemon.config_dir", return_value=tmp_path):
+        server._assert_port_file(56031)
+    port_file = tmp_path / "emrgd.port"
+    assert port_file.exists()
+    lines = port_file.read_text(encoding="utf-8").split()
+    assert lines[0] == "56031"
+    assert lines[1] == "tok-123"

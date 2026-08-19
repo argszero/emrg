@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import json
 import logging
 import os
@@ -19,7 +20,9 @@ import platform
 import re
 import secrets
 import signal
+import socket as _socket
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -30,7 +33,7 @@ from websockets.exceptions import ConnectionClosed
 
 from emrg._win import win32_no_window_kwargs
 from emrg.config import LlmConfig, config_dir
-from emrg.connect import cleanup_server, is_server_running_sync
+from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.llm import LlmClient
 from emrg.server.git_utils import (
@@ -142,57 +145,55 @@ def _get_jinja_env() -> "jinja2.Environment":
 # ── Module-level constants ──
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
+# Windows TIME_WAIT retry: SO_EXCLUSIVEADDRUSE (the only anti-hijack option on
+# Windows) blocks rebinding while accepted connections linger in TIME_WAIT.
+# serve() treats EADDRINUSE-with-no-listener as a TIME_WAIT remnant and retries
+# the bind for up to this many attempts at this interval (~10s), so a crashed
+# daemon restarts without a 30-120s stall.
+_TIME_WAIT_RETRIES = 20
+_TIME_WAIT_RETRY_DELAY = 0.5
 
-def _find_emrg_server_processes(own_pid: int) -> list[int]:
-    """Return PIDs of other live ``emrg.server`` daemon processes.
 
-    Host rant 2026-08-18T22:15:04 (process-name detection, host's chosen root
-    fix for the dual-instance restart storm): pid/port files can be missing,
-    stale, or mismatched (GUI spawn, crash restart, #593 family), so the
-    single-instance gate must ask the OS "is an earlier emrg.server already
-    alive?" and refuse to start if so. The process name is the ground truth —
-    the port file is not (observed 22:04: pids 23863/23864 coexisting while
-    the port file pointed at only one).
+def _create_fixed_port_socket(port: int) -> _socket.socket:
+    """Create + bind the daemon's fixed loopback listening socket.
+
+    This is the daemon's ONLY single-instance admission (host rant
+    2026-08-19T08:05:21): the kernel refuses a second bind on the same
+    (addr, port) with EADDRINUSE — pure resource exclusivity with no file to
+    forge/delete (PID files were the unreliable mechanism), no race window,
+    and automatic release when the process dies. Raises OSError(EADDRINUSE)
+    when another socket already owns the port; the caller treats a *live*
+    listener as "emrgd already running" and exits itself.
+
+    Socket options:
+    - Windows: SO_EXCLUSIVEADDRUSE only. It forbids any other socket from
+      binding the same port (SO_REUSEADDR alone would allow port hijacking).
+      SO_EXCLUSIVEADDRUSE and SO_REUSEADDR are MUTUALLY EXCLUSIVE on Windows
+      (the second setsockopt fails with WSAEINVAL 10022 — verified on the
+      Windows CI matrix). The cost is that a closed listening socket with
+      accepted connections lingering in TIME_WAIT blocks rebinding; serve()
+      handles that with a listener-probe + bounded retry so a crashed daemon
+      still restarts quickly (rant acceptance: "无 TIME_WAIT 卡死").
+    - POSIX: SO_REUSEADDR only. It permits rebinding while TIME_WAIT sockets
+      linger but does NOT allow two listeners on the same addr (that would be
+      SO_REUSEPORT, which we deliberately never set) — exclusivity is kept.
     """
-    pids: list[int] = []
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
     try:
-        if platform.system() == "Windows":
-            # PowerShell CIM scan (same contract as
-            # _stop_all._scan_windows_python_emrg — literal braces escaped).
-            ps_cmd = (
-                "Get-CimInstance Win32_Process | "
-                "Where-Object {{ $_.ProcessId -ne {own} -and "
-                "$_.Name -match 'python' -and "
-                "$_.CommandLine -match '-m emrg\\.server' }} | "
-                "ForEach-Object {{ Write-Output $_.ProcessId }}"
-            ).format(own=own_pid)
-            out = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", ps_cmd],
-                capture_output=True, text=True, timeout=10, **win32_no_window_kwargs(),
-            ).stdout
+        if sys.platform == "win32":
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_EXCLUSIVEADDRUSE, 1)
         else:
-            out = subprocess.run(
-                ["ps", "-axo", "pid=,command="],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-            for line in out.splitlines():
-                parts = line.strip().split(None, 1)
-                if len(parts) != 2:
-                    continue
-                try:
-                    pid = int(parts[0])
-                except ValueError:
-                    continue
-                if pid == own_pid:
-                    continue
-                # daemon cmdline: `python -m emrg.server` (installed python or
-                # uv run) — match the module path only (TUI is `-m emrg`).
-                if "-m emrg.server" in parts[1] or "emrg/server" in parts[1]:
-                    pids.append(pid)
-        return pids
-    except (OSError, subprocess.SubprocessError, TimeoutError):
-        logger.debug("process-name scan failed — falling back to port probe", exc_info=True)
-        return []
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(128)
+        sock.setblocking(False)
+        return sock
+    except OSError:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        raise
 
 
 class EmrgServer:
@@ -258,98 +259,93 @@ class EmrgServer:
             logger.info("skills loaded: %s", [s.name for s in self.skills])
 
     async def serve(self) -> None:
-        """Start listening for IPC connections (platform-adaptive)."""
+        """Start listening for IPC connections (fixed-port, platform-adaptive)."""
         self._running = True
 
-        # ── Single-instance admission: process-name detection (PRIMARY) ───
-        # (host rant 2026-08-18T22:15:04 — root fix for the dual-instance
-        # restart storm) pid/port files are unreliable (missing/stale/
-        # mismatched → two emrg.server processes coexisting, observed 22:04
-        # pids 23863/23864), so first ask the OS: if an earlier emrg.server
-        # process is already alive, THIS new instance exits itself — never
-        # force-kill the old one (that is what caused the restart storm).
+        # ── Single-instance admission: fixed-port bind exclusivity (ONLY) ───
+        # (host rant 2026-08-19T08:05:21) PID files are unreliable (plain
+        # files — content can be overwritten/deleted, and os.kill(pid,0)
+        # liveness probes misjudge: observed dual instances PID 3924+2592 on
+        # 08-19) and random ports (port=0) make port exclusivity useless. The
+        # fixed-port bind IS the admission: the kernel refuses a second bind
+        # (EADDRINUSE) — no file to forge, no race window, auto-released on
+        # crash. No transitional compatibility with old-format daemons
+        # (rant: "升级后即唯一生效").
         try:
-            existing = _find_emrg_server_processes(os.getpid())
-        except Exception:
-            existing = []
-        if existing:
-            logger.error(
-                "another emrg.server process(es) already running (pids %s) — "
-                "new instance exiting itself (process-name admission)",
-                existing,
+            sock = _create_fixed_port_socket(EMRGD_PORT)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            # The port is taken. Distinguish a LIVE daemon from a Windows
+            # TIME_WAIT remnant: only a live listener accepts connections.
+            # (Windows SO_EXCLUSIVEADDRUSE blocks rebinding while accepted
+            # connections linger in TIME_WAIT — SO_REUSEADDR cannot be combined
+            # with it, WSAEINVAL 10022; POSIX SO_REUSEADDR never hits this.)
+            if is_server_running_sync(timeout=0.5):
+                logger.error(
+                    "emrgd already running on 127.0.0.1:%d (EADDRINUSE, "
+                    "fixed-port admission) — new instance exiting itself. "
+                    "Stop it first (emrg server stop).",
+                    EMRGD_PORT,
+                )
+                self._running = False
+                return
+            # No listener behind the port → TIME_WAIT remnant. Retry the bind
+            # for a bounded window so a crashed daemon restarts without a
+            # 30-120s stall (rant acceptance: "无 TIME_WAIT 卡死").
+            logger.warning(
+                "port 127.0.0.1:%d busy but no daemon listening — "
+                "TIME_WAIT remnant, retrying bind (%d x %.1fs)",
+                EMRGD_PORT, _TIME_WAIT_RETRIES, _TIME_WAIT_RETRY_DELAY,
             )
-            self._running = False
-            return
+            for _ in range(_TIME_WAIT_RETRIES):
+                await asyncio.sleep(_TIME_WAIT_RETRY_DELAY)
+                try:
+                    sock = _create_fixed_port_socket(EMRGD_PORT)
+                    break
+                except OSError as retry_exc:
+                    if retry_exc.errno != errno.EADDRINUSE:
+                        raise
+                    if is_server_running_sync(timeout=0.5):
+                        logger.error(
+                            "emrgd already running on 127.0.0.1:%d (became "
+                            "live during TIME_WAIT retry) — new instance "
+                            "exiting itself.",
+                            EMRGD_PORT,
+                        )
+                        self._running = False
+                        return
+            else:
+                logger.error(
+                    "port 127.0.0.1:%d busy (TIME_WAIT) but no daemon "
+                    "listening after %d retries — giving up.",
+                    EMRGD_PORT, _TIME_WAIT_RETRIES,
+                )
+                self._running = False
+                return
 
-        # ── PID file: prevent duplicate daemon instances ───
+        # ── PID file: diagnostics only (rant 08-05:21 — no longer an
+        # admission gate). Written AFTER the fixed-port bind succeeded, so only
+        # the process that actually owns the port writes it; stop_all and
+        # diagnostics may still read it.
         runtime_dir = config_dir()
         pid_file = runtime_dir / "emrgd.pid"
-
-        # ── Single-instance admission (secondary): port-file liveness probe ───
-        # (rant 2026-08-18T12:49:09 ③) Multiple resident clients (GUI + TUI,
-        # possibly different installs) each spawn/restart the daemon on their
-        # own schedule; stale-restart sequences can leave the pid file missing
-        # while an old daemon is still alive, so the pid-file check alone lets
-        # a second instance start (observed: 4 emrg.server processes
-        # coexisting on different ports). Probe the port file next — if a
-        # live daemon already answers, do NOT start a duplicate.
         try:
-            if is_server_running_sync(timeout=1.0):
-                logger.error(
-                    "another emrgd instance is already listening (port file %s) — "
-                    "refusing to start a duplicate (single-instance admission)",
-                    runtime_dir / "emrgd.port",
-                )
-                self._running = False
-                return
-        except Exception:
-            logger.debug("single-instance port probe failed — continuing startup", exc_info=True)
-
-        try:
-            # Atomic create — fails if file already exists
-            fd = os.open(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            logger.debug("pid file written: %s (pid=%d)", pid_file, os.getpid())
-        except FileExistsError:
-            # PID file exists — check if the old process is still alive
-            try:
-                old_pid_s = pid_file.read_text(encoding="utf-8").strip()
-                old_pid = int(old_pid_s)
-                os.kill(old_pid, 0)
-                # Old process is alive. Host rant 2026-08-18T22:15:04: a new
-                # instance NEVER force-kills the old one (that takeover path
-                # caused the 22:04 dual-instance restart storm) — it exits
-                # itself. The process-name scan above already refused when an
-                # emrg.server cmdline was found; this pid-file branch is the
-                # fallback for a live-but-scan-missed process.
-                logger.error(
-                    "emrgd already running (pid=%d). "
-                    "Stop it first (emrg server stop) — new instance exiting itself.",
-                    old_pid,
-                )
-                self._running = False
-                return
-            except (ValueError, OSError):
-                # Stale PID file — remove and retry
-                logger.warning("stale pid file (pid %s gone), removing", old_pid_s)
-                pid_file.unlink()
-                fd = os.open(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                logger.debug("pid file written: %s (pid=%d)", pid_file, os.getpid())
+            pid_file.write_text(str(os.getpid()), encoding="utf-8")
+            logger.debug("pid file written (diagnostic only): %s (pid=%d)", pid_file, os.getpid())
+        except OSError:
+            logger.warning("could not write diagnostic pid file %s", pid_file, exc_info=True)
 
         self._server = await serve(
             self._handle_client,
-            host="127.0.0.1",
-            port=0,
+            sock=sock,
             max_size=16 * 1024 * 1024,
             # keepalive 超时放宽：TUI 回答结束时全量渲染可阻塞事件循环数秒，
             # 默认 ping_timeout=20 会导致服务器 CLOSE 1011 踢连接（rant 14:22:06）。
             # 保留 ping_interval=20（liveness 检测），容忍 300s 的 pong 延迟。
             ping_timeout=300,
         )
-        port = self._server.sockets[0].getsockname()[1]
+        port = EMRGD_PORT
         self._auth_token = secrets.token_urlsafe(32)
         self._assert_port_file(port)
         # Rant 2026-08-09T18:47:37 B4：启动完成一行自证——pid/port/port 文件路径/写入成功，
