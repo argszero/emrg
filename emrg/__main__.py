@@ -25,7 +25,7 @@ from pathlib import Path
 
 from emrg import __version__
 from emrg._win import win32_no_window_kwargs
-from emrg.connect import cleanup_server, connect_to_server
+from emrg.connect import AuthError, cleanup_server, connect_to_server
 from websockets.exceptions import ConnectionClosed
 
 
@@ -153,7 +153,7 @@ async def _send_shutdown() -> bool:
     """Send a graceful shutdown message to the daemon. Returns True on success."""
     try:
         ws = await asyncio.wait_for(connect_to_server(), timeout=3)
-    except (ConnectionRefusedError, FileNotFoundError, OSError, asyncio.TimeoutError):
+    except (ConnectionRefusedError, FileNotFoundError, OSError, asyncio.TimeoutError, AuthError):
         return False
 
     try:
@@ -204,7 +204,7 @@ def _stop_daemon() -> None:
             print("daemon stopped.")
         else:
             print("daemon not running (no pid from ping).")
-    except (ConnectionClosed, OSError, asyncio.TimeoutError, json.JSONDecodeError):
+    except (ConnectionClosed, OSError, asyncio.TimeoutError, json.JSONDecodeError, AuthError):
         print("daemon not running.")
 
 
