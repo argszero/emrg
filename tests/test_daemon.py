@@ -1497,7 +1497,7 @@ def test_update_check_force_runs_fresh_check(monkeypatch):
 
 # ── rant 2026-08-19T08:05:21：固定端口 bind 排斥 = 唯一单 daemon 准入 ──
 def test_serve_refuses_duplicate_when_fixed_port_bound(tmp_path):
-    """serve() must exit when another daemon already owns the fixed port.
+    """serve() must exit when another LIVE daemon owns the fixed port.
 
     The fixed-port bind (EADDRINUSE) is the ONLY single-instance admission
     (rant 2026-08-19T08:05:21): kernel-level resource exclusivity — no PID
@@ -1513,6 +1513,7 @@ def test_serve_refuses_duplicate_when_fixed_port_bound(tmp_path):
         raise OSError(_errno.EADDRINUSE, "Address already in use")
 
     with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_deny), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=True), \
          patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
          patch("emrg.server.daemon.serve", new_callable=AsyncMock) as mock_serve:
         import asyncio
@@ -1544,6 +1545,65 @@ def test_serve_proceeds_when_fixed_port_free(tmp_path):
             raise AssertionError("expected the websockets serve abort (admission passed)")
     assert (tmp_path / "emrgd.pid").exists(), "bind success must write the diagnostic pid file"
     assert (tmp_path / "emrgd.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+
+
+def test_serve_timewait_retry_recovers_bind(tmp_path):
+    """EADDRINUSE with NO live listener = TIME_WAIT remnant (Windows
+    SO_EXCLUSIVEADDRUSE) → serve() retries the bind and recovers."""
+    import asyncio
+    import errno as _errno
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    server = _make_server()
+    fake_sock = MagicMock()
+    bind_calls = {"n": 0}
+
+    def _flaky(port):
+        bind_calls["n"] += 1
+        if bind_calls["n"] == 1:
+            raise OSError(_errno.EADDRINUSE, "Address already in use")
+        return fake_sock
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_flaky), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRIES", 3), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRY_DELAY", 0.01), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock,
+               side_effect=RuntimeError("abort after retry recovered the bind")):
+        try:
+            asyncio.run(server.serve())
+        except RuntimeError as e:
+            assert "abort after retry" in str(e), f"unexpected abort: {e}"
+        else:
+            raise AssertionError("expected the websockets serve abort (retry recovered)")
+    assert bind_calls["n"] == 2, f"expected 2 bind attempts, got {bind_calls['n']}"
+    assert (tmp_path / "emrgd.pid").exists(), "recovered bind must write the diagnostic pid file"
+
+
+def test_serve_timewait_retry_exhausted(tmp_path):
+    """EADDRINUSE with no listener that never clears → serve() gives up
+    gracefully (no pid claim, no websockets bind)."""
+    import asyncio
+    import errno as _errno
+    from unittest.mock import AsyncMock, patch
+
+    server = _make_server()
+
+    def _always_busy(port):
+        raise OSError(_errno.EADDRINUSE, "Address already in use")
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_always_busy), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRIES", 2), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRY_DELAY", 0.01), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock) as mock_serve:
+        asyncio.run(server.serve())
+
+    assert server._running is False, "must give up after retries"
+    mock_serve.assert_not_awaited()
+    assert not (tmp_path / "emrgd.pid").exists(), "failed instance must not claim the pid file"
 
 
 def test_serve_rethrows_non_bind_errors(tmp_path):

@@ -33,7 +33,7 @@ from websockets.exceptions import ConnectionClosed
 
 from emrg._win import win32_no_window_kwargs
 from emrg.config import LlmConfig, config_dir
-from emrg.connect import EMRGD_PORT, cleanup_server
+from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.llm import LlmClient
 from emrg.server.git_utils import (
@@ -145,6 +145,14 @@ def _get_jinja_env() -> "jinja2.Environment":
 # ── Module-level constants ──
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
+# Windows TIME_WAIT retry: SO_EXCLUSIVEADDRUSE (the only anti-hijack option on
+# Windows) blocks rebinding while accepted connections linger in TIME_WAIT.
+# serve() treats EADDRINUSE-with-no-listener as a TIME_WAIT remnant and retries
+# the bind for up to this many attempts at this interval (~10s), so a crashed
+# daemon restarts without a 30-120s stall.
+_TIME_WAIT_RETRIES = 20
+_TIME_WAIT_RETRY_DELAY = 0.5
+
 
 def _create_fixed_port_socket(port: int) -> _socket.socket:
     """Create + bind the daemon's fixed loopback listening socket.
@@ -154,14 +162,18 @@ def _create_fixed_port_socket(port: int) -> _socket.socket:
     (addr, port) with EADDRINUSE — pure resource exclusivity with no file to
     forge/delete (PID files were the unreliable mechanism), no race window,
     and automatic release when the process dies. Raises OSError(EADDRINUSE)
-    when another daemon already owns the port; the caller treats that as
-    "emrgd already running" and exits itself.
+    when another socket already owns the port; the caller treats a *live*
+    listener as "emrgd already running" and exits itself.
 
     Socket options:
-    - Windows: SO_EXCLUSIVEADDRUSE + SO_REUSEADDR together. SO_REUSEADDR alone
-      allows any socket to hijack the port; SO_EXCLUSIVEADDRUSE forbids that.
-      Together they still allow a fast restart over lingering TIME_WAIT sockets
-      (Windows would otherwise block rebinding for 30-120s after a crash).
+    - Windows: SO_EXCLUSIVEADDRUSE only. It forbids any other socket from
+      binding the same port (SO_REUSEADDR alone would allow port hijacking).
+      SO_EXCLUSIVEADDRUSE and SO_REUSEADDR are MUTUALLY EXCLUSIVE on Windows
+      (the second setsockopt fails with WSAEINVAL 10022 — verified on the
+      Windows CI matrix). The cost is that a closed listening socket with
+      accepted connections lingering in TIME_WAIT blocks rebinding; serve()
+      handles that with a listener-probe + bounded retry so a crashed daemon
+      still restarts quickly (rant acceptance: "无 TIME_WAIT 卡死").
     - POSIX: SO_REUSEADDR only. It permits rebinding while TIME_WAIT sockets
       linger but does NOT allow two listeners on the same addr (that would be
       SO_REUSEPORT, which we deliberately never set) — exclusivity is kept.
@@ -170,7 +182,6 @@ def _create_fixed_port_socket(port: int) -> _socket.socket:
     try:
         if sys.platform == "win32":
             sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_EXCLUSIVEADDRUSE, 1)
-            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         else:
             sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
         sock.bind(("127.0.0.1", port))
@@ -263,7 +274,14 @@ class EmrgServer:
         try:
             sock = _create_fixed_port_socket(EMRGD_PORT)
         except OSError as exc:
-            if exc.errno == errno.EADDRINUSE:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            # The port is taken. Distinguish a LIVE daemon from a Windows
+            # TIME_WAIT remnant: only a live listener accepts connections.
+            # (Windows SO_EXCLUSIVEADDRUSE blocks rebinding while accepted
+            # connections linger in TIME_WAIT — SO_REUSEADDR cannot be combined
+            # with it, WSAEINVAL 10022; POSIX SO_REUSEADDR never hits this.)
+            if is_server_running_sync(timeout=0.5):
                 logger.error(
                     "emrgd already running on 127.0.0.1:%d (EADDRINUSE, "
                     "fixed-port admission) — new instance exiting itself. "
@@ -272,7 +290,39 @@ class EmrgServer:
                 )
                 self._running = False
                 return
-            raise
+            # No listener behind the port → TIME_WAIT remnant. Retry the bind
+            # for a bounded window so a crashed daemon restarts without a
+            # 30-120s stall (rant acceptance: "无 TIME_WAIT 卡死").
+            logger.warning(
+                "port 127.0.0.1:%d busy but no daemon listening — "
+                "TIME_WAIT remnant, retrying bind (%d x %.1fs)",
+                EMRGD_PORT, _TIME_WAIT_RETRIES, _TIME_WAIT_RETRY_DELAY,
+            )
+            for _ in range(_TIME_WAIT_RETRIES):
+                await asyncio.sleep(_TIME_WAIT_RETRY_DELAY)
+                try:
+                    sock = _create_fixed_port_socket(EMRGD_PORT)
+                    break
+                except OSError as retry_exc:
+                    if retry_exc.errno != errno.EADDRINUSE:
+                        raise
+                    if is_server_running_sync(timeout=0.5):
+                        logger.error(
+                            "emrgd already running on 127.0.0.1:%d (became "
+                            "live during TIME_WAIT retry) — new instance "
+                            "exiting itself.",
+                            EMRGD_PORT,
+                        )
+                        self._running = False
+                        return
+            else:
+                logger.error(
+                    "port 127.0.0.1:%d busy (TIME_WAIT) but no daemon "
+                    "listening after %d retries — giving up.",
+                    EMRGD_PORT, _TIME_WAIT_RETRIES,
+                )
+                self._running = False
+                return
 
         # ── PID file: diagnostics only (rant 08-05:21 — no longer an
         # admission gate). Written AFTER the fixed-port bind succeeded, so only
