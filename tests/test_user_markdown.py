@@ -100,3 +100,42 @@ def test_chat_history_update_last_updates_user_markdown():
     chat.update_last("updated text")
     assert isinstance(chat.rows[0], UserMarkdown)
     assert chat.rows[0].text == "updated text"
+
+
+def test_user_markdown_preserves_single_newlines():
+    """Pasted multi-line text keeps its line breaks (rant 2026-08-19T14:25:55).
+
+    RichMarkdown would collapse single \\n into spaces; the hard-break
+    preprocessing must keep each logical line separate with "> " only on
+    the first line and a same-width indent on continuation lines.
+    """
+    visible = _render("line1\nline2\nline3", 40)
+    assert len(visible) == 3
+    assert visible[0].startswith("> ")
+    assert "line1" in visible[0]
+    assert visible[1].startswith("  ")
+    assert "line2" in visible[1]
+    assert visible[2].startswith("  ")
+    assert "line3" in visible[2]
+
+
+def test_user_markdown_preserves_blank_lines_as_paragraphs():
+    """Blank lines still act as paragraph separators (\\n\\n unchanged)."""
+    visible = _render("para one\n\npara two", 40)
+    # two paragraphs → at least 2 rendered lines, second starts fresh
+    assert len(visible) >= 2
+    assert "para one" in visible[0]
+    assert "para two" in visible[-1]
+
+
+def test_preserve_line_breaks_skips_fenced_code_blocks():
+    """Lines inside ``` fences are not given trailing hard-break spaces."""
+    from emrg.client.python_tui.widgets.markdown import _preserve_line_breaks
+
+    text = "intro\n```\ncode line 1\ncode line 2\n```\noutro"
+    out = _preserve_line_breaks(text)
+    parts = out.split("\n")
+    assert parts[0] == "intro  "  # plain line → hard break
+    assert parts[2] == "code line 1"  # fence interior untouched
+    assert parts[3] == "code line 2"
+    assert parts[5] == "outro  "
