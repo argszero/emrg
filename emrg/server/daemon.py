@@ -1145,8 +1145,9 @@ class EmrgServer:
             except (OSError, ValueError):
                 pass
 
-    async def _task_vibe_check(self, task_name: str, prompt: str, completion_summary: str) -> dict:
-        """One-shot structured LLM ask (Ask mode, no tools, no history).
+    async def _task_vibe_check(self, task_name: str, session_id: str, cwd: str,
+                               prompt: str = "", completion_summary: str = "") -> dict:
+        """Structured LLM ask (Ask mode, no tools) about a finished task cycle.
 
         Asks whether a just-finished scheduled task produced meaningful value.
         The agent must answer in strict JSON:
@@ -1161,7 +1162,14 @@ class EmrgServer:
         memoryless LLM could not judge what happened. The done frame now
         carries the agent's full final reply (daemon.py done broadcast), so
         this prompt is evidence-driven: judge from the real final reply, not
-        from an empty shell. System + user messages live in
+        from an empty shell.
+
+        Rant 2026-08-19T10:15:43 (host-finalized architecture): the PRIMARY
+        evidence is the task's OWN session history, loaded here by the task's
+        fixed ``session_id`` (``emrg-evolution-{name}``) + working dir —
+        the full tool loop / analysis / memory writes are in the session,
+        far richer than the transported prompt/completion_summary. Those are
+        kept only as auxiliary context. System message lives in
         ``prompts/vibe_check.j2`` (same live-reload mechanism as system.j2).
 
         Raises on any failure (caller sends ``ok: false``); the scheduler
@@ -1173,11 +1181,27 @@ class EmrgServer:
             prompt=(prompt or "")[:2000],
             completion_summary=(completion_summary or "")[:3000],
         )
+        messages: list[dict] = [{"role": "system", "content": system}]
+        # Rant 2026-08-19T10:15:43: load the task's own session history by its
+        # fixed session_id (session files are organized by cwd). Recent N
+        # messages only — the whole session may be very long.
+        if session_id and cwd:
+            try:
+                session = Session.load(session_id, Path(cwd))
+                history = session.get_messages_for_llm()
+                if history:
+                    messages.extend(history[-100:])
+            except Exception:
+                logger.warning(
+                    "task_vibe_check: session history load failed (%s/%s)",
+                    session_id, cwd, exc_info=True,
+                )
+        messages.append({
+            "role": "user",
+            "content": "请基于以上任务信息与完整会话记录，严格按 system 中要求的 JSON 格式回答。",
+        })
         msg = await self.llm.chat(
-            [
-                {"role": "system", "content": system},
-                {"role": "user", "content": "请基于以上任务信息，严格按 system 中要求的 JSON 格式回答。"},
-            ],
+            messages,
             tools=[],
         )
         content = (msg.get("content") or "").strip()
@@ -1972,13 +1996,20 @@ class EmrgServer:
             # value — replacing the git-HEAD empty-cycle heuristic (HEAD
             # measures commits, not value: analysis/memory work without a
             # commit was miscounted as empty, and a no-op round over someone
-            # else's push counted as work). One-shot Ask-mode LLM call (no
-            # tools, no session history) with a strict JSON contract.
+            # else's push counted as work). Ask-mode LLM call (no tools) with
+            # a strict JSON contract. Rant 2026-08-19T10:15:43: primary
+            # evidence = the task's own session history loaded by its fixed
+            # session_id (session files organized by cwd), not the transported
+            # summary.
             task_name = msg.get("task_name", "")
+            session_id = msg.get("session_id", "")
+            cwd = msg.get("cwd", "")
             prompt = msg.get("prompt", "")
             summary = msg.get("completion_summary", "")
             try:
-                result = await self._task_vibe_check(task_name, prompt, summary)
+                result = await self._task_vibe_check(
+                    task_name, session_id, cwd, prompt, summary,
+                )
                 await self._send(ws, {
                     "type": "vibe_check_result",
                     "ok": True,

@@ -231,6 +231,72 @@ class TestWSVibeCheck:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_vibe_check_uses_session_history(self):
+        """Rant 2026-08-19T10:15:43 (host-finalized): the PRIMARY evidence is
+        the task's OWN session history — the daemon loads it by the fixed
+        session_id + cwd and passes the recent session messages to the LLM,
+        not just the transported prompt/completion_summary."""
+
+    def test_vibe_check_uses_session_history(self):
+        """Rant 2026-08-19T10:15:43 (host-finalized): the PRIMARY evidence is
+        the task's OWN session history — the daemon loads it by the fixed
+        session_id + cwd and passes the recent session messages to the LLM,
+        not just the transported prompt/completion_summary."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                # Pre-create the task's session history on disk (session files
+                # are organized by cwd: <cwd>/.emrg/sessions/<session_id>/).
+                sess_dir = tmp / ".emrg" / "sessions" / "emrg-evolution-deepseek-harness-opensource-task"
+                sess_dir.mkdir(parents=True, exist_ok=True)
+                (sess_dir / "history.jsonl").write_text(
+                    json.dumps({"type": "message", "role": "user",
+                                "content": "run the deepseek-harness cycle"}) + "\n" +
+                    json.dumps({"type": "message", "role": "assistant",
+                                "content": "fetched upstream, analyzed PR, wrote memory"}) + "\n",
+                    encoding="utf-8",
+                )
+
+                server, _, cleanup = await _boot_server(tmp)
+                try:
+                    seen = {}
+
+                    async def fake_chat(messages, tools=None):
+                        seen["messages"] = messages
+                        return {"content": '{"meaningful": true, "recommend_slowdown": false, "reason": "确实做了工作", "done": "fetch 上游 + 分析 PR + 写 memory"}'
+                                }
+                    server.llm.chat = fake_chat
+
+                    ws = await connect_to_server()
+                    try:
+                        await ws.send(json.dumps({
+                            "type": "task_vibe_check",
+                            "session_id": "emrg-evolution-deepseek-harness-opensource-task",
+                            "cwd": str(tmp),
+                            "task_name": "deepseek-harness-opensource-task",
+                            "prompt": "run cycle",
+                            "completion_summary": "auxiliary",
+                        }, ensure_ascii=False))
+                        frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                        data = json.loads(frame)
+                        assert data.get("ok") is True
+                        result = data.get("result", {})
+                        assert result.get("meaningful") is True
+                        # The LLM must have received the session history
+                        # messages (primary evidence), not just the summary.
+                        msgs = seen.get("messages", [])
+                        contents = [str(m.get("content", "")) for m in msgs]
+                        assert any("fetched upstream, analyzed PR" in c for c in contents), contents
+                        assert any("run the deepseek-harness cycle" in c for c in contents), contents
+                        # system prompt first, user ask last
+                        assert msgs[0]["role"] == "system"
+                        assert msgs[-1]["role"] == "user"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_vibe_check_missing_done_field_is_compatible(self):
         """Old models / old parsing omit 'done' → empty string, no crash."""
         async def _test():

@@ -207,6 +207,12 @@ class TaskHandler:
         template_path: Path | None = None,
     ) -> None:
         self.name = name
+        # Rant 2026-08-19T10:18:44: per-task logger — LoggerAdapter injects a
+        # `task` extra; the daemon's custom Formatter renders it as a dedicated
+        # [task] column in emrgd.log (scheduler lines are otherwise hard to
+        # tell apart when several tasks interleave). TaskScheduler-level logs
+        # keep the module logger (no task extra → "-" column).
+        self._logger = logging.LoggerAdapter(logger, {"task": self.name})
         self._template_path = template_path or (Path(__file__).parent / "evolution_prompt.md")
         self._config = config
         self.interval = interval
@@ -402,12 +408,12 @@ class TaskHandler:
                     env=no_prompt_env(),
                     **win32_no_window_kwargs(),
                 )
-                logger.info(
+                self._logger.info(
                     "TaskHandler[%s]: evolution workspace aligned to %s",
                     self.name, tag,
                 )
         except (subprocess.CalledProcessError, OSError) as e:
-            logger.warning(
+            self._logger.warning(
                 "TaskHandler[%s]: tag checkout %s failed (stay on master): %s",
                 self.name, tag, e,
             )
@@ -428,7 +434,7 @@ class TaskHandler:
                         entry["path"] = new_path
                         entry["last_active"] = datetime.now().isoformat()
                         atomic_write_yaml(entries, projects_file, prefix=".projects_")
-                        logger.info(
+                        self._logger.info(
                             "TaskHandler[%s]: projects.yml self-heal — emrg → %s",
                             self.name, new_path,
                         )
@@ -439,12 +445,12 @@ class TaskHandler:
                 "last_active": datetime.now().isoformat(),
             })
             atomic_write_yaml(entries, projects_file, prefix=".projects_")
-            logger.info(
+            self._logger.info(
                 "TaskHandler[%s]: projects.yml self-heal — added emrg → %s",
                 self.name, new_path,
             )
         except (yaml.YAMLError, OSError) as e:
-            logger.warning(
+            self._logger.warning(
                 "TaskHandler[%s]: projects.yml self-heal failed: %s",
                 self.name, e,
             )
@@ -479,7 +485,7 @@ class TaskHandler:
                     self._ensure_project_entry()
                 self._ensure_origin_reachable()
                 return True
-            logger.warning(
+            self._logger.warning(
                 "TaskHandler[%s]: %s exists but is not a git repo — "
                 "skipping self-heal to avoid data loss",
                 self.name, evolve_dir,
@@ -492,14 +498,14 @@ class TaskHandler:
         if self._workspace_heal_failures > 0:
             remaining = self._workspace_heal_next_retry_at - time.time()
             if remaining > 0:
-                logger.debug(
+                self._logger.debug(
                     "TaskHandler[%s]: workspace self-heal backoff "
                     "(%ds left) — skipping cycle",
                     self.name, int(remaining),
                 )
                 return False
         try:
-            logger.info(
+            self._logger.info(
                 "TaskHandler[%s]: cloning %s → %s (workspace self-heal)",
                 self.name, repo_url, evolve_dir,
             )
@@ -516,7 +522,7 @@ class TaskHandler:
             self._workspace_heal_failures += 1
             delay = min(300 * (2 ** (self._workspace_heal_failures - 1)), 1800)
             self._workspace_heal_next_retry_at = time.time() + delay
-            logger.warning(
+            self._logger.warning(
                 "TaskHandler[%s]: evolution workspace self-heal failed "
                 "(network down?): %s — skipping cycle; next retry in %ds",
                 self.name, e, delay,
@@ -548,7 +554,7 @@ class TaskHandler:
                 raise
             # NB: `e` is deleted when the except block exits — capture first.
             reason = (e.stderr.strip() or str(e))[:80]
-        logger.warning(
+        self._logger.warning(
             "TaskHandler[%s]: https clone failed (%s) — retrying via SSH",
             self.name, reason,
         )
@@ -593,7 +599,7 @@ class TaskHandler:
             **win32_no_window_kwargs(),
         )
         if result.returncode == 0:
-            logger.debug(
+            self._logger.debug(
                 "TaskHandler[%s]: origin probe: https OK", self.name,
             )
             return  # reachable — keep https
@@ -610,7 +616,7 @@ class TaskHandler:
             **win32_no_window_kwargs(),
         )
         if switch.returncode == 0:
-            logger.warning(
+            self._logger.warning(
                 "TaskHandler[%s]: https origin unreachable (%s) — "
                 "switched origin to %s",
                 self.name, (result.stderr.strip() or "")[:80], ssh_url,
@@ -624,7 +630,7 @@ class TaskHandler:
                 count = int(data.get("empty_cycles", 0) or 0)
                 slowdown = int(data.get("slowdown_hits", 0) or 0)
                 if count > 0 or slowdown > 0:
-                    logger.debug(
+                    self._logger.debug(
                         "TaskHandler[%s]: restored saturation state (%d empty cycles, %d slowdown votes)",
                         self.name, count, slowdown,
                     )
@@ -665,7 +671,7 @@ class TaskHandler:
         """
         self._running = True
         self._start_time = time.time()
-        logger.info(
+        self._logger.info(
             "TaskHandler[%s] started — every %ds", self.name, self.interval
         )
 
@@ -689,7 +695,7 @@ class TaskHandler:
                 _mode = "backoff"
             else:
                 _mode = "normal"
-            logger.debug(
+            self._logger.debug(
                 "TaskHandler[%s]: next run in %ds (mode=%s)",
                 self.name, int(wait_timeout), _mode,
             )
@@ -704,7 +710,7 @@ class TaskHandler:
                 # Manual trigger fired — clear and proceed
                 self._trigger_event.clear()
                 manual_trigger = True
-                logger.debug(
+                self._logger.debug(
                     "TaskHandler[%s] manually triggered", self.name
                 )
             except asyncio.TimeoutError:
@@ -715,7 +721,7 @@ class TaskHandler:
             # saturated ticks keep running full cycles at heartbeat cadence.
             if manual_trigger:
                 if self._empty_cycles >= self._saturation_threshold():
-                    logger.info(
+                    self._logger.info(
                         "TaskHandler[%s]: resumed via manual trigger "
                         "(was in saturation at %d empty cycles)",
                         self.name, self._empty_cycles,
@@ -724,13 +730,13 @@ class TaskHandler:
                 self._slowdown_hits = 0
                 self._save_saturation_state()
 
-            logger.debug("TaskHandler[%s] tick", self.name)
+            self._logger.debug("TaskHandler[%s] tick", self.name)
             self._cycle_running = True
             self._next_run_at = None  # running — no next time yet
             try:
                 await self._run_evolution_cycle()
             except Exception:
-                logger.warning(
+                self._logger.warning(
                     "TaskHandler[%s] crashed", self.name, exc_info=True
                 )
             finally:
@@ -738,7 +744,7 @@ class TaskHandler:
                 self._trigger_event.clear()  # clear any spurious set during cycle
 
         await self._write_final_summary()
-        logger.info("TaskHandler[%s] stopped", self.name)
+        self._logger.info("TaskHandler[%s] stopped", self.name)
 
     def stop(self) -> None:
         self._running = False
@@ -850,7 +856,7 @@ class TaskHandler:
         """
         if self._empty_cycles < self._saturation_threshold():
             return False
-        logger.info(
+        self._logger.info(
             "TaskHandler[%s]: saturation (%d empty cycles) — "
             "running full cycle at heartbeat interval (%ds) — never halting",
             self.name, self._empty_cycles, self._heartbeat_interval(),
@@ -868,6 +874,7 @@ class TaskHandler:
             await ws.send(json.dumps({
                 "type": "task_vibe_check",
                 "session_id": self._session_id,
+                "cwd": self._source_dir,
                 "task_name": self.name,
                 "prompt": (prompt or "")[:2000],
                 "completion_summary": (completion_summary or "")[:3000],
@@ -884,7 +891,7 @@ class TaskHandler:
                 if frame.get("type") != "vibe_check_result":
                     continue
                 if not frame.get("ok"):
-                    logger.warning(
+                    self._logger.warning(
                         "TaskHandler[%s]: vibe check error: %s",
                         self.name, (frame.get("error") or "")[:120],
                     )
@@ -897,7 +904,7 @@ class TaskHandler:
                     "done": result.get("done", ""),
                 }
         except Exception:
-            logger.debug("TaskHandler[%s]: vibe check failed", self.name, exc_info=True)
+            self._logger.debug("TaskHandler[%s]: vibe check failed", self.name, exc_info=True)
         return None
 
     async def _run_evolution_cycle(self) -> None:
@@ -909,7 +916,7 @@ class TaskHandler:
         # so the asyncio event loop is never blocked (a slow/failing git
         # clone used to wedge every websocket client for ~30s per cycle).
         if not await asyncio.to_thread(self._ensure_evolution_workspace):
-            logger.warning(
+            self._logger.warning(
                 "TaskHandler[%s]: workspace not ready — skipping cycle",
                 self.name,
             )
@@ -917,7 +924,7 @@ class TaskHandler:
 
         cycle_time = datetime.now()
         prompt = self._build_evolution_prompt()
-        logger.info(
+        self._logger.info(
             "TaskHandler[%s]: prompt built (%d chars), connecting ...",
             self.name, len(prompt),
         )
@@ -925,7 +932,7 @@ class TaskHandler:
 
         try:
             ws = await connect_to_server()
-            logger.info("TaskHandler[%s]: connected", self.name)
+            self._logger.info("TaskHandler[%s]: connected", self.name)
             self._connect_failures = 0
         except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
             # G129 (rant 2026-08-09T08:03:46): 连接失败不得静默吞掉——GUI 测试曾把
@@ -935,7 +942,7 @@ class TaskHandler:
             self._connect_failures += 1
             port_path = config_dir() / "emrgd.port"
             if self._connect_failures >= self._CONNECT_FAIL_ALERT:
-                logger.error(
+                self._logger.error(
                     "TaskHandler[%s]: cannot connect for %d consecutive cycles "
                     "(%s) — daemon unreachable. Check %s (may have been overwritten "
                     "by GUI tests or stale after daemon restart); run 'emrg server' "
@@ -943,7 +950,7 @@ class TaskHandler:
                     self.name, self._connect_failures, e, port_path,
                 )
             else:
-                logger.warning(
+                self._logger.warning(
                     "TaskHandler[%s]: cannot connect (%d/%d): %s",
                     self.name, self._connect_failures, self._CONNECT_FAIL_ALERT, e,
                 )
@@ -988,12 +995,12 @@ class TaskHandler:
                     completion_content = content
                     truncated = "exceeded" in content.lower()
                     if truncated:
-                        logger.warning(
+                        self._logger.warning(
                             "TaskHandler[%s] truncated (max tool rounds, tools=%d, duration=%ds)",
                             self.name, tool_count, duration,
                         )
                     else:
-                        logger.info(
+                        self._logger.info(
                             "TaskHandler[%s] complete (tools=%d, duration=%ds)",
                             self.name, tool_count, duration,
                         )
@@ -1005,7 +1012,7 @@ class TaskHandler:
                 resp_error = resp.get("error")
                 if isinstance(resp_error, str):
                     error = str(resp_error)
-                    logger.warning(
+                    self._logger.warning(
                         "TaskHandler[%s] server error: %s",
                         self.name, error,
                     )
@@ -1022,7 +1029,7 @@ class TaskHandler:
                     completion_summary=completion_content[:3000],
                 )
         except Exception as e:
-            logger.exception("TaskHandler[%s] error", self.name)
+            self._logger.exception("TaskHandler[%s] error", self.name)
             error = str(e)
         finally:
             try:
@@ -1054,7 +1061,7 @@ class TaskHandler:
                 if recommend:
                     self._slowdown_hits += 1
                 self._save_saturation_state()
-                logger.info(
+                self._logger.info(
                     "TaskHandler[%s]: empty cycle #%d (agent: %s%s)",
                     self.name, self._empty_cycles,
                     (vibe_result.get("reason") or "")[:100],
@@ -1063,7 +1070,7 @@ class TaskHandler:
                 )
             elif meaningful is True:
                 if self._empty_cycles > 0 or self._slowdown_hits > 0:
-                    logger.info(
+                    self._logger.info(
                         "TaskHandler[%s]: agent reported meaningful work, "
                         "resetting empty streak (%d) + slowdown votes (%d)",
                         self.name, self._empty_cycles, self._slowdown_hits,
@@ -1073,7 +1080,7 @@ class TaskHandler:
                 self._save_saturation_state()
         elif not error and not truncated:
             # vibe check failed/timeout — conservative: don't count, don't reset
-            logger.info(
+            self._logger.info(
                 "TaskHandler[%s]: vibe check unavailable — empty streak unchanged",
                 self.name,
             )
@@ -1082,7 +1089,7 @@ class TaskHandler:
                 reason = "truncated cycle" if truncated else "aborted cycle"
                 if error:
                     reason = f"aborted cycle ({error[:80]})"
-                logger.info(
+                self._logger.info(
                     "TaskHandler[%s]: %s, resetting empty streak",
                     self.name, reason,
                 )
@@ -1095,7 +1102,7 @@ class TaskHandler:
         # evolution_summary) with work that never happened — the "session
         # busy" aborts observed when interactive sessions hold the daemon.
         if error:
-            logger.warning(
+            self._logger.warning(
                 "TaskHandler[%s]: cycle aborted (%s) — not counted as evolution",
                 self.name, error[:200],
             )
