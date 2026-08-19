@@ -454,6 +454,7 @@ class TaskHandler:
                 "impact": list(log.impact),
                 "meaningful": log.meaningful,
                 "recommend_slowdown": log.recommend_slowdown,
+                "reason": log.reason,
                 "tool_count": log.tool_count,
             })
         saturation = {
@@ -775,10 +776,15 @@ class TaskHandler:
         summary = ""
         meaningful = None
         recommend = False
+        reason = ""
         if vibe_result is not None:
             summary = str(vibe_result.get("done") or "")[:500]
             meaningful = vibe_result.get("meaningful")
             recommend = bool(vibe_result.get("recommend_slowdown"))
+            # rant 2026-08-19T18:25:14: keep the vibe check's reason for the
+            # meaningful/slowdown judgment so the GUI secondary list can show
+            # 原因 (time/work/throttle/reason).
+            reason = str(vibe_result.get("reason") or "")[:300]
 
         log = EvolutionLog(
             timestamp=cycle_ts,
@@ -788,6 +794,7 @@ class TaskHandler:
             summary=summary,
             meaningful=meaningful,
             recommend_slowdown=recommend,
+            reason=reason,
             tool_count=tool_count,
         )
         # Rant 2026-08-19T14:18:40 — no disk archival: the evolution log lives

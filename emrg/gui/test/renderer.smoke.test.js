@@ -2655,13 +2655,13 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
         recent_runs: [
           { timestamp: "2026-08-18T10:00:00", summary: "修了双实例根因，提交 PR #854",
             impact: ["cycle-ts-complete", "tools-executed=26"], meaningful: true,
-            recommend_slowdown: false, tool_count: 26 },
+            recommend_slowdown: false, tool_count: 26, reason: "meaningful work" },
           { timestamp: "2026-08-18T09:00:00", summary: "",
             impact: ["cycle-ts-complete", "tools-executed=3"], meaningful: false,
-            recommend_slowdown: false, tool_count: 3 },
+            recommend_slowdown: false, tool_count: 3, reason: "" },
           { timestamp: "2026-08-18T08:00:00", summary: "NTE",
             impact: ["cycle-ts-complete"], meaningful: false,
-            recommend_slowdown: true, tool_count: 0 },
+            recommend_slowdown: true, tool_count: 0, reason: "empty cycles, no value" },
         ],
       },
       { name: "fresh-task", type: "sync", config: { project: "docs" }, interval: 3600, enabled: true },
@@ -2691,6 +2691,14 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   // 无 summary → 显示 "-"（rant 2026-08-19T07:06:45 宿主定稿：不再 fallback impact 机器串）
   const doneTexts = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")).map((n) => n.textContent)`, ctx);
   assert.strictEqual(doneTexts[1], "-", `无 summary 应显示 "-"，实际: ${doneTexts[1]}`);
+  // rant 2026-08-19T18:25:14：原因列 —— 有 reason 显示原文，无 reason 显示 "-"
+  const reasonTexts = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-reason")).map((n) => n.textContent)`, ctx);
+  assert.strictEqual(reasonTexts[0], "meaningful work", `原因列应显示 reason，实际: ${reasonTexts[0]}`);
+  assert.strictEqual(reasonTexts[1], "-", `无 reason 应显示 "-"，实际: ${reasonTexts[1]}`);
+  assert.strictEqual(reasonTexts[2], "empty cycles, no value", `原因列应显示降频原因，实际: ${reasonTexts[2]}`);
+  // rant 2026-08-19T18:25:14：一级列表不再显示"干了什么"（last_cycle_summary）
+  const primarySummary = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-meta-summary").length`, ctx);
+  assert.strictEqual(primarySummary, 0, `一级列表不应显示 last_cycle_summary，实际数量: ${primarySummary}`);
   // 再次点击 → 折叠
   await vm.runInContext(`document.getElementById("task-list").children[0].click()`, ctx);
   await tick();
@@ -2894,7 +2902,7 @@ test("rant 10:36:39：倒计时生命周期 —— 渲染启动 interval、离�
   assert.strictEqual(win2._intervalCount || 0, s2, "全 running 无倒计时 → 不启动 interval");
 });
 
-test("rant 10:45:52：任务行显示上次执行元信息 + 降频标识", async () => {
+test("rant 10:45:52：任务行显示上次执行元信息 + 降频标识（rant 18:25:14：不再显示摘要）", async () => {
   const nowMs = 1_700_000_000_000;
   const { ctx, win } = makeSandbox({
     listTasks: async () => [
@@ -2921,7 +2929,8 @@ test("rant 10:45:52：任务行显示上次执行元信息 + 降频标识", asyn
     return name + " => " + metaText + " ## " + satText;
   })`, ctx);
   assert.ok(rows[0].includes("上次运行：5m ago"), `运行时间相对显示：${rows[0]}`);
-  assert.ok(rows[0].includes("干了：tools-executed=24, cycle-complete"), `执行摘要：${rows[0]}`);
+  // rant 2026-08-19T18:25:14：一级列表不再显示"干了什么"（last_cycle_summary），移入点击展开的二级列表
+  assert.ok(!rows[0].includes("干了："), `一级列表不应显示摘要：${rows[0]}`);
   assert.ok(rows[0].includes("空转 3 轮"), `降频徽标：${rows[0]}`);
   assert.ok(rows[1].includes("尚未运行"), `未运行提示：${rows[1]}`);
   assert.ok(!rows[1].includes("空转"), `无降频时无徽标：${rows[1]}`);

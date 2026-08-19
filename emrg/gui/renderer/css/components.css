@@ -1050,7 +1050,7 @@ dialog::backdrop {
 .task-run-head,
 .task-run-row {
   display: grid;
-  grid-template-columns: 72px 1fr 92px;
+  grid-template-columns: 72px 1fr 92px 1fr;
   gap: 6px;
   font-size: var(--fs-aux);
   min-width: 0;
@@ -1071,6 +1071,12 @@ dialog::backdrop {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-2);
+}
+.task-run-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
 }
 .task-run-flag {
   display: flex;
