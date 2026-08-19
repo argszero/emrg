@@ -133,6 +133,10 @@ class EvolutionLog:
     summary: str = ""
     meaningful: Optional[bool] = None
     recommend_slowdown: bool = False
+    # rant 2026-08-19T18:25:14: the vibe check's natural-language reason for
+    # the meaningful/slowdown judgment, surfaced in the GUI task recent-runs
+    # secondary list (时间/工作/降频建议/原因).
+    reason: str = ""
     tool_count: int = 0
 
 

@@ -570,6 +570,7 @@ def test_evolution_handler_status_last_run_fields():
     assert r0["impact"] == ["tools-executed=24", "cycle-complete"]
     assert r0["meaningful"] is None
     assert r0["recommend_slowdown"] is False
+    assert r0["reason"] == ""
     assert r0["tool_count"] == 0
     # agent summary preferred over machine impact tags
     handler.evolutions.append(EvolutionLog(
@@ -580,6 +581,7 @@ def test_evolution_handler_status_last_run_fields():
         summary="修了 stop_all 双实例根因，提交 PR #854",
         meaningful=True,
         recommend_slowdown=False,
+        reason="meaningful work done",
         tool_count=5,
     ))
     st = handler.status()
@@ -587,6 +589,7 @@ def test_evolution_handler_status_last_run_fields():
     assert len(st["recent_runs"]) == 2, "recent_runs holds last 5 runs"
     assert st["recent_runs"][1]["summary"] == "修了 stop_all 双实例根因，提交 PR #854"
     assert st["recent_runs"][1]["meaningful"] is True
+    assert st["recent_runs"][1]["reason"] == "meaningful work done"
     assert st["recent_runs"][1]["tool_count"] == 5
     assert st["recent_runs"][0]["meaningful"] is None
 

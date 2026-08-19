@@ -714,6 +714,7 @@ const Dialogs = (() => {
     head.appendChild(el("span", {}, _t("app.taskRunsColTime")));
     head.appendChild(el("span", {}, _t("app.taskRunsColDone")));
     head.appendChild(el("span", {}, _t("app.taskRunsColThrottle")));
+    head.appendChild(el("span", {}, _t("app.taskRunsColReason")));
     wrap.appendChild(head);
     for (const r of runs) {
       const row = el("div", { class: "task-run-row" });
@@ -727,6 +728,9 @@ const Dialogs = (() => {
         flagCell.appendChild(el("span", { class: "task-badge task-run-badge-idle" }, _t("app.taskRunIdle")));
       }
       row.appendChild(flagCell);
+      // rant 2026-08-19T18:25:14：原因列 —— 降频/空转判断的自然语言理由（vibe check reason）。
+      let reason = (typeof r.reason === "string" && r.reason) ? r.reason : "";
+      row.appendChild(el("span", { class: "task-run-reason" }, reason || "-"));
       wrap.appendChild(row);
     }
     return wrap;
@@ -772,15 +776,14 @@ const Dialogs = (() => {
       if (t.interval != null) hints.push(_t("app.taskInterval", { n: t.interval ?? "-" }));
       if (t.enabled === false) hints.push(_t("app.taskDisabled"));
       row.appendChild(el("span", { class: "task-hint" }, hints.join(" · ")));
-      // rant 2026-08-18T10:45:52：上次执行维度 —— 最近一次运行时间 + 摘要 + 降频（saturation）标识。
-      // 数据来自 daemon list_tasks → handler.status()（last_run_at/last_cycle_summary/saturation）。
+      // rant 2026-08-18T10:45:52：上次执行维度 —— 最近一次运行时间 + 降频（saturation）标识。
+      // rant 2026-08-19T18:25:14：一级列表不再显示"干了什么"（last_cycle_summary）——
+      // 执行记录（时间/工作/降频建议/原因）统一由点击展开的二级列表（buildTaskRunDetail）呈现。
+      // 数据来自 daemon list_tasks → handler.status()（last_run_at/saturation/recent_runs）。
       const meta = el("div", { class: "task-meta" });
       if (t.last_run_at) {
         const runTxt = el("span", { class: "task-meta-item" }, _t("app.taskLastRun", { n: formatRelativeTime(t.last_run_at) }));
         meta.appendChild(runTxt);
-        if (t.last_cycle_summary) {
-          meta.appendChild(el("span", { class: "task-meta-item task-meta-summary" }, _t("app.taskLastRunSummary", { n: t.last_cycle_summary })));
-        }
       } else {
         meta.appendChild(el("span", { class: "task-meta-item" }, _t("app.taskNoRunYet")));
       }
