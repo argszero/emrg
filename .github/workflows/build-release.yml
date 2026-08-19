@@ -185,7 +185,14 @@ jobs:
           if command -v rsvg-convert >/dev/null 2>&1; then
             echo "rsvg-convert already available"
           elif [ "$RUNNER_OS" = "Linux" ]; then
-            sudo apt-get update -qq && sudo apt-get install -y -qq librsvg2-bin
+            # v0.2.55 lesson: a hung `sudo apt-get update`/install on a slow or
+            # network-starved runner blocks the job forever (no step timeout).
+            # Guard both with `timeout`; on failure gen-assets.sh falls back to
+            # Chrome headless (now with --no-sandbox + its own timeout).
+            timeout 180 sudo apt-get update -qq \
+              || echo "apt-get update timed out/failed — falling back to Chrome headless"
+            timeout 180 sudo apt-get install -y -qq librsvg2-bin \
+              || echo "apt-get install failed — falling back to Chrome headless"
           elif [ "$RUNNER_OS" = "macOS" ]; then
             brew install librsvg
           else
