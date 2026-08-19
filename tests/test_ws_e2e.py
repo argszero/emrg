@@ -401,6 +401,74 @@ class TestWSProtocol:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_tool_intent_logged_and_ignored_by_execution(self):
+        """Rant 2026-08-19T10:35:24: the agent's per-call `intent` is carried
+        in the tool_start broadcast and logged, but NOT passed to the tool
+        executor — the tool runs on its real arguments only."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    seen_args = {}
+
+                    async def fake_chat_stream(messages, tools=None):
+                        yield {"content": "先跑命令", "tool_calls": None, "finish_reason": None, "usage": None}
+                        yield {
+                            "content": None,
+                            "tool_calls": [{
+                                "index": 0, "id": "call_i1",
+                                "function": {"name": "bash",
+                                             "arguments": '{"command": "echo intent-ok", "intent": "验证 intent 日志"}',
+                                             },
+                            }],
+                            "finish_reason": "tool_calls", "usage": None,
+                        }
+                        yield {"content": "完成", "tool_calls": None, "finish_reason": "stop",
+                               "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+                    server.llm.chat_stream = fake_chat_stream
+                    # Capture what the real BashTool executor receives.
+                    orig_bash_execute = server.tools.get("bash").execute
+
+                    async def spy_execute(arguments):
+                        seen_args["executed"] = dict(arguments)
+                        return await orig_bash_execute(arguments)
+
+                    server.tools.get("bash").execute = spy_execute
+
+                    ws = await connect_to_server()
+                    try:
+                        task = {
+                            "type": "task",
+                            "id": "t-intent",
+                            "session_id": "s_e2e_intent",
+                            "cwd": str(cwd),
+                            "prompt": "run a command",
+                            "stream": True,
+                            "timestamp": "2026-08-19T00:00:00",
+                        }
+                        await ws.send(json.dumps(task, ensure_ascii=False))
+                        got_start_intent = None
+                        while True:
+                            frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                            resp = json.loads(frame)
+                            if resp.get("type") == "tool_start":
+                                got_start_intent = resp.get("intent")
+                            if resp.get("done"):
+                                break
+                        # broadcast carries the intent
+                        assert got_start_intent == "验证 intent 日志"
+                        # the executor received intent but must still run (bash
+                        # ignores unknown keys — command executes fine)
+                        assert "intent" in seen_args.get("executed", {})
+                        assert seen_args["executed"]["command"] == "echo intent-ok"
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_cancel_stops_task(self):
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
@@ -849,7 +917,7 @@ class TestWSQueueInjection:
 
                         def definition(self):
                             from emrg.server.tool_types import ToolDefinition
-                            return ToolDefinition(name="bash", purpose="slow bash for tests")
+                            return ToolDefinition(name="bash")
 
                     orig_get = server.tools.get
                     server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)
@@ -935,7 +1003,7 @@ class TestWSQueueInjection:
 
                         def definition(self):
                             from emrg.server.tool_types import ToolDefinition
-                            return ToolDefinition(name="bash", purpose="slow bash for tests")
+                            return ToolDefinition(name="bash")
 
                     orig_get = server.tools.get
                     server.tools.get = lambda name: _SlowBash() if name == "bash" else orig_get(name)

@@ -2477,14 +2477,12 @@ class EmrgServer:
                     except json.JSONDecodeError:
                         args = {}
 
-                    # Rant 2026-08-17T12:03:13: log the human-readable purpose
-                    # alongside the tool name so background/reflection calls
-                    # (memory reflection / consolidation) are understandable
-                    # without context.
-                    tool_obj = self.tools.get(tc_name)
-                    purpose = tool_obj.definition().purpose if tool_obj else "unknown tool"
-                    logger.info("tool call: %s — %s (%s)", tc_name, purpose,
-                                json.dumps(_redact(args), ensure_ascii=False)[:200])
+                    # Rant 2026-08-19T10:35:24: log the tool's intent (why this
+                    # call happened, written by the agent) instead of the
+                    # static purpose. intent missing (internal/LLM-free calls)
+                    # → "-", no fallback.
+                    intent = (args or {}).get("intent") or "-"
+                    logger.info("tool call: %s — %s", tc_name, intent)
 
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
@@ -2493,6 +2491,7 @@ class EmrgServer:
                         "tool_name": tc_name,
                         "tool_call_id": tc_id,
                         "arguments": args,
+                        "intent": args.get("intent") or "",
                     })
 
                     # Inject session cwd as default for filesystem tools
@@ -3598,11 +3597,12 @@ class EmrgServer:
                             "tool_call_id": tc_id,
                             "content": result_text,
                         })
-                        # Rant 2026-08-17T12:03:13: include the human-readable purpose
-                        purpose = tool.definition().purpose if tool else "unknown tool"
+                        # Rant 2026-08-19T10:35:24: use the call's intent (why
+                        # this tool was invoked) instead of the static purpose.
+                        intent = (args or {}).get("intent") or "-"
                         logger.debug(
                             "memory reflection: id=%s round=%d tool %s — %s → %s%s",
-                            session.session_id, _round + 1, tc_name, purpose,
+                            session.session_id, _round + 1, tc_name, intent,
                             _redact_string(result_text[:100]),
                             "…" if len(result_text) > 100 else "",
                         )
@@ -3709,11 +3709,12 @@ class EmrgServer:
                         "tool_call_id": tc_id,
                         "content": result_text,
                     })
-                    # Rant 2026-08-17T12:03:13: include the human-readable purpose
-                    purpose = tool.definition().purpose if tool else "unknown tool"
+                    # Rant 2026-08-19T10:35:24: use the call's intent instead
+                    # of the static purpose.
+                    intent = (args or {}).get("intent") or "-"
                     logger.debug(
                         "consolidation tool: %s — %s → %s%s",
-                        tc_name, purpose, _redact_string(result_text[:100]),
+                        tc_name, intent, _redact_string(result_text[:100]),
                         "…" if len(result_text) > 100 else "",
                     )
         except Exception:

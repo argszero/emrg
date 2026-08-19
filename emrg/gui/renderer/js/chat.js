@@ -318,6 +318,11 @@ const Chat = (() => {
     row.appendChild(el("span", { class: "tool-spinner" }));
     const label = el("span", { class: "tool-label" }, phrases.doing);
     row.appendChild(label);
+    // Rant 2026-08-19T10:35:24: show the agent's intent (why this call
+    // happened) as a human-readable purpose instead of raw argument JSON.
+    if (data.intent) {
+      row.appendChild(el("span", { class: "tool-intent" }, data.intent));
+    }
     row.appendChild(el("span", { class: "tool-chevron" }, "⌄"));
     // 点展开 → 显示原始输出（等宽字体/圆角浅底）
     row.addEventListener("click", () => {

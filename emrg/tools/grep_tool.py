@@ -29,7 +29,6 @@ class GrepTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="grep",
-            purpose="Search file contents with a regex pattern",
             description=(
                 "Search file contents for a regex pattern. "
                 "Returns matching lines prefixed with filename:line_number. "
@@ -79,8 +78,13 @@ class GrepTool(ToolExecutor):
                         "type": "integer",
                         "description": f"Maximum matches to return (default: {MAX_RESULTS}).",
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
+                        "One human-readable sentence, e.g. 'find all callers of connect_to_server'.",
+                    },
                 },
-                "required": ["pattern"],
+                "required": ["pattern", "intent"],
             },
         )
 

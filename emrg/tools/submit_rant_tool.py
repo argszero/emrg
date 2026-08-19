@@ -43,7 +43,6 @@ class SubmitRantTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="submit_rant",
-            purpose="Submit a user-confirmed rant, or list/update/cleanup rants.jsonl for evolution curation",
             description=(
                 "Unified rant-management tool for rants.jsonl. "
                 "**action=submit**: write a user rant/feedback/improvement "
@@ -121,8 +120,13 @@ class SubmitRantTool(ToolExecutor):
                             "becomes completed)."
                         ),
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
+                        "One human-readable sentence, e.g. 'record the host's feedback about the tool log'.",
+                    },
                 },
-                "required": ["action"],
+                "required": ["action", "intent"],
             },
         )
 

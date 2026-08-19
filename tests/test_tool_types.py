@@ -46,6 +46,13 @@ class TestToolDefinition:
         assert "test" in r
         assert "a test tool" in r
 
+    def test_no_purpose_field(self):
+        """Rant 2026-08-19T10:35:24: the static `purpose` field was removed —
+        intent (per-call, agent-written) replaces it."""
+        td = ToolDefinition(name="x", description="desc")
+        assert not hasattr(td, "purpose")
+        assert td.name == "x"
+
 
 class TestToolResult:
     """Tests for the ToolResult dataclass."""

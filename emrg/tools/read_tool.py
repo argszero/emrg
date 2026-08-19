@@ -29,7 +29,6 @@ class ReadTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="read",
-            purpose="Read file content (line-numbered, chunked)",
             description=(
                 "Read a file from the filesystem. Returns content with "
                 "line numbers prefixing each line (format: '  LINE_NUMBER\\tCONTENT'). "
@@ -67,8 +66,13 @@ class ReadTool(ToolExecutor):
                             "(default: 0). Use to resume within a truncated line."
                         ),
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
+                        "One human-readable sentence, e.g. 'check how billing is implemented in billing.rs'.",
+                    },
                 },
-                "required": ["file_path"],
+                "required": ["file_path", "intent"],
             },
         )
 

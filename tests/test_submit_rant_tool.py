@@ -120,11 +120,14 @@ def test_submit_rant_definition_exposes_consent_contract():
     assert "action" in d.parameters["required"]
     assert "message" in d.parameters["properties"]  # documented
     assert "project" in d.parameters["properties"]  # documented since rant 12:03:13
-    assert d.purpose  # human-readable purpose (rant 12:03:13)
+    # rant 2026-08-19T10:35:24: static purpose removed → per-call intent required
+    assert not hasattr(d, "purpose")
+    assert "intent" in d.parameters["required"]
 
 
-def test_all_tools_have_purpose():
-    """Every registered tool carries a non-empty human-readable purpose."""
+def test_all_tools_require_intent():
+    """Rant 2026-08-19T10:35:24: every registered tool requires the per-call
+    `intent` parameter (agent writes why it is calling); static purpose gone."""
     from emrg.tools.bash_tool import BashTool
     from emrg.tools.read_tool import ReadTool
     from emrg.tools.write_tool import WriteTool
@@ -136,7 +139,9 @@ def test_all_tools_have_purpose():
                  GlobTool(), GrepTool(), SubmitRantTool()):
         d = tool.definition()
         assert d.name, "tool name missing"
-        assert d.purpose, f"{d.name} has no purpose"
+        assert "intent" in d.parameters["properties"], f"{d.name} missing intent property"
+        assert "intent" in d.parameters["required"], f"{d.name} intent not required"
+        assert not hasattr(d, "purpose"), f"{d.name} still has static purpose"
 
 
 # --- rant 2026-08-18T16:42:52: unified rant tool (list/update/cleanup) --------

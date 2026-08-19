@@ -59,12 +59,15 @@ def test_tool_start_from_dict():
         "tool_name": "bash",
         "tool_call_id": "call-42",
         "arguments": {"command": "echo hi"},
+        "intent": "check the echo behavior",
     }
     ts = ToolStart.from_dict(d)
     assert ts.request_id == "req-1"
     assert ts.tool_name == "bash"
     assert ts.tool_call_id == "call-42"
     assert ts.arguments == {"command": "echo hi"}
+    # rant 2026-08-19T10:35:24: tool_start carries the agent's per-call intent
+    assert ts.intent == "check the echo behavior"
 
 
 def test_tool_start_defaults():
@@ -72,6 +75,7 @@ def test_tool_start_defaults():
     assert ts.request_id == ""
     assert ts.tool_name == ""
     assert ts.arguments == {}
+    assert ts.intent == ""
 
 
 def test_tool_end_from_dict():
