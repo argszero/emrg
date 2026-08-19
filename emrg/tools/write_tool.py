@@ -19,7 +19,6 @@ class WriteTool(ToolExecutor):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="write",
-            purpose="Write or create a file (new file or full overwrite)",
             description=(
                 "Write content to a file. Creates the file if it doesn't exist, "
                 "or overwrites it if it does. Parent directories are created "
@@ -37,8 +36,13 @@ class WriteTool(ToolExecutor):
                         "type": "string",
                         "description": "The complete content to write to the file.",
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
+                        "One human-readable sentence, e.g. 'write memory file recording the decision'.",
+                    },
                 },
-                "required": ["file_path", "content"],
+                "required": ["file_path", "content", "intent"],
             },
         )
 

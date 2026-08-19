@@ -455,9 +455,13 @@ async def interactive(init_auto_evolve: bool = False):
                     ts = ToolStart.from_dict(data)
                     tool_args[ts.tool_call_id] = ts.arguments  # track for diff rendering
                     _tool_start_times[ts.tool_call_id] = time.time()
+                    # Rant 2026-08-19T10:35:24: display the agent's intent
+                    # (why this call happened) as the card header when present;
+                    # fall back to formatted args.
+                    display = ts.intent if ts.intent else _format_args(ts.arguments, ts.tool_name)
                     card = ToolCard(
                         name=ts.tool_name,
-                        command=_format_args(ts.arguments, ts.tool_name),
+                        command=display,
                         status="running",
                         expanded=False,
                     )

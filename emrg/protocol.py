@@ -70,6 +70,7 @@ class ToolStart:
     tool_name: str = ""
     tool_call_id: str = ""
     arguments: dict = field(default_factory=dict)
+    intent: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> ToolStart:
@@ -78,6 +79,7 @@ class ToolStart:
             tool_name=d.get("tool_name", ""),
             tool_call_id=d.get("tool_call_id", ""),
             arguments=d.get("arguments", {}),
+            intent=d.get("intent", ""),
         )
 
 
