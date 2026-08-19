@@ -614,6 +614,146 @@ def test_evolution_handler_recent_runs_capped_at_five():
     assert runs[-1]["timestamp"] == "2026-08-18T10:06:00"
 
 
+# ── Task-run persistence (rant 2026-08-19T20:50:36, host Plan B) ─────
+# Execution records append to ~/.emrg/logs/task-runs/<task>.jsonl so the GUI
+# recent-runs survive daemon restarts; restored on handler init.
+
+
+def test_task_handler_task_runs_persist_across_restart(tmp_path):
+    """Appended run records are restored by a fresh handler (daemon restart).
+
+    Plan B (rant 2026-08-19T20:50:36): cycle records persist to
+    <config>/logs/task-runs/<task>.jsonl; a new TaskHandler over the same
+    config_dir loads them back into self.evolutions.
+    """
+    from emrg.protocol import EvolutionLog
+    from emrg.server import scheduler as mod
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        h1 = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        h1.evolutions.append(EvolutionLog(
+            timestamp="2026-08-19T20:10:00",
+            trigger="evolution-emrg-task-ts",
+            summary="fixed vibe-check 400, submitted PR #874",
+            meaningful=True,
+            recommend_slowdown=False,
+            reason="meaningful work done",
+            tool_count=7,
+        ))
+        h1._append_task_run(h1.evolutions[-1])
+        # second record
+        h1.evolutions.append(EvolutionLog(
+            timestamp="2026-08-19T20:20:00",
+            trigger="evolution-emrg-task-ts2",
+            summary="",
+            meaningful=False,
+            recommend_slowdown=True,
+            reason="too many empty cycles",
+            tool_count=0,
+        ))
+        h1._append_task_run(h1.evolutions[-1])
+
+        # "daemon restart": a brand-new handler over the same config_dir
+        h2 = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        assert len(h2.evolutions) == 2
+        first = h2.evolutions[0]
+        assert first.timestamp == "2026-08-19T20:10:00"
+        assert first.summary == "fixed vibe-check 400, submitted PR #874"
+        assert first.meaningful is True
+        assert first.reason == "meaningful work done"
+        assert first.tool_count == 7
+        second = h2.evolutions[1]
+        assert second.summary == ""
+        assert second.meaningful is False
+        assert second.recommend_slowdown is True
+        assert second.reason == "too many empty cycles"
+        # GUI secondary list shows the restored records
+        runs = h2.status()["recent_runs"]
+        assert [r["timestamp"] for r in runs] == [
+            "2026-08-19T20:10:00", "2026-08-19T20:20:00",
+        ]
+        assert runs[1]["reason"] == "too many empty cycles"
+        assert runs[1]["recommend_slowdown"] is True
+        # JSONL file exists under logs/task-runs/<task>.jsonl
+        f = tmp_path / "logs" / "task-runs" / "emrg-task.jsonl"
+        assert f.exists()
+        lines = f.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 2
+    finally:
+        mod.config_dir = orig
+
+
+def test_task_handler_task_runs_capped_at_fifty(tmp_path):
+    """JSONL keeps only the most recent 50 records (bounded append)."""
+    from emrg.protocol import EvolutionLog
+    from emrg.server import scheduler as mod
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        h1 = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        for i in range(60):
+            h1.evolutions.append(EvolutionLog(
+                timestamp=f"2026-08-19T20:{i % 60:02d}:00",
+                summary=f"run-{i}",
+                tool_count=i,
+            ))
+            h1._append_task_run(h1.evolutions[-1])
+
+        f = tmp_path / "logs" / "task-runs" / "emrg-task.jsonl"
+        lines = f.read_text(encoding="utf-8").strip().splitlines()
+        assert len(lines) == 50, "file trimmed to the last 50 records"
+        # fresh handler restores the most recent 50
+        h2 = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        assert len(h2.evolutions) == 50
+        assert h2.evolutions[-1].summary == "run-59"
+        assert h2.evolutions[0].summary == "run-10"
+    finally:
+        mod.config_dir = orig
+
+
+def test_task_handler_task_runs_corrupt_file_ignored(tmp_path):
+    """Corrupt/unreadable JSONL is ignored — handler starts empty, no crash."""
+    from emrg.server import scheduler as mod
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        runs_dir = tmp_path / "logs" / "task-runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "emrg-task.jsonl").write_text(
+            "not-json-at-all\n{broken json\n{\"timestamp\": \"ok\", \"summary\": \"kept\"}\n",
+            encoding="utf-8",
+        )
+        handler = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        # corrupt lines skipped; valid line kept
+        assert len(handler.evolutions) == 1
+        assert handler.evolutions[0].summary == "kept"
+    finally:
+        mod.config_dir = orig
+
+
+def test_task_handler_task_runs_write_failure_tolerated(tmp_path):
+    """A failed append only logs a warning — never breaks the running cycle."""
+    from emrg.protocol import EvolutionLog
+    from emrg.server import scheduler as mod
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        handler = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        # sabotage: make the target file path a directory → append raises
+        runs_dir = tmp_path / "logs" / "task-runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "emrg-task.jsonl").mkdir()  # dir where the file should be
+        log = EvolutionLog(timestamp="2026-08-19T20:30:00", summary="x")
+        handler.evolutions.append(log)
+        # must not raise; cycle continues with the in-memory record
+        handler._append_task_run(log)
+        assert len(handler.evolutions) == 1
+        assert handler.evolutions[0].summary == "x"
+    finally:
+        mod.config_dir = orig
+
+
 def test_evolution_handler_default_owner():
     """When no git remote is detectable, falls back to EMRG defaults."""
     handler = TaskHandler(
