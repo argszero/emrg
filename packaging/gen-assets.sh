@@ -91,8 +91,17 @@ render_svg_to_png() {
 <style>html,body{margin:0;padding:0;background:#fff}</style></head>
 <body><img src="$SVG_URL" width="1024" height="1024"></body></html>
 HTMLEOF
-      if "$chrome" --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
-          --allow-file-access-from-files \
+      TIMEOUT_CMD=""
+      command -v timeout >/dev/null 2>&1 && TIMEOUT_CMD="timeout 90"
+      NO_SANDBOX=""
+      # v0.2.55 Build Release lesson: on ubuntu-24.04 x86_64 the Chrome headless
+      # fallback hung forever (no step-level timeout in CI), blocking the whole
+      # release build twice. Add a hard timeout so a stuck renderer falls through
+      # to the next renderer, and --no-sandbox on Linux (runner container).
+      [ "$(uname -s)" = "Linux" ] && NO_SANDBOX="--no-sandbox"
+      if $TIMEOUT_CMD "$chrome" --headless --disable-gpu --hide-scrollbars \
+          --force-device-scale-factor=1 --allow-file-access-from-files \
+          $NO_SANDBOX \
           --screenshot="$OUT/icon.png" --window-size=1024,1024 \
           "$PAGE_URL" >/dev/null 2>&1 \
           && check_icon_opaque; then
