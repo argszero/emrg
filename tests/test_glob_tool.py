@@ -73,7 +73,7 @@ def test_definition():
     d = tool.definition()
     assert d.name == "glob"
     assert "pattern" in d.parameters.get("properties", {})
-    assert d.parameters.get("required") == ["pattern"]
+    assert d.parameters.get("required") == ["pattern", "intent"]
 
 
 def test_glob_invalid_workdir():

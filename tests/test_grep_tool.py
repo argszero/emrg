@@ -101,7 +101,7 @@ def test_definition():
     d = tool.definition()
     assert d.name == "grep"
     assert "pattern" in d.parameters.get("properties", {})
-    assert d.parameters.get("required") == ["pattern"]
+    assert d.parameters.get("required") == ["pattern", "intent"]
 
 
 def test_skips_hidden_dirs(temp_cwd):
