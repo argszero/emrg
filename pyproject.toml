@@ -1,6 +1,6 @@
 [project]
 name = "emrg"
-version = "0.2.51"
+version = "0.2.52"
 description = "EMRG — a self-evolving AI agent architecture"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
