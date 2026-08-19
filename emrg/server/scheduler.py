@@ -18,25 +18,18 @@ import json
 import logging
 import os
 import re
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
 import yaml
 
-from emrg._win import win32_no_window_kwargs
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
 from emrg.server.git_utils import (
-    INSTALL_INFO,
     _detect_git_remote,
-    git_origin_url,
-    https_to_ssh_url,
-    is_git_connection_error,
-    no_prompt_env,
     resolve_git_gh,
 )
 
@@ -247,13 +240,6 @@ class TaskHandler:
         # rant 2026-08-09T08:03:46：GUI 测试覆盖真实 emrgd.port 致 10h 连不上）。
         self._CONNECT_FAIL_ALERT = 3
         self._connect_failures = 0
-        # ── Workspace self-heal backoff (rant 2026-08-19T00:54:32) ──
-        # clone/self-heal failure (network down) must not retry every cycle:
-        # each failed clone blocks up to ~30s and (on Windows) wedges the
-        # websocket clients. Exponential backoff 5min → 10min → 20min → 30min
-        # cap; reset on success.
-        self._workspace_heal_failures = 0
-        self._workspace_heal_next_retry_at = 0.0
         self._saturation_dir = config_dir() / "saturation"
         self._saturation_dir.mkdir(parents=True, exist_ok=True)
         self._saturation_file = self._saturation_dir / f"{self.name}.json"
@@ -267,10 +253,9 @@ class TaskHandler:
         self.project_path = path or name  # default to name for emrg itself
 
         # Derive owner/repo/git from config override → path git remote → defaults.
-        # _repo_configured gates the workspace self-heal (rant 2026-08-12T18:14:46):
-        # any task with a real repo (config owner/repo, or a git remote in its
-        # project path) gets clone/align self-heal; the emrg evolution task
-        # always counts as configured (defaults to argszero/emrg).
+        # (rant 2026-08-19T14:20:52: workspace self-heal deleted — these fields
+        # remain for prompt context {repo}/{owner} and task-config resolution;
+        # the agent manages its own git workspace via tools.)
         repo_spec = _detect_git_remote(path) if path else ""
         cfg_owner = config.get("owner")
         cfg_repo = config.get("repo")
@@ -289,338 +274,8 @@ class TaskHandler:
             self._repo_configured = project_name == "emrg"
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
-        # 解析一次 git 可执行路径（install-info.json → bundled → PATH 回退）。
-        # 2026-08-12 事故：daemon 从无 PATH git 的环境重启后，裸 `git` 调用
-        # FileNotFoundError → _is_usable_git_repo() 误判 "not a git repo" →
-        # 演化周期全部跳过。此后所有 git 调用走 resolve_git_gh() 的确定性解析。
-        self._git_exe = resolve_git_gh()[0] or "git"
-        # One-shot https-origin probe per handler lifetime (see
-        # _ensure_origin_reachable) — avoids re-probing every cycle.
-        self._origin_probed = False
 
-    # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──
-    #
-    # Packaged installs run the daemon from ~/.emrg/install/source/emrg — a
-    # .git-less source snapshot — so evolution cannot commit/push/PR. Each
-    # cycle starts by ensuring the workspace is a usable git repo:
-    #   - dev machine (source_dir is a real git repo) → untouched
-    #   - otherwise → clone EMRG into ~/.emrg/evolution/emrg/, align it to the
-    #     installed release tag, and self-heal projects.yml/tasks.yml entries.
-    # Idempotent and failure-tolerant (no network → skip cycle, GUI unaffected).
-
-    def _repo_url_from_install_info(self) -> str | None:
-        """Read the repo URL from install-info.json 'repo' field, if present."""
-        try:
-            data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
-            value = data.get("repo")
-            return str(value) if value else None
-        except (OSError, json.JSONDecodeError, AttributeError):
-            return None
-
-    def _is_usable_git_repo(self, path: str) -> bool:
-        """True if path is a git repo with a working tree we can commit to."""
-        if not path or not Path(path).is_dir():
-            return False
-        try:
-            result = subprocess.run(
-                [self._git_exe, "rev-parse", "--is-inside-work-tree"],
-                cwd=path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=5,
-                env=no_prompt_env(),
-                **win32_no_window_kwargs(),
-            )
-            if result.returncode != 0 or result.stdout.strip() != "true":
-                return False
-            return os.access(path, os.W_OK)
-        except (subprocess.SubprocessError, OSError):
-            return False
-
-    def _ensure_git_identity(self, repo_dir: Path) -> None:
-        """Set git user.name/user.email if missing (fresh clones have none)."""
-        name = os.environ.get("GIT_AUTHOR_NAME", "") or "EMRG Evolution"
-        email = os.environ.get("GIT_AUTHOR_EMAIL", "") or "emrg@argszero.dev"
-        try:
-            for key, default in (("user.name", name), ("user.email", email)):
-                result = subprocess.run(
-                    [self._git_exe, "config", key],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=5,
-                    env=no_prompt_env(),
-                    **win32_no_window_kwargs(),
-                )
-                if not result.stdout.strip():
-                    subprocess.run(
-                        [self._git_exe, "config", key, default],
-                        cwd=repo_dir,
-                        capture_output=True,
-                        timeout=5,
-                        env=no_prompt_env(),
-                        **win32_no_window_kwargs(),
-                    )
-        except (subprocess.SubprocessError, OSError):
-            pass
-
-    def _align_to_installed_version(self, repo_dir: Path) -> None:
-        """Point the local master branch at the installed release tag.
-
-        Reads ~/.emrg/install/version.txt (e.g. "0.2.7"); checks out
-        ``v0.2.7`` if the tag exists, otherwise stays on the clone's
-        default branch (latest master). A named branch (not detached HEAD)
-        keeps the evolution flow (branch-from-master, push, PR) working.
-        """
-        tag = None
-        try:
-            version_file = Path.home() / ".emrg" / "install" / "version.txt"
-            if version_file.exists():
-                ver = version_file.read_text(encoding="utf-8").strip()
-                if ver:
-                    tag = f"v{ver}"
-        except OSError:
-            tag = None
-        if not tag:
-            return
-        try:
-            result = subprocess.run(
-                [self._git_exe, "tag", "-l", tag],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=10,
-                env=no_prompt_env(),
-                **win32_no_window_kwargs(),
-            )
-            if result.returncode == 0 and tag in result.stdout.split():
-                subprocess.run(
-                    [self._git_exe, "checkout", "-B", "master", tag],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=30,
-                    check=True,
-                    env=no_prompt_env(),
-                    **win32_no_window_kwargs(),
-                )
-                self._logger.info(
-                    "TaskHandler[%s]: evolution workspace aligned to %s",
-                    self.name, tag,
-                )
-        except (subprocess.CalledProcessError, OSError) as e:
-            self._logger.warning(
-                "TaskHandler[%s]: tag checkout %s failed (stay on master): %s",
-                self.name, tag, e,
-            )
-
-    def _ensure_project_entry(self) -> None:
-        """Add/update the emrg project entry in projects.yml (idempotent)."""
-        projects_file = config_dir() / "projects.yml"
-        try:
-            entries: list[dict] = []
-            if projects_file.exists():
-                data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    entries = [e for e in data if isinstance(e, dict)]
-            new_path = str(self._source_dir)
-            for entry in entries:
-                if entry.get("name") == "emrg":
-                    if entry.get("path") != new_path:
-                        entry["path"] = new_path
-                        entry["last_active"] = datetime.now().isoformat()
-                        atomic_write_yaml(entries, projects_file, prefix=".projects_")
-                        self._logger.info(
-                            "TaskHandler[%s]: projects.yml self-heal — emrg → %s",
-                            self.name, new_path,
-                        )
-                    return
-            entries.append({
-                "name": "emrg",
-                "path": new_path,
-                "last_active": datetime.now().isoformat(),
-            })
-            atomic_write_yaml(entries, projects_file, prefix=".projects_")
-            self._logger.info(
-                "TaskHandler[%s]: projects.yml self-heal — added emrg → %s",
-                self.name, new_path,
-            )
-        except (yaml.YAMLError, OSError) as e:
-            self._logger.warning(
-                "TaskHandler[%s]: projects.yml self-heal failed: %s",
-                self.name, e,
-            )
-
-    def _ensure_evolution_workspace(self) -> bool:
-        """Self-heal the task workspace; returns False to skip the cycle.
-
-        Applies to any task that has a repo configured (the emrg evolution
-        task, or a paper/open-source/promote task with config owner/repo or
-        a git remote in its project path — rant 2026-08-12T18:14:46).
-        Returns True when the workspace is usable (existing dev repo, or a
-        successful clone into ``~/.emrg/evolution/<repo>/``).
-        """
-        if not self._repo_configured:
-            return True  # no repo configured for this task — nothing to self-heal
-        if self._is_usable_git_repo(self._source_dir):
-            self._ensure_origin_reachable()
-            return True  # dev machine — use the existing repo as-is
-        repo_url = self._repo_url_from_install_info() or self._repo_url
-        evolve_dir = EVOLUTION_CWD / self._repo
-        if evolve_dir.exists():
-            if self._is_usable_git_repo(str(evolve_dir)):
-                self._source_dir = str(evolve_dir)
-                self.project_path = str(evolve_dir)
-                # Persist the corrected path (idempotent — writes only when the
-                # emrg entry differs). #716 repairs a stale emrg entry (deleted
-                # pytest-temp dir leaked into projects.yml) at scheduler startup
-                # only; this re-persists every cycle so a mid-run pollution on a
-                # long-running daemon self-heals within one cycle without a
-                # restart (list_projects/GUI pickers stay correct).
-                if self._project_name == "emrg":
-                    self._ensure_project_entry()
-                self._ensure_origin_reachable()
-                return True
-            self._logger.warning(
-                "TaskHandler[%s]: %s exists but is not a git repo — "
-                "skipping self-heal to avoid data loss",
-                self.name, evolve_dir,
-            )
-            return False
-        # Backoff gate (rant 2026-08-19T00:54:32): after a failed clone /
-        # self-heal (network down), don't retry every cycle — each failed
-        # clone blocks up to ~30s and wedges websocket clients. Skip until
-        # the backoff window expires.
-        if self._workspace_heal_failures > 0:
-            remaining = self._workspace_heal_next_retry_at - time.time()
-            if remaining > 0:
-                self._logger.debug(
-                    "TaskHandler[%s]: workspace self-heal backoff "
-                    "(%ds left) — skipping cycle",
-                    self.name, int(remaining),
-                )
-                return False
-        try:
-            self._logger.info(
-                "TaskHandler[%s]: cloning %s → %s (workspace self-heal)",
-                self.name, repo_url, evolve_dir,
-            )
-            self._clone_workspace(repo_url, evolve_dir)
-            self._align_to_installed_version(evolve_dir)
-            self._ensure_git_identity(evolve_dir)
-            self._source_dir = str(evolve_dir)
-            self.project_path = str(evolve_dir)
-            self._ensure_project_entry()
-            self._workspace_heal_failures = 0
-            self._workspace_heal_next_retry_at = 0.0
-            return True
-        except (subprocess.CalledProcessError, OSError) as e:
-            self._workspace_heal_failures += 1
-            delay = min(300 * (2 ** (self._workspace_heal_failures - 1)), 1800)
-            self._workspace_heal_next_retry_at = time.time() + delay
-            self._logger.warning(
-                "TaskHandler[%s]: evolution workspace self-heal failed "
-                "(network down?): %s — skipping cycle; next retry in %ds",
-                self.name, e, delay,
-            )
-            return False
-
-    def _clone_workspace(self, repo_url: str, target: Path) -> None:
-        """Clone the evolution repo, retrying via SSH when https is blocked.
-
-        Uses a short ``http.connectTimeout`` so a blocked github.com:443
-        fails fast (seconds) instead of hanging; on a connection-type
-        failure the clone is retried with the SSH URL
-        (``git@github.com:owner/repo.git``), which works on networks that
-        block https git transport (observed on the packaged host). Other
-        failures (auth / 404 / repo-specific) propagate unchanged.
-        """
-        cmd = [self._git_exe, "-c", "http.connectTimeout=5", "clone", repo_url, str(target)]
-        reason = ""
-        try:
-            subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8",
-                timeout=120, check=True, env=no_prompt_env(),
-                **win32_no_window_kwargs(),
-            )
-            return
-        except subprocess.CalledProcessError as e:
-            ssh_url = https_to_ssh_url(repo_url)
-            if not ssh_url or not is_git_connection_error(e.stderr or ""):
-                raise
-            # NB: `e` is deleted when the except block exits — capture first.
-            reason = (e.stderr.strip() or str(e))[:80]
-        self._logger.warning(
-            "TaskHandler[%s]: https clone failed (%s) — retrying via SSH",
-            self.name, reason,
-        )
-        # rant 2026-08-19T00:54:32 — bound the SSH connect too (GIT_SSH_COMMAND
-        # ConnectTimeout=5), so a blocked SSH port fails fast instead of eating
-        # the full timeout while blocking the event loop offload thread.
-        subprocess.run(
-            [self._git_exe, "clone", ssh_url, str(target)],
-            capture_output=True, text=True, encoding="utf-8",
-            timeout=120, check=True,
-            env={**no_prompt_env(), "GIT_SSH_COMMAND": "ssh -o ConnectTimeout=5"},
-            **win32_no_window_kwargs(),
-        )
-
-    def _ensure_origin_reachable(self) -> None:
-        """Probe the github.com https origin; switch to SSH when blocked.
-
-        Some networks block github.com:443 while SSH port 22 stays open.
-        With an https origin every evolution pull/push hangs ~75 s and the
-        saturation-halt auto-resume (``git ls-remote``) never fires,
-        silently starving the cycle. One cheap probe per handler lifetime
-        (bounded by ``http.connectTimeout``) detects the blocked case; on
-        success nothing changes; on a connection-type failure the origin is
-        switched to the equivalent SSH URL so pull/push/ls-remote keep
-        working. Auth/404 errors never trigger a switch.
-        """
-        if self._origin_probed:
-            return
-        self._origin_probed = True
-        origin = git_origin_url(self._source_dir)
-        ssh_url = https_to_ssh_url(origin)
-        if not ssh_url:
-            return  # not a github.com https origin — nothing to switch
-        result = subprocess.run(
-            [self._git_exe, "-c", "http.connectTimeout=4", "ls-remote", origin, "HEAD"],
-            cwd=self._source_dir,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=15,
-            env=no_prompt_env(),
-            **win32_no_window_kwargs(),
-        )
-        if result.returncode == 0:
-            self._logger.debug(
-                "TaskHandler[%s]: origin probe: https OK", self.name,
-            )
-            return  # reachable — keep https
-        if not is_git_connection_error(result.stderr):
-            return  # auth/404 etc — switching would not help
-        switch = subprocess.run(
-            [self._git_exe, "remote", "set-url", "origin", ssh_url],
-            cwd=self._source_dir,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            timeout=5,
-            env=no_prompt_env(),
-            **win32_no_window_kwargs(),
-        )
-        if switch.returncode == 0:
-            self._logger.warning(
-                "TaskHandler[%s]: https origin unreachable (%s) — "
-                "switched origin to %s",
-                self.name, (result.stderr.strip() or "")[:80], ssh_url,
-            )
+    # ── Saturation state (restored from disk across daemon restarts) ──
 
     def _load_saturation_state(self) -> tuple[int, int]:
         """Restore (empty_cycles, slowdown_hits) from disk (daemon restarts)."""
@@ -909,19 +564,10 @@ class TaskHandler:
 
     async def _run_evolution_cycle(self) -> None:
 
-        # Self-heal the evolution workspace first (rant 20:42 方案 C):
-        # packaged installs lack a writable git repo; clone on demand.
-        # rant 2026-08-19T00:54:32 — the self-heal runs git subprocesses
-        # (clone/ls-remote/config) synchronously; offload to a worker thread
-        # so the asyncio event loop is never blocked (a slow/failing git
-        # clone used to wedge every websocket client for ~30s per cycle).
-        if not await asyncio.to_thread(self._ensure_evolution_workspace):
-            self._logger.warning(
-                "TaskHandler[%s]: workspace not ready — skipping cycle",
-                self.name,
-            )
-            return
-
+        # Rant 2026-08-19T14:20:52 — workspace self-heal deleted: git workspace
+        # management is the agent's job (bash tools). The cycle proceeds
+        # directly to prompt build / daemon connection; if the configured
+        # source path is invalid the agent discovers it via tool errors.
         cycle_time = datetime.now()
         prompt = self._build_evolution_prompt()
         self._logger.info(
@@ -1144,7 +790,9 @@ class TaskHandler:
             recommend_slowdown=recommend,
             tool_count=tool_count,
         )
-        await self._write_evolution_log(log)
+        # Rant 2026-08-19T14:18:40 — no disk archival: the evolution log lives
+        # in the in-memory list only (GUI recent-runs + evolution_count both
+        # read self.evolutions); evolution-*.json was never consumed.
         self.evolutions.append(log)
 
     def _build_evolution_prompt(self) -> str:
@@ -1190,35 +838,6 @@ class TaskHandler:
         env = jinja2.Environment(undefined=jinja2.Undefined)
         template = env.from_string(self._template_path.read_text(encoding="utf-8"))
         return template.render(**context)
-
-    async def _write_evolution_log(self, entry: EvolutionLog) -> None:
-        filename = f"evolution-{entry.timestamp.replace(':', '-')}.json"
-        path = self._logs_dir / filename
-        data = {
-            "timestamp": entry.timestamp,
-            "trigger": entry.trigger,
-            "impact": entry.impact,
-            "operations": entry.operations,
-            "summary": entry.summary,
-            "meaningful": entry.meaningful,
-            "recommend_slowdown": entry.recommend_slowdown,
-            "tool_count": entry.tool_count,
-        }
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        # Rotate: keep at most 27 evolution log files (oldest deleted).
-        # Filenames use ISO timestamps so lexical sort = chronological.
-        _MAX_LOG_FILES = 27
-        try:
-            log_files = sorted([
-                f for f in self._logs_dir.iterdir()
-                if f.is_file() and f.name.startswith("evolution-")
-            ])
-            if len(log_files) > _MAX_LOG_FILES:
-                for old in log_files[:len(log_files) - _MAX_LOG_FILES]:
-                    old.unlink(missing_ok=True)
-        except OSError:
-            pass  # best-effort cleanup
 
     async def _write_final_summary(self) -> None:
         if not self.evolutions:
@@ -1470,16 +1089,15 @@ class TaskScheduler:
         """Ensure projects.yml has an emrg entry and tasks.yml has the task.
 
         Packaged installs (or first runs) may lack tasks.yml entirely, or lack
-        the emrg-task entry. Without it, no TaskHandler is ever created,
-        so the workspace self-heal (which lives inside the handler) cannot run.
+        the emrg-task entry. Without it, no TaskHandler is ever created, so
+        the emrg task never runs.
 
-        The projects.yml emrg entry is ensured here too (rant 02:58): the only
-        other writer (_ensure_evolution_workspace's clone branch) requires a
-        first tick + network. If projects.yml lacks the entry,
-        _resolve_project_path("emrg") returns None and the handler's
-        _source_dir degenerates to the relative string "emrg" (dangling cwd).
-        The path is fixed to ~/.emrg/evolution/emrg; an existing entry is
-        preserved as-is (dev machines may configure a custom path).
+        The projects.yml emrg entry is ensured here too (rant 02:58): if
+        projects.yml lacks the entry, _resolve_project_path("emrg") returns
+        None and the handler's _source_dir degenerates to the relative string
+        "emrg" (dangling cwd). The path is fixed to ~/.emrg/evolution/emrg;
+        an existing entry is preserved as-is (dev machines may configure a
+        custom path).
         """
         # 1. projects.yml — add name=emrg entry if missing (preserve existing).
         projects_file = config_dir() / "projects.yml"
