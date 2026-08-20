@@ -32,12 +32,14 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 
 #### 0.3 Confirm promotion channel availability
 
-- Check the CLI: `which curl` (needed for Reddit/HN search)
+- **Browser-first channel probing (MUST, rant 2026-08-19T21:08:55)**: use `browser-harness` to operate the **real browser** for all channel detection and actions — the login state (cookies/sessions) exists **only in the real browser**. curl/API probes see a logged-out view and misjudge channel availability (e.g. curl returns 000 for Reddit while the browser is logged in and fully usable). When checking whether a channel works / is logged in / can post: **open it in the real browser via browser-harness first**; only fall back to curl for plain public-data reads (public JSON endpoints, docs) when the browser path is unavailable or the data is genuinely public.
+- Check the CLI: `which curl` (public-data reads only — never for login-state judgment)
 - Check whether the browser harness skill is available (`/skills` or `ls ~/.emrg/skills/`)
 - Channel unavailable → record it in the state file (blocked = channel unavailable); skip channel actions this round, but still write the reflection
 - **Channel not logged in** → check the state file's `channel accounts` list for that channel:
   - An account exists (auto-registered or host-provided) → use it (never register a duplicate)
   - No account → judge whether auto-registration is possible (browser harness / API can complete the flow, no human-only steps like SMS/captcha) → if yes, register per the Account Registration section below, then continue; if not, mark the channel `blocked (registration needs human)` — do NOT force it
+- **Host-action pages (human-needed, MUST keep open)**: whenever a page opened in the browser needs host action (account registration, SMS/captcha verification, authorization confirm, payment, login cookie, etc.) — **do NOT close that tab**. It must stay in the browser as a "pending host action" tab, and the state file's `blocked` field must record `XX page left open in browser (tab: <page title>), awaiting host action`. After the host completes the action (e.g. registration done), the channel becomes usable from the next round. Never close/reopen the same pending page in a loop.
 
 #### 0.4 Learn the project's latest state (MUST every round)
 
@@ -106,6 +108,9 @@ automatically, PROVIDED:
 1. **You can complete the registration** (via browser harness or the channel's API). If
    registration needs human steps (SMS verification, manual captcha, payment), you cannot
    complete it → mark the channel `blocked (registration needs human)`, do NOT force it.
+   **Leave the registration page open in the browser as a "pending host action" tab (never
+   close it)** and note `page left open, awaiting host` in the state file's `blocked` field —
+   the host may complete it manually; the channel becomes usable once registered.
 2. **Never register a duplicate**: if the channel already has an account (registered by this
    instance before, or the host's existing account), REUSE it — do not create another.
 3. **Respect the channel's registration rules**: channels that forbid automated signup are
