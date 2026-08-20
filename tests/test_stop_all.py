@@ -669,6 +669,10 @@ class TestIndependentLockProbe:
         residuals do not (rant 2026-08-18T21:24:48 #2c/#5)."""
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
+        # ⛔ 最高原则（宿主 2026-08-18T22:58）：必须隔离 stop_daemon——本机运行
+        # pytest 时真实 stop_all() 会连 ws 发 shutdown 杀死正在运行的 emrgd
+        # （2026-08-20 16:18/16:25 两次实证）。同文件其它 stop_all() 测试均有此隔离。
+        monkeypatch.setattr(_stop_all, "stop_daemon", lambda: None)
         monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
         monkeypatch.setattr(
             _stop_all, "verify",
