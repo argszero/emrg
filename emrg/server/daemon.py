@@ -577,6 +577,11 @@ class EmrgServer:
         (dependencies / backup / GUI / retry) is the agent's, template-
         driven; the program's only state is the in-flight re-entry flag.
         Failures are silent — the next tick retries naturally.
+
+        The FIRST tick runs only after TICK_INTERVAL (5 min): the daemon
+        must never hammer the GitHub API at startup (test harnesses boot
+        many servers; each immediate tick would fire a real network request
+        and destabilize timing).
         """
         from emrg.config import load_update_config
         from emrg.server.upgrade import TICK_INTERVAL, UpgradeManager
@@ -585,11 +590,11 @@ class EmrgServer:
             load_update_config(), self._run_upgrade_session
         )
         while True:
+            await asyncio.sleep(TICK_INTERVAL)
             try:
                 await self._upgrade_manager.tick()
             except Exception:
                 logger.debug("upgrade tick failed (retry next tick)", exc_info=True)
-            await asyncio.sleep(TICK_INTERVAL)
 
     async def _run_upgrade_session(self, session_id: str, cwd: str, prompt: str) -> None:
         """Public session-runner used by UpgradeManager (and a candidate entry
