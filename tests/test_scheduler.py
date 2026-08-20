@@ -1431,6 +1431,36 @@ def test_evolution_cycle_log_work_no_completion_fallback(tmp_path):
     assert log2.tool_count == 0
 
 
+def test_evolution_cycle_log_work_not_truncated(tmp_path):
+    """Rant 2026-08-20T22:45:33: work is saved in FULL — the [:500] truncation
+    is removed (it produced exactly-500-char garbage in task-run JSONL).
+    A long work value round-trips through the cycle log and the JSONL intact."""
+    long_work = ("完成。" + "详细产出说明。" * 120)  # ~600 chars > old 500 cap
+    assert len(long_work) > 500
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"work": long_work, "recommend_slowdown": False,
+                    "slowdown_reason": ""}},
+    ])
+    asyncio.run(handler._run_evolution_cycle())
+    log = captured["log"]
+    assert log.work == long_work, \
+        "work must be persisted without [:500] truncation"
+    # JSONL copy keeps the full value too
+    from emrg.server import scheduler as mod
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        h = TaskHandler(name="emrg-task", config={}, interval=60,
+                        identity=InstanceIdentity())
+        assert h.evolutions, "restored from the JSONL written by the cycle"
+        assert h.evolutions[-1].work == long_work
+    finally:
+        mod.config_dir = orig
+
+
 def test_evolution_cycle_vibe_unavailable_state_unchanged(tmp_path):
     """Vibe check unavailable (timeout/failure) → slowdown state unchanged.
 

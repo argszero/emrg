@@ -855,7 +855,9 @@ class TaskHandler:
         recommend = False
         slowdown_reason = ""
         if vibe_result is not None:
-            work = str(vibe_result.get("work") or "")[:500]
+            # Rant 2026-08-20T22:45:33: no more [:500] truncation — save the
+            # full work value (prompt guidance keeps it ≤200 chars).
+            work = str(vibe_result.get("work") or "")
             recommend = bool(vibe_result.get("recommend_slowdown"))
             # rant 2026-08-19T18:25:14: keep the vibe check's reason so the GUI
             # secondary list can show 原因 (time/work/throttle/reason).
