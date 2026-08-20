@@ -147,7 +147,6 @@ const ELEMENT_IDS = [
   "result-panel", "result-list", "result-toggle",
   "result-tabs", "result-tab-files", "result-tab-artifacts", "result-tabbar", "result-files", "result-viewer", "result-resizer",
   "growth-card", "growth-count", "about-recent",
-  "about-update", "about-update-check-btn",
   "github-banner", "github-banner-msg", "github-banner-connect", "github-banner-dismiss",
   "toast", "toast-msg",
   // rant 18:23:15 P3：定时任务/自定义类型管理（settings 区）
@@ -236,7 +235,6 @@ function makeSandbox(overrides = {}) {
       closePreview: async () => ({ ok: true }),
       panelResized: async () => ({ ok: true }),
       getPreviewState: async () => ({ path: null }), // P2.3：崩溃恢复拉取
-      updateInstall: async () => ({ ok: true }), // rant 12:10：一键安装 IPC 默认桩
       sendRant: async () => ({}),
       listRants: async () => [],
       ...overrides,
@@ -2309,90 +2307,6 @@ test("B3: 发送消息清除该会话草稿；新会话从空草稿开始", asyn
   assert.strictEqual(newDraft, "", "new session starts with empty draft");
 });
 
-test("rant 09:18：启动主动更新提示——有新版本且未提示过 → 系统消息一次", async () => {
-  const { ctx } = makeSandbox({
-    updateCheck: async () => ({ enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "", current_version: "0.2.23" }),
-    updateCheckPrompted: async () => ({}),
-  });
-  await tick();
-  const r = await vm.runInContext(`(async function() {
-    let prompted = null;
-    window.emrg.updateCheckPrompted = async (p) => { prompted = p; };
-    await EMRG_Dialogs.promptUpdateAtStartup();
-    const texts = [];
-    for (let i = 0; i < $("workspace").children.length; i++) texts.push($("workspace").children[i].textContent);
-    return { n: texts.length, joined: texts.join("|"), prompted: JSON.stringify(prompted) };
-  })()`, ctx);
-  assert.ok(r.n >= 1, "应输出一条系统消息");
-  assert.ok(r.joined.includes("0.2.99"), `系统消息应含新版本号，实际 ${r.joined}`);
-  assert.ok(r.prompted.includes("0.2.99"), "应记录已提示版本（幂等）");
-});
-
-test("rant 09:18：启动提示幂等——已提示过/未启用/无更新 → 不提示", async () => {
-  const { ctx } = makeSandbox({
-    updateCheck: async () => ({ enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "0.2.99", current_version: "0.2.23" }),
-  });
-  await tick();
-  const r = await vm.runInContext(`(async function() {
-    await EMRG_Dialogs.promptUpdateAtStartup();
-    return { n: $("workspace").children.length };
-  })()`, ctx);
-  assert.strictEqual(r.n, 0, "已提示过同版本 → 不得重复提示");
-});
-
-test("rant 09:18：设置页手动检查按钮——点击强制重新检查并显示检查中", async () => {
-  const { ctx } = makeSandbox({
-    updateCheck: async (payload) => ({ enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "", current_version: "0.2.23", _force: payload && payload.force }),
-    updateCheckPrompted: async () => ({}),
-  });
-  await tick();
-  const r = await vm.runInContext(`(async function() {
-    const calls = [];
-    window.emrg.updateCheck = async (payload) => {
-      calls.push(payload || {});
-      return { enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "" };
-    };
-    const btn = $("about-update-check-btn");
-    btn.textContent = "检查更新"; // 模拟 index.html 静态文案（沙箱不加载 HTML）
-    EMRG_Dialogs.initUpdateCheckButton();
-    btn.click();
-    const during = { text: btn.textContent, disabled: btn.disabled };
-    await new Promise((res) => setTimeout(res, 20));
-    return {
-      calls: JSON.stringify(calls),
-      duringText: during.text,
-      afterText: btn.textContent,
-      afterDisabled: btn.disabled,
-      updateShown: !$("about-update").classList.contains("hidden"),
-    };
-  })()`, ctx);
-  const calls = JSON.parse(r.calls);
-  assert.strictEqual(calls.length, 1, "点击按钮应触发一次 updateCheck");
-  assert.strictEqual(calls[0].force, true, "手动检查必须带 force:true（跳过 TTL 缓存）");
-  assert.strictEqual(r.duringText, "检查中…", "检查中按钮应显示“检查中…”");
-  assert.strictEqual(r.afterText, "检查更新", "完成后按钮文案恢复");
-  assert.strictEqual(r.afterDisabled, false, "完成后按钮恢复可用");
-  assert.strictEqual(r.updateShown, true, "有新版本应显示 about-update 行");
-});
-
-test("rant 09:18：refreshUpdateCheck 透传 force 参数", async () => {
-  const { ctx } = makeSandbox({
-    updateCheck: async (payload) => ({ enabled: false, has_update: false, latest_version: "", prompted_version: "" }),
-  });
-  await tick();
-  const r = await vm.runInContext(`(async function() {
-    const calls = [];
-    window.emrg.updateCheck = async (payload) => { calls.push(payload || {}); return { enabled: false, has_update: false, latest_version: "", prompted_version: "" }; };
-    await EMRG_Dialogs.refreshUpdateCheck({ force: true });
-    await EMRG_Dialogs.refreshUpdateCheck();
-    return JSON.stringify(calls);
-  })()`, ctx);
-  const calls = JSON.parse(r);
-  assert.strictEqual(calls.length, 2);
-  assert.strictEqual(calls[0].force, true, "refreshUpdateCheck({force:true}) 应透传 force");
-  assert.strictEqual(calls[1].force, false, "默认 refreshUpdateCheck() 不带 force");
-});
-
 // ── P2.3 + P3.4（rant 2026-08-11T12:20:35）：HTML 预览 WebContentsView ──────────
 
 test("P3.4：HTML tab 打开 → previewHtml IPC + 占位渲染（不走 read_file）", async () => {
@@ -2522,76 +2436,6 @@ test("P2.3：handlePreviewState 幂等——已打开路径仅激活不重复开
   assert.ok(calls.previewHtml.length >= 2, "恢复激活应重新 previewHtml（bounds/loadURL 同步）");
 });
 
-// ── rant 2026-08-12T12:10:12：自动下载 + GUI 一键安装 ──
-
-test("rant 12:10：已下载安装包 → 设置页一键安装按钮 → 确认 → updateInstall", async () => {
-  const installCalls = [];
-  const { ctx, els } = makeSandbox({
-    updateCheck: async () => ({
-      enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "",
-      current_version: "0.2.27",
-      downloaded_version: "0.2.99",
-      downloaded_path: "/home/u/.emrg/updates/EMRG-0.2.99-windows-x64.exe",
-    }),
-    updateInstall: async (p) => { installCalls.push(p); return { ok: true }; },
-  });
-  await tick();
-  await vm.runInContext("EMRG_Dialogs.refreshUpdateCheck()", ctx);
-  await tick();
-  const updEl = els["about-update"];
-  assert.strictEqual(updEl.classList.contains("hidden"), false, "update row visible");
-  assert.ok(updEl.children.length >= 1, "install button rendered");
-  const btn = updEl.children[0];
-  assert.ok((btn.textContent || "").includes("0.2.99"), `button text has version: "${btn.textContent}"`);
-  assert.ok(btn.className.includes("btn"), `button styled as button: "${btn.className}"`);
-  btn.click(); // → 确认对话框
-  await tick();
-  assert.strictEqual(els["confirm-dialog"].open, true, "confirm dialog shown");
-  assert.ok((els["confirm-message"].textContent || "").includes("0.2.99"), "confirm mentions version");
-  await vm.runInContext("EMRG_Dialogs.confirmOk()", ctx);
-  await tick();
-  assert.strictEqual(installCalls.length, 1, "updateInstall called once");
-  assert.strictEqual(installCalls[0].path, "/home/u/.emrg/updates/EMRG-0.2.99-windows-x64.exe", "downloaded path passed");
-  assert.strictEqual(installCalls[0].version, "0.2.99", "version passed");
-});
-
-test("rant 12:10：启动提示——已下载 → 系统消息“已就绪”（非更新链接）", async () => {
-  const { ctx } = makeSandbox({
-    updateCheck: async () => ({
-      enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "",
-      current_version: "0.2.27",
-      downloaded_version: "0.2.99",
-      downloaded_path: "/home/u/.emrg/updates/EMRG-0.2.99-macos-arm64.pkg",
-    }),
-  });
-  await tick();
-  const r = await vm.runInContext(`(async function() {
-    await EMRG_Dialogs.promptUpdateAtStartup();
-    const texts = [];
-    for (let i = 0; i < $("workspace").children.length; i++) texts.push($("workspace").children[i].textContent);
-    return texts.join("|");
-  })()`, ctx);
-  assert.ok(r.includes("0.2.99"), `ready message contains version: "${r}"`);
-  assert.ok(r.includes("已下载") || r.includes("downloaded"), `ready wording: "${r}"`);
-});
-
-test("rant 12:10：downloaded_version == 当前版本 → 无安装按钮（退化更新链接）", async () => {
-  const { ctx, els } = makeSandbox({
-    updateCheck: async () => ({
-      enabled: true, has_update: true, latest_version: "0.2.99", prompted_version: "",
-      current_version: "0.2.27", downloaded_version: "0.2.27",
-    }),
-  });
-  await tick();
-  await vm.runInContext("EMRG_Dialogs.refreshUpdateCheck()", ctx);
-  await tick();
-  const updEl = els["about-update"];
-  assert.strictEqual(updEl.classList.contains("hidden"), false, "update row visible");
-  assert.strictEqual(updEl.children.length, 1, "single element (no install button)");
-  const child = updEl.children[0];
-  assert.ok(!child.className.includes("btn"), "not a button when downloaded == current");
-  assert.ok((child.attributes.href || "").includes("releases"), "falls back to the Releases link");
-});
 
 // ── rant 18:23:15 P3：定时任务/自定义类型管理（settings 区） ──
 test("P3：设置面板打开 → 任务列表渲染（名称/类型/项目/间隔）+ 编辑预填 → taskUpdate", async () => {

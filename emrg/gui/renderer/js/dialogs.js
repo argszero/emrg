@@ -233,11 +233,6 @@ const Dialogs = (() => {
       } catch { /* 元素缺失（测试桩）时忽略 */ }
       // Windows GCM rant Stage 2：GitHub 连接状态随设置面板打开时刷新
       await refreshGithubStatus();
-      // Auto update-check prompt (rant 2026-08-10T07:12:12): about area shows
-      // a one-time non-intrusive line when a newer release exists.
-      // rant 2026-08-11T09:18:16：手动"检查更新"按钮（force 重新检查）
-      initUpdateCheckButton();
-      await refreshUpdateCheck();
     } catch (e) {
       Chat.addSystemMessage(_t("settings.readFailed", { msg: e.message }));
     }
@@ -491,126 +486,6 @@ const Dialogs = (() => {
     }
   }
 
-  // Auto update-check prompt (rant 2026-08-10T07:12:12): display-only, one
-  // line in the about area, never a modal.
-  // force (rant 2026-08-11T09:18:16): settings manual check button — run a
-  // fresh GitHub fetch instead of returning the daemon's cached result.
-  // rant 2026-08-12T12:10:12: when the daemon already auto-downloaded a
-  // verified installer (downloaded_version), show a one-click install button
-  // instead of the plain Releases link.
-  // ⚠️ 局部变量命名 updEl（勿用 el——会遮蔽模块级 el() 元素工厂，el("a",…)
-  // 抛 TypeError → catch 吞掉 → 更新行永远 hidden，正是 #602 隐藏缺陷）
-  async function refreshUpdateCheck({ force = false } = {}) {
-    const updEl = $("about-update");
-    if (!updEl) return; // 元素缺失（测试桩）时忽略
-    try {
-      const u = await window.emrg.updateCheck({ force });
-      if (!u || !u.enabled) {
-        updEl.classList.add("hidden");
-        updEl.textContent = "";
-        return;
-      }
-      updEl.textContent = "";
-      let shown = false;
-      // ① 已自动下载 + 校验通过 → 一键安装按钮（rant 2026-08-12T12:10:12）
-      if (u.downloaded_version && u.downloaded_version !== u.current_version) {
-        const btn = el("button", {
-          type: "button",
-          class: "btn btn-sm btn-primary",
-        }, _t("settings.updateReady", { latest: u.downloaded_version }));
-        btn.addEventListener("click", () => showUpdateInstallConfirm(u));
-        updEl.appendChild(btn);
-        shown = true;
-      }
-      // ② 有新版但未下载 → Releases 链接（幂等：同版本只提示一次）
-      if (!shown && u.has_update && u.latest_version && u.latest_version !== u.prompted_version) {
-        const link = el("a", {
-          href: "https://github.com/argszero/emrg/releases",
-          target: "_blank",
-          rel: "noopener",
-        }, _t("settings.updateAvailable", { latest: u.latest_version }));
-        updEl.appendChild(link);
-        shown = true;
-        try { await window.emrg.updateCheckPrompted({ version: u.latest_version }); } catch { /* ignore */ }
-      }
-      updEl.classList.toggle("hidden", !shown);
-    } catch {
-      updEl.classList.add("hidden");
-      updEl.textContent = "";
-    }
-  }
-
-  // Auto-update one-click install (rant 2026-08-12T12:10:12): the daemon
-  // downloaded + SHA256-verified the installer; the user clicks install →
-  // confirm (SmartScreen hint on Windows) → launch installer + quit EMRG
-  // (the installer stops any remaining EMRG processes itself).
-  function showUpdateInstallConfirm(u) {
-    const isWin = /win/i.test((navigator.platform || "") + (navigator.userAgent || ""));
-    showConfirm(
-      _t("settings.installTitle"),
-      _t(isWin ? "settings.installConfirmWin" : "settings.installConfirm", { latest: u.downloaded_version || "" }),
-      {
-        okText: _t("settings.installNow"),
-        danger: false,
-        onOk: async () => {
-          try {
-            const res = await window.emrg.updateInstall({ path: u.downloaded_path, version: u.downloaded_version });
-            if (res && res.ok) {
-              Chat.addSystemMessage(_t("settings.installStarted", { latest: u.downloaded_version || "" }));
-            } else {
-              Chat.addSystemMessage(_t("settings.installFailed", { msg: (res && res.error) || "" }));
-            }
-          } catch {
-            Chat.addSystemMessage(_t("settings.installFailed", { msg: "" }));
-          }
-        },
-      },
-    );
-  }
-
-  // 设置页"检查更新"手动按钮（rant 2026-08-11T09:18:16）：点击立即强制
-  // 重新检查（不等 TTL 轮询），检查中显示"检查中…"，完成后恢复按钮。
-  function initUpdateCheckButton() {
-    const btn = $("about-update-check-btn");
-    if (!btn) return; // 元素缺失（测试桩）时忽略
-    btn.addEventListener("click", async () => {
-      const original = btn.textContent;
-      btn.disabled = true;
-      btn.textContent = _t("settings.checkingUpdate");
-      try {
-        await refreshUpdateCheck({ force: true });
-      } finally {
-        btn.disabled = false;
-        btn.textContent = original;
-      }
-    });
-  }
-
-  // 启动主动更新提示（rant 2026-08-11T09:18:16）：GUI 启动成功路径调用，
-  // 不依赖打开设置对话框——有新版本且未提示过时输出一条非阻塞系统消息
-  // （对齐 TUI 启动 system 行）。rant 2026-08-12T12:10:12：若 daemon 已
-  // 自动下载好安装包，则提示"已就绪，点击安装"。boot 时 daemon 可能未
-  // 就绪 → 静默失败。
-  async function promptUpdateAtStartup() {
-    try {
-      const u = await window.emrg.updateCheck({ force: false });
-      if (!u || !u.enabled) return;
-      // 已自动下载 + 校验通过 → "已就绪，点击安装"（设置 → 关于）
-      if (u.downloaded_version && u.downloaded_version !== u.current_version) {
-        Chat.addSystemMessage(
-          _t("app.updateReady", { latest: u.downloaded_version }),
-        );
-        return;
-      }
-      if (!u.has_update || !u.latest_version) return;
-      if (u.latest_version === u.prompted_version) return;
-      Chat.addSystemMessage(
-        _t("app.updateAvailable", { latest: u.latest_version }),
-      );
-      // 幂等：同版本只提示一次
-      try { await window.emrg.updateCheckPrompted({ version: u.latest_version }); } catch { /* ignore */ }
-    } catch { /* boot-time daemon may not be ready — silent */ }
-  }
 
   // ── 定时任务管理（rant 2026-08-12T18:23:15 P3：GUI 任务/自定义类型 CRUD） ──
   // 决策点执行：①内置类型只读 ②被任务引用的自定义类型拒绝删除 ③项目仅限已注册
@@ -1652,10 +1527,6 @@ const Dialogs = (() => {
     initGithubSection,
     initDeviceDialog,
     refreshGithubStatus,
-    refreshUpdateCheck,
-    initUpdateCheckButton,
-    promptUpdateAtStartup,
-    showUpdateInstallConfirm, // rant 12:10:12：已下载安装包 → 一键安装确认
     initOpenSessionDialog, // P5：打开会话对话框初始化
     showOpenSessionDialog, // P5：两步打开会话
     initNewSessionDialog, // P5 slice 2：新建会话对话框初始化
