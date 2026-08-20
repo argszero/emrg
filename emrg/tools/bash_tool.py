@@ -171,6 +171,13 @@ def _protected_paths() -> list[str]:
     return out
 
 
+def _is_absolute_path(p: str) -> bool:
+    """True when ``p`` is absolute (or drive-less rooted, e.g. ``/etc/hosts``
+    on Windows — ntpath.isabs returns False for those, but they still do not
+    resolve under the cwd, so the sandbox must treat them as absolute)."""
+    return os.path.isabs(p) or p.startswith("/") or p.startswith("\\")
+
+
 def _is_within(path: str, root: str) -> bool:
     """True when ``path`` (absolute) is inside ``root`` (absolute) or equals it."""
     try:
@@ -220,7 +227,7 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
         if t == "/dev/null":
             continue
         expanded = os.path.expanduser(t)
-        if not os.path.isabs(expanded):
+        if not _is_absolute_path(expanded):
             # Relative target: assumed in-workspace (cwd = the workspace root).
             continue
         real = os.path.realpath(expanded)
