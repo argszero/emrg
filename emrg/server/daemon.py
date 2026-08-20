@@ -1275,7 +1275,11 @@ class EmrgServer:
         if not isinstance(data, dict):
             raise ValueError("vibe check response is not a JSON object")
         return {
-            "work": str(data.get("work", ""))[:500],
+            # Rant 2026-08-20T22:45:33: no more [:500] truncation — the
+            # prompt guidance (≤200 chars, outputs/results only) keeps work
+            # brief; hard-cutting produced exactly-500-char garbage in the
+            # saved task-run JSONL. Save the full value.
+            "work": str(data.get("work", "")),
             "recommend_slowdown": bool(data.get("recommend_slowdown")),
             "slowdown_reason": str(data.get("slowdown_reason", ""))[:300],
         }
