@@ -2571,16 +2571,18 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
         name: "emrg-task", type: "evolution", config: { project: "emrg" },
         interval: 60, enabled: true, last_run_at: "2026-08-18T10:00:00",
         saturation: { heartbeat_interval: 480, heartbeat_active: true },
+        // rant 2026-08-20T22:59:16 #2：后端 recent_runs 按时间升序（旧在上）；
+        // GUI 渲染前必须按 timestamp 倒序（最新在最上面）
         recent_runs: [
-          { timestamp: "2026-08-18T10:00:00", work: "修了双实例根因，提交 PR #854",
-            impact: ["cycle-ts-complete", "tools-executed=26"],
-            recommend_slowdown: false, tool_count: 26, slowdown_reason: "" },
-          { timestamp: "2026-08-18T09:00:00", work: "",
-            impact: ["cycle-ts-complete", "tools-executed=3"],
-            recommend_slowdown: false, tool_count: 3, slowdown_reason: "" },
           { timestamp: "2026-08-18T08:00:00", work: "NTE",
             impact: ["cycle-ts-complete"], recommend_slowdown: true, tool_count: 0,
             slowdown_reason: "长期无产出" },
+          { timestamp: "2026-08-18T09:00:00", work: "",
+            impact: ["cycle-ts-complete", "tools-executed=3"],
+            recommend_slowdown: false, tool_count: 3, slowdown_reason: "" },
+          { timestamp: "2026-08-18T10:00:00", work: "修了双实例根因，提交 PR #854",
+            impact: ["cycle-ts-complete", "tools-executed=26"],
+            recommend_slowdown: false, tool_count: 26, slowdown_reason: "" },
         ],
       },
       { name: "fresh-task", type: "sync", config: { project: "docs" }, interval: 3600, enabled: true },
@@ -2591,6 +2593,7 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   await tick();
   await vm.runInContext("App.openTasksPanel()", ctx);
   await tick();
+  await tick(); // buildTaskRunDetail 异步（renderMarkdown）→ 多等一拍
   // 初始：子表隐藏（行内含 .task-run-detail.hidden）
   const hiddenBefore = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-detail")).every((d) => d.classList.contains("hidden"))`, ctx);
   assert.strictEqual(hiddenBefore, true, "子表初始应隐藏");
@@ -2599,9 +2602,11 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   await tick();
   const detail = vm.runInContext(`document.getElementById("task-list").children[0].querySelector(".task-run-detail")`, ctx);
   assert.strictEqual(detail.classList.contains("hidden"), false, "点击后子表应展开");
-  // 第一行 run：Agent 总结展示（自然语言 work，rant 2026-08-20T10:58:55 字段统一）
-  const doneTxt = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")[0].textContent`, ctx);
-  assert.strictEqual(doneTxt, "修了双实例根因，提交 PR #854", `子表应显示 Agent 总结，实际: ${doneTxt}`);
+  // rant 2026-08-20T22:59:16 #2：按 timestamp 倒序渲染 —— 最新（10:00）在最上面
+  const doneHtmls = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")).map((n) => n.innerHTML)`, ctx);
+  assert.ok(String(doneHtmls[0]).includes("修了双实例根因，提交 PR #854"),
+    `最新记录（10:00）应渲染在第一行（倒序），实际: ${doneHtmls[0]}`);
+  assert.ok(String(doneHtmls[2]).includes("NTE"), "第三行应为 08:00（NTE）");
   // 降频徽章：recommend_slowdown=true → 建议降频（idle 空转徽章已删除，rant 10:58:55）
   const warnCount = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-badge-warn").length`, ctx);
   assert.ok(warnCount >= 1, "recommend_slowdown=true 应显示建议降频徽章");
@@ -2617,11 +2622,25 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   const reasonTexts = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-reason")).map((n) => n.textContent)`, ctx);
   assert.strictEqual(reasonTexts[0], "-", `无 slowdown_reason 应显示 "-"，实际: ${reasonTexts[0]}`);
   assert.strictEqual(reasonTexts[1], "-", `无 slowdown_reason 应显示 "-"，实际: ${reasonTexts[1]}`);
-  assert.strictEqual(reasonTexts[2], "长期无产出", `原因列应显示降频原因，实际: ${reasonTexts[2]}`);
+  const reasonHtmls = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-reason")).map((n) => n.innerHTML)`, ctx);
+  assert.ok(String(reasonHtmls[2]).includes("长期无产出"), `原因列应显示降频原因，实际: ${reasonHtmls[2]}`);
+  // rant 2026-08-20T22:59:16 #3：点击 work cell → 本条记录下方展开完整内容（Markdown），再点收起
+  const expandCountBefore = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-expand:not(.hidden)").length`, ctx);
+  assert.strictEqual(expandCountBefore, 0, "初始所有展开块应隐藏");
+  await vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")[0].click()`, ctx);
+  await tick();
+  const expandVisible = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-expand")[0].classList.contains("hidden")`, ctx);
+  assert.strictEqual(expandVisible, false, "点击 work cell 后应展开完整内容");
+  const expandHtml = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-expand")[0].innerHTML`, ctx);
+  assert.ok(String(expandHtml).includes("修了双实例根因，提交 PR #854"), "展开块应含完整 work 内容（Markdown 渲染）");
+  await vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")[0].click()`, ctx);
+  await tick();
+  const expandCollapsed = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-expand")[0].classList.contains("hidden")`, ctx);
+  assert.strictEqual(expandCollapsed, true, "再次点击应收起");
   // rant 2026-08-19T18:25:14：一级列表不再显示"干了什么"（last_cycle_summary）
   const primarySummary = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-meta-summary").length`, ctx);
   assert.strictEqual(primarySummary, 0, `一级列表不应显示 last_cycle_summary，实际数量: ${primarySummary}`);
-  // 再次点击 → 折叠
+  // 再次点击任务卡 → 折叠
   await vm.runInContext(`document.getElementById("task-list").children[0].click()`, ctx);
   await tick();
   assert.strictEqual(vm.runInContext(`document.getElementById("task-list").children[0].querySelector(".task-run-detail").classList.contains("hidden")`, ctx), true, "再次点击应折叠");
@@ -2635,6 +2654,10 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   assert.ok(rowRule.includes("flex-wrap: wrap"), "task-row 应含 flex-wrap: wrap（子表换行到任务卡下方）");
   const detailRule = taskCss.slice(taskCss.indexOf(".task-run-detail"), taskCss.indexOf(".task-run-detail.hidden"));
   assert.ok(detailRule.includes("flex-basis: 100%"), "task-run-detail 应保持 flex-basis:100%（配合 flex-wrap 换行）");
+  // rant 2026-08-20T22:59:16 #3：work/reason cell 多行截断（line-clamp + 省略号）
+  const cellRule = taskCss.slice(taskCss.indexOf(".task-run-cell"), taskCss.indexOf(".task-run-expand"));
+  assert.ok(cellRule.includes("-webkit-line-clamp: 2"), "task-run-cell 应含 2 行截断（line-clamp）");
+  assert.ok(cellRule.includes("cursor: pointer"), "task-run-cell 应可点击（cursor: pointer）");
   // rant 2026-08-20T10:34:40：主表一行 —— task-meta 不得再 flex-basis:100%
   // （曾强制"上次运行"独占一行 → 任务卡变 3 行），应改为弹性 auto 与 actions 同行
   const metaRule = taskCss.slice(taskCss.indexOf(".task-meta {"), taskCss.indexOf(".task-meta-item"));

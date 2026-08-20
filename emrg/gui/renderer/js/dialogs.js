@@ -572,13 +572,21 @@ const Dialogs = (() => {
   // （时间 / 干了什么 / 降频）。数据来自 daemon handler.status().recent_runs
   // （最多 5 条）。Rant 2026-08-19T07:06:45（宿主定稿）：无 summary 不再
   // fallback impact 机器串——空则显示 "-"；无记录 → 占位文案。
-  function buildTaskRunDetail(t) {
+  // Rant 2026-08-20T22:59:16（宿主）三处改进：
+  //   1) work/slowdown_reason 按 Markdown 渲染（emrgMarkdown.renderMarkdown，
+  //      不再纯文本 el("span", text)）；
+  //   2) 子表按时间倒序渲染（最新在最上面；后端 recent_runs 语义——最近 5 条——不变）；
+  //   3) work/reason cell 多行截断（CSS line-clamp）+ 点击 cell 在本条记录下方
+  //      展开完整内容（Markdown 渲染），再点收起。
+  async function buildTaskRunDetail(t) {
     const wrap = el("div", { class: "task-run-detail hidden" });
-    const runs = Array.isArray(t.recent_runs) ? t.recent_runs : [];
+    const runs = Array.isArray(t.recent_runs) ? [...t.recent_runs] : [];
     if (runs.length === 0) {
       wrap.appendChild(el("div", { class: "task-run-empty" }, _t("app.taskRunsEmpty")));
       return wrap;
     }
+    // rant 2026-08-20T22:59:16 #2：GUI 渲染前按 timestamp 倒序（最新在最上面）
+    runs.sort((a, b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
     const head = el("div", { class: "task-run-head" });
     head.appendChild(el("span", {}, _t("app.taskRunsColTime")));
     head.appendChild(el("span", {}, _t("app.taskRunsColDone")));
@@ -589,8 +597,22 @@ const Dialogs = (() => {
       const row = el("div", { class: "task-run-row" });
       row.appendChild(el("span", { class: "task-run-time" }, formatRelativeTime(r.timestamp)));
       // rant 2026-08-20T10:58:55：字段统一 work（原 summary/done）
-      let done = (typeof r.work === "string" && r.work) ? r.work : "";
-      row.appendChild(el("span", { class: "task-run-done" }, done || "-"));
+      // rant 2026-08-20T22:59:16 #1/#3：Markdown 渲染 + 点击展开完整内容
+      const done = (typeof r.work === "string" && r.work) ? r.work : "";
+      const doneCell = el("span", { class: "task-run-done task-run-cell" });
+      const doneExpand = el("div", { class: "task-run-expand hidden" });
+      if (done) {
+        const md = await window.emrgMarkdown.renderMarkdown(done);
+        doneCell.innerHTML = md;
+        doneExpand.innerHTML = md;
+        doneCell.addEventListener("click", (e) => {
+          if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+          doneExpand.classList.toggle("hidden");
+        });
+      } else {
+        doneCell.textContent = "-";
+      }
+      row.appendChild(doneCell);
       const flagCell = el("span", { class: "task-run-flag" });
       if (r.recommend_slowdown) {
         flagCell.appendChild(el("span", { class: "task-badge task-run-badge-warn" }, _t("app.taskRunThrottle")));
@@ -598,9 +620,24 @@ const Dialogs = (() => {
       row.appendChild(flagCell);
       // rant 2026-08-19T18:25:14：原因列 —— 降频判断的自然语言理由（vibe check
       // slowdown_reason，rant 2026-08-20T10:58:55 改名）。
-      let reason = (typeof r.slowdown_reason === "string" && r.slowdown_reason) ? r.slowdown_reason : "";
-      row.appendChild(el("span", { class: "task-run-reason" }, reason || "-"));
+      const reason = (typeof r.slowdown_reason === "string" && r.slowdown_reason) ? r.slowdown_reason : "";
+      const reasonCell = el("span", { class: "task-run-reason task-run-cell" });
+      const reasonExpand = el("div", { class: "task-run-expand hidden" });
+      if (reason) {
+        const md = await window.emrgMarkdown.renderMarkdown(reason);
+        reasonCell.innerHTML = md;
+        reasonExpand.innerHTML = md;
+        reasonCell.addEventListener("click", (e) => {
+          if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+          reasonExpand.classList.toggle("hidden");
+        });
+      } else {
+        reasonCell.textContent = "-";
+      }
+      row.appendChild(reasonCell);
       wrap.appendChild(row);
+      wrap.appendChild(doneExpand);
+      wrap.appendChild(reasonExpand);
     }
     return wrap;
   }
@@ -714,7 +751,7 @@ const Dialogs = (() => {
       // rant 2026-08-18T21:32:32：点击任务卡（非按钮）→ 手风琴展开最近运行子表。
       // 真实 DOM 中按钮点击通过 e.target.closest("button") 拦截（不触发展开）；
       // 测试沙箱的 click() 无 target → 直接切换（沙箱中按钮点击不冒泡，互不影响）。
-      const runDetail = buildTaskRunDetail(t);
+      const runDetail = await buildTaskRunDetail(t);
       row.appendChild(runDetail);
       let runDetailOpen = false;
       row.addEventListener("click", (e) => {
