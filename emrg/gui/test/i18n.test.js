@@ -145,15 +145,6 @@ test("Stage2：动态文案键（app/chat/dlg/panel）双语齐全", () => {
   assert.strictEqual(evalIn(zh, 'I18N.t("dlg.deleteModelBody", { name: "gpt-4o" })'), "「gpt-4o」将从可用模型里移除。");
 });
 
-test("Stage2：时间分组标签本地化（util.group*）", () => {
-  const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
-  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupToday")'), "Today");
-  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupYesterday")'), "Yesterday");
-  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupEarlier")'), "Earlier");
-  const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
-  assert.strictEqual(evalIn(zh, 'I18N.t("util.groupToday")'), "今天");
-});
-
 test("Stage2：成长卡/关于区静态文案键（#501 吸收）", () => {
   const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
   assert.strictEqual(evalIn(ctx, 'I18N.t("copy.growthCountPrefix")'), "Self-evolved");

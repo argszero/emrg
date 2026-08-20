@@ -559,10 +559,17 @@ const App = (() => {
   function sessionProjectName(sid) {
     const os = state.openSessions.find((s) => s.sid === sid);
     if (os && os.projectName) return os.projectName;
+    // rant 17:48:07：回退用会话自身 cwd 末段（与历史列表一致），再 "home"
+    const cur = state.sessions.find((s) => s.session_id === sid);
+    if (cur && cur.cwd) {
+      const norm = String(cur.cwd).replace(/\\/g, "/").replace(/\/+$/, "");
+      const seg = norm.split("/");
+      if (seg[seg.length - 1]) return seg[seg.length - 1];
+    }
     return "home";
   }
 
-  // 会话视图顶部标题栏：项目/名称(id) 或 项目/id（有 title 时带 (id) 后缀）
+  // 会话视图顶部标题栏：统一 project/name|id（rant 2026-08-20T17:48:07）
   function renderSessionHeader(sid) {
     if (!sid) return;
     const view = [...$("workspace").children].find((c) => c.dataset?.sid === sid);
@@ -575,7 +582,7 @@ const App = (() => {
     const cur = state.sessions.find((s) => s.session_id === sid) || {};
     const project = sessionProjectName(sid);
     const title = cur.title && cur.title !== sid ? cur.title : "";
-    const text = title ? `${project}/${title}(${sid})` : `${project}/${sid}`;
+    const text = `${project}/${title}|${sid}`;
     header.textContent = text;
     header.title = text; // 悬停完整信息
   }
