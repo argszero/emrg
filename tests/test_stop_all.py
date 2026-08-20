@@ -966,3 +966,16 @@ class TestTeeDualWrite:
         assert "log also written to" in out
         assert str(tmp_path / ".emrg" / "logs") in out
         assert "exit code 0 (clean)" in out
+
+
+class TestStopDaemonHermeticityGuard:
+    """⛔ Red line (host 2026-08-18T22:58): conftest's autouse guard must keep
+    stop_daemon patched so a forgetful test can never kill the live daemon
+    again (rant 2026-08-20T16:32:30). Canary checks function identity only —
+    it never calls any stop path."""
+
+    def test_conftest_guard_stop_daemon_is_installed(self):
+        import emrg._stop_all as stop_mod
+        assert stop_mod.stop_daemon.__name__ == "_no_real_stop_daemon", (
+            "conftest stop_daemon guard missing — real stop_daemon reachable from tests"
+        )
