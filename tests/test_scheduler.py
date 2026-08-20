@@ -1530,10 +1530,10 @@ def test_evolution_cycle_aborted_leaves_slowdown_state(tmp_path):
 
 
 # ── Connect-failure alerting (G129, rant 2026-08-09T08:03:46) ─────
-# GUI tests once overwrote the real ~/.emrg/emrgd.port with fake values,
+# GUI tests once overwrote the real ~/.emrg/emrgd.token with fake values,
 # so the evolution cycle failed to reach the daemon for 10 hours with only
 # a WARNING log. Consecutive failures must escalate to ERROR + carry an
-# actionable hint (check the port file), never silently swallow.
+# actionable hint (check the token file), never silently swallow.
 
 def test_evolution_cycle_connect_failure_escalates_to_error(tmp_path, caplog):
     """Repeated connect failures must escalate from warning to error alert."""
@@ -1556,7 +1556,7 @@ def test_evolution_cycle_connect_failure_escalates_to_error(tmp_path, caplog):
         # 第 3 次（达到阈值）必须出现 ERROR 告警，且提示检查 port 文件
         error_msgs = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
         assert error_msgs, "expected an ERROR alert after threshold"
-        assert any("emrgd.port" in m for m in error_msgs), error_msgs
+        assert any("emrgd.token" in m for m in error_msgs), error_msgs
         assert any("consecutive" in m for m in error_msgs), error_msgs
     finally:
         mod.connect_to_server = _original_connect_to_server()

@@ -676,43 +676,43 @@ def test_list_rants_missing_file_returns_empty(tmp_path, monkeypatch):
     assert frame["rants"] == []
 
 
-# ── Port-file self-heal (rant 2026-08-09T13:16:36 root cause) ─────────
-# G43 stale-port logic once deleted a healthy daemon's emrgd.port after a
+# ── Token-file self-heal (rant 2026-08-09T13:16:36 root cause) ─────────
+# G43 stale-port logic once deleted a healthy daemon's emrgd.token after a
 # transient ws failure → daemon's own scheduler lost the file (93× "cannot
 # connect") while the PID lock blocked new spawns. The daemon re-asserts
-# its port file so any external deletion self-heals.
+# its token file so any external deletion self-heals.
 
-def test_assert_port_file_writes_port_and_token(tmp_path, monkeypatch):
-    """_assert_port_file writes '<port>\\n<token>' with mode 0o600."""
+def test_assert_token_file_writes_token(tmp_path, monkeypatch):
+    """_assert_token_file writes the single-line token with mode 0o600."""
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
     server = _make_server()
     server._auth_token = "tok123"
-    server._assert_port_file(43210)
-    text = (tmp_path / "emrgd.port").read_text(encoding="utf-8")
-    assert text == "43210\ntok123"
+    server._assert_token_file()
+    text = (tmp_path / "emrgd.token").read_text(encoding="utf-8")
+    assert text == "tok123"
 
 
-def test_assert_port_file_rewrites_deleted_file(tmp_path, monkeypatch):
-    """A deleted port file is re-asserted on the next keepalive tick."""
+def test_assert_token_file_rewrites_deleted_file(tmp_path, monkeypatch):
+    """A deleted token file is re-asserted on the next keepalive tick."""
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
     server = _make_server()
     server._auth_token = "tok456"
-    server._assert_port_file(45678)
-    port_path = tmp_path / "emrgd.port"
-    assert port_path.exists()
+    server._assert_token_file()
+    token_path = tmp_path / "emrgd.token"
+    assert token_path.exists()
 
     # 外部删除（模拟 G43 unlink 竞态）
-    port_path.unlink()
-    assert not port_path.exists()
+    token_path.unlink()
+    assert not token_path.exists()
 
     # keepalive loop 的恢复逻辑：缺失 → 重新断言
-    server._assert_port_file(45678)
-    text = (tmp_path / "emrgd.port").read_text(encoding="utf-8")
-    assert text == "45678\ntok456"
+    server._assert_token_file()
+    text = (tmp_path / "emrgd.token").read_text(encoding="utf-8")
+    assert text == "tok456"
 
 
 def test_port_keepalive_loop_restores_missing_file(tmp_path, monkeypatch):
-    """The keepalive loop re-asserts a deleted port file within one tick."""
+    """The keepalive loop re-asserts a deleted token file within one tick."""
     import asyncio
 
     monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
@@ -720,17 +720,17 @@ def test_port_keepalive_loop_restores_missing_file(tmp_path, monkeypatch):
     server._auth_token = "tok789"
     server._server = type("S", (), {"sockets": [type("Sock", (), {"getsockname": lambda self: (None, 9999)})()]})()
     server._running = True
-    server._assert_port_file(9999)
-    port_path = tmp_path / "emrgd.port"
-    port_path.unlink()
+    server._assert_token_file()
+    token_path = tmp_path / "emrgd.token"
+    token_path.unlink()
 
     # 执行与 loop 相同的恢复逻辑（loop 本体 sleep 60s，测试直接驱动检查体）
     async def one_tick():
-        if not port_path.exists():
-            server._assert_port_file(9999)
+        if not token_path.exists():
+            server._assert_token_file()
     asyncio.run(one_tick())
-    assert port_path.exists()
-    assert port_path.read_text(encoding="utf-8") == "9999\ntok789"
+    assert token_path.exists()
+    assert token_path.read_text(encoding="utf-8") == "tok789"
 
 
 # ── _redact 日志脱敏（rant 10:21 + 跨项目 base64 教训）──────────────
@@ -1588,19 +1588,20 @@ def test_serve_rethrows_non_bind_errors(tmp_path):
             raise AssertionError("expected OSError(EACCES) to propagate")
 
 
-def test_assert_port_file_writes_fixed_port(tmp_path):
-    """_assert_port_file persists the FIXED port (56031) + auth token."""
+def test_assert_token_file_writes_token_only(tmp_path):
+    """_assert_token_file persists ONLY the auth token (no port — rant
+    2026-08-20T14:32:52: emrgd.port → emrgd.token, single-line token)."""
     from unittest.mock import patch
 
     server = _make_server()
     server._auth_token = "tok-123"
     with patch("emrg.server.daemon.config_dir", return_value=tmp_path):
-        server._assert_port_file(56031)
-    port_file = tmp_path / "emrgd.port"
-    assert port_file.exists()
-    lines = port_file.read_text(encoding="utf-8").split()
-    assert lines[0] == "56031"
-    assert lines[1] == "tok-123"
+        server._assert_token_file()
+    token_file = tmp_path / "emrgd.token"
+    assert token_file.exists()
+    assert token_file.read_text(encoding="utf-8").strip() == "tok-123"
+    # 旧 emrgd.port 不再被写入
+    assert not (tmp_path / "emrgd.port").exists()
 
 
 # ── Daemon stop-path logging (rant 2026-08-19T14:02:37) ──────────────

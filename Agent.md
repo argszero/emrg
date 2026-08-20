@@ -13,7 +13,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - `__main__.py` — CLI entry (`emrg`, `emrg server`, `emrg rant`, `emrg update`)
   - `protocol.py` — Communication protocol (TaskRequest, TaskResponse, ToolStart, ToolEnd, ServerPong, EvolutionLog, InstanceIdentity)
   - `config.py` — Config loading (`~/.emrg/config.toml`, Python 3.11+ tomllib)
-  - `connect.py` — IPC connection (WebSocket over TCP loopback, token auth via `emrgd.port`)
+  - `connect.py` — IPC connection (WebSocket over TCP loopback, token auth via `emrgd.token`)
   - `memory.py` — Memory system (ProjectMemoryStore, SessionMemoryStore, MemoryFile, MemoryIndex)
   - `session.py` — Session management (Session CRUD, history persistence, compact/clear)
 - `emrg/server/` — Server (WebSocket daemon, EMRG's living core)
@@ -115,7 +115,7 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 ## Test Commands
 
 ```bash
-pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
+pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.token; python -m emrg
 ```
 
 Python: `uv run pytest tests/ -v` (958) — import check: `uv run python -c "from emrg.client.app import run_client"`

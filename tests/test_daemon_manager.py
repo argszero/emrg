@@ -69,7 +69,7 @@ def _ping_pong_frame() -> str:
 
 class TestIsRunning:
     @patch("emrg.client.daemon_manager.is_server_running_sync", return_value=True)
-    def test_true_when_port_file_ok(self, mock_probe):
+    def test_true_when_token_file_ok(self, mock_probe):
         assert daemon_manager.is_running() is True
         mock_probe.assert_called_once()
 
@@ -120,9 +120,9 @@ class TestStartDaemon:
 # ── check_and_restart_if_stale ───────────────────────────────
 
 class TestCheckAndRestartIfStale:
-    def test_no_port_file_returns_early(self, tmp_path):
+    def test_no_token_file_returns_early(self, tmp_path):
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(tmp_path / "nope.port")):
+                   return_value=str(tmp_path / "nope.token")):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # no exceptions = pass
 
@@ -132,12 +132,12 @@ class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_mtime_unchanged_no_restart(self, mock_connect, mock_running,
                                         mock_src, mock_cfg, tmp_path):
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # No restart: the frame's started_at (2026) > mtimes (0), so no SIGTERM.
         # We only assert connect was used (ping roundtrip happened).
@@ -151,8 +151,8 @@ class TestCheckAndRestartIfStale:
     def test_source_newer_triggers_restart(self, mock_connect, mock_kill,
                                            mock_cleanup, mock_running,
                                            mock_src, mock_cfg, tmp_path):
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         # started_at in the past → source mtime (1e12) > server_start
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
 
@@ -164,7 +164,7 @@ class TestCheckAndRestartIfStale:
         mock_kill.side_effect = fake_kill
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # SIGTERM sent to pid 9999
         kill_calls = [c.args for c in mock_kill.call_args_list]
@@ -183,8 +183,8 @@ class TestCheckAndRestartIfStale:
             mock_src, mock_cfg, tmp_path):
         """rant 12:49:09 ② — old daemon takes ~0.4s to die: cleanup_server()
         must NOT run while the old pid is still alive (multi-instance guard)."""
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
 
         probe_calls = {"n": 0}
@@ -199,7 +199,7 @@ class TestCheckAndRestartIfStale:
         mock_kill.side_effect = fake_kill
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # waited ≥2 probe rounds (old pid alive → no cleanup yet), then cleanup after death
         assert probe_calls["n"] >= 3, f"should probe liveness ≥3 times, got {probe_calls['n']}"
@@ -216,13 +216,13 @@ class TestCheckAndRestartIfStale:
             mock_src, mock_cfg, tmp_path):
         """rant 12:49:09 ② — old daemon never dies on SIGTERM → SIGKILL fallback,
         and cleanup still happens after the kill."""
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
         mock_kill.side_effect = lambda pid, sig: None  # pid stays "alive" forever
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         kill_calls = [c.args for c in mock_kill.call_args_list]
         assert any(c[1] == signal.SIGKILL for c in kill_calls), (
@@ -233,12 +233,12 @@ class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_server_unreachable_silent(self, mock_connect, mock_src, mock_cfg, tmp_path):
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         mock_connect.side_effect = ConnectionRefusedError("no daemon")
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())  # no raise
 
     @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
@@ -247,12 +247,12 @@ class TestCheckAndRestartIfStale:
     def test_server_auth_error_propagates(self, mock_connect, mock_src, mock_cfg, tmp_path):
         """G129: AuthError (token mismatch) must NOT be swallowed — it's a
         config/install problem the user must see, not a transient disconnect."""
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         mock_connect.side_effect = daemon_manager.AuthError("authentication failed")
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             with pytest.raises(daemon_manager.AuthError):
                 asyncio.run(daemon_manager.check_and_restart_if_stale())
 
@@ -261,12 +261,12 @@ class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_server_programming_error_propagates(self, mock_connect, mock_src, mock_cfg, tmp_path):
         """G129: genuine bugs must surface, not vanish into a bare except Exception."""
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         mock_connect.side_effect = AttributeError("boom")
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             with pytest.raises(AttributeError):
                 asyncio.run(daemon_manager.check_and_restart_if_stale())
 

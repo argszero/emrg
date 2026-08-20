@@ -18,7 +18,7 @@ writes config_dir()/projects.yml AND tasks.yml via scheduler.py's own
 This autouse fixture makes any write to the REAL ~/.emrg/projects.yml
 or ~/.emrg/tasks.yml a hard test failure: the offending test is named
 immediately instead of the pollution being discovered later (precedent:
-#583 assertPortFileInTmp sandbox guard for the emrgd.port file).
+#583 assertPortFileInTmp sandbox guard for the emrgd.token file).
 """
 from __future__ import annotations
 

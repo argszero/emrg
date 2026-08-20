@@ -243,7 +243,7 @@ class TaskHandler:
         # The flag is persisted to disk (~/.emrg/saturation/<task>.json) so
         # it survives daemon restarts.
         # G129: 连续连接失败告警阈值——达到后升级为 ERROR（防静默吞掉，
-        # rant 2026-08-09T08:03:46：GUI 测试覆盖真实 emrgd.port 致 10h 连不上）。
+        # rant 2026-08-09T08:03:46：GUI 测试覆盖真实 emrgd.token 致 10h 连不上）。
         self._CONNECT_FAIL_ALERT = 3
         self._connect_failures = 0
         self._saturation_dir = config_dir() / "saturation"
@@ -568,7 +568,7 @@ class TaskHandler:
         """Exponential backoff while the daemon is unreachable.
 
         Rant 2026-08-09T13:16:36 (v0.2.15 Windows regression): when the
-        daemon is down (emrgd.port missing), every tick's connect failure
+        daemon is down (emrgd.token missing), every tick's connect failure
         returned immediately and the loop re-ran at full interval — with
         multiple handlers that produced a per-second retry/window storm.
         Backoff = max(30s, interval * 2^n) capped at 10 minutes, where n
@@ -655,11 +655,11 @@ class TaskHandler:
             self._connect_failures = 0
         except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
             # G129 (rant 2026-08-09T08:03:46): 连接失败不得静默吞掉——GUI 测试曾把
-            # 假 port 值写进真实 ~/.emrg/emrgd.port，导致演化周期 10 小时连不上
+            # 假 token 值写进真实 ~/.emrg/emrgd.token，导致演化周期 10 小时连不上
             # daemon（WinError 1225）只留下 WARNING。累计失败达到阈值后升级为
-            # ERROR 告警，提示 port 文件可能被外部覆盖（检查 ~/.emrg/emrgd.port）。
+            # ERROR 告警，提示 token 文件可能被外部覆盖（检查 ~/.emrg/emrgd.token）。
             self._connect_failures += 1
-            port_path = config_dir() / "emrgd.port"
+            port_path = config_dir() / "emrgd.token"
             if self._connect_failures >= self._CONNECT_FAIL_ALERT:
                 self._logger.error(
                     "TaskHandler[%s]: cannot connect for %d consecutive cycles "

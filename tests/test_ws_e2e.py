@@ -111,12 +111,12 @@ async def _boot_server(tmp: Path):
     server.llm.chat_stream = _make_fake_chat_stream()
 
     task = asyncio.create_task(server.serve())
-    # Wait for the port file (daemon ready)
+    # Wait for the token file (daemon ready)
     for _ in range(200):
-        if (tmp / "emrgd.port").exists():
+        if (tmp / "emrgd.token").exists():
             break
         await asyncio.sleep(0.05)
-    assert (tmp / "emrgd.port").exists(), "daemon did not publish port file"
+    assert (tmp / "emrgd.token").exists(), "daemon did not publish token file"
 
     async def _cleanup():
         server._server.close()

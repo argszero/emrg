@@ -66,7 +66,7 @@ def atomic_write_bytes(
     Writes to a temp file in the same directory, then chmod + os.replace()
     to atomically swap. On error, the temp file is cleaned up.
 
-    Used for the daemon port/token file (``emrgd.port``) where mode 0o600
+    Used for the daemon auth token file (``emrgd.token``) where mode 0o600
     is required (token must not leak to other local users).
     """
     target.parent.mkdir(parents=True, exist_ok=True)

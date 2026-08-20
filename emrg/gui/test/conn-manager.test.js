@@ -58,12 +58,12 @@ function setupTempHome() {
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
   // 预写 port 文件（模拟已运行 daemon）——路径必须落在 tmpHome 内
-  const portFile = path.join(tmpHome, ".emrg", "emrgd.port");
+  const portFile = path.join(tmpHome, ".emrg", "emrgd.token");
   assert.ok(
     path.resolve(portFile).startsWith(path.resolve(tmpHome) + path.sep),
     "port file escapes tmpHome",
   );
-  fs.writeFileSync(portFile, "41234\nseekrit-token");
+  fs.writeFileSync(portFile, "seekrit-token");
 }
 
 function teardownTempHome() {
@@ -142,7 +142,7 @@ test("P2 open: 引导 daemon + skipStart 会话连接 + resume_session 自动订
   assert.strictEqual(manager.get("sess-1"), conn);
   assert.deepStrictEqual(manager.all(), ["sess-1"]);
   // 会话连接 url = 预写 port 文件端口（daemon 未重启）
-  assert.strictEqual(sessionWs.url, "ws://127.0.0.1:41234");
+  assert.strictEqual(sessionWs.url, "ws://127.0.0.1:56031");
 });
 
 test("P2 open: 已打开 sid → 复用连接，不重复 resume_session", async () => {

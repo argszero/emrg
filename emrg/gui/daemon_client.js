@@ -3,7 +3,7 @@
  * daemon_client.js — main 进程内唯一与 emrgd 通信的模块。
  *
  * 协议语义完全对照 emrg/client/daemon_manager.py（Phase 2 参考实现）：
- * - 读 ~/.emrg/emrgd.port（port\n token，0o600）→ ws://127.0.0.1:<port> → auth 首帧 → auth_ok
+ * - 读 ~/.emrg/emrgd.token（单行 token，0o600）→ ws://127.0.0.1:56031（EMRGD_PORT 常量）→ auth 首帧 → auth_ok
  * - 坏 JSON 帧忽略（对照 daemon_manager.recv R53）
  * - ConnectionClosed 传播 → 触发重连（对照 R11）
  * - auth 失败（auth_ok 前 close）= AuthError 语义（G88：停止自动重试，防无限重连）
@@ -18,22 +18,27 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const WebSocket = require("ws");
 
-// G129 (rant 2026-08-09T08:03:46): PORT_FILE 必须接受 projectDir——硬编码
+// G129 (rant 2026-08-09T08:03:46): TOKEN_FILE 必须接受 projectDir——硬编码
 // os.homedir() 时，Windows 测试的 setupTempHome() 只设 HOME 不设 USERPROFILE，
-// os.homedir() 仍读 USERPROFILE（真实用户目录）→ 测试把假 port/token 写进
-// 真实的 ~/.emrg/emrgd.port → 演化周期 10 小时连不上 daemon（WinError 1225）。
+// os.homedir() 仍读 USERPROFILE（真实用户目录）→ 测试把假 token 写进
+// 真实的 ~/.emrg/emrgd.token → 演化周期 10 小时连不上 daemon（WinError 1225）。
 // 所有调用点必须传 this.projectDir（默认 os.homedir() 保持生产行为不变）。
-const PORT_FILE = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.port");
+const TOKEN_FILE = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.token");
 const EMRGD_LOG = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.log");
 // Rant 2026-08-09T18:47:37（GUI 连不上 daemon 回归）：daemon 的规范运行时目录永远是
 // ~/.emrg（daemon.py config_dir() = Path.home()/".emrg"；connect.py 无条件读
-// ~/.emrg/emrgd.port）。GUI 的 projectDir 若被 config gui.project_dir 指向别处
-// （非 home），按 projectDir 读 port/pid/log 全部落空 → 误判 daemon 不存在 →
+// ~/.emrg/emrgd.token）。GUI 的 projectDir 若被 config gui.project_dir 指向别处
+// （非 home），按 projectDir 读 token/pid/log 全部落空 → 误判 daemon 不存在 →
 // 反复 spawn 撞 PID 锁 → "failed to start after 3 attempts" 假错误，而真 daemon 一直活着。
 // 规范位置常量：作为 projectDir 读取失败时的权威回退。
-const HOME_PORT_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.port");
+const HOME_TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
 const HOME_PID_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.pid");
 const HOME_EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
+// Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52): the
+// daemon always listens on this constant — keep in sync with emrg/connect.py
+// EMRGD_PORT and emrg/_stop_all.py _EMRGD_PORT. The token file no longer
+// carries a port; all connections/probes use this constant.
+const EMRGD_PORT = 56031;
 const MAX_PAYLOAD = 16 * 1024 * 1024; // G62/G105：16MB 双向一致（工具输出上限 200KB）
 const AUTH_TIMEOUT_MS = 10_000;
 const SPAWN_WAIT_MS = 5_000;
@@ -120,38 +125,39 @@ class DaemonClient {
 
   // ── 生命周期 ────────────────────────────────────────────
 
-  // Rant 2026-08-09T18:47:37：读 port/token 的权威入口。先试 projectDir（G129 语义），
-  // 缺失/畸形时回退 daemon 规范位置 ~/.emrg。返回 {port, token, source} 或 null。
+  // Rant 2026-08-09T18:47:37：读 token 的权威入口。先试 projectDir（G129 语义），
+  // 缺失/畸形时回退 daemon 规范位置 ~/.emrg。文件仅含单行 token（rant
+  // 2026-08-20T14:32:52）；端口一律用 EMRGD_PORT 常量。返回 {token, source, port} 或 null。
   _readPortToken() {
     const tryRead = (file) => {
       try {
         const text = fs.readFileSync(file, "utf8");
-        const [port, token] = text.split(/\s+/);
-        if (port && token) return { port, token };
+        const token = text.trim();
+        if (token) return { token };
       } catch { /* missing/unreadable → try next */ }
       return null;
     };
-    const project = tryRead(PORT_FILE(this.projectDir));
-    if (project) return { ...project, source: "projectDir" };
-    const home = tryRead(HOME_PORT_FILE());
+    const project = tryRead(TOKEN_FILE(this.projectDir));
+    if (project) return { ...project, source: "projectDir", port: EMRGD_PORT };
+    const home = tryRead(HOME_TOKEN_FILE());
     if (home) {
       this.logger.warn(
-        `[gui] port file not found at projectDir (${PORT_FILE(this.projectDir)}) — ` +
-        `reusing canonical ~/.emrg/emrgd.port (port=${home.port})`
+        `[gui] token file not found at projectDir (${TOKEN_FILE(this.projectDir)}) — ` +
+        `reusing canonical ~/.emrg/emrgd.token`
       );
-      return { ...home, source: "home" };
+      return { ...home, source: "home", port: EMRGD_PORT };
     }
     return null;
   }
 
   isRunning(timeoutMs = 1500) {
-    // G43/G90：TCP 探测（不可简化为 port 文件存在）。18:47:37：port 源改为权威读取
+    // G43/G90：TCP 探测（不可简化为 token 文件存在）。18:47:37：token 源改为权威读取
     // （projectDir 回退 ~/.emrg），否则 projectDir≠home 时永远探测假路径 → 假 false。
+    // 14:32:52：端口用常量 EMRGD_PORT，不再从文件读 port。
     const pt = this._readPortToken();
     if (!pt) return Promise.resolve(false);
-    const port = Number(pt.port);
     return new Promise((resolve) => {
-      const sock = net.connect({ host: "127.0.0.1", port, timeout: timeoutMs });
+      const sock = net.connect({ host: "127.0.0.1", port: EMRGD_PORT, timeout: timeoutMs });
       sock.once("connect", () => { sock.destroy(); resolve(true); });
       sock.once("error", () => { sock.destroy(); resolve(false); });
       sock.once("timeout", () => { sock.destroy(); resolve(false); });
@@ -283,31 +289,31 @@ class DaemonClient {
   }
 
   // Rant 2026-08-09T18:47:37（A1 + B1）：探测"已存在的 daemon"——4 状态诊断日志
-  // （port_file_exists / port_file_content / daemon_alive(ping) / spawn_result）。
-  // spawn 失败 ≠ daemon 不存在：GUI 可能因 projectDir≠home 读错 port 文件，
-  // 或 daemon 早已被 scheduler/TUI 拉起。返回 {port, token} 或 null。
+  // （token_file_exists / token_file_content / daemon_alive(ping) / spawn_result）。
+  // spawn 失败 ≠ daemon 不存在：GUI 可能因 projectDir≠home 读错 token 文件，
+  // 或 daemon 早已被 scheduler/TUI 拉起。返回 {token, source, port} 或 null。
   async _probeExistingDaemon(spawnResult = "n/a") {
     const pt = this._readPortToken();
-    const portFileExists = !!(pt || this._readPortTokenRaw());
+    const tokenFileExists = !!(pt || this._readPortTokenRaw());
     const alive = pt ? await this.isRunning(1000) : false;
     this.logger.info(
-      `[gui] probe: port_file_exists=${portFileExists}, port_file_content=${pt ? pt.port : "—"}, ` +
+      `[gui] probe: token_file_exists=${tokenFileExists}, token_file_content=${pt ? "present" : "—"}, ` +
       `daemon_alive(ping)=${alive}, spawn_result=${spawnResult}`
     );
     if (pt && alive) return pt;
     return null;
   }
 
-  // 读 port 文件原始存在性（不含解析），供 probe 日志用。
+  // 读 token 文件原始存在性（不含解析），供 probe 日志用。
   _readPortTokenRaw() {
-    for (const file of [PORT_FILE(this.projectDir), HOME_PORT_FILE()]) {
+    for (const file of [TOKEN_FILE(this.projectDir), HOME_TOKEN_FILE()]) {
       try { if (fs.readFileSync(file, "utf8").trim()) return true; } catch { /* next */ }
     }
     return false;
   }
 
   // Rant 2026-08-09T18:47:37（A1）：spawn 失败（含 3 次节流）→ 探测已有 daemon →
-  // 活着直接复用；确实无 daemon 才抛原始错误。spawn 成功则读回 port/token。
+  // 活着直接复用；确实无 daemon 才抛原始错误。spawn 成功则读回 token。
   async _spawnOrProbe() {
     try {
       await this.startDaemon();
@@ -315,23 +321,23 @@ class DaemonClient {
       const existing = await this._probeExistingDaemon(`failed(${String(spawnErr.message).slice(0, 60)})`);
       if (existing) {
         this.logger.warn(
-          `[gui] spawn failed (${spawnErr.message}) — existing daemon detected at port=${existing.port}, reusing`
+          `[gui] spawn failed (${spawnErr.message}) — existing daemon detected at port=${EMRGD_PORT}, reusing`
         );
         return existing;
       }
       this.logger.warn(`[gui] spawn failed (${spawnErr.message}) — no existing daemon reachable, giving up`);
       throw spawnErr;
     }
-    // spawn 成功：daemon 永远写规范 ~/.emrg/emrgd.port（daemon.py config_dir()），
+    // spawn 成功：daemon 永远写规范 ~/.emrg/emrgd.token（daemon.py config_dir()），
     // 用权威读取（projectDir 回退 home），不假设 projectDir==home。
     const pt = this._readPortToken();
-    if (!pt) throw new Error("port file not written after spawn");
-    this.logger.info(`[gui] daemon spawned ok: port=${pt.port}`);
+    if (!pt) throw new Error("token file not written after spawn");
+    this.logger.info(`[gui] daemon spawned ok: port=${EMRGD_PORT}`);
     return pt;
   }
 
   async ensureConnected({ skipStart = false } = {}) {
-    // Rant 2026-08-09T18:47:37：1. 读 port 文件（projectDir → 规范 ~/.emrg 回退）→
+    // Rant 2026-08-09T18:47:37：1. 读 token 文件（projectDir → 规范 ~/.emrg 回退）→
     // 无则拉 daemon；spawn 失败先探测已有 daemon，活着直接复用，不再盲报
     // "failed to start after 3 attempts"。每步打结构化诊断日志（B1-B5）。
     // P2 connManager（rant 2026-08-10T15:07:19）：skipStart=true 时 daemon 生命周期
@@ -342,23 +348,23 @@ class DaemonClient {
       port = pt.port;
       token = pt.token;
       this.logger.info(
-        `[gui] ensureConnected: port_file_exists=true, port_file_content=${port}, source=${pt.source}`
+        `[gui] ensureConnected: token_file_exists=true, port=${port}, source=${pt.source}`
       );
     } else {
       if (skipStart) {
         throw new Error(
-          `daemon not running (skipStart): no port file at ${PORT_FILE(this.projectDir)}`
+          `daemon not running (skipStart): no token file at ${TOKEN_FILE(this.projectDir)}`
         );
       }
-      this.logger.info(`[gui] ensureConnected: port_file_exists=false — spawning daemon`);
+      this.logger.info(`[gui] ensureConnected: token_file_exists=false — spawning daemon`);
       const r = await this._spawnOrProbe();
       port = r.port;
       token = r.token;
     }
 
-    // 2. ws 连接（G43 stale port：连接失败删文件重拉一次）
+    // 2. ws 连接（G43 stale token：连接失败删文件重拉一次）
     try {
-      this.ws = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: MAX_PAYLOAD });
+      this.ws = new WebSocket(`ws://127.0.0.1:${EMRGD_PORT}`, { maxPayload: MAX_PAYLOAD });
     } catch (e) {
       // ws 构造一般异步失败；在 open 事件处理
       throw e;
@@ -366,31 +372,31 @@ class DaemonClient {
     try {
       await this._awaitOpen();
     } catch (e) {
-      // G43 加固（rant 2026-08-09T13:16:36 根因）：port 文件存在但连不上时，
-      // 先查 emrgd.pid —— daemon 进程还活着就【绝不删 port 文件】。旧 G43 直接
-      // unlink 会把健康 daemon 的 port 文件删掉 → 僵尸态（daemon 活着、scheduler
+      // G43 加固（rant 2026-08-09T13:16:36 根因）：token 文件存在但连不上时，
+      // 先查 emrgd.pid —— daemon 进程还活着就【绝不删 token 文件】。旧 G43 直接
+      // unlink 会把健康 daemon 的 token 文件删掉 → 僵尸态（daemon 活着、scheduler
       // 永远 cannot connect、PID 锁挡住新 spawn）。只有 daemon 真死了才删+重拉。
       if (this._daemonProcessAlive()) {
         this.logger.warn(
-          `[gui] ws connect failed: ${e.message} — daemon pid alive, keeping port file (transient)`
+          `[gui] ws connect failed: ${e.message} — daemon pid alive, keeping token file (transient)`
         );
         try { this.ws.close(); } catch { /* ignore */ }
         throw new Error(`daemon unreachable (pid alive): ${e.message}`);
       }
       if (skipStart) {
         this.logger.warn(
-          `[gui] ws connect failed: ${e.message} — stale port, daemon dead (skipStart: not respawning)`
+          `[gui] ws connect failed: ${e.message} — stale token, daemon dead (skipStart: not respawning)`
         );
         try { this.ws.close(); } catch { /* ignore */ }
         throw new Error(`daemon unreachable (skipStart): ${e.message}`);
       }
-      this.logger.warn(`[gui] ws connect failed: ${e.message} — stale port, respawning daemon`);
+      this.logger.warn(`[gui] ws connect failed: ${e.message} — stale token, respawning daemon`);
       try { this.ws.close(); } catch { /* ignore */ }
-      try { fs.unlinkSync(PORT_FILE(this.projectDir)); } catch { /* ignore */ }
+      try { fs.unlinkSync(TOKEN_FILE(this.projectDir)); } catch { /* ignore */ }
       const r = await this._spawnOrProbe();
       port = r.port;
       token = r.token;
-      this.ws = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: MAX_PAYLOAD });
+      this.ws = new WebSocket(`ws://127.0.0.1:${EMRGD_PORT}`, { maxPayload: MAX_PAYLOAD });
       await this._awaitOpen();
     }
 
@@ -781,4 +787,4 @@ function generateSessionId(seed) {
   return sid;
 }
 
-module.exports = { DaemonClient, generateSessionId, PORT_FILE, SESSION_ID_RE, MAX_PAYLOAD };
+module.exports = { DaemonClient, generateSessionId, TOKEN_FILE, SESSION_ID_RE, MAX_PAYLOAD, EMRGD_PORT };
