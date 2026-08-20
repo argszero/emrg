@@ -632,6 +632,19 @@ class EmrgServer:
             logger.debug("upgrade session failed (retry next tick)", exc_info=True)
             self._session_busy[session_id] = False
 
+    def _current_installed_version(self) -> str:
+        """Current installed EMRG version from ~/.emrg/install/version.txt.
+
+        Rant 2026-08-20T18:30:57: raw data only, zero judgment — the GUI
+        compares it with its last known version and shows the upgrade banner.
+        Returns "" when the file is missing (dev/standalone runs).
+        """
+        try:
+            v = (Path.home() / ".emrg" / "install" / "version.txt").read_text(encoding="utf-8").strip()
+            return v
+        except (OSError, ValueError):
+            return ""
+
     def _evolution_count(self) -> int:
         """Total completed evolution cycles across scheduler handlers + disk.
 
@@ -1397,6 +1410,10 @@ class EmrgServer:
                 "started_at": self.start_time.isoformat(),
                 "pid": os.getpid(),
                 "model": self.llm.config.model,
+                # Rant 2026-08-20T18:30:57：并入当前安装版本——GUI 轮询 pong 时对比
+                # 上次已知版本，发现变化 → 弹"已升级，重启生效"横幅。daemon 只回原始数据，
+                # 零判断逻辑（升级判断由 GUI 负责）。
+                "current_version": self._current_installed_version(),
             })
             return
 

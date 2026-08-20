@@ -1719,3 +1719,35 @@ def test_shutdown_message_missing_source_degrades(tmp_path, caplog):
 
     assert "shutdown requested by client (peer=unknown peer, source=unknown)" in caplog.text
     assert server._stop_reason == "shutdown_msg"
+
+
+def test_pong_includes_current_version(tmp_path, monkeypatch):
+    """Pong carries current_version from ~/.emrg/install/version.txt.
+
+    Rant 2026-08-20T18:30:57: the GUI compares the version it last saw with
+    the daemon's installed version and shows the upgrade banner on change.
+    Missing file → empty string (dev runs), never an error.
+    """
+    import emrg.server.daemon as daemon_mod
+    install = tmp_path / ".emrg" / "install"
+    install.mkdir(parents=True)
+    (install / "version.txt").write_text("0.2.59\n", encoding="utf-8")
+
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+
+    server = _make_server()
+    assert server._current_installed_version() == "0.2.59"
+
+    # Missing file → "" (no crash)
+    empty = tmp_path / "no-install"
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: empty)
+    assert server._current_installed_version() == ""
+
+    # Pong payload includes the field
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    writer = _FakeWriter()
+    import asyncio
+    asyncio.run(server._process_message({"type": "ping"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "pong"
+    assert frame["current_version"] == "0.2.59"

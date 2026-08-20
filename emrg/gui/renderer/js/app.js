@@ -76,6 +76,8 @@ const App = (() => {
       state.serverId = init.server_id || "";
       state.model = init.model || "";
       state.version = init.version || "";
+      state.currentVersion = init.current_version || ""; // rant 18:30:57：安装版本（升级横幅对比基准）
+      state.lastKnownVersion = state.currentVersion;
       state.evolutionCount = init.evolution_count ?? null;
       state.lastKnownEvolutionCount = state.evolutionCount;
       updateConnectionDot(init.config_exists && init.api_key_configured ? "green" : "gray");
@@ -1342,6 +1344,39 @@ const App = (() => {
     $("conn-banner").classList.add("hidden");
   }
 
+  // ── 升级完成横幅（rant 2026-08-20T18:30:57） ─────────────
+  function maybeShowUpgradeBanner(currentVersion) {
+    if (!currentVersion) return; // 无版本数据（dev 运行）→ 不显示
+    if (currentVersion === state.lastKnownVersion) return; // 版本未变
+    const b = $("upgrade-banner");
+    if (!b) return;
+    const msg = $("upgrade-banner-msg");
+    if (msg) msg.textContent = _t("app.upgradeBannerMsg", { version: currentVersion });
+    b.classList.remove("hidden");
+    state.lastKnownVersion = currentVersion; // 已提示，防重复弹
+  }
+  function hideUpgradeBanner() {
+    const b = $("upgrade-banner");
+    if (b) b.classList.add("hidden");
+  }
+  function initUpgradeBanner() {
+    const restart = $("upgrade-banner-restart");
+    if (restart) restart.addEventListener("click", async () => {
+      restart.disabled = true;
+      try {
+        await window.emrg.restartDaemon();
+        // shutdown 已发——connManager restart-recovery 会重新 spawn 新 daemon 并重连；
+        // 恢复后 status 事件里 current_version 已 = 新版本 → 横幅消失。
+        hideUpgradeBanner();
+      } catch (e) {
+        restart.disabled = false;
+        Chat.addSystemMessage(_t("app.upgradeRestartFailed", { msg: e.message }));
+      }
+    });
+    const dismiss = $("upgrade-banner-dismiss");
+    if (dismiss) dismiss.addEventListener("click", hideUpgradeBanner);
+  }
+
   // ── 事件处理（main 已分类） ─────────────
   async function handleEvent(evt) {
     const { type, data } = evt;
@@ -1547,6 +1582,8 @@ const App = (() => {
       if (data.server_id) state.serverId = data.server_id;
       if (data.model) state.model = data.model;
       state.evolutionCount = data.evolution_count ?? state.evolutionCount;
+      // rant 18:30:57：pong 携带 current_version → 对比已知版本，变化则弹升级横幅
+      maybeShowUpgradeBanner(data.current_version || state.currentVersion);
       updateModelSwitcher();
       updateGrowthCard();
       maybeShowEvolutionToast();
@@ -1753,6 +1790,7 @@ const App = (() => {
     Dialogs.initTaskManagement(); // rant 18:23:15 P3：定时任务/自定义类型管理
     Dialogs.initRantPanel(); // rant 14:10:14 P4：rant 面板（筛选/新建）
     initGithubBanner(); // Windows GCM rant Stage 2：演化需 GitHub 但未认证时的连接横幅
+    initUpgradeBanner(); // rant 18:30:57：升级完成横幅（重启生效按钮）
     initModelSwitcher();
     initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
     ResultPanel.init(); // WorkBuddy P1：结果面板（⌘\ 折叠 + 窄屏自动隐藏）

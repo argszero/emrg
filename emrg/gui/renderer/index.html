@@ -57,6 +57,13 @@
         <button type="button" id="github-banner-dismiss" class="btn btn-ghost" title="关闭" data-i18n-title="settings.githubBannerDismiss">✕</button>
       </div>
 
+      <!-- 升级完成横幅（rant 2026-08-20T18:30:57：检测到新版本 → 提示 + 一键重启生效） -->
+      <div id="upgrade-banner" class="hidden">
+        <span id="upgrade-banner-msg"></span>
+        <button type="button" id="upgrade-banner-restart" class="btn btn-primary" data-i18n="app.upgradeRestartBtn">重启生效</button>
+        <button type="button" id="upgrade-banner-dismiss" class="btn btn-ghost" title="关闭" data-i18n-title="settings.githubBannerDismiss">✕</button>
+      </div>
+
       <!-- 工作区（rant 18:55:09 v0.2：会话视图 + 面板视图的公共父容器；DOM 显隐切换，状态保留） -->
       <div id="workspace">
       <section class="workspace-view" id="panel-projects" data-view="projects">
