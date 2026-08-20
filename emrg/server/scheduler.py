@@ -622,9 +622,14 @@ class TaskHandler:
     async def _request_vibe_check(self, ws, prompt: str, completion_summary: str) -> dict | None:
         """Ask the daemon for a structured vibe check on the SAME connection.
 
-        Sends ``task_vibe_check`` and waits for ``vibe_check_result`` (~20s).
-        Fully defensive — any failure/timeout returns None; the caller
-        conservatively leaves the slowdown state unchanged.
+        Sends ``task_vibe_check`` and waits for ``vibe_check_result``. Rant
+        2026-08-20T20:19:31: no timeout — the vibe check is the completion
+        judgment right after a finished cycle; when concurrent tasks hold the
+        LLM a single call can exceed 20s, and waiting longer for an accurate
+        work/reason beats dropping the data (the daemon's LLM call has its own
+        retry/timeout, and a dead daemon raises ConnectionClosed).
+        Fully defensive — any failure/connection-close returns None; the
+        caller conservatively leaves the slowdown state unchanged.
         """
         try:
             await ws.send(json.dumps({
@@ -635,13 +640,9 @@ class TaskHandler:
                 "prompt": (prompt or "")[:2000],
                 "completion_summary": (completion_summary or "")[:3000],
             }, ensure_ascii=False))
-            deadline = time.monotonic() + 20.0
-            while time.monotonic() < deadline:
-                remaining = max(0.5, deadline - time.monotonic())
+            while True:
                 try:
-                    frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
-                except asyncio.TimeoutError:
-                    break
+                    frame = json.loads(await ws.recv())
                 except ConnectionClosed:
                     break
                 if frame.get("type") != "vibe_check_result":
