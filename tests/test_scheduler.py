@@ -2075,3 +2075,37 @@ def test_evolution_template_renders_dual_project_match():
     assert "emrg" in out, "task.project 值应渲染"
     assert "argszero/emrg" in out, "owner/repo 形式应渲染"
     assert "ignore rants without a `project` field entirely" in out
+
+
+# ── sandbox tier resolution (rant 2026-08-20T18:05:20) ─────────────
+
+
+def test_sandbox_resolution_unified_default_rule():
+    """Rant 2026-08-20T18:05:20: no name-based builtin defaults — the
+    configured value wins, otherwise the unified default is workspace-write.
+    There is no implicit danger-full-access fallback."""
+    # explicit tasks.yml top-level sandbox wins
+    assert TaskHandler._resolve_sandbox({}, "read-only") == "read-only"
+    # config.sandbox used when no explicit value
+    assert TaskHandler._resolve_sandbox({"sandbox": "read-only"}, None) == "read-only"
+    # explicit beats config
+    assert (
+        TaskHandler._resolve_sandbox({"sandbox": "workspace-write"}, "danger-full-access")
+        == "danger-full-access"
+    )
+    # no name-based defaults: emrg-task no longer implies workspace-write
+    # via the old special case — it is the unified default now
+    handler = TaskHandler(
+        name="emrg-task", config={"project": "emrg"}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    assert handler._sandbox == "workspace-write"
+    # plain task name also gets the unified default, not danger-full-access
+    handler2 = TaskHandler(
+        name="generic-task", config={}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    assert handler2._sandbox == "workspace-write"
+    # invalid values fall through to the default
+    assert TaskHandler._resolve_sandbox({"sandbox": "bogus"}, None) == "workspace-write"
+    assert TaskHandler._resolve_sandbox({}, "bogus") == "workspace-write"
