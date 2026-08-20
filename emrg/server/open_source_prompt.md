@@ -381,6 +381,11 @@ Closes #<N>
 - [ ] New tests added"
 ```
 
+> ⚠️ **Publishing spec (rant 2026-08-20T14:10:28 — comment double-encoding bug)**:
+> 1. **Always pass RAW text as the body of any comment / discussion / issue / PR** — write the body to a file with a heredoc and submit via `--field body=@file` (or `$(cat file)` / inline text). **NEVER** use patterns like `python3 -c "import json; print(json.dumps(...))"` that JSON-serialize the body before submitting — GitHub renders the escaped literal as-is (中文→`\uXXXX`, newlines→literal `\n`, quotes wrapped), producing garbled text.
+> 2. **Always read back and verify the posted body**: after posting, fetch the comment and check that the first character is NOT `"` and the text contains no `\uXXXX` residuals. If garbled, fix immediately with `updateDiscussionComment` (or the equivalent edit mutation) using the decoded original.
+> 3. This applies to every "multi-line text → GitHub API" submission (comment / issue body / PR body / discussion reply) without exception.
+
 **Not pushing = wasted work. Push failed → check permissions/network → record in the state file → finish.**
 
 #### B.7 Exit condition
