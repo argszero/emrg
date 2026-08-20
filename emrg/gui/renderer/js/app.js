@@ -584,7 +584,7 @@ const App = (() => {
     const cur = state.sessions.find((s) => s.session_id === sid) || {};
     const project = sessionProjectName(sid);
     const title = cur.title && cur.title !== sid ? cur.title : "";
-    const text = `${project}/${title}|${sid}`;
+    const text = title ? `${project}/${title}` : `${project}/${sid}`; // rant 22:04:57：有 name 显示 name，无 name 显示完整 id
     header.textContent = text;
     header.title = text; // 悬停完整信息
   }
@@ -668,7 +668,7 @@ const App = (() => {
         Chat.addSystemMessage(_t("app.sessionDisconnected"), sid);
       }
       updateEmptyState();
-      Sidebar.highlight(sid);
+      Sidebar.highlight(sid, opts.scopeNav); // rant 22:04:02：点击哪列表只高亮该列表（scopeNav 缺省则两列表）
       setComposerDisabled(false); // 防御性：独立调用 switchSession 也确保输入框可用
     } catch (e) {
       // P6（rant 15:07:19 上限 20）：超限提示本地化（main 抛 too many open sessions）

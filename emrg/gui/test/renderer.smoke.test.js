@@ -1995,7 +1995,7 @@ test("P4 s2: open_sessions 事件 → 渲染打开会话区（项目名/标题 +
   assert.strictEqual(els["open-sessions-label"].hidden, true, "label hidden when no open sessions");
 });
 
-test("P4 s2: 跨项目打开会话（entry.title 优先，state.sessions 无该 sid）→ 统一 project/name|id 格式", async () => {
+test("P4 s2: 跨项目打开会话（entry.title 优先，state.sessions 无该 sid）→ 有 name 显示 name、无 name 显示 id（rant 22:04:57）", async () => {
   const { ctx, els } = makeSandbox({});
   await tick();
   await vm.runInContext(
@@ -2003,7 +2003,7 @@ test("P4 s2: 跨项目打开会话（entry.title 优先，state.sessions 无该 
     'App.state.sessions = [{ session_id: "sess-local", title: "Local" }];' + // 当前项目会话；无 sess-x / sess-other
     'App.handleEvent({ type: "open_sessions", data: { openSessions: [' + // main 已按 lastActive 倒序
     '  { sid: "sess-x", projectName: "evolution", projectPath: "/p/evolution", lastActive: "t3", title: "Evolution Task" },' + // 跨项目 + title
-    '  { sid: "sess-other", projectName: "mem", projectPath: "/p/mem", lastActive: "t2" },' + // 跨项目无 title → 空 name
+    '  { sid: "sess-other", projectName: "mem", projectPath: "/p/mem", lastActive: "t2" },' + // 跨项目无 title → 显示完整 id
     '  { sid: "sess-local", projectName: "emrg", projectPath: "/p/emrg", lastActive: "t1" }' + // 当前项目 → state.sessions title
     '] } });',
     ctx
@@ -2011,13 +2011,35 @@ test("P4 s2: 跨项目打开会话（entry.title 优先，state.sessions 无该 
   const nav = els["open-sessions"];
   assert.strictEqual(nav.children.length, 3, "three open-session items rendered");
   const t0 = nav.children[0].children[0] || nav.children[0];
-  assert.ok((t0.textContent || "").includes("Evolution Task"), "cross-project entry shows entry.title");
-  assert.ok((t0.textContent || "").includes("sess-x"), "id 单独显示（project/name|id）");
+  assert.ok((t0.textContent || "").includes("evolution/Evolution Task"), "有 title → project/name（不含 id）");
+  assert.ok(!(t0.textContent || "").includes("sess-x"), "有 title 时不显示 id");
   const t1 = nav.children[1].children[0] || nav.children[1];
-  assert.ok((t1.textContent || "").includes("sess-other"), "cross-project no title → id 兜底显示");
+  assert.ok((t1.textContent || "").includes("mem/sess-other"), "无 title → project/完整 id");
   const t2 = nav.children[2].children[0] || nav.children[2];
-  assert.ok((t2.textContent || "").includes("Local"), "current-project entry still resolves via state.sessions title");
-  assert.ok((t2.textContent || "").includes("sess-local"), "当前项目条目同样带 id（project/name|id）");
+  assert.ok((t2.textContent || "").includes("emrg/Local"), "当前项目条目有 title → project/name（不含 id）");
+  assert.ok(!(t2.textContent || "").includes("sess-local"), "有 title 时不显示 id");
+});
+
+test("rant 22:04:02: highlight(sid, navEl) 列表作用域 — 只高亮指定列表，另一列表保持原样", async () => {
+  const { ctx, els } = makeSandbox({});
+  await tick();
+  await vm.runInContext(
+    'App.state.sessionId = "sess-a";' +
+    'App.handleEvent({ type: "sessions", data: { sessions: [{ session_id: "sess-a", title: "Alpha", cwd: "/p/emrg" }, { session_id: "sess-b", title: "Beta", cwd: "/p/emrg" }] } });' +
+    'App.handleEvent({ type: "open_sessions", data: { openSessions: [' +
+    '  { sid: "sess-b", projectName: "proj-b", projectPath: "/b", lastActive: "t2" },' +
+    '  { sid: "sess-a", projectName: "proj-a", projectPath: "/a", lastActive: "t1" }' +
+    '] } });',
+    ctx
+  );
+  // 只高亮打开会话区（模拟点击打开会话列表条目）
+  await vm.runInContext('EMRG_Sidebar.highlight("sess-b", document.getElementById("open-sessions"));', ctx);
+  assert.strictEqual(els["open-sessions"].children[0].classList.contains("active"), true, "open-sessions 条目高亮");
+  const convB = [...els["conv-list"].children].find((c) => c.dataset.sid === "sess-b");
+  assert.ok(convB && !convB.classList.contains("active"), "conv-list 中同 sid 条目不被联动高亮");
+  // 无 navEl 参数 → 两列表都更新（兼容初始渲染/全量刷新）
+  await vm.runInContext('EMRG_Sidebar.highlight("sess-b");', ctx);
+  assert.strictEqual(convB.classList.contains("active"), true, "无 navEl 时两列表都高亮");
 });
 
 test("P4 s2: closeOpenSession 关闭激活会话 → 切到剩余打开会话 + 容器释放", async () => {
