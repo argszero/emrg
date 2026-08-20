@@ -2713,6 +2713,11 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   assert.ok(rowRule.includes("flex-wrap: wrap"), "task-row 应含 flex-wrap: wrap（子表换行到任务卡下方）");
   const detailRule = taskCss.slice(taskCss.indexOf(".task-run-detail"), taskCss.indexOf(".task-run-detail.hidden"));
   assert.ok(detailRule.includes("flex-basis: 100%"), "task-run-detail 应保持 flex-basis:100%（配合 flex-wrap 换行）");
+  // rant 2026-08-20T10:34:40：主表一行 —— task-meta 不得再 flex-basis:100%
+  // （曾强制"上次运行"独占一行 → 任务卡变 3 行），应改为弹性 auto 与 actions 同行
+  const metaRule = taskCss.slice(taskCss.indexOf(".task-meta {"), taskCss.indexOf(".task-meta-item"));
+  assert.ok(!metaRule.includes("flex-basis: 100%"), "task-meta 不得含 flex-basis:100%（主表一行紧凑布局）");
+  assert.ok(/flex:\s*0\s*1\s*auto/.test(metaRule), "task-meta 应为 flex: 0 1 auto（弹性占剩余空间、与 actions 同行、窄窗口内部换行）");
 });
 
 test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 taskCreate", async () => {
