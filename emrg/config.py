@@ -39,21 +39,21 @@ class LlmConfig:
 
 @dataclass
 class UpdateConfig:
-    """Auto update-check settings (rants 2026-08-10T07:12:12, 2026-08-12T12:10:12).
+    """Auto-upgrade settings (rant 2026-08-20T12:33:59 — 自动升级重构).
 
-    check: master switch — when false, the daemon never queries GitHub
-        (checking, downloading and prompting are all disabled).
-    ttl_hours: how often to re-check the latest release (default 1h;
-        rant 2026-08-12T12:10:12: host 指示 24h → 1h).
-    auto_download: when a newer version exists, download the current
-        platform's installer into ~/.emrg/updates/ in the background
-        (stream + Range resume + SHA256 verify). Installation is ALWAYS
-        user-initiated — never auto-installed.
+    enabled: master switch — when false, the daemon never checks for new
+        releases and never triggers an upgrade session.
+    delay_minutes: how long after a release is published before it becomes
+        eligible for upgrade (default 1440 = 1 day; the host can set 1 for
+        immediate). Granularity is minutes (host chose A). The check
+        interval is NOT configurable — hard-coded 5 minutes in upgrade.py.
+    Old fields check / ttl_hours / auto_download are removed (the
+    download-installer mechanism is fully replaced by the agent-driven
+    local equivalent install).
     """
 
-    check: bool = True
-    ttl_hours: int = 1
-    auto_download: bool = True
+    enabled: bool = True
+    delay_minutes: int = 1440
 
 
 @dataclass
@@ -114,9 +114,8 @@ def load_config() -> EmrgConfig:
 
     update_data = data.get("update", {})
     update = UpdateConfig(
-        check=update_data.get("check", True),
-        ttl_hours=update_data.get("ttl_hours", 1),
-        auto_download=update_data.get("auto_download", True),
+        enabled=update_data.get("enabled", True),
+        delay_minutes=update_data.get("delay_minutes", 1440),
     )
 
     return EmrgConfig(llm=llm, update=update)
@@ -125,9 +124,8 @@ def load_config() -> EmrgConfig:
 def load_update_config() -> UpdateConfig:
     """Load only the [update] section (rant 2026-08-10T07:12:12).
 
-    The daemon is constructed with just LlmConfig; this helper lets it read
-    the update-check switch without parsing the full config. Missing config
-    file or missing section → defaults (check=True, ttl=1h, auto_download=True).
+    The daemon constructs the UpgradeManager from this helper. Missing config
+    file or missing section → defaults (enabled=True, delay_minutes=1440).
     """
     cfg_path = config_path()
     if not cfg_path.exists():
@@ -138,9 +136,8 @@ def load_update_config() -> UpdateConfig:
         return UpdateConfig()
     update_data = data.get("update", {})
     return UpdateConfig(
-        check=update_data.get("check", True),
-        ttl_hours=update_data.get("ttl_hours", 1),
-        auto_download=update_data.get("auto_download", True),
+        enabled=update_data.get("enabled", True),
+        delay_minutes=update_data.get("delay_minutes", 1440),
     )
 
 

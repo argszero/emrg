@@ -124,11 +124,6 @@ const App = (() => {
       // 修复：boot 成功路径必须启用输入框（此前仅 done/cancelled/disconnected/error
       // 回调会调用 setComposerDisabled(false)，形成"需先发消息才能启用输入框"死锁）
       setComposerDisabled(false);
-      // rant 2026-08-11T09:18:16：启动主动更新提示——不开设置也能看到新版本
-      // （非阻塞系统消息，一次幂等；daemon 未就绪时静默失败）
-      if (window.EMRG_Dialogs?.promptUpdateAtStartup) {
-        Dialogs.promptUpdateAtStartup();
-      }
     } catch (e) {
       Chat.addSystemMessage(_t("app.bootFailed", { msg: e.message }));
     }
@@ -1508,13 +1503,6 @@ const App = (() => {
             if (label) label.textContent = _t("app.unknownResult");
           }
         }
-        break;
-      case "update_downloaded":
-        // rant 2026-08-12T12:10:12：daemon 后台自动下载 + 校验完新安装包 →
-        // 非阻塞提示"已就绪，点击安装"（设置 → 关于显示安装按钮）
-        Chat.addSystemMessage(
-          _t("app.updateReady", { latest: data.downloaded_version || "" }),
-        );
         break;
       case "group_cleared":
         Chat.groupNodes.delete(data.requestId);

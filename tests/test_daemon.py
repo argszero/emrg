@@ -1455,46 +1455,6 @@ def test_list_projects_ordered_by_latest_session_activity(tmp_path, monkeypatch)
     assert none_proj["latest_session_at"] == ""
 
 
-def test_update_check_force_runs_fresh_check(monkeypatch):
-    """update_check with force:true runs a fresh fetch; without force it
-    returns the cached state (rant 2026-08-11T09:18:16 manual check button)."""
-    import asyncio
-
-    server = _make_server()
-    writer = _FakeWriter()
-    calls = []
-
-    async def fake_run_once(state=None):
-        calls.append(state)
-        return {"checked": True, "latest_version": "9.9.9", "state": {}}
-
-    monkeypatch.setattr("emrg.update_check.run_update_check_once", fake_run_once)
-    monkeypatch.setattr(
-        "emrg.update_check.load_state",
-        lambda: {"latest_version": "9.9.9", "prompted_version": ""},
-    )
-    monkeypatch.setattr(
-        "emrg.update_check.is_newer",
-        lambda latest, current: latest != current,
-    )
-
-    # force:true → fresh check runs, reply carries the refreshed latest
-    asyncio.run(server._process_message({"type": "update_check", "force": True}, writer))
-    assert len(calls) == 1, "force:true must trigger one fresh check"
-    reply = json.loads(writer._frames[-1])
-    assert reply["type"] == "update_check"
-    assert reply["latest_version"] == "9.9.9"
-    assert reply["has_update"] is True
-
-    # no force → cached path, no fresh check
-    writer._frames.clear()
-    calls.clear()
-    asyncio.run(server._process_message({"type": "update_check"}, writer))
-    assert calls == [], "no force → must return cache without a fresh fetch"
-    reply = json.loads(writer._frames[-1])
-    assert reply["type"] == "update_check"
-
-
 # ── rant 2026-08-19T08:05:21：固定端口 bind 排斥 = 唯一单 daemon 准入 ──
 def test_serve_refuses_duplicate_when_fixed_port_bound(tmp_path):
     """serve() must exit when another LIVE daemon owns the fixed port.
@@ -1656,7 +1616,7 @@ def _make_shutdown_server(tmp_path) -> EmrgServer:
     server = _make_server()
     server._stop_reason = "cancel"
     server._skills_ttl_task = None
-    server._update_check_task = None
+    server._upgrade_tick_task = None
     server._port_keepalive_task = None
     server._scheduler = AsyncMock()  # stop_all + wait_all, no real handlers
     server._scheduler.stop_all = MagicMock()  # real API is sync
@@ -1687,7 +1647,7 @@ def test_shutdown_all_logs_reason_and_cleanup_steps(tmp_path, caplog):
     text = caplog.text
     assert "daemon stopping (reason=cancel, handlers=0) — cleaning up" in text
     assert "cancelled skills-ttl loop" in text
-    assert "cancelled update-check loop" in text
+    assert "cancelled upgrade-tick loop" in text
     assert "cancelled port-keepalive loop" in text
     assert "stopped scheduler" in text
     assert "closed llm client" in text

@@ -23,6 +23,7 @@ import signal
 import socket as _socket
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -386,11 +387,14 @@ class EmrgServer:
         # host-modified skill copies.
         self._skills_ttl_task = asyncio.create_task(self._skills_ttl_loop())
 
-        # Auto update-check prompt (rant 2026-08-10T07:12:12): runs at startup
-        # + every [update] ttl_hours (default 24h). ONLY checks the latest
-        # release and persists state — clients (TUI/GUI) decide how to show
-        # the one-time prompt. No auto download/install, silent on failure.
-        self._update_check_task = asyncio.create_task(self._update_check_loop())
+        # Auto-upgrade trigger (rant 2026-08-20T12:33:59 — 自动升级重构):
+        # every 5 minutes the UpgradeManager checks GitHub releases, delay-
+        # filters, compares with install/version.txt and — when a newer
+        # eligible tag exists — starts an agent session ("emrg-upgrade")
+        # that performs the local equivalent install. All logic lives in
+        # emrg/server/upgrade.py; the daemon only runs the tick loop and
+        # provides the session-runner callback.
+        self._upgrade_tick_task = asyncio.create_task(self._upgrade_tick_loop())
 
         try:
             await self._server.serve_forever()
@@ -427,10 +431,10 @@ class EmrgServer:
         )
 
         steps: list[tuple[str, bool]] = []
-        # 1. Background task loops (skills TTL, update check, port keepalive)
+        # 1. Background task loops (skills TTL, upgrade tick, port keepalive)
         for task, name in (
             (self._skills_ttl_task, "skills-ttl loop"),
-            (self._update_check_task, "update-check loop"),
+            (self._upgrade_tick_task, "upgrade-tick loop"),
             (self._port_keepalive_task, "port-keepalive loop"),
         ):
             try:
@@ -563,104 +567,67 @@ class EmrgServer:
                 logger.warning("skills update errors: %s", result["errors"])
             await asyncio.sleep(_UPDATE_TTL_SECONDS)
 
-    async def _update_check_loop(self) -> None:
-        """Background auto update-check + auto-download (rants 07:12:12, 12:10:12).
+    async def _upgrade_tick_loop(self) -> None:
+        """Auto-upgrade trigger (rant 2026-08-20T12:33:59 — 自动升级重构).
 
-        Runs at startup + every [update] ttl_hours (default 1h). Checks the
-        latest release via api.github.com and persists state to
-        ~/.emrg/.last_update_check.json. When a newer version exists and
-        [update] auto_download is enabled, the installer is downloaded in a
-        background task (stream + Range resume + SHA256 verify) — NEVER
-        auto-installed. Failures are silent (never crash, never log noise);
-        the next TTL retries. Disabled entirely when [update] check = false.
+        Constructs the UpgradeManager once, then ticks every 5 minutes
+        (TICK_INTERVAL is hard-coded, not configurable). The manager checks
+        releases → delay-filter → compare with install/version.txt → start
+        an agent session when a newer eligible tag exists. All judgment
+        (dependencies / backup / GUI / retry) is the agent's, template-
+        driven; the program's only state is the in-flight re-entry flag.
+        Failures are silent — the next tick retries naturally.
+
+        The FIRST tick runs only after TICK_INTERVAL (5 min): the daemon
+        must never hammer the GitHub API at startup (test harnesses boot
+        many servers; each immediate tick would fire a real network request
+        and destabilize timing).
         """
         from emrg.config import load_update_config
-        from emrg.update_check import (
-            load_state,
-            run_update_check_once,
-            should_check,
+        from emrg.server.upgrade import TICK_INTERVAL, UpgradeManager
+
+        self._upgrade_manager = UpgradeManager(
+            load_update_config(), self._run_upgrade_session
         )
-
-        update_cfg = load_update_config()
-        if not update_cfg.check:
-            logger.debug("auto update-check disabled by config ([update] check=false)")
-            return
-
-        ttl = max(3600, int(update_cfg.ttl_hours or 1) * 3600)
         while True:
-            state = load_state()
-            if should_check(state, ttl):
-                result = await run_update_check_once()
-                if result.get("checked"):
-                    logger.debug(
-                        "update check: latest=%s", result.get("latest_version")
-                    )
-                    await self._maybe_auto_download(
-                        result.get("latest_version"), update_cfg.auto_download
-                    )
-            await asyncio.sleep(ttl)
+            await asyncio.sleep(TICK_INTERVAL)
+            try:
+                await self._upgrade_manager.tick()
+            except Exception:
+                logger.debug("upgrade tick failed (retry next tick)", exc_info=True)
 
-    async def _maybe_auto_download(self, latest_version: str, auto_download: bool) -> None:
-        """Kick off a background installer download when a newer version exists.
+    async def _run_upgrade_session(self, session_id: str, cwd: str, prompt: str) -> None:
+        """Public session-runner used by UpgradeManager (and a candidate entry
+        point for the scheduler's task capability — same ability, two entries,
+        host decision 2026-08-20T12:33:59).
 
-        rant 2026-08-12T12:10:12: auto-download runs in its own task so the
-        check loop / chat is never blocked. Skipped when auto_download is
-        disabled, the version is not newer than the running one, or the same
-        version is already downloaded (and verified).
+        Reuses the existing session queueing semantics: when the session is
+        busy the request is queued (pending) and executed when free. Runs
+        headless — _run_tool_loop only uses _broadcast, no real ws client is
+        needed, so no UI is involved. The upgrade session id is fixed
+        (emrg-upgrade) for traceability.
         """
-        if not auto_download or not latest_version:
-            return
-        import emrg
-        from emrg.update_check import (
-            is_newer,
-            load_state,
-            parse_version,
+        req = TaskRequest(
+            id=f"upgrade-{int(time.time())}",
+            session_id=session_id,
+            cwd=cwd,
+            prompt=prompt,
+            timestamp="",
         )
-
-        state = load_state()
-        current = getattr(emrg, "__version__", "0")
-        if not is_newer(parse_version(latest_version), parse_version(current)):
+        if self._session_busy.get(session_id):
+            # Queue per existing semantics (host decision A: busy → pending,
+            # execute when free). A queued-but-never-drained upgrade is
+            # re-triggered by the next tick (version.txt unchanged).
+            self._session_pending.setdefault(session_id, []).append((req, True))
             return
-        if state.get("downloaded_version") == latest_version:
-            return  # already downloaded + verified
-        asyncio.create_task(self._auto_download_update(latest_version))
-
-    async def _auto_download_update(self, version: str) -> None:
-        """Background installer download + state persist + client notify.
-
-        Never raises; failures are silent and retried at the next TTL. On
-        success the downloaded_* fields are persisted to the update state
-        file and connected clients get an update_downloaded broadcast so the
-        GUI can show the "ready to install" prompt (rant 2026-08-12T12:10:12).
-        """
-        from emrg.update_check import (
-            download_release_asset,
-            load_state,
-            save_state,
-        )
-
+        session = self._get_or_create_session(session_id, Path(cwd))
+        self._session_busy[session_id] = True
+        cancel_event = asyncio.Event()
         try:
-            result = await download_release_asset(version)
+            await self._run_tool_loop_locked(req, None, session, cancel_event, allow_tools=True)
         except Exception:
-            logger.debug("update auto-download failed (retry next TTL)", exc_info=True)
-            return
-        if not result:
-            return  # silent — next TTL retries
-        try:
-            state = load_state()
-            state.update(result)
-            save_state(state)
-        except Exception:
-            pass
-        logger.info(
-            "update auto-downloaded: %s -> %s",
-            result.get("downloaded_version"),
-            result.get("downloaded_path"),
-        )
-        try:
-            await self._broadcast_all({"type": "update_downloaded", **result})
-        except Exception:
-            pass
+            logger.debug("upgrade session failed (retry next tick)", exc_info=True)
+            self._session_busy[session_id] = False
 
     def _evolution_count(self) -> int:
         """Total completed evolution cycles across scheduler handlers + disk.
@@ -1848,58 +1815,6 @@ class EmrgServer:
             # when evolution actually needs GitHub.
             auth = await self._check_github_auth()
             await self._send(ws, {"type": "github_status", **auth})
-
-        elif msg_type == "update_check":
-            # Auto update-check prompt (rant 2026-08-10T07:12:12): TUI/GUI
-            # query the daemon's latest known release. Returns the cached
-            # latest_version (populated at startup + every TTL) plus a
-            # has_update flag computed against the running version. No auto
-            # download/install; the client shows a one-time prompt.
-            # force:true (rant 2026-08-11T09:18:16) — GUI manual check
-            # button: run a fresh GitHub fetch first instead of the cache.
-            import emrg
-            from emrg.config import load_update_config
-            from emrg.update_check import (
-                is_newer,
-                load_state,
-                parse_version,
-                run_update_check_once,
-            )
-
-            if msg.get("force"):
-                try:
-                    await run_update_check_once()
-                except Exception:
-                    logger.debug("forced update check failed", exc_info=True)
-            current = getattr(emrg, "__version__", "0")
-            state = load_state()
-            latest = state.get("latest_version") or ""
-            has_update = bool(
-                latest and is_newer(parse_version(latest), parse_version(current))
-            )
-            await self._send(ws, {
-                "type": "update_check",
-                "current_version": current,
-                "latest_version": latest,
-                "has_update": has_update,
-                "prompted_version": state.get("prompted_version") or "",
-                # rant 2026-08-12T12:10:12: auto-download state — GUI shows the
-                # "ready to install" button when downloaded_version is newer.
-                "downloaded_version": state.get("downloaded_version") or "",
-                "downloaded_path": state.get("downloaded_path") or "",
-                "downloaded_sha": state.get("downloaded_sha") or "",
-                "enabled": load_update_config().check,
-            })
-
-        elif msg_type == "update_check_prompted":
-            # Idempotency (rant 07:12:12 §4): a client records that it showed
-            # the prompt for this version — same version never re-prompted.
-            from emrg.update_check import load_state, mark_prompted
-
-            version = msg.get("version", "")
-            if version:
-                mark_prompted(load_state(), version)
-            await self._send(ws, {"type": "update_check_prompted", "ok": True})
 
         elif msg_type == "github_connect":
             # Windows GCM rant Stage 2: GUI PAT auth — gh auth login
