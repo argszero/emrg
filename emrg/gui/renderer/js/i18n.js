@@ -128,9 +128,6 @@ const I18N = (() => {
       "settings.templateDeleteFailed": "类型删除失败：{msg}",
       "settings.saveModel": "保存模型",
       "settings.defaultHint": "点左侧圆点可设为默认模型，切换后下一条消息即生效",
-      "settings.groupWorkdir": "工作目录",
-      "settings.workdirDesc": "EMRG 在哪里帮你干活",
-      "settings.choose": "选择…",
       "settings.groupAppearance": "外观",
       "settings.theme": "主题",
       "settings.themeLight": "浅色",
@@ -177,9 +174,6 @@ const I18N = (() => {
       "welcome.step1Hint": "用于连接你的 AI 模型服务",
       "welcome.baseUrl": "接口地址",
       "welcome.defaultModel": "默认模型",
-      "welcome.step2": "第二步：选择工作目录（可跳过）",
-      "welcome.projectPlaceholder": "默认 ~/.emrg/evolution",
-      "welcome.step2Hint": "EMRG 会在这个目录里帮你干活",
       "welcome.saveStart": "保存并开始",
 
       // 确认 / 重命名
@@ -354,7 +348,6 @@ const I18N = (() => {
       "dlg.initFailed": "初始化失败了：{msg}",
       "dlg.renameFailed": "重命名失败了：{msg}",
       // 应用动态文案（app.js）
-      "app.workdirInvalid": "工作目录不可用，请到设置里改一下。",
       "app.bootFailed": "启动遇到了问题：{msg}",
       "app.needSession": "请先创建一个对话。",
       "app.queued": "⏳ 已排队（位置 {pos}）— 当前回合结束后处理。",
@@ -545,9 +538,6 @@ const I18N = (() => {
       "settings.templateDeleteFailed": "Failed to delete type: {msg}",
       "settings.saveModel": "Save model",
       "settings.defaultHint": "Click the dot on the left to set the default model — takes effect on the next message",
-      "settings.groupWorkdir": "Working directory",
-      "settings.workdirDesc": "Where EMRG does work for you",
-      "settings.choose": "Choose…",
       "settings.groupAppearance": "Appearance",
       "settings.theme": "Theme",
       "settings.themeLight": "Light",
@@ -594,9 +584,6 @@ const I18N = (() => {
       "welcome.step1Hint": "Used to connect to your AI model service",
       "welcome.baseUrl": "Base URL",
       "welcome.defaultModel": "Default model",
-      "welcome.step2": "Step 2: choose a working directory (optional)",
-      "welcome.projectPlaceholder": "Default: ~/.emrg/evolution",
-      "welcome.step2Hint": "EMRG will work for you in this directory",
       "welcome.saveStart": "Save & start",
 
       // Confirm / rename
@@ -771,7 +758,6 @@ const I18N = (() => {
       "dlg.initFailed": "Initialization failed: {msg}",
       "dlg.renameFailed": "Rename failed: {msg}",
       // App dynamic copy (app.js)
-      "app.workdirInvalid": "Working directory unavailable — update it in Settings.",
       "app.bootFailed": "Startup failed: {msg}",
       "app.needSession": "Start a conversation first.",
       "app.queued": "⏳ Queued (position {pos}) — will run after the current turn.",

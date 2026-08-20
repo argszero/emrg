@@ -134,7 +134,7 @@ afterEach(() => {
 });
 
 test("P2 open: 引导 daemon + skipStart 会话连接 + resume_session 自动订阅", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const { conn, sessionWs } = await driveOpen(manager, "sess-1", "/proj/a");
 
   assert.ok(conn instanceof DaemonClient);
@@ -146,7 +146,7 @@ test("P2 open: 引导 daemon + skipStart 会话连接 + resume_session 自动订
 });
 
 test("P2 open: 已打开 sid → 复用连接，不重复 resume_session", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const first = await driveOpen(manager, "sess-1", "/proj/a");
   const sentBefore = first.sessionWs.sent.length;
   const second = await manager.open("sess-1", "/proj/a");
@@ -155,12 +155,12 @@ test("P2 open: 已打开 sid → 复用连接，不重复 resume_session", async
 });
 
 test("P2 get: 未打开 sid → null", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   assert.strictEqual(manager.get("nope"), null);
 });
 
 test("P2 close: 断开并移除；再 get → null；重复 close → false", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const { conn } = await driveOpen(manager, "sess-1", "/proj/a");
   assert.strictEqual(manager.close("sess-1"), true);
   assert.strictEqual(manager.get("sess-1"), null);
@@ -169,7 +169,7 @@ test("P2 close: 断开并移除；再 get → null；重复 close → false", as
 });
 
 test("P2 close: 主动关闭标记 _intentionalClose 且不触发重启恢复", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const { conn } = await driveOpen(manager, "sess-1", "/proj/a");
   let recoverCalls = 0;
   manager.recoverAll = async () => { recoverCalls += 1; };
@@ -181,7 +181,7 @@ test("P2 close: 主动关闭标记 _intentionalClose 且不触发重启恢复", 
 });
 
 test("P6 close: 在忙连接（ownStream）先 cancel 再 close", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   // 停用自动恢复（本测试专注 close 行为；单连接全关会触发重启判定）
   manager.recoverAll = async () => {};
   const busy = await driveOpen(manager, "sess-busy", "/proj/a");
@@ -194,7 +194,7 @@ test("P6 close: 在忙连接（ownStream）先 cancel 再 close", async () => {
 });
 
 test("P6 close: 空闲连接 close 不 cancel", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   manager.recoverAll = async () => {};
   const idle = await driveOpen(manager, "sess-idle", "/proj/a");
   idle.sessionWs.sent.length = 0;
@@ -204,7 +204,7 @@ test("P6 close: 空闲连接 close 不 cancel", async () => {
 });
 
 test("P2 open: 断连残留连接 → 关闭重开（不返回 stale conn）", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const s1 = await driveOpen(manager, "sess-1", "/proj/a");
   // 停用自动恢复（本测试专注 open 的 stale 处理；自动恢复由前序测试覆盖）——
   // 否则单会话全断会被判定为 daemon 重启自动 recoverAll
@@ -237,7 +237,7 @@ test("P2 open: 断连残留连接 → 关闭重开（不返回 stale conn）", a
 });
 
 test("P2 单连接退避: 多会话中单条断 → 独立退避重开该会话（不触发全量恢复）", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome, singleRetryDelayMs: 20 });
+  const manager = new ConnManager({ singleRetryDelayMs: 20 });
   const s1 = await driveOpen(manager, "sess-1", "/proj/a");
   const s2 = await driveOpen(manager, "sess-2", "/proj/b");
   let recoverCalls = 0;
@@ -273,7 +273,7 @@ test("P2 单连接退避: 多会话中单条断 → 独立退避重开该会话�
 });
 
 test("P2 closeAll: 全部关闭", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   await driveOpen(manager, "sess-1", "/proj/a");
   await driveOpen(manager, "sess-2", "/proj/b");
   manager.closeAll();
@@ -281,7 +281,7 @@ test("P2 closeAll: 全部关闭", async () => {
 });
 
 test("P2 重启恢复: 所有连接同窗口断开 → 判定重启并自动 recoverAll", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const s1 = await driveOpen(manager, "sess-1", "/proj/a");
   const s2 = await driveOpen(manager, "sess-2", "/proj/b");
   assert.deepStrictEqual(manager.all().sort(), ["sess-1", "sess-2"]);
@@ -302,7 +302,7 @@ test("P2 重启恢复: 所有连接同窗口断开 → 判定重启并自动 rec
 });
 
 test("P2 重启恢复: 单条断开 → 不判定重启、不 recoverAll", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const s1 = await driveOpen(manager, "sess-1", "/proj/a");
   await driveOpen(manager, "sess-2", "/proj/b");
   let recoverCalls = 0;
@@ -314,7 +314,7 @@ test("P2 重启恢复: 单条断开 → 不判定重启、不 recoverAll", async
 });
 
 test("P2 重启恢复: recoverAll 重连重订阅全部会话（复用 open 序列）", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const s1 = await driveOpen(manager, "sess-1", "/proj/a");
   const s2 = await driveOpen(manager, "sess-2", "/proj/b");
   // 关闭自动触发（本测试专注 recoverAll 本体；自动触发已在上一测试覆盖）
@@ -364,7 +364,7 @@ test("P2 重启恢复: recoverAll 重连重订阅全部会话（复用 open 序�
 // ── P2 rewire（rant 15:07:19）：daemon 级连接 + onOpen 钩子 + resume:false ──
 
 test("P2 ensureDaemon: 保留 daemon 级连接（复用，不重复建连）", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const p = manager.ensureDaemon();
   const bootWs = await waitForWs();
   await driveAuth(bootWs);
@@ -378,7 +378,7 @@ test("P2 ensureDaemon: 保留 daemon 级连接（复用，不重复建连）", a
 });
 
 test("P2 open: 复用 ensureDaemon 连接（无重复引导）+ resume_session 照常", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const p0 = manager.ensureDaemon();
   const bootWs = await waitForWs();
   await driveAuth(bootWs);
@@ -401,7 +401,7 @@ test("P2 open: 复用 ensureDaemon 连接（无重复引导）+ resume_session �
 });
 
 test("P2 open({resume:false}): 新会话首条消息前不 resume_session（daemon 隐式订阅）", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const p = manager.open("sess-new", "/proj/a", { resume: false });
   const bootWs = await waitForWs();
   await driveAuth(bootWs);
@@ -417,7 +417,7 @@ test("P2 open({resume:false}): 新会话首条消息前不 resume_session（daem
 });
 
 test("P2 open 失败: resume 报错（会话已删）→ 连接关闭不泄漏 + 抛出", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const p = manager.open("sess-gone", "/proj/a");
   const bootWs = await waitForWs();
   await driveAuth(bootWs);
@@ -443,7 +443,7 @@ test("P2 open 失败: resume 报错（会话已删）→ 连接关闭不泄漏 +
 });
 
 test("P2 onOpen 钩子: 新会话连接建立时触发（含 recoverAll 重开路径）", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   const opened = [];
   manager.onOpen((sid, conn) => opened.push([sid, conn]));
   const s1 = await driveOpen(manager, "sess-1", "/proj/a");
@@ -486,7 +486,7 @@ test("P2 onOpen 钩子: 新会话连接建立时触发（含 recoverAll 重开�
 });
 
 test("P2 onRecovered 钩子: recoverAll 完成后触发（main.js 刷新 UI 状态用）", async () => {
-  const manager = new ConnManager({ projectDir: tmpHome });
+  const manager = new ConnManager({  });
   let recovered = 0;
   manager.onRecovered(() => { recovered += 1; });
   const s1 = await driveOpen(manager, "sess-1", "/proj/a");

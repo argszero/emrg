@@ -18,22 +18,13 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const WebSocket = require("ws");
 
-// G129 (rant 2026-08-09T08:03:46): TOKEN_FILE 必须接受 projectDir——硬编码
-// os.homedir() 时，Windows 测试的 setupTempHome() 只设 HOME 不设 USERPROFILE，
-// os.homedir() 仍读 USERPROFILE（真实用户目录）→ 测试把假 token 写进
-// 真实的 ~/.emrg/emrgd.token → 演化周期 10 小时连不上 daemon（WinError 1225）。
-// 所有调用点必须传 this.projectDir（默认 os.homedir() 保持生产行为不变）。
-const TOKEN_FILE = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.token");
-const EMRGD_LOG = (projectDir = os.homedir()) => path.join(projectDir, ".emrg", "emrgd.log");
-// Rant 2026-08-09T18:47:37（GUI 连不上 daemon 回归）：daemon 的规范运行时目录永远是
-// ~/.emrg（daemon.py config_dir() = Path.home()/".emrg"；connect.py 无条件读
-// ~/.emrg/emrgd.token）。GUI 的 projectDir 若被 config gui.project_dir 指向别处
-// （非 home），按 projectDir 读 token/pid/log 全部落空 → 误判 daemon 不存在 →
-// 反复 spawn 撞 PID 锁 → "failed to start after 3 attempts" 假错误，而真 daemon 一直活着。
-// 规范位置常量：作为 projectDir 读取失败时的权威回退。
-const HOME_TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
+// Rant 2026-08-20T16:03:31：GUI"工作目录"概念已删除——daemon 运行时文件固定读取
+// 规范位置 ~/.emrg（daemon.py config_dir() = Path.home()/".emrg"；connect.py 无条件
+// 读 ~/.emrg/emrgd.token）。projectDir 参数与 G129 回退逻辑随概念一起清理（#884 后
+// emrgd.token 已是唯一规范位置，回退冗余）。
+const TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
+const EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
 const HOME_PID_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.pid");
-const HOME_EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
 // Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52): the
 // daemon always listens on this constant — keep in sync with emrg/connect.py
 // EMRGD_PORT and emrg/_stop_all.py _EMRGD_PORT. The token file no longer
@@ -86,8 +77,7 @@ const RESPONSE_TYPES = {
 };
 
 class DaemonClient {
-  constructor({ projectDir = os.homedir(), logger = console, authTimeoutMs = AUTH_TIMEOUT_MS, isPackaged = false, deltaBatchMs = 0 } = {}) {
-    this.projectDir = projectDir;
+  constructor({ logger = console, authTimeoutMs = AUTH_TIMEOUT_MS, isPackaged = false, deltaBatchMs = 0 } = {}) {
     this.logger = logger;
     this._authTimeoutMs = authTimeoutMs; // G142 测试可注入短超时（默认 10s）
     this._isPackaged = isPackaged; // Phase 4：打包模式（rant #12 §4）由 main.js 注入 app.isPackaged
@@ -125,9 +115,9 @@ class DaemonClient {
 
   // ── 生命周期 ────────────────────────────────────────────
 
-  // Rant 2026-08-09T18:47:37：读 token 的权威入口。先试 projectDir（G129 语义），
-  // 缺失/畸形时回退 daemon 规范位置 ~/.emrg。文件仅含单行 token（rant
-  // 2026-08-20T14:32:52）；端口一律用 EMRGD_PORT 常量。返回 {token, source, port} 或 null。
+  // Rant 2026-08-20T16:03:31：读 token 的权威入口——固定读 daemon 规范位置
+  // ~/.emrg/emrgd.token（#884 后唯一位置）。文件仅含单行 token；端口一律用
+  // EMRGD_PORT 常量。返回 {token, source, port} 或 null。
   _readPortToken() {
     const tryRead = (file) => {
       try {
@@ -137,16 +127,8 @@ class DaemonClient {
       } catch { /* missing/unreadable → try next */ }
       return null;
     };
-    const project = tryRead(TOKEN_FILE(this.projectDir));
-    if (project) return { ...project, source: "projectDir", port: EMRGD_PORT };
-    const home = tryRead(HOME_TOKEN_FILE());
-    if (home) {
-      this.logger.warn(
-        `[gui] token file not found at projectDir (${TOKEN_FILE(this.projectDir)}) — ` +
-        `reusing canonical ~/.emrg/emrgd.token`
-      );
-      return { ...home, source: "home", port: EMRGD_PORT };
-    }
+    const token = tryRead(TOKEN_FILE());
+    if (token) return { ...token, source: "canonical", port: EMRGD_PORT };
     return null;
   }
 
@@ -168,8 +150,8 @@ class DaemonClient {
     // R124 对应（daemon_manager.py）：spawn 超时后读 emrgd.log 尾部，
     // 让宿主看到真实失败原因（缺 DLL / PATH / 端口冲突），而不是干巴巴的
     // "failed to start within timeout"（rant 2026-08-09T13:16:36 验收项 ②）。
-    // 18:47:37：log 也在规范 ~/.emrg 下——projectDir 读不到就回退 home。
-    for (const file of [EMRGD_LOG(this.projectDir), HOME_EMRGD_LOG()]) {
+    // 18:47:37：log 在规范 ~/.emrg 下；16:03:31 后固定读该位置。
+    for (const file of [EMRGD_LOG()]) {
       try {
         const data = fs.readFileSync(file, "utf8");
         const tail = data.trim().split("\n").slice(-lines).join("\n");
@@ -193,7 +175,7 @@ class DaemonClient {
     if (this._isPackaged) {
       const emrgdPath = this._findDaemonExecutable();
       const opts = {
-        cwd: this.projectDir,
+        cwd: os.homedir(),
         stdio: "ignore",
         detached: true,
       };
@@ -203,7 +185,7 @@ class DaemonClient {
         opts.shell = true;
         opts.windowsHide = true;
       }
-      this.logger.info(`[gui] spawning packaged daemon: ${emrgdPath} cwd=${this.projectDir}`);
+      this.logger.info(`[gui] spawning packaged daemon: ${emrgdPath} cwd=${os.homedir()}`);
       const child = spawn(emrgdPath, [], opts);
       child.unref();
       this._daemonChild = child;
@@ -218,9 +200,9 @@ class DaemonClient {
     // G125：spawn 设 cwd=project_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
     const python = this._findPython();
     const args = ["-m", "emrg.server"];
-    this.logger.info(`[gui] spawning daemon: ${python} ${args.join(" ")} cwd=${this.projectDir}`);
+    this.logger.info(`[gui] spawning daemon: ${python} ${args.join(" ")} cwd=${os.homedir()}`);
     const child = spawn(python, args, {
-      cwd: this.projectDir,
+      cwd: os.homedir(),
       stdio: "ignore", // G68：对照 DEVNULL
       detached: true, // 对照 start_new_session=True
       // windowsHide: python.exe 是 console 子系统——GUI spawn 时不隐藏会
@@ -242,12 +224,9 @@ class DaemonClient {
   // Rant 2026-08-09T13:16:36 G43 加固：daemon 进程是否存活（emrgd.pid 探测）。
   // 存活 → ws 连接失败视为瞬时（daemon 重启/启动中），保留 port 文件交给退避重试；
   // 死亡 → 允许 G43 删文件重拉。
-  // 18:47:37：pid 文件也在规范 ~/.emrg —— projectDir 读不到回退 home。
+  // 18:47:37：pid 文件在规范 ~/.emrg；16:03:31 后固定读该位置。
   _daemonProcessAlive() {
-    const pidFiles = [
-      path.join(this.projectDir, ".emrg", "emrgd.pid"),
-      HOME_PID_FILE(),
-    ];
+    const pidFiles = [HOME_PID_FILE()];
     for (const pidFile of pidFiles) {
       try {
         const pid = Number(String(fs.readFileSync(pidFile, "utf8")).trim());
@@ -290,8 +269,8 @@ class DaemonClient {
 
   // Rant 2026-08-09T18:47:37（A1 + B1）：探测"已存在的 daemon"——4 状态诊断日志
   // （token_file_exists / token_file_content / daemon_alive(ping) / spawn_result）。
-  // spawn 失败 ≠ daemon 不存在：GUI 可能因 projectDir≠home 读错 token 文件，
-  // 或 daemon 早已被 scheduler/TUI 拉起。返回 {token, source, port} 或 null。
+  // spawn 失败 ≠ daemon 不存在：daemon 可能早已被 scheduler/TUI 拉起。
+  // 返回 {token, source, port} 或 null。
   async _probeExistingDaemon(spawnResult = "n/a") {
     const pt = this._readPortToken();
     const tokenFileExists = !!(pt || this._readPortTokenRaw());
@@ -306,7 +285,7 @@ class DaemonClient {
 
   // 读 token 文件原始存在性（不含解析），供 probe 日志用。
   _readPortTokenRaw() {
-    for (const file of [TOKEN_FILE(this.projectDir), HOME_TOKEN_FILE()]) {
+    for (const file of [TOKEN_FILE()]) {
       try { if (fs.readFileSync(file, "utf8").trim()) return true; } catch { /* next */ }
     }
     return false;
@@ -329,7 +308,7 @@ class DaemonClient {
       throw spawnErr;
     }
     // spawn 成功：daemon 永远写规范 ~/.emrg/emrgd.token（daemon.py config_dir()），
-    // 用权威读取（projectDir 回退 home），不假设 projectDir==home。
+    // 权威读取固定该位置（16:03:31）。
     const pt = this._readPortToken();
     if (!pt) throw new Error("token file not written after spawn");
     this.logger.info(`[gui] daemon spawned ok: port=${EMRGD_PORT}`);
@@ -337,7 +316,7 @@ class DaemonClient {
   }
 
   async ensureConnected({ skipStart = false } = {}) {
-    // Rant 2026-08-09T18:47:37：1. 读 token 文件（projectDir → 规范 ~/.emrg 回退）→
+    // Rant 2026-08-09T18:47:37：1. 读 token 文件（固定规范 ~/.emrg）→
     // 无则拉 daemon；spawn 失败先探测已有 daemon，活着直接复用，不再盲报
     // "failed to start after 3 attempts"。每步打结构化诊断日志（B1-B5）。
     // P2 connManager（rant 2026-08-10T15:07:19）：skipStart=true 时 daemon 生命周期
@@ -353,7 +332,7 @@ class DaemonClient {
     } else {
       if (skipStart) {
         throw new Error(
-          `daemon not running (skipStart): no token file at ${TOKEN_FILE(this.projectDir)}`
+          `daemon not running (skipStart): no token file at ${TOKEN_FILE()}`
         );
       }
       this.logger.info(`[gui] ensureConnected: token_file_exists=false — spawning daemon`);
@@ -392,7 +371,7 @@ class DaemonClient {
       }
       this.logger.warn(`[gui] ws connect failed: ${e.message} — stale token, respawning daemon`);
       try { this.ws.close(); } catch { /* ignore */ }
-      try { fs.unlinkSync(TOKEN_FILE(this.projectDir)); } catch { /* ignore */ }
+      try { fs.unlinkSync(TOKEN_FILE()); } catch { /* ignore */ }
       const r = await this._spawnOrProbe();
       port = r.port;
       token = r.token;

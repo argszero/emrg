@@ -172,7 +172,6 @@
         <h2 class="workspace-view-title" data-i18n="settings.title">设置</h2>
         <div class="panel-tabs" id="settings-tabs" role="tablist">
           <button type="button" class="panel-tab active" id="settings-tab-model" data-settings-tab="model" data-i18n="settings.groupModel">模型服务</button>
-          <button type="button" class="panel-tab" id="settings-tab-workdir" data-settings-tab="workdir" data-i18n="settings.groupWorkdir">工作目录</button>
           <button type="button" class="panel-tab" id="settings-tab-github" data-settings-tab="github" data-i18n="settings.groupGithub">GitHub</button>
           <button type="button" class="panel-tab" id="settings-tab-appearance" data-settings-tab="appearance" data-i18n="settings.groupAppearance">外观</button>
           <button type="button" class="panel-tab" id="settings-tab-language" data-settings-tab="language" data-i18n="settings.groupLanguage">语言</button>
@@ -204,16 +203,6 @@
               </div>
             </div>
             <div class="hint" style="margin-top:8px;" data-i18n="settings.defaultHint">点左侧圆点可设为默认模型，切换后下一条消息即生效</div>
-          </div>
-        </div>
-        <div class="panel-tab-body hidden" id="settings-body-workdir" data-settings-body="workdir">
-          <div class="settings-group">
-            <label><span data-i18n="settings.workdirDesc">EMRG 在哪里帮你干活</span>
-              <div class="dir-row">
-                <input type="text" id="set-project-dir" readonly />
-                <button type="button" id="pick-dir-btn" class="btn btn-ghost" data-i18n="settings.choose">选择…</button>
-              </div>
-            </label>
           </div>
         </div>
         <div class="panel-tab-body hidden" id="settings-body-github" data-settings-body="github">
@@ -340,13 +329,6 @@
       <label><span data-i18n="welcome.baseUrl">接口地址</span> <input type="text" id="welcome-base-url" placeholder="https://api.deepseek.com" /></label>
       <label><span data-i18n="welcome.defaultModel">默认模型</span>
         <select id="welcome-model"></select>
-      </label>
-      <label><span data-i18n="welcome.step2">第二步：选择工作目录（可跳过）</span>
-        <div class="dir-row">
-          <input type="text" id="welcome-project-dir" readonly placeholder="默认 ~/.emrg/evolution" data-i18n-placeholder="welcome.projectPlaceholder" />
-          <button type="button" id="welcome-pick-btn" class="btn btn-ghost" data-i18n="settings.choose">选择…</button>
-        </div>
-        <div class="hint" data-i18n="welcome.step2Hint">EMRG 会在这个目录里帮你干活</div>
       </label>
       <div class="dialog-actions">
         <button type="button" id="welcome-save" class="btn btn-primary" data-i18n="welcome.saveStart">保存并开始</button>

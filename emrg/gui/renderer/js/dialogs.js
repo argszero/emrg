@@ -213,7 +213,6 @@ const Dialogs = (() => {
       const s = await window.emrg.getSettings();
       $("set-api-key").value = s.apiKey || "";
       $("set-base-url").value = s.baseUrl || "";
-      $("set-project-dir").value = s.projectDir || "";
       if (s.theme) theme = s.theme;
       renderThemeOptions();
       renderLangOptions(); // rant 21:19：语言选择器高亮当前值
@@ -245,7 +244,6 @@ const Dialogs = (() => {
       apiKey: $("set-api-key").value.trim(),
       baseUrl: $("set-base-url").value.trim(),
       model: defaultName,
-      projectDir: $("set-project-dir").value.trim(),
       theme,
       models: extraModels,
     };
@@ -260,7 +258,6 @@ const Dialogs = (() => {
       await window.emrg.saveSettings(config);
       Chat.addSystemMessage(_t("dlg.saved"));
       App.state.apiKeyConfigured = true;
-      App.state.projectDir = config.projectDir || App.state.projectDir;
       App.state.model = defaultName;
       App.updateModelSwitcher();
       await App.boot();
@@ -271,7 +268,6 @@ const Dialogs = (() => {
 
   // ── 首启引导 ─────────────────────────────
   function showWelcome() {
-    $("welcome-project-dir").value = "";
     $("welcome-api-key").value = "";
     $("welcome-base-url").value = "";
     $("welcome-model").innerHTML = `<option value="">${_t("dlg.loading")}</option>`;
@@ -306,14 +302,12 @@ const Dialogs = (() => {
       apiKey: key,
       baseUrl: $("welcome-base-url").value.trim(),
       model: $("welcome-model").value || "deepseek-chat",
-      projectDir: $("welcome-project-dir").value.trim() || "",
     };
     try {
       await window.emrg.saveSettings(config);
       if ($("welcome-dialog").open) $("welcome-dialog").close();
       Chat.addSystemMessage(_t("dlg.starting"));
       App.state.apiKeyConfigured = true;
-      App.state.projectDir = config.projectDir || App.state.projectDir;
       await App.boot();
     } catch (e) {
       Chat.addSystemMessage(_t("dlg.initFailed", { msg: e.message }));

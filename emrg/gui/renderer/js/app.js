@@ -26,7 +26,6 @@ const App = (() => {
     openSessions: [], // [{ sid, projectName, projectPath, lastActive }]，lastActive 倒序
     apiKeyConfigured: false,
     configExists: false,
-    projectDir: "",
     model: "",
     serverId: "",
     version: "", // WorkBuddy P3：init 返回的 package.json 版本号（/version 不再硬编码）
@@ -74,7 +73,6 @@ const App = (() => {
       const init = await window.emrg.init();
       state.configExists = init.config_exists;
       state.apiKeyConfigured = init.api_key_configured;
-      state.projectDir = init.project_dir || "";
       state.serverId = init.server_id || "";
       state.model = init.model || "";
       state.version = init.version || "";
@@ -91,11 +89,6 @@ const App = (() => {
       }
       if (!init.api_key_configured) {
         Dialogs.showSettings(); // key 空/占位符
-        return;
-      }
-      if (!init.project_dir_valid) {
-        Chat.addSystemMessage(_t("app.workdirInvalid"));
-        Dialogs.showSettings();
         return;
       }
       if (init.sessions && init.sessions.length > 0) {
@@ -562,13 +555,11 @@ const App = (() => {
     return view;
   }
 
-  /** 会话标题栏显示的项目名：openSessions 优先，回退全局 projectDir 的 basename */
+  /** 会话标题栏显示的项目名：openSessions 优先，无项目回退 "home"（rant 2026-08-20T16:03:31） */
   function sessionProjectName(sid) {
     const os = state.openSessions.find((s) => s.sid === sid);
     if (os && os.projectName) return os.projectName;
-    const dir = state.projectDir || "";
-    const parts = dir.split(/[\\/]/).filter(Boolean);
-    return parts[parts.length - 1] || dir;
+    return "home";
   }
 
   // 会话视图顶部标题栏：项目/名称(id) 或 项目/id（有 title 时带 (id) 后缀）
@@ -624,10 +615,10 @@ const App = (() => {
     input.style.height = Math.min(input.scrollHeight, 150) + "px";
   }
 
-  /** 会话的项目根目录（openSessions 优先，回退全局 projectDir；P3.1 文件树根） */
+  /** 会话的项目根目录（openSessions 优先，无项目回退空——文件树空根；rant 2026-08-20T16:03:31） */
   function projectPathFor(sid) {
     const os = state.openSessions.find((s) => s.sid === sid);
-    return (os && os.projectPath) || state.projectDir || "";
+    return (os && os.projectPath) || "";
   }
 
   async function switchSession(sid, opts = {}) {    // G65：busy 即自有流进行中/发送中（IPC 往返窗口内 ownStreamRequestId 尚未赋值）
@@ -772,7 +763,7 @@ const App = (() => {
   }
 
   /** rant 14:10:14 P2：设置面板 tab 切换（模型服务/工作目录/GitHub/外观/语言/关于）。 */
-  const SETTINGS_TABS = ["model", "workdir", "github", "appearance", "language", "about"];
+  const SETTINGS_TABS = ["model", "github", "appearance", "language", "about"];
   function switchSettingsTab(name) {
     if (!SETTINGS_TABS.includes(name)) return;
     for (const t of SETTINGS_TABS) {
@@ -1596,14 +1587,6 @@ const App = (() => {
     Dialogs.initLangButtons(); // rant 21:19：设置语言选择器
     $("settings-cancel").addEventListener("click", () => switchView("settings")); // P2：取消=关闭设置视图
     $("settings-save").addEventListener("click", Dialogs.saveSettings);
-    $("pick-dir-btn").addEventListener("click", async () => {
-      const dir = await window.emrg.pickProjectDir();
-      if (dir) $("set-project-dir").value = dir;
-    });
-    $("welcome-pick-btn").addEventListener("click", async () => {
-      const dir = await window.emrg.pickProjectDir();
-      if (dir) $("welcome-project-dir").value = dir;
-    });
     $("welcome-save").addEventListener("click", Dialogs.saveWelcome);
     $("confirm-cancel").addEventListener("click", Dialogs.closeConfirm);
     $("confirm-ok").addEventListener("click", Dialogs.confirmOk);

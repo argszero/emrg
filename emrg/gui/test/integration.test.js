@@ -96,7 +96,7 @@ before(async () => {
   if (process.env.EMRG_SKIP_INTEGRATION) return;
   daemonProc = spawnDaemon();
   await waitForPortFile();
-  client = new DaemonClient({ projectDir: tmp });
+  client = new DaemonClient({  });
   await client.ensureConnected();
 });
 
