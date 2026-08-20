@@ -284,32 +284,30 @@ class TaskHandler:
             self._repo_configured = project_name == "emrg"
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
-        # Sandbox tier for this task's bash tool (rant 2026-08-20T15:46:50):
-        # explicit config wins; builtin tasks get suggested defaults; None =
-        # danger-full-access (current behavior).
-        self._sandbox = self._resolve_sandbox(name, config, sandbox)
+        # Sandbox tier for this task's bash tool (rant 2026-08-20T15:46:50 +
+        # 18:05:20): explicit config wins, otherwise unified default
+        # workspace-write. No task-name builtin defaults, no implicit
+        # danger-full-access fallback.
+        self._sandbox = self._resolve_sandbox(config, sandbox)
         if self._sandbox:
             self._logger.info(
                 "TaskHandler[%s]: bash sandbox tier = %s", name, self._sandbox
             )
 
     @staticmethod
-    def _resolve_sandbox(name: str, config: dict, explicit: str | None) -> str | None:
+    def _resolve_sandbox(config: dict, explicit: str | None) -> str:
         """Effective bash sandbox tier for a task.
 
-        Order: tasks.yml top-level ``sandbox:`` field → ``config.sandbox`` →
-        builtin defaults by task name → None (= danger-full-access, the
-        existing un-sandboxed behavior). Invalid values fall through to the
-        defaults rather than breaking the task.
+        Rant 2026-08-20T18:05:20: unified rule — configured value wins,
+        otherwise ``"workspace-write"``. No task-name builtin defaults
+        (emrg-task/opensource special cases removed), no implicit
+        danger-full-access fallback. Invalid values fall through to the
+        default rather than breaking the task.
         """
         for cand in (explicit, config.get("sandbox")):
-            if cand in SANDBOX_MODES and cand != "danger-full-access":
+            if cand in SANDBOX_MODES:
                 return cand
-        if name == "emrg-task":
-            return "workspace-write"  # evolution writes its own repo
-        if name.endswith("-opensource-task"):
-            return "read-only"  # community work in host-owned repos
-        return None
+        return "workspace-write"
 
     # ── Saturation state (restored from disk across daemon restarts) ──
 
