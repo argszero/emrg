@@ -906,6 +906,40 @@ def test_open_source_template_allow_self_merge_conditional():
     assert "**overridden**" not in out_false
 
 
+def test_open_source_template_never_stashes_host_work():
+    """Rant 2026-08-20T11:58:27 (host data-loss report): a dirty working tree
+    must run the cycle read-only — the prompt must never instruct stashing /
+    resetting the host's uncommitted work in the live source directory."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260820",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, evolution_count=0, git_path="git", gh_path="gh",
+    )
+    # the old data-losing instruction is gone
+    assert "→ `git stash`" not in out, "no more 'git stash' action instruction"
+    assert "→ `git pull --rebase`" not in out or "dirty tree" in out, \
+        "pull --rebase must be gated on a clean tree"
+    # the new safety rules render
+    assert "Never touch the host's uncommitted work" in out
+    assert "read-only" in out, "dirty tree → read-only cycle"
+    assert "git rebase --abort" in out, "pull-conflict handling must abort, not stash"
+    assert "Never stash host work" in out
+    # the prohibition explicitly forbids the destructive forms
+    for banned in ("git checkout .", "git restore .", "git reset --hard", "git clean"):
+        assert f"`{banned}`" in out, f"禁止项应列出 {banned}"
+
+
 def test_open_source_template_full_code_study_b2b():
     """open_source_prompt.md B.2b requires full-code study before contributing
     (rant 2026-08-14T15:53:39)."""
