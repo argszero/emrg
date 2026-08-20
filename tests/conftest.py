@@ -69,3 +69,26 @@ def _redirect_sessions_index(monkeypatch, tmp_path):
         sidx, "sessions_index_path",
         lambda: tmp_path / "sessions_index.json",
     )
+
+
+@pytest.fixture(autouse=True)
+def _guard_stop_daemon_hermeticity(monkeypatch):
+    """⛔ Red line (host 2026-08-18T22:58): tests must NEVER trigger a real
+    stop_daemon() — it sends a shutdown over the websocket and kills the live
+    emrgd (2026-08-20 16:18/16:25 real incidents; the daemon is EMRG's life
+    core; rant 2026-08-20T16:32:30). Any test that calls stop_all()/
+    stop_daemon() without isolating stop_daemon now fails loudly with
+    AssertionError instead of killing the daemon. Tests that DO isolate it
+    (monkeypatch.setattr(_stop_all, "stop_daemon", lambda: None)) patch after
+    this fixture and override it as usual.
+    """
+    import emrg._stop_all as stop_mod
+
+    def _no_real_stop_daemon(*args, **kwargs):
+        raise AssertionError(
+            "test triggered a REAL stop_daemon() — ⛔ red-line violation "
+            "(host 2026-08-18T22:58); tests must isolate it via "
+            "monkeypatch.setattr(emrg._stop_all, 'stop_daemon', lambda: None)"
+        )
+
+    monkeypatch.setattr(stop_mod, "stop_daemon", _no_real_stop_daemon)
