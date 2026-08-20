@@ -26,8 +26,7 @@
 const { DaemonClient } = require("./daemon_client.js");
 
 class ConnManager {
-  constructor({ projectDir, logger = console, isPackaged = false, restartWindowMs = 1000, singleRetryDelayMs = 1000 } = {}) {
-    this.projectDir = projectDir;
+  constructor({ logger = console, isPackaged = false, restartWindowMs = 1000, singleRetryDelayMs = 1000 } = {}) {
     this.logger = logger;
     this.isPackaged = isPackaged;
     this._conns = new Map(); // sid -> { conn, projectPath }
@@ -49,7 +48,6 @@ class ConnManager {
   async ensureDaemon() {
     if (this._daemonConn && this._daemonConn.connected) return this._daemonConn;
     const boot = new DaemonClient({
-      projectDir: this.projectDir,
       logger: this.logger,
       isPackaged: this.isPackaged,
     });
@@ -79,7 +77,6 @@ class ConnManager {
     }
     await this.ensureDaemon();
     const conn = new DaemonClient({
-      projectDir: this.projectDir,
       logger: this.logger,
       isPackaged: this.isPackaged,
       deltaBatchMs: 16, // P2：delta 批量（G122 16ms）每连接一份（#626）

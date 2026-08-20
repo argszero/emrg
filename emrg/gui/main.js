@@ -28,7 +28,8 @@ function main() {
   const logger = createLogger();
   let win = null;
   let connManager = null; // P2（rant 15:07:19）：连接管理器 = daemon 生命周期唯一 owner
-  let projectDir = os.homedir();
+  // Rant 2026-08-20T16:03:31：GUI"工作目录"概念已删除——无项目上下文时的兜底 cwd 固定为 home。
+  const DEFAULT_CWD = os.homedir();
   let configExists = false;
   let currentSessionId = null;
   let reconnectTimer = null;
@@ -191,7 +192,7 @@ vision = false
       }
       const python = connManager?.daemonConn()?._findPython() || "python3";
       const child = spawn(python, ["-c", "from emrg.config import ensure_config; ensure_config()"], {
-        cwd: projectDir,
+        cwd: DEFAULT_CWD,
         stdio: "ignore",
         ...(process.platform === "win32" ? { windowsHide: true } : {}),
       });
@@ -232,7 +233,7 @@ vision = false
   function validateConfig(c) {
     // 设计 §7.1：直接接收所需字段 + 基本类型检查（防写坏 config.toml 的健壮性，非安全设计）
     const out = {};
-    for (const k of ["apiKey", "baseUrl", "model", "projectDir", "theme"]) {
+    for (const k of ["apiKey", "baseUrl", "model", "theme"]) {
       if (c[k] !== undefined) out[k] = typeof c[k] === "string" ? c[k] : String(c[k]);
     }
     if (Array.isArray(c.models)) {
@@ -257,20 +258,14 @@ vision = false
       // G34/G71/G112：config 存在性 → ensureConnected → ping → list_sessions
       configExists = fs.existsSync(configPath());
       const cfg = readConfig();
-      projectDir = cfg.gui?.project_dir || os.homedir();
-      // G121：校验 project_dir 存在可写
-      let projectDirValid = true;
-      try {
-        fs.accessSync(projectDir, fs.constants.W_OK);
-      } catch { projectDirValid = false; }
 
       if (!configExists) {
         // config 缺失 → 不拉起 daemon（daemon 启动即崩），直接返回缺配置
-        return { config_exists: false, api_key_configured: false, project_dir: projectDir, project_dir_valid: projectDirValid, server_id: "", model: "", version: APP_VERSION };
+        return { config_exists: false, api_key_configured: false, server_id: "", model: "", version: APP_VERSION };
       }
       const keyConfigured = isKeyConfigured(cfg.llm?.api_key);
       if (!keyConfigured) {
-        return { config_exists: true, api_key_configured: false, project_dir: projectDir, project_dir_valid: projectDirValid, server_id: "", model: "", version: APP_VERSION };
+        return { config_exists: true, api_key_configured: false, server_id: "", model: "", version: APP_VERSION };
       }
 
       await ensureConnected();
@@ -281,8 +276,6 @@ vision = false
       return {
         config_exists: true,
         api_key_configured: true,
-        project_dir: projectDir,
-        project_dir_valid: projectDirValid,
         server_id: pong?.identity?.instance_id || "",
         model: pong?.model || "",
         evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
@@ -301,7 +294,7 @@ vision = false
       }
       // P2：每会话独立连接——首条消息前自动打开（新会话不 resume，daemon 隐式订阅）
       // P5 slice 2：cwd 取该会话所属项目（跨项目会话用其项目路径，非全局 projectDir）
-      const sessionCwd = openSessions.get(sessionId)?.projectPath || projectDir;
+      const sessionCwd = openSessions.get(sessionId)?.projectPath || DEFAULT_CWD;
       let conn = connManager?.get(sessionId);
       if (!conn || !conn.connected) {
         conn = await openSession(sessionId, sessionCwd, { resume: false });
@@ -338,7 +331,7 @@ vision = false
       // G110：切会话清空旧连接分组缓存（含 timer），防广播"幽灵"残留
       connManager?.get(prevSid)?.clearGroups();
       // P5 slice 2：跨项目打开——用该项目路径 resume（非全局 projectDir）
-      const targetPath = projectPath || openSessions.get(sessionId)?.projectPath || projectDir;
+      const targetPath = projectPath || openSessions.get(sessionId)?.projectPath || DEFAULT_CWD;
       try {
         await openSession(sessionId, targetPath); // 打开（新）会话连接 + resume_session 自动订阅
       } catch (e) {
@@ -362,7 +355,7 @@ vision = false
 
     ipcMain.handle("emrg:deleteSession", async (_e, { sessionId }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await requireConn().sendCommandAndWait("delete_session", { session_id: sessionId, cwd: projectDir }, 5000);
+      await requireConn().sendCommandAndWait("delete_session", { session_id: sessionId, cwd: DEFAULT_CWD }, 5000);
       connManager?.close(sessionId); // P2：删除会话 → 关闭该会话连接（若打开）
       openSessions.delete(sessionId); // P4：删除（删数据）→ 一并移出打开会话簿记
       schedulePersistGuiState();
@@ -374,7 +367,7 @@ vision = false
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       const clean = String(title || "").trim().slice(0, 80); // 截断超长标题
       if (!clean) throw new Error("empty title");
-      const frame = await requireConn().sendCommandAndWait("rename_session", { session_id: sessionId, cwd: projectDir, title: clean }, 5000);
+      const frame = await requireConn().sendCommandAndWait("rename_session", { session_id: sessionId, cwd: DEFAULT_CWD, title: clean }, 5000);
       // 跨项目会话重命名成功后立即同步侧边栏标题（rant 12:01:44）
       const v = openSessions.get(sessionId);
       if (v) {
@@ -419,21 +412,21 @@ vision = false
     ipcMain.handle("emrg:clearSession", async (_e, { sessionId }) => {
       // GUI / 指令 P1：/clear — 清空当前会话（daemon 协议 clear_session 已存在）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await requireConn().sendCommandAndWait("clear_session", { session_id: sessionId, cwd: projectDir }, 5000);
+      await requireConn().sendCommandAndWait("clear_session", { session_id: sessionId, cwd: DEFAULT_CWD }, 5000);
       return { ok: true };
     });
 
     ipcMain.handle("emrg:compactSession", async (_e, { sessionId }) => {
       // GUI / 指令 P1：/compact — 压缩当前会话历史（daemon 协议 compact 已存在）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await requireConn().sendCommandAndWait("compact", { session_id: sessionId, cwd: projectDir }, 5000);
+      await requireConn().sendCommandAndWait("compact", { session_id: sessionId, cwd: DEFAULT_CWD }, 5000);
       return { ok: true };
     });
 
     ipcMain.handle("emrg:listHistory", async (_e, { sessionId, limit, offset } = {}) => {
       // GUI / 指令 P2：/rewind + rant 14:15:12 历史按需加载（limit/offset 可选）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      const payload = { session_id: sessionId, cwd: projectDir };
+      const payload = { session_id: sessionId, cwd: DEFAULT_CWD };
       if (limit != null) payload.limit = limit;
       if (offset != null) payload.offset = offset;
       const frame = await requireConn().sendCommandAndWait("list_history", payload, 5000);
@@ -448,7 +441,7 @@ vision = false
       }
       const frame = await requireConn().sendCommandAndWait(
         "rewind_session",
-        { session_id: sessionId, cwd: projectDir, record_index: recordIndex },
+        { session_id: sessionId, cwd: DEFAULT_CWD, record_index: recordIndex },
         5000
       );
       return { ok: true, removedCount: frame.removed_count ?? 0 };
@@ -456,7 +449,7 @@ vision = false
 
     ipcMain.handle("emrg:listMemories", async (_e, { scope = "project", sessionId } = {}) => {
       // GUI / 指令 P3：/memory — 列出记忆（daemon list_memories → memories_list）
-      const params = { scope, cwd: projectDir };
+      const params = { scope, cwd: DEFAULT_CWD };
       if (scope === "session") {
         if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
         params.session_id = sessionId;
@@ -468,7 +461,7 @@ vision = false
     ipcMain.handle("emrg:readMemory", async (_e, { memoryId, scope = "project", sessionId } = {}) => {
       // GUI / 指令 P3：/memory <id> — 读取单条记忆（daemon read_memory → memory_content）
       if (typeof memoryId !== "string" || !memoryId.trim()) throw new Error("invalid memory_id");
-      const params = { scope, memory_id: memoryId.trim(), cwd: projectDir };
+      const params = { scope, memory_id: memoryId.trim(), cwd: DEFAULT_CWD };
       if (scope === "session") {
         if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
         params.session_id = sessionId;
@@ -534,7 +527,7 @@ vision = false
       const skills = [];
       const dirs = [
         { dir: path.join(os.homedir(), ".emrg", "skills"), source: "user" },
-        { dir: path.join(projectDir, ".emrg", "skills"), source: "project" },
+        { dir: path.join(DEFAULT_CWD, ".emrg", "skills"), source: "project" },
       ];
       for (const { dir, source } of dirs) {
         let files = [];
@@ -769,7 +762,6 @@ vision = false
         apiKey: isKeyConfigured(key) ? key : "",
         baseUrl: cfg.llm?.base_url || "",
         model: cfg.llm?.model || "",
-        projectDir: cfg.gui?.project_dir || os.homedir(),
         models,
         modelDetails,
         theme: cfg.gui?.theme || "system", // §7.1：外观主题持久化（浅色/深色/跟随系统）
@@ -792,11 +784,6 @@ vision = false
       if (cfg.apiKey !== undefined) toml.llm.api_key = cfg.apiKey;
       if (cfg.baseUrl !== undefined) toml.llm.base_url = cfg.baseUrl;
       if (cfg.model !== undefined) toml.llm.model = cfg.model;
-      if (cfg.projectDir !== undefined) {
-        toml.gui = toml.gui || {};
-        toml.gui.project_dir = cfg.projectDir; // G115：snake_case 落盘
-        projectDir = cfg.projectDir;
-      }
       if (cfg.theme !== undefined) {
         toml.gui = toml.gui || {};
         toml.gui.theme = cfg.theme; // §7.1：主题持久化（浅色/深色/跟随系统）
@@ -845,7 +832,7 @@ vision = false
   // 惰性初始化 connManager（挂事件桥 + 恢复钩子）。
   function ensureConnManager() {
     if (connManager) return connManager;
-    connManager = new ConnManager({ projectDir, logger, isPackaged: app.isPackaged });
+    connManager = new ConnManager({ logger, isPackaged: app.isPackaged });
     // 每个新会话连接建立时挂 renderer 事件桥（附带 sid；含 recoverAll 重开路径）
     connManager.onOpen((sid, conn, projectPath) => {
       conn.onEvent((type, data) => {
@@ -1084,7 +1071,7 @@ vision = false
       if (connManager.daemonConn()?.connected) {
         // G41（P2 改写）：恢复当前会话连接（若 daemon 重启后未由 recoverAll 重开）
         if (currentSessionId && !connManager.get(currentSessionId)) {
-          try { await openSession(currentSessionId, projectDir); } catch { /* 会话可能已删 */ }
+          try { await openSession(currentSessionId, DEFAULT_CWD); } catch { /* 会话可能已删 */ }
         }
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
@@ -1114,7 +1101,7 @@ vision = false
     });
   }
 
-  async function listSessions(cwd = projectDir) {
+  async function listSessions(cwd = DEFAULT_CWD) {
     try {
       const frame = await requireConn().sendCommandAndWait("list_sessions", { cwd }, 5000);
       return frame.sessions || [];

@@ -132,8 +132,8 @@ const ELEMENT_IDS = [
   "project-list", "project-add-btn",
   "rant-filter-tabs", "rant-filter-all", "rant-filter-pending", "rant-filter-inprogress", "rant-filter-completed",
   "rant-list", "rant-new-btn", "rant-form", "rant-form-project", "rant-form-message", "rant-form-cancel", "rant-form-submit",
-  "settings-tabs", "settings-tab-model", "settings-tab-workdir", "settings-tab-github", "settings-tab-appearance", "settings-tab-language", "settings-tab-about",
-  "settings-body-model", "settings-body-workdir", "settings-body-github", "settings-body-appearance", "settings-body-language", "settings-body-about",
+  "settings-tabs", "settings-tab-model", "settings-tab-github", "settings-tab-appearance", "settings-tab-language", "settings-tab-about",
+  "settings-body-model", "settings-body-github", "settings-body-appearance", "settings-body-language", "settings-body-about",
   "settings-cancel", "settings-save", "set-api-key", "set-base-url", "set-project-dir",  "set-model", "pick-dir-btn", "theme-options", "welcome-dialog", "welcome-api-key", "welcome-base-url",
   "welcome-model", "welcome-project-dir", "welcome-pick-btn", "welcome-save", "confirm-dialog",
   "confirm-title", "confirm-message", "confirm-cancel", "confirm-ok", "main", "composer-wrap",
@@ -206,11 +206,11 @@ function makeSandbox(overrides = {}) {
     marked: null,
     hljs: null,
     emrg: {
-      init: async () => ({ config_exists: false, api_key_configured: false, project_dir: "", project_dir_valid: true, server_id: "", model: "", evolution_count: 0, sessions: [] }),
+      init: async () => ({ config_exists: false, api_key_configured: false, server_id: "", model: "", evolution_count: 0, sessions: [] }),
       onEvent() {},
       sendMessage: async () => ({}),
       cancel: async () => ({}),
-      getSettings: async () => ({ apiKey: "", baseUrl: "", model: "", projectDir: "", models: [], modelDetails: [], theme: "system" }),
+      getSettings: async () => ({ apiKey: "", baseUrl: "", model: "", models: [], modelDetails: [], theme: "system" }),
       saveSettings: async () => ({}),
       pickProjectDir: async () => null,
       listSessions: async () => [],
@@ -288,9 +288,7 @@ test("boot：config 就绪 → 加载会话列表", async () => {
     init: async () => ({
       config_exists: true,
       api_key_configured: true,
-      project_dir: "/tmp",
-      project_dir_valid: true,
-      server_id: "srv-1",
+            server_id: "srv-1",
       model: "deepseek-chat",
       evolution_count: 42,
       sessions: [{ session_id: "s1", title: "测试对话", updated_at: "2026-08-05T10:00:00Z" }],
@@ -658,8 +656,7 @@ test("多模型管理：modelDetails 加载渲染 + saveSettings 传 models 数�
       apiKey: "sk-x",
       baseUrl: "",
       model: "deepseek-chat",
-      projectDir: "/tmp",
-      theme: "system",
+            theme: "system",
       models: ["deepseek-chat", "gpt-4o"],
       modelDetails: [
         { name: "deepseek-chat", vision: false },
@@ -854,8 +851,7 @@ test("rant 10:48:58：window.marked 缺失时从 Monaco AMD 模块表兜底取�
 test("模型切换器：菜单项构建 + 键盘导航 handler 注册", async () => {
   const { ctx } = makeSandbox({
     getSettings: async () => ({
-      apiKey: "sk-x", baseUrl: "", model: "deepseek-chat", projectDir: "/tmp",
-      theme: "system",
+      apiKey: "sk-x", baseUrl: "", model: "deepseek-chat",       theme: "system",
       models: ["deepseek-chat", "gpt-4o"],
       modelDetails: [
         { name: "deepseek-chat", vision: false },
@@ -2023,9 +2019,7 @@ test("P4 s2: boot init 携带 open_sessions + active_sid → 采用恢复的激�
     init: async () => ({
       config_exists: true,
       api_key_configured: true,
-      project_dir: "/tmp",
-      project_dir_valid: true,
-      server_id: "srv",
+            server_id: "srv",
       model: "m",
       evolution_count: 0,
       sessions: [{ session_id: "sess-r", title: "Restored" }],
@@ -2985,9 +2979,7 @@ test("rant 18:55:09 v0.2 回归：back-to-bottom 跟随会话视图滚动（scro
     init: async () => ({
       config_exists: true,
       api_key_configured: true,
-      project_dir: "/tmp",
-      project_dir_valid: true,
-      server_id: "srv-1",
+            server_id: "srv-1",
       model: "m",
       evolution_count: 0,
       sessions: [{ session_id: "s1", title: "测试对话", updated_at: "2026-08-05T10:00:00Z" }],
@@ -3033,9 +3025,7 @@ test("rant 18:55:09 v0.2：导航点击 → 工作区视图切换（面板整块
     init: async () => ({
       config_exists: true,
       api_key_configured: true,
-      project_dir: "/tmp",
-      project_dir_valid: true,
-      server_id: "srv-1",
+            server_id: "srv-1",
       model: "m",
       evolution_count: 0,
       sessions: [{ session_id: "s1", title: "测试对话", updated_at: "2026-08-05T10:00:00Z" }],
@@ -3095,7 +3085,7 @@ test("rant 14:10:14 P2：设置面板 tab 切换（6 tab 独立显隐 + 高亮�
   await tick();
   // 默认：model tab 激活且可见，其余 tab body 隐藏
   assert.strictEqual(visible("settings-body-model"), true, "默认显示模型服务 tab");
-  for (const t of ["workdir", "github", "appearance", "language", "about"]) {
+  for (const t of ["github", "appearance", "language", "about"]) {
     assert.strictEqual(visible(`settings-body-${t}`), false, `默认隐藏 ${t} tab`);
   }
   // 切到 GitHub tab → 只有它可见 + 高亮

@@ -88,7 +88,7 @@ function setupTempHome() {
   // os.homedir() 仍返回真实用户目录（这是 10h daemon gap 的直接根因）。
   process.env.USERPROFILE = tmpHome;
   // 预写 token 文件（模拟已运行 daemon）—— 路径必须落在 tmpHome 内
-  const tokenFile = TOKEN_FILE(tmpHome);
+  const tokenFile = TOKEN_FILE();
   assertTokenFileInTmp(tokenFile);
   fs.writeFileSync(tokenFile, "seekrit-token");
 }
@@ -144,20 +144,20 @@ afterEach(() => {
 });
 
 test("ensureConnected: token 文件读取 + auth 首帧 + auth_ok", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   assert.strictEqual(client.connected, true);
   assert.strictEqual(client._authFailed, false);
 });
 
 test("ensureConnected: token 文件缺失 → 拉起 daemon（spawn 参数正确 G28/G68/G125）", async () => {
-  fs.rmSync(TOKEN_FILE(tmpHome), { force: true });
-  const client = new DaemonClient({ projectDir: tmpHome });
+  fs.rmSync(TOKEN_FILE(), { force: true });
+  const client = new DaemonClient();
   // stub startDaemon：模拟拉起后写 token 文件
   let spawnCalls = null;
   client.startDaemon = async function () {
-    spawnCalls = { python: this._findPython(), projectDir: this.projectDir };
-    fs.writeFileSync(TOKEN_FILE(tmpHome), "seekrit-token");
+    spawnCalls = { python: this._findPython(), cwd: os.homedir() };
+    fs.writeFileSync(TOKEN_FILE(), "seekrit-token");
   };
   await connectClient(client);
   assert.ok(spawnCalls, "startDaemon should be called");
@@ -166,11 +166,11 @@ test("ensureConnected: token 文件缺失 → 拉起 daemon（spawn 参数正确
     ? path.join(".venv", "Scripts", "python.exe")
     : path.join(".venv", "bin", "python");
   assert.ok(spawnCalls.python.endsWith(pyPath), `python=${spawnCalls.python} (expected ${pyPath})`);
-  assert.strictEqual(spawnCalls.projectDir, tmpHome);
+  assert.strictEqual(spawnCalls.cwd, os.homedir());
 });
 
 test("P2 deltaBatchMs: 批量合并 message_delta，终态前冲刷保序（rant 14:11）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 16 });
+  const client = new DaemonClient({ deltaBatchMs: 16 });
   await connectClient(client);
   const seen = [];
   client.onEvent((type, data) => seen.push([type, data]));
@@ -189,7 +189,7 @@ test("P2 deltaBatchMs: 批量合并 message_delta，终态前冲刷保序（rant
 });
 
 test("P2 deltaBatchMs: done 终态到达 → 先冲刷残留 delta 再发 done（顺序保证）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 1000 }); // 定时器远未到期
+  const client = new DaemonClient({ deltaBatchMs: 1000 }); // 定时器远未到期
   await connectClient(client);
   const seen = [];
   client.onEvent((type, data) => seen.push([type, data]));
@@ -206,7 +206,7 @@ test("P2 deltaBatchMs: done 终态到达 → 先冲刷残留 delta 再发 done�
 });
 
 test("P2 deltaBatchMs: cancelled 终态 → 冲刷残留 delta 再发 cancelled", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 1000 });
+  const client = new DaemonClient({ deltaBatchMs: 1000 });
   await connectClient(client);
   const seen = [];
   client.onEvent((type, data) => seen.push([type, data]));
@@ -220,7 +220,7 @@ test("P2 deltaBatchMs: cancelled 终态 → 冲刷残留 delta 再发 cancelled"
 });
 
 test("P2 deltaBatchMs: 默认 0 = 每帧即时发（既有行为回归）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const seen = [];
   client.onEvent((type, data) => seen.push([type, data]));
@@ -233,7 +233,7 @@ test("P2 deltaBatchMs: 默认 0 = 每帧即时发（既有行为回归）", asyn
 });
 
 test("P2 deltaBatchMs: close 冲刷残留 delta", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 1000 });
+  const client = new DaemonClient({ deltaBatchMs: 1000 });
   await connectClient(client);
   const seen = [];
   client.onEvent((type, data) => seen.push([type, data]));
@@ -246,7 +246,7 @@ test("P2 deltaBatchMs: close 冲刷残留 delta", async () => {
 });
 
 test("P2 deltaBatchMs: error 终态 → 冲刷残留 delta 再发 error", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome, deltaBatchMs: 1000 });
+  const client = new DaemonClient({ deltaBatchMs: 1000 });
   await connectClient(client);
   const seen = [];
   client.onEvent((type, data) => seen.push([type, data]));
@@ -260,8 +260,8 @@ test("P2 deltaBatchMs: error 终态 → 冲刷残留 delta 再发 error", async 
 });
 
 test("P2 skipStart: token 文件缺失 → 抛错不拉起 daemon（connManager 独占 daemon 生命周期）", async () => {
-  fs.rmSync(TOKEN_FILE(tmpHome), { force: true });
-  const client = new DaemonClient({ projectDir: tmpHome });
+  fs.rmSync(TOKEN_FILE(), { force: true });
+  const client = new DaemonClient();
   let spawnCalls = 0;
   client.startDaemon = async function () {
     spawnCalls += 1;
@@ -277,8 +277,8 @@ test("P2 skipStart: token 文件缺失 → 抛错不拉起 daemon（connManager 
 
 test("P2 skipStart: stale port + daemon 已死 → 抛错不重拉（不删文件不 spawn）", async () => {
   // 预写 token 文件（连接用常量端口，必然失败场景由 ws error 模拟）
-  fs.writeFileSync(TOKEN_FILE(tmpHome), "seekrit-token"); // 127.0.0.1:1 拒绝连接
-  const client = new DaemonClient({ projectDir: tmpHome });
+  fs.writeFileSync(TOKEN_FILE(), "seekrit-token"); // 127.0.0.1:1 拒绝连接
+  const client = new DaemonClient();
   // daemon 进程已死（无 pid 文件）→ 旧路径会删文件重拉；skipStart 必须拒绝
   let spawnCalls = 0;
   client.startDaemon = async function () {
@@ -292,12 +292,12 @@ test("P2 skipStart: stale port + daemon 已死 → 抛错不重拉（不删文�
   await assert.rejects(p, /daemon unreachable \(skipStart\)/);
   assert.strictEqual(spawnCalls, 0, "startDaemon must never be called");
   // token 文件保留（connManager 重启恢复依赖它判断 daemon 状态）
-  assert.ok(fs.existsSync(TOKEN_FILE(tmpHome)), "port file must be kept");
+  assert.ok(fs.existsSync(TOKEN_FILE()), "port file must be kept");
   assert.strictEqual(client.connected, false);
 });
 
 test("Phase4: _findDaemonExecutable 打包模式定位捆绑 emrgd（POSIX）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome, isPackaged: true });
+  const client = new DaemonClient({ isPackaged: true });
   const exe = client._findDaemonExecutable();
   const expected = path.join(os.homedir(), ".emrg", "install", "bin", process.platform === "win32" ? "emrgd.cmd" : "emrgd");
   assert.strictEqual(exe, expected);
@@ -305,7 +305,7 @@ test("Phase4: _findDaemonExecutable 打包模式定位捆绑 emrgd（POSIX）", 
 });
 
 test("Phase4: isPackaged startDaemon 走捆绑 emrgd 分支（非 python -m）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome, isPackaged: true });
+  const client = new DaemonClient({ isPackaged: true });
   // _findPython 只存在于源码分支；打包分支调用 _findDaemonExecutable。
   const exe = client._findDaemonExecutable();
   assert.ok(exe.endsWith("emrgd") || exe.endsWith("emrgd.cmd"), `exe=${exe}`);
@@ -333,7 +333,7 @@ test("Phase4: isPackaged startDaemon 走捆绑 emrgd 分支（非 python -m）",
   let DaemonClientPackaged;
   try {
     DaemonClientPackaged = require("../daemon_client.js").DaemonClient;
-    const c2 = new DaemonClientPackaged({ projectDir: tmpHome, isPackaged: true });
+    const c2 = new DaemonClientPackaged({ isPackaged: true });
     c2._findPython = () => { throw new Error("_findPython must not be called in packaged mode"); };
     c2.isRunning = async () => true;
     const child = await c2.startDaemon();
@@ -349,11 +349,11 @@ test("Phase4: isPackaged startDaemon 走捆绑 emrgd 分支（非 python -m）",
 });
 
 test("G43 stale port: 连接失败（port 文件存在但拒绝）→ 删文件重拉", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   let respawned = false;
   client.startDaemon = async function () {
     respawned = true;
-    fs.writeFileSync(TOKEN_FILE(tmpHome), "seekrit-token");
+    fs.writeFileSync(TOKEN_FILE(), "seekrit-token");
   };
   const p = client.ensureConnected();
   await waitForWs();
@@ -362,7 +362,7 @@ test("G43 stale port: 连接失败（port 文件存在但拒绝）→ 删文件�
   // 重拉后创建第二个 ws → open → auth → auth_ok
   await waitForWs(() => currentMockWs !== firstWs);
   assert.ok(respawned, "startDaemon should respawn after stale port");
-  assert.strictEqual(fs.existsSync(TOKEN_FILE(tmpHome)), true);
+  assert.strictEqual(fs.existsSync(TOKEN_FILE()), true);
   assert.strictEqual(currentMockWs.url, "ws://127.0.0.1:" + EMRGD_PORT);
   currentMockWs.emit("open");
   await waitForAuthSent(currentMockWs);
@@ -372,10 +372,10 @@ test("G43 stale port: 连接失败（port 文件存在但拒绝）→ 删文件�
 });
 
 test("rant 13:16:36 G43 加固：daemon 进程活着 → ws 失败不删 port 文件、不重拉", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   // 写入 emrgd.pid（当前进程 = 活着）
   fs.writeFileSync(path.join(tmpHome, ".emrg", "emrgd.pid"), String(process.pid));
-  const tokenFile = TOKEN_FILE(tmpHome);
+  const tokenFile = TOKEN_FILE();
   fs.writeFileSync(tokenFile, "seekrit-token");
   assert.strictEqual(client._daemonProcessAlive(), true, "pid alive → true");
 
@@ -392,7 +392,7 @@ test("rant 13:16:36 G43 加固：daemon 进程活着 → ws 失败不删 port �
 });
 
 test("rant 13:16:36 G43 加固：daemon 真死了（pid 不存在）→ 仍删文件重拉", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   // pid 文件指向不存在的进程 → 视为死 daemon
   fs.writeFileSync(path.join(tmpHome, ".emrg", "emrgd.pid"), "999999");
   assert.strictEqual(client._daemonProcessAlive(), false, "pid 不存在 → false");
@@ -400,7 +400,7 @@ test("rant 13:16:36 G43 加固：daemon 真死了（pid 不存在）→ 仍删�
   let respawned = false;
   client.startDaemon = async function () {
     respawned = true;
-    fs.writeFileSync(TOKEN_FILE(tmpHome), "seekrit-token");
+    fs.writeFileSync(TOKEN_FILE(), "seekrit-token");
   };
   const p = client.ensureConnected();
   await waitForWs();
@@ -416,12 +416,12 @@ test("rant 13:16:36 G43 加固：daemon 真死了（pid 不存在）→ 仍删�
 });
 
 test("rant 13:16:36 G43 加固：无 pid 文件 → 视为死 daemon（删文件重拉）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   assert.strictEqual(client._daemonProcessAlive(), false, "无 pid 文件 → false");
 });
 
 test("rant 13:16:36 ⑤ spawn 节流：超 MAX_SPAWN_ATTEMPTS 后不再拉起 daemon", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   let spawnCount = 0;
   // 镜像真实 startDaemon 的节流语义（检查上限 → 计数 +1 → spawn → 超时失败）
   client.startDaemon = async function () {
@@ -444,7 +444,7 @@ test("rant 13:16:36 ⑤ spawn 节流：超 MAX_SPAWN_ATTEMPTS 后不再拉起 da
 });
 
 test("rant 13:16:36 ⑤ spawn 节流计数在成功连接后归零", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   // 先失败一次（计数 +1），再成功 auth → 计数归零
   client.startDaemon = async function () {
     this._spawnAttempts += 1; // 镜像真实 startDaemon 的计数
@@ -467,7 +467,7 @@ test("rant 13:16:36 ⑤ spawn 节流计数在成功连接后归零", async () =>
 });
 
 test("auth 失败（G88）：auth_ok 前 close → 停止自动重试", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   const p = client.ensureConnected();
   await waitForWs();
   currentMockWs.emit("open");
@@ -479,7 +479,7 @@ test("auth 失败（G88）：auth_ok 前 close → 停止自动重试", async ()
 
 test("auth 超时（G142）：reject + _authFailed + ws.close + listener 清理", async () => {
   // 注入 30ms 短超时（生产默认 10s）——快速触发超时路径
-  const client = new DaemonClient({ projectDir: tmpHome, authTimeoutMs: 30 });
+  const client = new DaemonClient({ authTimeoutMs: 30 });
   const p = client.ensureConnected();
   await waitForWs();
   currentMockWs.emit("open");
@@ -498,7 +498,7 @@ test("auth 超时（G142）：reject + _authFailed + ws.close + listener 清理"
 });
 
 test("坏 JSON 帧 → 忽略不崩（R53）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const events = [];
   client.onEvent((t) => events.push(t));
@@ -509,7 +509,7 @@ test("坏 JSON 帧 → 忽略不崩（R53）", async () => {
 });
 
 test("ws close → disconnected 事件 + pending reject（G89/G90）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const events = [];
   client.onEvent((t) => events.push(t));
@@ -521,7 +521,7 @@ test("ws close → disconnected 事件 + pending reject（G89/G90）", async () 
 });
 
 test("断连清 _currentStream + G94 timer（#338 回归：不弹虚假超时）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   // 发起任务 → _currentStream 建立
   const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: tmpHome, prompt: "hi" });
@@ -541,7 +541,7 @@ test("断连清 _currentStream + G94 timer（#338 回归：不弹虚假超时）
 });
 
 test("sendTask payload（G32，无 stream 字段——rant 21:20:38）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hello", images: null });
   const frame = JSON.parse(currentMockWs.sent.at(-1));
@@ -555,7 +555,7 @@ test("sendTask payload（G32，无 stream 字段——rant 21:20:38）", async (
 });
 
 test("sendTask 外部预生成 requestId（G143）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const outer = "s_260803_1730_outer1234";
   const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: outer });
@@ -566,7 +566,7 @@ test("sendTask 外部预生成 requestId（G143）", async () => {
 });
 
 test("sendCommand payload + cancel 无多余字段（G24）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   client.sendCommand("cancel");
   const frame = JSON.parse(currentMockWs.sent.at(-1));
@@ -579,7 +579,7 @@ test("sendCommand payload + cancel 无多余字段（G24）", async () => {
 test("sendCommand 帧形状：payload 带 type 字段不覆盖消息类型（rant 2026-08-14T21:48）", async () => {
   // task CRUD payload 含任务类型字段 type（如 "evolution"）——消息类型必须保留，
   // 否则 daemon 路由失败返回 unknown message type，GUI 保存无响应。
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   client.sendCommand("task_create", { type: "evolution", name: "t1", project: "p1" });
   const frame = JSON.parse(currentMockWs.sent.at(-1));
@@ -589,7 +589,7 @@ test("sendCommand 帧形状：payload 带 type 字段不覆盖消息类型（ran
 });
 
 test("帧分类（G21+G58）：各帧事件分发正确", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const seen = [];
   client.onEvent((type, data) => seen.push([type, data]));
@@ -625,7 +625,7 @@ test("帧分类（G21+G58）：各帧事件分发正确", async () => {
 });
 
 test("命令-响应配对（G93）：list_sessions → sessions_list resolve", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const p = client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 2000);
   await new Promise((r) => setTimeout(r, 10));
@@ -636,7 +636,7 @@ test("命令-响应配对（G93）：list_sessions → sessions_list resolve", a
 });
 
 test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/trigger + 补 rewind/read_memory）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   // clear_session → clear_result（原 clear 映射会超时）
   const p1 = client.sendCommandAndWait("clear_session", { session_id: "s1", cwd: tmpHome }, 2000);
@@ -713,7 +713,7 @@ test("RESPONSE_TYPES 映射表与 daemon 命令名一致（修正 clear/rename/t
 });
 
 test("rant 18:23:15 P2/P3：RESPONSE_TYPES 覆盖任务/模板 CRUD（task_result / templates_list / template_result）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
   // task_create → task_result
@@ -765,7 +765,7 @@ test("rant 18:23:15 P2/P3：RESPONSE_TYPES 覆盖任务/模板 CRUD（task_resul
 });
 
 test("命令-响应配对超时 → reject（G93）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   await assert.rejects(
     client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 50),
@@ -774,7 +774,7 @@ test("命令-响应配对超时 → reject（G93）", async () => {
 });
 
 test("error 帧 FIFO reject 最早未决（G103）；无未决 error → 广播", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const seen = [];
   client.onEvent((t, d) => seen.push([t, d]));
@@ -793,7 +793,7 @@ test("error 帧 FIFO reject 最早未决（G103）；无未决 error → 广播"
 });
 
 test("分组生命周期（G83+G104）：建组 → done 清理；>20 丢最老", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
   // tool_start 建组（G104）
@@ -825,7 +825,7 @@ test("generateSessionId 格式（G28+G81）", () => {
 });
 
 test("isRunning：TCP 探测（G43/G90）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   // mock net.connect：成功 → true
   const origConnect = net.connect;
   net.connect = (opts) => {
@@ -840,12 +840,12 @@ test("isRunning：TCP 探测（G43/G90）", async () => {
     net.connect = origConnect;
   }
   // token 文件缺失 → false
-  fs.rmSync(TOKEN_FILE(tmpHome), { force: true });
+  fs.rmSync(TOKEN_FILE(), { force: true });
   assert.strictEqual(await client.isRunning(), false);
 });
 
 test("断连 pending 请求全部 reject + disconnected（G89）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const pending = [
     client.sendCommandAndWait("list_sessions", { cwd: tmpHome }, 5000),
@@ -860,62 +860,48 @@ test("断连 pending 请求全部 reject + disconnected（G89）", async () => {
 
 // ── Rant 2026-08-09T18:47:37（GUI 连不上 daemon 回归）──────────────────
 
-test("18:47:37: projectDir port 文件缺失 → 回退规范 ~/.emrg（home）→ 不 spawn 直接连接", async () => {
-  // 宿主场景：config gui.project_dir 指向非 home 目录 → projectDir/.emrg 无 token 文件，
-  // 真 daemon 写在 ~/.emrg/emrgd.token（setupTempHome 已预写 seekrit-token）。
-  const elsewhere = path.join(tmpHome, "elsewhere");
-  fs.mkdirSync(path.join(elsewhere, ".emrg"), { recursive: true });
-  const client = new DaemonClient({ projectDir: elsewhere });
+test("16:03:31: token 固定读规范 ~/.emrg → 存在则不 spawn 直接连接", async () => {
+  // setupTempHome 已把 HOME/USERPROFILE 重定向到 tmpHome 并预写 ~/.emrg/emrgd.token；
+  // projectDir 概念删除后（rant 2026-08-20T16:03:31）token 固定读该位置。
+  const client = new DaemonClient();
   let spawned = false;
   client.startDaemon = async function () { spawned = true; };
   await connectClient(client);
-  assert.strictEqual(spawned, false, "home 有 token 文件 → 必须复用，不 spawn");
+  assert.strictEqual(spawned, false, "规范位置有 token 文件 → 必须复用，不 spawn");
   assert.strictEqual(client.connected, true);
   assert.strictEqual(currentMockWs.url, "ws://127.0.0.1:" + EMRGD_PORT, "连接 canonical home port");
 });
 
-test("18:47:37: stale projectDir port + spawn 节流失败 → probe 复用 canonical home daemon", async () => {
-  // 宿主场景变体：projectDir 有 STALE token 文件（ws 连不上），真 daemon 在 home。
-  // ws 失败 → 删 projectDir stale 文件 → spawn 节流抛错 → probe 发现 home 活着 → 复用。
-  const elsewhere = path.join(tmpHome, "elsewhere");
-  fs.mkdirSync(path.join(elsewhere, ".emrg"), { recursive: true });
-  fs.writeFileSync(TOKEN_FILE(elsewhere), "stale-token"); // stale：无 daemon 监听
-  const client = new DaemonClient({ projectDir: elsewhere });
+test("16:03:31: stale token + spawn 节流失败 → probe 诚实失败，抛原始错误（不假装复用）", async () => {
+  // 宿主场景：token 文件存在（stale，无 daemon 监听）。ws 失败 → pid 死 →
+  // 删 stale token → spawn 节流抛错 → probe 无 token 可复用 → 诚实抛原始错误
+  // （projectDir 概念删除后 token 只有一个规范位置，probe 复用需 token 存在）。
+  const client = new DaemonClient();
   // spawn 命中节流（正是宿主看到的假错误 "after 3 attempts"）
   client.startDaemon = async function () {
     throw new Error("daemon failed to start after 3 attempts — please start it manually");
   };
-  // TCP 探测：常量端口 56031 "可连接"（模拟真 daemon 在跑）
-  client.isRunning = async () => true;
   // 捕获日志 → 断言 4 状态诊断字段齐全（B1/B3）
   const logs = [];
   client.logger = { info: (...a) => logs.push(a.join(" ")), warn: (...a) => logs.push(a.join(" ")) };
   const p = client.ensureConnected();
   await waitForWs();
   const firstWs = currentMockWs;
-  firstWs.emit("error", new Error("connect ECONNREFUSED")); // 拒绝
-  // probe 复用 → 新 ws 到常量端口 56031 → open → auth → auth_ok
-  await waitForWs(() => currentMockWs !== firstWs);
-  assert.strictEqual(currentMockWs.url, "ws://127.0.0.1:" + EMRGD_PORT, "复用 canonical home port");
-  currentMockWs.emit("open");
-  await waitForAuthSent(currentMockWs);
-  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "auth_ok" })));
-  await p;
-  assert.strictEqual(client.connected, true, "probe 到已有 daemon → 直接连接");
+  firstWs.emit("error", new Error("connect ECONNREFUSED")); // stale：拒绝
+  await assert.rejects(() => p, /daemon failed to start after 3 attempts/, "诚实抛原始错误");
   const probeLine = logs.find((l) => l.includes("probe:"));
   assert.ok(probeLine, "必须输出 probe 诊断日志");
-  assert.match(probeLine, /token_file_exists=/);
+  assert.match(probeLine, /token_file_exists=false/, "token 已被删 → probe 如实上报");
   assert.match(probeLine, /token_file_content=/);
   assert.match(probeLine, /daemon_alive\(ping\)=/);
-  assert.match(probeLine, /spawn_result=/);
-  assert.match(probeLine, /failed\(daemon failed to start after 3 attempts/);
-  assert.ok(logs.some((l) => l.includes("existing daemon detected at port=" + EMRGD_PORT + ", reusing")), "复用日志");
+  assert.match(probeLine, /spawn_result=failed\(daemon failed to start after 3 attempts/);
+  assert.ok(logs.some((l) => l.includes("no existing daemon reachable, giving up")), "诚实放弃日志");
 });
 
 // ── P2 自有流锁（G65 每连接独立；rant 15:07:19）──────────────────────────
 
 test("P2 ownStream: sendTask 恒标记 ownStream + requestId（非 stream 路径已删）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   const rid = client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-1" });
   assert.strictEqual(client.ownStream, true, "ownStream set unconditionally");
@@ -924,7 +910,7 @@ test("P2 ownStream: sendTask 恒标记 ownStream + requestId（非 stream 路径
 });
 
 test("P2 ownStream: 自有 done（request 匹配）→ 释放锁；广播 done（不匹配）→ 保持", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-2" });
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
@@ -938,7 +924,7 @@ test("P2 ownStream: 自有 done（request 匹配）→ 释放锁；广播 done�
 });
 
 test("P2 ownStream: timeout 兜底 done（无匹配 request）→ 释放锁", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-3" });
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
@@ -947,7 +933,7 @@ test("P2 ownStream: timeout 兜底 done（无匹配 request）→ 释放锁", as
 });
 
 test("P2 ownStream: session busy 即发 error → 释放锁（防 G65 锁泄漏）", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-4" });
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
@@ -956,7 +942,7 @@ test("P2 ownStream: session busy 即发 error → 释放锁（防 G65 锁泄漏�
 });
 
 test("P2 ownStream: cancelled（request 匹配）→ 释放锁", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-5" });
   const send = (obj) => currentMockWs.emit("message", Buffer.from(JSON.stringify(obj)));
@@ -965,7 +951,7 @@ test("P2 ownStream: cancelled（request 匹配）→ 释放锁", async () => {
 });
 
 test("P2 ownStream: 断连 → 释放锁", async () => {
-  const client = new DaemonClient({ projectDir: tmpHome });
+  const client = new DaemonClient();
   await connectClient(client);
   client.sendTask({ sessionId: "s_260803_1730_abcd1234", cwd: "/proj", prompt: "hi", requestId: "req-own-6" });
   assert.strictEqual(client.ownStream, true);

@@ -103,11 +103,11 @@ function makeSandbox(overrides = {}) {
     emrg: {
       // 注意：app.js 模块加载即 App.boot()，init 返回空 sessions 走 newSession 路径，
       // 避免 boot 自动 switchSession 污染计数（非空 sessions 会触发 boot 切换）
-      init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", evolution_count: 1, sessions: [] }),
+      init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", evolution_count: 1, sessions: [] }),
       onEvent() {},
       sendMessage: async () => ({}),
       cancel: async () => ({}),
-      getSettings: async () => ({ apiKey: "k", baseUrl: "", model: "m", projectDir: "/p", models: [], modelDetails: [], theme: "system" }),
+      getSettings: async () => ({ apiKey: "k", baseUrl: "", model: "m", models: [], modelDetails: [], theme: "system" }),
       saveSettings: async () => ({}),
       pickProjectDir: async () => null,
       listSessions: async () => [{ session_id: "s1", title: "会话一" }, { session_id: "s2", title: "会话二" }],
@@ -292,7 +292,7 @@ test("P2：sendMessage 透传 state.mode（ask → sendMessage 带 mode）", asy
 // ── WorkBuddy P3（rant 21:35）：自进化可见化 ────────────────
 test("P3：/version 使用动态版本号（不再硬编码 v0.2.7）", async () => {
   const { ctx } = makeSandbox({
-    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 3, sessions: [] }),
+    init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 3, sessions: [] }),
   });
   await tick();
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/version', args: [] })", ctx);
@@ -304,7 +304,7 @@ test("P3：/version 使用动态版本号（不再硬编码 v0.2.7）", async ()
 
 test("P3：updateGrowthCard 更新侧边栏成长计数", async () => {
   const { ctx, els } = makeSandbox({
-    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 42, sessions: [] }),
+    init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 42, sessions: [] }),
   });
   await tick();
   await vm.runInContext("App.updateGrowthCard()", ctx);
@@ -313,7 +313,7 @@ test("P3：updateGrowthCard 更新侧边栏成长计数", async () => {
 
 test("P3：进化计数增长 → toast 显示（一天最多一次）", async () => {
   const { ctx, els } = makeSandbox({
-    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 5, sessions: [] }),
+    init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 5, sessions: [] }),
   });
   await tick();
   // 模拟 pong 事件：计数 5 → 6（进化发生）
@@ -334,7 +334,7 @@ test("P3：进化计数增长 → toast 显示（一天最多一次）", async (
 
 test("P3：toast '去看看' 关闭并输出版本信息", async () => {
   const { ctx, els } = makeSandbox({
-    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 2, sessions: [] }),
+    init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 2, sessions: [] }),
   });
   await tick();
   // 计数 2 → 3 触发 toast
