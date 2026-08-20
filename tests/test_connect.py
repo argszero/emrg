@@ -10,12 +10,12 @@ from emrg.connect import CONNECT_ID, AuthError, cleanup_server, get_server_path,
 class TestGetServerPath:
     """Tests for get_server_path — daemon port/token file path."""
 
-    def test_returns_port_file_path(self, monkeypatch, tmp_path):
-        """Returns ~/.emrg/emrgd.port in the config dir."""
+    def test_returns_token_file_path(self, monkeypatch, tmp_path):
+        """Returns ~/.emrg/emrgd.token in the config dir."""
         monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
 
         result = get_server_path()
-        expected = str(tmp_path / f"{CONNECT_ID}.port")
+        expected = str(tmp_path / f"{CONNECT_ID}.token")
         assert result == expected
 
     def test_connect_id_constant(self):
@@ -29,29 +29,29 @@ class TestAuthError:
 
 
 class TestCleanupServer:
-    def test_removes_port_file(self, monkeypatch, tmp_path):
-        """Removes the port file if present."""
+    def test_removes_token_file(self, monkeypatch, tmp_path):
+        """Removes the token file if present."""
         monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
-        port_file = tmp_path / f"{CONNECT_ID}.port"
-        port_file.write_text("49152\ntoken", encoding="utf-8")
+        port_file = tmp_path / f"{CONNECT_ID}.token"
+        port_file.write_text("token", encoding="utf-8")
 
         cleanup_server()
 
         assert not port_file.exists()
 
     def test_noop_when_absent(self, monkeypatch, tmp_path):
-        """Does nothing when the port file doesn't exist."""
+        """Does nothing when the token file doesn't exist."""
         monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
 
         cleanup_server()  # must not raise
 
     def test_leaves_other_files(self, monkeypatch, tmp_path):
-        """Only removes the port file, not other config files."""
+        """Only removes the token file, not other config files."""
         monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
         other = tmp_path / "config.toml"
         other.write_text("x", encoding="utf-8")
-        port_file = tmp_path / f"{CONNECT_ID}.port"
-        port_file.write_text("1\nt", encoding="utf-8")
+        port_file = tmp_path / f"{CONNECT_ID}.token"
+        port_file.write_text("t", encoding="utf-8")
 
         cleanup_server()
 
@@ -60,8 +60,8 @@ class TestCleanupServer:
 
 
 class TestIsServerRunningSync:
-    """Probes the FIXED daemon port (rant 2026-08-19T08:05:21) — no port-file
-    read, so a missing/stale emrgd.port never hides a live daemon."""
+    """Probes the FIXED daemon port (rant 2026-08-19T08:05:21) — no token-file
+    read, so a missing/stale emrgd.token never hides a live daemon."""
 
     def _free_port(self) -> int:
         """Bind a probe socket to port 0 to get a free port (avoids colliding
@@ -134,12 +134,12 @@ class TestConnectToServer:
 
         monkeypatch.setattr(connect_mod, "config_dir", lambda: tmp_path)
         monkeypatch.setattr(connect_mod, "connect", fake_connect)
-        (tmp_path / f"{CONNECT_ID}.port").write_text("49152\ntoken", encoding="utf-8")
+        (tmp_path / f"{CONNECT_ID}.token").write_text("token", encoding="utf-8")
 
         asyncio.run(connect_mod.connect_to_server())
 
-        # Fixed daemon port (rant 2026-08-19T08:05:21) — the URI no longer
-        # depends on the port file's port value, only the token is read from it.
+        # Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52) —
+        # the URI no longer depends on the file (single-line token only).
         assert captured["uri"] == f"ws://127.0.0.1:{connect_mod.EMRGD_PORT}"
         assert captured["kwargs"]["proxy"] is None
         assert captured["kwargs"]["max_size"] == 16 * 1024 * 1024

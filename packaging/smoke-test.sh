@@ -68,22 +68,21 @@ else
   nohup emrgd >"$HOME/.emrg/emrgd-debug.log" 2>&1 &
 fi
 for i in $(seq 1 30); do
-  [ -f "$HOME/.emrg/emrgd.port" ] && break
+  [ -f "$HOME/.emrg/emrgd.token" ] && break
   sleep 0.5
 done
-if [ ! -f "$HOME/.emrg/emrgd.port" ]; then
+if [ ! -f "$HOME/.emrg/emrgd.token" ]; then
   echo "  [debug] emrgd-debug.log:" >&2
   cat "$HOME/.emrg/emrgd-debug.log" 2>/dev/null || true
   echo "  [debug] emrgd.log (tail):" >&2
   tail -20 "$HOME/.emrg/emrgd.log" 2>/dev/null || true
-  fail "daemon did not write port file"
+  fail "daemon did not write token file"
 else
-  port=$(head -1 "$HOME/.emrg/emrgd.port")
-  token=$(sed -n 2p "$HOME/.emrg/emrgd.port")
-  if python3 - "$port" "$token" <<'PYEOF'
+  token=$(cat "$HOME/.emrg/emrgd.token")
+  if python3 - "$token" <<'PYEOF'
 import json, sys
 from websockets.sync.client import connect
-port, token = sys.argv[1], sys.argv[2]
+port, token = 56031, sys.argv[1]
 try:
     ws = connect(f"ws://127.0.0.1:{port}", open_timeout=3)
     ws.send(json.dumps({"type": "auth", "token": token}))
@@ -104,10 +103,10 @@ fi
 
 # 3. 会话持久化核心链路（R79 降级：无 LLM）
 say "3. session persistence core (no-LLM)"
-if [ -f "$HOME/.emrg/emrgd.port" ]; then
-  if python3 - "$HOME/.emrg/emrgd.port" <<'PYEOF'
+if [ -f "$HOME/.emrg/emrgd.token" ]; then
+  if python3 - "$HOME/.emrg/emrgd.token" <<'PYEOF'
 import json, sys, websockets.sync.client
-port, token = open(sys.argv[1]).read().split()
+port, token = 56031, open(sys.argv[1]).read().strip()
 ws = websockets.sync.client.connect(f"ws://127.0.0.1:{port}", open_timeout=3)
 ws.send(json.dumps({"type": "auth", "token": token}))
 json.loads(ws.recv())

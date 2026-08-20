@@ -1,6 +1,6 @@
 """DaemonManager end-to-end tests (real daemon, mocked LLM).
 
-⚠️ 不经 ensure_connected() 的完整路径（它会读真实 ~/.emrg/emrgd.port 连错
+⚠️ 不经 ensure_connected() 的完整路径（它会读真实 ~/.emrg/emrgd.token 连错
 daemon）——先复用 test_ws_e2e 的 _boot_server 起隔离 daemon，再对
 ensure_connected 的三个内部调用打桩（check_and_restart / is_running /
 connect_to_server），验证 DaemonConnection 全链路：ping → list_models →

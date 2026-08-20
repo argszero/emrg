@@ -329,17 +329,17 @@ def ws_graceful_shutdown(port: int, token: str, timeout: float = 3.0) -> bool:
 def stop_daemon() -> None:
     """Stop the daemon: ws shutdown → pid file → SIGTERM/taskkill /F → poll.
 
-    Also removes ``~/.emrg/emrgd.port`` once the daemon pid is confirmed dead
+    Also removes ``~/.emrg/emrgd.token`` once the daemon pid is confirmed dead
     (the daemon itself removes it on graceful shutdown; a force-killed daemon
     cannot, so we clean it up — the next daemon start re-asserts both files).
     """
-    port_path = config_dir() / "emrgd.port"
+    token_path = config_dir() / "emrgd.token"
     # Fixed-port shutdown (rant 2026-08-19T08:05:21): the daemon always
-    # listens on _EMRGD_PORT; the port file only supplies the auth token. If
-    # the file is missing/stale, fall through to the pid + cmdline paths.
+    # listens on _EMRGD_PORT; the token file only supplies the auth token
+    # (single line, rant 2026-08-20T14:32:52). If the file is missing/stale,
+    # fall through to the pid + cmdline paths.
     try:
-        text = port_path.read_text(encoding="utf-8").split()
-        token = text[1] if len(text) == 2 else ""
+        token = token_path.read_text(encoding="utf-8").strip()
     except (OSError, ValueError):
         token = ""
     if token and ws_graceful_shutdown(_EMRGD_PORT, token):
@@ -371,13 +371,13 @@ def stop_daemon() -> None:
     for pid in _scan_windows_python_emrg(os.getpid()):
         _kill_pid_windows(pid)
 
-    # Port file cleanup: the daemon removes it on graceful shutdown; a
+    # Token file cleanup: the daemon removes it on graceful shutdown; a
     # force-killed daemon cannot, so remove it once the pid is confirmed gone
     # (the next daemon start re-asserts both files).
     daemon_gone = pid is None or not _pid_alive(pid)
     if daemon_gone:
         try:
-            port_path.unlink()
+            token_path.unlink()
         except OSError:
             pass
 

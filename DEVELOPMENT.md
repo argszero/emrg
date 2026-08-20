@@ -103,7 +103,7 @@ vision = true
 ┌─────────────┐    WebSocket (ws://)    ┌──────────────┐
 │   emrg TUI  │ ◄─────────────────────► │   emrgd      │
 │  (client)   │  TCP loopback + auth    │  (daemon)    │
-│             │  token (emrgd.port)     │              │
+│             │  token (emrgd.token)    │              │
 │  • Chat     │                         │  • LLM loop  │
 │  • Markdown │                         │  • Tools     │
 │  • ToolCards│                         │  • Evolution │

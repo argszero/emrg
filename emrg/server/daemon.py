@@ -351,23 +351,23 @@ class EmrgServer:
         )
         port = EMRGD_PORT
         self._auth_token = secrets.token_urlsafe(32)
-        self._assert_port_file(port)
-        # Rant 2026-08-09T18:47:37 B4：启动完成一行自证——pid/port/port 文件路径/写入成功，
+        self._assert_token_file()
+        # Rant 2026-08-09T18:47:37 B4：启动完成一行自证——pid/port/token 文件路径/写入成功，
         # 宿主拿到 emrgd.log 就知道 daemon 到底起没起、写没写对文件。
         logger.info(
-            "emrgd listening on 127.0.0.1:%d | identity=%s | pid=%d | port_file=%s | port_file_written_ok=%s",
+            "emrgd listening on 127.0.0.1:%d | identity=%s | pid=%d | token_file=%s | token_file_written_ok=%s",
             port,
             self.identity.instance_id[:8],
             os.getpid(),
-            config_dir() / "emrgd.port",
-            (config_dir() / "emrgd.port").exists(),
+            config_dir() / "emrgd.token",
+            (config_dir() / "emrgd.token").exists(),
         )
 
         # Rant 2026-08-09T13:16:36 root-cause self-heal: G43 stale-port logic
-        # deleted a healthy daemon's emrgd.port after a transient ws failure →
+        # deleted a healthy daemon's emrgd.token after a transient ws failure →
         # the daemon's OWN scheduler lost the file (93× "cannot connect") while
         # GUI respawns hit the PID lock and exited. The daemon re-asserts its
-        # port file periodically so any external deletion self-heals.
+        # token file periodically so any external deletion self-heals.
         self._port_keepalive_task = asyncio.create_task(self._port_keepalive_loop())
 
         self._scheduler = TaskScheduler(self.identity)
@@ -486,33 +486,33 @@ class EmrgServer:
         )
 
     async def _port_keepalive_loop(self) -> None:
-        """Re-assert the port file if it was deleted or overwritten.
+        """Re-assert the token file if it was deleted or overwritten.
 
         Rant 2026-08-09T13:16:36 root cause: a client's stale-port unlink
-        (G43) can remove a healthy daemon's emrgd.port after one transient
+        (G43) can remove a healthy daemon's emrgd.token after one transient
         ws failure. The daemon's own scheduler reads that file to reconnect,
         so it then fails forever while the PID lock blocks new spawns —
         the zombie state behind the Windows v0.2.15 storm. Re-writing the
         file every 60s makes the daemon self-healing.
         """
-        port_path = config_dir() / "emrgd.port"
+        token_path = config_dir() / "emrgd.token"
         while self._running:
             await asyncio.sleep(60)
             try:
-                if not port_path.exists():
-                    port = self._server.sockets[0].getsockname()[1]
-                    self._assert_port_file(port)
+                if not token_path.exists():
+                    self._assert_token_file()
                     logger.warning(
-                        "emrgd.port was missing — re-asserted (external deletion?)"
+                        "emrgd.token was missing — re-asserted (external deletion?)"
                     )
             except (OSError, IndexError, AttributeError):
                 pass
 
-    def _assert_port_file(self, port: int) -> None:
-        """(Re)write the port/token file for the current listener."""
+    def _assert_token_file(self) -> None:
+        """(Re)write the auth token file for the current daemon (single-line
+        token, mode 0o600 — rant 2026-08-20T14:32:52: emrgd.port → emrgd.token)."""
         atomic_write_bytes(
-            f"{port}\n{self._auth_token}",
-            config_dir() / "emrgd.port",
+            self._auth_token,
+            config_dir() / "emrgd.token",
             mode=0o600,
         )
 

@@ -102,7 +102,7 @@ def test_stop_all_py_restart_manager_lock_owners():
     """rant 2026-08-17T17:55:42 — DeleteFile code 5 通用解（Restart Manager）。
 
     0.2.43 安装实测根因：占用 install\\ 下文件的是【外来进程】（browser-harness
-    daemon，独立 uv CPython，AppData\\Roaming\\uv\\tools），emrgd.pid/emrgd.port
+    daemon，独立 uv CPython，AppData\\Roaming\\uv\\tools），emrgd.pid/emrgd.token
     全空、无任何 -m emrg 进程 → 命令行扫描永远找不到。修复 = Restart Manager
     （rstrtmgr.dll）扫 install\\ 全部文件收集占用者 → 排除自身+祖先进程链
     （stop_all 由 install\\python-dist\\python.exe 执行，自身加载 install\\python313.dll；
