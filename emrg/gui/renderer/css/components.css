@@ -1007,8 +1007,10 @@ dialog::backdrop {
 }
 
 /* rant 2026-08-18T10:45:52：任务行"上次执行"元信息（运行时间/摘要/降频标识） */
+/* rant 2026-08-20T10:34:40：主表一行 —— 去掉 flex-basis:100%（曾强制"上次运行"独占一行），
+   改为 flex: 0 1 auto 与 actions 同行；窄窗口下靠自身 flex-wrap 内部合理换行 */
 .task-meta {
-  flex-basis: 100%;
+  flex: 0 1 auto;
   display: flex;
   align-items: center;
   gap: 6px;
