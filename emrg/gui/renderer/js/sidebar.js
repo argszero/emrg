@@ -27,10 +27,10 @@ const Sidebar = (() => {
     const known = (App.state && App.state.sessions) || [];
     for (const entry of openSessions) {
       const cur = known.find((s) => s.session_id === entry.sid) || {};
-      const title = entry.title || cur.title || entry.sid; // entry.title 优先（跨项目），再 cur.title（当前项目），最后 sid
+      const title = entry.title || cur.title || ""; // entry.title 优先（跨项目），再 cur.title；id 单独显示，不降级为 sid
       const item = el("div", { class: "conv-item open-session-item" });
       item.dataset.sid = entry.sid;
-      item.appendChild(el("span", { class: "conv-title" }, _t("sidebar.openSessionOf", { project: entry.projectName || "", title })));
+      item.appendChild(el("span", { class: "conv-title" }, sessionLabel(entry.projectName || "", title, entry.sid)));
       item.addEventListener("click", () => App.switchSession(entry.sid));
       item.addEventListener("contextmenu", (e) => {
         e.preventDefault();
@@ -41,7 +41,20 @@ const Sidebar = (() => {
     highlight(App.state.sessionId);
   }
 
-  /** 渲染分组对话列表 */
+  /** 会话条目统一格式 project/name|id（rant 2026-08-20T17:48:07 三处统一） */
+  function sessionLabel(project, title, sid) {
+    return `${project}/${title}|${sid}`;
+  }
+
+  /** cwd 末段作项目名（Path(s.cwd).name 语义，兼容 \\ 与 /） */
+  function cwdProjectName(cwd) {
+    if (!cwd) return "";
+    const norm = String(cwd).replace(/\\/g, "/").replace(/\/+$/, "");
+    const seg = norm.split("/");
+    return seg[seg.length - 1] || "";
+  }
+
+  /** 渲染会话列表（rant 17:48:07：去掉今天/昨天/更早分组，按最后活跃倒序，project/name|id） */
   function render(list) {
     sessions = list || [];
     const nav = $("conv-list");
@@ -50,32 +63,21 @@ const Sidebar = (() => {
       nav.appendChild(el("div", { class: "conv-item placeholder" }, EMRG_Copy.COPY.noSessions));
       return;
     }
-    // rant 21:19：分组标签本地化（顺序保持 今天→昨天→更早 不变）
-    const groups = {};
-    for (const lbl of [_t("util.groupToday"), _t("util.groupYesterday"), _t("util.groupEarlier")]) {
-      groups[lbl] = [];
-    }
-    for (const s of sessions) {
-      const g = groupLabel(s.updated_at || s.created_at);
-      if (!groups[g]) groups[g] = [];
-      groups[g].push(s);
-    }
-    for (const [label, items] of Object.entries(groups)) {
-      if (!items.length) continue;
-      nav.appendChild(el("div", { class: "conv-group-label" }, label));
-      for (const s of items) {
-        const item = el("div", { class: "conv-item" });
-        item.dataset.sid = s.session_id;
-        const title = s.title || s.session_id; // G27：title 优先
-        item.appendChild(el("span", { class: "conv-title" }, title));
-        item.addEventListener("click", () => App.switchSession(s.session_id));
-        // 右键菜单：重命名 / 删除（友好确认）
-        item.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          App.showConvMenu(item, s.session_id, title);
-        });
-        nav.appendChild(item);
-      }
+    const sorted = [...sessions].sort((a, b) =>
+      String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
+    for (const s of sorted) {
+      const item = el("div", { class: "conv-item" });
+      item.dataset.sid = s.session_id;
+      const title = s.title || ""; // G27：title 优先，无 title 则空（id 已单独显示）
+      const project = cwdProjectName(s.cwd);
+      item.appendChild(el("span", { class: "conv-title" }, sessionLabel(project, title, s.session_id)));
+      item.addEventListener("click", () => App.switchSession(s.session_id));
+      // 右键菜单：重命名 / 删除（友好确认）
+      item.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        App.showConvMenu(item, s.session_id, title || s.session_id);
+      });
+      nav.appendChild(item);
     }
     highlight(App.state.sessionId);
   }

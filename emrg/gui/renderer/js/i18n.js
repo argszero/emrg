@@ -317,10 +317,6 @@ const I18N = (() => {
       "chat.elapsed": "耗时 {s}",
       "chat.expand": "展开全文",
       "chat.toolGroupSummary": "{count} 个工具执行 · {time}",
-      // 时间分组（utils.js/sidebar.js）
-      "util.groupToday": "今天",
-      "util.groupYesterday": "昨天",
-      "util.groupEarlier": "更早",
       // 结果面板（result-panel.js）
       // Markdown 代码块（markdown.js）
       "md.copyCode": "复制代码",
@@ -410,7 +406,6 @@ const I18N = (() => {
       "app.closeSession": "❌ 关闭会话（保留数据）",
       "app.closeFailed": "关闭会话失败了：{msg}",
       "sidebar.openSessions": "打开的会话",
-      "sidebar.openSessionOf": "{project} / {title}",
       "app.noModels": "还没有配置模型",
       "app.goSettings": "去设置添加",
       "app.modelSwitchFailed": "切换模型失败了：{msg}",
@@ -727,10 +722,6 @@ const I18N = (() => {
       "chat.elapsed": "took {s}",
       "chat.expand": "Expand full text",
       "chat.toolGroupSummary": "{count} tool calls · {time}",
-      // Time groups (utils.js/sidebar.js)
-      "util.groupToday": "Today",
-      "util.groupYesterday": "Yesterday",
-      "util.groupEarlier": "Earlier",
       // Result panel (result-panel.js)
       // Markdown code block (markdown.js)
       "md.copyCode": "Copy code",
@@ -820,7 +811,6 @@ const I18N = (() => {
       "app.closeSession": "❌ Close session (keep data)",
       "app.closeFailed": "Failed to close session: {msg}",
       "sidebar.openSessions": "Open sessions",
-      "sidebar.openSessionOf": "{project} / {title}",
       "app.noModels": "No models configured",
       "app.goSettings": "Add in Settings",
       "app.modelSwitchFailed": "Failed to switch model: {msg}",
