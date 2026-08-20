@@ -255,37 +255,37 @@ test("P4：/trigger <name> 直接触发（不打开对话框）", async () => {
   assert.ok(!(els["tasks-dialog"] && els["tasks-dialog"].__open), "direct trigger should not open dialog");
 });
 
-// ── WorkBuddy P2（rant 21:35）：Ask/Auto 模式 ────────────────
-test("P2：setMode('ask') 更新 state.mode 并提示（Ask 只对话不执行工具）", async () => {
+// ── Rant 2026-08-20T18:18：Ask/Auto 删除 → 沙箱三档切换 ────────────────
+test("setSandbox 更新 state.sandbox（三档白名单）", async () => {
   const { ctx } = makeSandbox({});
   await tick();
-  await vm.runInContext("App.setMode('ask')", ctx);
-  const mode = await vm.runInContext("App.state.mode", ctx);
-  assert.strictEqual(mode, "ask", "state.mode 应为 ask");
-  await vm.runInContext("App.setMode('auto')", ctx);
-  const mode2 = await vm.runInContext("App.state.mode", ctx);
-  assert.strictEqual(mode2, "auto", "state.mode 应切回 auto");
+  await vm.runInContext("App.setSandbox('read-only')", ctx);
+  const sb = await vm.runInContext("App.state.sandbox", ctx);
+  assert.strictEqual(sb, "read-only", "state.sandbox 应为 read-only");
+  await vm.runInContext("App.setSandbox('danger-full-access')", ctx);
+  const sb2 = await vm.runInContext("App.state.sandbox", ctx);
+  assert.strictEqual(sb2, "danger-full-access", "state.sandbox 应切到 danger-full-access");
 });
 
-test("P2：setMode 非法值不生效（白名单 ask/auto）", async () => {
+test("setSandbox 非法值不生效（白名单 read-only/workspace-write/danger-full-access）", async () => {
   const { ctx } = makeSandbox({});
   await tick();
-  await vm.runInContext("App.setMode('bogus')", ctx);
-  const mode = await vm.runInContext("App.state.mode", ctx);
-  assert.strictEqual(mode, "auto", "非法 mode 应保持默认 auto");
+  await vm.runInContext("App.setSandbox('bogus')", ctx);
+  const sb = await vm.runInContext("App.state.sandbox", ctx);
+  assert.strictEqual(sb, "workspace-write", "非法档位应保持默认 workspace-write");
 });
 
-test("P2：sendMessage 透传 state.mode（ask → sendMessage 带 mode）", async () => {
+test("sendMessage 透传 state.sandbox（read-only → sendMessage 带 sandbox）", async () => {
   let sent = null;
   const { ctx, els } = makeSandbox({
     sendMessage: async (p) => { sent = p; return {}; },
   });
   await tick();
-  vm.runInContext('App.state.sessionId = "s1"; App.state.mode = "ask";', ctx);
+  vm.runInContext('App.state.sessionId = "s1"; App.state.sandbox = "read-only";', ctx);
   els["input"].value = "帮我写一段代码";
   await vm.runInContext("App.sendMessage()", ctx);
   assert.ok(sent, "sendMessage 应被调用");
-  assert.strictEqual(sent.mode, "ask", "ask 模式应透传 mode 参数");
+  assert.strictEqual(sent.sandbox, "read-only", "read-only 档位应透传 sandbox 参数");
   assert.strictEqual(sent.text, "帮我写一段代码", "文本应正常透传");
 });
 

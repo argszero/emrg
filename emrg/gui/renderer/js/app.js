@@ -21,7 +21,7 @@ const App = (() => {
     sessionsBySid: new Map(), // sid → { busy, ownStreamRequestId, mode, autoScroll }
     // P2 queue-injection（#655）：busy 时发送的消息入 daemon 队列（task_queued），
     // 此处按会话记录以便 queued_requeue 以原 requestId 重发（不重加用户行）。
-    queuedSends: new Map(), // sid → [{ requestId, text, mode }]
+    queuedSends: new Map(), // sid → [{ requestId, text, sandbox }]
     // P4 slice 2（rant 15:07:19）：跨项目打开的会话（侧边栏数据源，main 广播）
     openSessions: [], // [{ sid, projectName, projectPath, lastActive }]，lastActive 倒序
     apiKeyConfigured: false,
@@ -35,8 +35,8 @@ const App = (() => {
     autoScroll: true,
     // GUI / 指令补全菜单（rant 19:44 P1）：items=[{cmd,hint,phase}] index=当前高亮
     cmdMenu: { items: [], index: -1 },
-    // WorkBuddy P2（rant 21:35）：工作模式 ask（纯对话）/ auto（默认，自动执行工具）
-    mode: "auto",
+    // Rant 2026-08-20T18:18：会话级沙箱档位（read-only / workspace-write / danger-full-access），默认可写工作区
+    sandbox: "workspace-write",
     // B3（rant 21:59:11）：每会话输入框草稿（浏览器 tab 式状态保留）——切换会话保存旧
     // sid 草稿、恢复新 sid 草稿；发送成功即清除该 sid 草稿
     drafts: new Map(), // sid → 草稿文本
@@ -48,12 +48,12 @@ const App = (() => {
   function sidState(sid) {
     const key = sid || state.sessionId || "default";
     if (!state.sessionsBySid.has(key)) {
-      state.sessionsBySid.set(key, { busy: false, ownStreamRequestId: null, mode: "auto", autoScroll: true, disconnected: false });
+      state.sessionsBySid.set(key, { busy: false, ownStreamRequestId: null, sandbox: "workspace-write", autoScroll: true, disconnected: false });
     }
     return state.sessionsBySid.get(key);
   }
 
-  // 激活会话条目 = state.busy/ownStreamRequestId/mode 的事实源（P3 过渡期兼容层）
+  // 激活会话条目 = state.busy/ownStreamRequestId/sandbox 的事实源（P3 过渡期兼容层）
   Object.defineProperty(state, "busy", {
     get() { return sidState(state.sessionId).busy; },
     set(v) { sidState(state.sessionId).busy = v; },
@@ -62,9 +62,9 @@ const App = (() => {
     get() { return sidState(state.sessionId).ownStreamRequestId; },
     set(v) { sidState(state.sessionId).ownStreamRequestId = v; },
   });
-  Object.defineProperty(state, "mode", {
-    get() { return sidState(state.sessionId).mode; },
-    set(v) { sidState(state.sessionId).mode = v; },
+  Object.defineProperty(state, "sandbox", {
+    get() { return sidState(state.sessionId).sandbox; },
+    set(v) { sidState(state.sessionId).sandbox = v; },
   });
 
   // ── 启动 ─────────────────────────────────
@@ -158,10 +158,10 @@ const App = (() => {
     if (wasBusy) {
       const sid = state.sessionId;
       if (!state.queuedSends.has(sid)) state.queuedSends.set(sid, []);
-      state.queuedSends.get(sid).push({ requestId, text, mode: state.mode });
+      state.queuedSends.get(sid).push({ requestId, text, sandbox: state.sandbox });
     }
     try {
-      const res = await window.emrg.sendMessage({ sessionId: state.sessionId, text, requestId, mode: state.mode });
+      const res = await window.emrg.sendMessage({ sessionId: state.sessionId, text, requestId, sandbox: state.sandbox });
       state.ownStreamRequestId = res.requestId || requestId; // G124：以 daemon 回显为准
     } catch (e) {
       state.busy = false;
@@ -1289,28 +1289,24 @@ const App = (() => {
     }
   }
 
-  // ── 工作模式切换器（Ask/Auto，WorkBuddy P2） ───────
+  // ── 沙箱档位切换器（read-only / workspace-write / danger-full-access，rant 2026-08-20T18:18） ──
   function initModeSwitcher() {
-    const sw = $("mode-switcher");
+    const sw = $("sandbox-switcher");
     if (!sw) return;
     sw.addEventListener("click", (e) => {
       const btn = e.target.closest ? e.target.closest(".mode-btn") : null;
-      if (!btn || !btn.dataset.mode) return;
-      setMode(btn.dataset.mode);
+      if (!btn || !btn.dataset.sandbox) return;
+      setSandbox(btn.dataset.sandbox);
     });
   }
 
-  function setMode(mode) {
-    if (mode !== "ask" && mode !== "auto") return;
-    state.mode = mode;
-    const sw = $("mode-switcher");
+  function setSandbox(sandbox) {
+    if (!["read-only", "workspace-write", "danger-full-access"].includes(sandbox)) return;
+    state.sandbox = sandbox;
+    const sw = $("sandbox-switcher");
     if (!sw) return;
     for (const btn of sw.querySelectorAll(".mode-btn")) {
-      btn.classList.toggle("active", btn.dataset.mode === mode);
-    }
-    // Ask 模式提示（仅当切到 ask 时轻提示一次，不打断）
-    if (mode === "ask") {
-      Chat.addSystemMessage(_t("app.askModeNotice"));
+      btn.classList.toggle("active", btn.dataset.sandbox === sandbox);
     }
   }
 
@@ -1455,7 +1451,7 @@ const App = (() => {
                 sst.ownStreamRequestId = item.requestId;
                 if (!sid || sid === state.sessionId) setComposerDisabled(true);
                 try {
-                  const res = await window.emrg.sendMessage({ sessionId: sid, text: item.text, requestId: item.requestId, mode: item.mode });
+                  const res = await window.emrg.sendMessage({ sessionId: sid, text: item.text, requestId: item.requestId, sandbox: item.sandbox });
                   sst.ownStreamRequestId = res.requestId || item.requestId;
                 } catch (e) {
                   sst.busy = false;
@@ -1463,7 +1459,7 @@ const App = (() => {
                   if (!sid || sid === state.sessionId) setComposerDisabled(false);
                 }
                 if (wasBusy || i > 0) {
-                  remaining.push({ requestId: item.requestId, text: item.text, mode: item.mode });
+                  remaining.push({ requestId: item.requestId, text: item.text, sandbox: item.sandbox });
                 }
               }
               if (remaining.length) state.queuedSends.set(sid, remaining);
@@ -1792,7 +1788,7 @@ const App = (() => {
     initGithubBanner(); // Windows GCM rant Stage 2：演化需 GitHub 但未认证时的连接横幅
     initUpgradeBanner(); // rant 18:30:57：升级完成横幅（重启生效按钮）
     initModelSwitcher();
-    initModeSwitcher(); // WorkBuddy P2：Ask/Auto 工作模式
+    initModeSwitcher(); // rant 18:18：沙箱档位切换器（替代 Ask/Auto）
     ResultPanel.init(); // WorkBuddy P1：结果面板（⌘\ 折叠 + 窄屏自动隐藏）
     FileTree.setSession(state.sessionId, projectPathFor(state.sessionId)); // P3.1：文件树初始根
     initEvolutionToast(); // WorkBuddy P3：进化 toast 按钮绑定
@@ -1826,7 +1822,7 @@ const App = (() => {
     maybeShowEvolutionToast, // WorkBuddy P3：进化 toast 检测
     showVersionInfo, // WorkBuddy P3：/version 内容（toast "去看看" 共用）
     refreshLocale, // rant 21:19：locale 切换后动态文案重刷
-    setMode, // WorkBuddy P2：Ask/Auto 模式（导出供测试与外部调用）
+    setSandbox, // rant 18:18：沙箱档位切换（导出供测试与外部调用）
     loadEvolutionSummary, // WorkBuddy P3：最近改进摘要
   };
 })();

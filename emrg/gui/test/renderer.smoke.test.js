@@ -1746,7 +1746,7 @@ test("P2 queue: steer_committed removes that request from queue", async () => {
   await tick();
   await vm.runInContext(
     'App.state.sessionId = "sess-1";' +
-    'App.state.queuedSends.set("sess-1", [{ requestId: "req-a", text: "hi", mode: "auto" }, { requestId: "req-b", text: "yo", mode: "auto" }]);' +
+    'App.state.queuedSends.set("sess-1", [{ requestId: "req-a", text: "hi", sandbox: "workspace-write" }, { requestId: "req-b", text: "yo", sandbox: "workspace-write" }]);' +
     'App.handleEvent({ type: "steer_committed", sid: "sess-1", data: { request_id: "req-a" } });',
     ctx
   );
@@ -1764,7 +1764,7 @@ test("P2 queue: queued_requeue re-sends with same requestId + re-tracks (review 
   await vm.runInContext(
     'App.state.sessionId = "sess-1";' +
     'App.state.busy = true;' + // wasBusy → re-send is re-tracked
-    'App.state.queuedSends.set("sess-1", [{ requestId: "req-queue", text: "hi", mode: "auto" }]);' +
+    'App.state.queuedSends.set("sess-1", [{ requestId: "req-queue", text: "hi", sandbox: "workspace-write" }]);' +
     'App.handleEvent({ type: "queued_requeue", sid: "sess-1", data: { request_ids: ["req-queue"] } });',
     ctx
   );
@@ -1791,8 +1791,8 @@ test("P2 queue: requeue with 2 msgs (idle turn end) re-tracks 2nd+ (review ❌ r
     'App.state.sessionId = "sess-1";' +
     'App.state.busy = false;' + // 单客户端：回合刚结束 → wasBusy=false
     'App.state.queuedSends.set("sess-1", [' +
-    '  { requestId: "req-m1", text: "m1", mode: "auto" },' +
-    '  { requestId: "req-m2", text: "m2", mode: "auto" }]);' +
+    '  { requestId: "req-m1", text: "m1", sandbox: "workspace-write" },' +
+    '  { requestId: "req-m2", text: "m2", sandbox: "workspace-write" }]);' +
     'App.handleEvent({ type: "queued_requeue", sid: "sess-1", data: { request_ids: ["req-m1", "req-m2"] } });',
     ctx
   );
@@ -1809,7 +1809,7 @@ test("P2 queue: queued_cancelled clears queue + note", async () => {
   await tick();
   await vm.runInContext(
     'App.state.sessionId = "sess-1";' +
-    'App.state.queuedSends.set("sess-1", [{ requestId: "req-a", text: "hi", mode: "auto" }]);' +
+    'App.state.queuedSends.set("sess-1", [{ requestId: "req-a", text: "hi", sandbox: "workspace-write" }]);' +
     'App.handleEvent({ type: "queued_cancelled", sid: "sess-1", data: {} });',
     ctx
   );
