@@ -151,19 +151,23 @@ In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is share
 
 ## vs. the competition
 
-|  | Claude Code | Codex | **EMRG** |
-|---|---|---|---|
-| AI-powered coding | ✅ | ✅ | ✅ |
-| Tool-calling (bash, read, write, edit, glob, grep) | ✅ | ✅ | ✅ |
-| Session memory & context | ✅ | ✅ | ✅ |
-| `/` command autocomplete | ✅ | ✅ | ✅ |
-| ESC interrupt | ✅ | ✅ | ✅ |
-| **Self-evolution** | ❌ | ❌ | ✅ *autonomous* |
-| **Background daemon** | ❌ | ❌ | ✅ *persistent* |
-| **Learns from rants** | ❌ | ❌ | ✅ */rant → PR* |
-| **Open source** | ❌ | ✅ *Apache-2.0* | ✅ *MIT* |
+|  | Claude Code | Codex | DeepSeek Harness | **EMRG** |
+|---|---|---|---|---|
+| AI-powered coding | ✅ | ✅ | ✅ | ✅ |
+| Tool-calling (bash, read, write, edit, glob, grep) | ✅ | ✅ | ✅ | ✅ |
+| Session memory & context | ✅ | ✅ | ✅ | ✅ |
+| `/` command autocomplete | ✅ | ✅ | ✅ | ✅ |
+| ESC interrupt | ✅ | ✅ | — | ✅ |
+| Plugin architecture | ❌ | ❌ | ✅ *everything is a plugin* | ❌ |
+| Sandboxed execution | ❌ | ❌ | ✅ | ❌ |
+| Subagents | ❌ | ❌ | ✅ | ❌ |
+| Web UI | ❌ | ❌ | ✅ *browser* | ✅ *Electron* |
+| **Self-evolution** | ❌ | ❌ | ❌ | ✅ *autonomous* |
+| **Background daemon** | ❌ | ❌ | ❌ | ✅ *persistent* |
+| **Learns from rants** | ❌ | ❌ | ❌ | ✅ */rant → PR* |
+| **Open source** | ❌ | ✅ *Apache-2.0* | ✅ *MIT* | ✅ *MIT* |
 
-> *Codex is open source but has no self-evolution — openness alone isn't the differentiator; closing the loop is.*
+> *DeepSeek Harness is a plugin-based agent harness with deep engineering (sandboxing, subagents, workflows) — but it does not evolve itself. EMRG's differentiator is closing the loop: self-evolution, a persistent background daemon, and rant-driven improvement.*
 
 EMRG doesn't just keep up — it catches up on its own.
 
