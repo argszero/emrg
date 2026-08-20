@@ -94,6 +94,152 @@ def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
     return rewritten.rstrip(), path
 
 
+# ── Sandbox — file-level isolation for the bash tool (rant 2026-08-20T15:46:50) ──
+#
+# Three tiers (default danger-full-access = current, un-sandboxed behavior):
+#   danger-full-access  — no checks at all (existing behavior)
+#   read-only           — no writes allowed: destructive commands (rm -r /
+#                         rmdir / mv / cp -r) and shell redirects (> / >>)
+#                         to any non-/dev/null target are blocked
+#   workspace-write     — writes inside the workspace root (and the OS temp
+#                         area) are allowed; destructive writes to protected
+#                         daemon state files and to absolute paths outside
+#                         the workspace are blocked
+#
+# Enforcement is deliberately heuristic (host design-finalized): a static
+# command scan, NOT an OS-level sandbox (no bwrap/Seatbelt/ACL). The checked
+# modes report enforcement="partial" — honest reporting, never pretending
+# full OS-level isolation. The core value is blocking a hallucinated LLM's
+# obviously destructive commands (rm -rf with a wrong path, writing the
+# daemon's own state files).
+
+SANDBOX_MODES = ("danger-full-access", "read-only", "workspace-write")
+
+# Daemon state files — writing to these from a sandboxed task is always
+# blocked (they are the daemon's own data, not agent scratch space).
+_PROTECTED_FILES = (
+    "~/.emrg/config.toml",
+    "~/.emrg/emrgd.token",
+    "~/.emrg/tasks.yml",
+    "~/.emrg/projects.yml",
+    "~/.emrg/rants.jsonl",
+)
+
+
+def _extract_write_targets(cmd: str) -> list[str]:
+    """Heuristic extraction of write targets from a command line.
+
+    Returns path tokens the command appears to write to:
+      - ``rm -r/-rf/-R <path>`` and ``rmdir <path>`` → the removed path
+      - ``mv <src> <dst>`` / ``cp -r <src> <dst>`` → the destination
+      - ``> / >> / 2> / &>`` redirects → the redirect target
+
+    Deliberately non-exhaustive (the sandbox only catches obvious
+    destructive writes — the boundary is honest: enforcement=partial).
+    """
+    targets: list[str] = []
+    # rm -r / rm -rf / rm -R ... <path>  (recursive delete)
+    for m in re.finditer(r"\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*\s+)+([^\s|;&]+)", cmd):
+        targets.append(m.group(1))
+    # rmdir <path>
+    for m in re.finditer(r"\brmdir\s+([^\s|;&]+)", cmd):
+        targets.append(m.group(1))
+    # mv <src> <dst> — the destination is the last bare token
+    for m in re.finditer(r"\bmv\s+((?:-[a-zA-Z]*\s+)*[^\s|;&]+\s+[^\s|;&]+)", cmd):
+        toks = m.group(1).split()
+        if len(toks) >= 2:
+            targets.append(toks[-1])
+    # cp -r <src> <dst> — the destination is the last bare token
+    for m in re.finditer(r"\bcp\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*\s+)+([^\s|;&]+\s+[^\s|;&]+)", cmd):
+        toks = m.group(1).split()
+        if len(toks) >= 2:
+            targets.append(toks[-1])
+    # shell redirects: > file / >> file / 2> file / &> file
+    for m in re.finditer(r"(?:\d*>>?|&>>?)\s*([^\s|;&]+)", cmd):
+        targets.append(m.group(1))
+    return targets
+
+
+def _protected_paths() -> list[str]:
+    """Canonicalized (realpath) protected daemon state files."""
+    out: list[str] = []
+    for p in _PROTECTED_FILES:
+        try:
+            out.append(os.path.realpath(os.path.expanduser(p)))
+        except OSError:
+            pass
+    return out
+
+
+def _is_within(path: str, root: str) -> bool:
+    """True when ``path`` (absolute) is inside ``root`` (absolute) or equals it."""
+    try:
+        rp = os.path.realpath(path)
+        rr = os.path.realpath(root)
+        return rp == rr or rp.startswith(rr + os.sep)
+    except OSError:
+        return False
+
+
+def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
+    """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
+
+    Returns ``(allowed, blocked_reason, enforcement)``:
+      - danger-full-access → (True, None, "full") — no checks, current behavior.
+      - read-only → blocks every destructive write (rm -r / rmdir / mv /
+        cp -r and shell redirects to any non-/dev/null target).
+      - workspace-write → blocks destructive writes to protected daemon
+        files, to ``~/.emrg`` itself, and to absolute paths outside the
+        workspace root (the OS temp dir is allowed — mirrors dsh's
+        workspace + backend-promised temp area).
+
+    Heuristic by design: static scan only, no OS-level boundary — checked
+    modes honestly report enforcement="partial".
+    """
+    if mode not in SANDBOX_MODES:
+        return False, f"invalid sandbox mode {mode!r}", "partial"
+    if mode == "danger-full-access":
+        return True, None, "full"
+
+    targets = _extract_write_targets(cmd)
+    if mode == "read-only":
+        for t in targets:
+            if t != "/dev/null":
+                return False, (
+                    f"read-only sandbox: blocked destructive write targeting {t!r}"
+                ), "partial"
+        return True, None, "partial"
+
+    # workspace-write
+    if not targets:
+        return True, None, "partial"
+    protected = _protected_paths()
+    emrg_home = os.path.realpath(os.path.expanduser("~/.emrg"))
+    workdir_real = os.path.realpath(workdir) if workdir else None
+    for t in targets:
+        if t == "/dev/null":
+            continue
+        expanded = os.path.expanduser(t)
+        if not os.path.isabs(expanded):
+            # Relative target: assumed in-workspace (cwd = the workspace root).
+            continue
+        real = os.path.realpath(expanded)
+        if real in protected:
+            return False, (
+                f"workspace-write sandbox: blocked write to protected daemon file {t!r}"
+            ), "partial"
+        if real == emrg_home:
+            return False, (
+                f"workspace-write sandbox: blocked destructive write to {t!r} "
+                "(would erase the daemon's data directory)"
+            ), "partial"
+        if workdir_real and not _is_within(real, workdir_real) and not _is_within(real, tempfile.gettempdir()):
+            return False, (
+                f"workspace-write sandbox: blocked write outside workspace {t!r}"
+            ), "partial"
+    return True, None, "partial"
+
+
 def _decode_output(data: bytes, os_name: str | None = None) -> str:
     """Decode subprocess output bytes without corrupting non-UTF-8 text.
 
@@ -166,9 +312,29 @@ class BashTool(ToolExecutor):
         cmd = arguments.get("command", "")
         timeout = arguments.get("timeout", 30)
         workdir = arguments.get("workdir", None)
+        # Sandbox tier — daemon-injected per task config (the agent cannot
+        # choose its own sandbox; rant 2026-08-20T15:46:50).
+        sandbox = arguments.get("sandbox")
 
         if not cmd:
             return ToolResult(name="bash", content="Error: no command provided", error=True)
+
+        # Static file-level isolation check (rant 2026-08-20T15:46:50).
+        sandbox_tag: str | None = None
+        if sandbox and sandbox != "danger-full-access":
+            allowed, reason, enforcement = _check_sandbox(cmd, sandbox, workdir)
+            if not allowed:
+                logger.info("bash: BLOCKED by %s sandbox: %s", sandbox, reason)
+                return ToolResult(
+                    name="bash",
+                    content=(
+                        f"⛔ [sandbox:{sandbox} enforcement={enforcement}] "
+                        f"{reason} — command not executed"
+                    ),
+                    error=True,
+                )
+            sandbox_tag = f"[sandbox:{sandbox} enforcement={enforcement}]"
+            logger.debug("bash: sandbox %s check passed", sandbox)
 
         logger.debug("bash: running %r (timeout=%ds)", cmd[:100], timeout)
 
@@ -271,6 +437,8 @@ class BashTool(ToolExecutor):
             if not parts:
                 parts.append("(no output)")
             result = "\n".join(parts)
+            if sandbox_tag:
+                result = f"{sandbox_tag} ok\n{result}"
             return ToolResult(name="bash", content=result)
         except FileNotFoundError:
             return ToolResult(

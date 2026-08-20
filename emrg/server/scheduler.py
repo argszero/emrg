@@ -25,6 +25,7 @@ import yaml
 
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
+from emrg.tools.bash_tool import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
@@ -130,6 +131,7 @@ def _task_cfg_signature(cfg: dict) -> tuple:
         json.dumps(conf, sort_keys=True),
         cfg.get("interval", DEFAULT_INTERVAL),
         bool(cfg.get("enabled", True)),
+        cfg.get("sandbox"),
     )
 
 
@@ -198,6 +200,7 @@ class TaskHandler:
         interval: int,
         identity: InstanceIdentity,
         template_path: Path | None = None,
+        sandbox: str | None = None,
     ) -> None:
         self.name = name
         # Rant 2026-08-19T10:18:44: per-task logger — LoggerAdapter injects a
@@ -281,6 +284,32 @@ class TaskHandler:
             self._repo_configured = project_name == "emrg"
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
+        # Sandbox tier for this task's bash tool (rant 2026-08-20T15:46:50):
+        # explicit config wins; builtin tasks get suggested defaults; None =
+        # danger-full-access (current behavior).
+        self._sandbox = self._resolve_sandbox(name, config, sandbox)
+        if self._sandbox:
+            self._logger.info(
+                "TaskHandler[%s]: bash sandbox tier = %s", name, self._sandbox
+            )
+
+    @staticmethod
+    def _resolve_sandbox(name: str, config: dict, explicit: str | None) -> str | None:
+        """Effective bash sandbox tier for a task.
+
+        Order: tasks.yml top-level ``sandbox:`` field → ``config.sandbox`` →
+        builtin defaults by task name → None (= danger-full-access, the
+        existing un-sandboxed behavior). Invalid values fall through to the
+        defaults rather than breaking the task.
+        """
+        for cand in (explicit, config.get("sandbox")):
+            if cand in SANDBOX_MODES and cand != "danger-full-access":
+                return cand
+        if name == "emrg-task":
+            return "workspace-write"  # evolution writes its own repo
+        if name.endswith("-opensource-task"):
+            return "read-only"  # community work in host-owned repos
+        return None
 
     # ── Saturation state (restored from disk across daemon restarts) ──
 
@@ -684,6 +713,7 @@ class TaskHandler:
                 "prompt": prompt,
                 "stream": True,
                 "timestamp": cycle_time.isoformat(),
+                "sandbox": self._sandbox,
             },
             ensure_ascii=False,
         )
@@ -961,6 +991,7 @@ class TaskScheduler:
             interval=cfg.get("interval", DEFAULT_INTERVAL),
             identity=self.identity,
             template_path=template_path,
+            sandbox=cfg.get("sandbox"),
         )
 
     def _start_handler_for(self, cfg: dict) -> TaskHandler:
@@ -1267,12 +1298,15 @@ class TaskScheduler:
         self, name: str, task_type: str, project: str,
         interval: int | None = None, enabled: bool = True,
         repo: str | None = None, description: str | None = None,
+        sandbox: str | None = None,
     ) -> tuple[bool, str | dict]:
         """Create a task. Returns (ok, error) or (ok, task-dict)."""
         interval = DEFAULT_INTERVAL if interval is None else interval
         err = self._validate_task_fields(name, task_type, project, interval)
         if err:
             return False, err
+        if sandbox is not None and sandbox not in SANDBOX_MODES:
+            return False, f"invalid sandbox {sandbox!r} (expected one of {', '.join(SANDBOX_MODES)})"
         tasks = self._load_tasks()
         if any(t.get("name") == name for t in tasks):
             return False, f"task {name!r} already exists"
@@ -1287,6 +1321,8 @@ class TaskScheduler:
             "enabled": bool(enabled),
             "last_run": None,
         }
+        if sandbox is not None:
+            task["sandbox"] = sandbox
         if description:
             task["description"] = description
         tasks.append(task)
@@ -1327,6 +1363,10 @@ class TaskScheduler:
             task["enabled"] = bool(fields["enabled"])
         if "description" in fields:
             task["description"] = fields["description"]
+        if "sandbox" in fields:
+            if fields["sandbox"] is not None and fields["sandbox"] not in SANDBOX_MODES:
+                return False, f"invalid sandbox {fields['sandbox']!r} (expected one of {', '.join(SANDBOX_MODES)})"
+            task["sandbox"] = fields["sandbox"]
         self._save_tasks(tasks)
         logger.info("TaskScheduler: task %s updated", name)
         return True, task

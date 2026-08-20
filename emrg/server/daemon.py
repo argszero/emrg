@@ -613,6 +613,9 @@ class EmrgServer:
             cwd=cwd,
             prompt=prompt,
             timestamp="",
+            # Upgrade writes install/ and source/ inside its own work dir —
+            # workspace-write tier (rant 2026-08-20T15:46:50).
+            sandbox="workspace-write",
         )
         if self._session_busy.get(session_id):
             # Queue per existing semantics (host decision A: busy → pending,
@@ -772,6 +775,7 @@ class EmrgServer:
                             prompt=data.get("prompt", ""),
                             timestamp=data.get("timestamp", ""),
                             images=data.get("images"),
+                            sandbox=data.get("sandbox"),
                         )
                     except Exception as e:
                         await self._send(ws, {"error": f"invalid task: {e}"})
@@ -1467,6 +1471,7 @@ class EmrgServer:
                 enabled=msg.get("enabled", True),
                 repo=msg.get("repo"),
                 description=msg.get("description"),
+                sandbox=msg.get("sandbox"),
             )
             if not ok:
                 await self._send(ws, {"type": "task_result", "error": res})
@@ -1478,7 +1483,7 @@ class EmrgServer:
             if not self._scheduler:
                 await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
                 return
-            fields = {k: msg[k] for k in ("task_type", "project", "interval", "enabled", "repo", "description") if k in msg}
+            fields = {k: msg[k] for k in ("task_type", "project", "interval", "enabled", "repo", "description", "sandbox") if k in msg}
             if "task_type" in fields:
                 fields["type"] = fields.pop("task_type")
             ok, res = self._scheduler.task_update(msg.get("name", "").strip(), **fields)
@@ -2535,6 +2540,12 @@ class EmrgServer:
                         args["workdir"] = str(session.cwd)
                     elif tc_name == "grep" and "path" not in args:
                         args["path"] = str(session.cwd)
+
+                    # Sandbox tier (rant 2026-08-20T15:46:50): the task's
+                    # configured sandbox is injected into the bash tool — the
+                    # agent cannot choose it per call.
+                    if tc_name == "bash" and req.sandbox:
+                        args["sandbox"] = req.sandbox
 
                     # Execute
                     tool = self.tools.get(tc_name)
