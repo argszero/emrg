@@ -154,6 +154,7 @@ const ELEMENT_IDS = [
   "task-list", "task-add-btn", "task-template-mgr-btn",
   "task-form", "task-form-name", "task-form-type", "task-form-project",
   "task-form-interval", "task-form-enabled", "task-form-repo",
+  "task-form-sandbox",
   "task-form-cancel", "task-form-save",
   "task-template-form", "task-template-name", "task-template-prompt",
   "task-template-cancel", "task-template-save", "task-template-list",
@@ -2525,8 +2526,11 @@ test("P3：设置面板打开 → 任务列表渲染（名称/类型/项目/间�
   assert.strictEqual(els["task-form-interval"].value, 1800);
   assert.strictEqual(els["task-form-enabled"].checked, true);
   assert.strictEqual(els["task-form-repo"].value, "");
+  // rant 18:06:44：沙箱下拉默认 workspace-write（与后端默认一致）；任务无 sandbox 字段 → 默认值
+  assert.strictEqual(els["task-form-sandbox"].value, "workspace-write", "编辑任务默认沙箱档位应为 workspace-write");
   // 修改后保存 → taskUpdate
   vm.runInContext('document.getElementById("task-form-interval").value = "600"', ctx);
+  vm.runInContext('document.getElementById("task-form-sandbox").value = "read-only"', ctx);
   await vm.runInContext("EMRG_Dialogs.saveTaskForm()", ctx);
   await tick();
   assert.ok(updated, "taskUpdate 应被调用");
@@ -2535,6 +2539,7 @@ test("P3：设置面板打开 → 任务列表渲染（名称/类型/项目/间�
   assert.strictEqual(updated.type, "evolution");
   assert.strictEqual(updated.project, "emrg");
   assert.strictEqual(updated.enabled, true);
+  assert.strictEqual(updated.sandbox, "read-only", "保存 payload 应含沙箱档位");
 });
 
 test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什么/降频徽章）", async () => {
@@ -2651,7 +2656,7 @@ test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 t
   assert.ok((els["confirm-message"].textContent || "").includes("60"), `错误提示含 60：${els["confirm-message"].textContent}`);
   assert.strictEqual(created, null, "非法间隔不应提交 taskCreate");
   await vm.runInContext("EMRG_Dialogs.closeConfirm()", ctx);
-  // 间隔 600 → 提交（含自定义类型 + 启用勾选）
+  // 间隔 600 → 提交（含自定义类型 + 启用勾选 + 默认沙箱 workspace-write）
   vm.runInContext('document.getElementById("task-form-interval").value = "600"', ctx);
   await vm.runInContext("EMRG_Dialogs.saveTaskForm()", ctx);
   await tick();
@@ -2661,6 +2666,14 @@ test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 t
   assert.strictEqual(created.project, "emrg");
   assert.strictEqual(created.interval, 600);
   assert.strictEqual(created.enabled, true);
+  assert.strictEqual(created.sandbox, "workspace-write", "新增任务 payload 默认沙箱应为 workspace-write");
+  // 下拉切换档位 → payload 跟随
+  vm.runInContext('document.getElementById("task-form-name").value = "new-task2"', ctx);
+  vm.runInContext('document.getElementById("task-form-sandbox").value = "danger-full-access"', ctx);
+  await vm.runInContext("EMRG_Dialogs.saveTaskForm()", ctx);
+  await tick();
+  assert.strictEqual(created.name, "new-task2");
+  assert.strictEqual(created.sandbox, "danger-full-access", "切换档位后 payload 应跟随");
   assert.strictEqual(vm.runInContext('document.getElementById("task-form").classList.contains("hidden")', ctx), true, "保存后表单收起");
 });
 

@@ -761,6 +761,8 @@ const Dialogs = (() => {
     $("task-form-interval").value = task && task.interval != null ? task.interval : 1800;
     $("task-form-enabled").checked = task ? task.enabled !== false : true;
     $("task-form-repo").value = cfg.repo || "";
+    // rant 2026-08-20T18:06:44：沙箱下拉预填（编辑读 task.sandbox；新增默认 workspace-write 与后端默认一致）
+    $("task-form-sandbox").value = (task && task.sandbox) || "workspace-write";
     $("task-form").classList.remove("hidden");
     $("task-form-name").focus();
   }
@@ -790,6 +792,7 @@ const Dialogs = (() => {
       interval,
       enabled: $("task-form-enabled").checked,
       repo: $("task-form-repo").value.trim() || undefined,
+      sandbox: $("task-form-sandbox").value,
     };
     try {
       if (editingTask === null) await window.emrg.taskCreate(payload);
