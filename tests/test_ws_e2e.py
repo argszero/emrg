@@ -1032,12 +1032,15 @@ class TestWSQueueInjection:
     """
 
     @staticmethod
-    def _task(sid, tid, prompt, cwd, mode="auto"):
-        return {
+    def _task(sid, tid, prompt, cwd, sandbox=None):
+        t = {
             "type": "task", "id": tid, "session_id": sid,
             "cwd": str(cwd), "prompt": prompt, "stream": True,
-            "mode": mode, "timestamp": "2026-08-10T21:55:37",
+            "timestamp": "2026-08-10T21:55:37",
         }
+        if sandbox:
+            t["sandbox"] = sandbox
+        return t
 
     def test_pending_injected_at_round_boundary_after_tools(self):
         """B's message queued while A's tool executes is injected at the
@@ -1129,9 +1132,11 @@ class TestWSQueueInjection:
                     await cleanup()
         asyncio.run(_test())
 
-    def test_pending_ask_injects_empty_tools(self):
-        """A queued Ask-mode message is injected with an empty tool set
-        (mode=ask → tools=[]), so the injected round can only reply."""
+    def test_pending_sandbox_queued_keeps_tools(self):
+        """Rant 2026-08-20T18:18: a queued message with a sandbox tier is
+        injected with tools enabled (no more Ask/empty-tool mode) — the
+        sandbox tier only constrains the bash tool's file permissions,
+        never the tool set itself."""
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 cwd = Path(tmp)
@@ -1175,13 +1180,14 @@ class TestWSQueueInjection:
                             self._task("s_ask", "t-ask-a", "turn", cwd), ensure_ascii=False))
                         await asyncio.sleep(0.15)
                         await ws_b.send(json.dumps(
-                            self._task("s_ask", "t-ask-b", "ask-me", cwd, mode="ask"),
+                            self._task("s_ask", "t-ask-b", "ask-me", cwd, sandbox="read-only"),
                             ensure_ascii=False))
                         fq = await _recv_until(
                             ws_b, lambda f: f.get("type") == "task_queued", what="task_queued")
                         while seen["tools"] == "unset":
                             await asyncio.wait_for(ws_a.recv(), timeout=10)
-                        assert seen["tools"] == [], f"ask round must have empty tools, got {seen['tools']}"
+                        assert seen["tools"] is not None, "tools must be enabled for the queued round"
+                        assert len(seen["tools"]) > 0, f"tools must be non-empty (no Ask mode), got {seen['tools']}"
                     finally:
                         await ws_a.close()
                         await ws_b.close()

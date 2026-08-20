@@ -284,9 +284,10 @@
           <span id="model-switcher-label" data-i18n="composer.modelLoading">加载中…</span>
           <span style="font-size:10px;">⌄</span>
         </div>
-        <div class="mode-switcher" id="mode-switcher" title="工作模式：Ask 只对话 / Auto 自动执行" data-i18n-title="composer.modeTitle">
-          <button type="button" class="mode-btn" data-mode="ask">Ask</button>
-          <button type="button" class="mode-btn active" data-mode="auto">Auto</button>
+        <div class="mode-switcher" id="sandbox-switcher" title="沙箱档位：read-only 只读 / workspace-write 可写工作区 / danger-full-access 全放行" data-i18n-title="composer.sandboxTitle">
+          <button type="button" class="mode-btn" data-sandbox="read-only" title="read-only（只读）" data-i18n-title="composer.sandboxReadOnly">只读</button>
+          <button type="button" class="mode-btn active" data-sandbox="workspace-write" title="workspace-write（可写工作区，默认）" data-i18n-title="composer.sandboxWorkspaceWrite">可写</button>
+          <button type="button" class="mode-btn" data-sandbox="danger-full-access" title="danger-full-access（全放行）" data-i18n-title="composer.sandboxFullAccess">全放行</button>
         </div>
         <div class="composer-card">
           <textarea id="input" rows="1" placeholder="发消息给 EMRG… (Enter 发送 / Shift+Enter 换行)" data-i18n-placeholder="composer.placeholder" disabled></textarea>

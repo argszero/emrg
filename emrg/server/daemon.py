@@ -793,9 +793,12 @@ class EmrgServer:
                     except Exception as e:
                         await self._send(ws, {"error": f"invalid task: {e}"})
                         continue
-                    # WorkBuddy P2 (rant 21:35): Ask mode — pure chat, no tools.
-                    # mode="ask" → LLM gets an empty tool set so it can only reply.
-                    allow_tools = data.get("mode", "auto") != "ask"
+                    # Rant 2026-08-20T18:18: Ask/Auto modes removed — every
+                    # interactive message allows tools; the sandbox tier
+                    # (req.sandbox, per-message) controls file permissions.
+                    # The pending queue keeps the (req, allow_tools) shape for
+                    # compatibility but allow_tools is always True now.
+                    allow_tools = True
                     if self._session_busy.get(session_id):
                         # Queue the task; injected at the next round boundary.
                         self._session_pending.setdefault(session_id, []).append((req, allow_tools))
@@ -2143,13 +2146,15 @@ class EmrgServer:
 
         Returns ``(injected_count, ask_injected)`` — ``ask_injected`` is True
         when any queued message was Ask mode (mode=ask); the caller must use
-        an empty tool set for the round that processes it.
+        an empty tool set for the round that processes it. (Rant
+        2026-08-20T18:18: Ask mode removed — always False, kept for signature
+        compatibility.)
         """
         sid = session.session_id
         pending = self._session_pending.pop(sid, [])
         if not pending:
             return 0, False
-        ask_injected = any(not allow for _, allow in pending)
+        ask_injected = any(not allow for _, allow in pending)  # always False post-rant 18:18
         for preq, _ in pending:
             pcontent = self._build_user_content(
                 preq.prompt, preq.images, self.llm.config.vision

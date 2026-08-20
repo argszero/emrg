@@ -287,7 +287,7 @@ vision = false
       };
     });
 
-    ipcMain.handle("emrg:sendMessage", async (_e, { sessionId, text, requestId, mode }) => {
+    ipcMain.handle("emrg:sendMessage", async (_e, { sessionId, text, requestId, sandbox }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       if (!validateText(text)) throw new Error("invalid text");
       if (requestId !== undefined && (typeof requestId !== "string" || requestId.length < 8 || requestId.length > 64)) {
@@ -304,9 +304,9 @@ vision = false
       let rid;
       try {
         // G143：renderer 预生成 requestId（send 前标记自有流，消除 IPC 往返竞态窗口）
-        // WorkBuddy P2：mode="ask" → 纯对话（daemon 不启用工具）
+        // Rant 2026-08-20T18:18：sandbox 档位（read-only / workspace-write / danger-full-access）
         // G65：conn.sendTask 内部标记 ownStream（每连接独立锁）
-        rid = conn.sendTask({ sessionId, cwd: sessionCwd, prompt: text, requestId, mode });
+        rid = conn.sendTask({ sessionId, cwd: sessionCwd, prompt: text, requestId, sandbox });
       } catch (e) {
         conn._releaseOwnStream(); // sendTask 抛异常（ws.send 失败）→ 释放锁，防 G65 锁泄漏
         throw e;

@@ -551,6 +551,7 @@ test("sendTask payload（G32，无 stream 字段——rant 21:20:38）", async (
   assert.strictEqual(frame.cwd, "/proj");
   assert.strictEqual(frame.prompt, "hello");
     assert.strictEqual(frame.images, null);
+  assert.strictEqual(frame.sandbox, "workspace-write", "rant 18:18：默认沙箱档位应随每条消息发送");
   assert.ok(frame.timestamp);
 });
 
