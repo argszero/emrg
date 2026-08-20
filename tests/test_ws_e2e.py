@@ -189,7 +189,8 @@ class TestWSVibeCheck:
 
     The scheduler replaces its git-HEAD empty-cycle heuristic with an agent
     answer: the daemon runs a single Ask-mode LLM call (no tools, no history)
-    and returns a strict-JSON {meaningful, recommend_slowdown, reason} result.
+    and returns a strict-JSON {work, recommend_slowdown, slowdown_reason}
+    result (fields unified rant 2026-08-20T10:58:55, meaningful deleted).
     """
 
     def test_vibe_check_returns_structured_result(self):
@@ -199,7 +200,7 @@ class TestWSVibeCheck:
                 try:
                     async def fake_chat(messages, tools=None):
                         # echo back a strict-JSON answer; fenced JSON tolerated
-                        return {"content": '```json\n{"meaningful": false, "recommend_slowdown": true, "reason": "长期无产出", "done": "分析了双实例根因，提交 PR #854"}\n```'}
+                        return {"content": '```json\n{"work": "分析了双实例根因，提交 PR #854", "recommend_slowdown": true, "slowdown_reason": "长期无产出"}\n```'}
                     server.llm.chat = fake_chat
 
                     ws = await connect_to_server()
@@ -216,12 +217,10 @@ class TestWSVibeCheck:
                         assert data.get("type") == "vibe_check_result"
                         assert data.get("ok") is True
                         result = data.get("result", {})
-                        assert result.get("meaningful") is False
+                        # rant 2026-08-20T10:58:55: unified 3-field shape
+                        assert result.get("work") == "分析了双实例根因，提交 PR #854"
                         assert result.get("recommend_slowdown") is True
-                        assert result.get("reason") == "长期无产出"
-                        # rant 2026-08-18T21:32:32: natural-language "done"
-                        # summary of what meaningful work was done this cycle
-                        assert result.get("done") == "分析了双实例根因，提交 PR #854"
+                        assert result.get("slowdown_reason") == "长期无产出"
                         # the ask must carry the fixed system prompt + no tools
                         sent = server.llm.chat
                         assert sent is fake_chat
@@ -263,7 +262,7 @@ class TestWSVibeCheck:
 
                     async def fake_chat(messages, tools=None):
                         seen["messages"] = messages
-                        return {"content": '{"meaningful": true, "recommend_slowdown": false, "reason": "确实做了工作", "done": "fetch 上游 + 分析 PR + 写 memory"}'
+                        return {"content": '{"work": "fetch 上游 + 分析 PR + 写 memory", "recommend_slowdown": false, "slowdown_reason": ""}'
                                 }
                     server.llm.chat = fake_chat
 
@@ -281,7 +280,7 @@ class TestWSVibeCheck:
                         data = json.loads(frame)
                         assert data.get("ok") is True
                         result = data.get("result", {})
-                        assert result.get("meaningful") is True
+                        assert result.get("work") == "fetch 上游 + 分析 PR + 写 memory"
                         # The LLM must have received the session history
                         # messages (primary evidence), not just the summary.
                         msgs = seen.get("messages", [])
@@ -335,7 +334,7 @@ class TestWSVibeCheck:
 
                     async def fake_chat(messages, tools=None):
                         seen["messages"] = messages
-                        return {"content": '{"meaningful": false, "recommend_slowdown": false, "reason": "nt", "done": ""}'}
+                        return {"content": '{"work": "", "recommend_slowdown": false, "slowdown_reason": "nt"}'}
                     server.llm.chat = fake_chat
 
                     ws = await connect_to_server()
@@ -365,14 +364,14 @@ class TestWSVibeCheck:
                     await cleanup()
         asyncio.run(_test())
 
-    def test_vibe_check_missing_done_field_is_compatible(self):
-        """Old models / old parsing omit 'done' → empty string, no crash."""
+    def test_vibe_check_missing_fields_is_compatible(self):
+        """Old models / old parsing omit work/slowdown_reason → empty, no crash."""
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 server, _, cleanup = await _boot_server(Path(tmp))
                 try:
                     async def fake_chat(messages, tools=None):
-                        return {"content": '{"meaningful": true, "recommend_slowdown": false, "reason": "ok"}'}
+                        return {"content": '{"recommend_slowdown": false}'}
                     server.llm.chat = fake_chat
 
                     ws = await connect_to_server()
@@ -389,8 +388,9 @@ class TestWSVibeCheck:
                         assert data.get("type") == "vibe_check_result"
                         assert data.get("ok") is True
                         result = data.get("result", {})
-                        assert result.get("done") == ""
-                        assert result.get("meaningful") is True
+                        assert result.get("work") == ""
+                        assert result.get("recommend_slowdown") is False
+                        assert result.get("slowdown_reason") == ""
                     finally:
                         await ws.close()
                 finally:

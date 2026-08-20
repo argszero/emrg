@@ -2651,17 +2651,17 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
       {
         name: "emrg-task", type: "evolution", config: { project: "emrg" },
         interval: 60, enabled: true, last_run_at: "2026-08-18T10:00:00",
-        last_cycle_summary: "修了双实例根因",
+        saturation: { heartbeat_interval: 480, heartbeat_active: true },
         recent_runs: [
-          { timestamp: "2026-08-18T10:00:00", summary: "修了双实例根因，提交 PR #854",
-            impact: ["cycle-ts-complete", "tools-executed=26"], meaningful: true,
-            recommend_slowdown: false, tool_count: 26, reason: "meaningful work" },
-          { timestamp: "2026-08-18T09:00:00", summary: "",
-            impact: ["cycle-ts-complete", "tools-executed=3"], meaningful: false,
-            recommend_slowdown: false, tool_count: 3, reason: "" },
-          { timestamp: "2026-08-18T08:00:00", summary: "NTE",
-            impact: ["cycle-ts-complete"], meaningful: false,
-            recommend_slowdown: true, tool_count: 0, reason: "empty cycles, no value" },
+          { timestamp: "2026-08-18T10:00:00", work: "修了双实例根因，提交 PR #854",
+            impact: ["cycle-ts-complete", "tools-executed=26"],
+            recommend_slowdown: false, tool_count: 26, slowdown_reason: "" },
+          { timestamp: "2026-08-18T09:00:00", work: "",
+            impact: ["cycle-ts-complete", "tools-executed=3"],
+            recommend_slowdown: false, tool_count: 3, slowdown_reason: "" },
+          { timestamp: "2026-08-18T08:00:00", work: "NTE",
+            impact: ["cycle-ts-complete"], recommend_slowdown: true, tool_count: 0,
+            slowdown_reason: "长期无产出" },
         ],
       },
       { name: "fresh-task", type: "sync", config: { project: "docs" }, interval: 3600, enabled: true },
@@ -2680,22 +2680,25 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   await tick();
   const detail = vm.runInContext(`document.getElementById("task-list").children[0].querySelector(".task-run-detail")`, ctx);
   assert.strictEqual(detail.classList.contains("hidden"), false, "点击后子表应展开");
-  // 第一行 run：Agent 总结展示（自然语言）
+  // 第一行 run：Agent 总结展示（自然语言 work，rant 2026-08-20T10:58:55 字段统一）
   const doneTxt = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")[0].textContent`, ctx);
   assert.strictEqual(doneTxt, "修了双实例根因，提交 PR #854", `子表应显示 Agent 总结，实际: ${doneTxt}`);
-  // 降频徽章：recommend_slowdown=true → 建议降频；meaningful=false → 空转
+  // 降频徽章：recommend_slowdown=true → 建议降频（idle 空转徽章已删除，rant 10:58:55）
   const warnCount = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-badge-warn").length`, ctx);
   assert.ok(warnCount >= 1, "recommend_slowdown=true 应显示建议降频徽章");
   const idleCount = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-run-badge-idle").length`, ctx);
-  assert.ok(idleCount >= 1, "meaningful=false 应显示空转徽章");
-  // 无 summary → 显示 "-"（rant 2026-08-19T07:06:45 宿主定稿：不再 fallback impact 机器串）
+  assert.strictEqual(idleCount, 0, "meaningful 已删除，不应再出现空转徽章");
+  // 一级卡片：heartbeat_active → 已降频徽章（app.taskThrottled，rant 10:58:55）
+  const satBadge = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-saturation-badge").length`, ctx);
+  assert.strictEqual(satBadge, 1, "saturation.heartbeat_active=true 应显示已降频徽章");
+  // 无 work → 显示 "-"（rant 2026-08-19T07:06:45 宿主定稿：不再 fallback impact 机器串）
   const doneTexts = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-done")).map((n) => n.textContent)`, ctx);
-  assert.strictEqual(doneTexts[1], "-", `无 summary 应显示 "-"，实际: ${doneTexts[1]}`);
-  // rant 2026-08-19T18:25:14：原因列 —— 有 reason 显示原文，无 reason 显示 "-"
+  assert.strictEqual(doneTexts[1], "-", `无 work 应显示 "-"，实际: ${doneTexts[1]}`);
+  // rant 2026-08-19T18:25:14：原因列 —— 有 slowdown_reason 显示原文，无则 "-"
   const reasonTexts = vm.runInContext(`Array.from(document.getElementById("task-list").children[0].querySelectorAll(".task-run-reason")).map((n) => n.textContent)`, ctx);
-  assert.strictEqual(reasonTexts[0], "meaningful work", `原因列应显示 reason，实际: ${reasonTexts[0]}`);
-  assert.strictEqual(reasonTexts[1], "-", `无 reason 应显示 "-"，实际: ${reasonTexts[1]}`);
-  assert.strictEqual(reasonTexts[2], "empty cycles, no value", `原因列应显示降频原因，实际: ${reasonTexts[2]}`);
+  assert.strictEqual(reasonTexts[0], "-", `无 slowdown_reason 应显示 "-"，实际: ${reasonTexts[0]}`);
+  assert.strictEqual(reasonTexts[1], "-", `无 slowdown_reason 应显示 "-"，实际: ${reasonTexts[1]}`);
+  assert.strictEqual(reasonTexts[2], "长期无产出", `原因列应显示降频原因，实际: ${reasonTexts[2]}`);
   // rant 2026-08-19T18:25:14：一级列表不再显示"干了什么"（last_cycle_summary）
   const primarySummary = vm.runInContext(`document.getElementById("task-list").children[0].querySelectorAll(".task-meta-summary").length`, ctx);
   assert.strictEqual(primarySummary, 0, `一级列表不应显示 last_cycle_summary，实际数量: ${primarySummary}`);
@@ -2921,11 +2924,10 @@ test("rant 10:45:52：任务行显示上次执行元信息 + 降频标识（rant
       { name: "with-run", type: "evolution", running: false, interval: 1800,
         next_run_in_seconds: 43,
         last_run_at: new Date(nowMs - 5 * 60_000).toISOString(),
-        last_cycle_summary: "tools-executed=24, cycle-complete",
-        saturation: { empty_cycles: 3, threshold: 5, heartbeat_interval: 7200, heartbeat_active: true } },
+        saturation: { heartbeat_interval: 7200, heartbeat_active: true } },
       { name: "never-run", type: "evolution", running: false, interval: 3600,
-        next_run_in_seconds: null, enabled: true, last_run_at: null, last_cycle_summary: null,
-        saturation: { empty_cycles: 0, threshold: 5, heartbeat_interval: 7200, heartbeat_active: false } },
+        next_run_in_seconds: null, enabled: true, last_run_at: null,
+        saturation: { heartbeat_interval: 7200, heartbeat_active: false } },
     ],
     listProjects: async () => [],
   });
@@ -2943,9 +2945,11 @@ test("rant 10:45:52：任务行显示上次执行元信息 + 降频标识（rant
   assert.ok(rows[0].includes("上次运行：5m ago"), `运行时间相对显示：${rows[0]}`);
   // rant 2026-08-19T18:25:14：一级列表不再显示"干了什么"（last_cycle_summary），移入点击展开的二级列表
   assert.ok(!rows[0].includes("干了："), `一级列表不应显示摘要：${rows[0]}`);
-  assert.ok(rows[0].includes("空转 3 轮"), `降频徽标：${rows[0]}`);
+  // rant 2026-08-20T10:58:55：降频徽标只认 heartbeat_active —— 「已降频 · heartbeat {m}s」
+  // （7200s → 2h00m；不再有 empty_cycles "空转 N 轮" 文案）
+  assert.ok(rows[0].includes("已降频 · heartbeat 2h00m"), `降频徽标：${rows[0]}`);
   assert.ok(rows[1].includes("尚未运行"), `未运行提示：${rows[1]}`);
-  assert.ok(!rows[1].includes("空转"), `无降频时无徽标：${rows[1]}`);
+  assert.ok(!rows[1].includes("已降频"), `无降频时无徽标：${rows[1]}`);
 });
 
 test("rant 2026-08-14T15:41:52：快速点击添加任务 —— 元数据未加载完也填充下拉 + 保存成功", async () => {

@@ -543,11 +543,10 @@ def test_evolution_handler_status_last_run_fields():
     st = handler.status()
     assert st["name"] == "test"
     assert st["last_run_at"] is None
-    assert st["last_cycle_summary"] is None
-    assert st["saturation"]["empty_cycles"] == 0
-    assert "threshold" in st["saturation"]
+    # rant 2026-08-20T10:58:55: last_cycle_summary deleted; saturation is
+    # {heartbeat_interval, heartbeat_active} only
+    assert st["saturation"]["heartbeat_active"] is False
     assert "heartbeat_interval" in st["saturation"]
-    assert "heartbeat_active" in st["saturation"]
     # rant 2026-08-18T21:32:32: recent_runs present, empty before any run
     assert st["recent_runs"] == []
     # after one evolution → last-run populated from the latest log
@@ -557,41 +556,34 @@ def test_evolution_handler_status_last_run_fields():
         impact=["tools-executed=24", "cycle-complete"],
         operations=["llm-reflection", "tool-execution"],
     ))
-    handler._empty_cycles = 3
+    handler._slowdown_active = True
     st = handler.status()
     assert st["last_run_at"] == "2026-08-18T10:00:00"
-    # rant 2026-08-19T07:06:45: empty summary → None (no machine impact fallback)
-    assert st["last_cycle_summary"] is None
-    assert st["saturation"]["empty_cycles"] == 3
+    assert st["saturation"]["heartbeat_active"] is True
     assert len(st["recent_runs"]) == 1
     r0 = st["recent_runs"][0]
     assert r0["timestamp"] == "2026-08-18T10:00:00"
-    assert r0["summary"] == ""
+    assert r0["work"] == ""
     assert r0["impact"] == ["tools-executed=24", "cycle-complete"]
-    assert r0["meaningful"] is None
     assert r0["recommend_slowdown"] is False
-    assert r0["reason"] == ""
+    assert r0["slowdown_reason"] == ""
     assert r0["tool_count"] == 0
-    # agent summary preferred over machine impact tags
+    # agent work summary preferred over machine impact tags
     handler.evolutions.append(EvolutionLog(
         timestamp="2026-08-18T11:00:00",
         trigger="evolution-test-ts",
         impact=["tools-executed=5", "cycle-complete"],
         operations=[],
-        summary="修了 stop_all 双实例根因，提交 PR #854",
-        meaningful=True,
+        work="修了 stop_all 双实例根因，提交 PR #854",
         recommend_slowdown=False,
-        reason="meaningful work done",
+        slowdown_reason="meaningful work done",
         tool_count=5,
     ))
     st = handler.status()
-    assert st["last_cycle_summary"] == "修了 stop_all 双实例根因，提交 PR #854"
     assert len(st["recent_runs"]) == 2, "recent_runs holds last 5 runs"
-    assert st["recent_runs"][1]["summary"] == "修了 stop_all 双实例根因，提交 PR #854"
-    assert st["recent_runs"][1]["meaningful"] is True
-    assert st["recent_runs"][1]["reason"] == "meaningful work done"
+    assert st["recent_runs"][1]["work"] == "修了 stop_all 双实例根因，提交 PR #854"
+    assert st["recent_runs"][1]["slowdown_reason"] == "meaningful work done"
     assert st["recent_runs"][1]["tool_count"] == 5
-    assert st["recent_runs"][0]["meaningful"] is None
 
 
 def test_evolution_handler_recent_runs_capped_at_five():
@@ -635,10 +627,9 @@ def test_task_handler_task_runs_persist_across_restart(tmp_path):
         h1.evolutions.append(EvolutionLog(
             timestamp="2026-08-19T20:10:00",
             trigger="evolution-emrg-task-ts",
-            summary="fixed vibe-check 400, submitted PR #874",
-            meaningful=True,
+            work="fixed vibe-check 400, submitted PR #874",
             recommend_slowdown=False,
-            reason="meaningful work done",
+            slowdown_reason="",
             tool_count=7,
         ))
         h1._append_task_run(h1.evolutions[-1])
@@ -646,10 +637,9 @@ def test_task_handler_task_runs_persist_across_restart(tmp_path):
         h1.evolutions.append(EvolutionLog(
             timestamp="2026-08-19T20:20:00",
             trigger="evolution-emrg-task-ts2",
-            summary="",
-            meaningful=False,
+            work="",
             recommend_slowdown=True,
-            reason="too many empty cycles",
+            slowdown_reason="长期无产出",
             tool_count=0,
         ))
         h1._append_task_run(h1.evolutions[-1])
@@ -659,21 +649,20 @@ def test_task_handler_task_runs_persist_across_restart(tmp_path):
         assert len(h2.evolutions) == 2
         first = h2.evolutions[0]
         assert first.timestamp == "2026-08-19T20:10:00"
-        assert first.summary == "fixed vibe-check 400, submitted PR #874"
-        assert first.meaningful is True
-        assert first.reason == "meaningful work done"
+        assert first.work == "fixed vibe-check 400, submitted PR #874"
+        assert first.recommend_slowdown is False
+        assert first.slowdown_reason == ""
         assert first.tool_count == 7
         second = h2.evolutions[1]
-        assert second.summary == ""
-        assert second.meaningful is False
+        assert second.work == ""
         assert second.recommend_slowdown is True
-        assert second.reason == "too many empty cycles"
+        assert second.slowdown_reason == "长期无产出"
         # GUI secondary list shows the restored records
         runs = h2.status()["recent_runs"]
         assert [r["timestamp"] for r in runs] == [
             "2026-08-19T20:10:00", "2026-08-19T20:20:00",
         ]
-        assert runs[1]["reason"] == "too many empty cycles"
+        assert runs[1]["slowdown_reason"] == "长期无产出"
         assert runs[1]["recommend_slowdown"] is True
         # JSONL file exists under logs/task-runs/<task>.jsonl
         f = tmp_path / "logs" / "task-runs" / "emrg-task.jsonl"
@@ -695,7 +684,7 @@ def test_task_handler_task_runs_capped_at_fifty(tmp_path):
         for i in range(60):
             h1.evolutions.append(EvolutionLog(
                 timestamp=f"2026-08-19T20:{i % 60:02d}:00",
-                summary=f"run-{i}",
+                work=f"run-{i}",
                 tool_count=i,
             ))
             h1._append_task_run(h1.evolutions[-1])
@@ -706,8 +695,8 @@ def test_task_handler_task_runs_capped_at_fifty(tmp_path):
         # fresh handler restores the most recent 50
         h2 = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
         assert len(h2.evolutions) == 50
-        assert h2.evolutions[-1].summary == "run-59"
-        assert h2.evolutions[0].summary == "run-10"
+        assert h2.evolutions[-1].work == "run-59"
+        assert h2.evolutions[0].work == "run-10"
     finally:
         mod.config_dir = orig
 
@@ -721,13 +710,13 @@ def test_task_handler_task_runs_corrupt_file_ignored(tmp_path):
         runs_dir = tmp_path / "logs" / "task-runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         (runs_dir / "emrg-task.jsonl").write_text(
-            "not-json-at-all\n{broken json\n{\"timestamp\": \"ok\", \"summary\": \"kept\"}\n",
+            "not-json-at-all\n{broken json\n{\"timestamp\": \"ok\", \"work\": \"kept\"}\n",
             encoding="utf-8",
         )
         handler = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
         # corrupt lines skipped; valid line kept
         assert len(handler.evolutions) == 1
-        assert handler.evolutions[0].summary == "kept"
+        assert handler.evolutions[0].work == "kept"
     finally:
         mod.config_dir = orig
 
@@ -744,12 +733,12 @@ def test_task_handler_task_runs_write_failure_tolerated(tmp_path):
         runs_dir = tmp_path / "logs" / "task-runs"
         runs_dir.mkdir(parents=True, exist_ok=True)
         (runs_dir / "emrg-task.jsonl").mkdir()  # dir where the file should be
-        log = EvolutionLog(timestamp="2026-08-19T20:30:00", summary="x")
+        log = EvolutionLog(timestamp="2026-08-19T20:30:00", work="x")
         handler.evolutions.append(log)
         # must not raise; cycle continues with the in-memory record
         handler._append_task_run(log)
         assert len(handler.evolutions) == 1
-        assert handler.evolutions[0].summary == "x"
+        assert handler.evolutions[0].work == "x"
     finally:
         mod.config_dir = orig
 
@@ -1316,150 +1305,169 @@ def _make_cycle_handler(tmp_path, frames):
 
 
 def test_evolution_cycle_truncated_not_empty_not_complete(tmp_path):
-    """Truncated done frame → flagged truncated, NOT an empty cycle, impact reflects it."""
+    """Truncated done frame → flagged truncated, NOT a complete cycle, slowdown
+    state untouched (no vibe signal from a truncated round)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"tool_name": "bash"},
         {"request_id": "r1", "content": "Exceeded maximum tool call rounds (270).",
          "done": True, "delta": False, "session_id": "s"},
     ])
     asyncio.run(handler._run_evolution_cycle())
-    assert handler._empty_cycles == 0, \
-        "truncated cycle must not advance the idle-halt backoff"
+    assert handler._slowdown_active is False, \
+        "truncated cycle must not touch the slowdown state (no vibe signal)"
     impact = captured["log"].impact
     assert any("truncated" in i for i in impact), impact
     assert "truncated=max-tool-rounds" in impact, impact
     assert not any(i.endswith("-complete") for i in impact), impact
 
 
-def test_evolution_cycle_complete_agent_says_not_meaningful_is_empty(tmp_path):
-    """Clean completion + agent vibe check meaningful=false → empty cycle.
-
-    Rant 2026-08-17T11:39:19: the AGENT (task_vibe_check structured answer)
-    decides emptiness, not git HEAD.
-    """
+def test_evolution_cycle_complete_agent_recommends_no_slowdown(tmp_path):
+    """Clean completion + vibe work empty + recommend_slowdown=false → normal
+    cadence maintained, work stays empty (rant 2026-08-20T10:58:55: the vibe
+    check's recommend_slowdown is the ONLY slowdown switch)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
-         "result": {"meaningful": False, "recommend_slowdown": False,
-                    "reason": "nothing to evolve"}},
+         "result": {"work": "", "recommend_slowdown": False,
+                    "slowdown_reason": "nothing to evolve"}},
     ])
     asyncio.run(handler._run_evolution_cycle())
-    assert handler._empty_cycles == 1, \
-        "agent-reported meaningless complete cycle is counted as empty"
-    impact = captured["log"].impact
+    assert handler._slowdown_active is False
+    log = captured["log"]
+    impact = log.impact
     assert any(i.endswith("-complete") for i in impact), impact
     assert any(i.startswith("cycle-") for i in impact), \
         f"impact tag uses new cycle- prefix (rant 2026-08-12T18:03:26), got {impact}"
     assert "truncated=max-tool-rounds" not in impact, impact
+    assert log.work == "", "empty work stays empty (no completion fallback)"
+    assert log.recommend_slowdown is False
 
 
-def test_evolution_cycle_complete_agent_says_meaningful_resets_streak(tmp_path):
-    """Agent reports meaningful work → empty streak + slowdown votes reset.
-
-    A round that produced value (analysis/memory/decision without a commit)
-    must NOT count as empty — the git-HEAD heuristic's core false positive.
-    """
+def test_evolution_cycle_agent_work_restores_normal_cadence(tmp_path):
+    """Agent reports work + recommend_slowdown=false → a throttled handler is
+    restored to normal cadence; the work is persisted (rant 2026-08-20T10:58:55
+    — recommend=false is the restore signal, no counter/vote machinery)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Analyzed the issue and wrote memory",
          "done": True, "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
-         "result": {"meaningful": True, "recommend_slowdown": False,
-                    "reason": "completed analysis",
-                    "done": "分析了 scheduler 空转判定 bug，写了 memory 记录"}},
+         "result": {"work": "分析了 scheduler 空转判定 bug，写了 memory 记录",
+                    "recommend_slowdown": False,
+                    "slowdown_reason": ""}},
     ])
-    handler._empty_cycles = 5
-    handler._slowdown_hits = 2
+    handler._slowdown_active = True  # previously throttled
     asyncio.run(handler._run_evolution_cycle())
-    assert handler._empty_cycles == 0, "meaningful work resets the empty streak"
-    assert handler._slowdown_hits == 0, "meaningful work resets slowdown votes"
+    assert handler._slowdown_active is False, \
+        "recommend=false restores the normal cadence"
     assert "log" in captured
-    # rant 2026-08-18T21:32:32: agent's natural-language summary persisted
     log = captured["log"]
-    assert log.summary == "分析了 scheduler 空转判定 bug，写了 memory 记录"
-    assert log.meaningful is True
+    assert log.work == "分析了 scheduler 空转判定 bug，写了 memory 记录"
     assert log.recommend_slowdown is False
+    assert log.slowdown_reason == ""
     assert log.tool_count == 0
 
 
-def test_evolution_cycle_log_summary_no_completion_fallback(tmp_path):
-    """Rant 2026-08-19T07:06:45 (host-finalized): the summary uses ONLY the
-    vibe check "done" field — NO fallback to the completion first line. Empty
-    stays empty (GUI renders "-"), never a machine/rough fallback."""
+def test_evolution_cycle_log_work_no_completion_fallback(tmp_path):
+    """Rant 2026-08-19T07:06:45 (host-finalized): work uses ONLY the vibe
+    check "work" field — NO fallback to the completion first line. Empty stays
+    empty (GUI renders "-"), never a machine/rough fallback."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Reviewed PR and posted LGTM",
          "done": True, "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
-         "result": {"meaningful": True, "recommend_slowdown": False,
-                    "reason": "reviewed"}},
+         "result": {"work": "", "recommend_slowdown": False,
+                    "slowdown_reason": "reviewed"}},
     ])
     asyncio.run(handler._run_evolution_cycle())
     log = captured["log"]
-    assert log.summary == "", \
-        "missing done → summary stays empty (no completion fallback)"
-    assert log.meaningful is True
+    assert log.work == "", \
+        "missing work → work stays empty (no completion fallback)"
+    assert log.recommend_slowdown is False
 
-    # vibe check entirely unavailable → summary stays empty, flags None/False
+    # vibe check entirely unavailable → work stays empty, flags False
     handler2, captured2 = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
     ])
     asyncio.run(handler2._run_evolution_cycle())
     log2 = captured2["log"]
-    assert log2.summary == "", "vibe unavailable → summary stays empty (no fallback)"
-    assert log2.meaningful is None
+    assert log2.work == "", "vibe unavailable → work stays empty (no fallback)"
     assert log2.recommend_slowdown is False
     assert log2.tool_count == 0
 
 
-def test_evolution_cycle_vibe_unavailable_streak_unchanged(tmp_path):
-    """Vibe check unavailable (timeout/failure) → counter neither advances nor resets.
+def test_evolution_cycle_vibe_unavailable_state_unchanged(tmp_path):
+    """Vibe check unavailable (timeout/failure) → slowdown state unchanged.
 
-    Conservative: a failed question must not cause a wrong slowdown NOR a
-    wrong reset (rant 2026-08-17T11:39:19)."""
+    Conservative: a failed question must not cause a wrong throttle NOR a
+    wrong restore (rant 2026-08-20T10:58:55)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         # no vibe_check_result frame → helper times out / connection closed
     ])
-    handler._empty_cycles = 3
-    handler._slowdown_hits = 1
+    handler._slowdown_active = True
     asyncio.run(handler._run_evolution_cycle())
-    assert handler._empty_cycles == 3, "vibe check failure must not advance the counter"
-    assert handler._slowdown_hits == 1, "vibe check failure must not reset votes"
+    assert handler._slowdown_active is True, \
+        "vibe check failure must not touch the slowdown state"
     assert "log" in captured, "main task still completed normally"
+    assert captured["log"].work == ""
+    assert captured["log"].recommend_slowdown is False
 
 
-def test_evolution_cycle_agent_recommend_slowdown_accumulates(tmp_path):
-    """recommend_slowdown votes accumulate; 3 votes tighten the threshold.
+def test_evolution_cycle_recommend_slowdown_throttles(tmp_path):
+    """recommend_slowdown=true → _slowdown_active=True (heartbeat cadence);
+    the next cycle's recommend=false restores normal cadence (rant
+    2026-08-20T10:58:55 — the vibe flag is the single switch)."""
+    handler, _ = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"work": "", "recommend_slowdown": True,
+                    "slowdown_reason": "长期无产出"}},
+    ])
+    asyncio.run(handler._run_evolution_cycle())
+    assert handler._slowdown_active is True, \
+        "recommend=true must throttle the next run to heartbeat cadence"
+    assert handler._saturation_heartbeat_active() is True
+    assert handler._heartbeat_interval() == 480  # 60s task → 8 min
 
-    The saturation threshold drops from 30 to 10 when the agent keeps saying
-    the task has no value (rant 2026-08-17T11:39:19)."""
-    for i in range(3):
-        handler, _ = _make_cycle_handler(tmp_path, frames=[
-            {"request_id": "r1", "content": "Done", "done": True,
-             "delta": False, "session_id": "s"},
-            {"type": "vibe_check_result", "ok": True,
-             "result": {"meaningful": False, "recommend_slowdown": True,
-                        "reason": "long-term no value"}},
-        ])
-        asyncio.run(handler._run_evolution_cycle())
-        assert handler._slowdown_hits == i + 1, handler._slowdown_hits
-        assert handler._empty_cycles == i + 1, handler._empty_cycles
-    # 3 votes → tightened threshold (30 → 10)
-    assert handler._saturation_threshold() == 10, "3 slowdown votes must tighten the threshold"
-    assert handler._saturation_threshold() < handler._IDLE_HALT_THRESHOLD
+    # second cycle: agent says value again → restore
+    handler2, captured2 = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"work": "merged PR #880", "recommend_slowdown": False,
+                    "slowdown_reason": ""}},
+    ])
+    asyncio.run(handler2._run_evolution_cycle())
+    assert handler2._slowdown_active is False
+    assert captured2["log"].recommend_slowdown is False
 
 
-def test_saturation_threshold_defaults_to_idle_halt(tmp_path):
-    """Below 3 slowdown votes the threshold stays at _IDLE_HALT_THRESHOLD (30)."""
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    assert handler._slowdown_hits == 0
-    assert handler._saturation_threshold() == handler._IDLE_HALT_THRESHOLD
-    handler._slowdown_hits = 2
-    assert handler._saturation_threshold() == handler._IDLE_HALT_THRESHOLD
-    handler._slowdown_hits = 3
-    assert handler._saturation_threshold() == 10
+def test_slowdown_state_persisted_across_restart(tmp_path):
+    """_slowdown_active survives a daemon restart via the saturation file
+    (~/.emrg/saturation/<task>.json, rant 2026-08-20T10:58:55)."""
+    from emrg.server import scheduler as mod
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        h1 = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        h1._slowdown_active = True
+        h1._save_saturation_state()
+        # "daemon restart": a fresh handler over the same config_dir
+        h2 = TaskHandler(name="emrg-task", config={}, interval=60, identity=InstanceIdentity())
+        assert h2._slowdown_active is True, \
+            "throttled state restored from disk"
+        # old-format file (no slowdown_active) reads as False — no migration
+        (tmp_path / "saturation" / "other.json").write_text(
+            '{"empty_cycles": 3, "slowdown_hits": 2}', encoding="utf-8")
+        h4 = TaskHandler(name="other", config={}, interval=60, identity=InstanceIdentity())
+        assert h4._slowdown_active is False, \
+            "legacy saturation files simply read as not throttled"
+    finally:
+        mod.config_dir = orig
 
 
 def test_evolution_cycle_aborted_error_not_counted(tmp_path):
@@ -1470,19 +1478,21 @@ def test_evolution_cycle_aborted_error_not_counted(tmp_path):
     asyncio.run(handler._run_evolution_cycle())
     assert "log" not in captured, "aborted cycle must not write an evolution log"
     assert handler.evolutions == [], "aborted cycle must not append to evolutions"
-    assert handler._empty_cycles == 0, \
-        "aborted cycle must not advance the idle-halt backoff (agent never ran)"
+    assert handler._slowdown_active is False, \
+        "aborted cycle must not touch the slowdown state (agent never ran)"
 
 
-def test_evolution_cycle_aborted_resets_empty_streak(tmp_path):
-    """Aborted cycle resets a pre-existing empty streak (blocked ≠ NTE)."""
+def test_evolution_cycle_aborted_leaves_slowdown_state(tmp_path):
+    """Aborted cycle leaves a pre-existing throttle flag untouched (blocked ≠
+    a vibe signal; rant 2026-08-20T10:58:55 conservative rule)."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"error": "session busy"},
     ])
-    handler._empty_cycles = 5
+    handler._slowdown_active = True
     asyncio.run(handler._run_evolution_cycle())
     assert "log" not in captured
-    assert handler._empty_cycles == 0, "abort resets the streak (not a real empty cycle)"
+    assert handler._slowdown_active is True, \
+        "abort must not clear the throttle flag (no vibe signal received)"
 
 
 # ── Connect-failure alerting (G129, rant 2026-08-09T08:03:46) ─────
@@ -1507,7 +1517,7 @@ def test_evolution_cycle_connect_failure_escalates_to_error(tmp_path, caplog):
                 asyncio.run(handler._run_evolution_cycle())
                 assert "log" not in captured, "connect failure must not write an evolution log"
                 assert handler.evolutions == []
-                assert handler._empty_cycles == 0, "connect failure ≠ empty cycle"
+                assert handler._slowdown_active is False, "connect failure ≠ throttle signal"
         assert handler._connect_failures == handler._CONNECT_FAIL_ALERT
         # 第 3 次（达到阈值）必须出现 ERROR 告警，且提示检查 port 文件
         error_msgs = [r.message for r in caplog.records if r.levelno >= logging.ERROR]
@@ -1619,8 +1629,9 @@ def _original_connect_to_server():
 
 # ── Saturation heartbeat: slow down, never stop (rant 2026-08-09T09:35:55) ─
 # The old complete halt (skipping scheduled runs) is replaced by
-# low-frequency full cycles: saturated ticks still run, just at the heartbeat
-# interval. Upstream advance auto-resumes (counter reset, normal frequency).
+# low-frequency full cycles: throttled ticks still run, just at the heartbeat
+# interval. The throttle flag is set solely by the vibe check's
+# recommend_slowdown (rant 2026-08-20T10:58:55).
 
 def test_heartbeat_interval_formula(tmp_path):
     """heartbeat = max(interval, min(interval*8, 8h)); long intervals unchanged."""
@@ -1639,69 +1650,75 @@ def test_heartbeat_interval_formula(tmp_path):
         assert handler._heartbeat_interval() == expected, (interval, expected)
 
 
-def test_saturation_heartbeat_active_true_at_threshold(tmp_path):
-    """At/above threshold → heartbeat cadence (not skip), no network (rant
-    2026-08-18T20:32:07 — upstream check removed)."""
+def test_saturation_heartbeat_active_true_when_throttled(tmp_path):
+    """Throttle flag on → heartbeat cadence (not skip), no network (rant
+    2026-08-18T20:32:07 — upstream check removed; flag from vibe check, rant
+    2026-08-20T10:58:55)."""
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    handler._empty_cycles = 30  # == _IDLE_HALT_THRESHOLD
+    handler._slowdown_active = True
     assert handler._saturation_heartbeat_active() is True
-    assert handler._empty_cycles == 30  # counter untouched
     assert handler._heartbeat_interval() == 480  # 60s task → 8 min
 
 
 def test_saturation_heartbeat_log_message_no_skip(tmp_path, caplog):
-    """Saturation log must say heartbeat, never 'skipping scheduled run'."""
+    """A throttled cycle logs 'heartbeat interval', never 'skipping scheduled run'."""
     import logging
 
-    handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    handler._empty_cycles = 30
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"work": "", "recommend_slowdown": True,
+                    "slowdown_reason": "长期无产出"}},
+    ])
     with caplog.at_level(logging.INFO, logger="emrg.server.scheduler"):
-        assert handler._saturation_heartbeat_active() is True
+        asyncio.run(handler._run_evolution_cycle())
+    assert handler._slowdown_active is True
     msgs = " ".join(r.message for r in caplog.records)
     assert "skipping scheduled run" not in msgs, \
         "old complete-halt log must not appear (rant 09:35:55)"
-    assert "heartbeat" in msgs and "never halting" in msgs, msgs
+    assert "heartbeat" in msgs, msgs
+    assert "log" in captured, "throttled tick must still run a full cycle"
 
 
 def test_saturation_heartbeat_makes_no_network_calls(tmp_path):
     """Saturation judgment never touches the network (rant 2026-08-18T20:32:07
     — the old _remote_advanced ls-remote blocked the event loop; the check is
-    gone entirely, recovery happens via cycle output resetting the counter).
+    gone entirely, recovery happens via the next vibe check).
     scheduler no longer imports subprocess at all (rant 2026-08-19T14:20:52
     deleted the self-heal git machinery) — no subprocess can be called."""
     from emrg.server import scheduler as mod
 
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    handler._empty_cycles = 30
+    handler._slowdown_active = True
 
     assert not hasattr(mod, "subprocess"), \
         "scheduler must not import subprocess anymore (self-heal deleted)"
     assert handler._saturation_heartbeat_active() is True
-    assert handler._empty_cycles == 30
 
 
-def test_saturation_heartbeat_false_below_threshold(tmp_path):
-    """Below threshold → normal interval (remote state irrelevant)."""
+def test_saturation_heartbeat_false_when_normal(tmp_path):
+    """No throttle flag → normal interval (remote state irrelevant)."""
     handler = _make_handler(tmp_path, project="", path=str(tmp_path))
-    handler._empty_cycles = 10
+    handler._slowdown_active = False
     assert handler._saturation_heartbeat_active() is False
-    assert handler._empty_cycles == 10
 
 
-def test_saturated_tick_still_runs_full_cycle(tmp_path):
-    """Saturated handler runs a full cycle (never skipped) at heartbeat."""
+def test_throttled_tick_still_runs_full_cycle(tmp_path):
+    """Throttled handler runs a full cycle (never skipped) at heartbeat; a
+    recommend=false vibe result clears the throttle afterwards."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
         {"request_id": "r1", "content": "Done", "done": True,
          "delta": False, "session_id": "s"},
         {"type": "vibe_check_result", "ok": True,
-         "result": {"meaningful": False, "recommend_slowdown": False,
-                    "reason": "nothing to evolve"}},
+         "result": {"work": "reviewed PR #879", "recommend_slowdown": False,
+                    "slowdown_reason": ""}},
     ])
-    handler._empty_cycles = 30  # saturated
+    handler._slowdown_active = True  # throttled
     asyncio.run(handler._run_evolution_cycle())
-    assert "log" in captured, "saturated tick must still run a full cycle"
-    assert handler._empty_cycles == 31, \
-        "NTE cycle during saturation keeps incrementing (heartbeat continues)"
+    assert "log" in captured, "throttled tick must still run a full cycle"
+    assert handler._slowdown_active is False, \
+        "recommend=false restores normal cadence (heartbeat continues until then)"
 
 
 def test_list_tasks_logs_slow_handler(tmp_path, caplog):
