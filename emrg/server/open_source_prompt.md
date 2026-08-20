@@ -381,6 +381,11 @@ Closes #<N>
 - [ ] New tests added"
 ```
 
+> ⚠️ **PR-issue linking (rant 2026-08-20T21:27:30 — bot `needs:issue` hard-block, PR #43460/#43282 blocked 2 days)**:
+> 1. **Verify the issue is actually linked, not just mentioned in the body.** A `Closes #<N>` line in the PR body does NOT guarantee GitHub's linked-issue field (GraphQL `closingIssuesReferences`) is populated — some repos (e.g. anomalyco/opencode's pr-standards bot) gate on the linked-issue field and hard-block your PR with `needs:issue` even when the body says `Closes`. After creating the PR, verify with `gh pr view <N> --json linkedIssues` (or GraphQL `closingIssuesReferences`); if it is empty, attempt association (`gh pr edit` / GraphQL `addLinkedIssues` / REST `POST /pulls/{n}/issues`) — if association still fails, record it in the state file and ask in the PR thread instead of assuming it worked.
+> 2. **A bot `needs:issue` / block review comment is a HARD block, not an informational note.** Treat any bot review comment that blocks your PR as blocking until resolved — never dismiss it as "only an informational bot note". Misjudging it wasted 6 reflection rounds before the mistake was caught.
+> 3. **Resolve bot blocks the same round you see them.** Do not defer a block to the next round (here a fix discovered 08-18 stayed unfixed until 08-20, missing the fix window); handle it until the block clears or the state file records an explicit blocker.
+
 > ⚠️ **Publishing spec (rant 2026-08-20T14:10:28 — comment double-encoding bug)**:
 > 1. **Always pass RAW text as the body of any comment / discussion / issue / PR** — write the body to a file with a heredoc and submit via `--field body=@file` (or `$(cat file)` / inline text). **NEVER** use patterns like `python3 -c "import json; print(json.dumps(...))"` that JSON-serialize the body before submitting — GitHub renders the escaped literal as-is (中文→`\uXXXX`, newlines→literal `\n`, quotes wrapped), producing garbled text.
 > 2. **Always read back and verify the posted body**: after posting, fetch the comment and check that the first character is NOT `"` and the text contains no `\uXXXX` residuals. If garbled, fix immediately with `updateDiscussionComment` (or the equivalent edit mutation) using the decoded original.
