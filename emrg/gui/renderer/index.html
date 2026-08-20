@@ -107,6 +107,15 @@
                 <input type="checkbox" id="task-form-enabled" checked /> <span data-i18n="settings.taskEnabled">启用</span>
               </label>
             </div>
+            <div class="model-form-row">
+              <label class="model-form-label" data-i18n="settings.taskSandbox">沙箱
+                <select id="task-form-sandbox">
+                  <option value="workspace-write">workspace-write</option>
+                  <option value="read-only">read-only</option>
+                  <option value="danger-full-access">danger-full-access</option>
+                </select>
+              </label>
+            </div>
             <label class="model-form-label" data-i18n="settings.taskRepo">仓库（选填 owner/repo）
               <input type="text" id="task-form-repo" maxlength="80" placeholder="acme/repo" />
             </label>
