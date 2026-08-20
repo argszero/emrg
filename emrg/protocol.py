@@ -30,6 +30,11 @@ class TaskRequest:
         default_factory=lambda: datetime.now().isoformat()
     )
     images: Optional[list[dict]] = None
+    # Sandbox tier for the task's bash tool (rant 2026-08-20T15:46:50):
+    # "read-only" | "workspace-write" | "danger-full-access" (default None =
+    # danger-full-access, current behavior). Set by task config, never by
+    # the agent itself.
+    sandbox: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {
@@ -42,6 +47,8 @@ class TaskRequest:
         }
         if self.images:
             d["images"] = self.images
+        if self.sandbox:
+            d["sandbox"] = self.sandbox
         return d
 
 

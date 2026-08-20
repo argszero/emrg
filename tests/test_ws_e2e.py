@@ -1677,7 +1677,7 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None):
+                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None):
                         calls.update(name=name, task_type=task_type, project=project)
                         return True, {"name": name, "type": task_type}
 
@@ -1707,7 +1707,7 @@ class TestWSTaskWire:
                 try:
                     calls = {}
 
-                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None):
+                    def fake_create(name, task_type, project, interval=None, enabled=True, repo=None, description=None, sandbox=None):
                         calls.update(name=name, task_type=task_type, project=project)
                         return True, {"name": name, "type": task_type}
 
