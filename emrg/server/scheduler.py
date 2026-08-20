@@ -230,22 +230,18 @@ class TaskHandler:
             self.evolutions = restored
 
         # ── Saturation — slow down, never stop (rant 2026-08-09T09:35:55) ──
-        # Track consecutive empty cycles (rant 2026-08-17T11:39:19: the agent
-        # itself answers whether a round was meaningful — git HEAD compares
-        # commits, not value, so it was removed as the empty-cycle oracle).
-        # After the threshold of empty cycles, switch to low-frequency
-        # heartbeat full cycles instead of the old complete halt:
-        #   - Scheduled runs continue at heartbeat interval (never skipped)
-        #   - heartbeat = max(interval, min(interval*8, 8h)) — 60s task → 8min
-        #   - Manual trigger (/trigger) or upstream git HEAD advance restores
-        #     the normal frequency immediately (counter reset to 0)
-        #   - The agent's recommend_slowdown votes (3) tighten the threshold
-        #     from 30 to 10 (host 2026-08-17T11:39:19)
+        # Rant 2026-08-20T10:58:55 (host design-finalized): the empty-cycle
+        # counter / slowdown-vote / threshold machinery is DELETED. Slowdown
+        # is decided solely by the agent's vibe-check recommend_slowdown:
+        #   - true  → _slowdown_active=True  → next run at heartbeat interval
+        #   - false → _slowdown_active=False → back to normal interval
+        #   - vibe unavailable / truncated / aborted → state unchanged
+        #   - Manual trigger (/trigger) → _slowdown_active=False (host
+        #     manually paying attention = back to high frequency) + persist
+        # heartbeat = max(interval, min(interval*8, 8h)) — 60s task → 8min
         #
-        # Counter is persisted to disk to survive daemon restarts.
-        self._IDLE_HALT_THRESHOLD = 30
-        self._SLOWDOWN_VOTES_TO_TIGHTEN = 3
-        self._TIGHTENED_THRESHOLD = 10
+        # The flag is persisted to disk (~/.emrg/saturation/<task>.json) so
+        # it survives daemon restarts.
         # G129: 连续连接失败告警阈值——达到后升级为 ERROR（防静默吞掉，
         # rant 2026-08-09T08:03:46：GUI 测试覆盖真实 emrgd.port 致 10h 连不上）。
         self._CONNECT_FAIL_ALERT = 3
@@ -253,7 +249,8 @@ class TaskHandler:
         self._saturation_dir = config_dir() / "saturation"
         self._saturation_dir.mkdir(parents=True, exist_ok=True)
         self._saturation_file = self._saturation_dir / f"{self.name}.json"
-        self._empty_cycles, self._slowdown_hits = self._load_saturation_state()
+        self._slowdown_active = False
+        self._slowdown_active = self._load_saturation_state()
 
         # Resolve project path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
@@ -287,32 +284,35 @@ class TaskHandler:
 
     # ── Saturation state (restored from disk across daemon restarts) ──
 
-    def _load_saturation_state(self) -> tuple[int, int]:
-        """Restore (empty_cycles, slowdown_hits) from disk (daemon restarts)."""
+    def _load_saturation_state(self) -> bool:
+        """Restore the slowdown flag from disk (daemon restarts).
+
+        Rant 2026-08-20T10:58:55 (host design-finalized): file content is
+        ``{"slowdown_active": bool}``. A daemon restart keeps a throttled
+        task at heartbeat cadence until the next vibe check says false or a
+        manual trigger resets it. Old files (empty_cycles/slowdown_hits)
+        simply read as False — no migration needed.
+        """
         try:
             if self._saturation_file.exists():
                 data = json.loads(self._saturation_file.read_text(encoding="utf-8"))
-                count = int(data.get("empty_cycles", 0) or 0)
-                slowdown = int(data.get("slowdown_hits", 0) or 0)
-                if count > 0 or slowdown > 0:
-                    self._logger.debug(
-                        "TaskHandler[%s]: restored saturation state (%d empty cycles, %d slowdown votes)",
-                        self.name, count, slowdown,
+                active = bool(data.get("slowdown_active", False))
+                if active:
+                    self._logger.info(
+                        "TaskHandler[%s]: restored slowdown state (heartbeat active)",
+                        self.name,
                     )
-                return count, slowdown
+                return active
         except Exception:
             pass
-        return 0, 0
+        return False
 
     def _save_saturation_state(self) -> None:
-        """Persist (empty_cycles, slowdown_hits) to disk."""
+        """Persist the slowdown flag to disk."""
         try:
             self._saturation_file.write_text(
-                json.dumps(
-                    {"empty_cycles": self._empty_cycles,
-                     "slowdown_hits": self._slowdown_hits},
-                    ensure_ascii=False,
-                ),
+                json.dumps({"slowdown_active": self._slowdown_active},
+                           ensure_ascii=False),
                 encoding="utf-8",
             )
         except Exception:
@@ -351,10 +351,9 @@ class TaskHandler:
                         continue
                     records.append(EvolutionLog(
                         timestamp=str(data.get("timestamp") or ""),
-                        summary=str(data.get("summary") or ""),
-                        meaningful=data.get("meaningful"),
+                        work=str(data.get("work") or ""),
                         recommend_slowdown=bool(data.get("recommend_slowdown")),
-                        reason=str(data.get("reason") or ""),
+                        slowdown_reason=str(data.get("slowdown_reason") or ""),
                         tool_count=int(data.get("tool_count") or 0),
                     ))
                 if records:
@@ -383,10 +382,9 @@ class TaskHandler:
             with open(self._task_runs_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps({
                     "timestamp": log.timestamp,
-                    "summary": log.summary,
-                    "meaningful": log.meaningful,
+                    "work": log.work,
                     "recommend_slowdown": log.recommend_slowdown,
-                    "reason": log.reason,
+                    "slowdown_reason": log.slowdown_reason,
                     "tool_count": log.tool_count,
                 }, ensure_ascii=False) + "\n")
             # Trim to the last _TASK_RUNS_MAX records (rewrite in place only
@@ -404,16 +402,6 @@ class TaskHandler:
                 self.name, exc,
             )
 
-    def _saturation_threshold(self) -> int:
-        """Empty-cycle threshold before dropping to heartbeat cadence.
-
-        The agent's recommend_slowdown votes (3) tighten the threshold from
-        30 to 10 — the agent itself keeps reporting the task has no value
-        (rant 2026-08-17T11:39:19)."""
-        if self._slowdown_hits >= self._SLOWDOWN_VOTES_TO_TIGHTEN:
-            return self._TIGHTENED_THRESHOLD
-        return self._IDLE_HALT_THRESHOLD
-
     async def run(self) -> None:
         """Run evolution cycles at configured interval.
 
@@ -427,12 +415,14 @@ class TaskHandler:
         )
 
         while self._running:
-            # Saturation → wait at the heartbeat interval (low-frequency full
-            # cycle, rant 2026-08-09T09:35:55); otherwise the normal interval.
-            # Manual trigger wakes immediately either way. Never skip a cycle.
+            # Slowdown → wait at the heartbeat interval (low-frequency full
+            # cycle, rant 2026-08-09T09:35:55; flag set by vibe check
+            # recommend_slowdown, rant 2026-08-20T10:58:55); otherwise the
+            # normal interval. Manual trigger wakes immediately either way.
+            # Never skip a cycle.
             wait_timeout = (
                 self._heartbeat_interval()
-                if self._saturation_heartbeat_active()
+                if self._slowdown_active
                 # Rant 2026-08-09T13:16:36: exponential backoff while the
                 # daemon is unreachable — stops the retry/window storm.
                 else self._connect_backoff()
@@ -440,7 +430,7 @@ class TaskHandler:
             # Diagnostic log (rant 2026-08-18T20:48:45): expose which
             # scheduling mode drove the wait — normal | heartbeat | backoff —
             # so the saturation/backoff state machine is traceable end-to-end.
-            if self._empty_cycles >= self._saturation_threshold():
+            if self._slowdown_active:
                 _mode = "heartbeat"
             elif self._connect_failures > 0:
                 _mode = "backoff"
@@ -468,17 +458,17 @@ class TaskHandler:
                 # Normal scheduled run
                 pass
 
-            # Manual triggers always reset the saturation counter; otherwise
-            # saturated ticks keep running full cycles at heartbeat cadence.
+            # Manual triggers always clear the slowdown flag — the host
+            # manually paying attention means back to high frequency
+            # (rant 2026-08-20T10:58:55, host-confirmed semantics).
             if manual_trigger:
-                if self._empty_cycles >= self._saturation_threshold():
+                if self._slowdown_active:
                     self._logger.info(
                         "TaskHandler[%s]: resumed via manual trigger "
-                        "(was in saturation at %d empty cycles)",
-                        self.name, self._empty_cycles,
+                        "(was throttled at heartbeat cadence)",
+                        self.name,
                     )
-                self._empty_cycles = 0
-                self._slowdown_hits = 0
+                self._slowdown_active = False
                 self._save_saturation_state()
 
             self._logger.debug("TaskHandler[%s] tick", self.name)
@@ -531,33 +521,30 @@ class TaskHandler:
         # GUI tasks panel can show when a task last ran, what it did, and
         # whether it is being throttled (saturation). All data is in-memory /
         # on disk already — no extra I/O beyond the in-memory evolutions list.
+        # Rant 2026-08-20T10:58:55: last_cycle_summary deleted (GUI primary
+        # list no longer uses it since rant 2026-08-19T18:25:14); last_run_at
+        # is derived from the restored evolutions and survives restarts via
+        # the task-runs JSONL.
         last_run_at: str | None = None
-        last_cycle_summary: str | None = None
         if self.evolutions:
-            last = self.evolutions[-1]
-            last_run_at = last.timestamp
-            # rant 2026-08-19T07:06:45 (host-finalized): NO machine impact
-            # fallback — empty summary shows as None (GUI renders "-").
-            last_cycle_summary = last.summary if last.summary else None
+            last_run_at = self.evolutions[-1].timestamp
         # rant 2026-08-18T21:32:32: last 5 run records for the GUI accordion
-        # subtable — {timestamp, summary, impact, meaningful,
-        # recommend_slowdown, tool_count}; all in-memory, no extra I/O.
+        # subtable — {timestamp, work, impact, recommend_slowdown,
+        # slowdown_reason, tool_count} (fields unified rant 2026-08-20T10:58:55);
+        # all in-memory, no extra I/O.
         recent_runs = []
         for log in self.evolutions[-5:]:
             recent_runs.append({
                 "timestamp": log.timestamp,
-                "summary": log.summary,
+                "work": log.work,
                 "impact": list(log.impact),
-                "meaningful": log.meaningful,
                 "recommend_slowdown": log.recommend_slowdown,
-                "reason": log.reason,
+                "slowdown_reason": log.slowdown_reason,
                 "tool_count": log.tool_count,
             })
         saturation = {
-            "empty_cycles": self._empty_cycles,
-            "threshold": self._saturation_threshold(),
             "heartbeat_interval": self._heartbeat_interval(),
-            "heartbeat_active": self._saturation_heartbeat_active(),
+            "heartbeat_active": self._slowdown_active,
         }
         return {
             "name": self.name,
@@ -565,7 +552,6 @@ class TaskHandler:
             "next_run_in_seconds": remaining,
             "interval": self.interval,
             "last_run_at": last_run_at,
-            "last_cycle_summary": last_cycle_summary,
             "recent_runs": recent_runs,
             "saturation": saturation,
         }
@@ -599,28 +585,19 @@ class TaskHandler:
         """Whether this tick should run at the low-frequency heartbeat interval
         instead of the normal interval.
 
-        Replaces the old complete saturation halt (rant 2026-08-09T09:35:55):
-        at/above the empty-cycle threshold the handler keeps running full
-        cycles, just at a reduced cadence — never skipping. Saturation
-        judgment depends ONLY on the empty-cycle count (rant 2026-08-18T20:32:07):
-        no upstream network check — recovery happens naturally when a cycle
-        produces output and the empty counter resets.
+        Rant 2026-08-20T10:58:55 (host design-finalized): the flag is set
+        solely by the agent's vibe-check recommend_slowdown (true → throttled)
+        and cleared by a false recommendation or a manual trigger. Kept as a
+        method for call-site compatibility.
         """
-        if self._empty_cycles < self._saturation_threshold():
-            return False
-        self._logger.info(
-            "TaskHandler[%s]: saturation (%d empty cycles) — "
-            "running full cycle at heartbeat interval (%ds) — never halting",
-            self.name, self._empty_cycles, self._heartbeat_interval(),
-        )
-        return True
+        return self._slowdown_active
 
     async def _request_vibe_check(self, ws, prompt: str, completion_summary: str) -> dict | None:
         """Ask the daemon for a structured vibe check on the SAME connection.
 
         Sends ``task_vibe_check`` and waits for ``vibe_check_result`` (~20s).
         Fully defensive — any failure/timeout returns None; the caller
-        conservatively leaves the empty-cycle counter unchanged.
+        conservatively leaves the slowdown state unchanged.
         """
         try:
             await ws.send(json.dumps({
@@ -650,10 +627,9 @@ class TaskHandler:
                     return None
                 result = frame.get("result") or {}
                 return {
-                    "meaningful": result.get("meaningful"),
-                    "recommend_slowdown": result.get("recommend_slowdown"),
-                    "reason": result.get("reason", ""),
-                    "done": result.get("done", ""),
+                    "work": str(result.get("work", "")),
+                    "recommend_slowdown": bool(result.get("recommend_slowdown")),
+                    "slowdown_reason": str(result.get("slowdown_reason", "")),
                 }
         except Exception:
             self._logger.debug("TaskHandler[%s]: vibe check failed", self.name, exc_info=True)
@@ -780,65 +756,40 @@ class TaskHandler:
             except Exception:
                 pass
 
-        # Empty-cycle accounting (rant 2026-08-17T11:39:19): the AGENT decides
-        # whether the round was meaningful (task_vibe_check structured answer),
-        # not git HEAD — HEAD compares commits, so an agent that did analysis /
-        # memory work without a commit was miscounted as empty, and a no-op
-        # round over someone else's push counted as work.
-        #   - meaningful: false → empty cycle (advance the backoff)
-        #   - meaningful: true  → reset the empty streak (+ slowdown votes)
-        #   - recommend_slowdown: true → +1 slowdown vote (3 votes tighten
-        #     the saturation threshold from 30 to 10)
-        #   - vibe check unavailable (ok=false / timeout / parse error) →
-        #     conservative: count unchanged (neither advance nor reset)
-        # A truncated cycle is NOT empty — the agent wanted to work but hit the
-        # tool-round cap; counting it would wrongly back off the handler.
-        # An aborted cycle (server error like "session busy", or an exception)
-        # is NOT empty either — the agent was blocked before reaching an NTE
-        # conclusion; counting it would also advance the idle-halt backoff.
+        # Slowdown state machine (rant 2026-08-20T10:58:55, host design-finalized):
+        # the agent's recommend_slowdown is the ONLY slowdown switch — the old
+        # empty-cycle counter / slowdown-vote / threshold machinery is deleted.
+        #   - vibe success + recommend=true  → _slowdown_active=True (next run
+        #     at heartbeat interval, persisted)
+        #   - vibe success + recommend=false → _slowdown_active=False (normal
+        #     interval, persisted)
+        #   - vibe unavailable / truncated / aborted → state unchanged
+        #     (conservative: neither throttle nor restore on a bad signal)
         if not error and not truncated and vibe_result is not None:
-            meaningful = vibe_result.get("meaningful")
             recommend = bool(vibe_result.get("recommend_slowdown"))
-            if meaningful is False:
-                self._empty_cycles += 1
-                if recommend:
-                    self._slowdown_hits += 1
+            if recommend:
+                self._slowdown_active = True
                 self._save_saturation_state()
                 self._logger.info(
-                    "TaskHandler[%s]: empty cycle #%d (agent: %s%s)",
-                    self.name, self._empty_cycles,
-                    (vibe_result.get("reason") or "")[:100],
-                    f"; slowdown votes {self._slowdown_hits}/{self._SLOWDOWN_VOTES_TO_TIGHTEN}"
-                    if recommend else "",
+                    "TaskHandler[%s]: agent recommends slowdown — next run at "
+                    "heartbeat interval (%ds)",
+                    self.name, self._heartbeat_interval(),
                 )
-            elif meaningful is True:
-                if self._empty_cycles > 0 or self._slowdown_hits > 0:
+            else:
+                if self._slowdown_active:
                     self._logger.info(
-                        "TaskHandler[%s]: agent reported meaningful work, "
-                        "resetting empty streak (%d) + slowdown votes (%d)",
-                        self.name, self._empty_cycles, self._slowdown_hits,
+                        "TaskHandler[%s]: agent recommends normal cadence — "
+                        "restoring interval (%ds)",
+                        self.name, self.interval,
                     )
-                self._empty_cycles = 0
-                self._slowdown_hits = 0
+                self._slowdown_active = False
                 self._save_saturation_state()
         elif not error and not truncated:
-            # vibe check failed/timeout — conservative: don't count, don't reset
+            # vibe check failed/timeout — conservative: state unchanged
             self._logger.info(
-                "TaskHandler[%s]: vibe check unavailable — empty streak unchanged",
+                "TaskHandler[%s]: vibe check unavailable — slowdown state unchanged",
                 self.name,
             )
-        else:
-            if self._empty_cycles > 0 or self._slowdown_hits > 0:
-                reason = "truncated cycle" if truncated else "aborted cycle"
-                if error:
-                    reason = f"aborted cycle ({error[:80]})"
-                self._logger.info(
-                    "TaskHandler[%s]: %s, resetting empty streak",
-                    self.name, reason,
-                )
-            self._empty_cycles = 0
-            self._slowdown_hits = 0
-            self._save_saturation_state()
 
         # Aborted cycles are not evolutions: no log file, no count. Writing
         # them would inflate the evolution count (GUI growth card / toast,
@@ -863,34 +814,32 @@ class TaskHandler:
         if truncated:
             impact.append("truncated=max-tool-rounds")
 
-        # rant 2026-08-18T21:32:32: persist the agent's own summary of what
-        # meaningful work was done (vibe check "done" field) + the vibe flags,
-        # so the GUI task recent-runs table shows real value, not a machine
-        # string. Rant 2026-08-19T07:06:45 (host-finalized): NO fallback to the
-        # completion first line — summary uses only the vibe check "done"
-        # field; empty stays empty (GUI shows "-"), never a machine fallback.
-        summary = ""
-        meaningful = None
+        # rant 2026-08-18T21:32:32: persist the agent's own natural-language
+        # summary of what was done this cycle (vibe check "work" field) + the
+        # vibe flags, so the GUI task recent-runs table shows real value, not
+        # a machine string. Rant 2026-08-19T07:06:45 (host-finalized): NO
+        # fallback to the completion first line — work uses only the vibe
+        # check "work" field; empty stays empty (GUI shows "-"). Field names
+        # unified to work/recommend_slowdown/slowdown_reason (rant
+        # 2026-08-20T10:58:55).
+        work = ""
         recommend = False
-        reason = ""
+        slowdown_reason = ""
         if vibe_result is not None:
-            summary = str(vibe_result.get("done") or "")[:500]
-            meaningful = vibe_result.get("meaningful")
+            work = str(vibe_result.get("work") or "")[:500]
             recommend = bool(vibe_result.get("recommend_slowdown"))
-            # rant 2026-08-19T18:25:14: keep the vibe check's reason for the
-            # meaningful/slowdown judgment so the GUI secondary list can show
-            # 原因 (time/work/throttle/reason).
-            reason = str(vibe_result.get("reason") or "")[:300]
+            # rant 2026-08-19T18:25:14: keep the vibe check's reason so the GUI
+            # secondary list can show 原因 (time/work/throttle/reason).
+            slowdown_reason = str(vibe_result.get("slowdown_reason") or "")[:300]
 
         log = EvolutionLog(
             timestamp=cycle_ts,
             trigger=f"evolution-{self.name}-{cycle_ts}",
             impact=impact,
             operations=["llm-reflection", "tool-execution", "self-improvement"],
-            summary=summary,
-            meaningful=meaningful,
+            work=work,
             recommend_slowdown=recommend,
-            reason=reason,
+            slowdown_reason=slowdown_reason,
             tool_count=tool_count,
         )
         # Rant 2026-08-19T14:18:40 — no more evolution-*.json single-file

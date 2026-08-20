@@ -128,15 +128,13 @@ class EvolutionLog:
     operations: list[str] = field(default_factory=list)
     upstream_contribution: Optional[dict] = None
     # rant 2026-08-18T21:32:32: the agent's own natural-language summary of
-    # what meaningful work was done this cycle (from the vibe check "done"
-    # field) + the vibe result flags, surfaced in GUI task recent-runs.
-    summary: str = ""
-    meaningful: Optional[bool] = None
+    # what was done this cycle, surfaced in GUI task recent-runs.
+    # Rant 2026-08-20T10:58:55 (host design-finalized): `summary` → `work`;
+    # `meaningful` deleted (agent no longer self-rates value);
+    # `reason` → `slowdown_reason` (only populated when recommend_slowdown).
+    work: str = ""
     recommend_slowdown: bool = False
-    # rant 2026-08-19T18:25:14: the vibe check's natural-language reason for
-    # the meaningful/slowdown judgment, surfaced in the GUI task recent-runs
-    # secondary list (时间/工作/降频建议/原因).
-    reason: str = ""
+    slowdown_reason: str = ""
     tool_count: int = 0
 
 

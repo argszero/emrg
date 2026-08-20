@@ -719,17 +719,17 @@ const Dialogs = (() => {
     for (const r of runs) {
       const row = el("div", { class: "task-run-row" });
       row.appendChild(el("span", { class: "task-run-time" }, formatRelativeTime(r.timestamp)));
-      let done = (typeof r.summary === "string" && r.summary) ? r.summary : "";
+      // rant 2026-08-20T10:58:55：字段统一 work（原 summary/done）
+      let done = (typeof r.work === "string" && r.work) ? r.work : "";
       row.appendChild(el("span", { class: "task-run-done" }, done || "-"));
       const flagCell = el("span", { class: "task-run-flag" });
       if (r.recommend_slowdown) {
         flagCell.appendChild(el("span", { class: "task-badge task-run-badge-warn" }, _t("app.taskRunThrottle")));
-      } else if (r.meaningful === false) {
-        flagCell.appendChild(el("span", { class: "task-badge task-run-badge-idle" }, _t("app.taskRunIdle")));
       }
       row.appendChild(flagCell);
-      // rant 2026-08-19T18:25:14：原因列 —— 降频/空转判断的自然语言理由（vibe check reason）。
-      let reason = (typeof r.reason === "string" && r.reason) ? r.reason : "";
+      // rant 2026-08-19T18:25:14：原因列 —— 降频判断的自然语言理由（vibe check
+      // slowdown_reason，rant 2026-08-20T10:58:55 改名）。
+      let reason = (typeof r.slowdown_reason === "string" && r.slowdown_reason) ? r.slowdown_reason : "";
       row.appendChild(el("span", { class: "task-run-reason" }, reason || "-"));
       wrap.appendChild(row);
     }
@@ -787,9 +787,11 @@ const Dialogs = (() => {
       } else {
         meta.appendChild(el("span", { class: "task-meta-item" }, _t("app.taskNoRunYet")));
       }
+      // rant 2026-08-20T10:58:55：降频徽标改为只认 heartbeat_active（不再用
+      // empty_cycles）—— 文案「已降频 · heartbeat {m}s」（app.taskThrottled）。
       const sat = (t.saturation && typeof t.saturation === "object") ? t.saturation : null;
-      if (sat && sat.empty_cycles > 0 && sat.heartbeat_active) {
-        meta.appendChild(el("span", { class: "task-badge task-saturation-badge" }, _t("app.taskSaturation", { n: sat.empty_cycles, m: formatCountdown(sat.heartbeat_interval) })));
+      if (sat && sat.heartbeat_active) {
+        meta.appendChild(el("span", { class: "task-badge task-saturation-badge" }, _t("app.taskThrottled", { m: formatCountdown(sat.heartbeat_interval) })));
       }
       row.appendChild(meta);
       const actions = el("span", { class: "task-actions" });

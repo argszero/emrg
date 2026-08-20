@@ -1218,13 +1218,16 @@ class EmrgServer:
                                prompt: str = "", completion_summary: str = "") -> dict:
         """Structured LLM ask (Ask mode, no tools) about a finished task cycle.
 
-        Asks whether a just-finished scheduled task produced meaningful value.
-        The agent must answer in strict JSON:
-        ``{"meaningful": bool, "recommend_slowdown": bool, "reason": str, "done": str}``.
+        The agent must answer in strict JSON (rant 2026-08-20T10:58:55,
+        host design-finalized — fields unified to 3, meaningful deleted):
+        ``{"work": str, "recommend_slowdown": bool, "slowdown_reason": str}``.
 
-        ``done`` (rant 2026-08-18T21:32:32) is a natural-language summary of
-        what meaningful work was done this cycle, for humans to read in the
-        GUI task recent-runs table. Old models / old parsing omit it → "".
+        ``work`` (rant 2026-08-18T21:32:32 → renamed from ``done``) is a
+        natural-language summary of what was done this cycle, for humans to
+        read in the GUI task recent-runs table. ``recommend_slowdown`` is now
+        the ONLY slowdown switch: true → next run at heartbeat interval,
+        false → normal interval. ``slowdown_reason`` is required only when
+        recommend_slowdown is true. Old models / old parsing omit fields → "".
 
         Rant 2026-08-19T07:10:40 (root cause): the done frame used to carry an
         empty ``content``, so ``completion_summary`` here was empty and the
@@ -1242,7 +1245,7 @@ class EmrgServer:
         ``prompts/vibe_check.j2`` (same live-reload mechanism as system.j2).
 
         Raises on any failure (caller sends ``ok: false``); the scheduler
-        conservatively leaves its empty-cycle counter unchanged then.
+        conservatively leaves its slowdown state unchanged then.
         """
         template = _get_jinja_env().get_template("vibe_check.j2")
         system = template.render(
@@ -1285,10 +1288,9 @@ class EmrgServer:
         if not isinstance(data, dict):
             raise ValueError("vibe check response is not a JSON object")
         return {
-            "meaningful": bool(data.get("meaningful")),
+            "work": str(data.get("work", ""))[:500],
             "recommend_slowdown": bool(data.get("recommend_slowdown")),
-            "reason": str(data.get("reason", ""))[:200],
-            "done": str(data.get("done", ""))[:500],
+            "slowdown_reason": str(data.get("slowdown_reason", ""))[:300],
         }
 
     def _build_system_prompt(self, session: Session | None = None) -> str:
