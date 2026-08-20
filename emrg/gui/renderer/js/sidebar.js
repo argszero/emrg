@@ -31,7 +31,7 @@ const Sidebar = (() => {
       const item = el("div", { class: "conv-item open-session-item" });
       item.dataset.sid = entry.sid;
       item.appendChild(el("span", { class: "conv-title" }, sessionLabel(entry.projectName || "", title, entry.sid)));
-      item.addEventListener("click", () => App.switchSession(entry.sid));
+      item.addEventListener("click", () => App.switchSession(entry.sid, { scopeNav: nav }));
       item.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         App.showOpenSessionsMenu(item, entry);
@@ -41,9 +41,9 @@ const Sidebar = (() => {
     highlight(App.state.sessionId);
   }
 
-  /** 会话条目统一格式 project/name|id（rant 2026-08-20T17:48:07 三处统一） */
+  /** 会话条目统一格式：有 name 显示 project/name，无 name 显示 project/id（rant 2026-08-20T22:04:57） */
   function sessionLabel(project, title, sid) {
-    return `${project}/${title}|${sid}`;
+    return title ? `${project}/${title}` : `${project}/${sid}`;
   }
 
   /** cwd 末段作项目名（Path(s.cwd).name 语义，兼容 \\ 与 /） */
@@ -71,7 +71,7 @@ const Sidebar = (() => {
       const title = s.title || ""; // G27：title 优先，无 title 则空（id 已单独显示）
       const project = cwdProjectName(s.cwd);
       item.appendChild(el("span", { class: "conv-title" }, sessionLabel(project, title, s.session_id)));
-      item.addEventListener("click", () => App.switchSession(s.session_id));
+      item.addEventListener("click", () => App.switchSession(s.session_id, { scopeNav: nav }));
       // 右键菜单：重命名 / 删除（友好确认）
       item.addEventListener("contextmenu", (e) => {
         e.preventDefault();
@@ -82,9 +82,10 @@ const Sidebar = (() => {
     highlight(App.state.sessionId);
   }
 
-  /** 高亮当前对话（含打开会话区） */
-  function highlight(sid) {
-    for (const nav of [$("conv-list"), $("open-sessions")]) {
+  /** 高亮当前对话：指定 navEl 则仅更新该列表，否则两列表都更新（rant 2026-08-20T22:04:02 列表选中互不影响） */
+  function highlight(sid, navEl) {
+    const targets = navEl ? [navEl] : [$("conv-list"), $("open-sessions")];
+    for (const nav of targets) {
       if (!nav) continue;
       for (const item of nav.querySelectorAll(".conv-item")) {
         item.classList.toggle("active", item.dataset.sid === sid);
@@ -119,7 +120,7 @@ const Sidebar = (() => {
       } else if (e.key === "Enter" && _focusIdx >= 0) {
         e.preventDefault();
         const target = items[_focusIdx];
-        if (target.dataset.sid) App.switchSession(target.dataset.sid);
+        if (target.dataset.sid) App.switchSession(target.dataset.sid, { scopeNav: nav });
         clearFocus();
       } else if (e.key === "Escape") {
         clearFocus();
