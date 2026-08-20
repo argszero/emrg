@@ -108,9 +108,28 @@ cd {{ source_dir }} && git fetch origin 2>&1
 cd {{ source_dir }} && git status --short --branch 2>&1
 ```
 
-- Uncommitted local changes → `git stash` (record stash info in the state file)
-- Behind upstream → `git pull --rebase`
-- Merge conflicts → **stop**, record the conflicts in the state file, finish this cycle
+> ⛔ **Never touch the host's uncommitted work** (rant 2026-08-20T11:58:27 — the task
+> used to `git stash` / silently reset dirty working trees, silently discarding the
+> host's live edits). The source directory is the HOST's working directory, not a
+> dedicated clone — a dirty working tree is NORMAL and must be respected:
+> - **Never** run `git stash`, `git checkout .`, `git restore .`, `git clean`,
+>   `git reset --hard`, or any other command that hides/discards uncommitted changes.
+> - **Never** create branches, commit, push, or open PRs while the tree is dirty.
+> - A dirty tree is not an error — it means this cycle runs **read-only**: scanning,
+>   review, issue discussion, and state-file updates only. Record
+>   `工作树非干净（dirty working tree）— 本周期只读` in the state file and proceed
+>   with the read-only parts of the cycle; finish without any git write operations.
+
+- **Uncommitted local changes present** → do NOT stash/reset/restore. Record
+  "dirty working tree — read-only cycle" in the state file; run the cycle
+  **read-only** (scan / review / issue discussion only, no git writes, no PR
+  submission), then finish. Skip `git pull --rebase` this cycle too.
+- Behind upstream **and working tree clean** → `git pull --rebase`
+- Behind upstream **and working tree dirty** → skip the pull, record
+  "behind upstream, dirty tree — pull skipped" in the state file
+- Merge conflicts during a pull (tree was clean beforehand) → `git rebase --abort`
+  (restores the pre-pull clean state), record the conflicts in the state file,
+  finish this cycle — **never stash host work to resolve conflicts**
 
 #### 0.4 Read the state file
 
@@ -535,7 +554,7 @@ Other platforms (Gitee/Gitea/Gerrit, etc.): prefer the platform's official CLI (
 | Situation | Handling |
 |-----------|----------|
 | Network timeout / `gh` API unavailable | Record in state file (blocked = network unavailable), finish this cycle. **Do not retry.** |
-| `git pull` conflicts | `git stash` → `git pull --rebase` → if still conflicting, record in state file, finish |
+| `git pull` conflicts | `git rebase --abort` (the tree was clean before the pull; abort restores it) → record in state file, finish. **Never stash host work.** |
 | `gh pr create` fails (branch name already exists) | Change the branch name, re-push and re-create |
 | Tests failing | Fix → re-test, don't skip. If unfixable, honestly state it in the PR description |
 
