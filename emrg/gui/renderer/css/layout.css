@@ -302,13 +302,24 @@
   margin-left: auto;
   margin-right: auto;
 }
+/* 工具执行全宽左对齐（宿主 2026-08-20 17:50:30）：消息正文保持 760px 阅读宽度，
+   工具行/组/输出不受限，铺满整个聊天窗口左侧。 */
+.session-view > .tool-row,
+.session-view > .tool-group,
+.session-view > .tool-group .tool-group-rows,
+.session-view > .tool-output,
+.session-view > .tool-expand-btn {
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
 
-/* 输入区 */
+/* 输入区（宿主 2026-08-20 17:50:30：状态栏/输入框 100% 全宽，不再 808px 居中） */
 #composer-wrap {
   position: relative; /* / 指令补全菜单锚点（rant 19:44 P1） */
   padding: var(--sp-2) var(--sp-5) var(--sp-4);
-  max-width: 808px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   width: 100%;
 }
 
@@ -633,7 +644,7 @@ body.sidebar-collapsed #app {
   color: currentColor;      /* mono：图标颜色跟随文字色 */
   fill: currentColor;
 }
-.ft-icon path { fill: currentColor; }
+.ft-icon path:not([fill]) { fill: currentColor; }
 /* 展开/收起 chevron（VS Code 风格 ▸/▾，rant 2026-08-13T20:58:57） */
 .ft-chevron {
   flex: none;
@@ -643,7 +654,7 @@ body.sidebar-collapsed #app {
   color: currentColor;
   fill: currentColor;
 }
-.ft-chevron path { fill: currentColor; }
+.ft-chevron path:not([fill]) { fill: currentColor; }
 .ft-name {
   flex: 1;
   overflow: hidden;
