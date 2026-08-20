@@ -392,6 +392,29 @@
 }
 #github-banner .btn { padding: 4px 12px; min-height: 0; font-size: var(--fs-secondary); }
 
+/* ── 升级完成横幅（rant 2026-08-20T18:30:57：版本变化 → 提示 + 一键重启） ── */
+#upgrade-banner {
+  position: absolute;
+  top: var(--sp-3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px var(--sp-3) 6px var(--sp-4);
+  font-size: var(--fs-secondary);
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+  animation: banner-in var(--dur-med) var(--ease);
+  white-space: nowrap;
+  max-width: 90%;
+}
+#upgrade-banner .btn { padding: 4px 12px; min-height: 0; font-size: var(--fs-secondary); }
+
 /* ── 侧边栏折叠（⌘B / 窄屏） ────────────── */
 body.sidebar-collapsed #sidebar {
   display: none;

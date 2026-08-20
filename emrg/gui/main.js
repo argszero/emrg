@@ -279,6 +279,7 @@ vision = false
         server_id: pong?.identity?.instance_id || "",
         model: pong?.model || "",
         evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
+        current_version: pong?.current_version || "", // rant 18:30:57：安装版本（GUI 对比显示升级横幅）
         version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
         sessions,
         open_sessions: openSessionsList(),
@@ -314,6 +315,20 @@ vision = false
     });
 
     ipcMain.handle("emrg:listSessions", async () => listSessions());
+
+    // Rant 2026-08-20T18:30:57：一键"重启生效"——发 shutdown（source=gui-restart）让
+    // daemon 停；connManager 检测到全部掉线 → restart-recovery → ensureDaemon 用新
+    // 安装代码重新 spawn（GUI 本就是 daemon 生命周期 owner，不发子进程调 CLI）。
+    ipcMain.handle("emrg:restartDaemon", async () => {
+      const conn = activeConn();
+      if (!conn || !conn.connected) throw new Error("daemon not connected");
+      try {
+        conn.sendCommand("shutdown", { source: "gui-restart" });
+      } catch (e) {
+        throw new Error(`shutdown failed: ${e.message}`);
+      }
+      return { ok: true };
+    });
 
     ipcMain.handle("emrg:switchSession", async (_e, { sessionId, projectPath } = {}) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
@@ -851,7 +866,7 @@ vision = false
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
         const pong = await waitForPong();
-        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model });
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "" });
         logger.info("[gui] connManager recovery complete");
       } catch (e) {
         logger.warn(`[gui] post-recovery refresh failed: ${e.message}`);
@@ -1076,7 +1091,7 @@ vision = false
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
         const pong = await waitForPong();
-        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model });
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "" });
       }
     }, delay);
   }

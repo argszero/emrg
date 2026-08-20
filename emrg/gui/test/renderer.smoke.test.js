@@ -148,6 +148,7 @@ const ELEMENT_IDS = [
   "result-tabs", "result-tab-files", "result-tab-artifacts", "result-tabbar", "result-files", "result-viewer", "result-resizer",
   "growth-card", "growth-count", "about-recent",
   "github-banner", "github-banner-msg", "github-banner-connect", "github-banner-dismiss",
+  "upgrade-banner", "upgrade-banner-msg", "upgrade-banner-restart", "upgrade-banner-dismiss",
   "toast", "toast-msg",
   // rant 18:23:15 P3：定时任务/自定义类型管理（settings 区）
   "task-list", "task-add-btn", "task-template-mgr-btn",
@@ -731,6 +732,58 @@ test("GCM rant Stage 2：演化增长 + 未认证 → GitHub 连接横幅出现�
   const toastIdx = src.indexOf("function maybeShowEvolutionToast()");
   const toastBlock = src.slice(toastIdx, toastIdx + 800);
   assert.ok(toastBlock.includes("maybeShowGithubBanner()"), "演化增长应触发 GitHub 横幅检查");
+});
+
+test("rant 18:30:57：版本变化 → 升级横幅出现 + 重启按钮触发 restartDaemon（正反两态）", async () => {
+  // 正态：status current_version 与已知版本不同 → 横幅出现
+  const { ctx } = makeSandbox({
+    init: async () => ({
+      config_exists: true,
+      api_key_configured: true,
+      current_version: "0.2.58",
+      sessions: [],
+    }),
+  });
+  await tick();
+  await vm.runInContext(`(function() {
+    document.getElementById("upgrade-banner").classList.add("hidden");
+    App.state.lastKnownVersion = "0.2.58";
+    App.handleEvent({ type: "status", data: { connected: true, current_version: "0.2.59" } });
+  })()`, ctx);
+  const visible = vm.runInContext(
+    '!document.getElementById("upgrade-banner").classList.contains("hidden")',
+    ctx
+  );
+  assert.strictEqual(visible, true, "版本变化 → 升级横幅应出现");
+
+  // 负态：版本未变 → 横幅保持隐藏
+  const { ctx: ctx2 } = makeSandbox({});
+  await tick();
+  await vm.runInContext(`(function() {
+    document.getElementById("upgrade-banner").classList.add("hidden");
+    App.state.lastKnownVersion = "0.2.58";
+    App.handleEvent({ type: "status", data: { connected: true, current_version: "0.2.58" } });
+  })()`, ctx2);
+  const hidden = vm.runInContext(
+    'document.getElementById("upgrade-banner").classList.contains("hidden")',
+    ctx2
+  );
+  assert.strictEqual(hidden, true, "版本未变 → 横幅应保持隐藏");
+
+  // 重启按钮 → restartDaemon 调用
+  let restarted = false;
+  const { ctx: ctx3 } = makeSandbox({});
+  await tick();
+  await vm.runInContext(`(async function() {
+    App._testRestartDaemon = () => { window.__restartCalled = true; };
+  })()`, ctx3);
+  const appSrc = fs.readFileSync(path.join(RENDERER_JS, "app.js"), "utf8");
+  assert.ok(appSrc.includes("restartDaemon"), "重启按钮应调用 window.emrg.restartDaemon");
+  const GUI_DIR = path.join(__dirname, "..");
+  const mainSrc = fs.readFileSync(path.join(GUI_DIR, "main.js"), "utf8");
+  assert.ok(mainSrc.includes("emrg:restartDaemon"), "main.js 应注册 emrg:restartDaemon IPC");
+  const preloadSrc = fs.readFileSync(path.join(GUI_DIR, "preload.js"), "utf8");
+  assert.ok(preloadSrc.includes("restartDaemon"), "preload 应暴露 restartDaemon");
 });
 
 test("右键菜单：重命名对话框 → renameSession 调用（设计 §3.2）", async () => {
