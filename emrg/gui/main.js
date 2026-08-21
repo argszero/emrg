@@ -284,8 +284,7 @@ vision = false
         server_id: pong?.identity?.instance_id || "",
         model: pong?.model || "",
         evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
-        current_version: pong?.current_version || "", // rant 18:30:57：安装版本（GUI 对比显示升级横幅）
-        previous_version: pong?.previous_version || "", // rant 12:44:34：升级前版本（横幅 from→to）
+        current_version: pong?.current_version || "", // rant 18:30:57：进程实际运行版本（升级横幅对比基准；14:38:27 起为内存版本）
         version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
         sessions,
         open_sessions: openSessionsList(),
@@ -899,7 +898,7 @@ vision = false
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
         const pong = await waitForPong();
-        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "", previous_version: pong?.previous_version || "" });
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "" });
         logger.info("[gui] connManager recovery complete");
       } catch (e) {
         logger.warn(`[gui] post-recovery refresh failed: ${e.message}`);
@@ -1126,7 +1125,7 @@ vision = false
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
         const pong = await waitForPong();
-        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "", previous_version: pong?.previous_version || "" });
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "" });
       }
     }, delay);
   }
@@ -1179,6 +1178,16 @@ vision = false
       stopHeartbeat();
       try { conn.close(); } catch { /* ignore */ }
       scheduleReconnect();
+      return;
+    }
+    // Rant 2026-08-21T14:38:27：升级判断——installed_version（磁盘实时）≠
+    // current_version（进程内存运行版本）且 installed 非空 → 发专用 upgrade 事件
+    // （不复用 status，避免 handleStatus 副作用刷屏），由 renderer 弹横幅。
+    if (pong.installed_version && pong.installed_version !== pong.current_version) {
+      sendToRenderer("upgrade", {
+        current_version: pong.current_version || "",
+        installed_version: pong.installed_version,
+      });
     }
   }
 

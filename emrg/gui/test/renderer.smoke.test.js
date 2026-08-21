@@ -735,14 +735,13 @@ test("GCM rant Stage 2：演化增长 + 未认证 → GitHub 连接横幅出现�
   assert.ok(toastBlock.includes("maybeShowGithubBanner()"), "演化增长应触发 GitHub 横幅检查");
 });
 
-test("rant 18:30:57 + 12:44:34：版本变化 → 升级横幅（from→to）+ 重启按钮触发 restartDaemon（正反两态）", async () => {
-  // 正态：status current_version 与已知版本不同 → 横幅出现；有 previous_version → 显示 from→to
+test("rant 18:30:57 + 12:44:34 + 14:38:27：升级横幅（installed≠run → from→to）+ 重启按钮（正反两态）", async () => {
+  // 正态（14:38:27 模型）：upgrade 事件 installed≠current → 横幅出现 + from→to 文案
   const { ctx } = makeSandbox({
     init: async () => ({
       config_exists: true,
       api_key_configured: true,
       current_version: "0.2.58",
-      previous_version: "",
       sessions: [],
     }),
   });
@@ -750,29 +749,43 @@ test("rant 18:30:57 + 12:44:34：版本变化 → 升级横幅（from→to）+ �
   await vm.runInContext(`(function() {
     document.getElementById("upgrade-banner").classList.add("hidden");
     App.state.lastKnownVersion = "0.2.58";
-    App.handleEvent({ type: "status", data: { connected: true, current_version: "0.2.61", previous_version: "0.2.57" } });
+    App.handleEvent({ type: "upgrade", data: { current_version: "0.2.58", installed_version: "0.2.62" } });
   })()`, ctx);
   const visible = vm.runInContext(
     '!document.getElementById("upgrade-banner").classList.contains("hidden")',
     ctx
   );
-  assert.strictEqual(visible, true, "版本变化 → 升级横幅应出现");
+  assert.strictEqual(visible, true, "installed≠run → 升级横幅应出现");
   const bannerText = vm.runInContext('document.getElementById("upgrade-banner-msg").textContent', ctx);
-  assert.ok(bannerText.includes("0.2.57") && bannerText.includes("0.2.61"), `横幅应显示 from→to，实际 ${bannerText}`);
+  assert.ok(bannerText.includes("0.2.58") && bannerText.includes("0.2.62"), `横幅应显示 from→to，实际 ${bannerText}`);
 
-  // 负态：版本未变 → 横幅保持隐藏
+  // 负态1：installed == lastKnown（已提示过）→ 保持隐藏（防重复弹）
   const { ctx: ctx2 } = makeSandbox({});
   await tick();
   await vm.runInContext(`(function() {
     document.getElementById("upgrade-banner").classList.add("hidden");
-    App.state.lastKnownVersion = "0.2.58";
-    App.handleEvent({ type: "status", data: { connected: true, current_version: "0.2.58" } });
+    App.state.lastKnownVersion = "0.2.62";
+    App.handleEvent({ type: "upgrade", data: { current_version: "0.2.58", installed_version: "0.2.62" } });
   })()`, ctx2);
   const hidden = vm.runInContext(
     'document.getElementById("upgrade-banner").classList.contains("hidden")',
     ctx2
   );
-  assert.strictEqual(hidden, true, "版本未变 → 横幅应保持隐藏");
+  assert.strictEqual(hidden, true, "已提示过同版本 → 横幅应保持隐藏");
+
+  // 负态2：status 事件不再触发横幅（14:38:27：升级判断移出 status）
+  const { ctx: ctx4 } = makeSandbox({});
+  await tick();
+  await vm.runInContext(`(function() {
+    document.getElementById("upgrade-banner").classList.add("hidden");
+    App.state.lastKnownVersion = "0.2.58";
+    App.handleEvent({ type: "status", data: { connected: true, current_version: "0.2.62" } });
+  })()`, ctx4);
+  const hidden2 = vm.runInContext(
+    'document.getElementById("upgrade-banner").classList.contains("hidden")',
+    ctx4
+  );
+  assert.strictEqual(hidden2, true, "status 事件不应再弹升级横幅");
 
   // 重启按钮 → restartDaemon 调用
   let restarted = false;
@@ -783,9 +796,12 @@ test("rant 18:30:57 + 12:44:34：版本变化 → 升级横幅（from→to）+ �
   })()`, ctx3);
   const appSrc = fs.readFileSync(path.join(RENDERER_JS, "app.js"), "utf8");
   assert.ok(appSrc.includes("restartDaemon"), "重启按钮应调用 window.emrg.restartDaemon");
+  assert.ok(appSrc.includes('case "upgrade"'), "app.js 应处理 upgrade 事件");
   const GUI_DIR = path.join(__dirname, "..");
   const mainSrc = fs.readFileSync(path.join(GUI_DIR, "main.js"), "utf8");
   assert.ok(mainSrc.includes("emrg:restartDaemon"), "main.js 应注册 emrg:restartDaemon IPC");
+  assert.ok(mainSrc.includes('sendToRenderer("upgrade"'), "main.js 心跳应发 upgrade 事件");
+  assert.ok(mainSrc.includes("pong.installed_version"), "心跳应对比 installed_version");
   const preloadSrc = fs.readFileSync(path.join(GUI_DIR, "preload.js"), "utf8");
   assert.ok(preloadSrc.includes("restartDaemon"), "preload 应暴露 restartDaemon");
 });

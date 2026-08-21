@@ -1743,7 +1743,8 @@ def test_pong_includes_current_version(tmp_path, monkeypatch):
     monkeypatch.setattr(daemon_mod.Path, "home", lambda: empty)
     assert server._current_installed_version() == ""
 
-    # Pong payload includes the field
+    # Pong payload includes both fields (14:38:27 refactor: current_version =
+    # in-memory run version captured at startup; installed_version = live read)
     monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
     writer = _FakeWriter()
     import asyncio
@@ -1751,38 +1752,40 @@ def test_pong_includes_current_version(tmp_path, monkeypatch):
     frame = _last_frame(writer)
     assert frame["type"] == "pong"
     assert frame["current_version"] == "0.2.59"
+    assert frame["installed_version"] == "0.2.59"
 
 
-def test_pong_includes_previous_version(tmp_path, monkeypatch):
-    """Pong carries previous_version from ~/.emrg/install/previous-version.txt.
+def test_pong_run_vs_installed_version(tmp_path, monkeypatch):
+    """current_version is the daemon's in-memory run version (fixed at
+    startup); installed_version is the live disk read — the upgrade agent can
+    update version.txt while the daemon still runs the pre-upgrade code.
 
-    Rant 2026-08-21T12:44:34: the upgrade agent records the pre-upgrade
-    version in previous-version.txt before overwriting version.txt, so the
-    GUI banner can show "upgraded from X to Y". Missing file → "" (dev runs
-    or first install), never an error.
+    Rant 2026-08-21T14:38:27: the GUI shows the upgrade banner when
+    installed_version ≠ current_version (upgrade installed, restart pending).
+    previous-version.txt is no longer used for the judgment.
     """
     import emrg.server.daemon as daemon_mod
     install = tmp_path / ".emrg" / "install"
     install.mkdir(parents=True)
     (install / "version.txt").write_text("0.2.61\n", encoding="utf-8")
-    (install / "previous-version.txt").write_text("0.2.57\n", encoding="utf-8")
 
     monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
 
     server = _make_server()
-    assert server._previous_installed_version() == "0.2.57"
+    # _run_version captured at startup — mirrors the daemon's running code
+    assert server._run_version == "0.2.61"
 
-    # Missing file → "" (no crash)
-    empty = tmp_path / "no-install"
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: empty)
-    assert server._previous_installed_version() == ""
+    # Simulate an upgrade: version.txt updated on disk, daemon not restarted
+    (install / "version.txt").write_text("0.2.62\n", encoding="utf-8")
+    assert server._run_version == "0.2.61", "run version must stay fixed in-process"
+    assert server._current_installed_version() == "0.2.62"
 
-    # Pong payload includes the field
-    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    # Pong: current_version = run (0.2.61), installed_version = disk (0.2.62)
     writer = _FakeWriter()
     import asyncio
     asyncio.run(server._process_message({"type": "ping"}, writer))
     frame = _last_frame(writer)
     assert frame["type"] == "pong"
     assert frame["current_version"] == "0.2.61"
-    assert frame["previous_version"] == "0.2.57"
+    assert frame["installed_version"] == "0.2.62"
+    assert "previous_version" not in frame, "previous-version.txt no longer used (14:38:27)"
