@@ -787,6 +787,19 @@ test("rant 18:30:57：版本变化 → 升级横幅出现 + 重启按钮触发 r
   assert.ok(preloadSrc.includes("restartDaemon"), "preload 应暴露 restartDaemon");
 });
 
+test("rant 12:44:34: main.js 心跳探活已接入（断连主动重连）", async () => {
+  const GUI_DIR = path.join(__dirname, "..");
+  const mainSrc = fs.readFileSync(path.join(GUI_DIR, "main.js"), "utf8");
+  assert.ok(mainSrc.includes("HEARTBEAT_MS"), "应有心跳间隔常量");
+  assert.ok(mainSrc.includes("function startHeartbeat"), "应有 startHeartbeat");
+  assert.ok(mainSrc.includes("function stopHeartbeat"), "应有 stopHeartbeat");
+  assert.ok(mainSrc.includes("function _heartbeatTick"), "应有心跳 tick");
+  assert.ok(mainSrc.includes("waitForPong"), "心跳复用 waitForPong 探测");
+  assert.ok(mainSrc.includes("scheduleReconnect"), "无 pong/连接断开 → 触发重连");
+  assert.ok(mainSrc.includes("startHeartbeat(); // rant 2026-08-21T12:44:34"), "连接成功后启动心跳");
+  assert.ok(mainSrc.includes("stopHeartbeat(); // rant 2026-08-21T12:44:34：退出清理心跳定时器"), "窗口关闭清理心跳");
+});
+
 test("右键菜单：重命名对话框 → renameSession 调用（设计 §3.2）", async () => {
   let renamed = null;
   const { ctx, els } = makeSandbox({
