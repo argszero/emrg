@@ -20,7 +20,8 @@ import pytest
 from emrg import _stop_all
 from emrg._stop_all import (
     _caller_context,
-    _read_pid_file,
+    _daemon_scan_pids,
+    _port_is_open,
     _verify_posix,
     match_cmdline,
     scan_pids,
@@ -97,16 +98,73 @@ class TestScanPids:
         assert scan_pids("  1 /sbin/launchd\n  2 /usr/libexec/foo\n", own_pid=9999) == []
 
 
-class TestPidFile:
-    def test_read_pid_file(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(_stop_all, "config_dir", lambda: tmp_path)
-        assert _read_pid_file() is None  # missing
-        (tmp_path / "emrgd.pid").write_text("1234\n", encoding="utf-8")
-        assert _read_pid_file() == 1234
-        (tmp_path / "emrgd.pid").write_text("abc\n", encoding="utf-8")
-        assert _read_pid_file() is None  # invalid
-        (tmp_path / "emrgd.pid").write_text("-5\n", encoding="utf-8")
-        assert _read_pid_file() is None  # non-positive
+class TestPortIsOpen:
+    """_port_is_open — fixed-port TCP probe (rant 2026-08-21T16:45:06: the
+    port is the daemon ground truth; emrgd.pid is gone)."""
+
+    def test_open_when_connection_succeeds(self, monkeypatch):
+        def _fake_create_connection(addr, timeout=0.3):
+            sock = type("S", (), {"close": lambda self: None})()
+            return sock
+
+        monkeypatch.setattr(_stop_all.socket, "create_connection", _fake_create_connection)
+        assert _port_is_open(56031) is True
+
+    def test_closed_when_refused(self, monkeypatch):
+        def _refused(addr, timeout=0.3):
+            raise ConnectionRefusedError("refused")
+
+        monkeypatch.setattr(_stop_all.socket, "create_connection", _refused)
+        assert _port_is_open(56031) is False
+
+    def test_closed_on_oserror(self, monkeypatch):
+        def _boom(addr, timeout=0.3):
+            raise OSError("network unreachable")
+
+        monkeypatch.setattr(_stop_all.socket, "create_connection", _boom)
+        assert _port_is_open(56031) is False
+
+
+class TestDaemonScanPids:
+    """_daemon_scan_pids — cmdline identity for the daemon only
+    (``-m emrg.server``, rant 2026-08-21T16:45:06: stop_daemon kill fallback)."""
+
+    def test_posix_matches_only_daemon(self, monkeypatch):
+        ps_out = (
+            "  100 /usr/bin/python -m emrg.server\n"
+            "  200 /usr/bin/python -m emrg\n"        # TUI — NOT matched
+            "  300 /usr/bin/python -m pytest\n"
+            "  400 /usr/bin/python -m emrg.server --init-auto-evolve\n"
+        )
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        monkeypatch.setattr(_stop_all, "_ps_output", lambda: ps_out)
+        assert _daemon_scan_pids(own_pid=9999) == [100, 400]
+
+    def test_posix_excludes_own_pid(self, monkeypatch):
+        ps_out = "  999 /usr/bin/python -m emrg.server\n"
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        monkeypatch.setattr(_stop_all, "_ps_output", lambda: ps_out)
+        assert _daemon_scan_pids(own_pid=999) == []
+
+    def test_windows_delegates_server_only(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        captured = {}
+        monkeypatch.setattr(
+            _stop_all, "_scan_windows_python_emrg",
+            lambda own, server_only=False: captured.update(own=own, server_only=server_only) or [555],
+        )
+        assert _daemon_scan_pids(own_pid=42) == [555]
+        assert captured == {"own": 42, "server_only": True}
+
+    def test_windows_scan_server_only_filter(self, monkeypatch):
+        """The CIM CommandLine filter must target emrg.server only."""
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        monkeypatch.setattr(
+            _stop_all.subprocess, "run",
+            lambda cmd, **kw: type("CP", (), {"stdout": "111\n222\n"}),
+        )
+        pids = _stop_all._scan_windows_python_emrg(1, server_only=True)
+        assert pids == [111, 222]
 
 
 class TestCallerContext:
@@ -316,7 +374,7 @@ class TestVerifyWindowsPythonResidual:
 
     def test_reports_python_emrg_residual(self, monkeypatch):
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
-        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_port_is_open", lambda port, timeout=0.3: False)
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [555])
         monkeypatch.setattr(
             _stop_all.subprocess, "run",
@@ -327,7 +385,7 @@ class TestVerifyWindowsPythonResidual:
 
     def test_no_python_residual_when_clean(self, monkeypatch):
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
-        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_port_is_open", lambda port, timeout=0.3: False)
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
         monkeypatch.setattr(
             _stop_all.subprocess, "run",
@@ -534,7 +592,7 @@ class TestLockOwners:
 
     def test_verify_windows_logs_rm_diag(self, monkeypatch, capsys):
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
-        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_port_is_open", lambda port, timeout=0.3: False)
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
         monkeypatch.setattr(
             _stop_all.subprocess, "run",
@@ -566,7 +624,7 @@ class TestLockOwners:
 
     def test_verify_reports_lock_owner_residual(self, monkeypatch):
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
-        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_port_is_open", lambda port, timeout=0.3: False)
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
         monkeypatch.setattr(
             _stop_all, "_windows_lock_owners",
@@ -650,7 +708,7 @@ class TestIndependentLockProbe:
 
     def test_verify_categories_include_lock_probe(self, monkeypatch):
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
-        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_port_is_open", lambda port, timeout=0.3: False)
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
         monkeypatch.setattr(_stop_all, "_lock_owner_ps", lambda kill: "")
         monkeypatch.setattr(
@@ -877,7 +935,7 @@ class TestLockProbeFailClosed:
         root = tmp_path / ".emrg" / "install"
         root.mkdir(parents=True)
         (root / "a.txt").write_text("x", encoding="utf-8")
-        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_port_is_open", lambda port, timeout=0.3: False)
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
         monkeypatch.setattr(_stop_all, "_lock_owner_ps", lambda kill: "")
         monkeypatch.setattr(
@@ -905,7 +963,7 @@ class TestVerifySingleScan:
         scan ONCE — the previous code ran it twice (~2s+ wasted, duplicated
         rm-scan log lines)."""
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
-        monkeypatch.setattr(_stop_all, "_read_pid_file", lambda: None)
+        monkeypatch.setattr(_stop_all, "_port_is_open", lambda port, timeout=0.3: False)
         monkeypatch.setattr(_stop_all, "_scan_windows_python_emrg", lambda own: [])
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
         calls = {"n": 0}
