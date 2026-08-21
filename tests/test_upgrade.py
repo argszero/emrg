@@ -274,6 +274,10 @@ def test_daemon_upgrade_session_runner(monkeypatch, tmp_path):
 
     server = _make_server()
     monkeypatch.setattr(server, "_max_tool_rounds", 3)
+    # ⛔ Red line (host 2026-08-21T10:35:57): tests must never create/write the
+    # real emrg-upgrade session — isolate the session factory (the conftest
+    # autouse guard raises on the real one for SESSION_ID).
+    monkeypatch.setattr(server, "_get_or_create_session", lambda sid, cwd: object())
     ran = []
 
     async def fake_loop(req, ws, session, cancel_event, allow_tools=True):
@@ -291,6 +295,24 @@ def test_daemon_upgrade_session_runner(monkeypatch, tmp_path):
     assert ran[0][2] == "PROMPT"
     assert ran[0][3] is True, "upgrade sessions run with tools"
     assert server._session_busy.get("emrg-upgrade") is False, "busy lock released"
+
+
+def test_upgrade_chain_hermeticity_guards():
+    """⛔ Red line (host 2026-08-21T10:35:57): the conftest autouse guard must
+    block the real auto-upgrade chain by default — no real GitHub releases
+    request, no real install/version.txt access. A long-running pytest session
+    really executed the upgrade chain every 5 minutes (PID 72994, 21h).
+    """
+    from pathlib import Path
+
+    import emrg.server.upgrade as up
+
+    # 1. Network: the upgrade module's httpx.AsyncClient raises by default.
+    with pytest.raises(AssertionError, match="red-line"):
+        up.httpx.AsyncClient()
+
+    # 2. Version file: not the real ~/.emrg/install/version.txt.
+    assert up.VERSION_FILE != Path.home() / ".emrg" / "install" / "version.txt"
 
 
 # ── no residual references to the removed mechanism ───────────────────────

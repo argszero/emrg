@@ -100,6 +100,19 @@ async def _boot_server(tmp: Path):
     sched_mod.config_dir = lambda: tmp  # scheduler builds its own projects_file (#738)
     connect_mod.config_dir = lambda: tmp
 
+    # ⛔ Red line (host 2026-08-21T10:35:57): tests must never run the real
+    # auto-upgrade chain. serve() unconditionally starts the 5-minute
+    # _upgrade_tick_loop, which builds UpgradeManager(load_update_config(), …)
+    # with enabled=True by default — over a long session the tick really
+    # requested the GitHub releases API and wrote real emrg-upgrade sessions
+    # (21h pytest incident, PID 72994). Force the manager disabled so the tick
+    # is a no-op; the conftest autouse guard additionally blocks the network.
+    import emrg.config as cfg_mod
+    from emrg.config import UpdateConfig as _UpdateConfig
+
+    _orig_load_update_config = cfg_mod.load_update_config
+    cfg_mod.load_update_config = lambda: _UpdateConfig(enabled=False)
+
     server = daemon_mod.EmrgServer(_make_config())
     server.llm = AsyncMock()
     server.llm.config = _make_config()  # real config so _run_tool_loop reads thresholds
@@ -130,6 +143,7 @@ async def _boot_server(tmp: Path):
         connect_mod.config_dir = _orig_connect_cfg
         daemon_mod.EMRGD_PORT = _orig_daemon_port
         connect_mod.EMRGD_PORT = _orig_connect_port
+        cfg_mod.load_update_config = _orig_load_update_config
 
     return server, task, _cleanup
 
