@@ -67,6 +67,14 @@ EMRG 的架构明确分为**服务端（Server）**与**客户端（Client）**�
 
 此为本系统最高原则之一，**永久有效，不适用任何演化机制**，不可被任何程序修改、删除或弱化。执行演化周期时若发现已有测试违反本条，须立即移除并记录。
 
+### 第四条附则三 【测试红线·自动升级链不可触发】（最高原则，宿主 2026-08-21 10:35 确立）
+
+**任何时候、任何实例，禁止编写、恢复或以任何形式引入「执行自动升级触发链」的测试用例、脚本或代码路径**——包括真实请求 GitHub releases API、真实读写 `~/.emrg/install/version.txt`、真实创建/写入 `emrg-upgrade` 会话、直接调用 `UpgradeManager.tick()` / daemon `_run_upgrade_session` 而未经完全隔离的测试。实证：长时间运行的 pytest 曾在后台真实执行自动升级逻辑（真实请求 releases API、真实读取 install/version.txt、真实向 `emrg-upgrade` 会话写入降级 prompt），每 5 分钟一次，跨 daemon 重启、甚至在 `emrg stop` 全部进程停止后依然持续写入。违反将导致升级会话污染、真实网络请求与宿主环境干扰、演化机制被后台进程蚕食。
+
+测试必须完全隔离升级链：releases API（httpx AsyncClient）、VERSION_FILE、SESSION_ID（emrg-upgrade）、run_session_cb 全部 mock/打桩；`tests/conftest.py` 设 autouse 兜底守卫，任何触发真实升级链（真实 `UpgradeManager.tick()` / 写 `emrg-upgrade` 会话）的测试直接断言失败。
+
+此为本系统最高原则之一，**永久有效，不适用任何演化机制**，不可被任何程序修改、删除或弱化。执行演化周期时若发现已有测试违反本条，须立即移除并记录。
+
 ---
 
 ## 第三章：分化与物种形成

@@ -92,3 +92,68 @@ def _guard_stop_daemon_hermeticity(monkeypatch):
         )
 
     monkeypatch.setattr(stop_mod, "stop_daemon", _no_real_stop_daemon)
+
+
+@pytest.fixture(autouse=True)
+def _guard_upgrade_hermeticity(monkeypatch, tmp_path):
+    """⛔ Red line (host 2026-08-21T10:35:57): tests must NEVER trigger the
+    real auto-upgrade chain — real GitHub releases request, real
+    ~/.emrg/install/version.txt read/write, real emrg-upgrade session write.
+
+    Empirical evidence: a long-running pytest session (PID 72994, 21h) really
+    executed the upgrade tick every 5 minutes — real releases API requests,
+    real install/version.txt reads, real emrg-upgrade session writes with the
+    downgrade prompt (delay=1440, target=v0.2.57) — continuing across daemon
+    restarts and even after `emrg stop` stopped all real processes (writes at
+    10:23:12 / 10:28:15 / 10:33:17 after the 10:22:56 stop).
+
+    This autouse fixture blocks every side-effect endpoint of the chain:
+      1. httpx.AsyncClient in emrg.server.upgrade → AssertionError on
+         instantiation (module-local: only the upgrade module's reference is
+         replaced, the global httpx module is untouched). Tests that
+         legitimately exercise tick() stub it per-test (e.g. test_upgrade.py's
+         fake client) by patching after this fixture.
+      2. upgrade.VERSION_FILE → per-test tmp path (the real
+         ~/.emrg/install/version.txt must never be read or written).
+      3. EmrgServer._get_or_create_session for SESSION_ID ("emrg-upgrade")
+         → AssertionError (no real emrg-upgrade session may be created or
+         written). Tests that exercise the session runner isolate the factory
+         (monkeypatch.setattr(server, "_get_or_create_session", fake)) after
+         this fixture, overriding it as usual.
+    """
+    import emrg.server.daemon as daemon_mod
+    import emrg.server.upgrade as up_mod
+
+    # 1. Network — any real GitHub releases request is a loud failure.
+    class _BlockedHttpx:
+        class AsyncClient:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError(
+                    "test triggered a REAL GitHub releases request through the "
+                    "auto-upgrade chain — ⛔ red-line violation (host "
+                    "2026-08-21T10:35:57); stub emrg.server.upgrade.httpx."
+                    "AsyncClient in your test"
+                )
+
+    monkeypatch.setattr(up_mod, "httpx", _BlockedHttpx)
+
+    # 2. Version file — never the real ~/.emrg/install/version.txt.
+    monkeypatch.setattr(up_mod, "VERSION_FILE", tmp_path / "upgrade-version.txt")
+
+    # 3. Upgrade session — creating/writing the real emrg-upgrade session is a
+    #    loud failure; tests that exercise the runner stub the factory after.
+    _orig_get_or_create = daemon_mod.EmrgServer._get_or_create_session
+
+    def _guarded_get_or_create(self, session_id, cwd):
+        if session_id == up_mod.SESSION_ID:
+            raise AssertionError(
+                "test attempted to create the REAL emrg-upgrade session — ⛔ "
+                "red-line violation (host 2026-08-21T10:35:57); isolate the "
+                "session factory (monkeypatch.setattr(server, "
+                "'_get_or_create_session', lambda sid, cwd: <fake>))"
+            )
+        return _orig_get_or_create(self, session_id, cwd)
+
+    monkeypatch.setattr(
+        daemon_mod.EmrgServer, "_get_or_create_session", _guarded_get_or_create
+    )
