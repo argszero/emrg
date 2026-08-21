@@ -171,6 +171,51 @@ class TestVerifyPosix:
         assert any("pid 43" in r for r in out)
 
 
+class TestVerifyPosixSkipGui:
+    """--skip-gui (rant 2026-08-21T12:44:34): the GUI is the caller and must
+    be excluded from the residual scan — it intentionally survives to
+    relaunch itself after stop_all exits."""
+
+    def test_gui_pid_excluded(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "_stop_scan_pids", lambda own: [42, 400])
+        monkeypatch.setattr(
+            _stop_all, "_ps_output",
+            lambda: (
+                "  42 /usr/bin/python -m emrg\n"
+                " 400 /Applications/EMRG.app/Contents/MacOS/EMRG\n"
+            ),
+        )
+        out = _verify_posix(skip_gui=True)
+        assert any("pid 42" in r for r in out), "TUI residual must still be reported"
+        assert not any("pid 400" in r for r in out), "GUI pid must be excluded"
+
+    def test_without_skip_gui_still_flags_gui(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "_stop_scan_pids", lambda own: [400])
+        out = _verify_posix()
+        assert any("pid 400" in r for r in out)
+
+
+class TestStepPlanSkipGui:
+    """_step_plan(skip_gui=True) omits the GUI stop step (rant
+    2026-08-21T12:44:34) — taskkill /IM EMRG.exe / ps-scan EMRG.app would
+    kill the GUI main process that must relaunch itself."""
+
+    def test_skips_gui_keeps_clients_daemon(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        names = [n for n, _ in _stop_all._step_plan(skip_gui=True)]
+        assert names == ["TUI", "daemon"]
+
+    def test_default_includes_gui(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        names = [n for n, _ in _stop_all._step_plan()]
+        assert names == ["GUI", "TUI", "daemon"]
+
+    def test_windows_skips_gui_keeps_bundled_git(self, monkeypatch):
+        monkeypatch.setattr(_stop_all, "is_win", lambda: True)
+        names = [n for n, _ in _stop_all._step_plan(skip_gui=True)]
+        assert names == ["TUI", "daemon", "bundled git", "file-lock owners"]
+
+
 class TestScanWindowsPythonEmrg:
     """_scan_windows_python_emrg — the cmdline fallback (rant 2026-08-17T17:03:38).
 
@@ -650,7 +695,7 @@ class TestIndependentLockProbe:
         monkeypatch.setattr(_stop_all, "check_install_writable", lambda: next(locked))
         monkeypatch.setattr(
             _stop_all, "verify",
-            lambda: ["locked file (installer overwrite would fail): C:\\locked.pyd"],
+            lambda *a, **kw: ["locked file (installer overwrite would fail): C:\\locked.pyd"],
         )
         # lock residual only → exit 0 (advisory), not 1
         assert _stop_all.stop_all() == 0
@@ -676,7 +721,7 @@ class TestIndependentLockProbe:
         monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
         monkeypatch.setattr(
             _stop_all, "verify",
-            lambda: ["daemon (pid 1234)", "file-lock owner (pid 9400, python.exe)"],
+            lambda *a, **kw: ["daemon (pid 1234)", "file-lock owner (pid 9400, python.exe)"],
         )
         assert _stop_all.stop_all() == 1
         out = capsys.readouterr().out
@@ -964,7 +1009,7 @@ class TestTeeDualWrite:
         monkeypatch.setattr(_stop_all, "stop_tui", lambda: None)
         monkeypatch.setattr(_stop_all, "stop_daemon", lambda: None)
         monkeypatch.setattr(_stop_all, "_stop_scan_pids", lambda own: [])
-        monkeypatch.setattr(_stop_all, "verify", lambda: [])
+        monkeypatch.setattr(_stop_all, "verify", lambda *a, **kw: [])
         assert _stop_all.stop_all() == 0
         out = capsys.readouterr().out
         assert "log also written to" in out
