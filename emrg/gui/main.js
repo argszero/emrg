@@ -322,17 +322,35 @@ vision = false
 
     ipcMain.handle("emrg:listSessions", async () => listSessions());
 
-    // Rant 2026-08-20T18:30:57：一键"重启生效"——发 shutdown（source=gui-restart）让
-    // daemon 停；connManager 检测到全部掉线 → restart-recovery → ensureDaemon 用新
-    // 安装代码重新 spawn（GUI 本就是 daemon 生命周期 owner，不发子进程调 CLI）。
+    // Rant 2026-08-21T12:44:34：一键"重启生效"。旧实现只发 shutdown —— daemon 会被
+    // TUI 客户端拉回（TUI 断线自动重连+自动 spawn，emrg/client/app.py:378-394），
+    // 而 GUI 自己永不重连（实证 emrg-gui.log 11:41：杀 daemon 后 36 分钟无重连，
+    // 状态栏绿点假象 + "daemon not connected"）。
+    // 新实现：spawn `python -m emrg._stop_all --skip-gui` —— 复用全链路 stop
+    // （顺序 GUI→TUI→daemon，客户端先死不会重拉 daemon；--skip-gui 跳过 stop_gui，
+    // 否则 taskkill /IM EMRG.exe / ps-scan EMRG.app 会杀掉 GUI 主进程本身，
+    // relaunch 永不执行）→ 等 exit 0 → GUI 自己 app.relaunch() + app.exit(0) →
+    // 新 GUI 进程启动 → ensureDaemon 用新安装代码 spawn 新 daemon。TUI 不需要感知
+    // 重启（直接被杀，不会进重连循环）。
     ipcMain.handle("emrg:restartDaemon", async () => {
-      const conn = activeConn();
-      if (!conn || !conn.connected) throw new Error("daemon not connected");
-      try {
-        conn.sendCommand("shutdown", { source: "gui-restart" });
-      } catch (e) {
-        throw new Error(`shutdown failed: ${e.message}`);
-      }
+      const python = connManager?.daemonConn()?._findPython() || "python3";
+      const result = await new Promise((resolve) => {
+        const child = spawn(python, ["-m", "emrg._stop_all", "--skip-gui"], {
+          cwd: os.homedir(),
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        let err = "";
+        child.stderr?.on("data", (d) => { err += String(d); });
+        child.on("error", (e) => resolve({ ok: false, error: `spawn failed: ${e.message}` }));
+        child.on("close", (code) => resolve(
+          code === 0
+            ? { ok: true }
+            : { ok: false, error: `stop_all exit ${code}: ${err.slice(-500)}` }
+        ));
+      });
+      if (!result.ok) throw new Error(result.error);
+      app.relaunch(); // 新 GUI 进程启动 → ensureDaemon 用新安装代码 spawn 新 daemon
+      app.exit(0);
       return { ok: true };
     });
 

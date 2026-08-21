@@ -38,6 +38,15 @@ detect it missing — stopping the daemon first while clients are alive makes
 them immediately re-spawn it, so the stop "stops nothing" and the installer
 still hits locked files. With the daemon last, no client remains to bring
 it back, and verify() sees the true final state.
+
+``--skip-gui`` mode (host rant 2026-08-21T12:44:34, GUI "restart to apply"):
+the GUI itself invokes this module as ``python -m emrg._stop_all --skip-gui``
+to tear down every TUI client + the daemon before relaunching itself. The
+GUI process MUST be skipped by both the step plan and the residual verify —
+otherwise ``stop_gui`` (taskkill /IM EMRG.exe / ps-scan EMRG.app) kills the
+GUI main process that is supposed to ``app.relaunch()`` right after, and
+verify() would report the (intentionally still-alive) GUI as a residual and
+exit 1. The GUI performs the relaunch itself.
 """
 
 from __future__ import annotations
@@ -58,7 +67,7 @@ from pathlib import Path
 
 # Build stamp printed at the start of every run so the operator can tell at a
 # glance which stop_all.py generation executed (rant 2026-08-17T21:06:31).
-_STOP_ALL_STAMP = "built 2026-08-19 (read-only lock probe + stop-chain caller log — rants 13:08:41 + 13:11:34)"
+_STOP_ALL_STAMP = "built 2026-08-21 (--skip-gui mode for GUI restart-to-apply — rant 12:44:34)"
 
 # Fixed daemon port (host rant 2026-08-19T08:05:21): the daemon binds a fixed
 # loopback port as its single-instance admission. This module is pure stdlib
@@ -100,6 +109,16 @@ def _no_window() -> dict:
 _WIN_PY_NAME_RE = r"^python.*\.exe$"
 
 
+def _is_gui_cmdline(cmd: str) -> bool:
+    """True when a command line belongs to the GUI app (EMRG.app / AppImage).
+
+    Used by ``--skip-gui`` mode to exclude the (intentionally alive) GUI
+    caller from the residual verify, and by :func:`match_cmdline` for the
+    plain stop scan.
+    """
+    return "EMRG.app" in cmd or bool(_APPIMAGE_RE.search(cmd))
+
+
 def match_cmdline(cmd: str) -> bool:
     """True if a command line belongs to an emrg process.
 
@@ -107,11 +126,27 @@ def match_cmdline(cmd: str) -> bool:
     (macOS GUI) and ``EMRG-*.AppImage`` (Linux AppImage). Does NOT match
     lookalikes such as ``-m emrg.serverless`` or ``-m emrgx``.
     """
-    if "EMRG.app" in cmd:
-        return True
-    if _APPIMAGE_RE.search(cmd):
+    if _is_gui_cmdline(cmd):
         return True
     return bool(_EMRG_CLIENT_RE.search(cmd))
+
+
+def _iter_ps_lines(ps_output: str) -> list[tuple[int, str]]:
+    """Parse ``ps -axww -o pid=,command=`` output into ``(pid, cmdline)``
+    pairs (used by the ``--skip-gui`` verify filter to identify GUI pids)."""
+    pairs: list[tuple[int, str]] = []
+    for line in ps_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pairs.append((int(parts[0]), parts[1]))
+        except ValueError:
+            continue
+    return pairs
 
 
 def scan_pids(ps_output: str, own_pid: int) -> list[int]:
@@ -1222,25 +1257,30 @@ def _classify_locked_files(
     return self_held, residual
 
 
-def _verify_windows_categories() -> list[tuple[str, list[str]]]:
+def _verify_windows_categories(skip_gui: bool = False) -> list[tuple[str, list[str]]]:
     """Windows residual scan, one ``(category, residual_strings)`` entry per
     check — so the operator can see each check's result instead of guessing
     (rant 2026-08-17T21:06:31 #3). Result is cached in ``_windows_cats_cache``
-    so _verify_windows_summary() does not re-run the expensive scan."""
+    so _verify_windows_summary() does not re-run the expensive scan.
+
+    ``skip_gui=True`` (``--skip-gui``, rant 2026-08-21T12:44:34): the GUI is
+    the caller and must not be reported as a residual (it intentionally
+    survives to relaunch itself)."""
     global _windows_cats_cache
     cats: list[tuple[str, list[str]]] = []
 
     # GUI residual
     gui: list[str] = []
-    try:
-        out = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq EMRG.exe"],
-            capture_output=True, text=True, timeout=10, **_no_window(),
-        ).stdout
-        for m in re.finditer(r"EMRG\.exe\s+(\d+)", out):
-            gui.append(f"EMRG.exe (pid {m.group(1)})")
-    except (OSError, subprocess.SubprocessError, TimeoutError):
-        pass
+    if not skip_gui:
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq EMRG.exe"],
+                capture_output=True, text=True, timeout=10, **_no_window(),
+            ).stdout
+            for m in re.finditer(r"EMRG\.exe\s+(\d+)", out):
+                gui.append(f"EMRG.exe (pid {m.group(1)})")
+        except (OSError, subprocess.SubprocessError, TimeoutError):
+            pass
     cats.append(("GUI", gui))
 
     # daemon residual (emrgd.pid still alive)
@@ -1368,21 +1408,34 @@ def _verify_windows_summary() -> str:
     return " / ".join(f"{name} {len(items)}" for name, items in cats)
 
 
-def _verify_windows() -> list[str]:
+def _verify_windows(skip_gui: bool = False) -> list[str]:
     residuals: list[str] = []
-    for _name, items in _verify_windows_categories():
+    for _name, items in _verify_windows_categories(skip_gui=skip_gui):
         residuals.extend(items)
     return residuals
 
 
-def _verify_posix() -> list[str]:
-    return [f"emrg process (pid {pid})" for pid in _stop_scan_pids(os.getpid())]
+def _verify_posix(skip_gui: bool = False) -> list[str]:
+    """POSIX residual scan. ``skip_gui=True`` (``--skip-gui``) drops the
+    GUI's own pids (EMRG.app / EMRG-*.AppImage) from the residual list —
+    the GUI is the caller and intentionally stays alive to relaunch."""
+    pids = _stop_scan_pids(os.getpid())
+    if skip_gui:
+        out = _ps_output()
+        if out is not None:
+            gui_pids = {
+                pid
+                for pid, cmd in _iter_ps_lines(out)
+                if _is_gui_cmdline(cmd)
+            }
+            pids = [p for p in pids if p not in gui_pids]
+    return [f"emrg process (pid {pid})" for pid in pids]
 
 
-def verify() -> list[str]:
+def verify(skip_gui: bool = False) -> list[str]:
     """Scan for residual emrg processes. Returns a list of human-readable
     ``"name (pid N)"`` entries (empty = clean)."""
-    return _verify_windows() if is_win() else _verify_posix()
+    return _verify_windows(skip_gui=skip_gui) if is_win() else _verify_posix(skip_gui=skip_gui)
 
 
 # ── Orchestration ───────────────────────────────────────────────
@@ -1514,25 +1567,33 @@ def _caller_context() -> str:
     return f"caller pid {ppid} ({parent or 'unknown parent'}) | argv: {argv}"
 
 
-def _step_plan() -> list[tuple[str, object]]:
+def _step_plan(skip_gui: bool = False) -> list[tuple[str, object]]:
     """Ordered stop steps. Clients (GUI/TUI) FIRST, daemon LAST (rant
     2026-08-17T14:15:33): both clients auto-spawn the daemon when it
     disappears, so stopping the daemon first would let a live client
     immediately bring it back — leaving locked files for the installer.
-    Bundled git + RM lock-owner kill are Windows-only."""
+    Bundled git + RM lock-owner kill are Windows-only.
+
+    ``skip_gui=True`` (``--skip-gui``, rant 2026-08-21T12:44:34): the GUI
+    itself is the caller and relaunches after stop_all exits — its stop step
+    must be omitted, or the GUI main process gets killed before relaunch."""
     if is_win():
-        return [
+        steps = [
             ("GUI", stop_gui),
             ("TUI", stop_tui),
             ("daemon", stop_daemon),
             ("bundled git", stop_bundled_git),
             ("file-lock owners", stop_lock_owners),
         ]
-    return [
-        ("GUI", stop_gui),
-        ("TUI", stop_tui),
-        ("daemon", stop_daemon),
-    ]
+    else:
+        steps = [
+            ("GUI", stop_gui),
+            ("TUI", stop_tui),
+            ("daemon", stop_daemon),
+        ]
+    if skip_gui:
+        steps = [s for s in steps if s[0] != "GUI"]
+    return steps
 
 
 def _is_lock_residual(r: str) -> bool:
@@ -1547,8 +1608,13 @@ def _is_lock_residual(r: str) -> bool:
     ))
 
 
-def stop_all() -> int:
+def stop_all(skip_gui: bool = False) -> int:
     """Run every stop step, then verify. Returns 0 (clean) or 1 (residuals).
+
+    ``skip_gui=True`` (CLI ``--skip-gui``, rant 2026-08-21T12:44:34): the GUI
+    invokes this to tear down TUI + daemon before relaunching itself — the
+    GUI stop step is skipped AND the GUI process is excluded from the
+    residual verify (it intentionally stays alive as the caller).
 
     Logging follows the standard from rant 2026-08-17T21:06:31: header with
     build stamp / python / platform / pid, ``[N/T] step -> result (elapsed)``
@@ -1592,7 +1658,7 @@ def stop_all() -> int:
     _pp_warn = _pythonpath_install_warning(_pp)
     if _pp_warn:
         print(f"emrg stop: WARNING {_pp_warn}")
-    steps = _step_plan()
+    steps = _step_plan(skip_gui=skip_gui)
     for i, (name, fn) in enumerate(steps, 1):
         s = time.monotonic()
         try:
@@ -1639,7 +1705,7 @@ def stop_all() -> int:
                 f"stop_all runtime itself (python-dist DLL) — released when "
                 f"stop_all exits; installer continues"
             )
-    residuals = verify()
+    residuals = verify(skip_gui=skip_gui)
     # Lock-related residuals are ADVISORY after escalation (rant
     # 2026-08-18T21:24:48 #2c/#5): an unkillable external lock holder is
     # logged in detail and the install CONTINUES — the installer's own
@@ -1683,7 +1749,11 @@ def stop_all() -> int:
 
 
 def main() -> None:
-    code = stop_all()
+    # Rant 2026-08-21T12:44:34: --skip-gui — the GUI calls
+    # ``python -m emrg._stop_all --skip-gui`` to tear down TUI + daemon
+    # before relaunching itself; its own stop/verify checks are skipped.
+    skip_gui = "--skip-gui" in sys.argv[1:]
+    code = stop_all(skip_gui=skip_gui)
     sys.exit(code)
 
 

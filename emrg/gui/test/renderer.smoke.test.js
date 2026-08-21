@@ -803,6 +803,16 @@ test("rant 12:44:34: main.js 心跳探活已接入（断连主动重连）", asy
   assert.ok(mainSrc.includes("stopHeartbeat(); // rant 2026-08-21T12:44:34：退出清理心跳定时器"), "窗口关闭清理心跳");
 });
 
+test("rant 12:44:34: 重启生效走 _stop_all --skip-gui 全链路 stop + app.relaunch", async () => {
+  const GUI_DIR = path.join(__dirname, "..");
+  const mainSrc = fs.readFileSync(path.join(GUI_DIR, "main.js"), "utf8");
+  assert.ok(mainSrc.includes("emrg:restartDaemon"), "main.js 应注册 emrg:restartDaemon IPC");
+  assert.ok(mainSrc.includes('"-m", "emrg._stop_all", "--skip-gui"'), "重启应 spawn python -m emrg._stop_all --skip-gui");
+  assert.ok(mainSrc.includes("app.relaunch()"), "stop_all exit 0 → app.relaunch()");
+  assert.ok(mainSrc.includes("app.exit(0)"), "relaunch 后立即 app.exit(0) 退出旧进程");
+  assert.ok(!mainSrc.includes('conn.sendCommand("shutdown"'), "不再只发 shutdown（daemon 会被 TUI 拉回 + GUI 永不重连）");
+});
+
 test("右键菜单：重命名对话框 → renameSession 调用（设计 §3.2）", async () => {
   let renamed = null;
   const { ctx, els } = makeSandbox({
