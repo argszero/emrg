@@ -491,7 +491,10 @@ const Dialogs = (() => {
   // rant 2026-08-15T10:36:39：任务状态 + 下次运行倒计时
   // 倒计时以"渲染时快照的 deadline"为基准每秒递减（直接改 DOM 文本，不重渲染整行防闪烁/滚动丢失）
   let taskCountdownTimer = null; // setInterval id（面板激活时启动，离开视图时清除防泄漏）
-  let taskCountdowns = []; // [{name, deadline, span}] — 每 1s 由 updateTaskCountdowns 更新
+  let taskCountdowns = []; // [{name, deadline, span} | {name, startedAt, span}] — 每 1s 由 updateTaskCountdowns 更新
+  // rant 2026-08-22T07:18:35：面板激活时每 5s 轮询任务状态（loadTaskMeta + renderTaskList），
+  // 让"运行中→待运行"切换和下次倒计时 ≤5s 内自动更新（宿主确认轮询方案，不引入事件推送）。
+  let taskPollTimer = null; // setInterval id（任务面板激活时启动，离开视图时清除防泄漏）
 
   // 倒计时格式化：≤60s "43s"；≤1h "1m23s"；>1h "1h05m"；负数/非数钳制为 0
   function formatCountdown(totalSeconds) {
@@ -523,6 +526,13 @@ const Dialogs = (() => {
   function updateTaskCountdowns() {
     let expired = false;
     for (const e of taskCountdowns) {
+      // rant 2026-08-22T07:18:35：running 时长与待运行倒计时同机制、反向——
+      // startedAt 固定、now 递增即时长（elapsed）；deadline 固定、now 递增则剩余递减。
+      if (e.startedAt != null) {
+        const el = Math.max(0, Math.floor((Date.now() - e.startedAt) / 1000));
+        e.span.textContent = _t("app.taskRunningDuration", { n: formatCountdown(el) });
+        continue;
+      }
       const rem = Math.max(0, Math.ceil((e.deadline - Date.now()) / 1000));
       e.span.textContent = _t("app.taskNextRun", { n: formatCountdown(rem) });
       // rant 2026-08-18T11:16:32：倒计时归零后任务状态不会自动更新（pending → running 永不反映到 UI）。
@@ -553,6 +563,28 @@ const Dialogs = (() => {
     }
     if (taskCountdowns.length === 0) return;
     taskCountdownTimer = setInterval(updateTaskCountdowns, 1000);
+  }
+
+  // rant 2026-08-22T07:18:35：5s 状态轮询（方案 B：宿主确认轮询、可接受几秒滞后）。
+  // 幂等：重复启动先清旧定时器；renderTaskList 不主动重启它（避免轮询自驱死循环）。
+  function startTaskPoll() {
+    if (taskPollTimer !== null) {
+      clearInterval(taskPollTimer);
+      taskPollTimer = null;
+    }
+    taskPollTimer = setInterval(async () => {
+      try {
+        await loadTaskMeta();
+        await renderTaskList();
+      } catch { /* 轮询失败静默，下轮重试 */ }
+    }, 5000);
+  }
+
+  function stopTaskPoll() {
+    if (taskPollTimer !== null) {
+      clearInterval(taskPollTimer);
+      taskPollTimer = null;
+    }
   }
 
   async function loadTaskMeta() {
@@ -676,6 +708,13 @@ const Dialogs = (() => {
       if (t.running) {
         const runBadge = el("span", { class: "task-badge task-running-badge" }, _t("app.taskRunningBadge"));
         row.appendChild(runBadge);
+        // rant 2026-08-22T07:18:35：running 行显示已运行时长（started_at 由 scheduler
+        // status() 暴露；startedAt 固定、每秒递增 → 与待运行倒计时同机制反向跳动）。
+        if (t.started_at != null) {
+          const elapsedSpan = el("span", { class: "task-next-run" }, _t("app.taskRunningDuration", { n: formatCountdown(0) }));
+          row.appendChild(elapsedSpan);
+          countdowns.push({ name: t.name, startedAt: Number(t.started_at) * 1000, span: elapsedSpan });
+        }
       } else if (t.next_run_in_seconds != null) {
         row.appendChild(el("span", { class: "task-badge task-pending-badge" }, _t("app.taskPendingBadge")));
         const nextSpan = el("span", { class: "task-next-run" }, _t("app.taskNextRun", { n: formatCountdown(t.next_run_in_seconds) }));
@@ -1602,6 +1641,8 @@ const Dialogs = (() => {
     updateTaskCountdowns, // rant 10:36:39：1s tick 更新倒计时文本（测试直接调用模拟走秒）
     startTaskCountdown, // rant 10:36:39：启动 1s 倒计时（幂等；renderTaskList 自动调用）
     stopTaskCountdown, // rant 10:36:39：停止并清引用（离开任务视图时 app.js 调用防泄漏）
+    startTaskPoll, // rant 2026-08-22T07:18:35：启动 5s 状态轮询（任务面板激活时 app.js 调用）
+    stopTaskPoll, // rant 2026-08-22T07:18:35：停止轮询（离开任务视图时 app.js 调用防泄漏）
     renderProjectList, // rant 14:10:14 P5：项目面板列表渲染（测试/刷新复用）
     showProjectSessionsInPanel, // rant 14:10:14 P5：项目面板内嵌会话列表（测试复用）
     initRantPanel, // rant 14:10:14 P4：rant 面板初始化

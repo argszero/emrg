@@ -573,9 +573,14 @@ class TaskHandler:
             "heartbeat_interval": self._heartbeat_interval(),
             "heartbeat_active": self._slowdown_active,
         }
+        # rant 2026-08-22T07:18:35: expose the current cycle's start time so the
+        # GUI tasks panel can show "已运行 XXs" (elapsed, ticking up). Epoch
+        # seconds; valid only while running — None when idle/completed.
+        started_at = self._start_time if self._cycle_running else None
         return {
             "name": self.name,
             "running": self._cycle_running,
+            "started_at": started_at,
             "next_run_in_seconds": remaining,
             "interval": self.interval,
             "last_run_at": last_run_at,

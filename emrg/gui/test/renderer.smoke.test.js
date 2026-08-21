@@ -2907,7 +2907,8 @@ test("rant 10:36:39：任务行状态展示 —— 运行中/待运行+倒计时
     // rant 11:16:32：mock 有状态 —— deadline（50s 后）已过 → waiting-task 转为 running，
     // 验证归零后 updateTaskCountdowns 自动重拉任务状态（pending → running 徽标）
     listTasks: async () => [
-      { name: "running-task", type: "evolution", running: true, interval: 60, next_run_in_seconds: null },
+      // rant 2026-08-22T07:18:35：running 任务带 started_at（scheduler status() 暴露）→ 显示已运行时长
+      { name: "running-task", type: "evolution", running: true, interval: 60, next_run_in_seconds: null, started_at: 1_700_000_000 },
       { name: "waiting-task", type: "evolution", running: nowMs >= 1_700_000_050_000, interval: 1800, next_run_in_seconds: 43 },
       { name: "idle-task", type: "custom", running: false, interval: 3600, next_run_in_seconds: null, enabled: true },
       { name: "disabled-task", type: "custom", running: false, interval: 3600, next_run_in_seconds: null, enabled: false },
@@ -2927,6 +2928,7 @@ test("rant 10:36:39：任务行状态展示 —— 运行中/待运行+倒计时
   })`, ctx);
   assert.strictEqual(texts.length, 4, "4 任务各一行");
   assert.ok(texts[0].includes("运行中"), `running 徽标：${texts[0]}`);
+  assert.ok(texts[0].includes("已运行 0s"), `running 显示已运行时长（初始 0s）：${texts[0]}`);
   assert.ok(texts[0].includes("运行中") && !texts[0].includes("下次运行"), "running 无倒计时");
   assert.ok(texts[1].includes("待运行") && texts[1].includes("下次运行 43s"), `等待任务：${texts[1]}`);
   assert.ok(texts[2].includes("待调度") && !texts[2].includes("下次运行"), `空闲任务：${texts[2]}`);
@@ -2935,7 +2937,7 @@ test("rant 10:36:39：任务行状态展示 —— 运行中/待运行+倒计时
   nowMs += 1000;
   await vm.runInContext("EMRG_Dialogs.updateTaskCountdowns()", ctx);
   let nextRuns = vm.runInContext(`Array.from(document.getElementById("task-list").children).map((r) => { const s = r.querySelector(".task-next-run"); return s ? s.textContent : ""; }).filter(Boolean)`, ctx);
-  assert.deepStrictEqual(nextRuns, ["下次运行 42s"], "1s 后递减为 42s");
+  assert.deepStrictEqual(nextRuns, ["已运行 1s", "下次运行 42s"], "1s 后 elapsed 递增 + 倒计时递减");
   // 快进到 deadline 之后 → rant 11:16:32：归零触发自动 renderTaskList 重拉状态（异步），
   // mock 此刻返回 running → UI 从"待运行+倒计时"刷新为 running 徽标（无倒计时）
   nowMs += 50_000;
@@ -2971,7 +2973,7 @@ test("rant 10:36:39：倒计时生命周期 —— 渲染启动 interval、离�
   await vm.runInContext("App.openTasksPanel()", ctx);
   await tick();
   assert.ok((win._intervalCount || 0) > start2, "重开任务面板 → 倒计时重新启动");
-  // 无倒计时的任务（全 running）→ 不启动 interval
+  // 无倒计时的任务（全 running）→ 不启动倒计时 interval；但 5s 状态轮询 interval 照常启动
   const { ctx: ctx2, win: win2 } = makeSandbox({
     listTasks: async () => [
       { name: "r1", type: "evolution", running: true, interval: 60, next_run_in_seconds: null },
@@ -2982,7 +2984,11 @@ test("rant 10:36:39：倒计时生命周期 —— 渲染启动 interval、离�
   const s2 = win2._intervalCount || 0;
   await vm.runInContext("App.openTasksPanel()", ctx2);
   await tick();
-  assert.strictEqual(win2._intervalCount || 0, s2, "全 running 无倒计时 → 不启动 interval");
+  assert.strictEqual(win2._intervalCount || 0, s2 + 1, "全 running 无倒计时 → 仅启动 5s 轮询 interval（rant 07:18:35）");
+  // 轮询生命周期：离开任务视图 → 轮询 interval 也被清理（防泄漏）
+  const clear2 = win2._clearCount || 0;
+  await vm.runInContext("App.switchView('projects')", ctx2);
+  assert.ok((win2._clearCount || 0) > clear2, "离开任务视图 → 轮询 interval 同样被 clear 防泄漏");
 });
 
 test("rant 10:45:52：任务行显示上次执行元信息 + 降频标识（rant 18:25:14：不再显示摘要）", async () => {
