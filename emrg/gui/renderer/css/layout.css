@@ -18,6 +18,7 @@
   min-width: 220px;
   display: flex;
   flex-direction: column;
+  height: 100%; /* 撑满 #app 高度，让 .sidebar-footer 能贴底（rant 2026-08-22T07:10:44） */
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
 }
@@ -217,7 +218,6 @@
 /* P4 slice 2：打开会话区（跨项目 tab）——紧贴新对话按钮，视觉轻量 */
 #open-sessions {
   padding-bottom: var(--sp-1);
-  border-bottom: 1px solid var(--border);
   margin-bottom: var(--sp-1);
   max-height: 40%;
   overflow-y: auto;
@@ -231,6 +231,7 @@
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-4);
+  margin-top: auto; /* column flex 中自动贴到 #sidebar 底边（rant 2026-08-22T07:10:44） */
   border-top: 1px solid var(--border);
 }
 
