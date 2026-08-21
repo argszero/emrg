@@ -824,6 +824,11 @@ async def interactive(init_auto_evolve: bool = False):
                     if err:
                         chat.add("system", f"Error: {err}")
                     elif tasks:
+                        # Re-trigger guard: a previous TaskSelector may still be
+                        # in the chat (duplicate /trigger) — drop it before
+                        # stacking a new one (rant 2026-08-21T16:47:44).
+                        if task_sel.widget is not None:
+                            chat.remove(task_sel.widget)
                         task_sel.widget = TaskSelector(tasks)
                         task_sel.active = True
                         task_sel.pending = False
@@ -1233,6 +1238,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 session_sel.active = False
                 chat.add("system", "Session selection cancelled.")
+                chat.remove(session_sel.widget)
                 session_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1240,6 +1246,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 sid = session_sel.widget.selected_session_id
                 session_sel.active = False
+                chat.remove(session_sel.widget)
                 session_sel.widget = None
                 if sid:
                     await conn.send_command("resume_session", session_id=sid, cwd=cwd)
@@ -1261,6 +1268,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel
                 delete_sel.active = False
                 chat.add("system", "Delete cancelled.")
+                chat.remove(delete_sel.widget)
                 delete_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1268,6 +1276,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — delete immediately
                 sid = delete_sel.widget.selected_session_id
                 delete_sel.active = False
+                chat.remove(delete_sel.widget)
                 delete_sel.widget = None
                 if sid:
                     await conn.send_command("delete_session", session_id=sid, cwd=cwd)
@@ -1288,6 +1297,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 project_sel.active = False
                 chat.add("system", "Project selection cancelled.")
+                chat.remove(project_sel.widget)
                 project_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1295,6 +1305,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 pname = project_sel.widget.selected_project_name
                 project_sel.active = False
+                chat.remove(project_sel.widget)
                 project_sel.widget = None
                 if pname:
                     nonlocal _rant_project
@@ -1317,6 +1328,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 model_sel.active = False
                 chat.add("system", "Model selection cancelled.")
+                chat.remove(model_sel.widget)
                 model_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1324,6 +1336,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 mname = model_sel.widget.selected_model_name
                 model_sel.active = False
+                chat.remove(model_sel.widget)
                 model_sel.widget = None
                 if mname:
                     await conn.send_command("set_model", model=mname)
@@ -1344,6 +1357,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 rewind_sel.active = False
                 chat.add("system", "Rewind cancelled.")
+                chat.remove(rewind_sel.widget)
                 rewind_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1351,6 +1365,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 idx = rewind_sel.widget.selected_record_index
                 rewind_sel.active = False
+                chat.remove(rewind_sel.widget)
                 rewind_sel.widget = None
                 if idx is not None:
                     await conn.send_command("rewind_session", session_id=session_id,
@@ -1373,6 +1388,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 task_sel.active = False
                 chat.add("system", "Task selection cancelled.")
+                chat.remove(task_sel.widget)
                 task_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1380,6 +1396,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data in (b"\r", b"\n"):  # Enter — confirm
                 task_name = task_sel.widget.selected_task_name
                 task_sel.active = False
+                chat.remove(task_sel.widget)
                 task_sel.widget = None
                 if task_name:
                     await conn.send_command("trigger_task", name=task_name,
@@ -1953,6 +1970,7 @@ Streaming
                         target_sid = parts[1].strip()
                         # Deactivate selector if active
                         session_sel.active = False
+                        chat.remove(session_sel.widget)
                         session_sel.widget = None
                         session_sel.pending = False
                         await conn.send_command("resume_session", session_id=target_sid, cwd=cwd)
