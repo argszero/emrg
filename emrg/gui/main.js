@@ -332,13 +332,22 @@ vision = false
     // relaunch 永不执行）→ 等 exit 0 → GUI 自己 app.relaunch() + app.exit(0) →
     // 新 GUI 进程启动 → ensureDaemon 用新安装代码 spawn 新 daemon。TUI 不需要感知
     // 重启（直接被杀，不会进重连循环）。
+    // 打包模式：宿主 PATH python3 无 `emrg` 可导入 → 用安装版运行时 python +
+    // PYTHONPATH（daemon_client._findInstalledPython/_installedPythonPath）。
     ipcMain.handle("emrg:restartDaemon", async () => {
-      const python = connManager?.daemonConn()?._findPython() || "python3";
+      const dc = connManager?.daemonConn();
+      const isPackaged = !!dc?._isPackaged;
+      const python = isPackaged && dc
+        ? dc._findInstalledPython()
+        : (dc?._findPython() || "python3");
+      const spawnOpts = {
+        cwd: os.homedir(),
+        stdio: ["ignore", "ignore", "pipe"],
+      };
+      if (isPackaged && dc) spawnOpts.env = { ...process.env, PYTHONPATH: dc._installedPythonPath() };
+      if (process.platform === "win32") spawnOpts.windowsHide = true; // 防黑窗（源码模式同 G68）
       const result = await new Promise((resolve) => {
-        const child = spawn(python, ["-m", "emrg._stop_all", "--skip-gui"], {
-          cwd: os.homedir(),
-          stdio: ["ignore", "ignore", "pipe"],
-        });
+        const child = spawn(python, ["-m", "emrg._stop_all", "--skip-gui"], spawnOpts);
         let err = "";
         child.stderr?.on("data", (d) => { err += String(d); });
         child.on("error", (e) => resolve({ ok: false, error: `spawn failed: ${e.message}` }));

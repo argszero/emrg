@@ -66,6 +66,16 @@ class TestBuildParser:
         parser = _build_parser()
         args = parser.parse_args(["stop"])
         assert args.command == "stop"
+        assert args.skip_gui is False
+
+    def test_stop_command_skip_gui(self):
+        """emrg stop --skip-gui (rant 2026-08-21T12:44:34): the GUI's
+        restart-to-apply calls the CLI so the install launcher's PYTHONPATH
+        makes `emrg` importable for the packaged app."""
+        parser = _build_parser()
+        args = parser.parse_args(["stop", "--skip-gui"])
+        assert args.command == "stop"
+        assert args.skip_gui is True
 
 
 class TestMatchEmrgClient:

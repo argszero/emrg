@@ -70,13 +70,20 @@ def _build_parser() -> argparse.ArgumentParser:
     # (no action = foreground run, handled in main())
 
     # emrg stop
-    sub.add_parser(
+    stop_parser = sub.add_parser(
         "stop",
         help="Stop ALL running emrg processes (daemon, TUI, GUI)",
         description="Stop every running emrg process: the daemon, TUI clients and "
         "the GUI app. Graceful stop first, force-kill stragglers. Also kills the "
         "bundled git tree on Windows and exits non-zero when residual processes "
         "remain (used by the Windows installer pre-stop).",
+    )
+    stop_parser.add_argument(
+        "--skip-gui",
+        action="store_true",
+        help="Do not stop the GUI app and exclude it from the residual verify "
+        "(used by the GUI's restart-to-apply: the GUI is the caller and "
+        "relaunches itself after stop_all exits).",
     )
 
     # emrg update
@@ -123,7 +130,9 @@ def main() -> None:
     elif parsed.command == "stop":
         # Windows installer pre-stop depends on the non-zero exit code when
         # residual processes remain (emrg/_stop_all.py owns the full logic).
-        sys.exit(_stop_all())
+        # --skip-gui (rant 2026-08-21T12:44:34): the GUI's restart-to-apply
+        # calls `emrg stop --skip-gui` so its own process survives to relaunch.
+        sys.exit(_stop_all(skip_gui=getattr(parsed, "skip_gui", False)))
     elif parsed.command == "update":
         _run_update()
     else:
