@@ -325,3 +325,51 @@ def test_chat_history_line_cache_remove_sync():
     # Removing a row not in the list is a no-op
     chat.remove(_CountingWidget("ghost"))
     assert len(chat.rows) == 2
+
+
+# ── Modifier-prefixed CSI arrows (rant 2026-08-21T11:36:56) ─────────────────
+
+
+def test_csi_alt_arrow_mapping():
+    """Option/Ctrl+←/→ map to word movement; unmodified/other keys don't."""
+    from emrg.client.app import _csi_modifier_action
+
+    assert _csi_modifier_action(b"\x1b[1;3D") == "word_left"    # Option+←
+    assert _csi_modifier_action(b"\x1b[1;3C") == "word_right"   # Option+→
+    assert _csi_modifier_action(b"\x1b[1;5D") == "word_left"    # Ctrl+←
+    assert _csi_modifier_action(b"\x1b[1;5C") == "word_right"   # Ctrl+→
+    assert _csi_modifier_action(b"\x1b[1;7D") == "word_left"    # Alt+Ctrl+←
+    # Kitty keyboard protocol: key code 68='D' (Left) / 67='C' (Right)
+    assert _csi_modifier_action(b"\x1b[68;3u") == "word_left"
+    assert _csi_modifier_action(b"\x1b[67;3u") == "word_right"
+    # No-op sequences
+    assert _csi_modifier_action(b"\x1b[D") is None       # bare ← (no modifier)
+    assert _csi_modifier_action(b"\x1b[1;2D") is None    # Shift+← (mod 2)
+    assert _csi_modifier_action(b"\x1b[3~") is None      # Delete key
+    assert _csi_modifier_action(b"\x1b[1;3A") is None    # Alt+↑ (not mapped)
+    assert _csi_modifier_action(b"abc") is None          # not a CSI sequence
+
+
+def test_input_widget_move_word():
+    """move_word_left/right jump across whitespace-delimited words."""
+    from emrg.client.widgets import InputWidget
+
+    w = InputWidget()
+    w.text = "foo bar baz"
+    w.cursor = len(w.text)
+    w.move_word_left()
+    assert w.cursor == 8   # start of 'baz'
+    w.move_word_left()
+    assert w.cursor == 4   # start of 'bar'
+    w.move_word_left()
+    assert w.cursor == 0   # start of 'foo'
+    w.move_word_left()
+    assert w.cursor == 0   # already at start — no-op
+    w.move_word_right()
+    assert w.cursor == 4
+    w.move_word_right()
+    assert w.cursor == 8
+    w.move_word_right()
+    assert w.cursor == 11  # end
+    w.move_word_right()
+    assert w.cursor == 11  # already at end — no-op
