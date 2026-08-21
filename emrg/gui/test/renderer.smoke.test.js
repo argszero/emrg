@@ -123,7 +123,7 @@ function makeEl(id) {
 }
 
 const ELEMENT_IDS = [
-  "workspace", "input", "send-btn", "stop-btn", "conv-list", "open-sessions", "open-sessions-label", "status-dot", "settings-btn",
+  "workspace", "input", "send-btn", "stop-btn", "open-sessions", "open-sessions-label", "status-dot", "settings-btn",
   "open-session-dialog", "open-session-list", "open-session-title", "open-session-desc", "open-session-new", "open-session-cancel", "open-session-new-session",
   "new-session-dialog", "new-session-list", "new-session-new", "new-session-cancel",
   "conn-banner", "empty-state", "model-switcher", "model-switcher-label", "brand-star", "new-chat-btn", "open-chat-btn",
@@ -285,7 +285,7 @@ test("boot：config 缺失 → 首启引导（不拉起 daemon）", async () => 
   assert.ok(els["welcome-dialog"].open, "welcome-dialog 应打开");
 });
 
-test("boot：config 就绪 → 加载会话列表", async () => {
+test("boot：config 就绪 → 加载会话列表（rant 11:44:52：历史列表已移除，state 仍保留）", async () => {
   const { ctx, els } = makeSandbox({
     init: async () => ({
       config_exists: true,
@@ -298,9 +298,9 @@ test("boot：config 就绪 → 加载会话列表", async () => {
     switchSession: async () => ({}),
   });
   await tick();
-  // conv-list 应有会话项（rant 17:48:07：无分组标签，直接 project/name|id）
-  const items = vm.runInContext('document.getElementById("conv-list").children.length', ctx);
-  assert.ok(items >= 1, `conv-list 应有会话项，实际 ${items}`);
+  // rant 11:44:52：conv-list 不再渲染（历史会话列表移除）；state.sessions 仍加载供切换/标题栏使用
+  const count = vm.runInContext('App.state.sessions.length', ctx);
+  assert.strictEqual(count, 1, `state.sessions 应有 1 条，实际 ${count}`);
 });
 
 test("流式 delta 追加 + 工具行 running→done 状态流转", async () => {
@@ -990,24 +990,18 @@ test("设置/首启对话框：Enter 提交键盘绑定（交互一致性）", a
   assert.ok(bindBlock.includes("enterToSave"), "Enter 应通过 enterToSave 触发提交");
 });
 
-test("对话列表键盘导航：↑↓ 聚焦 / Enter 切换（与 TUI /resume 一致）", async () => {
-  const { ctx } = makeSandbox({});
-  await tick();
-  const src = fs.readFileSync(path.join(RENDERER_JS, "sidebar.js"), "utf8");
-  assert.ok(src.includes("ArrowDown"), "sidebar 应支持 ↑↓ 键盘导航");
-  assert.ok(src.includes("kbd-focus"), "应有键盘聚焦状态");
-  assert.ok(src.includes("App.switchSession"), "Enter 应切换会话");
-  const css = fs.readFileSync(path.join(__dirname, "..", "renderer", "css", "components.css"), "utf8");
-  assert.ok(css.includes(".conv-item.kbd-focus"), "键盘聚焦高亮样式应存在");
-});
+// rant 11:44:52：历史会话列表 + ↑↓/Enter 键盘导航已整体移除（sidebar.js 不再含 initKeyboard/clearFocus/kbd-focus）
 
-test("对话列表键盘导航：输入控件内不劫持（e.target 守卫，textarea ↑↓/Enter 正常）", async () => {
+test("rant 11:44:52: sidebar.js 已移除历史会话列表渲染与键盘导航", async () => {
   const { ctx } = makeSandbox({});
   await tick();
   const src = fs.readFileSync(path.join(RENDERER_JS, "sidebar.js"), "utf8");
-  // 输入框是 <textarea id="input">，document 级常驻 keydown 必须跳过输入控件
-  assert.ok(src.includes("closest(\"input, textarea, select, [contenteditable]\")"), "输入控件内应跳过键盘导航");
-  assert.ok(src.includes("e.target.closest"), "应使用 e.target 守卫");
+  assert.ok(!src.includes("conv-list"), "sidebar 不应再引用 conv-list");
+  assert.ok(!src.includes("kbd-focus"), "sidebar 不应再有 kbd-focus 键盘聚焦");
+  assert.ok(!src.includes("initKeyboard"), "sidebar 不应再有 initKeyboard");
+  assert.ok(!src.includes("clearFocus"), "sidebar 不应再有 clearFocus");
+  const html = fs.readFileSync(path.join(__dirname, "..", "renderer", "index.html"), "utf8");
+  assert.ok(!html.includes('id="conv-list"'), "index.html 不应再有 conv-list nav");
 });
 
 test("P3.2：tool_finished 只登记 write/edit 成功文件（bash 不登记）", async () => {
@@ -2033,7 +2027,7 @@ test("P4 s2: 跨项目打开会话（entry.title 优先，state.sessions 无该 
   assert.ok(!(t2.textContent || "").includes("sess-local"), "有 title 时不显示 id");
 });
 
-test("rant 22:04:02: highlight(sid, navEl) 列表作用域 — 只高亮指定列表，另一列表保持原样", async () => {
+test("rant 22:04:02: highlight(sid, navEl) 列表作用域 — 只高亮指定列表（rant 11:44:52：仅剩 open-sessions）", async () => {
   const { ctx, els } = makeSandbox({});
   await tick();
   await vm.runInContext(
@@ -2048,11 +2042,9 @@ test("rant 22:04:02: highlight(sid, navEl) 列表作用域 — 只高亮指定�
   // 只高亮打开会话区（模拟点击打开会话列表条目）
   await vm.runInContext('EMRG_Sidebar.highlight("sess-b", document.getElementById("open-sessions"));', ctx);
   assert.strictEqual(els["open-sessions"].children[0].classList.contains("active"), true, "open-sessions 条目高亮");
-  const convB = [...els["conv-list"].children].find((c) => c.dataset.sid === "sess-b");
-  assert.ok(convB && !convB.classList.contains("active"), "conv-list 中同 sid 条目不被联动高亮");
-  // 无 navEl 参数 → 两列表都更新（兼容初始渲染/全量刷新）
+  // 无 navEl 参数 → 全量刷新同样只作用于 open-sessions（conv-list 已不存在）
   await vm.runInContext('EMRG_Sidebar.highlight("sess-b");', ctx);
-  assert.strictEqual(convB.classList.contains("active"), true, "无 navEl 时两列表都高亮");
+  assert.strictEqual(els["open-sessions"].children[0].classList.contains("active"), true, "无 navEl 时 open-sessions 高亮");
 });
 
 test("P4 s2: closeOpenSession 关闭激活会话 → 切到剩余打开会话 + 容器释放", async () => {
