@@ -735,13 +735,14 @@ test("GCM rant Stage 2：演化增长 + 未认证 → GitHub 连接横幅出现�
   assert.ok(toastBlock.includes("maybeShowGithubBanner()"), "演化增长应触发 GitHub 横幅检查");
 });
 
-test("rant 18:30:57：版本变化 → 升级横幅出现 + 重启按钮触发 restartDaemon（正反两态）", async () => {
-  // 正态：status current_version 与已知版本不同 → 横幅出现
+test("rant 18:30:57 + 12:44:34：版本变化 → 升级横幅（from→to）+ 重启按钮触发 restartDaemon（正反两态）", async () => {
+  // 正态：status current_version 与已知版本不同 → 横幅出现；有 previous_version → 显示 from→to
   const { ctx } = makeSandbox({
     init: async () => ({
       config_exists: true,
       api_key_configured: true,
       current_version: "0.2.58",
+      previous_version: "",
       sessions: [],
     }),
   });
@@ -749,13 +750,15 @@ test("rant 18:30:57：版本变化 → 升级横幅出现 + 重启按钮触发 r
   await vm.runInContext(`(function() {
     document.getElementById("upgrade-banner").classList.add("hidden");
     App.state.lastKnownVersion = "0.2.58";
-    App.handleEvent({ type: "status", data: { connected: true, current_version: "0.2.59" } });
+    App.handleEvent({ type: "status", data: { connected: true, current_version: "0.2.61", previous_version: "0.2.57" } });
   })()`, ctx);
   const visible = vm.runInContext(
     '!document.getElementById("upgrade-banner").classList.contains("hidden")',
     ctx
   );
   assert.strictEqual(visible, true, "版本变化 → 升级横幅应出现");
+  const bannerText = vm.runInContext('document.getElementById("upgrade-banner-msg").textContent', ctx);
+  assert.ok(bannerText.includes("0.2.57") && bannerText.includes("0.2.61"), `横幅应显示 from→to，实际 ${bannerText}`);
 
   // 负态：版本未变 → 横幅保持隐藏
   const { ctx: ctx2 } = makeSandbox({});

@@ -1751,3 +1751,38 @@ def test_pong_includes_current_version(tmp_path, monkeypatch):
     frame = _last_frame(writer)
     assert frame["type"] == "pong"
     assert frame["current_version"] == "0.2.59"
+
+
+def test_pong_includes_previous_version(tmp_path, monkeypatch):
+    """Pong carries previous_version from ~/.emrg/install/previous-version.txt.
+
+    Rant 2026-08-21T12:44:34: the upgrade agent records the pre-upgrade
+    version in previous-version.txt before overwriting version.txt, so the
+    GUI banner can show "upgraded from X to Y". Missing file → "" (dev runs
+    or first install), never an error.
+    """
+    import emrg.server.daemon as daemon_mod
+    install = tmp_path / ".emrg" / "install"
+    install.mkdir(parents=True)
+    (install / "version.txt").write_text("0.2.61\n", encoding="utf-8")
+    (install / "previous-version.txt").write_text("0.2.57\n", encoding="utf-8")
+
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+
+    server = _make_server()
+    assert server._previous_installed_version() == "0.2.57"
+
+    # Missing file → "" (no crash)
+    empty = tmp_path / "no-install"
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: empty)
+    assert server._previous_installed_version() == ""
+
+    # Pong payload includes the field
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    writer = _FakeWriter()
+    import asyncio
+    asyncio.run(server._process_message({"type": "ping"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "pong"
+    assert frame["current_version"] == "0.2.61"
+    assert frame["previous_version"] == "0.2.57"

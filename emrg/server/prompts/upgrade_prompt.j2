@@ -44,6 +44,11 @@ release installer" means for this version.
   update or add — the target tag's pyproject.toml dependencies are the
   source of truth. Operate as needed (pip --target install/uninstall/update).
 - `{{ install_dir }}/version.txt` ← {{ target_tag }} (the version).
+- Before overwriting `version.txt`: if it already exists with a different
+  content, copy its current content to `{{ install_dir }}/previous-version.txt`
+  (rant 2026-08-21T12:44:34 — the GUI upgrade banner shows "from X to Y").
+  If `version.txt` did not exist (first install), delete any stale
+  `previous-version.txt`.
 - `{{ install_dir }}/bin/` launcher scripts (emrg/emrgd/emrg.cmd/emrgd.cmd
   etc.) — sync if the target tag changed them.
 - GUI as needed: whether `~/Applications/EMRG.app` is updated is YOUR call —
