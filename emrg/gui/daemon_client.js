@@ -220,12 +220,11 @@ class DaemonClient {
     throw new Error(`emrgd failed to start within timeout${this._readLogTail()}`);
   }
 
-  // Rant 2026-08-21T15:26:42：daemon 存活判断改用固定端口 TCP 探测——
-  // emrgd.pid 不再作为存活依据（可缺失/stale：stop_all 清理、崩溃、外部删除），
+  // Rant 2026-08-21T15:26:42：daemon 存活判断用固定端口 TCP 探测——
   // 固定端口才是 ground truth（rant 2026-08-19T08:05:21，connect.py
-  // is_server_running_sync 同语义）。端口通 = daemon 活着 = 绝不删 token；
-  // 端口不通才允许 stale-token 删除+重拉路径。pid 文件降级为纯诊断
-  // （daemon 自己写/删，其他代码不再读它判断存活）。
+  // is_server_running_sync 同语义；rant 2026-08-21T16:45:06 后 emrgd.pid 已彻底
+  // 移除）。端口通 = daemon 活着 = 绝不删 token；端口不通才允许 stale-token
+  // 删除+重拉路径。
   _daemonProcessAlive(timeoutMs = 1000) {
     return new Promise((resolve) => {
       const sock = net.connect({ host: "127.0.0.1", port: EMRGD_PORT, timeout: timeoutMs });
@@ -370,10 +369,11 @@ class DaemonClient {
       await this._awaitOpen();
     } catch (e) {
       // G43 加固（rant 2026-08-09T13:16:36 根因）：token 文件存在但连不上时，
-      // 先探测固定端口（rant 2026-08-21T15:26:42：TCP 探活，不再读 emrgd.pid）——
-      // daemon 还活着就【绝不删 token 文件】。旧 G43 直接 unlink 会把健康
-      // daemon 的 token 文件删掉 → 僵尸态（daemon 活着、scheduler 永远
-      // cannot connect、PID 锁挡住新 spawn）。只有 daemon 真死了才删+重拉。
+      // 先探测固定端口（rant 2026-08-21T15:26:42：TCP 探活；rant 16:45:06 后
+      // emrgd.pid 已彻底移除）——daemon 还活着就【绝不删 token 文件】。旧 G43
+      // 直接 unlink 会把健康 daemon 的 token 文件删掉 → 僵尸态（daemon 活着、
+      // scheduler 永远 cannot connect、PID 锁挡住新 spawn）。只有 daemon 真死
+      // 了才删+重拉。
       if (await this._daemonProcessAlive()) {
         this.logger.warn(
           `[gui] ws connect failed: ${e.message} — daemon port alive, keeping token file (transient)`

@@ -7,9 +7,11 @@ Python**——bin/stop-emrg.cmd 删除，新增 emrg/_stop_all.py（纯标准库
 emrg stop 与 Inno PrepareToInstall 共用同一实现。本测试纯文本断言（不执行
 iscc/cmd/python —— macOS/CI 无 Windows），钉死接线：
   1. bin/stop-emrg.cmd 已删除；bin/stop-git.ps1 仍不存在
-  2. emrg/_stop_all.py 覆盖全流程：ws 协议关闭 → emrgd.pid 兜底 → taskkill /F、
-     GUI 优雅关闭+/F 兜底、TUI CIM 命令行过滤（python.exe|pythonw.exe）、
-     install\\git\\ 前缀连坐强杀 bundled git、verify 残留检查 + exit 1
+  2. emrg/_stop_all.py 覆盖全流程：ws 协议关闭 → 固定端口探测 → cmdline 扫描
+     （-m emrg.server）→ SIGTERM/taskkill /F、GUI 优雅关闭+/F 兜底、TUI CIM
+     命令行过滤（python.exe|pythonw.exe）、install\\git\\ 前缀连坐强杀 bundled git、
+     verify 残留检查 + exit 1（rant 2026-08-21T16:45:06：emrgd.pid 已彻底移除，
+     daemon 存活 ground truth = 固定端口 56031）
   3. emrg/__main__.py 的 stop 子命令 sys.exit(_stop_all())（退出码透传）
   4. make-installer.sh 的 .iss 模板：[Files] dontcopy(stop_all.py) + [Code]
      PrepareToInstall 用 runtime python 运行 {tmp} 提取版
@@ -37,9 +39,11 @@ def test_stop_emrg_cmd_deleted():
 
 def test_stop_all_py_covers_daemon_gui_tui_git_verify():
     content = _read("emrg/_stop_all.py")
-    # daemon：ws 协议关闭 + emrgd.pid 兜底（taskkill /F）
+    # daemon：ws 协议关闭 + 固定端口探测等待 + cmdline 扫描兜底（SIGTERM/taskkill /F）
     assert "ws_graceful_shutdown" in content
-    assert "emrgd.pid" in content
+    assert "_port_is_open" in content
+    assert "_daemon_scan_pids" in content
+    assert "_EMRG_SERVER_RE" in content
     assert '["taskkill", "/F", "/PID", str(pid)]' in content
     # GUI：优雅 taskkill /IM EMRG.exe 先于无条件 /F（宿主 01:27:07Z 教训）
     assert '"taskkill", "/IM", "EMRG.exe"' in content
@@ -70,13 +74,12 @@ def test_stop_all_py_covers_daemon_gui_tui_git_verify():
 
 
 def test_stop_all_py_cmdline_scan_fallback():
-    """rant 2026-08-17T17:03:38 — DeleteFile code 5: pid 文件盲区兜底。
+    """rant 2026-08-17T17:03:38 + 2026-08-21T16:45:06 — daemon kill 用 cmdline 兜底。
 
-    stop_daemon() 只杀 emrgd.pid 里的 pid（文件丢失/过时/不匹配 → 实际活着的
-    pythonw daemon 漏杀，锁住 websockets C 扩展），stop_tui() 刻意排除
-    emrg.server，verify() 不扫 python 进程 → 漏杀时 exit 0 → Inno 继续覆盖。
-    修复 = Windows 侧按命令行扫描 python.exe|pythonw.exe -m emrg(.server)
-    兜底（cmdline 是唯一可靠身份），daemon 步与 verify 步都接入。
+    emrgd.pid 已彻底移除（rant 16:45:06）：daemon 存活 ground truth = 固定端口
+    （_port_is_open），kill 目标 = cmdline 扫描（_daemon_scan_pids 匹配
+    -m emrg.server）。stop_tui() 刻意排除 emrg.server；verify() 的 daemon
+    残留 = 端口探测 + python 进程 cmdline 扫描，两者都接入。
     """
     content = _read("emrg/_stop_all.py")
     # 扫描辅助：python 解释器镜像（_WIN_PY_NAME_RE 宽松匹配版本化启动器）
@@ -87,13 +90,22 @@ def test_stop_all_py_cmdline_scan_fallback():
     assert r'^python.*\.exe$' in content
     assert r"-match '-m emrg'" in content
     assert "Write-Output $_.ProcessId" in content
-    assert "emrg\\.server" not in content  # 绝不能 -notmatch emrg.server
-    # stop_daemon() 在 pid 路径后追加 cmdline 兜底
+    # 默认扫描绝不能排除 emrg.server（stop_tui 的盲区——daemon 由默认扫描兜住）；
+    # server_only 变体才收窄到 -m emrg\.server（stop_daemon kill 目标）
+    assert r"-notmatch 'emrg\\.server'" not in content.split("def _scan_windows_python_emrg")[0]
+    assert r'cmd_re = r"-m emrg\.server" if server_only else r"-m emrg"' in content
+    # 固定端口探测 helper（daemon 存活 ground truth）
+    assert "def _port_is_open" in content
+    assert "def _daemon_scan_pids" in content
+    assert "_EMRG_SERVER_RE" in content
+    # stop_daemon() 走 ws 关闭 → 端口等待 → cmdline 扫描兜底
     daemon_src = content.split("def stop_daemon")[1].split("def stop_gui")[0]
-    assert "_scan_windows_python_emrg(os.getpid())" in daemon_src
+    assert "_port_is_open(_EMRGD_PORT)" in daemon_src
+    assert "_daemon_scan_pids(os.getpid())" in daemon_src
     assert "_kill_pid_windows(pid)" in daemon_src
-    # verify() 增加 python emrg 进程残留检查（不依赖 pid 文件）
+    # verify() daemon 残留 = 端口探测 + python emrg 进程 cmdline 检查
     verify_src = content.split("def _verify_windows")[1].split("def _verify_posix")[0]
+    assert "_port_is_open(_EMRGD_PORT)" in verify_src
     assert "_scan_windows_python_emrg(os.getpid())" in verify_src
     assert 'f"python emrg process (pid {p})"' in verify_src
 

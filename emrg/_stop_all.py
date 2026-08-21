@@ -23,10 +23,10 @@ Steps (mirroring the old stop-emrg.cmd flow, all best-effort):
               ``/F``; POSIX ps-scan (``EMRG.app`` / ``EMRG-*.AppImage``)
 - TUI:        Windows CIM filter ``python.exe|pythonw.exe -m emrg`` (not
               ``emrg.server``); POSIX ps-scan
-- daemon:     ws protocol ``shutdown`` → ``~/.emrg/emrgd.pid`` → SIGTERM /
-              ``taskkill /F /PID`` → 3s poll → cmdline-scan fallback
-              (missing/stale pid file → kill any ``python*.exe -m emrg(.server)``,
-              rant 2026-08-17T17:03:38); port file removed once dead
+- daemon:     ws protocol ``shutdown`` → fixed-port TCP probe wait →
+              SIGTERM / ``taskkill /F /PID`` → cmdline-scan fallback
+              (``-m emrg.server``, rant 2026-08-17T17:03:38); port file
+              removed once dead
 - bundled git: Windows ``install\\git\\`` prefix kill (git/ssh/plink/bash
               + fallback prefix full-kill — port of stop-emrg.cmd step 4)
 - verify:     residual scan; any survivor → ``exit 1`` with a named list
@@ -76,6 +76,10 @@ _STOP_ALL_STAMP = "built 2026-08-21 (--skip-gui mode for GUI restart-to-apply �
 _EMRGD_PORT = 56031
 
 _EMRG_CLIENT_RE = re.compile(r"-m\s+emrg(\.server)?(\s|$)")
+# daemon-only cmdline identity (``-m emrg.server`` — rant 2026-08-21T16:45:06:
+# the fixed port is the daemon ground truth, cmdline scan is the kill fallback;
+# TUI clients use ``-m emrg`` and are stopped earlier in the chain).
+_EMRG_SERVER_RE = re.compile(r"-m\s+emrg\.server(\s|$)")
 _APPIMAGE_RE = re.compile(r"EMRG-[\w.\-]*AppImage(\s|$)")
 
 
@@ -183,16 +187,6 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _read_pid_file() -> int | None:
-    """Read ~/.emrg/emrgd.pid → int pid, or None if missing/invalid."""
-    try:
-        raw = (config_dir() / "emrgd.pid").read_text(encoding="utf-8").strip()
-        pid = int(raw)
-        return pid if pid > 0 else None
-    except (OSError, ValueError):
-        return None
-
-
 def _kill_pid_windows(pid: int) -> None:
     """Force-kill a pid on Windows (taskkill /F — TerminateProcess)."""
     subprocess.run(
@@ -219,28 +213,32 @@ def _kill_pid_posix(pid: int, grace: float = 3.0) -> None:
         pass
 
 
-def _scan_windows_python_emrg(own_pid: int) -> list[int]:
+def _scan_windows_python_emrg(own_pid: int, server_only: bool = False) -> list[int]:
     """Scan python.exe/pythonw.exe whose command line matches ``-m emrg`` /
     ``-m emrg.server`` (TUI + daemon), excluding ``own_pid``.
 
+    ``server_only=True`` restricts the match to ``-m emrg.server`` (the daemon
+    only — rant 2026-08-21T16:45:06: stop_daemon's kill fallback targets the
+    daemon, TUI clients are stopped earlier in the chain).
+
     Command line is the only reliable identity on Windows (rant
-    2026-08-17T17:03:38): the daemon's ``emrgd.pid`` can be missing/stale/
-    mismatched (GUI spawn, crash restart, external unlink — #593 family), so a
-    live daemon would otherwise survive the pid-file path and keep locking the
-    ``websockets`` C extensions under ``install\\`` — the installer then fails
-    with ``DeleteFile failed; code 5`` while verify() reports clean.
+    2026-08-17T17:03:38): a live daemon would otherwise survive the pid-file
+    path and keep locking the ``websockets`` C extensions under ``install\\`` —
+    the installer then fails with ``DeleteFile failed; code 5`` while verify()
+    reports clean.
     """
     if not is_win():
         return []
+    cmd_re = r"-m emrg\.server" if server_only else r"-m emrg"
     # Literal PowerShell script-block braces must be escaped as {{ }} — same
     # contract as stop_tui() (str.format() would raise on unescaped braces).
     ps_cmd = (
         "Get-CimInstance Win32_Process | "
         "Where-Object {{ $_.ProcessId -ne {own} -and "
         "$_.Name -match '{name_re}' -and "
-        "$_.CommandLine -match '-m emrg' }} | "
+        "$_.CommandLine -match '{cmd_re}' }} | "
         "ForEach-Object {{ Write-Output $_.ProcessId }}"
-    ).format(own=own_pid, name_re=_WIN_PY_NAME_RE)
+    ).format(own=own_pid, name_re=_WIN_PY_NAME_RE, cmd_re=cmd_re)
     try:
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_cmd],
@@ -249,6 +247,46 @@ def _scan_windows_python_emrg(own_pid: int) -> list[int]:
     except (OSError, subprocess.SubprocessError, TimeoutError):
         return []
     return [int(p) for p in out.split() if p.strip().isdigit()]
+
+
+def _daemon_scan_pids(own_pid: int) -> list[int]:
+    """Cmdline-scan pids of the daemon only (``-m emrg.server``) — the kill
+    fallback for stop_daemon (rant 2026-08-21T16:45:06). POSIX ps-scan filtered
+    to the daemon regex; Windows reuses the CIM scan with server_only."""
+    if is_win():
+        return _scan_windows_python_emrg(own_pid, server_only=True)
+    out = _ps_output()
+    if out is None:
+        return []
+    pids: list[int] = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            continue
+        if pid == own_pid:
+            continue
+        if _EMRG_SERVER_RE.search(parts[1]):
+            pids.append(pid)
+    return pids
+
+
+def _port_is_open(port: int, timeout: float = 0.3) -> bool:
+    """Fixed-port TCP probe — port open = a live daemon owns it (ground truth,
+    rant 2026-08-19T08:05:21). Mirrors emrg.connect.is_server_running_sync
+    semantics without importing the emrg package (standalone in installer)."""
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        sock.close()
+        return True
+    except OSError:
+        return False
 
 
 # ── Minimal WebSocket client (RFC 6455, stdlib only) ────────────
@@ -362,55 +400,52 @@ def ws_graceful_shutdown(port: int, token: str, timeout: float = 3.0) -> bool:
 # ── Individual stop steps ───────────────────────────────────────
 
 def stop_daemon() -> None:
-    """Stop the daemon: ws shutdown → pid file → SIGTERM/taskkill /F → poll.
+    """Stop the daemon: ws shutdown → fixed-port wait → cmdline-scan kill
+    fallback (``-m emrg.server``) → token cleanup (rant 2026-08-21T16:45:06:
+    the fixed port is the ground truth; the emrgd.pid file is gone, so liveness
+    is judged by the port and the kill target is found by command line).
 
-    Also removes ``~/.emrg/emrgd.token`` once the daemon pid is confirmed dead
-    (the daemon itself removes it on graceful shutdown; a force-killed daemon
-    cannot, so we clean it up — the next daemon start re-asserts both files).
+    Also removes ``~/.emrg/emrgd.token`` once the daemon port is confirmed
+    closed (the daemon itself removes it on graceful shutdown; a force-killed
+    daemon cannot, so we clean it up — the next daemon start re-asserts it).
     """
     token_path = config_dir() / "emrgd.token"
     # Fixed-port shutdown (rant 2026-08-19T08:05:21): the daemon always
     # listens on _EMRGD_PORT; the token file only supplies the auth token
     # (single line, rant 2026-08-20T14:32:52). If the file is missing/stale,
-    # fall through to the pid + cmdline paths.
+    # fall through to the cmdline-scan path.
     try:
         token = token_path.read_text(encoding="utf-8").strip()
     except (OSError, ValueError):
         token = ""
     if token and ws_graceful_shutdown(_EMRGD_PORT, token):
-        # wait for the daemon to exit + remove its pid file
-        # (~10s grace: old stop-emrg.cmd v2 polled emrgd.pid up to
-        # 10s; a busy daemon mid-tool-loop needs the full window)
+        # wait for the daemon to exit — the port closing is the ground truth
+        # (~10s grace: old stop-emrg.cmd v2 polled up to 10s; a busy daemon
+        # mid-tool-loop needs the full window)
         for _ in range(60):
-            pid = _read_pid_file()
-            if pid is None or not _pid_alive(pid):
+            if not _port_is_open(_EMRGD_PORT):
                 break
             time.sleep(0.15)
 
-    pid = _read_pid_file()
-    if pid is not None and _pid_alive(pid):
+    # Fallback: the daemon survived the ws path (or no ws token) → kill by
+    # command-line identity (``-m emrg.server``), the only reliable marker on
+    # Windows (rant 2026-08-17T17:03:38). TUI clients were already stopped
+    # earlier in the chain, so the daemon-only scan is safe.
+    for pid in _daemon_scan_pids(os.getpid()):
         if is_win():
             _kill_pid_windows(pid)
         else:
             _kill_pid_posix(pid)
         # poll up to 10s for it to disappear (matches old v2 grace window)
         for _ in range(60):
-            if not _pid_alive(pid):
+            if not _port_is_open(_EMRGD_PORT):
                 break
             time.sleep(0.15)
 
-    # Fallback: pid file missing/stale/mismatched → the live daemon (or any
-    # TUI client stop_tui could not reach) would otherwise survive and keep
-    # locking files under install\. Scan the command line — the only reliable
-    # identity on Windows (rant 2026-08-17T17:03:38; returns [] on POSIX).
-    for pid in _scan_windows_python_emrg(os.getpid()):
-        _kill_pid_windows(pid)
-
     # Token file cleanup: the daemon removes it on graceful shutdown; a
-    # force-killed daemon cannot, so remove it once the pid is confirmed gone
-    # (the next daemon start re-asserts both files).
-    daemon_gone = pid is None or not _pid_alive(pid)
-    if daemon_gone:
+    # force-killed daemon cannot, so remove it once the port is confirmed
+    # closed (the next daemon start re-asserts it).
+    if not _port_is_open(_EMRGD_PORT):
         try:
             token_path.unlink()
         except OSError:
@@ -1283,16 +1318,16 @@ def _verify_windows_categories(skip_gui: bool = False) -> list[tuple[str, list[s
             pass
     cats.append(("GUI", gui))
 
-    # daemon residual (emrgd.pid still alive)
+    # daemon residual (fixed-port TCP probe — rant 2026-08-21T16:45:06: the
+    # port is the daemon ground truth; emrgd.pid is gone)
     daemon: list[str] = []
-    pid = _read_pid_file()
-    if pid is not None and _pid_alive(pid):
-        daemon.append(f"daemon (pid {pid})")
+    if _port_is_open(_EMRGD_PORT):
+        daemon.append(f"daemon (port {_EMRGD_PORT} open)")
     cats.append(("daemon", daemon))
 
     # python emrg process residual (TUI/daemon by command line — covers the
-    # pid-file blind spot: a live daemon with a missing/stale pid file would
-    # otherwise pass verify and the installer would overwrite locked files)
+    # port-probe blind spot: a live daemon on a different port / a TUI client
+    # the installer would otherwise miss)
     py = [f"python emrg process (pid {p})" for p in _scan_windows_python_emrg(os.getpid())]
     cats.append(("cmdline-scan", py))
 

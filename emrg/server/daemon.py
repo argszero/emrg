@@ -333,18 +333,6 @@ class EmrgServer:
                 self._stop_reason = "bind_exit"
                 return
 
-        # ── PID file: diagnostics only (rant 08-05:21 — no longer an
-        # admission gate). Written AFTER the fixed-port bind succeeded, so only
-        # the process that actually owns the port writes it; stop_all and
-        # diagnostics may still read it.
-        runtime_dir = config_dir()
-        pid_file = runtime_dir / "emrgd.pid"
-        try:
-            pid_file.write_text(str(os.getpid()), encoding="utf-8")
-            logger.debug("pid file written (diagnostic only): %s (pid=%d)", pid_file, os.getpid())
-        except OSError:
-            logger.warning("could not write diagnostic pid file %s", pid_file, exc_info=True)
-
         self._server = await serve(
             self._handle_client,
             sock=sock,
@@ -409,9 +397,9 @@ class EmrgServer:
             self._stop_reason = "crash"
             logger.error("daemon serve crashed — cleanup started", exc_info=True)
         finally:
-            await self._shutdown_all(pid_file)
+            await self._shutdown_all()
 
-    async def _shutdown_all(self, pid_file: Path) -> None:
+    async def _shutdown_all(self) -> None:
         """Best-effort teardown with per-step logging (rant 2026-08-19T14:02:37).
 
         Every daemon stop path funnels through here: shutdown message,
@@ -474,16 +462,6 @@ class EmrgServer:
             steps.append(("removed port file", True))
         except Exception:
             steps.append(("removed port file", False))
-        # 5. PID file (diagnostic)
-        try:
-            if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                pid_file.unlink()
-                logger.debug("pid file removed: %s", pid_file)
-                steps.append(("removed pid file", True))
-            else:
-                steps.append(("removed pid file (absent)", True))
-        except OSError:
-            steps.append(("removed pid file", False))
 
         uptime = max(0, int((datetime.now() - self.start_time).total_seconds()))
         all_ok = all(ok for _, ok in steps)

@@ -1461,8 +1461,9 @@ def test_serve_refuses_duplicate_when_fixed_port_bound(tmp_path):
 
     The fixed-port bind (EADDRINUSE) is the ONLY single-instance admission
     (rant 2026-08-19T08:05:21): kernel-level resource exclusivity — no PID
-    file to forge/delete, no race window. A refused instance must not claim
-    the pid file nor reach the websockets bind.
+    file to forge/delete, no race window (emrgd.pid removed entirely per
+    rant 2026-08-21T16:45:06). A refused instance must not reach the
+    websockets bind.
     """
     import errno as _errno
     from unittest.mock import AsyncMock, patch
@@ -1481,12 +1482,11 @@ def test_serve_refuses_duplicate_when_fixed_port_bound(tmp_path):
 
     assert server._running is False, "duplicate daemon must not keep running"
     mock_serve.assert_not_awaited(), "must not bind when the fixed port is taken"
-    assert not (tmp_path / "emrgd.pid").exists(), "refused instance must not claim the pid file"
 
 
 def test_serve_proceeds_when_fixed_port_free(tmp_path):
-    """Negative path: fixed port free → bind passes → pid diagnostic written
-    and the websockets serve is reached with the pre-bound socket."""
+    """Negative path: fixed port free → bind passes → the websockets serve is
+    reached with the pre-bound socket (no pid file is written anymore)."""
     import asyncio
     from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1503,8 +1503,7 @@ def test_serve_proceeds_when_fixed_port_free(tmp_path):
             assert "abort after admission" in str(e), f"unexpected abort: {e}"
         else:
             raise AssertionError("expected the websockets serve abort (admission passed)")
-    assert (tmp_path / "emrgd.pid").exists(), "bind success must write the diagnostic pid file"
-    assert (tmp_path / "emrgd.pid").read_text(encoding="utf-8").strip() == str(os.getpid())
+    assert not (tmp_path / "emrgd.pid").exists(), "no pid file may be written (rant 2026-08-21T16:45:06)"
 
 
 def test_serve_timewait_retry_recovers_bind(tmp_path):
@@ -1538,12 +1537,12 @@ def test_serve_timewait_retry_recovers_bind(tmp_path):
         else:
             raise AssertionError("expected the websockets serve abort (retry recovered)")
     assert bind_calls["n"] == 2, f"expected 2 bind attempts, got {bind_calls['n']}"
-    assert (tmp_path / "emrgd.pid").exists(), "recovered bind must write the diagnostic pid file"
+    assert not (tmp_path / "emrgd.pid").exists(), "no pid file may be written (rant 2026-08-21T16:45:06)"
 
 
 def test_serve_timewait_retry_exhausted(tmp_path):
     """EADDRINUSE with no listener that never clears → serve() gives up
-    gracefully (no pid claim, no websockets bind)."""
+    gracefully (no websockets bind; no pid file exists anymore)."""
     import asyncio
     import errno as _errno
     from unittest.mock import AsyncMock, patch
@@ -1639,11 +1638,9 @@ def test_shutdown_all_logs_reason_and_cleanup_steps(tmp_path, caplog):
     import logging
 
     server = _make_shutdown_server(tmp_path)
-    pid_file = tmp_path / "emrgd.pid"
-    pid_file.write_text(str(os.getpid()), encoding="utf-8")
 
     caplog.set_level(logging.INFO, logger="emrg.server.daemon")
-    asyncio.run(server._shutdown_all(pid_file))
+    asyncio.run(server._shutdown_all())
 
     text = caplog.text
     assert "daemon stopping (reason=cancel, handlers=0) — cleaning up" in text
@@ -1653,10 +1650,8 @@ def test_shutdown_all_logs_reason_and_cleanup_steps(tmp_path, caplog):
     assert "stopped scheduler" in text
     assert "closed llm client" in text
     assert "removed port file" in text
-    assert "removed pid file" in text
     assert "daemon stopped (reason=cancel, uptime=" in text
     assert "all_ok=True" in text
-    assert not pid_file.exists()  # our own pid → unlinked
 
 
 def test_shutdown_all_handles_failing_cleanup(tmp_path, caplog):
@@ -1668,7 +1663,7 @@ def test_shutdown_all_handles_failing_cleanup(tmp_path, caplog):
     server.llm.close = AsyncMock(side_effect=RuntimeError("boom"))
 
     caplog.set_level(logging.INFO, logger="emrg.server.daemon")
-    asyncio.run(server._shutdown_all(tmp_path / "missing.pid"))
+    asyncio.run(server._shutdown_all())
 
     text = caplog.text
     assert "daemon stopping (reason=cancel" in text
@@ -1685,7 +1680,7 @@ def test_shutdown_all_reason_crash_and_sigint(tmp_path, caplog):
         server = _make_shutdown_server(tmp_path)
         server._stop_reason = reason
         caplog.set_level(logging.INFO, logger="emrg.server.daemon")
-        asyncio.run(server._shutdown_all(tmp_path / "missing.pid"))
+        asyncio.run(server._shutdown_all())
         assert f"daemon stopping (reason={reason}" in caplog.text
         assert f"daemon stopped (reason={reason}" in caplog.text
         caplog.clear()
