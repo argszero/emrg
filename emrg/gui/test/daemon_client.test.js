@@ -279,21 +279,33 @@ test("P2 skipStart: stale port + daemon 已死 → 抛错不重拉（不删文�
   // 预写 token 文件（连接用常量端口，必然失败场景由 ws error 模拟）
   fs.writeFileSync(TOKEN_FILE(), "seekrit-token"); // 127.0.0.1:1 拒绝连接
   const client = new DaemonClient();
-  // daemon 进程已死（无 pid 文件）→ 旧路径会删文件重拉；skipStart 必须拒绝
-  let spawnCalls = 0;
-  client.startDaemon = async function () {
-    spawnCalls += 1;
-    throw new Error("startDaemon must not be called with skipStart");
+  // 端口探测 mock：端口不通 = daemon 死（rant 15:26:42 固定端口为准）
+  const origConnect = net.connect;
+  net.connect = (opts) => {
+    const sock = new (require("node:events").EventEmitter)();
+    sock.destroy = () => {};
+    setTimeout(() => sock.emit("error", new Error("ECONNREFUSED")), 1);
+    return sock;
   };
-  const p = client.ensureConnected({ skipStart: true });
-  await waitForWs();
-  const firstWs = currentMockWs;
-  firstWs.emit("error", new Error("connect ECONNREFUSED"));
-  await assert.rejects(p, /daemon unreachable \(skipStart\)/);
-  assert.strictEqual(spawnCalls, 0, "startDaemon must never be called");
-  // token 文件保留（connManager 重启恢复依赖它判断 daemon 状态）
-  assert.ok(fs.existsSync(TOKEN_FILE()), "port file must be kept");
-  assert.strictEqual(client.connected, false);
+  try {
+    // daemon 已死（端口不通）→ 旧路径会删文件重拉；skipStart 必须拒绝
+    let spawnCalls = 0;
+    client.startDaemon = async function () {
+      spawnCalls += 1;
+      throw new Error("startDaemon must not be called with skipStart");
+    };
+    const p = client.ensureConnected({ skipStart: true });
+    await waitForWs();
+    const firstWs = currentMockWs;
+    firstWs.emit("error", new Error("connect ECONNREFUSED"));
+    await assert.rejects(p, /daemon unreachable \(skipStart\)/);
+    assert.strictEqual(spawnCalls, 0, "startDaemon must never be called");
+    // token 文件保留（connManager 重启恢复依赖它判断 daemon 状态）
+    assert.ok(fs.existsSync(TOKEN_FILE()), "port file must be kept");
+    assert.strictEqual(client.connected, false);
+  } finally {
+    net.connect = origConnect;
+  }
 });
 
 test("Phase4: _findDaemonExecutable 打包模式定位捆绑 emrgd（POSIX）", async () => {
@@ -350,74 +362,119 @@ test("Phase4: isPackaged startDaemon 走捆绑 emrgd 分支（非 python -m）",
 
 test("G43 stale port: 连接失败（port 文件存在但拒绝）→ 删文件重拉", async () => {
   const client = new DaemonClient();
-  let respawned = false;
-  client.startDaemon = async function () {
-    respawned = true;
-    fs.writeFileSync(TOKEN_FILE(), "seekrit-token");
+  // 端口探测 mock：端口不通 = daemon 死（rant 15:26:42 固定端口为准）
+  const origConnect = net.connect;
+  net.connect = (opts) => {
+    const sock = new (require("node:events").EventEmitter)();
+    sock.destroy = () => {};
+    setTimeout(() => sock.emit("error", new Error("ECONNREFUSED")), 1);
+    return sock;
   };
-  const p = client.ensureConnected();
-  await waitForWs();
-  const firstWs = currentMockWs;
-  firstWs.emit("error", new Error("connect ECONNREFUSED"));
-  // 重拉后创建第二个 ws → open → auth → auth_ok
-  await waitForWs(() => currentMockWs !== firstWs);
-  assert.ok(respawned, "startDaemon should respawn after stale port");
-  assert.strictEqual(fs.existsSync(TOKEN_FILE()), true);
-  assert.strictEqual(currentMockWs.url, "ws://127.0.0.1:" + EMRGD_PORT);
-  currentMockWs.emit("open");
-  await waitForAuthSent(currentMockWs);
-  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "auth_ok" })));
-  await p;
-  assert.strictEqual(client.connected, true);
+  try {
+    let respawned = false;
+    client.startDaemon = async function () {
+      respawned = true;
+      fs.writeFileSync(TOKEN_FILE(), "seekrit-token");
+    };
+    const p = client.ensureConnected();
+    await waitForWs();
+    const firstWs = currentMockWs;
+    firstWs.emit("error", new Error("connect ECONNREFUSED"));
+    // 重拉后创建第二个 ws → open → auth → auth_ok
+    await waitForWs(() => currentMockWs !== firstWs);
+    assert.ok(respawned, "startDaemon should respawn after stale port");
+    assert.strictEqual(fs.existsSync(TOKEN_FILE()), true);
+    assert.strictEqual(currentMockWs.url, "ws://127.0.0.1:" + EMRGD_PORT);
+    currentMockWs.emit("open");
+    await waitForAuthSent(currentMockWs);
+    currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "auth_ok" })));
+    await p;
+    assert.strictEqual(client.connected, true);
+  } finally {
+    net.connect = origConnect;
+  }
 });
 
-test("rant 13:16:36 G43 加固：daemon 进程活着 → ws 失败不删 port 文件、不重拉", async () => {
+test("rant 15:26:42 加固：daemon 端口活着 → ws 失败不删 token 文件、不重拉", async () => {
   const client = new DaemonClient();
-  // 写入 emrgd.pid（当前进程 = 活着）
-  fs.writeFileSync(path.join(tmpHome, ".emrg", "emrgd.pid"), String(process.pid));
-  const tokenFile = TOKEN_FILE();
-  fs.writeFileSync(tokenFile, "seekrit-token");
-  assert.strictEqual(client._daemonProcessAlive(), true, "pid alive → true");
-
-  let respawned = false;
-  client.startDaemon = async function () { respawned = true; };
-  const p = client.ensureConnected();
-  await waitForWs();
-  const firstWs = currentMockWs;
-  firstWs.emit("error", new Error("connect ECONNREFUSED"));
-  // 守卫路径：不删文件、不重拉，直接抛"daemon unreachable (pid alive)"
-  await assert.rejects(p, /daemon unreachable \(pid alive\)/);
-  assert.strictEqual(fs.existsSync(tokenFile), true, "token 文件必须保留（daemon 还活着）");
-  assert.strictEqual(respawned, false, "pid 活着 → 不重拉 daemon（防风暴）");
-});
-
-test("rant 13:16:36 G43 加固：daemon 真死了（pid 不存在）→ 仍删文件重拉", async () => {
-  const client = new DaemonClient();
-  // pid 文件指向不存在的进程 → 视为死 daemon
-  fs.writeFileSync(path.join(tmpHome, ".emrg", "emrgd.pid"), "999999");
-  assert.strictEqual(client._daemonProcessAlive(), false, "pid 不存在 → false");
-
-  let respawned = false;
-  client.startDaemon = async function () {
-    respawned = true;
-    fs.writeFileSync(TOKEN_FILE(), "seekrit-token");
+  // mock net.connect：端口通 = daemon 活着（固定端口 ground truth，不再读 emrgd.pid）
+  const origConnect = net.connect;
+  net.connect = (opts) => {
+    const sock = new (require("node:events").EventEmitter)();
+    sock.destroy = () => {};
+    setTimeout(() => sock.emit("connect"), 1);
+    return sock;
   };
-  const p = client.ensureConnected();
-  await waitForWs();
-  const firstWs = currentMockWs;
-  firstWs.emit("error", new Error("connect ECONNREFUSED"));
-  await waitForWs(() => currentMockWs !== firstWs);
-  assert.ok(respawned, "真死 → 重拉 daemon");
-  currentMockWs.emit("open");
-  await waitForAuthSent(currentMockWs);
-  currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "auth_ok" })));
-  await p;
-  assert.strictEqual(client.connected, true);
+  try {
+    const tokenFile = TOKEN_FILE();
+    fs.writeFileSync(tokenFile, "seekrit-token");
+    assert.strictEqual(await client._daemonProcessAlive(), true, "端口通 → true");
+
+    let respawned = false;
+    client.startDaemon = async function () { respawned = true; };
+    const p = client.ensureConnected();
+    await waitForWs();
+    const firstWs = currentMockWs;
+    firstWs.emit("error", new Error("connect ECONNREFUSED"));
+    // 守卫路径：不删文件、不重拉，直接抛"daemon unreachable (port alive)"
+    await assert.rejects(p, /daemon unreachable \(port alive\)/);
+    assert.strictEqual(fs.existsSync(tokenFile), true, "token 文件必须保留（daemon 还活着）");
+    assert.strictEqual(respawned, false, "端口活着 → 不重拉 daemon（防风暴）");
+  } finally {
+    net.connect = origConnect;
+  }
 });
 
-test("rant 13:16:36 G43 加固：无 pid 文件 → 视为死 daemon（删文件重拉）", async () => {
+test("rant 15:26:42 加固：daemon 真死了（端口不通）→ 仍删文件重拉", async () => {
   const client = new DaemonClient();
-  assert.strictEqual(client._daemonProcessAlive(), false, "无 pid 文件 → false");
+  // mock net.connect：端口不通 = daemon 死了（pid 文件存在与否都不再影响判断）
+  const origConnect = net.connect;
+  net.connect = (opts) => {
+    const sock = new (require("node:events").EventEmitter)();
+    sock.destroy = () => {};
+    setTimeout(() => sock.emit("error", new Error("ECONNREFUSED")), 1);
+    return sock;
+  };
+  try {
+    assert.strictEqual(await client._daemonProcessAlive(), false, "端口不通 → false");
+
+    let respawned = false;
+    client.startDaemon = async function () {
+      respawned = true;
+      fs.writeFileSync(TOKEN_FILE(), "seekrit-token");
+    };
+    const p = client.ensureConnected();
+    await waitForWs();
+    const firstWs = currentMockWs;
+    firstWs.emit("error", new Error("connect ECONNREFUSED"));
+    await waitForWs(() => currentMockWs !== firstWs);
+    assert.ok(respawned, "真死 → 重拉 daemon");
+    currentMockWs.emit("open");
+    await waitForAuthSent(currentMockWs);
+    currentMockWs.emit("message", Buffer.from(JSON.stringify({ type: "auth_ok" })));
+    await p;
+    assert.strictEqual(client.connected, true);
+  } finally {
+    net.connect = origConnect;
+  }
+});
+
+test("rant 15:26:42：emrgd.pid 缺失/存在都不再是存活依据——固定端口为准", async () => {
+  const client = new DaemonClient();
+  const origConnect = net.connect;
+  net.connect = (opts) => {
+    const sock = new (require("node:events").EventEmitter)();
+    sock.destroy = () => {};
+    setTimeout(() => sock.emit("error", new Error("ECONNREFUSED")), 1);
+    return sock;
+  };
+  try {
+    // 即使 emrgd.pid 存在（指向当前活进程），端口不通 → 仍判死（pid 文件不参与判断）
+    fs.writeFileSync(path.join(tmpHome, ".emrg", "emrgd.pid"), String(process.pid));
+    assert.strictEqual(await client._daemonProcessAlive(), false, "端口不通 → false（pid 存在也无效）");
+  } finally {
+    net.connect = origConnect;
+  }
 });
 
 test("rant 13:16:36 ⑤ spawn 节流：超 MAX_SPAWN_ATTEMPTS 后不再拉起 daemon", async () => {
@@ -874,10 +931,19 @@ test("16:03:31: token 固定读规范 ~/.emrg → 存在则不 spawn 直接连�
 });
 
 test("16:03:31: stale token + spawn 节流失败 → probe 诚实失败，抛原始错误（不假装复用）", async () => {
-  // 宿主场景：token 文件存在（stale，无 daemon 监听）。ws 失败 → pid 死 →
+  // 宿主场景：token 文件存在（stale，无 daemon 监听）。ws 失败 → 端口探测死 →
   // 删 stale token → spawn 节流抛错 → probe 无 token 可复用 → 诚实抛原始错误
   // （projectDir 概念删除后 token 只有一个规范位置，probe 复用需 token 存在）。
   const client = new DaemonClient();
+  // 端口探测 mock：端口不通 = daemon 死（rant 15:26:42 固定端口为准，不再读 emrgd.pid）
+  const origConnect = net.connect;
+  net.connect = (opts) => {
+    const sock = new (require("node:events").EventEmitter)();
+    sock.destroy = () => {};
+    setTimeout(() => sock.emit("error", new Error("ECONNREFUSED")), 1);
+    return sock;
+  };
+  try {
   // spawn 命中节流（正是宿主看到的假错误 "after 3 attempts"）
   client.startDaemon = async function () {
     throw new Error("daemon failed to start after 3 attempts — please start it manually");
@@ -897,6 +963,9 @@ test("16:03:31: stale token + spawn 节流失败 → probe 诚实失败，抛原
   assert.match(probeLine, /daemon_alive\(ping\)=/);
   assert.match(probeLine, /spawn_result=failed\(daemon failed to start after 3 attempts/);
   assert.ok(logs.some((l) => l.includes("no existing daemon reachable, giving up")), "诚实放弃日志");
+  } finally {
+    net.connect = origConnect;
+  }
 });
 
 // ── P2 自有流锁（G65 每连接独立；rant 15:07:19）──────────────────────────
