@@ -94,8 +94,7 @@ const App = (() => {
         return;
       }
       if (init.sessions && init.sessions.length > 0) {
-        state.sessions = init.sessions;
-        Sidebar.render(init.sessions);
+        state.sessions = init.sessions; // rant 11:44:52：历史会话列表已移除，不再渲染 conv-list
         // P4 slice 2：main 恢复的打开会话 + 激活会话（跳过 switchSession 的 IPC 往返）
         state.openSessions = init.open_sessions || [];
         Sidebar.renderOpenSessions(state.openSessions);
@@ -651,7 +650,6 @@ const App = (() => {
       if (res.error === "session_not_found") {
         Chat.addSystemMessage(_t("app.deletedSwitch"));
         if (res.next_session) {
-          Sidebar.render(res.sessions || []);
           await switchSession(res.next_session, { silent: true });
         } else {
           await newSession();
@@ -909,7 +907,6 @@ const App = (() => {
     try {
       const sessions = await window.emrg.listSessions();
       state.sessions = sessions;
-      Sidebar.render(sessions);
       Sidebar.renderOpenSessions(state.openSessions); // 打开会话区 title 同步刷新
       renderSessionHeader(state.sessionId); // 激活会话标题栏同步刷新
     } catch { /* 忽略 */ }
@@ -1491,7 +1488,6 @@ const App = (() => {
         break;
       case "sessions":
         state.sessions = data.sessions || [];
-        Sidebar.render(data.sessions || []);
         break;
       case "open_sessions":
         // P4 slice 2：main 广播打开会话列表变化 → 刷新侧边栏打开会话区
@@ -1539,7 +1535,6 @@ const App = (() => {
       case "list_result":
         if (data.type === "sessions_list") {
           state.sessions = data.sessions || [];
-          Sidebar.render(data.sessions || []);
         }
         break;
       case "command_result":

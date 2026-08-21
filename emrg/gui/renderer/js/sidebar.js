@@ -5,7 +5,6 @@
  */
 
 const Sidebar = (() => {
-  let sessions = [];
   let openSessions = [];
 
   /**
@@ -46,45 +45,9 @@ const Sidebar = (() => {
     return title ? `${project}/${title}` : `${project}/${sid}`;
   }
 
-  /** cwd 末段作项目名（Path(s.cwd).name 语义，兼容 \\ 与 /） */
-  function cwdProjectName(cwd) {
-    if (!cwd) return "";
-    const norm = String(cwd).replace(/\\/g, "/").replace(/\/+$/, "");
-    const seg = norm.split("/");
-    return seg[seg.length - 1] || "";
-  }
-
-  /** 渲染会话列表（rant 17:48:07：去掉今天/昨天/更早分组，按最后活跃倒序，project/name|id） */
-  function render(list) {
-    sessions = list || [];
-    const nav = $("conv-list");
-    nav.innerHTML = "";
-    if (!sessions.length) {
-      nav.appendChild(el("div", { class: "conv-item placeholder" }, EMRG_Copy.COPY.noSessions));
-      return;
-    }
-    const sorted = [...sessions].sort((a, b) =>
-      String(b.updated_at || b.created_at || "").localeCompare(String(a.updated_at || a.created_at || "")));
-    for (const s of sorted) {
-      const item = el("div", { class: "conv-item" });
-      item.dataset.sid = s.session_id;
-      const title = s.title || ""; // G27：title 优先，无 title 则空（id 已单独显示）
-      const project = cwdProjectName(s.cwd);
-      item.appendChild(el("span", { class: "conv-title" }, sessionLabel(project, title, s.session_id)));
-      item.addEventListener("click", () => App.switchSession(s.session_id, { scopeNav: nav }));
-      // 右键菜单：重命名 / 删除（友好确认）
-      item.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        App.showConvMenu(item, s.session_id, title || s.session_id);
-      });
-      nav.appendChild(item);
-    }
-    highlight(App.state.sessionId);
-  }
-
-  /** 高亮当前对话：指定 navEl 则仅更新该列表，否则两列表都更新（rant 2026-08-20T22:04:02 列表选中互不影响） */
+  /** 高亮当前会话条目（rant 11:44:52：历史会话列表已移除，仅剩打开会话区） */
   function highlight(sid, navEl) {
-    const targets = navEl ? [navEl] : [$("conv-list"), $("open-sessions")];
+    const targets = navEl ? [navEl] : [$("open-sessions")];
     for (const nav of targets) {
       if (!nav) continue;
       for (const item of nav.querySelectorAll(".conv-item")) {
@@ -93,55 +56,7 @@ const Sidebar = (() => {
     }
   }
 
-  // ── 键盘导航：↑↓ 切换高亮 / Enter 切换会话（与 TUI /resume 选择器一致）──
-  let _keyHandler = null;
-  let _focusIdx = -1;
-
-  function initKeyboard() {
-    const nav = $("conv-list");
-    _keyHandler = (e) => {
-      // 输入控件（textarea/input/select/contenteditable）内不劫持 ↑↓/Enter——
-      // 输入框是 <textarea id="input">，多行输入需 ↑↓ 移动光标、Shift+Enter 换行
-      if (e.target.closest("input, textarea, select, [contenteditable]")) return;
-      const items = nav.querySelectorAll(".conv-item");
-      if (!items.length) return;
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        if (_focusIdx < 0) {
-          // 未聚焦：从当前会话开始
-          _focusIdx = items.findIndex((it) => it.classList.contains("active"));
-          if (_focusIdx < 0) _focusIdx = 0;
-        }
-        _focusIdx = e.key === "ArrowDown"
-          ? (_focusIdx + 1) % items.length
-          : (_focusIdx - 1 + items.length) % items.length;
-        items.forEach((it, j) => it.classList.toggle("kbd-focus", j === _focusIdx));
-        items[_focusIdx].scrollIntoView({ block: "nearest" });
-      } else if (e.key === "Enter" && _focusIdx >= 0) {
-        e.preventDefault();
-        const target = items[_focusIdx];
-        if (target.dataset.sid) App.switchSession(target.dataset.sid, { scopeNav: nav });
-        clearFocus();
-      } else if (e.key === "Escape") {
-        clearFocus();
-      }
-    };
-    document.addEventListener("keydown", _keyHandler);
-  }
-
-  function clearFocus() {
-    _focusIdx = -1;
-    for (const it of $("conv-list").querySelectorAll(".kbd-focus")) {
-      it.classList.remove("kbd-focus");
-    }
-  }
-
-  function init() {
-    if (!_keyHandler) initKeyboard();
-  }
-  init(); // 模块级绑定一次
-
-  return { render, renderOpenSessions, highlight, clearFocus };
+  return { renderOpenSessions, highlight };
 })();
 
 window.EMRG_Sidebar = Sidebar;
