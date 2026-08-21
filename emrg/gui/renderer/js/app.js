@@ -76,8 +76,7 @@ const App = (() => {
       state.serverId = init.server_id || "";
       state.model = init.model || "";
       state.version = init.version || "";
-      state.currentVersion = init.current_version || ""; // rant 18:30:57：安装版本（升级横幅对比基准）
-      state.previousVersion = init.previous_version || ""; // rant 12:44:34：升级前版本（横幅 from→to）
+      state.currentVersion = init.current_version || ""; // rant 18:30:57：进程实际运行版本（升级横幅对比基准；14:38:27 起为 daemon 内存版本）
       state.lastKnownVersion = state.currentVersion;
       state.evolutionCount = init.evolution_count ?? null;
       state.lastKnownEvolutionCount = state.evolutionCount;
@@ -1338,23 +1337,25 @@ const App = (() => {
     $("conn-banner").classList.add("hidden");
   }
 
-  // ── 升级完成横幅（rant 2026-08-20T18:30:57 + 2026-08-21T12:44:34） ─────
-  function maybeShowUpgradeBanner(currentVersion, previousVersion) {
-    if (!currentVersion) return; // 无版本数据（dev 运行）→ 不显示
-    if (currentVersion === state.lastKnownVersion) return; // 版本未变
+  // ── 升级完成横幅（rant 18:30:57 + 12:44:34 + 14:38:27） ─────────────
+  // 14:38:27 重构：参数为 (installedVersion, runVersion)——installed 是磁盘实时
+  // 安装版本（升级 agent 已更新但未重启），run 是 daemon 进程实际运行版本。
+  // installed ≠ run → "已从 {run} 升级到 {installed}，重启后生效"。
+  function maybeShowUpgradeBanner(installedVersion, runVersion) {
+    if (!installedVersion) return; // 无版本数据（dev 运行）→ 不显示
+    if (installedVersion === state.lastKnownVersion) return; // 已提示过该版本（防重复弹）
     const b = $("upgrade-banner");
     if (!b) return;
     const msg = $("upgrade-banner-msg");
     if (msg) {
-      // rant 12:44:34：daemon 提供升级前版本 → 显示 "from → to"；否则回退旧文案
-      if (previousVersion && previousVersion !== currentVersion) {
-        msg.textContent = _t("app.upgradeBannerMsgFromTo", { from: previousVersion, to: currentVersion });
+      if (runVersion && runVersion !== installedVersion) {
+        msg.textContent = _t("app.upgradeBannerMsgFromTo", { from: runVersion, to: installedVersion });
       } else {
-        msg.textContent = _t("app.upgradeBannerMsg", { version: currentVersion });
+        msg.textContent = _t("app.upgradeBannerMsg", { version: installedVersion });
       }
     }
     b.classList.remove("hidden");
-    state.lastKnownVersion = currentVersion; // 已提示，防重复弹
+    state.lastKnownVersion = installedVersion; // 已提示，防重复弹
   }
   function hideUpgradeBanner() {
     const b = $("upgrade-banner");
@@ -1494,6 +1495,9 @@ const App = (() => {
       case "status":
         handleStatus(data);
         break;
+      case "upgrade": // rant 14:38:27：心跳检测到 installed ≠ run → 弹"重启生效"横幅
+        maybeShowUpgradeBanner(data.installed_version, data.current_version);
+        break;
       case "sessions":
         state.sessions = data.sessions || [];
         break;
@@ -1581,10 +1585,8 @@ const App = (() => {
       if (data.server_id) state.serverId = data.server_id;
       if (data.model) state.model = data.model;
       state.evolutionCount = data.evolution_count ?? state.evolutionCount;
-      // rant 18:30:57：pong 携带 current_version → 对比已知版本，变化则弹升级横幅
-      // rant 12:44:34：同时携带 previous_version → 横幅显示 from → to
-      if (data.previous_version) state.previousVersion = data.previous_version;
-      maybeShowUpgradeBanner(data.current_version || state.currentVersion, state.previousVersion);
+      // 14:38:27：升级判断移出 status——由 main.js 心跳对比 installed/current 发
+      // 专用 upgrade 事件（本分支不再弹横幅，避免重连刷屏副作用）。
       updateModelSwitcher();
       updateGrowthCard();
       maybeShowEvolutionToast();

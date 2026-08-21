@@ -227,6 +227,10 @@ class EmrgServer:
         self._running = False
         self._stop_reason: str = "unknown"  # shutdown_msg|cancel|sigint|bind_exit|crash (rant 2026-08-19T14:02:37)
         self._scheduler: Optional[TaskScheduler] = None
+        # Rant 2026-08-21T14:38:27：进程实际运行版本——启动时读一次 install/version.txt
+        # 记入内存（进程生命周期内不变）。GUI 用它对比磁盘实时 installed_version：
+        # 有差异 = 已装新版本但 daemon 未重启 → 弹"重启生效"横幅。
+        self._run_version = self._current_installed_version()
         self._max_tool_rounds = llm_config.max_tool_rounds
         self._projects_log = runtime_dir / "projects.yml"
         self._rants_log = runtime_dir / "rants.jsonl"
@@ -633,29 +637,16 @@ class EmrgServer:
             self._session_busy[session_id] = False
 
     def _current_installed_version(self) -> str:
-        """Current installed EMRG version from ~/.emrg/install/version.txt.
+        """Currently installed EMRG version from ~/.emrg/install/version.txt.
 
-        Rant 2026-08-20T18:30:57: raw data only, zero judgment — the GUI
-        compares it with its last known version and shows the upgrade banner.
+        Rant 2026-08-20T18:30:57 + 2026-08-21T14:38:27: live disk read — the
+        upgrade agent may have updated it while this daemon process still
+        runs the pre-upgrade code. The GUI compares it with the in-memory
+        ``_run_version`` and shows the upgrade banner when they differ.
         Returns "" when the file is missing (dev/standalone runs).
         """
         try:
             v = (Path.home() / ".emrg" / "install" / "version.txt").read_text(encoding="utf-8").strip()
-            return v
-        except (OSError, ValueError):
-            return ""
-
-    def _previous_installed_version(self) -> str:
-        """Pre-upgrade EMRG version from ~/.emrg/install/previous-version.txt.
-
-        Rant 2026-08-21T12:44:34: the upgrade agent writes the version it is
-        replacing into previous-version.txt before overwriting version.txt,
-        so the GUI banner can show "upgraded from X to Y" instead of only the
-        target version. Raw data only; "" when missing (dev/standalone or
-        first install).
-        """
-        try:
-            v = (Path.home() / ".emrg" / "install" / "previous-version.txt").read_text(encoding="utf-8").strip()
             return v
         except (OSError, ValueError):
             return ""
@@ -1432,13 +1423,13 @@ class EmrgServer:
                 "started_at": self.start_time.isoformat(),
                 "pid": os.getpid(),
                 "model": self.llm.config.model,
-                # Rant 2026-08-20T18:30:57：并入当前安装版本——GUI 轮询 pong 时对比
-                # 上次已知版本，发现变化 → 弹"已升级，重启生效"横幅。daemon 只回原始数据，
-                # 零判断逻辑（升级判断由 GUI 负责）。
-                "current_version": self._current_installed_version(),
-                # Rant 2026-08-21T12:44:34：并入升级前版本——GUI 横幅显示 "from → to"
-                # （升级 agent 在覆盖 version.txt 前写入 previous-version.txt）。
-                "previous_version": self._previous_installed_version(),
+                # Rant 2026-08-20T18:30:57 + 2026-08-21T14:38:27：current_version =
+                # 本进程实际运行版本（启动时读入内存，进程生命周期内不变）；
+                # installed_version = 磁盘实时安装版本（升级 agent 可能已更新）。
+                # GUI 对比二者：有差异 = 已装新版本但未重启 daemon → 弹横幅。
+                # previous-version.txt 不再参与判断（14:38:27 重构）。
+                "current_version": self._run_version,
+                "installed_version": self._current_installed_version(),
             })
             return
 
