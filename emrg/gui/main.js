@@ -42,6 +42,11 @@ function main() {
   // （对称 TUI app.py _throttle_warned，PR #594）。成功连接后复位。
   let daemonStoppedNotified = false;
   let stopping = false;
+  // Rant 2026-08-21T12:44:34：定时探活心跳——daemon 级 disconnected 事件此前无人
+  // 监听（grep 证实），断连只能靠 ws close 被动通知；心跳每 15s ping 一次，
+  // 无 pong 或连接已断 → 主动 scheduleReconnect（指数退避已有）。
+  let heartbeatTimer = null;
+  const HEARTBEAT_MS = 15_000;
   // P4（rant 15:07:19）：跨项目打开的会话状态——sid → {projectName, projectPath,
   // lastActive}。写盘防抖 1s（打开/关闭/切换时更新，镜像 rant 设计）。
   let openSessions = new Map();
@@ -1053,6 +1058,7 @@ vision = false
       cancelReconnect();
       reconnectDelayMs = 1000; // 退避复位
       daemonStoppedNotified = false; // 节流提示复位（下个生命周期可再提示）
+      startHeartbeat(); // rant 2026-08-21T12:44:34：定时探活（断连主动重连）
       sendToRenderer("status", { connected: true });
     } catch (e) {
       const dm = connManager.daemonConn();
@@ -1077,6 +1083,7 @@ vision = false
   // 时 daemon 连接不可用"的初始/空闲场景）。
   function scheduleReconnect() {
     if (stopping || reconnectTimer) return;
+    stopHeartbeat(); // 重连期间不再心跳（心跳失败路径会再调本函数，防叠）
     const delay = reconnectDelayMs;
     reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS); // 指数退避
     reconnectTimer = setTimeout(async () => {
@@ -1100,8 +1107,8 @@ vision = false
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   }
 
-  async function waitForPong(timeoutMs = 3000) {
-    const conn = activeConn();
+  async function waitForPong(timeoutMs = 3000, connOverride = null) {
+    const conn = connOverride || activeConn();
     if (!conn || !conn.connected) return null; // 未连接 → 直接超时语义（不抛）
     return new Promise((resolve) => {
       const off = conn.onEvent((type, data) => {
@@ -1114,6 +1121,37 @@ vision = false
       const timer = setTimeout(() => { off(); resolve(null); }, timeoutMs);
       conn.sendCommand("ping");
     });
+  }
+
+  // ── 心跳探活（rant 2026-08-21T12:44:34）─────────────────────
+  function startHeartbeat() {
+    if (heartbeatTimer || stopping) return;
+    heartbeatTimer = setInterval(() => { _heartbeatTick(); }, HEARTBEAT_MS);
+    logger.info(`[gui] heartbeat started (every ${HEARTBEAT_MS / 1000}s)`);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+  }
+
+  async function _heartbeatTick() {
+    if (stopping) { stopHeartbeat(); return; }
+    const conn = connManager?.daemonConn();
+    if (!conn) return;
+    if (!conn.connected) {
+      // daemon 级断连无人监听（旧缺陷）→ 心跳主动补触发重连
+      logger.warn("[gui] heartbeat: daemon connection dropped — scheduling reconnect");
+      stopHeartbeat();
+      scheduleReconnect();
+      return;
+    }
+    const pong = await waitForPong(3000, conn);
+    if (!pong) {
+      logger.warn("[gui] heartbeat: no pong from daemon — scheduling reconnect");
+      stopHeartbeat();
+      try { conn.close(); } catch { /* ignore */ }
+      scheduleReconnect();
+    }
   }
 
   async function listSessions(cwd = DEFAULT_CWD) {
@@ -1252,6 +1290,7 @@ vision = false
   app.on("window-all-closed", () => {
     stopping = true;
     cancelReconnect();
+    stopHeartbeat(); // rant 2026-08-21T12:44:34：退出清理心跳定时器
     persistGuiStateNow(); // P4：退出前冲刷未落盘的打开会话状态（防抖 timer 取消）
     connManager?.closeAll(); // P2：关闭全部会话连接 + daemon 级连接
     // P2.3：窗口关闭自动销毁子 view（R5-⑤ 无需手动清理）；复位状态防二次使用
