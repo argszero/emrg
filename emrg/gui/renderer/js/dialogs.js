@@ -642,6 +642,14 @@ const Dialogs = (() => {
     return wrap;
   }
 
+  async function refreshTaskListIfOpen() {
+    // rant 2026-08-21T17:41:23：触发任务后表格不刷新（状态/上次运行/倒计时滞后）。
+    // 聊天 /trigger 路径复用：任务面板开着才重渲染；没开就不做（renderTaskList 无谓开销 + 倒计时定时器）。
+    if (App.state.activeView === "tasks") {
+      await renderTaskList();
+    }
+  }
+
   async function renderTaskList() {
     const list = $("task-list");
     if (!list) return; // 元素缺失（测试桩）时忽略
@@ -713,9 +721,11 @@ const Dialogs = (() => {
           } else if (res && res.result === "running") {
             Chat.addSystemMessage(_t("app.taskRunning", { n: t.name }));
             showToast(_t("app.taskRunning", { n: t.name }), { type: "info", durationMs: 4000 });
+            await renderTaskList(); // rant 2026-08-21T17:41:23：触发后立即刷新表格（状态/上次运行/倒计时不滞后）
           } else {
             Chat.addSystemMessage(_t("app.triggered", { n: t.name }));
             showToast(_t("app.triggered", { n: t.name }), { type: "success" });
+            await renderTaskList(); // rant 2026-08-21T17:41:23：触发成功后立即刷新表格
           }
         } catch (e) {
           Chat.addSystemMessage(_t("app.triggerFailed", { msg: e.message }));
@@ -1573,6 +1583,7 @@ const Dialogs = (() => {
     initTaskManagement, // rant 18:23:15 P3：定时任务/自定义类型管理初始化
     loadTaskMeta, // rant 18:23:15 P3：任务/类型元数据加载（面板打开/测试复用）
     renderTaskList, // rant 18:23:15 P3：任务列表渲染（测试/刷新复用）
+    refreshTaskListIfOpen, // rant 2026-08-21T17:41:23：任务面板开着才重渲染（聊天 /trigger 路径复用）
     formatCountdown, // rant 10:36:39：倒计时格式化（≤60s "43s" / ≤1h "1m23s" / >1h "1h05m"；测试复用）
     updateTaskCountdowns, // rant 10:36:39：1s tick 更新倒计时文本（测试直接调用模拟走秒）
     startTaskCountdown, // rant 10:36:39：启动 1s 倒计时（幂等；renderTaskList 自动调用）

@@ -467,9 +467,11 @@ const App = (() => {
       } else if (res.result === "running") {
         Chat.addSystemMessage(_t("app.taskRunning", { n }));
         showToast(_t("app.taskRunning", { n }), { type: "info", durationMs: 4000 });
+        await Dialogs.refreshTaskListIfOpen(); // rant 2026-08-21T17:41:23：面板开着则立即刷新
       } else {
         Chat.addSystemMessage(_t("app.triggered", { n }));
         showToast(_t("app.triggered", { n }), { type: "success" });
+        await Dialogs.refreshTaskListIfOpen(); // rant 2026-08-21T17:41:23：面板开着则立即刷新
       }
     } catch (e) {
       Chat.addSystemMessage(_t("app.triggerFailed", { msg: e.message }));

@@ -2797,16 +2797,22 @@ test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 t
 
 test("rant 2026-08-15T09:20:27/09:23:10：面板操作反馈走全局 toast（任意视图可见）+ Trigger 三态语义", async () => {
   const triggerCalls = [];
+  let listCalls = 0;
+  let nightlyRunning = false; // rant 2026-08-21T17:41:23：状态化 mock —— 触发后 nightly 转为 running
   const { ctx, els } = makeSandbox({
-    listTasks: async () => [
-      { name: "emrg-task", type: "evolution", running: true, interval: 60 },
-      { name: "nightly", type: "custom", running: false, interval: 3600 },
-    ],
+    listTasks: async () => {
+      listCalls += 1;
+      return [
+        { name: "emrg-task", type: "evolution", running: true, interval: 60 },
+        { name: "nightly", type: "custom", running: nightlyRunning, interval: 3600 },
+      ];
+    },
     listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
     triggerTask: async (payload) => {
       triggerCalls.push(payload);
       if (payload.name === "emrg-task") return { name: "emrg-task", result: "running", detail: "task is currently executing" };
       if (payload.name === "missing") return { error: "task 'missing' not found" };
+      nightlyRunning = true; // 触发成功 → daemon 侧状态变化（mock 模拟下次 listTasks 返回 running）
       return { name: "nightly", result: "triggered", detail: "next run moved to immediately" };
     },
   });
@@ -2822,6 +2828,7 @@ test("rant 2026-08-15T09:20:27/09:23:10：面板操作反馈走全局 toast（�
   const btns1 = rows[1].querySelectorAll(".model-action-btn");
   assert.strictEqual(btns0[0].disabled, true, "running 任务触发按钮应禁用");
   assert.strictEqual(btns1[0].disabled, false, "空闲任务触发按钮可用");
+  const callsBefore = listCalls;
   // 触发空闲任务 → triggered → success toast（面板视图下 toast 可见）
   btns1[0].click();
   await tick();
@@ -2829,15 +2836,23 @@ test("rant 2026-08-15T09:20:27/09:23:10：面板操作反馈走全局 toast（�
   assert.strictEqual(triggerCalls[0].name, "nightly");
   assert.strictEqual(els["toast"].classList.contains("toast-success"), true, "triggered → success toast");
   assert.ok(String(els["toast-msg"].textContent).includes("nightly"), "toast 消息含任务名");
+  // rant 2026-08-21T17:41:23：触发成功后表格必须立即刷新 —— listTasks 被重拉 + nightly 行出现 running 徽标
+  assert.ok(listCalls >= callsBefore + 1, "触发后应重新拉取任务列表（renderTaskList）");
+  const rows2 = vm.runInContext('Array.from(document.getElementById("task-list").children).filter((c) => c.className.includes("task-row"))', ctx);
+  assert.strictEqual(rows2.length, 2, "刷新后仍两行");
+  assert.strictEqual(rows2[1].querySelectorAll(".task-running-badge").length, 1, "触发后 nightly 行应显示 running 徽标");
+  assert.strictEqual(rows2[1].querySelectorAll(".model-action-btn")[0].disabled, true, "触发后 nightly 触发按钮应禁用");
   // /trigger 路径：running → info toast（不再假成功）
   await vm.runInContext('App.doTrigger("emrg-task")', ctx);
   await tick();
   assert.strictEqual(els["toast"].classList.contains("toast-info"), true, "running → info toast");
   assert.ok(String(els["toast-msg"].textContent).includes("emrg-task"), "info toast 含任务名");
-  // 触发失败 → error toast
+  // 触发失败 → error toast（不刷新列表）
+  const callsBeforeErr = listCalls;
   vm.runInContext('App.doTrigger("missing")', ctx);
   await tick();
   assert.strictEqual(els["toast"].classList.contains("toast-error"), true, "error → error toast");
+  assert.strictEqual(listCalls, callsBeforeErr, "触发失败不应重拉列表");
 });
 
 // ── rant 2026-08-15T10:36:39：任务状态 + 下次运行倒计时 ──
