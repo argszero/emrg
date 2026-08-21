@@ -24,7 +24,6 @@ const WebSocket = require("ws");
 // emrgd.token 已是唯一规范位置，回退冗余）。
 const TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
 const EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
-const HOME_PID_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.pid");
 // Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52): the
 // daemon always listens on this constant — keep in sync with emrg/connect.py
 // EMRGD_PORT and emrg/_stop_all.py _EMRGD_PORT. The token file no longer
@@ -221,24 +220,19 @@ class DaemonClient {
     throw new Error(`emrgd failed to start within timeout${this._readLogTail()}`);
   }
 
-  // Rant 2026-08-09T13:16:36 G43 加固：daemon 进程是否存活（emrgd.pid 探测）。
-  // 存活 → ws 连接失败视为瞬时（daemon 重启/启动中），保留 port 文件交给退避重试；
-  // 死亡 → 允许 G43 删文件重拉。
-  // 18:47:37：pid 文件在规范 ~/.emrg；16:03:31 后固定读该位置。
-  _daemonProcessAlive() {
-    const pidFiles = [HOME_PID_FILE()];
-    for (const pidFile of pidFiles) {
-      try {
-        const pid = Number(String(fs.readFileSync(pidFile, "utf8")).trim());
-        if (!Number.isInteger(pid) || pid <= 0) return false;
-        process.kill(pid, 0); // 信号 0 = 仅探测存在性
-        return true;
-      } catch (err) {
-        if (err && err.code === "EPERM") return true; // 进程存在但权限不同（Windows）
-        // ESRCH（不存在）/ ENOENT（无 pid 文件）→ 试下一个候选
-      }
-    }
-    return false;
+  // Rant 2026-08-21T15:26:42：daemon 存活判断改用固定端口 TCP 探测——
+  // emrgd.pid 不再作为存活依据（可缺失/stale：stop_all 清理、崩溃、外部删除），
+  // 固定端口才是 ground truth（rant 2026-08-19T08:05:21，connect.py
+  // is_server_running_sync 同语义）。端口通 = daemon 活着 = 绝不删 token；
+  // 端口不通才允许 stale-token 删除+重拉路径。pid 文件降级为纯诊断
+  // （daemon 自己写/删，其他代码不再读它判断存活）。
+  _daemonProcessAlive(timeoutMs = 1000) {
+    return new Promise((resolve) => {
+      const sock = net.connect({ host: "127.0.0.1", port: EMRGD_PORT, timeout: timeoutMs });
+      sock.once("connect", () => { sock.destroy(); resolve(true); });
+      sock.once("error", () => { sock.destroy(); resolve(false); });
+      sock.once("timeout", () => { sock.destroy(); resolve(false); });
+    });
   }
 
   _findDaemonExecutable() {
@@ -376,15 +370,16 @@ class DaemonClient {
       await this._awaitOpen();
     } catch (e) {
       // G43 加固（rant 2026-08-09T13:16:36 根因）：token 文件存在但连不上时，
-      // 先查 emrgd.pid —— daemon 进程还活着就【绝不删 token 文件】。旧 G43 直接
-      // unlink 会把健康 daemon 的 token 文件删掉 → 僵尸态（daemon 活着、scheduler
-      // 永远 cannot connect、PID 锁挡住新 spawn）。只有 daemon 真死了才删+重拉。
-      if (this._daemonProcessAlive()) {
+      // 先探测固定端口（rant 2026-08-21T15:26:42：TCP 探活，不再读 emrgd.pid）——
+      // daemon 还活着就【绝不删 token 文件】。旧 G43 直接 unlink 会把健康
+      // daemon 的 token 文件删掉 → 僵尸态（daemon 活着、scheduler 永远
+      // cannot connect、PID 锁挡住新 spawn）。只有 daemon 真死了才删+重拉。
+      if (await this._daemonProcessAlive()) {
         this.logger.warn(
-          `[gui] ws connect failed: ${e.message} — daemon pid alive, keeping token file (transient)`
+          `[gui] ws connect failed: ${e.message} — daemon port alive, keeping token file (transient)`
         );
         try { this.ws.close(); } catch { /* ignore */ }
-        throw new Error(`daemon unreachable (pid alive): ${e.message}`);
+        throw new Error(`daemon unreachable (port alive): ${e.message}`);
       }
       if (skipStart) {
         this.logger.warn(
