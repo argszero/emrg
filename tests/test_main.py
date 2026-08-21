@@ -6,6 +6,7 @@ from emrg.__main__ import (
 )
 
 
+
 class TestBuildParser:
     def test_no_args(self):
         parser = _build_parser()
@@ -124,3 +125,38 @@ class TestScanEmrgClientPids:
 
     def test_no_matches(self):
         assert _scan_emrg_client_pids("  1 /sbin/launchd\n  2 /usr/libexec/foo\n", own_pid=9999) == []
+
+
+class TestStopAllSkipGui:
+    """_stop_all(skip_gui=...) forwards to emrg._stop_all.stop_all.
+
+    Regression: `emrg stop` crashed with
+    ``TypeError: _stop_all() got an unexpected keyword argument 'skip_gui'`` —
+    the --skip-gui flag (rant 2026-08-21T12:44:34) was plumbed into the call
+    site but the wrapper's signature was never updated. Fully mocked: nothing
+    is actually stopped (the real daemon must never be killed by a test).
+    """
+
+    def test_forwards_skip_gui(self, monkeypatch):
+        from emrg import _stop_all as stop_mod
+        from emrg.__main__ import _stop_all
+
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            stop_mod, "stop_all",
+            lambda skip_gui=False: calls.append(skip_gui) or 0,
+        )
+        assert _stop_all(skip_gui=True) == 0
+        assert calls == [True]
+
+    def test_default_skip_gui_false(self, monkeypatch):
+        from emrg import _stop_all as stop_mod
+        from emrg.__main__ import _stop_all
+
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            stop_mod, "stop_all",
+            lambda skip_gui=False: calls.append(skip_gui) or 0,
+        )
+        assert _stop_all() == 0
+        assert calls == [False]

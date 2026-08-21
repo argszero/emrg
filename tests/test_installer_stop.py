@@ -258,6 +258,10 @@ def test_main_delegates_stop_to_stop_all():
     assert "--skip-gui" in content
     assert "skip_gui=getattr(parsed, \"skip_gui\", False)" in content
     assert "from emrg._stop_all import stop_all" in content
+    # 包装函数签名必须接受并透传 skip_gui（回归：曾漏改签名导致
+    # `emrg stop` 直接 TypeError）
+    assert "def _stop_all(skip_gui: bool = False) -> int:" in content
+    assert "return stop_all(skip_gui=skip_gui)" in content
 
 
 def test_emrgd_cmd_has_stop_branch():

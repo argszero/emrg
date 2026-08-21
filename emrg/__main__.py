@@ -239,17 +239,21 @@ def _scan_emrg_client_pids(ps_output: str, own_pid: int) -> list[int]:
     return scan_pids(ps_output, own_pid)
 
 
-def _stop_all() -> int:
+def _stop_all(skip_gui: bool = False) -> int:
     """Stop every running emrg process: daemon, TUI, GUI (+ bundled git on
     Windows) and verify. Returns 0 on clean stop, 1 when residual processes
     remain — the Windows installer aborts on the non-zero exit.
+
+    ``skip_gui=True`` (CLI ``--skip-gui``, rant 2026-08-21T12:44:34): the
+    GUI's restart-to-apply keeps its own process alive and excluded from the
+    residual verify — forwarded to ``stop_all``.
 
     All logic lives in ``emrg/_stop_all.py`` (pure stdlib) so the installer
     can also run it standalone with the runtime's Python; this function is
     the ``emrg stop`` CLI entry point that propagates the exit code.
     """
     from emrg._stop_all import stop_all
-    return stop_all()
+    return stop_all(skip_gui=skip_gui)
 
 
 def _restart_daemon() -> None:
