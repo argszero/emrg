@@ -1,14 +1,15 @@
-/* layout.css — 整体布局：左侧边栏 + 主区（居中单栏聊天 + 输入卡片）
+/* layout.css — 整体布局：左侧边栏 + 工作区（#workspace 会话/面板视图 + 输入卡片）
  * 结构：
  *   #app
  *     #sidebar（品牌区 + 新对话 + 分组列表 + 底部设置/连接圆点）
- *     #main（#chat-view 滚动区 + #empty-state 欢迎屏 + #composer-wrap 输入卡片）
+ *     #main（#workspace 视图容器 + #empty-state 欢迎屏 + #composer-wrap 输入卡片）
  */
 
 #app {
   display: flex;
   height: 100vh;
   width: 100vw;
+  position: relative; /* #result-resizer 绝对定位锚点（P2 框架） */
 }
 
 /* ── 侧边栏 ─────────────────────────────── */
@@ -33,6 +34,102 @@
 .sidebar-brand .brand-star {
   color: var(--accent);
   font-size: 18px;
+}
+
+/* 侧边栏导航（rant 14:10:14 P1：5 入口 activity-bar 式） */
+.side-nav {
+  display: flex;
+  gap: 2px;
+  padding: 0 var(--sp-3) var(--sp-2);
+}
+.side-nav-item {
+  flex: 1;
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-card);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.side-nav-item:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+.side-nav-item.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+/* 工作区视图（rant 18:55:09 v0.2：面板从侧边栏移入 #workspace，整块工作区显示）——
+ * 默认隐藏；.active 时填充整个工作区（宽布局，不再受侧边栏 264px 限制） */
+.workspace-view {
+  display: none;
+  flex-direction: column;
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--sp-4);
+}
+.workspace-view.active {
+  display: flex;
+}
+/* 面板视图内容包装（v0.1 .side-panel-body 视觉对等：正文级字号 + 次级文字色） */
+.workspace-view-body {
+  font-size: var(--fs-secondary);
+  color: var(--text-3);
+}
+
+/* rant 21:49:51：面板视图标题（设置/Rant/项目/任务面板统一） */
+.workspace-view-title {
+  font-size: var(--fs-title);
+  font-weight: 600;
+  color: var(--text-1);
+  margin: 0 0 var(--sp-3);
+}
+
+/* rant 14:10:14 P2：设置面板 tab（模型服务/工作目录/GitHub/外观/语言/关于） */
+.panel-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: var(--sp-3);
+}
+.panel-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-secondary);
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.panel-tab:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+.panel-tab.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--accent);
+}
+.panel-tab-body .settings-group {
+  margin-bottom: var(--sp-3);
+}
+.panel-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
 }
 
 /* 成长状态卡（WorkBuddy P3：自进化可见化） */
@@ -80,6 +177,29 @@
   box-shadow: var(--shadow-md);
 }
 
+/* B2（rant 21:59:11）："打开会话"入口——新对话按钮下的轻量 ghost 按钮 */
+.open-chat-btn {
+  margin: calc(-1 * var(--sp-1)) var(--sp-3) var(--sp-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 8px var(--sp-3);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.open-chat-btn:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+
 #conv-list {
   flex: 1;
   overflow-y: auto;
@@ -92,6 +212,18 @@
   font-weight: 600;
   color: var(--text-3);
   letter-spacing: 0.02em;
+}
+
+/* P4 slice 2：打开会话区（跨项目 tab）——紧贴新对话按钮，视觉轻量 */
+#open-sessions {
+  padding-bottom: var(--sp-1);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-1);
+  max-height: 40%;
+  overflow-y: auto;
+}
+.open-sessions-label {
+  padding-top: var(--sp-2);
 }
 
 .sidebar-footer {
@@ -112,29 +244,82 @@
   background: var(--bg);
 }
 
-/* 聊天滚动区：居中单栏最大 760px，左右留白 ≥24px */
-#chat-view {
+/* 工作区包装（rant 18:55:09 v0.2 起：#chat-view 更名 #workspace——会话视图 + 面板视图的
+ * 公共父容器；每会话一个 .session-view，每面板一个 .workspace-view，display 互斥切换） */
+#workspace {
   flex: 1;
-  overflow-y: auto;
+  position: relative;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: var(--sp-5);
-  padding: var(--sp-5) var(--sp-5) var(--sp-4);
-  scroll-behavior: smooth;
 }
-#chat-view > * {
+
+/* 每会话滚动容器：只有激活会话可见，切换 display 保留状态（浏览器 tab 效果） */
+.session-view {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  display: none;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  /* rant 21:28:49：去掉 smooth——JS scrollTop=scrollHeight 也走平滑动画，工具行快速
+     连续追加时滚不到底 → 最新内容不可见。JS 跳转全部即时；用户手动滚动不受影响。 */
+}
+.session-view.active {
+  display: flex;
+}
+/* 会话标题栏：项目/名称(id) 或 项目/id，滚动置顶、全宽贴边（负 margin 抵消 .session-view padding） */
+.session-header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  flex-shrink: 0;
+  margin: calc(-1 * var(--sp-5)) calc(-1 * var(--sp-5)) var(--sp-3) !important;
+  padding: var(--sp-3) var(--sp-5);
+  width: auto !important;
+  max-width: none !important;
+  font-size: var(--fs-secondary);
+  color: var(--text-2);
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+/* P3 finalize：会话连接断开标记（P4 每会话容器可见；激活会话另走全局横幅） */
+.session-view.disconnected {
+  opacity: 0.55;
+}
+.session-view.disconnected::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(45deg, transparent 0 8px, rgba(128, 128, 128, 0.08) 8px 16px);
+}
+#workspace > *:not(.session-view):not(.workspace-view),
+.session-view > * {
   width: 100%;
   max-width: 760px;
   margin-left: auto;
   margin-right: auto;
 }
+/* 工具执行全宽左对齐（宿主 2026-08-20 17:50:30）：消息正文保持 760px 阅读宽度，
+   工具行/组/输出不受限，铺满整个聊天窗口左侧。 */
+.session-view > .tool-row,
+.session-view > .tool-group,
+.session-view > .tool-group .tool-group-rows,
+.session-view > .tool-output,
+.session-view > .tool-expand-btn {
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
 
-/* 输入区 */
+/* 输入区（宿主 2026-08-20 17:50:30：状态栏/输入框 100% 全宽，不再 808px 居中） */
 #composer-wrap {
   position: relative; /* / 指令补全菜单锚点（rant 19:44 P1） */
   padding: var(--sp-2) var(--sp-5) var(--sp-4);
-  max-width: 808px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   width: 100%;
 }
 
@@ -218,6 +403,29 @@
 }
 #github-banner .btn { padding: 4px 12px; min-height: 0; font-size: var(--fs-secondary); }
 
+/* ── 升级完成横幅（rant 2026-08-20T18:30:57：版本变化 → 提示 + 一键重启） ── */
+#upgrade-banner {
+  position: absolute;
+  top: var(--sp-3);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px var(--sp-3) 6px var(--sp-4);
+  font-size: var(--fs-secondary);
+  box-shadow: var(--shadow-md);
+  z-index: 20;
+  animation: banner-in var(--dur-med) var(--ease);
+  white-space: nowrap;
+  max-width: 90%;
+}
+#upgrade-banner .btn { padding: 4px 12px; min-height: 0; font-size: var(--fs-secondary); }
+
 /* ── 侧边栏折叠（⌘B / 窄屏） ────────────── */
 body.sidebar-collapsed #sidebar {
   display: none;
@@ -231,7 +439,8 @@ body.sidebar-collapsed #app {
   #sidebar {
     display: none;
   }
-  #chat-view {
+  /* #workspace 现为绝对定位包装（padding 移入 .session-view，避免滚动条内缩） */
+  .session-view {
     padding: var(--sp-4) var(--sp-4) var(--sp-3);
   }
   #composer-wrap {
@@ -251,13 +460,33 @@ body.sidebar-collapsed #app {
   transition: width 0.2s cubic-bezier(.2,.8,.3,1), min-width 0.2s cubic-bezier(.2,.8,.3,1);
 }
 #result-panel.collapsed {
-  width: 0;
-  min-width: 0;
-  border-left: none;
+  /* 方案 A（rant 2026-08-10T14:11:18）：折叠成窄条而非 0，header（含 toggle 按钮）保持可见可点 */
+  width: 40px;
+  min-width: 40px;
+  border-left: 1px solid var(--border);
 }
-#result-panel.collapsed .result-header,
+/* P2 框架：拖拽调整宽度期间抑制 width transition（R1-①：transition 与 mousemove 冲突） */
+#result-panel.dragging {
+  transition: none;
+}
 #result-panel.collapsed .result-list {
-  display: none;
+  display: none; /* 只藏内容区 */
+}
+#result-panel.collapsed .result-pane {
+  display: none; /* 折叠时所有 pane 隐藏（含激活中的文件 pane） */
+}
+#result-panel.collapsed .result-header {
+  display: flex;
+  justify-content: center;
+  padding: var(--sp-3) 0;
+}
+#result-panel.collapsed .result-title,
+#result-panel.collapsed .result-tabs,
+#result-panel.collapsed .result-tabbar {
+  display: none; /* 窄条只留 toggle 按钮 */
+}
+#result-panel.collapsed .result-toggle {
+  transform: rotate(180deg); /* » → « 指示可展开 */
 }
 
 .result-header {
@@ -287,12 +516,317 @@ body.sidebar-collapsed #app {
   background: var(--bg-soft);
 }
 
+/* ── P2 框架：Tab 栏（文件 / 产物 + 打开文件 Tab） ── */
+.result-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.result-tabs::-webkit-scrollbar { display: none; }
+.result-tab {
+  background: none;
+  border: none;
+  padding: var(--sp-1) var(--sp-3);
+  font-size: var(--fs-secondary);
+  color: var(--text-3);
+  cursor: pointer;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.result-tab:hover {
+  color: var(--text-1);
+  background: var(--bg-soft);
+}
+.result-tab.active {
+  color: var(--text-1);
+  background: var(--bg-soft);
+  font-weight: 600;
+}
+/* 打开文件 Tab 条（P3 查看器接入；rant 17:28 并入 .result-tabs 同排，每文件一个可关闭 Tab） */
+.result-tabbar {
+  display: none;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--sp-1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.result-tabbar.has-tabs { display: inline-flex; }
+.result-tabbar::-webkit-scrollbar { display: none; }
+.result-filetab {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 2px var(--sp-2);
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 160px;
+  overflow: hidden;
+  height: 22px; /* 与静态 tab 同高（同排并列） */
+}
+.result-filetab.active {
+  color: var(--text-1);
+  border-color: var(--accent);
+}
+.filetab-close {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+.filetab-close:hover {
+  color: var(--text-1);
+  background: var(--bg-hover);
+}
+
+/* ── P2 框架：内容 pane 切换（激活 pane 显示） ── */
+.result-pane { display: none; }
+.result-pane.active { display: flex; flex-direction: column; }
+
+/* ── 宽度拖拽手柄 ── */
+#result-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  right: 277px; /* JS 随宽度更新（right = panelWidth - 3） */
+  cursor: col-resize;
+  z-index: 40;
+}
+#result-resizer:hover {
+  background: var(--accent);
+  opacity: 0.35;
+}
+#result-resizer.dragging {
+  background: var(--accent);
+  opacity: 0.5;
+}
+
+/* ── P3.1：文件浏览器（懒加载目录树，VS Code 风格 rant 2026-08-12T17:28:19） ── */
+.result-files {
+  /* flex:1 + min-height:0（rant 2026-08-13T12:46:12）：flex 子项默认 flex:0 1 auto 高度随内容
+     增长永不压缩进容器 → overflow-y:auto 永不触发（有滚动条槽但滚不动）；与 .result-list 对齐 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 滚动条 hover 显示（VS Code 行为：平时隐藏，移入文件树区域显示） */
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+}
+.result-files::-webkit-scrollbar { width: 8px; }
+.result-files::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+.result-files:hover::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); }
+.result-files::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+
+.ft-row {
+  display: block;           /* 块级排布：.ft-head 行 + .ft-kids 子树纵向排列，行高自适应
+                               （修复布局 bug：定高 flex-wrap 使下一兄弟行与展开目录首个子项
+                                重叠，headless Chrome 像素实证——兄弟行遮挡子项） */
+  flex-shrink: 0;           /* rant 20:58:57：.ft-row 是 .result-files（flex column）的 flex
+                               item，默认 shrink:1 + overflow:hidden → min-height:auto 解析为 0，
+                               flex 把整棵树压缩到容器高度，scrollHeight==clientHeight 无法滚动 */
+  cursor: pointer;
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ft-head {
+  display: flex;
+  align-items: center;
+  height: 24px;             /* VS Code 紧凑行高（默认 22px，取 24px 适配 14px 图标） */
+  border-radius: 4px;
+}
+.ft-row:hover > .ft-head {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+/* 选中态：背景 + 左侧 2px accent 竖条（VS Code active 行） */
+.ft-row.active > .ft-head {
+  background: var(--bg-soft);
+  color: var(--text-1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.ft-dir {
+  color: var(--text-1);
+  font-weight: 500;
+}
+.ft-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-right: 4px;
+  color: currentColor;      /* mono：图标颜色跟随文字色 */
+  fill: currentColor;
+}
+.ft-icon path:not([fill]) { fill: currentColor; }
+/* 展开/收起 chevron（VS Code 风格 ▸/▾，rant 2026-08-13T20:58:57） */
+.ft-chevron {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin-right: 2px;
+  color: currentColor;
+  fill: currentColor;
+}
+.ft-chevron path:not([fill]) { fill: currentColor; }
+.ft-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;  /* 超长名省略号 */
+  white-space: nowrap;
+}
+.ft-kids {
+  position: relative;       /* 正常流布局：位于 .ft-head 之下（不再作为 flex 行溢出） */
+}
+.ft-kids.hidden {
+  display: none;
+}
+/* 缩进引导线：嵌套结构天然对齐父行图标列（left:2px ≈ 父行图标起点） */
+.ft-kids::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--border);
+}
+.ft-hint {
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-3);
+  font-size: var(--fs-small);
+}
+
+/* ── P3.3：文件查看器（基础版） ── */
+.result-viewer {
+  overflow: hidden;
+}
+.viewer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.viewer-path {
+  font-size: var(--fs-small);
+  color: var(--text-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.viewer-open {
+  flex: none;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  padding: 2px var(--sp-2);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.viewer-open:hover {
+  color: var(--text-1);
+  background: var(--bg-soft);
+}
+.viewer-pre {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: var(--sp-3);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+  white-space: pre;
+  color: var(--text-1);
+}
+/* P3.3：查看器图片直显 + md 渲染 */
+.viewer-img {
+  flex: 1;
+  object-fit: contain;
+  max-width: 100%;
+  padding: var(--sp-3);
+  box-sizing: border-box;
+}
+.viewer-md {
+  flex: 1;
+  overflow: auto;
+  padding: var(--sp-3);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+  color: var(--text-1);
+}
+.viewer-md h1, .viewer-md h2, .viewer-md h3 { margin: var(--sp-2) 0; }
+.viewer-md code {
+  background: var(--bg-soft);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+.viewer-md pre code {
+  display: block;
+  padding: var(--sp-3);
+  overflow-x: auto;
+}
+/* P3.4：HTML 预览占位（混合模型——WebContentsView 叠加其上；折叠/隐藏时占位可见） */
+.viewer-html {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-3);
+  box-sizing: border-box;
+}
+.viewer-html .result-empty {
+  max-width: 100%;
+}
+
+/* ── P3.2：产物文件行（write/edit 成功文件，点击打开查看器 Tab） ── */
+.artifact-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  cursor: pointer;
+  overflow: hidden;
+}
+.artifact-row:hover {
+  border-color: var(--accent);
+  background: var(--bg-soft);
+}
+.artifact-name {
+  font-size: var(--fs-secondary);
+  font-weight: 600;
+  color: var(--text-1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
+  max-width: 55%;
+}
+.artifact-rel {
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .result-list {
   flex: 1;
   overflow-y: auto;
   padding: var(--sp-3);
-  display: flex;
-  flex-direction: column;
   gap: var(--sp-2);
 }
 .result-empty {

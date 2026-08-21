@@ -145,15 +145,6 @@ test("Stage2：动态文案键（app/chat/dlg/panel）双语齐全", () => {
   assert.strictEqual(evalIn(zh, 'I18N.t("dlg.deleteModelBody", { name: "gpt-4o" })'), "「gpt-4o」将从可用模型里移除。");
 });
 
-test("Stage2：时间分组标签本地化（util.group*）", () => {
-  const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
-  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupToday")'), "Today");
-  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupYesterday")'), "Yesterday");
-  assert.strictEqual(evalIn(ctx, 'I18N.t("util.groupEarlier")'), "Earlier");
-  const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
-  assert.strictEqual(evalIn(zh, 'I18N.t("util.groupToday")'), "今天");
-});
-
 test("Stage2：成长卡/关于区静态文案键（#501 吸收）", () => {
   const { ctx } = makeSandbox({ navigator: { language: "en-US" } });
   assert.strictEqual(evalIn(ctx, 'I18N.t("copy.growthCountPrefix")'), "Self-evolved");
@@ -225,4 +216,62 @@ test("Stage3b：最近改进列表文案双语（#502 evolution_summary 侧）",
   assert.strictEqual(evalIn(ctx, 'I18N.t("app.noImprovements")'), "No improvements recorded yet — type /rant to drive the first evolution");
   const { ctx: zh } = makeSandbox({ navigator: { language: "zh-CN" } });
   assert.strictEqual(evalIn(zh, 'I18N.t("app.recentImprovements")'), "最近改进");
+});
+
+// ── Orphan-key guard（cycle 20260813-223026：#771 ❌ 教训固化）────────
+// #755 清理了 8 组孤儿键、#771 评审 ❌ 检出 7 个孤儿 i18n keys + 12 个未用 CSS 类——
+// 两个方向都缺自动守卫：①词典里定义了但全库无引用的孤儿键（删除功能后残留）
+// ②标记/代码里引用了但词典未定义的键（拼写错误会静默回退显示原始 key）。
+// 本测试扫描 index.html data-i18n* 属性 + renderer JS 全部取词点，双向校验。
+test("i18n 守卫：词典键无孤儿（定义了必须被引用）且引用键无缺失（引用必须已定义）", () => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "renderer", "index.html"), "utf8");
+  const { ctx } = makeSandbox({ navigator: { language: "zh-CN" } });
+  const dictKeys = new Set(evalIn(ctx, "Object.keys(I18N.DICTS.zh)"));
+  assert.ok(dictKeys.size > 60, `词典应有键（实际 ${dictKeys.size}）`);
+
+  // 1) 收集引用：index.html data-i18n / data-i18n-placeholder / data-i18n-title
+  const used = new Set();
+  const attrRe = /data-i18n(?:-placeholder|-title)?="([^"]+)"/g;
+  let m;
+  while ((m = attrRe.exec(html)) !== null) used.add(m[1]);
+
+  // 2) 收集引用：renderer JS 全部取词调用（跳过 i18n.js 词典本身）。
+  //    取 t-call 整体跨度（含三元前缀 _t(cond ? "A" : "B")），再取其中所有字面键；
+  //    模板串 t(`tool.${base}.doing`) → 静态段拼 glob（tool.*.doing）。
+  const globs = [];
+  const callRe = /(?:_t|I18N\.t|EMRG_I18N\.t|\bt)\([^)]*\)/g;
+  for (const f of fs.readdirSync(path.join(__dirname, "..", "renderer", "js"))) {
+    if (!f.endsWith(".js") || f === "i18n.js") continue;
+    const src = fs.readFileSync(path.join(__dirname, "..", "renderer", "js", f), "utf8");
+    let cm;
+    while ((cm = callRe.exec(src)) !== null) {
+      const body = cm[0];
+      if (body.includes("`")) {
+        const tplRe = /`([^`]*)`/;
+        const tpl = (tplRe.exec(body) || [])[1] || "";
+        if (tpl.includes("${")) globs.push(tpl.replace(/\$\{[^}]+\}/g, "*"));
+        else if (tpl) used.add(tpl);
+        continue;
+      }
+      const keyRe = /"([a-z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)+)"/g;
+      let km;
+      while ((km = keyRe.exec(body)) !== null) used.add(km[1]);
+    }
+    // 对象属性值引用（命令注册表 hint: "cmd.clear.hint" 形态）
+    const propRe = /\b(?:hint|title|key|label|placeholder|text|msg):\s*"([a-z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)+)"/g;
+    let pm;
+    while ((pm = propRe.exec(src)) !== null) used.add(pm[1]);
+  }
+  // glob → 正则：转义特殊字符，* → .*
+  const globRes = globs.map((g) => new RegExp("^" + g.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$"));
+
+  // 3) 方向 A：词典键必须被引用（孤儿检测）
+  const orphans = [...dictKeys].filter(
+    (k) => !used.has(k) && !globRes.some((re) => re.test(k))
+  );
+  assert.strictEqual(orphans.length, 0, `孤儿 i18n 键（词典定义但无引用，应删除）:\n  ${orphans.join("\n  ")}`);
+
+  // 4) 方向 B：引用键必须已在词典定义（拼写错误检测）
+  const missing = [...used].filter((k) => !dictKeys.has(k));
+  assert.strictEqual(missing.length, 0, `引用了但词典未定义的 i18n 键（拼写错误会静默回退）:\n  ${missing.join("\n  ")}`);
 });

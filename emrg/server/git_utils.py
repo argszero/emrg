@@ -3,16 +3,31 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
 
+from emrg._win import win32_no_window_kwargs
 from emrg.config import config_dir
 
 INSTALL_BIN = Path.home() / ".emrg" / "install" / "bin"
 INSTALL_INFO = config_dir() / "install-info.json"
+
+logger = logging.getLogger(__name__)
+
+# One-shot guard: when no git executable can be resolved at all, log the
+# root cause once per process (2026-08-12 incident follow-up — the daemon
+# restarted without PATH git and cycles were silently skipped for 18 min).
+_GIT_MISSING_WARNED = False
+
+# In-process memo of the last (git, gh) paths written to install-info.json —
+# resolve_git_gh() is called on every git_cmd(), and each call used to do an
+# atomic tmp+os.replace disk write even when nothing changed. Tool paths are
+# stable within a process lifetime, so write once and skip the rest.
+_LAST_CACHED_PATHS: tuple[str, str] | None = None
 
 
 # ── Non-interactive subprocess environment (rant 2026-08-07T10:17:27) ──
@@ -59,16 +74,82 @@ def parse_gh_auth_user(output: str) -> str | None:
     return match.group(1) if match else None
 
 
+# ── HTTPS→SSH fallback for blocked github.com:443 (2026-08-08) ───
+#
+# Some networks block github.com:443 (HTTPS git transport) while SSH
+# (port 22) and the api.github.com REST endpoint stay reachable. Observed
+# on the packaged host: `git pull` hangs ~75 s then fails with "Failed to
+# connect to github.com port 443", while `ssh -T git@github.com` succeeds.
+# A fresh `git clone` or any pull/push against an https origin then fails
+# and the evolution workspace never syncs. These helpers convert a
+# github.com https URL to its SSH form and recognise connection-type git
+# errors, so the scheduler can retry via SSH. Deliberately narrow: auth
+# failures / 404s / repo-specific errors never trigger a switch.
+
+_HTTPS_GITHUB_RE = re.compile(r"^https://github\.com/([^/]+)/([^/]+?)(?:\.git)?$")
+
+_CONNECTION_ERROR_MARKERS = (
+    "failed to connect",
+    "couldn't connect",
+    "could not connect",
+    "connection refused",
+    "connection timed out",
+    "operation timed out",
+    "could not resolve host",
+    "network is unreachable",
+    "unable to access",
+    "tls handshake timeout",
+    # "the remote end hung up unexpectedly" / "connection ... hung up" —
+    # git's classic message when a proxy/network drops the connection
+    # mid-transfer (observed on the packaged host: fetch fails with
+    # "fatal: the remote end hung up unexpectedly" while https works via
+    # proxy on retry). A network-level drop is exactly the case where an
+    # SSH retry may succeed.
+    "hung up",
+)
+
+
+def https_to_ssh_url(url: str) -> str | None:
+    """Convert a github.com https URL to its SSH form, or None.
+
+    ``https://github.com/owner/repo.git`` → ``git@github.com:owner/repo.git``
+    Returns None for non-github / non-https URLs (SSH URLs, enterprise
+    hosts, local paths) — callers must not switch those.
+    """
+    match = _HTTPS_GITHUB_RE.match((url or "").strip())
+    if not match:
+        return None
+    return f"git@github.com:{match.group(1)}/{match.group(2)}.git"
+
+
+def is_git_connection_error(stderr: str) -> bool:
+    """True when git stderr indicates a network/connection failure.
+
+    Does NOT match auth errors ("Authentication failed", "Permission
+    denied (publickey)"), missing repos ("Repository not found") or other
+    non-connection failures — switching the remote would not fix those.
+    """
+    text = (stderr or "").lower()
+    return any(marker in text for marker in _CONNECTION_ERROR_MARKERS)
+
+
+def git_origin_url(cwd: str) -> str:
+    """Return the raw origin URL for a repo, '' when absent/unreadable."""
+    result = git_cmd("remote", "get-url", "origin", cwd=cwd, timeout=5)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return ""
+
+
 def _detect_git_remote(cwd: str) -> str:
     """Detect the origin remote (owner/repo) from a git repository.
 
     Returns '' if detection fails.
     """
     try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            cwd=cwd, capture_output=True, text=True, encoding="utf-8", timeout=5,
-        )
+        # 用解析后的 git（install-info → bundled → PATH 回退，见 git_cmd），
+        # 防 daemon 启动环境无 PATH git 时误判 "not a git repo"（2026-08-12 事故）。
+        result = git_cmd("remote", "get-url", "origin", cwd=cwd, timeout=5)
         if result.returncode == 0:
             url = result.stdout.strip()
             # Extract owner/repo from various URL formats:
@@ -105,15 +186,25 @@ def _cache_tool_paths(git: str, gh: str) -> None:
     Also persists the EMRG repo URL (``repo``) so the evolution workspace
     self-heal (rant 2026-08-06T20:42:05) can clone on demand without
     hardcoding — packaged installs have no git remote to detect.
+
+    The write is atomic (temp file + os.replace) so concurrent readers
+    never observe a partially-written file; the read is guarded like
+    ``_cached_tool_path`` so a corrupt/partial cache (e.g. a crashed or
+    concurrent writer) degrades to an empty dict instead of raising
+    JSONDecodeError (observed as a flaky test_daemon failure when the
+    live daemon rewrote install-info.json mid-suite).
     """
     try:
         data = {}
         if INSTALL_INFO.exists():
-            data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
+            try:
+                data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, AttributeError):
+                data = {}
         data.update({"git_path": git, "gh_path": gh, "repo": "https://github.com/argszero/emrg.git"})
-        INSTALL_INFO.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        tmp = INSTALL_INFO.with_name(INSTALL_INFO.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, INSTALL_INFO)
     except OSError:
         pass
 
@@ -143,6 +234,7 @@ def resolve_git_gh() -> tuple[str, str]:
     Returns (git_path, gh_path). Missing executables yield '' (callers decide
     how to degrade).
     """
+    global _LAST_CACHED_PATHS
     git = _cached_tool_path("git")
     gh = _cached_tool_path("gh")
     if git and Path(git).exists():
@@ -154,9 +246,41 @@ def resolve_git_gh() -> tuple[str, str]:
     else:
         gh = _tool_in_install("gh") or (shutil.which("gh") or "")
 
-    if git or gh:
-        _cache_tool_paths(git, gh)
+    if git:
+        # Write the cache only when the resolved pair changed since the last
+        # write (or nothing cached yet) — avoids an atomic install-info.json
+        # write on every git_cmd() call. Paths are stable per process.
+        if _LAST_CACHED_PATHS != (git, gh):
+            _cache_tool_paths(git, gh)
+            _LAST_CACHED_PATHS = (git, gh)
+    else:
+        # git is the failure mode that silently disables evolution (2026-08-12
+        # incident) — warn regardless of whether gh resolved. Also skip the
+        # cache write so a previously valid cached git_path is not clobbered
+        # with '' (review #714 note).
+        _warn_git_missing_once()
     return git, gh
+
+
+def _warn_git_missing_once() -> None:
+    """Log one actionable WARNING when no git executable can be resolved.
+
+    2026-08-12 incident follow-up: a daemon restart in an environment with
+    neither bundled nor PATH git made every evolution git call raise
+    FileNotFoundError; _is_usable_git_repo() swallowed the OSError and the
+    cycle log only said "workspace not ready — skipping cycle" for 18
+    minutes. Log the root cause once per process so the daemon log is
+    diagnosable.
+    """
+    global _GIT_MISSING_WARNED
+    if _GIT_MISSING_WARNED:
+        return
+    _GIT_MISSING_WARNED = True
+    logger.warning(
+        "git executable not found (install-info / ~/.emrg/install / PATH all "
+        "empty) — evolution cycles will be skipped as 'not a git repo'; "
+        "install git or add it to PATH, then restart the daemon"
+    )
 
 
 def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess.CompletedProcess:
@@ -171,4 +295,5 @@ def git_cmd(*args: str, cwd: str | None = None, timeout: int = 10) -> subprocess
     return subprocess.run(
         [exe, *args], cwd=cwd, capture_output=True, text=True,
         encoding="utf-8", timeout=timeout, env=no_prompt_env(),
+        **win32_no_window_kwargs(),
     )

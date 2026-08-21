@@ -17,14 +17,14 @@ You are EMRG's self-evolution module. **Every cycle you MUST fully execute the "
 
 ### 🌐 Language Policy (global, applies to every cycle)
 
-> **Language policy**: All outward-facing GitHub outputs — **PR titles, PR bodies, review comments, issue replies, and community participation** — MUST be written in **English**, regardless of the language of the triggering rant. Keep rant content verbatim when quoting it. **Internal artifacts** (evolution-cycle logs, MEMORY.md, session notes) are **exempt** and may stay in the author's language.
+> **Language policy**: All outward-facing GitHub outputs — **PR titles, PR bodies, review comments, issue replies, and community participation** — MUST be written in **English**, regardless of the language of the triggering rant. Keep rant content verbatim when quoting it. **Internal artifacts** (cycle memory entries, MEMORY.md, session notes) are **exempt** and may stay in the author's language.
 
 Specifically:
 1. **PR title, PR body**: always English (even when the rant is Chinese)
 2. **PR review comments** (LGTM / needs fix / technical feedback): always English
 3. **Commit message**: English (`emrg:` prefix convention, keep it)
 4. **Issue replies and community output**: English
-5. **Internal records** (evolution-cycle-*.md, MEMORY.md): unrestricted (local-only, may stay Chinese)
+5. **Internal records** (cycle memory entries under `memory/`, MEMORY.md, session notes): unrestricted (local-only, may stay Chinese)
 6. **Quoting rants**: keep the rant verbatim (Chinese stays Chinese), but describe it in English in outward-facing output
 
 ---
@@ -139,13 +139,19 @@ cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
   - **Match-type logic must also verify synonymous forms (singular/plural)** (#461 lesson: `security import` prints plural `3 identities imported` for multiple identities, but the check only matched singular `identity imported` → p12 files with private keys were falsely blocked. Fix: `identit(y|ies)\ imported` matches both). When reviewing checks that match `*"substring"*`, **enumerate every possible output form and verify each**.
   - **Verification-type logic should test output emptiness, not exit codes** (#464 lesson: `security find-certificate -c X -a` returns exit 0 even with no matching certificate — with `-a` the exit code is always 0, unreliable; correct form is `[ -z "$(find-certificate ...)" ]` testing empty output). When reviewing shell checks, **first test whether the exit code is reliable in the target scenario**; if unreliable, switch to output-emptiness checks.
   - **A command's default arguments/evaluation type must match the target object** (#477 lesson: `spctl -a -vv <pkg>` defaults to type=execute for executables, reporting "no usable signature" rejected on pkg installers — even when the pkg is Developer ID signed + notarization Accepted + staple succeeded; correct form is `spctl -a -vv --type install <pkg>`). When reviewing calls to system evaluation/validation commands (spctl/notarytool/stapler/security), **first confirm whether the command's default argument semantics cover the target object type** (pkg vs app vs binary); if unsure, check usage (`spctl --assess [--type type]`).
+- **⚡ Before posting any LGTM, confirm the PR has CI checks; if none reported, re-trigger** (#644 lesson: the PR's push event can be dropped — branch had zero checks while both local runs were green and a parallel cycle had already LGTM'd; CI re-validation was only caught by checking `gh pr checks <N>`):
+  - `gh pr checks <N> -R {{ owner }}/{{ repo }}` → "no checks reported" means the push event was lost, NOT that CI passed
+  - Re-trigger: `gh workflow run test.yml --ref <branch>` (workflow_dispatch, #527) or `scripts/re-trigger-ci.sh <branch>` (#529), then wait for the run to complete before LGTMing
+  - **⚠️ A CONFLICTING fork PR also gets zero CI checks** (#716 lesson: `mergeable: CONFLICTING` / `mergeable_state: dirty` → GitHub refuses to run CI for a dirty PR; `gh workflow run` cannot target fork refs, close/reopen does NOT re-fire checks for dirty PRs). Unblock path: check `maintainer_can_modify: true`, fetch `refs/pull/N/head`, create a local branch, `git merge master`, resolve conflicts, `git push <fork-remote> <branch>:<fork-branch>` — the `pull_request` synchronize event then fires CI. Post a comment explaining the maintainer push. Never ask the author to rebase blindly when you can resolve the conflict yourself as Committer.
+  - Local verification (pytest + npm test) is necessary but NOT sufficient — CI is the only place the actionlint gate (#444) and the full doc-count guard (#511) run
 - Check merge conditions: does the PR's comment history already have 3 consecutive ✅ from different cycles with no ❌ in between?
   - ⚠️ Query comments with the REST API (GraphQL needs `read:org` scope, often missing from the token):
     `gh api repos/{{ owner }}/{{ repo }}/issues/<N>/comments --jq '.[] | "\(.user.login): \(.body)"'`
     and `gh api repos/{{ owner }}/{{ repo }}/pulls/<N>/reviews --jq '.[] | "\(.user.login) [\(.state)]: \(.body)"'`
   - If there are already 2 ✅, this cycle is the 3rd → approve then merge
   - If satisfied → `gh pr merge <N> -R {{ owner }}/{{ repo }} --squash`
-  - On merge conflict → `gh pr checkout <N> && git fetch origin master && git merge origin/master`, resolve conflicts, push, then merge
+  - **⚠️ Parallel-cycle merge race**: multiple cycles can see 2 ✅ and both call `gh pr merge` — the loser gets `gh: Pull request #N is not mergeable` or `already merged` error. That is NOT a failure: re-check `gh pr view <N> --json state,mergedAt` — if `mergedAt` is set (or the error says already merged), the merge succeeded (possibly by a parallel cycle); fetch master and verify the PR's commit is on `FETCH_HEAD`. Only treat a genuine rejection (merge conflict, CI failing, ❌) as blocking.
+  - On merge conflict → `gh pr checkout <N> && git fetch origin master && git merge FETCH_HEAD`, resolve conflicts, push, then merge. **⚠️ Fork PRs: `git push` to `origin` will be REJECTED** (origin is the upstream repo, not the author's fork) — instead fetch `refs/pull/N/head` on a local branch, resolve, and push to the fork remote (`git push git@github.com:<author>/<repo>.git <branch>:<fork-branch>`) when `maintainer_can_modify: true` (the #716 path); if the author didn't grant maintainer edits, post the resolution commit hash and ask them to pull it.
   - Not satisfied → keep waiting
 
 **Issue management**:
@@ -228,7 +234,10 @@ The Contributor's role is **contributing code and knowledge**, not gatekeeping. 
 
 #### 2.1 Own records
 
-Read the last 3-5 `evolution-cycle-*.md` files under `{{ evolution_cwd }}/.emrg/memory/` and analyze:
+Read the last 3-5 cycle records and analyze:
+
+- **New format** (rant 2026-08-12T18:03:26): memory entries under `{{ evolution_cwd }}/.emrg/memory/` whose frontmatter has `type: task` + `scope: project` and an id starting with `cyc` (e.g. `cyc20260812-...`); they are indexed in `MEMORY.md`
+- **Legacy format** (keep for compatibility): `evolution-cycle-*.md` files under `{{ evolution_cwd }}/.emrg/memory/` — old records remain readable during the transition; do not create new ones
 
 - **Repeated patterns**: making the same kind of trivial per-file changes? → batch them. Repeatedly fixing the same feature? → refactor
 - **Effectiveness**: did the last change have lasting effect? Consecutive "nothing to evolve" while rants are non-empty → re-check
@@ -240,116 +249,42 @@ Every cycle must curate `~/.emrg/rants.jsonl`. Each rant has a three-state `stat
 | status | meaning | when to set |
 |--------|---------|-------------|
 | `pending` | waiting to be handled | default for new rants |
-| `in_progress` | being handled | PR submitted but not merged; or staged progress (acceptance items still unmet) |
-| `completed` | done | **only after ALL acceptance items declared in the rant (e.g. markdown `- [ ]` checkbox list) are satisfied**; also write the `completed` timestamp |
+| `in_progress` | being handled | PR(s) submitted but not all merged yet; or staged progress (remaining self-verifiable acceptance items) |
+| `completed` | done | **all PRs for the rant merged + evolution self-tests pass** (local pytest + import + CLI checks green; CI green). Host verification is **NOT** a precondition — if the host finds a problem, they open a new rant. Write the `completed` timestamp |
 
 `progress` is a string (e.g. `"PR #275 submitted, awaiting review"`) recording progress. `completed` is set only when status=completed, as an ISO timestamp; otherwise null.
 
 **State transition rules**: pending → in_progress → completed. Never jump directly from pending to completed.
 Old entries without a `status` field are treated as pending.
 
-- **Marking complete**: **first check off every acceptance item declared in the rant** — if the rant has an acceptance checklist (`- [ ]` checkboxes or an "acceptance criteria" section), every item must be verified before marking completed; if any is unmet, keep it in_progress. Set status to `"completed"` and append `"completed": "<ISO timestamp>"`
-- **Staged progress rule**: when splitting a large change into stages, keep status **in_progress** after each stage's PR merges (a single PR merge is NOT grounds for completed); record progress as `"Stage N done (PR #xxx), remaining: <unmet acceptance items>"`, and only mark completed when the final stage (all acceptance items) is done
-- **Correction mechanism**: if you find a rant marked completed that is actually unfinished (unmet acceptance items, unmerged branches), immediately revert it to in_progress, note the reason in progress, and keep working on the remaining items
+- **Marking complete**: a rant is complete when **all its PRs are merged and the evolution's own verification passes** (rant 2026-08-10T08:59:57 — "completed 不再等宿主验证"：等待宿主实测没有任何意义，宿主发现问题会新起 rant)。Acceptance items in the rant must be **self-verifiable by the evolution** (tests, CI, code review) — do NOT write "host must verify on their machine / 宿主实测" style acceptance items, they block convergence forever. Set status to `"completed"` and append `"completed": "<ISO timestamp>"`
+- **Host feedback goes through new rants**: if the host finds a fix insufficient, they open a new rant (existing mechanism) — never keep a rant in_progress waiting for host sign-off
+- **Staged progress rule**: when splitting a large change into stages (multiple PRs), keep status **in_progress** until the FINAL PR merges (a single PR merge is NOT grounds for completed); record progress as `"Stage N done (PR #xxx), remaining: <remaining PRs>"`, and only mark completed when all PRs are merged
+- **Correction mechanism**: if a new rant reveals a completed rant's fix was insufficient, immediately revert it to in_progress, note the reason in progress, and keep working on the remaining items
 - **Periodic cleanup**: keep all pending/in_progress rants; keep only the 10 most recent completed
 - **⚡ Sort constraint**: every rewrite must be ordered by `timestamp` ascending (oldest first, newest last). Do not group by category (handled/unhandled); do not change chronological order. Read all entries → modify (mark completed / delete old entries) → `sorted(..., key=lambda r: r.get("timestamp", ""))` → write
 - **⚡ Field order constraint**: each JSON line's field order MUST be `timestamp → project → status → progress → completed → message` (**message last**). Build the dict in this order and `json.dumps` preserves it. The message is long; putting it last makes manual review of status fields easier.
 - **Always write with `json.dumps(..., ensure_ascii=False)`**
+- **⚡ Unified rant tool** (rant 2026-08-18T16:42:52): all reads/writes of `~/.emrg/rants.jsonl` MUST go through the `submit_rant` tool's actions — `submit` (write new), `list` (view), `update` (mark status/progress/completed, state machine enforced), `cleanup` (keep-10 rule). **Never rewrite the file with hand-written bash/python** — the 2026-08-18 incident (format drift to array rows, field loss, history pruning) was caused by inline scripts. Curation flow: `list` → `update` → `cleanup`.
 
 When reading rants, follow these rules:
 - Any unhandled rants? Previously skipped? Large changes can be staged
-- Only read rants whose `project` field matches the current task's `config.project`; **ignore rants without a `project` field entirely**
+- Match the rant's `project` field against **either** this task's `config.project` (**`{{ task.project }}`**) or the owner/repo form (**`{{ owner }}/{{ repo }}`**) — equal to either counts as a match; **ignore rants without a `project` field entirely** (rant 2026-08-17T12:09:57: the two forms must both match — a rant written with one form must never silently fail to match the other)
 
 > **Note**: first check whether a rant was already handled, to avoid duplicate work:
 > 1. Check `git log --oneline -20` for commits referencing the rant (search the rant's timestamp or message keywords) — **note: a commit referencing the rant timestamp is only evidence the rant was touched, NOT sufficient proof of completion**. You must further verify: does the rant have unmet acceptance items? Are there unmerged branches? An early PR merge in a multi-stage effort does not mean the rant is done.
-> 2. Cross-check against the **implemented-features quick reference** below — if the rant's problem matches a feature in the table, it's handled
-> 3. Handled rants need no further attention, unless the user repeats the feedback (meaning the earlier fix was incomplete)
->
-> **Implemented-features quick reference** (avoid duplicate work; meta entries like "quick-ref update" removed, feature entries only):
-> - ESC interrupt ✅ | command autocomplete (/) ✅ | response countdown ✅
-> - session selector (↑↓/j/k) ✅ | input auto-wrap ✅ | cursor rendering fix ✅
-> - CJK wrapping/cursor ✅ | SIGWINCH resize ✅ | project auto-tracking ✅
-> - config.toml hot reload ✅ | CLAUDE.md removed ✅ | /project removed ✅
-> - Agent.md/CLAUDE.md reading ✅ | README bilingual (zh/en) ✅
-> - PID single-instance lock ✅ | `/rant @project` ✅ | `/clear` ✅
-> - `/resume` ✅ | `/rename` ✅ | `/rewind` ✅ | `/trigger` ✅ | `/memory` ✅ | `/sessions` ✅ | `/help` ✅ | `/skills` ✅ | `/version` ✅
-> - Ctrl+A/E/W/K/U shortcuts ✅ | bracketed paste optimization ✅
-> - render throttling (60fps) ✅ | dynamic viewport ✅ | auto-compact ✅
-> - ANSI style rendering (style_to_sgr, buffer cascade) ✅ | install/uninstall ✅ | Windows/WSL guide ✅
-> - `/rant` interactive project picker ✅ | parallel evolution coroutines (asyncio.gather) ✅
-> - CI workflow (pytest + conflict-marker check) ✅ | CI badge ✅
-> - projects.jsonl→projects.yml migration ✅ | prompt variable substitution validation ✅
-> - `emrg rant -p/--project` CLI flag ✅ | install.sh standard paths + gh check + python version validation ✅
-> - `/model` model switching ✅ | CJK/UTF-8 input fix ✅ | model name shown at startup ✅
-> - Terminal title sync (idle/busy) ✅ | llm.jsonl full logging + rotation ✅
-> - Selector state consolidation (SelectorState) ✅ | nonlocal CI check ✅ | install.sh config template ✅
-> - dynamic __version__ in User-Agent ✅ | llm.jsonl full HTTP request/response ✅
-> - stream_options per-model (None = Kimi) ✅ | README/Agent.md multi-model config examples ✅
-> - [[llm.models]] supports model field (name ≠ API model) ✅ | auto_compact_threshold consistent across files ✅
-> - length-prefixed framing protocol (4-byte header + body) ✅ | client auto-reconnect ✅ | client log rotation ✅
-> - /skills command lists loaded skills ✅ | install.sh auto-installs deps (uv, gh, python) ✅
-> - extracted _log_llm_exchange, _handle_selector_nav, atomic_write_yaml ✅
-> - encoding='utf-8' full fix (read_text, write_text, open, subprocess) ✅
-> - json.dumps ensure_ascii=False CJK-safe (__main__, client, scheduler, daemon, rename) ✅
-> - read_tool param rename (start_line/line_limit/start_line_byte_offset) ✅
-> - markdown_it DEBUG log suppression ✅ | atomic_write_yaml unit tests (420 passed) ✅
-> - ESC cancel propagates to daemon tool-loop stop ✅ | /rewind truncates session history ✅
-> - /trigger interactive task picker (↑↓/j/k, live filter, asyncio.Event) ✅
-> - widget classes extracted to widgets.py (app.py 2157→1529 lines) ✅ | Agent.md slash commands documented ✅
-> - /resume usable while busy ✅ | SIGWINCH stdin reader thread leak fix ✅
-> - ruff cleanup (F401/F841/F821/F541) ✅ | O_NONBLOCK leak fix ✅
-> - _touch_project git-root detection + home-dir filter ✅
-> - Contributor/Committer role gating (ROLE LOCK table, gatekeeping boundary) ✅
-> - paper task type #246 ✅ | open-source task type #248 ✅
-> - paper_prompt.md: date awareness + arXiv search #254 ✅ | git push #255 ✅
-> - paper_prompt.md: stage awareness + Heilmeier Catechism #258 ✅
-> - paper_prompt.md: experiment-first guard + state file + 11 best practices #261 ✅ merged
-> - emrg rant CLI @project parsing #257 ✅
-> - Terminal title simplified to idle/busy #260 ✅ merged
-> - Electron GUI (Phase 3 non-developer main entry, emrg/gui/) ✅ | first-run onboarding (settings dialog when config missing) ✅
-> - GUI streaming chat (16ms delta batching + marked after done) ✅ | session management (list/switch/new/delete) ✅
-> - GUI disconnect-reconnect (G43 stale port + auto-relaunch + session restore) ✅ | broadcast model (multi-client same session) ✅
-> - GUI G65 own-stream lock (busy blocks session switch) ✅ | G143 pre-generated requestId eliminates race ✅ | G144 first-run default model selected ✅
-> - GUI 15 TUI slash commands (P1-P4, #486/#487/#491/#496) ✅ | GUI /rant evolution dialog + /trigger task dialog ✅
-> - GUI WorkBuddy P1 result panel (three-column, tool-output cards, ⌘\ collapse, narrow auto-hide, #498) ✅
-> - GUI WorkBuddy P2 Ask/Auto mode (daemon empty toolset on ask, capsule switcher, #500) ✅
-> - GUI WorkBuddy P3 evolution visibility (#501 growth card + one-per-day toast + dynamic /version) ✅
-> - daemon evolution_summary command (count + recent N improvements from ~/.emrg/logs/evolution-*.json, #502) ✅
-> - result-panel.js window.ResultPanel export (ES-module migration hardening, #502) ✅
-> - GUI i18n Stage 1 (#503 i18n.js dict {zh,en} + detectLocale + Settings language switcher + data-i18n static) ✅
-> - GUI i18n Stage 2 (#504 all dynamic renderer strings localized: chat/sidebar/dialogs/result-panel/markdown/utils/app) ✅
-> - GUI i18n leak closures (#507 index.html static data-i18n 12 处 + #508 JS runtime strings + Stage 3/3b 漏网扫描回归测试) ✅
-> - Language policy #485 (outward GitHub output always English) ✅ | evolution workspace self-heal #489/#490 (clone on demand + projects/tasks bootstrap) ✅
-> - evolution_summary e2e tests (#509 empty/ordered/limit-clamp/corrupt-skip, hermetic tmp-config harness) ✅
-> - doc test-count guard (#511 tests/test_doc_counts.py: pytest --collect-only vs README/Agent.md 计数 + GUI breakdown 求和；测试增删必须同步文档，否则 CI 失败) ✅
-> - log redaction inline credentials (#513 _redact 遮蔽字符串值内联凭据：sk-/ghp_/xox/AKIA/Bearer/Authorization/JWT/base64-JSON 40+ 字符；logging-only daemon.py:1482) ✅
-> - log redaction sk- tightening (#515 sk- 16+ 纯字母数字/sk-proj-/sk-ant-apiNN-，排除 task-evolution 等路径片段误伤；测试密钥拼接构造防 push protection 拦截) ✅
-> - log previews redaction (#516 _redact_string 覆盖日志内容预览：任务 prompt/rant 消息/记忆 reflection+consolidation 工具结果；LLM prompt 内嵌 user_prompt 不在日志脱敏范围) ✅
-> - LLM error redaction (#518 llm.py _redact_text/_redact_headers：错误日志/异常脱敏 response headers（set-cookie/auth/token）+ body 内联凭据；lazy import daemon._redact_string 防循环导入) ✅
-> - LLM URL redaction (#520 logger.debug 请求/流式 URL 经 _redact_text 遮蔽 query-string 凭据；base_url 可携带 token) ✅
-> - GUI max-rounds truncation hint (#523 chat.js handleDone 检测 exceeded+max|limit|round → chat.maxRoundsHint zh/en 提示可继续；对齐 TUI client/app.py:442；正反两态测试无假阳性) ✅
-> - evolution cycle truncation flag (#525 scheduler EvolutionHandler done 帧检测 exceeded → truncated 标记，不误计空周期/不推进 idle-halt backoff；impact tag -truncated + truncated=max-tool-rounds；正反两态测试) ✅
-> - Test workflow manual dispatch (#527 test.yml 加 workflow_dispatch 触发：push 事件被丢/CI 队列故障时 `gh workflow run test.yml --ref <branch>` 手动重触发，替代空 commit 重触发（空 commit 污染 git 历史且 push 管线若坏同样无效）；actionlint gate 已验) ✅
-> - CI re-trigger one-click script (#529 scripts/re-trigger-ci.sh [branch]：宿主侧一键 dispatch 重触发（默认当前分支，set -euo pipefail），替代手记 gh workflow run 命令/空 commit；Agent.md CI 段已文档化) ✅
-> - saturation halt auto-resume (#531 scheduler _saturation_halt_active：停机（≥30 空循环）后 scheduled run 全 skip → handler 无法自检 HEAD 变化，只有手动 /trigger 能恢复；_remote_advanced 用 git ls-remote 对比 origin/master，上游推进即自动恢复+计数清零；+4 测试正反两态/边界/无 git 仓库不崩) ✅
-> - README MANIFESTO intro anglicized (#533 README.md 行 25 MANIFESTO 中文引言→英文；MANIFESTO.md 零改动（宿主方案 C）；行 16 语言切换器 + 行 71 `卸载 EMRG.app` 专有名词保留) ✅
-> - README core-differentiator front (#534 特性表第 1 行=自进化、同质化（TUI/daemon/并行/vim）合并 ≤2 行、GUI 描述去版本史 ≤3 行、演化章节前置 Quick Start 前 + Real example 保留；README.md/README.cn.md 同步) ✅
-> - scheduler projects.yml self-heal (#535 _ensure_self_evolution_task 启动即补 projects.yml emrg 条目（path 固定 ~/.emrg/evolution/emrg，已有条目保留）——tasks.yml 有启动自愈但 projects.yml 缺对等保证，唯一补写点 clone 分支需 tick+网络 → _resolve_project_path None → _source_dir 退化 "emrg" 悬空 cwd；+3 测试缺失追加/存在保留/其他条目保留) ✅
-> - LLM gzip body tolerance (#541 llm.py _parse_json_body：gateway 返回无 Content-Encoding 的 gzip body（0x1f 0x8b magic）时 httpx 不解压 → resp.json() UnicodeDecodeError 裸崩（memory reflection 12:40 生产事故）；magic 检测透明解压 + chat() 解析失败（JSONDecodeError/UnicodeDecodeError/OSError/EOFError）走瞬时错误同款指数退避重试；chat_stream 已优雅降级无需改；+6 测试 plain/gzip/corrupt/解压/重试成功/重试耗尽) ✅
-> - GUI message display fixes (#543 rant 14:11 宿主实测三缺陷：欢迎屏不隐藏 + 光标残留 + 误标"来自其他客户端"；Bug A updateEmptyState 只在切会话调用 → Chat.append()/clear() 同步 App.updateEmptyState?.()；Bug B G122 16ms delta 缓冲 vs done 直通竞态 → 残留 delta 晚到建孤儿节点 → main.js flushDeltaBuf 终态（done/error/cancelled）前同步冲刷（webContents.send 保序）+ chat.js doneRids 集合丢弃已 done 流残留 delta（UUID 不复用，500 上限）+ cancelled/流式 error 调 clearTyping 全清在途 typing（daemon cancelled 无 request_id，mid-round 取消无 done 帧）；+3 回归测试，npm test 88→91 文档同步) ✅
-> - Windows GCM silent-fail (#545 rant 10:17 Windows 干净安装演化 cycle 反复弹 Git Credential Manager：daemon 是非交互后台进程，凭据操作必须静默快速失败——git_utils.no_prompt_env() 三守卫（GIT_TERMINAL_PROMPT=0/GCM_INTERACTIVE=never/GIT_ASKPASS=）应用于 bash_tool 子进程 + scheduler 全部 8 处 git subprocess + git_cmd；新增 github_status daemon 命令（bundled gh auth status 10s 超时 prompt-free 永不抛，parse_gh_auth_user 解析 as/account 双形态）；evolution/open_source prompt 平台守卫（Windows 跳过 git credential fill → 指向 GUI 设置页，未认证优雅跳过不重试）；+12 测试 508→520) ✅
-> - Windows TUI input + /rant visibility (#546 rant 10:38 Windows TUI 无法输入中文 + / 菜单上下键失效：win32.py _RAW_INPUT_MODE 加 ENABLE_VIRTUAL_TERMINAL_INPUT(0x0200) 使 conhost 交付 UTF-8 + ANSI 方向键（SetConsoleMode 失败回退 window-input-only 兼容 Win10 1607 前）；events.py 0xE0/0x00 老式扫描码归一化（InputParser 在 _utf8_len 之前拦截且门控在已识别扫描码 0x47-0x53——与 UTF-8 续字节 0xA0-0xBF 值域不相交精确无假拦截；parse_keypress 直映射 KeyName）；rant 10:48 /rant 项目列表过滤 evolution 工作区导致 emrg 项目消失（#78 过滤设计过时，#489/#490/#535 自愈后 ~/.emrg/evolution/emrg 是打包机唯一路径）→ _handle_list_projects 去过滤（_touch_project 保留跳过）；+12 测试 520→534，含判别力回归（泰文/天城文/Ctrl+@/分片读）) ✅
-> - GitHub PAT auth + setup-git (#548 GCM rant 10:17 Stage 2a：GUI 设置页 GitHub 连接区——github_connect daemon 命令（`gh auth login --with-token`，token 走 stdin 永不进 argv（防 ps 泄露）；成功后 `gh auth setup-git` 让 git 用 gh 当 credential helper → push/pull/fetch 永不回退 GCM；复用 _check_github_auth 同解析器重验 user 单一事实源）；github_disconnect（`gh auth logout --hostname github.com`）；dispatch github_connect_result/disconnect_result 帧；GUI RESPONSE_TYPES/IPC/preload 全链路 + 15 条 zh/en i18n；+8 测试 534→542（含 stdin 送达断言固化"token 不进 argv"）) ✅
-> - GitHub device-flow auth (#549 GCM rant 10:17 Stage 2b：首选授权路径不开终端不弹 GCM——github_connect_web daemon 命令 spawn `gh auth login --web`（stdin=DEVNULL prompt-free，探针实证非 TTY 仍输出 code+URL），解析一次性 code + device URL 返 GUI；后台任务保活 gh 至授权完成/300s 超时 kill（proc 存 self，cancel 竞态直 kill 防泄漏——task.cancel() 对未启动 task 不执行 body）；GUI 设置页无 token 优先 device flow + 新对话框（大号 code + shell.openExternal 开浏览器 + 3s github_status 轮询直至授权）；PAT 仍为受限环境兜底；+6 测试 542→548) ✅
-> - GitHub connect banner (#550 GCM rant 10:17 Stage 2c：演化计数增长（=演化刚产出需推 GitHub）且未认证时横幅提示"启用自进化需连接 GitHub → [去连接]"——挂钩 maybeShowEvolutionToast 增长检测点（每日 gate 前，每次增长都查）；maybeShowGithubBanner 查 github_status 未认证则显示，[去连接] 打开设置页 GitHub 区，[关闭] 本会话不再弹；本地聊天不依赖 GitHub 启动不打扰；与 #548/#549 闭环（横幅→设置→device flow→已连接）；GUI +1=92（正反两态 + seed hidden 判别 + 源码断言）) ✅
-
+> 2. Handled rants need no further attention, unless the user repeats the feedback (meaning the earlier fix was incomplete)
 #### 2.2 Latest GitHub code changes
 
 ```bash
-cd {{ source_dir }} && git fetch origin master && git log origin/master --oneline -10
+cd {{ source_dir }} && git fetch origin master && git log FETCH_HEAD --oneline -10
 ```
 
 Fetch and understand the newest commits on master (possibly from other Committers) — analyze what changed, why, and whether follow-up is needed.
+> ⚡ Use `FETCH_HEAD`, not `origin/master`: `git fetch origin master` always
+> writes FETCH_HEAD even when the repo has no remote-tracking refs (e.g.
+> after a workspace repair that stripped `remote.origin.fetch`), where
+> `git log origin/master` fails with "unknown revision".
 
 #### 2.3 EMRG memory and conversations across projects
 
@@ -417,6 +352,14 @@ cd {{ source_dir }}
 git checkout -b feature/<short-description>
 git add -A
 git commit -m "emrg: <short-description>"
+# ⚡ Branch-collision guard (R743 lesson): a parallel instance may already have pushed
+# this exact branch name + opened a PR with the same intent. Check BEFORE pushing:
+#   gh pr list -R {{ owner }}/{{ repo }} --head feature/<short-description> --state all
+# If a PR already exists with the same intent: do NOT create a duplicate — review it
+# (Step 1.1) and, if your commit adds value, comment on the existing PR instead.
+# If the remote branch exists (push rejected non-fast-forward): git fetch origin <branch>
+# + diff against your commit; NEVER force-push over an existing remote branch — the
+# overwritten commit is often unrecoverable (already pruned from the remote).
 git push origin feature/<short-description>
 gh pr create -R {{ owner }}/{{ repo }} --title "emrg: <short-description>" --body "brief description of changes and reasons"
 ```
@@ -427,7 +370,17 @@ gh pr create -R {{ owner }}/{{ repo }} --title "emrg: <short-description>" --bod
 
 ### 6. Record
 
-Create `evolution-cycle-{{ timestamp }}.md` recording findings, changes, and expected effects; update `MEMORY.md`.
+Create a **cycle memory entry** (rant 2026-08-12T18:03:26 — no more standalone `evolution-cycle-*.md` files; the record lives in the memory system):
+
+- Write `{{ evolution_cwd }}/.emrg/memory/cycle-{{ timestamp }}.md` with YAML frontmatter:
+  - `id`: `cyc{{ timestamp }}` (e.g. `cyc20260812-180325`)
+  - `event_at` / `created_at` / `updated_at`: ISO timestamps
+  - `type: task`, `scope: project`, `status: active` (cycle in progress) or `completed` (final)
+- Body: findings, changes, verification results, expected effects (same content as before, just a memory file)
+- Update the `MEMORY.md` index in the same directory (add one row, id linked to the filename) — this is the **single index** for cycle records
+- Keep the file format identical to other memory entries (frontmatter + Markdown body)
+
+> Transition note: legacy `evolution-cycle-*.md` files remain in place (readable, never deleted); only new records use the memory entry path.
 
 ---
 
@@ -444,4 +397,5 @@ Create `evolution-cycle-{{ timestamp }}.md` recording findings, changes, and exp
 - Do not modify `~/.emrg/config.toml`
 - Do not modify `max_tool_rounds`
 - Do not modify files under `{{ evolution_cwd }}` outside `{{ source_dir }}/`
+- **Do not modify this file (`evolution_prompt.md`) during normal evolution** — it is a **stable template** (host rant 2026-08-17T14:22:21). Routine evolution must not edit it, and must not append changelog/quick-reference history to it. The ONLY exception is when the evolution target itself is improving `evolution_prompt.md` (a prompt-specific rant like this one). "Was this feature already done?" is answered by the **memory system** (`.emrg/memory/` + MEMORY.md + `cycle-*.md` records) and `git log` — not by a static in-prompt history table.
 - Must push

@@ -3,7 +3,7 @@
  * daemon_client.js — main 进程内唯一与 emrgd 通信的模块。
  *
  * 协议语义完全对照 emrg/client/daemon_manager.py（Phase 2 参考实现）：
- * - 读 ~/.emrg/emrgd.port（port\n token，0o600）→ ws://127.0.0.1:<port> → auth 首帧 → auth_ok
+ * - 读 ~/.emrg/emrgd.token（单行 token，0o600）→ ws://127.0.0.1:56031（EMRGD_PORT 常量）→ auth 首帧 → auth_ok
  * - 坏 JSON 帧忽略（对照 daemon_manager.recv R53）
  * - ConnectionClosed 传播 → 触发重连（对照 R11）
  * - auth 失败（auth_ok 前 close）= AuthError 语义（G88：停止自动重试，防无限重连）
@@ -18,12 +18,26 @@ const crypto = require("crypto");
 const { spawn } = require("child_process");
 const WebSocket = require("ws");
 
-const PORT_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.port");
+// Rant 2026-08-20T16:03:31：GUI"工作目录"概念已删除——daemon 运行时文件固定读取
+// 规范位置 ~/.emrg（daemon.py config_dir() = Path.home()/".emrg"；connect.py 无条件
+// 读 ~/.emrg/emrgd.token）。projectDir 参数与 G129 回退逻辑随概念一起清理（#884 后
+// emrgd.token 已是唯一规范位置，回退冗余）。
+const TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
+const EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
+// Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52): the
+// daemon always listens on this constant — keep in sync with emrg/connect.py
+// EMRGD_PORT and emrg/_stop_all.py _EMRGD_PORT. The token file no longer
+// carries a port; all connections/probes use this constant.
+const EMRGD_PORT = 56031;
 const MAX_PAYLOAD = 16 * 1024 * 1024; // G62/G105：16MB 双向一致（工具输出上限 200KB）
 const AUTH_TIMEOUT_MS = 10_000;
 const SPAWN_WAIT_MS = 5_000;
 const PENDING_TIMEOUT_MS = 5_000;
 const STREAM_END_TIMEOUT_MS = 30_000; // G94：最后帧后 30s 无 done 强制结束
+// Rant 2026-08-09T13:16:36 ⑤（防风暴总闸）：单个"连接生命周期"内最多 spawn
+// MAX_SPAWN_ATTEMPTS 次 daemon——之后不再拉起，只把真实错误（含 emrgd.log 尾部）
+// 抛给上层，杜绝 GUI 每 5s 反复 spawn（每次 spawn 都是一个新的 cmd 窗口来源）。
+const MAX_SPAWN_ATTEMPTS = 3;
 
 const SESSION_ID_RE = /^s_\d{6}_\d{4}_[0-9a-f]{4,8}$/;
 
@@ -34,6 +48,7 @@ const RESPONSE_TYPES = {
   list_projects: "projects_list",
   list_history: "history_list",
   list_tasks: "tasks_list",
+  list_rants: "rants_list",
   list_memories: "memories_list",
   resume_session: "resume_result",
   delete_session: "session_deleted",
@@ -48,11 +63,20 @@ const RESPONSE_TYPES = {
   github_connect: "github_connect_result", // Windows GCM rant Stage 2：PAT 授权（daemon.py github_connect）
   github_disconnect: "github_disconnect_result", // Windows GCM rant Stage 2：断开（daemon.py github_disconnect）
   github_connect_web: "github_connect_web_result", // Stage 2b：device flow（daemon.py github_connect_web）
+  list_files: "files_list", // 右栏工作区面板 P1：目录树（daemon.py list_files）
+  read_file: "file_content", // 右栏工作区面板 P1：文件查看器（daemon.py read_file）
+  // rant 2026-08-12T18:23:15 P2/P3：任务 + 自定义类型 CRUD（daemon.py task_create 等）
+  task_create: "task_result",
+  task_update: "task_result",
+  task_delete: "task_result",
+  task_template_list: "templates_list",
+  task_template_create: "template_result",
+  task_template_update: "template_result",
+  task_template_delete: "template_result",
 };
 
 class DaemonClient {
-  constructor({ projectDir = os.homedir(), logger = console, authTimeoutMs = AUTH_TIMEOUT_MS, isPackaged = false } = {}) {
-    this.projectDir = projectDir;
+  constructor({ logger = console, authTimeoutMs = AUTH_TIMEOUT_MS, isPackaged = false, deltaBatchMs = 0 } = {}) {
     this.logger = logger;
     this._authTimeoutMs = authTimeoutMs; // G142 测试可注入短超时（默认 10s）
     this._isPackaged = isPackaged; // Phase 4：打包模式（rant #12 §4）由 main.js 注入 app.isPackaged
@@ -67,32 +91,90 @@ class DaemonClient {
     this._authFailed = false;
     this._reconnectTimer = null;
     this._stopReconnect = false;
+    this._spawnAttempts = 0; // 连接生命周期内 spawn 计数（成功 auth 后归零）
+    // P2 connManager（rant 2026-08-10T15:07:19）：deltaBuf 批量（G122 16ms）每连接一份。
+    // deltaBatchMs > 0 时本实例自行批量 message_delta，终态（done/error/cancelled）前
+    // 强制冲刷保序（rant 14:11 孤儿节点教训）；默认 0 = 每帧即时发（既有行为不变）。
+    this._deltaBatchMs = deltaBatchMs;
+    this._deltaBuf = [];
+    this._deltaTimer = null;
+    // P2 connManager（rant 2026-08-10T15:07:19）：G65 自有流锁每连接一份。
+    // 从 main.js 全局移入——多会话各自独立：本连接发出的 task 流运行中 →
+    // ownStream=true，切会话/关连接前必须释放。
+    this.ownStream = false;
+    this.ownStreamRequestId = null;
+  }
+
+  // 释放自有流锁（G65）。done（request 匹配或 timeout 兜底）、session busy 即发
+  // 错误、cancelled（request 匹配）与断连时调用；sendTask 抛异常时由调用方清理。
+  _releaseOwnStream() {
+    this.ownStream = false;
+    this.ownStreamRequestId = null;
   }
 
   // ── 生命周期 ────────────────────────────────────────────
 
+  // Rant 2026-08-20T16:03:31：读 token 的权威入口——固定读 daemon 规范位置
+  // ~/.emrg/emrgd.token（#884 后唯一位置）。文件仅含单行 token；端口一律用
+  // EMRGD_PORT 常量。返回 {token, source, port} 或 null。
+  _readPortToken() {
+    const tryRead = (file) => {
+      try {
+        const text = fs.readFileSync(file, "utf8");
+        const token = text.trim();
+        if (token) return { token };
+      } catch { /* missing/unreadable → try next */ }
+      return null;
+    };
+    const token = tryRead(TOKEN_FILE());
+    if (token) return { ...token, source: "canonical", port: EMRGD_PORT };
+    return null;
+  }
+
   isRunning(timeoutMs = 1500) {
-    // G43/G90：TCP 探测（不可简化为 port 文件存在）
-    try {
-      const port = Number(fs.readFileSync(PORT_FILE(), "utf8").split("\n")[0]);
-      return new Promise((resolve) => {
-        const sock = net.connect({ host: "127.0.0.1", port, timeout: timeoutMs });
-        sock.once("connect", () => { sock.destroy(); resolve(true); });
-        sock.once("error", () => { sock.destroy(); resolve(false); });
-        sock.once("timeout", () => { sock.destroy(); resolve(false); });
-      });
-    } catch {
-      return Promise.resolve(false);
+    // G43/G90：TCP 探测（不可简化为 token 文件存在）。18:47:37：token 源改为权威读取
+    // （projectDir 回退 ~/.emrg），否则 projectDir≠home 时永远探测假路径 → 假 false。
+    // 14:32:52：端口用常量 EMRGD_PORT，不再从文件读 port。
+    const pt = this._readPortToken();
+    if (!pt) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const sock = net.connect({ host: "127.0.0.1", port: EMRGD_PORT, timeout: timeoutMs });
+      sock.once("connect", () => { sock.destroy(); resolve(true); });
+      sock.once("error", () => { sock.destroy(); resolve(false); });
+      sock.once("timeout", () => { sock.destroy(); resolve(false); });
+    });
+  }
+
+  _readLogTail(lines = 15) {
+    // R124 对应（daemon_manager.py）：spawn 超时后读 emrgd.log 尾部，
+    // 让宿主看到真实失败原因（缺 DLL / PATH / 端口冲突），而不是干巴巴的
+    // "failed to start within timeout"（rant 2026-08-09T13:16:36 验收项 ②）。
+    // 18:47:37：log 在规范 ~/.emrg 下；16:03:31 后固定读该位置。
+    for (const file of [EMRGD_LOG()]) {
+      try {
+        const data = fs.readFileSync(file, "utf8");
+        const tail = data.trim().split("\n").slice(-lines).join("\n");
+        return tail ? `\n  emrgd.log tail (${file}):\n${tail}` : "";
+      } catch { /* try next */ }
     }
+    return "";
   }
 
   async startDaemon() {
+    // Rant 2026-08-09T13:16:36 ⑤：spawn 节流——超过上限不再拉起（防窗口/重试风暴）。
+    if (this._spawnAttempts >= MAX_SPAWN_ATTEMPTS) {
+      throw new Error(
+        `daemon failed to start after ${MAX_SPAWN_ATTEMPTS} attempts — ` +
+        `please start it manually ('emrg server') and check emrgd.log${this._readLogTail()}`
+      );
+    }
+    this._spawnAttempts += 1;
     // Phase 4（rant #12 §4）：打包模式直接 spawn 捆绑 emrgd 可执行文件（脚本内部
     // exec python -m emrg.server）；源码模式保持 python -m emrg.server。
     if (this._isPackaged) {
       const emrgdPath = this._findDaemonExecutable();
       const opts = {
-        cwd: this.projectDir,
+        cwd: os.homedir(),
         stdio: "ignore",
         detached: true,
       };
@@ -102,35 +184,54 @@ class DaemonClient {
         opts.shell = true;
         opts.windowsHide = true;
       }
-      this.logger.info(`[gui] spawning packaged daemon: ${emrgdPath} cwd=${this.projectDir}`);
+      this.logger.info(`[gui] spawning packaged daemon: ${emrgdPath} cwd=${os.homedir()}`);
       const child = spawn(emrgdPath, [], opts);
       child.unref();
       this._daemonChild = child;
+      this.logger.info(`[gui] daemon spawned: pid=${child.pid} (packaged emrgd)`); // 18:47:37 B2
       const deadline = Date.now() + SPAWN_WAIT_MS;
       while (Date.now() < deadline) {
         if (await this.isRunning(500)) return child;
         await new Promise((r) => setTimeout(r, 300));
       }
-      throw new Error("emrgd failed to start within timeout");
+      throw new Error(`emrgd failed to start within timeout${this._readLogTail()}`);
     }
     // G125：spawn 设 cwd=project_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
     const python = this._findPython();
     const args = ["-m", "emrg.server"];
-    this.logger.info(`[gui] spawning daemon: ${python} ${args.join(" ")} cwd=${this.projectDir}`);
+    this.logger.info(`[gui] spawning daemon: ${python} ${args.join(" ")} cwd=${os.homedir()}`);
     const child = spawn(python, args, {
-      cwd: this.projectDir,
+      cwd: os.homedir(),
       stdio: "ignore", // G68：对照 DEVNULL
       detached: true, // 对照 start_new_session=True
+      // windowsHide: python.exe 是 console 子系统——GUI spawn 时不隐藏会
+      // 弹一个命令行黑窗（打包模式 emrgd.cmd 已改走 pythonw.exe，这里补源码模式）。
+      ...(process.platform === "win32" ? { windowsHide: true } : {}),
     });
     child.unref(); // GUI 退出不带走 daemon
     this._daemonChild = child; // 暴露 child（集成测试 after 清理用）
+    this.logger.info(`[gui] daemon spawned: pid=${child.pid} (source mode)`); // 18:47:37 B2
     // 等最多 SPAWN_WAIT_MS 就绪
     const deadline = Date.now() + SPAWN_WAIT_MS;
     while (Date.now() < deadline) {
       if (await this.isRunning(500)) return child;
       await new Promise((r) => setTimeout(r, 300));
     }
-    throw new Error("emrgd failed to start within timeout");
+    throw new Error(`emrgd failed to start within timeout${this._readLogTail()}`);
+  }
+
+  // Rant 2026-08-21T15:26:42：daemon 存活判断用固定端口 TCP 探测——
+  // 固定端口才是 ground truth（rant 2026-08-19T08:05:21，connect.py
+  // is_server_running_sync 同语义；rant 2026-08-21T16:45:06 后 emrgd.pid 已彻底
+  // 移除）。端口通 = daemon 活着 = 绝不删 token；端口不通才允许 stale-token
+  // 删除+重拉路径。
+  _daemonProcessAlive(timeoutMs = 1000) {
+    return new Promise((resolve) => {
+      const sock = net.connect({ host: "127.0.0.1", port: EMRGD_PORT, timeout: timeoutMs });
+      sock.once("connect", () => { sock.destroy(); resolve(true); });
+      sock.once("error", () => { sock.destroy(); resolve(false); });
+      sock.once("timeout", () => { sock.destroy(); resolve(false); });
+    });
   }
 
   _findDaemonExecutable() {
@@ -139,6 +240,30 @@ class DaemonClient {
     const bin = path.join(os.homedir(), ".emrg", "install", "bin");
     const name = process.platform === "win32" ? "emrgd.cmd" : "emrgd";
     return path.join(bin, name);
+  }
+
+  // Rant 2026-08-21T12:44:34（restart-to-apply 跟进）：打包模式下 `emrg` 包位于
+  // ~/.emrg/install/{source,lib}，宿主 PATH 的 python3 上没有 `emrg` 可导入——
+  // 重启流程必须用安装版运行时 python（与 bin/emrgd 启动器同一解析逻辑）。
+  _findInstalledPython() {
+    const bin = path.join(os.homedir(), ".emrg", "install", "bin");
+    if (process.platform === "win32") {
+      // R100：bin/python（复制品）缺 DLL 不可用（DLL 在 python-dist/ 根）
+      for (const n of ["python-dist\\python.exe", "python-dist\\python3.13.exe", "python.exe"]) {
+        const p = path.join(bin, n);
+        try { fs.accessSync(p); return p; } catch { /* next candidate */ }
+      }
+      return "python";
+    }
+    const p = path.join(bin, "python");
+    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* fallthrough */ }
+    return "python3";
+  }
+
+  // 安装版 PYTHONPATH 前缀（等价 bin/emrgd 的 PYTHONPATH="$PREFIX/source:$PREFIX/lib"）。
+  _installedPythonPath() {
+    const prefix = path.join(os.homedir(), ".emrg", "install");
+    return [path.join(prefix, "source"), path.join(prefix, "lib")].join(path.delimiter);
   }
 
   _findPython() {
@@ -159,22 +284,83 @@ class DaemonClient {
     return "python3";
   }
 
-  async ensureConnected() {
-    // 1. 读 port 文件 → 无则拉 daemon
-    let port, token;
+  // Rant 2026-08-09T18:47:37（A1 + B1）：探测"已存在的 daemon"——4 状态诊断日志
+  // （token_file_exists / token_file_content / daemon_alive(ping) / spawn_result）。
+  // spawn 失败 ≠ daemon 不存在：daemon 可能早已被 scheduler/TUI 拉起。
+  // 返回 {token, source, port} 或 null。
+  async _probeExistingDaemon(spawnResult = "n/a") {
+    const pt = this._readPortToken();
+    const tokenFileExists = !!(pt || this._readPortTokenRaw());
+    const alive = pt ? await this.isRunning(1000) : false;
+    this.logger.info(
+      `[gui] probe: token_file_exists=${tokenFileExists}, token_file_content=${pt ? "present" : "—"}, ` +
+      `daemon_alive(ping)=${alive}, spawn_result=${spawnResult}`
+    );
+    if (pt && alive) return pt;
+    return null;
+  }
+
+  // 读 token 文件原始存在性（不含解析），供 probe 日志用。
+  _readPortTokenRaw() {
+    for (const file of [TOKEN_FILE()]) {
+      try { if (fs.readFileSync(file, "utf8").trim()) return true; } catch { /* next */ }
+    }
+    return false;
+  }
+
+  // Rant 2026-08-09T18:47:37（A1）：spawn 失败（含 3 次节流）→ 探测已有 daemon →
+  // 活着直接复用；确实无 daemon 才抛原始错误。spawn 成功则读回 token。
+  async _spawnOrProbe() {
     try {
-      const text = fs.readFileSync(PORT_FILE(), "utf8");
-      [port, token] = text.split(/\s+/);
-      if (!port || !token) throw new Error("malformed port file");
-    } catch {
       await this.startDaemon();
-      const text = fs.readFileSync(PORT_FILE(), "utf8");
-      [port, token] = text.split(/\s+/);
+    } catch (spawnErr) {
+      const existing = await this._probeExistingDaemon(`failed(${String(spawnErr.message).slice(0, 60)})`);
+      if (existing) {
+        this.logger.warn(
+          `[gui] spawn failed (${spawnErr.message}) — existing daemon detected at port=${EMRGD_PORT}, reusing`
+        );
+        return existing;
+      }
+      this.logger.warn(`[gui] spawn failed (${spawnErr.message}) — no existing daemon reachable, giving up`);
+      throw spawnErr;
+    }
+    // spawn 成功：daemon 永远写规范 ~/.emrg/emrgd.token（daemon.py config_dir()），
+    // 权威读取固定该位置（16:03:31）。
+    const pt = this._readPortToken();
+    if (!pt) throw new Error("token file not written after spawn");
+    this.logger.info(`[gui] daemon spawned ok: port=${EMRGD_PORT}`);
+    return pt;
+  }
+
+  async ensureConnected({ skipStart = false } = {}) {
+    // Rant 2026-08-09T18:47:37：1. 读 token 文件（固定规范 ~/.emrg）→
+    // 无则拉 daemon；spawn 失败先探测已有 daemon，活着直接复用，不再盲报
+    // "failed to start after 3 attempts"。每步打结构化诊断日志（B1-B5）。
+    // P2 connManager（rant 2026-08-10T15:07:19）：skipStart=true 时 daemon 生命周期
+    // 由 connManager 独占管理——本实例只连接**已运行**的 daemon，绝不自行拉起。
+    let port, token;
+    const pt = this._readPortToken();
+    if (pt) {
+      port = pt.port;
+      token = pt.token;
+      this.logger.info(
+        `[gui] ensureConnected: token_file_exists=true, port=${port}, source=${pt.source}`
+      );
+    } else {
+      if (skipStart) {
+        throw new Error(
+          `daemon not running (skipStart): no token file at ${TOKEN_FILE()}`
+        );
+      }
+      this.logger.info(`[gui] ensureConnected: token_file_exists=false — spawning daemon`);
+      const r = await this._spawnOrProbe();
+      port = r.port;
+      token = r.token;
     }
 
-    // 2. ws 连接（G43 stale port：连接失败删文件重拉一次）
+    // 2. ws 连接（G43 stale token：连接失败删文件重拉一次）
     try {
-      this.ws = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: MAX_PAYLOAD });
+      this.ws = new WebSocket(`ws://127.0.0.1:${EMRGD_PORT}`, { maxPayload: MAX_PAYLOAD });
     } catch (e) {
       // ws 构造一般异步失败；在 open 事件处理
       throw e;
@@ -182,14 +368,33 @@ class DaemonClient {
     try {
       await this._awaitOpen();
     } catch (e) {
-      // G43：port 文件存在但连不上（daemon 已死/端口被占）→ 删文件重拉一次
-      this.logger.warn(`[gui] ws connect failed: ${e.message} — stale port, respawning daemon`);
+      // G43 加固（rant 2026-08-09T13:16:36 根因）：token 文件存在但连不上时，
+      // 先探测固定端口（rant 2026-08-21T15:26:42：TCP 探活；rant 16:45:06 后
+      // emrgd.pid 已彻底移除）——daemon 还活着就【绝不删 token 文件】。旧 G43
+      // 直接 unlink 会把健康 daemon 的 token 文件删掉 → 僵尸态（daemon 活着、
+      // scheduler 永远 cannot connect、PID 锁挡住新 spawn）。只有 daemon 真死
+      // 了才删+重拉。
+      if (await this._daemonProcessAlive()) {
+        this.logger.warn(
+          `[gui] ws connect failed: ${e.message} — daemon port alive, keeping token file (transient)`
+        );
+        try { this.ws.close(); } catch { /* ignore */ }
+        throw new Error(`daemon unreachable (port alive): ${e.message}`);
+      }
+      if (skipStart) {
+        this.logger.warn(
+          `[gui] ws connect failed: ${e.message} — stale token, daemon dead (skipStart: not respawning)`
+        );
+        try { this.ws.close(); } catch { /* ignore */ }
+        throw new Error(`daemon unreachable (skipStart): ${e.message}`);
+      }
+      this.logger.warn(`[gui] ws connect failed: ${e.message} — stale token, respawning daemon`);
       try { this.ws.close(); } catch { /* ignore */ }
-      try { fs.unlinkSync(PORT_FILE()); } catch { /* ignore */ }
-      await this.startDaemon();
-      const text = fs.readFileSync(PORT_FILE(), "utf8");
-      [port, token] = text.split(/\s+/);
-      this.ws = new WebSocket(`ws://127.0.0.1:${port}`, { maxPayload: MAX_PAYLOAD });
+      try { fs.unlinkSync(TOKEN_FILE()); } catch { /* ignore */ }
+      const r = await this._spawnOrProbe();
+      port = r.port;
+      token = r.token;
+      this.ws = new WebSocket(`ws://127.0.0.1:${EMRGD_PORT}`, { maxPayload: MAX_PAYLOAD });
       await this._awaitOpen();
     }
 
@@ -232,6 +437,11 @@ class DaemonClient {
 
     this.connected = true;
     this._authFailed = false;
+    this._spawnAttempts = 0; // 连接生命周期成功 → 重置 spawn 节流计数
+    // Rant 2026-08-09T18:47:37 B5：最终状态一行自证——GUI 连的是谁、连没连上。
+    this.logger.info(
+      `[gui] ensureConnected result=connected, daemon_running=true, port=${port}, token_set=${!!token}`
+    );
 
     // 5. 注册 message/close 监听 → 事件流分发
     this.ws.on("message", (data) => this._onFrame(data));
@@ -254,11 +464,26 @@ class DaemonClient {
   }
 
   close() {
+    this._flushDeltaBuf(); // 断连前冲刷残留 delta（防丢失）
     if (this.ws) {
       try { this.ws.close(); } catch { /* ignore */ }
       this.ws = null;
     }
     this.connected = false;
+  }
+
+  // P2（rant 2026-08-10T15:07:19 + 14:11）：批量冲刷 delta 缓冲。
+  // 有定时器则清；有残留则按 {chunks} 形状一次性发出（与 main.js G122 同形）。
+  _flushDeltaBuf() {
+    if (this._deltaTimer) {
+      clearTimeout(this._deltaTimer);
+      this._deltaTimer = null;
+    }
+    if (this._deltaBuf.length) {
+      const chunks = this._deltaBuf;
+      this._deltaBuf = [];
+      this._emit("message_delta", { chunks });
+    }
   }
 
   // ── 事件 ────────────────────────────────────────────────
@@ -276,11 +501,12 @@ class DaemonClient {
 
   // ── 消息发送 ────────────────────────────────────────────
 
-  sendTask({ sessionId, cwd, prompt, stream = true, images = null, requestId = null, mode = "auto" }) {
+  sendTask({ sessionId, cwd, prompt, images = null, requestId = null, sandbox = "workspace-write" }) {
     // G32：request_id 必须作为 id 字段发出（daemon 只回显不自生成）
-    // G96：stream 必须显式 true（daemon 读 stream 默认 False）
     // G143：外部预生成 requestId 优先（renderer send 前标记自有流，消除 IPC 往返竞态窗口）
-    // WorkBuddy P2：mode="ask" → daemon 不启用工具（纯对话）
+    // Rant 2026-08-20T18:18：sandbox 档位（read-only / workspace-write / danger-full-access），
+    // 随每条 task 消息发送——daemon 用它控制该次工具执行的写权限（默认可写工作区）。
+    // rant 21:20:38：非 stream 路径已删除——所有 task 恒走 tool_loop（流式）
     const rid = requestId || crypto.randomUUID();
     const payload = {
       type: "task",
@@ -289,17 +515,22 @@ class DaemonClient {
       cwd,
       prompt,
       timestamp: new Date().toISOString(),
-      stream,
       images,
+      sandbox,
     };
-    if (mode && mode !== "auto") payload.mode = mode;
     this._setCurrentStream(rid);
+    // G65：自有流锁——本连接发出流式 task 即标记，done/error/cancelled/断连释放
+    // （多会话各自独立；main.js emrg:sendMessage 的 G65 切会话检查读本字段）
+    this.ownStream = true;
+    this.ownStreamRequestId = rid;
     this.ws.send(JSON.stringify(payload));
     return rid;
   }
 
   sendCommand(type, params = {}) {
-    this.ws.send(JSON.stringify({ type, ...params }));
+    // Wire message type last: a payload field named "type" (e.g. the task type in
+    // task CRUD) must never override the wire message type (rant 2026-08-14T21:48:00).
+    this.ws.send(JSON.stringify({ ...params, type }));
   }
 
   // G93/G103：命令-响应配对（pending FIFO，按响应帧 type 配对）。
@@ -380,10 +611,13 @@ class DaemonClient {
       return;
     }
     if (frame.type === "cancelled") {
+      this._flushDeltaBuf(); // 终态前冲刷（rant 14:11 同源：delta 不晚于终态）
+      // 自有流取消 → 释放 G65 锁（带 request_id 的 cancelled 明确是本流的终态）
+      if (frame.request_id === this.ownStreamRequestId) this._releaseOwnStream();
       this._emit("cancelled", frame);
       return;
     }
-    if (["sessions_list", "models_list", "history_list", "tasks_list"].includes(frame.type)) {
+    if (["sessions_list", "models_list", "history_list", "tasks_list", "files_list"].includes(frame.type)) {
       this._emit("list_result", frame);
       return;
     }
@@ -392,16 +626,28 @@ class DaemonClient {
       return;
     }
     if (frame.done) {
+      this._flushDeltaBuf(); // 终态前冲刷 delta：保证 delta 不晚于终态（rant 14:11）
       this._onDone(frame);
       this._emit("done", frame);
       return;
     }
     if (frame.delta) {
       this._onDelta(frame);
+      if (this._deltaBatchMs > 0) {
+        this._deltaBuf.push(frame);
+        if (!this._deltaTimer) {
+          this._deltaTimer = setTimeout(() => this._flushDeltaBuf(), this._deltaBatchMs);
+        }
+        return; // 批量模式：不即时发单帧
+      }
       this._emit("message_delta", frame);
       return;
     }
     if (frame.error) {
+      this._flushDeltaBuf(); // 终态前冲刷（rant 14:11 同源）
+      // session busy 是即发错误（daemon 返回后无 done 跟随）——释放自有流锁，防 G65 锁泄漏
+      // （流式错误如 LLM error 则有 done 跟随，由 done 分支释放，不在此处理）
+      if (frame.error && String(frame.error).includes("session busy")) this._releaseOwnStream();
       this._emit("error", frame);
       return;
     }
@@ -435,6 +681,10 @@ class DaemonClient {
     const rid = frame.request_id;
     if (rid && this._currentStream && this._currentStream.requestId === rid) {
       this.clearActiveStream();
+    }
+    // G65：仅自有流的 done 释放锁（广播 done 不影响）；timeout 兜底同样只清自有
+    if (rid === this.ownStreamRequestId || (frame.timeout && this.ownStream)) {
+      this._releaseOwnStream();
     }
     // G83：done 清理分组缓存（DOM 保留）
     if (rid) this._cleanupGroup(rid, true);
@@ -509,6 +759,7 @@ class DaemonClient {
   // G41/G89/G97：断连处理
   _onClose() {
     this.connected = false;
+    this._releaseOwnStream(); // 断连即释放 G65 自有流锁（防锁泄漏）
     this._rejectAllPending("connection closed");
     this.clearActiveStream(); // G94 timer 清理：断连后 30s 超时 timer 不应再触发（防虚假"响应超时"提示）
     this.clearGroups(); // G97：断连清空广播分组缓存（含 10 分钟 timer），防"幽灵"分组残留
@@ -535,4 +786,4 @@ function generateSessionId(seed) {
   return sid;
 }
 
-module.exports = { DaemonClient, generateSessionId, PORT_FILE, SESSION_ID_RE, MAX_PAYLOAD };
+module.exports = { DaemonClient, generateSessionId, TOKEN_FILE, SESSION_ID_RE, MAX_PAYLOAD, EMRGD_PORT };

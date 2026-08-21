@@ -5,103 +5,58 @@
  */
 
 const Sidebar = (() => {
-  let sessions = [];
+  let openSessions = [];
 
-  /** 渲染分组对话列表 */
-  function render(list) {
-    sessions = list || [];
-    const nav = $("conv-list");
+  /**
+   * P4 slice 2：渲染跨项目打开会话区（侧边栏顶部）。
+   * 条目 = 项目名 / 会话标题（lastActive 倒序，main 已排序）；激活高亮；
+   * 点击 → 切换；右键 → 关闭（保留数据）/ 重命名 / 删除。
+   */
+  function renderOpenSessions(list) {
+    openSessions = list || [];
+    const nav = $("open-sessions");
+    const label = $("open-sessions-label");
+    if (!nav) return;
     nav.innerHTML = "";
-    if (!sessions.length) {
-      nav.appendChild(el("div", { class: "conv-item placeholder" }, EMRG_Copy.COPY.noSessions));
+    if (!openSessions.length) {
+      if (label) label.hidden = true;
       return;
     }
-    // rant 21:19：分组标签本地化（顺序保持 今天→昨天→更早 不变）
-    const groups = {};
-    for (const lbl of [_t("util.groupToday"), _t("util.groupYesterday"), _t("util.groupEarlier")]) {
-      groups[lbl] = [];
-    }
-    for (const s of sessions) {
-      const g = groupLabel(s.updated_at || s.created_at);
-      if (!groups[g]) groups[g] = [];
-      groups[g].push(s);
-    }
-    for (const [label, items] of Object.entries(groups)) {
-      if (!items.length) continue;
-      nav.appendChild(el("div", { class: "conv-group-label" }, label));
-      for (const s of items) {
-        const item = el("div", { class: "conv-item" });
-        item.dataset.sid = s.session_id;
-        const title = s.title || s.session_id; // G27：title 优先
-        item.appendChild(el("span", { class: "conv-title" }, title));
-        item.addEventListener("click", () => App.switchSession(s.session_id));
-        // 右键菜单：重命名 / 删除（友好确认）
-        item.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          App.showConvMenu(item, s.session_id, title);
-        });
-        nav.appendChild(item);
-      }
+    if (label) label.hidden = false;
+    const known = (App.state && App.state.sessions) || [];
+    for (const entry of openSessions) {
+      const cur = known.find((s) => s.session_id === entry.sid) || {};
+      const title = entry.title || cur.title || ""; // entry.title 优先（跨项目），再 cur.title；id 单独显示，不降级为 sid
+      const item = el("div", { class: "conv-item open-session-item" });
+      item.dataset.sid = entry.sid;
+      item.appendChild(el("span", { class: "conv-title" }, sessionLabel(entry.projectName || "", title, entry.sid)));
+      item.addEventListener("click", () => App.switchSession(entry.sid, { scopeNav: nav }));
+      item.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        App.showOpenSessionsMenu(item, entry);
+      });
+      nav.appendChild(item);
     }
     highlight(App.state.sessionId);
   }
 
-  /** 高亮当前对话 */
-  function highlight(sid) {
-    for (const item of $("conv-list").querySelectorAll(".conv-item")) {
-      item.classList.toggle("active", item.dataset.sid === sid);
-    }
+  /** 会话条目统一格式：有 name 显示 project/name，无 name 显示 project/id（rant 2026-08-20T22:04:57） */
+  function sessionLabel(project, title, sid) {
+    return title ? `${project}/${title}` : `${project}/${sid}`;
   }
 
-  // ── 键盘导航：↑↓ 切换高亮 / Enter 切换会话（与 TUI /resume 选择器一致）──
-  let _keyHandler = null;
-  let _focusIdx = -1;
-
-  function initKeyboard() {
-    const nav = $("conv-list");
-    _keyHandler = (e) => {
-      // 输入控件（textarea/input/select/contenteditable）内不劫持 ↑↓/Enter——
-      // 输入框是 <textarea id="input">，多行输入需 ↑↓ 移动光标、Shift+Enter 换行
-      if (e.target.closest("input, textarea, select, [contenteditable]")) return;
-      const items = nav.querySelectorAll(".conv-item");
-      if (!items.length) return;
-      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        e.preventDefault();
-        if (_focusIdx < 0) {
-          // 未聚焦：从当前会话开始
-          _focusIdx = items.findIndex((it) => it.classList.contains("active"));
-          if (_focusIdx < 0) _focusIdx = 0;
-        }
-        _focusIdx = e.key === "ArrowDown"
-          ? (_focusIdx + 1) % items.length
-          : (_focusIdx - 1 + items.length) % items.length;
-        items.forEach((it, j) => it.classList.toggle("kbd-focus", j === _focusIdx));
-        items[_focusIdx].scrollIntoView({ block: "nearest" });
-      } else if (e.key === "Enter" && _focusIdx >= 0) {
-        e.preventDefault();
-        const target = items[_focusIdx];
-        if (target.dataset.sid) App.switchSession(target.dataset.sid);
-        clearFocus();
-      } else if (e.key === "Escape") {
-        clearFocus();
+  /** 高亮当前会话条目（rant 11:44:52：历史会话列表已移除，仅剩打开会话区） */
+  function highlight(sid, navEl) {
+    const targets = navEl ? [navEl] : [$("open-sessions")];
+    for (const nav of targets) {
+      if (!nav) continue;
+      for (const item of nav.querySelectorAll(".conv-item")) {
+        item.classList.toggle("active", item.dataset.sid === sid);
       }
-    };
-    document.addEventListener("keydown", _keyHandler);
-  }
-
-  function clearFocus() {
-    _focusIdx = -1;
-    for (const it of $("conv-list").querySelectorAll(".kbd-focus")) {
-      it.classList.remove("kbd-focus");
     }
   }
 
-  function init() {
-    if (!_keyHandler) initKeyboard();
-  }
-  init(); // 模块级绑定一次
-
-  return { render, highlight, clearFocus };
+  return { renderOpenSessions, highlight };
 })();
 
 window.EMRG_Sidebar = Sidebar;

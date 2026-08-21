@@ -48,8 +48,13 @@ class GlobTool(ToolExecutor):
                             "Working directory for the pattern (default: project root)."
                         ),
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
+                        "One human-readable sentence, e.g. 'find all test files for the scheduler'.",
+                    },
                 },
-                "required": ["pattern"],
+                "required": ["pattern", "intent"],
             },
         )
 

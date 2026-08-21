@@ -46,6 +46,8 @@ function makeEl(id) {
       if (frag) this.innerHTML += frag;
     },
     removeChild() {},
+    setAttribute() {},
+    removeAttribute() {},
     querySelectorAll: () => [],
     getBoundingClientRect: () => ({ left: 0, right: 100, top: 0, bottom: 100, width: 100, height: 100 }),
     showModal() { this.__open = true; },
@@ -91,17 +93,21 @@ function makeSandbox(overrides = {}) {
     crypto: { randomUUID: () => "mock-uuid" },
     localStorage: { getItem: () => null, setItem() {} },
     matchMedia: () => ({ matches: false, addEventListener() {} }),
+    // P2 框架：window 级监听（result-panel resizer 拖拽 / resize）
+    _listeners: {},
+    addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) { const a = this._listeners[type]; if (a) { const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); } },
     DOMPurify: { sanitize: (x) => x },
     marked: null,
     hljs: null,
     emrg: {
       // 注意：app.js 模块加载即 App.boot()，init 返回空 sessions 走 newSession 路径，
       // 避免 boot 自动 switchSession 污染计数（非空 sessions 会触发 boot 切换）
-      init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", evolution_count: 1, sessions: [] }),
+      init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", evolution_count: 1, sessions: [] }),
       onEvent() {},
       sendMessage: async () => ({}),
       cancel: async () => ({}),
-      getSettings: async () => ({ apiKey: "k", baseUrl: "", model: "m", projectDir: "/p", models: [], modelDetails: [], theme: "system" }),
+      getSettings: async () => ({ apiKey: "k", baseUrl: "", model: "m", models: [], modelDetails: [], theme: "system" }),
       saveSettings: async () => ({}),
       pickProjectDir: async () => null,
       listSessions: async () => [{ session_id: "s1", title: "会话一" }, { session_id: "s2", title: "会话二" }],
@@ -120,13 +126,15 @@ function makeSandbox(overrides = {}) {
       triggerTask: async () => ({}),
       sendRant: async () => ({}),
       openFile: async () => ({ ok: true }),
+      listFiles: async () => ({ entries: [] }),
+      readFile: async () => ({ content: "", binary: false }),
       ...overrides,
     },
   };
   win.window = win;
   win.document = document;
   const ctx = vm.createContext(win);
-  for (const f of ["utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "app"]) {
+  for (const f of ["utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "file-tree", "app"]) {
     const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
     vm.runInContext(code, ctx, { filename: "renderer/js/" + f + ".js" });
   }
@@ -201,34 +209,40 @@ test("P3：/skills 打开技能列表对话框并调用 listSkills", async () =>
   assert.ok(els["skills-dialog"] && els["skills-dialog"].__open === true, "skills dialog opened");
 });
 
-test("P4：/rant 无参数打开进化对话框（项目下拉加载）", async () => {
+test("P4：/rant 无参数打开 Rant 面板 + 新建表单（rant 14:10:14 P6：rant-dialog 移除）", async () => {
   const { ctx, els } = makeSandbox({
     listProjects: async () => [{ name: "emrg" }],
     sendRant: async () => ({ ok: true, count: 5 }),
   });
   await tick();
+  vm.runInContext('document.getElementById("rant-form").classList.add("hidden")', ctx); // 镜像 index.html 初始态
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/rant', args: [] })", ctx);
-  assert.ok(els["rant-dialog"] && els["rant-dialog"].__open === true, "rant dialog opened");
+  await tick();
+  const panel = els["panel-rants"];
+  assert.ok(panel && panel.classList.contains("active"), "rants workspace view should be active");
+  assert.ok(els["rant-form"] && !els["rant-form"].classList.contains("hidden"), "rant form should be open");
 });
 
-test("P4：/rant 直接跟内容快速提交（不打开对话框）", async () => {
+test("P4：/rant 直接跟内容快速提交（不打开面板）", async () => {
   const { ctx, els } = makeSandbox({
     listProjects: async () => [{ name: "emrg" }],
     sendRant: async () => ({ ok: true, count: 5 }),
   });
   await tick();
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/rant', args: ['希望支持主题切换'] })", ctx);
-  assert.ok(!(els["rant-dialog"] && els["rant-dialog"].__open), "direct rant submit should not open dialog");
+  const panel = els["panel-rants"];
+  assert.ok(!(panel && panel.classList.contains("active")), "direct rant submit should not open panel");
 });
 
-test("P4：/trigger 无参数打开任务列表对话框", async () => {
+test("P4：/trigger 无参数打开任务面板", async () => {
   const { ctx, els } = makeSandbox({
     listTasks: async () => [{ name: "emrg-task", type: "evolution", interval: 60 }],
     triggerTask: async () => ({ ok: true }),
   });
   await tick();
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/trigger', args: [] })", ctx);
-  assert.ok(els["tasks-dialog"] && els["tasks-dialog"].__open === true, "tasks dialog opened");
+  const panel = els["panel-tasks"];
+  assert.ok(panel && panel.classList.contains("active"), "tasks workspace view should be active");
 });
 
 test("P4：/trigger <name> 直接触发（不打开对话框）", async () => {
@@ -241,44 +255,44 @@ test("P4：/trigger <name> 直接触发（不打开对话框）", async () => {
   assert.ok(!(els["tasks-dialog"] && els["tasks-dialog"].__open), "direct trigger should not open dialog");
 });
 
-// ── WorkBuddy P2（rant 21:35）：Ask/Auto 模式 ────────────────
-test("P2：setMode('ask') 更新 state.mode 并提示（Ask 只对话不执行工具）", async () => {
+// ── Rant 2026-08-20T18:18：Ask/Auto 删除 → 沙箱三档切换 ────────────────
+test("setSandbox 更新 state.sandbox（三档白名单）", async () => {
   const { ctx } = makeSandbox({});
   await tick();
-  await vm.runInContext("App.setMode('ask')", ctx);
-  const mode = await vm.runInContext("App.state.mode", ctx);
-  assert.strictEqual(mode, "ask", "state.mode 应为 ask");
-  await vm.runInContext("App.setMode('auto')", ctx);
-  const mode2 = await vm.runInContext("App.state.mode", ctx);
-  assert.strictEqual(mode2, "auto", "state.mode 应切回 auto");
+  await vm.runInContext("App.setSandbox('read-only')", ctx);
+  const sb = await vm.runInContext("App.state.sandbox", ctx);
+  assert.strictEqual(sb, "read-only", "state.sandbox 应为 read-only");
+  await vm.runInContext("App.setSandbox('danger-full-access')", ctx);
+  const sb2 = await vm.runInContext("App.state.sandbox", ctx);
+  assert.strictEqual(sb2, "danger-full-access", "state.sandbox 应切到 danger-full-access");
 });
 
-test("P2：setMode 非法值不生效（白名单 ask/auto）", async () => {
+test("setSandbox 非法值不生效（白名单 read-only/workspace-write/danger-full-access）", async () => {
   const { ctx } = makeSandbox({});
   await tick();
-  await vm.runInContext("App.setMode('bogus')", ctx);
-  const mode = await vm.runInContext("App.state.mode", ctx);
-  assert.strictEqual(mode, "auto", "非法 mode 应保持默认 auto");
+  await vm.runInContext("App.setSandbox('bogus')", ctx);
+  const sb = await vm.runInContext("App.state.sandbox", ctx);
+  assert.strictEqual(sb, "workspace-write", "非法档位应保持默认 workspace-write");
 });
 
-test("P2：sendMessage 透传 state.mode（ask → sendMessage 带 mode）", async () => {
+test("sendMessage 透传 state.sandbox（read-only → sendMessage 带 sandbox）", async () => {
   let sent = null;
   const { ctx, els } = makeSandbox({
     sendMessage: async (p) => { sent = p; return {}; },
   });
   await tick();
-  vm.runInContext('App.state.sessionId = "s1"; App.state.mode = "ask";', ctx);
+  vm.runInContext('App.state.sessionId = "s1"; App.state.sandbox = "read-only";', ctx);
   els["input"].value = "帮我写一段代码";
   await vm.runInContext("App.sendMessage()", ctx);
   assert.ok(sent, "sendMessage 应被调用");
-  assert.strictEqual(sent.mode, "ask", "ask 模式应透传 mode 参数");
+  assert.strictEqual(sent.sandbox, "read-only", "read-only 档位应透传 sandbox 参数");
   assert.strictEqual(sent.text, "帮我写一段代码", "文本应正常透传");
 });
 
 // ── WorkBuddy P3（rant 21:35）：自进化可见化 ────────────────
 test("P3：/version 使用动态版本号（不再硬编码 v0.2.7）", async () => {
   const { ctx } = makeSandbox({
-    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 3, sessions: [] }),
+    init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 3, sessions: [] }),
   });
   await tick();
   await vm.runInContext("App.handleCommand({ type: 'command', cmd: '/version', args: [] })", ctx);
@@ -290,7 +304,7 @@ test("P3：/version 使用动态版本号（不再硬编码 v0.2.7）", async ()
 
 test("P3：updateGrowthCard 更新侧边栏成长计数", async () => {
   const { ctx, els } = makeSandbox({
-    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 42, sessions: [] }),
+    init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 42, sessions: [] }),
   });
   await tick();
   await vm.runInContext("App.updateGrowthCard()", ctx);
@@ -299,7 +313,7 @@ test("P3：updateGrowthCard 更新侧边栏成长计数", async () => {
 
 test("P3：进化计数增长 → toast 显示（一天最多一次）", async () => {
   const { ctx, els } = makeSandbox({
-    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 5, sessions: [] }),
+    init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 5, sessions: [] }),
   });
   await tick();
   // 模拟 pong 事件：计数 5 → 6（进化发生）
@@ -320,7 +334,7 @@ test("P3：进化计数增长 → toast 显示（一天最多一次）", async (
 
 test("P3：toast '去看看' 关闭并输出版本信息", async () => {
   const { ctx, els } = makeSandbox({
-    init: async () => ({ config_exists: true, api_key_configured: true, project_dir: "/p", project_dir_valid: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 2, sessions: [] }),
+    init: async () => ({ config_exists: true, api_key_configured: true, server_id: "srv", model: "m", version: "0.2.8", evolution_count: 2, sessions: [] }),
   });
   await tick();
   // 计数 2 → 3 触发 toast

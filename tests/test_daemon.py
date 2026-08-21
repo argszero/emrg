@@ -9,22 +9,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
+
+import yaml
 
 from emrg.config import LlmConfig
 from emrg.protocol import InstanceIdentity
 from emrg.server.daemon import EmrgServer
-from emrg.server.scheduler import EvolutionHandler, TaskScheduler
+from emrg.server.scheduler import TaskHandler, TaskScheduler
 from emrg.session import Session
 
 
-# ── EvolutionHandler._build_evolution_prompt ─────────────────────
+# ── TaskHandler._build_evolution_prompt ─────────────────────
 
 
 def test_build_prompt_emrg_self():
     """Builds prompt for emrg self-evolution."""
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -43,7 +48,7 @@ def test_build_prompt_emrg_self():
 
 def test_build_prompt_with_project():
     """Builds prompt for a custom project — derives owner/repo via git remote."""
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="myproject", config={"path": "/home/user/src/myproject"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
@@ -64,13 +69,35 @@ def test_build_prompt_all_variables_substituted():
     """No raw template placeholders ({var}) should remain in output."""
     import re
 
-    handler = EvolutionHandler(
+    handler = TaskHandler(
         name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
         identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
     )
     p1 = handler._build_evolution_prompt()
     braces = re.findall(r"\{[a-z_]+\}", p1)
     assert not braces, f"Unsubstituted placeholders: {braces}"
+
+
+def test_build_prompt_step22_uses_fetch_head():
+    """Step 2.2 must log FETCH_HEAD, not origin/master.
+
+    `git fetch origin master` always writes FETCH_HEAD even when the repo
+    has no remote-tracking refs (e.g. after a workspace repair that
+    stripped `remote.origin.fetch`), where `git log origin/master` fails
+    with "unknown revision" (observed 2026-08-08, cycles 09:15 & 09:30).
+    """
+    handler = TaskHandler(
+        name="emrg", config={"path": "/tmp/emrg"}, interval=1800,
+        identity=InstanceIdentity(instance_id="test-id", host_name="testhost"),
+    )
+    prompt = handler._build_evolution_prompt()
+    # The actual Step 2.2 command block must log FETCH_HEAD, not origin/master.
+    step22 = prompt.split("#### 2.2 Latest GitHub code changes", 1)[1].split("#### 2.3", 1)[0]
+    assert "git fetch origin master && git log FETCH_HEAD --oneline -10" in step22
+    assert "git fetch origin master && git log origin/master" not in step22
+    # Merge-conflict guidance must also merge FETCH_HEAD (line 148).
+    assert "git merge FETCH_HEAD" in prompt
+    assert "git merge origin/master" not in prompt
 
 
 # ── TaskScheduler._load_tasks ────────────────────────────────────
@@ -190,7 +217,12 @@ def test_migrate_auto_evolve_entries(tmp_path):
 
 def _make_server() -> EmrgServer:
     """Create a minimal EmrgServer for testing."""
-    return EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    server = EmrgServer(LlmConfig(base_url="http://localhost", api_key="test"))
+    # Point the project log at a tmp file by default so context/message tests
+    # can never write the real ~/.emrg/projects.yml (2026-08-13 leak). Tests
+    # that exercise _projects_log override it explicitly afterwards.
+    server._projects_log = Path(tempfile.mkdtemp()) / "projects.yml"
+    return server
 
 
 def test_context_section_no_files(tmp_path):
@@ -199,6 +231,61 @@ def test_context_section_no_files(tmp_path):
     session = Session.create_with_id("ctx-test", tmp_path)
     result = server._collect_project_context(session)
     assert result == []
+
+
+def test_system_prompt_environment_time_and_os(tmp_path):
+    """system.j2 renders Current time + Operating system env info.
+
+    Rant 2026-08-13T14:01:46: agent must know "what time it is now"
+    (tz-aware local time, not UTC) and what platform it runs on.
+    """
+    server = _make_server()
+    session = Session.create_with_id("env-test", tmp_path)
+    rendered = server._build_system_prompt(session)
+
+    # Current time: tz-aware local ISO, seconds precision
+    assert "**Current time**: `" in rendered
+    m = re.search(r"\*\*Current time\*\*: `([^`]+)`", rendered)
+    assert m is not None
+    parsed = datetime.fromisoformat(m.group(1))
+    assert parsed.tzinfo is not None  # local tz-aware, never naive UTC
+
+    # OS name + platform detail present
+    assert "**Operating system**: `" in rendered
+    assert "Darwin" in rendered or "Windows" in rendered or "Linux" in rendered
+
+    # system.md debug output written
+    assert (session.dir_path / "system.md").exists()
+    md = (session.dir_path / "system.md").read_text(encoding="utf-8")
+    assert "Current time" in md and "Operating system" in md
+
+
+def test_system_prompt_environment_without_session(tmp_path):
+    """Env info renders even with no session (current_time/os always known)."""
+    server = _make_server()
+    rendered = server._build_system_prompt()
+    assert "**Current time**: `" in rendered
+    assert "**Operating system**: `" in rendered
+    assert "**Working directory**" not in rendered
+
+
+def test_system_prompt_rant_handling_section(tmp_path):
+    """Rant Handling section renders (rant 2026-08-17T11:51:59): agent must
+    know to detect rants in normal conversation, confirm with the user, and
+    only then call submit_rant."""
+    server = _make_server()
+    rendered = server._build_system_prompt()
+    assert "## Rant Handling" in rendered
+    assert "submit_rant" in rendered
+    assert "explicit" in rendered.lower()  # consent-before-call contract
+    assert "/rant" in rendered
+
+
+def test_submit_rant_tool_registered():
+    """submit_rant is in the daemon tool registry (available in all sessions)."""
+    server = _make_server()
+    assert "submit_rant" in server.tools.names
+    assert server.tools.get("submit_rant") is not None
 
 
 def test_context_section_single_file(tmp_path):
@@ -502,7 +589,10 @@ def test_rant_field_order(tmp_path, monkeypatch):
         "type": "rant",
         "message": "test rant message",
         "project": "emrg",
-        "timestamp": "2026-07-31T20:46:59.734987",
+        # Client-supplied timestamp must be IGNORED — the daemon stamps rants
+        # with tz-aware local time (rant 2026-08-07T13:34Z: GUI sent UTC Z,
+        # 8h behind on UTC+8 hosts). A stale UTC value here must not leak through.
+        "timestamp": "2026-07-31T20:46:59.734987Z",
     }, writer))  # type: ignore[arg-type]
 
     lines = (tmp_path / "rants.jsonl").read_text(encoding="utf-8").strip().splitlines()
@@ -515,6 +605,132 @@ def test_rant_field_order(tmp_path, monkeypatch):
     assert entry["project"] == "emrg"
     assert entry["status"] == "pending"
     assert entry["message"] == "test rant message"
+    # Daemon-authoritative local timestamp: tz-aware, NOT UTC (no Z suffix),
+    # and within 60s of the wall clock.
+    import datetime as _dt
+    assert not entry["timestamp"].endswith("Z")
+    ts = _dt.datetime.fromisoformat(entry["timestamp"])
+    assert ts.tzinfo is not None
+    assert abs((_dt.datetime.now(ts.tzinfo) - ts).total_seconds()) < 60
+
+
+def _last_frame(writer: "_FakeWriter") -> dict:
+    """Parse the last WebSocket frame the daemon sent (daemon._send → ws.send → _frames)."""
+    import json as _json
+    raw = writer._frames[-1]
+    return _json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+
+
+def test_list_rants_filter_and_order(tmp_path, monkeypatch):
+    """list_rants reads rants.jsonl: optional status filter + newest-first order."""
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+
+    # 写入 3 条（乱序），覆盖三状态
+    entries = [
+        {"timestamp": "2026-08-13T10:00:00+08:00", "project": "", "status": "pending", "progress": None, "completed": None, "message": "new idea"},
+        {"timestamp": "2026-08-13T14:10:14+08:00", "project": "emrg", "status": "in_progress", "progress": "P1 done", "completed": None, "message": "GUI redesign"},
+        {"timestamp": "2026-08-12T09:00:00+08:00", "project": "", "status": "completed", "progress": None, "completed": "2026-08-12T12:00:00+08:00", "message": "old rant"},
+    ]
+    with open(tmp_path / "rants.jsonl", "w", encoding="utf-8") as f:
+        for e in entries:
+            f.write(json.dumps(e, ensure_ascii=False) + "\n")
+
+    # 无筛选 → 全部，时间倒序（最新在前）
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "rants_list"
+    assert [r["message"] for r in frame["rants"]] == ["GUI redesign", "new idea", "old rant"]
+
+    # status=completed 筛选
+    asyncio.run(server._process_message({"type": "list_rants", "status": "completed"}, writer))
+    frame = _last_frame(writer)
+    assert [r["message"] for r in frame["rants"]] == ["old rant"]
+
+    # status=in_progress 筛选
+    asyncio.run(server._process_message({"type": "list_rants", "status": "in_progress"}, writer))
+    frame = _last_frame(writer)
+    assert [r["message"] for r in frame["rants"]] == ["GUI redesign"]
+
+    # 损坏行跳过（corrupt JSON 不崩）
+    with open(tmp_path / "rants.jsonl", "a", encoding="utf-8") as f:
+        f.write("{not json}\n")
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))
+    frame = _last_frame(writer)
+    assert len(frame["rants"]) == 3  # 损坏行被跳过
+
+
+def test_list_rants_missing_file_returns_empty(tmp_path, monkeypatch):
+    """list_rants with no rants.jsonl → empty list (no crash)."""
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    writer = _FakeWriter()
+    asyncio.run(server._process_message({"type": "list_rants"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "rants_list"
+    assert frame["rants"] == []
+
+
+# ── Token-file self-heal (rant 2026-08-09T13:16:36 root cause) ─────────
+# G43 stale-port logic once deleted a healthy daemon's emrgd.token after a
+# transient ws failure → daemon's own scheduler lost the file (93× "cannot
+# connect") while the PID lock blocked new spawns. The daemon re-asserts
+# its token file so any external deletion self-heals.
+
+def test_assert_token_file_writes_token(tmp_path, monkeypatch):
+    """_assert_token_file writes the single-line token with mode 0o600."""
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    server._auth_token = "tok123"
+    server._assert_token_file()
+    text = (tmp_path / "emrgd.token").read_text(encoding="utf-8")
+    assert text == "tok123"
+
+
+def test_assert_token_file_rewrites_deleted_file(tmp_path, monkeypatch):
+    """A deleted token file is re-asserted on the next keepalive tick."""
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    server._auth_token = "tok456"
+    server._assert_token_file()
+    token_path = tmp_path / "emrgd.token"
+    assert token_path.exists()
+
+    # 外部删除（模拟 G43 unlink 竞态）
+    token_path.unlink()
+    assert not token_path.exists()
+
+    # keepalive loop 的恢复逻辑：缺失 → 重新断言
+    server._assert_token_file()
+    text = (tmp_path / "emrgd.token").read_text(encoding="utf-8")
+    assert text == "tok456"
+
+
+def test_port_keepalive_loop_restores_missing_file(tmp_path, monkeypatch):
+    """The keepalive loop re-asserts a deleted token file within one tick."""
+    import asyncio
+
+    monkeypatch.setattr("emrg.server.daemon.config_dir", lambda: tmp_path)
+    server = _make_server()
+    server._auth_token = "tok789"
+    server._server = type("S", (), {"sockets": [type("Sock", (), {"getsockname": lambda self: (None, 9999)})()]})()
+    server._running = True
+    server._assert_token_file()
+    token_path = tmp_path / "emrgd.token"
+    token_path.unlink()
+
+    # 执行与 loop 相同的恢复逻辑（loop 本体 sleep 60s，测试直接驱动检查体）
+    async def one_tick():
+        if not token_path.exists():
+            server._assert_token_file()
+    asyncio.run(one_tick())
+    assert token_path.exists()
+    assert token_path.read_text(encoding="utf-8") == "tok789"
 
 
 # ── _redact 日志脱敏（rant 10:21 + 跨项目 base64 教训）──────────────
@@ -1092,3 +1308,479 @@ def test_list_projects_includes_evolution_workspace(tmp_path, monkeypatch):
     paths = [p["path"] for p in reply["projects"]]
     assert emrg_path in paths  # emrg visible even though under evolution cwd
     assert "/home/u/work/other" in paths
+
+
+# ── remove_project (P1 GUI multi-session, rant 2026-08-10T15:07:19) ──
+
+
+def _server_with_projects(tmp_path: Path, entries: list[dict]) -> tuple[EmrgServer, Path]:
+    """Server whose _projects_log points at a tmp projects.yml with entries."""
+    server = _make_server()
+    projects_file = tmp_path / "projects.yml"
+    projects_file.write_text(
+        yaml.safe_dump(entries, allow_unicode=True), encoding="utf-8"
+    )
+    server._projects_log = projects_file
+    return server, projects_file
+
+
+def _decode_frames(writer: _FakeWriter) -> list[dict]:
+    return [json.loads(f) for f in writer._frames]
+
+
+def test_remove_project_removes_matching_entry(tmp_path):
+    """Removing an existing project drops only its projects.yml entry."""
+    server, projects_file = _server_with_projects(tmp_path, [
+        {"name": "alpha", "path": "/home/u/a", "last_active": "2026-08-10T10:00:00"},
+        {"name": "beta", "path": "/home/u/b", "last_active": "2026-08-10T10:05:00"},
+    ])
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("alpha", writer))
+
+    replies = _decode_frames(writer)
+    assert len(replies) == 1
+    assert replies[0] == {"type": "project_removed", "removed": True, "name": "alpha"}
+
+    remaining = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
+    assert [e["name"] for e in remaining] == ["beta"]
+
+
+def test_remove_project_unknown_name_leaves_file_unchanged(tmp_path):
+    """Removing a non-existent name reports removed=False and keeps the file."""
+    entries = [
+        {"name": "alpha", "path": "/home/u/a", "last_active": "2026-08-10T10:00:00"},
+    ]
+    server, projects_file = _server_with_projects(tmp_path, entries)
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("nope", writer))
+
+    replies = _decode_frames(writer)
+    assert len(replies) == 1
+    assert replies[0]["removed"] is False
+    assert replies[0]["name"] == "nope"
+    assert yaml.safe_load(projects_file.read_text(encoding="utf-8")) == entries
+
+
+def test_remove_project_preserves_disk_session_data(tmp_path):
+    """Deleting the project entry must NOT touch <path>/.emrg/sessions/ data."""
+    project_dir = tmp_path / "u" / "a"
+    sessions_dir = project_dir / ".emrg" / "sessions" / "sess-1"
+    sessions_dir.mkdir(parents=True)
+    (sessions_dir / "history.jsonl").write_text('{"role":"user"}\n', encoding="utf-8")
+
+    server, _ = _server_with_projects(tmp_path, [
+        {"name": "alpha", "path": str(project_dir), "last_active": "2026-08-10T10:00:00"},
+    ])
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("alpha", writer))
+    assert _decode_frames(writer)[0]["removed"] is True
+    # on-disk session data survives the project removal
+    assert (sessions_dir / "history.jsonl").read_text(encoding="utf-8") == '{"role":"user"}\n'
+
+
+def test_remove_project_no_projects_file(tmp_path):
+    """No projects.yml → removed=False without raising."""
+    server = _make_server()
+    server._projects_log = tmp_path / "projects.yml"  # never created
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("alpha", writer))
+    assert _decode_frames(writer)[0] == {
+        "type": "project_removed", "removed": False, "name": "alpha",
+    }
+
+
+def test_remove_project_corrupt_yaml_reports_error(tmp_path):
+    """Corrupt projects.yml → removed=False + error, no crash."""
+    server = _make_server()
+    projects_file = tmp_path / "projects.yml"
+    projects_file.write_text("a: [unclosed", encoding="utf-8")
+    server._projects_log = projects_file
+    writer = _FakeWriter()
+    asyncio.run(server._handle_remove_project("alpha", writer))
+    replies = _decode_frames(writer)
+    assert replies[0]["removed"] is False
+    assert replies[0]["error"]
+
+
+# ── list_projects ordering by latest session activity (P6, rant 15:07:19) ──
+
+
+def test_list_projects_ordered_by_latest_session_activity(tmp_path, monkeypatch):
+    """Projects come back sorted by their newest session's created_at (desc).
+
+    P6 acceptance ("选项目按该项目最新会话活跃倒序"): the daemon aggregates
+    each project's sessions dir (parallel scan) because the GUI cannot issue
+    concurrent list_sessions on one connection (pending map keys by respType).
+    """
+    import asyncio
+    import json
+
+    from emrg.server import daemon as dmod
+
+    server = _make_server()
+    p_old = tmp_path / "old"
+    p_new = tmp_path / "new"
+    p_none = tmp_path / "nosess"
+    for p in (p_old, p_new, p_none):
+        p.mkdir()
+    # 老项目：最近会话 created_at 较早
+    (p_old / ".emrg" / "sessions" / "s-old").mkdir(parents=True)
+    (p_old / ".emrg" / "sessions" / "s-old" / "meta.json").write_text(
+        json.dumps({"session_id": "s-old", "created_at": "2026-08-01T00:00:00"}), encoding="utf-8"
+    )
+    # 新项目：最近会话 created_at 较晚 → 应排第一
+    (p_new / ".emrg" / "sessions" / "s-new").mkdir(parents=True)
+    (p_new / ".emrg" / "sessions" / "s-new" / "meta.json").write_text(
+        json.dumps({"session_id": "s-new", "created_at": "2026-08-10T12:00:00"}), encoding="utf-8"
+    )
+    # 无会话项目 → 排最后（无 latest_session_at）
+    projects_file = tmp_path / "projects.yml"
+    projects_file.write_text(
+        f"- name: old\n  path: {p_old}\n"
+        f"- name: new\n  path: {p_new}\n"
+        f"- name: nosess\n  path: {p_none}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "_projects_log", projects_file)
+
+    writer = _FakeWriter()
+    asyncio.run(server._handle_list_projects(writer))
+
+    reply = json.loads(writer._frames[0])
+    names = [p["name"] for p in reply["projects"]]
+    assert names == ["new", "old", "nosess"], f"ordered by latest session activity: {names}"
+    new_proj = next(p for p in reply["projects"] if p["name"] == "new")
+    assert new_proj["latest_session_at"] == "2026-08-10T12:00:00"
+    none_proj = next(p for p in reply["projects"] if p["name"] == "nosess")
+    assert none_proj["latest_session_at"] == ""
+
+
+# ── rant 2026-08-19T08:05:21：固定端口 bind 排斥 = 唯一单 daemon 准入 ──
+def test_serve_refuses_duplicate_when_fixed_port_bound(tmp_path):
+    """serve() must exit when another LIVE daemon owns the fixed port.
+
+    The fixed-port bind (EADDRINUSE) is the ONLY single-instance admission
+    (rant 2026-08-19T08:05:21): kernel-level resource exclusivity — no PID
+    file to forge/delete, no race window (emrgd.pid removed entirely per
+    rant 2026-08-21T16:45:06). A refused instance must not reach the
+    websockets bind.
+    """
+    import errno as _errno
+    from unittest.mock import AsyncMock, patch
+
+    server = _make_server()
+
+    def _deny(port):
+        raise OSError(_errno.EADDRINUSE, "Address already in use")
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_deny), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=True), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock) as mock_serve:
+        import asyncio
+        asyncio.run(server.serve())
+
+    assert server._running is False, "duplicate daemon must not keep running"
+    mock_serve.assert_not_awaited(), "must not bind when the fixed port is taken"
+
+
+def test_serve_proceeds_when_fixed_port_free(tmp_path):
+    """Negative path: fixed port free → bind passes → the websockets serve is
+    reached with the pre-bound socket (no pid file is written anymore)."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    server = _make_server()
+    fake_sock = MagicMock()
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", return_value=fake_sock), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock,
+               side_effect=RuntimeError("abort after admission — bind already verified")):
+        try:
+            asyncio.run(server.serve())
+        except RuntimeError as e:
+            assert "abort after admission" in str(e), f"unexpected abort: {e}"
+        else:
+            raise AssertionError("expected the websockets serve abort (admission passed)")
+    assert not (tmp_path / "emrgd.pid").exists(), "no pid file may be written (rant 2026-08-21T16:45:06)"
+
+
+def test_serve_timewait_retry_recovers_bind(tmp_path):
+    """EADDRINUSE with NO live listener = TIME_WAIT remnant (Windows
+    SO_EXCLUSIVEADDRUSE) → serve() retries the bind and recovers."""
+    import asyncio
+    import errno as _errno
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    server = _make_server()
+    fake_sock = MagicMock()
+    bind_calls = {"n": 0}
+
+    def _flaky(port):
+        bind_calls["n"] += 1
+        if bind_calls["n"] == 1:
+            raise OSError(_errno.EADDRINUSE, "Address already in use")
+        return fake_sock
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_flaky), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRIES", 3), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRY_DELAY", 0.01), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock,
+               side_effect=RuntimeError("abort after retry recovered the bind")):
+        try:
+            asyncio.run(server.serve())
+        except RuntimeError as e:
+            assert "abort after retry" in str(e), f"unexpected abort: {e}"
+        else:
+            raise AssertionError("expected the websockets serve abort (retry recovered)")
+    assert bind_calls["n"] == 2, f"expected 2 bind attempts, got {bind_calls['n']}"
+    assert not (tmp_path / "emrgd.pid").exists(), "no pid file may be written (rant 2026-08-21T16:45:06)"
+
+
+def test_serve_timewait_retry_exhausted(tmp_path):
+    """EADDRINUSE with no listener that never clears → serve() gives up
+    gracefully (no websockets bind; no pid file exists anymore)."""
+    import asyncio
+    import errno as _errno
+    from unittest.mock import AsyncMock, patch
+
+    server = _make_server()
+
+    def _always_busy(port):
+        raise OSError(_errno.EADDRINUSE, "Address already in use")
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_always_busy), \
+         patch("emrg.server.daemon.is_server_running_sync", return_value=False), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRIES", 2), \
+         patch("emrg.server.daemon._TIME_WAIT_RETRY_DELAY", 0.01), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path), \
+         patch("emrg.server.daemon.serve", new_callable=AsyncMock) as mock_serve:
+        asyncio.run(server.serve())
+
+    assert server._running is False, "must give up after retries"
+    mock_serve.assert_not_awaited()
+    assert not (tmp_path / "emrgd.pid").exists(), "failed instance must not claim the pid file"
+
+
+def test_serve_rethrows_non_bind_errors(tmp_path):
+    """A non-EADDRINUSE socket error must propagate — only 'address in use'
+    means 'already running'."""
+    import asyncio
+    import errno as _errno
+    from unittest.mock import patch
+
+    server = _make_server()
+
+    def _boom(port):
+        raise OSError(_errno.EACCES, "Permission denied")
+
+    with patch("emrg.server.daemon._create_fixed_port_socket", side_effect=_boom), \
+         patch("emrg.server.daemon.config_dir", return_value=tmp_path):
+        try:
+            asyncio.run(server.serve())
+        except OSError as e:
+            assert e.errno == _errno.EACCES, f"unexpected errno: {e.errno}"
+        else:
+            raise AssertionError("expected OSError(EACCES) to propagate")
+
+
+def test_assert_token_file_writes_token_only(tmp_path):
+    """_assert_token_file persists ONLY the auth token (no port — rant
+    2026-08-20T14:32:52: emrgd.port → emrgd.token, single-line token)."""
+    from unittest.mock import patch
+
+    server = _make_server()
+    server._auth_token = "tok-123"
+    with patch("emrg.server.daemon.config_dir", return_value=tmp_path):
+        server._assert_token_file()
+    token_file = tmp_path / "emrgd.token"
+    assert token_file.exists()
+    assert token_file.read_text(encoding="utf-8").strip() == "tok-123"
+    # 旧 emrgd.port 不再被写入
+    assert not (tmp_path / "emrgd.port").exists()
+
+
+# ── Daemon stop-path logging (rant 2026-08-19T14:02:37) ──────────────
+# Any reason / any path the daemon stops must leave a detailed emrgd.log:
+# when, why, who triggered, what was cleaned up. These are PURE-MOCK tests
+# (mock the scheduler/llm/background tasks, never boot or stop a real
+# daemon) — the highest principle forbids stop/restart server tests.
+
+def _make_shutdown_server(tmp_path) -> EmrgServer:
+    """EmrgServer with all teardown dependencies mocked for _shutdown_all."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    server = _make_server()
+    server._stop_reason = "cancel"
+    server._skills_ttl_task = None
+    server._upgrade_tick_task = None
+    server._port_keepalive_task = None
+    server._scheduler = AsyncMock()  # stop_all + wait_all, no real handlers
+    server._scheduler.stop_all = MagicMock()  # real API is sync
+    server._scheduler.wait_all = AsyncMock()
+    server.llm = AsyncMock()         # close() awaitable
+    server._server = _ShutdownFakeServer()  # sync .close(), no unawaited coroutine
+    return server
+
+
+class _ShutdownFakeServer:
+    """Minimal stand-in for the websockets Server in shutdown-message tests."""
+
+    def close(self) -> None:
+        pass
+
+
+def test_shutdown_all_logs_reason_and_cleanup_steps(tmp_path, caplog):
+    """_shutdown_all logs the stop reason + every cleanup step + final line."""
+    import logging
+
+    server = _make_shutdown_server(tmp_path)
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    asyncio.run(server._shutdown_all())
+
+    text = caplog.text
+    assert "daemon stopping (reason=cancel, handlers=0) — cleaning up" in text
+    assert "cancelled skills-ttl loop" in text
+    assert "cancelled upgrade-tick loop" in text
+    assert "cancelled port-keepalive loop" in text
+    assert "stopped scheduler" in text
+    assert "closed llm client" in text
+    assert "removed port file" in text
+    assert "daemon stopped (reason=cancel, uptime=" in text
+    assert "all_ok=True" in text
+
+
+def test_shutdown_all_handles_failing_cleanup(tmp_path, caplog):
+    """A failing cleanup step is recorded (all_ok=False), never raises."""
+    import logging
+    from unittest.mock import AsyncMock
+
+    server = _make_shutdown_server(tmp_path)
+    server.llm.close = AsyncMock(side_effect=RuntimeError("boom"))
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    asyncio.run(server._shutdown_all())
+
+    text = caplog.text
+    assert "daemon stopping (reason=cancel" in text
+    assert "closed llm client" in text  # step listed even on failure
+    assert "daemon stopped (reason=cancel" in text
+    assert "all_ok=False" in text
+
+
+def test_shutdown_all_reason_crash_and_sigint(tmp_path, caplog):
+    """_stop_reason is echoed in both the start and final log lines."""
+    import logging
+
+    for reason in ("crash", "sigint", "shutdown_msg"):
+        server = _make_shutdown_server(tmp_path)
+        server._stop_reason = reason
+        caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+        asyncio.run(server._shutdown_all())
+        assert f"daemon stopping (reason={reason}" in caplog.text
+        assert f"daemon stopped (reason={reason}" in caplog.text
+        caplog.clear()
+
+
+def test_shutdown_message_logs_peer_and_source(tmp_path, caplog):
+    """shutdown msg logs peer + source and sets _stop_reason=shutdown_msg."""
+    import logging
+
+    server = _make_shutdown_server(tmp_path)
+    writer = _FakeWriter()
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    asyncio.run(server._process_message({"type": "shutdown", "source": "stop_all"}, writer))
+
+    assert "shutdown requested by client (peer=unknown peer, source=stop_all)" in caplog.text
+    assert server._stop_reason == "shutdown_msg"
+    # shutdown_ack is sent back
+    assert _last_frame(writer) == {"type": "shutdown_ack"}
+
+
+def test_shutdown_message_missing_source_degrades(tmp_path, caplog):
+    """Legacy shutdown msg without source logs source=unknown (backward compat)."""
+    import logging
+
+    server = _make_shutdown_server(tmp_path)
+    writer = _FakeWriter()
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    asyncio.run(server._process_message({"type": "shutdown"}, writer))
+
+    assert "shutdown requested by client (peer=unknown peer, source=unknown)" in caplog.text
+    assert server._stop_reason == "shutdown_msg"
+
+
+def test_pong_includes_current_version(tmp_path, monkeypatch):
+    """Pong carries current_version from ~/.emrg/install/version.txt.
+
+    Rant 2026-08-20T18:30:57: the GUI compares the version it last saw with
+    the daemon's installed version and shows the upgrade banner on change.
+    Missing file → empty string (dev runs), never an error.
+    """
+    import emrg.server.daemon as daemon_mod
+    install = tmp_path / ".emrg" / "install"
+    install.mkdir(parents=True)
+    (install / "version.txt").write_text("0.2.59\n", encoding="utf-8")
+
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+
+    server = _make_server()
+    assert server._current_installed_version() == "0.2.59"
+
+    # Missing file → "" (no crash)
+    empty = tmp_path / "no-install"
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: empty)
+    assert server._current_installed_version() == ""
+
+    # Pong payload includes both fields (14:38:27 refactor: current_version =
+    # in-memory run version captured at startup; installed_version = live read)
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    writer = _FakeWriter()
+    import asyncio
+    asyncio.run(server._process_message({"type": "ping"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "pong"
+    assert frame["current_version"] == "0.2.59"
+    assert frame["installed_version"] == "0.2.59"
+
+
+def test_pong_run_vs_installed_version(tmp_path, monkeypatch):
+    """current_version is the daemon's in-memory run version (fixed at
+    startup); installed_version is the live disk read — the upgrade agent can
+    update version.txt while the daemon still runs the pre-upgrade code.
+
+    Rant 2026-08-21T14:38:27: the GUI shows the upgrade banner when
+    installed_version ≠ current_version (upgrade installed, restart pending).
+    previous-version.txt is no longer used for the judgment.
+    """
+    import emrg.server.daemon as daemon_mod
+    install = tmp_path / ".emrg" / "install"
+    install.mkdir(parents=True)
+    (install / "version.txt").write_text("0.2.61\n", encoding="utf-8")
+
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+
+    server = _make_server()
+    # _run_version captured at startup — mirrors the daemon's running code
+    assert server._run_version == "0.2.61"
+
+    # Simulate an upgrade: version.txt updated on disk, daemon not restarted
+    (install / "version.txt").write_text("0.2.62\n", encoding="utf-8")
+    assert server._run_version == "0.2.61", "run version must stay fixed in-process"
+    assert server._current_installed_version() == "0.2.62"
+
+    # Pong: current_version = run (0.2.61), installed_version = disk (0.2.62)
+    writer = _FakeWriter()
+    import asyncio
+    asyncio.run(server._process_message({"type": "ping"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "pong"
+    assert frame["current_version"] == "0.2.61"
+    assert frame["installed_version"] == "0.2.62"
+    assert "previous_version" not in frame, "previous-version.txt no longer used (14:38:27)"

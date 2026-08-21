@@ -19,12 +19,6 @@
   background: var(--bg-soft);
   color: var(--text-1);
 }
-/* 键盘导航聚焦（↑↓）——区别于当前会话高亮 */
-.conv-item.kbd-focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  background: var(--bg-soft);
-}
 .conv-item.active {
   background: var(--accent-soft);
   color: var(--accent);
@@ -48,6 +42,11 @@
 }
 .msg.user {
   align-self: flex-end;
+  /* rant 21:28:49：flex 容器中 auto margin 优先于 align-self——.session-view > * 的
+     margin-left/right:auto（居中 760px）盖掉了 align-self:flex-end → 用户气泡被居中
+     而非右对齐。margin-left:auto + margin-right:0（特异性 0,2,0 覆盖 0,1,0）恢复右对齐。 */
+  margin-left: auto;
+  margin-right: 0;
   background: var(--accent-soft);
   color: var(--text-1);
   border-radius: var(--radius-bubble);
@@ -89,6 +88,19 @@
 .msg.remote-label {
   font-size: var(--fs-aux);
   color: var(--text-3);
+}
+/* 历史消息（rant 14:15:12：只读展示，视觉弱化区分于实时消息） */
+.msg.user.history {
+  opacity: 0.72;
+  animation: none;
+}
+.history-load-bar {
+  text-align: center;
+  font-size: var(--fs-secondary);
+  color: var(--accent);
+  padding: var(--sp-2) 0;
+  cursor: pointer;
+  user-select: none;
 }
 
 /* Markdown 内容排版 */
@@ -204,9 +216,9 @@
   display: flex;
   align-items: center;
   gap: var(--sp-2);
-  font-size: var(--fs-secondary);
+  font-size: var(--fs-small);
   color: var(--text-2);
-  padding: 4px 2px;
+  padding: 2px 2px;
   border-radius: 8px;
   cursor: pointer;
   user-select: none;
@@ -219,13 +231,17 @@
 }
 .tool-row .tool-spinner {
   display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid var(--amber-soft);
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--amber-soft);
   border-top-color: var(--amber);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
+}
+/* rant 21:08：工具完成后 spinner 不再转圈（JS 亦移除元素，CSS 兜底防闪烁） */
+.tool-row:not(.running) .tool-spinner {
+  display: none;
 }
 .tool-row.running {
   color: var(--amber);
@@ -245,6 +261,15 @@
   color: var(--text-3);
   margin-left: auto;
   transition: transform var(--dur-med) var(--ease);
+}
+.tool-row .tool-intent {
+  font-size: var(--fs-secondary);
+  color: var(--text-2);
+  margin-left: var(--sp-2);
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tool-row.expanded .tool-chevron {
   transform: rotate(180deg);
@@ -267,6 +292,44 @@
   color: var(--accent);
   padding: 2px 6px;
   margin: 0 0 6px 2px;
+}
+
+/* rant 21:28:49：工具耗时（成功时 label 后 · 3.2s） */
+.tool-time {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  margin-left: 4px;
+}
+
+/* ── 连续工具合并组（方案 A：⌄ N 个工具执行 · Ts） ─────── */
+.tool-group {
+  display: flex;
+  flex-direction: column;
+}
+.tool-group-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  font-size: var(--fs-small);
+  color: var(--text-3);
+  padding: 2px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+.tool-group-bar:hover {
+  background: var(--bg-soft);
+}
+.tool-group-bar .tool-group-chev {
+  font-size: 10px;
+  transition: transform var(--dur-med) var(--ease);
+}
+.tool-group.collapsed .tool-group-rows {
+  display: none;
+}
+.tool-group:not(.collapsed) .tool-group-bar .tool-group-chev {
+  transform: rotate(180deg);
 }
 
 /* ── 空状态欢迎屏 ─────────────────────── */
@@ -560,10 +623,19 @@ dialog::backdrop {
   margin-bottom: var(--sp-3);
 }
 .dialog-card label > input,
-.dialog-card label > select {
+.dialog-card label > select,
+.dialog-card label > textarea {
   width: 100%;
   margin-top: var(--sp-1);
   padding: 8px 10px;
+}
+/* rant 2026-08-07T13:32Z: rant dialog textarea was unstyled — default box was
+   tiny. Full width + comfortable min-height + vertical resize + inherited font. */
+.dialog-card label > textarea {
+  min-height: 120px;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.5;
 }
 .dialog-card .hint {
   font-size: var(--fs-aux);
@@ -732,6 +804,347 @@ dialog::backdrop {
 .model-form-vision input {
   accent-color: var(--accent);
 }
+
+/* 定时任务管理（rant 2026-08-12T18:23:15 P3：GUI 任务/自定义类型 CRUD） */
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+.task-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+}
+.task-name {
+  font-weight: 600;
+  flex-shrink: 0;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-hint {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-badge {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+/* rant 21:36:01：Rant 面板 5 列 + 状态徽标三态配色（已完成绿 / 进行中琥珀 / 待处理灰） */
+.rant-head {
+  display: flex;
+  gap: 8px;
+  padding: 2px 8px 6px;
+  font-size: var(--fs-aux);
+  font-weight: 600;
+  color: var(--text-3);
+}
+.rant-head .rant-col-time,
+.rant-row .rant-col-time {
+  flex: 0 0 150px;
+}
+.rant-head .rant-col-project,
+.rant-row .rant-col-project {
+  flex: 0 0 90px;
+}
+.rant-head .rant-col-status,
+.rant-row .rant-col-status {
+  flex: 0 0 76px;
+}
+.rant-head .rant-col-progress,
+.rant-row .rant-col-progress {
+  flex: 1.2;
+  min-width: 0;
+}
+.rant-head .rant-col-content,
+.rant-row .rant-col-content {
+  flex: 2;
+  min-width: 0;
+}
+.rant-head span,
+.rant-row .rant-col-time,
+.rant-row .rant-col-project,
+.rant-row .rant-col-progress,
+.rant-row .rant-col-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rant-row .rant-col-time,
+.rant-row .rant-col-project,
+.rant-row .rant-col-progress,
+.rant-row .rant-col-content {
+  font-size: var(--fs-aux);
+  color: var(--text-2);
+}
+.task-badge.badge-done {
+  color: #16a34a;
+  border-color: #16a34a;
+  background: color-mix(in srgb, #16a34a 10%, transparent);
+}
+.task-badge.badge-warn {
+  color: #d97706;
+  border-color: #d97706;
+  background: color-mix(in srgb, #d97706 10%, transparent);
+}
+.task-badge.badge-muted {
+  color: var(--text-3);
+  border-color: var(--border);
+  background: transparent;
+}
+.rant-detail {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-secondary);
+}
+.rant-meta {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  margin-bottom: 4px;
+}
+.rant-md {
+  margin-top: 4px;
+}
+.rant-progress {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  word-break: break-all;
+}
+/* rant 10:41:43：rant 详情 markdown —— 【】标题预处理后的 h4 层次 + 嵌套列表缩进可见 */
+.rant-md h4 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  color: var(--text-1);
+}
+.rant-md li > ul,
+.rant-md li > ol {
+  margin-left: 1em;
+}
+.task-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.task-empty {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  text-align: center;
+  padding: var(--sp-2);
+}
+
+.task-form {
+  margin-top: 8px;
+  padding: var(--sp-3);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--bg-soft);
+}
+.task-form select,
+.task-form textarea {
+  width: 100%;
+  margin-top: 2px;
+  padding: 6px 10px;
+  font-size: var(--fs-secondary);
+}
+
+/* rant 09:23:10：任务 running 徽标（常驻运行的任务从源头减少误点） */
+.task-running-badge {
+  background: var(--bg-soft);
+  color: var(--text-3);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 4px;
+}
+
+/* rant 10:36:39：任务状态徽标（待运行/待调度）+ 下次运行倒计时 */
+.task-pending-badge,
+.task-idle-badge {
+  background: var(--bg-soft);
+  color: var(--text-3);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  margin-left: 4px;
+}
+.task-pending-badge {
+  color: var(--accent);
+  background: var(--accent-soft, var(--bg-soft));
+}
+.task-next-run {
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums; /* 倒计时走秒不抖动 */
+}
+
+/* rant 2026-08-18T10:45:52：任务行"上次执行"元信息（运行时间/摘要/降频标识） */
+/* rant 2026-08-20T10:34:40：主表一行 —— 去掉 flex-basis:100%（曾强制"上次运行"独占一行），
+   改为 flex: 0 1 auto 与 actions 同行；窄窗口下靠自身 flex-wrap 内部合理换行 */
+.task-meta {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.task-meta-item {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.task-meta-summary {
+  max-width: 60%;
+  color: var(--text-2);
+}
+.task-saturation-badge {
+  background: var(--warn-soft, var(--bg-soft));
+  color: var(--warn, var(--text-3));
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--warn-soft, var(--border));
+}
+/* rant 2026-08-18T21:32:32：任务卡点击展开的最近运行子表（时间/干了什么/降频） */
+.task-run-detail {
+  flex-basis: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+  min-width: 0;
+}
+.task-run-detail.hidden {
+  display: none;
+}
+.task-run-head,
+.task-run-row {
+  display: grid;
+  grid-template-columns: 72px 1fr 92px 1fr;
+  gap: 6px;
+  font-size: var(--fs-aux);
+  min-width: 0;
+  align-items: center;
+}
+.task-run-head {
+  color: var(--text-3);
+  font-weight: 600;
+}
+.task-run-time {
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.task-run-done {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+.task-run-reason {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+}
+/* rant 2026-08-20T22:59:16 #3：work/reason cell 多行截断（限制行数 + 省略号），
+   点击 cell 在本条记录下方展开完整内容（Markdown 渲染），再点收起 */
+.task-run-cell {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  white-space: normal;
+  cursor: pointer;
+  line-height: 1.35;
+}
+.task-run-cell:hover {
+  color: var(--accent, var(--text-2));
+}
+.task-run-expand {
+  flex-basis: 100%;
+  grid-column: 1 / -1;
+  font-size: var(--fs-aux);
+  color: var(--text-2);
+  background: var(--bg-soft, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}
+.task-run-expand.hidden {
+  display: none;
+}
+.task-run-expand :first-child {
+  margin-top: 0;
+}
+.task-run-expand :last-child {
+  margin-bottom: 0;
+}
+.task-run-flag {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+.task-run-badge-warn {
+  background: var(--warn-soft, var(--bg-soft));
+  color: var(--warn, var(--text-3));
+  border-color: var(--warn-soft, var(--border));
+}
+.task-run-badge-idle {
+  color: var(--text-3);
+}
+.task-run-empty {
+  flex-basis: 100%;
+  font-size: var(--fs-aux);
+  color: var(--text-3);
+  padding: 4px 0;
+}
+
+/* rant 09:17:45：提示词编辑器 Monaco 挂载容器（长提示词 300px 起步） */
+.monaco-host {
+  width: 100%;
+  min-height: 300px;
+  margin-top: 2px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-1);
+}
+.task-form .hidden,
+.monaco-host.hidden {
+  display: none;
+}
+
 .theme-options {
   display: flex;
   gap: var(--sp-2);
@@ -918,6 +1331,30 @@ dialog::backdrop {
 .mode-btn:hover:not(.active) {
   color: var(--text-1);
 }
+
+/* ── 通用 toast（rant 2026-08-15T09:20:27：面板操作反馈全局可见） ── */
+.toast {
+  position: fixed;
+  top: 16px;
+  right: 20px;
+  z-index: 1100;
+  max-width: calc(100vw - 40px);
+  padding: 10px 16px;
+  border-radius: var(--radius-btn);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0,0,0,0.18));
+  animation: toast-in 0.22s var(--ease);
+  pointer-events: none;
+}
+.toast-msg {
+  font-size: var(--fs-secondary);
+  color: var(--text-1);
+  white-space: pre-wrap;
+}
+.toast-success { border-left: 4px solid var(--ok, #2e9e5b); }
+.toast-error { border-left: 4px solid var(--danger, #d64545); }
+.toast-info { border-left: 4px solid var(--accent, #4a7dff); }
 
 /* ── 进化完成 toast（WorkBuddy P3）────────────────── */
 .evolution-toast {

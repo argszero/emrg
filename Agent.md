@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-EMRG is a self-evolving AI agent architecture experiment. Python implementation, based on a micro-kernel design.
+EMRG is a self-evolving AI agent architecture experiment. Python implementation, based on a micro-kernel design. The name reads as "emerge" — intelligence that emerges from use — expanding to Evolving Micro-kernel, Rant-driven Growth.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - `__main__.py` — CLI entry (`emrg`, `emrg server`, `emrg rant`, `emrg update`)
   - `protocol.py` — Communication protocol (TaskRequest, TaskResponse, ToolStart, ToolEnd, ServerPong, EvolutionLog, InstanceIdentity)
   - `config.py` — Config loading (`~/.emrg/config.toml`, Python 3.11+ tomllib)
-  - `connect.py` — IPC connection (WebSocket over TCP loopback, token auth via `emrgd.port`)
+  - `connect.py` — IPC connection (WebSocket over TCP loopback, token auth via `emrgd.token`)
   - `memory.py` — Memory system (ProjectMemoryStore, SessionMemoryStore, MemoryFile, MemoryIndex)
   - `session.py` — Session management (Session CRUD, history persistence, compact/clear)
 - `emrg/server/` — Server (WebSocket daemon, EMRG's living core)
@@ -22,7 +22,7 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - `tool_types.py` — Tool type definitions (ToolDefinition, ToolResult)
   - `evolution_prompt.md` — Evolution prompt template
 - `emrg/tools/` — Tool implementations (bash, read, write, edit, glob, grep, base + registry)
-- `emrg/skills/` — Dynamically loaded skill modules (skills, progressive disclosure)
+- `emrg/skills/` — Dynamically loaded skill modules (skills, progressive disclosure) + installable-skills catalog (`skill-catalog.md`, `/skills available|install|update`)
 - `emrg/client/` — Client (TUI interface based on inlined python-tui)
   - `daemon_manager.py` — Daemon lifecycle (start/restart-if-stale/ensure-connected) + protocol client (DaemonConnection: send_task/send_command/recv/read_stream) — shared with GUI (Phase 3)
   - `app.py` — Main entry, event loop, ChatHistory widget, command autocomplete, session selector
@@ -36,6 +36,25 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
 - Client logs go to `./.emrg/emrg-client.log`
 - **README language**: `README.md` = English (default), `README.cn.md` = Chinese
 - **Project context files**: `README.md` = English, `Agent.md` = English
+
+## Terminology
+
+Unified vocabulary for the agent's execution model (code terms in `emrg/server/daemon.py`):
+
+- **Tool loop** (工具循环) — the complete process triggered by one user message: the agent calls tools and sends LLM requests repeatedly until a round produces no new tool calls. Code: "tool loop" (`_run_tool_loop`).
+- **Round** (轮) — one iteration inside a tool loop: one LLM request + zero or more tool calls + tool executions. Code: `round_num` (daemon.py:1775 `for round_num in range(1, self._max_tool_rounds + 1)`), bounded by `max_tool_rounds`.
+- **Evolution cycle** (演化周期) — a distinct concept: one full run of the self-evolution task ("Prepare → Review → Discover → Improve → Submit → Record"), unrelated to tool loop rounds.
+
+Hierarchy:
+```
+user message
+  └── tool loop (the whole process)
+        ├── round 1: LLM request → tool calls → execute
+        ├── round 2: LLM request → tool calls → execute
+        └── round N: LLM request → no tool calls → loop ends
+```
+
+Usage: say "tool loop" for the whole process, "round N" for a single LLM request + tools. Do not call evolution cycles "rounds".
 
 ## Current Features
 
@@ -66,7 +85,13 @@ EMRG is a self-evolving AI agent architecture experiment. Python implementation,
   - Streaming chat with delta rendering (16ms batching), markdown on done (marked + DOMPurify + local highlight.js subset), tool call status cards (2000-char truncation + expand)
   - Session list/switch/new/delete + right-click rename (context menu, #423) synced with daemon; own-stream busy lock (G65); broadcast streams from other clients tagged "来自其他客户端"
   - Disconnect/reconnect: red status dot, auto daemon respawn (stale-port detection), session resume, input bar restored on disconnect (no 30s fake-timeout)
-  - Unit tests `npm test` (91: 22 daemon_client + 22 app-commands + 22 renderer smoke + 15 i18n + 7 integration + 3 commands); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
+  - Unit tests `npm test` (258: 45 daemon_client + 19 conn-manager + 22 app-commands + 129 renderer smoke + 15 i18n + 8 integration + 3 commands + 8 build-config + 7 gui-state + 2 tool-group); RESPONSE_TYPES mirror daemon protocol verified against `daemon.py`
+- **Scheduled tasks** — Task generalization + CRUD (rant 2026-08-12T18:23:15, #709/#710/#711)
+  - Task handler generalized: `TaskHandler` (renamed from `EvolutionHandler`), repo-configured self-heal for any project, template lookup builtin → `~/.emrg/task-templates/<name>.md` → fallback
+  - Daemon commands: `task_create/update/delete` + `task_template_create/list/update/delete` (tasks stored in `~/.emrg/tasks.yml`, custom type templates in `~/.emrg/task-templates/`)
+  - Hot reload: editing tasks.yml at runtime adds/removes handlers without daemon restart (`TaskScheduler.apply_tasks`)
+  - Validation: name `^[a-z0-9][a-z0-9-]*$` ≤32 chars, type builtin-or-custom, project must be registered, interval ≥60s; builtin types/templates read-only; deleting a referenced custom type refused (error includes task count)
+  - GUI settings → 定时任务 section: task list (trigger/edit/delete) + add/edit form (type + registered-project pickers, interval validation) + custom-type management (prompt-template textarea; builtin read-only); IPC wired through main.js/preload.js + RESPONSE_TYPES
 - **Auto project tracking** — Automatically detects and records working directories; project-scoped sessions
 - **Rant-driven evolution** — User feedback via `/rant` drives automatic self-improvement cycles
 - **Headless GitHub auth** — Non-interactive evolution auto-extracts `GH_TOKEN` from git credential store (osxkeychain / credential helper); PR comment/LGTM queries fall back to REST API (GraphQL needs `read:org` scope)
@@ -90,13 +115,17 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 ## Test Commands
 
 ```bash
-pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.port; python -m emrg
+pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.token; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (572) — import check: `uv run python -c "from emrg.client.app import run_client"`
-GUI: `cd emrg/gui && npm test` (91: 22 daemon_client + 22 app-commands + 22 renderer smoke + 15 i18n + 7 integration + 3 commands) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
-CI: `uv run pytest` + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
+Python: `uv run pytest tests/ -v` (1003) — import check: `uv run python -c "from emrg.client.app import run_client"`
+GUI: `cd emrg/gui && npm test` (258: 45 daemon_client + 19 conn-manager + 22 app-commands + 129 renderer smoke + 15 i18n + 8 integration + 3 commands + 8 build-config + 7 gui-state + 2 tool-group) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
+CI: `uv run pytest` (ubuntu + **windows-2025 matrix** — Windows pytest 回归在 PR CI 即失败，v0.2.29 教训 #725) + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
 Re-trigger: `scripts/re-trigger-ci.sh [branch]` (workflow_dispatch, #527 — 替代空 commit 重触发：Actions outage 会整段丢弃 push 事件，dispatch 走 API 路径不受影响)
+
+## Packaging
+
+Generated icon products (`packaging/assets/icon.png/icon-512/icon-256/icon.icns/icon.ico`) are **gitignored** — only `icon.svg` design source is committed (#688); CI generates them in Build Release. Local installer builds (`make-installer.sh` / `build-runtime.sh`) require running `bash packaging/gen-assets.sh` first (idempotent; renderer priority rsvg-convert → Chrome headless → sips; `.icns` needs macOS `iconutil`, skipped elsewhere).
 
 ## Configuration
 

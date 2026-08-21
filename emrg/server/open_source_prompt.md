@@ -38,11 +38,11 @@ gh auth status 2>&1 || {
     TOKEN=$(printf "protocol=https\nhost=github.com\n\n" | git credential fill 2>/dev/null | grep '^password=' | cut -d= -f2-)
     if [ -n "$TOKEN" ]; then
       export GH_TOKEN="$TOKEN"
-      echo "gh 未认证 — 已从 git 凭据提取 token (GH_TOKEN)"
+      echo "gh not authenticated — token extracted from git credentials (GH_TOKEN)"
       gh auth status 2>&1
     fi
   else
-    echo "gh 未认证 — 请在 EMRG GUI 设置页连接 GitHub（无需终端）"
+    echo "gh not authenticated — connect GitHub from the EMRG GUI settings page (no terminal needed)"
   fi
 }
 ```
@@ -58,6 +58,7 @@ This task's role is configured in tasks.yml as: **{{ task.role }}**
 
 - **Committer**: may review, merge, close
 - **Contributor**: may fork + PR, test, participate in discussion — **gatekeeping forbidden**
+- **allow_self_merge** (tasks.yml, optional, default `false`): when `true`, a Committer may also review and merge **their own** PRs. When `false`/absent (the default), the existing rule stands — never merge your own PRs, wait for other Committers to review. This setting only affects self-PR handling; review/merge of other people's PRs always follows the role (Committer yes / Contributor no).
 
 No need to run `git push --dry-run` detection.
 
@@ -92,6 +93,8 @@ Write the identity to `{{ evolution_cwd }}/memory/identity-github-role.md` (crea
 | `gh repo fork` | ✅ | ✅ |
 | `gh pr create` | ✅ | ✅ |
 
+> **Self-merge opt-in**: `allow_self_merge` (tasks.yml, default `false`) lifts the "own PR" restriction only — when `true`, a Committer may review and merge their **own** PRs. Reviewing/merging **other people's** PRs always follows the ROLE LOCK table above. When `false`/absent (default), the existing rule stands: never merge your own PRs.
+
 **Legitimate contribution paths for Contributors**:
 - Found a fixable bug/feature in an Issue → fork the repo → implement → test → open a PR
 - Participate in issue discussions
@@ -105,28 +108,88 @@ cd {{ source_dir }} && git fetch origin 2>&1
 cd {{ source_dir }} && git status --short --branch 2>&1
 ```
 
-- Uncommitted local changes → `git stash` (record stash info in the state file)
-- Behind upstream → `git pull --rebase`
-- Merge conflicts → **stop**, record the conflicts in the state file, finish this cycle
+> ⛔ **Never touch the host's uncommitted work** (rant 2026-08-20T11:58:27 — the task
+> used to `git stash` / silently reset dirty working trees, silently discarding the
+> host's live edits). The source directory is the HOST's working directory, not a
+> dedicated clone — a dirty working tree is NORMAL and must be respected:
+> - **Never** run `git stash`, `git checkout .`, `git restore .`, `git clean`,
+>   `git reset --hard`, or any other command that hides/discards uncommitted changes.
+> - **Never** create branches, commit, push, or open PRs while the tree is dirty.
+> - A dirty tree is not an error — it means this cycle runs **read-only**: scanning,
+>   review, issue discussion, and state-file updates only. Record
+>   `工作树非干净（dirty working tree）— 本周期只读` in the state file and proceed
+>   with the read-only parts of the cycle; finish without any git write operations.
+
+- **Uncommitted local changes present** → do NOT stash/reset/restore. Record
+  "dirty working tree — read-only cycle" in the state file; run the cycle
+  **read-only** (scan / review / issue discussion only, no git writes, no PR
+  submission), then finish. Skip `git pull --rebase` this cycle too.
+- Behind upstream **and working tree clean** → `git pull --rebase`
+- Behind upstream **and working tree dirty** → skip the pull, record
+  "behind upstream, dirty tree — pull skipped" in the state file
+- Merge conflicts during a pull (tree was clean beforehand) → `git rebase --abort`
+  (restores the pre-pull clean state), record the conflicts in the state file,
+  finish this cycle — **never stash host work to resolve conflicts**
 
 #### 0.4 Read the state file
 
 ```bash
-cat {{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md 2>/dev/null || echo "[新状态文件]" > {{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md
+cat {{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md 2>/dev/null || echo "[new state file]" > {{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md
 ```
 
 State file format:
 
 ```markdown
 # Open-Source State: {{ owner }}/{{ repo }}
-- 角色: Committer | Contributor
-- 当前阶段: 准备 | 侦察 | 贡献 | 追踪 | 审查
-- 上次完成: <上一轮做了什么>
-- 活跃PR: <自己的 open PR 列表，每行一个>
-- 进行中: <正在实现的内容 | 无>
-- 下一步: <本轮计划做什么>
-- 阻塞: <什么在阻止进展？空=无阻塞>
+- role: Committer | Contributor
+- current stage: Prep | Recon | Contribute | Track | Review
+- last completed: <what was done last round>
+- active PRs: <own open PR list, one per line>
+- in progress: <what is being implemented | none>
+- next step: <what this round plans to do>
+- blocked: <what is blocking progress? empty = no blocker>
 ```
+
+#### 0.5 Rant scan (host development instructions)
+
+**Rants are the host's development work orders.** A rant whose `project` field equals this task's `config.project` (tasks.yml) is a development instruction for THIS repository.
+
+```bash
+cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip rant scan]"
+```
+
+Filter rules (aligned with evolution_prompt.md):
+
+- Match the rant's `project` field against **exactly one value** — this task's `config.project` (tasks.yml): **`{{ task.project }}`** — equal counts as a match; anything else does **not** match
+- Example: if `config.project` is `aitokenpool`, then a rant with `project: aitokenpool` matches; a rant with `project: argszero/aitokenpool` does **NOT** match (hosts should write the `config.project` value in the rant's project field)
+- **Ignore rants without a `project` field entirely**
+- Only consider rants with status `pending` or `in_progress`
+
+**⚠️ Unmatched-rant hint**: after the scan, if there exist rants with status `pending`/`in_progress` whose `project` starts with `{{ task.project }}` or `{{ owner }}/{{ repo }}` but did NOT match the filter above, record the count in the state file / reflection (e.g. "存在 N 条 project 疑似本项目但未匹配的 rant" / "N rants with a project resembling this repo were not matched") — never silently skip them; the host can then fix the rant's `project` field to the `config.project` value.
+
+**Dedup check — before treating any candidate rant as actionable** (run for each candidate):
+
+```bash
+cd {{ source_dir }} && git log --oneline -20
+```
+
+- Search the log for the rant's timestamp or message keywords
+- ⚠️ A commit referencing the rant timestamp is only evidence the rant was **touched** — NOT sufficient proof of completion. It counts as already handled only when: all its acceptance items are satisfied AND all related branches/PRs are merged. Otherwise treat it as actionable.
+
+**Rant status management** (aligned with evolution_prompt.md):
+
+| status | meaning |
+|--------|---------|
+| `pending` | waiting to be handled (default for new rants) |
+| `in_progress` | being handled — set when starting work; write `progress` (e.g. "implementing X (PR #N)") |
+| `completed` | done — all PRs for the rant merged + self-verification passes (project test suite, e.g. `cargo test` / `pytest` / `npm test`); write the `completed` ISO timestamp. Host verification is NOT a precondition — host feedback arrives as new rants |
+
+- State transitions: pending → in_progress → completed. **Never jump directly from pending to completed**
+- Host opens a new rant saying a fix is insufficient → revert the old rant to `in_progress`, note the reason in `progress`
+- Cleanup: keep all pending/in_progress rants; keep only the 10 most recent completed
+- When rewriting: sort by `timestamp` ascending; field order `timestamp → project → status → progress → completed → message` (message last); write with `json.dumps(..., ensure_ascii=False)`
+
+**Language policy**: rant-driven outputs (PR title/body, review comments, issue replies) MUST be written in English; keep rant content verbatim when quoting it. Internal artifacts (state file, reflection, memory) may stay in the author's language.
 
 ---
 
@@ -135,10 +198,13 @@ State file format:
 **Decision logic**:
 
 ```
-Is "进行中" (in progress) in the state file non-empty?
+Unhandled rant found in 0.5 (project matches, pending/in_progress, dedup check passed)?
+  → Phase Contribution (handle the rant — host instruction, highest priority)
+
+Is "in progress" non-empty in the state file?
   → Phase Contribution (continue the unfinished implementation)
 
-Are there open items in "活跃PR" (active PRs)?
+Are there open items in "active PRs"?
   → Phase Tracking (check PR status, respond to reviews)
 
 No active work?
@@ -198,6 +264,20 @@ cd {{ source_dir }} && gh issue view <N> -R {{ owner }}/{{ repo }} --json state,
 
 - If claimed by someone else or closed → return to Phase Recon
 
+#### B.1b Rant-driven mode (host rant as development instruction)
+
+When Phase Contribution is entered because an **unhandled rant** (project-matching, pending/in_progress) was found in the 0.5 scan:
+
+- The rant is the host's explicit development instruction — **priority over issues**
+- Before implementing: mark the rant `in_progress` in `~/.emrg/rants.jsonl` with a `progress` description (e.g. "implementing X (PR #N)")
+- One rant may be split into multiple PRs (one acceptance item per PR, small iterations); reference the rant (timestamp + keywords) in the PR description
+- Flow continues with B.2–B.6 below (read conventions → fork/branch → implement → test → commit + PR)
+- After a PR is submitted: update the rant's `progress` (e.g. "PR #N submitted, awaiting review")
+- When ALL the rant's PRs are merged and self-verification passes (the project's test suite, per B.5): set status `completed` and write the `completed` timestamp
+- Language policy: PR title/body in English; quote the rant verbatim when referencing it
+
+> ⚠️ The dedup check is already done in 0.5 — never start work on a rant whose acceptance items are already satisfied and branches merged.
+
 #### B.2 Study project conventions (MUST do before implementing)
 
 **Before writing any code, read the target repository's contribution guide files**:
@@ -205,11 +285,11 @@ cd {{ source_dir }} && gh issue view <N> -R {{ owner }}/{{ repo }} --json state,
 ```bash
 cd {{ source_dir }}
 # Read the contributing guide (if present)
-cat CONTRIBUTING.md 2>/dev/null || echo "[无 CONTRIBUTING.md]"
+cat CONTRIBUTING.md 2>/dev/null || echo "[no CONTRIBUTING.md]"
 # Read the PR template (if present)
-cat .github/pull_request_template.md 2>/dev/null || echo "[无 PR 模板]"
+cat .github/pull_request_template.md 2>/dev/null || echo "[no PR template]"
 # Check for other convention files
-ls .github/ 2>/dev/null || echo "[无 .github 目录]"
+ls .github/ 2>/dev/null || echo "[no .github directory]"
 ```
 
 Extract from these files and strictly follow:
@@ -222,6 +302,21 @@ Extract from these files and strictly follow:
 - **PR target branch** (`master`, `main`, or `dev`)
 
 **Submitting without reading the conventions = wasted time.** Requirements found in the conventions override this prompt's defaults (e.g., if the project requires PRs to target `dev`, follow the project convention).
+
+#### B.2b Read the full codebase (MUST before contributing)
+
+> ⚠️ Prerequisite: **re-read the latest code before every contribution** (0.3 Source sync guarantees `git pull` to latest; any contribution idea must be built on the code you just pulled — never on memory or stale code).
+
+**Read the full codebase** (not just the target files):
+- Start at the repo root: README / docs / directory structure → understand the project's positioning and module layout
+- Read through the core module sources (top-down through the directory tree, understanding each module's responsibility)
+- When you locate the code relevant to this Issue/goal, **read the full relevant files closely** (not just around the change point)
+
+**Understand the design intent from the repository author's perspective**:
+- Ask yourself: why did the author design it this way? What problem does this function/module solve? Why this pattern (vs. another way)?
+- Read commit history / git blame: understand the code's evolution, don't guess the author's intent
+- Unclear intent → read the tests (tests are docs), read Issues/discussion records
+- **Only when you understand the author's design intent should you consider how to contribute** — contributions must follow the existing design, not start from scratch
 
 #### B.3 Fork and branch
 
@@ -251,7 +346,7 @@ cd {{ source_dir }}
 #    - Go: go test ./... 2>&1 || echo "⚠️ test failures"
 #
 # 2. If the project has no tests → at least manually verify the change:
-python -c "<验证代码片段>" 2>&1 || echo "⚠️ verification failed"
+python -c "<verification code snippet>" 2>&1 || echo "⚠️ verification failed"
 ```
 
 - Tests failing → fix the code → re-test → until passing. **Never submit code that fails tests.**
@@ -285,6 +380,15 @@ Closes #<N>
 - [ ] Existing tests pass
 - [ ] New tests added"
 ```
+
+> ⚠️ **PR submission rules (rant 2026-08-20T21:53:36 — supersedes earlier PR-issue linking notes)**:
+> 1. **Base the PR on the DEFAULT branch.** Before opening a PR, check the target repo's default branch (`gh repo view --json defaultBranchRef`) and open the PR against it. GitHub only resolves closing keywords in the body/commit message into the linked-issue field when the PR base is the default branch; for any other base the linked field stays empty and bot checks like `needs:issue` never pass. If the repo explicitly requires a non-default base (e.g. per CONTRIBUTING), record in the state file that the check fails by design and is ignorable — do not keep retrying.
+> 2. **Act on PR feedback the same round.** After creating the PR and in every reflection round, check bot/maintainer comments (`gh api repos/<owner>/<repo>/issues/<n>/comments`). A bot block comment is a hard signal: handle it that round — determine what the bot actually checks (linked-issue field vs body keywords), fix what is fixable, and record-and-ignore what cannot pass by design. Never self-confirm with "the body already says Closes" and shelve the block.
+> 3. **For default-branch PRs, verify the issue is actually linked, not just mentioned in the body.** This prompt is Jinja2-rendered — use plain placeholders `<owner>`/`<repo>`/`<n>` (NOT Jinja2 double-brace delimiters, which would be silently erased). Verify via GraphQL `closingIssuesReferences`: `gh api graphql -f query='{ repository(owner: "<owner>", name: "<repo>") { pullRequest(number: <n>) { closingIssuesReferences(first: 5) { nodes { number } } } } }'` — `gh pr view <N> --json linkedIssues` FAILS on gh ≤ 2.58 (unknown field). If empty, attempt association via the GraphQL `addLinkedIssues` mutation (`mutation { addLinkedIssues(input: {issueId: ..., linkedPullRequestId: ..., relationship: CLOSES}) }`) — REST `POST /pulls/<n>/issues` is 404 and `gh pr edit` does not manage linked issues. If association still fails, record it in the state file and ask in the PR thread instead of assuming it worked.
+> ⚠️ **Publishing spec (rant 2026-08-20T14:10:28 — comment double-encoding bug)**:
+> 1. **Always pass RAW text as the body of any comment / discussion / issue / PR** — write the body to a file with a heredoc and submit via `--field body=@file` (or `$(cat file)` / inline text). **NEVER** use patterns like `python3 -c "import json; print(json.dumps(...))"` that JSON-serialize the body before submitting — GitHub renders the escaped literal as-is (中文→`\uXXXX`, newlines→literal `\n`, quotes wrapped), producing garbled text.
+> 2. **Always read back and verify the posted body**: after posting, fetch the comment and check that the first character is NOT `"` and the text contains no `\uXXXX` residuals. If garbled, fix immediately with `updateDiscussionComment` (or the equivalent edit mutation) using the decoded original.
+> 3. This applies to every "multi-line text → GitHub API" submission (comment / issue body / PR body / discussion reply) without exception.
 
 **Not pushing = wasted work. Push failed → check permissions/network → record in the state file → finish.**
 
@@ -395,7 +499,7 @@ Each round must answer these 7 questions (cannot be omitted):
 
 1. **What was this round's goal?** — Which Phase did this round enter (recon/contribution/tracking/review)? What specific task to complete? If there's rant feedback, list the rants considered this round (write "no new rant feedback" if none)
 2. **What does success look like?** — What would "done" look like? (PR merged? Issue claimed? Review completed? Contribution accepted?)
-3. **What was actually done?** — Concrete actions: which issues scanned, what code written, which PRs reviewed, what discussions replied to, what waited on
+3. **What was actually done?** — Concrete actions: which issues scanned, what code written, which PRs reviewed, what discussions replied to, what waited on. **If this round submitted a PR for a rant, record the PR number and the rant it addresses (timestamp/keywords).**
 4. **What is the current progress?** — Compared to the ideal outcome, how far along? What's missing? (How many more reviews does the PR need? Which part of the code is unfinished? Was the issue claimed by someone else?)
 5. **What pitfalls were hit?** — Which attempts failed, what CI broke, why reviews were rejected, network/permission blockers, platform CLI or browser unavailability. Record honestly, don't gloss over
 6. **What opportunities were discovered?** — Which issues are worth doing, which PRs have potential, what new directions in community activity, which project conventions deserve attention?
@@ -459,7 +563,7 @@ Other platforms (Gitee/Gitea/Gerrit, etc.): prefer the platform's official CLI (
 | Situation | Handling |
 |-----------|----------|
 | Network timeout / `gh` API unavailable | Record in state file (blocked = network unavailable), finish this cycle. **Do not retry.** |
-| `git pull` conflicts | `git stash` → `git pull --rebase` → if still conflicting, record in state file, finish |
+| `git pull` conflicts | `git rebase --abort` (the tree was clean before the pull; abort restores it) → record in state file, finish. **Never stash host work.** |
 | `gh pr create` fails (branch name already exists) | Change the branch name, re-push and re-create |
 | Tests failing | Fix → re-test, don't skip. If unfixable, honestly state it in the PR description |
 
@@ -467,7 +571,7 @@ Other platforms (Gitee/Gitea/Gerrit, etc.): prefer the platform's official CLI (
 
 - 🛑 No destructive refactoring of the target repository
 - 🛑 Do not modify `~/.emrg/config.toml`
-- 🛑 Do not merge your own PRs (wait for other Committers to review)
+- 🛑 Do not merge your own PRs (wait for other Committers to review){% if task.get('allow_self_merge', false) %} — **overridden**: this task configures `allow_self_merge: true`, so a Committer may review and merge their own PRs{% endif %}
 - 🛑 Contributors are forbidden from executing `gh pr review`, `gh pr merge`, `gh issue close` and other write operations
 - 🛑 Do not do multiple unrelated things in one cycle
 - 🛑 Do not skip the preparation step (even when "everything looks fine")

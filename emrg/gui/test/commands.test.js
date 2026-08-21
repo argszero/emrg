@@ -22,16 +22,16 @@ function loadCommands() {
   return vm.runInContext("EMRG_Commands", ctx);
 }
 
-test("注册表含 TUI 全部 15 个 / 指令（rant 19:44 验收）", () => {
+test("注册表含 TUI 全部 15 个 / 指令 + /open（rant 19:44 验收 + P5 扩展）", () => {
   const Commands = loadCommands();
   const expected = [
     "/clear", "/compact", "/delete", "/help", "/image", "/memory", "/model",
-    "/rant", "/rename", "/resume", "/rewind", "/sessions", "/skills", "/trigger", "/version",
+    "/open", "/rant", "/rename", "/resume", "/rewind", "/sessions", "/skills", "/trigger", "/version",
   ];
   for (const cmd of expected) {
     assert.ok(Commands.COMMANDS[cmd], `缺指令 ${cmd}`);
   }
-  assert.strictEqual(Object.keys(Commands.COMMANDS).length, 15);
+  assert.strictEqual(Object.keys(Commands.COMMANDS).length, 16);
   // 每条指令都有 hint（补全菜单展示用）
   for (const [cmd, meta] of Object.entries(Commands.COMMANDS)) {
     assert.ok(meta.hint && meta.hint.length > 0, `${cmd} 缺 hint`);
@@ -68,8 +68,8 @@ test("parseInput：普通消息 / 已知指令（含参数）/ 未知指令", ()
 
 test("getCompletions：前缀过滤 + 排序 + hint 透传", () => {
   const Commands = loadCommands();
-  // 空前缀 → 全部 15 条
-  assert.strictEqual(Commands.getCompletions("").length, 15);
+  // 空前缀 → 全部 16 条
+  assert.strictEqual(Commands.getCompletions("").length, 16);
   // /r 前缀 → /rant /rename /resume /rewind（spread 转宿主 Realm 数组再比较）
   const r = [...Commands.getCompletions("/r")].map((i) => String(i.cmd)).sort();
   assert.deepStrictEqual(r, ["/rant", "/rename", "/resume", "/rewind"].sort());

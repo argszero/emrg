@@ -21,12 +21,43 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
-const SKIP = !!process.env.EMRG_SKIP_INTEGRATION;
-if (SKIP) {
-  skip("EMRG_SKIP_INTEGRATION=1 — 集成测试跳过（本地运行）");
+const { DaemonClient, generateSessionId, TOKEN_FILE, EMRGD_PORT } = require("../daemon_client.js");
+
+// #861 (rant 2026-08-19T08:05:21) made the daemon bind a FIXED loopback port
+// (56031) as its single-instance admission; #884 (rant 2026-08-20T14:32:52)
+// moved the auth credential to emrgd.token (port no longer carried in any
+// file). This suite spawns its OWN isolated daemon (HOME→tmp) — on any host
+// where the real daemon is already running (the normal dev machine state,
+// "the server is the living core"), the isolated daemon cannot bind 56031
+// (EADDRINUSE) and exits → no token file → every test times out with
+// "daemon token file timeout". CI stays green only because runners have no
+// live daemon. Fix: probe the fixed port at module load and skip the whole
+// suite (like EMRG_SKIP_INTEGRATION) when a live daemon already owns it —
+// the isolated-daemon premise is impossible in that state. CI (daemon-free
+// runners) still runs the full suite.
+function liveDaemonOnFixedPort() {
+  try {
+    require("node:child_process").execSync(
+      `node -e "const s=require('node:net').connect(${EMRGD_PORT},'127.0.0.1');` +
+        `s.on('connect',()=>process.exit(0));s.on('error',()=>process.exit(1));` +
+        `setTimeout(()=>process.exit(1),1000)"`,
+      { stdio: "ignore", timeout: 2000 }
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-const { DaemonClient, generateSessionId, PORT_FILE } = require("../daemon_client.js");
+const SKIP = !!process.env.EMRG_SKIP_INTEGRATION || liveDaemonOnFixedPort();
+if (SKIP) {
+  skip(
+    process.env.EMRG_SKIP_INTEGRATION
+      ? "EMRG_SKIP_INTEGRATION=1 — 集成测试跳过（本地运行）"
+      : `fixed-port admission: a live daemon owns 127.0.0.1:${EMRGD_PORT} — ` +
+        "integration tests need an isolated daemon (CI runs them on daemon-free runners)"
+  );
+}
 
 // ── 环境 ─────────────────────────────────────────────────
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "emrg-gui-integ-"));
@@ -41,7 +72,11 @@ process.env.HOME = tmp;
 process.env.USERPROFILE = tmp;
 
 function findPython() {
-  const root = path.resolve(__dirname, "..", ".."); // emrg/gui → 项目根
+  // G129: 本文件位于 emrg/gui/test/ —— 必须上溯 3 级到仓库根（emrg/gui/ 下的
+  // daemon_client.js 才是 2 级）。此前只上溯 2 级解析到 emrg/ 包目录，找不到
+  // .venv → 回退 PATH python3/python；本机 PATH python 是损坏的
+  // ~/.emrg/install/bin/python.exe（Failed to import encodings）→ daemon 起不来。
+  const root = path.resolve(__dirname, "..", "..", ".."); // test → gui → emrg → 仓库根
   const candidates = [
     path.join(root, ".venv", "bin", "python"),
     path.join(root, ".venv", "Scripts", "python.exe"),
@@ -65,10 +100,10 @@ function waitForPortFile(timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const check = () => {
       try {
-        const text = fs.readFileSync(PORT_FILE(), "utf8");
+        const text = fs.readFileSync(TOKEN_FILE(tmp), "utf8");
         if (text && text.trim()) return resolve(text);
       } catch { /* not yet */ }
-      if (Date.now() > deadline) return reject(new Error("daemon port file timeout"));
+      if (Date.now() > deadline) return reject(new Error("daemon token file timeout"));
       setTimeout(check, 200);
     };
     check();
@@ -89,23 +124,43 @@ function spawnDaemon() {
 before(async () => {
   // ⚠️ EMRG_SKIP_INTEGRATION 时 skip() 只跳过测试体，before() 仍执行——
   //    必须显式短路，否则 Windows CI 单测步骤会 spawn daemon 超时（daemon port file timeout）
-  if (process.env.EMRG_SKIP_INTEGRATION) return;
+  //    #861/#884 后同样的短路也适用于 live-daemon 自动跳过（固定端口已被真实 daemon 占用时
+  //    隔离 daemon 无法启动，waitForPortFile 必超时——见文件头注释）。
+  if (SKIP) return;
   daemonProc = spawnDaemon();
   await waitForPortFile();
-  client = new DaemonClient({ projectDir: tmp });
+  client = new DaemonClient({  });
   await client.ensureConnected();
 });
+
+// G130 (rant 2026-08-09T08:03:46 follow-up): POSIX process-group kill
+// process.kill(-pid) is a no-op on Windows (throws ESRCH — negative PIDs are
+// not supported), so killed daemons stayed alive as orphans and test 7
+// ("daemon 被杀 → ensureConnected 重连") failed locally. Use taskkill /T /F
+// (tree kill) on win32, keep the POSIX group kill elsewhere.
+function killProcessTree(pid, signal) {
+  if (process.platform === "win32") {
+    try {
+      require("node:child_process").execSync(`taskkill /PID ${pid} /T /F`, {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch { /* process already gone */ }
+    return;
+  }
+  try { process.kill(-pid, signal); } catch { /* ignore */ }
+}
 
 async function killDaemon(child) {
   if (!child) return;
   // SIGTERM → 等待退出（最多 3s）→ SIGKILL 兜底（防 detached 孤儿残留）
-  try { process.kill(-child.pid); } catch { /* ignore */ }
+  killProcessTree(child.pid);
   const deadline = Date.now() + 3000;
   while (Date.now() < deadline && child.exitCode === null) {
     await new Promise((r) => setTimeout(r, 100));
   }
   if (child.exitCode === null) {
-    try { process.kill(-child.pid, "SIGKILL"); } catch { /* ignore */ }
+    killProcessTree(child.pid, "SIGKILL");
   }
 }
 
@@ -173,14 +228,14 @@ test("delete_session（不存在）→ 错误帧（无破坏性）", { skip: SKI
 });
 
 test("daemon 被杀 → ensureConnected 重连（G43 stale port 流程）", { skip: SKIP }, async () => {
-  // 杀 daemon（不删 port 文件）→ 连接应失败 → stale 检测 → 删文件重拉
-  try { process.kill(-daemonProc.pid); } catch { /* ignore */ }
+  // 杀 daemon（不删 token 文件）→ 连接应失败 → stale 检测 → 删文件重拉
+  killProcessTree(daemonProc.pid);
   await new Promise((r) => setTimeout(r, 800));
   assert.strictEqual(client.connected, false, "daemon killed → disconnected");
   // ensureConnected 应自动重拉（G43 stale port）
   await client.ensureConnected();
   assert.strictEqual(client.connected, true);
-  assert.ok(fs.existsSync(PORT_FILE()), "new port file written");
+  assert.ok(fs.existsSync(TOKEN_FILE(tmp)), "new token file written");
   // 重连后可继续通信
   const frame = await client.sendCommandAndWait("list_sessions", { cwd: tmp }, 5000);
   assert.strictEqual(frame.type, "sessions_list");

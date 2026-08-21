@@ -29,8 +29,12 @@ class TaskRequest:
     timestamp: str = field(
         default_factory=lambda: datetime.now().isoformat()
     )
-    stream: bool = False
     images: Optional[list[dict]] = None
+    # Sandbox tier for the task's bash tool (rant 2026-08-20T15:46:50):
+    # "read-only" | "workspace-write" | "danger-full-access" (default None =
+    # danger-full-access, current behavior). Set by task config, never by
+    # the agent itself.
+    sandbox: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = {
@@ -40,10 +44,11 @@ class TaskRequest:
             "cwd": self.cwd,
             "prompt": self.prompt,
             "timestamp": self.timestamp,
-            "stream": self.stream,
         }
         if self.images:
             d["images"] = self.images
+        if self.sandbox:
+            d["sandbox"] = self.sandbox
         return d
 
 
@@ -72,6 +77,7 @@ class ToolStart:
     tool_name: str = ""
     tool_call_id: str = ""
     arguments: dict = field(default_factory=dict)
+    intent: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> ToolStart:
@@ -80,6 +86,7 @@ class ToolStart:
             tool_name=d.get("tool_name", ""),
             tool_call_id=d.get("tool_call_id", ""),
             arguments=d.get("arguments", {}),
+            intent=d.get("intent", ""),
         )
 
 
@@ -127,6 +134,15 @@ class EvolutionLog:
     impact: list[str] = field(default_factory=list)
     operations: list[str] = field(default_factory=list)
     upstream_contribution: Optional[dict] = None
+    # rant 2026-08-18T21:32:32: the agent's own natural-language summary of
+    # what was done this cycle, surfaced in GUI task recent-runs.
+    # Rant 2026-08-20T10:58:55 (host design-finalized): `summary` → `work`;
+    # `meaningful` deleted (agent no longer self-rates value);
+    # `reason` → `slowdown_reason` (only populated when recommend_slowdown).
+    work: str = ""
+    recommend_slowdown: bool = False
+    slowdown_reason: str = ""
+    tool_count: int = 0
 
 
 @dataclass

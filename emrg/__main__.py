@@ -5,6 +5,7 @@ Usage:
     emrg server             Run daemon in foreground
     emrg server stop        Stop the running daemon
     emrg server restart     Restart the daemon
+    emrg stop               Stop ALL running emrg processes (daemon, TUI, GUI)
     emrg update             git pull + reinstall from source
 """
 
@@ -23,7 +24,8 @@ from datetime import datetime
 from pathlib import Path
 
 from emrg import __version__
-from emrg.connect import cleanup_server, connect_to_server
+from emrg._win import win32_no_window_kwargs
+from emrg.connect import AuthError, cleanup_server, connect_to_server
 from websockets.exceptions import ConnectionClosed
 
 
@@ -67,6 +69,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     # (no action = foreground run, handled in main())
 
+    # emrg stop
+    stop_parser = sub.add_parser(
+        "stop",
+        help="Stop ALL running emrg processes (daemon, TUI, GUI)",
+        description="Stop every running emrg process: the daemon, TUI clients and "
+        "the GUI app. Graceful stop first, force-kill stragglers. Also kills the "
+        "bundled git tree on Windows and exits non-zero when residual processes "
+        "remain (used by the Windows installer pre-stop).",
+    )
+    stop_parser.add_argument(
+        "--skip-gui",
+        action="store_true",
+        help="Do not stop the GUI app and exclude it from the residual verify "
+        "(used by the GUI's restart-to-apply: the GUI is the caller and "
+        "relaunches itself after stop_all exits).",
+    )
+
     # emrg update
     sub.add_parser(
         "update",
@@ -108,6 +127,12 @@ def main() -> None:
             _run_daemon()
     elif parsed.command == "rant":
         _send_rant(" ".join(parsed.message), project=parsed.project)
+    elif parsed.command == "stop":
+        # Windows installer pre-stop depends on the non-zero exit code when
+        # residual processes remain (emrg/_stop_all.py owns the full logic).
+        # --skip-gui (rant 2026-08-21T12:44:34): the GUI's restart-to-apply
+        # calls `emrg stop --skip-gui` so its own process survives to relaunch.
+        sys.exit(_stop_all(skip_gui=getattr(parsed, "skip_gui", False)))
     elif parsed.command == "update":
         _run_update()
     else:
@@ -126,6 +151,9 @@ def _start_daemon_background() -> subprocess.Popen:
         stdin=subprocess.DEVNULL,
         start_new_session=True,
         close_fds=True,
+        # Windows: background daemon spawn must not pop a console window
+        # (rant 2026-08-09T13:16:36 — cmd-window storm).
+        **win32_no_window_kwargs(),
     )
     return proc
 
@@ -134,11 +162,11 @@ async def _send_shutdown() -> bool:
     """Send a graceful shutdown message to the daemon. Returns True on success."""
     try:
         ws = await asyncio.wait_for(connect_to_server(), timeout=3)
-    except (ConnectionRefusedError, FileNotFoundError, OSError, asyncio.TimeoutError):
+    except (ConnectionRefusedError, FileNotFoundError, OSError, asyncio.TimeoutError, AuthError):
         return False
 
     try:
-        await ws.send(json.dumps({"type": "shutdown"}, ensure_ascii=False))
+        await ws.send(json.dumps({"type": "shutdown", "source": "emrg server stop"}, ensure_ascii=False))
         frame = await asyncio.wait_for(ws.recv(), timeout=3)
         try:
             await ws.close()
@@ -185,8 +213,47 @@ def _stop_daemon() -> None:
             print("daemon stopped.")
         else:
             print("daemon not running (no pid from ping).")
-    except (ConnectionClosed, OSError, asyncio.TimeoutError, json.JSONDecodeError):
+    except (ConnectionClosed, OSError, asyncio.TimeoutError, json.JSONDecodeError, AuthError):
         print("daemon not running.")
+
+
+# ── Stop everything (`emrg stop`) ──────────────────────────────
+
+def _match_emrg_client(cmd: str) -> bool:
+    """True if a process command line belongs to an emrg process (TUI/daemon/GUI).
+
+    Delegates to ``emrg._stop_all.match_cmdline`` — the single source of truth
+    shared with the standalone installer script (bin/stop_all.py).
+    """
+    from emrg._stop_all import match_cmdline
+    return match_cmdline(cmd)
+
+
+def _scan_emrg_client_pids(ps_output: str, own_pid: int) -> list[int]:
+    """Parse `ps -axww -o pid=,command=` output → pids of emrg processes.
+
+    `own_pid` is excluded so `emrg stop` (itself `python -m emrg stop`) never
+    kills the CLI that is running it. Delegates to ``emrg._stop_all.scan_pids``.
+    """
+    from emrg._stop_all import scan_pids
+    return scan_pids(ps_output, own_pid)
+
+
+def _stop_all(skip_gui: bool = False) -> int:
+    """Stop every running emrg process: daemon, TUI, GUI (+ bundled git on
+    Windows) and verify. Returns 0 on clean stop, 1 when residual processes
+    remain — the Windows installer aborts on the non-zero exit.
+
+    ``skip_gui=True`` (CLI ``--skip-gui``, rant 2026-08-21T12:44:34): the
+    GUI's restart-to-apply keeps its own process alive and excluded from the
+    residual verify — forwarded to ``stop_all``.
+
+    All logic lives in ``emrg/_stop_all.py`` (pure stdlib) so the installer
+    can also run it standalone with the runtime's Python; this function is
+    the ``emrg stop`` CLI entry point that propagates the exit code.
+    """
+    from emrg._stop_all import stop_all
+    return stop_all(skip_gui=skip_gui)
 
 
 def _restart_daemon() -> None:
@@ -207,7 +274,7 @@ def _run_daemon() -> None:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     # Suppress noisy httpcore/httpx DEBUG logs (rant #24)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -282,10 +349,17 @@ def _run_client(init_auto_evolve: bool = False) -> None:
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
             RotatingFileHandler(
-                str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3
+                str(log_path), maxBytes=10 * 1024 * 1024, backupCount=3,
+                # encoding="utf-8" — symmetric with the daemon's #556 fix:
+                # the default locale code page (GBK on zh-CN Windows) cannot
+                # encode U+FFFD and logging.emit would crash with "--- Logging
+                # error ---", polluting the shared TUI terminal. errors=
+                # "backslashreplace" is defense-in-depth: logging must never
+                # crash on exotic characters (rant 2026-08-08T09:35:30).
+                encoding="utf-8", errors="backslashreplace",
             ),
         ],
     )
@@ -334,6 +408,7 @@ def _run_update() -> None:
             text=True,
             encoding="utf-8",
             timeout=10,
+            **win32_no_window_kwargs(),
         )
         if result.returncode != 0:
             print(f"git pull failed:\n{result.stderr}", file=sys.stderr)
@@ -350,6 +425,7 @@ def _run_update() -> None:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        **win32_no_window_kwargs(),
     )
     if result.returncode != 0:
         print(f"reinstall failed:\n{result.stderr}", file=sys.stderr)

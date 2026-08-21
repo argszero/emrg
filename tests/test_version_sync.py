@@ -50,7 +50,7 @@ def _uv_lock_version() -> str:
 def _shell_fallback_versions() -> list[tuple[str, str]]:
     """各 shell 脚本的版本 fallback（打包时无法读取 __version__ 时使用）。"""
     results: list[tuple[str, str]] = []
-    for rel in ("packaging/make-installer.sh", "packaging/build-runtime.sh"):
+    for rel in ("packaging/make-installer.sh", "packaging/build-runtime.sh", "packaging/make-run-installer.sh"):
         content = (REPO_ROOT / rel).read_text(encoding="utf-8")
         m = re.search(r'\|\| echo "?(\d+\.\d+\.\d+)"?', content)
         assert m, f"{rel} 中找不到版本 fallback"

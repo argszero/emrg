@@ -78,8 +78,13 @@ class GrepTool(ToolExecutor):
                         "type": "integer",
                         "description": f"Maximum matches to return (default: {MAX_RESULTS}).",
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
+                        "One human-readable sentence, e.g. 'find all callers of connect_to_server'.",
+                    },
                 },
-                "required": ["pattern"],
+                "required": ["pattern", "intent"],
             },
         )
 

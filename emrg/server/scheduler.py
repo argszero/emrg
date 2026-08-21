@@ -17,7 +17,7 @@ import asyncio
 import json
 import logging
 import os
-import subprocess
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,13 +25,12 @@ import yaml
 
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
+from emrg.tools.bash_tool import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
 from emrg.server.atomic import atomic_write_yaml
 from emrg.server.git_utils import (
-    INSTALL_INFO,
     _detect_git_remote,
-    no_prompt_env,
     resolve_git_gh,
 )
 
@@ -48,6 +47,92 @@ TASK_TEMPLATES: dict[str, str] = {
     "open-source": "open_source_prompt.md",
     "promote": "promote_prompt.md",
 }
+
+# ── Task CRUD constants (rant 2026-08-12T18:23:15 P2) ─────────────
+TASK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+TASK_NAME_MAX = 32
+MIN_INTERVAL = 60
+DEFAULT_INTERVAL = 1800
+
+
+def _task_templates_dir() -> Path:
+    """Directory holding user-defined task type templates."""
+    return config_dir() / "task-templates"
+
+
+def _custom_templates() -> list[str]:
+    """Names of user-defined task types (sorted, *.md basenames)."""
+    d = _task_templates_dir()
+    if not d.is_dir():
+        return []
+    try:
+        return sorted(p.stem for p in d.glob("*.md"))
+    except OSError:
+        return []
+
+
+def _read_custom_template(name: str) -> str | None:
+    """Read a user template's prompt text; None if missing."""
+    p = _task_templates_dir() / f"{name}.md"
+    try:
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+    except OSError:
+        pass
+    return None
+
+
+def _write_custom_template(name: str, prompt: str) -> None:
+    """Atomically write a user template."""
+    d = _task_templates_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{name}.md"
+    tmp = p.with_suffix(".md.tmp")
+    tmp.write_text(prompt, encoding="utf-8")
+    tmp.replace(p)
+
+
+def _delete_custom_template(name: str) -> None:
+    p = _task_templates_dir() / f"{name}.md"
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+def _resolve_task_template(task_type: str) -> Path:
+    """Resolve the prompt template for a task type.
+
+    Built-in TASK_TEMPLATES take priority; custom task types (rant
+    2026-08-12T18:14:46 P2) fall back to a user template in
+    ``~/.emrg/task-templates/<type>.md``, then to the generic
+    evolution prompt. Pure helper so P2 can unit-test lookup without
+    a scheduler instance.
+    """
+    builtin = TASK_TEMPLATES.get(task_type)
+    if builtin:
+        return Path(__file__).parent / builtin
+    user_tpl = config_dir() / "task-templates" / f"{task_type}.md"
+    if user_tpl.exists():
+        return user_tpl
+    return Path(__file__).parent / "evolution_prompt.md"
+
+
+def _task_cfg_signature(cfg: dict) -> tuple:
+    """Stable signature of a task cfg for hot-reload diffing.
+
+    Any change to type / config / interval / enabled marks the task
+    as needing a handler restart.
+    """
+    conf = cfg.get("config") if isinstance(cfg.get("config"), dict) else {}
+    return (
+        cfg.get("name"),
+        cfg.get("type"),
+        json.dumps(conf, sort_keys=True),
+        cfg.get("interval", DEFAULT_INTERVAL),
+        bool(cfg.get("enabled", True)),
+        cfg.get("sandbox"),
+    )
 
 
 def _resolve_project_path(name: str) -> str | None:
@@ -94,10 +179,10 @@ def _load_project_config(name: str, source_dir: str) -> dict:
     return {}
 
 
-# ── EvolutionHandler ────────────────────────────────────────────
+# ── TaskHandler ────────────────────────────────────────────
 
 
-class EvolutionHandler:
+class TaskHandler:
     """Self-contained evolution loop for one project (or emrg itself).
 
     Each handler runs its own while+sleep(interval) coroutine,
@@ -115,8 +200,15 @@ class EvolutionHandler:
         interval: int,
         identity: InstanceIdentity,
         template_path: Path | None = None,
+        sandbox: str | None = None,
     ) -> None:
         self.name = name
+        # Rant 2026-08-19T10:18:44: per-task logger — LoggerAdapter injects a
+        # `task` extra; the daemon's custom Formatter renders it as a dedicated
+        # [task] column in emrgd.log (scheduler lines are otherwise hard to
+        # tell apart when several tasks interleave). TaskScheduler-level logs
+        # keep the module logger (no task extra → "-" column).
+        self._logger = logging.LoggerAdapter(logger, {"task": self.name})
         self._template_path = template_path or (Path(__file__).parent / "evolution_prompt.md")
         self._config = config
         self.interval = interval
@@ -129,20 +221,39 @@ class EvolutionHandler:
         self._logs_dir = config_dir() / "logs"
         self._logs_dir.mkdir(parents=True, exist_ok=True)
         self.evolutions: list[EvolutionLog] = []
+        # Rant 2026-08-19T20:50:36 (host Plan B): execution records persist to
+        # disk (~/.emrg/logs/task-runs/<task>.jsonl, append-only JSONL) so the
+        # GUI task recent-runs survive daemon restarts. In-memory
+        # self.evolutions stays the primary source (status() reads it); the
+        # JSONL is a durable copy restored on init (bounded to the last N).
+        self._task_runs_dir = self._logs_dir / "task-runs"
+        self._task_runs_file = self._task_runs_dir / f"{self.name}.jsonl"
+        restored = self._load_task_runs()
+        if restored:
+            self.evolutions = restored
 
-        # ── Saturation halt — stop burning tokens on empty cycles ───
-        # Track consecutive cycles where git HEAD didn't advance (NTE).
-        # After _IDLE_HALT_THRESHOLD empty cycles, switch to trigger-only:
-        #   - Scheduled runs are skipped
-        #   - Only manual trigger (/trigger) resumes the cycle
-        #   - Counter resets on trigger or when git HEAD advances
+        # ── Saturation — slow down, never stop (rant 2026-08-09T09:35:55) ──
+        # Rant 2026-08-20T10:58:55 (host design-finalized): the empty-cycle
+        # counter / slowdown-vote / threshold machinery is DELETED. Slowdown
+        # is decided solely by the agent's vibe-check recommend_slowdown:
+        #   - true  → _slowdown_active=True  → next run at heartbeat interval
+        #   - false → _slowdown_active=False → back to normal interval
+        #   - vibe unavailable / truncated / aborted → state unchanged
+        #   - Manual trigger (/trigger) → _slowdown_active=False (host
+        #     manually paying attention = back to high frequency) + persist
+        # heartbeat = max(interval, min(interval*8, 8h)) — 60s task → 8min
         #
-        # Counter is persisted to disk to survive daemon restarts.
-        self._IDLE_HALT_THRESHOLD = 30
+        # The flag is persisted to disk (~/.emrg/saturation/<task>.json) so
+        # it survives daemon restarts.
+        # G129: 连续连接失败告警阈值——达到后升级为 ERROR（防静默吞掉，
+        # rant 2026-08-09T08:03:46：GUI 测试覆盖真实 emrgd.token 致 10h 连不上）。
+        self._CONNECT_FAIL_ALERT = 3
+        self._connect_failures = 0
         self._saturation_dir = config_dir() / "saturation"
         self._saturation_dir.mkdir(parents=True, exist_ok=True)
         self._saturation_file = self._saturation_dir / f"{self.name}.json"
-        self._empty_cycles = self._load_saturation_state()
+        self._slowdown_active = False
+        self._slowdown_active = self._load_saturation_state()
 
         # Resolve project path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
@@ -151,264 +262,172 @@ class EvolutionHandler:
         path = _resolve_project_path(project_name) if project_name else config.get("path", "")
         self.project_path = path or name  # default to name for emrg itself
 
-        # Derive owner/repo/git from path
+        # Derive owner/repo/git from config override → path git remote → defaults.
+        # (rant 2026-08-19T14:20:52: workspace self-heal deleted — these fields
+        # remain for prompt context {repo}/{owner} and task-config resolution;
+        # the agent manages its own git workspace via tools.)
         repo_spec = _detect_git_remote(path) if path else ""
-        if repo_spec and "/" in repo_spec:
+        cfg_owner = config.get("owner")
+        cfg_repo = config.get("repo")
+        if cfg_owner and cfg_repo:
+            self._owner, self._repo = cfg_owner, cfg_repo
+            self._repo_url = f"https://github.com/{self._owner}/{self._repo}.git"
+            self._repo_configured = True
+        elif repo_spec and "/" in repo_spec:
             self._owner, self._repo = repo_spec.split("/", 1)
             self._repo_url = f"https://github.com/{self._owner}/{self._repo}.git"
+            self._repo_configured = True
         else:
             self._owner = self.OWNER
             self._repo = self.REPO
             self._repo_url = self.EMRG_REPO_URL
+            self._repo_configured = project_name == "emrg"
         self._session_id = f"emrg-evolution-{name}"
         self._source_dir = path or name
-
-    def _get_git_head(self) -> str | None:
-        """Return current git HEAD hash, or None if not a git repo."""
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=self._source_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                env=no_prompt_env(),
+        # Sandbox tier for this task's bash tool (rant 2026-08-20T15:46:50 +
+        # 18:05:20): explicit config wins, otherwise unified default
+        # workspace-write. No task-name builtin defaults, no implicit
+        # danger-full-access fallback.
+        self._sandbox = self._resolve_sandbox(config, sandbox)
+        if self._sandbox:
+            self._logger.info(
+                "TaskHandler[%s]: bash sandbox tier = %s", name, self._sandbox
             )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return None
 
-    # ── Evolution workspace self-heal (rant 2026-08-06T20:42:05, 方案 C) ──
-    #
-    # Packaged installs run the daemon from ~/.emrg/install/source/emrg — a
-    # .git-less source snapshot — so evolution cannot commit/push/PR. Each
-    # cycle starts by ensuring the workspace is a usable git repo:
-    #   - dev machine (source_dir is a real git repo) → untouched
-    #   - otherwise → clone EMRG into ~/.emrg/evolution/emrg/, align it to the
-    #     installed release tag, and self-heal projects.yml/tasks.yml entries.
-    # Idempotent and failure-tolerant (no network → skip cycle, GUI unaffected).
+    @staticmethod
+    def _resolve_sandbox(config: dict, explicit: str | None) -> str:
+        """Effective bash sandbox tier for a task.
 
-    def _repo_url_from_install_info(self) -> str | None:
-        """Read the repo URL from install-info.json 'repo' field, if present."""
-        try:
-            data = json.loads(INSTALL_INFO.read_text(encoding="utf-8"))
-            value = data.get("repo")
-            return str(value) if value else None
-        except (OSError, json.JSONDecodeError, AttributeError):
-            return None
-
-    def _is_usable_git_repo(self, path: str) -> bool:
-        """True if path is a git repo with a working tree we can commit to."""
-        if not path or not Path(path).is_dir():
-            return False
-        try:
-            result = subprocess.run(
-                ["git", "rev-parse", "--is-inside-work-tree"],
-                cwd=path,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=5,
-                env=no_prompt_env(),
-            )
-            if result.returncode != 0 or result.stdout.strip() != "true":
-                return False
-            return os.access(path, os.W_OK)
-        except (subprocess.SubprocessError, OSError):
-            return False
-
-    def _ensure_git_identity(self, repo_dir: Path) -> None:
-        """Set git user.name/user.email if missing (fresh clones have none)."""
-        name = os.environ.get("GIT_AUTHOR_NAME", "") or "EMRG Evolution"
-        email = os.environ.get("GIT_AUTHOR_EMAIL", "") or "emrg@argszero.dev"
-        try:
-            for key, default in (("user.name", name), ("user.email", email)):
-                result = subprocess.run(
-                    ["git", "config", key],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=5,
-                    env=no_prompt_env(),
-                )
-                if not result.stdout.strip():
-                    subprocess.run(
-                        ["git", "config", key, default],
-                        cwd=repo_dir,
-                        capture_output=True,
-                        timeout=5,
-                        env=no_prompt_env(),
-                    )
-        except (subprocess.SubprocessError, OSError):
-            pass
-
-    def _align_to_installed_version(self, repo_dir: Path) -> None:
-        """Point the local master branch at the installed release tag.
-
-        Reads ~/.emrg/install/version.txt (e.g. "0.2.7"); checks out
-        ``v0.2.7`` if the tag exists, otherwise stays on the clone's
-        default branch (latest master). A named branch (not detached HEAD)
-        keeps the evolution flow (branch-from-master, push, PR) working.
+        Rant 2026-08-20T18:05:20: unified rule — configured value wins,
+        otherwise ``"workspace-write"``. No task-name builtin defaults
+        (emrg-task/opensource special cases removed), no implicit
+        danger-full-access fallback. Invalid values fall through to the
+        default rather than breaking the task.
         """
-        tag = None
-        try:
-            version_file = Path.home() / ".emrg" / "install" / "version.txt"
-            if version_file.exists():
-                ver = version_file.read_text(encoding="utf-8").strip()
-                if ver:
-                    tag = f"v{ver}"
-        except OSError:
-            tag = None
-        if not tag:
-            return
-        try:
-            result = subprocess.run(
-                ["git", "tag", "-l", tag],
-                cwd=repo_dir,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=10,
-                env=no_prompt_env(),
-            )
-            if result.returncode == 0 and tag in result.stdout.split():
-                subprocess.run(
-                    ["git", "checkout", "-B", "master", tag],
-                    cwd=repo_dir,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    timeout=30,
-                    check=True,
-                    env=no_prompt_env(),
-                )
-                logger.info(
-                    "EvolutionHandler[%s]: evolution workspace aligned to %s",
-                    self.name, tag,
-                )
-        except (subprocess.CalledProcessError, OSError) as e:
-            logger.warning(
-                "EvolutionHandler[%s]: tag checkout %s failed (stay on master): %s",
-                self.name, tag, e,
-            )
+        for cand in (explicit, config.get("sandbox")):
+            if cand in SANDBOX_MODES:
+                return cand
+        return "workspace-write"
 
-    def _ensure_project_entry(self) -> None:
-        """Add/update the emrg project entry in projects.yml (idempotent)."""
-        projects_file = config_dir() / "projects.yml"
-        try:
-            entries: list[dict] = []
-            if projects_file.exists():
-                data = yaml.safe_load(projects_file.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    entries = [e for e in data if isinstance(e, dict)]
-            new_path = str(self._source_dir)
-            for entry in entries:
-                if entry.get("name") == "emrg":
-                    if entry.get("path") != new_path:
-                        entry["path"] = new_path
-                        entry["last_active"] = datetime.now().isoformat()
-                        atomic_write_yaml(entries, projects_file, prefix=".projects_")
-                        logger.info(
-                            "EvolutionHandler[%s]: projects.yml self-heal — emrg → %s",
-                            self.name, new_path,
-                        )
-                    return
-            entries.append({
-                "name": "emrg",
-                "path": new_path,
-                "last_active": datetime.now().isoformat(),
-            })
-            atomic_write_yaml(entries, projects_file, prefix=".projects_")
-            logger.info(
-                "EvolutionHandler[%s]: projects.yml self-heal — added emrg → %s",
-                self.name, new_path,
-            )
-        except (yaml.YAMLError, OSError) as e:
-            logger.warning(
-                "EvolutionHandler[%s]: projects.yml self-heal failed: %s",
-                self.name, e,
-            )
+    # ── Saturation state (restored from disk across daemon restarts) ──
 
-    def _ensure_evolution_workspace(self) -> bool:
-        """Self-heal the evolution workspace; returns False to skip the cycle.
+    def _load_saturation_state(self) -> bool:
+        """Restore the slowdown flag from disk (daemon restarts).
 
-        Only applies to the EMRG self-evolution task (config.project == emrg).
-        Returns True when the workspace is usable (existing dev repo, or a
-        successful clone into ``~/.emrg/evolution/emrg/``).
+        Rant 2026-08-20T10:58:55 (host design-finalized): file content is
+        ``{"slowdown_active": bool}``. A daemon restart keeps a throttled
+        task at heartbeat cadence until the next vibe check says false or a
+        manual trigger resets it. Old files (empty_cycles/slowdown_hits)
+        simply read as False — no migration needed.
         """
-        if self._project_name != "emrg" or self._repo != self.REPO:
-            return True  # paper/open-source/promote tasks: not our concern
-        if self._is_usable_git_repo(self._source_dir):
-            return True  # dev machine — use the existing repo as-is
-        repo_url = self._repo_url_from_install_info() or self._repo_url
-        evolve_dir = EVOLUTION_CWD / self.REPO
-        if evolve_dir.exists():
-            if self._is_usable_git_repo(str(evolve_dir)):
-                self._source_dir = str(evolve_dir)
-                self.project_path = str(evolve_dir)
-                return True
-            logger.warning(
-                "EvolutionHandler[%s]: %s exists but is not a git repo — "
-                "skipping self-heal to avoid data loss",
-                self.name, evolve_dir,
-            )
-            return False
-        try:
-            logger.info(
-                "EvolutionHandler[%s]: cloning %s → %s (workspace self-heal)",
-                self.name, repo_url, evolve_dir,
-            )
-            subprocess.run(
-                ["git", "clone", repo_url, str(evolve_dir)],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=120,
-                check=True,
-                env=no_prompt_env(),
-            )
-            self._align_to_installed_version(evolve_dir)
-            self._ensure_git_identity(evolve_dir)
-            self._source_dir = str(evolve_dir)
-            self.project_path = str(evolve_dir)
-            self._ensure_project_entry()
-            return True
-        except (subprocess.CalledProcessError, OSError) as e:
-            logger.warning(
-                "EvolutionHandler[%s]: evolution workspace self-heal failed "
-                "(network down?): %s — skipping cycle",
-                self.name, e,
-            )
-            return False
-
-    def _load_saturation_state(self) -> int:
-        """Restore _empty_cycles counter from disk (survives daemon restarts)."""
         try:
             if self._saturation_file.exists():
                 data = json.loads(self._saturation_file.read_text(encoding="utf-8"))
-                count = data.get("empty_cycles", 0)
-                if count > 0:
-                    logger.debug(
-                        "EvolutionHandler[%s]: restored saturation state (%d empty cycles)",
-                        self.name, count,
+                active = bool(data.get("slowdown_active", False))
+                if active:
+                    self._logger.info(
+                        "TaskHandler[%s]: restored slowdown state (heartbeat active)",
+                        self.name,
                     )
-                return count
+                return active
         except Exception:
             pass
-        return 0
+        return False
 
     def _save_saturation_state(self) -> None:
-        """Persist _empty_cycles counter to disk."""
+        """Persist the slowdown flag to disk."""
         try:
             self._saturation_file.write_text(
-                json.dumps({"empty_cycles": self._empty_cycles}, ensure_ascii=False),
+                json.dumps({"slowdown_active": self._slowdown_active},
+                           ensure_ascii=False),
                 encoding="utf-8",
             )
         except Exception:
             pass
+
+    # ── Task-run persistence (rant 2026-08-19T20:50:36, host Plan B) ──
+    # Execution records persist to ~/.emrg/logs/task-runs/<task>.jsonl
+    # (append-only JSONL, one line per cycle) so the GUI task recent-runs
+    # secondary list survives daemon restarts. self.evolutions (in-memory)
+    # stays the primary source for status(); the JSONL is a durable copy
+    # restored on init, bounded to the most recent _TASK_RUNS_MAX records.
+    _TASK_RUNS_MAX = 50
+
+    def _load_task_runs(self) -> list[EvolutionLog]:
+        """Restore the most recent execution records from the task JSONL.
+
+        Fault-tolerant (rant 2026-08-19T20:50:36): a missing or corrupt file
+        yields an empty list (never raises); a single corrupt line is skipped
+        while the rest is kept.
+        """
+        records: list[EvolutionLog] = []
+        try:
+            if self._task_runs_file.exists():
+                lines = self._task_runs_file.read_text(encoding="utf-8").splitlines()
+                for line in lines[-self._TASK_RUNS_MAX:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except (ValueError, TypeError):
+                        self._logger.warning(
+                            "TaskHandler[%s]: skipping corrupt task-run line in %s",
+                            self.name, self._task_runs_file,
+                        )
+                        continue
+                    records.append(EvolutionLog(
+                        timestamp=str(data.get("timestamp") or ""),
+                        work=str(data.get("work") or ""),
+                        recommend_slowdown=bool(data.get("recommend_slowdown")),
+                        slowdown_reason=str(data.get("slowdown_reason") or ""),
+                        tool_count=int(data.get("tool_count") or 0),
+                    ))
+                if records:
+                    self._logger.info(
+                        "TaskHandler[%s]: restored %d execution record(s) from %s",
+                        self.name, len(records), self._task_runs_file,
+                    )
+        except Exception:
+            # unreadable file → start empty, never crash the handler
+            records = []
+            self._logger.warning(
+                "TaskHandler[%s]: failed to read task-run file %s (starting empty)",
+                self.name, self._task_runs_file,
+            )
+        return records
+
+    def _append_task_run(self, log: EvolutionLog) -> None:
+        """Append one execution record to the task JSONL (bounded append).
+
+        Writes a JSON line for the completed cycle, then trims the file to the
+        most recent _TASK_RUNS_MAX records. Fault-tolerant: a write failure
+        only logs a warning and never affects the running cycle.
+        """
+        try:
+            self._task_runs_dir.mkdir(parents=True, exist_ok=True)
+            with open(self._task_runs_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "timestamp": log.timestamp,
+                    "work": log.work,
+                    "recommend_slowdown": log.recommend_slowdown,
+                    "slowdown_reason": log.slowdown_reason,
+                    "tool_count": log.tool_count,
+                }, ensure_ascii=False) + "\n")
+            # Trim to the last _TASK_RUNS_MAX records (rewrite in place only
+            # when over the cap, mirroring the old 27-file rotation).
+            try:
+                lines = self._task_runs_file.read_text(encoding="utf-8").splitlines()
+                if len(lines) > self._TASK_RUNS_MAX:
+                    with open(self._task_runs_file, "w", encoding="utf-8") as f:
+                        f.write("\n".join(lines[-self._TASK_RUNS_MAX:]) + "\n")
+            except Exception:
+                pass  # trimming is best-effort; the append already succeeded
+        except Exception as exc:
+            self._logger.warning(
+                "TaskHandler[%s]: failed to persist task-run record: %s",
+                self.name, exc,
+            )
 
     async def run(self) -> None:
         """Run evolution cycles at configured interval.
@@ -418,58 +437,82 @@ class EvolutionHandler:
         """
         self._running = True
         self._start_time = time.time()
-        logger.info(
-            "EvolutionHandler[%s] started — every %ds", self.name, self.interval
+        self._logger.info(
+            "TaskHandler[%s] started — every %ds", self.name, self.interval
         )
 
         while self._running:
+            # Slowdown → wait at the heartbeat interval (low-frequency full
+            # cycle, rant 2026-08-09T09:35:55; flag set by vibe check
+            # recommend_slowdown, rant 2026-08-20T10:58:55); otherwise the
+            # normal interval. Manual trigger wakes immediately either way.
+            # Never skip a cycle.
+            wait_timeout = (
+                self._heartbeat_interval()
+                if self._slowdown_active
+                # Rant 2026-08-09T13:16:36: exponential backoff while the
+                # daemon is unreachable — stops the retry/window storm.
+                else self._connect_backoff()
+            )
+            # Diagnostic log (rant 2026-08-18T20:48:45): expose which
+            # scheduling mode drove the wait — normal | heartbeat | backoff —
+            # so the saturation/backoff state machine is traceable end-to-end.
+            if self._slowdown_active:
+                _mode = "heartbeat"
+            elif self._connect_failures > 0:
+                _mode = "backoff"
+            else:
+                _mode = "normal"
+            self._logger.debug(
+                "TaskHandler[%s]: next run in %ds (mode=%s)",
+                self.name, int(wait_timeout), _mode,
+            )
             # Wait for interval or manual trigger (interruptible)
-            self._next_run_at = time.time() + self.interval
+            self._next_run_at = time.time() + wait_timeout
             manual_trigger = False
             try:
                 await asyncio.wait_for(
                     self._trigger_event.wait(),
-                    timeout=self.interval,
+                    timeout=wait_timeout,
                 )
                 # Manual trigger fired — clear and proceed
                 self._trigger_event.clear()
                 manual_trigger = True
-                logger.debug(
-                    "EvolutionHandler[%s] manually triggered", self.name
+                self._logger.debug(
+                    "TaskHandler[%s] manually triggered", self.name
                 )
             except asyncio.TimeoutError:
                 # Normal scheduled run
                 pass
 
-            # Saturation halt: if too many empty cycles, skip scheduled runs.
-            # Manual triggers always bypass the halt and reset the counter.
+            # Manual triggers always clear the slowdown flag — the host
+            # manually paying attention means back to high frequency
+            # (rant 2026-08-20T10:58:55, host-confirmed semantics).
             if manual_trigger:
-                if self._empty_cycles >= self._IDLE_HALT_THRESHOLD:
-                    logger.info(
-                        "EvolutionHandler[%s]: resumed via manual trigger "
-                        "(was halted at %d empty cycles)",
-                        self.name, self._empty_cycles,
+                if self._slowdown_active:
+                    self._logger.info(
+                        "TaskHandler[%s]: resumed via manual trigger "
+                        "(was throttled at heartbeat cadence)",
+                        self.name,
                     )
-                self._empty_cycles = 0
+                self._slowdown_active = False
                 self._save_saturation_state()
-            elif self._saturation_halt_active():
-                continue
 
-            logger.debug("EvolutionHandler[%s] tick", self.name)
+            self._logger.debug("TaskHandler[%s] tick", self.name)
             self._cycle_running = True
             self._next_run_at = None  # running — no next time yet
             try:
                 await self._run_evolution_cycle()
             except Exception:
-                logger.warning(
-                    "EvolutionHandler[%s] crashed", self.name, exc_info=True
+                self._logger.warning(
+                    "TaskHandler[%s] crashed", self.name, exc_info=True
                 )
             finally:
                 self._cycle_running = False
                 self._trigger_event.clear()  # clear any spurious set during cycle
 
         await self._write_final_summary()
-        logger.info("EvolutionHandler[%s] stopped", self.name)
+        self._logger.info("TaskHandler[%s] stopped", self.name)
 
     def stop(self) -> None:
         self._running = False
@@ -501,98 +544,170 @@ class EvolutionHandler:
         remaining = None
         if self._next_run_at is not None:
             remaining = max(0, int(self._next_run_at - time.time()))
+        # rant 2026-08-18T10:45:52: expose the LAST-execution dimension so the
+        # GUI tasks panel can show when a task last ran, what it did, and
+        # whether it is being throttled (saturation). All data is in-memory /
+        # on disk already — no extra I/O beyond the in-memory evolutions list.
+        # Rant 2026-08-20T10:58:55: last_cycle_summary deleted (GUI primary
+        # list no longer uses it since rant 2026-08-19T18:25:14); last_run_at
+        # is derived from the restored evolutions and survives restarts via
+        # the task-runs JSONL.
+        last_run_at: str | None = None
+        if self.evolutions:
+            last_run_at = self.evolutions[-1].timestamp
+        # rant 2026-08-18T21:32:32: last 5 run records for the GUI accordion
+        # subtable — {timestamp, work, impact, recommend_slowdown,
+        # slowdown_reason, tool_count} (fields unified rant 2026-08-20T10:58:55);
+        # all in-memory, no extra I/O.
+        recent_runs = []
+        for log in self.evolutions[-5:]:
+            recent_runs.append({
+                "timestamp": log.timestamp,
+                "work": log.work,
+                "impact": list(log.impact),
+                "recommend_slowdown": log.recommend_slowdown,
+                "slowdown_reason": log.slowdown_reason,
+                "tool_count": log.tool_count,
+            })
+        saturation = {
+            "heartbeat_interval": self._heartbeat_interval(),
+            "heartbeat_active": self._slowdown_active,
+        }
         return {
             "name": self.name,
             "running": self._cycle_running,
             "next_run_in_seconds": remaining,
             "interval": self.interval,
+            "last_run_at": last_run_at,
+            "recent_runs": recent_runs,
+            "saturation": saturation,
+            # rant 2026-08-21T17:46:12: expose the task→session link so the GUI
+            # tasks panel can add an "open session" action. All in-memory —
+            # project name (config.project), resolved project path, and the
+            # fixed task session_id (emrg-evolution-{name}).
+            "project": self._project_name,
+            "project_path": self.project_path,
+            "session_id": self._session_id,
         }
 
-    def _remote_advanced(self) -> bool:
-        """True if origin/master differs from the local HEAD (new upstream work).
+    def _heartbeat_interval(self) -> int:
+        """Low-frequency heartbeat interval (rant 2026-08-09T09:35:55):
+        heartbeat = max(task_interval, min(task_interval * 8, 8 hours)).
+        Protection = slow down, never stop. Long-interval tasks (>= 8h)
+        keep their original cadence (the 8x/8h caps don't apply).
+        """
+        return max(self.interval, min(self.interval * 8, 8 * 3600))
 
-        A saturation-halted handler never runs scheduled cycles, so it can
-        never detect a HEAD change on its own — only a manual /trigger
-        could resume it. If every instance halted during an idle stretch,
-        new upstream work (PRs/commits from other instances or the host)
-        would go unnoticed indefinitely. This cheap check (one ``git
-        ls-remote`` — no fetch, no working-tree mutation) lets the halt
-        auto-resume on genuine upstream activity.
+    def _connect_backoff(self) -> float:
+        """Exponential backoff while the daemon is unreachable.
+
+        Rant 2026-08-09T13:16:36 (v0.2.15 Windows regression): when the
+        daemon is down (emrgd.token missing), every tick's connect failure
+        returned immediately and the loop re-ran at full interval — with
+        multiple handlers that produced a per-second retry/window storm.
+        Backoff = max(30s, interval * 2^n) capped at 10 minutes, where n
+        is the consecutive-failure count. Returns the normal interval when
+        there are no consecutive failures.
+        """
+        if self._connect_failures <= 0:
+            return float(self.interval)
+        n = min(self._connect_failures, 10)  # cap the exponent growth
+        backoff = max(30.0, float(self.interval) * (2 ** n))
+        return min(backoff, 600.0)  # never wait longer than 10 minutes
+
+    def _saturation_heartbeat_active(self) -> bool:
+        """Whether this tick should run at the low-frequency heartbeat interval
+        instead of the normal interval.
+
+        Rant 2026-08-20T10:58:55 (host design-finalized): the flag is set
+        solely by the agent's vibe-check recommend_slowdown (true → throttled)
+        and cleared by a false recommendation or a manual trigger. Kept as a
+        method for call-site compatibility.
+        """
+        return self._slowdown_active
+
+    async def _request_vibe_check(self, ws, prompt: str, completion_summary: str) -> dict | None:
+        """Ask the daemon for a structured vibe check on the SAME connection.
+
+        Sends ``task_vibe_check`` and waits for ``vibe_check_result``. Rant
+        2026-08-20T20:19:31: no timeout — the vibe check is the completion
+        judgment right after a finished cycle; when concurrent tasks hold the
+        LLM a single call can exceed 20s, and waiting longer for an accurate
+        work/reason beats dropping the data (the daemon's LLM call has its own
+        retry/timeout, and a dead daemon raises ConnectionClosed).
+        Fully defensive — any failure/connection-close returns None; the
+        caller conservatively leaves the slowdown state unchanged.
         """
         try:
-            local = self._get_git_head()
-            if not local:
-                return False
-            result = subprocess.run(
-                ["git", "ls-remote", "origin", "master"],
-                cwd=self._source_dir,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=no_prompt_env(),
-            )
-            if result.returncode != 0:
-                return False
-            remote = result.stdout.strip().split()
-            return bool(remote) and remote[0] != local
+            await ws.send(json.dumps({
+                "type": "task_vibe_check",
+                "session_id": self._session_id,
+                "cwd": self._source_dir,
+                "task_name": self.name,
+                "prompt": (prompt or "")[:2000],
+                "completion_summary": (completion_summary or "")[:3000],
+            }, ensure_ascii=False))
+            while True:
+                try:
+                    frame = json.loads(await ws.recv())
+                except ConnectionClosed:
+                    break
+                if frame.get("type") != "vibe_check_result":
+                    continue
+                if not frame.get("ok"):
+                    self._logger.warning(
+                        "TaskHandler[%s]: vibe check error: %s",
+                        self.name, (frame.get("error") or "")[:120],
+                    )
+                    return None
+                result = frame.get("result") or {}
+                return {
+                    "work": str(result.get("work", "")),
+                    "recommend_slowdown": bool(result.get("recommend_slowdown")),
+                    "slowdown_reason": str(result.get("slowdown_reason", "")),
+                }
         except Exception:
-            return False
-
-    def _saturation_halt_active(self) -> bool:
-        """Whether a scheduled tick should be skipped due to saturation halt.
-
-        Extracted from the run loop so the halt decision is testable:
-        at/above the threshold the tick is skipped UNLESS the upstream
-        remote advanced (auto-resume: reset the counter and run the cycle,
-        so a halted handler does not miss new work forever).
-        """
-        if self._empty_cycles < self._IDLE_HALT_THRESHOLD:
-            return False
-        if self._remote_advanced():
-            logger.info(
-                "EvolutionHandler[%s]: upstream advanced — resuming from saturation halt",
-                self.name,
-            )
-            self._empty_cycles = 0
-            self._save_saturation_state()
-            return False
-        logger.info(
-            "EvolutionHandler[%s]: saturation halt — "
-            "skipping scheduled run (%d empty cycles). "
-            "Use /trigger to resume.",
-            self.name, self._empty_cycles,
-        )
-        return True
+            self._logger.debug("TaskHandler[%s]: vibe check failed", self.name, exc_info=True)
+        return None
 
     async def _run_evolution_cycle(self) -> None:
 
-        # Self-heal the evolution workspace first (rant 20:42 方案 C):
-        # packaged installs lack a writable git repo; clone on demand.
-        if not self._ensure_evolution_workspace():
-            logger.warning(
-                "EvolutionHandler[%s]: workspace not ready — skipping cycle",
-                self.name,
-            )
-            return
-
+        # Rant 2026-08-19T14:20:52 — workspace self-heal deleted: git workspace
+        # management is the agent's job (bash tools). The cycle proceeds
+        # directly to prompt build / daemon connection; if the configured
+        # source path is invalid the agent discovers it via tool errors.
         cycle_time = datetime.now()
         prompt = self._build_evolution_prompt()
-        logger.info(
-            "EvolutionHandler[%s]: prompt built (%d chars), connecting ...",
+        self._logger.info(
+            "TaskHandler[%s]: prompt built (%d chars), connecting ...",
             self.name, len(prompt),
         )
         start_time = cycle_time
 
-        # Track git HEAD to detect empty (NTE) cycles
-        git_head_before = self._get_git_head()
-
         try:
             ws = await connect_to_server()
-            logger.info("EvolutionHandler[%s]: connected", self.name)
-        except (ConnectionRefusedError, FileNotFoundError) as e:
-            logger.warning(
-                "EvolutionHandler[%s]: cannot connect: %s", self.name, e
-            )
+            self._logger.info("TaskHandler[%s]: connected", self.name)
+            self._connect_failures = 0
+        except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
+            # G129 (rant 2026-08-09T08:03:46): 连接失败不得静默吞掉——GUI 测试曾把
+            # 假 token 值写进真实 ~/.emrg/emrgd.token，导致演化周期 10 小时连不上
+            # daemon（WinError 1225）只留下 WARNING。累计失败达到阈值后升级为
+            # ERROR 告警，提示 token 文件可能被外部覆盖（检查 ~/.emrg/emrgd.token）。
+            self._connect_failures += 1
+            port_path = config_dir() / "emrgd.token"
+            if self._connect_failures >= self._CONNECT_FAIL_ALERT:
+                self._logger.error(
+                    "TaskHandler[%s]: cannot connect for %d consecutive cycles "
+                    "(%s) — daemon unreachable. Check %s (may have been overwritten "
+                    "by GUI tests or stale after daemon restart); run 'emrg server' "
+                    "or restart the daemon to recover.",
+                    self.name, self._connect_failures, e, port_path,
+                )
+            else:
+                self._logger.warning(
+                    "TaskHandler[%s]: cannot connect (%d/%d): %s",
+                    self.name, self._connect_failures, self._CONNECT_FAIL_ALERT, e,
+                )
             return
 
         task_msg = json.dumps(
@@ -604,6 +719,7 @@ class EvolutionHandler:
                 "prompt": prompt,
                 "stream": True,
                 "timestamp": cycle_time.isoformat(),
+                "sandbox": self._sandbox,
             },
             ensure_ascii=False,
         )
@@ -611,6 +727,7 @@ class EvolutionHandler:
         tool_count = 0
         error = None
         truncated = False
+        completion_content = ""
 
         try:
             await ws.send(task_msg)
@@ -630,15 +747,16 @@ class EvolutionHandler:
                     # wrongly advancing the idle-halt backoff (mem repo lesson:
                     # truncation must be flagged, not silently treated as done).
                     content = resp.get("content") or ""
+                    completion_content = content
                     truncated = "exceeded" in content.lower()
                     if truncated:
-                        logger.warning(
-                            "EvolutionHandler[%s] truncated (max tool rounds, tools=%d, duration=%ds)",
+                        self._logger.warning(
+                            "TaskHandler[%s] truncated (max tool rounds, tools=%d, duration=%ds)",
                             self.name, tool_count, duration,
                         )
                     else:
-                        logger.info(
-                            "EvolutionHandler[%s] complete (tools=%d, duration=%ds)",
+                        self._logger.info(
+                            "TaskHandler[%s] complete (tools=%d, duration=%ds)",
                             self.name, tool_count, duration,
                         )
                     break
@@ -649,13 +767,24 @@ class EvolutionHandler:
                 resp_error = resp.get("error")
                 if isinstance(resp_error, str):
                     error = str(resp_error)
-                    logger.warning(
-                        "EvolutionHandler[%s] server error: %s",
+                    self._logger.warning(
+                        "TaskHandler[%s] server error: %s",
                         self.name, error,
                     )
                     break
+
+            # Empty-cycle detection (rant 2026-08-17T11:39:19): after a clean
+            # completion, ask the agent via task_vibe_check whether the round
+            # was meaningful. Done on the SAME ws connection (daemon replies
+            # with vibe_check_result). Any failure → None → counter untouched.
+            vibe_result = None
+            if not error and not truncated:
+                vibe_result = await self._request_vibe_check(
+                    ws, prompt=prompt,
+                    completion_summary=completion_content[:3000],
+                )
         except Exception as e:
-            logger.exception("EvolutionHandler[%s] error", self.name)
+            self._logger.exception("TaskHandler[%s] error", self.name)
             error = str(e)
         finally:
             try:
@@ -663,49 +792,102 @@ class EvolutionHandler:
             except Exception:
                 pass
 
-        # Detect empty cycles: git HEAD unchanged → no work was done.
-        # A truncated cycle is NOT empty — the agent wanted to work but hit
-        # the tool-round cap; counting it would wrongly back off the handler.
-        git_head_after = self._get_git_head()
-        if (
-            not truncated
-            and git_head_before and git_head_after
-            and git_head_before == git_head_after
-        ):
-            self._empty_cycles += 1
-            self._save_saturation_state()
-            logger.debug(
-                "EvolutionHandler[%s]: empty cycle #%d (HEAD=%s)",
-                self.name, self._empty_cycles, git_head_after[:8],
-            )
-        else:
-            if self._empty_cycles > 0:
-                reason = "truncated cycle" if truncated else "git HEAD changed"
-                logger.info(
-                    "EvolutionHandler[%s]: %s, resetting empty streak",
-                    self.name, reason,
+        # Slowdown state machine (rant 2026-08-20T10:58:55, host design-finalized):
+        # the agent's recommend_slowdown is the ONLY slowdown switch — the old
+        # empty-cycle counter / slowdown-vote / threshold machinery is deleted.
+        #   - vibe success + recommend=true  → _slowdown_active=True (next run
+        #     at heartbeat interval, persisted)
+        #   - vibe success + recommend=false → _slowdown_active=False (normal
+        #     interval, persisted)
+        #   - vibe unavailable / truncated / aborted → state unchanged
+        #     (conservative: neither throttle nor restore on a bad signal)
+        if not error and not truncated and vibe_result is not None:
+            recommend = bool(vibe_result.get("recommend_slowdown"))
+            if recommend:
+                self._slowdown_active = True
+                self._save_saturation_state()
+                self._logger.info(
+                    "TaskHandler[%s]: agent recommends slowdown — next run at "
+                    "heartbeat interval (%ds)",
+                    self.name, self._heartbeat_interval(),
                 )
-            self._empty_cycles = 0
-            self._save_saturation_state()
+            else:
+                if self._slowdown_active:
+                    self._logger.info(
+                        "TaskHandler[%s]: agent recommends normal cadence — "
+                        "restoring interval (%ds)",
+                        self.name, self.interval,
+                    )
+                self._slowdown_active = False
+                self._save_saturation_state()
+        elif not error and not truncated:
+            # vibe check failed/timeout — conservative: state unchanged
+            self._logger.info(
+                "TaskHandler[%s]: vibe check unavailable — slowdown state unchanged",
+                self.name,
+            )
+
+        # Aborted cycles are not evolutions: no log file, no count. Writing
+        # them would inflate the evolution count (GUI growth card / toast,
+        # evolution_summary) with work that never happened — the "session
+        # busy" aborts observed when interactive sessions hold the daemon.
+        if error:
+            self._logger.warning(
+                "TaskHandler[%s]: cycle aborted (%s) — not counted as evolution",
+                self.name, error[:200],
+            )
+            return
 
         cycle_ts = cycle_time.isoformat()
+        # Rant 2026-08-12T18:03:26: cycle records are now memory entries
+        # (memory/cycle-<ts>.md, written by the agent per evolution_prompt §6),
+        # not standalone evolution-cycle-*.md files — keep the impact tag
+        # aligned with the new naming.
         impact = [
-            f"evolution-cycle-{cycle_ts}-{'truncated' if truncated else 'complete'}",
+            f"cycle-{cycle_ts}-{'truncated' if truncated else 'complete'}",
             f"tools-executed={tool_count}",
         ]
         if truncated:
             impact.append("truncated=max-tool-rounds")
-        if error:
-            impact.append(f"error={error[:200]}")
+
+        # rant 2026-08-18T21:32:32: persist the agent's own natural-language
+        # summary of what was done this cycle (vibe check "work" field) + the
+        # vibe flags, so the GUI task recent-runs table shows real value, not
+        # a machine string. Rant 2026-08-19T07:06:45 (host-finalized): NO
+        # fallback to the completion first line — work uses only the vibe
+        # check "work" field; empty stays empty (GUI shows "-"). Field names
+        # unified to work/recommend_slowdown/slowdown_reason (rant
+        # 2026-08-20T10:58:55).
+        work = ""
+        recommend = False
+        slowdown_reason = ""
+        if vibe_result is not None:
+            # Rant 2026-08-20T22:45:33: no more [:500] truncation — save the
+            # full work value (prompt guidance keeps it ≤200 chars).
+            work = str(vibe_result.get("work") or "")
+            recommend = bool(vibe_result.get("recommend_slowdown"))
+            # rant 2026-08-19T18:25:14: keep the vibe check's reason so the GUI
+            # secondary list can show 原因 (time/work/throttle/reason).
+            slowdown_reason = str(vibe_result.get("slowdown_reason") or "")[:300]
 
         log = EvolutionLog(
             timestamp=cycle_ts,
             trigger=f"evolution-{self.name}-{cycle_ts}",
             impact=impact,
             operations=["llm-reflection", "tool-execution", "self-improvement"],
+            work=work,
+            recommend_slowdown=recommend,
+            slowdown_reason=slowdown_reason,
+            tool_count=tool_count,
         )
-        await self._write_evolution_log(log)
+        # Rant 2026-08-19T14:18:40 — no more evolution-*.json single-file
+        # archival (unconsumed). Rant 2026-08-19T20:50:36 (host Plan B):
+        # execution records persist as append-only JSONL per task
+        # (~/.emrg/logs/task-runs/<task>.jsonl) so the GUI recent-runs
+        # secondary list survives daemon restarts — a durable copy of the
+        # in-memory self.evolutions list, restored on init.
         self.evolutions.append(log)
+        self._append_task_run(log)
 
     def _build_evolution_prompt(self) -> str:
         """Build evolution prompt from a Jinja2 template.
@@ -751,31 +933,6 @@ class EvolutionHandler:
         template = env.from_string(self._template_path.read_text(encoding="utf-8"))
         return template.render(**context)
 
-    async def _write_evolution_log(self, entry: EvolutionLog) -> None:
-        filename = f"evolution-{entry.timestamp.replace(':', '-')}.json"
-        path = self._logs_dir / filename
-        data = {
-            "timestamp": entry.timestamp,
-            "trigger": entry.trigger,
-            "impact": entry.impact,
-            "operations": entry.operations,
-        }
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-
-        # Rotate: keep at most 27 evolution log files (oldest deleted).
-        # Filenames use ISO timestamps so lexical sort = chronological.
-        _MAX_LOG_FILES = 27
-        try:
-            log_files = sorted([
-                f for f in self._logs_dir.iterdir()
-                if f.is_file() and f.name.startswith("evolution-")
-            ])
-            if len(log_files) > _MAX_LOG_FILES:
-                for old in log_files[:len(log_files) - _MAX_LOG_FILES]:
-                    old.unlink(missing_ok=True)
-        except OSError:
-            pass  # best-effort cleanup
-
     async def _write_final_summary(self) -> None:
         if not self.evolutions:
             return
@@ -800,23 +957,92 @@ class TaskScheduler:
     """
 
     HANDLERS: dict[str, type] = {
-        "evolution": EvolutionHandler,
-        "paper": EvolutionHandler,  # same handler, different template
-        "open-source": EvolutionHandler,  # same handler, different template
-        "promote": EvolutionHandler,  # same handler, different template
+        "evolution": TaskHandler,
+        "paper": TaskHandler,  # same handler, different template
+        "open-source": TaskHandler,  # same handler, different template
+        "promote": TaskHandler,  # same handler, different template
     }
 
     def __init__(self, identity: InstanceIdentity) -> None:
         self.identity = identity
-        self._tasks_file = config_dir() / "tasks.yml"
-        self._handlers: list[EvolutionHandler] = []
+        self._tasks_file: Path | None = None
+        self._handlers: list[TaskHandler] = []
         self._coros: list[asyncio.Task] = []
+        # cfg (from tasks.yml) used to start each handler — for hot-reload diffing.
+        self._handler_cfgs: dict[str, dict] = {}
+
+    @property
+    def _tasks_file(self) -> Path:
+        """tasks.yml path — resolved lazily so config_dir() patches work
+        (hermeticity guard #738: tests patch config_dir after construction,
+        and tests may override _tasks_file directly with a tmp path)."""
+        if self.__tasks_file is None:
+            self.__tasks_file = config_dir() / "tasks.yml"
+        return self.__tasks_file
+
+    @_tasks_file.setter
+    def _tasks_file(self, value: Path | None) -> None:
+        self.__tasks_file = value
+
+    def _build_handler(self, cfg: dict) -> TaskHandler:
+        """Construct a TaskHandler for a task cfg (pure sync construction).
+
+        May block briefly (git remote detection in ``TaskHandler.__init__``
+        + template lookup) — callers in the event loop must offload via
+        ``asyncio.to_thread`` (rant 2026-08-19T01:05:47: no blocking calls
+        in the loop).
+        """
+        template_path = _resolve_task_template(cfg["type"])
+        return TaskHandler(
+            name=cfg["name"],
+            config=cfg.get("config", {}),
+            interval=cfg.get("interval", DEFAULT_INTERVAL),
+            identity=self.identity,
+            template_path=template_path,
+            sandbox=cfg.get("sandbox"),
+        )
+
+    def _start_handler_for(self, cfg: dict) -> TaskHandler:
+        """Create + start a handler for a task cfg; returns the handler.
+
+        Boot path (no websocket clients connected yet) — sync construction
+        is acceptable here.
+        """
+        handler = self._build_handler(cfg)
+        self._handlers.append(handler)
+        self._handler_cfgs[handler.name] = cfg
+        self._coros.append(asyncio.create_task(handler.run()))
+        return handler
+
+    async def _start_handler_async(self, cfg: dict) -> TaskHandler:
+        """Hot-reload path (apply_tasks, on the event loop while serving):
+        offload the sync handler construction to a worker thread so a slow
+        git probe never freezes the loop (rant 2026-08-19T01:05:47)."""
+        handler = await asyncio.to_thread(self._build_handler, cfg)
+        self._handlers.append(handler)
+        self._handler_cfgs[handler.name] = cfg
+        self._coros.append(asyncio.create_task(handler.run()))
+        return handler
+
+    def _stop_handler(self, handler: TaskHandler) -> None:
+        """Stop a handler and cancel its coroutine (hot-reload removal/restart)."""
+        handler.stop()
+        try:
+            idx = self._handlers.index(handler)
+        except ValueError:
+            idx = -1
+        if idx >= 0:
+            coro = self._coros[idx]
+            coro.cancel()
+            del self._coros[idx]
+            del self._handlers[idx]
+        self._handler_cfgs.pop(handler.name, None)
 
     def load_and_start(self) -> list[asyncio.Task]:
         """Load tasks.yml, start all enabled tasks, return coroutine list."""
         # Self-heal: packaged installs may lack the emrg self-evolution task.
         # This must run here (not inside the handler) because a missing task
-        # means no EvolutionHandler is ever started (rant 20:42 方案 C).
+        # means no TaskHandler is ever started (rant 20:42 方案 C).
         self._ensure_self_evolution_task()
 
         tasks_config = self._load_tasks()
@@ -829,28 +1055,17 @@ class TaskScheduler:
         for cfg in tasks_config:
             if not cfg.get("enabled", True):
                 continue
-            handler_cls = self.HANDLERS.get(cfg["type"])
+            handler_cls = self.HANDLERS.get(cfg["type"], TaskHandler)
             if handler_cls is None:
                 logger.warning(
                     "TaskScheduler: unknown type %r for task %r",
                     cfg["type"], cfg["name"],
                 )
                 continue
-            template_name = TASK_TEMPLATES.get(cfg["type"], "evolution_prompt.md")
-            template_path = Path(__file__).parent / template_name
-            handler = handler_cls(
-                name=cfg["name"],
-                config=cfg.get("config", {}),
-                interval=cfg.get("interval", 1800),
-                identity=self.identity,
-                template_path=template_path,
-            )
-            self._handlers.append(handler)
-            coro = asyncio.create_task(handler.run())
-            self._coros.append(coro)
+            self._start_handler_for(cfg)
             logger.info(
                 "TaskScheduler: started %s[%s] every %ds",
-                cfg["type"], cfg["name"], cfg.get("interval", 1800),
+                cfg["type"], cfg["name"], cfg.get("interval", DEFAULT_INTERVAL),
             )
 
         return self._coros
@@ -871,8 +1086,37 @@ class TaskScheduler:
         return None
 
     def list_tasks(self) -> list[dict]:
-        """Return status for all running handlers."""
-        return [handler.status() for handler in self._handlers]
+        """Return status for all running handlers.
+
+        MUST stay pure in-memory (rant 2026-08-18T20:48:45): this is the
+        /trigger + tasks-panel request path — any I/O here stalls every WS
+        message. The per-handler timing below exists to catch exactly that:
+        total >200ms → WARNING with a per-handler breakdown, >50ms → DEBUG.
+        """
+        start = time.monotonic()
+        results = []
+        per_handler: list[str] = []
+        for handler in self._handlers:
+            h_start = time.monotonic()
+            results.append(handler.status())
+            per_handler.append(f"{handler.name}={1000 * (time.monotonic() - h_start):.1f}ms")
+        elapsed_ms = 1000 * (time.monotonic() - start)
+        if elapsed_ms > 200:
+            logger.warning(
+                "TaskScheduler: list_tasks took %.1fms (>200ms — "
+                "status() must stay in-memory) — per-handler: %s",
+                elapsed_ms, ", ".join(per_handler),
+            )
+        elif elapsed_ms > 50:
+            logger.debug(
+                "TaskScheduler: list_tasks took %.1fms — per-handler: %s",
+                elapsed_ms, ", ".join(per_handler),
+            )
+        return results
+
+    def total_evolutions(self) -> int:
+        """Total completed evolution cycles across all running handlers."""
+        return sum(len(handler.evolutions) for handler in self._handlers)
 
     async def wait_all(self) -> None:
         """Wait for all handler coroutines to finish (after cancel)."""
@@ -940,16 +1184,15 @@ class TaskScheduler:
         """Ensure projects.yml has an emrg entry and tasks.yml has the task.
 
         Packaged installs (or first runs) may lack tasks.yml entirely, or lack
-        the emrg-task entry. Without it, no EvolutionHandler is ever created,
-        so the workspace self-heal (which lives inside the handler) cannot run.
+        the emrg-task entry. Without it, no TaskHandler is ever created, so
+        the emrg task never runs.
 
-        The projects.yml emrg entry is ensured here too (rant 02:58): the only
-        other writer (_ensure_evolution_workspace's clone branch) requires a
-        first tick + network. If projects.yml lacks the entry,
-        _resolve_project_path("emrg") returns None and the handler's
-        _source_dir degenerates to the relative string "emrg" (dangling cwd).
-        The path is fixed to ~/.emrg/evolution/emrg; an existing entry is
-        preserved as-is (dev machines may configure a custom path).
+        The projects.yml emrg entry is ensured here too (rant 02:58): if
+        projects.yml lacks the entry, _resolve_project_path("emrg") returns
+        None and the handler's _source_dir degenerates to the relative string
+        "emrg" (dangling cwd). The path is fixed to ~/.emrg/evolution/emrg;
+        an existing entry is preserved as-is (dev machines may configure a
+        custom path).
         """
         # 1. projects.yml — add name=emrg entry if missing (preserve existing).
         projects_file = config_dir() / "projects.yml"
@@ -969,6 +1212,28 @@ class TaskScheduler:
                 logger.info(
                     "TaskScheduler: self-heal — added emrg entry to projects.yml"
                 )
+            else:
+                # Repair a stale emrg entry whose path no longer exists
+                # (2026-08-12 incident: a pytest temp dir leaked into
+                # projects.yml by a test run; the dir is deleted after the
+                # suite, leaving the entry pointing at a dead path forever —
+                # list_projects/GUI pickers show a wrong path and the handler
+                # re-resolves a dangling dir every cycle). Dev machines with a
+                # real custom checkout keep their path (is_dir() True).
+                for entry in entries:
+                    if entry.get("name") != "emrg":
+                        continue
+                    existing = entry.get("path")
+                    if existing and Path(existing).is_dir():
+                        break  # real checkout — preserved as-is
+                    entry["path"] = str(EVOLUTION_CWD / "emrg")
+                    entry["last_active"] = datetime.now().isoformat()
+                    atomic_write_yaml(entries, projects_file, prefix=".projects_")
+                    logger.info(
+                        "TaskScheduler: self-heal — repaired stale emrg entry "
+                        "%r -> %s", existing, entry["path"],
+                    )
+                    break
         except (yaml.YAMLError, OSError) as e:
             logger.warning(
                 "TaskScheduler: projects.yml self-heal failed: %s", e
@@ -1019,3 +1284,216 @@ class TaskScheduler:
         })
         self._save_tasks(tasks)
         logger.info("TaskScheduler: created task %s", name)
+
+    # ── Task CRUD + hot reload (rant 2026-08-12T18:23:15 P2) ────────
+
+    @staticmethod
+    def _validate_task_fields(
+        name: str, task_type: str, project: str, interval: int,
+    ) -> str | None:
+        """Return an error string, or None when the fields are valid."""
+        if not TASK_NAME_RE.match(name) or len(name) > TASK_NAME_MAX:
+            return f"invalid task name {name!r} (^[a-z0-9][a-z0-9-]*$, <= {TASK_NAME_MAX} chars)"
+        if task_type not in TASK_TEMPLATES and task_type not in _custom_templates():
+            return f"unknown task type {task_type!r} (not builtin, no custom template)"
+        if not project or _resolve_project_path(project) is None:
+            return f"project {project!r} is not registered in projects.yml"
+        if not isinstance(interval, int) or isinstance(interval, bool) or interval < MIN_INTERVAL:
+            return f"interval must be an integer >= {MIN_INTERVAL}"
+        return None
+
+    def task_create(
+        self, name: str, task_type: str, project: str,
+        interval: int | None = None, enabled: bool = True,
+        repo: str | None = None, description: str | None = None,
+        sandbox: str | None = None,
+    ) -> tuple[bool, str | dict]:
+        """Create a task. Returns (ok, error) or (ok, task-dict)."""
+        interval = DEFAULT_INTERVAL if interval is None else interval
+        err = self._validate_task_fields(name, task_type, project, interval)
+        if err:
+            return False, err
+        if sandbox is not None and sandbox not in SANDBOX_MODES:
+            return False, f"invalid sandbox {sandbox!r} (expected one of {', '.join(SANDBOX_MODES)})"
+        tasks = self._load_tasks()
+        if any(t.get("name") == name for t in tasks):
+            return False, f"task {name!r} already exists"
+        cfg: dict = {"project": project}
+        if repo:
+            cfg["repo"] = repo
+        task: dict = {
+            "name": name,
+            "type": task_type,
+            "config": cfg,
+            "interval": interval,
+            "enabled": bool(enabled),
+            "last_run": None,
+        }
+        if sandbox is not None:
+            task["sandbox"] = sandbox
+        if description:
+            task["description"] = description
+        tasks.append(task)
+        self._save_tasks(tasks)
+        logger.info("TaskScheduler: task %s created (type=%s)", name, task_type)
+        return True, task
+
+    def task_update(self, name: str, **fields) -> tuple[bool, str | dict]:
+        """Update a task's fields. Returns (ok, error) or (ok, task-dict)."""
+        tasks = self._load_tasks()
+        task = next((t for t in tasks if t.get("name") == name), None)
+        if task is None:
+            return False, f"task {name!r} not found"
+        new_type = fields.get("type", task.get("type", "evolution"))
+        new_project = fields.get("project")
+        if new_project is None:
+            cfg = task.get("config") if isinstance(task.get("config"), dict) else {}
+            new_project = cfg.get("project", "")
+        new_interval = fields.get("interval", task.get("interval", DEFAULT_INTERVAL))
+        err = self._validate_task_fields(name, new_type, new_project, new_interval)
+        if err:
+            return False, err
+        if "type" in fields:
+            task["type"] = fields["type"]
+        if "project" in fields or "repo" in fields:
+            cfg = task.get("config") if isinstance(task.get("config"), dict) else {}
+            if "project" in fields:
+                cfg["project"] = fields["project"]
+            if "repo" in fields:
+                if fields["repo"]:
+                    cfg["repo"] = fields["repo"]
+                else:
+                    cfg.pop("repo", None)
+            task["config"] = cfg
+        if "interval" in fields:
+            task["interval"] = fields["interval"]
+        if "enabled" in fields:
+            task["enabled"] = bool(fields["enabled"])
+        if "description" in fields:
+            task["description"] = fields["description"]
+        if "sandbox" in fields:
+            if fields["sandbox"] is not None and fields["sandbox"] not in SANDBOX_MODES:
+                return False, f"invalid sandbox {fields['sandbox']!r} (expected one of {', '.join(SANDBOX_MODES)})"
+            task["sandbox"] = fields["sandbox"]
+        self._save_tasks(tasks)
+        logger.info("TaskScheduler: task %s updated", name)
+        return True, task
+
+    def task_delete(self, name: str) -> tuple[bool, str]:
+        """Delete a task by name. Returns (ok, error)."""
+        tasks = self._load_tasks()
+        before = len(tasks)
+        tasks = [t for t in tasks if t.get("name") != name]
+        if len(tasks) == before:
+            return False, f"task {name!r} not found"
+        self._save_tasks(tasks)
+        logger.info("TaskScheduler: task %s deleted", name)
+        return True, ""
+
+    async def apply_tasks(self, tasks: list[dict]) -> dict:
+        """Hot-reload tasks from a new config list (rant 2026-08-12T18:23:15 P2).
+
+        Writes tasks.yml atomically, diffs against running handlers, and
+        starts/stops/restarts handlers as needed — no daemon restart.
+        Idempotent; returns {"added": [...], "removed": [...], "updated": [...]}.
+        """
+        self._save_tasks(tasks)
+        enabled = {
+            t.get("name"): t for t in tasks
+            if isinstance(t, dict) and t.get("enabled", True)
+        }
+        current = {h.name: h for h in list(self._handlers)}
+        added: list[str] = []
+        removed: list[str] = []
+        updated: list[str] = []
+        for name, handler in list(current.items()):
+            if name not in enabled:
+                removed.append(name)
+                self._stop_handler(handler)
+        for name, cfg in enabled.items():
+            if name not in current:
+                added.append(name)
+                await self._start_handler_async(cfg)
+            else:
+                old = self._handler_cfgs.get(name)
+                if old is not None and _task_cfg_signature(old) != _task_cfg_signature(cfg):
+                    updated.append(name)
+                    self._stop_handler(current[name])
+                    await self._start_handler_async(cfg)
+        return {"added": added, "removed": removed, "updated": updated}
+
+    def list_templates(self) -> list[dict]:
+        """List all task types: builtin (read-only) + custom (with prompt preview).
+
+        rant 2026-08-15T09:17:45/09:20:12：builtin 也附带 ``prompt`` 正文，
+        GUI 只读 Monaco 查看器得以展示真实提示词（读失败回退文件名占位）。
+        """
+        result: list[dict] = []
+        for name in sorted(TASK_TEMPLATES):
+            prompt = ""
+            try:
+                p = Path(__file__).parent / TASK_TEMPLATES[name]
+                if p.exists():
+                    prompt = p.read_text(encoding="utf-8")
+            except OSError:
+                pass
+            result.append({
+                "name": name,
+                "builtin": True,
+                "template": TASK_TEMPLATES[name],
+                "prompt": prompt,
+            })
+        for name in _custom_templates():
+            result.append({
+                "name": name,
+                "builtin": False,
+                "template": f"{name}.md",
+                "prompt": _read_custom_template(name) or "",
+            })
+        return result
+
+    def template_create(self, name: str, prompt: str) -> tuple[bool, str]:
+        """Create a custom task type template. Returns (ok, error)."""
+        if not TASK_NAME_RE.match(name) or len(name) > TASK_NAME_MAX:
+            return False, f"invalid template name {name!r} (^[a-z0-9][a-z0-9-]*$, <= {TASK_NAME_MAX} chars)"
+        if name in TASK_TEMPLATES:
+            return False, f"builtin task type {name!r} is read-only"
+        if not prompt or not prompt.strip():
+            return False, "template prompt must not be empty"
+        if _read_custom_template(name) is not None:
+            return False, f"template {name!r} already exists"
+        _write_custom_template(name, prompt)
+        logger.info("TaskScheduler: custom template %s created", name)
+        return True, ""
+
+    def template_update(self, name: str, prompt: str) -> tuple[bool, str]:
+        """Update a custom task type template. Returns (ok, error)."""
+        if name in TASK_TEMPLATES:
+            return False, f"builtin task type {name!r} is read-only"
+        if _read_custom_template(name) is None:
+            return False, f"template {name!r} not found"
+        if not prompt or not prompt.strip():
+            return False, "template prompt must not be empty"
+        _write_custom_template(name, prompt)
+        logger.info("TaskScheduler: custom template %s updated", name)
+        return True, ""
+
+    def template_delete(self, name: str) -> tuple[bool, str]:
+        """Delete a custom task type template. Returns (ok, error).
+
+        Refuses when tasks reference the type (host decision, rant 18:23:15).
+        """
+        if name in TASK_TEMPLATES:
+            return False, f"builtin task type {name!r} is read-only"
+        if _read_custom_template(name) is None:
+            return False, f"template {name!r} not found"
+        tasks = self._load_tasks()
+        refs = [t.get("name") for t in tasks if t.get("type") == name]
+        if refs:
+            return False, (
+                f"cannot delete type {name!r}: {len(refs)} task(s) use it "
+                f"({', '.join(str(r) for r in refs[:5])})"
+            )
+        _delete_custom_template(name)
+        logger.info("TaskScheduler: custom template %s deleted", name)
+        return True, ""

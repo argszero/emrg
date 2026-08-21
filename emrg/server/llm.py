@@ -137,8 +137,13 @@ class LlmClient:
 
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
-            logger.debug("LLM request: url=%s model=%s (attempt %d/%d)",
-                         _redact_text(url), self.config.model, attempt + 1, MAX_RETRIES + 1)
+            # First attempt is the normal path — log nothing (rant
+            # 2026-08-17T14:27:39: 1/4 on every request is noise); retries
+            # already log via the "transient error ... retrying" warning,
+            # this debug line only adds the attempt counter for retries.
+            if attempt > 0:
+                logger.debug("LLM request: url=%s model=%s (attempt %d/%d)",
+                             _redact_text(url), self.config.model, attempt + 1, MAX_RETRIES + 1)
 
             resp = await client.post(url, headers=headers, json=payload)
 
@@ -204,10 +209,16 @@ class LlmClient:
 
         Yields dicts of shape:
             {"content": str | None, "tool_calls": list[dict] | None,
-             "finish_reason": str | None, "usage": dict | None}
+             "finish_reason": str | None, "usage": dict | None,
+             "reasoning": str | None}
 
         tool_calls are accumulated across chunks (by index). Each yield
         carries the current accumulated state so callers can track progress.
+
+        ``reasoning`` (rant 2026-08-18T09:43:23) carries the accumulated
+        think/chain-of-thought text (``reasoning_content`` / ``reasoning``
+        deltas) or None when the model does not reason. Usage may include
+        ``reasoning_tokens`` when the API reports it.
 
         The final yield includes usage (prompt_tokens, completion_tokens)
         when the API provides it.
@@ -232,13 +243,18 @@ class LlmClient:
 
         # Accumulated state across chunks (reset on retry)
         content_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tc_by_index: dict[int, dict] = {}
 
         last_error = None
         for attempt in range(MAX_RETRIES + 1):
-            logger.debug("LLM stream attempt %d/%d", attempt + 1, MAX_RETRIES + 1)
+            # First attempt silent (rant 2026-08-17T14:27:39) — the retrying
+            # warning already logs the retry; this adds the attempt counter.
+            if attempt > 0:
+                logger.debug("LLM stream attempt %d/%d", attempt + 1, MAX_RETRIES + 1)
             # Reset accumulators before each attempt
             content_parts[:] = []
+            reasoning_parts[:] = []
             tc_by_index.clear()
 
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
@@ -292,6 +308,14 @@ class LlmClient:
                     if text_content:
                         content_parts.append(text_content)
 
+                    # Accumulate reasoning / think block (rant 2026-08-18T09:43:23):
+                    # DeepSeek sends `reasoning_content`, OpenAI-compatible
+                    # endpoints may send `reasoning` — accept both field names,
+                    # accumulating per-delta like content_parts.
+                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                    if reasoning:
+                        reasoning_parts.append(reasoning)
+
                     # Accumulate tool_calls from delta
                     for tc in delta.get("tool_calls", []):
                         idx = tc.get("index", 0)
@@ -319,6 +343,14 @@ class LlmClient:
 
                     # Capture usage from chunk (may appear in any chunk or only in final)
                     usage = chunk.get("usage")
+                    # reasoning_tokens may sit at the top level or nested under
+                    # completion_tokens_details (rant 2026-08-18T09:43:23)
+                    reasoning_tokens = (
+                        usage.get("reasoning_tokens")
+                        if usage and usage.get("reasoning_tokens") is not None
+                        else (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                        if usage else None
+                    )
 
                     yield {
                         "content": text_content or None,
@@ -327,7 +359,11 @@ class LlmClient:
                         "usage": {
                             "prompt_tokens": usage.get("prompt_tokens"),
                             "completion_tokens": usage.get("completion_tokens"),
+                            "reasoning_tokens": reasoning_tokens,
                         } if usage else None,
+                        # accumulated think text; None when the model does not
+                        # reason (rant 2026-08-18T09:43:23 — only on response side)
+                        "reasoning": "".join(reasoning_parts) or None,
                     }
 
                     # On finish, we're done with this stream

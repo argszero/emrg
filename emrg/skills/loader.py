@@ -43,10 +43,16 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
     """Parse simple key: value YAML frontmatter.
 
     Handles quoted strings and plain values. No nested structures.
+    Indented (nested) lines are ignored so a skill whose frontmatter also
+    carries a nested metadata list (skill-catalog.md, rant
+    2026-08-08T10:14:29) keeps its own top-level name/description —
+    nested ``description:`` keys must not overwrite the top-level one.
     This avoids adding pyyaml as a dependency for the simple format.
     """
     result: dict[str, str] = {}
     for line in text.split("\n"):
+        if line[:1].isspace():  # indented → nested YAML, not a top-level key
+            continue
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -63,6 +69,13 @@ def _parse_frontmatter(text: str) -> dict[str, str]:
 
 def _parse_skill_file(file_path: Path, source: str) -> Optional[Skill]:
     """Parse a single skill .md file. Returns None if parsing fails."""
+    # Defensive: the deprecated registry file (superseded 2026-08-08T10:14:29
+    # by skill-catalog.md) would parse as a bogus skill named "recommended"
+    # — never load it as one.
+    if file_path.name == "recommended.md":
+        logger.debug("skill: skipping deprecated registry file %s", file_path)
+        return None
+
     try:
         text = file_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):

@@ -1,5 +1,10 @@
-"""Tests for emrg/__main__.py argument parsing."""
-from emrg.__main__ import _build_parser
+"""Tests for emrg/__main__.py argument parsing and `emrg stop` process matching."""
+from emrg.__main__ import (
+    _build_parser,
+    _match_emrg_client,
+    _scan_emrg_client_pids,
+)
+
 
 
 class TestBuildParser:
@@ -57,3 +62,101 @@ class TestBuildParser:
         assert args.command == "rant"
         assert args.project == "emrg"
         assert args.message == ["hello"]
+
+    def test_stop_command(self):
+        parser = _build_parser()
+        args = parser.parse_args(["stop"])
+        assert args.command == "stop"
+        assert args.skip_gui is False
+
+    def test_stop_command_skip_gui(self):
+        """emrg stop --skip-gui (rant 2026-08-21T12:44:34): the GUI's
+        restart-to-apply calls the CLI so the install launcher's PYTHONPATH
+        makes `emrg` importable for the packaged app."""
+        parser = _build_parser()
+        args = parser.parse_args(["stop", "--skip-gui"])
+        assert args.command == "stop"
+        assert args.skip_gui is True
+
+
+class TestMatchEmrgClient:
+    """`emrg stop` process matching — positive and negative states."""
+
+    def test_matches_tui(self):
+        assert _match_emrg_client("python -m emrg")
+        assert _match_emrg_client("python -m emrg --init-auto-evolve")
+
+    def test_matches_daemon(self):
+        assert _match_emrg_client("python -m emrg.server")
+        assert _match_emrg_client("pythonw -m emrg.server")
+
+    def test_matches_macos_gui(self):
+        assert _match_emrg_client("/Applications/EMRG.app/Contents/MacOS/EMRG")
+        assert _match_emrg_client("EMRG.app/Contents/MacOS/EMRG --no-sandbox")
+
+    def test_does_not_match_lookalikes(self):
+        # module-like but different module: must not match
+        assert not _match_emrg_client("python -m emrg.serverless")
+        assert not _match_emrg_client("python -m emrgx")
+        # unrelated processes
+        assert not _match_emrg_client("git fetch origin master")
+        assert not _match_emrg_client("python -m pytest tests/")
+        assert not _match_emrg_client("EMRGX.app/Contents/MacOS/EMRGX")
+        # `-m emrg` as substring of a longer flag (e.g. -X something) must not match
+        assert not _match_emrg_client("python -X dev main.py -m emrgistry")
+
+
+class TestScanEmrgClientPids:
+    def test_parses_and_excludes_own_pid(self):
+        ps_out = (
+            "  100 /usr/bin/python -m emrg\n"
+            "  200 /usr/bin/python -m emrg.server\n"
+            "  300 /usr/bin/python -m pytest\n"
+            "  400 /Applications/EMRG.app/Contents/MacOS/EMRG\n"
+        )
+        pids = _scan_emrg_client_pids(ps_out, own_pid=200)
+        # 100 (TUI) + 400 (GUI) matched; 200 excluded as own pid; 300 unrelated
+        assert pids == [100, 400]
+
+    def test_empty_and_malformed_lines(self):
+        ps_out = "  100 /usr/bin/python -m emrg\n\n   \nnot-a-pid  /bin/ls\n"
+        pids = _scan_emrg_client_pids(ps_out, own_pid=9999)
+        assert pids == [100]
+
+    def test_no_matches(self):
+        assert _scan_emrg_client_pids("  1 /sbin/launchd\n  2 /usr/libexec/foo\n", own_pid=9999) == []
+
+
+class TestStopAllSkipGui:
+    """_stop_all(skip_gui=...) forwards to emrg._stop_all.stop_all.
+
+    Regression: `emrg stop` crashed with
+    ``TypeError: _stop_all() got an unexpected keyword argument 'skip_gui'`` —
+    the --skip-gui flag (rant 2026-08-21T12:44:34) was plumbed into the call
+    site but the wrapper's signature was never updated. Fully mocked: nothing
+    is actually stopped (the real daemon must never be killed by a test).
+    """
+
+    def test_forwards_skip_gui(self, monkeypatch):
+        from emrg import _stop_all as stop_mod
+        from emrg.__main__ import _stop_all
+
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            stop_mod, "stop_all",
+            lambda skip_gui=False: calls.append(skip_gui) or 0,
+        )
+        assert _stop_all(skip_gui=True) == 0
+        assert calls == [True]
+
+    def test_default_skip_gui_false(self, monkeypatch):
+        from emrg import _stop_all as stop_mod
+        from emrg.__main__ import _stop_all
+
+        calls: list[bool] = []
+        monkeypatch.setattr(
+            stop_mod, "stop_all",
+            lambda skip_gui=False: calls.append(skip_gui) or 0,
+        )
+        assert _stop_all() == 0
+        assert calls == [False]

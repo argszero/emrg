@@ -8,6 +8,7 @@ emrg.client.daemon_manager.asyncio.create_subprocess_exec。
 
 import asyncio
 import json
+import signal
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,6 +23,14 @@ import sys
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon 生命周期测试依赖 POSIX 进程语义（Windows CI 冒烟不跑）")
 
 from emrg.client import daemon_manager
+
+
+@pytest.fixture(autouse=True)
+def _reset_spawn_attempts():
+    """每个测试前重置模块级 spawn 节流计数（跨测试状态不泄漏）。"""
+    daemon_manager._spawn_attempts = 0
+    yield
+    daemon_manager._spawn_attempts = 0
 
 
 class FakeWS:
@@ -60,7 +69,7 @@ def _ping_pong_frame() -> str:
 
 class TestIsRunning:
     @patch("emrg.client.daemon_manager.is_server_running_sync", return_value=True)
-    def test_true_when_port_file_ok(self, mock_probe):
+    def test_true_when_token_file_ok(self, mock_probe):
         assert daemon_manager.is_running() is True
         mock_probe.assert_called_once()
 
@@ -91,11 +100,13 @@ class TestStartDaemon:
         assert args[0].endswith("python") or "python" in args[0]
         assert args[1:] == ("-m", "emrg.server")
 
+    @patch("emrg.client.daemon_manager.asyncio.sleep", new_callable=AsyncMock)
     @patch("emrg.client.daemon_manager.is_running", return_value=False)
     @patch("emrg.client.daemon_manager.cleanup_server")
     @patch("emrg.client.daemon_manager.asyncio.create_subprocess_exec",
            new_callable=AsyncMock)
-    def test_raises_on_timeout(self, mock_spawn, mock_cleanup, mock_is_running):
+    def test_raises_on_timeout(self, mock_spawn, mock_cleanup, mock_is_running,
+                               mock_sleep):
         proc = MagicMock(pid=1234)
         mock_spawn.return_value = proc
 
@@ -109,9 +120,9 @@ class TestStartDaemon:
 # ── check_and_restart_if_stale ───────────────────────────────
 
 class TestCheckAndRestartIfStale:
-    def test_no_port_file_returns_early(self, tmp_path):
+    def test_no_token_file_returns_early(self, tmp_path):
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(tmp_path / "nope.port")):
+                   return_value=str(tmp_path / "nope.token")):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # no exceptions = pass
 
@@ -121,12 +132,12 @@ class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_mtime_unchanged_no_restart(self, mock_connect, mock_running,
                                         mock_src, mock_cfg, tmp_path):
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # No restart: the frame's started_at (2026) > mtimes (0), so no SIGTERM.
         # We only assert connect was used (ping roundtrip happened).
@@ -140,29 +151,124 @@ class TestCheckAndRestartIfStale:
     def test_source_newer_triggers_restart(self, mock_connect, mock_kill,
                                            mock_cleanup, mock_running,
                                            mock_src, mock_cfg, tmp_path):
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         # started_at in the past → source mtime (1e12) > server_start
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
 
+        def fake_kill(pid, sig):
+            # liveness probe (sig=0) → old daemon already dead → no wait
+            if sig == 0:
+                raise ProcessLookupError(pid)
+
+        mock_kill.side_effect = fake_kill
+
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # SIGTERM sent to pid 9999
         kill_calls = [c.args for c in mock_kill.call_args_list]
         assert any(9999 in call and call[0] == 9999 for call in kill_calls)
+        # rant 12:49:09 ②：port file cleanup happens only AFTER old pid confirmed dead
+        assert mock_cleanup.called
+
+    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
+    @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_restart_waits_until_old_pid_dead_before_cleanup(
+            self, mock_connect, mock_kill, mock_cleanup, mock_running,
+            mock_src, mock_cfg, tmp_path):
+        """rant 12:49:09 ② — old daemon takes ~0.4s to die: cleanup_server()
+        must NOT run while the old pid is still alive (multi-instance guard)."""
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
+        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+
+        probe_calls = {"n": 0}
+
+        def fake_kill(pid, sig):
+            if sig == 0:
+                probe_calls["n"] += 1
+                if probe_calls["n"] < 3:
+                    return  # still alive (no exception = process exists)
+                raise ProcessLookupError(pid)  # dies on 3rd probe
+
+        mock_kill.side_effect = fake_kill
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(token_file)):
+            asyncio.run(daemon_manager.check_and_restart_if_stale())
+        # waited ≥2 probe rounds (old pid alive → no cleanup yet), then cleanup after death
+        assert probe_calls["n"] >= 3, f"should probe liveness ≥3 times, got {probe_calls['n']}"
+        assert mock_cleanup.called
+
+    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
+    @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_restart_force_kills_stuck_old_pid(
+            self, mock_connect, mock_kill, mock_cleanup, mock_running,
+            mock_src, mock_cfg, tmp_path):
+        """rant 12:49:09 ② — old daemon never dies on SIGTERM → SIGKILL fallback,
+        and cleanup still happens after the kill."""
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
+        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+        mock_kill.side_effect = lambda pid, sig: None  # pid stays "alive" forever
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(token_file)):
+            asyncio.run(daemon_manager.check_and_restart_if_stale())
+        kill_calls = [c.args for c in mock_kill.call_args_list]
+        assert any(c[1] == signal.SIGKILL for c in kill_calls), (
+            "stuck old pid must be SIGKILLed after the SIGTERM grace window")
+        assert mock_cleanup.called
 
     @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_server_unreachable_silent(self, mock_connect, mock_src, mock_cfg, tmp_path):
-        port_file = tmp_path / "emrgd.port"
-        port_file.write_text("12345\ntoken\n")
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
         mock_connect.side_effect = ConnectionRefusedError("no daemon")
 
         with patch("emrg.client.daemon_manager.get_server_path",
-                   return_value=str(port_file)):
+                   return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())  # no raise
+
+    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_server_auth_error_propagates(self, mock_connect, mock_src, mock_cfg, tmp_path):
+        """G129: AuthError (token mismatch) must NOT be swallowed — it's a
+        config/install problem the user must see, not a transient disconnect."""
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
+        mock_connect.side_effect = daemon_manager.AuthError("authentication failed")
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(token_file)):
+            with pytest.raises(daemon_manager.AuthError):
+                asyncio.run(daemon_manager.check_and_restart_if_stale())
+
+    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_server_programming_error_propagates(self, mock_connect, mock_src, mock_cfg, tmp_path):
+        """G129: genuine bugs must surface, not vanish into a bare except Exception."""
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
+        mock_connect.side_effect = AttributeError("boom")
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(token_file)):
+            with pytest.raises(AttributeError):
+                asyncio.run(daemon_manager.check_and_restart_if_stale())
 
 
 # ── ensure_connected ─────────────────────────────────────────
@@ -204,6 +310,56 @@ class TestEnsureConnected:
         asyncio.run(_run())
 
 
+# ── Spawn throttle (rant 2026-08-09T13:16:36 ⑤) ─────────────
+# TUI _reconnect 循环每 1s 调 ensure_connected → start_daemon 会每 1s spawn 一台
+# 新 daemon（Windows 每个 spawn 都是 cmd 窗口来源）。单个连接生命周期内最多
+# _MAX_SPAWN_ATTEMPTS 次，超限抛节流错误；成功连接后归零。
+
+class TestSpawnThrottle:
+    @patch("emrg.client.daemon_manager.asyncio.sleep", new_callable=AsyncMock)
+    @patch("emrg.client.daemon_manager.is_running", return_value=False)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.asyncio.create_subprocess_exec",
+           new_callable=AsyncMock)
+    def test_start_daemon_throttles_after_max_attempts(self, mock_spawn,
+                                                       mock_cleanup, mock_is_running,
+                                                       mock_sleep):
+        proc = MagicMock(pid=1234)
+        mock_spawn.return_value = proc
+
+        async def _run():
+            # 前 3 次：真正 spawn（is_running 恒 False → 超时抛错）
+            for _ in range(3):
+                with pytest.raises(RuntimeError, match="failed to start"):
+                    await daemon_manager.start_daemon()
+            assert mock_spawn.await_count == 3
+            # 第 4 次：不再 spawn，直接抛节流错误（提示手动 emrg server）
+            with pytest.raises(RuntimeError, match="after 3 attempts"):
+                await daemon_manager.start_daemon()
+            assert mock_spawn.await_count == 3, "超过上限后不得再 spawn（防弹窗/重试风暴）"
+            assert daemon_manager._spawn_attempts == 3
+
+        asyncio.run(_run())
+
+    @patch("emrg.client.daemon_manager.is_running", return_value=False)
+    @patch("emrg.client.daemon_manager.check_and_restart_if_stale",
+           new_callable=AsyncMock)
+    @patch("emrg.client.daemon_manager.start_daemon", new_callable=AsyncMock)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_spawn_attempts_reset_on_success(self, mock_connect, mock_cleanup,
+                                             mock_start, mock_check, mock_running):
+        daemon_manager._spawn_attempts = 2  # 模拟已有失败
+        ws = FakeWS([json.dumps({"type": "auth_ok"})])
+        mock_connect.return_value = ws
+
+        async def _run():
+            await daemon_manager.ensure_connected()
+            assert daemon_manager._spawn_attempts == 0, "成功连接后节流计数必须归零"
+
+        asyncio.run(_run())
+
+
 # ── DaemonConnection ─────────────────────────────────────────
 
 class TestDaemonConnection:
@@ -213,7 +369,7 @@ class TestDaemonConnection:
     def test_send_task_payload(self):
         conn = self._conn()
         asyncio.run(conn.send_task(
-            session_id="s1", cwd="/tmp/x", prompt="hello", stream=True,
+            session_id="s1", cwd="/tmp/x", prompt="hello",
             images=[{"path": "/tmp/a.png", "label": "[image1]"}],
         ))
         sent = json.loads(conn._ws.sent[0])
@@ -221,7 +377,7 @@ class TestDaemonConnection:
         assert sent["session_id"] == "s1"
         assert sent["cwd"] == "/tmp/x"
         assert sent["prompt"] == "hello"
-        assert sent["stream"] is True
+        assert "stream" not in sent  # non-stream path removed (rant 21:20:38)
         assert sent["images"] == [{"path": "/tmp/a.png", "label": "[image1]"}]
 
     def test_send_task_no_images(self):
@@ -229,6 +385,21 @@ class TestDaemonConnection:
         asyncio.run(conn.send_task(session_id="s1", cwd="/tmp/x", prompt="hi"))
         sent = json.loads(conn._ws.sent[0])
         assert "images" not in sent
+
+    def test_send_task_explicit_id(self):
+        conn = self._conn()
+        rid = asyncio.run(conn.send_task(
+            session_id="s1", cwd="/tmp/x", prompt="hi", id="abc-123"))
+        sent = json.loads(conn._ws.sent[0])
+        assert sent["id"] == "abc-123"
+        assert rid == "abc-123"
+
+    def test_send_task_returns_generated_id(self):
+        conn = self._conn()
+        rid = asyncio.run(conn.send_task(session_id="s1", cwd="/tmp/x", prompt="hi"))
+        sent = json.loads(conn._ws.sent[0])
+        assert sent["id"] == rid
+        assert rid  # non-empty uuid
 
     def test_send_command_payload(self):
         conn = self._conn()

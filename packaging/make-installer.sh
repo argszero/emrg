@@ -25,7 +25,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 RUNTIME="$DIST/runtime"
-VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.11)"
+VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.65)"
 PLATFORM="${1:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 
 mkdir -p "$DIST/artifacts"
@@ -176,7 +176,7 @@ EOF
     ;;
 
   linux)
-    echo "==> Linux tar.gz + AppImage (AppImage built by electron-builder, collected R116)"
+    echo "==> Linux tar.gz + AppImage + .run (AppImage built by electron-builder, collected R116)"
     tar -czf "$DIST/artifacts/EMRG-$VERSION-linux-$(uname -m).tar.gz" -C "$(dirname "$RUNTIME")" runtime
     # R116: 收集 electron-builder 产出的 AppImage（emrg/gui/dist/*.AppImage）到
     # dist/artifacts/ —— 之前只生成 tar.gz，release 缺 linux AppImage（rant #13 Step 5）。
@@ -188,6 +188,9 @@ EOF
     else
       echo "!! AppImage not found in emrg/gui/dist — Linux release 缺 AppImage（有 tar.gz 兜底）" >&2
     fi
+    # .run 自解压离线安装器（rant 2026-08-17T10:16:54）：Linux 无头服务器
+    # SSH/无桌面/普通用户场景一键安装。payload = 同一 runtime/ 目录，零网络。
+    bash "$ROOT/packaging/make-run-installer.sh"
     ;;
 
   windows|win32|mingw*|msys*)
@@ -234,6 +237,10 @@ PrivilegesRequiredOverridesAllowed=dialog
 ; 否则 explorer 不刷新环境变量缓存，新开 cmd 也看不到更新后的 PATH（rant 2026-08-05T14:28:02）
 ChangesEnvironment=yes
 DisableProgramGroupPage=yes
+; R125: CloseApplications=no — Inno Restart Manager (CloseApplications=yes default) 会误报
+; 任何占用 install 目录文件的非 EMRG 进程（sh/vim/explorer/Defender）弹 "unable to automatically
+; close all applications" 选择框，且 Try again 反复失败；EMRG 进程关闭由 R130 stop_all.py 精确负责
+CloseApplications=no
 OutputDir=$DIST_WIN/artifacts
 OutputBaseFilename=EMRG-$VERSION-windows-x64
 SetupIconFile=$ROOT_WIN/packaging/assets/icon.ico
@@ -242,6 +249,12 @@ Compression=lzma2
 SolidCompression=yes
 [Files]
 Source: "$STAGE_WIN/payload\\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+; R130: dontcopy — 供 [Code] PrepareToInstall 在覆盖文件前 ExtractTemporaryFile 取出
+; bin\stop_all.py 并用 runtime python 执行（升级安装前优雅关闭 GUI/TUI/daemon/bundled
+; git，rant 2026-08-17T10:32:27：停止逻辑全部收敛到 Python，stop-emrg.cmd 已删除）。
+; stop_all.py 是纯标准库单文件（emrg/_stop_all.py 的副本），不依赖 emrg 包可导入。
+; 正常安装时该文件仍由上方通配符装入 {app}\bin\stop_all.py。
+Source: "$STAGE_WIN/payload\\bin\\stop_all.py"; DestDir: "{tmp}"; Flags: dontcopy
 [Icons]
 Name: "{userprograms}\\EMRG"; Filename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"; IconFilename: "{app}\\emrg-gui\\EMRG\\EMRG.exe"
 [UninstallRun]
@@ -356,6 +369,101 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
     RemoveBinDirFromPath;
+end;
+
+// R130: 升级安装前优雅关闭运行中的 EMRG 进程（rant 2026-08-10T08:50:44 起，
+// 2026-08-17T10:32:27 收敛：stop-emrg.cmd 删除，全部停止逻辑进 emrg/_stop_all.py）——
+// Inno CloseApplications 看不到无窗口的 pythonw daemon（emrgd.cmd → pythonw.exe
+// -m emrg.server 常驻锁文件），覆盖 ~/.emrg\install 时卡在"停止已有进程"。
+// PrepareToInstall 在安装开始前用 runtime 的 python 运行 bin\stop_all.py：
+// ws 协议关闭 daemon → emrgd.pid 兜底 → taskkill /F、taskkill EMRG.exe 优雅→/F、
+// CIM 命令行过滤 TUI、install\git\ 前缀连坐强杀 bundled git、verify 残留检查；
+// 有残留 exit 1（脚本打印残留清单）→ 中止安装。干净安装（无旧 install）直接跳过。
+// {app} 是旧版安装目录——不能依赖旧版 emrg 命令（可能无 stop 子命令），所以用
+// 单文件脚本 + runtime python（{app}\bin\python-dist\python.exe，R90 布局，
+// 与 DLL 同目录；回退 python3.13.exe，与 emrg.cmd 探测链一致）。
+// 返回非空字符串 = 中止安装并显示该消息（宁可中止也不卡死）。
+// 重定向必须经 {cmd}（cmd.exe）——CreateProcess 不解释 > 重定向，直接 Exec
+// python.exe 会把 ">" "log" 2>&1 当脚本参数静默吞掉（R125 日志展示失效）。
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+  PythonExe: string;
+  StopScript: string;
+  LogFile: string;
+  LogText: AnsiString;
+begin
+  Result := '';
+  // 干净安装：{app} 尚不存在或旧版无 python-dist 布局 → 无进程需停止
+  PythonExe := ExpandConstant('{app}\bin\python-dist\python.exe');
+  if not FileExists(PythonExe) then
+    PythonExe := ExpandConstant('{app}\bin\python-dist\python3.13.exe');
+  if not FileExists(PythonExe) then
+    Exit;
+  ExtractTemporaryFile('stop_all.py');
+  StopScript := ExpandConstant('{tmp}\stop_all.py');
+  // R125: rant 2026-08-13T09:24:37 — 输出重定向到日志，失败时直接展示日志内容
+  // （列出杀不掉的进程），宿主不再需要手动跑诊断。
+  // cmd 引号嵌套：外层 /c "..."，内层脚本路径用双引号包裹，重定向在外、
+  // 仍在内层引号外（SW_HIDE 隐藏窗口后 stdout/stderr 经 > log 2>&1 落盘）。
+  // -I（isolated mode，v0.2.50 引入）已移除（rants 2026-08-18T21:13:03 / 21:14:16）：
+  // python-build-standalone 定位 stdlib 依赖目录结构 / ._pth 机制，-I 忽略之 →
+  // v0.2.50 Windows 安装 "Failed to import encodings" 启动即崩（连 stop_all.log 都没有）。
+  // -I 防的"自锁"假设已被证伪：stop_all 的 excluded-chain 已排除自身 + 祖先进程链
+  // （从不杀自己），#847 self-held 归属已处理自身锁，且 stop_all 纯标准库从不加载
+  // websockets。恢复 v0.2.49 的 "{PythonExe}" "{StopScript}"，无需任何替代 flag。
+  LogFile := ExpandConstant('{tmp}\stop_all.log');
+  // rant 2026-08-19T00:44:52 — 安装器韧性：旧版 runtime python 可能已被早期失败安装
+  // （v0.2.49/v0.2.50 的 -I 事故）损坏，启动即崩 "Failed to import encodings"（连
+  // stop_all.log 都没有）→ 用坏 python 跑 stop_all 必然失败 → 升级安装被硬中止。
+  // 宿主实测：删除旧 install\bin 后走"干净安装"分支即成功 —— v0.2.51 包本身完好，
+  // 脆弱点在升级路径。修复：跑 stop_all 前先健康检查旧 python 能否启动
+  // （-c "import encodings, sys"，python-build-standalone 启动即加载 encodings），
+  // 启动失败 → 跳过 stop_all 继续安装（宁可旧进程锁文件让安装器报 DeleteFile、
+  // 可重试可重启恢复，也不能因坏 python 卡死升级）。健康检查与 stop_all 同款：
+  // 经 {cmd} 重定向到日志，失败信息进日志 + Setup log。
+  if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" -c "import encodings, sys" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode <> 0 then
+    begin
+      LogText := '';
+      if FileExists(LogFile) then
+        LoadStringFromFile(LogFile, LogText);
+      Log('PrepareToInstall: old runtime python failed health check (exit ' + IntToStr(ResultCode) + '), skipping stop_all and continuing install. ' + LogText);
+      Exit;
+    end;
+  end
+  else
+  begin
+    Log('PrepareToInstall: could not run old runtime python health check, skipping stop_all and continuing install.');
+    Exit;
+  end;
+  // 健康检查通过：旧 python 可启动 → 正常跑 stop_all（保留现有逻辑）
+  if Exec(ExpandConstant('{cmd}'), '/c ""' + PythonExe + '" "' + StopScript + '" > "' + LogFile + '" 2>&1"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if ResultCode <> 0 then
+    begin
+      LogText := '';
+      // LoadStringFromFile 的 Inno Pascal Script 签名是
+      // function LoadStringFromFile(const FileName: String; var S: AnsiString): Boolean;
+      // （6.7.1 → 7.x 全版本一致，见 issrc Shared.ScriptFunc.pas）——不存在单参数
+      // 字符串返回形式！v0.2.30 Build Release 31661378619 因此编译失败
+      // （iscc "Invalid number of parameters"，Test CI 不编译 .iss 未拦住）。
+      // 正确用法：out-param 写入 LogText，返回 Boolean 表示成功。
+      // 注意：本注释位于未加引号 heredoc 内，禁用反引号与命令替换语法
+      // （iscc compile gate 实证捕获），以免破坏 .iss 渲染。
+      if FileExists(LogFile) then
+        LoadStringFromFile(LogFile, LogText);
+      if Length(LogText) > 2000 then
+        LogText := Copy(LogText, 1, 2000);
+      if LogText <> '' then
+        Result := 'EMRG could not stop all running processes (emrg stop exit code ' + IntToStr(ResultCode) + '). Details from the stop script:' + #13#10 + #13#10 + LogText + #13#10 + #13#10 + 'Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).'
+      else
+        Result := 'EMRG could not stop all running processes (emrg stop exit code ' + IntToStr(ResultCode) + '). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry (a helper process such as the bundled Git may still hold a file lock).';
+    end;
+  end
+  else
+    Result := 'EMRG could not run the process-stop script (stop_all.py). Please close EMRG (GUI/TUI) and retry the install, or restart the computer and retry.';
 end;
 EOF
     # Windows 路径转义（iscc 需要 Windows 路径，但在 bash/msys 下用当前路径）

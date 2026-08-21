@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import json
 import logging
 import os
@@ -19,6 +20,10 @@ import platform
 import re
 import secrets
 import signal
+import socket as _socket
+import subprocess
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -27,8 +32,9 @@ import yaml
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
+from emrg._win import win32_no_window_kwargs
 from emrg.config import LlmConfig, config_dir
-from emrg.connect import cleanup_server
+from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.llm import LlmClient
 from emrg.server.git_utils import (
@@ -45,7 +51,7 @@ from emrg.protocol import (
     ServerPong,
     TaskRequest,
 )
-from emrg.session import Session
+from emrg.session import Session, last_n_messages
 
 # ── 日志脱敏（rant 2026-08-06T10:21:26）────────────────────────────
 # tool call 参数可能含 api_key/token/authorization/password 等敏感字段，
@@ -112,7 +118,10 @@ from emrg.tools.write_tool import WriteTool
 from emrg.tools.edit_tool import EditTool
 from emrg.tools.glob_tool import GlobTool
 from emrg.tools.grep_tool import GrepTool
+from emrg.tools.submit_rant_tool import SubmitRantTool
 from emrg.skills.loader import load_skills
+from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
+from emrg.server.rants import append_rant
 from emrg.server.scheduler import TaskScheduler
 
 logger = logging.getLogger(__name__)
@@ -137,7 +146,55 @@ def _get_jinja_env() -> "jinja2.Environment":
 # ── Module-level constants ──
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
+# Windows TIME_WAIT retry: SO_EXCLUSIVEADDRUSE (the only anti-hijack option on
+# Windows) blocks rebinding while accepted connections linger in TIME_WAIT.
+# serve() treats EADDRINUSE-with-no-listener as a TIME_WAIT remnant and retries
+# the bind for up to this many attempts at this interval (~10s), so a crashed
+# daemon restarts without a 30-120s stall.
+_TIME_WAIT_RETRIES = 20
+_TIME_WAIT_RETRY_DELAY = 0.5
 
+
+def _create_fixed_port_socket(port: int) -> _socket.socket:
+    """Create + bind the daemon's fixed loopback listening socket.
+
+    This is the daemon's ONLY single-instance admission (host rant
+    2026-08-19T08:05:21): the kernel refuses a second bind on the same
+    (addr, port) with EADDRINUSE — pure resource exclusivity with no file to
+    forge/delete (PID files were the unreliable mechanism), no race window,
+    and automatic release when the process dies. Raises OSError(EADDRINUSE)
+    when another socket already owns the port; the caller treats a *live*
+    listener as "emrgd already running" and exits itself.
+
+    Socket options:
+    - Windows: SO_EXCLUSIVEADDRUSE only. It forbids any other socket from
+      binding the same port (SO_REUSEADDR alone would allow port hijacking).
+      SO_EXCLUSIVEADDRUSE and SO_REUSEADDR are MUTUALLY EXCLUSIVE on Windows
+      (the second setsockopt fails with WSAEINVAL 10022 — verified on the
+      Windows CI matrix). The cost is that a closed listening socket with
+      accepted connections lingering in TIME_WAIT blocks rebinding; serve()
+      handles that with a listener-probe + bounded retry so a crashed daemon
+      still restarts quickly (rant acceptance: "无 TIME_WAIT 卡死").
+    - POSIX: SO_REUSEADDR only. It permits rebinding while TIME_WAIT sockets
+      linger but does NOT allow two listeners on the same addr (that would be
+      SO_REUSEPORT, which we deliberately never set) — exclusivity is kept.
+    """
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        if sys.platform == "win32":
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", port))
+        sock.listen(128)
+        sock.setblocking(False)
+        return sock
+    except OSError:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        raise
 
 
 class EmrgServer:
@@ -148,6 +205,13 @@ class EmrgServer:
         runtime_dir.mkdir(parents=True, exist_ok=True)
         # Ensure skills directory exists for evolution-installed skills
         (runtime_dir / "skills").mkdir(exist_ok=True)
+        # Installable-skills catalog baseline (rant 2026-08-08T10:14:29):
+        # the catalog is itself a skill (skill-catalog.md); on upgrades or
+        # user deletion the daemon re-writes it from the embedded baseline.
+        try:
+            ensure_catalog_file()
+        except Exception:
+            logger.debug("could not ensure skill catalog", exc_info=True)
 
         host_name = platform.node()
         self.identity = InstanceIdentity(
@@ -161,7 +225,12 @@ class EmrgServer:
         self.evolutions: list[EvolutionLog] = []
         self.llm = LlmClient(llm_config)
         self._running = False
+        self._stop_reason: str = "unknown"  # shutdown_msg|cancel|sigint|bind_exit|crash (rant 2026-08-19T14:02:37)
         self._scheduler: Optional[TaskScheduler] = None
+        # Rant 2026-08-21T14:38:27：进程实际运行版本——启动时读一次 install/version.txt
+        # 记入内存（进程生命周期内不变）。GUI 用它对比磁盘实时 installed_version：
+        # 有差异 = 已装新版本但 daemon 未重启 → 弹"重启生效"横幅。
+        self._run_version = self._current_installed_version()
         self._max_tool_rounds = llm_config.max_tool_rounds
         self._projects_log = runtime_dir / "projects.yml"
         self._rants_log = runtime_dir / "rants.jsonl"
@@ -169,6 +238,10 @@ class EmrgServer:
         # ── Phase 2 broadcast model (protocol-contract §2.6) ──
         self._session_subscribers: dict[str, set] = {}  # session_id → set[ws]
         self._session_busy: dict[str, bool] = {}        # session_id → active task?
+        # P1 queue-injection (rant 2026-08-10T21:55:37): per-session FIFO of
+        # (TaskRequest, allow_tools) received while a tool loop is busy —
+        # injected at the next round boundary (aligned with codex steer_input).
+        self._session_pending: dict[str, list[tuple[TaskRequest, bool]]] = {}
         self._all_connections: set = set()              # all authenticated connections
 
         # Device-flow auth (rant 10:17 Stage 2b): background gh auth login --web task
@@ -183,6 +256,7 @@ class EmrgServer:
         self.tools.register(EditTool())
         self.tools.register(GlobTool())
         self.tools.register(GrepTool())
+        self.tools.register(SubmitRantTool())
         logger.info("tools registered: %s", self.tools.names)
 
         # Load skills
@@ -191,100 +265,410 @@ class EmrgServer:
             logger.info("skills loaded: %s", [s.name for s in self.skills])
 
     async def serve(self) -> None:
-        """Start listening for IPC connections (platform-adaptive)."""
+        """Start listening for IPC connections (fixed-port, platform-adaptive)."""
         self._running = True
 
-        # ── PID file: prevent duplicate daemon instances ───
-        runtime_dir = config_dir()
-        pid_file = runtime_dir / "emrgd.pid"
+        # ── Single-instance admission: fixed-port bind exclusivity (ONLY) ───
+        # (host rant 2026-08-19T08:05:21) PID files are unreliable (plain
+        # files — content can be overwritten/deleted, and os.kill(pid,0)
+        # liveness probes misjudge: observed dual instances PID 3924+2592 on
+        # 08-19) and random ports (port=0) make port exclusivity useless. The
+        # fixed-port bind IS the admission: the kernel refuses a second bind
+        # (EADDRINUSE) — no file to forge, no race window, auto-released on
+        # crash. No transitional compatibility with old-format daemons
+        # (rant: "升级后即唯一生效").
         try:
-            # Atomic create — fails if file already exists
-            fd = os.open(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            os.write(fd, str(os.getpid()).encode())
-            os.close(fd)
-            logger.debug("pid file written: %s (pid=%d)", pid_file, os.getpid())
-        except FileExistsError:
-            # PID file exists — check if the old process is still alive
-            try:
-                old_pid_s = pid_file.read_text(encoding="utf-8").strip()
-                old_pid = int(old_pid_s)
-                os.kill(old_pid, 0)
-                # Old process is alive — but is its port file still there?
-                port_path = runtime_dir / "emrgd.port"
-                if not port_path.exists():
-                    # Port file gone → zombie daemon, force-kill and take over
-                    logger.warning(
-                        "old daemon (pid=%d) alive but port file gone — force-killing", old_pid
-                    )
-                    os.kill(old_pid, signal.SIGKILL)
-                    try:
-                        os.waitpid(old_pid, 0)
-                    except ChildProcessError:
-                        pass
-                    pid_file.unlink()
-                    fd = os.open(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                    os.write(fd, str(os.getpid()).encode())
-                    os.close(fd)
-                    logger.debug("pid file written: %s (pid=%d)", pid_file, os.getpid())
-                else:
-                    logger.error(
-                        "emrgd already running (pid=%d). "
-                        "Stop it first or remove %s if stale.",
-                        old_pid, pid_file,
-                    )
-                    self._running = False
-                    return
-            except (ValueError, OSError):
-                # Stale PID file — remove and retry
-                logger.warning("stale pid file (pid %s gone), removing", old_pid_s)
-                pid_file.unlink()
-                fd = os.open(pid_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.write(fd, str(os.getpid()).encode())
-                os.close(fd)
-                logger.debug("pid file written: %s (pid=%d)", pid_file, os.getpid())
+            sock = _create_fixed_port_socket(EMRGD_PORT)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+            # The port is taken. Distinguish a LIVE daemon from a Windows
+            # TIME_WAIT remnant: only a live listener accepts connections.
+            # (Windows SO_EXCLUSIVEADDRUSE blocks rebinding while accepted
+            # connections linger in TIME_WAIT — SO_REUSEADDR cannot be combined
+            # with it, WSAEINVAL 10022; POSIX SO_REUSEADDR never hits this.)
+            if is_server_running_sync(timeout=0.5):
+                logger.error(
+                    "emrgd already running on 127.0.0.1:%d (EADDRINUSE, "
+                    "fixed-port admission) — new instance exiting itself. "
+                    "Stop it first (emrg server stop).",
+                    EMRGD_PORT,
+                )
+                self._running = False
+                self._stop_reason = "bind_exit"
+                return
+            # No listener behind the port → TIME_WAIT remnant. Retry the bind
+            # for a bounded window so a crashed daemon restarts without a
+            # 30-120s stall (rant acceptance: "无 TIME_WAIT 卡死").
+            logger.warning(
+                "port 127.0.0.1:%d busy but no daemon listening — "
+                "TIME_WAIT remnant, retrying bind (%d x %.1fs)",
+                EMRGD_PORT, _TIME_WAIT_RETRIES, _TIME_WAIT_RETRY_DELAY,
+            )
+            for _ in range(_TIME_WAIT_RETRIES):
+                await asyncio.sleep(_TIME_WAIT_RETRY_DELAY)
+                try:
+                    sock = _create_fixed_port_socket(EMRGD_PORT)
+                    break
+                except OSError as retry_exc:
+                    if retry_exc.errno != errno.EADDRINUSE:
+                        raise
+                    if is_server_running_sync(timeout=0.5):
+                        logger.error(
+                            "emrgd already running on 127.0.0.1:%d (became "
+                            "live during TIME_WAIT retry) — new instance "
+                            "exiting itself.",
+                            EMRGD_PORT,
+                        )
+                        self._running = False
+                        self._stop_reason = "bind_exit"
+                        return
+            else:
+                logger.error(
+                    "port 127.0.0.1:%d busy (TIME_WAIT) but no daemon "
+                    "listening after %d retries — giving up.",
+                    EMRGD_PORT, _TIME_WAIT_RETRIES,
+                )
+                self._running = False
+                self._stop_reason = "bind_exit"
+                return
 
         self._server = await serve(
             self._handle_client,
-            host="127.0.0.1",
-            port=0,
+            sock=sock,
             max_size=16 * 1024 * 1024,
             # keepalive 超时放宽：TUI 回答结束时全量渲染可阻塞事件循环数秒，
             # 默认 ping_timeout=20 会导致服务器 CLOSE 1011 踢连接（rant 14:22:06）。
             # 保留 ping_interval=20（liveness 检测），容忍 300s 的 pong 延迟。
             ping_timeout=300,
         )
-        port = self._server.sockets[0].getsockname()[1]
+        port = EMRGD_PORT
         self._auth_token = secrets.token_urlsafe(32)
-        atomic_write_bytes(
-            f"{port}\n{self._auth_token}",
-            config_dir() / "emrgd.port",
-            mode=0o600,
-        )
+        self._assert_token_file()
+        # Rant 2026-08-09T18:47:37 B4：启动完成一行自证——pid/port/token 文件路径/写入成功，
+        # 宿主拿到 emrgd.log 就知道 daemon 到底起没起、写没写对文件。
         logger.info(
-            "emrgd listening on 127.0.0.1:%d | identity=%s",
+            "emrgd listening on 127.0.0.1:%d | identity=%s | pid=%d | token_file=%s | token_file_written_ok=%s",
             port,
             self.identity.instance_id[:8],
+            os.getpid(),
+            config_dir() / "emrgd.token",
+            (config_dir() / "emrgd.token").exists(),
         )
+
+        # Rant 2026-08-09T13:16:36 root-cause self-heal: G43 stale-port logic
+        # deleted a healthy daemon's emrgd.token after a transient ws failure →
+        # the daemon's OWN scheduler lost the file (93× "cannot connect") while
+        # GUI respawns hit the PID lock and exited. The daemon re-asserts its
+        # token file periodically so any external deletion self-heals.
+        self._port_keepalive_task = asyncio.create_task(self._port_keepalive_loop())
 
         self._scheduler = TaskScheduler(self.identity)
         self._scheduler.load_and_start()
 
+        # Global cross-project session index (rant 2026-08-13T16:42:22):
+        # backfill the index from every on-disk session (registered projects +
+        # unregistered ones under ~/.emrg) so sessions created before this
+        # feature are discoverable by other projects. Best-effort — never
+        # crashes startup.
+        self._rebuild_sessions_index()
+
+        # Background deterministic skill update check (rant 2026-08-08T10:14:29):
+        # runs at startup + every 24h — refreshes managed skills to their
+        # latest GitHub releases. Never installs a CLI silently, never touches
+        # host-modified skill copies.
+        self._skills_ttl_task = asyncio.create_task(self._skills_ttl_loop())
+
+        # Auto-upgrade trigger (rant 2026-08-20T12:33:59 — 自动升级重构):
+        # every 5 minutes the UpgradeManager checks GitHub releases, delay-
+        # filters, compares with install/version.txt and — when a newer
+        # eligible tag exists — starts an agent session ("emrg-upgrade")
+        # that performs the local equivalent install. All logic lives in
+        # emrg/server/upgrade.py; the daemon only runs the tick loop and
+        # provides the session-runner callback.
+        self._upgrade_tick_task = asyncio.create_task(self._upgrade_tick_loop())
+
         try:
             await self._server.serve_forever()
         except asyncio.CancelledError:
-            pass
+            self._stop_reason = "cancel"
+            logger.info("daemon serve cancelled (asyncio.CancelledError) — cleanup started")
+        except Exception:
+            self._stop_reason = "crash"
+            logger.error("daemon serve crashed — cleanup started", exc_info=True)
         finally:
-            self._scheduler.stop_all()
-            await self._scheduler.wait_all()
-            await self.llm.close()
-            cleanup_server()
-            # Remove PID file
+            await self._shutdown_all()
+
+    async def _shutdown_all(self) -> None:
+        """Best-effort teardown with per-step logging (rant 2026-08-19T14:02:37).
+
+        Every daemon stop path funnels through here: shutdown message,
+        asyncio cancel (Ctrl+C / parent kill), crash. Logs the stop reason
+        + each cleanup step's success/failure so a post-mortem can answer
+        "why did the daemon stop / what was cleaned up" from emrgd.log
+        alone. Never raises.
+        """
+        try:
+            n_handlers = (
+                len(self._scheduler._handlers)
+                if self._scheduler is not None
+                and isinstance(getattr(self._scheduler, "_handlers", None), list)
+                else 0
+            )
+        except Exception:
+            n_handlers = 0
+        logger.info(
+            "daemon stopping (reason=%s, handlers=%d) — cleaning up",
+            self._stop_reason, n_handlers,
+        )
+
+        steps: list[tuple[str, bool]] = []
+        # 1. Background task loops (skills TTL, upgrade tick, port keepalive)
+        for task, name in (
+            (self._skills_ttl_task, "skills-ttl loop"),
+            (self._upgrade_tick_task, "upgrade-tick loop"),
+            (self._port_keepalive_task, "port-keepalive loop"),
+        ):
             try:
-                if pid_file.exists() and pid_file.read_text(encoding="utf-8").strip() == str(os.getpid()):
-                    pid_file.unlink()
-                    logger.debug("pid file removed: %s", pid_file)
-            except OSError:
+                if task is not None:
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                steps.append((f"cancelled {name}", True))
+            except Exception:
+                steps.append((f"cancelled {name}", False))
+        # 2. Scheduler
+        try:
+            if self._scheduler is not None:
+                self._scheduler.stop_all()
+                await self._scheduler.wait_all()
+                steps.append(("stopped scheduler", True))
+            else:
+                steps.append(("stopped scheduler (none)", True))
+        except Exception:
+            logger.warning("scheduler stop failed", exc_info=True)
+            steps.append(("stopped scheduler", False))
+        # 3. LLM client
+        try:
+            await self.llm.close()
+            steps.append(("closed llm client", True))
+        except Exception:
+            steps.append(("closed llm client", False))
+        # 4. Port file
+        try:
+            cleanup_server()
+            steps.append(("removed port file", True))
+        except Exception:
+            steps.append(("removed port file", False))
+
+        uptime = max(0, int((datetime.now() - self.start_time).total_seconds()))
+        all_ok = all(ok for _, ok in steps)
+        logger.info(
+            "daemon stopped (reason=%s, uptime=%ds, steps=%s, all_ok=%s)",
+            self._stop_reason, uptime,
+            ", ".join(s for s, _ in steps), all_ok,
+        )
+
+    async def _port_keepalive_loop(self) -> None:
+        """Re-assert the token file if it was deleted or overwritten.
+
+        Rant 2026-08-09T13:16:36 root cause: a client's stale-port unlink
+        (G43) can remove a healthy daemon's emrgd.token after one transient
+        ws failure. The daemon's own scheduler reads that file to reconnect,
+        so it then fails forever while the PID lock blocks new spawns —
+        the zombie state behind the Windows v0.2.15 storm. Re-writing the
+        file every 60s makes the daemon self-healing.
+        """
+        token_path = config_dir() / "emrgd.token"
+        while self._running:
+            await asyncio.sleep(60)
+            try:
+                if not token_path.exists():
+                    self._assert_token_file()
+                    logger.warning(
+                        "emrgd.token was missing — re-asserted (external deletion?)"
+                    )
+            except (OSError, IndexError, AttributeError):
                 pass
+
+    def _assert_token_file(self) -> None:
+        """(Re)write the auth token file for the current daemon (single-line
+        token, mode 0o600 — rant 2026-08-20T14:32:52: emrgd.port → emrgd.token)."""
+        atomic_write_bytes(
+            self._auth_token,
+            config_dir() / "emrgd.token",
+            mode=0o600,
+        )
+
+    def _rebuild_sessions_index(self) -> None:
+        """Backfill the global cross-project session index at startup.
+
+        Rant 2026-08-13T16:42:22: sessions created before this feature (or in
+        projects not registered in projects.yml) would otherwise be invisible
+        to other projects. Best-effort — failures are logged at debug level
+        and never crash the daemon.
+        """
+        from emrg.sessions_index import rebuild_sessions_index
+
+        try:
+            project_paths: list[str] = []
+            if self._projects_log.exists():
+                try:
+                    data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
+                    if isinstance(data, list):
+                        project_paths = [
+                            e.get("path", "")
+                            for e in data
+                            if isinstance(e, dict) and e.get("path")
+                        ]
+                except (yaml.YAMLError, OSError):
+                    pass
+            count = rebuild_sessions_index(config_dir(), project_paths)
+            logger.info("sessions index rebuilt: %d sessions indexed", count)
+        except Exception:
+            logger.debug("sessions index rebuild failed", exc_info=True)
+
+    async def _skills_ttl_loop(self) -> None:
+        """Background deterministic skill update check (startup + every 24h).
+
+        Design (rant 2026-08-08T10:14:29 §6): the check is deterministic
+        logic, not LLM thinking — on each tick, refresh every managed=true
+        skill whose latest GitHub release differs from the recorded version.
+        Failures are logged at debug level and never crash the daemon.
+        """
+        from emrg.skills.installer import _UPDATE_TTL_SECONDS, run_update_check_once
+
+        while True:
+            result = await run_update_check_once()
+            if result.get("updated"):
+                logger.info("skills auto-updated: %s", result["updated"])
+                self.skills = load_skills()
+            elif result.get("errors"):
+                logger.warning("skills update errors: %s", result["errors"])
+            await asyncio.sleep(_UPDATE_TTL_SECONDS)
+
+    async def _upgrade_tick_loop(self) -> None:
+        """Auto-upgrade trigger (rant 2026-08-20T12:33:59 — 自动升级重构).
+
+        Constructs the UpgradeManager once, then ticks every 5 minutes
+        (TICK_INTERVAL is hard-coded, not configurable). The manager checks
+        releases → delay-filter → compare with install/version.txt → start
+        an agent session when a newer eligible tag exists. All judgment
+        (dependencies / backup / GUI / retry) is the agent's, template-
+        driven; the program's only state is the in-flight re-entry flag.
+        Failures are silent — the next tick retries naturally.
+
+        The FIRST tick runs only after TICK_INTERVAL (5 min): the daemon
+        must never hammer the GitHub API at startup (test harnesses boot
+        many servers; each immediate tick would fire a real network request
+        and destabilize timing).
+        """
+        from emrg.config import load_update_config
+        from emrg.server.upgrade import TICK_INTERVAL, UpgradeManager
+
+        self._upgrade_manager = UpgradeManager(
+            load_update_config(), self._run_upgrade_session
+        )
+        while True:
+            await asyncio.sleep(TICK_INTERVAL)
+            try:
+                await self._upgrade_manager.tick()
+            except Exception:
+                logger.debug("upgrade tick failed (retry next tick)", exc_info=True)
+
+    async def _run_upgrade_session(self, session_id: str, cwd: str, prompt: str) -> None:
+        """Public session-runner used by UpgradeManager (and a candidate entry
+        point for the scheduler's task capability — same ability, two entries,
+        host decision 2026-08-20T12:33:59).
+
+        Reuses the existing session queueing semantics: when the session is
+        busy the request is queued (pending) and executed when free. Runs
+        headless — _run_tool_loop only uses _broadcast, no real ws client is
+        needed, so no UI is involved. The upgrade session id is fixed
+        (emrg-upgrade) for traceability.
+        """
+        req = TaskRequest(
+            id=f"upgrade-{int(time.time())}",
+            session_id=session_id,
+            cwd=cwd,
+            prompt=prompt,
+            timestamp="",
+            # Upgrade writes install/ and source/ inside its own work dir —
+            # workspace-write tier (rant 2026-08-20T15:46:50).
+            sandbox="workspace-write",
+        )
+        if self._session_busy.get(session_id):
+            # Queue per existing semantics (host decision A: busy → pending,
+            # execute when free). A queued-but-never-drained upgrade is
+            # re-triggered by the next tick (version.txt unchanged).
+            self._session_pending.setdefault(session_id, []).append((req, True))
+            return
+        session = self._get_or_create_session(session_id, Path(cwd))
+        self._session_busy[session_id] = True
+        cancel_event = asyncio.Event()
+        try:
+            await self._run_tool_loop_locked(req, None, session, cancel_event, allow_tools=True)
+        except Exception:
+            logger.debug("upgrade session failed (retry next tick)", exc_info=True)
+            self._session_busy[session_id] = False
+
+    def _current_installed_version(self) -> str:
+        """Currently installed EMRG version from ~/.emrg/install/version.txt.
+
+        Rant 2026-08-20T18:30:57 + 2026-08-21T14:38:27: live disk read — the
+        upgrade agent may have updated it while this daemon process still
+        runs the pre-upgrade code. The GUI compares it with the in-memory
+        ``_run_version`` and shows the upgrade banner when they differ.
+        Returns "" when the file is missing (dev/standalone runs).
+        """
+        try:
+            v = (Path.home() / ".emrg" / "install" / "version.txt").read_text(encoding="utf-8").strip()
+            return v
+        except (OSError, ValueError):
+            return ""
+
+    def _evolution_count(self) -> int:
+        """Total completed evolution cycles across scheduler handlers + disk.
+
+        The daemon's own ``self.evolutions`` list is a legacy from the
+        pre-scheduler BackgroundThread design (#95) and is never appended;
+        the scheduler's handlers own the real per-cycle logs. Aggregate from
+        the scheduler, falling back to the legacy list only when the
+        scheduler is unavailable (e.g. test harnesses mock it away).
+
+        The scheduler's in-memory count resets to 0 on daemon restart, while
+        the ``evolution-*.json`` log files persist — so also count valid log
+        files on disk and return the max. This keeps the GUI growth card /
+        evolution toast consistent with the ``recent`` list (which reads the
+        same files) across restarts instead of showing 0.
+        """
+        in_memory = 0
+        sched = getattr(self, "_scheduler", None)
+        if sched is not None:
+            try:
+                total = sched.total_evolutions()
+                if isinstance(total, int):
+                    in_memory = total
+            except Exception:
+                pass
+        else:
+            in_memory = len(self.evolutions)
+
+        disk = 0
+        try:
+            logs_dir = config_dir() / "logs"
+            for f in logs_dir.glob("evolution-*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    if data.get("timestamp"):
+                        disk += 1
+                except (json.JSONDecodeError, OSError):
+                    continue  # corrupt/partial write — don't count
+        except OSError:
+            pass
+        return max(in_memory, disk)
 
     async def _handle_client(self, ws) -> None:
         """Handle a single WebSocket client connection.
@@ -376,14 +760,10 @@ class EmrgServer:
                         })
                         continue
                     # Phase 2 session-level lock (protocol-contract §2.6.5):
-                    # one active task per session — concurrent clients get
-                    # "session busy" instead of racing writes.
-                    if self._session_busy.get(session_id):
-                        await self._send(ws, {
-                            "error": "session busy",
-                            "session_id": session_id,
-                        })
-                        continue
+                    # one active task per session — concurrent tasks queue.
+                    # P1 (rant 21:55:37): construct req + allow_tools FIRST
+                    # (the busy branch must append req to the pending queue),
+                    # then check busy.
                     try:
                         req = TaskRequest(
                             id=data.get("id", ""),
@@ -391,15 +771,28 @@ class EmrgServer:
                             cwd=cwd,
                             prompt=data.get("prompt", ""),
                             timestamp=data.get("timestamp", ""),
-                            stream=data.get("stream", False),
                             images=data.get("images"),
+                            sandbox=data.get("sandbox"),
                         )
                     except Exception as e:
                         await self._send(ws, {"error": f"invalid task: {e}"})
                         continue
-                    # WorkBuddy P2 (rant 21:35): Ask mode — pure chat, no tools.
-                    # mode="ask" → LLM gets an empty tool set so it can only reply.
-                    allow_tools = data.get("mode", "auto") != "ask"
+                    # Rant 2026-08-20T18:18: Ask/Auto modes removed — every
+                    # interactive message allows tools; the sandbox tier
+                    # (req.sandbox, per-message) controls file permissions.
+                    # The pending queue keeps the (req, allow_tools) shape for
+                    # compatibility but allow_tools is always True now.
+                    allow_tools = True
+                    if self._session_busy.get(session_id):
+                        # Queue the task; injected at the next round boundary.
+                        self._session_pending.setdefault(session_id, []).append((req, allow_tools))
+                        await self._broadcast(session_id, {
+                            "type": "task_queued",
+                            "request_id": req.id,
+                            "session_id": session_id,
+                            "position": len(self._session_pending[session_id]),
+                        })
+                        continue
                     # Cancel previous task if still running
                     if _tool_task and not _tool_task.done():
                         if _cancel_event:
@@ -407,19 +800,14 @@ class EmrgServer:
                         _tool_task.cancel()
                     session = self._get_or_create_session(session_id, Path(cwd))
                     logger.info(
-                        'task received: session=%s prompt="%s" → routing via LLM (stream=%s)',
-                        session_id, _redact_string(req.prompt[:60]), req.stream,
+                        'task received: session=%s prompt="%s" → routing via LLM',
+                        session_id, _redact_string(req.prompt[:60]),
                     )
                     _cancel_event = asyncio.Event()
                     self._session_busy[session_id] = True  # lock (released in *locked wrapper)
-                    if req.stream:
-                        _tool_task = asyncio.create_task(
-                            self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
-                        )
-                    else:
-                        _tool_task = asyncio.create_task(
-                            self._run_chat_once_locked(req, ws, session)
-                        )
+                    _tool_task = asyncio.create_task(
+                        self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
+                    )
                     continue
 
                 await self._process_message(data, ws)
@@ -593,6 +981,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
             output = stdout.decode("utf-8", errors="replace")
@@ -626,6 +1015,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             stdout, _ = await asyncio.wait_for(
                 proc.communicate(token.encode("utf-8") + b"\n"), timeout=30
@@ -658,6 +1048,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             await asyncio.wait_for(proc.communicate(), timeout=30)
             return proc.returncode == 0
@@ -678,6 +1069,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
             if proc.returncode != 0:
@@ -723,6 +1115,7 @@ class EmrgServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=no_prompt_env(),
+                **win32_no_window_kwargs(),
             )
         except (OSError, ValueError):
             return {"ok": False, "code": None, "url": None,
@@ -792,12 +1185,103 @@ class EmrgServer:
             except (OSError, ValueError):
                 pass
 
+    async def _task_vibe_check(self, task_name: str, session_id: str, cwd: str,
+                               prompt: str = "", completion_summary: str = "") -> dict:
+        """Structured LLM ask (Ask mode, no tools) about a finished task cycle.
+
+        The agent must answer in strict JSON (rant 2026-08-20T10:58:55,
+        host design-finalized — fields unified to 3, meaningful deleted):
+        ``{"work": str, "recommend_slowdown": bool, "slowdown_reason": str}``.
+
+        ``work`` (rant 2026-08-18T21:32:32 → renamed from ``done``) is a
+        natural-language summary of what was done this cycle, for humans to
+        read in the GUI task recent-runs table. ``recommend_slowdown`` is now
+        the ONLY slowdown switch: true → next run at heartbeat interval,
+        false → normal interval. ``slowdown_reason`` is required only when
+        recommend_slowdown is true. Old models / old parsing omit fields → "".
+
+        Rant 2026-08-19T07:10:40 (root cause): the done frame used to carry an
+        empty ``content``, so ``completion_summary`` here was empty and the
+        memoryless LLM could not judge what happened. The done frame now
+        carries the agent's full final reply (daemon.py done broadcast), so
+        this prompt is evidence-driven: judge from the real final reply, not
+        from an empty shell.
+
+        Rant 2026-08-19T10:15:43 (host-finalized architecture): the PRIMARY
+        evidence is the task's OWN session history, loaded here by the task's
+        fixed ``session_id`` (``emrg-evolution-{name}``) + working dir —
+        the full tool loop / analysis / memory writes are in the session,
+        far richer than the transported prompt/completion_summary. Those are
+        kept only as auxiliary context. System message lives in
+        ``prompts/vibe_check.j2`` (same live-reload mechanism as system.j2).
+
+        Raises on any failure (caller sends ``ok: false``); the scheduler
+        conservatively leaves its slowdown state unchanged then.
+        """
+        template = _get_jinja_env().get_template("vibe_check.j2")
+        system = template.render(
+            task_name=task_name or "",
+            prompt=(prompt or "")[:2000],
+            completion_summary=(completion_summary or "")[:3000],
+        )
+        messages: list[dict] = [{"role": "system", "content": system}]
+        # Rant 2026-08-19T10:15:43: load the task's own session history by its
+        # fixed session_id (session files are organized by cwd). Recent N
+        # messages only — the whole session may be very long.
+        if session_id and cwd:
+            try:
+                session = Session.load(session_id, Path(cwd))
+                history = session.get_messages_for_llm()
+                if history:
+                    # Rant 2026-08-19T19:25:56 (root cause): slicing the
+                    # validated list can orphan a leading role:"tool" message
+                    # whose matching assistant(tool_calls) lies before the
+                    # window → LLM 400 "tool must follow tool_calls". Use
+                    # last_n_messages to drop window-boundary orphans.
+                    messages.extend(last_n_messages(history, 100))
+            except Exception:
+                logger.warning(
+                    "task_vibe_check: session history load failed (%s/%s)",
+                    session_id, cwd, exc_info=True,
+                )
+        messages.append({
+            "role": "user",
+            "content": "请基于以上任务信息与完整会话记录，严格按 system 中要求的 JSON 格式回答。",
+        })
+        msg = await self.llm.chat(
+            messages,
+            tools=[],
+        )
+        content = (msg.get("content") or "").strip()
+        # Tolerate markdown fences if the model wraps the JSON in ```json ... ```
+        content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content).strip()
+        data = json.loads(content)
+        if not isinstance(data, dict):
+            raise ValueError("vibe check response is not a JSON object")
+        return {
+            # Rant 2026-08-20T22:45:33: no more [:500] truncation — the
+            # prompt guidance (≤200 chars, outputs/results only) keeps work
+            # brief; hard-cutting produced exactly-500-char garbage in the
+            # saved task-run JSONL. Save the full value.
+            "work": str(data.get("work", "")),
+            "recommend_slowdown": bool(data.get("recommend_slowdown")),
+            "slowdown_reason": str(data.get("slowdown_reason", ""))[:300],
+        }
+
     def _build_system_prompt(self, session: Session | None = None) -> str:
         """Build the system prompt via Jinja2 template.
 
         Data collection here; rendering delegated to prompts/system.j2.
         """
         ctx: dict[str, Any] = {}
+
+        # ── Environment ──
+        ctx["current_time"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        ctx["os_name"] = platform.system()
+        ctx["platform_detail"] = platform.platform()
+        # Global config dir (~/.emrg) — injected so system.j2 can reference the
+        # cross-project sessions index and other global data files by path.
+        ctx["config_dir"] = str(config_dir())
 
         # ── Working Directory ──
         if session:
@@ -907,7 +1391,7 @@ class EmrgServer:
                     "branch_id": self.identity.branch_id,
                 },
                 uptime_seconds=max(0, elapsed),
-                evolution_count=len(self.evolutions),
+                evolution_count=self._evolution_count(),
             )
             await self._send(ws, {
                 "type": "pong",
@@ -917,6 +1401,13 @@ class EmrgServer:
                 "started_at": self.start_time.isoformat(),
                 "pid": os.getpid(),
                 "model": self.llm.config.model,
+                # Rant 2026-08-20T18:30:57 + 2026-08-21T14:38:27：current_version =
+                # 本进程实际运行版本（启动时读入内存，进程生命周期内不变）；
+                # installed_version = 磁盘实时安装版本（升级 agent 可能已更新）。
+                # GUI 对比二者：有差异 = 已装新版本但未重启 daemon → 弹横幅。
+                # previous-version.txt 不再参与判断（14:38:27 重构）。
+                "current_version": self._run_version,
+                "installed_version": self._current_installed_version(),
             })
             return
 
@@ -977,6 +1468,86 @@ class EmrgServer:
                     "type": "trigger_result",
                     "error": "scheduler not running",
                 })
+
+        elif msg_type == "task_create":
+            # rant 2026-08-12T18:23:15 P2 — task CRUD with hot reload
+            if not self._scheduler:
+                await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
+                return
+            ok, res = self._scheduler.task_create(
+                name=msg.get("name", "").strip(),
+                task_type=msg.get("task_type", "").strip(),
+                project=msg.get("project", "").strip(),
+                interval=msg.get("interval"),
+                enabled=msg.get("enabled", True),
+                repo=msg.get("repo"),
+                description=msg.get("description"),
+                sandbox=msg.get("sandbox"),
+            )
+            if not ok:
+                await self._send(ws, {"type": "task_result", "error": res})
+                return
+            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
+            await self._send(ws, {"type": "task_result", "ok": True, "task": res, "summary": summary})
+
+        elif msg_type == "task_update":
+            if not self._scheduler:
+                await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
+                return
+            fields = {k: msg[k] for k in ("task_type", "project", "interval", "enabled", "repo", "description", "sandbox") if k in msg}
+            if "task_type" in fields:
+                fields["type"] = fields.pop("task_type")
+            ok, res = self._scheduler.task_update(msg.get("name", "").strip(), **fields)
+            if not ok:
+                await self._send(ws, {"type": "task_result", "error": res})
+                return
+            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
+            await self._send(ws, {"type": "task_result", "ok": True, "task": res, "summary": summary})
+
+        elif msg_type == "task_delete":
+            if not self._scheduler:
+                await self._send(ws, {"type": "task_result", "error": "scheduler not running"})
+                return
+            ok, err = self._scheduler.task_delete(msg.get("name", "").strip())
+            if not ok:
+                await self._send(ws, {"type": "task_result", "error": err})
+                return
+            summary = await self._scheduler.apply_tasks(self._scheduler._load_tasks())
+            await self._send(ws, {"type": "task_result", "ok": True, "summary": summary})
+
+        elif msg_type == "task_template_list":
+            if not self._scheduler:
+                await self._send(ws, {"type": "templates_list", "templates": []})
+                return
+            await self._send(ws, {
+                "type": "templates_list",
+                "templates": self._scheduler.list_templates(),
+            })
+
+        elif msg_type == "task_template_create":
+            if not self._scheduler:
+                await self._send(ws, {"type": "template_result", "error": "scheduler not running"})
+                return
+            ok, err = self._scheduler.template_create(
+                msg.get("name", "").strip(), msg.get("prompt", "")
+            )
+            await self._send(ws, {"type": "template_result", "ok": ok, **({"error": err} if not ok else {})})
+
+        elif msg_type == "task_template_update":
+            if not self._scheduler:
+                await self._send(ws, {"type": "template_result", "error": "scheduler not running"})
+                return
+            ok, err = self._scheduler.template_update(
+                msg.get("name", "").strip(), msg.get("prompt", "")
+            )
+            await self._send(ws, {"type": "template_result", "ok": ok, **({"error": err} if not ok else {})})
+
+        elif msg_type == "task_template_delete":
+            if not self._scheduler:
+                await self._send(ws, {"type": "template_result", "error": "scheduler not running"})
+                return
+            ok, err = self._scheduler.template_delete(msg.get("name", "").strip())
+            await self._send(ws, {"type": "template_result", "ok": ok, **({"error": err} if not ok else {})})
 
         elif msg_type == "compact":
             cwd = msg.get("cwd", "")
@@ -1071,6 +1642,33 @@ class EmrgServer:
 
             await self._handle_read_memory(scope, memory_id, session_id, cwd, ws)
 
+        elif msg_type == "list_files":
+            # GUI right-panel workspace file browser (rant 2026-08-11T12:20:35 P1.1)
+            path_str = msg.get("path", "")
+            if not path_str:
+                await self._send(ws, {
+                    "type": "files_list",
+                    "error": "list_files requires path",
+                })
+                return
+            await self._handle_list_files(path_str, ws)
+
+        elif msg_type == "read_file":
+            # GUI right-panel file viewer (rant 2026-08-11T12:20:35 P1.1)
+            path_str = msg.get("path", "")
+            if not path_str:
+                await self._send(ws, {
+                    "type": "file_content",
+                    "error": "read_file requires path",
+                })
+                return
+            await self._handle_read_file(
+                path_str,
+                msg.get("start_line"),
+                msg.get("line_limit"),
+                ws,
+            )
+
         elif msg_type == "rant":
             # Store user rant/feedback for evolution analysis
             rant_message = msg.get("message", "").strip()
@@ -1081,43 +1679,87 @@ class EmrgServer:
             # Optional project targeting (multi-project support)
             project = msg.get("project", "").strip()
 
-            # Field order: timestamp → project → status → progress → completed → message
-            # (project right after timestamp per user feedback; message last)
-            entry = {
-                "timestamp": msg.get("timestamp", datetime.now().isoformat()),
-                "project": project,
-                "status": "pending",
-                "progress": None,
-                "completed": None,
-            }
-            # message last, so status fields stay visible when scanning the file
-            entry["message"] = rant_message
-
-            self._rants_log.parent.mkdir(parents=True, exist_ok=True)
-
-            # Read existing rants, append new, sort by timestamp, rewrite sorted
-            rants: list[dict] = []
-            if self._rants_log.exists():
-                with open(self._rants_log, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if line:
-                            try:
-                                rants.append(json.loads(line))
-                            except json.JSONDecodeError:
-                                pass
-            rants.append(entry)
-            rants.sort(key=lambda r: r.get("timestamp", ""))
-
-            with open(self._rants_log, "w", encoding="utf-8") as f:
-                for r in rants:
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-            count = len(rants)
+            # Shared write logic (rant 2026-08-17T11:51:59): daemon ``rant``
+            # command and the submit_rant tool use the same append_rant, so
+            # the file format / sort / daemon-authoritative timestamp stay
+            # consistent no matter which path recorded the rant.
+            count = append_rant(self._rants_log, rant_message, project)
 
             logger.info("rant recorded (%d total)%s: %s",
                 count, f" project={project}" if project else "", _redact_string(rant_message[:100]))
             await self._send(ws, {"ok": True, "count": count})
+
+        elif msg_type == "list_rants":
+            # Rant panel (rant 2026-08-13T14:10:14 P4): read ~/.emrg/rants.jsonl,
+            # optional status filter (pending/in_progress/completed/"" = all).
+            try:
+                filter_status = str(msg.get("status", "") or "").strip()
+                rants = []
+                if self._rants_log.exists():
+                    with open(self._rants_log, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                r = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if filter_status and r.get("status", "pending") != filter_status:
+                                continue
+                            rants.append(r)
+                # 时间倒序（最新在前，面板列表惯例）
+                rants.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
+                await self._send(ws, {
+                    "type": "rants_list",
+                    "rants": rants,
+                })
+            except OSError as e:
+                logger.exception("list_rants: failed to read %s", self._rants_log)
+                await self._send(ws, {"type": "rants_list", "rants": [], "error": str(e)})
+
+        elif msg_type == "skills_available":
+            # Installable-skills catalog (rant 2026-08-08T10:14:29): list
+            # catalog skills with installed/managed status.
+            entries = load_catalog_skills()
+            installed = {s.name for s in self.skills}
+            result = [
+                {
+                    "name": e.get("name", ""),
+                    "description": e.get("description", ""),
+                    "installed": e.get("name", "") in installed,
+                    "managed": skill_is_managed(e.get("name", "")),
+                }
+                for e in entries
+            ]
+            await self._send(ws, {"type": "skills_available_result", "skills": result})
+
+        elif msg_type == "skills_install":
+            # /skills install <name> — host-confirmed CLI install, then
+            # self-publish skill files into ~/.emrg/skills/.
+            from emrg.skills.installer import install_skill
+
+            name = msg.get("name", "").strip()
+            confirmed = bool(msg.get("confirmed", False))
+            if not name:
+                await self._send(ws, {
+                    "type": "skills_install_result",
+                    "error": "skills_install requires a skill name",
+                })
+                return
+            result = await install_skill(name, confirmed=confirmed)
+            if result.get("ok"):
+                # Reload so the next system-prompt build includes the skill
+                # (design: "下次构建系统提示即含该技能", no daemon restart needed).
+                self.skills = load_skills()
+            await self._send(ws, {"type": "skills_install_result", "name": name, **result})
+
+        elif msg_type == "skills_update":
+            # /skills update — refresh managed skills to latest releases.
+            from emrg.skills.installer import update_managed_skills
+
+            result = await update_managed_skills()
+            await self._send(ws, {"type": "skills_update_result", **result})
 
         elif msg_type == "list_models":
             await self._handle_list_models(ws)
@@ -1135,10 +1777,23 @@ class EmrgServer:
         elif msg_type == "list_projects":
             await self._handle_list_projects(ws)
 
+        elif msg_type == "remove_project":
+            # P1 GUI multi-session (rant 2026-08-10T15:07:19): drop a
+            # projects.yml entry by name (disk session data preserved).
+            name = msg.get("name", "").strip()
+            if not name:
+                await self._send(ws, {
+                    "type": "project_removed",
+                    "removed": False,
+                    "error": "remove_project requires name",
+                })
+                return
+            await self._handle_remove_project(name, ws)
+
         elif msg_type == "evolution_summary":
             # WorkBuddy P3 (rant 21:35): self-evolution visibility.
             # Low-cost: read evolution log files (~/.emrg/logs/evolution-*.json)
-            # written by EvolutionHandler; return count + recent N summaries.
+            # written by TaskHandler; return count + recent N summaries.
             limit = msg.get("limit", 5)
             try:
                 logs_dir = config_dir() / "logs"
@@ -1160,13 +1815,13 @@ class EmrgServer:
                         continue
                 await self._send(ws, {
                     "type": "evolution_summary",
-                    "count": len(self.evolutions),
+                    "count": self._evolution_count(),
                     "recent": recent,
                 })
             except OSError:
                 await self._send(ws, {
                     "type": "evolution_summary",
-                    "count": len(self.evolutions),
+                    "count": self._evolution_count(),
                     "recent": [],
                 })
 
@@ -1207,6 +1862,14 @@ class EmrgServer:
                 return
             session = self._get_or_create_session(session_id, Path(cwd))
             session.clear()
+            # P1 (rant 21:55:37) Change F: clearing a session also drops its
+            # pending queue (queued messages are stale after clear).
+            dropped = self._session_pending.pop(session_id, [])
+            if dropped:
+                await self._broadcast(session_id, {
+                    "type": "queued_cancelled",
+                    "session_id": session_id,
+                })
             await self._send(ws, {
                 "type": "clear_result",
                 "session_id": session_id,
@@ -1234,6 +1897,14 @@ class EmrgServer:
 
             deleted = Session.delete(session_id, Path(cwd))
             if deleted:
+                # P1 (rant 21:55:37) Change F: deleting the session also
+                # drops its pending queue.
+                dropped = self._session_pending.pop(session_id, [])
+                if dropped:
+                    await self._broadcast(session_id, {
+                        "type": "queued_cancelled",
+                        "session_id": session_id,
+                    })
                 await self._send(ws, {
                     "type": "session_deleted",
                     "session_id": session_id,
@@ -1270,10 +1941,23 @@ class EmrgServer:
                         "preview": preview,
                         "timestamp": r.get("timestamp", ""),
                     })
+            # Optional pagination (rant 2026-08-13T14:15:12): limit/offset
+            # count from the NEWEST message backwards (offset=0 = latest).
+            # Absent limit = full list (backward compatible, used by /rewind).
+            limit = msg.get("limit")
+            offset = msg.get("offset", 0)
+            has_more = False
+            if limit is not None:
+                total = len(user_messages)
+                end = max(0, total - offset)
+                start = max(0, end - limit)
+                has_more = start > 0
+                user_messages = user_messages[start:end]
             await self._send(ws, {
                 "type": "history_list",
                 "session_id": session_id,
                 "messages": user_messages,
+                "has_more": has_more,
             })
 
         elif msg_type == "rewind_session":
@@ -1313,8 +1997,55 @@ class EmrgServer:
             logger.info("session rewound: %s at index %d (removed %d records)",
                         session_id, record_index, len(records) - len(truncated))
 
+        elif msg_type == "task_vibe_check":
+            # Rant 2026-08-17T11:39:19: scheduler asks the agent, after a
+            # scheduled task completes, whether the round produced meaningful
+            # value — replacing the git-HEAD empty-cycle heuristic (HEAD
+            # measures commits, not value: analysis/memory work without a
+            # commit was miscounted as empty, and a no-op round over someone
+            # else's push counted as work). Ask-mode LLM call (no tools) with
+            # a strict JSON contract. Rant 2026-08-19T10:15:43: primary
+            # evidence = the task's own session history loaded by its fixed
+            # session_id (session files organized by cwd), not the transported
+            # summary.
+            task_name = msg.get("task_name", "")
+            session_id = msg.get("session_id", "")
+            cwd = msg.get("cwd", "")
+            prompt = msg.get("prompt", "")
+            summary = msg.get("completion_summary", "")
+            try:
+                result = await self._task_vibe_check(
+                    task_name, session_id, cwd, prompt, summary,
+                )
+                await self._send(ws, {
+                    "type": "vibe_check_result",
+                    "ok": True,
+                    "result": result,
+                })
+            except Exception as e:  # noqa: BLE001 — best-effort, never fatal
+                logger.warning("task_vibe_check failed: %s", e)
+                await self._send(ws, {
+                    "type": "vibe_check_result",
+                    "ok": False,
+                    "error": str(e)[:200],
+                })
+
         elif msg_type == "shutdown":
-            logger.info("shutdown requested by client")
+            # Rant 2026-08-19T13:11:34 — every daemon kill must be attributable:
+            # log the requesting peer (loopback client) alongside the action so
+            # "谁杀 daemon" can be traced from emrgd.log alone.
+            # Rant 2026-08-19T14:02:37 — loopback peers are indistinguishable
+            # (all 127.0.0.1:*), so senders tag the message with a `source`
+            # (emrg server stop / stop_all) to tell emrg stop / GUI /
+            # installer apart; missing source degrades to "unknown".
+            peer = ""
+            try:
+                peer = str(ws.remote_address)
+            except Exception:
+                peer = "unknown peer"
+            source = str(msg.get("source") or "unknown")
+            self._stop_reason = "shutdown_msg"
+            logger.info("shutdown requested by client (peer=%s, source=%s)", peer, source)
             await self._send(ws, {"type": "shutdown_ack"})
             try:
                 await ws.close()
@@ -1378,70 +2109,58 @@ class EmrgServer:
             content.insert(0, {"type": "text", "text": "请分析这张图片"})
         return content
 
-    async def _run_chat_once(
-        self, req: TaskRequest, ws, session: Session
-    ) -> None:
-        """Non-streaming single-turn chat (no tool loop)."""
-        system_prompt = self._build_system_prompt(session)
-        history_messages = session.get_messages_for_llm()
-        user_content = self._build_user_content(req.prompt, req.images, self.llm.config.vision)
-        messages: list[dict] = [
-            {"role": "system", "content": system_prompt},
-            *history_messages,
-            {"role": "user", "content": user_content},
-        ]
-        tools = self.tools.to_openai_tools()
-
-        # Persist user message (with image references if present)
-        user_record: dict = {
-            "type": "message",
-            "role": "user",
-            "content": req.prompt,
-        }
-        if req.images:
-            user_record["images"] = req.images
-        session.append_message(user_record)
-
-        try:
-            msg = await self.llm.chat(messages, tools=tools)
-            content = msg.get("content", "")
-
-            # Log LLM request/response
-            self._log_llm_exchange(
-                session, messages, tools, content,
-                finish_reason=msg.get("finish_reason", "stop"),
-                tool_calls=msg.get("tool_calls"),
-            )
-
-            # Persist assistant message
-            session.append_message({
-                "type": "message",
-                "role": "assistant",
-                "content": content or "",
-            })
-
-            await self._broadcast(session.session_id, {
-                "request_id": req.id,
-                "content": content or "",
-                "done": True,
-                "delta": False,
-                "session_id": session.session_id,
-            })
-
-            # Fire-and-forget: reflect on whether to save memories
-            self._maybe_reflect_memory(session, req.prompt, content or "")
-        except Exception as e:
-            logger.exception("LLM error")
-            await self._broadcast(session.session_id, {
-                "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
-            })
-
     # ── Phase 2 session-lock wrappers (protocol-contract §2.6.5) ──
     # The caller fire-and-forgets with asyncio.create_task() and never awaits,
     # so the lock MUST be released inside the task (wrapper finally) — not in
     # the caller. cancel path: _tool_task.cancel() → task cancelled → wrapper
     # finally runs → lock released. This also roots out the multi-connection
     # write race (§5): session writes are serialized by the single active task.
+
+    async def _inject_pending_messages(
+        self, session: Session, messages: list[dict],
+    ) -> tuple[int, bool]:
+        """Pop the session's pending queue and inject it into `messages`.
+
+        P1 queue-injection (rant 2026-08-10T21:55:37), aligned with codex
+        steer_input: messages sent while the tool loop is busy are queued per
+        session and injected at the next round boundary (after the current
+        round's tools, before the next LLM request).
+
+        Uses pop() for atomic removal — while we await broadcasts, the read
+        loop may append new messages to the same list; popping the whole list
+        means those land in a fresh list (setdefault) and are injected next
+        round. Never dropped.
+
+        Each injected message is persisted (append_message) so auto-compact
+        rebuilding from history keeps it, and a ``steer_committed`` broadcast
+        tells clients the message was committed into the turn.
+
+        Returns ``(injected_count, ask_injected)`` — ``ask_injected`` is True
+        when any queued message was Ask mode (mode=ask); the caller must use
+        an empty tool set for the round that processes it. (Rant
+        2026-08-20T18:18: Ask mode removed — always False, kept for signature
+        compatibility.)
+        """
+        sid = session.session_id
+        pending = self._session_pending.pop(sid, [])
+        if not pending:
+            return 0, False
+        ask_injected = any(not allow for _, allow in pending)  # always False post-rant 18:18
+        for preq, _ in pending:
+            pcontent = self._build_user_content(
+                preq.prompt, preq.images, self.llm.config.vision
+            )
+            messages.append({"role": "user", "content": pcontent})
+            record: dict = {"type": "message", "role": "user", "content": preq.prompt}
+            if preq.images:
+                record["images"] = preq.images
+            session.append_message(record)
+            await self._broadcast(sid, {
+                "type": "steer_committed",
+                "request_id": preq.id,
+                "session_id": sid,
+            })
+        return len(pending), ask_injected
 
     async def _run_tool_loop_locked(
         self, req: TaskRequest, ws, session: Session,
@@ -1450,20 +2169,36 @@ class EmrgServer:
     ) -> None:
         """Run _run_tool_loop and release the session busy lock on exit."""
         session_id = session.session_id
+        normal_end = False
         try:
             await self._run_tool_loop(req, ws, session, cancel_event, allow_tools)
+            normal_end = True
         finally:
             self._session_busy[session_id] = False
-
-    async def _run_chat_once_locked(
-        self, req: TaskRequest, ws, session: Session,
-    ) -> None:
-        """Run _run_chat_once and release the session busy lock on exit."""
-        session_id = session.session_id
-        try:
-            await self._run_chat_once(req, ws, session)
-        finally:
-            self._session_busy[session_id] = False
+            # P1 (rant 21:55:37): messages still queued when the loop ends are
+            # not lost. We do NOT start a follow-up task here (_tool_task /
+            # _cancel_event are read-loop locals — a hand-off would break
+            # cancel + busy tracking); instead:
+            #   normal end → queued_requeue → clients auto re-send (busy is
+            #     now released, the re-send goes through the normal path)
+            #   cancel / error / disconnect → queued_cancelled (queue dropped)
+            pending = self._session_pending.pop(session_id, [])
+            if pending:
+                # A cancel (even one caught and returned from inside the loop)
+                # must NOT auto-requeue: the user stopped the turn. Exception /
+                # disconnect also drop the queue. Only a clean turn end
+                # re-sends the queued messages.
+                if normal_end and not (cancel_event and cancel_event.is_set()):
+                    await self._broadcast(session_id, {
+                        "type": "queued_requeue",
+                        "session_id": session_id,
+                        "request_ids": [r.id for r, _ in pending],
+                    })
+                else:
+                    await self._broadcast(session_id, {
+                        "type": "queued_cancelled",
+                        "session_id": session_id,
+                    })
 
     async def _run_tool_loop(
         self, req: TaskRequest, ws, session: Session,
@@ -1506,9 +2241,41 @@ class EmrgServer:
             *history_messages,
             {"role": "user", "content": user_content},
         ]
-        tools_openai = self.tools.to_openai_tools() if allow_tools else []
+        tools_base = self.tools.to_openai_tools() if allow_tools else []
+        # P1 (rant 21:55:37): injection rounds do NOT consume the round budget;
+        # force_ask latches "an Ask message was injected outside the round-top
+        # injection (stop / Case 3 / loop-end)" so the next round uses an empty
+        # tool set for it.
+        force_ask = False
+        round_num = 1
+        while True:
+            if round_num > self._max_tool_rounds:
+                # P1 (rant 21:55:37): round budget exhausted but messages
+                # still queued — process them with a fresh round budget
+                # instead of stranding them; only fall back to the
+                # "Exceeded maximum" error when the queue is empty.
+                _n, _ask = await self._inject_pending_messages(session, messages)
+                if _n:
+                    force_ask = _ask
+                    round_num = 1
+                    continue
 
-        for round_num in range(1, self._max_tool_rounds + 1):
+                # Exceeded max tool rounds
+                logger.warning("max tool rounds (%d) exceeded for task %s",
+                               self._max_tool_rounds, req.id)
+                await self._broadcast(session.session_id, {
+                    "request_id": req.id,
+                    "content": f"Exceeded maximum tool call rounds ({self._max_tool_rounds}).",
+                    "done": True,
+                    "delta": False,
+                    "session_id": session.session_id,
+                })
+
+                # Fire-and-forget: reflect on whether to save memories
+                self._maybe_reflect_memory(session, req.prompt, full_content)
+                return
+
+            tools_openai = tools_base
             # Check for cancellation between rounds
             if cancel_event and cancel_event.is_set():
                 logger.info("tool loop cancelled by client at round %d", round_num)
@@ -1520,6 +2287,13 @@ class EmrgServer:
                     "session_id": session.session_id,
                 })
                 return
+
+            # P1 queue-injection: drain pending at the round boundary (after
+            # this round's tools, before the next LLM request — codex steer).
+            _injected, _ask = await self._inject_pending_messages(session, messages)
+            if _ask or force_ask:
+                tools_openai = []
+            force_ask = False
 
             logger.debug("tool loop round %d: %d messages, %d tools",
                          round_num, len(messages), len(tools_openai))
@@ -1579,6 +2353,7 @@ class EmrgServer:
 
             # Streaming call to LLM
             content_parts: list[str] = []
+            reasoning_parts: list[str] = []  # think block, llm.jsonl only (rant 2026-08-18T09:43:23)
             tc_by_index: dict[int, dict] = {}
             final_finish = None
             final_usage: dict | None = None
@@ -1599,6 +2374,13 @@ class EmrgServer:
                             "delta": True,
                             "session_id": session.session_id,
                         })
+
+                    # Accumulate reasoning (think) — NOT broadcast, NOT persisted
+                    # into session messages; only lands in the llm.jsonl response
+                    # record via _log_llm_exchange (rant 2026-08-18T09:43:23).
+                    r = delta.get("reasoning")
+                    if r:
+                        reasoning_parts.append(r)
 
                     # Track accumulated tool calls for finalization
                     tcs = delta.get("tool_calls")
@@ -1638,6 +2420,7 @@ class EmrgServer:
                 return
 
             full_content = "".join(content_parts)
+            full_reasoning = "".join(reasoning_parts) or None
             logger.debug("round %d finish: %s, tool_calls=%d, content_len=%d",
                          round_num, final_finish, len(tc_by_index), len(full_content))
 
@@ -1647,6 +2430,7 @@ class EmrgServer:
                 self._log_llm_exchange(
                     session, [dict(m) for m in messages], tools_openai,
                     full_content, final_finish, final_usage,
+                    reasoning=full_reasoning,
                 )
 
                 # Persist assistant message
@@ -1656,12 +2440,28 @@ class EmrgServer:
                     "content": full_content,
                 })
 
+                # Append the assistant reply to the local messages so the
+                # LLM context stays coherent when queued messages are
+                # injected after this round (mirrors Case 2's assistant
+                # tool_calls message).
+                messages.append({"role": "assistant", "content": full_content})
+
+                # P1 (rant 21:55:37): messages queued mid-round (after the
+                # round-top drain) must not end the turn — inject and continue.
+                # Injection round does not consume the round budget.
+                _n, _ask = await self._inject_pending_messages(session, messages)
+                if _n:
+                    force_ask = _ask
+                    continue
+
                 await self._broadcast(session.session_id, {
                     "request_id": req.id,
-                    "content": "",
+                    "content": full_content or "",
                     "done": True,
                     "delta": False,
                     "session_id": session.session_id,
+                    # rant 21:52:18: authoritative current-context message count.
+                    "context_messages": len(messages),
                 })
 
                 # Fire-and-forget: reflect on whether to save memories
@@ -1682,6 +2482,7 @@ class EmrgServer:
                                       "arguments": tc.get("function", {}).get("arguments", "")}}
                         for tc in tool_calls
                     ],
+                    reasoning=full_reasoning,
                 )
 
                 # Build the assistant message with tool_calls
@@ -1730,8 +2531,12 @@ class EmrgServer:
                     except json.JSONDecodeError:
                         args = {}
 
-                    logger.info("tool call: %s(%s)", tc_name,
-                                json.dumps(_redact(args), ensure_ascii=False)[:200])
+                    # Rant 2026-08-19T10:35:24: log the tool's intent (why this
+                    # call happened, written by the agent) instead of the
+                    # static purpose. intent missing (internal/LLM-free calls)
+                    # → "-", no fallback.
+                    intent = (args or {}).get("intent") or "-"
+                    logger.info("tool call: %s — %s", tc_name, intent)
 
                     # Notify client (broadcast to all session subscribers)
                     await self._broadcast(session.session_id, {
@@ -1740,6 +2545,7 @@ class EmrgServer:
                         "tool_name": tc_name,
                         "tool_call_id": tc_id,
                         "arguments": args,
+                        "intent": args.get("intent") or "",
                     })
 
                     # Inject session cwd as default for filesystem tools
@@ -1747,6 +2553,12 @@ class EmrgServer:
                         args["workdir"] = str(session.cwd)
                     elif tc_name == "grep" and "path" not in args:
                         args["path"] = str(session.cwd)
+
+                    # Sandbox tier (rant 2026-08-20T15:46:50): the task's
+                    # configured sandbox is injected into the bash tool — the
+                    # agent cannot choose it per call.
+                    if tc_name == "bash" and req.sandbox:
+                        args["sandbox"] = req.sandbox
 
                     # Execute
                     tool = self.tools.get(tc_name)
@@ -1798,13 +2610,18 @@ class EmrgServer:
                         "error": result.error,
                     })
 
-                # Log LLM request for this round (before continuing)
+                # Log LLM request for this round (before continuing).
+                # Tool rounds consume the round budget; injection rounds do
+                # not (they `continue` from the stop / Case 3 branches
+                # without incrementing).
+                round_num += 1
                 continue
 
             # Case 3: Max tokens or other stop — done
             self._log_llm_exchange(
                 session, [dict(m) for m in messages], tools_openai,
                 full_content, final_finish, final_usage,
+                reasoning=full_reasoning,
             )
 
             session.append_message({
@@ -1813,41 +2630,49 @@ class EmrgServer:
                 "content": full_content,
             })
 
+            # Append the assistant reply to the local messages so the LLM
+            # context stays coherent when queued messages are injected
+            # after this round.
+            messages.append({"role": "assistant", "content": full_content})
+
+            # P1 (rant 21:55:37): messages queued mid-round must not end the
+            # turn — inject and continue (injection round does not consume
+            # the round budget).
+            _n, _ask = await self._inject_pending_messages(session, messages)
+            if _n:
+                force_ask = _ask
+                continue
+
             await self._broadcast(session.session_id, {
                 "request_id": req.id,
                 "content": full_content or "",
                 "done": True,
                 "delta": False,
                 "session_id": session.session_id,
+                # rant 21:52:18: current LLM context size (system + history +
+                # user + all tool results + assistant replies) — authoritative
+                # for the TUI status bar message count.
+                "context_messages": len(messages),
             })
 
             # Fire-and-forget: reflect on whether to save memories
             self._maybe_reflect_memory(session, req.prompt, full_content)
             return
 
-        # Exceeded max tool rounds
-        logger.warning("max tool rounds (%d) exceeded for task %s",
-                       self._max_tool_rounds, req.id)
-        await self._broadcast(session.session_id, {
-            "request_id": req.id,
-            "content": f"Exceeded maximum tool call rounds ({self._max_tool_rounds}).",
-            "done": True,
-            "delta": False,
-            "session_id": session.session_id,
-        })
-
-        # Fire-and-forget: reflect on whether to save memories
-        self._maybe_reflect_memory(session, req.prompt, full_content)
-
     def _log_llm_exchange(
         self, session: Session, messages, tools,
         content: str, finish_reason: str = "stop",
         usage=None, tool_calls=None,
+        reasoning: str | None = None,
     ) -> None:
         """Log a complete LLM request/response exchange to the session.
 
-        Centralizes the 4 identical append_llm patterns from _run_chat_once
-        and _run_tool_loop, ensuring consistent logging format.
+        Centralizes the identical append_llm patterns from _run_tool_loop,
+        ensuring consistent logging format.
+
+        ``reasoning`` (rant 2026-08-18T09:43:23) is written ONLY into the
+        response record (when the model produced a think block); the request
+        record stays untouched so llm.jsonl history/context is not bloated.
         """
         session.append_llm({
             "type": "request",
@@ -1867,6 +2692,8 @@ class EmrgServer:
             response["usage"] = usage
         if tool_calls is not None:
             response["tool_calls"] = tool_calls
+        if reasoning is not None:
+            response["reasoning"] = reasoning
         session.append_llm(response)
 
     # ── Token estimation helpers ──────────────────────────────
@@ -2190,6 +3017,11 @@ class EmrgServer:
     ) -> None:
         """Read projects.yml and return all project entries.
 
+        Ordered by each project's latest session activity (created_at desc,
+        parallel scan) — P6 of the GUI multi-session rant (2026-08-10T15:07:19)
+        so the open/new-session dialogs show the most recently active projects
+        first.
+
         No evolution-workspace filter (rant 2026-08-07T10:48:00): projects.yml
         only contains explicitly registered entries, and on packaged installs
         the emrg project's only path IS ~/.emrg/evolution/emrg — filtering it
@@ -2202,17 +3034,107 @@ class EmrgServer:
             if self._projects_log.exists():
                 data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
                 if isinstance(data, list):
+                    entries = [p for p in data if isinstance(p, dict)]
+                    # P6 验收（rant 2026-08-10T15:07:19）：项目按"该项目最新会话活跃"倒序
+                    # ——并行扫描各项目 sessions 目录取最大 created_at（GUI 单连接无法并发
+                    # list_sessions：_pending 按 respType 键控会互相覆盖，故 daemon 侧聚合）。
+                    async def _latest_session_at(entry: dict) -> str:
+                        p = entry.get("path", "")
+                        if not p:
+                            return ""
+                        try:
+                            sessions = Session.list_sessions(Path(p))
+                            return sessions[0].get("created_at", "") if sessions else ""
+                        except (OSError, ValueError, json.JSONDecodeError):
+                            return ""
+
+                    ats = await asyncio.gather(*(_latest_session_at(e) for e in entries))
+                    ordered = sorted(zip(entries, ats), key=lambda t: t[1], reverse=True)
+                    # rant 2026-08-19T01:05:47 — _detect_git_remote runs a sync
+                    # git subprocess per project; offload to worker threads so a
+                    # slow git probe never freezes the event loop (websocket
+                    # clients would otherwise time out during list_projects).
+                    repos = await asyncio.gather(*(
+                        asyncio.to_thread(_detect_git_remote, p.get("path", ""))
+                        for p, _ in ordered
+                    ))
                     projects = [
                         {"name": p.get("name", ""),
-                         "repo": _detect_git_remote(p.get("path", "")),
-                         "path": p.get("path", "")}
-                        for p in data if isinstance(p, dict)
+                         "repo": repo,
+                         "path": p.get("path", ""),
+                         "latest_session_at": at}
+                        for (p, at), repo in zip(ordered, repos)
                     ]
         except (yaml.YAMLError, OSError):
             logger.exception("Failed to read projects.yml")
         await self._send(ws, {
             "type": "projects_list",
             "projects": projects,
+        })
+
+    async def _handle_remove_project(self, name: str, ws) -> None:
+        """Remove a project entry from projects.yml by name.
+
+        P1 of the GUI multi-session feature (rant 2026-08-10T15:07:19):
+        deletes only the projects.yml entry — on-disk session data under
+        <path>/.emrg/sessions/ is preserved (a later _touch_project
+        re-registers the project). Mirrors _touch_project's read path and
+        atomic_write_yaml. Responses:
+          {"type": "project_removed", "removed": true,  "name": name}
+          {"type": "project_removed", "removed": false, "name": name, ...}
+        """
+        if not self._projects_log.exists():
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+            })
+            return
+        try:
+            data = yaml.safe_load(self._projects_log.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError):
+            logger.exception("remove_project: failed to read %s", self._projects_log)
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+                "error": "failed to read projects.yml",
+            })
+            return
+        if not isinstance(data, list):
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+            })
+            return
+        remaining = [
+            e for e in data
+            if not (isinstance(e, dict) and e.get("name") == name)
+        ]
+        if len(remaining) == len(data):
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+            })
+            return
+        try:
+            atomic_write_yaml(remaining, self._projects_log, prefix=".projects_")
+        except OSError:
+            logger.exception("remove_project: failed to write %s", self._projects_log)
+            await self._send(ws, {
+                "type": "project_removed",
+                "removed": False,
+                "name": name,
+                "error": "failed to write projects.yml",
+            })
+            return
+        logger.info("remove_project: removed %s from projects.yml", name)
+        await self._send(ws, {
+            "type": "project_removed",
+            "removed": True,
+            "name": name,
         })
 
     async def _handle_list_models(
@@ -2327,6 +3249,150 @@ class EmrgServer:
                 "updated_at": session._updated_at,
                 "title": session.title,
             },
+        })
+
+    # ── GUI workspace panel: list_files / read_file (rant 2026-08-11T12:20:35 P1.1) ──
+    # 单目录条目上限：超出截断 + truncated 提示（与 ReadTool 的防爆理念一致）
+    _MAX_LIST_ENTRIES = 5000
+    # read_file 1MB 上限：更大文件引导用系统工具打开（避免 WebSocket 帧过大）
+    _MAX_READ_FILE_SIZE = 1 * 1024 * 1024
+    # 显式 line_limit 的上限（对齐 ReadTool.MAX_LINES）
+    _MAX_READ_LINES = 2000
+
+    async def _handle_list_files(self, path_str: str, ws) -> None:
+        """List one directory level (workspace file browser data source).
+
+        Returns {"type": "files_list", path, entries: [{name, path, type}],
+        truncated?} — fields deliberately limited to name/type/path (no
+        size/mtime: per-entry stat is expensive on 5000-entry directories).
+        """
+        raw = Path(path_str).expanduser()
+        if not raw.is_absolute():
+            await self._send(ws, {
+                "type": "files_list",
+                "error": "path must be absolute",
+            })
+            return
+        path = raw.resolve()
+        try:
+            if not path.exists():
+                await self._send(ws, {
+                    "type": "files_list",
+                    "error": f"path not found: {path}",
+                })
+                return
+            if not path.is_dir():
+                await self._send(ws, {
+                    "type": "files_list",
+                    "error": f"not a directory: {path}",
+                })
+                return
+            entries = sorted(
+                path.iterdir(),
+                # 目录在前、按名排序（对齐 ReadTool）；符号链接不跟随 →
+                # is_dir(follow_symlinks=False) 为 False → 归入 file 类不可展开
+                key=lambda p: (not p.is_dir(follow_symlinks=False), p.name),
+            )
+            result = []
+            truncated = False
+            for e in entries[: self._MAX_LIST_ENTRIES]:
+                is_dir = e.is_dir(follow_symlinks=False)
+                result.append({
+                    "name": e.name,
+                    "path": str(e),
+                    "type": "dir" if is_dir else "file",
+                })
+            if len(entries) > self._MAX_LIST_ENTRIES:
+                truncated = True
+            await self._send(ws, {
+                "type": "files_list",
+                "path": str(path),
+                "entries": result,
+                "truncated": truncated,
+            })
+        except OSError as exc:
+            await self._send(ws, {
+                "type": "files_list",
+                "error": f"cannot list directory: {exc}",
+            })
+
+    async def _handle_read_file(
+        self, path_str: str, start_line, line_limit, ws
+    ) -> None:
+        """Read a text file (workspace panel viewer data source).
+
+        Returns {"type": "file_content", path, content, truncated?, binary?,
+        error?}. Binary files report binary=True with empty content (image
+        preview is rendered via file:// URL in the renderer, no base64).
+        """
+        raw = Path(path_str).expanduser()
+        if not raw.is_absolute():
+            await self._send(ws, {
+                "type": "file_content",
+                "error": "path must be absolute",
+            })
+            return
+        path = raw.resolve()
+        try:
+            if not path.exists():
+                await self._send(ws, {
+                    "type": "file_content",
+                    "error": f"file not found: {path}",
+                })
+                return
+            if path.is_dir():
+                await self._send(ws, {
+                    "type": "file_content",
+                    "error": f"is a directory: {path}",
+                })
+                return
+            file_size = path.stat().st_size
+            if file_size > self._MAX_READ_FILE_SIZE:
+                await self._send(ws, {
+                    "type": "file_content",
+                    "path": str(path),
+                    "error": "文件过大，用系统工具打开",
+                })
+                return
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                await self._send(ws, {
+                    "type": "file_content",
+                    "path": str(path),
+                    "binary": True,
+                })
+                return
+        except OSError as exc:
+            await self._send(ws, {
+                "type": "file_content",
+                "error": f"cannot read file: {exc}",
+            })
+            return
+
+        all_lines = text.split("\n")
+        total = len(all_lines)
+        try:
+            start = max(1, int(start_line or 1))
+        except (TypeError, ValueError):
+            start = 1
+        try:
+            limit = int(line_limit) if line_limit is not None else None
+        except (TypeError, ValueError):
+            limit = None
+        if limit is not None:
+            limit = min(limit, self._MAX_READ_LINES)
+            selected = all_lines[start - 1 : start - 1 + limit]
+            truncated = start - 1 + limit < total
+        else:
+            selected = all_lines[start - 1 :]
+            truncated = False
+        await self._send(ws, {
+            "type": "file_content",
+            "path": str(path),
+            "content": "\n".join(selected),
+            "truncated": truncated,
+            "total_lines": total,
         })
 
     async def _handle_list_memories(
@@ -2591,7 +3657,15 @@ class EmrgServer:
                             "tool_call_id": tc_id,
                             "content": result_text,
                         })
-                        logger.debug("memory reflection tool: %s → %s", tc_name, _redact_string(result_text[:100]))
+                        # Rant 2026-08-19T10:35:24: use the call's intent (why
+                        # this tool was invoked) instead of the static purpose.
+                        intent = (args or {}).get("intent") or "-"
+                        logger.debug(
+                            "memory reflection: id=%s round=%d tool %s — %s → %s%s",
+                            session.session_id, _round + 1, tc_name, intent,
+                            _redact_string(result_text[:100]),
+                            "…" if len(result_text) > 100 else "",
+                        )
 
             except Exception:
                 logger.debug("memory reflection failed", exc_info=True)
@@ -2695,7 +3769,14 @@ class EmrgServer:
                         "tool_call_id": tc_id,
                         "content": result_text,
                     })
-                    logger.debug("consolidation tool: %s → %s", tc_name, _redact_string(result_text[:100]))
+                    # Rant 2026-08-19T10:35:24: use the call's intent instead
+                    # of the static purpose.
+                    intent = (args or {}).get("intent") or "-"
+                    logger.debug(
+                        "consolidation tool: %s — %s → %s%s",
+                        tc_name, intent, _redact_string(result_text[:100]),
+                        "…" if len(result_text) > 100 else "",
+                    )
         except Exception:
             logger.debug("memory consolidation failed", exc_info=True)
 
@@ -2706,4 +3787,7 @@ async def run_server(llm_config: LlmConfig) -> None:
     try:
         await server.serve()
     except KeyboardInterrupt:
-        logger.info("shutdown signal received")
+        # Rant 2026-08-19T14:02:37 — attribute the stop: serve()'s teardown
+        # already logged the full cleanup; this line identifies the trigger.
+        server._stop_reason = "sigint"
+        logger.info("shutdown signal received (SIGINT), cleanup started")

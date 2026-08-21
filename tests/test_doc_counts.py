@@ -4,6 +4,16 @@ Pattern history: #426 -> #430 -> #510 -> #511. Every time tests are added or
 removed, the documented counts drift and require a follow-up doc PR. This
 module asserts the documented Python count matches the real collection, and
 that the documented GUI breakdown sums to its headline number.
+
+#584: README.cn.md was the only test-count doc NOT guarded — it drifted to
+91 (22 renderer smoke) while README.md/Agent.md said 96 (27 renderer smoke)
+after #580 added 3 GUI tests. Both checks now cover all three docs
+(README.md, README.cn.md, Agent.md); CJK full-width parens and the
+"项：" separator are normalized before matching.
+#692: rant 2026-08-11T19:50:37 — README.md/README.cn.md switched to the
+Tests badge (no hardcoded counts); the python-count check now guards
+Agent.md only, while the GUI-breakdown check still picks up any
+"(N: ...)" line it finds in any doc (Agent.md keeps the breakdown).
 """
 
 import re
@@ -29,11 +39,14 @@ def _collected_pytest_count() -> int:
 def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
     """Extract (label, headline, parts) for every documented GUI count."""
     found = []
-    for doc in ("README.md", "Agent.md"):
+    for doc in ("README.md", "README.cn.md", "Agent.md"):
         text = (REPO_ROOT / doc).read_text(encoding="utf-8")
         for line in text.splitlines():
             if "npm test" not in line:
                 continue
+            # CJK docs use full-width parens and "（N 项：..." instead of "(N: ..."
+            line = line.replace("（", "(").replace("）", ")")
+            line = re.sub(r"(\d+) 项：", r"\1: ", line)
             m = re.search(r"\((\d+): ([^)]+)\)", line)
             if not m:
                 continue
@@ -51,18 +64,19 @@ def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
 
 def test_python_count_matches_docs() -> None:
     collected = _collected_pytest_count()
-    for doc in ("README.md", "Agent.md"):
-        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
-        # README: "run tests (currently N items)" | Agent.md: "pytest tests/ -v` (N)"
-        m = re.search(r"currently (\d+) items", text) or re.search(
-            r"uv run pytest tests/ -v` \((\d+)\)", text
-        )
-        assert m, f"no documented Python count found in {doc}"
-        documented = int(m.group(1))
-        assert documented == collected, (
-            f"{doc} documents {documented} Python tests but {collected} are collected "
-            f"(--collect-only). Sync the doc (and this guard) when adding/removing tests."
-        )
+    # rant 2026-08-11T19:50:37: README.md/README.cn.md dropped hardcoded counts in
+    # favor of the Tests badge (dynamic — no more doc drift). Agent.md keeps the
+    # number (project-context file, checked by the same guard).
+    doc = "Agent.md"
+    text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+    # Agent.md: "pytest tests/ -v` (N)"
+    m = re.search(r"uv run pytest tests/ -v` \((\d+)\)", text)
+    assert m, f"no documented Python count found in {doc}"
+    documented = int(m.group(1))
+    assert documented == collected, (
+        f"{doc} documents {documented} Python tests but {collected} are collected "
+        f"(--collect-only). Sync the doc (and this guard) when adding/removing tests."
+    )
 
 
 def test_gui_breakdown_sums_to_headline() -> None:
@@ -72,3 +86,57 @@ def test_gui_breakdown_sums_to_headline() -> None:
         assert sum(parts) == headline, (
             f"{label}: breakdown {parts} sums to {sum(parts)} but headline says {headline}"
         )
+
+
+def test_no_duplicate_npm_test_command_lines() -> None:
+    """Each doc must not contain an identical `npm test` command line twice.
+
+    #617: README.cn.md carried the `npm test` line twice (exact copy-paste
+    duplicate). The breakdown-sum guard above passed because it validates
+    each line independently — both copies sum correctly to the same
+    headline. Exact-line duplicates within one doc are always a copy-paste
+    bug: README.md has one line, README.cn.md must have one, Agent.md has
+    two *different* lines (features + test-commands sections), never an
+    identical repeat.
+    """
+    for doc in ("README.md", "README.cn.md", "Agent.md"):
+        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+        lines = [ln.rstrip() for ln in text.splitlines() if "npm test" in ln]
+        dupes = {ln for ln in lines if lines.count(ln) > 1}
+        assert not dupes, (
+            f"{doc} contains duplicated npm-test command line(s) — remove the "
+            f"copy-paste duplicate: {dupes}"
+        )
+    # rant 2026-08-11T17:58:11 (README emoji 泛滥 → 克制化)：节标题必须纯文本，
+    # 无 emoji（保留的 emoji 仅限对比表 ✅/❌、底部 ❤️、语言切换 🇬🇧/🇨🇳）。
+    emoji = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F]")
+    for doc in ("README.md", "README.cn.md"):
+        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+        bad = [
+            ln for ln in text.splitlines()
+            if re.match(r"^#{1,3} ", ln) and emoji.search(ln)
+        ]
+        assert not bad, f"{doc}: heading(s) must not contain emoji: {bad}"
+
+
+def test_evolution_prompt_no_quick_ref_block() -> None:
+    """evolution_prompt.md must not contain the implemented-features quick
+    reference block (rant 2026-08-17T14:22:21 — removed in #822).
+
+    pm25coder follow-up on #822: cheap insurance against accidental
+    re-insertion of the static in-prompt history table. The memory system
+    + git log handle dedup instead.
+    """
+    prompt = (REPO_ROOT / "emrg" / "server" / "evolution_prompt.md").read_text(
+        encoding="utf-8"
+    )
+    # Case-insensitive match (pm25coder note): the original block's header was
+    # capitalized ("Implemented-features quick reference") — the lowercase
+    # body phrase is the guaranteed substring, but lowercasing the whole file
+    # catches a header-only re-insertion too.
+    assert "implemented-features quick reference" not in prompt.lower(), (
+        "evolution_prompt.md must not contain the implemented-features quick "
+        "reference block — dedup is handled by the memory system + git log "
+        "(rant 2026-08-17T14:22:21, #822)"
+    )
+

@@ -21,13 +21,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 
+from emrg._win import win32_no_window_kwargs
 from emrg.connect import (
+    AuthError,
     cleanup_server,
     connect_to_server,
     get_server_path,
     is_server_running_sync,
 )
 from emrg.protocol import TaskRequest
+from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +70,33 @@ def is_running() -> bool:
     return is_server_running_sync()
 
 
+# Rant 2026-08-09T13:16:36 ⑤（防风暴总闸）：daemon 启动失败时不得无限重拉——
+# TUI app.py _reconnect 循环每 1s 调 ensure_connected → start_daemon 会每 1s
+# spawn 一个新 daemon 进程（Windows 上每个 spawn 都是 cmd 窗口来源）。单个
+# "连接生命周期"内最多 _MAX_SPAWN_ATTEMPTS 次 spawn，超限抛错提示宿主手动
+# `emrg server`；成功连接后归零。
+_MAX_SPAWN_ATTEMPTS = 3
+_spawn_attempts = 0
+
+
 async def start_daemon() -> subprocess.Popen:
     """Start emrgd in the background and wait until it accepts connections."""
-    logger.info("starting emrgd daemon...")
+    global _spawn_attempts
+    if _spawn_attempts >= _MAX_SPAWN_ATTEMPTS:
+        raise RuntimeError(
+            f"daemon failed to start after {_MAX_SPAWN_ATTEMPTS} attempts — "
+            "please run 'emrg server' manually and check emrgd.log"
+        )
+    _spawn_attempts += 1
+    logger.info("starting emrgd daemon (attempt %d/%d)...", _spawn_attempts, _MAX_SPAWN_ATTEMPTS)
     cleanup_server()
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "emrg.server",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-        start_new_session=True, close_fds=True)
+        start_new_session=True, close_fds=True,
+        # Windows: daemon spawn must never pop a console window
+        # (rant 2026-08-09T13:16:36 — cmd-window storm).
+        **win32_no_window_kwargs())
     for _ in range(15):
         await asyncio.sleep(0.3)
         if is_running():
@@ -146,28 +168,60 @@ async def check_and_restart_if_stale() -> None:
                 logger.info(
                     "%s, restarting (old pid=%d)", restart_reason, server_pid,
                 )
-                # Kill old server: SIGTERM first, SIGKILL if still alive
+                # Kill old server: SIGTERM first, SIGKILL if still alive.
+                # ⚠️ (rant 2026-08-18T12:49:09 ②) The old daemon must be TRULY
+                # dead before the port file is removed and a new daemon spawns.
+                # Previously cleanup_server() deleted the port file BEFORE the
+                # wait, so is_running() (a port-file probe) returned False
+                # instantly and a new daemon spawned while the old one was still
+                # shutting down → multiple emrg.server instances on different
+                # ports. Wait on the old PID itself (POSIX os.kill(pid,0) probe),
+                # then remove the port file only after it is gone.
                 try:
                     os.kill(server_pid, signal.SIGTERM)
                 except (ProcessLookupError, OSError):
                     pass
-                cleanup_server()
-                # Wait for old server to die
-                for _ in range(10):
+
+                def _old_pid_alive() -> bool:
+                    if sys.platform == "win32":
+                        # os.kill(pid, 0) would TerminateProcess on Windows —
+                        # never use it as a liveness probe. Windows SIGTERM is
+                        # an immediate hard kill, so the port probe suffices.
+                        return is_running()
+                    try:
+                        os.kill(server_pid, 0)
+                        return True
+                    except ProcessLookupError:
+                        return False
+                    except OSError:
+                        return True  # EPERM → process exists
+
+                for _ in range(50):  # up to 10s for graceful shutdown
                     await asyncio.sleep(0.2)
-                    if not is_running():
+                    if not _old_pid_alive():
                         break
                 else:
                     # SIGTERM didn't work — force kill
                     logger.warning("old daemon (pid=%d) didn't die, sending SIGKILL", server_pid)
                     try:
                         os.kill(server_pid, signal.SIGKILL)
-                        await asyncio.sleep(0.3)
                     except (ProcessLookupError, OSError):
                         pass
+                    for _ in range(10):  # up to 2s for SIGKILL to land
+                        await asyncio.sleep(0.2)
+                        if not _old_pid_alive():
+                            break
+                # Old daemon is gone — now safe to remove its port file
+                cleanup_server()
     except (ConnectionRefusedError, FileNotFoundError, OSError, json.JSONDecodeError,
-            asyncio.TimeoutError, Exception):
-        pass  # Server not reachable — connect_to_server will handle
+            asyncio.TimeoutError, ConnectionClosed):
+        # G129 (rant 2026-08-09T08:03:46): only genuinely transient connection
+        # failures are swallowed here — connect_to_server in ensure_connected()
+        # will surface the real error. AuthError and programming errors are NOT
+        # in this list: a token mismatch is a config/install problem the user
+        # must see (previously hidden by a bare `except Exception`).
+        logger.debug("stale check: server not reachable — connect_to_server will handle")
+        pass
 
 
 async def ensure_connected() -> "DaemonConnection":
@@ -175,11 +229,15 @@ async def ensure_connected() -> "DaemonConnection":
 
     内部改名：check_and_restart_if_stale / is_running / start_daemon。
     """
+    global _spawn_attempts
     await check_and_restart_if_stale()
     if not is_running():
         cleanup_server()
         await start_daemon()
-    return DaemonConnection(await connect_to_server())
+    conn = DaemonConnection(await connect_to_server())
+    # 连接生命周期成功 → spawn 节流计数归零（对照 GUI daemon_client.js auth_ok）
+    _spawn_attempts = 0
+    return conn
 
 
 # ── 协议客户端封装 ─────────────────────────────────────────────────────
@@ -196,15 +254,20 @@ class DaemonConnection:
         self._ws = ws
 
     async def send_task(self, session_id: str, cwd: str, prompt: str,
-                        stream: bool = True, images: list | None = None) -> None:
+                        images: list | None = None, id: str | None = None) -> str:
         """聊天发送：TaskRequest(type="task")。images 支持 /image 粘贴图。
 
         内部 json.dumps(req.to_dict(), ensure_ascii=False) 以 str 发送（不 .encode()）。
+        `id` 显式指定请求 id（P1 queue requeue 复用原 id 以匹配 queued_requeue）；
+        返回最终请求 id（未指定时为内部生成的 uuid）。
         """
-        req = TaskRequest(session_id=session_id, cwd=cwd, prompt=prompt, stream=stream)
+        req = TaskRequest(session_id=session_id, cwd=cwd, prompt=prompt)
+        if id:
+            req.id = id
         if images:
             req.images = images
         await self._ws.send(json.dumps(req.to_dict(), ensure_ascii=False))
+        return req.id
 
     async def send_command(self, type_: str, **params) -> None:
         """通用命令：ping/list_*/set_*/rant/compact/... 只发不读。

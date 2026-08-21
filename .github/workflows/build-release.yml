@@ -5,12 +5,15 @@ name: Build Release
 #
 # matrix:
 #   macos-15(arm64)        → EMRG-<ver>-macos-arm64.pkg
-#   ubuntu-24.04(x86_64)   → EMRG-<ver>-linux-x86_64.AppImage + tar.gz
-#   ubuntu-24.04-arm(aarch64) → EMRG-<ver>-linux-aarch64.AppImage + tar.gz
+#   ubuntu-24.04(x86_64)   → EMRG-<ver>-linux-x86_64.AppImage + tar.gz + .run
+#   ubuntu-24.04-arm(aarch64) → EMRG-<ver>-linux-aarch64.AppImage + tar.gz + .run
 #   windows-2025(x64)      → EMRG-<ver>-windows-x64.exe
 #
 # 冒烟在无 Python runner 上跑（R111 验证干净机器承诺）；离线冒烟（R96）
 # 在 Linux job 用 iptables 断网执行。
+#
+# .run = Linux 无头服务器离线一键安装器（rant 2026-08-17T10:16:54）：
+# bash 自解压头 + runtime tarball payload，零网络零依赖。
 
 on:
   push:
@@ -153,6 +156,65 @@ jobs:
         shell: bash
         run: bash packaging/build-runtime.sh
 
+      # ── CRLF 断言（rant 2026-08-13T09:44:32）────────────────
+      # git blob 的 *.cmd 是 LF，工作区 CRLF 靠 .gitattributes checkout 转换；
+      # 若 CI 检出未应用 .gitattributes，build-runtime 拷到的就是 LF →
+      # cmd.exe 整文件串行拼接 → 安装器 "stop-emrg.cmd exit code 1"。
+      # build-runtime.sh 已强制转 CRLF（R126），此步双保险验证产物确实是纯 CRLF。
+      - name: Verify runtime *.cmd are pure CRLF
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in dist/runtime/bin/emrg.cmd dist/runtime/bin/emrgd.cmd dist/runtime/bin/stop-emrg.cmd; do
+            [ -f "$f" ] || continue
+            cr=$(tr -cd '\r' < "$f" | wc -c)
+            lf=$(tr -cd '\n' < "$f" | wc -c)
+            if [ "$cr" -ne "$lf" ] || [ "$lf" -eq 0 ]; then
+              echo "::error::$f has bare-LF line(s) ($((lf-cr)) of $lf) — cmd.exe misparses LF → installer exit 1"
+              exit 1
+            fi
+            echo "OK $f: pure CRLF ($lf lines)"
+          done
+
+      # ── 图标资产生成（rant 2026-08-11T18:28:09：仓库只保留 icon.svg 设计源，
+      #     png/icns/ico 由 CI 构建时现生成，必须先于 GUI 构建执行）──
+      - name: Generate icon assets (icon.svg → png/icns/ico)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v rsvg-convert >/dev/null 2>&1; then
+            echo "rsvg-convert already available"
+          elif [ "$RUNNER_OS" = "Linux" ]; then
+            # v0.2.55 lesson: a hung `sudo apt-get update`/install on a slow or
+            # network-starved runner blocks the job forever (no step timeout).
+            # Guard both with `timeout`; on failure gen-assets.sh falls back to
+            # Chrome headless (now with --no-sandbox + its own timeout).
+            timeout 180 sudo apt-get update -qq \
+              || echo "apt-get update timed out/failed — falling back to Chrome headless"
+            timeout 180 sudo apt-get install -y -qq librsvg2-bin \
+              || echo "apt-get install failed — falling back to Chrome headless"
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install librsvg
+          else
+            # Windows: try to install librsvg (best effort); the fixed Chrome/Edge
+            # headless HTML-wrapper path in gen-assets.sh is the fallback
+            # (rant 2026-08-12T17:25:28: raw SVG screenshot was fully transparent).
+            if command -v choco >/dev/null 2>&1 && choco install -y librsvg >/dev/null 2>&1; then
+              echo "choco installed librsvg"
+            elif command -v winget >/dev/null 2>&1 && winget install --silent --accept-package-agreements librsvg >/dev/null 2>&1; then
+              echo "winget installed librsvg"
+            else
+              echo "no rsvg-convert; gen-assets.sh will fall back to Chrome/Edge headless (HTML wrapper)"
+            fi
+          fi
+          bash packaging/gen-assets.sh
+          # 产物必须存在（GUI 构建引用 ../packaging/assets/*.png/icns/ico）
+          test -s packaging/assets/icon.png
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            test -s packaging/assets/icon.icns
+          fi
+          test -s packaging/assets/icon.ico
+
       # ── GUI dist（electron-builder；linux extraResources runtime §5 R64）──
       - name: Build GUI (electron-builder)
         working-directory: emrg/gui
@@ -179,6 +241,25 @@ jobs:
       - name: Make installer
         shell: bash
         run: bash packaging/make-installer.sh
+
+      # ── zip 安装包（Windows only，rant 2026-08-10T20:10:41）──
+      # 宿主反馈：除 exe 安装包外再提供 zip 压缩版（内容 = 同名 exe），
+      # 方便直接解压使用/分发。压缩后产物 EMRG-<ver>-windows-x64.zip
+      # 走下方 Upload artifacts（glob 需含 *.zip）。
+      - name: Zip installer (Windows only)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd dist/artifacts
+          EXE="$(find . -maxdepth 1 -name 'EMRG-*-windows-x64.exe' | head -1)"
+          if [ -z "$EXE" ]; then
+            echo "::error::no EMRG-*-windows-x64.exe found in dist/artifacts"
+            exit 1
+          fi
+          ZIP="${EXE%.exe}.zip"
+          powershell -NoProfile -Command "Compress-Archive -Force -Path \"$EXE\" -DestinationPath \"$ZIP\""
+          ls -la
+          test -s "$ZIP"
 
       # ── pkg 签名（macOS only，P2；Secret 未配则跳过降级）──
       # ⚠️ productsign 需要 Developer ID Installer 身份（非 Application 身份）——
@@ -284,6 +365,8 @@ jobs:
             dist/artifacts/*.exe
             dist/artifacts/*.AppImage
             dist/artifacts/*.tar.gz
+            dist/artifacts/*.zip
+            dist/artifacts/*.run
 
   release:
     needs: build

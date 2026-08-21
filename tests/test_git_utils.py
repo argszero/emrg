@@ -115,6 +115,46 @@ def test_cache_tool_paths_preserves_existing_fields(tmp_path, monkeypatch):
     assert data["repo"] == "https://github.com/argszero/emrg.git"
 
 
+def test_cache_tool_paths_tolerates_corrupt_cache(tmp_path, monkeypatch):
+    """A corrupt/partial install-info.json must not raise — degrades to {}.
+
+    Regression for the flaky test_daemon::test_build_prompt_with_project
+    (json.decoder.JSONDecodeError): the live daemon rewrites this shared
+    file non-atomically; a concurrent reader could catch a partial write.
+    """
+    from emrg.server import git_utils as mod
+    import json as _json
+
+    info = tmp_path / "install-info.json"
+    info.write_text('{"git_path": "/partial', encoding="utf-8")  # truncated JSON
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")  # must not raise
+
+    data = _json.loads(info.read_text(encoding="utf-8"))
+    assert data["git_path"] == "/usr/bin/git"
+    assert data["repo"] == "https://github.com/argszero/emrg.git"
+
+
+def test_cache_tool_paths_atomic_write_no_temp_leftover(tmp_path, monkeypatch):
+    """Write is atomic: target is valid JSON and no .tmp file remains."""
+    from emrg.server import git_utils as mod
+    import json as _json
+
+    info = tmp_path / "install-info.json"
+    info.write_text(
+        _json.dumps({"custom": "old"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(mod, "INSTALL_INFO", info)
+
+    mod._cache_tool_paths("/usr/bin/git", "/usr/bin/gh")
+
+    assert not (tmp_path / "install-info.json.tmp").exists()
+    data = _json.loads(info.read_text(encoding="utf-8"))
+    assert data["git_path"] == "/usr/bin/git"
+    assert data["custom"] == "old"
+
+
 # ── no_prompt_env / parse_gh_auth_user (rant 2026-08-07T10:17:27) ──
 
 
@@ -164,3 +204,172 @@ def test_parse_gh_auth_user_empty():
 
     assert parse_gh_auth_user("") is None
     assert parse_gh_auth_user(None) is None  # type: ignore[arg-type]
+
+
+# ── HTTPS→SSH fallback helpers (2026-08-08) ───────────────────────
+
+def test_https_to_ssh_url_dot_git():
+    from emrg.server.git_utils import https_to_ssh_url
+
+    assert https_to_ssh_url("https://github.com/argszero/emrg.git") == "git@github.com:argszero/emrg.git"
+
+
+def test_https_to_ssh_url_no_dot_git():
+    from emrg.server.git_utils import https_to_ssh_url
+
+    assert https_to_ssh_url("https://github.com/argszero/emrg") == "git@github.com:argszero/emrg.git"
+
+
+def test_https_to_ssh_url_rejects_ssh_url():
+    from emrg.server.git_utils import https_to_ssh_url
+
+    assert https_to_ssh_url("git@github.com:argszero/emrg.git") is None
+
+
+def test_https_to_ssh_url_rejects_other_hosts_and_garbage():
+    from emrg.server.git_utils import https_to_ssh_url
+
+    assert https_to_ssh_url("https://gitlab.com/argszero/emrg.git") is None
+    assert https_to_ssh_url("https://github.example.com/a/b.git") is None
+    assert https_to_ssh_url("") is None
+    assert https_to_ssh_url(None) is None  # type: ignore[arg-type]
+    assert https_to_ssh_url("file:///tmp/repo") is None
+
+
+def test_is_git_connection_error_matches_connection_failures():
+    from emrg.server.git_utils import is_git_connection_error
+
+    assert is_git_connection_error(
+        "fatal: unable to access 'https://github.com/a/b.git/': "
+        "Failed to connect to github.com port 443 after 10013 ms"
+    )
+    assert is_git_connection_error("ssh: connect to host github.com port 22: Connection refused")
+
+
+def test_is_git_connection_error_matches_hung_up():
+    """'remote end hung up' (network drop mid-transfer) is a connection error."""
+    from emrg.server.git_utils import is_git_connection_error
+
+    assert is_git_connection_error("fatal: the remote end hung up unexpectedly")
+    assert is_git_connection_error(
+        "error: RPC failed; curl 92 HTTP/2 stream 0 was not closed cleanly: "
+        "PROTOCOL_ERROR (err 1)\nfatal: the remote end hung up unexpectedly"
+    )
+
+
+def test_is_git_connection_error_rejects_auth_and_404():
+    from emrg.server.git_utils import is_git_connection_error
+
+    assert not is_git_connection_error("remote: Repository not found.")
+    assert not is_git_connection_error("Permission denied (publickey).")
+    assert not is_git_connection_error("Authentication failed for 'https://github.com/a/b.git'")
+    assert not is_git_connection_error("")
+    assert not is_git_connection_error(None)  # type: ignore[arg-type]
+
+
+def test_git_origin_url_real_repo():
+    """Reads the raw origin URL from a real repo."""
+    import subprocess as real_subprocess
+
+    from emrg.server.git_utils import git_origin_url
+
+    repo = real_subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if repo.returncode != 0:
+        return  # not in a git repo (packaged source) — skip
+    url = git_origin_url(repo.stdout.strip())
+    assert isinstance(url, str)
+    assert url  # the evolution workspace has an origin
+
+
+def test_git_origin_url_missing_remote(tmp_path):
+    import subprocess as real_subprocess
+
+    from emrg.server.git_utils import git_origin_url
+
+    real_subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    assert git_origin_url(str(tmp_path)) == ""
+
+
+def test_resolve_git_gh_warns_once_when_git_missing(monkeypatch, caplog):
+    """Total git absence logs one actionable WARNING (2026-08-12 incident).
+
+    A daemon restart with neither bundled nor PATH git used to fail silently
+    (FileNotFoundError swallowed by _is_usable_git_repo → cycles skipped as
+    "not a git repo"). The one-shot warning makes the root cause visible.
+    """
+    import logging
+
+    from emrg.server import git_utils as gu
+
+    # Force all three resolution sources empty (no install-info / bundled / PATH).
+    monkeypatch.setattr(gu, "_cached_tool_path", lambda tool: None)
+    monkeypatch.setattr(gu, "_tool_in_install", lambda tool: None)
+    monkeypatch.setattr(gu.shutil, "which", lambda tool: None)
+    monkeypatch.setattr(gu, "_GIT_MISSING_WARNED", False)
+
+    with caplog.at_level(logging.WARNING, logger="emrg.server.git_utils"):
+        git, gh = gu.resolve_git_gh()
+        assert git == "" and gh == ""
+        gu.resolve_git_gh()  # second call must NOT re-warn
+
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1
+    assert "git executable not found" in warns[0].getMessage()
+
+
+def test_resolve_git_gh_warns_when_git_missing_but_gh_present(monkeypatch, caplog):
+    """Git-missing must warn even when gh resolves (review #714 finding).
+
+    The failure mode is git-specific: a dev box with gh on PATH but no git
+    would previously skip the warning entirely (the old `else` of `if git or
+    gh`) yet still silently disable evolution. The warning is gated on git
+    alone; the cache write is skipped so a previously valid cached git_path
+    is not clobbered with ''.
+    """
+    import logging
+
+    from emrg.server import git_utils as gu
+
+    def fake_cache(git: str, gh: str) -> None:
+        assert git == "", f"cache must not be written with empty git, got {git=} {gh=}"
+        raise AssertionError("_cache_tool_paths should not be called when git is missing")
+
+    monkeypatch.setattr(gu, "_cached_tool_path", lambda tool: None)
+    monkeypatch.setattr(gu, "_tool_in_install", lambda tool: None)
+    # gh resolves via PATH, git does not.
+    monkeypatch.setattr(gu.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
+    monkeypatch.setattr(gu, "_cache_tool_paths", fake_cache)
+    monkeypatch.setattr(gu, "_GIT_MISSING_WARNED", False)
+
+    with caplog.at_level(logging.WARNING, logger="emrg.server.git_utils"):
+        git, gh = gu.resolve_git_gh()
+        assert git == "" and gh == "/usr/bin/gh"
+        gu.resolve_git_gh()  # second call must NOT re-warn
+
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1
+    assert "git executable not found" in warns[0].getMessage()
+
+
+def test_resolve_git_gh_writes_cache_once_per_process(monkeypatch):
+    """Cache write happens once per process, not on every git_cmd() call.
+
+    resolve_git_gh() runs on every git_cmd(); before this fix each call did an
+    atomic install-info.json write even when the resolved paths were unchanged.
+    Tool paths are stable within a process lifetime — write once, skip the rest.
+    """
+    from emrg.server import git_utils as gu
+
+    calls = []
+    monkeypatch.setattr(gu, "_cached_tool_path", lambda tool: None)
+    monkeypatch.setattr(gu, "_tool_in_install", lambda tool: None)
+    monkeypatch.setattr(gu.shutil, "which", lambda tool: "/usr/bin/git" if tool == "git" else "/usr/bin/gh")
+    monkeypatch.setattr(gu, "_cache_tool_paths", lambda g, h: calls.append((g, h)))
+    monkeypatch.setattr(gu, "_LAST_CACHED_PATHS", None)
+
+    gu.resolve_git_gh()
+    gu.resolve_git_gh()  # unchanged paths → no second write
+    gu.resolve_git_gh()
+
+    assert len(calls) == 1, f"expected exactly 1 cache write, got {len(calls)}: {calls}"
+    assert calls[0] == ("/usr/bin/git", "/usr/bin/gh")

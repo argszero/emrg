@@ -68,22 +68,21 @@ else
   nohup emrgd >"$HOME/.emrg/emrgd-debug.log" 2>&1 &
 fi
 for i in $(seq 1 30); do
-  [ -f "$HOME/.emrg/emrgd.port" ] && break
+  [ -f "$HOME/.emrg/emrgd.token" ] && break
   sleep 0.5
 done
-if [ ! -f "$HOME/.emrg/emrgd.port" ]; then
+if [ ! -f "$HOME/.emrg/emrgd.token" ]; then
   echo "  [debug] emrgd-debug.log:" >&2
   cat "$HOME/.emrg/emrgd-debug.log" 2>/dev/null || true
   echo "  [debug] emrgd.log (tail):" >&2
   tail -20 "$HOME/.emrg/emrgd.log" 2>/dev/null || true
-  fail "daemon did not write port file"
+  fail "daemon did not write token file"
 else
-  port=$(head -1 "$HOME/.emrg/emrgd.port")
-  token=$(sed -n 2p "$HOME/.emrg/emrgd.port")
-  if python3 - "$port" "$token" <<'PYEOF'
+  token=$(cat "$HOME/.emrg/emrgd.token")
+  if python3 - "$token" <<'PYEOF'
 import json, sys
 from websockets.sync.client import connect
-port, token = sys.argv[1], sys.argv[2]
+port, token = 56031, sys.argv[1]
 try:
     ws = connect(f"ws://127.0.0.1:{port}", open_timeout=3)
     ws.send(json.dumps({"type": "auth", "token": token}))
@@ -104,10 +103,10 @@ fi
 
 # 3. 会话持久化核心链路（R79 降级：无 LLM）
 say "3. session persistence core (no-LLM)"
-if [ -f "$HOME/.emrg/emrgd.port" ]; then
-  if python3 - "$HOME/.emrg/emrgd.port" <<'PYEOF'
+if [ -f "$HOME/.emrg/emrgd.token" ]; then
+  if python3 - "$HOME/.emrg/emrgd.token" <<'PYEOF'
 import json, sys, websockets.sync.client
-port, token = open(sys.argv[1]).read().split()
+port, token = 56031, open(sys.argv[1]).read().strip()
 ws = websockets.sync.client.connect(f"ws://127.0.0.1:{port}", open_timeout=3)
 ws.send(json.dumps({"type": "auth", "token": token}))
 json.loads(ws.recv())
@@ -158,6 +157,32 @@ ok "9. GUI+TUI same daemon — local manual (R120 同 cwd 前提)"
 if [ -f "$HOME/.emrg/install/bin/emrg-uninstall" ]; then ok "10. emrg-uninstall present"; else fail "10. emrg-uninstall"; fi
 ok "11. read-only install — local manual (R61/R47)"
 ok "12. offline install — Linux CI iptables/unshare (R47/R96)"
+
+# 13. .run 自解压安装器（rant 2026-08-17T10:16:54）：独立临时 HOME 一键安装
+say "13. .run self-extracting installer (offline one-click)"
+RUN_FILE="$(ls "$ROOT"/dist/artifacts/EMRG-*-linux-*.run 2>/dev/null | head -1 || true)"
+if [ -z "$RUN_FILE" ]; then
+  ok "13. .run — no artifact in dist/artifacts (installer build skipped; audit-degraded)"
+else
+  run_home="$(mktemp -d)"
+  if (cd "$run_home" && HOME="$run_home" bash "$RUN_FILE" --no-profile >/dev/null 2>&1) \
+     && [ -x "$run_home/.emrg/install/bin/emrg" ] \
+     && [ -L "$run_home/.local/bin/emrg" ] \
+     && [ -L "$run_home/.local/bin/emrgd" ] \
+     && [ -x "$run_home/.emrg/install/bin/emrg-uninstall" ] \
+     && HOME="$run_home" "$run_home/.emrg/install/bin/emrg" --version 2>&1 | grep -q "emrg "; then
+    ok "13. .run install (extract + symlink + version)"
+    # 幂等重跑（覆盖旧安装）
+    if (cd "$run_home" && HOME="$run_home" bash "$RUN_FILE" --no-profile >/dev/null 2>&1); then
+      ok "13. .run re-run idempotent"
+    else
+      fail "13. .run re-run idempotent"
+    fi
+  else
+    fail "13. .run install"
+  fi
+  rm -rf "$run_home"
+fi
 
 # 清理临时 daemon
 emrg server stop >/dev/null 2>&1 || true

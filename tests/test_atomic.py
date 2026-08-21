@@ -72,18 +72,18 @@ def test_atomic_write_no_temp_leak(tmp_path: Path):
 
 def test_atomic_write_bytes_basic(tmp_path: Path):
     """Writes a text blob and reads it back."""
-    target = tmp_path / "emrgd.port"
-    atomic_write_bytes("49152\ns3cret-token", target)
+    target = tmp_path / "emrgd.token"
+    atomic_write_bytes("s3cret-token", target)
 
     assert target.exists()
-    assert target.read_text(encoding="utf-8") == "49152\ns3cret-token"
+    assert target.read_text(encoding="utf-8") == "s3cret-token"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="chmod 0600 semantics differ on Windows")
 def test_atomic_write_bytes_mode_600(tmp_path: Path):
     """Writes with mode 0o600 by default (token file must be private)."""
-    target = tmp_path / "emrgd.port"
-    atomic_write_bytes("49152\ntoken", target)
+    target = tmp_path / "emrgd.token"
+    atomic_write_bytes("token", target)
 
     mode = stat.S_IMODE(os.stat(str(target)).st_mode)
     assert mode == 0o600
@@ -91,16 +91,16 @@ def test_atomic_write_bytes_mode_600(tmp_path: Path):
 
 def test_atomic_write_bytes_creates_parent_dir(tmp_path: Path):
     """Creates parent directories if they don't exist."""
-    target = tmp_path / "deep" / "nested" / "emrgd.port"
-    atomic_write_bytes("1\nt", target)
+    target = tmp_path / "deep" / "nested" / "emrgd.token"
+    atomic_write_bytes("t", target)
 
     assert target.exists()
-    assert target.read_text(encoding="utf-8") == "1\nt"
+    assert target.read_text(encoding="utf-8") == "t"
 
 
 def test_atomic_write_bytes_overwrites(tmp_path: Path):
     """Overwrites existing file atomically."""
-    target = tmp_path / "emrgd.port"
+    target = tmp_path / "emrgd.token"
     target.write_text("old", encoding="utf-8")
 
     atomic_write_bytes("new", target)
@@ -111,12 +111,12 @@ def test_atomic_write_bytes_overwrites(tmp_path: Path):
 def test_atomic_write_bytes_no_temp_leak(tmp_path: Path):
     """Verifies no temp files remain after write."""
     before = set(os.listdir(str(tmp_path)))
-    target = tmp_path / "emrgd.port"
-    atomic_write_bytes("1\nt", target)
+    target = tmp_path / "emrgd.token"
+    atomic_write_bytes("t", target)
     after = set(os.listdir(str(tmp_path)))
 
-    assert "emrgd.port" in after
-    assert after - before == {"emrgd.port"}
+    assert "emrgd.token" in after
+    assert after - before == {"emrgd.token"}
 
 
 def test_atomic_write_custom_prefix(tmp_path: Path):

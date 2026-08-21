@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None
 from datetime import datetime
 from pathlib import Path, PurePath
+from emrg._win import win32_no_window_kwargs
 from emrg.client import daemon_manager
 from emrg.client.python_tui import ChatRow, Diff, InputParser, StatusLine, Terminal, ToolCard
 from emrg.client.python_tui.widgets.markdown import StreamingMarkdown
@@ -27,6 +28,61 @@ from emrg.skills.loader import load_skills
 logger = logging.getLogger(__name__)
 
 
+def _csi_modifier_action(data: bytes) -> str | None:
+    """Map modifier-prefixed CSI arrow sequences to an editing action.
+
+    macOS terminals (iTerm2/Ghostty) send \x1b[1;3D for Option+←, \x1b[1;3C
+    for Option+→, \x1b[1;5D for Ctrl+← etc. — the plain handler only inspects
+    data[2] (the '1' parameter) and drops the sequence, so the cursor never
+    moves while Option+Backspace (\x17) works (rant 2026-08-21T11:36:56).
+    Also handles the Kitty keyboard protocol form \x1b[68;3u (key code 68 =
+    'D' = Left, 67 = 'C' = Right) with an Alt modifier.
+
+    Returns 'word_left' / 'word_right' for Alt/Ctrl+←/→, else None.
+    """
+    if len(data) < 4 or data[0] != 0x1B or data[1] != 0x5B:
+        return None
+    if b";" not in data:
+        return None
+    final = data[-1]
+    if not (0x40 <= final <= 0x7E):
+        return None
+    try:
+        parts = data[2:-1].split(b";")
+        if not parts or any(not p.isdigit() for p in parts):
+            return None
+        params = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(params) < 2:
+        return None
+    mod = params[1]
+    if mod not in (3, 5, 7):  # Alt(3) / Ctrl(5) / Alt+Ctrl(7)
+        return None
+    if final in (0x44, 0x43):  # legacy CSI: D=← C=→
+        return "word_left" if final == 0x44 else "word_right"
+    if final == 0x75 and params[0] in (67, 68):  # Kitty CSI-u: 68='D' 67='C'
+        return "word_left" if params[0] == 68 else "word_right"
+    return None
+
+
+def _format_status_left(title: str, sid: str, model: str = "") -> str:
+    """Format left status: version + session title + short ID + model.
+
+    Module-level so it is unit-testable (rant 2026-08-13T14:11:03).
+    """
+    import emrg
+    ver = getattr(emrg, "__version__", "dev")
+    parts = [f"v{ver}"]
+    if title:
+        parts.append(f"{title} ({sid})")
+    else:
+        parts.append(sid)
+    if model:
+        parts.append(f"[{model}]")
+    return " ".join(parts)
+
+
 # ── Clipboard image support (platform-adaptive) ─────────────
 
 def _detect_clipboard_image() -> tuple[bool, str | None]:
@@ -39,6 +95,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
             result = subprocess.run(
                 ['osascript', '-e', 'clipboard info'],
                 capture_output=True, text=True, timeout=3,
+                **win32_no_window_kwargs(),
             )
             out = result.stdout
             has_image = any(tag in out for tag in (
@@ -55,7 +112,8 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                      'try\n  set f to (the clipboard as «class furl»)\n'
                      '  return POSIX path of f\nend try'],
                     capture_output=True, text=True, timeout=2,
-                )
+                    **win32_no_window_kwargs(),
+            )
                 if r2.stdout.strip():
                     label = Path(r2.stdout.strip()).name
             except Exception:
@@ -66,6 +124,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
             result = subprocess.run(
                 ['xclip', '-selection', 'clipboard', '-t', 'TARGETS', '-o'],
                 capture_output=True, text=True, timeout=3,
+                **win32_no_window_kwargs(),
             )
             out = result.stdout
             if 'image/png' not in out:
@@ -78,7 +137,8 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                         ['xclip', '-selection', 'clipboard', '-t',
                          'text/uri-list', '-o'],
                         capture_output=True, text=True, timeout=2,
-                    )
+                        **win32_no_window_kwargs(),
+            )
                     uri = r2.stdout.strip()
                     if uri:
                         label = Path(uri.replace('file://', '')).name
@@ -95,6 +155,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
             result = subprocess.run(
                 ['powershell', '-Command', ps_cmd],
                 capture_output=True, text=True, timeout=5,
+                **win32_no_window_kwargs(),
             )
             if 'IMAGE' not in result.stdout:
                 return False, None
@@ -108,7 +169,8 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                      'if ($files -ne $null -and $files.Count -gt 0) '
                      '{ Write-Output $files[0] }'],
                     capture_output=True, text=True, timeout=3,
-                )
+                    **win32_no_window_kwargs(),
+            )
                 if r2.stdout.strip():
                     label = Path(r2.stdout.strip()).name
             except Exception:
@@ -139,6 +201,7 @@ def _extract_clipboard_image(target_path: str) -> bool:
             subprocess.run(
                 ['osascript', '-e', applescript],
                 capture_output=True, timeout=5,
+                **win32_no_window_kwargs(),
             )
             path = Path(target_path)
             return path.exists() and path.stat().st_size > 0
@@ -149,7 +212,8 @@ def _extract_clipboard_image(target_path: str) -> bool:
                     ['xclip', '-selection', 'clipboard', '-t',
                      'image/png', '-o'],
                     stdout=f, timeout=5,
-                )
+                    **win32_no_window_kwargs(),
+            )
             path = Path(target_path)
             return path.exists() and path.stat().st_size > 0
 
@@ -164,6 +228,7 @@ def _extract_clipboard_image(target_path: str) -> bool:
             subprocess.run(
                 ['powershell', '-Command', ps_cmd],
                 capture_output=True, timeout=5,
+                **win32_no_window_kwargs(),
             )
             path = Path(target_path)
             return path.exists() and path.stat().st_size > 0
@@ -201,14 +266,13 @@ async def interactive(init_auto_evolve: bool = False):
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
-    def _status_left(title: str, sid: str) -> str:
-        """Format left status: show both name and short ID for renamed sessions."""
-        if title:
-            return f"{title} ({sid[:8]})"
-        return sid
+    def _status_left(title: str, sid: str, model: str = "") -> str:
+        """Format left status: version + session title + short ID + model."""
+        return _format_status_left(title, sid, model)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
+    current_model = ""  # model name tracked independently of server_id (rant 2026-08-11T20:02:43)
 
-    status = StatusLine(left=_status_left(session_title, session_id), center="connecting...")
+    status = StatusLine(left=_status_left(session_title, session_id, current_model), center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
     term.mount(status=status, composer=inp, chat=chat)
 
@@ -221,6 +285,11 @@ async def interactive(init_auto_evolve: bool = False):
     _welcomed = False  # show welcome message once on first connect
     _request_start: float = 0.0  # timestamp when current request started
     _elapsed_task: asyncio.Task | None = None  # background timer task
+    # P1 queue-injection client side (daemon #655): messages sent while the
+    # session is busy are queued daemon-side (task_queued). Track them here so
+    # `queued_requeue` can re-send with the same request id (without re-adding
+    # chat rows) and `queued_cancelled` clears on abort/disconnect.
+    _queued_sends: list[dict] = []  # {"id", "prompt", "images"}
 
     def _short_path(p: str) -> str:
         home = os.path.expanduser("~")
@@ -230,12 +299,12 @@ async def interactive(init_auto_evolve: bool = False):
             p = "…" + p[-29:]
         return p
 
-    def _update_right() -> None:
+    def _update_left_extra() -> None:
         if msg_count > 0:
-            status.update(right=f"{msg_count} msgs  {_short_path(cwd)}")
+            status.update(left_extra=f"· {msg_count} msgs · {_short_path(cwd)}")
         else:
-            status.update(right="Enter=send  Esc=quit  /help")
-    _update_right()
+            status.update(left_extra="Enter=send  Esc=quit  /help")
+    _update_left_extra()
 
     _status_base: str = ""  # base center text without timer, for elapsed timer overlay
     _last_center: str = ""  # last center text set via status.update, for timer overlay
@@ -247,7 +316,7 @@ async def interactive(init_auto_evolve: bool = False):
             try:
                 elapsed = int(time.time() - _request_start)
                 mins, secs = divmod(elapsed, 60)
-                timer = f"⏱{mins}:{secs:02d}" if mins > 0 else f"⏱{secs}s"
+                timer = f"[{mins}:{secs:02d}]"
                 status.elapsed = timer
                 term.set_title(f"{timer} {session_title or session_id} @ {project_name}")
                 term.render()
@@ -266,6 +335,7 @@ async def interactive(init_auto_evolve: bool = False):
     rewind_sel = SelectorState()
     task_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
+    _skills_confirm: tuple | None = None  # (skill_name, install_cmd) — next Enter answers the prompt
 
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
@@ -284,7 +354,9 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
+        nonlocal current_model
         nonlocal _last_center, _elapsed_task, conn
+        nonlocal _request_start
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
@@ -293,12 +365,16 @@ async def interactive(init_auto_evolve: bool = False):
             if _elapsed_task is not None:
                 _elapsed_task.cancel(); _elapsed_task = None
             busy = False  # pending request is lost
+            _queued_sends.clear()  # daemon drops the queue on disconnect (queued_cancelled)
             chat.add("system", "⏸ server connection lost — reconnecting...")
             status.update(center="reconnecting...")
             term.render()
             # close stale connection
             try: await conn.close()
             except Exception: pass
+            # Rant 2026-08-09T13:16:36 ⑤: spawn 节流命中后提示宿主手动启动
+            # （否则每 1s 静默重试 spawn 一台新 daemon，Windows 上即弹窗风暴）。
+            _throttle_warned = False
             while True:
                 try:
                     await asyncio.sleep(1)
@@ -309,6 +385,13 @@ async def interactive(init_auto_evolve: bool = False):
                     status.update(center=server_id or "emrg")
                     term.render()
                     return
+                except RuntimeError as e:
+                    if "failed to start after" in str(e) and not _throttle_warned:
+                        _throttle_warned = True
+                        chat.add("system", f"⚠ {e}")
+                        status.update(center="daemon down — run 'emrg server'")
+                        term.render()
+                    continue
                 except Exception:
                     continue
 
@@ -327,26 +410,89 @@ async def interactive(init_auto_evolve: bool = False):
                     ident = data.get("identity", {}); hid = ident.get("instance_id", "?")[:8]
                     host = ident.get("host_name", "?")
                     model = data.get("model", "")
-                    server_id = f"{hid} @ {host}"
                     if model:
-                        server_id += f" [{model}]"
+                        current_model = model
+                    server_id = f"{hid} @ {host}"
                     if not _welcomed:
                         _welcomed = True
                         import emrg
                         ver = getattr(emrg, "__version__", "dev")
                         chat.add("system", f"EMRG {ver}  |  {server_id}\nType /help for shortcuts, or just start chatting.")
-                    status.update(left=_status_left(session_title, session_id), center=server_id)
+                    status.update(left=_status_left(session_title, session_id, current_model), center=server_id)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render(); continue
+
+                # P1 queue-injection client side (daemon #655): messages sent
+                # while the session is busy are queued daemon-side and injected
+                # at the next round boundary. The TUI tracks them so a
+                # queued_requeue re-sends with the same request id.
+                if data.get("type") == "task_queued":
+                    # Daemon queued our task (session busy). The user row is
+                    # already shown; confirm the queue position.
+                    pos = data.get("position", 0)
+                    chat.add("system", f"⏳ Queued (position {pos}) — will run after the current turn.")
+                    chat.dirty = True; term.render()
+                    continue
+
+                if data.get("type") == "steer_committed":
+                    # Injected into the running turn — no longer needs requeue.
+                    rid = data.get("request_id", "")
+                    if rid:
+                        _queued_sends[:] = [q for q in _queued_sends if q.get("id") != rid]
+                    continue
+
+                if data.get("type") == "queued_requeue":
+                    # Turn ended with queued messages never injected — re-send
+                    # them through the normal path (the daemon lock is released
+                    # now). Rows were already added at the original submit, so
+                    # do NOT re-add them or double-count msg_count.
+                    ids = set(data.get("request_ids", []) or [])
+                    to_resend = [q for q in _queued_sends if q.get("id") in ids]
+                    _queued_sends.clear()
+                    if to_resend:
+                        was_busy = busy
+                        busy = True; need_new_assistant = True; stream_buffer = ""
+                        _request_start = time.time()
+                        if _elapsed_task is None:
+                            _elapsed_task = asyncio.create_task(_run_elapsed_timer())
+                        for i, q in enumerate(to_resend):
+                            rid = await conn.send_task(
+                                session_id=session_id, cwd=cwd, prompt=q["prompt"],
+                                images=q.get("images"), id=q["id"],
+                            )
+                            # Track every re-sent message the daemon will queue:
+                            # re-send #1 starts a new turn (busy=True above), so
+                            # re-sends #2+ arrive while busy and get queued
+                            # daemon-side (task_queued) — untracked they would be
+                            # silently lost at the next queued_requeue. Also
+                            # track all re-sends when a turn was already running
+                            # (multi-client). steer_committed removes ids that
+                            # get injected mid-turn, so the loop converges.
+                            if was_busy or i > 0:
+                                _queued_sends.append({"id": rid, "prompt": q["prompt"], "images": q.get("images")})
+                        chat.add("system", f"→ Re-sending {len(to_resend)} queued message(s).")
+                        chat.dirty = True; term.render()
+                    continue
+
+                if data.get("type") == "queued_cancelled":
+                    if _queued_sends:
+                        _queued_sends.clear()
+                        chat.add("system", "⏹ Queued message(s) cancelled.")
+                        chat.dirty = True; term.render()
+                    continue
 
                 # Tool lifecycle: create a ToolCard on start, update on end.
                 if data.get("type") == "tool_start":
                     ts = ToolStart.from_dict(data)
                     tool_args[ts.tool_call_id] = ts.arguments  # track for diff rendering
                     _tool_start_times[ts.tool_call_id] = time.time()
+                    # Rant 2026-08-19T10:35:24: display the agent's intent
+                    # (why this call happened) as the card header when present;
+                    # fall back to formatted args.
+                    display = ts.intent if ts.intent else _format_args(ts.arguments, ts.tool_name)
                     card = ToolCard(
                         name=ts.tool_name,
-                        command=_format_args(ts.arguments, ts.tool_name),
+                        command=display,
                         status="running",
                         expanded=False,
                     )
@@ -445,7 +591,14 @@ async def interactive(init_auto_evolve: bool = False):
                     _last_center = server_id or "emrg"
                     status.update(center=_last_center)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
-                    msg_count += 1; _update_right()
+                    # rant 21:52:18: daemon's done frame reports the authoritative
+                    # current-context message count (system + history + tool results);
+                    # fall back to the local +1 approximation when absent.
+                    if data.get("context_messages") is not None:
+                        msg_count = int(data["context_messages"])
+                    else:
+                        msg_count += 1
+                    _update_left_extra()
                     term.render()
                 if "error" in data:
                     err = data["error"]; logger.error("server error: %s", err)
@@ -462,7 +615,7 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.dirty = True
                         chat.add("system", "Session cleared — starting fresh.")
                         msg_count = 0
-                        _update_right()
+                        _update_left_extra()
                     status.update(center=server_id or "emrg")
                     term.render()
                     continue
@@ -483,10 +636,10 @@ async def interactive(init_auto_evolve: bool = False):
                             chat.rows.clear()
                             chat.dirty = True
                             chat.add("system", f"Created new session {new_sid} — continue chatting.")
-                            status.update(left=_status_left("", new_sid), center=server_id or "emrg")
+                            status.update(left=_status_left("", new_sid, current_model), center=server_id or "emrg")
                             term.set_title(f"{new_sid} @ {project_name}")
                             msg_count = 0
-                            _update_right()
+                            _update_left_extra()
                     status.update(center=server_id or "emrg")
                     term.render()
                     continue
@@ -505,7 +658,7 @@ async def interactive(init_auto_evolve: bool = False):
                         msg_count = 0
                         # Reload session state from server
                         await conn.send_command("ping")
-                        _update_right()
+                        _update_left_extra()
                     status.update(center=server_id or "emrg")
                     term.render()
                     continue
@@ -527,7 +680,7 @@ async def interactive(init_auto_evolve: bool = False):
                         )
                     busy = False
                     msg_count = max(0, msg_count - compacted)
-                    _update_right()
+                    _update_left_extra()
                     status.elapsed = ""
                     status.update(center=server_id or "emrg"); term.render()
                     continue
@@ -657,10 +810,9 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add("system",
                                  f"Model switched: {previous} → {model_name}"
                                  f" (context: {ctx_win:,})")
-                        # Update server_id so all subsequent status updates show the new model
-                        base_id = server_id.split(" [")[0] if " [" in server_id else server_id
-                        server_id = f"{base_id} [{model_name}]" if base_id else f"emrg [{model_name}]"
-                        status.update(center=server_id)
+                        # Track model independently and refresh the left section
+                        current_model = model_name
+                        status.update(left=_status_left(session_title, session_id, current_model), center=server_id)
                     term.render()
                     continue
 
@@ -672,6 +824,11 @@ async def interactive(init_auto_evolve: bool = False):
                     if err:
                         chat.add("system", f"Error: {err}")
                     elif tasks:
+                        # Re-trigger guard: a previous TaskSelector may still be
+                        # in the chat (duplicate /trigger) — drop it before
+                        # stacking a new one (rant 2026-08-21T16:47:44).
+                        if task_sel.widget is not None:
+                            chat.remove(task_sel.widget)
                         task_sel.widget = TaskSelector(tasks)
                         task_sel.active = True
                         task_sel.pending = False
@@ -696,6 +853,74 @@ async def interactive(init_auto_evolve: bool = False):
                         chat.add("system", f"Task '{name}' triggered: {detail}")
                     else:
                         chat.add("system", f"Task '{name}': {result} — {detail}")
+                    term.render()
+                    continue
+
+                # Skills available result (installable-skills catalog)
+                if data.get("type") == "skills_available_result":
+                    skills = data.get("skills", [])
+                    err = data.get("error", "")
+                    if err:
+                        chat.add("system", f"Error: {err}")
+                    elif not skills:
+                        chat.add("system", "No catalog skills found. Check ~/.emrg/skills/skill-catalog.md")
+                    else:
+                        lines = ["**Available Skills (catalog):**", ""]
+                        for s in skills:
+                            mark = "✅ installed" if s.get("installed") else "not installed"
+                            if s.get("managed"):
+                                mark += " · managed"
+                            lines.append(f"- **{s.get('name', '?')}** — {s.get('description', '')} ({mark})")
+                        lines.append("")
+                        lines.append("Install: `/skills install <name>` · Refresh: `/skills update`")
+                        chat.add("system", "\n".join(lines))
+                    status.update(center=server_id or "emrg")
+                    term.render()
+                    continue
+
+                # Skills install result
+                if data.get("type") == "skills_install_result":
+                    nonlocal _skills_confirm
+                    name = data.get("name", "")
+                    if data.get("confirm_required"):
+                        cmd = data.get("install_command", "")
+                        _skills_confirm = (name, cmd)
+                        chat.add("system",
+                                 f"⚠️  Skill `{name}` needs its CLI installed first:\n"
+                                 f"`{cmd}`\n\n"
+                                 f"Type `yes` to confirm, or anything else to cancel.")
+                    elif data.get("error"):
+                        chat.add("system", f"Install failed for `{name}`: {data['error']}")
+                    elif data.get("ok"):
+                        chat.add("system",
+                                 f"✅ Skill `{name}` installed"
+                                 + (f" (v{data.get('version', '?')})" if data.get("version") else "")
+                                 + ". It will appear in the next session's Available Skills.")
+                    status.update(center=server_id or "emrg")
+                    term.render()
+                    continue
+
+                # Skills update result
+                if data.get("type") == "skills_update_result":
+                    err = data.get("error", "")
+                    checked = data.get("checked", 0)
+                    updated = data.get("updated", [])
+                    skipped = data.get("skipped", [])
+                    errors = data.get("errors", [])
+                    if err:
+                        chat.add("system", f"Skill update failed: {err}")
+                    else:
+                        lines = [f"**Skill update check:** {checked} managed skill(s)"]
+                        if updated:
+                            lines.append(f"Updated: {', '.join(updated)}")
+                        if skipped:
+                            lines.append(f"Skipped (CLI missing): {', '.join(skipped)}")
+                        if errors:
+                            lines.append(f"Failed: {', '.join(errors)}")
+                        if not updated and not skipped and not errors:
+                            lines.append("All up to date.")
+                        chat.add("system", "\n".join(lines))
+                    status.update(center=server_id or "emrg")
                     term.render()
                     continue
 
@@ -764,11 +989,11 @@ async def interactive(init_auto_evolve: bool = False):
                         f"Resumed session {session_id}{title_extra} "
                         f"({meta.get('message_count', record_count)} messages, "
                         f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
-                    status.update(left=_status_left(session_title, session_id), center=server_id or "emrg")
+                    status.update(left=_status_left(session_title, session_id, current_model), center=server_id or "emrg")
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     # Set message count from loaded session
                     msg_count = meta.get("message_count", record_count)
-                    _update_right()
+                    _update_left_extra()
                     term.render()
                     continue
 
@@ -781,7 +1006,7 @@ async def interactive(init_auto_evolve: bool = False):
                         new_title = data.get("title", "")
                         session_title = new_title
                         chat.add("system", f"Session renamed to: {new_title}")
-                        status.update(left=_status_left(session_title, session_id), center=server_id or "emrg")
+                        status.update(left=_status_left(session_title, session_id, current_model), center=server_id or "emrg")
                         term.set_title(f"{session_title} @ {project_name}")
                     term.render()
                     continue
@@ -816,7 +1041,6 @@ async def interactive(init_auto_evolve: bool = False):
                     term.render()
                     continue
 
-                # Memory content (read)
                 if data.get("type") == "memory_content":
                     err = data.get("error", "")
                     if err:
@@ -948,10 +1172,12 @@ async def interactive(init_auto_evolve: bool = False):
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, conn, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
+        nonlocal current_model
         nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
+        nonlocal _skills_confirm
         if len(data) == 0: return True
         if data == b"\x1b[200~": paste_mode = True; return True
         if data == b"\x1b[201~":
@@ -1012,6 +1238,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 session_sel.active = False
                 chat.add("system", "Session selection cancelled.")
+                chat.remove(session_sel.widget)
                 session_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1019,6 +1246,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 sid = session_sel.widget.selected_session_id
                 session_sel.active = False
+                chat.remove(session_sel.widget)
                 session_sel.widget = None
                 if sid:
                     await conn.send_command("resume_session", session_id=sid, cwd=cwd)
@@ -1040,6 +1268,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel
                 delete_sel.active = False
                 chat.add("system", "Delete cancelled.")
+                chat.remove(delete_sel.widget)
                 delete_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1047,6 +1276,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — delete immediately
                 sid = delete_sel.widget.selected_session_id
                 delete_sel.active = False
+                chat.remove(delete_sel.widget)
                 delete_sel.widget = None
                 if sid:
                     await conn.send_command("delete_session", session_id=sid, cwd=cwd)
@@ -1067,6 +1297,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 project_sel.active = False
                 chat.add("system", "Project selection cancelled.")
+                chat.remove(project_sel.widget)
                 project_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1074,6 +1305,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 pname = project_sel.widget.selected_project_name
                 project_sel.active = False
+                chat.remove(project_sel.widget)
                 project_sel.widget = None
                 if pname:
                     nonlocal _rant_project
@@ -1096,6 +1328,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 model_sel.active = False
                 chat.add("system", "Model selection cancelled.")
+                chat.remove(model_sel.widget)
                 model_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1103,6 +1336,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 mname = model_sel.widget.selected_model_name
                 model_sel.active = False
+                chat.remove(model_sel.widget)
                 model_sel.widget = None
                 if mname:
                     await conn.send_command("set_model", model=mname)
@@ -1123,6 +1357,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 rewind_sel.active = False
                 chat.add("system", "Rewind cancelled.")
+                chat.remove(rewind_sel.widget)
                 rewind_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1130,6 +1365,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\r" or data == b"\n":  # Enter — confirm
                 idx = rewind_sel.widget.selected_record_index
                 rewind_sel.active = False
+                chat.remove(rewind_sel.widget)
                 rewind_sel.widget = None
                 if idx is not None:
                     await conn.send_command("rewind_session", session_id=session_id,
@@ -1152,6 +1388,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data == b"\x1b":  # Esc — cancel selection
                 task_sel.active = False
                 chat.add("system", "Task selection cancelled.")
+                chat.remove(task_sel.widget)
                 task_sel.widget = None
                 status.update(center=server_id or "emrg")
                 chat.dirty = True; term.render()
@@ -1159,6 +1396,7 @@ async def interactive(init_auto_evolve: bool = False):
             if data in (b"\r", b"\n"):  # Enter — confirm
                 task_name = task_sel.widget.selected_task_name
                 task_sel.active = False
+                chat.remove(task_sel.widget)
                 task_sel.widget = None
                 if task_name:
                     await conn.send_command("trigger_task", name=task_name,
@@ -1293,6 +1531,16 @@ async def interactive(init_auto_evolve: bool = False):
         if b == 0x1B and len(data) >= 3:
             if data[1] == 0x5B:
                 c = data[2]
+                # Modifier-prefixed arrows (macOS Option/Ctrl+←→): map to word
+                # movement (rant 2026-08-21T11:36:56).
+                _csi_action = _csi_modifier_action(data)
+                if _csi_action is not None:
+                    if _csi_action == "word_left":
+                        inp.move_word_left()
+                    else:
+                        inp.move_word_right()
+                    term.render()
+                    return True
                 if c == 0x41:  # Up
                     avail = max(1, term.viewport.viewport_width - 2)
                     if inp._cursor_vrow(avail) == 0:
@@ -1344,12 +1592,38 @@ async def interactive(init_auto_evolve: bool = False):
                 if text.lower() in ("quit", "exit"): return False
 
                 # If a rant project was selected, use this message as the rant
+                # (rant 2026-08-17T11:51:59: routes through the agent for
+                # polish/confirm, then the submit_rant tool records it)
                 if _rant_project:
-                    await conn.send_command("rant", message=text, project=_rant_project,
-                                            timestamp=datetime.now().isoformat())
-
-                    chat.add("system", f"Rant recorded (@{_rant_project}). The evolution system will review it.")
+                    hint = (
+                        f"[Host wants to submit this rant — polish it, ask for "
+                        f"confirmation if needed, then call submit_rant "
+                        f"(project: {_rant_project})]\n{text}"
+                    )
+                    chat.add("user", f"/rant @{_rant_project} {text}")
+                    chat.add("assistant", "")
+                    msg_count += 1; _update_left_extra()
+                    _last_center = "thinking..."
+                    status.update(center=_last_center)
+                    term.render()
+                    rid = await conn.send_task(session_id=session_id, cwd=cwd,
+                                               prompt=hint)
+                    if was_busy:
+                        _queued_sends.append({"id": rid, "prompt": hint, "images": None})
                     _rant_project = None
+                    status.update(center=server_id or "emrg")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
+                # Pending /skills install confirmation — next line is the answer
+                if _skills_confirm is not None:
+                    name, cmd = _skills_confirm
+                    _skills_confirm = None
+                    if text.lower() in ("y", "yes"):
+                        await conn.send_command("skills_install", name=name, confirmed=True)
+                        chat.add("system", f"Confirmed — installing `{name}` (CLI: `{cmd}`)…")
+                    else:
+                        chat.add("system", "Install cancelled.")
                     status.update(center=server_id or "emrg")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
@@ -1435,16 +1709,34 @@ async def interactive(init_auto_evolve: bool = False):
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
-                # Handle /skills command
-                if text.lower() == "/skills":
-                    skills = load_skills()
-                    if skills:
-                        lines = ["**Loaded Skills:**", ""]
-                        for s in skills:
-                            lines.append(f"- **{s.name}** ({s.source}) — {s.description}")
-                        chat.add("system", "\n".join(lines))
+                # Handle /skills command (list / available / install / update)
+                if text.lower().startswith("/skills"):
+                    parts = text.split(None, 1)
+                    sub = parts[1].strip() if len(parts) > 1 else ""
+                    sub_l = sub.lower()
+                    if sub_l == "available":
+                        # Installable-skills catalog (rant 2026-08-08T10:14:29)
+                        await conn.send_command("skills_available")
+                        status.update(center="checking available skills…")
+                    elif sub_l.startswith("install "):
+                        name = sub[8:].strip()
+                        if not name:
+                            chat.add("system", "Usage: /skills install <name>")
+                        else:
+                            await conn.send_command("skills_install", name=name, confirmed=False)
+                            status.update(center=f"installing {name}…")
+                    elif sub_l == "update":
+                        await conn.send_command("skills_update")
+                        status.update(center="checking skill updates…")
                     else:
-                        chat.add("system", "No skills loaded. Add .md files to ~/.emrg/skills/ or .emrg/skills/")
+                        skills = load_skills()
+                        if skills:
+                            lines = ["**Loaded Skills:**", ""]
+                            for s in skills:
+                                lines.append(f"- **{s.name}** ({s.source}) — {s.description}")
+                            chat.add("system", "\n".join(lines))
+                        else:
+                            chat.add("system", "No skills loaded. Add .md files to ~/.emrg/skills/ or .emrg/skills/")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
@@ -1588,6 +1880,10 @@ Streaming
                     return True
 
                 # Handle /rant command
+                # Rant 2026-08-17T11:51:59: /rant is no longer a direct write —
+                # it is a hint that the user wants to submit a rant. The text
+                # goes through the normal conversation so the agent can
+                # clarify / polish / confirm, then call the submit_rant tool.
                 if text.lower().startswith("/rant"):
                     parts = text.split(None, 2)
                     message = parts[1].strip() if len(parts) > 1 else ""
@@ -1609,16 +1905,22 @@ Streaming
                         status.update(center="loading projects...")
                         inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                         return True
-                    payload = {
-                        "message": message,
-                        "timestamp": datetime.now().isoformat(),
-                    }
-                    if project:
-                        payload["project"] = project
-                    await conn.send_command("rant", **payload)
-
                     target = f" (@{project})" if project else ""
-                    chat.add("system", f"Rant recorded{target}. The evolution system will review it.")
+                    hint = (
+                        f"[Host wants to submit this rant — polish it, ask for "
+                        f"confirmation if needed, then call submit_rant "
+                        f"(project: {project if project else 'emrg'})]\n{message}"
+                    )
+                    chat.add("user", f"/rant{target} {message}")
+                    chat.add("assistant", "")
+                    msg_count += 1; _update_left_extra()
+                    _last_center = "thinking..."
+                    status.update(center=_last_center)
+                    term.render()
+                    rid = await conn.send_task(session_id=session_id, cwd=cwd,
+                                               prompt=hint)
+                    if was_busy:
+                        _queued_sends.append({"id": rid, "prompt": hint, "images": None})
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
@@ -1668,6 +1970,7 @@ Streaming
                         target_sid = parts[1].strip()
                         # Deactivate selector if active
                         session_sel.active = False
+                        chat.remove(session_sel.widget)
                         session_sel.widget = None
                         session_sel.pending = False
                         await conn.send_command("resume_session", session_id=target_sid, cwd=cwd)
@@ -1676,9 +1979,11 @@ Streaming
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
-                if busy:
-                    logger.debug("ENTER blocked by busy")
-                    term.render(); return True
+                # P1 queue-injection (daemon #655): sending while busy no longer
+                # blocks — the daemon queues the task (task_queued) and injects
+                # it at the next round boundary, or re-sends via queued_requeue
+                # when the turn ends. Track the send for requeue.
+                was_busy = busy
 
                 busy = True; need_new_assistant = True  # rant #32: force new StreamingMarkdown per response
                 _request_start = time.time()
@@ -1691,7 +1996,7 @@ Streaming
                 history.append(text); stream_buffer = ""
                 history_index = -1  # reset history navigation on submit
                 chat.add("assistant", "")
-                msg_count += 1; _update_right()
+                msg_count += 1; _update_left_extra()
                 logger.debug("ROWS after asst: %d [%s]", len(chat.rows),
                     ', '.join(f'{r.role}={r.content[:20]}' for r in chat.rows if isinstance(r, ChatRow)))
                 _last_center = "thinking..."
@@ -1702,8 +2007,10 @@ Streaming
                     _pending_images[:] = [img for img in _pending_images if img.get("label") in inp.text]
                 images = _pending_images or None
                 _pending_images = []
-                await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
-                                     stream=True, images=images)
+                rid = await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
+                                           images=images)
+                if was_busy:
+                    _queued_sends.append({"id": rid, "prompt": text, "images": images})
                 logger.info("task sent, prompt_len=%d chars", len(text))
             inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render(); return True
         if b == 0x1B and len(data) >= 2 and data[1] in (0x0D, 0x0A):

@@ -1,6 +1,6 @@
 {
   "name": "emrg-gui",
-  "version": "0.2.11",
+  "version": "0.2.65",
   "description": "EMRG GUI — Electron client for the EMRG self-evolving AI agent (Phase 3)",
   "main": "main.js",
   "scripts": {
@@ -19,7 +19,8 @@
   },
   "devDependencies": {
     "electron": "^31.3.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "monaco-editor": "^0.56.0"
   },
   "build": {
     "appId": "com.emrg.gui",
@@ -28,17 +29,24 @@
       {
         "from": "../dist/runtime",
         "to": "runtime"
+      },
+      {
+        "from": "../packaging/assets/icon.png",
+        "to": "icon.png"
       }
     ],
     "files": [
       "main.js",
       "preload.js",
       "renderer/**",
+      "vendor/**",
+      "conn-manager.js",
+      "gui-state.js",
       "daemon_client.js",
       "package.json",
       "scripts/**"
     ],
-    "icon": "../packaging/assets/",
+    "icon": "icon.png",
     "mac": {
       "hardenedRuntime": true,
       "notarize": false,
@@ -51,7 +59,8 @@
           ]
         }
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "icon": "icon.icns"
     },
     "win": {
       "target": [
@@ -61,7 +70,8 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "icon": "icon.ico"
     },
     "linux": {
       "target": [
@@ -73,12 +83,16 @@
           "from": "../dist/runtime",
           "to": "runtime"
         }
-      ]
+      ],
+      "icon": "icon.png"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "perMachine": false
+    },
+    "directories": {
+      "buildResources": "../packaging/assets"
     }
   }
 }

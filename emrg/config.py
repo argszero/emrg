@@ -38,8 +38,28 @@ class LlmConfig:
 
 
 @dataclass
+class UpdateConfig:
+    """Auto-upgrade settings (rant 2026-08-20T12:33:59 — 自动升级重构).
+
+    enabled: master switch — when false, the daemon never checks for new
+        releases and never triggers an upgrade session.
+    delay_minutes: how long after a release is published before it becomes
+        eligible for upgrade (default 1440 = 1 day; the host can set 1 for
+        immediate). Granularity is minutes (host chose A). The check
+        interval is NOT configurable — hard-coded 5 minutes in upgrade.py.
+    Old fields check / ttl_hours / auto_download are removed (the
+    download-installer mechanism is fully replaced by the agent-driven
+    local equivalent install).
+    """
+
+    enabled: bool = True
+    delay_minutes: int = 1440
+
+
+@dataclass
 class EmrgConfig:
     llm: LlmConfig = field(default_factory=LlmConfig)
+    update: UpdateConfig = field(default_factory=UpdateConfig)
 
 
 def config_dir() -> Path:
@@ -92,7 +112,33 @@ def load_config() -> EmrgConfig:
         var_name = llm.api_key[2:-1]
         llm.api_key = os.environ.get(var_name, llm.api_key)
 
-    return EmrgConfig(llm=llm)
+    update_data = data.get("update", {})
+    update = UpdateConfig(
+        enabled=update_data.get("enabled", True),
+        delay_minutes=update_data.get("delay_minutes", 1440),
+    )
+
+    return EmrgConfig(llm=llm, update=update)
+
+
+def load_update_config() -> UpdateConfig:
+    """Load only the [update] section (rant 2026-08-10T07:12:12).
+
+    The daemon constructs the UpgradeManager from this helper. Missing config
+    file or missing section → defaults (enabled=True, delay_minutes=1440).
+    """
+    cfg_path = config_path()
+    if not cfg_path.exists():
+        return UpdateConfig()
+    try:
+        data = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return UpdateConfig()
+    update_data = data.get("update", {})
+    return UpdateConfig(
+        enabled=update_data.get("enabled", True),
+        delay_minutes=update_data.get("delay_minutes", 1440),
+    )
 
 
 def ensure_config() -> None:

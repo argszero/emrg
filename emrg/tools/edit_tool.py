@@ -54,8 +54,13 @@ class EditTool(ToolExecutor):
                             "If false (default), old_string must be unique."
                         ),
                     },
+                    "intent": {
+                        "type": "string",
+                        "description": "The purpose of this call: why you are invoking it and what you want to achieve. "
+                        "One human-readable sentence, e.g. 'fix the off-by-one in the retry loop'.",
+                    },
                 },
-                "required": ["file_path", "old_string", "new_string"],
+                "required": ["file_path", "old_string", "new_string", "intent"],
             },
         )
 
