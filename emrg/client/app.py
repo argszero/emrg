@@ -28,6 +28,44 @@ from emrg.skills.loader import load_skills
 logger = logging.getLogger(__name__)
 
 
+def _csi_modifier_action(data: bytes) -> str | None:
+    """Map modifier-prefixed CSI arrow sequences to an editing action.
+
+    macOS terminals (iTerm2/Ghostty) send \x1b[1;3D for Option+←, \x1b[1;3C
+    for Option+→, \x1b[1;5D for Ctrl+← etc. — the plain handler only inspects
+    data[2] (the '1' parameter) and drops the sequence, so the cursor never
+    moves while Option+Backspace (\x17) works (rant 2026-08-21T11:36:56).
+    Also handles the Kitty keyboard protocol form \x1b[68;3u (key code 68 =
+    'D' = Left, 67 = 'C' = Right) with an Alt modifier.
+
+    Returns 'word_left' / 'word_right' for Alt/Ctrl+←/→, else None.
+    """
+    if len(data) < 4 or data[0] != 0x1B or data[1] != 0x5B:
+        return None
+    if b";" not in data:
+        return None
+    final = data[-1]
+    if not (0x40 <= final <= 0x7E):
+        return None
+    try:
+        parts = data[2:-1].split(b";")
+        if not parts or any(not p.isdigit() for p in parts):
+            return None
+        params = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(params) < 2:
+        return None
+    mod = params[1]
+    if mod not in (3, 5, 7):  # Alt(3) / Ctrl(5) / Alt+Ctrl(7)
+        return None
+    if final in (0x44, 0x43):  # legacy CSI: D=← C=→
+        return "word_left" if final == 0x44 else "word_right"
+    if final == 0x75 and params[0] in (67, 68):  # Kitty CSI-u: 68='D' 67='C'
+        return "word_left" if params[0] == 68 else "word_right"
+    return None
+
+
 def _format_status_left(title: str, sid: str, model: str = "") -> str:
     """Format left status: version + session title + short ID + model.
 
@@ -1476,6 +1514,16 @@ async def interactive(init_auto_evolve: bool = False):
         if b == 0x1B and len(data) >= 3:
             if data[1] == 0x5B:
                 c = data[2]
+                # Modifier-prefixed arrows (macOS Option/Ctrl+←→): map to word
+                # movement (rant 2026-08-21T11:36:56).
+                _csi_action = _csi_modifier_action(data)
+                if _csi_action is not None:
+                    if _csi_action == "word_left":
+                        inp.move_word_left()
+                    else:
+                        inp.move_word_right()
+                    term.render()
+                    return True
                 if c == 0x41:  # Up
                     avail = max(1, term.viewport.viewport_width - 2)
                     if inp._cursor_vrow(avail) == 0:
