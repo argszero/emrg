@@ -645,6 +645,21 @@ class EmrgServer:
         except (OSError, ValueError):
             return ""
 
+    def _previous_installed_version(self) -> str:
+        """Pre-upgrade EMRG version from ~/.emrg/install/previous-version.txt.
+
+        Rant 2026-08-21T12:44:34: the upgrade agent writes the version it is
+        replacing into previous-version.txt before overwriting version.txt,
+        so the GUI banner can show "upgraded from X to Y" instead of only the
+        target version. Raw data only; "" when missing (dev/standalone or
+        first install).
+        """
+        try:
+            v = (Path.home() / ".emrg" / "install" / "previous-version.txt").read_text(encoding="utf-8").strip()
+            return v
+        except (OSError, ValueError):
+            return ""
+
     def _evolution_count(self) -> int:
         """Total completed evolution cycles across scheduler handlers + disk.
 
@@ -1421,6 +1436,9 @@ class EmrgServer:
                 # 上次已知版本，发现变化 → 弹"已升级，重启生效"横幅。daemon 只回原始数据，
                 # 零判断逻辑（升级判断由 GUI 负责）。
                 "current_version": self._current_installed_version(),
+                # Rant 2026-08-21T12:44:34：并入升级前版本——GUI 横幅显示 "from → to"
+                # （升级 agent 在覆盖 version.txt 前写入 previous-version.txt）。
+                "previous_version": self._previous_installed_version(),
             })
             return
 
