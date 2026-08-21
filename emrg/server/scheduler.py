@@ -581,6 +581,13 @@ class TaskHandler:
             "last_run_at": last_run_at,
             "recent_runs": recent_runs,
             "saturation": saturation,
+            # rant 2026-08-21T17:46:12: expose the task→session link so the GUI
+            # tasks panel can add an "open session" action. All in-memory —
+            # project name (config.project), resolved project path, and the
+            # fixed task session_id (emrg-evolution-{name}).
+            "project": self._project_name,
+            "project_path": self.project_path,
+            "session_id": self._session_id,
         }
 
     def _heartbeat_interval(self) -> int:
