@@ -1229,8 +1229,13 @@ const Dialogs = (() => {
       }
       sessions.forEach((s) => {
         const row = el("button", { class: "help-row", type: "button", style: "width:100%;text-align:left;cursor:pointer;background:none;border:none;" });
-        const name = el("span", { class: "help-cmd" }, s.title || _t("app.unnamed"));
-        const hint = el("span", { class: "help-hint" }, s.session_id === App.state.sessionId ? _t("app.current") : "");
+        // rant 11:41:07：有 title 显 title，无 title 显完整 session id（name-or-id 规则，不截短）
+        const name = el("span", { class: "help-cmd" }, s.title || s.session_id);
+        const marks = [];
+        if (s.session_id === App.state.sessionId) marks.push(_t("app.current"));
+        const act = relTime(s.updated_at); // 最后活跃时间（Session.list_sessions 已返回 updated_at）
+        if (act) marks.push(act);
+        const hint = el("span", { class: "help-hint" }, marks.join(" · "));
         row.appendChild(name);
         row.appendChild(hint);
         row.addEventListener("click", async () => {

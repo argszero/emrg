@@ -2157,6 +2157,40 @@ test("P5: /open 指令 → 打开会话对话框；无项目 → 提示新建", 
   );
 });
 
+test("rant 11:41:07: 打开会话列表 — 有 title 显 title、无 title 显完整 id + 最后活跃时间", async () => {
+  const now = Date.now();
+  const { ctx, els } = makeSandbox({
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
+    listProjectSessions: async () => ({
+      sessions: [
+        { session_id: "s-title", title: "My Session", updated_at: new Date(now - 5 * 60000).toISOString() },
+        { session_id: "s-untitled-full-id", title: "", updated_at: new Date(now - 2 * 3600000).toISOString() },
+        { session_id: "s-no-time" },
+      ],
+    }),
+  });
+  await tick();
+  await vm.runInContext("EMRG_Dialogs.showOpenSessionDialog()", ctx);
+  await tick();
+  els["open-session-list"].children[0].children[0].click(); // 点项目 → 会话列表
+  await tick();
+  const rows = els["open-session-list"].children;
+  assert.strictEqual(rows.length, 3, "three sessions listed");
+  const r0name = rows[0].children[0].textContent || "";
+  const r0hint = rows[0].children[1].textContent || "";
+  assert.ok(r0name.includes("My Session"), "titled session shows title");
+  assert.ok(r0hint.includes("分钟前"), "titled session shows relative last-active time");
+  const r1name = rows[1].children[0].textContent || "";
+  const r1hint = rows[1].children[1].textContent || "";
+  assert.ok(r1name.includes("s-untitled-full-id"), "untitled session shows full session id");
+  assert.ok(r1hint.includes("小时前"), "untitled session shows relative last-active time");
+  assert.ok(!r1name.includes("未命名"), "no unnamed fallback for untitled session");
+  const r2name = rows[2].children[0].textContent || "";
+  const r2hint = rows[2].children[1].textContent || "";
+  assert.ok(r2name.includes("s-no-time"), "session without updated_at still shows id");
+  assert.ok(r2hint === "", "no relative time when updated_at missing");
+});
+
 // ── P5 slice 2（rant 15:07:19）：新建会话对话框 + 删除项目（受保护守卫） ──
 
 test("P5 slice 2: showNewSessionDialog 列项目 → 点选项目 → newSession(projectPath)", async () => {
