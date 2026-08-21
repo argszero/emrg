@@ -25,7 +25,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 RUNTIME="$DIST/runtime"
-VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.61)"
+VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.62)"
 PLATFORM="${1:-$(uname -s | tr '[:upper:]' '[:lower:]')}"
 
 mkdir -p "$DIST/artifacts"
