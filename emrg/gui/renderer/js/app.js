@@ -77,6 +77,7 @@ const App = (() => {
       state.model = init.model || "";
       state.version = init.version || "";
       state.currentVersion = init.current_version || ""; // rant 18:30:57：安装版本（升级横幅对比基准）
+      state.previousVersion = init.previous_version || ""; // rant 12:44:34：升级前版本（横幅 from→to）
       state.lastKnownVersion = state.currentVersion;
       state.evolutionCount = init.evolution_count ?? null;
       state.lastKnownEvolutionCount = state.evolutionCount;
@@ -1337,14 +1338,21 @@ const App = (() => {
     $("conn-banner").classList.add("hidden");
   }
 
-  // ── 升级完成横幅（rant 2026-08-20T18:30:57） ─────────────
-  function maybeShowUpgradeBanner(currentVersion) {
+  // ── 升级完成横幅（rant 2026-08-20T18:30:57 + 2026-08-21T12:44:34） ─────
+  function maybeShowUpgradeBanner(currentVersion, previousVersion) {
     if (!currentVersion) return; // 无版本数据（dev 运行）→ 不显示
     if (currentVersion === state.lastKnownVersion) return; // 版本未变
     const b = $("upgrade-banner");
     if (!b) return;
     const msg = $("upgrade-banner-msg");
-    if (msg) msg.textContent = _t("app.upgradeBannerMsg", { version: currentVersion });
+    if (msg) {
+      // rant 12:44:34：daemon 提供升级前版本 → 显示 "from → to"；否则回退旧文案
+      if (previousVersion && previousVersion !== currentVersion) {
+        msg.textContent = _t("app.upgradeBannerMsgFromTo", { from: previousVersion, to: currentVersion });
+      } else {
+        msg.textContent = _t("app.upgradeBannerMsg", { version: currentVersion });
+      }
+    }
     b.classList.remove("hidden");
     state.lastKnownVersion = currentVersion; // 已提示，防重复弹
   }
@@ -1574,7 +1582,9 @@ const App = (() => {
       if (data.model) state.model = data.model;
       state.evolutionCount = data.evolution_count ?? state.evolutionCount;
       // rant 18:30:57：pong 携带 current_version → 对比已知版本，变化则弹升级横幅
-      maybeShowUpgradeBanner(data.current_version || state.currentVersion);
+      // rant 12:44:34：同时携带 previous_version → 横幅显示 from → to
+      if (data.previous_version) state.previousVersion = data.previous_version;
+      maybeShowUpgradeBanner(data.current_version || state.currentVersion, state.previousVersion);
       updateModelSwitcher();
       updateGrowthCard();
       maybeShowEvolutionToast();

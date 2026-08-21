@@ -285,6 +285,7 @@ vision = false
         model: pong?.model || "",
         evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
         current_version: pong?.current_version || "", // rant 18:30:57：安装版本（GUI 对比显示升级横幅）
+        previous_version: pong?.previous_version || "", // rant 12:44:34：升级前版本（横幅 from→to）
         version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
         sessions,
         open_sessions: openSessionsList(),
@@ -889,7 +890,7 @@ vision = false
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
         const pong = await waitForPong();
-        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "" });
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "", previous_version: pong?.previous_version || "" });
         logger.info("[gui] connManager recovery complete");
       } catch (e) {
         logger.warn(`[gui] post-recovery refresh failed: ${e.message}`);
@@ -1116,7 +1117,7 @@ vision = false
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
         const pong = await waitForPong();
-        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "" });
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "", previous_version: pong?.previous_version || "" });
       }
     }, delay);
   }
