@@ -811,6 +811,11 @@ test("rant 12:44:34: 重启生效走 _stop_all --skip-gui 全链路 stop + app.r
   assert.ok(mainSrc.includes("app.relaunch()"), "stop_all exit 0 → app.relaunch()");
   assert.ok(mainSrc.includes("app.exit(0)"), "relaunch 后立即 app.exit(0) 退出旧进程");
   assert.ok(!mainSrc.includes('conn.sendCommand("shutdown"'), "不再只发 shutdown（daemon 会被 TUI 拉回 + GUI 永不重连）");
+  assert.ok(mainSrc.includes("_findInstalledPython()"), "打包模式应使用安装版运行时 python");
+  assert.ok(mainSrc.includes("_installedPythonPath()"), "打包模式应注入安装版 PYTHONPATH");
+  const clientSrc = fs.readFileSync(path.join(GUI_DIR, "daemon_client.js"), "utf8");
+  assert.ok(clientSrc.includes("_findInstalledPython()"), "daemon_client 应提供安装版 python 解析");
+  assert.ok(clientSrc.includes("_installedPythonPath()"), "daemon_client 应提供安装版 PYTHONPATH");
 });
 
 test("右键菜单：重命名对话框 → renameSession 调用（设计 §3.2）", async () => {

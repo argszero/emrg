@@ -249,6 +249,30 @@ class DaemonClient {
     return path.join(bin, name);
   }
 
+  // Rant 2026-08-21T12:44:34（restart-to-apply 跟进）：打包模式下 `emrg` 包位于
+  // ~/.emrg/install/{source,lib}，宿主 PATH 的 python3 上没有 `emrg` 可导入——
+  // 重启流程必须用安装版运行时 python（与 bin/emrgd 启动器同一解析逻辑）。
+  _findInstalledPython() {
+    const bin = path.join(os.homedir(), ".emrg", "install", "bin");
+    if (process.platform === "win32") {
+      // R100：bin/python（复制品）缺 DLL 不可用（DLL 在 python-dist/ 根）
+      for (const n of ["python-dist\\python.exe", "python-dist\\python3.13.exe", "python.exe"]) {
+        const p = path.join(bin, n);
+        try { fs.accessSync(p); return p; } catch { /* next candidate */ }
+      }
+      return "python";
+    }
+    const p = path.join(bin, "python");
+    try { fs.accessSync(p, fs.constants.X_OK); return p; } catch { /* fallthrough */ }
+    return "python3";
+  }
+
+  // 安装版 PYTHONPATH 前缀（等价 bin/emrgd 的 PYTHONPATH="$PREFIX/source:$PREFIX/lib"）。
+  _installedPythonPath() {
+    const prefix = path.join(os.homedir(), ".emrg", "install");
+    return [path.join(prefix, "source"), path.join(prefix, "lib")].join(path.delimiter);
+  }
+
   _findPython() {
     // G59/G61/G126：优先项目 .venv，其次 PATH python3/python
     const root = path.resolve(__dirname, "..", "..");

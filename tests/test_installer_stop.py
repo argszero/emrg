@@ -240,7 +240,11 @@ def test_main_delegates_stop_to_stop_all():
     # stop 子命令帮助文案不再引用 stop-emrg.cmd
     assert "stop-emrg.cmd" not in content
     # main() 对 stop 分支 sys.exit(_stop_all())；_stop_all 委托 emrg._stop_all
-    assert "sys.exit(_stop_all())" in content
+    assert "sys.exit(_stop_all(" in content
+    # --skip-gui（rant 2026-08-21T12:44:34）：GUI restart-to-apply 走
+    # `emrg stop --skip-gui`，经安装版启动器 PYTHONPATH 使 emrg 可导入
+    assert "--skip-gui" in content
+    assert "skip_gui=getattr(parsed, \"skip_gui\", False)" in content
     assert "from emrg._stop_all import stop_all" in content
 
 
