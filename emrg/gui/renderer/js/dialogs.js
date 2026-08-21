@@ -723,6 +723,20 @@ const Dialogs = (() => {
         }
       });
       actions.appendChild(trigBtn);
+      // 打开会话（rant 2026-08-21T17:46:12：任务行加"打开会话"按钮——直接打开该任务
+      // 的固定会话 emrg-evolution-{name}，效果与"打开会话"弹窗选择一致（左侧列表出现并激活）。
+      // session_id/project_path 来自 daemon list_tasks（TaskHandler.status() 新增字段）。
+      const sessBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.taskOpenSession") }, _t("settings.taskOpenSession"));
+      if (!t.session_id) sessBtn.disabled = true;
+      sessBtn.addEventListener("click", async () => {
+        try {
+          await App.switchSession(t.session_id, { projectPath: t.project_path });
+        } catch (e) {
+          Chat.addSystemMessage(_t("openSession.loadFailed", { msg: e.message }));
+          showToast(_t("openSession.loadFailed", { msg: e.message }), { type: "error" });
+        }
+      });
+      actions.appendChild(sessBtn);
       // 编辑（表单预填 → taskUpdate）
       const editBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.taskEdit") }, _t("settings.taskEdit"));
       editBtn.addEventListener("click", () => { openTaskForm(t).catch(() => {}); });

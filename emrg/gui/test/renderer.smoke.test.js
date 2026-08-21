@@ -2613,7 +2613,7 @@ test("P3：设置面板打开 → 任务列表渲染（名称/类型/项目/间�
   await vm.runInContext(`(function() {
     const row = document.getElementById("task-list").children[0];
     const btns = row.querySelectorAll(".model-action-btn");
-    btns[1].click(); // 0=触发 1=编辑
+    btns[2].click(); // 0=触发 1=打开会话 2=编辑（rant 2026-08-21T17:46:12 插入会话按钮后）
   })()`, ctx);
   assert.strictEqual(vm.runInContext('document.getElementById("task-form").classList.contains("hidden")', ctx), false, "编辑应展开表单");
   assert.strictEqual(els["task-form-name"].value, "daily-report");
@@ -2838,6 +2838,36 @@ test("rant 2026-08-15T09:20:27/09:23:10：面板操作反馈走全局 toast（�
   vm.runInContext('App.doTrigger("missing")', ctx);
   await tick();
   assert.strictEqual(els["toast"].classList.contains("toast-error"), true, "error → error toast");
+});
+
+test("rant 2026-08-21T17:46:12：任务行'打开会话'按钮——直接打开该任务的固定会话", async () => {
+  const switchCalls = [];
+  const { ctx, els } = makeSandbox({
+    listTasks: async () => [
+      { name: "emrg-task", type: "evolution", running: true, interval: 60, session_id: "emrg-evolution-emrg-task", project_path: "/p/emrg", project: "emrg" },
+      { name: "no-sess", type: "custom", running: false, interval: 3600 }, // 无 session_id → 按钮禁用
+    ],
+    listProjects: async () => [{ name: "emrg", path: "/p/emrg" }],
+    switchSession: async (payload) => { switchCalls.push(payload); return {}; },
+  });
+  await tick();
+  await vm.runInContext("App.openTasksPanel()", ctx);
+  await tick();
+  const rows = vm.runInContext('Array.from(document.getElementById("task-list").children).filter((c) => c.className.includes("task-row"))', ctx);
+  assert.strictEqual(rows.length, 2, "两行");
+  // 按钮序：0=触发 1=打开会话 2=编辑 3=删除
+  const btns0 = rows[0].querySelectorAll(".model-action-btn");
+  assert.strictEqual(btns0.length, 4, "操作按钮 = 触发/打开会话/编辑/删除");
+  assert.ok(String(btns0[1].textContent).includes("打开会话"), "第 2 个按钮应为'打开会话'");
+  assert.strictEqual(btns0[1].disabled, false, "有 session_id 的按钮可用");
+  btns0[1].click();
+  await tick();
+  assert.strictEqual(switchCalls.length, 1, "点击应调用 switchSession");
+  assert.strictEqual(switchCalls[0].sessionId, "emrg-evolution-emrg-task", "带固定会话 id");
+  assert.strictEqual(switchCalls[0].projectPath, "/p/emrg", "带项目路径");
+  // 无 session_id → 按钮禁用（真实 DOM disabled 不派发 click；沙箱 fake 不模拟该语义，故只断言禁用态）
+  const btns1 = rows[1].querySelectorAll(".model-action-btn");
+  assert.strictEqual(btns1[1].disabled, true, "无 session_id 的按钮禁用");
 });
 
 // ── rant 2026-08-15T10:36:39：任务状态 + 下次运行倒计时 ──

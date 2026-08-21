@@ -549,6 +549,10 @@ def test_evolution_handler_status_last_run_fields():
     assert "heartbeat_interval" in st["saturation"]
     # rant 2026-08-18T21:32:32: recent_runs present, empty before any run
     assert st["recent_runs"] == []
+    # rant 2026-08-21T17:46:12: task→session link fields (GUI open-session action)
+    assert st["session_id"] == "emrg-evolution-test"
+    assert st["project"] == ""  # config={} → empty project name
+    assert st["project_path"] == "test"  # fallback path = name
     # after one evolution → last-run populated from the latest log
     handler.evolutions.append(EvolutionLog(
         timestamp="2026-08-18T10:00:00",
