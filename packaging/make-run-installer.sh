@@ -25,7 +25,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
 RUNTIME="$DIST/runtime"
-VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.67)"
+VERSION="$(cat "$RUNTIME/version.txt" 2>/dev/null || echo 0.2.68)"
 ARCH="${ARCH:-$(uname -m)}"   # x86_64 / aarch64
 OUT="$DIST/artifacts/EMRG-$VERSION-linux-$ARCH.run"
 
