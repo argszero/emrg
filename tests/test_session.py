@@ -641,55 +641,6 @@ class TestSessionGetMessagesForLLM:
         assert result[2]["role"] == "tool"
         assert result[2]["tool_call_id"] == "call_1"
 
-    def test_assistant_reasoning_passed_back(self, tmp_path):
-        """get_messages_for_llm() maps persisted reasoning to reasoning_content
-        (DeepSeek thinking-mode pass-back, rant 2026-08-22T17:25:02)."""
-        session = Session.create(tmp_path)
-        session.append_message({
-            "type": "message",
-            "role": "assistant",
-            "content": "answer",
-            "reasoning": "think step by step",
-        })
-
-        result = session.get_messages_for_llm()
-        assert len(result) == 1
-        assert result[0]["reasoning_content"] == "think step by step"
-
-    def test_assistant_reasoning_with_tool_calls_passed_back(self, tmp_path):
-        """get_messages_for_llm() keeps reasoning_content on tool-call rounds."""
-        session = Session.create(tmp_path)
-        session.append_message({
-            "type": "message",
-            "role": "assistant",
-            "content": None,
-            "reasoning": "need to read the file",
-            "tool_calls": [
-                {"id": "call_1", "type": "function", "function": {"name": "read", "arguments": "{}"}},
-            ],
-        })
-        session.append_message({
-            "type": "tool_result",
-            "role": "tool",
-            "tool_call_id": "call_1",
-            "content": "file content",
-        })
-
-        result = session.get_messages_for_llm()
-        assert len(result) == 2
-        assert result[0]["reasoning_content"] == "need to read the file"
-        assert "tool_calls" in result[0]
-
-    def test_old_records_without_reasoning_untouched(self, tmp_path):
-        """get_messages_for_llm() skips reasoning for old records without the field."""
-        session = Session.create(tmp_path)
-        session.append_message({"type": "message", "role": "assistant", "content": "old answer"})
-
-        result = session.get_messages_for_llm()
-        assert len(result) == 1
-        assert "reasoning_content" not in result[0]
-        assert result[0] == {"role": "assistant", "content": "old answer"}
-
 
 class TestSessionListSessions:
     """Tests for Session.list_sessions()."""

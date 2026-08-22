@@ -232,10 +232,6 @@ class EmrgServer:
         # 有差异 = 已装新版本但 daemon 未重启 → 弹"重启生效"横幅。
         self._run_version = self._current_installed_version()
         self._max_tool_rounds = llm_config.max_tool_rounds
-        # Tool-result sliding window: keep full tool results for the most
-        # recent N rounds; older groups are folded into a placeholder at
-        # send time (rant 2026-08-22T11:33:54).
-        self._tool_window_rounds = llm_config.tool_window_rounds
         self._projects_log = runtime_dir / "projects.yml"
         self._rants_log = runtime_dir / "rants.jsonl"
 
@@ -1313,11 +1309,6 @@ class EmrgServer:
         if session:
             ctx["session"] = self._collect_history_data(session)
 
-        # ── Tool Window ──
-        # Tool-result sliding window (rant 2026-08-22T11:33:54): expose the
-        # configured window so system.j2 renders the fold notice (hidden when 0).
-        ctx["tool_window_rounds"] = self._tool_window_rounds
-
         template = _get_jinja_env().get_template("system.j2")
         rendered = template.render(**ctx)
 
@@ -2209,94 +2200,6 @@ class EmrgServer:
                         "session_id": session_id,
                     })
 
-    def _apply_tool_window(
-        self,
-        messages: list[dict],
-        keep_rounds: int = 7,
-        history_path: str = "",
-    ) -> list[dict]:
-        """Fold tool results older than the recent N rounds (pure function).
-
-        Atomic group = assistant message with tool_calls + its immediately
-        following tool messages (OpenAI pairing constraint, see
-        session._validate_tool_messages). The most recent ``keep_rounds``
-        groups are kept in full; each older group is replaced in-place by a
-        single assistant placeholder message carrying tool names/counts,
-        tool_call_ids and the on-disk history path for backtracking.
-
-        Never folded: system/user messages, assistant plain-text replies,
-        summary records, and groups inside the window. ``keep_rounds <= 0``
-        disables folding (identity). No session/disk access — the history
-        path is passed in as a string (design doc §4.3/§4.4, rant
-        2026-08-22T11:33:54).
-        """
-        if keep_rounds <= 0:
-            return messages
-
-        # Split messages into segments: (foldable_group, payload) tuples.
-        # A foldable group is an assistant msg with tool_calls plus all
-        # consecutive tool messages that follow it.
-        segments: list[tuple[bool, object]] = []
-        i = 0
-        n = len(messages)
-        while i < n:
-            m = messages[i]
-            if m.get("role") == "assistant" and m.get("tool_calls"):
-                group = [m]
-                j = i + 1
-                while j < n and messages[j].get("role") == "tool":
-                    group.append(messages[j])
-                    j += 1
-                segments.append((True, group))
-                i = j
-            else:
-                segments.append((False, m))
-                i += 1
-
-        # Identify the most recent keep_rounds foldable groups (tail-scan).
-        foldable_idx = [k for k, (foldable, _) in enumerate(segments) if foldable]
-        keep_from = max(0, len(foldable_idx) - keep_rounds)
-        keep_set = set(foldable_idx[keep_from:])
-
-        out: list[dict] = []
-        for k, (foldable, payload) in enumerate(segments):
-            if foldable and k not in keep_set:
-                out.append(self._fold_tool_group(payload, keep_rounds, history_path))
-            elif foldable:
-                out.extend(payload)  # type: ignore[arg-type]
-            else:
-                out.append(payload)  # type: ignore[arg-type]
-        return out
-
-    @staticmethod
-    def _fold_tool_group(
-        group: list[dict],
-        keep_rounds: int,
-        history_path: str,
-    ) -> dict:
-        """Build the placeholder assistant message for one folded group."""
-        leader = group[0]
-        tool_calls = leader.get("tool_calls") or []
-        counts: dict[str, int] = {}
-        ids: list[str] = []
-        for tc in tool_calls:
-            name = (tc.get("function") or {}).get("name") or "?"
-            counts[name] = counts.get(name, 0) + 1
-            ids.append(str(tc.get("id", "")))
-        executed = ", ".join(f"{name} ×{cnt}" for name, cnt in counts.items())
-        id_list = ", ".join(ids)
-
-        lines = [
-            f"[Tool results omitted — older than recent {keep_rounds} rounds]",
-            f"executed: {executed}",
-            f"tool_call_ids: {id_list}",
-        ]
-        if history_path:
-            lines.append(f"full results: {history_path}")
-            anchor = ids[0] if ids else "tool_call_id"
-            lines.append(f"    → grep '<{anchor}>' 定位对应结果；或按时间戳区间回溯")
-        return {"role": "assistant", "content": "\n".join(lines)}
-
     async def _run_tool_loop(
         self, req: TaskRequest, ws, session: Session,
         cancel_event: asyncio.Event | None = None,
@@ -2346,15 +2249,6 @@ class EmrgServer:
         force_ask = False
         round_num = 1
         while True:
-            # Tool-result sliding window (rant 2026-08-22T11:33:54): fold
-            # tool results older than the most recent N rounds into a
-            # placeholder before each LLM request. Pure fold — the on-disk
-            # history.jsonl keeps full results for backtracking.
-            messages = self._apply_tool_window(
-                messages,
-                keep_rounds=self._tool_window_rounds,
-                history_path=str(session.dir_path / "history.jsonl"),
-            )
             if round_num > self._max_tool_rounds:
                 # P1 (rant 21:55:37): round budget exhausted but messages
                 # still queued — process them with a fresh round budget
@@ -2539,24 +2433,18 @@ class EmrgServer:
                     reasoning=full_reasoning,
                 )
 
-                # Persist assistant message (reasoning kept for DeepSeek
-                # thinking-mode pass-back, rant 2026-08-22T17:25:02)
+                # Persist assistant message
                 session.append_message({
                     "type": "message",
                     "role": "assistant",
                     "content": full_content,
-                    **({"reasoning": full_reasoning} if full_reasoning else {}),
                 })
 
                 # Append the assistant reply to the local messages so the
                 # LLM context stays coherent when queued messages are
                 # injected after this round (mirrors Case 2's assistant
                 # tool_calls message).
-                messages.append({
-                    "role": "assistant",
-                    "content": full_content,
-                    **({"reasoning_content": full_reasoning} if full_reasoning else {}),
-                })
+                messages.append({"role": "assistant", "content": full_content})
 
                 # P1 (rant 21:55:37): messages queued mid-round (after the
                 # round-top drain) must not end the turn — inject and continue.
@@ -2611,10 +2499,6 @@ class EmrgServer:
                         },
                     })
                 assistant_msg["tool_calls"] = openai_tool_calls
-                if full_reasoning:
-                    # DeepSeek thinking mode: reasoning must be passed back
-                    # verbatim on the next round (rant 2026-08-22T17:25:02).
-                    assistant_msg["reasoning_content"] = full_reasoning
                 messages.append(assistant_msg)
 
                 # Persist assistant message WITH embedded tool_calls
@@ -2622,7 +2506,6 @@ class EmrgServer:
                     "type": "message",
                     "role": "assistant",
                     "content": full_content,
-                    **({"reasoning": full_reasoning} if full_reasoning else {}),
                     "tool_calls": [
                         {
                             "id": tc.get("id", ""),
@@ -2745,17 +2628,12 @@ class EmrgServer:
                 "type": "message",
                 "role": "assistant",
                 "content": full_content,
-                **({"reasoning": full_reasoning} if full_reasoning else {}),
             })
 
             # Append the assistant reply to the local messages so the LLM
             # context stays coherent when queued messages are injected
             # after this round.
-            messages.append({
-                "role": "assistant",
-                "content": full_content,
-                **({"reasoning_content": full_reasoning} if full_reasoning else {}),
-            })
+            messages.append({"role": "assistant", "content": full_content})
 
             # P1 (rant 21:55:37): messages queued mid-round must not end the
             # turn — inject and continue (injection round does not consume
@@ -3752,10 +3630,6 @@ class EmrgServer:
                     # IMPORTANT: assistant message with tool_calls must come BEFORE
                     # tool result messages (OpenAI/DeepSeek API requirement).
                     assistant_msg["tool_calls"] = openai_tool_calls
-                    if msg.get("reasoning_content") or msg.get("reasoning"):
-                        assistant_msg["reasoning_content"] = (
-                            msg.get("reasoning_content") or msg.get("reasoning")
-                        )
                     messages.append(assistant_msg)
 
                     for tc in tool_calls:
@@ -3868,10 +3742,6 @@ class EmrgServer:
                         "function": {"name": fn.get("name", ""), "arguments": fn.get("arguments", "")},
                     })
                 assistant_msg["tool_calls"] = openai_tool_calls
-                if msg.get("reasoning_content") or msg.get("reasoning"):
-                    assistant_msg["reasoning_content"] = (
-                        msg.get("reasoning_content") or msg.get("reasoning")
-                    )
                 messages.append(assistant_msg)
 
                 for tc in tool_calls:
