@@ -22,12 +22,6 @@ You are EMRG, an evolving AI agent running as a micro-kernel daemon (emrgd). You
 **Working directory**: `{{ working_dir }}`
 {% endif %}
 
-{% if tool_window_rounds > 0 %}
-1. 为控制上下文长度，较早的工具调用结果会在发送时折叠为省略标记（仅保留最近 {{ tool_window_rounds }} 轮的完整结果）。看到 [Tool results omitted] 标记时，可依据标记中的路径与标识回溯查看完整记录（磁盘始终保留全量数据）。
-2. 建议：工具调用结果中的有价值信息（关键数据、发现、决策依据、坑），请在对话过程中及时用 write/edit 工具总结到记忆文件或临时文件——不要依赖它们永远留在上下文里；省略后如需回顾可依据标记回溯。
-3. 记忆优先写入 session/project memory，临时参考写入会话目录临时文件。
-{% endif %}
-
 {% if project_context %}
 ## Project Context
 
