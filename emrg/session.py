@@ -323,6 +323,12 @@ class Session:
             if r.get("type") == "message":
                 msg: dict = {"role": r["role"], "content": r.get("content")}
 
+                # DeepSeek thinking mode: assistant reasoning must be passed
+                # back verbatim to the API (rant 2026-08-22T17:25:02). Old
+                # records without the field are skipped naturally.
+                if r.get("role") == "assistant" and r.get("reasoning"):
+                    msg["reasoning_content"] = r["reasoning"]
+
                 # Check for embedded tool_calls (current format)
                 embedded_tc = r.get("tool_calls")
                 if embedded_tc and r["role"] == "assistant":
