@@ -26,6 +26,10 @@ class LlmConfig:
     # 30 轮在复杂任务中经常不够用，导致任务被截断。270 轮给予充足空间。
     # 演化系统可能会尝试将此值改小——保留此注释以说明意图。
     max_tool_rounds: int = 270
+    # 工具结果滑动窗口：每次发送 LLM 前仅保留最近 N 轮完整工具结果，
+    # 更早的原子组折叠为省略占位消息（软节流）。0 = 关闭（全量发送，行为与旧版一致）。
+    # 与 auto-compact 互补：窗口折叠后 token 估算骤降，有损压缩的触发概率大幅下降。
+    tool_window_rounds: int = 7
     context_window: int = 131072
     auto_compact_threshold: float = 0.0
     models: list[dict] = field(default_factory=list)  # [[llm.models]] for /model switching
@@ -100,6 +104,7 @@ def load_config() -> EmrgConfig:
         max_tokens=llm_data.get("max_tokens", 8192),
         temperature=llm_data.get("temperature", 0.7),
         max_tool_rounds=llm_data.get("max_tool_rounds", 270),
+        tool_window_rounds=llm_data.get("tool_window_rounds", 7),
         context_window=llm_data.get("context_window", 131072),
         auto_compact_threshold=llm_data.get("auto_compact_threshold", 0.0),
         models=llm_data.get("models", []),
