@@ -2539,24 +2539,18 @@ class EmrgServer:
                     reasoning=full_reasoning,
                 )
 
-                # Persist assistant message (reasoning kept for DeepSeek
-                # thinking-mode pass-back, rant 2026-08-22T17:25:02)
+                # Persist assistant message
                 session.append_message({
                     "type": "message",
                     "role": "assistant",
                     "content": full_content,
-                    **({"reasoning": full_reasoning} if full_reasoning else {}),
                 })
 
                 # Append the assistant reply to the local messages so the
                 # LLM context stays coherent when queued messages are
                 # injected after this round (mirrors Case 2's assistant
                 # tool_calls message).
-                messages.append({
-                    "role": "assistant",
-                    "content": full_content,
-                    **({"reasoning_content": full_reasoning} if full_reasoning else {}),
-                })
+                messages.append({"role": "assistant", "content": full_content})
 
                 # P1 (rant 21:55:37): messages queued mid-round (after the
                 # round-top drain) must not end the turn — inject and continue.
@@ -2611,10 +2605,6 @@ class EmrgServer:
                         },
                     })
                 assistant_msg["tool_calls"] = openai_tool_calls
-                if full_reasoning:
-                    # DeepSeek thinking mode: reasoning must be passed back
-                    # verbatim on the next round (rant 2026-08-22T17:25:02).
-                    assistant_msg["reasoning_content"] = full_reasoning
                 messages.append(assistant_msg)
 
                 # Persist assistant message WITH embedded tool_calls
@@ -2622,7 +2612,6 @@ class EmrgServer:
                     "type": "message",
                     "role": "assistant",
                     "content": full_content,
-                    **({"reasoning": full_reasoning} if full_reasoning else {}),
                     "tool_calls": [
                         {
                             "id": tc.get("id", ""),
@@ -2745,17 +2734,12 @@ class EmrgServer:
                 "type": "message",
                 "role": "assistant",
                 "content": full_content,
-                **({"reasoning": full_reasoning} if full_reasoning else {}),
             })
 
             # Append the assistant reply to the local messages so the LLM
             # context stays coherent when queued messages are injected
             # after this round.
-            messages.append({
-                "role": "assistant",
-                "content": full_content,
-                **({"reasoning_content": full_reasoning} if full_reasoning else {}),
-            })
+            messages.append({"role": "assistant", "content": full_content})
 
             # P1 (rant 21:55:37): messages queued mid-round must not end the
             # turn — inject and continue (injection round does not consume
@@ -3752,10 +3736,6 @@ class EmrgServer:
                     # IMPORTANT: assistant message with tool_calls must come BEFORE
                     # tool result messages (OpenAI/DeepSeek API requirement).
                     assistant_msg["tool_calls"] = openai_tool_calls
-                    if msg.get("reasoning_content") or msg.get("reasoning"):
-                        assistant_msg["reasoning_content"] = (
-                            msg.get("reasoning_content") or msg.get("reasoning")
-                        )
                     messages.append(assistant_msg)
 
                     for tc in tool_calls:
@@ -3868,10 +3848,6 @@ class EmrgServer:
                         "function": {"name": fn.get("name", ""), "arguments": fn.get("arguments", "")},
                     })
                 assistant_msg["tool_calls"] = openai_tool_calls
-                if msg.get("reasoning_content") or msg.get("reasoning"):
-                    assistant_msg["reasoning_content"] = (
-                        msg.get("reasoning_content") or msg.get("reasoning")
-                    )
                 messages.append(assistant_msg)
 
                 for tc in tool_calls:
