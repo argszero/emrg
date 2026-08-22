@@ -668,6 +668,12 @@ const App = (() => {
       if (sidState(sid).disconnected) {
         Chat.addSystemMessage(_t("app.sessionDisconnected"), sid);
       }
+      // rant 2026-08-22T08:07:47：任务/rant/项目面板点"打开会话"只切 sessionId 不切视图，
+      // 界面毫无变化。switchSession 成功后若仍在面板视图则切回会话视图（所有入口一致）。
+      // 递归/初始化路径用 silent，不会在这里触发重复 switchView。
+      if (!opts.silent && state.activeView !== "sessions") {
+        switchView("sessions");
+      }
       updateEmptyState();
       Sidebar.highlight(sid, opts.scopeNav); // rant 22:04:02：点击哪列表只高亮该列表（scopeNav 缺省则两列表）
       setComposerDisabled(false); // 防御性：独立调用 switchSession 也确保输入框可用
