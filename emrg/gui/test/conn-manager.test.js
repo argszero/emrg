@@ -129,6 +129,7 @@ beforeEach(() => {
   currentMockWs = null;
 });
 afterEach(() => {
+  ConnManager.destroyAll(); // 清空泄漏实例（退避定时器 + 连接）——onRecovered flake 根因
   teardownTempHome();
   currentMockWs = null;
 });
@@ -520,4 +521,20 @@ test("P2 onRecovered 钩子: recoverAll 完成后触发（main.js 刷新 UI 状�
   await driver;
   assert.strictEqual(reopened, 1);
   assert.strictEqual(recovered, 1, "onRecovered must fire after recoverAll completes");
+});
+
+test("P6 destroy: 清空退避定时器 + 关闭全部连接（防 unref 定时器泄漏跨测试干扰）", async () => {
+  const manager = new ConnManager({ singleRetryDelayMs: 200 });
+  const s1 = await driveOpen(manager, "sess-1", "/proj/a");
+  const s2 = await driveOpen(manager, "sess-2", "/proj/b");
+  // 只断 s1（s2 仍连）→ 非重启 → 单连接退避，200ms 定时器 pending
+  s1.sessionWs.emit("close");
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(manager._singleRetries.size, 1, "backoff timer scheduled");
+  const before = currentMockWs; // s2.sessionWs（最后一个创建的 ws）
+  manager.destroy();
+  assert.strictEqual(manager._singleRetries.size, 0, "destroy clears backoff timers");
+  assert.deepStrictEqual(manager.all(), [], "destroy closes all conns");
+  await new Promise((r) => setTimeout(r, 250));
+  assert.strictEqual(currentMockWs, before, "no stray connection created after destroy");
 });
