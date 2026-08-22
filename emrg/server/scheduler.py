@@ -214,7 +214,8 @@ class TaskHandler:
         self.interval = interval
         self.identity = identity
         self._running = False
-        self._start_time: float | None = None
+        self._start_time: float | None = None  # handler start (template uptime)
+        self._cycle_start_time: float | None = None  # per-cycle start (rant 2026-08-22T07:18:35 elapsed display)
         self._trigger_event = asyncio.Event()
         self._cycle_running = False
         self._next_run_at: float | None = None
@@ -500,6 +501,7 @@ class TaskHandler:
 
             self._logger.debug("TaskHandler[%s] tick", self.name)
             self._cycle_running = True
+            self._cycle_start_time = time.time()  # per-cycle elapsed base (rant 2026-08-22T07:18:35)
             self._next_run_at = None  # running — no next time yet
             try:
                 await self._run_evolution_cycle()
@@ -509,6 +511,7 @@ class TaskHandler:
                 )
             finally:
                 self._cycle_running = False
+                self._cycle_start_time = None
                 self._trigger_event.clear()  # clear any spurious set during cycle
 
         await self._write_final_summary()
@@ -573,9 +576,16 @@ class TaskHandler:
             "heartbeat_interval": self._heartbeat_interval(),
             "heartbeat_active": self._slowdown_active,
         }
+        # rant 2026-08-22T07:18:35: expose the CURRENT cycle's start time so the
+        # GUI tasks panel can show "已运行 XXs" (elapsed, ticking up). Epoch
+        # seconds; valid only while running — None when idle/completed.
+        # (Uses _cycle_start_time — per-cycle base; _start_time is handler
+        # uptime and would report cumulative time across cycles.)
+        started_at = self._cycle_start_time if self._cycle_running else None
         return {
             "name": self.name,
             "running": self._cycle_running,
+            "started_at": started_at,
             "next_run_in_seconds": remaining,
             "interval": self.interval,
             "last_run_at": last_run_at,

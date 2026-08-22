@@ -553,6 +553,14 @@ def test_evolution_handler_status_last_run_fields():
     assert st["session_id"] == "emrg-evolution-test"
     assert st["project"] == ""  # config={} → empty project name
     assert st["project_path"] == "test"  # fallback path = name
+    # rant 2026-08-22T07:18:35: started_at = per-CYCLE start epoch (set at tick
+    # begin, cleared at cycle end), only valid while running; None when idle
+    assert st["started_at"] is None, "idle handler → started_at None"
+    handler._cycle_running = True
+    handler._cycle_start_time = 1_700_000_000.0
+    assert handler.status()["started_at"] == 1_700_000_000.0, "running → cycle start epoch"
+    handler._cycle_running = False
+    assert handler.status()["started_at"] is None, "completed → started_at None again"
     # after one evolution → last-run populated from the latest log
     handler.evolutions.append(EvolutionLog(
         timestamp="2026-08-18T10:00:00",

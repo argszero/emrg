@@ -431,6 +431,7 @@ const App = (() => {
     try {
       await Dialogs.loadTaskMeta();
       await Dialogs.renderTaskList();
+      Dialogs.startTaskPoll?.(); // rant 2026-08-22T07:18:35：面板激活 → 5s 状态轮询
     } catch (e) {
       Chat.addSystemMessage(_t("app.tasksFailed", { msg: e.message }));
     }
@@ -684,7 +685,11 @@ const App = (() => {
     if (!VIEWS.includes(name)) return;
     const isOpen = state.activeView === name;
     // rant 10:36:39：离开任务视图 → 停倒计时（防泄漏；重开由 renderTaskList 重新启动）
-    if (state.activeView === "tasks" && name !== "tasks") Dialogs.stopTaskCountdown?.();
+    // rant 2026-08-22T07:18:35：同时停 5s 状态轮询（与倒计时同生命周期防泄漏）
+    if (state.activeView === "tasks" && name !== "tasks") {
+      Dialogs.stopTaskCountdown?.();
+      Dialogs.stopTaskPoll?.();
+    }
     for (const p of VIEWS) {
       const btn = $(`nav-${p}`);
       if (btn) btn.classList.toggle("active", false);
@@ -707,7 +712,11 @@ const App = (() => {
     } else {
       // 点当前激活项（toggle 关闭）/ 点 💬 会话 → 回会话视图
       // rant 10:36:39：从任务面板 toggle 关闭同样要停倒计时（activeView 即将离开 tasks）
-      if (state.activeView === "tasks") Dialogs.stopTaskCountdown?.();
+      // rant 2026-08-22T07:18:35：同时停 5s 轮询
+      if (state.activeView === "tasks") {
+        Dialogs.stopTaskCountdown?.();
+        Dialogs.stopTaskPoll?.();
+      }
       showSessionsView();
     }
   }
