@@ -26,6 +26,11 @@
 const { DaemonClient } = require("./daemon_client.js");
 
 class ConnManager {
+  // 存活实例登记：destroyAll() 供测试 afterEach / 应用退出时统一清理
+  // （清空退避定时器 + 关闭全部连接），防止 unref 的退避定时器跨测试泄漏
+  // 干扰后续用例（conn-manager.test.js onRecovered 偶发 cancelledByParent 根因）。
+  static _instances = new Set();
+
   constructor({ logger = console, isPackaged = false, restartWindowMs = 1000, singleRetryDelayMs = 1000 } = {}) {
     this.logger = logger;
     this.isPackaged = isPackaged;
@@ -40,6 +45,7 @@ class ConnManager {
     this._recovering = false; // 恢复中守卫（防 close→disconnect→recoverAll 递归）
     this._singleRetryDelayMs = singleRetryDelayMs;
     this._singleRetries = new Map(); // sid -> timer（单连接独立退避在途）
+    ConnManager._instances.add(this);
   }
 
   // 确保 daemon 已运行（connManager = daemon 生命周期唯一 owner）。
@@ -141,6 +147,24 @@ class ConnManager {
       this._daemonConn.close();
       this._daemonConn = null;
     }
+  }
+
+  // destroy()：释放本实例全部资源——清空单连接退避定时器（防 unref 定时器
+  // 在实例生命周期结束后仍触发重连）、清断连记录、关闭全部连接、清空钩子。
+  // 供测试 afterEach / 应用退出（main.js）调用。
+  destroy() {
+    for (const t of this._singleRetries.values()) clearTimeout(t);
+    this._singleRetries.clear();
+    this._disconnects.clear();
+    this.closeAll();
+    this._openHooks.clear();
+    this._recoverHooks.clear();
+    ConnManager._instances.delete(this);
+  }
+
+  // 批量销毁所有存活实例（测试 teardown 用：无论用例如何退出都能兜底清理）。
+  static destroyAll() {
+    for (const m of [...ConnManager._instances]) m.destroy();
   }
 
   // 新会话连接建立钩子（main.js 挂 renderer 事件桥；recoverAll 重开路径同样触发）
