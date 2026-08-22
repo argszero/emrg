@@ -246,6 +246,14 @@ with open(rants_file, "w", encoding="utf-8") as f:
 - Use `json.dumps(..., ensure_ascii=False)`; no Chinese escaping
 - Each message notes the source (channel + link) so the evolution task can trace back
 
+**Also file a public GitHub issue on the promoted project** (rant 2026-08-22T08:14:31) — a rant is an internal queue (no issue number, not community-visible); a public issue is transparent, traceable, and lets the community participate. For **valuable feedback** (same table above — feature request / bug report / negative experience / new problem / inspiration):
+
+1. Open a public issue on the target repo: `gh issue create -R {{ owner }}/{{ repo }} --title "<English title>" --body "<feedback summary> (source: <channel> <link>)"` — English title/body (language policy), body includes the source link for traceability.
+2. On success → record the issue number + link in the state file (e.g. `- filed issues: <#N> (<summary>, <link>)`), and optionally reference that issue number in the rant entry to avoid the evolution task re-processing the same feedback.
+3. Reuse the existing value table for the bar; **do NOT file** for pure praise / unrelated / duplicate / low-information. Do not over-encourage the community: only nudge someone to file an issue themselves if **both** hold (per host 2026-08-22): (a) the discussion already explicitly referenced the promoted project, and (b) you judge them likely willing (engaged / interested / proactively asking). Otherwise **file it yourself** (the `gh issue create` path above) rather than nudging.
+4. If the target repo has issues disabled (some open-source projects), degrade to the rants.jsonl path only.
+5. The promotion task does not implement these — it only collects (rant + issue) and hands off, consistent with the existing rant handoff semantics.
+
 ---
 
 ### 4. State File

@@ -2081,6 +2081,17 @@ test("rant 22:04:02: highlight(sid, navEl) 列表作用域 — 只高亮指定�
   assert.strictEqual(els["open-sessions"].children[0].classList.contains("active"), true, "无 navEl 时 open-sessions 高亮");
 });
 
+test("rant 08:07:47: switchSession 从面板视图调用成功 → 切回会话视图", async () => {
+  const { ctx } = makeSandbox({ switchSession: async () => ({}) });
+  await tick();
+  // 模拟任务面板激活 → 点"打开会话" → switchSession
+  await vm.runInContext('App.state.sessionId = "sess-a"; App.state.sessions = [{ session_id: "sess-a" }]; App.switchView("tasks");', ctx);
+  assert.strictEqual(vm.runInContext("App.state.activeView", ctx), "tasks", "进入任务面板后 activeView=tasks");
+  await vm.runInContext('App.switchSession("sess-a");', ctx);
+  await tick();
+  assert.strictEqual(vm.runInContext("App.state.activeView", ctx), "sessions", "switchSession 成功后 activeView 切回 sessions（界面有响应）");
+});
+
 test("P4 s2: closeOpenSession 关闭激活会话 → 切到剩余打开会话 + 容器释放", async () => {
   let closed = null;
   const { ctx, els } = makeSandbox({
