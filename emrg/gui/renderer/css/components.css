@@ -659,6 +659,15 @@ dialog::backdrop {
 }
 
 /* 设置分组 */
+#settings-body-model .settings-group > label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);           /* 4px */
+  margin-bottom: var(--sp-2); /* 8px */
+}
+#settings-body-model .settings-group > label input {
+  width: 100%;
+}
 .settings-group {
   margin-bottom: var(--sp-4);
 }
