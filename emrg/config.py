@@ -35,6 +35,12 @@ class LlmConfig:
     # stream_options: None means don't send stream_options at all (for APIs like Kimi).
     # Default is {"include_usage": False} for OpenAI/DeepSeek compatibility.
     stream_options: Optional[dict] = field(default_factory=lambda: {"include_usage": False})
+    # context_refresh_interval_ms: minimum interval (ms) between dynamic-context
+    # (current time) user-message injections into a tool loop. 0 = inject every
+    # request (fresh time, always model-aware). >0 (e.g. 60000) = skip
+    # re-injection within the window — the system prompt prefix stays
+    # byte-stable for prompt caching (rant 2026-08-23T13:54:14).
+    context_refresh_interval_ms: int = 0
 
 
 @dataclass
@@ -105,6 +111,7 @@ def load_config() -> EmrgConfig:
         models=llm_data.get("models", []),
         vision=llm_data.get("vision", False),
         stream_options=stream_opts,
+        context_refresh_interval_ms=llm_data.get("context_refresh_interval_ms", 0),
     )
 
     # Resolve ${ENV_VAR} placeholders in the API key

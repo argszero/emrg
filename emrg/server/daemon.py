@@ -237,6 +237,15 @@ class EmrgServer:
         # 有差异 = 已装新版本但 daemon 未重启 → 弹"重启生效"横幅。
         self._run_version = self._current_installed_version()
         self._max_tool_rounds = llm_config.max_tool_rounds
+        # Rant 2026-08-23T13:28:50: auto-compact usage anchoring —
+        # session_id → (last_real_prompt_tokens, last_local_estimate). The
+        # projected occupancy = real anchor + estimate delta, so systematic
+        # estimator undercount (CJK/JSON) never accumulates.
+        self._usage_anchors: dict[str, tuple[int, int]] = {}
+        # Rant 2026-08-23T13:54:14: per-session dynamic-context snapshot
+        # (session_id → (text, injected_ms)) so unchanged context is not
+        # re-sent (context_refresh_interval_ms gating).
+        self._context_snapshots: dict[str, tuple[str, float]] = {}
         self._projects_log = runtime_dir / "projects.yml"
         self._rants_log = runtime_dir / "rants.jsonl"
 
@@ -1281,7 +1290,11 @@ class EmrgServer:
         ctx: dict[str, Any] = {}
 
         # ── Environment ──
-        ctx["current_time"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        # Rant 2026-08-23T13:54:14: current_time was rendered into the system
+        # prefix — it changed every request, invalidating the prompt-cache
+        # prefix (each request's round 1 was a full miss). Time is now injected
+        # as a trailing user message in the tool loop instead; the prefix stays
+        # byte-stable within a session (system prompt = static sections only).
         ctx["os_name"] = platform.system()
         ctx["platform_detail"] = platform.platform()
         # Global config dir (~/.emrg) — injected so system.j2 can reference the
@@ -2271,6 +2284,10 @@ class EmrgServer:
             *history_messages,
             {"role": "user", "content": user_content},
         ]
+        # Rant 2026-08-23T13:54:14: dynamic context (current time) is injected
+        # as a trailing user message, NOT rendered into the system prefix —
+        # the prefix stays byte-stable so the prompt cache hits on round 1.
+        self._inject_context_message(session, messages)
         tools_base = self.tools.to_openai_tools() if allow_tools else []
         # P1 (rant 21:55:37): injection rounds do NOT consume the round budget;
         # force_ask latches "an Ask message was injected outside the round-top
@@ -2331,14 +2348,28 @@ class EmrgServer:
             # Auto-compact: if token count exceeds threshold, compact before this round
             if self.llm.config.auto_compact_threshold > 0.0:
                 estimated = self._estimate_tokens(messages)
+                # Rant 2026-08-23T13:28:50: usage-anchored projection —
+                # last real prompt_tokens from the API + only the estimate
+                # delta since then. The local estimator systematically
+                # undercounts CJK/JSON (148K est vs 222K real observed), so a
+                # pure estimate drifts and auto-compact never fires. Anchoring
+                # keeps the error in the delta only.
+                anchor = self._usage_anchors.get(session.session_id)
+                if anchor is not None and estimated >= anchor[1]:
+                    projected = anchor[0] + (estimated - anchor[1])
+                else:
+                    # No anchor yet (first round) or surface shrank below the
+                    # anchor baseline (post-compact): fall back to the plain
+                    # estimate — the anchor baseline is stale in that case.
+                    projected = estimated
                 trigger_at = int(
                     self.llm.config.context_window
                     * self.llm.config.auto_compact_threshold
                 )
-                if estimated > trigger_at:
+                if projected > trigger_at:
                     logger.info(
-                        "auto-compact triggered: ~%d tokens > %d (threshold=%.0f%%)",
-                        estimated, trigger_at,
+                        "auto-compact triggered: ~%d tokens (est=%d, anchor=%s) > %d (threshold=%.0f%%)",
+                        projected, estimated, anchor, trigger_at,
                         self.llm.config.auto_compact_threshold * 100,
                     )
                     # Notify client (broadcast to all session subscribers)
@@ -2346,7 +2377,7 @@ class EmrgServer:
                         "type": "compact_result",
                         "session_id": session.session_id,
                         "messages_compacted": 0,
-                        "summary": f"Auto-compacting... (context ~{estimated} tokens, threshold {trigger_at})",
+                        "summary": f"Auto-compacting... (context ~{projected} tokens, threshold {trigger_at})",
                         "auto": True,
                     })
                     try:
@@ -2364,6 +2395,10 @@ class EmrgServer:
                                 raise
                         count = session.compact(summary, keep_recent=5)
                         logger.info("auto-compact done: %d messages compacted", count)
+                        # Surface shrank below the anchor baseline — drop the
+                        # stale usage anchor so the next round re-anchors from
+                        # a fresh estimate (rant 2026-08-23T13:28:50).
+                        self._usage_anchors.pop(session.session_id, None)
                         await self._broadcast(session.session_id, {
                             "type": "compact_result",
                             "session_id": session.session_id,
@@ -2378,6 +2413,7 @@ class EmrgServer:
                             *history_messages,
                             {"role": "user", "content": req.prompt},
                         ]
+                        self._inject_context_message(session, messages)
                     except Exception:
                         logger.exception("auto-compact failed")
 
@@ -2448,6 +2484,18 @@ class EmrgServer:
                     "request_id": req.id,
                 })
                 return
+
+            # Rant 2026-08-23T13:28:50: refresh the usage anchor from the
+            # provider's real prompt_tokens + the local estimate of exactly
+            # what was sent (messages is still the sent set here — assistant
+            # reply / tool results are appended below). The next round's
+            # auto-compact projection uses this as its base.
+            if final_usage:
+                pt = final_usage.get("prompt_tokens")
+                if pt:
+                    self._usage_anchors[session.session_id] = (
+                        pt, self._estimate_tokens(messages)
+                    )
 
             full_content = "".join(content_parts)
             # llm.py yields the ACCUMULATED reasoning snapshot on every chunk
@@ -2755,6 +2803,39 @@ class EmrgServer:
         return f", cache {pct}%"
 
     # ── Token estimation helpers ──────────────────────────────
+
+    def _build_context_message(self, session: Session) -> dict | None:
+        """Return a user-role context message carrying the current time.
+
+        Rant 2026-08-23T13:54:14: the system prompt prefix must stay
+        byte-stable for prompt caching (current_time used to be rendered into
+        it — every request invalidated the whole prefix, round 1 always a full
+        miss). Dynamic context now lives as a trailing user message injected
+        before the user's prompt. The snapshot text is frozen for
+        ``context_refresh_interval_ms`` (0 = always fresh), so consecutive
+        requests within the window send byte-identical context and the
+        prefix stays cached; after the window the time refreshes.
+        """
+        interval_ms = getattr(self.llm.config, "context_refresh_interval_ms", 0)
+        now = datetime.now().astimezone()
+        text = f"[context] Current time: {now.isoformat(timespec='seconds')}"
+        last = self._context_snapshots.get(session.session_id)
+        if last is not None and interval_ms > 0:
+            last_text, last_ts = last
+            if (time.time() * 1000 - last_ts) < interval_ms:
+                text = last_text  # within refresh window — keep frozen snapshot
+        self._context_snapshots[session.session_id] = (text, time.time() * 1000)
+        return {"role": "user", "content": text}
+
+    def _inject_context_message(self, session: Session, messages: list[dict]) -> None:
+        """Insert the dynamic-context message before the user prompt.
+
+        Keeps the final user turn as the actual instruction while the context
+        (time snapshot) rides in the message stream right after history.
+        """
+        ctx = self._build_context_message(session)
+        if ctx is not None:
+            messages.insert(-1, ctx)
 
     @staticmethod
     def _count_chars_for_tokens(text: str) -> int:

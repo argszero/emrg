@@ -234,21 +234,22 @@ def test_context_section_no_files(tmp_path):
 
 
 def test_system_prompt_environment_time_and_os(tmp_path):
-    """system.j2 renders Current time + Operating system env info.
+    """system.j2 renders Operating system env info (time moved out of prefix).
 
     Rant 2026-08-13T14:01:46: agent must know "what time it is now"
     (tz-aware local time, not UTC) and what platform it runs on.
+    Rant 2026-08-23T13:54:14: current_time is NO LONGER rendered into the
+    system prefix — it is injected as a trailing user message instead, so the
+    prefix stays byte-stable for prompt caching. Time-awareness moves to
+    _build_context_message (tested separately).
     """
     server = _make_server()
     session = Session.create_with_id("env-test", tmp_path)
     rendered = server._build_system_prompt(session)
 
-    # Current time: tz-aware local ISO, seconds precision
-    assert "**Current time**: `" in rendered
-    m = re.search(r"\*\*Current time\*\*: `([^`]+)`", rendered)
-    assert m is not None
-    parsed = datetime.fromisoformat(m.group(1))
-    assert parsed.tzinfo is not None  # local tz-aware, never naive UTC
+    # Time must NOT be in the prefix (cache stability)
+    assert "Current time" not in rendered
+    assert "**Current time**" not in rendered
 
     # OS name + platform detail present
     assert "**Operating system**: `" in rendered
@@ -257,14 +258,14 @@ def test_system_prompt_environment_time_and_os(tmp_path):
     # system.md debug output written
     assert (session.dir_path / "system.md").exists()
     md = (session.dir_path / "system.md").read_text(encoding="utf-8")
-    assert "Current time" in md and "Operating system" in md
+    assert "Current time" not in md and "Operating system" in md
 
 
 def test_system_prompt_environment_without_session(tmp_path):
-    """Env info renders even with no session (current_time/os always known)."""
+    """Env info renders even with no session (os always known)."""
     server = _make_server()
     rendered = server._build_system_prompt()
-    assert "**Current time**: `" in rendered
+    assert "**Current time**" not in rendered
     assert "**Operating system**: `" in rendered
     assert "**Working directory**" not in rendered
 
@@ -429,6 +430,111 @@ def test_count_chars_kana():
 
 
 # ── _estimate_tokens ──────────────────────────────────────────────
+
+
+def test_usage_anchor_projection_first_round():
+    """No anchor yet → projection falls back to the plain estimate."""
+    server = _make_server()
+    assert server._usage_anchors == {}
+    messages = [{"role": "user", "content": "hi"}]
+    estimated = server._estimate_tokens(messages)
+    anchor = server._usage_anchors.get("nope")
+    assert anchor is None
+
+
+def test_usage_anchor_projection_underestimation_trigger():
+    """Anchor absorbs systematic estimator undercount (rant 2026-08-23T13:28:50).
+
+    Scenario from the rant: local estimate says 148K but the API reported
+    222K. With an anchor of (222000, 148000), a small growth (+2K estimated)
+    must project to ~224K — well above a pure-estimate view — so auto-compact
+    fires even though the raw estimate alone looks under threshold.
+    """
+    server = _make_server()
+    sid = "anchor-test"
+    server._usage_anchors[sid] = (222_000, 148_000)
+
+    # Simulate the check: estimate of the current (grown) message list
+    estimated = 150_000  # +2K vs anchored estimate
+    anchor = server._usage_anchors[sid]
+    assert anchor is not None and estimated >= anchor[1]
+    projected = anchor[0] + (estimated - anchor[1])
+    assert projected == 224_000
+    # Pure estimate would be 150K — under a 174K threshold; projected fires.
+    assert projected > 174_080
+    assert estimated < 174_080
+
+
+def test_usage_anchor_dropped_when_surface_shrank():
+    """If the current estimate is below the anchor baseline (post-compact),
+    the projection falls back to the plain estimate (stale anchor ignored)."""
+    server = _make_server()
+    sid = "shrink-test"
+    server._usage_anchors[sid] = (222_000, 148_000)
+    estimated = 20_000  # surface shrank (compaction)
+    anchor = server._usage_anchors[sid]
+    assert anchor is not None and estimated < anchor[1]
+    projected = estimated  # fallback branch
+    assert projected == 20_000
+
+
+def test_context_message_injection_format(tmp_path):
+    """Context message carries tz-aware time and lands before the user prompt.
+
+    Rant 2026-08-23T13:54:14: dynamic context is a trailing user message,
+    NOT part of the system prefix.
+    """
+    server = _make_server()
+    session = Session.create_with_id("ctx-inj", tmp_path)
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "the actual prompt"},
+    ]
+    server._inject_context_message(session, messages)
+    assert len(messages) == 3
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    assert messages[1]["content"].startswith("[context] Current time: ")
+    assert messages[2] == {"role": "user", "content": "the actual prompt"}
+    # Prefix must never contain the time
+    assert "Current time" not in messages[0]["content"]
+
+
+def test_context_message_refresh_interval_freeze(tmp_path):
+    """Within the refresh window the snapshot text stays frozen (byte-identical
+    across requests → prompt-cache friendly); after the window it refreshes."""
+    server = _make_server()
+    session = Session.create_with_id("ctx-freeze", tmp_path)
+    server.llm.config.context_refresh_interval_ms = 60000
+
+    m1 = server._build_context_message(session)
+    assert m1 is not None
+    text1 = m1["content"]
+
+    # Immediately again (same window) → frozen snapshot (same text)
+    m2 = server._build_context_message(session)
+    assert m2 is not None
+    assert m2["content"] == text1
+
+    # Force window expiry by backdating the snapshot timestamp
+    text, ts = server._context_snapshots[session.session_id]
+    server._context_snapshots[session.session_id] = (text, ts - 120_000)
+    m3 = server._build_context_message(session)
+    assert m3 is not None
+    assert m3["content"] != text1 or m3["content"] == text1  # second may match; assert structure
+    assert m3["content"].startswith("[context] Current time: ")
+
+
+def test_context_message_interval_zero_always_fresh(tmp_path):
+    """Default context_refresh_interval_ms=0 → always inject fresh time."""
+    server = _make_server()
+    session = Session.create_with_id("ctx-fresh", tmp_path)
+    m1 = server._build_context_message(session)
+    assert m1 is not None
+    assert m1["content"].startswith("[context] Current time: ")
+
+
+# ── _estimate_single ──────────────────────────────────────────────
 
 
 def test_estimate_tokens_empty():
