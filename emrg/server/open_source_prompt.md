@@ -485,6 +485,7 @@ At the end of every cycle:
 
 1. **Update the state file** `{{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md`
 2. **Record key findings** in `{{ evolution_cwd }}/memory/` (if there are important lessons or insights)
+   - ⚡ **Memory hygiene** (rant 2026-08-23T08:04:26): keep MEMORY.md a **pure index** — one short line per entry (title ≤512 chars, never duplicated content), update entries in place; if the index exceeds ~50 entries, merge/consolidate instead of appending.
 3. **The state file itself does not need git commits** (it's a local work record, lives in EMRG's evolution directory)
 
 ---

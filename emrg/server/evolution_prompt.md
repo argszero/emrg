@@ -378,6 +378,7 @@ Create a **cycle memory entry** (rant 2026-08-12T18:03:26 — no more standalone
   - `type: task`, `scope: project`, `status: active` (cycle in progress) or `completed` (final)
 - Body: findings, changes, verification results, expected effects (same content as before, just a memory file)
 - Update the `MEMORY.md` index in the same directory (add one row, id linked to the filename) — this is the **single index** for cycle records
+- ⚡ **Index-line norm** (rant 2026-08-23T08:04:26): each MEMORY.md index line is a **short one-line summary** (title ≤512 chars, single line) — never duplicated content. Update entries in place rather than appending when a record refines a previous one. If the index exceeds ~50 entries, consolidate (merge/archive) instead of growing it.
 - Keep the file format identical to other memory entries (frontmatter + Markdown body)
 
 > Transition note: legacy `evolution-cycle-*.md` files remain in place (readable, never deleted); only new records use the memory entry path.

@@ -44,7 +44,12 @@ from emrg.server.git_utils import (
     resolve_git_gh,
 )
 from emrg.server.tool_types import ToolResult
-from emrg.memory import ProjectMemoryStore, SessionMemoryStore
+from emrg.memory import (
+    INDEX_COUNT_WARN,
+    INDEX_SIZE_WARN,
+    ProjectMemoryStore,
+    SessionMemoryStore,
+)
 from emrg.protocol import (
     EvolutionLog,
     InstanceIdentity,
@@ -3547,6 +3552,30 @@ class EmrgServer:
                     for m in existing
                 ) if existing else "(none yet)"
 
+                # Rant 2026-08-23T08:04:26 — index governance: when the session
+                # index crosses soft thresholds, steer the reflection LLM toward
+                # consolidation instead of append-only growth.
+                hygiene_note = ""
+                try:
+                    index_size = (
+                        store.index_path.stat().st_size
+                        if store.index_path.exists() else 0
+                    )
+                except OSError:
+                    index_size = 0
+                if store.count > INDEX_COUNT_WARN or index_size > INDEX_SIZE_WARN:
+                    hygiene_note = (
+                        f"\n## ⚠️ Memory hygiene (index: {store.count} entries, "
+                        f"{index_size} bytes)\n"
+                        "- MEMORY.md must stay a **pure index**: one short line per "
+                        "entry (title ≤512 chars), never duplicated content.\n"
+                        "- Prefer **updating existing entries in place** over creating "
+                        "new ones when the new info refines an existing memory.\n"
+                        "- If the index has grown past ~50 entries, consolidate: merge "
+                        "redundant memories (mark old files `status: superseded` or "
+                        "`merged`) and keep only the most relevant entries in the index.\n"
+                    )
+
                 prompt = (
                     "You are the memory reflection module of EMRG. "
                     "Review the following exchange and decide if anything "
@@ -3569,6 +3598,9 @@ class EmrgServer:
                     "- If nothing worth remembering happened, just reply 'no new memories' briefly\n"
                     "- Prefer session-scope for tentative/evolving knowledge; "
                     "project-scope for stable, cross-session facts\n"
+                    "- Keep MEMORY.md a pure index: one short line per entry "
+                    "(title ≤512 chars); update entries in place rather than appending\n"
+                    f"{hygiene_note}"
                     "\n"
                     "Memory format (YAML frontmatter + Markdown):\n"
                     "```\n"
@@ -3715,7 +3747,12 @@ class EmrgServer:
                 f"(`{cwd}/.emrg/memory/`), update `scope` to `project`, and update "
                 "both MEMORY.md indexes\n"
                 "3. **Clean**: mark completed tasks as `status: superseded`\n"
-                "4. **Skip**: if everything looks fine, just reply 'no consolidation needed'\n"
+                "4. **Index cap** (rant 2026-08-23T08:04:26): the MEMORY.md index must "
+                "converge to **≤50 entries** — merge/archive redundant memories and keep "
+                "the index a pure index (one short line per entry, title ≤512 chars). "
+                "Detail .md files are the source of truth and may exceed 50; only the "
+                "index needs trimming.\n"
+                "5. **Skip**: if everything looks fine, just reply 'no consolidation needed'\n"
                 "\n"
                 f"Use the read/edit/write tools to make these changes. "
                 f"Session memory dir: `{store.directory}/` "
