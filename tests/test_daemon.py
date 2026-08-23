@@ -334,6 +334,59 @@ def test_context_section_manifesto(tmp_path):
     assert "Keep it simple" in result[0]["content"]
 
 
+# ── _cap_memory_index / _collect_memory_data ──────────────────────
+
+
+def test_cap_memory_index_small_file(tmp_path):
+    """Index under the 50KB cap is embedded as-is."""
+    server = _make_server()
+    idx = tmp_path / "MEMORY.md"
+    idx.write_text("- [row](cycle-1.md) — title\n" * 50)  # well under 50KB
+    assert server._cap_memory_index(idx) == idx.read_text(encoding="utf-8")
+
+
+def test_cap_memory_index_large_file(tmp_path):
+    """Index over 50KB is truncated at a line boundary with a notice.
+
+    Rant 2026-08-23T11:00:31: evolution agents append MEMORY.md rows
+    directly (bypassing memory_store's write-time guards), so the embedded
+    index must be capped at render time — defense in depth.
+    """
+    server = _make_server()
+    idx = tmp_path / "MEMORY.md"
+    line = "- [cyc00000000-000000](cycle-20260823-000000.md) — " + "x" * 100 + "\n"
+    idx.write_text(line * 600)  # ~64KB > 50KB cap
+    capped = server._cap_memory_index(idx)
+    assert len(capped) <= 50 * 1024 + 200  # head + notice
+    assert "truncated" in capped
+    assert "cycle-archive" in capped
+    # truncation lands on a line boundary (no half-cut index row)
+    last_line = capped.rsplit("\n", 1)[1]
+    assert last_line.startswith("… [truncated")
+
+
+def test_collect_memory_data_caps_index(tmp_path):
+    """_collect_memory_data embeds a capped index (never the raw giant)."""
+    server = _make_server()
+    (tmp_path / ".emrg" / "memory").mkdir(parents=True)
+    idx = tmp_path / ".emrg" / "memory" / "MEMORY.md"
+    line = "- [cyc00000000-000000](cycle-20260823-000000.md) — " + "y" * 100 + "\n"
+    idx.write_text(line * 600)  # ~64KB
+    session = Session.create_with_id("mem-cap", tmp_path)
+    data = server._collect_memory_data(session)
+    assert data["has_memories"] is True
+    assert data["project_memory_index_path"] == str(idx)
+    assert "truncated" in data["project_memory_index"]
+    assert len(data["project_memory_index"]) <= 50 * 1024 + 200
+
+
+def test_collect_memory_data_no_index(tmp_path):
+    """No MEMORY.md files → has_memories stays False."""
+    server = _make_server()
+    session = Session.create_with_id("mem-none", tmp_path)
+    assert server._collect_memory_data(session) is None
+
+
 # ── _count_chars_for_tokens ───────────────────────────────────────
 
 
