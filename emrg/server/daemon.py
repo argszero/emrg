@@ -1348,6 +1348,31 @@ class EmrgServer:
 
         return found
 
+    def _cap_memory_index(self, path) -> str:
+        """Cap a MEMORY.md embedded into the system prompt (defense in depth).
+
+        Rant 2026-08-23T11:00:31: #941's write-time guards only fire on
+        memory_store API writes, but agents append MEMORY.md rows directly
+        (evolution_prompt §6) and bypass them — the index once reached
+        787KB/2931 lines = 77% of a 452,972-char prompt (~250K all-miss
+        tokens per request). Cap what gets embedded; the full index and
+        cycle-archive-*.md stay readable on disk via the read tool.
+        """
+        limit = 50 * 1024  # match memory.INDEX_SIZE_WARN (50KB)
+        text = path.read_text(encoding="utf-8")
+        if len(text) <= limit:
+            return text
+        cut = text.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        head = text[:cut]
+        over = len(text) - len(head)
+        return head + (
+            f"\n… [truncated {over} chars — MEMORY.md exceeds the 50KB embed "
+            "cap; older cycle rows live in cycle-archive-*.md, readable via "
+            "the read tool]"
+        )
+
     def _collect_memory_data(self, session: Session) -> dict[str, Any] | None:
         """Read memory indexes, return structured data for template."""
         data: dict[str, Any] = {"has_memories": False}
@@ -1355,7 +1380,7 @@ class EmrgServer:
         project_dir = session.cwd / ".emrg" / "memory"
         pindex_path = project_dir / "MEMORY.md"
         if pindex_path.exists():
-            data["project_memory_index"] = pindex_path.read_text(encoding="utf-8")
+            data["project_memory_index"] = self._cap_memory_index(pindex_path)
             data["project_memory_dir"] = str(project_dir)
             data["project_memory_index_path"] = str(pindex_path)
             data["has_memories"] = True
@@ -1363,7 +1388,7 @@ class EmrgServer:
         smem_dir = session.memory_dir
         sindex_path = smem_dir / "MEMORY.md"
         if sindex_path.exists():
-            data["session_memory_index"] = sindex_path.read_text(encoding="utf-8")
+            data["session_memory_index"] = self._cap_memory_index(sindex_path)
             data["session_memory_dir"] = str(smem_dir)
             data["session_memory_index_path"] = str(sindex_path)
             data["has_memories"] = True

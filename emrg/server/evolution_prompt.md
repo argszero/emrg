@@ -378,7 +378,11 @@ Create a **cycle memory entry** (rant 2026-08-12T18:03:26 — no more standalone
   - `type: task`, `scope: project`, `status: active` (cycle in progress) or `completed` (final)
 - Body: findings, changes, verification results, expected effects (same content as before, just a memory file)
 - Update the `MEMORY.md` index in the same directory (add one row, id linked to the filename) — this is the **single index** for cycle records
-- ⚡ **Index-line norm** (rant 2026-08-23T08:04:26): each MEMORY.md index line is a **short one-line summary** (title ≤512 chars, single line) — never duplicated content. Update entries in place rather than appending when a record refines a previous one. If the index exceeds ~50 entries, consolidate (merge/archive) instead of growing it.
+- ⚡ **Index hygiene protocol** (rants 2026-08-23T08:04:26 + 11:00:31 — the daemon embeds MEMORY.md into the system prompt raw, and evolution's direct file writes bypass memory_store's guards; an unbounded index once reached 787KB/2931 lines = 77% of a 452,972-char prompt, ~250K all-miss tokens per request). Apply to **every MEMORY.md you maintain** (evolution-level, source-project-level, session-level). Rules:
+  - **Title-only rows**: each index row is a **one-line summary ≤512 chars** (id linked to the filename). **Never embed a cycle's summary/NTE text into the index row** — that text lives in the `cycle-<ts>.md` detail file only.
+  - **Hard cap: keep at most the 50 most recent cycle rows** in each MEMORY.md. Before adding a row that would exceed 50: append the oldest cycle rows to `cycle-archive-YYYYMMDD.md` **in the same directory** (create-if-missing, append-only, never rewrite or dedupe), then remove those rows from MEMORY.md. **Detail files (`cycle-*.md`) are never deleted** — only index rows move.
+  - **Archive files are excluded from the system prompt** (the daemon embeds only `MEMORY.md`): never reference `cycle-archive-*.md` in MEMORY.md rows, never re-add archived rows to the index, never paste archive content into MEMORY.md or the prompt. Archived rows stay readable via the `read` tool.
+  - **Row-cap check**: if a MEMORY.md already exceeds 50 cycle rows (e.g. after a missed cleanup), archive down to the latest 50 this cycle before adding the new row.
 - Keep the file format identical to other memory entries (frontmatter + Markdown body)
 
 > Transition note: legacy `evolution-cycle-*.md` files remain in place (readable, never deleted); only new records use the memory entry path.
