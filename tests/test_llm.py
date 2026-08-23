@@ -531,3 +531,45 @@ def test_stream_usage_reasoning_tokens_top_level_and_nested(monkeypatch, client)
     client._client = fake3
     chunks3 = _collect_chunks(client)
     assert chunks3[-1]["usage"] is None
+
+
+def test_stream_usage_cache_hit_tokens_top_level_and_nested(monkeypatch, client):
+    """usage.cache_hit_tokens is captured from the top level (DeepSeek native
+    prompt_cache_hit_tokens) AND from the prompt_tokens_details nesting
+    (OpenAI-compatible cached_tokens). Non-cache endpoints keep the exact
+    same record shape (rant 2026-08-23T09:17:14)."""
+    _patch_fast_sleep(monkeypatch)
+
+    # top-level prompt_cache_hit_tokens (DeepSeek native)
+    fake = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"content": "x"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 100, "completion_tokens": 20,
+                   "prompt_cache_hit_tokens": 70}},
+    )])
+    client._client = fake
+    chunks = _collect_chunks(client)
+    assert chunks[-1]["usage"]["cache_hit_tokens"] == 70
+    assert chunks[-1]["usage"]["prompt_tokens"] == 100  # unchanged
+
+    # nested under prompt_tokens_details.cached_tokens (OpenAI compatible)
+    fake2 = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"content": "x"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 50, "completion_tokens": 5,
+                   "prompt_tokens_details": {"cached_tokens": 30}}},
+    )])
+    client._client = fake2
+    chunks2 = _collect_chunks(client)
+    assert chunks2[-1]["usage"]["cache_hit_tokens"] == 30
+
+    # no cache fields reported → record shape unchanged (no new field)
+    fake3 = _FakeStreamClient([_make_stream(
+        {"choices": [{"delta": {"content": "hi"}}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 10, "completion_tokens": 2}},
+    )])
+    client._client = fake3
+    chunks3 = _collect_chunks(client)
+    assert "cache_hit_tokens" not in chunks3[-1]["usage"]
+    assert chunks3[-1]["usage"]["prompt_tokens"] == 10

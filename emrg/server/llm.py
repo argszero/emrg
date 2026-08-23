@@ -218,7 +218,8 @@ class LlmClient:
         ``reasoning`` (rant 2026-08-18T09:43:23) carries the accumulated
         think/chain-of-thought text (``reasoning_content`` / ``reasoning``
         deltas) or None when the model does not reason. Usage may include
-        ``reasoning_tokens`` when the API reports it.
+        ``reasoning_tokens`` when the API reports it, and ``cache_hit_tokens``
+        when the API reports prompt caching (rant 2026-08-23T09:17:14).
 
         The final yield includes usage (prompt_tokens, completion_tokens)
         when the API provides it.
@@ -351,16 +352,33 @@ class LlmClient:
                         else (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
                         if usage else None
                     )
+                    # cache_hit_tokens: DeepSeek native `prompt_cache_hit_tokens`
+                    # (top level) or OpenAI-compatible `prompt_tokens_details.cached_tokens`
+                    # (nested) — same dual-location pattern as reasoning_tokens
+                    # (rant 2026-08-23T09:17:14, LLM usage cache hit/miss visibility).
+                    # Omitted when the API does not report caching, so non-cache
+                    # endpoints keep the exact same record shape (no new fields).
+                    cache_hit_tokens = (
+                        usage.get("prompt_cache_hit_tokens")
+                        if usage and usage.get("prompt_cache_hit_tokens") is not None
+                        else (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+                        if usage else None
+                    )
+                    usage_out: dict | None = None
+                    if usage:
+                        usage_out = {
+                            "prompt_tokens": usage.get("prompt_tokens"),
+                            "completion_tokens": usage.get("completion_tokens"),
+                            "reasoning_tokens": reasoning_tokens,
+                        }
+                        if cache_hit_tokens is not None:
+                            usage_out["cache_hit_tokens"] = cache_hit_tokens
 
                     yield {
                         "content": text_content or None,
                         "tool_calls": current_tool_calls,
                         "finish_reason": finish,
-                        "usage": {
-                            "prompt_tokens": usage.get("prompt_tokens"),
-                            "completion_tokens": usage.get("completion_tokens"),
-                            "reasoning_tokens": reasoning_tokens,
-                        } if usage else None,
+                        "usage": usage_out,
                         # accumulated think text; None when the model does not
                         # reason (rant 2026-08-18T09:43:23 — only on response side)
                         "reasoning": "".join(reasoning_parts) or None,
