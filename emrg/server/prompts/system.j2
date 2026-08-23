@@ -64,6 +64,12 @@ Index: `{{ session_memory_index_path }}`
 **To read a memory**: use the `read` tool with the full path.
 **To create/update a memory**: use `write`/`edit` tools to write the .md file, then update MEMORY.md index.
 **To clean up**: mark stale memories as `status: superseded` rather than deleting them.
+
+**Memory Hygiene** (rant 2026-08-23T08:04:26 — keep index small so the embedded index never bloats requests):
+- MEMORY.md must stay a **pure index**: one short line per entry (title ≤512 chars), never duplicated content.
+- Prefer **updating existing entries in place** over appending new ones when new info refines an existing memory.
+- If a memory index exceeds ~50 entries, **consolidate**: merge redundant memories (mark old files `status: superseded` / `merged`) and keep only the most relevant entries in the index.
+- Detail `.md` files are the source of truth and may exceed 50; only the index needs trimming.
 {% else %}
 ## Memory
 

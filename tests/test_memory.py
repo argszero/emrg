@@ -161,6 +161,42 @@ class TestMemoryIndex:
         assert idx.entries[1].type == "decision"
         assert idx.entries[1].status == "superseded"
 
+    def test_add_entry_truncates_long_title(self):
+        """Rant 2026-08-23T08:04:26 — write-time truncation keeps the stored
+        index title bounded so MEMORY.md lines can't bloat the system prompt."""
+        idx = MemoryIndex()
+        long_title = "决策" + "x" * 600
+        mem = MemoryFile(
+            id="abc123",
+            type="task",
+            title=long_title,
+            created_at="2026-07-14T15:30:42Z",
+        )
+        idx.add_entry(mem)
+        entry = idx.entries[0]
+        assert len(entry.title) <= 512
+        assert entry.title.endswith("…")
+        # Filename (reachable detail file) is preserved un-truncated
+        assert entry.filename == mem.filename
+
+    def test_to_markdown_truncates_legacy_long_line(self):
+        """Rant 2026-08-23T08:04:26 — render-time fallback for legacy dirty
+        index data written before write-time truncation existed."""
+        long_title = "旧记录" + "y" * 700
+        text = (
+            "# Memory Index\n\n"
+            f"## task\n"
+            f"- [{long_title}](task-long.md) — rec: 2026-07-14, evt: 2026-07-10\n"
+        )
+        idx = MemoryIndex.from_text(text)
+        md = idx.to_markdown()
+        # Every rendered index line stays bounded…
+        for line in md.splitlines():
+            if line.startswith("- ["):
+                assert len(line) <= 512, f"line too long ({len(line)}): {line[:80]}…"
+        # …and the detail filename stays reachable.
+        assert "task-long.md" in md
+
 
 class TestProjectMemoryStore:
     def test_create_creates_file_and_index(self, project_store):
@@ -232,6 +268,35 @@ class TestSessionMemoryStore:
         # Original is merged
         original = session_store.get(mem.id)
         assert original.status == "merged"
+
+    def test_session_index_soft_guard_silent_below_threshold(
+        self, session_store, caplog
+    ):
+        """Rant 2026-08-23T08:04:26 — no warning below the soft thresholds."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="emrg.memory"):
+            for i in range(5):
+                session_store.create("task", f"T{i}", "body")
+        assert not any(
+            "consolidation recommended" in r.message for r in caplog.records
+        )
+
+    def test_session_index_soft_guard_warns_at_threshold(
+        self, session_store, caplog
+    ):
+        """Rant 2026-08-23T08:04:26 — soft guard warns (never deletes) when the
+        session index crosses the count threshold."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="emrg.memory"):
+            for i in range(101):
+                session_store.create("task", f"T{i}", "body")
+        assert any(
+            "consolidation recommended" in r.message for r in caplog.records
+        )
+        # Guard is non-destructive: no memory file was removed.
+        assert len(session_store.list()) == 101
 
 
 class TestMemoryIndexFileRoundtrip:

@@ -63,11 +63,33 @@ def _short_date(iso_str: str) -> str:
     return iso_str[:10]
 
 
+def _truncate_index_title(title: str, max_len: int | None = None) -> str:
+    """Truncate an index title to keep MEMORY.md lines bounded.
+
+    The filename (detail file path) is rendered separately in the index line,
+    so the full content stays reachable via ``read`` even after truncation.
+    """
+    if max_len is None:
+        max_len = INDEX_TITLE_MAX_CHARS
+    if len(title) <= max_len:
+        return title
+    return title[: max_len - 1] + "…"
+
+
 # ── Constants ──────────────────────────────────────────────────────
 
 VALID_TYPES = {"user", "feedback", "project", "reference", "decision", "task"}
 VALID_SCOPES = {"session", "project"}
 VALID_STATUSES = {"active", "superseded", "merged"}
+
+# Rant 2026-08-23T08:04:26 — memory index governance: keep MEMORY.md lines
+# bounded so the embedded index can't bloat the system prompt (413 / cost /
+# cache invalidation). Write-time truncation is primary; render-time
+# truncation is a fallback for legacy dirty data. Consolidation is
+# LLM-driven; these are soft guards (warn/truncate, never auto-delete).
+INDEX_TITLE_MAX_CHARS = 512  # max chars for one index title / line
+INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
+INDEX_SIZE_WARN = 50 * 1024  # >50KB MEMORY.md → consolidation recommended
 
 # ── MemoryFile ─────────────────────────────────────────────────────
 
@@ -309,9 +331,14 @@ class MemoryIndex:
         # Remove existing entry with same filename
         self.entries = [e for e in self.entries if e.filename != mem.filename]
 
+        # Rant 2026-08-23T08:04:26 — write-time truncation (primary guard):
+        # keep the stored index title bounded; the full title lives in the
+        # standalone .md frontmatter, and the filename stays in the index line.
+        title = _truncate_index_title(mem.display_title)
+
         self.entries.append(
             _IndexEntry(
-                title=mem.display_title,
+                title=title,
                 filename=mem.filename,
                 type=mem.type,
                 status=mem.status,
@@ -349,7 +376,24 @@ class MemoryIndex:
                 rec = f"rec: {_short_date(e.created_at)}" if e.created_at else ""
                 evt = f"evt: {_short_date(e.event_at)}" if e.event_at else ""
                 date_part = ", ".join(p for p in [rec, evt] if p)
-                lines.append(f"- [{e.title}]({e.filename}){status_tag} — {date_part}")
+                raw_line = f"- [{e.title}]({e.filename}){status_tag} — {date_part}"
+                if len(raw_line) > INDEX_TITLE_MAX_CHARS:
+                    # Rant 2026-08-23T08:04:26 — render-time fallback for legacy
+                    # dirty index data (write-time truncation wasn't in place).
+                    # Keep the filename so the detail file stays reachable.
+                    logger.warning(
+                        "memory index line exceeds %d chars (title=%d chars) — truncating",
+                        INDEX_TITLE_MAX_CHARS, len(e.title),
+                    )
+                    other = len(f"- []({e.filename}){status_tag} — {date_part}")
+                    budget = max(1, INDEX_TITLE_MAX_CHARS - other)
+                    line = (
+                        f"- [{_truncate_index_title(e.title, budget)}]"
+                        f"({e.filename}){status_tag} — {date_part}"
+                    )
+                else:
+                    line = raw_line
+                lines.append(line)
             lines.append("")
 
         return "\n".join(lines).strip() + "\n"
@@ -788,3 +832,30 @@ class SessionMemoryStore(MemoryStore):
 
     def __init__(self, session_dir: Path):
         super().__init__(session_dir / "memory", scope="session")
+
+    # Rant 2026-08-23T08:04:26 — soft guard only: warn when the session index
+    # crosses thresholds. Actual consolidation (merge/trim to ≤50) is
+    # LLM-driven via reflection/consolidation prompts — never auto-delete here.
+    def _save_index(self, index: MemoryIndex, source: str = "") -> None:
+        super()._save_index(index, source)
+        self._warn_index_thresholds()
+
+    def _warn_index_thresholds(self) -> None:
+        """Log a warning when the session index exceeds soft thresholds."""
+        try:
+            if self.count > INDEX_COUNT_WARN:
+                logger.warning(
+                    "memory index ≥ threshold — consolidation recommended: "
+                    "count=%d > %d (%s)",
+                    self.count, INDEX_COUNT_WARN, self.index_path,
+                )
+            if self.index_path.exists():
+                size = self.index_path.stat().st_size
+                if size > INDEX_SIZE_WARN:
+                    logger.warning(
+                        "memory index ≥ threshold — consolidation recommended: "
+                        "size=%d bytes > %d (%s)",
+                        size, INDEX_SIZE_WARN, self.index_path,
+                    )
+        except OSError:
+            logger.debug("memory index threshold check skipped", exc_info=True)
