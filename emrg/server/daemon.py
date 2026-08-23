@@ -242,6 +242,12 @@ class EmrgServer:
         # projected occupancy = real anchor + estimate delta, so systematic
         # estimator undercount (CJK/JSON) never accumulates.
         self._usage_anchors: dict[str, tuple[int, int]] = {}
+        # Rant 2026-08-24T02:06:34: fail-LOUD bookkeeping for the usage
+        # anchor — sessions whose anchor was deliberately dropped by a
+        # compaction, and sessions already warned about a missing anchor
+        # (warn once per session, no per-round spam).
+        self._usage_anchor_dropped_by_compact: set[str] = set()
+        self._warned_missing_usage_anchor: set[str] = set()
         # Rant 2026-08-23T13:54:14: per-session dynamic-context snapshot
         # (session_id → (text, injected_ms)) so unchanged context is not
         # re-sent (context_refresh_interval_ms gating).
@@ -2362,6 +2368,14 @@ class EmrgServer:
                     # anchor baseline (post-compact): fall back to the plain
                     # estimate — the anchor baseline is stale in that case.
                     projected = estimated
+                    # Rant 2026-08-24T02:06:34: fail LOUD when the anchor is
+                    # missing for an established session — first round and the
+                    # post-compact re-anchor round are legitimate; any other
+                    # missing anchor means the provider stopped returning
+                    # prompt_tokens, silently regressing the gate to
+                    # estimator-only (the exact #946 failure mode: 148K est
+                    # vs 222K real, gate never fired).
+                    self._warn_missing_usage_anchor(session, messages, estimated)
                 trigger_at = int(
                     self.llm.config.context_window
                     * self.llm.config.auto_compact_threshold
@@ -2399,6 +2413,10 @@ class EmrgServer:
                         # stale usage anchor so the next round re-anchors from
                         # a fresh estimate (rant 2026-08-23T13:28:50).
                         self._usage_anchors.pop(session.session_id, None)
+                        # Rant 2026-08-24T02:06:34: remember the drop was
+                        # intentional — the next round's anchor-less fallback
+                        # is then legitimate, not a silent provider-usage loss.
+                        self._usage_anchor_dropped_by_compact.add(session.session_id)
                         await self._broadcast(session.session_id, {
                             "type": "compact_result",
                             "session_id": session.session_id,
@@ -2863,6 +2881,41 @@ class EmrgServer:
                 ascii_chars += 1
         return (cjk // 2) + (ascii_chars // 4)
 
+    def _warn_missing_usage_anchor(
+        self, session, messages: list[dict], estimated: int
+    ) -> None:
+        """Warn once per session when auto-compact loses its usage anchor.
+
+        Rant 2026-08-24T02:06:34: the #946 usage-anchored projection must
+        fail LOUD about anchor-less fallback. Legitimate anchor-less states:
+        the session's first round (no assistant turn yet — nothing anchored)
+        and the round immediately after a compaction (anchor deliberately
+        dropped; the next LLM response re-anchors it). Any other missing
+        anchor means the provider stopped returning prompt_tokens — the gate
+        silently reverts to estimator-only gating, the exact #946 failure
+        mode (observed 148K est vs 222K real, gate never fired). Log once
+        per session so the regression is observable without per-round spam.
+        """
+        # First round: no assistant turn yet — nothing anchored, normal.
+        if not any(m.get("role") == "assistant" for m in messages):
+            return
+        # Post-compact re-anchor round: anchor deliberately dropped; consume
+        # the marker so a SECOND consecutive anchor-less round (provider
+        # still silent) warns on the next round.
+        if session.session_id in self._usage_anchor_dropped_by_compact:
+            self._usage_anchor_dropped_by_compact.discard(session.session_id)
+            return
+        if session.session_id in self._warned_missing_usage_anchor:
+            return  # already warned once for this session
+        self._warned_missing_usage_anchor.add(session.session_id)
+        logger.warning(
+            "auto-compact: usage anchor missing for established session %s "
+            "(est=%d) — provider not returning prompt_tokens; gate is "
+            "estimator-only (rant 2026-08-23T13:28:50 regression risk, "
+            "observed 148K est vs 222K real). Check provider usage reporting.",
+            session.session_id, estimated,
+        )
+
     def _estimate_tokens(self, messages: list[dict]) -> int:
         """Rough token estimation from OpenAI-format messages.
 
@@ -2970,6 +3023,14 @@ class EmrgServer:
 
         # Apply compact
         count = session.compact(summary, keep_recent=5)
+        # Rant 2026-08-24T02:06:34 (review fix on PR #948): mirror the
+        # auto-compact handling — a manual compact also deliberately shrinks
+        # the surface, so drop the stale usage anchor and mark the drop.
+        # Without this, the next round's anchor-less fallback would warn
+        # (false positive: a legitimate manual shrink misread as provider
+        # usage-loss).
+        self._usage_anchors.pop(session.session_id, None)
+        self._usage_anchor_dropped_by_compact.add(session.session_id)
 
         await self._broadcast(session.session_id, {
             "type": "compact_result",

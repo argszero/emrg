@@ -478,6 +478,106 @@ def test_usage_anchor_dropped_when_surface_shrank():
     assert projected == 20_000
 
 
+class _SidSession:
+    """Minimal session stand-in carrying a session_id."""
+
+    def __init__(self, sid: str):
+        self.session_id = sid
+
+
+# ── _warn_missing_usage_anchor (fail-LOUD, rant 2026-08-24T02:06:34) ──
+
+
+def test_missing_anchor_warns_once_for_established_session(caplog):
+    """An established session with a missing usage anchor must log a warning
+    (fail LOUD — the #946 estimator-only regression must be observable),
+    once per session to avoid per-round log spam."""
+    server = _make_server()
+    sid = "loud-test"
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "more"},
+    ]
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 50_000)
+    assert "usage anchor missing for established session" in caplog.text
+    assert sid in server._warned_missing_usage_anchor
+
+    # Second call — already warned, no duplicate log
+    caplog.clear()
+    server._warn_missing_usage_anchor(_SidSession(sid), messages, 60_000)
+    assert "usage anchor missing" not in caplog.text
+
+
+def test_missing_anchor_silent_on_first_round(caplog):
+    """First round (no assistant turn yet) is a legitimate anchor-less
+    state — no warning."""
+    server = _make_server()
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession("first"), messages, 100)
+    assert "usage anchor missing" not in caplog.text
+
+
+def test_missing_anchor_silent_post_compact_round(caplog):
+    """The round right after a compaction is legitimate (anchor deliberately
+    dropped); the marker is consumed so the NEXT anchor-less round warns
+    (provider confirmed still not returning prompt_tokens)."""
+    server = _make_server()
+    sid = "compact-test"
+    server._usage_anchor_dropped_by_compact.add(sid)
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 100)
+    assert "usage anchor missing" not in caplog.text
+    assert sid not in server._usage_anchor_dropped_by_compact  # consumed
+
+    # Provider still silent → the next anchor-less round now warns
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 200)
+    assert "usage anchor missing for established session" in caplog.text
+
+
+def test_manual_compact_drop_marks_anchor(caplog):
+    """A manual compact must drop the stale anchor and mark the drop
+    (maintainer review fix on PR #948): without it, the next anchor-less
+    round false-positives — a legitimate manual shrink misread as provider
+    usage-loss."""
+    server = _make_server()
+    sid = "manual-compact-test"
+    # Stale pre-compact anchor still present (the pre-fix bug state)
+    server._usage_anchors[sid] = (222_000, 148_000)
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+
+    # Buggy state: stale anchor + no drop marker → false-positive warning
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 100)
+    assert "usage anchor missing" in caplog.text
+
+    # Manual compact now mirrors auto-compact: pop anchor + mark the drop
+    server._usage_anchors.pop(sid, None)
+    server._usage_anchor_dropped_by_compact.add(sid)
+
+    # Next round stays silent (legitimate shrink, marker consumed)
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 50)
+    assert "usage anchor missing" not in caplog.text
+    assert sid not in server._usage_anchor_dropped_by_compact  # consumed
+
+
 def test_context_message_injection_format(tmp_path):
     """Context message carries tz-aware time and lands before the user prompt.
 
