@@ -341,7 +341,7 @@ def test_cap_memory_index_small_file(tmp_path):
     """Index under the 50KB cap is embedded as-is."""
     server = _make_server()
     idx = tmp_path / "MEMORY.md"
-    idx.write_text("- [row](cycle-1.md) — title\n" * 50)  # well under 50KB
+    idx.write_text("- [row](cycle-1.md) — title\n" * 50, encoding="utf-8")  # well under 50KB
     assert server._cap_memory_index(idx) == idx.read_text(encoding="utf-8")
 
 
@@ -355,7 +355,7 @@ def test_cap_memory_index_large_file(tmp_path):
     server = _make_server()
     idx = tmp_path / "MEMORY.md"
     line = "- [cyc00000000-000000](cycle-20260823-000000.md) — " + "x" * 100 + "\n"
-    idx.write_text(line * 600)  # ~64KB > 50KB cap
+    idx.write_text(line * 600, encoding="utf-8")  # ~64KB > 50KB cap
     capped = server._cap_memory_index(idx)
     assert len(capped) <= 50 * 1024 + 200  # head + notice
     assert "truncated" in capped
@@ -371,7 +371,7 @@ def test_collect_memory_data_caps_index(tmp_path):
     (tmp_path / ".emrg" / "memory").mkdir(parents=True)
     idx = tmp_path / ".emrg" / "memory" / "MEMORY.md"
     line = "- [cyc00000000-000000](cycle-20260823-000000.md) — " + "y" * 100 + "\n"
-    idx.write_text(line * 600)  # ~64KB
+    idx.write_text(line * 600, encoding="utf-8")  # ~64KB
     session = Session.create_with_id("mem-cap", tmp_path)
     data = server._collect_memory_data(session)
     assert data["has_memories"] is True
