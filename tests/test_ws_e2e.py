@@ -536,13 +536,15 @@ class TestWSProtocol:
                             if resp.get("done"):
                                 got_done = True
                                 # rant 21:52:18: done frame must report the
-                                # current LLM context size — system(1) + user(1)
-                                # + assistant(tool_calls)(1) + tool result(1) +
-                                # final assistant(1) = 5 for this one-round flow.
+                                # current LLM context size — system(1) +
+                                # context user(1, rant 2026-08-23T13:54:14) +
+                                # user(1) + assistant(tool_calls)(1) + tool
+                                # result(1) + final assistant(1) = 6 for this
+                                # one-round flow.
                                 context_messages = resp.get("context_messages")
                                 break
                         assert got_delta and got_tool and got_done
-                        assert context_messages == 5
+                        assert context_messages == 6
                     finally:
                         await ws.close()
                 finally:
