@@ -1784,3 +1784,41 @@ def test_pong_run_vs_installed_version(tmp_path, monkeypatch):
     assert frame["current_version"] == "0.2.61"
     assert frame["installed_version"] == "0.2.62"
     assert "previous_version" not in frame, "previous-version.txt no longer used (14:38:27)"
+
+
+# ── _format_cache_pct ─────────────────────────────────────
+
+
+def test_format_cache_pct_visibility():
+    """_format_cache_pct renders hit rate only when cache usage is visible
+    (rant 2026-08-23T09:17:14)."""
+    server = _make_server()
+
+    # cache hit reported (DeepSeek/OpenAI-compatible) → "cache N%"
+    assert server._format_cache_pct(
+        {"prompt_tokens": 100, "cache_hit_tokens": 70}) == ", cache 70%"
+
+    # all hits (miss = 0) → 100%
+    assert server._format_cache_pct(
+        {"prompt_tokens": 50, "cache_hit_tokens": 50}) == ", cache 100%"
+
+    # rounding
+    assert server._format_cache_pct(
+        {"prompt_tokens": 3, "cache_hit_tokens": 1}) == ", cache 33%"
+
+    # no cache reported → no suffix, format unchanged
+    assert server._format_cache_pct(
+        {"prompt_tokens": 10, "completion_tokens": 2}) == ""
+    assert server._format_cache_pct(
+        {"prompt_tokens": 0, "cache_hit_tokens": 0}) == ""
+
+    # None / malformed → no suffix
+    assert server._format_cache_pct(None) == ""
+    assert server._format_cache_pct({}) == ""
+    assert server._format_cache_pct({"prompt_tokens": 10}) == ""
+    assert server._format_cache_pct(
+        {"prompt_tokens": 10, "cache_hit_tokens": None}) == ""
+
+    # inconsistent (hit > prompt) → no suffix
+    assert server._format_cache_pct(
+        {"prompt_tokens": 10, "cache_hit_tokens": 20}) == ""

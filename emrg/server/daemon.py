@@ -2429,11 +2429,12 @@ class EmrgServer:
             # (contract: chunk["reasoning"] = full think text so far, see
             # llm.py:366). Appending every snapshot and joining would
             # double-accumulate → O(n²) blowup (29640 chars for 47 real tokens,
-            # up to 10MB records in llm.jsonl, rant 2026-08-23T10:0x). Take the
+            # up to 10MB records in llm.jsonl, rant 2026-08-23T10:15:06). Take the
             # LAST snapshot = complete think text.
             full_reasoning = reasoning_parts[-1] if reasoning_parts else None
-            logger.debug("round %d finish: %s, tool_calls=%d, content_len=%d",
-                         round_num, final_finish, len(tc_by_index), len(full_content))
+            logger.debug("round %d finish: %s, tool_calls=%d, content_len=%d%s",
+                         round_num, final_finish, len(tc_by_index), len(full_content),
+                         self._format_cache_pct(final_usage))
 
             # Case 1: Final text answer — no more tool calls
             if final_finish == "stop" or (final_finish and not tc_by_index):
@@ -2706,6 +2707,27 @@ class EmrgServer:
         if reasoning is not None:
             response["reasoning"] = reasoning
         session.append_llm(response)
+
+    @staticmethod
+    def _format_cache_pct(usage: dict | None) -> str:
+        """Return '", cache N%"' when prompt-cache usage is visible, else ''.
+
+        Cache visibility (rant 2026-08-23T09:17:14): hit rate = hit / (hit+miss)
+        with miss derived as prompt_tokens - cache_hit_tokens per the provider
+        schema (prompt_tokens = hit + miss); shown only when hit+miss > 0.
+        Endpoints that do not report caching yield '' so the log line format
+        stays unchanged (no new fields, no cache suffix).
+        """
+        if not usage:
+            return ""
+        hit = usage.get("cache_hit_tokens")
+        prompt = usage.get("prompt_tokens")
+        if not isinstance(hit, (int, float)) or not isinstance(prompt, (int, float)):
+            return ""
+        if hit <= 0 or prompt <= 0 or prompt < hit:
+            return ""
+        pct = round(hit / prompt * 100)
+        return f", cache {pct}%"
 
     # ── Token estimation helpers ──────────────────────────────
 
