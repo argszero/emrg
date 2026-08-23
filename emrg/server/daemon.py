@@ -2425,7 +2425,13 @@ class EmrgServer:
                 return
 
             full_content = "".join(content_parts)
-            full_reasoning = "".join(reasoning_parts) or None
+            # llm.py yields the ACCUMULATED reasoning snapshot on every chunk
+            # (contract: chunk["reasoning"] = full think text so far, see
+            # llm.py:366). Appending every snapshot and joining would
+            # double-accumulate → O(n²) blowup (29640 chars for 47 real tokens,
+            # up to 10MB records in llm.jsonl, rant 2026-08-23T10:15:06). Take the
+            # LAST snapshot = complete think text.
+            full_reasoning = reasoning_parts[-1] if reasoning_parts else None
             logger.debug("round %d finish: %s, tool_calls=%d, content_len=%d%s",
                          round_num, final_finish, len(tc_by_index), len(full_content),
                          self._format_cache_pct(final_usage))
