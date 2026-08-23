@@ -3023,6 +3023,14 @@ class EmrgServer:
 
         # Apply compact
         count = session.compact(summary, keep_recent=5)
+        # Rant 2026-08-24T02:06:34 (review fix on PR #948): mirror the
+        # auto-compact handling — a manual compact also deliberately shrinks
+        # the surface, so drop the stale usage anchor and mark the drop.
+        # Without this, the next round's anchor-less fallback would warn
+        # (false positive: a legitimate manual shrink misread as provider
+        # usage-loss).
+        self._usage_anchors.pop(session.session_id, None)
+        self._usage_anchor_dropped_by_compact.add(session.session_id)
 
         await self._broadcast(session.session_id, {
             "type": "compact_result",

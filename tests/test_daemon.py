@@ -547,6 +547,37 @@ def test_missing_anchor_silent_post_compact_round(caplog):
     assert "usage anchor missing for established session" in caplog.text
 
 
+def test_manual_compact_drop_marks_anchor(caplog):
+    """A manual compact must drop the stale anchor and mark the drop
+    (maintainer review fix on PR #948): without it, the next anchor-less
+    round false-positives — a legitimate manual shrink misread as provider
+    usage-loss."""
+    server = _make_server()
+    sid = "manual-compact-test"
+    # Stale pre-compact anchor still present (the pre-fix bug state)
+    server._usage_anchors[sid] = (222_000, 148_000)
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+
+    # Buggy state: stale anchor + no drop marker → false-positive warning
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 100)
+    assert "usage anchor missing" in caplog.text
+
+    # Manual compact now mirrors auto-compact: pop anchor + mark the drop
+    server._usage_anchors.pop(sid, None)
+    server._usage_anchor_dropped_by_compact.add(sid)
+
+    # Next round stays silent (legitimate shrink, marker consumed)
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 50)
+    assert "usage anchor missing" not in caplog.text
+    assert sid not in server._usage_anchor_dropped_by_compact  # consumed
+
+
 def test_context_message_injection_format(tmp_path):
     """Context message carries tz-aware time and lands before the user prompt.
 
