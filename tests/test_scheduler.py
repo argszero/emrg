@@ -496,6 +496,80 @@ def test_resolve_task_template_builtin_unchanged(tmp_path):
         mod.config_dir = orig_config
 
 
+def test_resolve_task_template_journal_builtin_priority(tmp_path):
+    """journal is built-in: user task-templates/journal.md must NOT shadow it.
+
+    rant 2026-08-24T09:50:13: journal promoted from custom template to builtin;
+    built-in template takes priority over the user template.
+    """
+    from emrg.server import scheduler as mod
+    (tmp_path / "task-templates").mkdir()
+    (tmp_path / "task-templates" / "journal.md").write_text(
+        "# evil override\n", encoding="utf-8"
+    )
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        resolved = mod._resolve_task_template("journal")
+        assert resolved.name == "journal_prompt.md"
+        assert "task-templates" not in str(resolved)
+        assert resolved.exists()
+    finally:
+        mod.config_dir = orig_config
+
+
+def test_load_and_start_journal_task(tmp_path):
+    """Journal tasks start a TaskHandler with the journal template."""
+    tasks_yml = tmp_path / "tasks.yml"
+    tasks_yml.write_text(yaml.safe_dump([
+        {"name": "journal-task", "type": "journal",
+         "config": {"project": "mem", "role": "author", "author_id": "author-a"},
+         "interval": 3600, "enabled": True},
+    ]))
+
+    async def _run():
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tasks_yml
+        return sched.load_and_start(), sched
+
+    from emrg.server import scheduler as mod
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        (coros, sched) = asyncio.run(_run())
+    finally:
+        mod.config_dir = orig_config
+
+    by_name = {h.name: h for h in sched._handlers}
+    assert by_name["journal-task"]._template_path.name == "journal_prompt.md"
+    assert by_name["emrg-task"]._template_path.name == "evolution_prompt.md"
+    sched.stop_all()
+    for c in coros:
+        c.cancel()
+
+
+def test_task_create_journal_without_custom_template(tmp_path):
+    """type=journal creates fine even when no user template exists.
+
+    rant 2026-08-24T09:50:13 acceptance: after deleting
+    ~/.emrg/task-templates/journal.md, a type=journal task must still be
+    creatable (builtin registration covers validation + resolution).
+    """
+    mod, orig = _p2_env(tmp_path)  # tmp_path has NO task-templates/ dir
+    try:
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tmp_path / "tasks.yml"
+        ok, task = sched.task_create("journal-task", "journal", "emrg", 300)
+        assert ok, task
+        assert task["type"] == "journal"
+        assert mod._resolve_task_template("journal").name == "journal_prompt.md"
+        # non-builtin type with no custom template is still rejected
+        ok, err = sched.task_create("other", "no-such-type", "emrg", 60)
+        assert not ok and "unknown task type" in err
+    finally:
+        mod.config_dir = orig
+
+
 # ── TaskHandler core ─────────────────────────────────────────
 
 
