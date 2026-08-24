@@ -2081,3 +2081,57 @@ def test_format_cache_pct_visibility():
     # inconsistent (hit > prompt) → no suffix
     assert server._format_cache_pct(
         {"prompt_tokens": 10, "cache_hit_tokens": 20}) == ""
+
+
+def test_tool_content_for_llm_vision(tmp_path):
+    """read-tool image refs convert to OpenAI vision content blocks for
+    vision-capable models (rant 2026-08-24T14:36:01)."""
+    import base64 as _b64
+
+    server = _make_server()
+    server.llm.config.vision = True
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+    ref = json.dumps({"type": "image", "path": str(img), "mime": "image/png"})
+    out = server._tool_content_for_llm(ref)
+    assert isinstance(out, list), "vision model → list content block"
+    types = [part["type"] for part in out]
+    assert types == ["text", "image_url"], types
+    url = out[1]["image_url"]["url"]
+    assert url.startswith("data:image/png;base64,")
+    b64_body = url.split(",", 1)[1]
+    assert _b64.b64decode(b64_body) == img.read_bytes()
+
+
+def test_tool_content_for_llm_non_vision(tmp_path):
+    """Non-vision models get a text placeholder, not an error (rant
+    2026-08-24T14:36:01 — degradation path must not crash)."""
+    server = _make_server()
+    server.llm.config.vision = False
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    ref = json.dumps({"type": "image", "path": str(img), "mime": "image/png"})
+    out = server._tool_content_for_llm(ref)
+    assert isinstance(out, str)
+    assert "Image" in out
+    assert "does not support image understanding" in out
+
+
+def test_tool_content_for_llm_passthrough():
+    """Non-image tool results pass through unchanged."""
+    server = _make_server()
+    assert server._tool_content_for_llm("plain text result") == "plain text result"
+    assert server._tool_content_for_llm("") == ""
+    assert server._tool_content_for_llm('{"type": "text", "text": "hi"}') == '{"type": "text", "text": "hi"}'
+    assert server._tool_content_for_llm('not json {') == 'not json {'
+
+
+def test_tool_content_for_llm_missing_image(tmp_path):
+    """A dangling image ref degrades to a warning instead of crashing."""
+    server = _make_server()
+    server.llm.config.vision = True
+    ref = json.dumps({"type": "image", "path": str(tmp_path / "gone.png"), "mime": "image/png"})
+    out = server._tool_content_for_llm(ref)
+    assert isinstance(out, str)
+    assert "Image unavailable" in out

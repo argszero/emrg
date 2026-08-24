@@ -184,3 +184,76 @@ def test_read_start_line_byte_offset_at_eol(temp_file):
     lines = result.content.split("\n")
     # line 3 should be empty (byte offset beyond its length)
     assert "     3\t" in lines[0] or lines[0].strip().startswith("3")
+
+
+def test_read_image_returns_vision_ref(temp_file):
+    """Reading a .png returns a structured image reference, not a binary error
+    (rant 2026-08-24T14:36:01 — ReadTool vision support)."""
+    import json
+
+    tool = ReadTool()
+    _, d = temp_file
+    img = d / "shot.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)  # tiny valid-ish PNG header
+    result = _run(tool.execute({"file_path": str(img)}))
+    assert not result.error, f"image read should not error: {result.content}"
+    ref = json.loads(result.content)
+    assert ref["type"] == "image"
+    assert ref["path"] == str(img.resolve())
+    assert ref["mime"] == "image/png"
+
+
+def test_read_image_jpeg_webp_mime(temp_file):
+    """jpeg/webp extensions map to the right mime types."""
+    import json
+
+    tool = ReadTool()
+    _, d = temp_file
+    for name, expect in (
+        ("photo.jpg", "image/jpeg"),
+        ("photo.jpeg", "image/jpeg"),
+        ("anim.gif", "image/gif"),
+        ("pic.webp", "image/webp"),
+    ):
+        img = d / name
+        img.write_bytes(b"\x00" * 32)
+        result = _run(tool.execute({"file_path": str(img)}))
+        assert not result.error, name
+        ref = json.loads(result.content)
+        assert ref["mime"] == expect, name
+
+
+def test_read_image_too_large(temp_file):
+    """Oversized images are rejected with a resize hint instead of a vision block."""
+    from emrg.tools.read_tool import MAX_IMAGE_SIZE
+
+    tool = ReadTool()
+    _, d = temp_file
+    img = d / "big.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (MAX_IMAGE_SIZE + 1))
+    result = _run(tool.execute({"file_path": str(img)}))
+    assert result.error
+    assert "too large" in result.content
+    assert "resize" in result.content.lower() or "compress" in result.content.lower()
+
+
+def test_read_uppercase_extension(temp_file):
+    """Uppercase extensions (.PNG) are handled case-insensitively."""
+    import json
+
+    tool = ReadTool()
+    _, d = temp_file
+    img = d / "shot.PNG"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+    result = _run(tool.execute({"file_path": str(img)}))
+    assert not result.error
+    ref = json.loads(result.content)
+    assert ref["mime"] == "image/png"
+
+
+def test_read_tool_description_mentions_images():
+    """The read tool description advertises image support."""
+    tool = ReadTool()
+    desc = tool.definition().description
+    assert "vision-format image block" in desc
+    assert ".png" in desc
