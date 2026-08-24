@@ -281,6 +281,27 @@ Path: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
 
 Rules: update every round; only update the relevant fields, don't delete other fields; keep the most recent 5 entries in "promotion log".
 
+#### 4.1 Housekeeping (MUST run every round — the state file is a working notebook, not an append-only log)
+
+Rants 2026-08-24T15:27:37 + 15:28:41 (host): the file grew to 67KB/103 lines/14 sections by pure appending — homework piled up from r34 to r44, closed threads stayed in the active list, the same thread appeared in 4 different sections, and `last completed` became a 3700-char wall of text. Keep it convergent:
+
+1. **Active lists only hold live entries** (`promotion tracking`, `promotion opportunities`, `homework record`): threads that are ACTED / closed / dormant / superseded leave the active list the same round they close — move them to `archive` (with the round range), never leave them in place.
+2. **Homework depth cap**: `homework record` keeps at most the **last 3 rounds** (rN, rN-1, rN-2). Older rounds collapse into one `archive` line, e.g. `- [archived r34-r41] homework: full detail dropped, outcomes in promotion tracking`.
+3. **Merge, don't duplicate**: one thread/topic = at most one entry per field. New round facts about an already-listed thread UPDATE that entry in place (append `rNN: <new outcome>` to its line) — no new lines. A thread also lives in exactly one place per fact type: thread status → `promotion tracking`, round homework → `homework record`, posted actions → `promotion log`. The same id (e.g. a Dev.to article id) must not appear in several fields for the same fact.
+4. **Snapshot fields are single-entry and short**: `last completed` and `next step` are REPLACED every round (never accumulated) — each ≤500 characters, high information density (round number + time + what was done / what's next + ids/links). Detail lives in the section fields, not in the snapshot.
+5. **Timeline**: every entry in tracking / log / homework / archive carries a round number (`rNN`) or a time so the file reads as a traceable timeline. Entries without any time marker are stale — refresh or archive them.
+6. **Archive**: an `archive` field at the bottom collects closed threads, superseded channel states, and old homework summaries, each as a summary ≤300 chars with a round range. Archived detail is not kept — once a fact is no longer actionable it is summarized or dropped.
+
+#### 4.2 Categorization (分门别类 — no one-pot stew)
+
+Organize the fields into five zones and maintain each zone consistently:
+
+- **A. Round snapshot** (replaced every round, never accumulated): `last completed`, `next step`
+- **B. Active state** (live facts only; closed → archive): `blocked`, `promotion target`, `promotion opportunities`, `promotion tracking`, `last learned`, `homework record`, `channel accounts`
+- **C. Channel status** (one source of truth): `blocked` is the single field that records current channel availability, incl. a one-line per-channel summary. `flagged/negative` and `banned list` keep only the historical record + cool-down state — never re-state what `blocked` already says. When a channel's status changes: update `blocked` first, then update/cross-reference the other two or drop the stale entry.
+- **D. Stats & output** (each independent, no mixing): `mention stats` — one line per round, newest last, final line = cumulative (each line ≤200 chars); `blog posts` — published only; `blog drafts` — queue only. Never mix published articles into drafts or vice versa.
+- **E. Archive**: closed/superseded entries with round ranges.
+
 ---
 
 ### 5. Reflection Log (mandatory every round)
