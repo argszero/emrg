@@ -934,6 +934,7 @@ class TaskHandler:
             "source_dir": str(self._source_dir),
             "session_id": self._session_id,
             "timestamp": datetime.now().strftime("%Y%m%d-%H%M%S"),
+            "current_time_human": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "task": self._config,
             "project": _load_project_config(self._project_name, str(self._source_dir)),
             "git_path": git_path,

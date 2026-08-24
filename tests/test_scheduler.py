@@ -570,6 +570,58 @@ def test_task_create_journal_without_custom_template(tmp_path):
         mod.config_dir = orig
 
 
+def test_journal_template_renders_with_context():
+    """journal_prompt.md renders without Jinja2 errors and covers the 4 follow-up rants.
+
+    rants 2026-08-24T18:09:13/18:15:31/18:16:50/18:19:08 — contribution-level
+    assessment, de-EMRG-ified scope, direction diversity, research-hotspot focus
+    + current-time injection must all be present in the rendered output for both
+    author and editor roles.
+    """
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "journal_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    ctx = dict(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        owner="x", repo="y", source_dir="/tmp/j", evolution_cwd="/tmp/evo",
+        evolution_count=0, timestamp="20260824-182903",
+        current_time_human="2026-08-24 18:29",
+        task={"role": "author", "project": "j", "author_id": "author-a"},
+    )
+    out = template.render(**ctx)
+    # Current-time injection (rant 18:19:08)
+    assert "Current time:" in out and "20260824-182903" in out
+    assert "2026-08-24 18:29" in out, "human-readable time must render"
+    # De-EMRG-ified scope (rant 18:15:31) — external scan first, no concrete examples
+    assert "External scan (MUST do, first priority)" in out
+    assert "NOT from any specific project or system name" in out
+    assert "self-evolving agents" not in out, "EMRG-specific arXiv example removed"
+    assert "agent self-improvement" not in out, "EMRG-specific arXiv example removed"
+    # Adversarial checks (rant 18:09:13)
+    assert "Adversarial checks" in out
+    assert "Reverse gap check" in out
+    assert "Evidence pre-assessment" in out
+    assert "Upgradability" in out
+    # Direction diversity (rant 18:16:50)
+    assert "direction-diversity check" in out
+    assert "host specified → obey host" in out
+    # Contribution-level declaration (rant 18:09:13)
+    assert "Contribution-level self-declaration" in out
+    assert "case study" in out and "theory+empirics" in out
+    # Irrelevant-rant exclusion (rant 18:15:31)
+    assert "Irrelevant-rant exclusion" in out
+    # Editor role renders too (diversity/adversarial text is author-side)
+    ctx2 = dict(ctx); ctx2["task"] = {"role": "editor", "project": "j"}
+    out2 = template.render(**ctx2)
+    assert "Editor Work Cycle" in out2
+    assert "Contribution-level consistency" in out2 or "contribution-level" in out2
+
+
 # ── TaskHandler core ─────────────────────────────────────────
 
 
