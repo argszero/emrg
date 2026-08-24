@@ -142,7 +142,7 @@ State file format:
 ```markdown
 # Open-Source State: {{ owner }}/{{ repo }}
 - role: Committer | Contributor
-- current stage: Prep | Recon | Contribute | Track | Review
+- current stage: Prep | Recon | Contribute | Track | Track+Recon | Review
 - last completed: <what was done last round>
 - active PRs: <own open PR list, one per line>
 - in progress: <what is being implemented | none>
@@ -206,6 +206,13 @@ Is "in progress" non-empty in the state file?
 
 Are there open items in "active PRs"?
   → Phase Tracking (check PR status, respond to reviews)
+    All open PRs healthy (MERGEABLE + CI green, no conflicts, no pending
+    review feedback) AND no rebase maintenance due this round (≤1 round
+    since last maintenance)?
+      → May run Recon in parallel this round (stage = Track+Recon):
+        scan issues/PRs for a new contribution direction; found one →
+        enter Phase Contribution next round (recon this round, implement
+        next round). See Phase C.1.5.
 
 No active work?
   → Phase Recon (scan issues/PRs for something to do)
@@ -214,7 +221,8 @@ Role = Committer and many PRs awaiting review?
   → May move to Phase Review after recon
 ```
 
-**Only one phase per cycle. Don't aim for completeness, just for progress.**
+**One primary phase per cycle. Don't aim for completeness, just for progress.**
+**Exception**: during Phase Tracking, when all open PRs are healthy (MERGEABLE + CI green, no conflicts, no pending review feedback) and no rebase maintenance is due this round, Recon may run **in parallel** (stage = `Track+Recon`) — see Phase C.1.5. Parallel Recon must still respect the output cap and direction-diversity rules there.
 
 ---
 
@@ -420,10 +428,38 @@ For each open PR:
 | **Closed (unmerged)** | Understand why → record in memory file → remove from active PR list |
 | **No feedback for 7+ days** | May politely ask on the PR "any updates or feedback?" |
 
+#### C.1.5 Parallel Recon (healthy-PR rule, rant 2026-08-24T14:05:06)
+
+Tracking is **not maintenance-only**. When **all** open PRs are healthy and this round needs no maintenance, you may run Recon in parallel instead of finishing the cycle — a long-lived healthy PR (MERGEABLE + CI green) must not lock the task out of producing new contributions.
+
+**Healthy** = for **every** open PR in the active list:
+- **MERGEABLE** — no conflicts (`gh pr view <N> -R {{ owner }}/{{ repo }} --json mergeable,mergeableState`)
+- **CI green** — `gh pr checks <N> -R {{ owner }}/{{ repo }}`: no failed/pending checks reported (a PR with **zero** checks reported means the push event was dropped — re-trigger, do not count as healthy)
+- **No unaddressed feedback** — no unanswered change requests / bot / maintainer comments (`gh api repos/{{ owner }}/{{ repo }}/pulls/<N>/reviews` + `/issues/<N>/comments`)
+- **No rebase maintenance due** — last maintenance round ≤ 1 round ago
+
+When healthy (all of the above), in the **same round**:
+1. Run Phase A Recon steps (A.1 scan issues, A.2 scan PRs) to find a new contribution direction
+2. Direction found → update the state file (stage = `Track+Recon`; keep all active PRs; set in-progress = new candidate), enter **Phase Contribution next round**
+3. Nothing found → update the state file (stage = `Track+Recon`, next step = continue recon), finish this cycle
+
+**Maintenance duty is NOT waived**: any open PR that needs rebase / review-feedback response / 7-day nudge → do Tracking maintenance first (C.1 table), and only then consider parallel Recon.
+
+**Parallel output cap**: while Tracking+Recon runs in parallel, hold at most **3 total same-day open PRs** (avoid stacking PRs that overload maintainers; PRs accumulated across days are not capped by this rule, but keep the total prudent).
+
+**Direction diversity**: if a Recon candidate's topic conflicts with existing open PR themes, prefer a contribution in a different module/type (broaden coverage rather than stacking similar work).
+
+**State file when parallel**:
+- `current stage: Track+Recon`
+- `active PRs:` keeps all healthy open PRs (one per line)
+- `in progress:` records the new candidate (issue URL / next contribution) alongside
+
 #### C.2 Exit condition
 
 - No open PRs → state file (active PRs = none), enter Phase Recon next round
-- Still have open PRs → update the state file, finish this cycle
+- Still have open PRs:
+  - All healthy + no maintenance due (per C.1.5) → run parallel Recon (stage = `Track+Recon`); found a direction → enter Phase Contribution next round; otherwise finish the cycle
+  - Any PR needs maintenance (rebase / feedback / nudge) → do it, update the state file, finish this cycle
 
 ---
 

@@ -1057,6 +1057,43 @@ def test_open_source_template_full_code_study_b2b():
     assert "Only when you understand the author's design intent should you consider how to contribute" in out, "理解设计意图后才可贡献应渲染"
 
 
+def test_open_source_template_parallel_recon_c15():
+    """open_source_prompt.md Phase C.1.5 allows parallel Recon when all open
+    PRs are healthy (rant 2026-08-24T14:05:06): a long-lived healthy PR must
+    not lock the task out of producing new contributions."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "open_source_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260824",
+        task={"role": "committer", "project": "aitokenpool"},
+        project={}, evolution_count=0, git_path="git", gh_path="gh",
+    )
+    # 1) the new section exists
+    assert "C.1.5 Parallel Recon" in out, "C.1.5 并行 Recon 节应渲染"
+    assert "not maintenance-only" in out, "Tracking 非纯维护说明应渲染"
+    # 2) healthy = MERGEABLE + CI green + no unaddressed feedback + no rebase due
+    assert "MERGEABLE" in out, "健康判定含 MERGEABLE"
+    assert "CI green" in out, "健康判定含 CI 绿"
+    assert "No unaddressed feedback" in out, "健康判定含无未处理评审反馈"
+    assert "No rebase maintenance due" in out, "健康判定含无需 rebase 维护"
+    # 3) parallel output cap + direction diversity rules render
+    assert "3 total same-day open PRs" in out, "同日 open PR 上限 3 个应渲染"
+    assert "Direction diversity" in out, "方向多样性规则应渲染"
+    # 4) state file stage value Track+Recon is documented in the format spec
+    assert "Track+Recon" in out, "Track+Recon stage 值应渲染"
+    # 5) the state machine no longer hard-locks open PRs into Tracking-only
+    assert "May run Recon in parallel this round" in out, "状态机应允许并行 Recon"
+
+
 def test_promote_template_learn_latest_state_04():
     """promote_prompt.md §0.4 requires learning the project's latest state
     before promoting (rant 2026-08-14T22:13:57, mirrors open-source B.2b #790)."""
