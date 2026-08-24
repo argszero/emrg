@@ -1044,6 +1044,41 @@ def test_open_source_template_allow_self_merge_conditional():
     assert "**overridden**" not in out_false
 
 
+def test_task_extra_prompt_conditional_all_templates():
+    """Rant 2026-08-24T21:59:15: tasks.yml config extra_prompt must inject into
+    every builtin task prompt (evolution/paper/open-source/promote/journal) near
+    the top; tasks WITHOUT extra_prompt render unchanged (no section, no residue).
+
+    Positive AND negative states both validated (#455 lesson).
+    """
+    import jinja2
+
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    server_dir = Path(__file__).resolve().parent.parent / "emrg" / "server"
+    base = dict(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/os", source_dir="/tmp/os", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260824",
+        current_time_human="2026-08-24 22:00",
+        project={"name": "x"}, evolution_count=0,
+        git_path="git", gh_path="gh",
+    )
+    extra = "插件开发（plugin）也是对本项目的合法贡献，不应被排除在贡献范围之外"
+    heading = "Task-specific Instructions (extra_prompt from tasks.yml)"
+    for name in ("evolution_prompt.md", "paper_prompt.md", "open_source_prompt.md",
+                 "promote_prompt.md", "journal_prompt.md"):
+        tpl = env.from_string((server_dir / name).read_text(encoding="utf-8"))
+        # positive: extra_prompt configured → injected near the top
+        out = tpl.render(task={"extra_prompt": extra, "role": "committer"}, **base)
+        assert heading in out, f"{name}: 条件节应渲染"
+        assert extra in out, f"{name}: extra_prompt 文本应注入 prompt"
+        # negative: absent → no section, no residue
+        out2 = tpl.render(task={"role": "committer"}, **base)
+        assert heading not in out2, f"{name}: 未配置 extra_prompt 不得出现条件节"
+        assert extra not in out2, f"{name}: 未配置 extra_prompt 不得注入文本"
+
+
 def test_open_source_template_never_stashes_host_work():
     """Rant 2026-08-20T11:58:27 (host data-loss report): a dirty working tree
     must run the cycle read-only — the prompt must never instruct stashing /

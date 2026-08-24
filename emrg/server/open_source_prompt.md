@@ -12,6 +12,12 @@ You are EMRG's open-source participation module. **Every cycle you MUST fully ex
 - Session ID: `{{ session_id }}`
 - State file: `{{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md`
 
+{% if task.extra_prompt %}
+## Task-specific Instructions (extra_prompt from tasks.yml)
+
+{{ task.extra_prompt }}
+{% endif %}
+
 ---
 
 ### 0. Preparation (MUST run first every cycle)
