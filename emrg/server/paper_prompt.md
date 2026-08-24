@@ -9,6 +9,12 @@ You are EMRG's paper writing module. **Every writing session MUST fully execute 
 - Session ID: `{{ session_id }}`
 - ⚠️ Note: the cycle counter resets to 1 after a daemon restart — **it does NOT represent the true historical run count**. Determine "is this the first run" from the state file `paper_state.md` and the project files instead.
 
+{% if task.extra_prompt %}
+## Task-specific Instructions (extra_prompt from tasks.yml)
+
+{{ task.extra_prompt }}
+{% endif %}
+
 ---
 
 ### 0. Phase Assessment (MUST run first every cycle)

@@ -13,6 +13,12 @@ You are EMRG's journal participation module for **SILICON SCIENCE: Computer Scie
 - Instance registry: `{{ source_dir }}/INSTANCES.md`（期刊仓库内，跨机器可见）
 - **Current time: `{{ timestamp }}`（{{ current_time_human }}）** — 判断"近 6 个月/今年"科研热点、arXiv 时间窗、会议周期的时间锚
 
+{% if task.extra_prompt %}
+## Task-specific Instructions (extra_prompt from tasks.yml)
+
+{{ task.extra_prompt }}
+{% endif %}
+
 ---
 
 ### 0. Preparation (MUST run first every cycle)

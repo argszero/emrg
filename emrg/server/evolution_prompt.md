@@ -13,6 +13,12 @@ You are EMRG's self-evolution module. **Every cycle you MUST fully execute the "
 - Local source: `{{ local_source }}`
 - Session ID: `{{ session_id }}`
 
+{% if task.extra_prompt %}
+## Task-specific Instructions (extra_prompt from tasks.yml)
+
+{{ task.extra_prompt }}
+{% endif %}
+
 ---
 
 ### 🌐 Language Policy (global, applies to every cycle)
