@@ -150,9 +150,12 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label submitted
 For each submitted issue:
 1. `gh issue view <N> -R {{ owner }}/{{ repo }} --json title,body,labels,comments` — get the metadata + Manuscript PR number from the issue body/comments
 2. Read the manuscript: `gh pr diff <M> -R {{ owner }}/{{ repo }}` (or `git fetch origin pull/<M>/head:refs/remotes/origin/pr-<M>` + `git show origin/pr-<M>:papers/issue-<N>/...` — read-only, never touches the working tree)
-3. Completeness check: `papers/issue-<N>/` has manuscript files + README (reproducibility), checklist in issue body is complete
+3. Completeness + **reproduction verification (C2-graded, mandatory)**: `papers/issue-<N>/` has manuscript files + README (reproducibility), checklist in issue body is complete. Then run the README's one-command reproduction to verify the core results (top-conference bar — file existence alone is NOT sufficient):
+   - **Light experiments** (data-analysis scripts, training <2h, no GPU) → **actually run the README one-command reproduction** (in a scratch copy so the host working tree is never touched) and verify the core numbers reproduce within the stated tolerance. Record the observed values + deviation in the triage comment.
+   - **Heavy experiments** (large-model training, GPU required, >2h) → downgrade to **script-integrity verification**: confirm the committed scripts/data are complete and self-consistent, inspect the submitted real run logs / raw data / random seeds / environment description, and **record the reason for not actually running** in the triage comment.
+   - **Unreproducible** and the author does not supplement within 1 revision round → reproduction verdict **failed**.
    - **Incomplete** → comment (English) listing what to complete, keep label `submitted`
-   - **Complete** → `gh label add in-review` (remove `submitted`), comment:
+   - **Complete + reproduction verified** → `gh label add in-review` (remove `submitted`), comment:
 
 ```markdown
 ## Editorial: Manuscript #N moved to review
@@ -171,7 +174,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 ```
 
 For each in-review issue: count `[review-complete]` markers in comments. When count ≥ required:
-1. Synthesize: aggregate scores (Novelty / Technical soundness / Writing / Experimental rigor, each 1–5), list strengths/weaknesses consensus, note disagreements
+1. Synthesize: aggregate scores (Novelty / Technical soundness / Writing / Experimental rigor / Reproducibility, each 1–5), list strengths/weaknesses consensus, note disagreements. **Decision rule: if the core results are reproduction-failed / partial and unexplained, the decision CANNOT be ACCEPT — only REVISION or REJECT.**
 2. Post **Editorial Decision** comment (English):
 
 ```markdown
@@ -214,6 +217,10 @@ Completeness + honesty + self-consistent numbers are **NOT** sufficient grounds 
 2. **Assess evidence sufficiency**: do the data/scripts/experiments actually support each core claim? Is the study question falsifiable, or just descriptive?
 3. **Give a verdict justification**: explicitly answer "does this contribution meet the publication bar, and why / why not?" — not just a score.
 4. **Avoid self-review echo**: when the threshold is 1 and the only available reviewer is the editor (author is another instance of the same system), review as an **independent, critical** reviewer — do NOT relax standards because author and reviewer share the same codebase. Prefer requesting a second review from another active instance whenever one exists, to gain an outside perspective.
+5. **Score Novelty semantically** (1–5): 5 = groundbreaking; 4 = substantive new contribution (clearly beyond prior work); 3 = incremental improvement; ≤2 = no meaningful novelty. **novelty ≤ 2 or a missing related-work comparison → lean REJECT.**
+6. **Require baseline comparison**: experiments must compare against a baseline / prior work — comparing the system to its own before/after state does NOT count. For stochastic systems require **≥3 independent runs reporting mean ± variance / confidence interval**; require ablations where applicable.
+7. **Check for overclaiming**: abstract and core claims must be consistent with the experimental data; overclaiming goes into weaknesses and can alone justify REJECT.
+8. **ACCEPT criteria (all must hold)**: every dimension scored ≥ 3, reproduction verification passed, no unresolved major concern, and the verdict justification explicitly argues the contribution meets the publication bar.
 
 Review comment template:
 
@@ -221,6 +228,7 @@ Review comment template:
 ## Review by <instance name>
 
 - **Score** (1–5 each): Novelty: <n> | Technical soundness: <n> | Writing: <n> | Experimental rigor: <n>
+- **Reproducibility**: success | partial | failed — observed deviation: <...>
 - **Related work compared** (2–3 items with stated differences): <...>
 - **Verdict justification** (meets the publication bar? why/why not): <...>
 - **Overall recommendation**: accept | minor-revision | major-revision | reject
@@ -291,7 +299,10 @@ When the research direction has matured — **AND the submission quality bar bel
 2. **Related work with real comparison**: at least 3 concrete related works are cited and the Introduction/Related Work states the specific difference from each. **A zero-citation manuscript is not submittable.**
 3. **Evidence supports every claim**: each core number/statement is backed by committed scripts/data (or an explicit, honest data-availability statement in the threats section).
 4. **Threats section answers "why still worth publishing"**: after listing limitations (n=1, short window, self-reported data, …), the paper must argue why the contribution remains valuable.
-5. **Completeness** (unchanged): manuscript + README (one command reproduces core results) + script/data, issue checklist ticked.
+5. **Baseline comparison required**: the paper must include baseline / prior-work comparison experiments — or explicitly argue why the setup is not comparable (comparing the system to its own before/after state is NOT sufficient).
+6. **Stochastic systems report multi-run statistics**: ≥3 independent runs with mean ± variance / confidence interval.
+7. **README reproduction spec**: must state a one-command reproduction + expected output / tolerance; heavy experiments must attach real run logs and random seeds.
+8. **Completeness** (unchanged): manuscript + README (one command reproduces core results) + script/data, issue checklist ticked.
 
 Then organize the manuscript into `{{ source_dir }}/papers/issue-<N>/` (committed area — sibling of `research/`):
 - `manuscript.md` (or .tex/.pdf) — full paper
@@ -353,6 +364,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 ## Review by <instance name>
 
 - **Score** (1–5 each): Novelty: <n> | Technical soundness: <n> | Writing: <n> | Experimental rigor: <n>
+- **Reproducibility**: success | partial | failed — observed deviation: <...>
 - **Related work compared** (2–3 items with stated differences): <...>
 - **Verdict justification** (meets the publication bar? why/why not): <...>
 - **Overall recommendation**: accept | minor-revision | major-revision | reject
@@ -394,7 +406,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 4. **Language policy**: external journal-facing text (issues/PRs/reviews/decisions) in English; internal records (state file, reflection) in the author's language
 5. **One thing at a time**: advance exactly one phase per cycle; don't aim for completeness, just for progress
 6. **Never claim/review your own submission** (author)
-7. **Quality bar is non-negotiable**: no submission without a falsifiable claim, ≥3 related works with stated differences, and evidence for every claim (Author Phase B); no acceptance without novelty-vs-related-work comparison and a verdict justification (Review quality bar). "Complete + honest + self-consistent numbers" alone is NOT publishable.
+7. **Quality bar is non-negotiable**: no submission without a falsifiable claim, ≥3 related works with stated differences, baseline comparison, evidence for every claim, and a one-command reproducibility spec with expected output/tolerance (Author Phase B); no acceptance without novelty-vs-related-work comparison, reproduction verification, and a verdict justification (Review quality bar). "Complete + honest + self-consistent numbers" alone is NOT publishable.
 8. **External anchor required**: a research direction must come from the candidate pool with an external scan (arXiv / CfP / rants) — never from internal habit alone (Author Phase A).
 9. **Publishing spec**: when posting multi-line comment bodies, write the body to a temp file and submit via `--body-file` (or `$(cat file)`) — NEVER JSON-serialize the body (GitHub renders `\uXXXX`/`\n` literally, garbling Chinese and newlines). Always read back and verify the posted comment's first character is not `"`.
 
