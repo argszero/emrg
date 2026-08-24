@@ -72,6 +72,38 @@ def _redirect_sessions_index(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _ensure_git_on_path(monkeypatch):
+    """Make bare ``git`` subprocess calls work on hosts without PATH git.
+
+    Three tests shell out to bare ``git`` (test_cmd_crlf.py ``git ls-files``,
+    test_git_utils.py ``git rev-parse`` / ``git init``) while the product
+    code resolves git through git_utils.resolve_git_gh() (install-info cache
+    → bundled ~/.emrg/install → PATH). On packaged installs git is NOT on
+    PATH, so those tests raise FileNotFoundError even though the daemon works
+    (2026-08-24: 3/972 failures on a PATH-less host). When PATH has no git,
+    prepend the directory of the same resolved git binary the product would
+    use (same tier order, no cache write). No-op on dev/CI where git is on
+    PATH.
+    """
+    import os
+    import shutil
+
+    if shutil.which("git"):
+        return  # git already reachable (dev / CI) — nothing to do
+
+    from emrg.server.git_utils import _cached_tool_path, _tool_in_install
+
+    git = _cached_tool_path("git")
+    if not (git and Path(git).exists()):
+        git = _tool_in_install("git") or shutil.which("git")
+    if not git:
+        return  # no git anywhere — let the tests fail with their own error
+
+    git_dir = str(Path(git).resolve().parent)
+    monkeypatch.setenv("PATH", git_dir + os.pathsep + os.environ.get("PATH", ""))
+
+
+@pytest.fixture(autouse=True)
 def _guard_stop_daemon_hermeticity(monkeypatch):
     """⛔ Red line (host 2026-08-18T22:58): tests must NEVER trigger a real
     stop_daemon() — it sends a shutdown over the websocket and kills the live
