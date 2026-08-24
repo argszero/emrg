@@ -2131,6 +2131,36 @@ class EmrgServer:
             return Session.load(session_id, cwd)
         return Session.create_with_id(session_id, cwd)
 
+    def _tool_content_for_llm(self, content: str) -> str | list[dict]:
+        """Convert a read-tool image reference into an OpenAI vision content block.
+
+        The read tool returns images as a JSON ref ({"type": "image", ...}).
+        For vision-capable models this becomes a data-URL image block; for
+        non-vision models it degrades to a text placeholder. Non-image tool
+        results pass through unchanged (rant 2026-08-24T14:36:01).
+        """
+        if not isinstance(content, str) or not content.startswith("{"):
+            return content
+        try:
+            ref = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return content
+        if not isinstance(ref, dict) or ref.get("type") != "image":
+            return content
+        path = ref.get("path", "")
+        mime = ref.get("mime", "image/png")
+        if not self.llm.config.vision:
+            return f"[Image: {path} — current model does not support image understanding; use the bash tool to inspect it]"
+        try:
+            b64 = base64.b64encode(Path(path).read_bytes()).decode()
+        except (OSError, FileNotFoundError) as e:
+            logger.warning("failed to read image %s: %s", path, e)
+            return f"[Image unavailable: {path}]"
+        return [
+            {"type": "text", "text": f"[Image: {path}]"},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+        ]
+
     @staticmethod
     def _build_user_content(text: str, images: list[dict] | None, vision: bool = False) -> list[dict] | str:
         """Build OpenAI vision content array when images are present.
@@ -2716,7 +2746,7 @@ class EmrgServer:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc_id,
-                        "content": result.content,
+                        "content": self._tool_content_for_llm(result.content),
                     })
 
                     # Notify client of result (broadcast to all session subscribers)
@@ -3898,7 +3928,7 @@ class EmrgServer:
                         messages.append({
                             "role": "tool",
                             "tool_call_id": tc_id,
-                            "content": result_text,
+                            "content": self._tool_content_for_llm(result_text),
                         })
                         # Rant 2026-08-19T10:35:24: use the call's intent (why
                         # this tool was invoked) instead of the static purpose.
@@ -4015,7 +4045,7 @@ class EmrgServer:
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc_id,
-                        "content": result_text,
+                        "content": self._tool_content_for_llm(result_text),
                     })
                     # Rant 2026-08-19T10:35:24: use the call's intent instead
                     # of the static purpose.
