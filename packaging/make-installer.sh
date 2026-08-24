@@ -63,8 +63,25 @@ case "$PLATFORM" in
         find "$PKG_ROOT/payload" -path '*EMRG.app' -prune -o -path '*卸载 EMRG.app' -prune -o \
           -type f \( -name '*.so' -o -name '*.dylib' -o -name 'python*' -o -name 'emrgd' -o -name 'emrg' -o -name 'emrg-uninstall' \) \
           -exec file {} + 2>/dev/null | grep 'Mach-O' | grep -v 'for architecture' | cut -d: -f1 | sort -u | while read -r BIN; do
-          codesign --force --timestamp --options runtime --sign "$SIGN_ID" "$BIN" 2>/dev/null && echo "    ✓ $(basename "$BIN")" || echo "    ✗ 跳过 $(basename "$BIN")"
+          # Python 解释器额外加 disable-library-validation 权限（rant 2026-08-25，
+          # journal R2 scipy ILP 实测阻断）：hardened runtime + TeamID 无此权限时
+          # library validation 强制生效 → pip 安装的 C 扩展（numpy/scipy/mypyc .so）
+          # 全部 "mapping process and mapped file have different Team IDs" 加载失败，
+          # 即使 venv 已可用。此权限是标准插件加载权限，公证接受；只加到解释器
+          # 本身（.so/.dylib 不需要权限，权限在进程主二进制上生效）。
+          ENT=""
+          case "$(basename "$BIN")" in
+            python*) ENT="--entitlements $ROOT/packaging/assets/python-entitlements.plist" ;;
+          esac
+          codesign --force --timestamp --options runtime $ENT --sign "$SIGN_ID" "$BIN" 2>/dev/null && echo "    ✓ $(basename "$BIN")" || echo "    ✗ 跳过 $(basename "$BIN")"
         done
+        # fail-loud：签名后断言 python 解释器确实带 disable-library-validation，
+        # 防止权限丢失/路径变化导致回归（防 journal 式 C 扩展加载失败）。
+        PY_BIN="$(find "$PKG_ROOT/payload" -path '*EMRG.app' -prune -o -type f -name 'python3.1[0-9]' -print 2>/dev/null | head -1)"
+        if [ -n "$PY_BIN" ] && ! codesign -d --entitlements - "$PY_BIN" 2>/dev/null | grep -q disable-library-validation; then
+          echo "::error::bundled python missing disable-library-validation entitlement: $PY_BIN" >&2
+          exit 1
+        fi
       else
         echo "!! 未找到 Developer ID Application 身份，跳过 runtime codesign（公证可能失败）" >&2
       fi

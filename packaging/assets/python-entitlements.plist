@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- rant 2026-08-25 (journal R2 scipy ILP blocked): the bundled python is
+       Developer ID signed with hardened runtime (--options runtime) but WITHOUT
+       this entitlement, so macOS library validation blocks loading ANY
+       pip-installed C extension (.so) — "mapping process and mapped file have
+       different Team IDs" — numpy/scipy/mypyc all fail to import even inside a
+       working venv. This entitlement is the standard plugin-loading allowance;
+       notarization accepts it. Applied to the python interpreter binaries only
+       in packaging/make-installer.sh (dylibs/so do not need it). -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
