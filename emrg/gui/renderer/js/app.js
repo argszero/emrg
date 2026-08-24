@@ -633,14 +633,18 @@ const App = (() => {
   }
 
   async function switchSession(sid, opts = {}) {    // G65：busy 即自有流进行中/发送中（IPC 往返窗口内 ownStreamRequestId 尚未赋值）
+    window.emrg?.log?.("info", `[switch] enter sid=${sid} opts=${JSON.stringify(opts)} busy=${state.busy} activeView=${state.activeView}`);
     if (state.busy) {
+      window.emrg?.log?.("warn", `[switch] ABORT busy sid=${sid}`);
       Chat.addSystemMessage(EMRG_Copy.COPY.sessionBusy);
       return;
     }
     try {
       // B3：离开前保存当前会话草稿
       saveDraft(state.sessionId);
+      window.emrg?.log?.("info", `[switch] invoke IPC sid=${sid} projectPath=${opts.projectPath ?? ""}`);
       const res = await window.emrg.switchSession({ sessionId: sid, projectPath: opts.projectPath });
+      window.emrg?.log?.("info", `[switch] IPC returned sid=${sid} res=${JSON.stringify(res).slice(0, 200)}`);
       state.sessionId = sid;
       // B3：恢复目标会话草稿
       restoreDraft(sid);
@@ -651,6 +655,7 @@ const App = (() => {
       FileTree.setSession(sid, projectPathFor(sid)); // P3.1：文件树根跟随会话项目
       updateEmptyState();
       if (res.error === "session_not_found") {
+        window.emrg?.log?.("warn", `[switch] session_not_found sid=${sid}`);
         Chat.addSystemMessage(_t("app.deletedSwitch"));
         if (res.next_session) {
           await switchSession(res.next_session, { silent: true });
@@ -672,13 +677,16 @@ const App = (() => {
       // 界面毫无变化。switchSession 成功后若仍在面板视图则切回会话视图（所有入口一致）。
       // 递归/初始化路径用 silent，不会在这里触发重复 switchView。
       if (!opts.silent && state.activeView !== "sessions") {
+        window.emrg?.log?.("info", `[switch] switching view sessions (was ${state.activeView})`);
         switchView("sessions");
       }
       updateEmptyState();
       Sidebar.highlight(sid, opts.scopeNav); // rant 22:04:02：点击哪列表只高亮该列表（scopeNav 缺省则两列表）
       setComposerDisabled(false); // 防御性：独立调用 switchSession 也确保输入框可用
+      window.emrg?.log?.("info", `[switch] DONE sid=${sid} activeView=${state.activeView}`);
     } catch (e) {
       // P6（rant 15:07:19 上限 20）：超限提示本地化（main 抛 too many open sessions）
+      window.emrg?.log?.("error", `[switch] EXCEPTION sid=${sid} ${e?.message || e}`);
       Chat.addSystemMessage(/too many open sessions/i.test(e.message || "") ? _t("app.tooManyOpenSessions") : _t("app.switchFailed", { msg: e.message }));
     }
   }
@@ -690,6 +698,8 @@ const App = (() => {
   function switchView(name) {
     if (!VIEWS.includes(name)) return;
     const isOpen = state.activeView === name;
+    // rant 2026-08-24：视图切换链路日志（任务管理点击排障）——记录每次导航切换
+    window.emrg?.log?.("info", `[view] switchView name=${name} prev=${state.activeView} isOpen=${isOpen}`);
     // rant 10:36:39：离开任务视图 → 停倒计时（防泄漏；重开由 renderTaskList 重新启动）
     // rant 2026-08-22T07:18:35：同时停 5s 状态轮询（与倒计时同生命周期防泄漏）
     if (state.activeView === "tasks" && name !== "tasks") {
@@ -703,6 +713,7 @@ const App = (() => {
     if (!isOpen && name !== "sessions") {
       // 打开面板视图：隐藏全部会话视图 + 全部面板视图（互斥——显式清面板，不依赖 DOM 树），激活目标面板
       state.activeView = name;
+      window.emrg?.log?.("info", `[view] panel activated name=${name}`);
       for (const child of $("workspace").children) {
         if (child.classList) child.classList.remove("active");
       }

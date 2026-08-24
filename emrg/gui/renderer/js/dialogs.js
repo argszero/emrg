@@ -588,16 +588,19 @@ const Dialogs = (() => {
   }
 
   async function loadTaskMeta() {
+    window.emrg?.log?.("info", "[taskPanel] loadTaskMeta start");
     try {
       const templates = await window.emrg.taskTemplateList();
       taskTypes = Array.isArray(templates)
         ? templates.map((t) => ({ name: t.name, builtin: Boolean(t.builtin) }))
         : [];
-    } catch { taskTypes = []; }
+      window.emrg?.log?.("info", `[taskPanel] loadTaskMeta templates=${taskTypes.length}`);
+    } catch (e) { window.emrg?.log?.("warn", `[taskPanel] taskTemplateList FAILED ${e?.message || e}`); taskTypes = []; }
     try {
       const projects = await window.emrg.listProjects();
       taskProjects = Array.isArray(projects) ? projects : [];
-    } catch { taskProjects = []; }
+      window.emrg?.log?.("info", `[taskPanel] loadTaskMeta projects=${taskProjects.length}`);
+    } catch (e) { window.emrg?.log?.("warn", `[taskPanel] listProjects FAILED ${e?.message || e}`); taskProjects = []; }
   }
 
   // rant 2026-08-18T21:32:32：任务卡点击 → 手风琴展开最近运行子表
@@ -690,7 +693,9 @@ const Dialogs = (() => {
     let tasks = [];
     try {
       tasks = await window.emrg.listTasks();
+      window.emrg?.log?.("info", `[taskPanel] listTasks OK count=${tasks?.length ?? 0}`);
     } catch (e) {
+      window.emrg?.log?.("error", `[taskPanel] listTasks FAILED ${e?.message || e}`);
       list.innerHTML = `<div class="task-empty">${_t("settings.taskEmpty")}</div>`;
       return;
     }
@@ -778,9 +783,17 @@ const Dialogs = (() => {
       const sessBtn = el("button", { type: "button", class: "model-action-btn", title: _t("settings.taskOpenSession") }, _t("settings.taskOpenSession"));
       if (!t.session_id) sessBtn.disabled = true;
       sessBtn.addEventListener("click", async () => {
+        window.emrg?.log?.("info", `[taskPanel] open-session CLICK task=${t.name} session_id=${t.session_id} project_path=${t.project_path} disabled=${!t.session_id}`);
+        if (!t.session_id) {
+          window.emrg?.log?.("warn", `[taskPanel] open-session SKIP no session_id task=${t.name}`);
+          return;
+        }
         try {
+          window.emrg?.log?.("info", `[taskPanel] open-session → switchSession sid=${t.session_id} projectPath=${t.project_path}`);
           await App.switchSession(t.session_id, { projectPath: t.project_path });
+          window.emrg?.log?.("info", `[taskPanel] open-session switchSession resolved sid=${t.session_id}`);
         } catch (e) {
+          window.emrg?.log?.("error", `[taskPanel] open-session switchSession THREW sid=${t.session_id} ${e?.message || e}`);
           Chat.addSystemMessage(_t("openSession.loadFailed", { msg: e.message }));
           showToast(_t("openSession.loadFailed", { msg: e.message }), { type: "error" });
         }

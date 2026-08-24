@@ -363,28 +363,42 @@ vision = false
     });
 
     ipcMain.handle("emrg:switchSession", async (_e, { sessionId, projectPath } = {}) => {
-      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      logger.info(`[gui:switch] REQUEST sid=${sessionId} projectPath=${projectPath}`);
+      if (!validateSessionId(sessionId)) {
+        logger.warn(`[gui:switch] REJECT invalid session_id=${sessionId}`);
+        throw new Error("invalid session_id");
+      }
       // P6（rant 15:07:19 边界）：projectPath 校验（跨项目打开时传项目路径）
       if (projectPath !== undefined && (typeof projectPath !== "string" || !projectPath.trim())) {
+        logger.warn(`[gui:switch] REJECT invalid project path=${projectPath}`);
         throw new Error("invalid project path");
       }
       // P6（rant 15:07:19 上限 20）：显式打开新会话超限 → 提示不自动关（已打开 sid 复用不拦）
       if (openSessions.size >= DEFAULT_CAP && !openSessions.has(sessionId)) {
+        logger.warn(`[gui:switch] REJECT too many open sessions (${openSessions.size}/${DEFAULT_CAP}) sid=${sessionId}`);
         throw new Error(`too many open sessions (${DEFAULT_CAP}) — close some first`);
       }
       // G65：自有流运行中禁止切会话（每连接独立锁，查当前激活连接）
-      if (connManager?.get(currentSessionId)?.ownStream) throw new Error("stream in progress — cannot switch");
+      if (connManager?.get(currentSessionId)?.ownStream) {
+        logger.warn(`[gui:switch] REJECT own stream in progress (sid=${currentSessionId})`);
+        throw new Error("stream in progress — cannot switch");
+      }
       const prevSid = currentSessionId;
+      logger.info(`[gui:switch] prevSid=${prevSid} → target=${sessionId}, openSessions.size=${openSessions.size}`);
       // G110：切会话清空旧连接分组缓存（含 timer），防广播"幽灵"残留
       connManager?.get(prevSid)?.clearGroups();
       // P5 slice 2：跨项目打开——用该项目路径 resume（非全局 projectDir）
       const targetPath = projectPath || openSessions.get(sessionId)?.projectPath || DEFAULT_CWD;
+      logger.info(`[gui:switch] openSession start sid=${sessionId} targetPath=${targetPath}`);
       try {
         await openSession(sessionId, targetPath); // 打开（新）会话连接 + resume_session 自动订阅
+        logger.info(`[gui:switch] openSession OK sid=${sessionId} targetPath=${targetPath}`);
       } catch (e) {
+        logger.error(`[gui:switch] openSession FAILED sid=${sessionId} targetPath=${targetPath}`, e);
         // G106：被动删除恢复——resume error → 刷新列表 + 切最近
         if (/not found|error/i.test(e.message)) {
           connManager?.close(sessionId); // 防御：失败连接已由 open 内部关闭
+          logger.warn(`[gui:switch] session not found — falling back to recent sid=${sessionId}`);
           return listSessions().then((sessions) => {
             const next = sessions[0]?.session_id || null;
             return { error: "session_not_found", sessions, next_session: next };
@@ -397,6 +411,7 @@ vision = false
       // P4（rant 15:07:19）：多会话保持——切走**不再关闭**旧会话连接（浏览器 tab
       // 效果：切回继续生成/看现场）。关闭走 emrg:closeSession（P4 slice 2 侧边栏）。
       markSessionActive(sessionId); // 更新 lastActive + activeSid 防抖写盘
+      logger.info(`[gui:switch] DONE sid=${sessionId} currentSessionId=${currentSessionId}`);
       return {};
     });
 
@@ -650,6 +665,15 @@ vision = false
       // GUI / 指令 P4：/trigger — daemon list_tasks → tasks_list
       const frame = await requireConn().sendCommandAndWait("list_tasks", {}, 5000);
       return frame.tasks || [];
+    });
+
+    // renderer → main 日志桥（rant 2026-08-24：打开会话链路排障）。级别白名单，
+    // 消息截断到 2000 字符防刷屏。写同一 emrg-gui.log，时间线可与 main 日志对齐。
+    ipcMain.handle("emrg:log", async (_e, { level, msg } = {}) => {
+      const lv = ["info", "warn", "error", "debug"].includes(level) ? level : "info";
+      const text = typeof msg === "string" ? msg.slice(0, 2000) : String(msg).slice(0, 2000);
+      try { logger[lv](`[renderer] ${text}`); } catch { /* 日志失败不影响功能 */ }
+      return { ok: true };
     });
 
     ipcMain.handle("emrg:triggerTask", async (_e, { name }) => {
