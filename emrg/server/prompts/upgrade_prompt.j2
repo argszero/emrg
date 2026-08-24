@@ -51,10 +51,46 @@ release installer" means for this version.
   `previous-version.txt`.
 - `{{ install_dir }}/bin/` launcher scripts (emrg/emrgd/emrg.cmd/emrgd.cmd
   etc.) — sync if the target tag changed them.
-- GUI as needed: whether `~/Applications/EMRG.app` is updated is YOUR call —
-  compare the GUI artifact versions; if needed, build locally with
-  electron-builder and replace; otherwise skip. Nothing in the program
-  hard-codes GUI update logic.
+- GUI **must be synced too** (rant 2026-08-24T17:50: GUI packages had been
+  stuck at 0.2.72 while the daemon moved on — the old "no node/npm, skip"
+  reasoning was a false premise: node/npm exist on the host (asdf), they are
+  just not on the daemon's PATH). Updating the GUI is a fixed part of the
+  upgrade, not optional:
+  1. **Version compare**: read the version inside the installed GUI asars —
+     `cd /tmp && npx --yes @electron/asar extract-file {{ install_dir }}/emrg-gui/EMRG.app/Contents/Resources/app.asar package.json`
+     (also extract from `~/Applications/EMRG.app` the same way) and compare
+     against the target tag's `emrg/gui/package.json` version. Identical →
+     skip the build but still do the copy/sync check in step 4.
+  2. **Toolchain self-sufficiency (inside {{ upgrade_work }}, never touch the
+     system)**: do NOT assume `node`/`npm` are callable — the daemon's
+     environment may lack the asdf shims. In order, try:
+     - `export PATH="$HOME/.asdf/shims:$PATH"` then re-check `node --version`
+       (asdf installs are at ~/.asdf/installs/nodejs/*);
+     - `source ~/.nvm/nvm.sh && nvm use --lts` (nvm);
+     - `brew install node` (Homebrew);
+     - last resort: download a node binary tarball (LTS, e.g. v22.x) from
+       https://nodejs.org/dist/ into `{{ upgrade_work }}/tools/node/`,
+       extract, and `export PATH="{{ upgrade_work }}/tools/node/<dir>/bin:$PATH"`.
+     Verify with `node --version && npm --version` before building.
+  3. **Build the GUI** (inside the {{ upgrade_work }} checkout of the target
+     tag, mirroring CI's build-release.yml order):
+     a. If `{{ upgrade_work }}/dist/runtime` does not exist (electron-builder
+        extraResources depends on it): `bash packaging/build-runtime.sh`
+        (needs `uv`; same prerequisite as CI).
+     b. `cd {{ upgrade_work }}/emrg/gui && npm install && npm run dist`
+        → produces `dist/mac-arm64/EMRG.app` (electron-builder `dir` target).
+        Building only the host arch is fine for an upgrade (e.g.
+        `npm run dist -- --arm64` on this arm64 host) — the release installer
+        rebuilds all arches. electron-builder's default ad-hoc signing is part
+        of the build output, NOT manual code-signing/notarization (step 6).
+  4. **Replace**: back up the current
+     `{{ install_dir }}/emrg-gui/EMRG.app` and `~/Applications/EMRG.app` into
+     `{{ backup_dir }}/<current_version>/` (the emrg-gui tree was previously
+     excluded from backups — include it from now on), then copy the fresh
+     build to both locations (postinstall semantics: `emrg-gui/EMRG.app` is
+     the install source, `~/Applications/EMRG.app` is the run copy).
+  5. **Verify**: re-extract the replaced asar's package.json and confirm its
+     `version` == target tag (strip the leading 'v').
 
 ## 4. Backup & rollback
 Before touching anything, back up the current {{ install_dir }}/source (and
