@@ -59,6 +59,9 @@ const api = {
   getSettings: () => ipcRenderer.invoke("emrg:getSettings"),
   cancel: () => ipcRenderer.invoke("emrg:cancel"),
   pickProjectDir: () => ipcRenderer.invoke("emrg:pickProjectDir"),
+  // 渲染进程日志桥（rant 2026-08-24：打开会话链路排障——renderer 点击/调用步骤
+  // 经 emrg:log IPC 上报，由 main 写入 ~/.emrg/emrg-gui.log，与 main 日志同文件时序对齐）
+  log: (level, msg) => ipcRenderer.invoke("emrg:log", { level, msg }),
   onEvent: (cb) => {
     const listener = (_e, evt) => cb(evt);
     ipcRenderer.on("emrg:event", listener);

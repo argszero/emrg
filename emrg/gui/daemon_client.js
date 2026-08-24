@@ -39,7 +39,11 @@ const STREAM_END_TIMEOUT_MS = 30_000; // G94：最后帧后 30s 无 done 强制�
 // 抛给上层，杜绝 GUI 每 5s 反复 spawn（每次 spawn 都是一个新的 cmd 窗口来源）。
 const MAX_SPAWN_ATTEMPTS = 3;
 
-const SESSION_ID_RE = /^s_\d{6}_\d{4}_[0-9a-f]{4,8}$/;
+// 会话 ID 允许多种形态：
+//  - 交互会话：s_<6位日期>_<4位时间>_<hex id>（generateSessionId 产物）
+//  - 固定任务会话：emrg-evolution-<task-name>（首尾均连字符，无下划线分隔）
+// 两者都可能经 GUI 的 switchSession/打开会话 传入，需都接受。
+const SESSION_ID_RE = /^(s_\d{6}_\d{4}_[0-9a-f]{4,8}|emrg-evolution-[A-Za-z0-9_-]+)$/;
 
 // G93：命令类型 → 响应帧类型映射（daemon 协议，daemon.py _process_message）
 const RESPONSE_TYPES = {

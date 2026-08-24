@@ -76,12 +76,17 @@ class ConnManager {
   // resume_session（自动订阅；resume:false 跳过，供新会话首条消息前用）。
   // 已打开的 sid 直接复用现有连接。失败时关闭连接不泄漏。
   async open(sid, projectPath, { resume = true } = {}) {
+    this.logger.info(`[connMgr] open start sid=${sid} projectPath=${projectPath} resume=${resume}`);
     const existing = this._conns.get(sid);
     if (existing) {
-      if (existing.conn.connected) return existing.conn;
+      if (existing.conn.connected) {
+        this.logger.info(`[connMgr] open REUSE existing connected sid=${sid}`);
+        return existing.conn;
+      }
       this.close(sid); // 残留断连连接 → 关闭重开（_intentionalClose 标记抑制断线横幅）
     }
     await this.ensureDaemon();
+    this.logger.info(`[connMgr] open create DaemonClient sid=${sid}`);
     const conn = new DaemonClient({
       logger: this.logger,
       isPackaged: this.isPackaged,
@@ -89,11 +94,15 @@ class ConnManager {
     });
     try {
       await conn.ensureConnected({ skipStart: true }); // daemon 已就绪 → 只连不拉
+      this.logger.info(`[connMgr] open connected sid=${sid} projectPath=${projectPath}`);
       if (resume) {
-        await conn.sendCommandAndWait("resume_session", { session_id: sid, cwd: projectPath }, 5000);
+        this.logger.info(`[connMgr] resume_session send sid=${sid} cwd=${projectPath}`);
+        const res = await conn.sendCommandAndWait("resume_session", { session_id: sid, cwd: projectPath }, 5000);
+        this.logger.info(`[connMgr] resume_session OK sid=${sid} res=${JSON.stringify(res).slice(0, 300)}`);
       }
     } catch (e) {
       conn.close(); // resume 失败（会话已删等）→ 不泄漏连接
+      this.logger.error(`[connMgr] open FAILED sid=${sid} projectPath=${projectPath}`, e);
       throw e;
     }
     // 断开监听 → 重启恢复判定（仅当所有打开会话在同一短窗口内断开）
