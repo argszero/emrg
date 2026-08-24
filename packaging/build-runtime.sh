@@ -3,8 +3,9 @@
 #
 # Builds dist/runtime/ containing:
 #   bin/python-dist/   standalone CPython 3.13.9 整目录（含 lib/libpython3.13.dylib）
-#   bin/python         软链 → ../python-dist/bin/python3.13（R82 相对软链）
-#   bin/python3        软链（同规则）
+#   bin/python         wrapper → python-dist/bin/python3.13（R82 软链改 wrapper，
+#                       rant 2026-08-24T21:46:53：软链使 venv 的 pyvenv.cfg home 错误）
+#   bin/python3        wrapper（同规则）
 #   bin/emrg bin/emrgd bin/emrg.cmd bin/emrgd.cmd bin/emrg-uninstall  启动/卸载脚本
 #   bin/stop_all.py            Windows 安装器预停止单文件（纯标准库，emrg/_stop_all.py 副本）
 #   source/            emrg 源码（只读，排除 gui node_modules）
@@ -62,8 +63,15 @@ cp -R "$PY_ROOT/." "$DIST/bin/python-dist/"
     # python 命令（session-scoped 脚本）可用。
     cp python-dist/*.dll . 2>/dev/null || true
   else
-    ln -sfn python-dist/bin/python3.13 python
-    ln -sfn python-dist/bin/python3.13 python3
+    # R82 → rant 2026-08-24T21:46:53：POSIX bin/python 由相对软链改为 wrapper
+    # （python-wrapper.sh）。软链使 sys.executable 停在 bin/（软链目录），而
+    # `python -m venv` 从 dirname(sys._base_executable) 写 pyvenv.cfg home=bin/，
+    # venv 基解释器重算不跟随软链 → 找不到标准库（encodings 导入失败，科研依赖
+    # 无法 pip 安装）。wrapper exec 真实解释器 → sys.executable =
+    # python-dist/bin/python3.13，venv home 正确，开箱可用。
+    cp "$ROOT/packaging/assets/python-wrapper.sh" python
+    cp "$ROOT/packaging/assets/python-wrapper.sh" python3
+    chmod +x python python3
   fi
   cp "$ROOT/bin/emrg" emrg
   cp "$ROOT/bin/emrgd" emrgd

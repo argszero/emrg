@@ -184,6 +184,31 @@ else
   rm -rf "$run_home"
 fi
 
+# 14. bundled python venv（rant 2026-08-24T21:46:53：bin/python 软链 → wrapper，
+#     pyvenv.cfg home 修复）。回归用例：install python 创建 venv 后必须能导入标准库
+#     + pip 可用。Windows 用 python-dist 根 exe（bin/python.exe 复制品缺 DLL，R100）。
+say "14. bundled python venv (pyvenv.cfg home fix)"
+PY_BIN="$HOME/.emrg/install/bin/python"
+if [ -e "$HOME/.emrg/install/bin/python-dist/python.exe" ]; then
+  PY_BIN="$HOME/.emrg/install/bin/python-dist/python.exe"
+elif [ -e "$HOME/.emrg/install/bin/python-dist/python3.13.exe" ]; then
+  PY_BIN="$HOME/.emrg/install/bin/python-dist/python3.13.exe"
+fi
+venv_dir="$smoke_home/.venv-smoke"
+VENV_PY="$venv_dir/bin/python"
+if [ -n "${WINDIR:-}" ]; then
+  VENV_PY="$venv_dir/Scripts/python.exe"
+fi
+rm -rf "$venv_dir"
+if "$PY_BIN" -m venv "$venv_dir" >/dev/null 2>&1 \
+   && "$VENV_PY" -c "import encodings; print('venv OK')" >/dev/null 2>&1 \
+   && "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+  ok "14. bundled python venv (import encodings + pip)"
+else
+  fail "14. bundled python venv (import encodings + pip)"
+fi
+rm -rf "$venv_dir"
+
 # 清理临时 daemon
 emrg server stop >/dev/null 2>&1 || true
 
