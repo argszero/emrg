@@ -815,12 +815,11 @@ dialog::backdrop {
 }
 
 /* 定时任务管理（rant 2026-08-12T18:23:15 P3：GUI 任务/自定义类型 CRUD） */
+/* 无 max-height/overflow：任务列表随内容完全展开，不出现内部垂直滚动条（rant 2026-08-24T21:21:58） */
 .task-list {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  max-height: 220px;
-  overflow-y: auto;
   margin-top: 4px;
 }
 .task-row {
