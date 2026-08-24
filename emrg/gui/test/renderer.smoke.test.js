@@ -2747,6 +2747,11 @@ test("rant 21:32:32：任务卡点击展开最近运行子表（时间/干了什
   const metaRule = taskCss.slice(taskCss.indexOf(".task-meta {"), taskCss.indexOf(".task-meta-item"));
   assert.ok(!metaRule.includes("flex-basis: 100%"), "task-meta 不得含 flex-basis:100%（主表一行紧凑布局）");
   assert.ok(/flex:\s*0\s*1\s*auto/.test(metaRule), "task-meta 应为 flex: 0 1 auto（弹性占剩余空间、与 actions 同行、窄窗口内部换行）");
+  // rant 2026-08-24T21:21:58：任务管理列表不得出现内部垂直滚动条 ——
+  // .task-list 不得含 max-height / overflow-y（任务 >5 时最后一条必须完整可见）
+  const taskListRule = taskCss.slice(taskCss.indexOf(".task-list {"), taskCss.indexOf(".task-row {"));
+  assert.ok(!taskListRule.includes("max-height"), ".task-list 不得含 max-height（任务 >5 时最后一条被滚动条截断）");
+  assert.ok(!taskListRule.includes("overflow-y"), ".task-list 不得含 overflow-y（任务列表内部不得出现垂直滚动条）");
 });
 
 test("P3：新增任务表单 —— 间隔 <60 客户端拒绝；≥60 提交 taskCreate", async () => {
