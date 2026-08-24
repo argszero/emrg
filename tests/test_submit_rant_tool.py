@@ -109,6 +109,48 @@ def test_submit_rant_tool_requires_project():
     assert "ask the user" in result.content
 
 
+def test_submit_rant_warns_on_unregistered_project(tmp_path, monkeypatch):
+    """Rant 2026-08-24T10:54:04: project must be a projects.yml short name —
+    an owner/repo-style name is recorded but flagged with registered
+    candidates so the mistake is visible at submit time."""
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    (tmp_path / "projects.yml").write_text(
+        "- name: emrg\n  path: /p/emrg\n"
+        "- name: aitokenpool\n  path: /p/aitokenpool\n",
+        encoding="utf-8",
+    )
+    tool = SubmitRantTool()
+    result = __import__("asyncio").run(tool.execute(
+        {"message": "something is broken", "project": "argszero/aitokenpool"}
+    ))
+    assert result.error is False
+    assert "Total rants: 1" in result.content
+    # warning names the problem + lists the registered candidates
+    assert "not a registered name" in result.content
+    assert "aitokenpool" in result.content
+    assert "emrg" in result.content
+    # the rant still lands (non-blocking warning)
+    lines = (tmp_path / "rants.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["project"] == "argszero/aitokenpool"
+
+
+def test_submit_rant_clean_on_registered_project(tmp_path, monkeypatch):
+    """A registered short name submits without the warning."""
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    (tmp_path / "projects.yml").write_text(
+        "- name: emrg\n  path: /p/emrg\n",
+        encoding="utf-8",
+    )
+    tool = SubmitRantTool()
+    result = __import__("asyncio").run(tool.execute(
+        {"message": "still broken", "project": "emrg"}
+    ))
+    assert result.error is False
+    assert "Total rants: 1" in result.content
+    assert "not a registered name" not in result.content
+
+
 def test_submit_rant_definition_exposes_consent_contract():
     """The tool description must require explicit user consent before calling."""
     tool = SubmitRantTool()
