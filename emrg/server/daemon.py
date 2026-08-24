@@ -128,6 +128,7 @@ from emrg.skills.loader import load_skills
 from emrg.skills.registry import ensure_catalog_file, load_catalog_skills, skill_is_managed
 from emrg.server.rants import append_rant
 from emrg.server.scheduler import TaskScheduler
+from emrg.server import logcontext
 
 logger = logging.getLogger(__name__)
 
@@ -819,15 +820,30 @@ class EmrgServer:
                             _cancel_event.set()
                         _tool_task.cancel()
                     session = self._get_or_create_session(session_id, Path(cwd))
-                    logger.info(
-                        'task received: session=%s prompt="%s" → routing via LLM',
-                        session_id, _redact_string(req.prompt[:60]),
+                    # Rant 2026-08-24T10:48:50: tag this task's context with the
+                    # session label so the emrgd.log [session] column attributes
+                    # every tool-loop line (task received / round / LLM stream /
+                    # tool call / execution) to its session. create_task copies
+                    # the current context, so the child tool-loop task inherits
+                    # the label; the parent resets it right after spawning
+                    # (per-session isolation on shared connections).
+                    _sess_title = getattr(session, "title", None)
+                    _title = _sess_title() if callable(_sess_title) else (_sess_title or "")
+                    _ctx_token = logcontext.push_session_label(
+                        logcontext.session_label_for(session.session_id, _title)
                     )
-                    _cancel_event = asyncio.Event()
-                    self._session_busy[session_id] = True  # lock (released in *locked wrapper)
-                    _tool_task = asyncio.create_task(
-                        self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
-                    )
+                    try:
+                        logger.info(
+                            'task received: session=%s prompt="%s" → routing via LLM',
+                            session_id, _redact_string(req.prompt[:60]),
+                        )
+                        _cancel_event = asyncio.Event()
+                        self._session_busy[session_id] = True  # lock (released in *locked wrapper)
+                        _tool_task = asyncio.create_task(
+                            self._run_tool_loop_locked(req, ws, session, _cancel_event, allow_tools=allow_tools)
+                        )
+                    finally:
+                        logcontext.session_label.reset(_ctx_token)
                     continue
 
                 await self._process_message(data, ws)

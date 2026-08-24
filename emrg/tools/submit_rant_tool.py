@@ -74,11 +74,13 @@ class SubmitRantTool(ToolExecutor):
                     "project": {
                         "type": "string",
                         "description": (
-                            "REQUIRED for submit — target project name "
-                            "(e.g. 'emrg', 'argszero/aitokenpool'). If you "
-                            "cannot determine which project the rant targets, "
-                            "ask the user before calling. Optional filter for "
-                            "list."
+                            "REQUIRED for submit — target project name = the "
+                            "short `name` registered in ~/.emrg/projects.yml "
+                            "(e.g. 'emrg', 'aitokenpool') — NOT the GitHub "
+                            "owner/repo form (rant 2026-08-24T10:54:04). If "
+                            "you cannot determine which project the rant "
+                            "targets, ask the user before calling. Optional "
+                            "filter for list."
                         ),
                     },
                     "message": {
@@ -180,10 +182,49 @@ class SubmitRantTool(ToolExecutor):
                 error=True,
             )
         target = f" ({project})" if project else ""
+        # Rant 2026-08-24T10:54:04: project must be the short name registered
+        # in ~/.emrg/projects.yml — not the GitHub owner/repo form. When the
+        # given name is not registered, append a non-blocking warning with the
+        # registered candidates so a copy-pasted wrong name is caught at
+        # submit time instead of requiring a manual re-submit + void.
+        registered = self._registered_project_names()
+        if registered and project not in registered:
+            candidates = " | ".join(sorted(registered))
+            warning = (
+                f"\n⚠ project {project!r} is not a registered name in "
+                f"~/.emrg/projects.yml (registered: {candidates}) — use the "
+                f"short `name` (e.g. 'emrg' or 'aitokenpool')."
+            )
+        else:
+            warning = ""
         return ToolResult(
             name="submit_rant",
-            content=f"Rant recorded{target}. Total rants: {count}.",
+            content=f"Rant recorded{target}. Total rants: {count}.{warning}",
         )
+
+    def _registered_project_names(self) -> list[str]:
+        """Short names registered in ~/.emrg/projects.yml (config dir).
+
+        The daemon registers projects there on first use; the list is the
+        authoritative source for the rant ``project`` field. Any read error
+        degrades to "no candidates" (validation is advisory, never blocking).
+        """
+        try:
+            import yaml
+
+            p = self._rants_log().parent / "projects.yml"
+            if not p.exists():
+                return []
+            data = yaml.safe_load(p.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [
+                    str(e.get("name", ""))
+                    for e in data
+                    if isinstance(e, dict) and e.get("name")
+                ]
+        except Exception:  # noqa: BLE001 — advisory only
+            return []
+        return []
 
     def _execute_list(self, arguments: dict) -> ToolResult:
         status = arguments.get("status")
