@@ -103,3 +103,54 @@ def test_write_content_too_large(temp_dir, monkeypatch):
     assert result.error
     assert "too large" in result.content
     assert not filepath.exists()
+
+
+# ── read-only sandbox (community issue #979) ──────────────────────────────
+
+
+def test_write_read_only_blocks_inside_workspace(temp_dir):
+    """Issue #979 follow-up: the write tool must not clobber the host's tree
+    when the dirty-tree guard forced read-only — writes inside the workspace
+    (task source dir) are blocked."""
+    tool = WriteTool()
+    workspace = temp_dir / "ws"
+    workspace.mkdir()
+    target = workspace / "host-file.txt"
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "content": "should not be written",
+        "sandbox": "read-only",
+        "workspace": str(workspace),
+    }))
+    assert result.error
+    assert "read-only sandbox" in result.content
+    assert not target.exists()
+
+
+def test_write_read_only_allows_outside_workspace(temp_dir):
+    """Writes outside the workspace (memory dir, logs) stay allowed — a
+    read-only cycle still records state and writes its own artifacts."""
+    tool = WriteTool()
+    workspace = temp_dir / "ws"
+    workspace.mkdir()
+    target = temp_dir / "outside" / "record.md"
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "content": "# record",
+        "sandbox": "read-only",
+        "workspace": str(workspace),
+    }))
+    assert not result.error
+    assert target.exists()
+
+
+def test_write_no_sandbox_unchanged(temp_dir):
+    """Normal use (no sandbox) keeps writing anywhere — no behavior change."""
+    tool = WriteTool()
+    target = temp_dir / "plain.txt"
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "content": "hi",
+    }))
+    assert not result.error
+    assert target.read_text() == "hi"

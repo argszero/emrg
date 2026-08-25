@@ -2734,6 +2734,12 @@ class EmrgServer:
                     # agent cannot choose it per call.
                     if tc_name == "bash" and req.sandbox:
                         args["sandbox"] = req.sandbox
+                    # write/edit get the tier + workspace boundary too
+                    # (community issue #979): under read-only the tools must
+                    # not clobber the host's tree — workspace = session cwd.
+                    elif tc_name in ("write", "edit") and req.sandbox:
+                        args["sandbox"] = req.sandbox
+                        args["workspace"] = str(session.cwd)
 
                     # Execute
                     tool = self.tools.get(tc_name)

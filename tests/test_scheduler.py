@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 import tempfile
 from pathlib import Path
@@ -2476,3 +2477,73 @@ def test_sandbox_resolution_unified_default_rule():
     # invalid values fall through to the default
     assert TaskHandler._resolve_sandbox({"sandbox": "bogus"}, None) == "workspace-write"
     assert TaskHandler._resolve_sandbox({}, "bogus") == "workspace-write"
+
+
+# ── structural dirty-tree guard (community issue #979) ────────────────────
+
+
+def test_is_dirty_tree_detects_uncommitted_changes():
+    """Community issue #979: a git repo with uncommitted changes is detected
+    via `git status --porcelain`; a clean repo and a non-git dir are not
+    (fail-open — the guard never blocks a cycle by itself)."""
+    with tempfile.TemporaryDirectory() as d:
+        subprocess.run(["git", "init", d], capture_output=True, timeout=10)
+        assert TaskHandler._is_dirty_tree_sync(d) is False  # clean repo
+        (Path(d) / "x.txt").write_text("hi", encoding="utf-8")
+        assert TaskHandler._is_dirty_tree_sync(d) is True  # untracked → dirty
+    # non-git dir → fail-open (False)
+    with tempfile.TemporaryDirectory() as d:
+        assert TaskHandler._is_dirty_tree_sync(d) is False
+
+
+def test_dirty_tree_forces_read_only_structural_guard():
+    """Community issue #979: a dirty source tree forces the cycle's effective
+    sandbox to read-only regardless of configuration — topology over rules."""
+    handler = TaskHandler(
+        name="emrg-task", config={"project": "emrg"}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    assert handler._sandbox == "workspace-write"  # configured default
+    assert asyncio.run(handler._effective_sandbox(dirty=True)) == "read-only"
+    # configured read-only stays read-only (no weakening)
+    handler2 = TaskHandler(
+        name="ro-task", config={}, interval=60, identity=InstanceIdentity(),
+        sandbox="read-only",
+    )
+    assert asyncio.run(handler2._effective_sandbox(dirty=True)) == "read-only"
+
+
+def test_dirty_tree_override_env_audited_receipt():
+    """Community issue #979: EMRG_TASK_DIRTY_OVERRIDE (comma-separated task
+    names, or *) lets a human lift the guard — every exception is logged as a
+    receipt. The override must name THIS task (or *) to apply."""
+    handler = TaskHandler(
+        name="emrg-task", config={"project": "emrg"}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    old = os.environ.get("EMRG_TASK_DIRTY_OVERRIDE")
+    try:
+        # task named in the override → configured tier restored
+        os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "other-task,emrg-task"
+        assert asyncio.run(handler._effective_sandbox(dirty=True)) == "workspace-write"
+        # wildcard → configured tier restored
+        os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "*"
+        assert asyncio.run(handler._effective_sandbox(dirty=True)) == "workspace-write"
+        # override for a different task → guard still applies
+        os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "other-task"
+        assert asyncio.run(handler._effective_sandbox(dirty=True)) == "read-only"
+    finally:
+        if old is None:
+            os.environ.pop("EMRG_TASK_DIRTY_OVERRIDE", None)
+        else:
+            os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = old
+
+
+def test_clean_tree_keeps_configured_sandbox():
+    """Community issue #979: a clean tree leaves the configured tier intact —
+    no behavior change for the normal case."""
+    handler = TaskHandler(
+        name="emrg-task", config={"project": "emrg"}, interval=60,
+        identity=InstanceIdentity(),
+    )
+    assert asyncio.run(handler._effective_sandbox(dirty=False)) == "workspace-write"

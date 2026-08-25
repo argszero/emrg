@@ -99,8 +99,11 @@ def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
 # Three tiers (default danger-full-access = current, un-sandboxed behavior):
 #   danger-full-access  — no checks at all (existing behavior)
 #   read-only           — no writes allowed: destructive commands (rm -r /
-#                         rmdir / mv / cp -r) and shell redirects (> / >>)
-#                         to any non-/dev/null target are blocked
+#                         rmdir / mv / cp -r), git mutating commands (stash /
+#                         checkout / restore / clean / reset / commit / push /
+#                         pull / merge / rebase — community issue #979) and
+#                         shell redirects (> / >>) to any non-/dev/null target
+#                         are blocked
 #   workspace-write     — writes inside the workspace root (and the OS temp
 #                         area) are allowed; destructive writes to protected
 #                         daemon state files and to absolute paths outside
@@ -124,6 +127,20 @@ _PROTECTED_FILES = (
     "~/.emrg/projects.yml",
     "~/.emrg/rants.jsonl",
 )
+
+# Git mutating commands — blocked under read-only (community issue #979,
+# heinrichneb dev.to comment on the 2026-08-20 data-loss postmortem): the
+# incident's actual killers (`git stash`, `git checkout .`, `git reset --hard`,
+# `git clean`) were NOT caught by the rm/rmdir/mv/cp checks. Under read-only
+# these must be structurally impossible, not merely discouraged by a prompt
+# rule — "rules can regress; topology can't". Read-only git reads (status /
+# fetch / log / diff / remote) stay allowed.
+_GIT_MUTATOR_RE = re.compile(
+    r"\bgit\s+(?:stash|checkout|restore|clean|reset|commit|push|pull|merge|"
+    r"rebase|cherry-pick|cherry_pick|revert|rm|mv|switch|apply|am|archive|"
+    r"submodule|worktree)\b"
+)
+_GIT_DELETE_RE = re.compile(r"\bgit\s+(?:branch|tag)\s+-[dD]\b")
 
 
 def _extract_write_targets(cmd: str) -> list[str]:
@@ -188,6 +205,33 @@ def _is_within(path: str, root: str) -> bool:
         return False
 
 
+def check_read_only_file_write(file_path: str, workspace: str | None = None) -> str | None:
+    """Read-only sandbox check for the write/edit tools (community issue #979).
+
+    Returns a block reason when the target file is inside the task's workspace
+    (the host's working tree — protected by the structural dirty-tree guard) or
+    is a protected daemon state file; returns None when allowed.
+
+    Writes OUTSIDE the workspace (memory dir, logs, OS temp) stay allowed so a
+    read-only cycle can still record state and write its own artifacts — the
+    guard protects the host's uncommitted work, not the agent's own scratch
+    space. Mirrors the bash tool's read-only semantics for file tools.
+    """
+    path = os.path.realpath(os.path.expanduser(file_path))
+    if workspace:
+        ws = os.path.realpath(os.path.expanduser(workspace))
+        if _is_within(path, ws):
+            return (
+                f"read-only sandbox: blocked file write inside workspace {path!r} "
+                "(dirty-tree guard, community issue #979)"
+            )
+    if path in _protected_paths():
+        return (
+            f"read-only sandbox: blocked write to protected daemon file {path!r}"
+        )
+    return None
+
+
 def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
     """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
 
@@ -215,6 +259,16 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
                 return False, (
                     f"read-only sandbox: blocked destructive write targeting {t!r}"
                 ), "partial"
+        # Git mutators are blocked too — the 2026-08-20 data-loss commands
+        # (stash / checkout . / reset --hard / clean) write no file targets
+        # and escaped the target scan (community issue #979). Also blocks
+        # working-tree writers: apply / am / archive / submodule / worktree.
+        m = _GIT_MUTATOR_RE.search(cmd) or _GIT_DELETE_RE.search(cmd)
+        if m:
+            return False, (
+                f"read-only sandbox: blocked git mutating command {m.group(0)!r} "
+                "(dirty-tree guard, community issue #979)"
+            ), "partial"
         return True, None, "partial"
 
     # workspace-write

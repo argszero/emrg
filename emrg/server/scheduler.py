@@ -336,6 +336,65 @@ class TaskHandler:
                 return cand
         return "workspace-write"
 
+    @staticmethod
+    def _is_dirty_tree_sync(source_dir: str) -> bool:
+        """Sync core of the dirty-tree probe (community issue #979).
+
+        Local ``subprocess`` import on purpose: the module must keep its
+        no-subprocess attribute invariant (rant 2026-08-19T14:20:52 — the
+        self-heal git machinery was deleted). Run via ``asyncio.to_thread``
+        so the event loop is never blocked by the git call.
+
+        Fail-open by design: a non-git source dir, or a failing git call,
+        returns False — there is no uncommitted state to protect, and the
+        guard itself must never block a cycle.
+        """
+        import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
+
+        if not os.path.isdir(os.path.join(source_dir, ".git")):
+            return False
+        try:
+            out = _sp.run(
+                ["git", "-C", source_dir, "status", "--porcelain"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except (OSError, _sp.SubprocessError):
+            return False
+        return bool(out.stdout.strip()) if out.returncode == 0 else False
+
+    async def _effective_sandbox(self, dirty: bool | None = None) -> str:
+        """Per-cycle effective bash sandbox tier for the task message.
+
+        Structural dirty-tree guard (community issue #979 — heinrichneb's
+        "audited override" pattern: inconvenient by default, possible on
+        explicit human override, every exception is a receipt). When the
+        source dir has uncommitted changes the cycle runs read-only
+        regardless of configuration — the host's live edits are out of
+        reach structurally, not by prompt aspiration. A human may override
+        with the env var ``EMRG_TASK_DIRTY_OVERRIDE`` (comma-separated task
+        names, or ``*`` for all); every override is logged as a receipt.
+        """
+        if dirty is None:
+            dirty = await asyncio.to_thread(
+                self._is_dirty_tree_sync, str(self._source_dir)
+            )
+        if not dirty:
+            return self._sandbox
+        override = os.environ.get("EMRG_TASK_DIRTY_OVERRIDE", "")
+        names = [n.strip() for n in override.split(",") if n.strip()]
+        if "*" in names or self.name in names:
+            self._logger.warning(
+                "TaskHandler[%s]: dirty tree + EMRG_TASK_DIRTY_OVERRIDE — "
+                "read-only guard overridden (sandbox=%s, audited receipt)",
+                self.name, self._sandbox,
+            )
+            return self._sandbox
+        self._logger.warning(
+            "TaskHandler[%s]: dirty working tree — cycle forced read-only "
+            "(structural guard, community issue #979)", self.name,
+        )
+        return "read-only"
+
     # ── Saturation state (restored from disk across daemon restarts) ──
 
     def _load_saturation_state(self) -> bool:
@@ -895,7 +954,10 @@ class TaskHandler:
                 "prompt": prompt,
                 "stream": True,
                 "timestamp": cycle_time.isoformat(),
-                "sandbox": self._sandbox,
+                # Structural dirty-tree guard (community issue #979): effective
+                # sandbox per cycle — dirty tree forces read-only unless a
+                # human set EMRG_TASK_DIRTY_OVERRIDE (audited receipt).
+                "sandbox": await self._effective_sandbox(),
             },
             ensure_ascii=False,
         )

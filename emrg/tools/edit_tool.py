@@ -7,6 +7,7 @@ from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
+from emrg.tools.bash_tool import check_read_only_file_write
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,15 @@ class EditTool(ToolExecutor):
             return ToolResult(name="edit", content="Error: old_string is empty", error=True)
 
         path = Path(file_path).expanduser().resolve()
+
+        # Read-only sandbox (community issue #979): the edit tool must not
+        # modify the host's uncommitted work in the task source tree when the
+        # dirty-tree guard forced read-only. Workspace boundary injected by the
+        # daemon (session cwd); None in non-daemon use → fail-open.
+        if arguments.get("sandbox") == "read-only":
+            reason = check_read_only_file_write(str(path), arguments.get("workspace"))
+            if reason:
+                return ToolResult(name="edit", content=reason, error=True)
 
         if not path.exists():
             return ToolResult(

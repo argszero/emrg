@@ -111,6 +111,81 @@ def test_check_read_only_allows_read_commands():
         assert allowed is True, cmd
 
 
+def test_check_read_only_blocks_git_mutators():
+    """Community issue #979: read-only must block git mutating commands —
+    the 2026-08-20 data-loss killers (stash / checkout . / reset --hard /
+    clean) escaped the rm/mv/cp target scan. Under read-only they must be
+    structurally impossible, not merely discouraged by a prompt rule."""
+    for cmd in (
+        "git stash",
+        "git stash list && git stash drop",
+        "git checkout .",
+        "git checkout -- src/main.py",
+        "git restore .",
+        "git clean -fd",
+        "git reset --hard",
+        "git reset --mixed HEAD~1",
+        "git commit -m 'wip'",
+        "git push origin master",
+        "git pull --rebase",
+        "git merge master",
+        "git rebase master",
+        "git cherry-pick abc123",
+        "git revert abc123",
+        "git rm foo.py",
+        "git switch feature/x",
+        "git branch -d old",
+        "git branch -D old",
+        "git tag -d v1",
+        # working-tree writers (cycle 20260825-193548)
+        "git apply patch.diff",
+        "git am patch-series.mbox",
+        "git archive --output=tree.tar HEAD",
+        "git submodule update --init",
+        "git worktree add ../wt master",
+    ):
+        allowed, reason, enforcement = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} should be blocked"
+        assert "read-only sandbox" in reason, cmd
+        assert "git" in reason, cmd
+        assert enforcement == "partial"
+
+
+def test_check_read_only_blocks_git_mv():
+    """`git mv a b` is blocked by the write-target scan (mv destination) —
+    the git-mutator reason isn't required, the block is what matters."""
+    allowed, reason, _ = _check_sandbox("git mv a b", "read-only")
+    assert allowed is False
+    assert "read-only sandbox" in reason
+
+
+def test_check_read_only_allows_git_reads():
+    """Read-only keeps read-only git reads available — the read-only cycle
+    still needs status/fetch/log/diff for scanning and review."""
+    for cmd in (
+        "git status --short --branch",
+        "git fetch origin master",
+        "git log --oneline -3",
+        "git diff",
+        "git diff --cached",
+        "git show HEAD --stat",
+        "git branch -a",
+        "git remote -v",
+        "git rev-parse --abbrev-ref HEAD",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} should be allowed (got {reason!r})"
+
+
+def test_check_workspace_write_allows_git_mutators():
+    """workspace-write is the normal working tier — tasks must still be able
+    to commit/push there. Only read-only blocks git mutation."""
+    for cmd in ("git stash", "git checkout .", "git reset --hard",
+                "git commit -m x", "git push origin master"):
+        allowed, _, _ = _check_sandbox(cmd, "workspace-write")
+        assert allowed is True, cmd
+
+
 # ── _check_sandbox — workspace-write ──────────────────────────────────────
 
 def test_check_workspace_write_allows_relative_writes():
