@@ -291,6 +291,12 @@ def test_push_end_to_end_byte_exact_with_fake_github(tmp_path):
     assert local.stdout.decode().strip() == result["sha"]
     # normalized message (no trailing newline) is what the remote object holds
     assert _git("cat-file", "commit", result["sha"], cwd=repo).stdout.endswith(b"\n\nchild commit")
+    # full local materialization: git log must traverse the API-normalized
+    # chain from the new branch head down to the base (all parents local)
+    r = _git("log", "--oneline", "refs/heads/feature/test", cwd=repo)
+    assert r.returncode == 0, r.stderr
+    log = r.stdout.decode()
+    assert log.count("\n") == 2, f"expected 2 commits in log, got: {log}"
 
     # call-order: blobs/trees first, then commits oldest-first, ref last
     def kind(p):

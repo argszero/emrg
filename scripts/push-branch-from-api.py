@@ -325,7 +325,7 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
     # the *remote* shas of already-created commits (they differ from the local
     # shas when GitHub normalizes the message), so track local->remote mapping
     commit_map: dict[str, str] = {}
-    last_payload: dict | None = None
+    payloads: list[dict] = []  # parallel to chain — needed for local materialization
     for local_sha, commit in chain:
         payload = {
             # GitHub's create-commit stores the message without a trailing
@@ -347,7 +347,7 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
                                 + e.read().decode("utf-8", "replace")[:300])
             raise
         commit_map[local_sha] = resp["sha"]
-        last_payload = payload
+        payloads.append(payload)
 
     # ---- update the remote ref (fast-forward semantics; force only if asked)
     final_sha = commit_map[chain[-1][0]]
@@ -370,17 +370,21 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
                             "use --force only if you know the remote is stale (no refs touched)") from e
         raise
 
-    # ---- materialize the remote commit locally so `git update-ref` can point
-    # at it (the API-created object does not exist in the local object store),
-    # then rewrite the local branch ref to the remote sha and verify
-    raw = _raw_commit(last_payload)
-    r = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"],
-                       input=raw, capture_output=True, cwd=cwd)
-    computed = r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else "?"
-    if r.returncode != 0 or computed != final_sha:
-        raise PushError(f"remote ref already updated to {final_sha} but local "
-                        f"materialization produced {computed} — run "
-                        f"'git fetch origin {branch}' to sync locally")
+    # ---- materialize EVERY created remote commit locally (not just the head),
+    # so `git update-ref` works and `git log` can traverse the new branch head
+    # through the API-normalized intermediate commits; then rewrite the local
+    # branch ref to the remote sha and verify
+    for (local_sha, _commit), payload in zip(chain, payloads):
+        raw = _raw_commit(payload)
+        r = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+                           input=raw, capture_output=True, cwd=cwd)
+        computed = r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else "?"
+        expected = commit_map[local_sha]
+        if r.returncode != 0 or computed != expected:
+            raise PushError(f"remote ref already updated to {final_sha} but local "
+                            f"materialization of {local_sha} produced {computed} "
+                            f"(expected {expected}) — run "
+                            f"'git fetch origin {branch}' to sync locally")
     git("update-ref", f"refs/heads/{branch}", final_sha, cwd=cwd)
     confirmed = api("GET", ref_path)["object"]["sha"]
     if confirmed != final_sha:
