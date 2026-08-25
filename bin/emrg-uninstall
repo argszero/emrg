@@ -44,15 +44,19 @@ from pathlib import Path
 EMRG_DIR = Path.home() / ".emrg"
 LOG_DIR = EMRG_DIR / "logs"
 GRAVEYARD_DIR = EMRG_DIR / "graveyard"
-PORT_FILE = EMRG_DIR / "emrgd.port"
-PID_FILE = EMRG_DIR / "emrgd.pid"
 INSTALL_DIR = EMRG_DIR / "install"
+
+# Rant 2026-08-25T18:46（宿主）：emrgd.pid / emrgd.port 已彻底废弃——不写不读。
+# 固定端口（EMRGD_PORT=56031）是 daemon 存活唯一 ground truth（rant
+# 2026-08-19T08:05:21）；token 只由 emrgd.token 单行承载（rant 2026-08-20T14:32:52）。
+# WHITELIST 里仍保留这两个文件名，仅为卸载时清理老安装的历史残留（不创建不读取）。
 
 # R101 whitelist — known EMRG files. Anything else in ~/.emrg is user data
 # and is preserved (listed in the report instead of deleted).
 # R121: 补全运行时文件 — emrgd.log / emrg-gui.log / gui-window.json 为 daemon/GUI
 # 运行日志与窗口状态；skills/ 是 daemon 启动时 mkdir 的运行时骨架（非用户数据），
 # 用户自定义 skills 先入 graveyard 快照再删除（rant 2026-08-05T15:35:17）。
+# emrgd.pid / emrgd.port：历史遗留（已废弃），仅卸载时清理。
 WHITELIST = [
     "install", "versions", "config.toml", "sessions", "memory", "logs",
     "projects.yml", "tasks.yml", "rants.jsonl", "saturation",
@@ -99,9 +103,16 @@ def stop_gui() -> dict:
 
 
 def stop_daemon() -> dict:
-    """Step 1b — stop the daemon. Returns {method, ok}."""
+    """Step 1b — stop the daemon. Returns {method, ok}.
+
+    Rant 2026-08-25T18:46（宿主）：不读 emrgd.pid / emrgd.port（已废弃）。
+    顺序：① ws 协议关闭（固定端口 56031 + emrgd.token 单行 token）
+         ② 命令行扫描 ``-m emrg.server`` 进程 SIGTERM/taskkill（与
+            emrg._stop_all.stop_daemon 同语义，仅剩的可靠身份标记）
+    """
     result = {"method": "none", "ok": False}
-    # Try protocol shutdown when websockets is importable (PYTHONPATH has lib/).
+    EMRGD_PORT = 56031  # 固定端口（connect.py EMRGD_PORT，rant 2026-08-19T08:05:21）
+    token_path = EMRG_DIR / "emrgd.token"
     try:
         import asyncio
         import json as _json
@@ -109,23 +120,20 @@ def stop_daemon() -> dict:
         from websockets.asyncio.client import connect  # type: ignore
         from websockets.exceptions import ConnectionClosed  # type: ignore
 
-        port = None
-        token = None
-        if PORT_FILE.exists():
-            lines = PORT_FILE.read_text(encoding="utf-8").splitlines()
-            if lines:
-                port = lines[0].strip()
-            if len(lines) > 1:
-                token = lines[1].strip()
+        token = ""
+        try:
+            token = token_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
 
         async def _shutdown() -> bool:
-            if not port:
+            if not token:
                 return False
             try:
-                ws = await asyncio.wait_for(connect(f"ws://127.0.0.1:{port}", open_timeout=3), timeout=4)
+                ws = await asyncio.wait_for(connect(f"ws://127.0.0.1:{EMRGD_PORT}", open_timeout=3), timeout=4)
                 try:
                     # Auth handshake (mirrors connect.py connect_to_server).
-                    await ws.send(_json.dumps({"type": "auth", "token": token or ""}, ensure_ascii=False))
+                    await ws.send(_json.dumps({"type": "auth", "token": token}, ensure_ascii=False))
                     ack = _json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
                     if ack.get("type") != "auth_ok":
                         await ws.close()
@@ -141,61 +149,68 @@ def stop_daemon() -> dict:
             except (ConnectionClosed, OSError, asyncio.TimeoutError, _json.JSONDecodeError):
                 return False
 
-        if port:
+        if token:
             ok = asyncio.run(_shutdown())
             if ok:
                 result = {"method": "protocol-shutdown", "ok": True}
                 print("  [1] daemon stopped (protocol shutdown)")
                 return result
     except Exception:
-        pass  # degrade to pid-based stop
+        pass  # degrade to cmdline-scan stop
 
-    # Fallback: SIGTERM via pid file (POSIX) / taskkill (Windows).
-    pid = None
-    if PID_FILE.exists():
-        try:
-            pid = int(PID_FILE.read_text(encoding="utf-8").strip())
-        except ValueError:
-            pid = None
-    if not pid and PORT_FILE.exists():
-        # port file second line is the token, not pid — skip
-        pass
-    if pid:
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/F"],
-                    capture_output=True, timeout=10,
-                )
-                # R121: 轮询确认进程退出（≤5s），避免 pid 文件被并发重建
-                for _ in range(35):
-                    chk = subprocess.run(
-                        ["tasklist", "/FI", f"PID eq {pid}"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    if "No tasks" in chk.stdout:
-                        break
-                    time.sleep(0.15)
-            else:
-                os.kill(pid, signal.SIGTERM)
-                for _ in range(20):
-                    try:
-                        os.kill(pid, 0)
+    # Fallback: kill by command-line identity (``-m emrg.server``) — the only
+    # reliable marker on Windows (rant 2026-08-17T17:03:38; emrg._stop_all
+    # same approach). No pid file involved.
+    import subprocess as _sp
+    try:
+        if os.name == "nt":
+            out = _sp.run(
+                ["wmic", "process", "where", "name='pythonw.exe'", "get", "processid,commandline"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout or ""
+            # PowerShell CIM fallback for Win11 24H2+ (no wmic).
+            if not out.strip() or "emrg.server" not in out:
+                ps_cmd = ("Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match "
+                          "'emrg.server' } | ForEach-Object { $_.ProcessId }")
+                out = _sp.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True, timeout=10,
+                ).stdout or ""
+            pids = [int(p) for p in re.findall(r"\d+", out) if p.strip()]
+            for pid in pids:
+                _sp.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=10)
+        else:
+            out = _sp.run(
+                ["ps", "-axww", "-o", "pid=,command="],
+                capture_output=True, text=True, timeout=10,
+            ).stdout or ""
+            pids = [int(m.group(1)) for m in re.finditer(r"^\s*(\d+)\s+.*-m emrg\.server\b", out, re.M)]
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+        if pids:
+            # Poll ≤5s for the port to close (ground truth).
+            import socket as _socket
+            for _ in range(35):
+                try:
+                    with _socket.create_connection(("127.0.0.1", EMRGD_PORT), timeout=0.3):
                         time.sleep(0.15)
-                    except OSError:
-                        break
-            result = {"method": "pid-sigterm", "ok": True}
-            print(f"  [1] daemon stopped (pid {pid})")
+                except OSError:
+                    break
+            result = {"method": "cmdline-scan", "ok": True}
+            print(f"  [1] daemon stopped (cmdline scan, {len(pids)} pid(s))")
             return result
-        except (OSError, subprocess.SubprocessError):
-            pass
-    # Fallback: remove stale runtime files.
-    for f in (PORT_FILE, PID_FILE):
-        try:
-            f.unlink()
-        except FileNotFoundError:
-            pass
-    print("  [1] daemon not running (or already stopped); removed stale port/pid files")
+    except (OSError, subprocess.SubprocessError, _sp.SubprocessError):
+        pass
+    # Token cleanup once port is confirmed closed (daemon removes it itself on
+    # graceful shutdown; a force-killed daemon cannot).
+    try:
+        token_path.unlink()
+    except OSError:
+        pass
+    print("  [1] daemon not running (or already stopped)")
     return result
 
 
