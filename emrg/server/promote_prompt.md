@@ -109,7 +109,7 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 | **Lobsters** | strict rules — read the community guide first | |
 | **Tech forums/communities** | V2EX, Stack Overflow relevant tags, etc. | join discussions and provide value, end with a natural link |
 | **Discord/Slack** | relevant tech channels | mention naturally when helping people solve problems |
-| **Blogs (blogger.com / Dev.to / Medium)** | own blog as home turf: long-form output of design philosophy, architecture decisions, latest progress (see Blog Publishing section) | deep content, not ads; project link at the end; low cadence (≤1 post/week) |
+| **Blogs (blogger.com / Dev.to / Medium)** | own blog as home turf: long-form output of design philosophy, architecture decisions, latest progress (see Blog Publishing section) | deep content, not ads; project link at the end; cadence 1-3 days per post (see Blog Publishing) |
 
 #### Secondary channels (one-off)
 
@@ -160,9 +160,12 @@ long-form output on your own turf.
   give value first, project mention natural (this is a home turf, but still not a hard ad).
 - **Fact-checking**: any claim about project capabilities/versions/mechanisms MUST be
   verified via §0.4 first (latest commit/release); cite the latest commit/release.
-- **Cadence**: low frequency, high quality — default ≤1 post/week; a new release or
-  major progress may add an immediate post. §0.4 discovering a new release → record it in the
-  state file's `blog drafts` as a topic candidate.
+- **Cadence**: 1-3 days per post — at least 2 posts/week (rant 2026-08-25T10:01:20 — the old
+  ≤1 post/week was too slow: publish-ready drafts piled up while the project ships ~8
+  releases/2 days, and a postmortem draft waited a full week, its window slipping to 08-27).
+  Publish within 1-3 days whenever a draft is ready; a new release or major progress may add
+  an immediate post. §0.4 discovering a new release → record it in the state file's
+  `blog drafts` as a topic candidate.
 - **Distribution**: publish on your own blog (blogger etc.); optionally cross-post to
   Dev.to/Medium (same content, note the original source link).
 - **State file**: `blog posts` field (title + platform + link + publish time + topic) to
