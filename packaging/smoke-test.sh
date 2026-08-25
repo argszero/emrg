@@ -46,11 +46,29 @@ export PYTHONDONTWRITEBYTECODE=1
 say "1. emrg --version"
 if emrg --version 2>&1 | grep -q "emrg "; then ok "emrg --version"; else fail "emrg --version"; fi
 
+# ⛔ 红线守卫（rant 2026-08-25T10:38:34 事件）：本脚本不得以任何形式 stop/restart
+# emrg server / emrgd（宿主最高原则 2026-08-18T22:58 / MANIFESTO 第四条附则二）。
+# 前置探测固定端口 56031：若已有真实 daemon 在跑 → 全部 daemon 步骤 audit-degraded
+# 跳过（同 9-12 款），绝不 pkill / stop / restart。旧实现曾 `pkill -f "emrg.server"`
+# + `emrg server stop`（步骤 4 与收尾），会误杀本机真实 daemon —— 已于本 PR 移除。
+DAEMON_DEGRADED=0
+if python3 -c '
+import socket, sys
+try:
+    s = socket.create_connection(("127.0.0.1", 56031), timeout=0.5)
+    s.close()
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+' >/dev/null 2>&1; then
+  DAEMON_DEGRADED=1
+fi
+
 # 2. 前置写最小 config.toml → 后台起 emrgd + 轮询 port + auth + pong（R78/R109）
 say "2. daemon start + port + auth + pong"
-# 清理可能残留的 emrg.server（CI runner / 本地重跑）
-pkill -f "emrg.server" >/dev/null 2>&1 || true
-sleep 0.5
+if [ "$DAEMON_DEGRADED" -eq 1 ]; then
+  ok "2. audit-degraded — port 56031 busy (real daemon running), not touching it"
+else
 cat > "$HOME/.emrg/config.toml" <<'EOF'
 [llm]
 base_url = "https://api.deepseek.com"
@@ -100,10 +118,13 @@ except Exception as e:
 PYEOF
   then ok "daemon auth + pong"; else fail "daemon auth + pong"; fi
 fi
+fi
 
 # 3. 会话持久化核心链路（R79 降级：无 LLM）
 say "3. session persistence core (no-LLM)"
-if [ -f "$HOME/.emrg/emrgd.token" ]; then
+if [ "$DAEMON_DEGRADED" -eq 1 ]; then
+  ok "3. audit-degraded — port 56031 busy"
+elif [ -f "$HOME/.emrg/emrgd.token" ]; then
   if python3 - "$HOME/.emrg/emrgd.token" <<'PYEOF'
 import json, sys, websockets.sync.client
 port, token = 56031, open(sys.argv[1]).read().strip()
@@ -119,21 +140,41 @@ PYEOF
   then ok "session core"; else fail "session core"; fi
 fi
 
-# 4. emrg server stop（R107b：依赖 2 的 daemon）
-say "4. emrg server stop"
-if emrg server stop 2>&1 | grep -q "stopped"; then ok "server stop"; else fail "server stop"; fi
-
-# 5. emrg rant "test"（R107：_send_rant 依赖 daemon——先重起）
-say "5. emrg rant"
-if [ -n "${WINDIR:-}" ]; then
-  # $HOME 在 Git Bash 是 POSIX 路径（/c/Users/...），cmd 需 Windows 路径（C:\Users\...）→ cygpath -m
-  EMRGD_CMD="$(cygpath -m "$HOME/.emrg/install/bin/emrgd.cmd")"
-  (cd "$HOME" && cmd //c "start /b $EMRGD_CMD" >"$HOME/.emrg/emrgd-debug2.log" 2>&1)
+# 4. daemon 存活逆断言（R107b 覆盖点改造，rant 2026-08-25T10:38:34）：不再
+# stop/restart，改为再次 auth+pong 断言「daemon 依然活着」（服务端健全性自证）。
+say "4. daemon still alive (re-auth + pong)"
+if [ "$DAEMON_DEGRADED" -eq 1 ]; then
+  ok "4. audit-degraded — port 56031 busy"
+elif [ -f "$HOME/.emrg/emrgd.token" ]; then
+  token=$(cat "$HOME/.emrg/emrgd.token")
+  if python3 - "$token" <<'PYEOF'
+import json, sys
+from websockets.sync.client import connect
+port, token = 56031, sys.argv[1]
+try:
+    ws = connect(f"ws://127.0.0.1:{port}", open_timeout=3)
+    ws.send(json.dumps({"type": "auth", "token": token}))
+    ack = ws.recv()
+    assert ack and json.loads(ack)["type"] == "auth_ok", f"unexpected ack={ack!r}"
+    ws.send(json.dumps({"type": "ping"}))
+    pong = ws.recv()
+    assert pong and json.loads(pong)["type"] == "pong", f"unexpected pong={pong!r}"
+    ws.close()
+    print("re-auth+pong OK")
+except Exception as e:
+    print(f"ALIVE_FAIL: {e!r}")
+    sys.exit(1)
+PYEOF
+  then ok "daemon alive (re-auth + pong)"; else fail "daemon alive (re-auth + pong)"; fi
 else
-  nohup emrgd >"$HOME/.emrg/emrgd-debug2.log" 2>&1 &
+  fail "daemon alive (no token)"
 fi
-sleep 1
-if emrg rant "smoke-test" 2>&1 | grep -qi "daemon not running"; then
+
+# 5. emrg rant "test"（R107：_send_rant 依赖 daemon；步骤 4 不再 stop，daemon 仍在跑，无需重起）
+say "5. emrg rant"
+if [ "$DAEMON_DEGRADED" -eq 1 ]; then
+  ok "5. audit-degraded — port 56031 busy"
+elif emrg rant "smoke-test" 2>&1 | grep -qi "daemon not running"; then
   fail "rant (daemon not running)"
 else
   ok "rant sent (no error)"
@@ -222,8 +263,8 @@ else
 fi
 rm -rf "$venv_dir"
 
-# 清理临时 daemon
-emrg server stop >/dev/null 2>&1 || true
+# 清理：红线禁止 stop/restart daemon —— CI 临时 daemon 随虚拟机销毁；本机由上方
+# 端口守卫兜底（56031 忙 → 降级跳过），绝不以任何形式终止 daemon 进程。
 
 printf '\n==== smoke summary: %d pass, %d fail ====\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
