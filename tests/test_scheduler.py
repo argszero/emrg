@@ -1259,6 +1259,36 @@ def test_promote_template_homework_first_dehardening():
     assert "mention stats" in out, "状态文件提及统计字段应渲染"
 
 
+def test_promote_template_direct_cdp_rule():
+    """promote_prompt.md §0.3 mandates direct CDP 127.0.0.1:57000 for all
+    browser ops, forbidding the remote-debugging-setup popup flow
+    (rant 2026-08-25T17:57:15, R49: popup blocked waiting for host Allow)."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "promote_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        repo_url="https://github.com/x/y.git", owner="x", repo="y",
+        local_source="/tmp/pm", source_dir="/tmp/pm", session_id="s1",
+        evolution_cwd="/tmp/evo", timestamp="20260825",
+        task={"project": "aitokenpool"},
+        project={"path": "/tmp/proj", "name": "aitokenpool", "description": "d"},
+        evolution_count=0, git_path="git", gh_path="gh",
+    )
+    # A. direct CDP endpoint mandated (positive discrimination)
+    assert "127.0.0.1:57000" in out, "直连 CDP 端点应渲染"
+    assert "Direct CDP connection (MUST" in out, "直连 CDP MUST 规则应渲染"
+    assert "remote-debugging-setup" in out, "禁止的 remote-debugging-setup 应点名"
+    assert "FORBIDDEN" in out, "禁止词应渲染"
+    # B. retry-direct-not-popup behavior
+    assert "retry the direct connection" in out, "直连失败应重试直连而非弹窗"
+
+
 def test_promote_template_registration_blog_sections():
     """promote_prompt.md §2.x host-authorized account registration + §2.y
     blog publishing (rants 2026-08-15T09:04:28 / 09:06:12)."""
