@@ -194,8 +194,15 @@ test("Stage3b：renderer JS 无未接入 i18n 的中文字符串（防 JS 侧回
     if (!f.endsWith(".js")) continue;
     if (f === "i18n.js") continue; // 词典本身全是中文（合法）
     const src = fs2.readFileSync(path.join(__dirname, "..", "renderer", "js", f), "utf8");
+    // 兜底词典块（如 error-boundary.js FALLBACK_DICTS）：与 i18n.js 词典同性质，整块跳过
+    let inFallbackDict = false;
     for (const [i, line] of src.split("\n").entries()) {
       let s = line.trim();
+      if (s.includes("FALLBACK_DICTS")) { inFallbackDict = true; continue; }
+      if (inFallbackDict) {
+        if (/^};$/.test(s)) inFallbackDict = false;
+        continue;
+      }
       if (!cjk.test(s)) continue;
       // 剥离注释：行首 //、行尾 // 注释、/* */ 块
       s = s.replace(/^\/\/.*$/, "").replace(/^\*.*$/, "").replace(/ \/\/.*$/, "").replace(/\/\*.*?\*\//g, "").trim();

@@ -158,6 +158,9 @@ const ELEMENT_IDS = [
   "task-form-cancel", "task-form-save",
   "task-template-form", "task-template-name", "task-template-prompt",
   "task-template-cancel", "task-template-save", "task-template-list",
+  // rant 21:13:18：全局错误边界覆盖层（error-boundary.js）
+  "error-boundary-overlay", "error-boundary-title", "error-boundary-summary",
+  "error-boundary-timestamp", "error-boundary-copy", "error-boundary-reload",
 ];
 
 /** 构造浏览器沙箱（win 即全局对象） */
@@ -172,7 +175,11 @@ function makeSandbox(overrides = {}) {
     querySelectorAll: () => [],
     addEventListener() {},
     documentElement: { setAttribute() {}, removeAttribute() {} },
-    body: { classList: { add() {}, remove() {}, toggle() {} } },
+    body: {
+      children: [],
+      appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
+      classList: { add() {}, remove() {}, toggle() {} },
+    },
   };
   const win = {
     console,
@@ -194,7 +201,13 @@ function makeSandbox(overrides = {}) {
     Set,
     Promise,
     requestAnimationFrame: (cb) => cb(),
-    navigator: { language: "zh-CN" }, // rant 21:19：沙箱固定 zh，断言保持确定性
+    navigator: {
+      language: "zh-CN", // rant 21:19：沙箱固定 zh，断言保持确定性
+      // rant 21:13:18：错误边界复制按钮依赖 navigator.clipboard
+      clipboard: { writeText: async () => { win._clipboardCopies = (win._clipboardCopies || 0) + 1; } },
+    },
+    // rant 21:13:18：错误边界重载按钮依赖 location.reload（仅渲染器，不碰 daemon）
+    location: { reload() { win._locationReloads = (win._locationReloads || 0) + 1; } },
     // P2 框架：localStorage 功能 mock（宽度/折叠分离持久化断言）
     localStorage: {
       _d: {},
@@ -249,7 +262,7 @@ function makeSandbox(overrides = {}) {
   win.addEventListener = function (type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); };
   win.removeEventListener = function (type, fn) { const a = this._listeners[type]; if (a) { const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); } };
   const ctx = vm.createContext(win);
-  for (const f of ["utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "file-tree", "app"]) {
+  for (const f of ["error-boundary", "utils", "i18n", "commands", "markdown", "copywriting", "chat", "sidebar", "dialogs", "result-panel", "file-tree", "app"]) {
     const code = fs.readFileSync(path.join(RENDERER_JS, f + ".js"), "utf8");
     vm.runInContext(code, ctx, { filename: "renderer/js/" + f + ".js" });
   }
@@ -262,7 +275,7 @@ const tick = () => new Promise((r) => setTimeout(r, 20));
 /** 消息节点数：排除 .session-header 标题栏（app.js 每会话视图顶部固定） */
 const msgCount = (el) => (el.children || []).filter((c) => !(c.className || "").split(/\s+/).includes("session-header")).length;
 
-test("8 模块按序加载且全局符号解析", () => {
+test("12 模块按序加载且全局符号解析", () => {
   const { ctx } = makeSandbox();
   const out = vm.runInContext(
     "(function(){ return { App: typeof App, Chat: typeof EMRG_Chat, Copy: typeof EMRG_Copy, Sidebar: typeof EMRG_Sidebar, Dialogs: typeof EMRG_Dialogs, Commands: typeof EMRG_Commands, utils: typeof $ }; })()",
@@ -276,6 +289,46 @@ test("8 模块按序加载且全局符号解析", () => {
   assert.strictEqual(out.Dialogs, "object");
   assert.strictEqual(out.Commands, "object");
   assert.strictEqual(out.utils, "function");
+});
+
+// ── rant 2026-08-25T21:13:18：全局错误边界（error-boundary.js） ──
+test("error-boundary：未捕获错误 → 覆盖层出现（标题/摘要截断/时间戳/按钮）；正常路径不出现", async () => {
+  const { win, els } = makeSandbox();
+  await tick();
+
+  // 正常路径：无错误 → 覆盖层不显示（display 非 block，零干扰）
+  assert.notStrictEqual(els["error-boundary-overlay"].style.display, "block", "正常路径覆盖层应隐藏");
+
+  // 触发 window error（监听器经 makeSandbox 载入 error-boundary.js 时注册）
+  const err = new Error("boom-" + "x".repeat(600));
+  (win._listeners["error"] || []).forEach((fn) => fn({ message: err.message, error: err }));
+
+  // 覆盖层出现 + 标题 + 摘要（含错误信息 + 截断 ≤ 500+2）
+  assert.strictEqual(els["error-boundary-overlay"].style.display, "block", "未捕获错误后覆盖层应显示");
+  assert.strictEqual(els["error-boundary-title"].textContent, "渲染器出错");
+  assert.ok((els["error-boundary-summary"].textContent || "").includes("boom"), "摘要应包含错误信息");
+  assert.ok((els["error-boundary-summary"].textContent || "").length <= 502, "摘要应截断至 500 字符 + 省略号");
+  assert.ok(els["error-boundary-timestamp"].textContent, "时间戳应存在");
+
+  // 两按钮存在且文案正确；复制按钮调 navigator.clipboard，重载按钮调 location.reload
+  assert.strictEqual(els["error-boundary-copy"].textContent, "复制错误");
+  assert.strictEqual(els["error-boundary-reload"].textContent, "重新加载");
+  els["error-boundary-copy"].click();
+  await tick();
+  assert.strictEqual(win._clipboardCopies, 1, "复制按钮应写入剪贴板");
+  els["error-boundary-reload"].click();
+  assert.strictEqual(win._locationReloads, 1, "重载按钮应调用 location.reload");
+});
+
+test("error-boundary：unhandledrejection 同样触发覆盖层（错误处理器不抛错）", async () => {
+  const { win, els } = makeSandbox();
+  await tick();
+  (win._listeners["unhandledrejection"] || []).forEach((fn) => fn({ reason: new Error("rej-boom") }));
+  assert.strictEqual(els["error-boundary-overlay"].style.display, "block");
+  assert.ok((els["error-boundary-summary"].textContent || "").includes("rej-boom"));
+  // 再触发一次：重复显示不抛错、内容更新
+  (win._listeners["unhandledrejection"] || []).forEach((fn) => fn({ reason: new Error("second-boom") }));
+  assert.ok((els["error-boundary-summary"].textContent || "").includes("second-boom"), "重复出错应更新摘要");
 });
 
 test("boot：config 缺失 → 首启引导（不拉起 daemon）", async () => {
