@@ -252,7 +252,7 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
     # the remote: a commit already present remotely is the real base, which
     # keeps fast-forward pushes after an amend cheap (upload only new commits)
     # even when the branch head is an API-normalized commit not in local history
-    chain = []
+    chain: list[tuple[str, dict]] = []  # (local_sha, parsed_commit)
     cur = local_tip
     while cur and cur != base:
         try:
@@ -263,8 +263,8 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
             if e.code not in (404, 422):
                 raise
         raw = git("cat-file", "commit", cur, cwd=cwd)
-        chain.append(parse_commit(raw))
-        parents = chain[-1]["parents"]
+        chain.append((cur, parse_commit(raw)))
+        parents = chain[-1][1]["parents"]
         if not parents:
             break
         cur = parents[0] if parents[0] != base else None
@@ -313,7 +313,7 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
         return rsha
 
     for commit in chain:
-        objs = collect_objects(commit["tree"], cwd=cwd)
+        objs = collect_objects(commit[1]["tree"], cwd=cwd)
         for bsha in sorted(objs["blobs"], key=lambda s: objs["blobs"][s]):
             remote_sha(bsha, "blob")
         # deepest paths first so children exist before parents
@@ -321,17 +321,19 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
         for tsha in sorted(objs["trees"], key=lambda s: (objs["trees"][s].count("/"), objs["trees"][s]), reverse=True):
             remote_sha(tsha, "tree")
 
-    # ---- create commits oldest -> newest, parents via remote shas
-    commit_map: list[str] = []
+    # ---- create commits oldest -> newest; a commit's parents must reference
+    # the *remote* shas of already-created commits (they differ from the local
+    # shas when GitHub normalizes the message), so track local->remote mapping
+    commit_map: dict[str, str] = {}
     last_payload: dict | None = None
-    for commit in chain:
+    for local_sha, commit in chain:
         payload = {
             # GitHub's create-commit stores the message without a trailing
             # newline (observed cycle 2026-08-26 00:59) — normalize here so the
             # payload reflects the object that will actually be stored
             "message": commit["message"].rstrip("\n"),
             "tree": obj_map.get(commit["tree"], commit["tree"]),
-            "parents": [obj_map.get(p, p) for p in commit["parents"]],
+            "parents": [commit_map.get(p) or obj_map.get(p, p) for p in commit["parents"]],
             "author": commit["author"],
             "committer": commit["committer"],
         }
@@ -344,11 +346,11 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
                                 "carry the original +0800 offset, gotcha 3): "
                                 + e.read().decode("utf-8", "replace")[:300])
             raise
-        commit_map.append(resp["sha"])
+        commit_map[local_sha] = resp["sha"]
         last_payload = payload
 
     # ---- update the remote ref (fast-forward semantics; force only if asked)
-    final_sha = commit_map[-1]
+    final_sha = commit_map[chain[-1][0]]
     body = {"sha": final_sha, "force": force}
     try:
         if existing:

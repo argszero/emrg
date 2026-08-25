@@ -181,6 +181,10 @@ class FakeGitHub:
         if path.startswith("/repos/x/git/commits"):
             if self.fail_commits:
                 raise _http_error(422, b'{"message":"Validation Failed"}')
+            # like real GitHub: parents must already exist remotely
+            for p in body.get("parents", []):
+                assert p in self.objects, f"parent {p} does not exist (not created)"
+            assert body["tree"] in self.objects, "tree not uploaded before commit"
             raw = _raw_commit_from_payload(body)
             sha = _hash_object(self.repo, "commit", raw, write=True)
             self.objects[sha] = ("commit", raw)
