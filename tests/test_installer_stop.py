@@ -468,3 +468,27 @@ def test_classify_locked_files_mixed():
         "bin/data.dat",
         "lib/websockets/speedups.cp313-win_amd64.pyd",
     ]
+
+
+def test_python_entitlements_plist_stays_comment_free():
+    """PR #975（2026-08-25）回归守卫：v0.2.78 macOS 公证构建失败根因之一 =
+    python-entitlements.plist 里 8 行 XML 注释导致 codesign AMFI 报错，修复 =
+    删注释。plist 是合法 XML，注释极易被后人重新写回（"解释下这权限干嘛的"）
+    → 本测试在任意平台 CI 先拦住，不用等 macOS 打包：
+
+      1. plist 不得含 XML 注释（<!-- ... -->）；
+      2. disable-library-validation 权限必须保留（与 make-installer.sh 签名后
+         fail-loud 检查同一不变式）；
+      3. 该权限的来龙去脉（rant 2026-08-25 journal R2：scipy ILP 实测阻断、
+         pip C 扩展 Team ID 不符加载失败）只许写在 make-installer.sh 注释里，
+         不得迁回 plist —— 两处断言互相锚定。
+    """
+    plist = _read("packaging/assets/python-entitlements.plist")
+    assert "<!--" not in plist
+    assert "<key>com.apple.security.cs.disable-library-validation</key>" in plist
+    assert "<true/>" in plist
+
+    script = _read("packaging/make-installer.sh")
+    # 上下文锚在签名循环注释（line ~66-71）+ fail-loud 检查（line ~78-84）
+    assert "journal R2" in script and "scipy" in script
+    assert "missing disable-library-validation entitlement" in script
