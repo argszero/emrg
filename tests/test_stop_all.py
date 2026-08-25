@@ -407,7 +407,10 @@ class TestLockOwners:
     EXTERNAL browser-harness daemon locking install\\ files; emrgd.pid/port
     empty and no -m emrg process, so the cmdline scan could never see it)."""
 
+    @pytest.mark.allow_real_stop("stop_lock_owners")
     def test_posix_noop(self, monkeypatch):
+        # Direct call is hermetic: is_win=False → early noop, and the only
+        # internal killer _lock_owner_ps is mocked (guard escape hatch).
         monkeypatch.setattr(_stop_all, "is_win", lambda: False)
         called: list = []
         monkeypatch.setattr(
@@ -575,7 +578,11 @@ class TestLockOwners:
         assert _stop_all._lock_owner_diag("rm-diag\tabc\t2\t3\t0\n") is None
         assert _stop_all._lock_owner_diag("") is None
 
+    @pytest.mark.allow_real_stop("stop_lock_owners")
     def test_stop_lock_owners_logs_diag(self, monkeypatch, capsys):
+        # Direct call is hermetic: both internal killers are mocked
+        # (find_install_module_holders → [] and _lock_owner_ps) — no real
+        # taskkill can fire (guard escape hatch).
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         monkeypatch.setattr(_stop_all, "find_install_module_holders", lambda: [])
         monkeypatch.setattr(
@@ -772,10 +779,16 @@ class TestIndependentLockProbe:
         residuals do not (rant 2026-08-18T21:24:48 #2c/#5)."""
         monkeypatch.setattr(_stop_all, "is_win", lambda: True)
         monkeypatch.setattr(_stop_all.time, "sleep", lambda *a, **k: None)
-        # ⛔ 最高原则（宿主 2026-08-18T22:58）：必须隔离 stop_daemon——本机运行
-        # pytest 时真实 stop_all() 会连 ws 发 shutdown 杀死正在运行的 emrgd
-        # （2026-08-20 16:18/16:25 两次实证）。同文件其它 stop_all() 测试均有此隔离。
+        # ⛔ 最高原则（宿主 2026-08-18T22:58）+ rant 2026-08-25T10:42:47：必须隔离
+        # 全部 5 个 stop 函数——本测试跑 Windows 分支，真实 stop_all() 会杀 GUI/
+        # TUI/daemon/bundled git/lock owners。此前只隔离了 stop_daemon（2026-08-20
+        # 16:18/16:25 实证），Windows 上跑 pytest 会真实杀掉正在运行的 GUI/TUI。
+        # 隔离模式与 test_stop_all_retries_lock_kill 保持一致。
+        monkeypatch.setattr(_stop_all, "stop_gui", lambda: None)
+        monkeypatch.setattr(_stop_all, "stop_tui", lambda: None)
         monkeypatch.setattr(_stop_all, "stop_daemon", lambda: None)
+        monkeypatch.setattr(_stop_all, "stop_bundled_git", lambda: None)
+        monkeypatch.setattr(_stop_all, "stop_lock_owners", lambda: None)
         monkeypatch.setattr(_stop_all, "check_install_writable", lambda: [])
         monkeypatch.setattr(
             _stop_all, "verify",
@@ -1075,14 +1088,19 @@ class TestTeeDualWrite:
         assert "exit code 0 (clean)" in out
 
 
-class TestStopDaemonHermeticityGuard:
-    """⛔ Red line (host 2026-08-18T22:58): conftest's autouse guard must keep
-    stop_daemon patched so a forgetful test can never kill the live daemon
-    again (rant 2026-08-20T16:32:30). Canary checks function identity only —
-    it never calls any stop path."""
+class TestStopAllHermeticityGuard:
+    """⛔ Red line (host 2026-08-18T22:58, extended by rant 2026-08-25T10:42:47):
+    conftest's autouse guard must keep ALL FIVE stop functions patched so a
+    forgetful test can never kill the live daemon/GUI/TUI again (rants
+    2026-08-20T16:32:30 / 2026-08-25T10:42:47). Canary checks function identity
+    only — it never calls any stop path."""
 
-    def test_conftest_guard_stop_daemon_is_installed(self):
+    @pytest.mark.parametrize(
+        "name",
+        ["stop_daemon", "stop_gui", "stop_tui", "stop_bundled_git", "stop_lock_owners"],
+    )
+    def test_conftest_guard_installed(self, name):
         import emrg._stop_all as stop_mod
-        assert stop_mod.stop_daemon.__name__ == "_no_real_stop_daemon", (
-            "conftest stop_daemon guard missing — real stop_daemon reachable from tests"
+        assert getattr(stop_mod, name).__name__ == f"_no_real_{name}", (
+            f"conftest {name} guard missing — real {name} reachable from tests"
         )
