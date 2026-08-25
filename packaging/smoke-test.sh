@@ -18,7 +18,12 @@ INSTALL_ROOT="${1:-$ROOT/dist/runtime}"
 PASS=0; FAIL=0
 
 smoke_home="$(mktemp -d)"
-trap 'rm -rf "$smoke_home"' EXIT
+# 红线守卫（rant 2026-08-25T10:38:34 / MANIFESTO 第四条附则二）：绝不以任何形式
+# stop/restart daemon。临时 daemon（步骤 2 自起）在 Windows 上仍持有
+# $HOME/.emrg/emrgd.log 等文件句柄 → 此处 rm 可能 "Device or resource busy"；
+# 2>/dev/null || true 使清理尽力而为（失败不改变退出码），残留临时 HOME 由
+# CI runner 的 orphan-process 清理兜底，本机由 56031 端口守卫降级兜底。
+trap 'rm -rf "$smoke_home" 2>/dev/null || true' EXIT
 export HOME="$smoke_home"
 mkdir -p "$HOME/.emrg"
 # R114: Windows 下经 cmd 启动的原生 python.exe 不认 Git Bash 的 $HOME —
