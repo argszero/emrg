@@ -2135,3 +2135,56 @@ def test_tool_content_for_llm_missing_image(tmp_path):
     out = server._tool_content_for_llm(ref)
     assert isinstance(out, str)
     assert "Image unavailable" in out
+
+
+# ── Daemon observability (rant 2026-08-25T09:25:32 — silent death) ──
+
+
+def test_write_exit_record(tmp_path, monkeypatch):
+    """Exit records are durable one-line JSON in ~/.emrg/emrgd-exit.log —
+    every daemon stop, normal or abnormal, must be attributable."""
+    from emrg.server.daemon import _write_exit_record
+
+    target = tmp_path / "emrgd-exit.log"
+    monkeypatch.setattr("emrg.server.daemon._EXIT_RECORD_PATH", target)
+
+    _write_exit_record("crash", 1, "Traceback (most recent call last):\n  boom")
+    _write_exit_record("normal", 0, None)
+
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2, "one JSON line per exit record"
+    crash = json.loads(lines[0])
+    assert crash["reason"] == "crash"
+    assert crash["exit_code"] == 1
+    assert "Traceback" in crash["traceback"]
+    normal = json.loads(lines[1])
+    assert normal["reason"] == "normal"
+    assert normal["exit_code"] == 0
+    assert normal["traceback"] is None
+    assert normal["timestamp"] and normal["pid"]
+
+
+def test_asyncio_exception_handler_routes_to_logger(caplog):
+    """Background-task crashes must reach the logger (emrgd.log), not die in
+    asyncio's default handler → stderr=DEVNULL (rant 2026-08-25T09:25:32)."""
+    import logging
+
+    from emrg.server.daemon import _asyncio_exception_handler
+
+    with caplog.at_level(logging.ERROR, logger="emrg.server.daemon"):
+        try:
+            raise ValueError("boom in background task")
+        except ValueError as exc:
+            _asyncio_exception_handler(None, {
+                "message": "Exception in Task-7",
+                "task": "Task-7",
+                "exception": exc,
+            })
+    assert any(
+        "unhandled asyncio exception" in r.getMessage() for r in caplog.records
+    )
+    # exc_info is not part of getMessage(); the formatted traceback (with the
+    # exception type name) lands in the record text / caplog.text instead.
+    assert any(
+        "ValueError" in (r.exc_text or "") for r in caplog.records
+    ) or "ValueError" in caplog.text
