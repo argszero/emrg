@@ -51,6 +51,16 @@ release installer" means for this version.
   `previous-version.txt`.
 - `{{ install_dir }}/bin/` launcher scripts (emrg/emrgd/emrg.cmd/emrgd.cmd
   etc.) — sync if the target tag changed them.
+- `{{ install_dir }}/bin/pyvenv.cfg` — Windows layout requirement (rant
+  2026-08-24T21:46:53, follow-up to #966): `bin\python.exe` / `bin\python3.exe`
+  are copies of the standalone interpreter and need a same-directory
+  `pyvenv.cfg` to locate the stdlib inside `bin\python-dist\`. Write it
+  idempotently with the **native absolute path** (backslashes on Windows),
+  i.e. one line: `home = {{ install_dir }}\bin\python-dist` — expand
+  {{ install_dir }} to the real path at runtime. A relative `home` fails with
+  "Fatal Python error: Failed to import encodings" — never use a relative
+  path. On POSIX layouts skip this file (the `bin/python` wrapper already
+  handles stdlib discovery).
 - GUI **must be synced too** (rant 2026-08-24T17:50: GUI packages had been
   stuck at 0.2.72 while the daemon moved on — the old "no node/npm, skip"
   reasoning was a false premise: node/npm exist on the host (asdf), they are

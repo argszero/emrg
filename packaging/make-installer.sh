@@ -376,10 +376,31 @@ begin
   BroadcastEnvironmentChange;
 end;
 
+// R131: 安装后写 {app}\bin\pyvenv.cfg（rant 2026-08-24T21:46:53，#966 的
+// Windows 后续）。bin\python.exe / python3.exe 是 python-dist 解释器的复制品，
+// 需要同目录 pyvenv.cfg 才能定位标准库（CPython 在 exe 所在目录查找
+// pyvenv.cfg，home 指向 python-dist）。home 必须为绝对路径——相对路径实测
+// Fatal Python error: Failed to import encodings（venv 内 python 无法定位
+// 标准库，任务无法安装科研依赖）。pyvenv.cfg 不在 payload 里（build-runtime
+// 不生成），由安装器 ssPostInstall 写入；升级安装覆盖同内容，幂等；
+// 卸载由 [UninstallDelete] 连同 {app} 一起删除。
+procedure WritePyvenvCfg;
+var
+  CfgPath: string;
+  CfgContent: AnsiString;
+begin
+  CfgPath := ExpandConstant('{app}\bin\pyvenv.cfg');
+  CfgContent := 'home = ' + ExpandConstant('{app}\bin\python-dist') + #13#10;
+  SaveStringToFile(CfgPath, CfgContent, False);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
+  begin
+    WritePyvenvCfg;
     AddBinDirToPath;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
