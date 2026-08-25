@@ -108,7 +108,9 @@ def test_check_read_only_allows_dev_null_redirect():
 def test_check_read_only_allows_read_commands():
     for cmd in ("ls -la", "git status", "cat file.txt", "pwd", "echo hi",
                 "git stash list", "git stash show -p",
-                "git stash show stash@{0}", "git stash list | grep foo"):
+                "git stash show stash@{0}", "git stash list | grep foo",
+                "git worktree list", "git worktree list --porcelain",
+                "git submodule status", "git submodule status | head"):
         allowed, _, _ = _check_sandbox(cmd, "read-only")
         assert allowed is True, cmd
 
@@ -149,6 +151,17 @@ def test_check_read_only_blocks_git_mutators():
         "git archive --output=tree.tar HEAD",
         "git submodule update --init",
         "git worktree add ../wt master",
+        # worktree/submodule MUTATORS stay blocked (cycle 20260825-200038)
+        "git worktree remove ../wt",
+        "git worktree move ../wt ../wt2",
+        "git worktree prune",
+        "git worktree lock ../wt",
+        "git worktree unlock ../wt",
+        "git submodule add https://example.com/repo.git sub",
+        "git submodule deinit -f .",
+        "git submodule sync",
+        "git worktree list && git worktree remove ../wt",
+        "git submodule status; git submodule update",
     ):
         allowed, reason, enforcement = _check_sandbox(cmd, "read-only")
         assert allowed is False, f"{cmd!r} should be blocked"
