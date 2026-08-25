@@ -85,6 +85,11 @@ Index: `{{ session_memory_index_path }}`
 **To read history**: use the `read` tool on `history.jsonl` for the current context, or on a specific `history_YYMMDD.jsonl` file for older messages.
 Each line is a JSON record with `type`, `role`, `content`, `timestamp` fields.
 Message records: `type=message`, tool calls: `type=tool_call`/`tool_result`, compacted summaries: `type=summary`.
+
+## Temp File Rules (rant 2026-08-25T18:10:57)
+- Throwaway scripts/scratch files (`.py`, `.ps1`, `.sh`, `.json` payloads) MUST be written under **`{{ session.dir_path }}/tmp/`** (create the directory if missing) — never in the project root, working directory, or `~/.emrg` root.
+- Clean up: at session/round end, delete temp files that have already been executed successfully; do not leave `tmp_*.py` / `.tmp-*` clutter in the working root.
+- If historical `tmp_*.py` clutter already exists in the working root, move it into `{{ session.dir_path }}/tmp/` or delete it once no longer needed.
 {% endif %}
 
 {% if config_dir %}

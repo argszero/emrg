@@ -282,6 +282,29 @@ def test_system_prompt_rant_handling_section(tmp_path):
     assert "/rant" in rendered
 
 
+def test_system_prompt_temp_file_rules_section(tmp_path):
+    """Temp File Rules section renders with the session tmp dir (rant
+    2026-08-25T18:10:57): throwaway scripts must go under the session
+    directory's tmp/ subdir, not the project root / workdir / ~/.emrg root."""
+    server = _make_server()
+    session = Session.create_with_id("tmpfile-test", tmp_path)
+    rendered = server._build_system_prompt(session)
+    assert "## Temp File Rules" in rendered
+    assert "tmp/" in rendered
+    # the rendered path must point into the session directory
+    assert str(session.dir_path) in rendered
+    assert "never in the project root" in rendered or "project root" in rendered
+
+
+def test_system_prompt_temp_file_rules_absent_without_session():
+    """Without a session the temp-file rules section is skipped (no path to
+    anchor it to), same as Session & History."""
+    server = _make_server()
+    rendered = server._build_system_prompt()
+    assert "## Temp File Rules" not in rendered
+    assert "## Session & History" not in rendered
+
+
 def test_submit_rant_tool_registered():
     """submit_rant is in the daemon tool registry (available in all sessions)."""
     server = _make_server()
