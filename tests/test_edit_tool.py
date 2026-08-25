@@ -110,3 +110,56 @@ def test_edit_is_directory(temp_file):
     }))
     assert result.error
     assert "is a directory" in result.content
+
+
+# ── read-only sandbox (community issue #979) ──────────────────────────────
+
+
+def test_edit_read_only_blocks_inside_workspace(temp_file):
+    """Issue #979 follow-up: the edit tool must not modify the host's tree
+    when the dirty-tree guard forced read-only."""
+    tool = EditTool()
+    workspace = temp_file.parent
+    original = temp_file.read_text()
+    result = _run(tool.execute({
+        "file_path": str(temp_file),
+        "old_string": "hello world",
+        "new_string": "changed",
+        "sandbox": "read-only",
+        "workspace": str(workspace),
+    }))
+    assert result.error
+    assert "read-only sandbox" in result.content
+    assert temp_file.read_text() == original  # untouched
+
+
+def test_edit_read_only_allows_outside_workspace(temp_file):
+    """Writes outside the workspace (memory dir, logs) stay allowed — a
+    read-only cycle still records state and writes its own artifacts."""
+    import tempfile as _tf
+
+    with _tf.TemporaryDirectory() as d:
+        target = Path(d) / "doc.md"
+        target.write_text("keep this line\n", encoding="utf-8")
+        tool = EditTool()
+        result = _run(tool.execute({
+            "file_path": str(target),
+            "old_string": "keep",
+            "new_string": "edited",
+            "sandbox": "read-only",
+            "workspace": str(temp_file.parent),  # different boundary
+        }))
+        assert not result.error
+        assert "edited" in target.read_text()
+
+
+def test_edit_no_sandbox_unchanged(temp_file):
+    """Normal use (no sandbox) keeps editing — no behavior change."""
+    tool = EditTool()
+    result = _run(tool.execute({
+        "file_path": str(temp_file),
+        "old_string": "foo bar",
+        "new_string": "baz qux",
+    }))
+    assert not result.error
+    assert "baz qux" in temp_file.read_text()

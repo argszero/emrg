@@ -204,6 +204,33 @@ def _is_within(path: str, root: str) -> bool:
         return False
 
 
+def check_read_only_file_write(file_path: str, workspace: str | None = None) -> str | None:
+    """Read-only sandbox check for the write/edit tools (community issue #979).
+
+    Returns a block reason when the target file is inside the task's workspace
+    (the host's working tree — protected by the structural dirty-tree guard) or
+    is a protected daemon state file; returns None when allowed.
+
+    Writes OUTSIDE the workspace (memory dir, logs, OS temp) stay allowed so a
+    read-only cycle can still record state and write its own artifacts — the
+    guard protects the host's uncommitted work, not the agent's own scratch
+    space. Mirrors the bash tool's read-only semantics for file tools.
+    """
+    path = os.path.realpath(os.path.expanduser(file_path))
+    if workspace:
+        ws = os.path.realpath(os.path.expanduser(workspace))
+        if _is_within(path, ws):
+            return (
+                f"read-only sandbox: blocked file write inside workspace {path!r} "
+                "(dirty-tree guard, community issue #979)"
+            )
+    if path in _protected_paths():
+        return (
+            f"read-only sandbox: blocked write to protected daemon file {path!r}"
+        )
+    return None
+
+
 def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
     """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
 
