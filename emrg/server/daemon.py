@@ -24,6 +24,7 @@ import socket as _socket
 import subprocess
 import sys
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -416,6 +417,10 @@ class EmrgServer:
             logger.info("daemon serve cancelled (asyncio.CancelledError) — cleanup started")
         except Exception:
             self._stop_reason = "crash"
+            # Rant 2026-08-25T09:25:32: keep the traceback so run_server can
+            # include it in the durable exit record (serve() returns normally
+            # after this handler runs — the exception is not re-raised).
+            self._crash_traceback = traceback.format_exc()
             logger.error("daemon serve crashed — cleanup started", exc_info=True)
         finally:
             await self._shutdown_all()
@@ -4059,13 +4064,126 @@ class EmrgServer:
             logger.debug("memory consolidation failed", exc_info=True)
 
 
-async def run_server(llm_config: LlmConfig) -> None:
-    """Run the EMRG server until interrupted."""
+_EXIT_RECORD_PATH = Path.home() / ".emrg" / "emrgd-exit.log"
+
+
+class DaemonExit:
+    """Exit metadata produced by run_server (rant 2026-08-25T09:25:32).
+
+    The caller (emrg.server.__main__.main) writes the durable exit record
+    once, on every stop path — normal or abnormal — so a silent daemon
+    death is attributable next time.
+    """
+
+    __slots__ = ("reason", "exit_code", "traceback")
+
+    def __init__(self, reason: str, exit_code: int, traceback: str | None) -> None:
+        self.reason = reason
+        self.exit_code = exit_code
+        self.traceback = traceback
+
+    def write_record(self) -> None:
+        _write_exit_record(self.reason, self.exit_code, self.traceback)
+
+
+def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) -> None:
+    """Append a one-line JSON exit record to ~/.emrg/emrgd-exit.log and mirror
+    it into emrgd.log (rant 2026-08-25T09:25:32 — daemon silent death).
+
+    The dedicated file is append-only and survives emrgd.log rotation
+    (10MB x 3), so every daemon stop — timestamp, reason, exit code,
+    traceback — stays queryable long after the fact.
+    """
+    record = {
+        "timestamp": datetime.now().astimezone().isoformat(),
+        "pid": os.getpid(),
+        "reason": reason,
+        "exit_code": exit_code,
+        "traceback": traceback_text,
+    }
+    line = json.dumps(record, ensure_ascii=False)
+    logger.info("daemon exit record: %s", line)
+    try:
+        with open(_EXIT_RECORD_PATH, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except OSError as exc:
+        logger.warning("failed to write exit record to %s: %s", _EXIT_RECORD_PATH, exc)
+
+
+def _asyncio_exception_handler(loop, context) -> None:
+    """Route background-task crashes into emrgd.log (rant 2026-08-25T09:25:32).
+
+    asyncio's default exception handler writes to stderr — which
+    daemon_manager points at DEVNULL — so an unhandled exception in a
+    TaskHandler / websockets callback / any background task used to vanish
+    without a trace (the daemon "silent death" cases). The loop handler is
+    installed by run_server; this one logs through the RotatingFileHandler
+    instead, keeping the task identity and the exception itself.
+    """
+    exc = context.get("exception")
+    logger.error(
+        "unhandled asyncio exception (message=%r, task=%r, future=%r)",
+        context.get("message"), context.get("task"), context.get("future"),
+        exc_info=exc,
+    )
+
+
+def _sigterm_handler(signum, frame) -> None:
+    """POSIX SIGTERM → SystemExit so main() records a sigterm exit record.
+
+    Windows does not support signal.signal(SIGTERM) (daemon_manager hard-
+    kills there via TerminateProcess, which no Python code can survive) —
+    this handler is only installed where signal.signal accepts it.
+    """
+    raise SystemExit(f"SIGTERM ({signum}) received")
+
+
+async def run_server(llm_config: LlmConfig) -> DaemonExit:
+    """Run the EMRG server until interrupted; return exit metadata.
+
+    Rant 2026-08-25T09:25:32 (daemon silent death): every stop path —
+    normal return, serve_forever crash, SIGINT, SIGTERM, cancellation —
+    produces a DaemonExit (reason / exit code / traceback) that the caller
+    persists as the durable exit record. Also installs the asyncio loop
+    exception handler so background task crashes reach emrgd.log instead of
+    vanishing into stderr=DEVNULL.
+    """
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_asyncio_exception_handler)
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+    except (ValueError, OSError, AttributeError):
+        pass  # Windows: signal.signal(SIGTERM) unsupported
+
     server = EmrgServer(llm_config)
     try:
         await server.serve()
+        reason = server._stop_reason or "normal"
+        exit_code = 1 if reason == "crash" else 0
+        traceback_text = getattr(server, "_crash_traceback", None)
+    except asyncio.CancelledError:
+        reason = "cancel"
+        exit_code = 0
+        traceback_text = None
+        server._stop_reason = reason
+        logger.info("daemon serve cancelled — cleanup started")
     except KeyboardInterrupt:
         # Rant 2026-08-19T14:02:37 — attribute the stop: serve()'s teardown
         # already logged the full cleanup; this line identifies the trigger.
-        server._stop_reason = "sigint"
+        reason = "sigint"
+        exit_code = 130
+        traceback_text = None
+        server._stop_reason = reason
         logger.info("shutdown signal received (SIGINT), cleanup started")
+    except BaseException as exc:
+        # Safety net: anything that escapes serve() (a signal SystemExit, a
+        # hard crash) is recorded with its traceback, never silently.
+        reason = "sigterm" if isinstance(exc, SystemExit) else "crash"
+        exit_code = 143 if isinstance(exc, SystemExit) else 1
+        traceback_text = "".join(
+            traceback.format_exception(type(exc), exc, exc.__traceback__)
+        )
+        logger.critical(
+            "daemon crashed (%s: %s)", type(exc).__name__, exc, exc_info=True
+        )
+    return DaemonExit(reason, exit_code, traceback_text)
