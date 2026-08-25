@@ -185,11 +185,24 @@ else
 fi
 
 # 14. bundled python venv（rant 2026-08-24T21:46:53：bin/python 软链 → wrapper，
-#     pyvenv.cfg home 修复）。回归用例：install python 创建 venv 后必须能导入标准库
-#     + pip 可用。Windows 用 python-dist 根 exe（bin/python.exe 复制品缺 DLL，R100）。
+#     pyvenv.cfg home 修复；Windows 后续：bin\python.exe 复制品依赖同目录
+#     bin\pyvenv.cfg 定位标准库）。回归用例：install python 创建 venv 后必须能
+#     导入标准库 + pip 可用。POSIX 走 bin/python wrapper（#966）；Windows 走
+#     bin\python.exe 本体——先复刻安装器 [Code] ssPostInstall 写的 bin\pyvenv.cfg
+#     （home = 绝对路径；相对路径实测 "Failed to import encodings"），再验证。
 say "14. bundled python venv (pyvenv.cfg home fix)"
 PY_BIN="$HOME/.emrg/install/bin/python"
-if [ -e "$HOME/.emrg/install/bin/python-dist/python.exe" ]; then
+if [ -n "${WINDIR:-}" ]; then
+  # R131：dist/runtime 未经安装器（pyvenv.cfg 由 make-installer.sh [Code] 在
+  # ssPostInstall 写入），smoke 在此复刻同款内容。有了 cfg 后 bin\python.exe
+  # 本体即可用（R100 "缺 DLL" 结论修正：DLL 同在 bin\，真正缺的是 cfg）。
+  INSTALL_BIN_WIN="$(cygpath -w "$HOME/.emrg/install/bin")"
+  printf 'home = %s\\python-dist\n' "$INSTALL_BIN_WIN" > "$HOME/.emrg/install/bin/pyvenv.cfg"
+  PY_BIN="$HOME/.emrg/install/bin/python.exe"
+  if [ ! -e "$PY_BIN" ]; then
+    PY_BIN="$HOME/.emrg/install/bin/python-dist/python.exe"
+  fi
+elif [ -e "$HOME/.emrg/install/bin/python-dist/python.exe" ]; then
   PY_BIN="$HOME/.emrg/install/bin/python-dist/python.exe"
 elif [ -e "$HOME/.emrg/install/bin/python-dist/python3.13.exe" ]; then
   PY_BIN="$HOME/.emrg/install/bin/python-dist/python3.13.exe"

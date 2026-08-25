@@ -312,6 +312,40 @@ def test_make_installer_iss_has_prepare_to_install():
     assert "restart the computer" in content
 
 
+def test_make_installer_iss_writes_pyvenv_cfg():
+    """rant 2026-08-24T21:46:53 — #966 的 Windows 后续：bin\\python.exe / python3.exe
+    是 python-dist 解释器的复制品，缺同目录 bin\\pyvenv.cfg → venv 内 python 无法
+    定位标准库（Could not find platform independent libraries + No module named
+    'encodings'）。修复 = 安装器 [Code] ssPostInstall 写 bin\\pyvenv.cfg
+    （home 指向 {app}\\bin\\python-dist 绝对路径；相对路径实测 "Failed to import
+    encodings"）。纯文本断言钉死接线（不执行 iscc/cmd —— macOS/CI 无 Windows）。
+    """
+    content = _read("packaging/make-installer.sh")
+    # WritePyvenvCfg 过程：SaveStringToFile 的 S 参数是 AnsiString（与 LogText 同规，
+    # 6.7.1 → 7.x 全版本一致）；UnicodeString 不匹配 → 声明 AnsiString 变量
+    assert "procedure WritePyvenvCfg;" in content
+    assert "CfgContent: AnsiString;" in content
+    assert "CfgContent: string;" not in content
+    assert "SaveStringToFile(CfgPath, CfgContent, False)" in content
+    # 写 {app}\\bin\\pyvenv.cfg，home = 绝对路径（ExpandConstant 展开 {app}）
+    assert "ExpandConstant('{app}\\bin\\pyvenv.cfg')" in content
+    assert "CfgContent := 'home = ' + ExpandConstant('{app}\\bin\\python-dist')" in content
+    # ssPostInstall 钩子：先写 cfg 再补 PATH（同一个 CurStepChanged）
+    step_src = content.split("procedure CurStepChanged")[1].split("procedure CurUninstallStepChanged")[0]
+    assert "WritePyvenvCfg;" in step_src
+    assert "AddBinDirToPath;" in step_src
+    assert step_src.index("WritePyvenvCfg;") < step_src.index("AddBinDirToPath;")
+    # smoke-test.sh：Windows 分支复刻同款 cfg（home 绝对路径）再验证 venv
+    smoke = _read("packaging/smoke-test.sh")
+    assert 'if [ -n "${WINDIR:-}" ]; then' in smoke
+    assert "printf 'home = %s\\\\python-dist\\n'" in smoke
+    assert 'PY_BIN="$HOME/.emrg/install/bin/python.exe"' in smoke
+    # upgrade_prompt.j2：本地等价安装也要写 bin\\pyvenv.cfg（绝对 home）
+    prompt = _read("emrg/server/prompts/upgrade_prompt.j2")
+    assert "bin/pyvenv.cfg" in prompt
+    assert "home = {{ install_dir }}\\bin\\python-dist" in prompt
+
+
 def test_make_installer_iss_old_python_health_check():
     """rant 2026-08-19T00:44:52 — 安装器韧性：旧版 python-dist 损坏（encodings 崩，
     v0.2.49/v0.2.50 -I 事故遗留）时，升级安装不得因坏 python 硬中止。
