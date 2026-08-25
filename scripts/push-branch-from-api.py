@@ -164,6 +164,25 @@ def _parse_person(line: str) -> dict:
     return {"name": name, "email": email, "date": dt.isoformat()}
 
 
+def _raw_commit(payload: dict) -> bytes:
+    """Rebuild the raw commit object GitHub stored for a create-commit payload.
+
+    GitHub stores author/committer with the original epoch+offset (gotcha 3)
+    and the message without a trailing newline; rebuilding from the payload
+    reproduces the exact raw bytes, so `git hash-object -w` yields the same
+    sha the API returned — which lets `git update-ref` point at it locally.
+    """
+    def person(p):
+        d = _dt.datetime.fromisoformat(p["date"])
+        return f"{p['name']} <{p['email']}> {int(d.timestamp())} {d.strftime('%z')}"
+
+    lines = [f"tree {payload['tree']}"]
+    lines += [f"parent {p}" for p in payload.get("parents", [])]
+    lines.append(f"author {person(payload['author'])}")
+    lines.append(f"committer {person(payload['committer'])}")
+    return ("\n".join(lines) + "\n\n" + payload["message"]).encode("utf-8")
+
+
 def collect_objects(commit: str, cwd: str | None = None) -> dict:
     """Collect every object the commit needs: blobs and all trees (any depth).
 
@@ -304,6 +323,7 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
 
     # ---- create commits oldest -> newest, parents via remote shas
     commit_map: list[str] = []
+    last_payload: dict | None = None
     for commit in chain:
         payload = {
             # GitHub's create-commit stores the message without a trailing
@@ -319,11 +339,13 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
             resp = api("POST", f"/repos/{repo}/git/commits", payload)
         except urllib.error.HTTPError as e:
             if e.code == 422:
-                raise PushError("commit creation rejected by API — check author/"
-                                "committer dates (must carry the original +0800 "
-                                "offset, gotcha 3): " + e.read().decode("utf-8", "replace")[:300])
+                raise PushError("commit creation rejected by API (no refs touched "
+                                "remotely) — check author/committer dates (must "
+                                "carry the original +0800 offset, gotcha 3): "
+                                + e.read().decode("utf-8", "replace")[:300])
             raise
         commit_map.append(resp["sha"])
+        last_payload = payload
 
     # ---- update the remote ref (fast-forward semantics; force only if asked)
     final_sha = commit_map[-1]
@@ -343,10 +365,20 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
     except urllib.error.HTTPError as e:
         if e.code == 422 and not force:
             raise PushError("remote ref update rejected (non-fast-forward?) — "
-                            "use --force only if you know the remote is stale") from e
+                            "use --force only if you know the remote is stale (no refs touched)") from e
         raise
 
-    # ---- rewrite the local branch ref to the remote sha and verify
+    # ---- materialize the remote commit locally so `git update-ref` can point
+    # at it (the API-created object does not exist in the local object store),
+    # then rewrite the local branch ref to the remote sha and verify
+    raw = _raw_commit(last_payload)
+    r = subprocess.run(["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+                       input=raw, capture_output=True, cwd=cwd)
+    computed = r.stdout.decode("utf-8", "replace").strip() if r.returncode == 0 else "?"
+    if r.returncode != 0 or computed != final_sha:
+        raise PushError(f"remote ref already updated to {final_sha} but local "
+                        f"materialization produced {computed} — run "
+                        f"'git fetch origin {branch}' to sync locally")
     git("update-ref", f"refs/heads/{branch}", final_sha, cwd=cwd)
     confirmed = api("GET", ref_path)["object"]["sha"]
     if confirmed != final_sha:
@@ -378,7 +410,7 @@ def main() -> int:
     try:
         result = push_branch(repo, args.branch, args.ref, args.force)
     except PushError as e:
-        print(f"push aborted (no refs touched remotely): {e}")
+        print(f"push aborted: {e}")
         return 1
     except urllib.error.HTTPError as e:
         print(f"push aborted (HTTP {e.code}): {e.read().decode('utf-8', 'replace')[:400]}")

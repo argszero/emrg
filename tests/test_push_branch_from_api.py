@@ -205,11 +205,13 @@ def test_script_wires_all_four_git_data_endpoints():
 
 def test_script_fails_loud_before_touching_refs():
     content = SCRIPT.read_text(encoding="utf-8")
-    assert "aborted (no refs touched remotely)" in content
+    assert "push aborted:" in content
+    assert "no refs touched" in content     # pre-ref failures say so explicitly
     assert "errors=\"replace\"" in content or "errors='replace'" in content  # gotcha 4
     assert "time.sleep" in content          # transient network retry with backoff
     assert "URLError" in content            # clean fail path for network errors
     assert "auth token" in content          # gh keyring token, memory-only auth
+    assert "hash-object" in content         # local materialization of remote commit
 
 
 # ---------------------------------------------------------- byte-exact logic
@@ -307,6 +309,26 @@ def test_push_end_to_end_byte_exact_with_fake_github(tmp_path):
     # two commits -> two create calls, oldest first
     commits = [p for k, p in zip(kinds, fake.log) if k == "commits"]
     assert len(commits) == 2
+
+
+def test_raw_commit_reconstruction_matches_reference(tmp_path):
+    """The script's _raw_commit must produce the same bytes as the test's
+    reference implementation (both rebuild the object GitHub stored)."""
+    mod = _load_module()
+    repo = _init_repo(tmp_path)
+    _write_file(repo, "a.txt")
+    _commit_all(repo, "root")
+    _commit_all(repo, "child msg", new_file="b.txt")
+    raw = _git("cat-file", "commit", "HEAD", cwd=repo).stdout
+    parsed = mod.parse_commit(raw)
+    payload = {
+        "message": parsed["message"].rstrip("\n"),
+        "tree": parsed["tree"],
+        "parents": parsed["parents"],
+        "author": parsed["author"],
+        "committer": parsed["committer"],
+    }
+    assert mod._raw_commit(payload) == _raw_commit_from_payload(payload)
 
 
 def test_push_no_op_when_ref_already_at_remote_head(tmp_path):
