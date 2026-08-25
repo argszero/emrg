@@ -52,6 +52,26 @@ function main() {
   let openSessions = new Map();
   let guiStateTimer = null;
   const GUI_STATE_DEBOUNCE_MS = 1000;
+  // Rant 2026-08-25T17:38:56（GUI 会话串线/空历史，根因 1+2）：会话级命令的 cwd
+  // 必须取该会话**真实所属项目**——兜底 DEFAULT_CWD（homedir）会让所有 GUI 会话
+  // 历史从 ~/.emrg/sessions/ 读取 → 一律空窗口，且 resume/task 在错误 cwd 误建
+  // 0-message 幽灵会话。解析顺序：openSessions 簿记 projectPath → 全局
+  // sessions_index.json（sid → 会话目录，cwd = 目录上溯 3 级）→ null（未知）。
+  // 调用方对 null 决策：新会话兜底 DEFAULT_CWD，已存在会话交由 daemon not_found
+  // 处理（switchSession 已有 fallback），绝不隐式回退 homedir。
+  function resolveSessionCwd(sessionId) {
+    const known = openSessions.get(sessionId)?.projectPath;
+    if (known) return known;
+    try {
+      const idx = JSON.parse(fs.readFileSync(path.join(os.homedir(), ".emrg", "sessions_index.json"), "utf8"));
+      const dir = idx[sessionId];
+      if (typeof dir === "string" && dir) {
+        // dir = <cwd>/.emrg/sessions/<sid> → cwd = 上溯 3 级（兼容 home 级会话 ~/.emrg/sessions/…）
+        return path.dirname(path.dirname(path.dirname(dir)));
+      }
+    } catch { /* index 缺失/损坏 → 未知（null） */ }
+    return null;
+  }
   // P2.3（rant 12:20:35）：HTML 预览 WebContentsView——懒创建、单实例复用、右对齐 bounds 同步。
   // renderer 崩溃 reload 后由 renderer 侧拉取（emrg:getPreviewState）恢复（main 是真相源）。
   let previewView = null;       // WebContentsView 实例（首次打开 HTML tab 才创建）
@@ -300,7 +320,7 @@ vision = false
       }
       // P2：每会话独立连接——首条消息前自动打开（新会话不 resume，daemon 隐式订阅）
       // P5 slice 2：cwd 取该会话所属项目（跨项目会话用其项目路径，非全局 projectDir）
-      const sessionCwd = openSessions.get(sessionId)?.projectPath || DEFAULT_CWD;
+      const sessionCwd = resolveSessionCwd(sessionId) || DEFAULT_CWD;
       let conn = connManager?.get(sessionId);
       if (!conn || !conn.connected) {
         conn = await openSession(sessionId, sessionCwd, { resume: false });
@@ -388,7 +408,10 @@ vision = false
       // G110：切会话清空旧连接分组缓存（含 timer），防广播"幽灵"残留
       connManager?.get(prevSid)?.clearGroups();
       // P5 slice 2：跨项目打开——用该项目路径 resume（非全局 projectDir）
-      const targetPath = projectPath || openSessions.get(sessionId)?.projectPath || DEFAULT_CWD;
+      // Rant 2026-08-25T17:38:56 根因 2：fallback 链去掉 DEFAULT_CWD——未知会话
+      // 交 daemon not_found 处理（下方已有 fallback 到最近会话），绝不隐式回退
+      // homedir 误建幽灵会话。
+      const targetPath = projectPath || resolveSessionCwd(sessionId);
       logger.info(`[gui:switch] openSession start sid=${sessionId} targetPath=${targetPath}`);
       try {
         await openSession(sessionId, targetPath); // 打开（新）会话连接 + resume_session 自动订阅
@@ -417,7 +440,7 @@ vision = false
 
     ipcMain.handle("emrg:deleteSession", async (_e, { sessionId }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await requireConn().sendCommandAndWait("delete_session", { session_id: sessionId, cwd: DEFAULT_CWD }, 5000);
+      await requireConn().sendCommandAndWait("delete_session", { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD }, 5000);
       connManager?.close(sessionId); // P2：删除会话 → 关闭该会话连接（若打开）
       openSessions.delete(sessionId); // P4：删除（删数据）→ 一并移出打开会话簿记
       schedulePersistGuiState();
@@ -429,7 +452,7 @@ vision = false
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       const clean = String(title || "").trim().slice(0, 80); // 截断超长标题
       if (!clean) throw new Error("empty title");
-      const frame = await requireConn().sendCommandAndWait("rename_session", { session_id: sessionId, cwd: DEFAULT_CWD, title: clean }, 5000);
+      const frame = await requireConn().sendCommandAndWait("rename_session", { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD, title: clean }, 5000);
       // 跨项目会话重命名成功后立即同步侧边栏标题（rant 12:01:44）
       const v = openSessions.get(sessionId);
       if (v) {
@@ -474,21 +497,23 @@ vision = false
     ipcMain.handle("emrg:clearSession", async (_e, { sessionId }) => {
       // GUI / 指令 P1：/clear — 清空当前会话（daemon 协议 clear_session 已存在）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await requireConn().sendCommandAndWait("clear_session", { session_id: sessionId, cwd: DEFAULT_CWD }, 5000);
+      await requireConn().sendCommandAndWait("clear_session", { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD }, 5000);
       return { ok: true };
     });
 
     ipcMain.handle("emrg:compactSession", async (_e, { sessionId }) => {
       // GUI / 指令 P1：/compact — 压缩当前会话历史（daemon 协议 compact 已存在）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      await requireConn().sendCommandAndWait("compact", { session_id: sessionId, cwd: DEFAULT_CWD }, 5000);
+      await requireConn().sendCommandAndWait("compact", { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD }, 5000);
       return { ok: true };
     });
 
     ipcMain.handle("emrg:listHistory", async (_e, { sessionId, limit, offset } = {}) => {
       // GUI / 指令 P2：/rewind + rant 14:15:12 历史按需加载（limit/offset 可选）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
-      const payload = { session_id: sessionId, cwd: DEFAULT_CWD };
+      // Rant 2026-08-25T17:38:56 根因 1（P0）：历史/记忆命令的 cwd 必须取会话真实
+      // 项目路径——硬编码 DEFAULT_CWD 使所有 GUI 会话从 ~/.emrg/sessions/ 读取 → 空历史。
+      const payload = { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD };
       if (limit != null) payload.limit = limit;
       if (offset != null) payload.offset = offset;
       const frame = await requireConn().sendCommandAndWait("list_history", payload, 5000);
@@ -503,7 +528,7 @@ vision = false
       }
       const frame = await requireConn().sendCommandAndWait(
         "rewind_session",
-        { session_id: sessionId, cwd: DEFAULT_CWD, record_index: recordIndex },
+        { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD, record_index: recordIndex },
         5000
       );
       return { ok: true, removedCount: frame.removed_count ?? 0 };
@@ -511,7 +536,9 @@ vision = false
 
     ipcMain.handle("emrg:listMemories", async (_e, { scope = "project", sessionId } = {}) => {
       // GUI / 指令 P3：/memory — 列出记忆（daemon list_memories → memories_list）
-      const params = { scope, cwd: DEFAULT_CWD };
+      // 记忆命令同样按会话真实项目取 cwd（scope=session 时用该会话，project 时用当前会话）
+      const memCwd = resolveSessionCwd(sessionId || currentSessionId) || DEFAULT_CWD;
+      const params = { scope, cwd: memCwd };
       if (scope === "session") {
         if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
         params.session_id = sessionId;
@@ -523,7 +550,7 @@ vision = false
     ipcMain.handle("emrg:readMemory", async (_e, { memoryId, scope = "project", sessionId } = {}) => {
       // GUI / 指令 P3：/memory <id> — 读取单条记忆（daemon read_memory → memory_content）
       if (typeof memoryId !== "string" || !memoryId.trim()) throw new Error("invalid memory_id");
-      const params = { scope, memory_id: memoryId.trim(), cwd: DEFAULT_CWD };
+      const params = { scope, memory_id: memoryId.trim(), cwd: resolveSessionCwd(sessionId || currentSessionId) || DEFAULT_CWD };
       if (scope === "session") {
         if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
         params.session_id = sessionId;
@@ -1144,7 +1171,7 @@ vision = false
       if (connManager.daemonConn()?.connected) {
         // G41（P2 改写）：恢复当前会话连接（若 daemon 重启后未由 recoverAll 重开）
         if (currentSessionId && !connManager.get(currentSessionId)) {
-          try { await openSession(currentSessionId, DEFAULT_CWD); } catch { /* 会话可能已删 */ }
+          try { await openSession(currentSessionId, resolveSessionCwd(currentSessionId) || DEFAULT_CWD); } catch { /* 会话可能已删 */ }
         }
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
