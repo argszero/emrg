@@ -31,3 +31,8 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "allow_real_stop: opt out of the conftest stop_all hermeticity guard for the listed stop function(s) — use only when the test has already isolated the function's internal kill machinery",
+]

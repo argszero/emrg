@@ -104,26 +104,51 @@ def _ensure_git_on_path(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _guard_stop_daemon_hermeticity(monkeypatch):
-    """⛔ Red line (host 2026-08-18T22:58): tests must NEVER trigger a real
-    stop_daemon() — it sends a shutdown over the websocket and kills the live
-    emrgd (2026-08-20 16:18/16:25 real incidents; the daemon is EMRG's life
-    core; rant 2026-08-20T16:32:30). Any test that calls stop_all()/
-    stop_daemon() without isolating stop_daemon now fails loudly with
-    AssertionError instead of killing the daemon. Tests that DO isolate it
-    (monkeypatch.setattr(_stop_all, "stop_daemon", lambda: None)) patch after
-    this fixture and override it as usual.
+def _guard_stop_all_hermeticity(monkeypatch, request):
+    """⛔ Red line (host 2026-08-18T22:58, extended by rant 2026-08-25T10:42:47):
+    tests must NEVER trigger a real stop step. stop_daemon() sends a shutdown
+    over the websocket and kills the live emrgd (2026-08-20 16:18/16:25 real
+    incidents; the daemon is EMRG's life core; rant 2026-08-20T16:32:30), and
+    stop_gui()/stop_tui()/stop_bundled_git()/stop_lock_owners() kill the live
+    GUI/TUI/processes on a Windows run (rant 2026-08-25T10:42:47:
+    test_stop_all.py:770 only isolated stop_daemon, so the other four ran for
+    real under the mocked Windows branch). Any test that calls stop_all()/
+    stop_*() without isolating the killer now fails loudly with AssertionError
+    instead of killing processes. Tests that DO isolate (monkeypatch.setattr(
+    _stop_all, "stop_x", lambda: None)) patch after this fixture and override
+    it as usual.
+
+    Escape hatch: a test that calls a stop function directly while having
+    already isolated its internals (e.g. stop_lock_owners with
+    find_install_module_holders + _lock_owner_ps mocked, or a POSIX noop)
+    opts out per function with @pytest.mark.allow_real_stop("stop_lock_owners").
     """
     import emrg._stop_all as stop_mod
 
-    def _no_real_stop_daemon(*args, **kwargs):
-        raise AssertionError(
-            "test triggered a REAL stop_daemon() — ⛔ red-line violation "
-            "(host 2026-08-18T22:58); tests must isolate it via "
-            "monkeypatch.setattr(emrg._stop_all, 'stop_daemon', lambda: None)"
-        )
+    _STOP_FUNCS = (
+        "stop_daemon", "stop_gui", "stop_tui", "stop_bundled_git",
+        "stop_lock_owners",
+    )
 
-    monkeypatch.setattr(stop_mod, "stop_daemon", _no_real_stop_daemon)
+    allowed = set()
+    marker = request.node.get_closest_marker("allow_real_stop")
+    if marker is not None:
+        allowed = set(marker.args)
+
+    def _no_real_stop(name):
+        def _raises(*args, **kwargs):
+            raise AssertionError(
+                f"test triggered a REAL {name}() — ⛔ red-line violation "
+                f"(host 2026-08-18T22:58 / rant 2026-08-25T10:42:47); tests must "
+                f"isolate it via monkeypatch.setattr(emrg._stop_all, {name!r}, "
+                f"lambda: None)"
+            )
+        _raises.__name__ = f"_no_real_{name}"
+        return _raises
+
+    for name in _STOP_FUNCS:
+        if name not in allowed:
+            monkeypatch.setattr(stop_mod, name, _no_real_stop(name))
 
 
 @pytest.fixture(autouse=True)
