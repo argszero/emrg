@@ -81,16 +81,41 @@ release installer" means for this version.
         → produces `dist/mac-arm64/EMRG.app` (electron-builder `dir` target).
         Building only the host arch is fine for an upgrade (e.g.
         `npm run dist -- --arm64` on this arm64 host) — the release installer
-        rebuilds all arches. electron-builder's default ad-hoc signing is part
-        of the build output, NOT manual code-signing/notarization (step 6).
+        rebuilds all arches.
+     c. **Re-seal the bundle + clear xattrs (REQUIRED — rant
+        2026-08-25T09:18:19)**: electron-builder's `dir` target only ad-hoc
+        signs the main binary, leaving the bundle unsealed (`codesign -d`
+        shows `Identifier=Electron`, `Info.plist=not bound`,
+        `Sealed Resources=none`), and the artifact carries xattrs such as
+        `com.apple.provenance`. On macOS 26 a deployed copy combining
+        provenance/quarantine attributes with an invalid signature is judged
+        malware and moved to Trash. Fix the BUILT ARTIFACT before any copy:
+        - `codesign --force --deep --sign - --timestamp=none "{{ upgrade_work }}/emrg/gui/dist/mac-arm64/EMRG.app"`
+          (full ad-hoc re-sign — seals the bundle: Info.plist bound, sealed
+          resources present; `codesign -d` then shows `Identifier=com.emrg.gui`)
+        - `xattr -cr "{{ upgrade_work }}/emrg/gui/dist/mac-arm64/EMRG.app"`
+          (clear extended attributes so ditto does not propagate them)
+        Sanity-check before copying:
+        `codesign --verify --deep --strict "{{ upgrade_work }}/emrg/gui/dist/mac-arm64/EMRG.app"`
+        — must pass (exit 0). If it fails, do NOT copy; report and roll back.
   4. **Replace**: back up the current
      `{{ install_dir }}/emrg-gui/EMRG.app` and `~/Applications/EMRG.app` into
      `{{ backup_dir }}/<current_version>/` (the emrg-gui tree was previously
      excluded from backups — include it from now on), then copy the fresh
      build to both locations (postinstall semantics: `emrg-gui/EMRG.app` is
-     the install source, `~/Applications/EMRG.app` is the run copy).
-  5. **Verify**: re-extract the replaced asar's package.json and confirm its
-     `version` == target tag (strip the leading 'v').
+     the install source, `~/Applications/EMRG.app` is the run copy). ditto
+     preserves source xattrs — clear them on the run copy too:
+     `xattr -cr ~/Applications/EMRG.app`.
+  5. **Verify**:
+     - re-extract the replaced asar's package.json and confirm its
+       `version` == target tag (strip the leading 'v');
+     - **signature check (REQUIRED — rant 2026-08-25T09:18:19)**:
+       `codesign --verify --deep --strict "{{ install_dir }}/emrg-gui/EMRG.app"`
+       and `codesign --verify --deep --strict ~/Applications/EMRG.app` must
+       both pass (exit 0). ANY failure = upgrade failure → restore from the
+       step-4 backup and report. Record the pass in the session log
+       (e.g. `codesign --verify --deep --strict EMRG.app OK (version {{ target_tag }})`)
+       — the upgrade log must show the signature verification result.
 
 ## 4. Backup & rollback
 Before touching anything, back up the current {{ install_dir }}/source (and
@@ -110,7 +135,10 @@ session, explicitly tell the host: upgrade to {{ target_tag }} is complete
 - Do NOT modify the evolution repo {{ source_repo }}'s worktree or branches
   (read-only source). All write operations happen in {{ upgrade_work }} /
   {{ install_dir }} / {{ backup_dir }}.
-- Do NOT touch code signing / notarization (release-side responsibility).
+- Do NOT touch Developer ID signing / notarization (release-side
+  responsibility). The local upgrade uses ad-hoc re-signing only (step 3c) —
+  it is REQUIRED for Gatekeeper compatibility on macOS 26, not a replacement
+  for the release installer's Developer ID / notary chain.
 - The MANIFESTO highest principle applies: never write, restore or introduce
   any test/script/code path that stops or restarts emrg server / emrgd.
   Step 5 ("do not restart the daemon") is the natural extension of that
