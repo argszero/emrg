@@ -427,6 +427,11 @@ const I18N = (() => {
       "app.authFailed": "认证失败了，请检查设置里的 API Key。",
       "app.daemonStopped": "daemon 启动失败（已停止自动重试）。请在终端运行 `emrg server` 排查；\n{msg}",
       "app.versionInfo": "EMRG GUI v{ver} · 实例 {id} · 模型 {model} · 已进化 {n} 次",
+
+      // 全局错误边界（rant 2026-08-25T21:13:18）
+      "errorBoundary.title": "渲染器出错",
+      "errorBoundary.copy": "复制错误",
+      "errorBoundary.reload": "重新加载",
     },
 
     en: {
@@ -841,6 +846,11 @@ const I18N = (() => {
       "app.authFailed": "Authentication failed — check your API Key in Settings.",
       "app.daemonStopped": "daemon failed to start (auto-retry stopped). Run `emrg server` in a terminal to debug;\n{msg}",
       "app.versionInfo": "EMRG GUI v{ver} · Instance {id} · Model {model} · Evolved {n} times",
+
+      // Global error boundary (rant 2026-08-25T21:13:18)
+      "errorBoundary.title": "Renderer error",
+      "errorBoundary.copy": "Copy error",
+      "errorBoundary.reload": "Reload",
     },
   };
 
