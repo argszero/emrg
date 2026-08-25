@@ -137,7 +137,8 @@ _PROTECTED_FILES = (
 # fetch / log / diff / remote) stay allowed.
 _GIT_MUTATOR_RE = re.compile(
     r"\bgit\s+(?:stash|checkout|restore|clean|reset|commit|push|pull|merge|"
-    r"rebase|cherry-pick|cherry_pick|revert|rm|mv|switch)\b"
+    r"rebase|cherry-pick|cherry_pick|revert|rm|mv|switch|apply|am|archive|"
+    r"submodule|worktree)\b"
 )
 _GIT_DELETE_RE = re.compile(r"\bgit\s+(?:branch|tag)\s+-[dD]\b")
 
@@ -260,7 +261,8 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
                 ), "partial"
         # Git mutators are blocked too — the 2026-08-20 data-loss commands
         # (stash / checkout . / reset --hard / clean) write no file targets
-        # and escaped the target scan (community issue #979).
+        # and escaped the target scan (community issue #979). Also blocks
+        # working-tree writers: apply / am / archive / submodule / worktree.
         m = _GIT_MUTATOR_RE.search(cmd) or _GIT_DELETE_RE.search(cmd)
         if m:
             return False, (

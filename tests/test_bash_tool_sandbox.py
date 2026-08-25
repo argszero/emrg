@@ -137,6 +137,12 @@ def test_check_read_only_blocks_git_mutators():
         "git branch -d old",
         "git branch -D old",
         "git tag -d v1",
+        # working-tree writers (cycle 20260825-193548)
+        "git apply patch.diff",
+        "git am patch-series.mbox",
+        "git archive --output=tree.tar HEAD",
+        "git submodule update --init",
+        "git worktree add ../wt master",
     ):
         allowed, reason, enforcement = _check_sandbox(cmd, "read-only")
         assert allowed is False, f"{cmd!r} should be blocked"
