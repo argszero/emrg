@@ -2496,6 +2496,30 @@ def test_is_dirty_tree_detects_uncommitted_changes():
         assert TaskHandler._is_dirty_tree_sync(d) is False
 
 
+def test_is_dirty_tree_linked_worktree():
+    """Cycle 20260825-194513: a linked git worktree has `.git` as a FILE, not
+    a dir — the probe must detect dirt there too (isdir-only check silently
+    failed open, bypassing the read-only guard in worktree setups)."""
+    with tempfile.TemporaryDirectory() as d:
+        subprocess.run(["git", "init", d], capture_output=True, timeout=10)
+        subprocess.run(["git", "-C", d, "config", "user.email", "t@t.t"],
+                       capture_output=True, timeout=10)
+        subprocess.run(["git", "-C", d, "config", "user.name", "t"],
+                       capture_output=True, timeout=10)
+        (Path(d) / "base.txt").write_text("base", encoding="utf-8")
+        subprocess.run(["git", "-C", d, "add", "base.txt"], capture_output=True, timeout=10)
+        subprocess.run(["git", "-C", d, "commit", "-m", "base"],
+                       capture_output=True, timeout=10)
+        wt = Path(d) / "wt"
+        subprocess.run(["git", "-C", d, "worktree", "add", str(wt), "HEAD"],
+                       capture_output=True, timeout=10)
+        # .git is a file in the linked worktree
+        assert (wt / ".git").is_file(), "linked worktree .git should be a file"
+        assert TaskHandler._is_dirty_tree_sync(str(wt)) is False  # clean worktree
+        (wt / "dirty.txt").write_text("dirty", encoding="utf-8")
+        assert TaskHandler._is_dirty_tree_sync(str(wt)) is True  # untracked → dirty
+
+
 def test_dirty_tree_forces_read_only_structural_guard():
     """Community issue #979: a dirty source tree forces the cycle's effective
     sandbox to read-only regardless of configuration — topology over rules."""

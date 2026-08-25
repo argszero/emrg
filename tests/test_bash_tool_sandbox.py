@@ -107,6 +107,8 @@ def test_check_read_only_allows_dev_null_redirect():
 
 def test_check_read_only_allows_read_commands():
     for cmd in ("ls -la", "git status", "cat file.txt", "pwd", "echo hi",
+                "git stash list", "git stash show -p",
+                "git stash show stash@{0}", "git stash list | grep foo",
                 "git worktree list", "git worktree list --porcelain",
                 "git submodule status", "git submodule status | head"):
         allowed, _, _ = _check_sandbox(cmd, "read-only")
@@ -121,6 +123,10 @@ def test_check_read_only_blocks_git_mutators():
     for cmd in (
         "git stash",
         "git stash list && git stash drop",
+        "git stash push -m wip",
+        "git stash drop stash@{0}",
+        "git stash pop",
+        "git stash clear",
         "git checkout .",
         "git checkout -- src/main.py",
         "git restore .",
