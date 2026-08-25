@@ -351,7 +351,12 @@ class TaskHandler:
         """
         import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
 
-        if not os.path.isdir(os.path.join(source_dir, ".git")):
+        # .git may be a directory (regular repo) or a file (linked worktree —
+        # "gitdir: ..." pointer). Treat both as git repos; only a bare/non-git
+        # dir fails open (cycle 20260825-194513: isdir-only check silently
+        # bypassed the guard in linked-worktree setups).
+        git_marker = os.path.join(source_dir, ".git")
+        if not os.path.isdir(git_marker) and not os.path.isfile(git_marker):
             return False
         try:
             out = _sp.run(
