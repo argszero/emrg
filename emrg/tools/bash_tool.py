@@ -141,6 +141,10 @@ _GIT_MUTATOR_RE = re.compile(
     r"submodule|worktree)\b"
 )
 _GIT_DELETE_RE = re.compile(r"\bgit\s+(?:branch|tag)\s+-[dD]\b")
+# `git stash list` / `git stash show` are READ-ONLY stash inspection (reviewing
+# WIP) — the mutator regex above would false-positive on them because it matches
+# the bare `git stash` token. Exempt a pure stash read (no chain to a mutator).
+_GIT_STASH_READ_RE = re.compile(r"\bgit\s+stash\s+(?:list|show)(?:\s|$|\|)")
 
 
 def _extract_write_targets(cmd: str) -> list[str]:
@@ -263,8 +267,15 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
         # (stash / checkout . / reset --hard / clean) write no file targets
         # and escaped the target scan (community issue #979). Also blocks
         # working-tree writers: apply / am / archive / submodule / worktree.
+        # Pure `git stash list` / `git stash show` (read-only WIP inspection)
+        # are exempt — but a chain to a mutator (e.g. `&& git stash drop`)
+        # stays blocked.
         m = _GIT_MUTATOR_RE.search(cmd) or _GIT_DELETE_RE.search(cmd)
-        if m:
+        if m and not (
+            _GIT_STASH_READ_RE.search(cmd)
+            and not re.search(r"\bgit\s+stash\s+(?:drop|pop|clear|apply|push|branch|create)\b", cmd)
+            and not re.search(r"&&|;", cmd)
+        ):
             return False, (
                 f"read-only sandbox: blocked git mutating command {m.group(0)!r} "
                 "(dirty-tree guard, community issue #979)"
