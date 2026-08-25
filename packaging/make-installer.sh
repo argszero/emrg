@@ -414,8 +414,10 @@ end;
 // Inno CloseApplications 看不到无窗口的 pythonw daemon（emrgd.cmd → pythonw.exe
 // -m emrg.server 常驻锁文件），覆盖 ~/.emrg\install 时卡在"停止已有进程"。
 // PrepareToInstall 在安装开始前用 runtime 的 python 运行 bin\stop_all.py：
-// ws 协议关闭 daemon → emrgd.pid 兜底 → taskkill /F、taskkill EMRG.exe 优雅→/F、
-// CIM 命令行过滤 TUI、install\git\ 前缀连坐强杀 bundled git、verify 残留检查；
+// ws 协议关闭 daemon（固定端口 56031 + emrgd.token）→ 命令行扫描 -m emrg.server
+// 兜底 → taskkill /F、taskkill EMRG.exe 优雅→/F、CIM 命令行过滤 TUI、
+// install\git\ 前缀连坐强杀 bundled git、verify 残留检查（emrgd.pid 已废弃，
+// rant 2026-08-21T16:45:06：固定端口为存活 ground truth）；
 // 有残留 exit 1（脚本打印残留清单）→ 中止安装。干净安装（无旧 install）直接跳过。
 // {app} 是旧版安装目录——不能依赖旧版 emrg 命令（可能无 stop 子命令），所以用
 // 单文件脚本 + runtime python（{app}\bin\python-dist\python.exe，R90 布局，
