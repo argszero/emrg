@@ -782,6 +782,104 @@ class TestWSBroadcast:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_broadcast_cwd_filtered(self):
+        """Subscribers on the same session_id but a DIFFERENT cwd must NOT
+        receive a running task's stream (rant 2026-08-25T17:38:56 root cause 3).
+
+        The GUI's homedir-fallback connection subscribed to the same session
+        id as the real TUI connection; without cwd scoping every broadcast
+        leaked across projects. Now broadcasts are filtered by the running
+        task's cwd: A's task (cwd_a) reaches only A, and B's later task
+        (cwd_b) reaches only B — proving the filter is symmetric and B is
+        alive, not simply disconnected.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                cwd_a = cwd / "proj_a"
+                cwd_b = cwd / "proj_b"
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        # Both subscribe to the SAME session_id from DIFFERENT cwds
+                        for ws, ws_cwd in ((ws_a, cwd_a), (ws_b, cwd_b)):
+                            await ws.send(json.dumps({
+                                "type": "list_history",
+                                "session_id": "s_cwd_filter",
+                                "cwd": str(ws_cwd),
+                            }))
+                            await asyncio.wait_for(ws.recv(), timeout=5)  # history_list
+
+                        async def _drain(ws):
+                            """Empty the socket so later asserts are unambiguous."""
+                            while True:
+                                try:
+                                    await asyncio.wait_for(ws.recv(), timeout=0.2)
+                                except (asyncio.TimeoutError, ConnectionClosed):
+                                    return
+
+                        await _drain(ws_b)
+
+                        # A runs a task at cwd_a → stream must reach A only
+                        server.llm.chat_stream = _make_fake_chat_stream()
+                        await ws_a.send(json.dumps({
+                            "type": "task",
+                            "id": "t-filter-a",
+                            "session_id": "s_cwd_filter",
+                            "cwd": str(cwd_a),
+                            "prompt": "你好",
+                            "stream": True,
+                            "timestamp": "2026-08-02T00:00:00",
+                        }, ensure_ascii=False))
+                        got_delta = got_tool = got_done = False
+                        while True:
+                            frame = json.loads(await asyncio.wait_for(ws_a.recv(), timeout=10))
+                            if frame.get("delta"):
+                                got_delta = True
+                            if "tool_name" in frame:
+                                got_tool = True
+                            if frame.get("done") and frame.get("request_id") == "t-filter-a":
+                                got_done = True
+                                break
+                        assert got_delta and got_tool and got_done
+                        # B (wrong cwd) must NOT see any of A's stream frames
+                        with pytest.raises(asyncio.TimeoutError):
+                            await asyncio.wait_for(ws_b.recv(), timeout=1.0)
+
+                        # Symmetric direction: B's task at cwd_b reaches B only
+                        server.llm.chat_stream = _make_fake_chat_stream()  # fresh round counter
+                        await ws_b.send(json.dumps({
+                            "type": "task",
+                            "id": "t-filter-b",
+                            "session_id": "s_cwd_filter",
+                            "cwd": str(cwd_b),
+                            "prompt": "你好",
+                            "stream": True,
+                            "timestamp": "2026-08-02T00:00:00",
+                        }, ensure_ascii=False))
+                        got_delta = got_tool = got_done = False
+                        while True:
+                            frame = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=10))
+                            if frame.get("delta"):
+                                got_delta = True
+                            if "tool_name" in frame:
+                                got_tool = True
+                            if frame.get("done") and frame.get("request_id") == "t-filter-b":
+                                got_done = True
+                                break
+                        assert got_delta and got_tool and got_done
+                        # A (wrong cwd for B's task) must NOT see B's stream
+                        with pytest.raises(asyncio.TimeoutError):
+                            await asyncio.wait_for(ws_a.recv(), timeout=1.0)
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_task_queued_instead_of_busy_error(self):
         """A's task holds the session lock; B's task is queued (task_queued,
         NOT 'session busy'), then injected into A's turn at the stop boundary
@@ -939,6 +1037,102 @@ class TestWSBroadcast:
                         await ws_b.close()
                 finally:
                     await cleanup()
+        asyncio.run(_test())
+
+
+class TestWSGhostSessionGuard:
+    """Resume must not bless 0-message ghost sessions (rant 2026-08-25T17:38:56
+    root cause 2).
+
+    Before the fix, a client hitting the wrong cwd (GUI homedir fallback)
+    caused a 0-message ghost session dir at the wrong project; resume_session
+    then reported success (0 messages), masking the real session. Now:
+      - missing session dir / meta.json → not found
+      - a 0-message session whose cwd differs from the canonical session cwd
+        (global sessions_index.json) → rejected with a clear error
+      - the canonical cwd still resumes with the real message count
+    """
+
+    def test_resume_rejects_ghost_at_wrong_cwd(self):
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp = Path(tmp)
+                cwd_a = tmp / "proj_a"  # canonical project of the real session
+                cwd_b = tmp / "proj_b"  # wrong project (ghost dir present)
+                sid = "s_ghost_test"
+
+                # Real session at proj_a: dir + meta.json with 2 messages
+                real_dir = cwd_a / ".emrg" / "sessions" / sid
+                real_dir.mkdir(parents=True, exist_ok=True)
+                (real_dir / "meta.json").write_text(json.dumps({
+                    "session_id": sid,
+                    "message_count": 2,
+                    "created_at": "2026-08-25T00:00:00Z",
+                    "updated_at": "2026-08-25T00:00:00Z",
+                }), encoding="utf-8")
+                (real_dir / "history.jsonl").write_text(
+                    '{"type":"message","role":"user","content":"hi"}\n'
+                    '{"type":"message","role":"assistant","content":"hello"}\n',
+                    encoding="utf-8",
+                )
+                # Ghost dir at the wrong project: 0 messages (pre-fix failure)
+                ghost_dir = cwd_b / ".emrg" / "sessions" / sid
+                ghost_dir.mkdir(parents=True, exist_ok=True)
+                (ghost_dir / "meta.json").write_text(json.dumps({
+                    "session_id": sid,
+                    "message_count": 0,
+                }), encoding="utf-8")
+
+                # _canonical_session_cwd reads emrg.sessions_index.config_dir
+                # (NOT the daemon's patched copy) → redirect it to the isolated
+                # tmp dir and register the canonical location.
+                import emrg.sessions_index as si_mod
+                orig_si_cfg = si_mod.config_dir
+                si_mod.config_dir = lambda: tmp
+
+                try:
+                    _, _, cleanup = await _boot_server(tmp)
+                    try:
+                        # Index must be deterministic — write AFTER the daemon's
+                        # startup rebuild so nothing prunes our entry.
+                        si_mod._write({sid: str(real_dir)}, tmp / "sessions_index.json")
+
+                        ws = await connect_to_server()
+                        try:
+                            # 1) wrong cwd → rejected (ghost must not mask the real session)
+                            await ws.send(json.dumps({
+                                "type": "resume_session",
+                                "session_id": sid,
+                                "cwd": str(cwd_b),
+                            }))
+                            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                            assert resp.get("type") == "resume_result"
+                            assert "error" in resp, f"ghost session not rejected: {resp!r}"
+                            # 2) canonical cwd → resumes with the real message count
+                            await ws.send(json.dumps({
+                                "type": "resume_session",
+                                "session_id": sid,
+                                "cwd": str(cwd_a),
+                            }))
+                            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                            assert resp.get("type") == "resume_result"
+                            assert "error" not in resp, f"canonical resume failed: {resp!r}"
+                            assert resp["meta"]["message_count"] == 2
+                            # 3) unknown session → not found (pre-existing guard kept)
+                            await ws.send(json.dumps({
+                                "type": "resume_session",
+                                "session_id": "s_no_such_session",
+                                "cwd": str(cwd_a),
+                            }))
+                            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+                            assert resp.get("type") == "resume_result"
+                            assert "error" in resp
+                        finally:
+                            await ws.close()
+                    finally:
+                        await cleanup()
+                finally:
+                    si_mod.config_dir = orig_si_cfg
         asyncio.run(_test())
 
 

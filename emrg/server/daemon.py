@@ -258,7 +258,11 @@ class EmrgServer:
         self._rants_log = runtime_dir / "rants.jsonl"
 
         # ── Phase 2 broadcast model (protocol-contract §2.6) ──
-        self._session_subscribers: dict[str, set] = {}  # session_id → set[ws]
+        # Rant 2026-08-25T17:38:56 根因 3（P1）：订阅按 session_id 键控、与 cwd 无关
+        # → 错误 cwd 的客户端（GUI 幽灵连接）与真实连接同组，实时消息串线。改为
+        # session_id → {ws: cwd}，广播时按运行中任务的 cwd 过滤（见 _session_task_cwds）。
+        self._session_subscribers: dict[str, dict] = {}  # session_id → {ws: cwd_str}
+        self._session_task_cwds: dict[str, str] = {}     # session_id → 运行中任务的 cwd
         self._session_busy: dict[str, bool] = {}        # session_id → active task?
         # P1 queue-injection (rant 2026-08-10T21:55:37): per-session FIFO of
         # (TaskRequest, allow_tools) received while a tool loop is busy —
@@ -751,8 +755,9 @@ class EmrgServer:
                     new_sid = data["session_id"]
                     if new_sid != last_session_id:
                         if last_session_id:  # unsubscribe from previous session
-                            self._session_subscribers.get(last_session_id, set()).discard(ws)
-                        self._session_subscribers.setdefault(new_sid, set()).add(ws)
+                            self._session_subscribers.get(last_session_id, {}).pop(ws, None)
+                        # 订阅记录该连接的 cwd——广播按 (session, cwd) 过滤（rant 17:38:56 根因 3）
+                        self._session_subscribers.setdefault(new_sid, {})[ws] = data.get("cwd") or last_cwd or ""
                         last_session_id = new_sid
                 if data.get("cwd"):
                     last_cwd = data["cwd"]
@@ -866,7 +871,7 @@ class EmrgServer:
                     pass
             # Phase 2 broadcast: unsubscribe on disconnect (protocol-contract §2.6.2)
             if last_session_id:
-                self._session_subscribers.get(last_session_id, set()).discard(ws)
+                self._session_subscribers.get(last_session_id, {}).pop(ws, None)
             self._all_connections.discard(ws)
             try:
                 await ws.close()
@@ -898,9 +903,21 @@ class EmrgServer:
     async def _broadcast(self, session_id: str, data: dict) -> None:
         """Send data to all subscribers of session_id (including the originator).
 
+        Rant 2026-08-25T17:38:56 根因 3（P1）：同一 session_id 可能有不同 cwd 的
+        订阅者（GUI 幽灵连接 vs TUI 真实连接）。运行中任务的事件按任务 cwd 过滤，
+        只投递给同一 (session, cwd) 的订阅者——幽灵连接不再收到真实会话的实时流。
+        无运行中任务（compact_result 等）时广播全部订阅者（内容非会话实时流，
+        无串线风险）。
+
         Best-effort: a single dead subscriber must not affect the others.
         """
-        for w in list(self._session_subscribers.get(session_id, ())):
+        subs = self._session_subscribers.get(session_id, {})
+        task_cwd = self._session_task_cwds.get(session_id)
+        if task_cwd:
+            targets = [w for w, wcwd in subs.items() if wcwd == task_cwd]
+        else:
+            targets = list(subs)
+        for w in targets:
             try:
                 await self._send(w, data)
             except Exception:
@@ -2269,12 +2286,16 @@ class EmrgServer:
     ) -> None:
         """Run _run_tool_loop and release the session busy lock on exit."""
         session_id = session.session_id
+        # Rant 2026-08-25T17:38:56 根因 3：广播按任务 cwd 过滤——记录本任务真实 cwd，
+        # 幽灵连接（错误 cwd 订阅）在任务期间收不到该会话实时流。
+        self._session_task_cwds[session_id] = str(session.cwd)
         normal_end = False
         try:
             await self._run_tool_loop(req, ws, session, cancel_event, allow_tools)
             normal_end = True
         finally:
             self._session_busy[session_id] = False
+            self._session_task_cwds.pop(session_id, None)
             # P1 (rant 21:55:37): messages still queued when the loop ends are
             # not lost. We do NOT start a follow-up task here (_tool_task /
             # _cancel_event are read-loop locals — a hand-off would break
@@ -3478,15 +3499,43 @@ class EmrgServer:
 
         The client reads history.jsonl directly from disk for display.
         We only confirm the session exists — no records over the wire.
+
+        Rant 2026-08-25T17:38:56 (GUI 会话串线/空历史，根因 2)：此前只查
+        session_dir.exists() —— 错误 cwd 的客户端（GUI homedir 兜底）会在
+        ~/.emrg/sessions/<sid>/ 误建 0-message 幽灵会话，resume 照常返回成功
+        （0 messages），真实会话所在项目反而永远打不开。修复：meta.json 缺失
+        或 message_count==0 时，按全局 sessions_index.json 校验请求 cwd 是否为
+        该会话真实项目路径；不匹配 → not_found + warning（幽灵目录不再掩盖错误）。
         """
         session_dir = cwd / ".emrg" / "sessions" / session_id
-        if not session_dir.exists():
+        meta_path = session_dir / "meta.json"
+        if not session_dir.exists() or not meta_path.exists():
             await self._send(ws, {
                 "type": "resume_result",
                 "session_id": session_id,
                 "error": f"Session {session_id} not found",
             })
             return
+
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            meta = {}
+        if meta.get("message_count", 0) <= 0:
+            canonical = self._canonical_session_cwd(session_id)
+            if canonical is None or str(Path(canonical).resolve()) != str(Path(cwd).resolve()):
+                logger.warning(
+                    "resume rejected: ghost session %s (0 messages) at %s — "
+                    "real session lives at %s (canonical cwd from sessions index)",
+                    session_id, session_dir, canonical or "unknown",
+                )
+                await self._send(ws, {
+                    "type": "resume_result",
+                    "session_id": session_id,
+                    "error": f"Session {session_id} not found (no messages at this cwd; "
+                             "real session lives in its project — open from the project's session list)",
+                })
+                return
 
         session = Session.load(session_id, cwd)
 
@@ -3501,6 +3550,26 @@ class EmrgServer:
                 "title": session.title,
             },
         })
+
+    def _canonical_session_cwd(self, session_id: str) -> str | None:
+        """Resolve a session's canonical project cwd from the global sessions index.
+
+        Index maps sid → absolute session dir (<cwd>/.emrg/sessions/<sid>);
+        the cwd is the dir 3 levels up (covers home-level sessions too:
+        ~/.emrg/sessions/<sid> → cwd = ~).
+        """
+        try:
+            from emrg.sessions_index import sessions_index_path, _load
+
+            data = _load(sessions_index_path())
+            dir_str = data.get(session_id)
+            if not dir_str:
+                return None
+            p = Path(dir_str)
+            return str(p.parent.parent.parent)
+        except Exception:
+            logger.debug("canonical session cwd lookup failed", exc_info=True)
+            return None
 
     # ── GUI workspace panel: list_files / read_file (rant 2026-08-11T12:20:35 P1.1) ──
     # 单目录条目上限：超出截断 + truncated 提示（与 ReadTool 的防爆理念一致）
