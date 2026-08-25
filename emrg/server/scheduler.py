@@ -234,6 +234,21 @@ class TaskHandler:
         if restored:
             self.evolutions = restored
 
+        # ── Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③) ──
+        # While a cycle is running, periodic + event-driven writes to
+        # <task>.heartbeat.json persist how far the cycle got (round /
+        # tool_count / timestamps). A daemon killed mid-cycle leaves the file
+        # with status=running — the next start reports exactly where the
+        # previous cycle was interrupted, so silent-death incidents become
+        # diagnosable (8-24 20:40 R46 / 8-25 02:00 emrg-task 01:26 lessons).
+        self._heartbeat_file = self._task_runs_dir / f"{self.name}.heartbeat.json"
+        self._cycle_progress: dict = {
+            "cycle_started_at": None,
+            "round": 0,
+            "tool_count": 0,
+        }
+        self._report_interrupted_cycle()
+
         # ── Saturation — slow down, never stop (rant 2026-08-09T09:35:55) ──
         # Rant 2026-08-20T10:58:55 (host design-finalized): the empty-cycle
         # counter / slowdown-vote / threshold machinery is DELETED. Slowdown
@@ -256,6 +271,16 @@ class TaskHandler:
         self._saturation_file = self._saturation_dir / f"{self.name}.json"
         self._slowdown_active = False
         self._slowdown_active = self._load_saturation_state()
+
+        # ── Next-run persistence (rant 2026-08-25T09:25:32 ④) ──
+        # The scheduled next-run time is persisted to
+        # ~/.emrg/next-run/<task>.json so a daemon restart does not reset the
+        # schedule: the handler resumes at the original slot (only ever
+        # shortens the wait, never extends; a slot that passed during downtime
+        # runs immediately instead of waiting a fresh full interval).
+        self._next_run_dir = config_dir() / "next-run"
+        self._next_run_file = self._next_run_dir / f"{self.name}.json"
+        self._resume_next_run_at: float | None = self._load_next_run_state()
 
         # Resolve project path from config (new schema) or fall back to
         # config.path for backward-compat with old tasks.yml entries.
@@ -346,6 +371,127 @@ class TaskHandler:
             )
         except Exception:
             pass
+
+    # ── Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③) ──
+    # The heartbeat file (<task>.heartbeat.json, sibling of the task-runs
+    # JSONL) exists ONLY while a cycle is running. It is written periodically
+    # by _heartbeat_loop and on every tool frame; removed on clean cycle end.
+    # A daemon killed mid-cycle leaves it behind with status=running, and the
+    # next handler start logs exactly where the cycle was interrupted.
+    _HEARTBEAT_PERIOD = 60  # seconds between periodic heartbeat writes
+
+    def _write_heartbeat(self, status: str) -> None:
+        """Persist current cycle progress (best-effort, never raises)."""
+        try:
+            self._task_runs_dir.mkdir(parents=True, exist_ok=True)
+            self._heartbeat_file.write_text(
+                json.dumps({
+                    "task": self.name,
+                    "status": status,
+                    "cycle_started_at": self._cycle_progress.get("cycle_started_at"),
+                    "last_heartbeat_at": datetime.now().isoformat(timespec="seconds"),
+                    "round": self._cycle_progress.get("round", 0),
+                    "tool_count": self._cycle_progress.get("tool_count", 0),
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass  # heartbeat is best-effort; never affects the running cycle
+
+    def _clear_heartbeat(self) -> None:
+        """Remove the running-cycle heartbeat marker (cycle ended cleanly)."""
+        try:
+            self._heartbeat_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodically persist cycle progress while a cycle is running."""
+        try:
+            while True:
+                await asyncio.sleep(self._HEARTBEAT_PERIOD)
+                self._write_heartbeat("running")
+        except asyncio.CancelledError:
+            pass
+
+    def _report_interrupted_cycle(self) -> None:
+        """Restart-time detection of a daemon killed mid-cycle.
+
+        Rant 2026-08-25T09:25:32 ③: a heartbeat file left with
+        status=running means the previous cycle never finished — restore its
+        progress into _cycle_progress and log "上次中断于 round X" so the
+        silent-death incident becomes diagnosable from emrgd.log alone.
+        """
+        try:
+            if not self._heartbeat_file.exists():
+                return
+            data = json.loads(self._heartbeat_file.read_text(encoding="utf-8"))
+            if data.get("status") != "running":
+                return
+            round_n = int(data.get("round") or 0)
+            tool_n = int(data.get("tool_count") or 0)
+            self._cycle_progress["round"] = round_n
+            self._cycle_progress["tool_count"] = tool_n
+            self._cycle_progress["cycle_started_at"] = data.get("cycle_started_at")
+            self._logger.warning(
+                "TaskHandler[%s]: previous cycle interrupted at round %s "
+                "(tool_count=%s, started %s, last heartbeat %s) — see %s",
+                self.name, round_n, tool_n,
+                data.get("cycle_started_at"), data.get("last_heartbeat_at"),
+                self._heartbeat_file,
+            )
+        except Exception:
+            pass
+
+    # ── Next-run persistence (rant 2026-08-25T09:25:32 ④) ──
+
+    def _load_next_run_state(self) -> float | None:
+        """Restore the persisted next-run time (~/.emrg/next-run/<task>.json).
+
+        Returns the epoch timestamp only when it is still in the future (a
+        daemon restart must not reset the schedule); None when absent, stale,
+        or unreadable.
+        """
+        try:
+            if self._next_run_file.exists():
+                data = json.loads(self._next_run_file.read_text(encoding="utf-8"))
+                ts = data.get("next_run_at")
+                if isinstance(ts, (int, float)) and ts > time.time():
+                    return float(ts)
+        except Exception:
+            pass
+        return None
+
+    def _save_next_run_state(self) -> None:
+        """Persist the current _next_run_at; delete the file when cleared."""
+        try:
+            if self._next_run_at is None:
+                self._next_run_file.unlink(missing_ok=True)
+                return
+            self._next_run_dir.mkdir(parents=True, exist_ok=True)
+            self._next_run_file.write_text(
+                json.dumps({"next_run_at": self._next_run_at}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _resume_wait_timeout(self, wait_timeout: float) -> float:
+        """Fold the restored next-run time into the wait (one-shot).
+
+        Rant 2026-08-25T09:25:32 ④: a daemon restart must not reset the next
+        run — if the persisted slot is still ahead, wait only the remainder
+        (never longer than the normal interval); if it already passed during
+        downtime, run immediately instead of waiting a fresh full interval.
+        """
+        resume = self._resume_next_run_at
+        if resume is None:
+            return wait_timeout
+        self._resume_next_run_at = None
+        remaining = resume - time.time()
+        if remaining <= 0:
+            return 0.0
+        return min(wait_timeout, remaining)
 
     # ── Task-run persistence (rant 2026-08-19T20:50:36, host Plan B) ──
     # Execution records persist to ~/.emrg/logs/task-runs/<task>.jsonl
@@ -456,6 +602,11 @@ class TaskHandler:
                 # daemon is unreachable — stops the retry/window storm.
                 else self._connect_backoff()
             )
+            # Rant 2026-08-25T09:25:32 ④: a daemon restart must not reset the
+            # next run — fold the persisted slot into the wait (one-shot:
+            # shorten to the remainder, or run immediately when the slot
+            # already passed during downtime).
+            wait_timeout = self._resume_wait_timeout(wait_timeout)
             # Diagnostic log (rant 2026-08-18T20:48:45): expose which
             # scheduling mode drove the wait — normal | heartbeat | backoff —
             # so the saturation/backoff state machine is traceable end-to-end.
@@ -471,6 +622,7 @@ class TaskHandler:
             )
             # Wait for interval or manual trigger (interruptible)
             self._next_run_at = time.time() + wait_timeout
+            self._save_next_run_state()  # survives daemon restarts (rant 2026-08-25T09:25:32 ④)
             manual_trigger = False
             try:
                 await asyncio.wait_for(
@@ -504,6 +656,17 @@ class TaskHandler:
             self._cycle_running = True
             self._cycle_start_time = time.time()  # per-cycle elapsed base (rant 2026-08-22T07:18:35)
             self._next_run_at = None  # running — no next time yet
+            self._save_next_run_state()  # clear the persisted slot (cycle starting now)
+            # Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③): a
+            # periodic writer keeps <task>.heartbeat.json fresh while the
+            # cycle runs; if the daemon dies mid-cycle the file survives and
+            # the next start reports where the cycle was interrupted.
+            self._cycle_progress = {
+                "cycle_started_at": datetime.now().isoformat(timespec="seconds"),
+                "round": 0,
+                "tool_count": 0,
+            }
+            heartbeat_task = asyncio.create_task(self._heartbeat_loop())
             try:
                 await self._run_evolution_cycle()
             except Exception:
@@ -513,6 +676,8 @@ class TaskHandler:
             finally:
                 self._cycle_running = False
                 self._cycle_start_time = None
+                heartbeat_task.cancel()
+                self._clear_heartbeat()  # cycle over — remove the running marker
                 self._trigger_event.clear()  # clear any spurious set during cycle
 
         await self._write_final_summary()
@@ -774,6 +939,25 @@ class TaskHandler:
 
                 if "tool_name" in resp:
                     tool_count += 1
+                    # Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③):
+                    # mirror the cumulative count into the heartbeat state —
+                    # the write happens AFTER the round field is applied below
+                    # so the persisted file carries the last frame's round.
+                    self._cycle_progress["tool_count"] = tool_count
+
+                # Round number (daemon exposes it on tool_start/done frames,
+                # rant 2026-08-25T09:25:32 ③): the heartbeat records the last
+                # round the cycle reached, so a restart can report "上次中断于
+                # round X" precisely.
+                rnd = resp.get("round")
+                if isinstance(rnd, int):
+                    self._cycle_progress["round"] = rnd
+
+                if "tool_name" in resp:
+                    # Write only after both fields are updated — the on-disk
+                    # heartbeat is then as fresh as the last tool activity
+                    # when the daemon dies.
+                    self._write_heartbeat("running")
 
                 resp_error = resp.get("error")
                 if isinstance(resp_error, str):

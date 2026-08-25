@@ -1744,6 +1744,133 @@ def test_slowdown_state_persisted_across_restart(tmp_path):
         mod.config_dir = orig
 
 
+# ── Cycle progress heartbeat (rant 2026-08-25T09:25:32 ③) ─────
+# While a cycle runs, tool frames mirror round/tool_count into _cycle_progress
+# and write <task>.heartbeat.json (status=running) — a daemon killed mid-cycle
+# leaves the marker behind, and the next handler start reports exactly where
+# the cycle was interrupted (silent-death incidents diagnosable from
+# emrgd.log alone).
+
+def test_cycle_heartbeat_tracks_progress_and_clears(tmp_path):
+    """Tool frames update _cycle_progress + write the running heartbeat; a
+    clean cycle end removes the marker (run() finally path)."""
+    import json as _json
+
+    handler, captured = _make_cycle_handler(tmp_path, frames=[
+        {"tool_name": "bash", "round": 1},
+        {"tool_name": "read", "round": 2},
+        {"request_id": "r1", "content": "Done", "done": True,
+         "delta": False, "session_id": "s"},
+        {"type": "vibe_check_result", "ok": True,
+         "result": {"work": "", "recommend_slowdown": False,
+                    "slowdown_reason": ""}},
+    ])
+    asyncio.run(handler._run_evolution_cycle())
+    # in-memory progress tracked from the streamed frames
+    assert handler._cycle_progress["tool_count"] == 2
+    assert handler._cycle_progress["round"] == 2
+    assert handler._cycle_progress["cycle_started_at"] is None or \
+        handler._cycle_progress["cycle_started_at"]
+    # heartbeat file was written on the last tool frame (status=running)
+    hb = tmp_path / "logs" / "task-runs" / "emrg-task.heartbeat.json"
+    assert hb.exists(), "heartbeat file must be written during the cycle"
+    data = _json.loads(hb.read_text(encoding="utf-8"))
+    assert data["status"] == "running"
+    assert data["task"] == "emrg-task"
+    assert data["tool_count"] == 2
+    assert data["round"] == 2
+    assert data["last_heartbeat_at"], "heartbeat must carry a timestamp"
+    # clean cycle end removes the running marker (run() finally → _clear_heartbeat)
+    handler._clear_heartbeat()
+    assert not hb.exists(), "clean cycle end must remove the heartbeat marker"
+
+
+def test_cycle_heartbeat_interrupted_reported_on_restart(tmp_path, caplog):
+    """A heartbeat left with status=running (daemon killed mid-cycle) is
+    reported by the next handler start: progress restored into
+    _cycle_progress + a warning naming the interrupting round."""
+    import json as _json
+
+    from emrg.server import scheduler as mod
+
+    hb_dir = tmp_path / "logs" / "task-runs"
+    hb_dir.mkdir(parents=True)
+    (hb_dir / "emrg-task.heartbeat.json").write_text(
+        _json.dumps({
+            "task": "emrg-task", "status": "running",
+            "cycle_started_at": "2026-08-25T00:00:00",
+            "last_heartbeat_at": "2026-08-25T00:05:00",
+            "round": 3, "tool_count": 7,
+        }), encoding="utf-8")
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
+            h = TaskHandler(name="emrg-task", config={}, interval=60,
+                            identity=InstanceIdentity())
+    finally:
+        mod.config_dir = orig
+    # progress restored (informational; the next cycle resets it at start)
+    assert h._cycle_progress["round"] == 3
+    assert h._cycle_progress["tool_count"] == 7
+    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("interrupted at round 3" in m for m in warnings), warnings
+
+
+# ── Next-run persistence (rant 2026-08-25T09:25:32 ④) ─────────
+# The scheduled next-run time persists to ~/.emrg/next-run/<task>.json so a
+# daemon restart does not reset the schedule (only shortens the wait; a slot
+# that passed during downtime runs immediately instead of a fresh interval).
+
+def test_next_run_state_persisted_across_restart(tmp_path):
+    """_next_run_at survives a daemon restart via the next-run file: a fresh
+    handler over the same config_dir resumes the original slot one-shot,
+    never extending the wait; stale/cleared states fall back to normal."""
+    import json as _json
+    import time as _time
+
+    from emrg.server import scheduler as mod
+
+    orig = mod.config_dir
+    try:
+        mod.config_dir = lambda: tmp_path
+        h1 = TaskHandler(name="emrg-task", config={}, interval=60,
+                         identity=InstanceIdentity())
+        h1._next_run_at = _time.time() + 3600
+        h1._save_next_run_state()
+        nrf = tmp_path / "next-run" / "emrg-task.json"
+        assert nrf.exists(), "next-run state must persist to disk"
+        # "daemon restart": a fresh handler over the same config_dir restores
+        # the persisted slot (one-shot, never extends the normal wait)
+        h2 = TaskHandler(name="emrg-task", config={}, interval=60,
+                         identity=InstanceIdentity())
+        assert h2._resume_next_run_at is not None, \
+            "future next-run slot restored from disk"
+        resumed = h2._resume_wait_timeout(600)
+        assert 0 < resumed <= 600, resumed
+        assert h2._resume_wait_timeout(600) == 600, \
+            "one-shot: the second wait falls back to the normal interval"
+        # a slot that expired while the daemon was down → run immediately
+        h3 = TaskHandler(name="emrg-task", config={}, interval=60,
+                         identity=InstanceIdentity())
+        h3._resume_next_run_at = _time.time() - 5  # passed during downtime
+        assert h3._resume_wait_timeout(600) == 0.0, \
+            "an already-passed slot runs immediately"
+        # a stale file (slot in the past) is ignored entirely
+        (tmp_path / "next-run" / "emrg-task.json").write_text(
+            _json.dumps({"next_run_at": _time.time() - 60}), encoding="utf-8")
+        h4 = TaskHandler(name="emrg-task", config={}, interval=60,
+                         identity=InstanceIdentity())
+        assert h4._resume_next_run_at is None, \
+            "a past slot must not be resumed"
+        # clearing the state deletes the persisted file
+        h4._next_run_at = None
+        h4._save_next_run_state()
+        assert not nrf.exists(), "cleared state must delete the next-run file"
+    finally:
+        mod.config_dir = orig
+
+
 def test_evolution_cycle_aborted_error_not_counted(tmp_path):
     """Server error frame (e.g. 'session busy') → no evolution log, no count."""
     handler, captured = _make_cycle_handler(tmp_path, frames=[
