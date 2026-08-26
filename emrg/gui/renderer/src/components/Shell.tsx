@@ -1,6 +1,7 @@
 import { useI18n } from "../lib/i18n";
 import { Sidebar } from "./Sidebar";
 import { ResultPanel } from "./ResultPanel";
+import { WorkspaceView } from "./WorkspaceView";
 
 /**
  * Shell — React 骨架占位布局（Batch 0 + Batch 3 Sidebar/ResultPanel 挂载）。
@@ -23,7 +24,7 @@ export function Shell() {
           <Sidebar openSessions={[]} />
         </aside>
         <main className="react-shell-main">
-          <p className="react-shell-placeholder">{t("shell.placeholder")}</p>
+          <WorkspaceView activeView="projects" />
         </main>
         <ResultPanel sid={null} workspaceRoot="" />
       </div>
