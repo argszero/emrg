@@ -119,6 +119,25 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     expect(calls.readMemory[0][0]).toMatchObject({ memoryId: "m1", scope: "project" });
   });
 
+  it("记忆详情按 vanilla 截断：title 80 / body 2000", async () => {
+    const longBody = "x".repeat(5000);
+    const longTitle = "T".repeat(200);
+    const { ref } = setup({
+      over: {
+        readMemory: vi.fn().mockResolvedValue({ id: "m1", title: longTitle, content: longBody }),
+      },
+    });
+    ref.current?.openMemory();
+    await waitFor(() => expect(screen.getByText("记忆一")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("记忆一"));
+    await waitFor(() => expect(screen.getByTestId("memory-detail")).toBeInTheDocument());
+    const detail = screen.getByTestId("memory-detail");
+    expect(detail.textContent).toContain("T".repeat(80));
+    expect(detail.textContent).not.toContain("T".repeat(81));
+    expect(detail.textContent).toContain("x".repeat(2000));
+    expect(detail.textContent).not.toContain("x".repeat(2001));
+  });
+
   it("/memory session 传 scope=session", async () => {
     const { ref, calls } = setup({ sid: "s1" });
     ref.current?.openMemory("session");

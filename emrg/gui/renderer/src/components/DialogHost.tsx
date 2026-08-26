@@ -415,7 +415,11 @@ export const DialogHost = forwardRef<DialogHostHandle, DialogHostProps>(function
           if (!b) return;
           try {
             const m = await b.readMemory({ memoryId: id, scope: memoryScope, sessionId: sid ?? undefined });
-            setMemoryDetail({ title: m.title || id, body: m.content || "" });
+            // vanilla showMemoryDialog 同款截断：详情 title 80 / body 2000（大记忆不整页渲染）
+            setMemoryDetail({
+              title: String(m.title || id).slice(0, 80),
+              body: String(m.content || "").slice(0, 2000),
+            });
           } catch (e) {
             setMemoryError((e as Error)?.message ?? String(e));
           }
