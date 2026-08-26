@@ -92,6 +92,19 @@ describe("FileTree", () => {
     await waitFor(() => expect(screen.getByText("LOAD_FAILED")).toBeInTheDocument());
   });
 
+  it("嵌套目录加载失败 → 子目录行内显示失败提示（根成功，回归 #999 审查发现）", async () => {
+    const listFiles = vi.fn(async (path: string) => {
+      if (path === "/proj/src") throw new Error("boom");
+      return { entries: [dir("src", "/proj/src")] };
+    });
+    setup({ listFiles, t: (k) => (k === "result.treeLoadFailed" ? "LOAD_FAILED" : k) });
+    await waitFor(() => expect(screen.getByText("src")).toBeInTheDocument());
+    await userEvent.click(screen.getByText("src").closest(".ft-row")!);
+    // 修复前：子目录 catch 置 loaded:true + error:true，但提示条件要求
+    // !st.loaded（永假）→ 失败静默；修复后与根错误路径一致（st.loaded && st.error）
+    await waitFor(() => expect(screen.getByText("LOAD_FAILED")).toBeInTheDocument());
+  });
+
   it("root 为空 → 显示 empty 提示（result.filesEmpty）", () => {
     setup({ root: "" });
     expect(screen.getByTestId("filetree-empty")).toHaveTextContent("No workspace");
