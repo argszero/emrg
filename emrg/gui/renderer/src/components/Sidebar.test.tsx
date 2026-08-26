@@ -100,4 +100,29 @@ describe("Sidebar", () => {
     const items = screen.getAllByTestId("open-session-item");
     expect(items[0].querySelector(".conv-title")).toHaveTextContent("L:s1");
   });
+
+  // ── Batch 5 slice 4：新对话/打开会话按钮 ──
+
+  it("渲染新对话/打开会话按钮（vanilla new-chat-btn / open-chat-btn）", () => {
+    setup();
+    expect(screen.getByTestId("new-chat-btn")).toHaveTextContent("＋ 新对话");
+    expect(screen.getByTestId("open-chat-btn")).toHaveTextContent("打开会话");
+  });
+
+  it("无打开会话时按钮仍渲染（空态入口）", () => {
+    setup({ openSessions: [] });
+    expect(screen.getByTestId("new-chat-btn")).toBeInTheDocument();
+    expect(screen.getByTestId("open-chat-btn")).toBeInTheDocument();
+    expect(screen.queryByTestId("open-session-item")).not.toBeInTheDocument();
+  });
+
+  it("点击新对话 → onNewChat；点击打开会话 → onOpenChat", async () => {
+    const onNewChat = vi.fn();
+    const onOpenChat = vi.fn();
+    setup({ onNewChat, onOpenChat });
+    await userEvent.click(screen.getByTestId("new-chat-btn"));
+    expect(onNewChat).toHaveBeenCalledTimes(1);
+    await userEvent.click(screen.getByTestId("open-chat-btn"));
+    expect(onOpenChat).toHaveBeenCalledTimes(1);
+  });
 });
