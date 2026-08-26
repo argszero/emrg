@@ -24,6 +24,11 @@ export function ConfirmDialog({ request, onDismiss, cancelText }: ConfirmDialogP
   const handleOk = async () => {
     try {
       await request.onOk?.();
+    } catch (e) {
+      // Batch 5 wires real async IPC (window.emrg) which can reject on network
+      // failure — swallow the rejection so the dialog still closes without an
+      // unhandled promise rejection in the console (reviewer suggestion, #1009).
+      console.error("[ConfirmDialog] onOk failed:", e);
     } finally {
       onDismiss?.();
     }

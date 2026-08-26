@@ -60,6 +60,18 @@ describe("ConfirmDialog", () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
+  it("onOk 抛错 → 仍关闭且无未处理拒绝（吞掉并 console.error）", async () => {
+    const onOk = vi.fn().mockRejectedValue(new Error("network down"));
+    const onDismiss = vi.fn();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setup({ title: "T", message: "M", onOk }, { onDismiss });
+    await userEvent.click(screen.getByTestId("confirm-ok"));
+    expect(onOk).toHaveBeenCalledTimes(1);
+    expect(onDismiss).toHaveBeenCalledTimes(1); // finally 仍关闭
+    expect(errSpy).toHaveBeenCalledWith("[ConfirmDialog] onOk failed:", expect.any(Error));
+    errSpy.mockRestore();
+  });
+
   it("点击取消 → 仅 onDismiss（onOk 不调用）", async () => {
     const onOk = vi.fn();
     const onDismiss = vi.fn();
