@@ -21,11 +21,28 @@ function mockEmrg() {
     return () => listeners.delete(cb);
   });
   const sendMessage = vi.fn().mockResolvedValue({ requestId: "req-9" });
-  (window as unknown as { emrg?: unknown }).emrg = { onEvent, sendMessage };
+  // DialogHost 用到的 IPC 通道（Batch 5 slice 4）：对话框数据加载 + 直接执行类指令
+  const clearSession = vi.fn().mockResolvedValue({ ok: true });
+  const compactSession = vi.fn().mockResolvedValue({ ok: true });
+  const listProjects = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
+  const listMemories = vi.fn().mockResolvedValue([]);
+  const listSkills = vi.fn().mockResolvedValue([]);
+  const listHistory = vi.fn().mockResolvedValue({ messages: [] });
+  (window as unknown as { emrg?: unknown }).emrg = {
+    onEvent,
+    sendMessage,
+    clearSession,
+    compactSession,
+    listProjects,
+    listMemories,
+    listSkills,
+    listHistory,
+  };
   return {
     listeners,
     onEvent,
     sendMessage,
+    clearSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -123,5 +140,53 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "hello" } });
     fireEvent.click(screen.getByTestId("composer-send"));
     await waitFor(() => expect(screen.getByText("Start a conversation first.")).toBeInTheDocument());
+  });
+
+  // ── Batch 5 slice 4：/指令路由 + 侧边栏按钮 ──
+
+  it("/help command opens the help dialog", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "/help" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await waitFor(() => expect(screen.getByTestId("help-dialog")).toBeInTheDocument());
+    expect(screen.getAllByTestId("help-row").length).toBeGreaterThanOrEqual(16);
+  });
+
+  it("/rename with an active session opens the rename dialog", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "/rename" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await waitFor(() => expect(screen.getByTestId("rename-dialog")).toBeInTheDocument());
+  });
+
+  it("sidebar new-chat button opens the new-session dialog", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("new-chat-btn")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("new-chat-btn"));
+    await waitFor(() => expect(screen.getByTestId("new-session-dialog")).toBeInTheDocument());
+  });
+
+  it("sidebar open-chat button opens the open-session dialog", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("open-chat-btn")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("open-chat-btn"));
+    await waitFor(() => expect(screen.getByTestId("open-session-dialog")).toBeInTheDocument());
+  });
+
+  it("/clear with an active session calls clearSession and shows the cleared message", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "/clear" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await waitFor(() => expect(screen.getByText("Current conversation cleared.")).toBeInTheDocument());
   });
 });
