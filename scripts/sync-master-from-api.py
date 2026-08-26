@@ -36,11 +36,36 @@ import urllib.request
 
 API = "https://api.github.com"
 
+_TOKEN: str | None = None  # resolved once by _auth_token(), held in memory only
+
+
+def _auth_token() -> str | None:
+    """Resolve a GitHub token once: env var, else `gh auth token` (read into
+    memory only — never printed). Falls back to anonymous when unavailable.
+
+    Anonymous requests are limited to 60/hr, which a commit-chain walk can
+    exhaust mid-run (observed cycle 2026-08-26 01:46 on the push counterpart);
+    authenticating upfront keeps long walks under the limit.
+    """
+    global _TOKEN
+    if _TOKEN is None:
+        t = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        if not t:
+            try:
+                out = subprocess.run(["gh", "auth", "token"], capture_output=True,
+                                     text=True, timeout=15, encoding="utf-8",
+                                     errors="replace")
+                t = out.stdout.strip() if out.returncode == 0 else None
+            except Exception:
+                t = None
+        _TOKEN = t or ""
+    return _TOKEN or None
+
 
 def api_get(url: str) -> dict:
-    """GET a GitHub API URL, using GH_TOKEN or gh CLI auth when available."""
+    """GET a GitHub API URL, authenticated when a token is available."""
     headers = {"User-Agent": "emrg-sync-master-from-api", "Accept": "application/vnd.github+json"}
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    token = _auth_token()
     if token:
         headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(url, headers=headers)
