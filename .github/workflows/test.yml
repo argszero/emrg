@@ -44,11 +44,8 @@ jobs:
         working-directory: emrg/gui
         run: |
           node --check main.js && node --check preload.js && node --check daemon_client.js
-          # renderer JS — 兼容旧扁平结构（renderer/*.js）与新 js/ 子目录结构（renderer/js/*.js，#417）
-          for f in renderer/app.js renderer/markdown.js renderer/js/*.js; do
-            [ -f "$f" ] || continue
-            node --check "$f" || exit 1
-          done
+          # renderer JS — vanilla files deleted in Batch 5 cleanup (#1024); React
+          # source is typechecked by tsc in the "GUI renderer React suite" step above
 
   # v0.2.29 教训：Windows pytest 此前只在 tag 触发的 Build Release 跑
   # （test.yml 仅 ubuntu）——FakeGitRun git.EXE 大小写 bug（#723）等 Windows-only

@@ -334,10 +334,6 @@ def test_no_residual_update_check_references():
         "emrg/client/app.py",
         "emrg/gui/main.js",
         "emrg/gui/preload.js",
-        "emrg/gui/renderer/js/app.js",
-        "emrg/gui/renderer/js/dialogs.js",
-        "emrg/gui/renderer/js/i18n.js",
-        "emrg/gui/renderer/index.html",
     ]
     assert not (repo / "emrg/update_check.py").exists(), "update_check.py must be deleted"
     assert not (repo / "tests/test_update_check.py").exists(), "test_update_check.py must be deleted"

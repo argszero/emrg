@@ -159,7 +159,7 @@ uv run python -m emrg --help
 cd emrg/gui
 npm ci               # install deps (production: --omit=dev)
 npm start            # launch GUI (auto-starts daemon)
-npm test             # run Node tests (178: 43 daemon_client + 19 conn-manager + 22 app-commands + 59 renderer smoke + 15 i18n + 7 integration + 3 commands + 3 build-config + 7 gui-state; integration runs in CI, local: npm run test:integration)
+npm test             # run Node tests (89: 45 daemon_client + 20 conn-manager + 8 integration + 6 build-config + 7 gui-state + 3 preload-api; integration runs in CI, local: npm run test:integration)
 ```
 
 ### Packaging (installer builds)
