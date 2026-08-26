@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../lib/i18n";
+import { SettingsPanel } from "./SettingsPanel";
 import {
   buildEvolveProjects,
   preprocessRantMarkdown,
@@ -34,6 +35,9 @@ export interface WorkspaceViewProps {
   rants?: RantRec[];
   activeView: WorkspaceViewId;
   onSwitch?: (view: WorkspaceViewId) => void;
+  /** 设置面板关于 tab 数据（Shell appState 注入，Batch 5 slice 6） */
+  version?: string;
+  evolutionCount?: number | null;
   onSelectProjectSession?: (project: ProjectRec, sessionId: string) => void;
   onViewProjectSessions?: (project: ProjectRec) => void;
   onAddProject?: () => void;
@@ -57,6 +61,8 @@ export function WorkspaceView({
   rants = [],
   activeView,
   onSwitch,
+  version,
+  evolutionCount,
   onSelectProjectSession,
   onViewProjectSessions,
   onAddProject,
@@ -191,19 +197,7 @@ export function WorkspaceView({
       )}
 
       {activeView === "settings" && (
-        <section className="workspace-view" data-view="settings" data-testid="panel-settings">
-          <h2 className="workspace-view-title">{t("settings.title")}</h2>
-          <div className="panel-tabs" role="tablist">
-            {["model", "github", "appearance", "language", "about"].map((tab) => (
-              <button key={tab} type="button" className="panel-tab" data-settings-tab={tab}>
-                {t(`settings.group${tab[0].toUpperCase()}${tab.slice(1)}`)}
-              </button>
-            ))}
-          </div>
-          <div className="panel-tab-body" data-settings-body="model">
-            <div className="settings-group">{t("dlg.notConfigured")} — Batch 4</div>
-          </div>
-        </section>
+        <SettingsPanel version={version} evolutionCount={evolutionCount} />
       )}
     </div>
   );
