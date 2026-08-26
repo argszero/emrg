@@ -602,6 +602,86 @@ def test_manual_compact_drop_marks_anchor(caplog):
     assert sid not in server._usage_anchor_dropped_by_compact  # consumed
 
 
+# ── model/provider switch invalidates anchors (Dev.to comment 3dh3g) ──
+
+
+def test_invalidate_usage_anchors_on_switch():
+    """A mid-session model switch must drop every usage anchor: the anchor
+    holds the OLD provider's real prompt_tokens; projecting old base + new
+    estimate delta mixes bases and can silently miss the auto-compact gate
+    (community feedback 2026-08-26T18:21:30, Dev.to comment 3dh3g)."""
+    server = _make_server()
+    server._usage_anchors["s1"] = (222_000, 148_000)
+    server._usage_anchors["s2"] = (100_000, 60_000)
+    server._missing_anchor_est["s1"] = (150_000, "2026-08-26T00:00:00+08:00")
+
+    server._invalidate_usage_anchors_on_switch()
+
+    assert server._usage_anchors == {}
+    assert server._missing_anchor_est == {}
+    # Only sessions that held an anchor are marked for the re-anchor pass
+    assert server._usage_anchor_dropped_by_switch == {"s1", "s2"}
+
+
+def test_switch_round_does_not_warn_false_positive(caplog):
+    """The anchor-less round right after a model switch is legitimate — the
+    fail-LOUD warning must stay silent, and the marker is consumed so a
+    SECOND consecutive anchor-less round (new provider also silent) warns."""
+    server = _make_server()
+    sid = "switch-test"
+    server._usage_anchors[sid] = (222_000, 148_000)
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+    server._invalidate_usage_anchors_on_switch()
+    assert server._usage_anchors == {}
+    assert sid in server._usage_anchor_dropped_by_switch
+
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 100)
+    assert "usage anchor missing" not in caplog.text
+    assert sid not in server._usage_anchor_dropped_by_switch  # consumed
+
+    # New provider still silent -> the next anchor-less round now warns
+    caplog.clear()
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 200)
+    assert "usage anchor missing for established session" in caplog.text
+
+
+def test_handle_set_model_invalidates_usage_anchors():
+    """set_model with a REAL api-model change must invalidate usage anchors —
+    a mid-session switch must not project the old provider's base with the
+    new estimate delta (Dev.to comment 3dh3g)."""
+    import asyncio
+    server = _make_server()
+    server._usage_anchors["s1"] = (222_000, 148_000)
+    server._usage_anchors["s2"] = (100_000, 60_000)
+    writer = _FakeWriter()
+    new_name = server.llm.config.model + "-switched"
+
+    asyncio.run(server._handle_set_model(new_name, writer))
+
+    assert server._usage_anchors == {}
+    assert server._usage_anchor_dropped_by_switch == {"s1", "s2"}
+
+
+def test_handle_set_model_same_api_model_keeps_anchors():
+    """Re-selecting the SAME api model (e.g. display alias) must NOT
+    invalidate anchors — the provider/tokenizer is unchanged."""
+    import asyncio
+    server = _make_server()
+    server._usage_anchors["s1"] = (222_000, 148_000)
+    writer = _FakeWriter()
+    same = server.llm.config.model
+
+    asyncio.run(server._handle_set_model(same, writer))
+
+    assert server._usage_anchors == {"s1": (222_000, 148_000)}
+    assert server._usage_anchor_dropped_by_switch == set()
+
+
 # ── usage-anchor countable stats (community feedback 2026-08-26T07:18:29) ──
 
 
