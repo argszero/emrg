@@ -40,7 +40,6 @@
       "preload.js",
       "renderer/**",
       "!renderer/node_modules{,/**/*}",
-      "!renderer/dist{,/**/*}",
       "!renderer/src{,/**/*}",
       "!renderer/test{,/**/*}",
       "!renderer/package-lock.json",
