@@ -271,4 +271,105 @@ describe("SettingsPanel", () => {
     fireEvent.click(screen.getByTestId("settings-save"));
     await waitFor(() => expect(screen.getByTestId("settings-msg").className).toContain("ok"));
   });
+
+  // ── templates tab（自定义任务类型管理，vanilla renderTemplateList 对等） ──
+
+  it("renders the templates tab and loads the type list", async () => {
+    const tpls = [
+      { name: "journal", prompt: "Phase A…", builtin: true },
+      { name: "my-type", template: "custom prompt", builtin: false },
+    ];
+    const listMock = vi.fn().mockResolvedValue(tpls);
+    setup({ taskTemplateList: listMock });
+    await screen.findByTestId("settings-tab-templates");
+    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await waitFor(() => expect(listMock).toHaveBeenCalledTimes(1));
+    const rows = screen.getAllByTestId("template-row");
+    expect(rows.length).toBe(2);
+    // builtin → view only; custom → view + edit + delete
+    expect(screen.queryByTestId("template-edit-journal")).toBeNull();
+    expect(screen.queryByTestId("template-delete-journal")).toBeNull();
+    expect(screen.getByTestId("template-edit-my-type")).toBeTruthy();
+    expect(screen.getByTestId("template-delete-my-type")).toBeTruthy();
+    // badges
+    expect(rows[0].textContent).toContain("builtin");
+    expect(rows[1].textContent).toContain("custom");
+  });
+
+  it("shows the empty state when no templates exist", async () => {
+    setup({ taskTemplateList: vi.fn().mockResolvedValue([]) });
+    await screen.findByTestId("settings-tab-templates");
+    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await waitFor(() => expect(screen.getByTestId("template-empty")).toBeTruthy());
+  });
+
+  it("creates a custom type via the form", async () => {
+    const listMock = vi.fn().mockResolvedValue([]);
+    const createMock = vi.fn().mockResolvedValue({});
+    setup({
+      taskTemplateList: listMock,
+      taskTemplateCreate: createMock,
+      taskTemplateUpdate: vi.fn().mockResolvedValue({}),
+    });
+    await screen.findByTestId("settings-tab-templates");
+    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await waitFor(() => screen.getByTestId("add-template-btn"));
+    fireEvent.click(screen.getByTestId("add-template-btn"));
+    expect(screen.getByTestId("template-form")).toBeTruthy();
+    fireEvent.change(screen.getByTestId("template-form-name"), { target: { value: "report" } });
+    fireEvent.change(screen.getByTestId("template-form-prompt"), { target: { value: "Write a report…" } });
+    fireEvent.click(screen.getByTestId("template-form-save"));
+    await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1));
+    expect(createMock).toHaveBeenCalledWith({ name: "report", prompt: "Write a report…" });
+    await waitFor(() => expect(listMock.mock.calls.length).toBeGreaterThan(1)); // reloaded
+  });
+
+  it("validates empty name/prompt on save", async () => {
+    const listMock = vi.fn().mockResolvedValue([]);
+    const createMock = vi.fn().mockResolvedValue({});
+    setup({ taskTemplateList: listMock, taskTemplateCreate: createMock });
+    await screen.findByTestId("settings-tab-templates");
+    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await waitFor(() => screen.getByTestId("add-template-btn"));
+    fireEvent.click(screen.getByTestId("add-template-btn"));
+    fireEvent.click(screen.getByTestId("template-form-save"));
+    await waitFor(() => expect(screen.getByTestId("settings-msg").textContent).toContain("must not be empty"));
+    expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it("deletes a custom type after confirm", async () => {
+    const listMock = vi.fn().mockResolvedValue([
+      { name: "my-type", prompt: "x", builtin: false },
+    ]);
+    const deleteMock = vi.fn().mockResolvedValue({});
+    setup({ taskTemplateList: listMock, taskTemplateDelete: deleteMock });
+    await screen.findByTestId("settings-tab-templates");
+    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await waitFor(() => screen.getByTestId("template-delete-my-type"));
+    fireEvent.click(screen.getByTestId("template-delete-my-type"));
+    // confirm dialog appears; confirm it
+    await waitFor(() => expect(screen.getByTestId("confirm-ok")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("confirm-ok"));
+    await waitFor(() => expect(deleteMock).toHaveBeenCalledTimes(1));
+    expect(deleteMock).toHaveBeenCalledWith({ name: "my-type" });
+    await waitFor(() => expect(listMock.mock.calls.length).toBeGreaterThan(1)); // reloaded
+  });
+
+  it("shows the daemon rejection message when deleting a referenced type", async () => {
+    setup({
+      taskTemplateList: vi.fn().mockResolvedValue([
+        { name: "journal", prompt: "x", builtin: false },
+      ]),
+      taskTemplateDelete: vi.fn().mockRejectedValue(new Error("referenced by 2 tasks")),
+    });
+    await screen.findByTestId("settings-tab-templates");
+    fireEvent.click(screen.getByTestId("settings-tab-templates"));
+    await waitFor(() => screen.getByTestId("template-delete-journal"));
+    fireEvent.click(screen.getByTestId("template-delete-journal"));
+    await waitFor(() => screen.getByTestId("confirm-ok"));
+    fireEvent.click(screen.getByTestId("confirm-ok"));
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-msg").textContent).toContain("referenced by 2 tasks"),
+    );
+  });
 });
