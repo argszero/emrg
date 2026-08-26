@@ -215,6 +215,18 @@ jobs:
           fi
           test -s packaging/assets/icon.ico
 
+      # ── React renderer (Vite) ── Batch 5 final switch 前置（cyc20260827-025722）──
+      # main.js 切换 loadFile → renderer/dist/index.html 前，先在发布流水线验证
+      # vite build 在全部 4 个 runner 可用 + dist 被 electron-builder 正确打包。
+      # test.yml PR CI 已跑同款命令（ubuntu+windows），此步补齐 macOS/arm 验证。
+      - name: Build React renderer (Vite)
+        working-directory: emrg/gui/renderer
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          test -f dist/index.html
+
       # ── GUI dist（electron-builder；linux extraResources runtime §5 R64）──
       - name: Build GUI (electron-builder)
         working-directory: emrg/gui
