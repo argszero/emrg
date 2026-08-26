@@ -602,6 +602,46 @@ def test_manual_compact_drop_marks_anchor(caplog):
     assert sid not in server._usage_anchor_dropped_by_compact  # consumed
 
 
+def test_model_switch_drops_stale_usage_anchors(caplog):
+    """Issue #1000 (Dev.to community finding): a usage anchor's base is the
+    OLD model's real prompt_tokens — the tokenizer base is model-specific
+    (148K est vs 222K real variance differs per model). A mid-session model
+    switch must drop ALL anchors + mark the deliberate drop so the next round
+    re-anchors from the NEW model's real usage: no stale-base projection
+    drift, no false-positive fail-LOUD missing-anchor warning."""
+    import asyncio
+
+    server = _make_server()
+    sid = "model-switch-test"
+    # Stale anchor from the OLD model's real prompt_tokens
+    server._usage_anchors[sid] = (222_000, 148_000)
+    server.llm.config.model = "gpt-4o"
+    server.llm.config.models = [
+        {"name": "deepseek", "model": "deepseek-chat", "context_window": 128000}
+    ]
+    writer = _FakeWriter()
+
+    # Actual model switch → anchors dropped + deliberate-drop marked
+    asyncio.run(server._handle_set_model("deepseek", writer))
+    assert sid not in server._usage_anchors
+    assert sid in server._usage_anchor_dropped_by_compact
+
+    # Next round: legitimate re-anchor round, no false-positive warning
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+    with caplog.at_level("WARNING", logger="emrg.server.daemon"):
+        server._warn_missing_usage_anchor(_SidSession(sid), messages, 100)
+    assert "usage anchor missing" not in caplog.text
+    assert sid not in server._usage_anchor_dropped_by_compact  # consumed
+
+    # No-op switch (same api model) must NOT drop anchors
+    server._usage_anchors[sid] = (222_000, 148_000)
+    asyncio.run(server._handle_set_model("deepseek", writer))
+    assert sid in server._usage_anchors  # untouched
+
+
 # ── usage-anchor countable stats (community feedback 2026-08-26T07:18:29) ──
 
 

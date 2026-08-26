@@ -2983,9 +2983,10 @@ class EmrgServer:
         # First round: no assistant turn yet — nothing anchored, normal.
         if not any(m.get("role") == "assistant" for m in messages):
             return
-        # Post-compact re-anchor round: anchor deliberately dropped; consume
-        # the marker so a SECOND consecutive anchor-less round (provider
-        # still silent) warns on the next round.
+        # Deliberate drop (post-compact, manual compact, or mid-session model
+        # switch — issue #1000): anchor intentionally invalidated; consume the
+        # marker so a SECOND consecutive anchor-less round (provider still
+        # silent) warns on the next round.
         if session.session_id in self._usage_anchor_dropped_by_compact:
             self._usage_anchor_dropped_by_compact.discard(session.session_id)
             return
@@ -3520,6 +3521,29 @@ class EmrgServer:
             self.llm.config.context_window = new_ctx
         if new_vision is not None:
             self.llm.config.vision = new_vision
+
+        # Issue #1000 (Dev.to community finding): a usage anchor's base is the
+        # OLD model's real prompt_tokens for the historical context. Different
+        # models tokenize the same context differently (the 148K-est-vs-222K-
+        # real tokenizer variance is model-specific), so after a mid-session
+        # model/provider switch a stale base drifts the projection and can
+        # mis-fire the auto-compact gate (undercount → overflow risk, or
+        # overcount → premature compact). Drop ALL anchors (model is global
+        # daemon state) and mark the drops as deliberate — same pattern as the
+        # post-compact drop — so the next round re-anchors from the NEW
+        # model's real usage and the fail-LOUD missing-anchor warning does not
+        # false-fire.
+        if api_model != old_model:
+            dropped = len(self._usage_anchors)
+            for sid in list(self._usage_anchors.keys()):
+                self._usage_anchors.pop(sid, None)
+                self._usage_anchor_dropped_by_compact.add(sid)
+            if dropped:
+                logger.info(
+                    "model switch %s → %s: dropped %d stale usage anchor(s) "
+                    "(issue #1000 — tokenizer base is model-specific)",
+                    old_model, api_model, dropped,
+                )
 
         logger.info(
             "model switched: %s → %s (api=%s, context_window: %d → %d)",
