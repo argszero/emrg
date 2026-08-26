@@ -5,7 +5,7 @@
  * 类名与 vanilla CSS 一致（Batch 5 复用）。
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ResultPanel, type ResultPanelProps, type ReadFile } from "./ResultPanel";
 import type { ArtifactRec } from "../lib/resultPanel";
@@ -119,5 +119,28 @@ describe("ResultPanel", () => {
     expect(panel.classList.contains("collapsed")).toBe(false);
     await userEvent.click(screen.getByTestId("result-toggle"));
     expect(panel.classList.contains("collapsed")).toBe(true);
+  });
+
+  it("拖拽调整宽度后 mouseup 持久化的是拖拽后的值（回归：评审发现持久化的是闭包里的旧 width）", () => {
+    // Node 22 的实验性 localStorage 遮蔽 jsdom（同 resultPanel.test.ts），用内存 stub
+    const memLS: Record<string, string> = {};
+    const savedLS = (globalThis as Record<string, unknown>).localStorage;
+    (globalThis as Record<string, unknown>).localStorage = {
+      getItem: (k: string) => (k in memLS ? memLS[k] : null),
+      setItem: (k: string, v: string) => { memLS[k] = v; },
+      removeItem: (k: string) => { delete memLS[k]; },
+      clear: () => { for (const k of Object.keys(memLS)) delete memLS[k]; },
+    } as Storage;
+    try {
+      setup(); // 默认宽 280
+      const resizer = screen.getByTestId("result-resizer");
+      // 左拖 100px → 宽 380（jsdom innerWidth 1024，vw 钳制不生效）
+      fireEvent.mouseDown(resizer, { clientX: 500 });
+      fireEvent.mouseMove(window, { clientX: 400 });
+      fireEvent.mouseUp(window);
+      expect(memLS["emrg.resultPanel.panelWidth"]).toBe("380");
+    } finally {
+      (globalThis as Record<string, unknown>).localStorage = savedLS;
+    }
   });
 });

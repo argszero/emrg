@@ -123,16 +123,21 @@ export function ResultPanel({
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = width;
+    // Track the dragged width in a local var so mouseup persists the final
+    // value, not the render-time `width` the closure captured (review #1006:
+    // pre-drag width was being saved on mouseup, snapping back on reload).
+    let currentWidth = startWidth;
     const onMove = (ev: MouseEvent) => {
       const w = Math.max(240, startWidth - (ev.clientX - startX));
       const vw = (window.innerWidth || 1200) * 0.45;
       const cw = Math.min(w, Math.max(240, vw));
+      currentWidth = cw;
       setWidth(cw);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
-      persistWidth(width);
+      persistWidth(currentWidth);
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
