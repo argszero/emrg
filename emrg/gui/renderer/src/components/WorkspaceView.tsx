@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import {
   buildEvolveProjects,
@@ -70,6 +70,14 @@ export function WorkspaceView({
   const [rantFilter, setRantFilter] = useState<RantFilter>("");
   const [expandedRant, setExpandedRant] = useState<string | null>(null);
   const [sessionsProject, setSessionsProject] = useState<ProjectRec | null>(null);
+  // 任务面板激活时每秒 tick → 倒计时/运行时长实时更新（vanilla taskPollTimer 行为；
+  // 评审 #1008：静态快照导致运行时长恒 0s）
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (activeView !== "tasks") return;
+    const id = setInterval(() => setTick((v) => v + 1), 1000);
+    return () => clearInterval(id);
+  }, [activeView]);
 
   const evolveProjects = useMemo(() => buildEvolveProjects(tasks), [tasks]);
   const filteredRants = useMemo(

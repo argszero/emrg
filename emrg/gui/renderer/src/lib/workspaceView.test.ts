@@ -147,11 +147,17 @@ describe("projectHint", () => {
 
 describe("taskStatusBadge", () => {
   const mk = (over: Partial<TaskRec>): TaskRec => ({ name: "t", ...over });
-  it("running → 运行中 + 时长", () => {
-    const b = taskStatusBadge(mk({ running: true, started_at: 100 }), t);
+  it("running → 运行中 + 真实时长（评审 #1008：不再硬编码 0s）", () => {
+    const now = Date.now();
+    // started_at 100s 前 → 已运行 1m40s（now 可注入，确定性）
+    const b = taskStatusBadge(mk({ running: true, started_at: Math.floor(now / 1000) - 100 }), t, now);
     expect(b?.cls).toBe("task-running-badge");
     expect(b?.text).toBe("app.taskRunningBadge");
-    expect(b?.countdown).toContain("app.taskRunningDuration");
+    expect(b?.countdown).toContain('"n":"1m40s"');
+  });
+  it("running 无 started_at → 无时长", () => {
+    const b = taskStatusBadge(mk({ running: true }), t);
+    expect(b?.countdown).toBeUndefined();
   });
   it("next_run → 待运行 + 倒计时", () => {
     const b = taskStatusBadge(mk({ next_run_in_seconds: 83 }), t);

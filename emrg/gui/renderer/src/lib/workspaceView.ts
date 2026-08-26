@@ -153,12 +153,19 @@ export interface TaskBadge {
   countdown?: string;
 }
 
-/** 任务行状态徽标：running → 运行中；next_run → 待运行+倒计时；enabled → 待调度；否则无徽标 */
-export function taskStatusBadge(t: TaskRec, tFn?: TFunc): TaskBadge | null {
+/**
+ * 任务行状态徽标：running → 运行中；next_run → 待运行+倒计时；enabled → 待调度；否则无徽标。
+ * `now` 可注入（测试用；默认 Date.now()）。running 时长 = now − started_at（秒），
+ * 不再硬编码 0s（评审 #1008 发现：vanilla 每帧 tick 实时时长，静态 0s 是回归）。
+ */
+export function taskStatusBadge(t: TaskRec, tFn?: TFunc, now: number = Date.now()): TaskBadge | null {
   const tr = tFn || ((k: string) => k);
   if (t.running) {
     const b: TaskBadge = { cls: "task-running-badge", text: tr("app.taskRunningBadge") };
-    if (t.started_at != null) b.countdown = tr("app.taskRunningDuration", { n: formatCountdown(0) });
+    if (t.started_at != null) {
+      const elapsed = Math.max(0, Math.floor(now / 1000 - Number(t.started_at)));
+      b.countdown = tr("app.taskRunningDuration", { n: formatCountdown(elapsed) });
+    }
     return b;
   }
   if (t.next_run_in_seconds != null) {

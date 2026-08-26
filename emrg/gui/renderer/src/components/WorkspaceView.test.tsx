@@ -5,7 +5,7 @@
  * 类名与 vanilla CSS 一致（Batch 5 复用）。
  */
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { I18nProvider } from "../lib/i18n";
 import { WorkspaceView, type WorkspaceViewProps } from "./WorkspaceView";
@@ -106,8 +106,9 @@ describe("WorkspaceView", () => {
     const onTrigger = vi.fn();
     const onEdit = vi.fn();
     const onDelete = vi.fn();
+    const startedAt = Math.floor(Date.now() / 1000) - 100; // 100s 前启动
     const tasks = [
-      task("daily-report", { running: true, started_at: 100 }),
+      task("daily-report", { running: true, started_at: startedAt }),
       task("evolve", { next_run_in_seconds: 83 }),
       task("idle", {}),
     ];
@@ -116,7 +117,7 @@ describe("WorkspaceView", () => {
     const badges = screen.getAllByTestId("task-status-badge");
     expect(badges[0]).toHaveTextContent("运行中");
     expect(badges[1]).toHaveTextContent("待运行");
-    expect(screen.getByText(/1m23s/)).toBeInTheDocument();
+    expect(screen.getByText(/1m4\d?s/)).toBeInTheDocument(); // 已运行 1m40s+（评审 #1008 回归：此前恒 0s）
     // 触发：running 行按钮禁用，idle 行可点
     const triggerBtns = screen.getAllByTitle("触发");
     expect(triggerBtns[0]).toBeDisabled();
@@ -127,6 +128,22 @@ describe("WorkspaceView", () => {
     expect(onEdit).toHaveBeenCalledWith(tasks[0]);
     await userEvent.click(screen.getAllByTitle("删除")[0]);
     expect(onDelete).toHaveBeenCalledWith(tasks[0]);
+  });
+
+  it("任务面板激活时每秒 tick：运行时长实时递增（vanilla taskPollTimer 行为）", async () => {
+    vi.useFakeTimers();
+    try {
+      const startedAt = Math.floor(Date.now() / 1000) - 100;
+      setup({ activeView: "tasks", tasks: [task("evolve", { running: true, started_at: startedAt })] });
+      expect(screen.getByText(/已运行 1m4\d?s/)).toBeInTheDocument();
+      // 快进 10s → 时长递增
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(screen.getByText(/已运行 1m5\d?s/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("任务空态 → taskEmpty", () => {
