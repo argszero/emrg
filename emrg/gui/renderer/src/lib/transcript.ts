@@ -151,6 +151,8 @@ export interface TranscriptStore {
   addUserMessage(text: string, sid?: string | null): void;
   addSystemMessage(text: string, sid?: string | null): void;
   addHistoryMessage(text: string, sid?: string | null): void;
+  /** 更早一页历史 prepend 到顶部（vanilla addHistoryMessage prepend 语义；loadBar 独立字段渲染在上方） */
+  prependHistoryMessage(text: string, sid?: string | null): void;
   setLoadBar(text: string | null, sid?: string | null): void;
   toggleRowOutput(sid: string | null, callId: string): void;
   expandRowContent(sid: string | null, callId: string): void;
@@ -431,6 +433,11 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     addHistoryMessage: (text, sid) => {
       mutate(() => {
         st(sid).entries.push({ kind: "history", text });
+      });
+    },
+    prependHistoryMessage: (text, sid) => {
+      mutate(() => {
+        st(sid).entries.unshift({ kind: "history", text });
       });
     },
     setLoadBar: (text, sid) => {
