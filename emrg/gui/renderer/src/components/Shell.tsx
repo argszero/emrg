@@ -1,4 +1,6 @@
 import { useI18n } from "../lib/i18n";
+import { useSnapshotStore } from "../hooks/useSnapshotStore";
+import { useDaemonBridge } from "./DaemonBridgeProvider";
 import { Sidebar } from "./Sidebar";
 import { ResultPanel } from "./ResultPanel";
 import { WorkspaceView } from "./WorkspaceView";
@@ -6,11 +8,15 @@ import { WorkspaceView } from "./WorkspaceView";
 /**
  * Shell — React 骨架占位布局（Batch 0 + Batch 3 Sidebar/ResultPanel 挂载）。
  * 设计文档 §5 Batch 0 项 4：错误边界/横幅/菜单等零风险组件先就位。
- * Batch 3：左侧挂载 <Sidebar> + 右侧挂载 <ResultPanel>（当前空数据，Batch 5 接线 daemon 事件）。
+ * Batch 3：左侧挂载 <Sidebar> + 右侧挂载 <ResultPanel>（当前空数据）。
+ * Batch 5 slice 2：接入 DaemonBridgeProvider —— 侧边栏实时消费 daemon 广播的
+ * 会话列表（open_sessions / sessions 事件驱动，bridge.store 快照订阅）。
  * 后续批次逐个替换为真实组件：TranscriptView / Dialogs。
  */
 export function Shell() {
   const { t } = useI18n();
+  const { bridge } = useDaemonBridge();
+  const appState = useSnapshotStore(bridge.store);
   return (
     <div className="react-shell" data-testid="react-shell">
       <header className="react-shell-header">
@@ -21,7 +27,7 @@ export function Shell() {
       </header>
       <div className="react-shell-body">
         <aside className="react-shell-sidebar" data-testid="react-shell-sidebar">
-          <Sidebar openSessions={[]} />
+          <Sidebar openSessions={appState.openSessions} knownSessions={appState.sessions} />
         </aside>
         <main className="react-shell-main">
           <WorkspaceView activeView="projects" />
