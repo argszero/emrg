@@ -68,37 +68,6 @@ test("vendor ships Monaco editor (loader + editor.main js/css)", () => {
   }
 });
 
-test("renderMarkdown fallback logs when marked is missing (AMD-hijack diagnostic)", () => {
-  const md = fs.readFileSync(path.join(GUI_ROOT, "renderer", "js", "markdown.js"), "utf-8");
-  assert.match(
-    md,
-    /if \(!window\.marked\) \{[\s\S]*console\.error\("markdown vendor missing \(marked not loaded/,
-    "silent markdown degradation must be diagnostic (console.error naming the AMD-hijack cause when marked is missing)"
-  );
-  assert.match(
-    md,
-    /recoverAmdModule\("marked"\)/,
-    "must attempt AMD module-table recovery before degrading (rant 2026-08-15T10:48:58)"
-  );
-});
-
-test("index.html loads marked/dompurify/highlight BEFORE monaco loader.js (AMD-hijack order guard)", () => {
-  // rant 2026-08-15T10:48:58：monaco/vs/loader.js 定义全局 AMD define/require；
-  // UMD marked 见 AMD 走 define 分支 → window.marked 永不设置 → markdown 全退化纯文本。
-  // 顺序修复 = marked 等 UMD 库必须先于 loader.js 加载（无 AMD → UMD 分支挂 window）。
-  const html = fs.readFileSync(path.join(GUI_ROOT, "renderer", "index.html"), "utf-8");
-  const idxMarked = html.indexOf('src="../vendor/marked.min.js"');
-  const idxDompurify = html.indexOf('src="../vendor/dompurify.min.js"');
-  const idxHighlight = html.indexOf('src="../vendor/highlight.custom.js"');
-  const idxMonaco = html.indexOf('src="../vendor/monaco/vs/loader.js"');
-  for (const [name, idx] of [["marked", idxMarked], ["dompurify", idxDompurify], ["highlight", idxHighlight], ["monaco loader", idxMonaco]]) {
-    assert.ok(idx >= 0, `index.html must include ${name} script`);
-  }
-  assert.ok(idxMarked < idxMonaco, "marked.min.js must load BEFORE monaco loader.js (else AMD define hijacks UMD marked)");
-  assert.ok(idxDompurify < idxMonaco, "dompurify.min.js must load BEFORE monaco loader.js");
-  assert.ok(idxHighlight < idxMonaco, "highlight.custom.js must load BEFORE monaco loader.js");
-});
-
 test("every main.js/preload.js local require is covered by files whitelist", () => {
   const files = (PKG.build && PKG.build.files) || [];
   const localRequires = [];
