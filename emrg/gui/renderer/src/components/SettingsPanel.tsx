@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { useI18n, setLocale } from "../lib/i18n";
+import { dialogReducer, initialDialogState } from "../lib/dialog";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 /**
  * SettingsPanel — Batch 5 slice 6：设置面板接线（vanilla dialogs.js showSettings/
@@ -13,7 +15,7 @@ import { useI18n, setLocale } from "../lib/i18n";
  *   默认模型 + [[llm.models]] 增删改设默认（vanilla renderModelList/saveModelForm 对等）。
  * - 主题三选（vanilla applyTheme 对等：data-theme attr）；语言选择（i18n setLocale）。
  */
-export type SettingsTab = "model" | "github" | "appearance" | "language" | "about";
+export type SettingsTab = "model" | "github" | "appearance" | "language" | "about" | "templates";
 
 export interface SettingsPanelProps {
   /** 版本号（Shell appState.currentVersion 注入） */
@@ -26,6 +28,14 @@ interface ModelRec {
   name: string;
   model: string;
   vision: boolean;
+}
+
+/** 自定义任务类型（daemon task_template_* 对等：name 为定位键，builtin 只读） */
+interface TemplateRec {
+  name: string;
+  prompt?: string;
+  template?: string;
+  builtin?: boolean;
 }
 
 interface GetSettingsResult {
@@ -43,6 +53,10 @@ interface EmrgBridge {
   githubStatus(): Promise<{ authenticated?: boolean; user?: string | null }>;
   githubConnect(p: { token: string }): Promise<{ ok?: boolean; user?: string; error?: string }>;
   githubDisconnect(): Promise<unknown>;
+  taskTemplateList(): Promise<TemplateRec[]>;
+  taskTemplateCreate(p: { name: string; prompt: string }): Promise<unknown>;
+  taskTemplateUpdate(p: { name: string; prompt: string }): Promise<unknown>;
+  taskTemplateDelete(p: { name: string }): Promise<unknown>;
 }
 
 function bridge(): EmrgBridge | undefined {
@@ -55,6 +69,7 @@ const TABS: { id: SettingsTab; labelKey: string }[] = [
   { id: "appearance", labelKey: "settings.groupAppearance" },
   { id: "language", labelKey: "settings.groupLanguage" },
   { id: "about", labelKey: "settings.aboutTitle" },
+  { id: "templates", labelKey: "settings.taskTemplates" },
 ];
 
 export function SettingsPanel({ version = "", evolutionCount = null }: SettingsPanelProps) {
@@ -78,6 +93,15 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
   const [formId, setFormId] = useState("");
   const [formVision, setFormVision] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
+  // templates tab 状态（vanilla renderTemplateList/openTemplateForm/saveTemplateForm）
+  const [templates, setTemplates] = useState<TemplateRec[] | null>(null);
+  const [tplFormOpen, setTplFormOpen] = useState(false);
+  const [editingTpl, setEditingTpl] = useState<string | null>(null);
+  const [tplBuiltinView, setTplBuiltinView] = useState(false);
+  const [tplName, setTplName] = useState("");
+  const [tplPrompt, setTplPrompt] = useState("");
+  // 删除确认（lib/dialog reducer + ConfirmDialog，vanilla showConfirm 对等）
+  const [dialogState, dispatch] = useReducer(dialogReducer, initialDialogState);
 
   // 打开 settings 面板 → 加载设置（vanilla showSettings）
   useEffect(() => {
@@ -102,6 +126,12 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     void refreshGithubStatus();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // templates tab 激活 → 加载类型列表（vanilla initTaskManagement 每次打开刷新）
+  useEffect(() => {
+    if (tab === "templates") void loadTemplates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   async function refreshGithubStatus() {
     const b = bridge();
@@ -250,6 +280,79 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
       setMsg({ kind: "err", text: t("settings.githubDisconnectFailed", { msg: (e as Error).message }) });
     } finally {
       setBusy(false);
+    }
+  }
+
+  // ── templates tab（自定义任务类型管理，vanilla dialogs.js 语义） ──
+  async function loadTemplates() {
+    const b = bridge();
+    if (!b?.taskTemplateList) return;
+    try {
+      setTemplates(await b.taskTemplateList());
+    } catch {
+      setTemplates([]); // 列表加载失败 → 空态（vanilla 同款 templateEmpty 兜底）
+    }
+  }
+
+  function openTplForm(tpl: TemplateRec | null) {
+    setEditingTpl(tpl ? tpl.name : null);
+    setTplBuiltinView(Boolean(tpl && tpl.builtin)); // 内置只读查看（隐藏保存）
+    setTplName(tpl ? tpl.name : "");
+    setTplPrompt(tpl ? tpl.prompt || tpl.template || "" : "");
+    setTplFormOpen(true);
+  }
+
+  function closeTplForm() {
+    setTplFormOpen(false);
+    setEditingTpl(null);
+    setTplBuiltinView(false);
+    setTplName("");
+    setTplPrompt("");
+  }
+
+  async function saveTplForm() {
+    const name = tplName.trim();
+    const prompt = tplPrompt.trim();
+    if (!name || !prompt) {
+      setMsg({ kind: "err", text: t("settings.templateInvalid") });
+      return;
+    }
+    const b = bridge();
+    if (!b?.taskTemplateCreate || !b?.taskTemplateUpdate) return;
+    try {
+      if (editingTpl === null) await b.taskTemplateCreate({ name, prompt });
+      else await b.taskTemplateUpdate({ name, prompt });
+      setMsg({ kind: "ok", text: t("settings.templateSaved") });
+      closeTplForm();
+      await loadTemplates();
+    } catch (e: unknown) {
+      setMsg({ kind: "err", text: t("settings.templateSaveFailed", { msg: (e as Error).message }) });
+    }
+  }
+
+  function requestDeleteTpl(tpl: TemplateRec) {
+    dispatch({
+      type: "open-confirm",
+      payload: {
+        title: t("settings.templateDelete"),
+        message: t("settings.templateDeleteConfirm", { name: tpl.name }),
+        okText: t("settings.templateDelete"),
+        danger: true,
+        onOk: () => doDeleteTpl(tpl.name),
+      },
+    });
+  }
+
+  async function doDeleteTpl(name: string) {
+    const b = bridge();
+    if (!b?.taskTemplateDelete) return;
+    try {
+      await b.taskTemplateDelete({ name });
+      setMsg({ kind: "ok", text: t("settings.templateDeleted") });
+      await loadTemplates();
+    } catch (e: unknown) {
+      // 决策点②：被任务引用的类型 daemon 拒绝删除（错误信息含任务数）
+      setMsg({ kind: "err", text: t("settings.templateDeleteFailed", { msg: (e as Error).message }) });
     }
   }
 
@@ -525,12 +628,105 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
           </div>
         )}
 
+        {/* ── 自定义类型（task templates，vanilla renderTemplateList 对等） ── */}
+        {tab === "templates" && (
+          <div className="panel-tab-body" data-settings-body="templates" data-testid="settings-body-templates">
+            <div className="settings-group">
+              <div className="settings-group-title">{t("settings.taskTemplates")}</div>
+              <div className="task-list" data-testid="template-list">
+                {!templates || templates.length === 0 ? (
+                  <div className="task-empty" data-testid="template-empty">{t("settings.templateEmpty")}</div>
+                ) : (
+                  templates.map((tpl) => {
+                    const body = tpl.prompt || tpl.template || "";
+                    return (
+                      <div className="task-row" key={tpl.name} data-testid="template-row">
+                        <span className="task-name">{tpl.name}</span>
+                        <span className="task-badge">{tpl.builtin ? t("settings.taskBuiltin") : t("settings.taskCustom")}</span>
+                        <span className="task-hint">{body.length > 60 ? `${body.slice(0, 60)}…` : body}</span>
+                        <span className="task-actions">
+                          <button type="button" className="model-action-btn" data-testid={`template-view-${tpl.name}`} onClick={() => openTplForm(tpl)}>
+                            {t("settings.templateView")}
+                          </button>
+                          {!tpl.builtin && (
+                            <>
+                              <button type="button" className="model-action-btn" data-testid={`template-edit-${tpl.name}`} onClick={() => openTplForm(tpl)}>
+                                {t("settings.templateEdit")}
+                              </button>
+                              <button type="button" className="model-action-btn danger" data-testid={`template-delete-${tpl.name}`} onClick={() => requestDeleteTpl(tpl)}>
+                                {t("settings.templateDelete")}
+                              </button>
+                            </>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ width: "100%", marginTop: 6 }}
+                data-testid="add-template-btn"
+                onClick={() => openTplForm(null)}
+              >
+                {t("settings.templateAdd")}
+              </button>
+              {tplFormOpen && (
+                <div className="model-form" data-testid="template-form">
+                  <div className="model-form-row">
+                    <label className="model-form-label">
+                      {t("settings.templateName")}
+                      <input
+                        type="text"
+                        data-testid="template-form-name"
+                        maxLength={40}
+                        disabled={editingTpl !== null} // daemon 以 name 定位 → 不可改名
+                        value={tplName}
+                        onChange={(e) => setTplName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") { e.preventDefault(); saveTplForm(); }
+                          else if (e.key === "Escape") { e.preventDefault(); closeTplForm(); }
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <label className="model-form-label">
+                    {t("settings.templatePrompt")}
+                    {/* vanilla 无 monaco 时回退轻量 shim（读写 .value）——textarea 即等价物 */}
+                    <textarea
+                      rows={6}
+                      data-testid="template-form-prompt"
+                      value={tplPrompt}
+                      onChange={(e) => setTplPrompt(e.target.value)}
+                    />
+                  </label>
+                  <div className="model-form-footer">
+                    <div style={{ display: "flex", gap: 8, marginLeft: "auto" }}>
+                      <button type="button" className="btn btn-ghost" style={{ padding: "6px 12px", minHeight: 30 }} onClick={closeTplForm}>
+                        {t("settings.cancel")}
+                      </button>
+                      {!tplBuiltinView && (
+                        <button type="button" className="btn btn-primary" style={{ padding: "6px 12px", minHeight: 30 }} data-testid="template-form-save" onClick={saveTplForm}>
+                          {t("settings.templateSave")}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         <div className="panel-actions" style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 12 }}>
           <button type="button" className="btn btn-primary" data-testid="settings-save" disabled={busy} onClick={saveSettings}>
             {t("settings.save")}
           </button>
         </div>
       </div>
+      <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
     </section>
   );
 }
