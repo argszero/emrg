@@ -69,6 +69,16 @@ def test_script_reconstructs_gpg_signed_commits():
     assert "reconstruct_commit" in content           # core logic named
 
 
+def test_script_authenticates_upfront_via_gh_token():
+    """Anonymous API requests are limited to 60/hr; a commit-chain walk can
+    exhaust them mid-run. The script must resolve a token once via env or
+    `gh auth token` (memory-only) and use it from the first request."""
+    content = SCRIPT.read_text(encoding="utf-8")
+    assert "auth token" in content                   # gh keyring token resolution
+    assert "_auth_token()" in content                # helper named
+    assert "Authorization" in content                # header applied when token present
+
+
 def test_script_fails_loud_before_touching_refs():
     content = SCRIPT.read_text(encoding="utf-8")
     assert "aborting (no refs touched)" in content   # mismatch → stop, refs safe
