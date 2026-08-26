@@ -1,0 +1,127 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
+import { Shell } from "./Shell";
+import { DaemonBridgeProvider } from "./DaemonBridgeProvider";
+import { I18nProvider } from "../lib/i18n";
+import type { DaemonEventFrame } from "../lib/daemonBridge";
+
+/**
+ * Shell.test.tsx — Batch 5 slice 3：聊天回路接线测试。
+ * 模拟 preload 的 window.emrg（多订阅者通道），通过 emit 投递 daemon 事件帧，
+ * 验证：会话自动选择、侧边栏切换、transcript 按 sid 切片、连接状态指示、
+ * 断连横幅、无会话发送提示。
+ */
+
+/** 模拟 preload 暴露的 window.emrg（与 ipcRenderer.on 语义一致） */
+function mockEmrg() {
+  const listeners = new Set<(evt: DaemonEventFrame) => void>();
+  const onEvent = vi.fn((cb: (evt: DaemonEventFrame) => void) => {
+    listeners.add(cb);
+    return () => listeners.delete(cb);
+  });
+  const sendMessage = vi.fn().mockResolvedValue({ requestId: "req-9" });
+  (window as unknown as { emrg?: unknown }).emrg = { onEvent, sendMessage };
+  return {
+    listeners,
+    onEvent,
+    sendMessage,
+    emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
+  };
+}
+
+function wrapper(children: ReactNode) {
+  return (
+    <I18nProvider lang="en">
+      <DaemonBridgeProvider>{children}</DaemonBridgeProvider>
+    </I18nProvider>
+  );
+}
+
+function openSessionsFrame(entries: { sid: string; title?: string }[]): DaemonEventFrame {
+  return { type: "open_sessions", data: { openSessions: entries } };
+}
+
+function sessionsFrame(sessions: { session_id: string; title?: string }[]): DaemonEventFrame {
+  return { type: "sessions", data: { sessions } };
+}
+
+function deltaFrame(sid: string, text: string): DaemonEventFrame {
+  return { type: "message_delta", sid, data: { chunks: [{ request_id: `req-${sid}`, content: text }] } };
+}
+
+describe("Shell (Batch 5 slice 3 chat wiring)", () => {
+  afterEach(() => {
+    delete (window as unknown as { emrg?: unknown }).emrg;
+  });
+
+  it("renders the chat loop (transcript + composer) without window.emrg (degradation)", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("transcript-view")).toBeInTheDocument());
+    expect(screen.getByTestId("composer")).toBeInTheDocument();
+    expect(screen.getByTestId("react-shell-sidebar")).toBeInTheDocument();
+    // 无 emrg → 连接状态点灰色（未连接）
+    expect(screen.getByTestId("conn-status").querySelector(".conn-dot")?.className).toContain("gray");
+  });
+
+  it("auto-selects the first open session and renders its transcript from broadcasts", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }]));
+    m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }, { session_id: "s2", title: "Beta" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(2));
+    // 自动选中第一个会话 → s1 条目带 active
+    expect(screen.getAllByTestId("open-session-item")[0].className).toContain("active");
+    // s1 的 delta 到达 → transcript 显示
+    m.emit(deltaFrame("s1", "Hello from s1"));
+    await waitFor(() => expect(screen.getByText("Hello from s1")).toBeInTheDocument());
+  });
+
+  it("clicking a sidebar session switches the transcript to that session (sid-scoped)", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(2));
+    // 两个会话都有内容，但 s1 激活 → 只显示 s1
+    m.emit(deltaFrame("s1", "content-one"));
+    m.emit(deltaFrame("s2", "content-two"));
+    await waitFor(() => expect(screen.getByText("content-one")).toBeInTheDocument());
+    expect(screen.queryByText("content-two")).not.toBeInTheDocument();
+    // 点击 s2 → 激活切换，transcript 显示 s2 内容
+    const s2 = screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2");
+    expect(s2).toBeTruthy();
+    fireEvent.click(s2 as HTMLElement);
+    await waitFor(() => expect(screen.getByText("content-two")).toBeInTheDocument());
+    expect(screen.queryByText("content-one")).not.toBeInTheDocument();
+    expect((screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2"))?.className).toContain("active");
+  });
+
+  it("shows the connection status + model from the status broadcast", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit({ type: "status", data: { connected: true, model: "claude-3.7" } });
+    await waitFor(() => expect(screen.getByTestId("conn-status").textContent).toContain("claude-3.7"));
+    expect(screen.getByTestId("conn-status").querySelector(".conn-dot")?.className).toContain("green");
+  });
+
+  it("shows the disconnected banner when the active session broadcasts disconnected", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
+    m.emit({ type: "disconnected", sid: "s1", data: {} });
+    await waitFor(() => expect(screen.getByTestId("conn-banner")).toBeInTheDocument());
+  });
+
+  it("composer send with no active session shows the need-session hint", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "hello" } });
+    fireEvent.click(screen.getByTestId("composer-send"));
+    await waitFor(() => expect(screen.getByText("Start a conversation first.")).toBeInTheDocument());
+  });
+});
