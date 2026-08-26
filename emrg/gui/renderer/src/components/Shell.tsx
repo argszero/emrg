@@ -143,7 +143,12 @@ export function Shell() {
         </aside>
         <main className="react-shell-main" data-testid="react-shell-main">
           {isPanelView ? (
-            <WorkspaceView activeView={activeView} onSwitch={switchView} />
+            <WorkspaceView
+              activeView={activeView}
+              onSwitch={switchView}
+              version={appState.currentVersion}
+              evolutionCount={appState.evolutionCount}
+            />
           ) : (
             <>
               {disconnected ? (
