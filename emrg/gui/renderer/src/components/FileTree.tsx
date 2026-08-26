@@ -140,15 +140,6 @@ export function FileTree({ root, listFiles = noopList, onOpenFile = () => {}, t 
     setSelectedPath(null);
   }, [root]);
 
-  const ensureDir = (path: string): DirState => {
-    let st = dirs.get(path);
-    if (!st) {
-      st = { loaded: false, loading: false, error: false, entries: [] };
-      setDirs((prev) => new Map(prev).set(path, st!));
-    }
-    return st;
-  };
-
   const expandDir = async (path: string) => {
     let st = dirs.get(path);
     if (!st) {
