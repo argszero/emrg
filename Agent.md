@@ -119,7 +119,7 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.token; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (1106) — import check: `uv run python -c "from emrg.client.app import run_client"`
+Python: `uv run pytest tests/ -v` (1107) — import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (265: 45 daemon_client + 20 conn-manager + 22 app-commands + 132 renderer smoke + 15 i18n + 8 integration + 3 commands + 8 build-config + 7 gui-state + 2 tool-group + 3 preload-api) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`
 Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (290: 5 snapshot-store + 9 utils + 3 ErrorBoundary + 2 App smoke + 11 commands + 4 copywriting + 11 i18n + 11 markdown + 15 transcript + 7 TranscriptView + 15 history + 22 composer + 14 Composer + 12 sidebar + 10 Sidebar + 9 fileTree + 9 FileTree + 16 resultPanel + 8 ResultPanel + 27 workspaceView + 8 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 10 dialogLists + 3 HelpDialog + 9 MemoryDialog + 6 SkillsDialog) + `npm run build` → `renderer/dist/`
 CI: `uv run pytest` (ubuntu + **windows-2025 matrix** — Windows pytest 回归在 PR CI 即失败，v0.2.29 教训 #725) + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)

@@ -710,6 +710,9 @@ def test_usage_anchor_loss_event_is_countable(tmp_path, monkeypatch):
     e1, e2 = json.loads(lines[0]), json.loads(lines[1])
     assert e1["type"] == "anchor_loss" and e1["session"] == "s1"
     assert e1["total"] == 1 and "timestamp" in e1
+    # Issue #1011: the loss event must say WHICH provider went silent
+    assert e1["model"] == "gpt-4o-mini"  # default LlmConfig model in _make_server
+    assert e1["provider"] == "localhost"  # base_url host of _make_server
     assert e2["session"] == "s2" and e2["est"] == 60_000 and e2["total"] == 2
 
 
@@ -759,10 +762,64 @@ def test_usage_anchor_drift_measured_on_reanchor(tmp_path, monkeypatch):
     assert drift["real_after"] == 180_000
     assert drift["delta"] == 80_000
     assert drift["loss_ts"] == loss["timestamp"]
+    # Issue #1011: drift window is attributable — loss identity (who went
+    # silent) + re-anchor identity (who finally reported real tokens)
+    assert drift["loss_model"] == loss["model"] == "gpt-4o-mini"
+    assert drift["loss_provider"] == loss["provider"] == "localhost"
+    assert drift["model"] == "gpt-4o-mini"
+    assert drift["provider"] == "localhost"
 
     # Re-anchor measured once — a second call (no pending loss) is a no-op
     server._record_anchor_drift(_SidSession(sid), 200_000)
     assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_usage_anchor_cross_provider_window_attributable(tmp_path, monkeypatch):
+    """Issue #1011 — heinrichneb: 'a counter that can't say WHICH provider
+    went silent is half a counter'. The loss window's identity must survive
+    from anchor_loss to anchor_drift: a mid-session model switch produces a
+    drift window whose loss side names the silent provider and whose re-anchor
+    side names the new provider."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    server = _make_server()
+    sid = "x-provider"
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+    # Loss detected under provider A (deepseek)
+    server.llm.config.model = "deepseek-chat"
+    server.llm.config.base_url = "https://api.deepseek.com/v1"
+    server._warn_missing_usage_anchor(_SidSession(sid), messages, 50_000)
+
+    # Model switch to provider B (openai) — #1003 invalidates anchors; the
+    # pending drift window is dropped, so no cross-provider drift is measured.
+    # But the anchor_loss event itself must still name provider A.
+    server.llm.config.model = "gpt-4o"
+    server.llm.config.base_url = "https://api.openai.com/v1"
+    server._invalidate_usage_anchors_on_switch()
+
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    loss = json.loads(lines[0])
+    assert loss["type"] == "anchor_loss"
+    assert loss["model"] == "deepseek-chat"
+    assert loss["provider"] == "api.deepseek.com"
+
+    # Same-provider window: loss + re-anchor both under provider B (fresh
+    # session — warn-once is per session lifetime, so a new window needs a
+    # new session id to emit a second anchor_loss)
+    server._warn_missing_usage_anchor(_SidSession("x-provider-2"), messages, 60_000)
+    server._record_anchor_drift(_SidSession("x-provider-2"), 150_000)
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 3
+    loss_b, drift_b = json.loads(lines[1]), json.loads(lines[2])
+    assert loss_b["provider"] == "api.openai.com"
+    assert drift_b["loss_model"] == "gpt-4o"
+    assert drift_b["loss_provider"] == "api.openai.com"
+    assert drift_b["model"] == "gpt-4o"
+    assert drift_b["provider"] == "api.openai.com"
 
 
 def test_context_message_injection_format(tmp_path):

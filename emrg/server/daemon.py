@@ -28,6 +28,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import yaml
 from websockets.asyncio.server import serve
@@ -259,7 +260,7 @@ class EmrgServer:
         # (estimated_tokens, iso_ts) at anchor-loss warning time, so the
         # estimator drift of the anchor-less window can be measured when
         # the provider re-anchors (countable metric, not just a log line).
-        self._missing_anchor_est: dict[str, tuple[int, str]] = {}
+        self._missing_anchor_est: dict[str, tuple[int, str, str, str]] = {}
         # Rant 2026-08-23T13:54:14: per-session dynamic-context snapshot
         # (session_id → (text, injected_ms)) so unchanged context is not
         # re-sent (context_refresh_interval_ms gating).
@@ -3023,13 +3024,23 @@ class EmrgServer:
             return  # already warned once for this session
         self._warned_missing_usage_anchor.add(session.session_id)
         loss_ts = datetime.now().astimezone().isoformat()
-        self._missing_anchor_est[session.session_id] = (estimated, loss_ts)
+        loss_model = self.llm.config.model
+        loss_provider = _provider_slug(self.llm.config.base_url)
+        # Issue #1011 (heinrichneb): a loss window without provider identity is
+        # half a counter — after a mid-session model switch the drift file must
+        # say WHICH provider went silent. Store the loss-time identity so a
+        # later anchor_drift can attribute the window.
+        self._missing_anchor_est[session.session_id] = (
+            estimated, loss_ts, loss_model, loss_provider,
+        )
         try:
             _append_usage_anchor_event({
                 "type": "anchor_loss",
                 "timestamp": loss_ts,
                 "session": session.session_id,
                 "est": estimated,
+                "model": loss_model,
+                "provider": loss_provider,
             })
         except OSError as exc:
             logger.warning("usage-anchor stats append failed: %s", exc)
@@ -3055,7 +3066,7 @@ class EmrgServer:
         stored = self._missing_anchor_est.pop(session.session_id, None)
         if not stored:
             return
-        est_before, loss_ts = stored
+        est_before, loss_ts, loss_model, loss_provider = stored
         try:
             _append_usage_anchor_event({
                 "type": "anchor_drift",
@@ -3064,6 +3075,12 @@ class EmrgServer:
                 "real_after": real_pt,
                 "delta": real_pt - est_before,
                 "loss_ts": loss_ts,
+                # Issue #1011: attribute the window — who went silent
+                # (loss identity) vs who re-anchored (current identity).
+                "loss_model": loss_model,
+                "loss_provider": loss_provider,
+                "model": self.llm.config.model,
+                "provider": _provider_slug(self.llm.config.base_url),
             })
         except OSError as exc:
             logger.warning("usage-anchor stats append failed: %s", exc)
@@ -4266,6 +4283,21 @@ def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) 
 
 
 _USAGE_ANCHOR_STATS_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
+
+
+def _provider_slug(base_url: str) -> str:
+    """Derive a provider identity from the LLM base_url (issue #1011).
+
+    Deterministic hostname extraction — 'https://api.openai.com/v1' →
+    'api.openai.com'; a local endpoint ('http://localhost:11434/v1') →
+    'localhost'. Empty/unparsable input falls back to the raw string so the
+    event still carries something attributable. No heuristics, no DNS.
+    """
+    try:
+        host = urlparse(base_url).hostname
+        return host or base_url
+    except Exception:
+        return base_url
 
 
 def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
