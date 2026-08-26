@@ -259,7 +259,7 @@ class EmrgServer:
         # (estimated_tokens, iso_ts) at anchor-loss warning time, so the
         # estimator drift of the anchor-less window can be measured when
         # the provider re-anchors (countable metric, not just a log line).
-        self._missing_anchor_est: dict[str, tuple[int, str]] = {}
+        self._missing_anchor_est: dict[str, tuple[int, str, str]] = {}
         # Rant 2026-08-23T13:54:14: per-session dynamic-context snapshot
         # (session_id → (text, injected_ms)) so unchanged context is not
         # re-sent (context_refresh_interval_ms gating).
@@ -3023,12 +3023,18 @@ class EmrgServer:
             return  # already warned once for this session
         self._warned_missing_usage_anchor.add(session.session_id)
         loss_ts = datetime.now().astimezone().isoformat()
-        self._missing_anchor_est[session.session_id] = (estimated, loss_ts)
+        # Issue #1011 (Dev.to post-3, heinrichneb): record WHICH provider went
+        # silent so cross-provider loss windows are attributable, not just
+        # countable — "a counter that can't say WHICH provider went silent is
+        # half a counter". The provider at loss time is stored so the drift
+        # measurement (possibly after a switch) can attribute both ends.
+        self._missing_anchor_est[session.session_id] = (estimated, loss_ts, self.llm.config.model)
         try:
             _append_usage_anchor_event({
                 "type": "anchor_loss",
                 "timestamp": loss_ts,
                 "session": session.session_id,
+                "provider": self.llm.config.model,
                 "est": estimated,
             })
         except OSError as exc:
@@ -3055,7 +3061,7 @@ class EmrgServer:
         stored = self._missing_anchor_est.pop(session.session_id, None)
         if not stored:
             return
-        est_before, loss_ts = stored
+        est_before, loss_ts, provider_at_loss = stored
         try:
             _append_usage_anchor_event({
                 "type": "anchor_drift",
@@ -3064,6 +3070,11 @@ class EmrgServer:
                 "real_after": real_pt,
                 "delta": real_pt - est_before,
                 "loss_ts": loss_ts,
+                # Issue #1011: attribute both ends of a cross-provider loss
+                # window (a mid-session switch deliberately drops anchors per
+                # #1003, so provider_at_loss may differ from provider_after).
+                "provider_at_loss": provider_at_loss,
+                "provider_after": self.llm.config.model,
             })
         except OSError as exc:
             logger.warning("usage-anchor stats append failed: %s", exc)

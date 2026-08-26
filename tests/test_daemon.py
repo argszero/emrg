@@ -613,7 +613,7 @@ def test_invalidate_usage_anchors_on_switch():
     server = _make_server()
     server._usage_anchors["s1"] = (222_000, 148_000)
     server._usage_anchors["s2"] = (100_000, 60_000)
-    server._missing_anchor_est["s1"] = (150_000, "2026-08-26T00:00:00+08:00")
+    server._missing_anchor_est["s1"] = (150_000, "2026-08-26T00:00:00+08:00", "gpt-4o-mini")
 
     server._invalidate_usage_anchors_on_switch()
 
@@ -710,7 +710,10 @@ def test_usage_anchor_loss_event_is_countable(tmp_path, monkeypatch):
     e1, e2 = json.loads(lines[0]), json.loads(lines[1])
     assert e1["type"] == "anchor_loss" and e1["session"] == "s1"
     assert e1["total"] == 1 and "timestamp" in e1
+    # Issue #1011: the loss event must name the provider that went silent
+    assert e1["provider"] == "gpt-4o-mini"
     assert e2["session"] == "s2" and e2["est"] == 60_000 and e2["total"] == 2
+    assert e2["provider"] == "gpt-4o-mini"
 
 
 def test_usage_anchor_stats_survive_restart(tmp_path, monkeypatch):
@@ -759,6 +762,10 @@ def test_usage_anchor_drift_measured_on_reanchor(tmp_path, monkeypatch):
     assert drift["real_after"] == 180_000
     assert drift["delta"] == 80_000
     assert drift["loss_ts"] == loss["timestamp"]
+    # Issue #1011: both ends of the loss window carry provider identity
+    assert loss["provider"] == "gpt-4o-mini"
+    assert drift["provider_at_loss"] == "gpt-4o-mini"
+    assert drift["provider_after"] == "gpt-4o-mini"
 
     # Re-anchor measured once — a second call (no pending loss) is a no-op
     server._record_anchor_drift(_SidSession(sid), 200_000)
