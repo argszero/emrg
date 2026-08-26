@@ -8,6 +8,7 @@ refs。核心风险 = 重建逻辑产生错误 sha（→ 本地历史与上游�
   2. 行为断言（hermetic，无网络）：在临时 git 仓库里用 git commit-tree 合成
      unsigned / signed 两类 commit，验证 reconstruct_commit() 字节级复现同一 sha
 """
+import base64
 import importlib.util
 import os
 import subprocess
@@ -144,3 +145,134 @@ def test_reconstruct_commit_mismatch_raises(tmp_path):
 
     with pytest.raises(ValueError):
         mod.reconstruct_commit(raw.decode("utf-8"), None, "different msg")
+
+
+# ------------------------------------------------- content-object auto-fetch
+
+
+def test_script_auto_fetches_missing_content_objects():
+    """cyc20260826-154904 教训：head commit 存在但其 blobs/trees 本地缺失时，
+    脚本应经 Git Data API 自动补全（blob hash-object + tree mktree），而非直接
+    fail-loud 要求 git fetch。"""
+    content = SCRIPT.read_text(encoding="utf-8")
+    assert "git/blobs" in content                    # blob fetch path
+    assert "mktree" in content                       # tree rebuild path
+    assert "no-fetch-objects" in content             # opt-out flag exists
+
+
+def _tree_entries(repo: Path, tree_sha: str) -> list[dict]:
+    """Parse `git ls-tree` of a tree into GitHub tree-API entry dicts."""
+    r = _git("ls-tree", tree_sha, cwd=repo)
+    assert r.returncode == 0, r.stderr
+    entries = []
+    for line in r.stdout.decode().splitlines():
+        mode, typ, sha, path = line.split(None, 3)
+        entries.append({"path": path, "mode": mode, "type": typ, "sha": sha})
+    return entries
+
+
+def test_fetch_missing_tree_and_blobs_hermetic(tmp_path, monkeypatch):
+    """在空仓库中，用假 API 补全 root tree → sub tree → blobs 全链路；
+    验证对象落库且 root tree sha 与源仓库一致（递归 + mktree 排序正确）。"""
+    mod = _load_module()
+
+    # 源仓库：a.txt + sub/b.txt 两个 blob、一个子树
+    src = tmp_path / "src"
+    src.mkdir()
+    _git("init", "-q", cwd=src)
+    _git("config", "user.name", "Test Author", cwd=src)
+    _git("config", "user.email", "test@example.com", cwd=src)
+    (src / "a.txt").write_text("hello alpha\n", encoding="utf-8")
+    (src / "sub").mkdir()
+    (src / "sub" / "b.txt").write_text("beta bytes\n", encoding="utf-8")
+    _git("add", ".", cwd=src)
+    r = _git("commit", "-m", "content commit", cwd=src, env=GIT_ENV)
+    assert r.returncode == 0, r.stderr
+
+    root = _git("rev-parse", "HEAD^{tree}", cwd=src).stdout.decode().strip()
+    entries = _tree_entries(src, root)
+    assert len(entries) == 2  # a.txt + sub/
+    sub_tree = next(e["sha"] for e in entries if e["type"] == "tree")
+    sub_entries = _tree_entries(src, sub_tree)
+    assert len(sub_entries) == 1 and sub_entries[0]["path"] == "b.txt"
+    blob_a = next(e["sha"] for e in entries if e["type"] == "blob")
+    blob_b = sub_entries[0]["sha"]
+
+    # 假 API：按 sha 提供 tree（非递归）与 blob（base64）
+    trees = {root: entries, sub_tree: sub_entries}
+    blobs = {
+        blob_a: _git("cat-file", "blob", blob_a, cwd=src).stdout,
+        blob_b: _git("cat-file", "blob", blob_b, cwd=src).stdout,
+    }
+
+    def fake_get(url: str) -> dict:
+        if "/git/blobs/" in url:
+            sha = url.rsplit("/", 1)[1]
+            return {"content": base64.b64encode(blobs[sha]).decode("ascii"),
+                    "encoding": "base64"}
+        if "/git/trees/" in url:
+            sha = url.rsplit("/", 1)[1]
+            return {"tree": trees[sha], "truncated": False}
+        raise AssertionError(f"unexpected API call: {url}")
+
+    monkeypatch.setattr(mod, "api_get", fake_get)
+
+    # 目标：全新空仓库（无任何对象）——模拟本地缺失 blobs/trees 的场景
+    target = tmp_path / "target"
+    target.mkdir()
+    _git("init", "-q", cwd=target)
+    monkeypatch.chdir(target)
+
+    mod._fetch_tree("owner/repo", root)
+
+    # 全部对象落库，root tree 可解析且 sha 一致
+    assert _git("cat-file", "-e", root, cwd=target).returncode == 0
+    assert _git("cat-file", "-e", sub_tree, cwd=target).returncode == 0
+    assert _git("cat-file", "-e", blob_a, cwd=target).returncode == 0
+    assert _git("cat-file", "-e", blob_b, cwd=target).returncode == 0
+    r = _git("rev-parse", root, cwd=target)
+    assert r.returncode == 0 and r.stdout.decode().strip() == root
+
+
+def test_fetch_missing_objects_idempotent(tmp_path, monkeypatch):
+    """已存在的对象不再请求 API（幂等），且 blob/tree 均可安全重入。"""
+    mod = _load_module()
+
+    src = tmp_path / "src"
+    src.mkdir()
+    _git("init", "-q", cwd=src)
+    _git("config", "user.name", "Test Author", cwd=src)
+    _git("config", "user.email", "test@example.com", cwd=src)
+    (src / "x.txt").write_text("x\n", encoding="utf-8")
+    _git("add", ".", cwd=src)
+    r = _git("commit", "-m", "x", cwd=src, env=GIT_ENV)
+    assert r.returncode == 0, r.stderr
+
+    root = _git("rev-parse", "HEAD^{tree}", cwd=src).stdout.decode().strip()
+    entries = _tree_entries(src, root)
+    blob = next(e["sha"] for e in entries if e["type"] == "blob")
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _git("init", "-q", cwd=target)
+    monkeypatch.chdir(target)
+
+    calls = {"n": 0}
+
+    def fake_get(url: str) -> dict:
+        calls["n"] += 1
+        if "/git/blobs/" in url:
+            return {"content": base64.b64encode(b"x\n").decode("ascii"),
+                    "encoding": "base64"}
+        if "/git/trees/" in url:
+            return {"tree": entries, "truncated": False}
+        raise AssertionError(f"unexpected API call: {url}")
+
+    monkeypatch.setattr(mod, "api_get", fake_get)
+    mod._fetch_tree("owner/repo", root)
+    n1 = calls["n"]
+    assert n1 >= 1
+    # 第二遍：全部已存在 → 零 API 调用
+    mod._fetch_tree("owner/repo", root)
+    assert calls["n"] == n1
+    assert _git("cat-file", "-e", blob, cwd=target).returncode == 0

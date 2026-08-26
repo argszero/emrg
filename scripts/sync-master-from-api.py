@@ -8,16 +8,26 @@ API that later got squash-merged upstream), so advancing local refs only needs
 the missing *commit* objects — reconstructed byte-exact from the API's
 verification payload + signature, including web-flow GPG-signed squash merges.
 
+
+When the head commit's *content* objects (blobs/trees) are also missing locally
+(e.g. a parallel PR introduced files this repo never had — first hit in cycle
+cyc20260826-154904 with #994's GUI assets), the script now auto-fetches them via
+the Git Data API: blobs via `git/blobs/{sha}` + `git hash-object -w`, trees via
+`git/trees/{sha}` + `git mktree` (canonical ordering), recursing bottom-up. The
+previous behavior failed loud with "run git fetch when https returns" and forced
+a manual gh-api + mktree recovery dance.
+
 Usage:
-    python scripts/sync-master-from-api.py [--repo owner/name] [--ref master]
+    python scripts/sync-master-from-api.py [--repo owner/name] [--ref master] [--repo owner/name] [--ref master]
 
 Behavior:
   * resolves repo from --repo or `git remote get-url origin`
   * walks the remote commit chain from <ref> head down to the first commit
     already present locally, writing each missing commit object via
     `git hash-object -t commit -w` (byte-exact, GPG signature preserved)
-  * verifies the root tree sha matches the remote (fail-loud if content
-    objects are missing locally — prefer `git fetch` when https returns)
+  * verifies the root tree sha matches the remote; if content objects are
+    missing, fetches missing blobs/trees via the Git Data API (disable with
+    --no-fetch-objects) and re-verifies — fail-loud only if still mismatched
   * updates refs/heads/<ref> and refs/remotes/origin/<ref>
 
 Requirements: git on PATH; api.github.com reachable. Auth: optional for public
@@ -121,6 +131,52 @@ def has_object(sha: str) -> bool:
                           capture_output=True).returncode == 0
 
 
+
+def _object_exists(sha: str) -> bool:
+    """Any object (blob/tree/commit) present locally by sha."""
+    return subprocess.run(["git", "cat-file", "-e", sha],
+                          capture_output=True).returncode == 0
+
+
+def _fetch_blob(repo: str, blob_sha: str) -> None:
+    """Fetch one missing blob via the Git Data API, writing it byte-exact."""
+    if _object_exists(blob_sha):
+        return
+    b = api_get(f"{API}/repos/{repo}/git/blobs/{blob_sha}")
+    if b.get("encoding") == "base64":
+        content = base64.b64decode(b["content"])
+    else:  # utf-8 text blobs are returned raw
+        content = b["content"].encode("utf-8")
+    r = subprocess.run(["git", "hash-object", "-w", "--stdin"], input=content,
+                       capture_output=True)
+    if r.returncode != 0 or r.stdout.decode().strip() != blob_sha:
+        raise RuntimeError(f"blob materialization mismatch for {blob_sha[:7]} "
+                           f"(got {r.stdout.decode().strip()[:7] or 'NONE'})")
+
+
+def _fetch_tree(repo: str, tree_sha: str) -> None:
+    """Recursively materialize a missing tree: blobs via hash-object, subtrees
+    via git mktree (git canonical ordering), bottom-up. Idempotent."""
+    if _object_exists(tree_sha):
+        return
+    t = api_get(f"{API}/repos/{repo}/git/trees/{tree_sha}")
+    if t.get("truncated"):
+        raise RuntimeError(f"tree {tree_sha[:7]} truncated by API (>100k entries)")
+    entries = t.get("tree", [])
+    for e in entries:
+        if e["type"] == "blob":
+            _fetch_blob(repo, e["sha"])
+        elif e["type"] == "tree":
+            _fetch_tree(repo, e["sha"])
+        # commit entries (submodules): leave to git fetch — rare in this repo
+    lines = [f"{e['mode']} {e['type']} {e['sha']}\t{e['path']}" for e in entries]
+    r = subprocess.run(["git", "mktree"], input=("\n".join(lines) + "\n").encode("utf-8"),
+                       capture_output=True)
+    if r.returncode != 0 or r.stdout.decode().strip() != tree_sha:
+        raise RuntimeError(f"tree materialization mismatch for {tree_sha[:7]} "
+                           f"(got {r.stdout.decode().strip()[:7] or 'NONE'})")
+
+
 def rev_parse(ref: str) -> str:
     r = subprocess.run(["git", "rev-parse", "-q", "--verify", ref], capture_output=True)
     return r.stdout.decode().strip() if r.returncode == 0 else ""
@@ -139,6 +195,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repo", help="owner/name (default: inferred from origin URL)")
     ap.add_argument("--ref", default="master", help="branch name to sync (default: master)")
+    ap.add_argument("--no-fetch-objects", action="store_true",
+                    help="fail loud on missing content objects instead of fetching them")
     args = ap.parse_args()
 
     repo = args.repo or repo_from_origin()
@@ -169,9 +227,17 @@ def main() -> int:
     local_tree = subprocess.run(["git", "rev-parse", head + "^{tree}"],
                                 capture_output=True, text=True)
     if local_tree.returncode != 0 or local_tree.stdout.strip() != tree:
-        raise SystemExit(f"tree mismatch or missing objects for {head[:7]} "
-                         f"(want {tree}, got {local_tree.stdout.strip() or 'NONE'}) — "
-                         "run `git fetch` when https returns")
+        if not args.no_fetch_objects:
+            print(f"  root tree {tree[:7]} missing locally — fetching blobs/trees via Git Data API")
+            _fetch_tree(repo, tree)
+            local_tree = subprocess.run(["git", "rev-parse", head + "^{tree}"],
+                                        capture_output=True, text=True)
+            if local_tree.returncode == 0 and local_tree.stdout.strip() == tree:
+                print(f"  materialized root tree {tree[:7]} (blobs + subtrees) OK")
+        if local_tree.returncode != 0 or local_tree.stdout.strip() != tree:
+            raise SystemExit(f"tree mismatch or missing objects for {head[:7]} "
+                             f"(want {tree}, got {local_tree.stdout.strip() or 'NONE'}) — "
+                             "run `git fetch` when https returns")
 
     for ref in (f"refs/heads/{args.ref}", f"refs/remotes/origin/{args.ref}"):
         subprocess.run(["git", "update-ref", ref, head], check=True)
