@@ -96,7 +96,7 @@ function FileTreeNode({
       </div>
       {isDir && (
         <div className={`ft-kids${expanded ? "" : " hidden"}`}>
-          {expanded && st && !st.loaded && !st.loading && st.error && (
+          {expanded && st && st.loaded && st.error && (
             <div className="ft-hint">{t("result.treeLoadFailed")}</div>
           )}
           {expanded && st && st.loading && !st.loaded && (
