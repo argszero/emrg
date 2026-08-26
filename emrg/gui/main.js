@@ -106,7 +106,7 @@ function main() {
         backgroundThrottling: false, // G92：后台窗口流式不延迟
       },
     });
-    win.loadFile(path.join(__dirname, "renderer", "index.html"));
+    win.loadFile(path.join(__dirname, "renderer", "dist", "index.html"));
     // P2.3：窗口尺寸变化 → 预览 bounds 跟随（右对齐矩形）
     win.on("resize", () => updatePreviewBounds());
     // G87：窗口状态持久化
@@ -118,7 +118,7 @@ function main() {
       // P2.3：预览 view 是独立 WebContents，崩溃不影响它；reload 完成后 renderer
       // 经 emrg:getPreviewState 拉取当前预览路径重新开 Tab（恢复 bounds/loadURL 一致，
       // 防预览与 Tab 栏不匹配，R5-④）
-      win.loadFile(path.join(__dirname, "renderer", "index.html"));
+      win.loadFile(path.join(__dirname, "renderer", "dist", "index.html"));
     });
     win.webContents.on("unresponsive", () => {
       logger.warn("[gui] renderer unresponsive");
