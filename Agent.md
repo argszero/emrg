@@ -119,7 +119,7 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.token; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (1096) — import check: `uv run python -c "from emrg.client.app import run_client"`
+Python: `uv run pytest tests/ -v` (1099) — import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (265: 45 daemon_client + 20 conn-manager + 22 app-commands + 132 renderer smoke + 15 i18n + 8 integration + 3 commands + 8 build-config + 7 gui-state + 2 tool-group + 3 preload-api) — syntax: `node --check main.js preload.js daemon_client.js renderer/js/*.js`; renderer React suite: `cd emrg/gui/renderer && npm run typecheck && npm test` (78 vitest: 5 snapshot-store + 9 utils + 3 ErrorBoundary + 2 App smoke + 11 commands + 4 copywriting + 11 i18n + 11 markdown + 15 transcript + 7 TranscriptView) + `npm run build` → `renderer/dist/`
 CI: `uv run pytest` (ubuntu + **windows-2025 matrix** — Windows pytest 回归在 PR CI 即失败，v0.2.29 教训 #725) + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
 Re-trigger: `scripts/re-trigger-ci.sh [branch]` (workflow_dispatch, #527 — 替代空 commit 重触发：Actions outage 会整段丢弃 push 事件，dispatch 走 API 路径不受影响)
