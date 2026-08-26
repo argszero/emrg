@@ -250,6 +250,11 @@ class EmrgServer:
         # (warn once per session, no per-round spam).
         self._usage_anchor_dropped_by_compact: set[str] = set()
         self._warned_missing_usage_anchor: set[str] = set()
+        # Community feedback 2026-08-26T07:18:29: session_id ->
+        # (estimated_tokens, iso_ts) at anchor-loss warning time, so the
+        # estimator drift of the anchor-less window can be measured when
+        # the provider re-anchors (countable metric, not just a log line).
+        self._missing_anchor_est: dict[str, tuple[int, str]] = {}
         # Rant 2026-08-23T13:54:14: per-session dynamic-context snapshot
         # (session_id → (text, injected_ms)) so unchanged context is not
         # re-sent (context_refresh_interval_ms gating).
@@ -2586,6 +2591,7 @@ class EmrgServer:
                     self._usage_anchors[session.session_id] = (
                         pt, self._estimate_tokens(messages)
                     )
+                    self._record_anchor_drift(session, pt)
 
             full_content = "".join(content_parts)
             # llm.py yields the ACCUMULATED reasoning snapshot on every chunk
@@ -2986,6 +2992,17 @@ class EmrgServer:
         if session.session_id in self._warned_missing_usage_anchor:
             return  # already warned once for this session
         self._warned_missing_usage_anchor.add(session.session_id)
+        loss_ts = datetime.now().astimezone().isoformat()
+        self._missing_anchor_est[session.session_id] = (estimated, loss_ts)
+        try:
+            _append_usage_anchor_event({
+                "type": "anchor_loss",
+                "timestamp": loss_ts,
+                "session": session.session_id,
+                "est": estimated,
+            })
+        except OSError as exc:
+            logger.warning("usage-anchor stats append failed: %s", exc)
         logger.warning(
             "auto-compact: usage anchor missing for established session %s "
             "(est=%d) — provider not returning prompt_tokens; gate is "
@@ -2993,6 +3010,33 @@ class EmrgServer:
             "observed 148K est vs 222K real). Check provider usage reporting.",
             session.session_id, estimated,
         )
+
+    def _record_anchor_drift(self, session, real_pt: int) -> None:
+        """Measure estimator drift after an anchor-loss window (community
+        feedback 2026-08-26T07:18:29 — heinrichneb: the post-compact
+        estimator-only round's worst case must be measured, not assumed).
+
+        When a session that lost its usage anchor finally re-anchors on a
+        provider-reported prompt_tokens, append an anchor_drift event
+        (est_at_loss, real_after, delta) so the estimator's drift — the
+        #946 148K-vs-222K failure mode — is countable over time instead
+        of anecdotal. One measurement per loss window.
+        """
+        stored = self._missing_anchor_est.pop(session.session_id, None)
+        if not stored:
+            return
+        est_before, loss_ts = stored
+        try:
+            _append_usage_anchor_event({
+                "type": "anchor_drift",
+                "session": session.session_id,
+                "est_at_loss": est_before,
+                "real_after": real_pt,
+                "delta": real_pt - est_before,
+                "loss_ts": loss_ts,
+            })
+        except OSError as exc:
+            logger.warning("usage-anchor stats append failed: %s", exc)
 
     def _estimate_tokens(self, messages: list[dict]) -> int:
         """Rough token estimation from OpenAI-format messages.
@@ -4183,6 +4227,39 @@ def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) 
             fh.write(line + "\n")
     except OSError as exc:
         logger.warning("failed to write exit record to %s: %s", _EXIT_RECORD_PATH, exc)
+
+
+_USAGE_ANCHOR_STATS_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
+
+
+def _append_usage_anchor_event(record: dict, path: Path | None = None) -> int:
+    """Append a countable usage-anchor event (one JSON line) and return the
+    cumulative total (community feedback 2026-08-26T07:18:29 — heinrichneb:
+    the fail-LOUD warning must land somewhere countable, not just a log line
+    that can go missing; an append-only file survives restarts and log
+    rotation, unlike the per-process in-memory dedupe set).
+
+    ``total`` is the cumulative event count, so the metric is readable as a
+    plain number without parsing every line. Callers swallow OSError — a
+    stats write must never take the daemon down.
+    """
+    path = path or _USAGE_ANCHOR_STATS_PATH
+    total = 0
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            total = sum(1 for _ in fh)
+    except OSError:
+        pass  # first event / unreadable file — start the count at 0
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {**record}
+        record.setdefault("timestamp", datetime.now().astimezone().isoformat())
+        record["total"] = total + 1
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        raise
+    return total + 1
 
 
 def _asyncio_exception_handler(loop, context) -> None:

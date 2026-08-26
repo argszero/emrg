@@ -19,6 +19,7 @@ import yaml
 
 from emrg.config import LlmConfig
 from emrg.protocol import InstanceIdentity
+from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.scheduler import TaskHandler, TaskScheduler
 from emrg.session import Session
@@ -599,6 +600,89 @@ def test_manual_compact_drop_marks_anchor(caplog):
         server._warn_missing_usage_anchor(_SidSession(sid), messages, 50)
     assert "usage anchor missing" not in caplog.text
     assert sid not in server._usage_anchor_dropped_by_compact  # consumed
+
+
+# ── usage-anchor countable stats (community feedback 2026-08-26T07:18:29) ──
+
+
+def test_usage_anchor_loss_event_is_countable(tmp_path, monkeypatch):
+    """The fail-LOUD anchor-loss warning must land somewhere countable — a
+    persistent JSONL metric with a cumulative total, not just a log line
+    (heinrichneb: "does it also land somewhere countable (a metric, not just
+    a line)? We once had errors that produced an EMPTY log"). One event per
+    session, totals cumulative across sessions."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    server = _make_server()
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "more"},
+    ]
+    server._warn_missing_usage_anchor(_SidSession("s1"), messages, 50_000)
+    server._warn_missing_usage_anchor(_SidSession("s2"), messages, 60_000)
+    # Same session again — warn-once semantics, no second event
+    server._warn_missing_usage_anchor(_SidSession("s1"), messages, 70_000)
+
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    e1, e2 = json.loads(lines[0]), json.loads(lines[1])
+    assert e1["type"] == "anchor_loss" and e1["session"] == "s1"
+    assert e1["total"] == 1 and "timestamp" in e1
+    assert e2["session"] == "s2" and e2["est"] == 60_000 and e2["total"] == 2
+
+
+def test_usage_anchor_stats_survive_restart(tmp_path, monkeypatch):
+    """The metric must survive daemon restarts: the in-memory dedupe re-arms,
+    but the append-only file keeps counting — the whole point of countable."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+    # "first daemon run"
+    server1 = _make_server()
+    server1._warn_missing_usage_anchor(_SidSession("a"), messages, 10_000)
+    # "daemon restarted" — fresh server, same stats file
+    server2 = _make_server()
+    server2._warn_missing_usage_anchor(_SidSession("b"), messages, 20_000)
+
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[1])["total"] == 2
+
+
+def test_usage_anchor_drift_measured_on_reanchor(tmp_path, monkeypatch):
+    """The estimator-only window's drift must be measured, not assumed: when a
+    warned session finally re-anchors on provider-reported prompt_tokens,
+    record est_at_loss vs real_after (the #946 148K-vs-222K failure mode)."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    server = _make_server()
+    sid = "drift-test"
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+    server._warn_missing_usage_anchor(_SidSession(sid), messages, 100_000)
+    # Provider returns real prompt_tokens on a later round -> re-anchor
+    server._record_anchor_drift(_SidSession(sid), 180_000)
+
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    loss, drift = json.loads(lines[0]), json.loads(lines[1])
+    assert loss["type"] == "anchor_loss"
+    assert drift["type"] == "anchor_drift"
+    assert drift["est_at_loss"] == 100_000
+    assert drift["real_after"] == 180_000
+    assert drift["delta"] == 80_000
+    assert drift["loss_ts"] == loss["timestamp"]
+
+    # Re-anchor measured once — a second call (no pending loss) is a no-op
+    server._record_anchor_drift(_SidSession(sid), 200_000)
+    assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 2
 
 
 def test_context_message_injection_format(tmp_path):
