@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import { useSnapshotStore } from "../hooks/useSnapshotStore";
 import { useDaemonBridge } from "./DaemonBridgeProvider";
+import { createProdMarkdownRenderer } from "../lib/vendorMarkdown";
 import { Sidebar, type SidebarViewId } from "./Sidebar";
 import { ResultPanel } from "./ResultPanel";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
@@ -72,6 +73,9 @@ export function Shell() {
   }
 
   const isPanelView = activeView !== "sessions";
+  // 生产 markdown 渲染器（真实 vendor marked/DOMPurify/hljs，Batch 5 承诺项）——
+  // 一次构造复用；缺省降级在 TranscriptView 内部仍兜底
+  const mdRenderer = useMemo(() => createProdMarkdownRenderer(), []);
 
   /** Composer 的 /指令路由（vanilla handleCommand 的 React 版；无对话框的指令进 runDirect） */
   function handleCommand(routing: CommandRouting): void {
@@ -156,7 +160,7 @@ export function Shell() {
                   {t("app.sessionDisconnected")}
                 </div>
               ) : null}
-              <TranscriptView store={transcript} sid={activeSid} />
+              <TranscriptView store={transcript} sid={activeSid} renderer={mdRenderer} />
               <Composer store={transcript} sid={activeSid} busy={busy} onCommand={handleCommand} />
             </>
           )}
