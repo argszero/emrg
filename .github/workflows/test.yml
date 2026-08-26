@@ -30,6 +30,13 @@ jobs:
         run: |
           npm ci --omit=dev
           EMRG_SKIP_INTEGRATION=1 npm test
+      - name: GUI renderer React suite (migration Batch 0)
+        working-directory: emrg/gui/renderer
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+          npm run build
       - name: GUI integration tests (G73 isolated HOME)
         working-directory: emrg/gui
         run: npm run test:integration

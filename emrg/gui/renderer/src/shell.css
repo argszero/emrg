@@ -1,0 +1,104 @@
+/* shell.css — Batch 0 React 骨架样式（迁移期独立，不触碰 renderer/css/ 既有文件） */
+
+.react-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #1e1e2e;
+  color: #cdd6f4;
+}
+
+.react-shell-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.react-shell-brand {
+  font-weight: 700;
+  letter-spacing: 0.5px;
+}
+
+.react-shell-badge {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(137, 180, 250, 0.15);
+  color: #89b4fa;
+}
+
+.react-shell-main {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.react-shell-placeholder {
+  opacity: 0.65;
+  max-width: 480px;
+  text-align: center;
+  line-height: 1.6;
+}
+
+/* ── 错误边界覆盖层（React 版；对齐 vanilla error-boundary.js 行为） ── */
+
+.error-boundary-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+}
+
+.error-boundary-card {
+  max-width: 560px;
+  padding: 24px;
+  border-radius: 12px;
+  background: #181825;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.error-boundary-title {
+  margin: 0 0 12px;
+  font-size: 18px;
+}
+
+.error-boundary-summary {
+  margin: 0 0 8px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.error-boundary-stamp {
+  margin: 0 0 16px;
+  font-size: 12px;
+  opacity: 0.5;
+}
+
+.error-boundary-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.error-boundary-actions button {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.error-boundary-actions button:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
