@@ -17,7 +17,22 @@ import {
  * - 点击 → onSelect(sid)；右键 → onContextMenu(entry, event)（调用方弹菜单）。
  * - activeSid 匹配条目加 .active（对应 vanilla highlight 逻辑）。
  * - Batch 5 slice 4：新对话/打开会话按钮（vanilla new-chat-btn / open-chat-btn）。
+ * - Batch 5 slice 5：侧边导航 rail（vanilla #side-nav .side-nav-item，data-view），
+ *   activeView 高亮 + onSwitchView 回调（vanilla app.js switchView 语义）。
  */
+
+/** 工作区视图 id（vanilla VIEWS 子集；sessions 为会话视图） */
+export type SidebarViewId = "sessions" | "projects" | "tasks" | "rants" | "settings";
+
+/** 导航按钮定义（vanilla index.html #side-nav 五个按钮，图标 + i18n title） */
+const NAV_ITEMS: { view: SidebarViewId; icon: string; labelKey: string }[] = [
+  { view: "sessions", icon: "💬", labelKey: "nav.sessions" },
+  { view: "projects", icon: "📁", labelKey: "nav.projects" },
+  { view: "tasks", icon: "⏱️", labelKey: "nav.tasks" },
+  { view: "rants", icon: "📣", labelKey: "nav.rants" },
+  { view: "settings", icon: "⚙️", labelKey: "nav.settings" },
+];
+
 export interface SidebarProps {
   openSessions: OpenSessionEntry[];
   knownSessions?: SessionInfo[];
@@ -30,6 +45,10 @@ export interface SidebarProps {
   onNewChat?: () => void;
   /** 打开会话按钮 → OpenSessionDialog（Batch 5 slice 4） */
   onOpenChat?: () => void;
+  /** 当前工作区视图（Batch 5 slice 5；nav 高亮依据） */
+  activeView?: SidebarViewId;
+  /** 点击 nav 按钮 → 切换工作区视图（vanilla switchView 语义） */
+  onSwitchView?: (view: SidebarViewId) => void;
 }
 
 export function Sidebar({
@@ -41,14 +60,36 @@ export function Sidebar({
   labelFn = sessionLabel,
   onNewChat,
   onOpenChat,
+  activeView = "sessions",
+  onSwitchView,
 }: SidebarProps) {
   const { t } = useI18n();
   const entries = sortOpenSessions(openSessions);
+
+  // vanilla #side-nav：五个导航按钮（sessions/projects/tasks/rants/settings）
+  const navRail = (
+    <nav className="side-nav" aria-label="Navigation" data-testid="side-nav">
+      {NAV_ITEMS.map(({ view, icon, labelKey }) => (
+        <button
+          key={view}
+          type="button"
+          className={`side-nav-item${activeView === view ? " active" : ""}`}
+          data-view={view}
+          data-testid={`nav-${view}`}
+          title={t(labelKey)}
+          onClick={() => onSwitchView?.(view)}
+        >
+          {icon}
+        </button>
+      ))}
+    </nav>
+  );
 
   if (!entries.length) {
     // vanilla：无打开会话 → label hidden + 空 nav
     return (
       <div className="react-sidebar" data-testid="sidebar">
+        {navRail}
         <button type="button" className="new-chat-btn" data-testid="new-chat-btn" title={t("sidebar.newChatTitle")} onClick={onNewChat}>
           {t("sidebar.newChat")}
         </button>
@@ -67,6 +108,7 @@ export function Sidebar({
 
   return (
     <div className="react-sidebar" data-testid="sidebar">
+      {navRail}
       <button type="button" className="new-chat-btn" data-testid="new-chat-btn" title={t("sidebar.newChatTitle")} onClick={onNewChat}>
         {t("sidebar.newChat")}
       </button>

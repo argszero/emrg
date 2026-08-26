@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import { useSnapshotStore } from "../hooks/useSnapshotStore";
 import { useDaemonBridge } from "./DaemonBridgeProvider";
-import { Sidebar } from "./Sidebar";
+import { Sidebar, type SidebarViewId } from "./Sidebar";
 import { ResultPanel } from "./ResultPanel";
-import { WorkspaceView } from "./WorkspaceView";
+import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
 import { TranscriptView } from "./TranscriptView";
 import { Composer, type CommandRouting } from "./Composer";
 import { DialogHost, type DialogHostHandle } from "./DialogHost";
@@ -27,13 +27,22 @@ import { DialogHost, type DialogHostHandle } from "./DialogHost";
  *   /sessions /open /resume → DialogHost；/clear /compact /version /image → runDirect）；
  * - Sidebar 新对话/打开会话按钮 → NewSessionDialog / OpenSessionDialog；
  * - DialogHost 统一持有对话框状态 + window.emrg 数据加载（vanilla dialogs.js 语义）。
- * 后续 slice：workspace 视图切换、settings/theme/model 面板、index.html 切换（Batch 5 final）。
+ *
+ * Batch 5 slice 5：workspace 视图切换——
+ * - activeView 状态（"sessions" | projects | tasks | rants | settings），vanilla
+ *   app.js switchView 语义：点当前面板再点一次 → toggle 回会话视图；点其他面板 →
+ *   切换；点 💬 → 回会话视图；
+ * - 面板视图激活时隐藏会话 chrome（transcript/composer/result-panel —— vanilla
+ *   setWorkspaceChrome("panel")），sessions 视图显示完整会话区；
+ * - Sidebar nav rail（#side-nav）高亮当前视图 + onSwitchView 接线；
+ * - WorkspaceView 数据仍为空数组注入（Batch 5 后续 slice 接 listProjects 等 IPC）。
  */
 export function Shell() {
   const { t } = useI18n();
   const { bridge, transcript } = useDaemonBridge();
   const appState = useSnapshotStore(bridge.store);
   const [activeSid, setActiveSid] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<"sessions" | WorkspaceViewId>("sessions");
   const dialogHost = useRef<DialogHostHandle>(null);
 
   // open_sessions 广播到达且尚无激活会话 → 自动选第一个（vanilla 同语义）
@@ -45,6 +54,24 @@ export function Shell() {
 
   const busy = activeSid ? (appState.busyBySid[activeSid] ?? false) : false;
   const disconnected = activeSid ? (appState.disconnectedBySid[activeSid] ?? false) : false;
+
+  /** 工作区视图切换（vanilla app.js switchView 语义）：
+   *  点当前面板 → toggle 回会话视图；点其他面板 → 切换；点 sessions → 回会话视图 */
+  function switchView(view: SidebarViewId): void {
+    if (view === "sessions") {
+      setActiveView("sessions");
+      return;
+    }
+    setActiveView((cur) => (cur === view ? "sessions" : view));
+  }
+
+  /** 选择会话：切换 sid + 回会话视图（vanilla switchSession → activeView="sessions"） */
+  function selectSession(sid: string | null): void {
+    setActiveSid(sid);
+    setActiveView("sessions");
+  }
+
+  const isPanelView = activeView !== "sessions";
 
   /** Composer 的 /指令路由（vanilla handleCommand 的 React 版；无对话框的指令进 runDirect） */
   function handleCommand(routing: CommandRouting): void {
@@ -107,29 +134,36 @@ export function Shell() {
             openSessions={appState.openSessions}
             knownSessions={appState.sessions}
             activeSid={activeSid}
-            onSelect={setActiveSid}
+            activeView={activeView}
+            onSelect={selectSession}
+            onSwitchView={switchView}
             onNewChat={() => dialogHost.current?.openNewSession()}
             onOpenChat={() => dialogHost.current?.openSessions()}
           />
         </aside>
         <main className="react-shell-main" data-testid="react-shell-main">
-          <WorkspaceView activeView="projects" />
-          {disconnected ? (
-            <div className="conn-banner" role="alert" data-testid="conn-banner">
-              {t("app.sessionDisconnected")}
-            </div>
-          ) : null}
-          <TranscriptView store={transcript} sid={activeSid} />
-          <Composer store={transcript} sid={activeSid} busy={busy} onCommand={handleCommand} />
+          {isPanelView ? (
+            <WorkspaceView activeView={activeView} onSwitch={switchView} />
+          ) : (
+            <>
+              {disconnected ? (
+                <div className="conn-banner" role="alert" data-testid="conn-banner">
+                  {t("app.sessionDisconnected")}
+                </div>
+              ) : null}
+              <TranscriptView store={transcript} sid={activeSid} />
+              <Composer store={transcript} sid={activeSid} busy={busy} onCommand={handleCommand} />
+            </>
+          )}
         </main>
-        <ResultPanel sid={activeSid} workspaceRoot="" />
+        {!isPanelView && <ResultPanel sid={activeSid} workspaceRoot="" />}
         <DialogHost
           ref={dialogHost}
           sid={activeSid}
           sessions={appState.sessions}
           transcript={transcript}
           appState={appState}
-          onSwitchSession={setActiveSid}
+          onSwitchSession={selectSession}
         />
       </div>
     </div>

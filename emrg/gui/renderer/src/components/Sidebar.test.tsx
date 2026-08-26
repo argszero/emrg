@@ -125,4 +125,39 @@ describe("Sidebar", () => {
     await userEvent.click(screen.getByTestId("open-chat-btn"));
     expect(onOpenChat).toHaveBeenCalledTimes(1);
   });
+
+  // ── Batch 5 slice 5：侧边导航 rail（vanilla #side-nav） ──
+
+  it("渲染五个导航按钮（data-view + i18n title，vanilla side-nav-item）", () => {
+    setup();
+    for (const view of ["sessions", "projects", "tasks", "rants", "settings"]) {
+      const btn = screen.getByTestId(`nav-${view}`);
+      expect(btn).toHaveClass("side-nav-item");
+      expect(btn).toHaveAttribute("data-view", view);
+    }
+    expect(screen.getAllByTestId(/^nav-/).length).toBe(5);
+  });
+
+  it("activeView 匹配按钮带 .active 高亮", () => {
+    setup({ activeView: "tasks" });
+    expect(screen.getByTestId("nav-tasks")).toHaveClass("active");
+    expect(screen.getByTestId("nav-sessions")).not.toHaveClass("active");
+    expect(screen.getByTestId("nav-projects")).not.toHaveClass("active");
+  });
+
+  it("无打开会话时 nav rail 仍渲染（空态入口）", () => {
+    setup({ openSessions: [] });
+    expect(screen.getByTestId("side-nav")).toBeInTheDocument();
+    expect(screen.getByTestId("nav-projects")).toBeInTheDocument();
+    expect(screen.queryByTestId("open-session-item")).not.toBeInTheDocument();
+  });
+
+  it("点击 nav 按钮 → onSwitchView(view)", async () => {
+    const onSwitchView = vi.fn();
+    setup({ onSwitchView });
+    await userEvent.click(screen.getByTestId("nav-projects"));
+    expect(onSwitchView).toHaveBeenCalledWith("projects");
+    await userEvent.click(screen.getByTestId("nav-settings"));
+    expect(onSwitchView).toHaveBeenCalledWith("settings");
+  });
 });

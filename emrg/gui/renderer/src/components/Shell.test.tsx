@@ -189,4 +189,70 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     fireEvent.click(screen.getByTestId("composer-send"));
     await waitFor(() => expect(screen.getByText("Current conversation cleared.")).toBeInTheDocument());
   });
+
+  // ── Batch 5 slice 5：workspace 视图切换（vanilla switchView 语义） ──
+
+  it("默认 sessions 视图：显示会话区（transcript/composer），不显示面板", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("transcript-view")).toBeInTheDocument());
+    expect(screen.getByTestId("composer")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-view")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("panel-projects")).not.toBeInTheDocument();
+  });
+
+  it("点击 nav-projects → 面板视图：显示项目面板，隐藏会话 chrome", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-projects"));
+    await waitFor(() => expect(screen.getByTestId("panel-projects")).toBeInTheDocument());
+    expect(screen.getByTestId("nav-projects").className).toContain("active");
+    // 面板视图隐藏会话 chrome（vanilla setWorkspaceChrome("panel")）
+    expect(screen.queryByTestId("transcript-view")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("composer")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("result-panel")).not.toBeInTheDocument();
+  });
+
+  it("点击当前激活面板 → toggle 回会话视图（vanilla 语义）", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-projects"));
+    await waitFor(() => expect(screen.getByTestId("panel-projects")).toBeInTheDocument());
+    // 再点同一面板 → 关闭回会话
+    fireEvent.click(screen.getByTestId("nav-projects"));
+    await waitFor(() => expect(screen.queryByTestId("panel-projects")).not.toBeInTheDocument());
+    expect(screen.getByTestId("composer")).toBeInTheDocument();
+    expect(screen.getByTestId("nav-projects").className).not.toContain("active");
+  });
+
+  it("面板间切换：projects → tasks → settings", async () => {
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-projects"));
+    await waitFor(() => expect(screen.getByTestId("panel-projects")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(screen.getByTestId("panel-tasks")).toBeInTheDocument());
+    expect(screen.queryByTestId("panel-projects")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("nav-settings"));
+    await waitFor(() => expect(screen.getByTestId("panel-settings")).toBeInTheDocument());
+    expect(screen.queryByTestId("panel-tasks")).not.toBeInTheDocument();
+  });
+
+  it("面板视图下点击会话条目 → 回会话视图并切换 sid", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }]));
+    await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(2));
+    // 打开面板
+    fireEvent.click(screen.getByTestId("nav-rants"));
+    await waitFor(() => expect(screen.getByTestId("panel-rants")).toBeInTheDocument());
+    // 点击 s2 → 回会话视图，s2 激活
+    const s2 = screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2");
+    expect(s2).toBeTruthy();
+    fireEvent.click(s2 as HTMLElement);
+    await waitFor(() => expect(screen.queryByTestId("panel-rants")).not.toBeInTheDocument());
+    expect(screen.getByTestId("composer")).toBeInTheDocument();
+    expect((screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2"))?.className).toContain("active");
+    expect(screen.getByTestId("nav-sessions").className).toContain("active");
+  });
 });
