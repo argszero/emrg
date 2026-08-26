@@ -3526,6 +3526,26 @@ class EmrgServer:
             old_model, model_name, api_model, old_ctx, self.llm.config.context_window,
         )
 
+        # Community feedback 2026-08-26T10:21:46 (#1000): a mid-session model
+        # switch invalidates every usage anchor — each anchored real
+        # prompt_tokens came from the OLD model's tokenizer, so carrying it
+        # into the new model's rounds (projected = real_old + est_delta)
+        # re-introduces the #946 underestimation (148K est vs 222K real) on
+        # the first post-switch round. Drop all anchors and mark the drops
+        # deliberate so the fail-LOUD anchor-loss warning does not
+        # false-positive (mirror of the post-compact drop, PR #948); the
+        # next round re-anchors from the new provider.
+        if api_model != old_model and self._usage_anchors:
+            anchor_count = len(self._usage_anchors)
+            for sid in self._usage_anchors:
+                self._usage_anchor_dropped_by_compact.add(sid)
+            self._usage_anchors.clear()
+            logger.info(
+                "model switch: invalidated %d usage anchor(s) (stale %s "
+                "baseline; next round re-anchors from %s)",
+                anchor_count, old_model, api_model,
+            )
+
         await self._send(ws, {
             "type": "model_set",
             "model": model_name,

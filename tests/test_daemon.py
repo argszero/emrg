@@ -602,6 +602,56 @@ def test_manual_compact_drop_marks_anchor(caplog):
     assert sid not in server._usage_anchor_dropped_by_compact  # consumed
 
 
+class _FakeWs:
+    """Minimal websocket stand-in with an async send() that records payloads."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+
+    async def send(self, text: str) -> None:
+        self.sent.append(text)
+
+
+def test_model_switch_invalidates_usage_anchor():
+    """A mid-session model switch must drop every stale usage anchor and mark
+    the drops deliberate (#1000 — the anchored real prompt_tokens came from
+    the OLD model's tokenizer; carrying it into the new model's rounds
+    re-introduces the #946 148K-vs-222K underestimation on the first
+    post-switch round)."""
+    server = _make_server()
+    server.llm.config.model = "api-old"
+    server.llm.config.models = [{"name": "model-x", "model": "api-x"}]
+    server._usage_anchors["s1"] = (222_000, 148_000)
+    server._usage_anchors["s2"] = (100_000, 70_000)
+
+    asyncio.run(server._handle_set_model("model-x", _FakeWs()))
+
+    # All anchors dropped; deliberate-drop markers set so the fail-LOUD
+    # anchor-loss warning does not false-positive on the next round
+    assert server._usage_anchors == {}
+    assert "s1" in server._usage_anchor_dropped_by_compact
+    assert "s2" in server._usage_anchor_dropped_by_compact
+    messages = [
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "y"},
+    ]
+    server._warn_missing_usage_anchor(_SidSession("s1"), messages, 50_000)
+    assert "s1" not in server._usage_anchor_dropped_by_compact  # consumed
+    assert server.llm.config.model == "api-x"
+
+
+def test_model_switch_same_model_keeps_anchor():
+    """Re-selecting the current model is a no-op — anchors must survive."""
+    server = _make_server()
+    server.llm.config.model = "api-x"
+    server.llm.config.models = [{"name": "model-x", "model": "api-x"}]
+    server._usage_anchors["s1"] = (222_000, 148_000)
+
+    asyncio.run(server._handle_set_model("model-x", _FakeWs()))
+
+    assert server._usage_anchors == {"s1": (222_000, 148_000)}
+
+
 # ── usage-anchor countable stats (community feedback 2026-08-26T07:18:29) ──
 
 
