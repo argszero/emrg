@@ -1,10 +1,13 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { DICTS } from "./i18n-dicts";
 
 /**
- * i18n.ts — React i18n context（Batch 0 骨架）。
- * 设计文档 §5 Batch 0 项 3：i18n context 先就位；完整词典（934 行 zh/en）
- * 原样迁移在 Batch 1（i18n.js → lib/i18n.ts），届时 dicts prop 传入真实词典。
- * 本文件仅含 Shell 占位所需的最小词典 + {n} 占位替换。
+ * i18n.tsx — React i18n context（Batch 1 remainder：完整词典 + 原生逻辑移植）。
+ * 设计文档 §5 Batch 1 项 3：i18n.js → lib/i18n.ts，词典原样搬，detectLocale/apply 逻辑保留。
+ * - 完整词典 373 keys（zh/en 严格对齐）位于 ./i18n-dicts.ts（由 vanilla i18n.js 机械生成）
+ * - t(key, params)：zh 兜底 + {var} 插值（与 vanilla t() 语义一致）
+ * - detectLocale/getLocale/setLocale：navigator 检测 + localStorage "emrg.locale" 覆盖
+ * - I18nProvider 仍支持注入自定义词典（测试/主题覆盖），与默认全词典合并
  */
 export type TranslateFn = (key: string, params?: Record<string, unknown>) => string;
 
@@ -13,8 +16,14 @@ interface I18nContextValue {
   t: TranslateFn;
 }
 
-/** Batch 0 最小词典（完整词典 Batch 1 迁移） */
-const DEFAULT_DICTS: Record<string, Record<string, string>> = {
+export const LOCALE_KEY = "emrg.locale";
+export type Locale = "zh" | "en";
+
+/** 完整词典（373 keys，zh/en 严格对齐）——由 vanilla i18n.js 机械生成，见 ./i18n-dicts.ts */
+export { DICTS, ZH_DICT, EN_DICT } from "./i18n-dicts";
+
+/** React 骨架专属 key（vanilla 词典无此分区；Batch 2+ 聊天区落地后并入组件词典） */
+const SHELL_DICT: Record<string, Record<string, string>> = {
   zh: {
     "shell.batch0Notice": "EMRG React 骨架（Batch 0）— 迁移进行中",
     "shell.placeholder": "React 组件树迁移分 6 批进行（Batch 0–5），当前为基建批次。",
@@ -25,11 +34,62 @@ const DEFAULT_DICTS: Record<string, Record<string, string>> = {
   },
 };
 
+/** 默认全词典 = vanilla 373 keys + React 骨架扩展 */
+export const DEFAULT_DICTS: Record<string, Record<string, string>> = {
+  zh: { ...DICTS.zh, ...SHELL_DICT.zh },
+  en: { ...DICTS.en, ...SHELL_DICT.en },
+};
+
 const I18nContext = createContext<I18nContextValue | null>(null);
 
-function detectLang(lang?: string): "zh" | "en" {
-  const l = (lang ?? (typeof navigator !== "undefined" ? navigator.language : "zh-CN")) || "";
-  return l.toLowerCase().startsWith("zh") ? "zh" : "en";
+/** navigator.language 检测（zh* → 中文，其他 → 英文）；navigator 异常 → zh 兜底（vanilla 同语义） */
+export function detectLocale(lang?: string): Locale {
+  try {
+    const l = (lang ?? (typeof navigator !== "undefined" ? navigator.language : "")) || "";
+    return /^zh/i.test(l) ? "zh" : "en";
+  } catch {
+    return "zh";
+  }
+}
+
+/** localStorage 手动覆盖（""=跟随系统）；不可用时回退系统检测 */
+export function getLocale(): Locale {
+  let saved: string | null = null;
+  try {
+    if (typeof localStorage !== "undefined") saved = localStorage.getItem(LOCALE_KEY);
+  } catch {
+    /* ignore */
+  }
+  if (saved === "zh" || saved === "en") return saved;
+  return detectLocale();
+}
+
+/** 手动覆盖语言：""=跟随系统 / "zh" / "en"；返回生效的 locale */
+export function setLocale(loc: "" | Locale): Locale {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(LOCALE_KEY, loc || "");
+  } catch {
+    /* ignore */
+  }
+  return getLocale();
+}
+
+/** 取词：t(key, {var: value})；当前语言缺失 → zh 兜底 → 原样返回 key（vanilla 同语义） */
+export function t(
+  key: string,
+  params?: Record<string, unknown>,
+  lang?: string,
+  dicts: Record<string, Record<string, string>> = DICTS,
+): string {
+  const locale = (lang as Locale) || getLocale();
+  const dict = dicts[locale] || dicts.zh;
+  let s = key in dict ? dict[key] : (dicts.zh?.[key] ?? key);
+  if (params) {
+    for (const [k, v] of Object.entries(params)) {
+      s = s.replaceAll(`{${k}}`, String(v));
+    }
+  }
+  return s;
 }
 
 function interpolate(template: string, params?: Record<string, unknown>): string {
@@ -44,16 +104,16 @@ export function I18nProvider({
 }: {
   /** 语言提示（缺省用 navigator.language；测试可注入） */
   lang?: string;
-  /** 自定义词典（Batch 1 起传入完整 zh/en 词典；与默认词典合并） */
+  /** 自定义词典（与默认全词典合并；测试/主题覆盖用） */
   dicts?: Record<string, Record<string, string>>;
   children: ReactNode;
 }) {
-  const l = detectLang(lang);
+  const l = detectLocale(lang);
   const value = useMemo<I18nContextValue>(() => {
     const dict = { ...(DEFAULT_DICTS[l] ?? DEFAULT_DICTS.en), ...(dicts?.[l] ?? {}) };
     return {
       lang: l,
-      t: (key, params) => interpolate(dict[key] ?? key, params),
+      t: (key, params) => interpolate(key in dict ? dict[key] : (DICTS.zh[key] ?? key), params),
     };
   }, [l, dicts]);
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
@@ -63,10 +123,10 @@ export function I18nProvider({
 export function useI18n(): I18nContextValue {
   const ctx = useContext(I18nContext);
   if (ctx) return ctx;
-  const l = detectLang();
+  const l = detectLocale();
   const dict = DEFAULT_DICTS[l] ?? DEFAULT_DICTS.en;
   return {
     lang: l,
-    t: (key, params) => interpolate(dict[key] ?? key, params),
+    t: (key, params) => interpolate(key in dict ? dict[key] : (DICTS.zh[key] ?? key), params),
   };
 }
