@@ -1,0 +1,139 @@
+/* tokens.css — 设计 token：双主题色板 / 字体 / 圆角 / 阴影 / 间距 / 动效
+ * 设计来源：docs/design/gui-redesign.md（rant 2026-08-05T21:59:47 完整复述）
+ * 双主题：浅色 + 深色。默认 prefers-color-scheme 跟随系统，
+ *         手动覆盖：<html data-theme="light|dark">（设置里三选）。
+ */
+:root {
+  /* 字体 */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "SF Mono", "Cascadia Code", Consolas, "JetBrains Mono", "Courier New", monospace;
+  --fs-body: 15px;
+  --fs-secondary: 13px;
+  --fs-aux: 12px;
+  --fs-title: 17px;
+  --fs-title-lg: 20px;
+  --lh-body: 1.7;
+
+  /* 圆角 */
+  --radius-bubble: 18px;
+  --radius-input: 12px;
+  --radius-btn: 12px;
+  --radius-card: 14px;
+  --radius-dialog: 20px;
+
+  /* 间距（8px 基准网格） */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* 动效 */
+  --dur-fast: 150ms;
+  --dur-med: 250ms;
+  --dur-slow: 350ms;
+  --ease: cubic-bezier(0.2, 0.8, 0.3, 1);
+
+  /* 浅色主题（默认） */
+  --bg: #fafafa;
+  --bg-panel: #ffffff;
+  --bg-soft: #f2f3f5;
+  --text-1: #1a1d21;
+  --text-2: #5f6672;
+  --text-3: #8a919d; /* WCAG 对比度 3.04:1（辅助文本 ≥3:1），原 #9aa1ad 2.49:1 不达标 */
+  --border: #e8eaed;
+  --accent: #16a06c; /* 生机绿 */
+  --accent-strong: #0e8a5c;
+  --accent-soft: #e6f5ee;
+  --blue: #3b82f6;
+  --red: #e5484d;
+  --red-soft: #fdecec;
+  --amber: #f5a623;
+  --amber-soft: #fdf3e0;
+
+  /* 阴影（浅色三档柔和） */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.08);
+  --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.14);
+
+  /* 滚动条 */
+  --scrollbar-thumb: #d3d6db;
+  --scrollbar-hover: #b9bdc4;
+}
+
+/* 深色主题（跟随系统） */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17181c;
+    --bg-panel: #1f2127;
+    --bg-soft: #26282f;
+    --text-1: #eceef2;
+    --text-2: #a4a9b4;
+    --text-3: #6b7078;
+    --border: #2e3138;
+    --accent: #2fbf83;
+    --accent-strong: #3fd493;
+    --accent-soft: #1d3a2f;
+    --blue: #5b9cf6;
+    --red: #ef5d62;
+    --red-soft: #3a2326;
+    --amber: #f0a940;
+    --amber-soft: #3a3120;
+    /* 深色阴影弱化，靠底色分层 */
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
+    --scrollbar-thumb: #3a3d45;
+    --scrollbar-hover: #4a4e58;
+  }
+}
+
+/* 手动强制深色 */
+:root[data-theme="dark"] {
+  --bg: #17181c;
+  --bg-panel: #1f2127;
+  --bg-soft: #26282f;
+  --text-1: #eceef2;
+  --text-2: #a4a9b4;
+  --text-3: #6b7078;
+  --border: #2e3138;
+  --accent: #2fbf83;
+  --accent-strong: #3fd493;
+  --accent-soft: #1d3a2f;
+  --blue: #5b9cf6;
+  --red: #ef5d62;
+  --red-soft: #3a2326;
+  --amber: #f0a940;
+  --amber-soft: #3a3120;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --scrollbar-thumb: #3a3d45;
+  --scrollbar-hover: #4a4e58;
+}
+
+/* 手动强制浅色 */
+:root[data-theme="light"] {
+  --bg: #fafafa;
+  --bg-panel: #ffffff;
+  --bg-soft: #f2f3f5;
+  --text-1: #1a1d21;
+  --text-2: #5f6672;
+  --text-3: #8a919d; /* WCAG 对比度 3.04:1（辅助文本 ≥3:1），原 #9aa1ad 2.49:1 不达标 */
+  --border: #e8eaed;
+  --accent: #16a06c;
+  --accent-strong: #0e8a5c;
+  --accent-soft: #e6f5ee;
+  --blue: #3b82f6;
+  --red: #e5484d;
+  --red-soft: #fdecec;
+  --amber: #f5a623;
+  --amber-soft: #fdf3e0;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 4px 12px rgba(16, 24, 40, 0.08);
+  --shadow-lg: 0 12px 32px rgba(16, 24, 40, 0.14);
+  --scrollbar-thumb: #d3d6db;
+  --scrollbar-hover: #b9bdc4;
+}
