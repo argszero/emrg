@@ -250,6 +250,11 @@ class EmrgServer:
         # (warn once per session, no per-round spam).
         self._usage_anchor_dropped_by_compact: set[str] = set()
         self._warned_missing_usage_anchor: set[str] = set()
+        # Community feedback 2026-08-26T18:21:30 (Dev.to comment 3dh3g):
+        # sessions whose usage anchor was deliberately invalidated by a
+        # mid-session model/provider switch — the next anchor-less round is a
+        # legitimate re-anchor round, not a silent provider usage-loss.
+        self._usage_anchor_dropped_by_switch: set[str] = set()
         # Community feedback 2026-08-26T07:18:29: session_id ->
         # (estimated_tokens, iso_ts) at anchor-loss warning time, so the
         # estimator drift of the anchor-less window can be measured when
@@ -2965,6 +2970,24 @@ class EmrgServer:
                 ascii_chars += 1
         return (cjk // 2) + (ascii_chars // 4)
 
+    def _invalidate_usage_anchors_on_switch(self) -> None:
+        """Drop every usage anchor when the active model/provider changes.
+
+        Community feedback 2026-08-26T18:21:30 (Dev.to comment 3dh3g): the
+        anchor is keyed by session_id only, so a mid-session model switch
+        would project the OLD provider's real prompt_tokens + the NEW
+        estimate delta — a mixed base that can silently miss the auto-compact
+        gate across providers (the #946 failure mode). Invalidate anchors and
+        any pending drift window, and mark sessions so the fail-LOUD
+        missing-anchor warning treats the switch round as a legitimate
+        re-anchor round (the next response re-anchors from the new
+        provider's real prompt_tokens).
+        """
+        switched = set(self._usage_anchors)
+        self._usage_anchors.clear()
+        self._missing_anchor_est.clear()
+        self._usage_anchor_dropped_by_switch.update(switched)
+
     def _warn_missing_usage_anchor(
         self, session, messages: list[dict], estimated: int
     ) -> None:
@@ -2988,6 +3011,13 @@ class EmrgServer:
         # still silent) warns on the next round.
         if session.session_id in self._usage_anchor_dropped_by_compact:
             self._usage_anchor_dropped_by_compact.discard(session.session_id)
+            return
+        # Model/provider switch round: anchor deliberately invalidated by
+        # _invalidate_usage_anchors_on_switch (Dev.to 3dh3g) — consume the
+        # marker so the NEXT anchor-less round warns if the new provider is
+        # also silent.
+        if session.session_id in self._usage_anchor_dropped_by_switch:
+            self._usage_anchor_dropped_by_switch.discard(session.session_id)
             return
         if session.session_id in self._warned_missing_usage_anchor:
             return  # already warned once for this session
@@ -3516,6 +3546,12 @@ class EmrgServer:
                 break
 
         self.llm.config.model = api_model
+        if api_model != old_model:
+            # Community feedback 2026-08-26T18:21:30 (Dev.to 3dh3g): a real
+            # API model change invalidates every usage anchor — the base held
+            # the previous provider's real prompt_tokens, which would mix
+            # with the new estimate delta on the next auto-compact projection.
+            self._invalidate_usage_anchors_on_switch()
         if new_ctx is not None:
             self.llm.config.context_window = new_ctx
         if new_vision is not None:
