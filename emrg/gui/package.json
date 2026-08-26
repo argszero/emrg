@@ -4,6 +4,7 @@
   "description": "EMRG GUI — Electron client for the EMRG self-evolving AI agent (Phase 3)",
   "main": "main.js",
   "scripts": {
+    "prestart": "npm --prefix renderer run build",
     "start": "electron .",
     "test": "node --test \"test/*.test.js\"",
     "test:integration": "node --test test/integration.test.js",
