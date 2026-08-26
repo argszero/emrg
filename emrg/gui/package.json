@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test",
+    "test": "node --test \"test/*.test.js\"",
     "test:integration": "node --test test/integration.test.js",
     "vendor": "node scripts/build-vendor.js",
     "dist": "electron-builder"
@@ -39,6 +39,13 @@
       "main.js",
       "preload.js",
       "renderer/**",
+      "!renderer/node_modules{,/**/*}",
+      "!renderer/dist{,/**/*}",
+      "!renderer/src{,/**/*}",
+      "!renderer/test{,/**/*}",
+      "!renderer/package-lock.json",
+      "!renderer/tsconfig.json",
+      "!renderer/vite.config.ts",
       "vendor/**",
       "conn-manager.js",
       "gui-state.js",
