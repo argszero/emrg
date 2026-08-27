@@ -145,6 +145,18 @@ export function Shell() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeView]);
 
+  // 任务面板激活时每 5s 轮询任务状态（vanilla startTaskPoll，rant 2026-08-22T07:18:35 方案 B：
+  // 宿主确认轮询、可接受几秒滞后）——让"运行中→待运行"切换与下次倒计时 ≤5s 内自动更新，
+  // 不引入事件推送。幂等：重复启动先清旧定时器；离开任务视图清除防泄漏；轮询失败静默下轮重试。
+  useEffect(() => {
+    if (activeView !== "tasks") return;
+    const id = setInterval(() => {
+      void loadTasks();
+    }, 5000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView]);
+
   // ── workspace 面板动作（vanilla dialogs.js 语义） ──
   async function addProject() {
     const b = wsBridge();
