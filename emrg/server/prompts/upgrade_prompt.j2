@@ -87,12 +87,22 @@ release installer" means for this version.
      a. If `{{ upgrade_work }}/dist/runtime` does not exist (electron-builder
         extraResources depends on it): `bash packaging/build-runtime.sh`
         (needs `uv`; same prerequisite as CI).
-     b. `cd {{ upgrade_work }}/emrg/gui && npm install && npm run dist`
+     b. Install GUI deps (MUST exit 0 before continuing):
+        `cd {{ upgrade_work }}/emrg/gui && npm install`
+     c. Build the GUI app (MUST RUN — never skip it; a stale dist will NOT be
+        rebuilt on its own): `cd {{ upgrade_work }}/emrg/gui && npm run dist`
         → produces `dist/mac-arm64/EMRG.app` (electron-builder `dir` target).
         Building only the host arch is fine for an upgrade (e.g.
         `npm run dist -- --arm64` on this arm64 host) — the release installer
         rebuilds all arches.
-     c. **Re-seal the bundle + clear xattrs (REQUIRED — rant
+     d. **Verify the build actually rebuilt the artifact (REQUIRED before
+        copying)** — `npm run dist` can silently reuse the stale app that
+        already sits in `dist/mac-arm64`, so confirm it is FRESH:
+        `stat -f "%m %N" {{ upgrade_work }}/emrg/gui/dist/mac-arm64/EMRG.app/Contents/Resources/app.asar`
+        must show an mtime AFTER this build started (within the last few
+        minutes). If app.asar is missing or its mtime is old, the build did
+        NOT run — DO NOT proceed to copy; report and roll back.
+     e. **Re-seal the bundle + clear xattrs (REQUIRED — rant
         2026-08-25T09:18:19)**: electron-builder's `dir` target only ad-hoc
         signs the main binary, leaving the bundle unsealed (`codesign -d`
         shows `Identifier=Electron`, `Info.plist=not bound`,
