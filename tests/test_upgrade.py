@@ -356,3 +356,113 @@ def test_no_residual_update_check_references():
         assert "ttl_hours" not in text, f"{rel} still references ttl_hours"
         assert "auto_download" not in text, f"{rel} still references auto_download"
         assert ".last_update_check" not in text, f"{rel} still references the state file"
+
+
+# ── upgrade_prompt.j2 structure guard (R2249) ─────────────────────────────
+# v0.2.82/v0.2.83 教训：upgrade_prompt.j2 的 GUI 构建行原本是单行
+# `npm install && npm run dist`，升级 agent 只执行了 `npm install`（把链截断或
+# 改写为后台命令），`npm run dist`（electron-builder）从未运行 → GUI 停留在旧版
+# 本。修复（#1043）把两步拆开并加 app.asar 新鲜度闸门；本测试把修复后的结构钉
+# 死——未来任何编辑若把两步重新合并、删除 MUST RUN 指令或移除新鲜度检查，立即红。
+def test_upgrade_prompt_gui_build_steps_are_separate_and_gated() -> None:
+    prompt = (Path(__file__).parent.parent / "emrg/server/prompts/upgrade_prompt.j2").read_text(
+        encoding="utf-8"
+    )
+    lines = prompt.splitlines()
+
+    # 1. npm install 与 npm run dist 必须在不同行（单行 && 链会被 agent 截断）
+    #    —— 原始 bug 的精确形态，禁止回归。
+    chain = [ln for ln in lines if "npm install" in ln and "npm run dist" in ln]
+    assert not chain, (
+        "upgrade_prompt.j2 must keep `npm install` and `npm run dist` on separate "
+        f"lines — a single-line && chain gets truncated by the upgrade agent (v0.2.82/"
+        "v0.2.83 regression). Found: {chain}"
+    )
+
+    # 2. 两步必须都存在，且 dist 步带 MUST RUN 指令（不可跳过语义）。
+    install_ln = next((ln for ln in lines if "npm install" in ln), None)
+    assert install_ln is not None, "upgrade_prompt.j2 must contain an npm install step"
+    dist_ln = next((ln for ln in lines if "npm run dist" in ln), None)
+    assert dist_ln is not None, "upgrade_prompt.j2 must contain an npm run dist step"
+    dist_idx = lines.index(dist_ln)
+    must_run_ctx = "\n".join(lines[max(0, dist_idx - 3) : dist_idx + 1])
+    assert "MUST RUN" in must_run_ctx, (
+        "the npm run dist step must carry a MUST RUN directive (a stale dist will "
+        "NOT rebuild on its own). Context: " + must_run_ctx
+    )
+
+    # 3. app.asar 新鲜度闸门必须存在（stat + app.asar，mtime 证明产物被重建）。
+    gate_ln = next((ln for ln in lines if "stat" in ln and "app.asar" in ln), None)
+    assert gate_ln is not None, (
+        "upgrade_prompt.j2 must verify the rebuilt artifact via app.asar mtime "
+        "(stat) — npm run dist can silently reuse a stale dist."
+    )
+
+    # 4. 顺序：install → dist → 新鲜度闸门（闸门在 dist 之后，验证其产物）。
+    gate_idx = lines.index(gate_ln)
+    install_idx = lines.index(install_ln)
+    assert install_idx < dist_idx < gate_idx, (
+        "step order must be: npm install → npm run dist → app.asar freshness gate "
+        f"(got install={install_idx} dist={dist_idx} gate={gate_idx})"
+    )
+
+
+
+# ── upgrade_prompt.j2 macOS re-seal chain guard (R2250) ───────────────────
+# rant 2026-08-25T09:18:19：electron-builder dir 产物只有主二进制 ad-hoc 签名，
+# bundle 未密封 + 带 com.apple.provenance 等 xattr；macOS 26 把"未密封 + 隔离属性"
+# 的部署副本判为恶意软件移入废纸篓。该修复是 prompt-only——本守卫把 re-seal →
+# copy → verify 的顺序与命令钉死，未来编辑若删除/调换这些步骤立即红。
+def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
+    prompt = (Path(__file__).parent.parent / "emrg/server/prompts/upgrade_prompt.j2").read_text(
+        encoding="utf-8"
+    )
+    lines = prompt.splitlines()
+
+    # 1. re-seal（3e）必须在 Replace/copy 之前：产物先修好再复制。
+    reseal = next(
+        (ln for ln in lines if "codesign --force --deep --sign -" in ln), None
+    )
+    assert reseal is not None, (
+        "upgrade_prompt.j2 must re-seal the built bundle (codesign --force --deep "
+        "--sign -) before copying — rant 2026-08-25T09:18:19 (macOS 26 moves "
+        "unsealed+xattr copies to Trash as malware)."
+    )
+    replace = next(
+        (ln for ln in lines if ln.strip().startswith("4.") and "Replace" in ln), None
+    )
+    assert replace is not None, "upgrade_prompt.j2 must contain the Replace step"
+    reseal_idx, replace_idx = lines.index(reseal), lines.index(replace)
+    assert reseal_idx < replace_idx, (
+        "re-seal (3e) must happen BEFORE the Replace/copy step — copying an "
+        f"unsealed bundle ships the malware-flagged artifact (got reseal={reseal_idx} "
+        f"replace={replace_idx})"
+    )
+
+    # 2. 构建产物的 xattr 清除必须在复制前（ditto 会传播 xattr）。
+    xattr_build = next(
+        (ln for ln in lines if 'xattr -cr "{{ upgrade_work }}' in ln), None
+    )
+    assert xattr_build is not None, (
+        "upgrade_prompt.j2 must clear xattrs on the BUILT artifact (xattr -cr on "
+        "the dist app) before copying — ditto propagates source xattrs."
+    )
+    assert lines.index(xattr_build) < replace_idx, (
+        "built-artifact xattr clear must precede the Replace/copy step"
+    )
+
+    # 3. 运行副本的 xattr 清除必须存在（step 4 copy 后）。
+    xattr_run = next(
+        (ln for ln in lines if "xattr -cr ~/Applications/EMRG.app" in ln), None
+    )
+    assert xattr_run is not None, (
+        "upgrade_prompt.j2 must clear xattrs on the run copy "
+        "(xattr -cr ~/Applications/EMRG.app) after copying."
+    )
+
+    # 4. verify：3e sanity + step5 install/run 双检 = 至少 3 次 codesign --verify
+    verify = [ln for ln in lines if "codesign --verify --deep --strict" in ln]
+    assert len(verify) >= 3, (
+        "upgrade_prompt.j2 must verify signatures at least 3 times (pre-copy sanity "
+        f"+ install + run copy). Found {len(verify)}: {verify}"
+    )
