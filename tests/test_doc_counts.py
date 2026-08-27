@@ -146,7 +146,7 @@ def _static_renderer_count() -> int:
     """Count renderer vitest cases statically (no node_modules needed).
 
     Matches vitest's executed total exactly: for every renderer test file the
-    ``^\s*(it|test)(`` definition count equals the number of executed cases
+    ``^\\s*(it|test)(`` definition count equals the number of executed cases
     (verified for all 44 files, R2254). Files are under
     ``emrg/gui/renderer/src`` with ``.test.ts`` / ``.test.tsx`` suffixes.
     """
