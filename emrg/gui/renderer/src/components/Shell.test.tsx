@@ -25,6 +25,8 @@ function mockEmrg() {
   const clearSession = vi.fn().mockResolvedValue({ ok: true });
   const compactSession = vi.fn().mockResolvedValue({ ok: true });
   const listProjects = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
+  const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true }]);
+  const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", project: "emrg", status: "pending", message: "x" }]);
   const listMemories = vi.fn().mockResolvedValue([]);
   const listSkills = vi.fn().mockResolvedValue([]);
   const listHistory = vi.fn().mockResolvedValue({ messages: [] });
@@ -34,6 +36,8 @@ function mockEmrg() {
     clearSession,
     compactSession,
     listProjects,
+    listTasks,
+    listRants,
     listMemories,
     listSkills,
     listHistory,
@@ -43,6 +47,9 @@ function mockEmrg() {
     onEvent,
     sendMessage,
     clearSession,
+    listProjects,
+    listTasks,
+    listRants,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -254,5 +261,46 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.getByTestId("composer")).toBeInTheDocument();
     expect((screen.getAllByTestId("open-session-item").find((el) => el.dataset.sid === "s2"))?.className).toContain("active");
     expect(screen.getByTestId("nav-sessions").className).toContain("active");
+  });
+
+  // ── Batch 5 slice 7：workspace 面板数据接线（真实 listProjects/listTasks/listRants） ──
+
+  it("进入任务面板 → 加载 listTasks 并渲染任务行", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(m.listTasks).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    expect(screen.getByTestId("task-row")).toHaveTextContent("evo");
+  });
+
+  it("进入 Rant 面板 → 加载 listRants 并渲染 rant 行", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-rants"));
+    await waitFor(() => expect(m.listRants).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByTestId("rant-row")).toBeInTheDocument());
+  });
+
+  it("进入项目面板 → 加载 listProjects；查看会话 → listProjectSessions 加载会话行", async () => {
+    const m = mockEmrg();
+    m.listProjects.mockResolvedValue([{ name: "p1", path: "/p/p1" }]);
+    (window as unknown as { emrg: { listProjectSessions?: unknown } }).emrg.listProjectSessions =
+      vi.fn().mockResolvedValue({ sessions: [{ session_id: "s1", title: "会话一" }] });
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-projects"));
+    await waitFor(() => expect(m.listProjects).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId("project-row")).toBeInTheDocument());
+    // 查看会话 → 会话子视图加载（en 标题 "Sessions"；限定在项目行内避免与侧栏撞名）
+    const row = screen.getByTestId("project-row");
+    fireEvent.click(row.querySelector('button[title="Sessions"]') as HTMLButtonElement);
+    await waitFor(() =>
+      expect((window as unknown as { emrg: { listProjectSessions?: unknown } }).emrg.listProjectSessions).toHaveBeenCalled(),
+    );
+    await waitFor(() => expect(screen.getByTestId("project-session-row")).toBeInTheDocument());
+    expect(screen.getByTestId("project-session-row")).toHaveTextContent("会话一");
   });
 });

@@ -1,8 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import { useSnapshotStore } from "../hooks/useSnapshotStore";
 import { useDaemonBridge } from "./DaemonBridgeProvider";
 import { createProdMarkdownRenderer } from "../lib/vendorMarkdown";
+import { dialogReducer, initialDialogState } from "../lib/dialog";
+import { ConfirmDialog } from "./ConfirmDialog";
+import type { ProjectRec, RantRec, TaskRec } from "../lib/workspaceView";
+import type { SessionRow } from "../lib/openSession";
 import { Sidebar, type SidebarViewId } from "./Sidebar";
 import { ResultPanel } from "./ResultPanel";
 import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
@@ -36,8 +40,26 @@ import { DialogHost, type DialogHostHandle } from "./DialogHost";
  * - 面板视图激活时隐藏会话 chrome（transcript/composer/result-panel —— vanilla
  *   setWorkspaceChrome("panel")），sessions 视图显示完整会话区；
  * - Sidebar nav rail（#side-nav）高亮当前视图 + onSwitchView 接线；
- * - WorkspaceView 数据仍为空数组注入（Batch 5 后续 slice 接 listProjects 等 IPC）。
+ * - WorkspaceView 数据接线：面板激活加载 listProjects/listTasks/listRants，项目会话子视图
+ *   listProjectSessions，动作 switch-session / add-project / delete-project / trigger-task。
  */
+/** Shell 用到的 workspace 数据桥方法（与 preload.js 通道对齐） */
+interface WorkspaceBridge {
+  listProjects(): Promise<ProjectRec[]>;
+  listProjectSessions(p: { projectPath: string }): Promise<{ sessions: SessionRow[] }>;
+  listTasks(): Promise<TaskRec[]>;
+  listRants(p: { status?: string }): Promise<RantRec[]>;
+  switchSession(p: { sessionId: string }): Promise<unknown>;
+  pickProjectDir(): Promise<{ path?: string } | null>;
+  registerProject(p: { path: string }): Promise<{ ok?: boolean; path?: string }>;
+  removeProject(p: { name: string; path?: string }): Promise<{ ok?: boolean; error?: string; protected?: boolean }>;
+  triggerTask(p: { name: string }): Promise<unknown>;
+}
+
+function wsBridge(): WorkspaceBridge | undefined {
+  return (window as unknown as { emrg?: WorkspaceBridge }).emrg;
+}
+
 export function Shell() {
   const { t } = useI18n();
   const { bridge, transcript } = useDaemonBridge();
@@ -45,6 +67,13 @@ export function Shell() {
   const [activeSid, setActiveSid] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<"sessions" | WorkspaceViewId>("sessions");
   const dialogHost = useRef<DialogHostHandle>(null);
+  // workspace 面板数据（Batch 5 接线：项目/任务/Rant 真实列表 + 项目会话）
+  const [projects, setProjects] = useState<ProjectRec[]>([]);
+  const [tasks, setTasks] = useState<TaskRec[]>([]);
+  const [rants, setRants] = useState<RantRec[]>([]);
+  const [projectSessions, setProjectSessions] = useState<SessionRow[] | null>(null);
+  const [projectSessionsError, setProjectSessionsError] = useState<string | null>(null);
+  const [dialogState, dispatch] = useReducer(dialogReducer, initialDialogState);
 
   // open_sessions 广播到达且尚无激活会话 → 自动选第一个（vanilla 同语义）
   useEffect(() => {
@@ -52,6 +81,113 @@ export function Shell() {
       setActiveSid(appState.openSessions[0].sid);
     }
   }, [appState.openSessions, activeSid]);
+
+  // ── workspace 面板数据加载（vanilla loadTaskMeta/renderRantList 语义） ──
+  async function loadProjects() {
+    const b = wsBridge();
+    if (!b?.listProjects) return;
+    try {
+      setProjects(await b.listProjects());
+    } catch {
+      setProjects([]);
+    }
+  }
+
+  async function loadTasks() {
+    const b = wsBridge();
+    if (!b?.listTasks) return;
+    try {
+      setTasks(await b.listTasks());
+    } catch {
+      setTasks([]);
+    }
+  }
+
+  async function loadRants() {
+    const b = wsBridge();
+    if (!b?.listRants) return;
+    try {
+      setRants(await b.listRants({}));
+    } catch {
+      setRants([]);
+    }
+  }
+
+  async function loadProjectSessions(p: ProjectRec) {
+    const b = wsBridge();
+    if (!b?.listProjectSessions || !p.path) return;
+    setProjectSessions(null);
+    setProjectSessionsError(null);
+    try {
+      const res = await b.listProjectSessions({ projectPath: p.path });
+      setProjectSessions(res.sessions ?? []);
+    } catch (e) {
+      setProjectSessionsError((e as Error)?.message ?? String(e));
+    }
+  }
+
+  // 面板激活 → 加载对应数据（每次进入刷新，vanilla 面板激活时拉取）
+  useEffect(() => {
+    if (activeView === "projects") void loadProjects();
+    else if (activeView === "tasks") void loadTasks();
+    else if (activeView === "rants") void loadRants();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeView]);
+
+  // ── workspace 面板动作（vanilla dialogs.js 语义） ──
+  async function addProject() {
+    const b = wsBridge();
+    if (!b?.pickProjectDir || !b?.registerProject) return;
+    try {
+      const res = await b.pickProjectDir();
+      if (!res?.path) return;
+      await b.registerProject({ path: res.path });
+      await loadProjects();
+    } catch (e) {
+      transcript.addSystemMessage(t("deleteProject.failed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+    }
+  }
+
+  function deleteProject(p: ProjectRec) {
+    dispatch({
+      type: "open-confirm",
+      payload: {
+        title: t("deleteProject.title"),
+        message: t("deleteProject.body", { name: String(p.name || p.path || "") }),
+        okText: "dlg.delete",
+        danger: true,
+        onOk: async () => {
+          const b = wsBridge();
+          if (!b?.removeProject) return;
+          try {
+            await b.removeProject({ name: p.name || "", path: p.path || "" });
+            await loadProjects();
+          } catch (e) {
+            transcript.addSystemMessage(t("deleteProject.failed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+          }
+        },
+      },
+    });
+  }
+
+  async function selectProjectSession(p: ProjectRec, sid: string) {
+    const b = wsBridge();
+    if (b?.switchSession) await b.switchSession({ sessionId: sid });
+    setActiveSid(sid);
+    setActiveView("sessions");
+  }
+
+  async function triggerTask(task: TaskRec) {
+    const b = wsBridge();
+    if (!b?.triggerTask || !task.name) return;
+    try {
+      await b.triggerTask({ name: task.name });
+      transcript.addSystemMessage(t("app.triggered", { n: task.name }), activeSid);
+      await loadTasks();
+    } catch (e) {
+      transcript.addSystemMessage(t("app.triggerFailed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+    }
+  }
 
   const busy = activeSid ? (appState.busyBySid[activeSid] ?? false) : false;
   const disconnected = activeSid ? (appState.disconnectedBySid[activeSid] ?? false) : false;
@@ -150,8 +286,20 @@ export function Shell() {
             <WorkspaceView
               activeView={activeView}
               onSwitch={switchView}
+              projects={projects}
+              tasks={tasks}
+              rants={rants}
+              projectSessions={projectSessions}
+              projectSessionsError={projectSessionsError}
+              currentSid={activeSid}
               version={appState.currentVersion}
               evolutionCount={appState.evolutionCount}
+              onViewProjectSessions={(p) => void loadProjectSessions(p)}
+              onSelectProjectSession={(p, sid) => void selectProjectSession(p, sid)}
+              onAddProject={() => void addProject()}
+              onDeleteProject={deleteProject}
+              onTriggerTask={(task) => void triggerTask(task)}
+              // onEditTask / onNewRant：需要任务表单与 rant 对话框 UI（后续 slice）
             />
           ) : (
             <>
@@ -174,6 +322,7 @@ export function Shell() {
           appState={appState}
           onSwitchSession={selectSession}
         />
+        <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
       </div>
     </div>
   );
