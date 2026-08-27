@@ -3143,11 +3143,27 @@ class EmrgServer:
             session.session_id, shift, real_pt, old_real, estimate, old_est,
         )
 
+    # Conservative per-image token allowance for vision content (Codex
+    # #41003 class bug): a pasted image in an image_url block costs the API
+    # hundreds-to-thousands of tokens, but the char-based estimator counted
+    # it as ~0 (content was a list, not a str). Auto-compact then never fired
+    # on image-heavy sessions and the context could overflow. The exact bill
+    # depends on resolution/detail (OpenAI high-detail ≈ 85 + 170/tile, max
+    # ~765); 1000 covers typical pasted screenshots. The usage anchor
+    # (self._usage_anchors) self-corrects the residual on the next real
+    # API usage, so this only needs to be in the right ballpark.
+    _TOKENS_PER_IMAGE = 1000
+
     def _estimate_tokens(self, messages: list[dict]) -> int:
         """Rough token estimation from OpenAI-format messages.
 
         Character-aware: CJK ≈ 2 chars/token, ASCII ≈ 4 chars/token.
         Adds +3 tokens per message for role/content metadata overhead.
+
+        Vision-aware: content may be a list of parts (OpenAI format:
+        {"type": "text" | "image_url", ...}) — text parts are char-counted,
+        each image_url block gets a fixed _TOKENS_PER_IMAGE allowance, and
+        unknown dict parts fall back to JSON char-counting.
         """
         total = 0
         for m in messages:
@@ -3155,9 +3171,30 @@ class EmrgServer:
             content = m.get("content") or ""
             if isinstance(content, str):
                 total += self._count_chars_for_tokens(content)
+            elif isinstance(content, list):
+                total += self._estimate_content_parts(content)
             for tc in (m.get("tool_calls") or []):
                 tc_str = json.dumps(tc, ensure_ascii=False)
                 total += self._count_chars_for_tokens(tc_str)
+        return total
+
+    @staticmethod
+    def _estimate_content_parts(parts: list) -> int:
+        """Estimate tokens for OpenAI vision-format content parts."""
+        total = 0
+        for part in parts:
+            if isinstance(part, str):
+                total += EmrgServer._count_chars_for_tokens(part)
+            elif isinstance(part, dict):
+                ptype = part.get("type")
+                if ptype == "text" and isinstance(part.get("text"), str):
+                    total += EmrgServer._count_chars_for_tokens(part["text"])
+                elif ptype == "image_url":
+                    total += EmrgServer._TOKENS_PER_IMAGE
+                else:
+                    total += EmrgServer._count_chars_for_tokens(
+                        json.dumps(part, ensure_ascii=False)
+                    )
         return total
 
     @staticmethod
