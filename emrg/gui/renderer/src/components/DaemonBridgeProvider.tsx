@@ -3,6 +3,7 @@ import {
   createDaemonBridge,
   type DaemonBridge,
   type DaemonEventFrame,
+  type InitResult,
   type SendMessagePayload,
 } from "../lib/daemonBridge";
 import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
@@ -21,6 +22,12 @@ import { useI18n, type TranslateFn } from "../lib/i18n";
  *   生产构建 StrictMode 为 no-op，单次挂载；value 就绪前一帧渲染 null。
  * - 非 Electron 环境（window.emrg 缺失）优雅降级：onEvent 返回 no-op 取消函数、
  *   sendMessage 以传入 requestId resolve —— 浏览器预览 / 单测不崩溃，store 可用。
+ * - 🔧 Batch 5 修复（rant 2026-08-27T10:53:38）：挂载时调用 window.emrg.init() 并把
+ *   返回值（connected/sessions/openSessions/model/serverId/evolutionCount 等）融合进
+ *   bridge store。vanilla boot（app.js run 调 window.emrg.init()，line 73）用返回值
+ *   初始化 config/sessions/open_sessions/model/connected；React 版此前只订阅
+ *   onEvent/sendMessage、从未调 init → main.js ensureConnected() 从不执行 → GUI 永不
+ *   连 daemon（常显断连）。此改动恢复 renderer 的 init 职责，不再依赖 main 兜底拉起。
  */
 
 export interface DaemonBridgeContextValue {
@@ -30,9 +37,10 @@ export interface DaemonBridgeContextValue {
 
 const DaemonBridgeContext = createContext<DaemonBridgeContextValue | null>(null);
 
-/** preload.js 暴露的 window.emrg 最小形状（仅本组件用到的两个通道） */
+/** preload.js 暴露的 window.emrg 最小形状（init/onEvent/sendMessage 三个通道） */
 interface EmrgWindow {
   emrg?: {
+    init?: () => Promise<InitResult>;
     onEvent?: (cb: (evt: DaemonEventFrame) => void) => () => void;
     sendMessage?: (p: SendMessagePayload) => Promise<{ requestId?: string }>;
   };
@@ -56,6 +64,11 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
         return emrg?.onEvent ? emrg.onEvent(cb) : () => {};
       },
       emrg: {
+        init: async () => {
+          const emrg = (window as unknown as EmrgWindow).emrg;
+          if (!emrg?.init) return {};
+          return emrg.init();
+        },
         sendMessage: async (p) => {
           const emrg = (window as unknown as EmrgWindow).emrg;
           if (!emrg?.sendMessage) return { requestId: p.requestId };
@@ -65,6 +78,19 @@ export function DaemonBridgeProvider({ children }: { children: ReactNode }) {
       transcript,
       t: tt,
     });
+    // 🔧 Batch 5 修复：挂载即 init，把 init 返回值（连接状态/会话列表/model 等）
+    // 融合进 store。vanilla boot 语义：init 成功（config_exists && api_key_configured）
+    // 才置 connected=true；config/key 缺失则由 main 返回 config_exists=false /
+    // api_key_configured=false → connected 保持 false（UI 显示"未配置"降级，不崩）。
+    void (async () => {
+      try {
+        const result = await (window as unknown as EmrgWindow).emrg?.init?.();
+        if (result) bridge.applyInit(result);
+      } catch (e) {
+        // init 失败（daemon 未就绪/通道缺失）：静默降级，连接状态由后续事件驱动
+        console.error("[emrg] gui init failed", e);
+      }
+    })();
     setValue({ bridge, transcript });
     return () => bridge.dispose();
   }, []);

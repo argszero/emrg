@@ -23,11 +23,23 @@ function mockEmrg() {
     return () => listeners.delete(cb);
   });
   const sendMessage = vi.fn().mockResolvedValue({ requestId: "req-9" });
-  (window as unknown as { emrg?: unknown }).emrg = { onEvent, sendMessage };
+  const init = vi.fn().mockResolvedValue({
+    config_exists: true,
+    api_key_configured: true,
+    server_id: "inst-1",
+    model: "gpt-4o",
+    evolution_count: 42,
+    current_version: "0.2.81",
+    sessions: [{ session_id: "s1", title: "hello" }],
+    open_sessions: [{ sid: "s1", projectName: "p" }],
+    active_sid: "s1",
+  });
+  (window as unknown as { emrg?: unknown }).emrg = { onEvent, sendMessage, init };
   return {
     listeners,
     onEvent,
     sendMessage,
+    init,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -86,6 +98,23 @@ describe("DaemonBridgeProvider (Batch 5 slice 2)", () => {
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
     m.emit({ type: "open_sessions", data: { openSessions: [{ sid: "s1", projectName: "p" }] }, sid: null });
     await waitFor(() => expect(openSessions).toBe(1));
+  });
+
+  it("挂载时调用 window.emrg.init() 并把结果融合进 bridge store（connected/会话/model）", async () => {
+    const m = mockEmrg();
+    let connected = false;
+    let model = "";
+    function Probe() {
+      const { bridge } = useDaemonBridge();
+      const appState = useSnapshotStore(bridge.store);
+      connected = appState.connected;
+      model = appState.model;
+      return <div />;
+    }
+    render(wrapper(<Probe />));
+    await waitFor(() => expect(m.init).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(connected).toBe(true));
+    expect(model).toBe("gpt-4o");
   });
 
   it("window.emrg 缺失时优雅降级（不抛错，子组件可挂载）", async () => {

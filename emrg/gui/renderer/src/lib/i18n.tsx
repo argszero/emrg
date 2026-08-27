@@ -24,14 +24,8 @@ export { DICTS, ZH_DICT, EN_DICT } from "./i18n-dicts";
 
 /** React 骨架专属 key（vanilla 词典无此分区；Batch 2+ 聊天区落地后并入组件词典） */
 const SHELL_DICT: Record<string, Record<string, string>> = {
-  zh: {
-    "shell.batch0Notice": "EMRG React 骨架（Batch 0）— 迁移进行中",
-    "shell.placeholder": "React 组件树迁移分 6 批进行（Batch 0–5），当前为基建批次。",
-  },
-  en: {
-    "shell.batch0Notice": "EMRG React shell (Batch 0) — migration in progress",
-    "shell.placeholder": "The React component tree migrates in 6 batches (Batch 0–5); this is the infrastructure batch.",
-  },
+  zh: {},
+  en: {},
 };
 
 /** 默认全词典 = vanilla 373 keys + React 骨架扩展 */
