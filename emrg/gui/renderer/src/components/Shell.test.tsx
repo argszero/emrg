@@ -377,8 +377,11 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
     fireEvent.click(screen.getByTitle("Edit"));
     await waitFor(() => expect(screen.getByTestId("task-form-dialog")).toBeInTheDocument());
+    // 预填由 TaskFormDialog 的 useEffect 在 mount 后执行（vanilla openTaskForm 语义，
+    // 见 #1031 同类 flaky 修复）。用 waitFor 等待 effect 填充值，避免在 effect 跑完前
+    // 读到空 name.value（#1035 轮询测试的 fake-timer/async 交错曾偶发暴露此竞态）。
     const name = screen.getByTestId("task-form-name") as HTMLInputElement;
-    expect(name.value).toBe("evo");
+    await waitFor(() => expect(name.value).toBe("evo"));
     expect(name.disabled).toBe(true);
     fireEvent.change(screen.getByTestId("task-form-interval"), { target: { value: "7200" } });
     fireEvent.click(screen.getByTestId("task-form-save"));
