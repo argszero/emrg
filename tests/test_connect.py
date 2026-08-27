@@ -30,8 +30,9 @@ class TestAuthError:
 
 class TestCleanupServer:
     def test_removes_token_file(self, monkeypatch, tmp_path):
-        """Removes the token file if present."""
+        """Removes the token file if present (no daemon listening → deletion ok)."""
         monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("emrg.connect.is_server_running_sync", lambda: False)
         port_file = tmp_path / f"{CONNECT_ID}.token"
         port_file.write_text("token", encoding="utf-8")
 
@@ -42,12 +43,14 @@ class TestCleanupServer:
     def test_noop_when_absent(self, monkeypatch, tmp_path):
         """Does nothing when the token file doesn't exist."""
         monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("emrg.connect.is_server_running_sync", lambda: False)
 
         cleanup_server()  # must not raise
 
     def test_leaves_other_files(self, monkeypatch, tmp_path):
         """Only removes the token file, not other config files."""
         monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("emrg.connect.is_server_running_sync", lambda: False)
         other = tmp_path / "config.toml"
         other.write_text("x", encoding="utf-8")
         port_file = tmp_path / f"{CONNECT_ID}.token"
@@ -57,6 +60,23 @@ class TestCleanupServer:
 
         assert other.exists()
         assert not port_file.exists()
+
+    def test_keeps_token_when_daemon_listening(self, monkeypatch, tmp_path):
+        """rant 2026-08-27T14:48:50 — never delete a HEALTHY daemon's token.
+
+        A mis-triggered spawn cleanup (start_daemon / _start_daemon_background run
+        cleanup_server() unconditionally) must not remove the token of a daemon
+        that is actually listening on the fixed port. The doomed spawn (EADDRINUSE
+        suicide) would never rewrite it → token-missing window for new connections.
+        """
+        monkeypatch.setattr("emrg.connect.config_dir", lambda: tmp_path)
+        monkeypatch.setattr("emrg.connect.is_server_running_sync", lambda: True)
+        port_file = tmp_path / f"{CONNECT_ID}.token"
+        port_file.write_text("token", encoding="utf-8")
+
+        cleanup_server()
+
+        assert port_file.exists(), "token must survive when a daemon is listening"
 
 
 class TestIsServerRunningSync:

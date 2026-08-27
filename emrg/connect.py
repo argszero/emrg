@@ -102,7 +102,23 @@ async def connect_to_server():
 
 
 def cleanup_server() -> None:
-    """Remove the daemon auth token file on shutdown."""
+    """Remove the daemon auth token file on shutdown.
+
+    ⚠️ Guards against deleting a HEALTHY daemon's token (rant 2026-08-27T14:48:50):
+    a mis-triggered spawn cleanup (start_daemon / _start_daemon_background run this
+    unconditionally) must never remove the token of a daemon that is actually
+    listening on the fixed port — the fixed port is the single-instance ground
+    truth, and a transient TCP probe miss while a daemon is alive caused the token
+    to be deleted and the doomed spawn (EADDRINUSE suicide) never rewrote it.
+
+    Only delete when the fixed-port probe confirms NO daemon is accepting
+    connections. A fresh daemon start rewrites the token atomically
+    (_assert_token_file / atomic_write_bytes), so a stale token from a crashed
+    daemon is harmless on the next successful start.
+    """
+    if is_server_running_sync():
+        logger.debug("daemon still listening on the fixed port — keeping token file")
+        return
     port_path = Path(get_server_path())
     if port_path.exists():
         port_path.unlink()
