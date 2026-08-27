@@ -132,7 +132,7 @@ cp "$ROOT/LICENSE" "$DIST/assets/LICENSE" 2>/dev/null || echo "Apache-2.0" > "$D
 # the runtime so installed machines have it even before daemon first run.
 cp "$ROOT/packaging/assets/skill-catalog.md" "$DIST/assets/skill-catalog.md" 2>/dev/null || true
 "$PY_BIN" -c "import emrg,sys; sys.path.insert(0,'$DIST/source'); import emrg as e; print(e.__version__)" > "$DIST/version.txt" 2>/dev/null \
-  || echo "0.2.81" > "$DIST/version.txt"
+  || echo "0.2.82" > "$DIST/version.txt"
 
 echo "==> runtime size: $(du -sh "$DIST" | cut -f1)"
 echo "==> runtime built OK"
