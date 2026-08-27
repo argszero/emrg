@@ -39,6 +39,46 @@
   padding: 0;
 }
 
+/* ── 横向三栏主容器（对齐 vanilla layout.css #app 的 flex 横向 + 侧/主/结果三栏） ──
+   Batch 5 用类名 react-shell-* 而非 vanilla ID（#app/#sidebar/#result-panel），
+   layout.css 的 ID 选择器对类名不生效，故在此补齐等价布局（rant 2026-08-27T13:16:33）。 */
+.react-shell-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.react-shell-sidebar {
+  width: 264px;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--bg-panel);
+}
+
+/* 结果面板右栏（对齐 vanilla #result-panel 280px；ResultPanel.tsx 已是 className=result-panel） */
+.result-panel {
+  width: 280px;
+  min-width: 240px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--bg-panel);
+  overflow: hidden;
+  transition: width 0.2s cubic-bezier(.2,.8,.3,1), min-width 0.2s cubic-bezier(.2,.8,.3,1);
+}
+.result-panel.collapsed {
+  width: 40px;
+  min-width: 40px;
+  border-left: 1px solid var(--border);
+}
+.result-panel.dragging {
+  transition: none;
+}
+
 /* Batch 5 slice 3：聊天回路布局（transcript 滚动区 + composer 贴底） */
 .react-shell-main .transcript-view {
   flex: 1;
