@@ -111,7 +111,9 @@ def _llm_log_files(session_dir: Path) -> list[Path]:
 
     def key(f: Path) -> int:
         suffix = f.name[len("llm.jsonl"):]  # "" or ".1", ".2", ...
-        return int(suffix[1:]) if suffix else 10**9
+        # Rotation shifts main -> .1 -> .2 -> .3, so .3 is the OLDEST backup
+        # and the main file is the newest. Read chronologically: .3 first.
+        return -int(suffix[1:]) if suffix else 10**9
 
     files = sorted(session_dir.glob("llm.jsonl*"), key=key)
     return files
