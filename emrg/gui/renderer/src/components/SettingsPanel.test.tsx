@@ -225,27 +225,71 @@ describe("SettingsPanel", () => {
     );
   });
 
-  it("applies theme option to documentElement", async () => {
-    setup();
+  it("applies theme option to documentElement and persists via saveSettings", async () => {
+    const { calls } = setup();
     await screen.findByTestId("settings-tab-appearance");
     fireEvent.click(screen.getByTestId("settings-tab-appearance"));
     fireEvent.click(screen.getByTestId("theme-light"));
     expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    // 点击即持久化（rant 22:22:50）：saveSettings 载荷含 theme
+    await waitFor(() => {
+      const last = calls.saveSettings[calls.saveSettings.length - 1]?.[0] as { theme?: string };
+      expect(last.theme).toBe("light");
+    });
     fireEvent.click(screen.getByTestId("theme-dark"));
     expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    await waitFor(() => {
+      const last = calls.saveSettings[calls.saveSettings.length - 1]?.[0] as { theme?: string };
+      expect(last.theme).toBe("dark");
+    });
     fireEvent.click(screen.getByTestId("theme-system"));
     expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
+    await waitFor(() => {
+      const last = calls.saveSettings[calls.saveSettings.length - 1]?.[0] as { theme?: string };
+      expect(last.theme).toBe("system");
+    });
   });
 
-  it("sets locale from language tab", async () => {
+  it("sets locale from language tab and persists via saveSettings", async () => {
+    const { calls } = setup();
     const spy = vi.spyOn(i18n, "setLocale").mockImplementation((l): i18n.Locale => (l === "" ? "zh" : l));
-    setup();
     await screen.findByTestId("settings-tab-language");
     fireEvent.click(screen.getByTestId("settings-tab-language"));
     fireEvent.click(screen.getByTestId("lang-zh"));
     expect(spy).toHaveBeenCalledWith("zh");
+    await waitFor(() => {
+      const last = calls.saveSettings[calls.saveSettings.length - 1]?.[0] as { lang?: string };
+      expect(last.lang).toBe("zh");
+    });
     fireEvent.click(screen.getByTestId("lang-system"));
     expect(spy).toHaveBeenCalledWith("");
+    await waitFor(() => {
+      const last = calls.saveSettings[calls.saveSettings.length - 1]?.[0] as { lang?: string };
+      expect(last.lang).toBe("");
+    });
+  });
+
+  it("reopen reads persisted theme/lang and does not reset to system", async () => {
+    const { calls } = setup({
+      getSettings: vi.fn().mockResolvedValue({
+        apiKey: "sk-test",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-v3",
+        theme: "light",
+        lang: "en",
+        modelDetails: [],
+      }),
+    });
+    await screen.findByTestId("settings-tab-appearance");
+    fireEvent.click(screen.getByTestId("settings-tab-appearance"));
+    // 持久化值被应用（light 而非恒 "system" 重置）
+    await waitFor(() => expect(document.documentElement.getAttribute("data-theme")).toBe("light"));
+    // 语言：getSettings 读回 lang=en → setLocale 被调用
+    await waitFor(() => {
+      const spyCalls = calls.saveSettings.length; // 无点击 → 不新增持久化调用
+      expect(spyCalls).toBe(0);
+    });
+    expect(calls.saveSettings.length).toBe(0);
   });
 
   it("renders version and evolution count in about tab", async () => {

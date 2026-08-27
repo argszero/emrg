@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { DICTS } from "./i18n-dicts";
 
 /**
@@ -17,6 +17,8 @@ interface I18nContextValue {
 }
 
 export const LOCALE_KEY = "emrg.locale";
+/** setLocale 后广播给 I18nProvider 的事件（localStorage 写入本身不触发 React 重渲染） */
+export const LOCALE_CHANGED_EVENT = "emrg:locale-changed";
 export type Locale = "zh" | "en";
 
 /** 完整词典（373 keys，zh/en 严格对齐）——由 vanilla i18n.js 机械生成，见 ./i18n-dicts.ts */
@@ -65,6 +67,12 @@ export function setLocale(loc: "" | Locale): Locale {
   } catch {
     /* ignore */
   }
+  // 通知 I18nProvider 重读（React 版 provider 状态化：不广播则 UI 不刷新）
+  try {
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(LOCALE_CHANGED_EVENT));
+  } catch {
+    /* ignore */
+  }
   return getLocale();
 }
 
@@ -102,14 +110,21 @@ export function I18nProvider({
   dicts?: Record<string, Record<string, string>>;
   children: ReactNode;
 }) {
-  const l = detectLocale(lang);
+  const [locale, setLocaleState] = useState<Locale>(() => detectLocale(lang));
+  // 外部 setLocale（SettingsPanel 直接调用模块函数）→ 广播 LOCALE_CHANGED_EVENT →
+  // 本 provider 重读生效（React 化后 localStorage 写入本身不触发重渲染）
+  useEffect(() => {
+    const onChange = () => setLocaleState(detectLocale(lang));
+    window.addEventListener(LOCALE_CHANGED_EVENT, onChange);
+    return () => window.removeEventListener(LOCALE_CHANGED_EVENT, onChange);
+  }, [lang]);
   const value = useMemo<I18nContextValue>(() => {
-    const dict = { ...(DEFAULT_DICTS[l] ?? DEFAULT_DICTS.en), ...(dicts?.[l] ?? {}) };
+    const dict = { ...(DEFAULT_DICTS[locale] ?? DEFAULT_DICTS.en), ...(dicts?.[locale] ?? {}) };
     return {
-      lang: l,
+      lang: locale,
       t: (key, params) => interpolate(key in dict ? dict[key] : (DICTS.zh[key] ?? key), params),
     };
-  }, [l, dicts]);
+  }, [locale, dicts]);
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
 }
 
