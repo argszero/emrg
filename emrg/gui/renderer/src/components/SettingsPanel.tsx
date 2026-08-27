@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from "react";
-import { useI18n, setLocale } from "../lib/i18n";
+import { useI18n, setLocale, type Locale } from "../lib/i18n";
 import { dialogReducer, initialDialogState } from "../lib/dialog";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -44,6 +44,7 @@ interface GetSettingsResult {
   model?: string;
   modelDetails?: { name: string; model?: string; vision?: boolean }[];
   theme?: string;
+  lang?: string;
 }
 
 /** SettingsPanel 用到的 preload 桥方法（与 preload.js 通道对齐） */
@@ -121,6 +122,8 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
           })),
         );
         applyTheme(s.theme || "system");
+        // 语言持久化（rant 22:22:50）：config.toml 有 lang → 应用；""（跟随系统/旧配置）→ 不动
+        if (s.lang) setLocale(s.lang as "" | Locale);
       })
       .catch((e: Error) => setMsg({ kind: "err", text: t("settings.readFailed", { msg: e.message }) }));
     void refreshGithubStatus();
@@ -148,6 +151,18 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
     const root = document.documentElement;
     if (mode === "system" || !mode) root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", mode);
+  }
+
+  /** 外观偏好即点即持久化（rant 22:22:50）：theme/lang 点击 → saveSettings 落盘
+   *  config.toml（重开面板/重启 GUI 不回退）。成功静默；失败显示错误消息。 */
+  async function persistAppearance(patch: { theme?: string; lang?: string }) {
+    const b = bridge();
+    if (!b?.saveSettings) return;
+    try {
+      await b.saveSettings(patch);
+    } catch (e: unknown) {
+      setMsg({ kind: "err", text: t("settings.saveFailed", { msg: (e as Error).message }) });
+    }
   }
 
   // ── model tab ─────────────────────────────
@@ -573,6 +588,7 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                       onClick={() => {
                         setTheme(m);
                         applyTheme(m);
+                        void persistAppearance({ theme: m });
                       }}
                     >
                       {t(`settings.theme${m[0].toUpperCase()}${m.slice(1)}`)}
@@ -598,7 +614,10 @@ export function SettingsPanel({ version = "", evolutionCount = null }: SettingsP
                       className="theme-option"
                       data-lang={loc}
                       data-testid={`lang-${loc || "system"}`}
-                      onClick={() => setLocale(loc)}
+                      onClick={() => {
+                        setLocale(loc);
+                        void persistAppearance({ lang: loc });
+                      }}
                     >
                       {t(
                         loc === "" ? "settings.langFollowSystem" : loc === "zh" ? "settings.langZh" : "settings.langEn",

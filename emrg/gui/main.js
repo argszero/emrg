@@ -258,7 +258,7 @@ vision = false
   function validateConfig(c) {
     // 设计 §7.1：直接接收所需字段 + 基本类型检查（防写坏 config.toml 的健壮性，非安全设计）
     const out = {};
-    for (const k of ["apiKey", "baseUrl", "model", "theme"]) {
+    for (const k of ["apiKey", "baseUrl", "model", "theme", "lang"]) {
       if (c[k] !== undefined) out[k] = typeof c[k] === "string" ? c[k] : String(c[k]);
     }
     if (Array.isArray(c.models)) {
@@ -873,6 +873,7 @@ vision = false
         models,
         modelDetails,
         theme: cfg.gui?.theme || "system", // §7.1：外观主题持久化（浅色/深色/跟随系统）
+        lang: cfg.gui?.lang || "", // rant 22:22:50：语言持久化（""=跟随系统 / zh / en）
       };
     });
 
@@ -895,6 +896,10 @@ vision = false
       if (cfg.theme !== undefined) {
         toml.gui = toml.gui || {};
         toml.gui.theme = cfg.theme; // §7.1：主题持久化（浅色/深色/跟随系统）
+      }
+      if (cfg.lang !== undefined) {
+        toml.gui = toml.gui || {};
+        toml.gui.lang = cfg.lang; // rant 22:22:50：语言持久化（""=跟随系统 / zh / en）
       }
       if (cfg.models !== undefined) {
         // §7.1：多模型保存——合并写 [[llm.models]]（保留已有项的 context_window 等高级字段）
