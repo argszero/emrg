@@ -41,7 +41,11 @@ function rendererCssFiles() {
   const srcDir = path.join(RENDERER, "src");
   const files = [];
   for (const f of fs.readdirSync(cssDir)) if (f.endsWith(".css")) files.push(`css/${f}`);
-  for (const f of fs.readdirSync(srcDir)) if (f.endsWith(".css")) files.push(`src/${f}`);
+  // 递归扫描 src/（Node 20+ readdirSync recursive，CI Node 22 支持）：组件级 scoped CSS
+  // （src/components/*.css 等）同样必须过守卫，否则静默漏检（cyc20260827-232221 实测）
+  for (const f of fs.readdirSync(srcDir, { recursive: true })) {
+    if (typeof f === "string" && f.endsWith(".css")) files.push(`src/${f}`);
+  }
   return files.filter((f) => !f.endsWith("tokens.css"));
 }
 
