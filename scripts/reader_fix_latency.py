@@ -19,7 +19,7 @@ The median across all such issues is the headline number. Only the earliest
 merged PR counts — a fix is "shipped" when its first merged PR lands.
 
 Usage:
-    python scripts/reader-fix-latency.py [--repo owner/name] [--limit N]
+    python scripts/reader_fix_latency.py [--repo owner/name] [--limit N]
 
 Requires `gh` authenticated. Talks only to api.github.com (works even when
 git-over-https to github.com:443 is down, the documented EMRG network shape).
