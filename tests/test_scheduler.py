@@ -2181,6 +2181,54 @@ def test_list_tasks_logs_slow_handler(tmp_path, caplog):
     assert handler.name in msgs, "per-handler breakdown must name the slow handler"
 
 
+def test_list_tasks_includes_static_task_config(tmp_path):
+    """list_tasks must merge the task's static config (type/enabled/config/
+    sandbox) into the runtime status — the GUI tasks panel renders type
+    badges + enabled hints and the edit form prefills from these fields;
+    without them type falls back to "evolution" and project/repo/sandbox are
+    lost (R2245 data-shape gap: handler.status() only exposes runtime state).
+    """
+    from emrg.server.scheduler import TaskScheduler
+
+    handler = _make_handler(tmp_path, name="journal", project="sci")
+    sched = TaskScheduler(InstanceIdentity())
+    sched._handlers = [handler]
+    sched._handler_cfgs[handler.name] = {
+        "name": "journal",
+        "type": "journal",
+        "config": {"project": "sci", "repo": "argszero/sci"},
+        "interval": 3600,
+        "enabled": False,
+        "sandbox": "read-only",
+    }
+    tasks = sched.list_tasks()
+    assert len(tasks) == 1
+    row = tasks[0]
+    assert row["name"] == "journal"
+    assert row["type"] == "journal"
+    assert row["enabled"] is False
+    assert row["config"] == {"project": "sci", "repo": "argszero/sci"}
+    assert row["sandbox"] == "read-only"
+    # runtime fields must survive the merge
+    assert "running" in row and "interval" in row and row["interval"] == 60
+
+
+def test_list_tasks_without_cfg_leaves_status_untouched(tmp_path):
+    """A handler not present in _handler_cfgs (edge: hot-reload race) must not
+    be decorated — status fields stay as-is."""
+    from emrg.server.scheduler import TaskScheduler
+
+    handler = _make_handler(tmp_path, name="plain", project="emrg")
+    sched = TaskScheduler(InstanceIdentity())
+    sched._handlers = [handler]
+    # no _handler_cfgs entry for this handler
+    tasks = sched.list_tasks()
+    assert len(tasks) == 1
+    assert tasks[0]["name"] == "plain"
+    assert "type" not in tasks[0]
+    assert "config" not in tasks[0]
+
+
 # ── Task CRUD + hot reload + templates (rant 2026-08-12T18:23:15 P2) ──
 
 

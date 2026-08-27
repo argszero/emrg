@@ -1362,7 +1362,21 @@ class TaskScheduler:
         per_handler: list[str] = []
         for handler in self._handlers:
             h_start = time.monotonic()
-            results.append(handler.status())
+            status = handler.status()
+            # Task config enrichment (R2245): handler.status() exposes only
+            # runtime state — the GUI tasks panel + edit form need the task's
+            # static config (type/enabled/config/sandbox) to render type
+            # badges, enabled hints, project links, and prefill the edit form
+            # (previously undefined → GUI fell back to "evolution"/defaults).
+            # Merged from _handler_cfgs (pure in-memory — keeps list_tasks
+            # I/O-free per rant 2026-08-18T20:48:45).
+            cfg = self._handler_cfgs.get(handler.name)
+            if cfg:
+                status["type"] = cfg.get("type", "evolution")
+                status["enabled"] = cfg.get("enabled", True)
+                status["config"] = cfg.get("config", {})
+                status["sandbox"] = cfg.get("sandbox")
+            results.append(status)
             per_handler.append(f"{handler.name}={1000 * (time.monotonic() - h_start):.1f}ms")
         elapsed_ms = 1000 * (time.monotonic() - start)
         if elapsed_ms > 200:
