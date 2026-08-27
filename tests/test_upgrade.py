@@ -356,3 +356,52 @@ def test_no_residual_update_check_references():
         assert "ttl_hours" not in text, f"{rel} still references ttl_hours"
         assert "auto_download" not in text, f"{rel} still references auto_download"
         assert ".last_update_check" not in text, f"{rel} still references the state file"
+
+
+# ── upgrade_prompt.j2 structure guard (R2249) ─────────────────────────────
+# v0.2.82/v0.2.83 教训：upgrade_prompt.j2 的 GUI 构建行原本是单行
+# `npm install && npm run dist`，升级 agent 只执行了 `npm install`（把链截断或
+# 改写为后台命令），`npm run dist`（electron-builder）从未运行 → GUI 停留在旧版
+# 本。修复（#1043）把两步拆开并加 app.asar 新鲜度闸门；本测试把修复后的结构钉
+# 死——未来任何编辑若把两步重新合并、删除 MUST RUN 指令或移除新鲜度检查，立即红。
+def test_upgrade_prompt_gui_build_steps_are_separate_and_gated() -> None:
+    prompt = (Path(__file__).parent.parent / "emrg/server/prompts/upgrade_prompt.j2").read_text(
+        encoding="utf-8"
+    )
+    lines = prompt.splitlines()
+
+    # 1. npm install 与 npm run dist 必须在不同行（单行 && 链会被 agent 截断）
+    #    —— 原始 bug 的精确形态，禁止回归。
+    chain = [ln for ln in lines if "npm install" in ln and "npm run dist" in ln]
+    assert not chain, (
+        "upgrade_prompt.j2 must keep `npm install` and `npm run dist` on separate "
+        f"lines — a single-line && chain gets truncated by the upgrade agent (v0.2.82/"
+        "v0.2.83 regression). Found: {chain}"
+    )
+
+    # 2. 两步必须都存在，且 dist 步带 MUST RUN 指令（不可跳过语义）。
+    install_ln = next((ln for ln in lines if "npm install" in ln), None)
+    assert install_ln is not None, "upgrade_prompt.j2 must contain an npm install step"
+    dist_ln = next((ln for ln in lines if "npm run dist" in ln), None)
+    assert dist_ln is not None, "upgrade_prompt.j2 must contain an npm run dist step"
+    dist_idx = lines.index(dist_ln)
+    must_run_ctx = "\n".join(lines[max(0, dist_idx - 3) : dist_idx + 1])
+    assert "MUST RUN" in must_run_ctx, (
+        "the npm run dist step must carry a MUST RUN directive (a stale dist will "
+        "NOT rebuild on its own). Context: " + must_run_ctx
+    )
+
+    # 3. app.asar 新鲜度闸门必须存在（stat + app.asar，mtime 证明产物被重建）。
+    gate_ln = next((ln for ln in lines if "stat" in ln and "app.asar" in ln), None)
+    assert gate_ln is not None, (
+        "upgrade_prompt.j2 must verify the rebuilt artifact via app.asar mtime "
+        "(stat) — npm run dist can silently reuse a stale dist."
+    )
+
+    # 4. 顺序：install → dist → 新鲜度闸门（闸门在 dist 之后，验证其产物）。
+    gate_idx = lines.index(gate_ln)
+    install_idx = lines.index(install_ln)
+    assert install_idx < dist_idx < gate_idx, (
+        "step order must be: npm install → npm run dist → app.asar freshness gate "
+        f"(got install={install_idx} dist={dist_idx} gate={gate_idx})"
+    )
