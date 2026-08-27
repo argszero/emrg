@@ -4,7 +4,7 @@ Keeps interactive_demo.py's input handling, renders chat in viewport.
 
 from __future__ import annotations
 
-import asyncio, json, logging, os, platform, signal, subprocess, sys, threading, time
+import asyncio, json, logging, os, platform, re, signal, subprocess, sys, threading, time
 try:
     import fcntl  # POSIX-only（TUI 非阻塞 stdin）；Windows 无此模块
 except ImportError:  # pragma: no cover - Windows
@@ -81,6 +81,29 @@ def _format_status_left(title: str, sid: str, model: str = "") -> str:
     if model:
         parts.append(f"[{model}]")
     return " ".join(parts)
+
+
+def _auto_title_from_prompt(text: str, max_len: int = 30) -> str | None:
+    """Derive a short session title from the first user message.
+
+    Codex #40492 borrow: unnamed tasks/sessions get a descriptive title
+    automatically. Deterministic text-derived (no LLM call, zero latency,
+    no token cost) — unlike the on-demand LLM auto-title via ``/rename``
+    with an empty title.
+
+    Returns ``None`` when the message is a slash command or has no usable
+    text (session stays untitled in that case). Module-level so it is
+    unit-testable.
+    """
+    if not text or text.lstrip().startswith("/"):
+        return None
+    first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    if not first:
+        return None
+    first = re.sub(r"\s+", " ", first)
+    if len(first) <= max_len:
+        return first
+    return first[: max_len - 1] + "…"
 
 
 # ── Clipboard image support (platform-adaptive) ─────────────
@@ -2007,6 +2030,15 @@ Streaming
                     _pending_images[:] = [img for img in _pending_images if img.get("label") in inp.text]
                 images = _pending_images or None
                 _pending_images = []
+                # Auto-title a fresh, untitled session from its first user
+                # message (Codex #40492 borrow: unnamed sessions/tasks get a
+                # descriptive title automatically). Deterministic text-derived
+                # title — free, no LLM call. Skips slash commands.
+                if msg_count == 1 and not session_title:
+                    auto_title = _auto_title_from_prompt(text)
+                    if auto_title:
+                        await conn.send_command("rename_session", session_id=session_id,
+                                                cwd=cwd, title=auto_title)
                 rid = await conn.send_task(session_id=session_id, cwd=cwd, prompt=text,
                                            images=images)
                 if was_busy:
