@@ -382,6 +382,16 @@ vision = false
       return { ok: true };
     });
 
+    // 升级横幅重启（rant 2026-08-27T21:54:51）：仅重启 GUI 进程本身，绝不触碰
+    // daemon —— 服务端是 EMRG 生命本体（MANIFESTO 最高原则），不得走上面的
+    // restartDaemon stop 链。新 GUI 进程启动后复用已在运行的 daemon；若 daemon
+    // 本身也需用新代码重启，由 heartbeat 的 installed≠current 驱动用户再次点击。
+    ipcMain.handle("emrg:relaunchGui", async () => {
+      app.relaunch();
+      app.exit(0);
+      return { ok: true };
+    });
+
     ipcMain.handle("emrg:switchSession", async (_e, { sessionId, projectPath } = {}) => {
       logger.info(`[gui:switch] REQUEST sid=${sessionId} projectPath=${projectPath}`);
       if (!validateSessionId(sessionId)) {

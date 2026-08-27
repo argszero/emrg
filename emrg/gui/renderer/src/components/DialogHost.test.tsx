@@ -30,6 +30,7 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     busyBySid: {},
     ownStreamRidBySid: {},
     disconnectedBySid: {},
+    upgradeBanner: null,
     ...over,
   };
 }

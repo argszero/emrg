@@ -61,6 +61,8 @@ interface WorkspaceBridge {
   taskDelete(p: { name: string }): Promise<unknown>;
   taskTemplateList(): Promise<{ name: string }[]>;
   sendRant(p: { message: string; project?: string }): Promise<{ ok?: boolean; count?: number }>;
+  /** 升级横幅重启：仅重启 GUI 进程本身（emrg:relaunchGui），绝不触碰 daemon */
+  relaunchGui?(): Promise<unknown>;
 }
 
 function wsBridge(): WorkspaceBridge | undefined {
@@ -85,6 +87,11 @@ export function Shell() {
   const [taskForm, setTaskForm] = useState<{ task: TaskRec | null } | null>(null);
   const [rantOpen, setRantOpen] = useState(false);
   const [taskTypes, setTaskTypes] = useState<string[]>([]);
+  // 升级横幅（rant 2026-08-27T21:54:51：React 迁移丢 upgrade 事件）：dismissed 记录
+  // 已提示过的 installed 版本（vanilla state.lastKnownVersion 语义——心跳每 15s 重发
+  // 同一版本，不重复弹）；restarting 防重复点击（relaunch 后进程即退出）。
+  const [dismissedUpgrade, setDismissedUpgrade] = useState<string | null>(null);
+  const [restarting, setRestarting] = useState(false);
 
   // open_sessions 广播到达且尚无激活会话 → 自动选第一个（vanilla 同语义）
   useEffect(() => {
@@ -358,8 +365,59 @@ export function Shell() {
     }
   }
 
+  /** 升级横幅重启：调 emrg:relaunchGui（仅重启 GUI 进程，不碰 daemon ——
+   *  服务端是 EMRG 生命本体，不得走 restartDaemon 的 stop 链）。失败 → 系统消息。 */
+  async function handleUpgradeRestart() {
+    const b = wsBridge();
+    if (!b?.relaunchGui) return;
+    setRestarting(true);
+    try {
+      await b.relaunchGui();
+      // 成功：进程即将退出重启，无需清理（restarting 状态随进程消亡）
+    } catch (e) {
+      setRestarting(false);
+      transcript.addSystemMessage(
+        t("app.upgradeRestartFailed", { msg: e instanceof Error ? e.message : String(e) }),
+        activeSid,
+      );
+    }
+  }
+
+  const upgradeBanner = appState.upgradeBanner;
+  const showUpgradeBanner =
+    upgradeBanner && upgradeBanner.installed !== "" && upgradeBanner.installed !== dismissedUpgrade;
+
   return (
     <div className="react-shell" data-testid="react-shell">
+      {showUpgradeBanner ? (
+        <div id="upgrade-banner" role="status" data-testid="upgrade-banner">
+          <span id="upgrade-banner-msg">
+            {upgradeBanner.current && upgradeBanner.current !== upgradeBanner.installed
+              ? t("app.upgradeBannerMsgFromTo", { from: upgradeBanner.current, to: upgradeBanner.installed })
+              : t("app.upgradeBannerMsg", { version: upgradeBanner.installed })}
+          </span>
+          <button
+            type="button"
+            id="upgrade-banner-restart"
+            className="btn btn-primary"
+            data-testid="upgrade-banner-restart"
+            disabled={restarting}
+            onClick={() => void handleUpgradeRestart()}
+          >
+            {t("app.upgradeRestartBtn")}
+          </button>
+          <button
+            type="button"
+            id="upgrade-banner-dismiss"
+            className="btn btn-ghost"
+            title="✕"
+            data-testid="upgrade-banner-dismiss"
+            onClick={() => setDismissedUpgrade(upgradeBanner.installed)}
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
       <header className="react-shell-header">
         <span className="react-shell-brand">✦ EMRG</span>
         <span className="react-shell-conn" data-testid="conn-status" title={t("sidebar.statusTitle")}>
