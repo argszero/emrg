@@ -466,3 +466,59 @@ def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
         "upgrade_prompt.j2 must verify signatures at least 3 times (pre-copy sanity "
         f"+ install + run copy). Found {len(verify)}: {verify}"
     )
+
+
+# ── upgrade_prompt.j2 backup/rollback chain guard (R2252) ──────────────────
+# 数据安全链：升级前必须备份现有 app（install 源 + 运行副本两个位置），verify 任何
+# 失败必须从备份恢复——否则一次坏升级会同时毁掉工作副本且无回退（数据丢失 > 坏部署）。
+# 该链此前 prompt-only、无自动化守卫；本测试钉死 backup-before-copy + restore-on-failure。
+def test_upgrade_prompt_backup_rollback_chain_guarded() -> None:
+    prompt = (Path(__file__).parent.parent / "emrg/server/prompts/upgrade_prompt.j2").read_text(
+        encoding="utf-8"
+    )
+    lines = prompt.splitlines()
+
+    # 1. step 4 必须备份两个 app 位置（install 源 + 运行副本）到 backup_dir。
+    step4 = next(
+        (i for i, ln in enumerate(lines) if ln.strip().startswith("4.") and "Replace" in ln), None
+    )
+    assert step4 is not None, "upgrade_prompt.j2 must contain the Replace (step 4) header"
+    step4_block = "\n".join(lines[step4 : step4 + 10])
+    assert "{{ install_dir }}/emrg-gui/EMRG.app" in step4_block, (
+        "step 4 must back up the install-source app ({{ install_dir }}/emrg-gui/EMRG.app)"
+    )
+    assert "~/Applications/EMRG.app" in step4_block, (
+        "step 4 must back up the run copy (~/Applications/EMRG.app)"
+    )
+    assert "{{ backup_dir }}" in step4_block, (
+        "step 4 must back up into {{ backup_dir }}/<current_version>/"
+    )
+
+    # 2. backup 必须发生在 copy 之前（back-up 语言先于 copy 语言）。
+    backup_marker = next((i for i, ln in enumerate(lines) if "back up the current" in ln), None)
+    copy_marker = next((i for i, ln in enumerate(lines) if "copy the fresh" in ln), None)
+    assert backup_marker is not None, "step 4 must say 'back up the current ...'"
+    assert copy_marker is not None, "step 4 must say 'copy the fresh build'"
+    assert backup_marker < copy_marker, (
+        "backup must precede copy — replacing the app without a backup leaves no "
+        f"rollback path on failure (got backup={backup_marker} copy={copy_marker})"
+    )
+
+    # 3. restore-from-backup 必须存在于失败路径（step 5 verify 失败 → restore）。
+    restores = [ln for ln in lines if "restore from" in ln]
+    assert len(restores) >= 2, (
+        "restore-from-backup must be instructed at least twice: the step-5 verify "
+        "failure path AND the '## 4. Backup & rollback' section. "
+        f"Found {len(restores)}: {restores}"
+    )
+
+    # 4. '## 4. Backup & rollback' 段必须同时含 backup 与 restore 语义。
+    sec = next(
+        (i for i, ln in enumerate(lines) if ln.strip().startswith("## 4.") and "Backup" in ln), None
+    )
+    assert sec is not None, "upgrade_prompt.j2 must contain a '## 4. Backup & rollback' section"
+    sec_block = "\n".join(lines[sec : sec + 8])
+    assert "back up" in sec_block and "restore" in sec_block, (
+        "the Backup & rollback section must instruct both backing up before touching "
+        "and restoring on failure."
+    )
