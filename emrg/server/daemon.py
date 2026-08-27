@@ -2594,8 +2594,14 @@ class EmrgServer:
             if final_usage:
                 pt = final_usage.get("prompt_tokens")
                 if pt:
+                    estimate = self._estimate_tokens(messages)
+                    # Issue #1027: detect a provider/tokenizer silently changing
+                    # under an unchanged base_url/model alias (gateway reroute,
+                    # silent model update) BEFORE the anchor is overwritten —
+                    # the old anchor is the last known same-provider baseline.
+                    self._detect_silent_anchor_drift(session, pt, estimate)
                     self._usage_anchors[session.session_id] = (
-                        pt, self._estimate_tokens(messages)
+                        pt, estimate
                     )
                     self._record_anchor_drift(session, pt)
 
@@ -3084,6 +3090,58 @@ class EmrgServer:
             })
         except OSError as exc:
             logger.warning("usage-anchor stats append failed: %s", exc)
+
+    def _detect_silent_anchor_drift(self, session, real_pt: int, estimate: int) -> None:
+        """Detect a provider/tokenizer silently changing under an unchanged
+        base_url/model alias (issue #1027, Dev.to 3dicj — heinrichneb: gateway
+        reroute / silent model update keeps the old provider's real
+        prompt_tokens as the projection base; the anchor "looks healthy while
+        it drifts").
+
+        The local estimate is provider-independent (character-based), so the
+        bias ratio real/est is roughly constant for a fixed provider. When a
+        fresh real_pt arrives with a bias that deviates from the previous
+        anchored round beyond ``_SILENT_DRIFT_THRESHOLD``, the provider's
+        tokenizer almost certainly changed underneath us — append a countable
+        ``anchor_provider_drift`` event so the shift is observable, and log a
+        warning. The anchor itself re-anchors naturally on this round (the new
+        real_pt becomes the baseline), so the projection self-corrects — the
+        event makes the silent drift falsifiable instead of invisible.
+
+        Called with the OLD anchor still in place (before the overwrite).
+        """
+        old = self._usage_anchors.get(session.session_id)
+        if not old or old[1] <= 0 or estimate <= 0:
+            return
+        old_real, old_est = old
+        old_bias = old_real / old_est
+        new_bias = real_pt / estimate
+        if old_bias <= 0:
+            return
+        shift = abs(new_bias - old_bias) / old_bias
+        if shift < _SILENT_DRIFT_THRESHOLD:
+            return
+        try:
+            _append_usage_anchor_event({
+                "type": "anchor_provider_drift",
+                "session": session.session_id,
+                "prev_real": old_real,
+                "real_pt": real_pt,
+                "prev_est": old_est,
+                "estimate": estimate,
+                # signed ratio: +0.6 = tokenizer counts ~60% more than before
+                "bias_shift": round((new_bias - old_bias) / old_bias, 4),
+                "model": self.llm.config.model,
+                "provider": _provider_slug(self.llm.config.base_url),
+            })
+        except OSError as exc:
+            logger.warning("usage-anchor stats append failed: %s", exc)
+        logger.warning(
+            "usage anchor silent drift session=%s bias_shift=%.2f "
+            "(real %d vs %d, est %d vs %d) — provider/tokenizer changed "
+            "under unchanged base_url; re-anchored on new real prompt_tokens",
+            session.session_id, shift, real_pt, old_real, estimate, old_est,
+        )
 
     def _estimate_tokens(self, messages: list[dict]) -> int:
         """Rough token estimation from OpenAI-format messages.
@@ -4283,6 +4341,14 @@ def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) 
 
 
 _USAGE_ANCHOR_STATS_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
+
+# Issue #1027: relative bias-ratio shift (real_pt / local_estimate) between
+# consecutive anchored rounds that is treated as a silent provider/tokenizer
+# change. The local estimate is provider-independent, so a stable provider
+# keeps the ratio within a few %; tokenizer differences are typically
+# 1.3-2x (#946: 148K est vs 222K real = 1.5x). 25% separates real drift from
+# per-round estimate noise without false positives.
+_SILENT_DRIFT_THRESHOLD = 0.25
 
 
 def _provider_slug(base_url: str) -> str:
