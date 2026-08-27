@@ -1,12 +1,15 @@
-/* shell.css — Batch 0 React 骨架样式（迁移期独立，不触碰 renderer/css/ 既有文件） */
+/* shell.css — Batch 0 React 骨架样式（迁移期独立，不触碰 renderer/css/ 既有文件）。
+ * 主题修复（rant 2026-08-27T20:33:31）：React 迁移前浅色正常，主容器 .react-shell
+ * 原先硬编码 Catppuccin 深色（#1e1e2e/#cdd6f4），未接 tokens.css 的主题变量，
+ * 导致浅色主题失效。现全部改接 var(--*) 变量，浅/深/跟随系统三态均正确。 */
 
 .react-shell {
   display: flex;
   flex-direction: column;
   height: 100vh;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  background: #1e1e2e;
-  color: #cdd6f4;
+  background: var(--bg);
+  color: var(--text-1);
 }
 
 .react-shell-header {
@@ -14,7 +17,7 @@
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--border);
 }
 
 .react-shell-brand {
@@ -26,8 +29,8 @@
   font-size: 12px;
   padding: 2px 10px;
   border-radius: 999px;
-  background: rgba(137, 180, 250, 0.15);
-  color: #89b4fa;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .react-shell-main {
@@ -89,13 +92,13 @@
 
 .react-shell-main .composer {
   padding: 8px 16px 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--border);
 }
 
 .react-shell-main .conn-banner {
   padding: 8px 16px;
-  background: rgba(250, 179, 135, 0.12);
-  color: #fab387;
+  background: var(--amber-soft);
+  color: var(--amber);
   font-size: 13px;
 }
 
@@ -104,7 +107,7 @@
   display: flex;
   gap: 4px;
   padding: 0 12px 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--border);
   margin-bottom: 8px;
 }
 .react-shell-sidebar .side-nav-item {
@@ -113,19 +116,19 @@
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
-  color: #a6adc8;
+  color: var(--text-2);
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 .react-shell-sidebar .side-nav-item:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #cdd6f4;
+  background: var(--bg-soft);
+  color: var(--text-1);
 }
 .react-shell-sidebar .side-nav-item.active {
-  background: rgba(137, 180, 250, 0.15);
-  color: #89b4fa;
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 /* Batch 5 slice 5：工作区面板（vanilla .workspace-view 对等；React 仅渲染激活面板） */
@@ -144,7 +147,7 @@
   font-size: 16px;
   font-weight: 600;
   margin: 0 0 12px;
-  color: #cdd6f4;
+  color: var(--text-1);
 }
 
 .react-shell-conn {
@@ -163,11 +166,11 @@
 }
 
 .conn-dot.green {
-  background: #a6e3a1;
+  background: var(--accent);
 }
 
 .conn-dot.gray {
-  background: #6c7086;
+  background: var(--text-3);
 }
 
 .react-shell-placeholder {
@@ -193,14 +196,15 @@
   max-width: 560px;
   padding: 24px;
   border-radius: 12px;
-  background: #181825;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
 }
 
 .error-boundary-title {
   margin: 0 0 12px;
   font-size: 18px;
+  color: var(--text-1);
 }
 
 .error-boundary-summary {
@@ -209,12 +213,14 @@
   font-size: 13px;
   white-space: pre-wrap;
   word-break: break-word;
+  color: var(--text-2);
 }
 
 .error-boundary-stamp {
   margin: 0 0 16px;
   font-size: 12px;
   opacity: 0.5;
+  color: var(--text-3);
 }
 
 .error-boundary-actions {
@@ -226,12 +232,12 @@
 .error-boundary-actions button {
   padding: 6px 14px;
   border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid var(--border);
   background: transparent;
-  color: inherit;
+  color: var(--text-1);
   cursor: pointer;
 }
 
 .error-boundary-actions button:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--bg-soft);
 }
