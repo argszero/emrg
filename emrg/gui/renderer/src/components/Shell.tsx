@@ -5,6 +5,8 @@ import { useDaemonBridge } from "./DaemonBridgeProvider";
 import { createProdMarkdownRenderer } from "../lib/vendorMarkdown";
 import { dialogReducer, initialDialogState } from "../lib/dialog";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { TaskFormDialog, type TaskFormPayload } from "./TaskFormDialog";
+import { RantDialog } from "./RantDialog";
 import type { ProjectRec, RantRec, TaskRec } from "../lib/workspaceView";
 import type { SessionRow } from "../lib/openSession";
 import { Sidebar, type SidebarViewId } from "./Sidebar";
@@ -54,6 +56,11 @@ interface WorkspaceBridge {
   registerProject(p: { path: string }): Promise<{ ok?: boolean; path?: string }>;
   removeProject(p: { name: string; path?: string }): Promise<{ ok?: boolean; error?: string; protected?: boolean }>;
   triggerTask(p: { name: string }): Promise<unknown>;
+  taskCreate(p: TaskFormPayload): Promise<unknown>;
+  taskUpdate(p: TaskFormPayload): Promise<unknown>;
+  taskDelete(p: { name: string }): Promise<unknown>;
+  taskTemplateList(): Promise<{ name: string }[]>;
+  sendRant(p: { message: string; project?: string }): Promise<{ ok?: boolean; count?: number }>;
 }
 
 function wsBridge(): WorkspaceBridge | undefined {
@@ -74,6 +81,10 @@ export function Shell() {
   const [projectSessions, setProjectSessions] = useState<SessionRow[] | null>(null);
   const [projectSessionsError, setProjectSessionsError] = useState<string | null>(null);
   const [dialogState, dispatch] = useReducer(dialogReducer, initialDialogState);
+  // Batch 5 slice 8：任务表单 + Rant 对话框（vanilla openTaskForm/openRantForm 语义）
+  const [taskForm, setTaskForm] = useState<{ task: TaskRec | null } | null>(null);
+  const [rantOpen, setRantOpen] = useState(false);
+  const [taskTypes, setTaskTypes] = useState<string[]>([]);
 
   // open_sessions 广播到达且尚无激活会话 → 自动选第一个（vanilla 同语义）
   useEffect(() => {
@@ -189,6 +200,85 @@ export function Shell() {
     }
   }
 
+  // ── Batch 5 slice 8：任务表单 + Rant 对话框（vanilla openTaskForm/openRantForm 语义） ──
+  /** 打开任务表单：加载类型下拉（taskTemplateList）+ 项目列表 → 预填 */
+  async function openTaskForm(task: TaskRec) {
+    const b = wsBridge();
+    const isEdit = Boolean(task?.name);
+    if (b?.taskTemplateList && taskTypes.length === 0) {
+      try {
+        const tpls = await b.taskTemplateList();
+        const names = (tpls || []).map((tp) => tp.name);
+        // 内置类型兜底（taskTemplateList 只返回自定义；vanilla 用 taskTypes=内置+自定义）
+        if (!names.includes("evolution")) names.unshift("evolution");
+        setTaskTypes(names);
+      } catch {
+        setTaskTypes(["evolution"]);
+      }
+    }
+    if (taskTypes.length === 0 && !isEdit) {
+      // 首次打开且模板加载失败 → 仍可用 evolution 内置类型
+      setTaskTypes((prev) => (prev.length ? prev : ["evolution"]));
+    }
+    if (!isEdit) await loadProjects(); // 新建需要项目下拉
+    setTaskForm({ task: isEdit ? task : null });
+  }
+
+  async function saveTask(payload: TaskFormPayload) {
+    const b = wsBridge();
+    const editing = taskForm?.task?.name ? taskForm.task.name : null;
+    if (!b) return;
+    try {
+      if (editing) await b.taskUpdate({ ...payload, name: editing });
+      else await b.taskCreate(payload);
+      transcript.addSystemMessage(t("settings.taskSaved"), activeSid);
+      await loadTasks();
+    } catch (e) {
+      transcript.addSystemMessage(t("app.tasksFailed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+    }
+  }
+
+  function deleteTask(task: TaskRec) {
+    dispatch({
+      type: "open-confirm",
+      payload: {
+        title: t("settings.taskDelete"),
+        message: t("settings.taskDeleteConfirm", { name: String(task.name || "") }),
+        okText: "dlg.delete",
+        danger: true,
+        onOk: async () => {
+          const b = wsBridge();
+          if (!b?.taskDelete || !task.name) return;
+          try {
+            await b.taskDelete({ name: task.name });
+            transcript.addSystemMessage(t("settings.taskDeleted"), activeSid);
+            await loadTasks();
+          } catch (e) {
+            transcript.addSystemMessage(t("app.tasksFailed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+          }
+        },
+      },
+    });
+  }
+
+  async function submitRant(payload: { message: string; project: string }) {
+    const b = wsBridge();
+    if (!b?.sendRant) return;
+    try {
+      const res = await b.sendRant(payload);
+      transcript.addSystemMessage(t("rants.sent", { count: res?.count ?? "" }), activeSid);
+      await loadRants();
+    } catch (e) {
+      transcript.addSystemMessage(t("rants.sendFailed", { msg: (e as Error)?.message ?? String(e) }), activeSid);
+    }
+  }
+
+  /** 打开 Rant 对话框：vanilla openRantForm 语义 —— 显式 listProjects 填充项目下拉 */
+  async function newRant() {
+    if (projects.length === 0) await loadProjects();
+    setRantOpen(true);
+  }
+
   const busy = activeSid ? (appState.busyBySid[activeSid] ?? false) : false;
   const disconnected = activeSid ? (appState.disconnectedBySid[activeSid] ?? false) : false;
 
@@ -299,7 +389,9 @@ export function Shell() {
               onAddProject={() => void addProject()}
               onDeleteProject={deleteProject}
               onTriggerTask={(task) => void triggerTask(task)}
-              // onEditTask / onNewRant：需要任务表单与 rant 对话框 UI（后续 slice）
+              onEditTask={(task) => void openTaskForm(task)}
+              onDeleteTask={(task) => deleteTask(task)}
+              onNewRant={() => void newRant()}
             />
           ) : (
             <>
@@ -323,6 +415,19 @@ export function Shell() {
           onSwitchSession={selectSession}
         />
         <ConfirmDialog request={dialogState.confirm} onDismiss={() => dispatch({ type: "close-confirm" })} />
+        <TaskFormDialog
+          request={taskForm}
+          types={taskTypes}
+          projects={projects}
+          onSubmit={(payload) => void saveTask(payload)}
+          onDismiss={() => setTaskForm(null)}
+        />
+        <RantDialog
+          open={rantOpen}
+          projects={projects}
+          onSubmit={(payload) => void submitRant(payload)}
+          onDismiss={() => setRantOpen(false)}
+        />
       </div>
     </div>
   );

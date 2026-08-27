@@ -30,6 +30,12 @@ function mockEmrg() {
   const listMemories = vi.fn().mockResolvedValue([]);
   const listSkills = vi.fn().mockResolvedValue([]);
   const listHistory = vi.fn().mockResolvedValue({ messages: [] });
+  // Batch 5 slice 8：任务 CRUD + Rant 提交（window.emrg 桥已暴露，main.js IPC 在列）
+  const taskCreate = vi.fn().mockResolvedValue({ ok: true });
+  const taskUpdate = vi.fn().mockResolvedValue({ ok: true });
+  const taskDelete = vi.fn().mockResolvedValue({ ok: true });
+  const taskTemplateList = vi.fn().mockResolvedValue([{ name: "journal" }]);
+  const sendRant = vi.fn().mockResolvedValue({ ok: true, count: 11 });
   (window as unknown as { emrg?: unknown }).emrg = {
     onEvent,
     sendMessage,
@@ -41,6 +47,11 @@ function mockEmrg() {
     listMemories,
     listSkills,
     listHistory,
+    taskCreate,
+    taskUpdate,
+    taskDelete,
+    taskTemplateList,
+    sendRant,
   };
   return {
     listeners,
@@ -50,6 +61,11 @@ function mockEmrg() {
     listProjects,
     listTasks,
     listRants,
+    taskCreate,
+    taskUpdate,
+    taskDelete,
+    taskTemplateList,
+    sendRant,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -302,5 +318,81 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     );
     await waitFor(() => expect(screen.getByTestId("project-session-row")).toBeInTheDocument());
     expect(screen.getByTestId("project-session-row")).toHaveTextContent("会话一");
+  });
+
+  // ── Batch 5 slice 8：任务表单 + Rant 对话框接线 ──
+
+  it("任务面板「＋ 添加任务」→ 打开表单 → 保存 → taskCreate + 刷新列表", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    // 打开表单（任务行按钮 + 底部添加按钮均触发 openTaskForm）
+    fireEvent.click(screen.getByText("＋ Add task"));
+    await waitFor(() => expect(screen.getByTestId("task-form-dialog")).toBeInTheDocument());
+    // 类型下拉来自 taskTemplateList（journal）+ evolution 兜底
+    const typeSel = screen.getByTestId("task-form-type") as HTMLSelectElement;
+    await waitFor(() => expect(m.taskTemplateList).toHaveBeenCalled());
+    expect(typeSel.options.length).toBeGreaterThanOrEqual(2);
+    // 填表保存
+    fireEvent.change(screen.getByTestId("task-form-name"), { target: { value: "t2" } });
+    fireEvent.click(screen.getByTestId("task-form-save"));
+    await waitFor(() => expect(m.taskCreate).toHaveBeenCalledTimes(1));
+    const payload = m.taskCreate.mock.calls[0][0];
+    expect(payload.name).toBe("t2");
+    expect(payload.interval).toBe(1800);
+    await waitFor(() => expect(m.listTasks).toHaveBeenCalledTimes(2)); // 初始 + 保存后刷新
+    expect(screen.queryByTestId("task-form-dialog")).not.toBeInTheDocument();
+  });
+
+  it("任务行「Edit」→ 表单预填 + name 只读 → 保存 → taskUpdate（不改名）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByTitle("Edit"));
+    await waitFor(() => expect(screen.getByTestId("task-form-dialog")).toBeInTheDocument());
+    const name = screen.getByTestId("task-form-name") as HTMLInputElement;
+    expect(name.value).toBe("evo");
+    expect(name.disabled).toBe(true);
+    fireEvent.change(screen.getByTestId("task-form-interval"), { target: { value: "7200" } });
+    fireEvent.click(screen.getByTestId("task-form-save"));
+    await waitFor(() => expect(m.taskUpdate).toHaveBeenCalledTimes(1));
+    expect(m.taskUpdate.mock.calls[0][0]).toMatchObject({ name: "evo", interval: 7200 });
+    expect(m.taskCreate).not.toHaveBeenCalled();
+  });
+
+  it("任务行「Delete」→ 确认弹窗 → taskDelete + 刷新", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByTitle("Delete"));
+    await waitFor(() => expect(screen.getByTestId("confirm-dialog")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("confirm-ok"));
+    await waitFor(() => expect(m.taskDelete).toHaveBeenCalledWith({ name: "evo" }));
+    await waitFor(() => expect(m.listTasks).toHaveBeenCalledTimes(2));
+  });
+
+  it("Rant 面板「＋ New rant」→ 对话框 → 提交 → sendRant + 刷新列表", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-rants"));
+    await waitFor(() => expect(screen.getByTestId("rant-row")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("＋ New rant"));
+    await waitFor(() => expect(screen.getByTestId("rant-dialog")).toBeInTheDocument());
+    // 项目下拉含已注册项目 emrg
+    const sel = screen.getByTestId("rant-project") as HTMLSelectElement;
+    expect(Array.from(sel.options).some((o) => o.value === "emrg")).toBe(true);
+    fireEvent.change(screen.getByTestId("rant-message"), { target: { value: "测试 rant" } });
+    fireEvent.change(screen.getByTestId("rant-project"), { target: { value: "emrg" } });
+    fireEvent.click(screen.getByTestId("rant-submit"));
+    await waitFor(() => expect(m.sendRant).toHaveBeenCalledWith({ message: "测试 rant", project: "emrg" }));
+    await waitFor(() => expect(m.listRants).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId("rant-dialog")).not.toBeInTheDocument();
   });
 });

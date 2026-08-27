@@ -33,7 +33,7 @@ export interface TaskRec {
   interval?: number | null;
   last_run_at?: string | null;
   saturation?: { heartbeat_active?: boolean; heartbeat_interval?: number } | null;
-  config?: { project?: string } | null;
+  config?: { project?: string; repo?: string; sandbox?: string } | null;
 }
 
 export type TFunc = (key: string, vars?: Record<string, unknown>) => string;
