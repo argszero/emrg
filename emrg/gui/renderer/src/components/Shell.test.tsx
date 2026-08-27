@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { Shell } from "./Shell";
 import { DaemonBridgeProvider } from "./DaemonBridgeProvider";
@@ -321,6 +321,29 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
   });
 
   // ── Batch 5 slice 8：任务表单 + Rant 对话框接线 ──
+
+  it("任务面板激活时每 5s 轮询 listTasks（vanilla startTaskPoll 语义）", async () => {
+    vi.useFakeTimers();
+    try {
+      const m = mockEmrg();
+      render(wrapper(<Shell />));
+      await vi.waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId("nav-tasks"));
+      await vi.waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+      const callsAfterActivation = m.listTasks.mock.calls.length;
+      expect(callsAfterActivation).toBeGreaterThanOrEqual(1);
+      // 快进 5s → 再次轮询；再快进 10s → 至少再两次
+      await act(async () => {
+        vi.advanceTimersByTime(5000);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(m.listTasks.mock.calls.length).toBeGreaterThanOrEqual(callsAfterActivation + 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it("任务面板「＋ 添加任务」→ 打开表单 → 保存 → taskCreate + 刷新列表", async () => {
     const m = mockEmrg();
