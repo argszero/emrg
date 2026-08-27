@@ -15,6 +15,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 import yaml
 
 from emrg.config import LlmConfig
@@ -772,6 +773,56 @@ def test_usage_anchor_drift_measured_on_reanchor(tmp_path, monkeypatch):
     # Re-anchor measured once — a second call (no pending loss) is a no-op
     server._record_anchor_drift(_SidSession(sid), 200_000)
     assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_silent_provider_drift_emits_event(tmp_path, monkeypatch):
+    """Issue #1027 — heinrichneb (Dev.to 3dicj): a provider silently changing
+    under an unchanged base_url/model alias keeps the old provider's real
+    prompt_tokens as the projection base — the anchor "looks healthy while it
+    drifts". A fresh real_pt whose bias (real/est) deviates from the previous
+    anchored round beyond the threshold must emit a countable
+    anchor_provider_drift event and re-anchor on the new real number."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    server = _make_server()
+    sid = "silent-drift"
+    # Provider A round: real 222K vs est 148K → bias 1.5 (the #946 shape)
+    server._usage_anchors[sid] = (222_000, 148_000)
+    # Provider B round (same base_url): real 360K vs est 150K → bias 2.4
+    server._detect_silent_anchor_drift(_SidSession(sid), 360_000, 150_000)
+
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    ev = json.loads(lines[0])
+    assert ev["type"] == "anchor_provider_drift"
+    assert ev["session"] == sid
+    assert ev["prev_real"] == 222_000 and ev["real_pt"] == 360_000
+    assert ev["prev_est"] == 148_000 and ev["estimate"] == 150_000
+    assert ev["bias_shift"] == pytest.approx(0.6, abs=0.01)  # (2.4-1.5)/1.5
+    assert ev["model"] == "gpt-4o-mini" and ev["provider"] == "localhost"
+    # Re-anchor on the new provider's real number (natural anchor overwrite)
+    server._usage_anchors[sid] = (360_000, 150_000)
+    # Same provider bias again → no second event (stable after re-anchor)
+    server._detect_silent_anchor_drift(_SidSession(sid), 365_000, 152_000)
+    assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 1
+
+
+def test_silent_drift_below_threshold_silent(tmp_path, monkeypatch):
+    """Issue #1027 — a small per-round bias wobble (same provider, estimate
+    noise) must NOT emit a drift event: the threshold separates real
+    tokenizer changes from normal variance."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    server = _make_server()
+    sid = "no-drift"
+    server._usage_anchors[sid] = (222_000, 148_000)  # bias 1.5
+    # Same provider: real 240K vs est 150K → bias 1.6 → shift 6.7% < 25%
+    server._detect_silent_anchor_drift(_SidSession(sid), 240_000, 150_000)
+    assert not stats.exists() or stats.read_text(encoding="utf-8").strip() == ""
+
+    # No anchor at all → no-op (first round, nothing to compare against)
+    server._detect_silent_anchor_drift(_SidSession("fresh"), 10_000, 9_000)
+    assert not stats.exists() or stats.read_text(encoding="utf-8").strip() == ""
 
 
 def test_usage_anchor_cross_provider_window_attributable(tmp_path, monkeypatch):
