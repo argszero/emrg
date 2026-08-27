@@ -11,6 +11,7 @@
   --fs-body: 15px;
   --fs-secondary: 13px;
   --fs-aux: 12px;
+  --fs-small: 11px;
   --fs-title: 17px;
   --fs-title-lg: 20px;
   --lh-body: 1.7;
@@ -19,6 +20,7 @@
   --radius-bubble: 18px;
   --radius-input: 12px;
   --radius-btn: 12px;
+  --radius-sm: 8px;
   --radius-card: 14px;
   --radius-dialog: 20px;
 
@@ -40,6 +42,8 @@
   --bg: #fafafa;
   --bg-panel: #ffffff;
   --bg-soft: #f2f3f5;
+  --bg-1: #eceef2;
+  --bg-hover: #e8eaed;
   --text-1: #1a1d21;
   --text-2: #5f6672;
   --text-3: #8a919d; /* WCAG 对比度 3.04:1（辅助文本 ≥3:1），原 #9aa1ad 2.49:1 不达标 */
@@ -69,6 +73,8 @@
     --bg: #17181c;
     --bg-panel: #1f2127;
     --bg-soft: #26282f;
+    --bg-1: #2e3138;
+    --bg-hover: #2e3138;
     --text-1: #eceef2;
     --text-2: #a4a9b4;
     --text-3: #6b7078;
@@ -95,6 +101,8 @@
   --bg: #17181c;
   --bg-panel: #1f2127;
   --bg-soft: #26282f;
+  --bg-1: #2e3138;
+  --bg-hover: #2e3138;
   --text-1: #eceef2;
   --text-2: #a4a9b4;
   --text-3: #6b7078;
@@ -119,6 +127,8 @@
   --bg: #fafafa;
   --bg-panel: #ffffff;
   --bg-soft: #f2f3f5;
+  --bg-1: #eceef2;
+  --bg-hover: #e8eaed;
   --text-1: #1a1d21;
   --text-2: #5f6672;
   --text-3: #8a919d; /* WCAG 对比度 3.04:1（辅助文本 ≥3:1），原 #9aa1ad 2.49:1 不达标 */
