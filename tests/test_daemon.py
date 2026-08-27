@@ -973,6 +973,49 @@ def test_estimate_tokens_multiple_messages():
     assert result == 7
 
 
+def test_estimate_tokens_vision_image_block():
+    """Vision content: text parts char-counted, image_url blocks get allowance.
+
+    Codex #41003-class fix: before, list-form content was skipped entirely
+    (only +3 overhead), so pasted images estimated at ~0 tokens and
+    auto-compact never fired on image-heavy sessions.
+    """
+    server = _make_server()
+    msgs = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "what is in this screenshot"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ],
+    }]
+    result = server._estimate_tokens(msgs)
+    text_tokens = server._count_chars_for_tokens("what is in this screenshot")
+    # 3 overhead + text tokens + 1 image allowance
+    assert result == 3 + text_tokens + server._TOKENS_PER_IMAGE
+
+
+def test_estimate_tokens_vision_multiple_images():
+    """Three image blocks → three allowances (plus overhead)."""
+    server = _make_server()
+    msgs = [{
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,CCCC"}},
+        ],
+    }]
+    result = server._estimate_tokens(msgs)
+    assert result == 3 + 3 * server._TOKENS_PER_IMAGE
+
+
+def test_estimate_tokens_vision_empty_list():
+    """Empty content list → just overhead (no crash)."""
+    server = _make_server()
+    msgs = [{"role": "user", "content": []}]
+    assert server._estimate_tokens(msgs) == 3
+
+
 # ── _estimate_single ──────────────────────────────────────────────
 
 
