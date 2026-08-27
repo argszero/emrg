@@ -140,3 +140,40 @@ def test_evolution_prompt_no_quick_ref_block() -> None:
         "(rant 2026-08-17T14:22:21, #822)"
     )
 
+
+
+def _static_renderer_count() -> int:
+    """Count renderer vitest cases statically (no node_modules needed).
+
+    Matches vitest's executed total exactly: for every renderer test file the
+    ``^\s*(it|test)(`` definition count equals the number of executed cases
+    (verified for all 44 files, R2254). Files are under
+    ``emrg/gui/renderer/src`` with ``.test.ts`` / ``.test.tsx`` suffixes.
+    """
+    base = REPO_ROOT / "emrg" / "gui" / "renderer" / "src"
+    total = 0
+    for f in sorted(base.rglob("*.test.ts")) + sorted(base.rglob("*.test.tsx")):
+        text = f.read_text(encoding="utf-8")
+        total += len(re.findall(r"^\s*(?:it|test)\(", text, re.M))
+    return total
+
+
+def test_renderer_count_matches_docs() -> None:
+    """Agent.md's Renderer headline must equal the real vitest count.
+
+    R2254 (#1049/#1050): renderer tests grew 445 -> 448 without Agent.md being
+    bumped. The GUI-breakdown guard only validates each "(N: ...)" line's
+    *internal* sum (parts sum to headline) — it cannot see reality, and the
+    pytest CI job has no node_modules to run vitest. The static definition
+    count equals vitest's executed total, so this guard runs everywhere
+    pytest does and turns the drift red immediately.
+    """
+    renderer = [b for b in _gui_breakdowns() if "Renderer" in b[0]]
+    assert renderer, "Agent.md must document the Renderer test breakdown"
+    label, headline, parts = renderer[0]
+    static = _static_renderer_count()
+    assert headline == static, (
+        f"{label}: documents {headline} renderer tests but {static} are "
+        f"counted statically (vitest-equivalent). Sync Agent.md when "
+        "adding/removing renderer tests."
+    )
