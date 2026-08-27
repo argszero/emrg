@@ -118,11 +118,26 @@ export interface SendMessagePayload {
   sandbox?: string;
 }
 
+/** window.emrg.init() 返回值（main.js emrg:init 处理器 → preload.init） */
+export interface InitResult {
+  config_exists?: boolean;
+  api_key_configured?: boolean;
+  server_id?: string;
+  model?: string;
+  evolution_count?: number | null;
+  current_version?: string;
+  version?: string;
+  sessions?: SessionSummary[];
+  open_sessions?: OpenSessionEntry[];
+  active_sid?: string | null;
+}
+
 /** 注入依赖（onEvent/emrg 不设默认，接线层显式传入） */
 export interface DaemonBridgeDeps {
   onEvent: (cb: (evt: DaemonEventFrame) => void) => () => void;
   emrg: {
     sendMessage(p: SendMessagePayload): Promise<{ requestId?: string }>;
+    init?(): Promise<InitResult>;
   };
   transcript: TranscriptStore;
   t?: TranslateFn;
@@ -135,6 +150,8 @@ export interface DaemonBridge {
   dispose(): void;
   /** 供接线层手动投递（测试/重放用） */
   handleFrame(frame: DaemonEventFrame): void;
+  /** 把 window.emrg.init() 返回值融合进 store（对齐 vanilla boot 语义） */
+  applyInit(result: InitResult): void;
 }
 
 export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
@@ -307,5 +324,20 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
 
   const dispose = onEvent((evt) => handleFrame(evt));
 
-  return { store, dispose, handleFrame };
+  function applyInit(result: InitResult): void {
+    if (!result) return;
+    store.update((s) => ({
+      ...s,
+      // init 成功=配置存在+key 已配置（main.js 仅在两者均满足时才走到 ensureConnected）
+      connected: Boolean(result.config_exists && result.api_key_configured),
+      serverId: result.server_id || s.serverId,
+      model: result.model || s.model,
+      evolutionCount: result.evolution_count ?? s.evolutionCount,
+      currentVersion: result.current_version || s.currentVersion,
+      sessions: result.sessions || s.sessions,
+      openSessions: result.open_sessions || s.openSessions,
+    }));
+  }
+
+  return { store, dispose, handleFrame, applyInit };
 }

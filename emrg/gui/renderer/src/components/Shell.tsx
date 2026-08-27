@@ -362,9 +362,6 @@ export function Shell() {
     <div className="react-shell" data-testid="react-shell">
       <header className="react-shell-header">
         <span className="react-shell-brand">✦ EMRG</span>
-        <span className="react-shell-badge" data-testid="react-shell-badge">
-          {t("shell.batch0Notice")}
-        </span>
         <span className="react-shell-conn" data-testid="conn-status" title={t("sidebar.statusTitle")}>
           <span className={`conn-dot ${appState.connected ? "green" : "gray"}`} />
           {appState.connected ? appState.model : t("copy.disconnected")}
