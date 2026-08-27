@@ -145,4 +145,34 @@ describe("createDaemonBridge", () => {
     expect(st.busyBySid["s2"]).toBe(true); // s2 锁保留
     expect(st.ownStreamRidBySid["s2"]).toBe("r2"); // s2 的 rid 未被误清
   });
+
+  it("applyInit 融合 init 返回 → store（connected/会话/model，vanilla boot 语义）", () => {
+    const { bridge } = setup();
+    bridge.applyInit({
+      config_exists: true,
+      api_key_configured: true,
+      server_id: "inst-1",
+      model: "gpt-4o",
+      evolution_count: 42,
+      current_version: "0.2.81",
+      sessions: [{ session_id: "s1", title: "hello" }],
+      open_sessions: [{ sid: "s1", projectName: "p" }],
+    });
+    let st = bridge.store.get();
+    expect(st.connected).toBe(true);
+    expect(st.serverId).toBe("inst-1");
+    expect(st.model).toBe("gpt-4o");
+    expect(st.evolutionCount).toBe(42);
+    expect(st.currentVersion).toBe("0.2.81");
+    expect(st.sessions).toHaveLength(1);
+    expect(st.openSessions).toHaveLength(1);
+  });
+
+  it("applyInit 在 config/key 缺失时保持 connected=false（未配置降级，不崩）", () => {
+    const { bridge } = setup();
+    bridge.applyInit({ config_exists: false, api_key_configured: false });
+    const st = bridge.store.get();
+    expect(st.connected).toBe(false);
+    expect(st.sessions).toHaveLength(0);
+  });
 });
