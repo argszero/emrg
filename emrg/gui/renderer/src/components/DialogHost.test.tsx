@@ -178,7 +178,9 @@ describe("DialogHost (Batch 5 slice 4)", () => {
     ref2.current?.openRename();
     await waitFor(() => expect(screen.getByTestId("rename-dialog")).toBeInTheDocument());
     const input = screen.getByTestId("rename-input") as HTMLInputElement;
-    expect(input.value).toBe("旧标题");
+    // RenameDialog fills the input in a useEffect after mount — waitFor (flake
+    // fix: CI raced the effect and observed '' instead of the prefill).
+    await waitFor(() => expect(input.value).toBe("旧标题"));
     fireEvent.change(input, { target: { value: "新标题" } });
     fireEvent.click(screen.getByTestId("rename-ok"));
     await waitFor(() => expect(calls2.renameSession.length).toBe(1));
