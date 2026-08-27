@@ -58,10 +58,16 @@ export interface ErrorData {
   message?: string;
 }
 
+/** upgrade 事件载荷（main.js 心跳检测 installed_version ≠ current_version → 专用事件） */
+export interface UpgradeData {
+  current_version?: string;
+  installed_version?: string;
+}
+
 /** 统一事件帧（onEvent 回调入参） */
 export interface DaemonEventFrame {
   type: string;
-  data: Record<string, unknown> & { chunks?: DeltaChunk[] } & Partial<DoneData & ToolStartData & ToolEndData & StatusData & PongData & SessionsData & QueuedData & ErrorData>;
+  data: Record<string, unknown> & { chunks?: DeltaChunk[] } & Partial<DoneData & ToolStartData & ToolEndData & StatusData & PongData & SessionsData & QueuedData & ErrorData & UpgradeData>;
   sid?: string | null;
 }
 
@@ -86,6 +92,8 @@ export interface DaemonAppState {
   ownStreamRidBySid: Record<string, string | null>;
   /** 每会话断线标记（P3 finalize：后台会话断线不触发全局 UI） */
   disconnectedBySid: Record<string, boolean>;
+  /** upgrade 事件（心跳检测 installed ≠ current → "重启生效"横幅；null=无待重启提示） */
+  upgradeBanner: { current: string; installed: string } | null;
 }
 
 const SID_NULL = "__emrg_null_sid__";
@@ -106,6 +114,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     busyBySid: {},
     ownStreamRidBySid: {},
     disconnectedBySid: {},
+    upgradeBanner: null,
   });
 }
 
@@ -313,6 +322,19 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         queuedSends.delete(KEY(sid));
         if (!sid) {
           store.update((s) => ({ ...s, connected: false }));
+        }
+        break;
+      }
+      case "upgrade": {
+        // 心跳每 15s 检测到 installed ≠ current 都会重发；同一 installed 版本只
+        // 写一次 store（vanilla lastKnownVersion 语义：不重复弹，dismiss 后不再出现）。
+        const up = data as UpgradeData;
+        const installed = up.installed_version || "";
+        if (installed && installed !== store.get().upgradeBanner?.installed) {
+          store.update((s) => ({
+            ...s,
+            upgradeBanner: { current: up.current_version || s.currentVersion, installed },
+          }));
         }
         break;
       }

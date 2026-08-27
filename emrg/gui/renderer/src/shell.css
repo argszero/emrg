@@ -10,6 +10,8 @@
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--text-1);
+  /* 升级横幅 #upgrade-banner 用 absolute 定位（vanilla #app 为 positioned ancestor） */
+  position: relative;
 }
 
 .react-shell-header {

@@ -11,6 +11,7 @@ const api = {
   sendMessage: (payload) => ipcRenderer.invoke("emrg:sendMessage", payload),
   listSessions: () => ipcRenderer.invoke("emrg:listSessions"),
   restartDaemon: () => ipcRenderer.invoke("emrg:restartDaemon"),
+  relaunchGui: () => ipcRenderer.invoke("emrg:relaunchGui"),
   switchSession: (payload) => ipcRenderer.invoke("emrg:switchSession", payload),
   newSession: (payload) => ipcRenderer.invoke("emrg:newSession", payload),
   deleteSession: (payload) => ipcRenderer.invoke("emrg:deleteSession", payload),

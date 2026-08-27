@@ -175,4 +175,20 @@ describe("createDaemonBridge", () => {
     expect(st.connected).toBe(false);
     expect(st.sessions).toHaveLength(0);
   });
+
+  it("upgrade → store.upgradeBanner；同 installed 心跳重发不重建（dedupe）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "upgrade", data: { current_version: "0.2.83", installed_version: "0.2.84" } });
+    expect(bridge.store.get().upgradeBanner).toEqual({ current: "0.2.83", installed: "0.2.84" });
+    // 心跳每 15s 重发同一版本 → 引用不变（Object.is no-op，不触发 re-render）
+    const before = bridge.store.get();
+    emit({ type: "upgrade", data: { current_version: "0.2.83", installed_version: "0.2.84" } });
+    expect(bridge.store.get()).toBe(before);
+    // 新 installed 版本 → 更新
+    emit({ type: "upgrade", data: { current_version: "0.2.84", installed_version: "0.2.85" } });
+    expect(bridge.store.get().upgradeBanner).toEqual({ current: "0.2.84", installed: "0.2.85" });
+    // 空 installed → 忽略（dev 运行无版本数据）
+    emit({ type: "upgrade", data: { current_version: "0.2.85", installed_version: "" } });
+    expect(bridge.store.get().upgradeBanner).toEqual({ current: "0.2.84", installed: "0.2.85" });
+  });
 });

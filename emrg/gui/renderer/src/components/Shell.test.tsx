@@ -36,6 +36,7 @@ function mockEmrg() {
   const taskDelete = vi.fn().mockResolvedValue({ ok: true });
   const taskTemplateList = vi.fn().mockResolvedValue([{ name: "journal" }]);
   const sendRant = vi.fn().mockResolvedValue({ ok: true, count: 11 });
+  const relaunchGui = vi.fn().mockResolvedValue({ ok: true });
   (window as unknown as { emrg?: unknown }).emrg = {
     onEvent,
     sendMessage,
@@ -52,6 +53,7 @@ function mockEmrg() {
     taskDelete,
     taskTemplateList,
     sendRant,
+    relaunchGui,
   };
   return {
     listeners,
@@ -66,6 +68,7 @@ function mockEmrg() {
     taskDelete,
     taskTemplateList,
     sendRant,
+    relaunchGui,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -420,5 +423,31 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(m.sendRant).toHaveBeenCalledWith({ message: "测试 rant", project: "emrg" }));
     await waitFor(() => expect(m.listRants).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId("rant-dialog")).not.toBeInTheDocument();
+  });
+
+  it("upgrade 事件 → 渲染升级横幅；重启按钮调 relaunchGui（仅 GUI，不碰 daemon）；dismiss 后同版本不重现", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    // 初始无横幅
+    expect(screen.queryByTestId("upgrade-banner")).not.toBeInTheDocument();
+    // 心跳 upgrade 帧（installed 0.2.84 ≠ current 0.2.83）
+    act(() => {
+      m.emit({ type: "upgrade", data: { current_version: "0.2.83", installed_version: "0.2.84" } });
+    });
+    const banner = await screen.findByTestId("upgrade-banner");
+    expect(banner).toBeInTheDocument();
+    // from→to 文案（en 词典）
+    expect(screen.getByText(/upgraded from 0\.2\.83 to 0\.2\.84/i)).toBeInTheDocument();
+    // 重启按钮 → relaunchGui（仅 GUI 进程重启，绝不走 restartDaemon stop 链）
+    fireEvent.click(screen.getByTestId("upgrade-banner-restart"));
+    await waitFor(() => expect(m.relaunchGui).toHaveBeenCalledTimes(1));
+    // dismiss → 隐藏；同版本心跳重发不重现（vanilla lastKnownVersion 语义）
+    fireEvent.click(screen.getByTestId("upgrade-banner-dismiss"));
+    expect(screen.queryByTestId("upgrade-banner")).not.toBeInTheDocument();
+    act(() => {
+      m.emit({ type: "upgrade", data: { current_version: "0.2.83", installed_version: "0.2.84" } });
+    });
+    expect(screen.queryByTestId("upgrade-banner")).not.toBeInTheDocument();
   });
 });
