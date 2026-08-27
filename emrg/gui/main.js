@@ -712,13 +712,13 @@ vision = false
 
     // ── Task/template CRUD IPC (rant 2026-08-12T18:23:15 P3) ──────────
     ipcMain.handle("emrg:taskCreate", async (_e, payload) => {
-      const { name, type, project, interval, enabled, repo, description } = payload || {};
+      const { name, type, project, interval, enabled, repo, description, sandbox } = payload || {};
       if (typeof name !== "string" || !name.trim()) throw new Error("invalid task name");
       if (typeof type !== "string" || !type.trim()) throw new Error("invalid task type");
       if (typeof project !== "string" || !project.trim()) throw new Error("invalid project");
       const frame = await requireConn().sendCommandAndWait("task_create", {
         name: name.trim(), task_type: type.trim(), project: project.trim(),
-        interval, enabled, repo, description,
+        interval, enabled, repo, description, sandbox,
       }, 8000);
       if (!frame.ok && frame.error) throw new Error(frame.error);
       return frame;
