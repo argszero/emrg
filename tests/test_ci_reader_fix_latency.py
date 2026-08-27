@@ -7,6 +7,7 @@ The script is module-friendly; pure functions are tested here without gh.
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from pathlib import Path
 
@@ -84,3 +85,36 @@ class TestMedian:
 
     def test_empty(self) -> None:
         assert rfl.median([]) == 0.0
+
+
+class TestAgeDays:
+    def test_known_age(self) -> None:
+        # exactly 5 days = 432_000 seconds
+        now = dt.datetime(2026, 8, 28, 12, 0, 0, tzinfo=dt.timezone.utc)
+        assert rfl.age_days("2026-08-23T12:00:00Z", now=now) == pytest.approx(5.0)
+
+    def test_zero_for_now(self) -> None:
+        now = dt.datetime(2026, 8, 28, 12, 0, 0, tzinfo=dt.timezone.utc)
+        assert rfl.age_days("2026-08-28T12:00:00Z", now=now) == pytest.approx(0.0)
+
+    def test_future_issue_negative(self) -> None:
+        now = dt.datetime(2026, 8, 28, 12, 0, 0, tzinfo=dt.timezone.utc)
+        assert rfl.age_days("2026-08-29T12:00:00Z", now=now) == pytest.approx(-1.0)
+
+
+class TestCollectOpenIssueAges:
+    def test_filters_pr_rows(self, monkeypatch) -> None:
+        def fake_gh(args):
+            if "state=open" in args:
+                return [
+                    {"number": 1056, "created_at": "2026-08-27T22:49:16Z"},
+                    {"number": 999, "pull_request": {"merged_at": None}},  # PR, skip
+                    {"number": 1000, "created_at": "2026-08-26T10:21:46Z"},
+                ]
+            return []
+
+        monkeypatch.setattr(rfl, "_gh", fake_gh)
+        rows = rfl.collect_open_issue_ages("argszero/emrg", 300)
+        nums = [r[0] for r in rows]
+        assert nums == [1056, 1000]
+        assert all(len(r) == 3 for r in rows)  # (number, age_days, created_at)
