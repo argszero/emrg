@@ -405,3 +405,64 @@ def test_upgrade_prompt_gui_build_steps_are_separate_and_gated() -> None:
         "step order must be: npm install → npm run dist → app.asar freshness gate "
         f"(got install={install_idx} dist={dist_idx} gate={gate_idx})"
     )
+
+
+
+# ── upgrade_prompt.j2 macOS re-seal chain guard (R2250) ───────────────────
+# rant 2026-08-25T09:18:19：electron-builder dir 产物只有主二进制 ad-hoc 签名，
+# bundle 未密封 + 带 com.apple.provenance 等 xattr；macOS 26 把"未密封 + 隔离属性"
+# 的部署副本判为恶意软件移入废纸篓。该修复是 prompt-only——本守卫把 re-seal →
+# copy → verify 的顺序与命令钉死，未来编辑若删除/调换这些步骤立即红。
+def test_upgrade_prompt_macos_reseal_chain_guarded() -> None:
+    prompt = (Path(__file__).parent.parent / "emrg/server/prompts/upgrade_prompt.j2").read_text(
+        encoding="utf-8"
+    )
+    lines = prompt.splitlines()
+
+    # 1. re-seal（3e）必须在 Replace/copy 之前：产物先修好再复制。
+    reseal = next(
+        (ln for ln in lines if "codesign --force --deep --sign -" in ln), None
+    )
+    assert reseal is not None, (
+        "upgrade_prompt.j2 must re-seal the built bundle (codesign --force --deep "
+        "--sign -) before copying — rant 2026-08-25T09:18:19 (macOS 26 moves "
+        "unsealed+xattr copies to Trash as malware)."
+    )
+    replace = next(
+        (ln for ln in lines if ln.strip().startswith("4.") and "Replace" in ln), None
+    )
+    assert replace is not None, "upgrade_prompt.j2 must contain the Replace step"
+    reseal_idx, replace_idx = lines.index(reseal), lines.index(replace)
+    assert reseal_idx < replace_idx, (
+        "re-seal (3e) must happen BEFORE the Replace/copy step — copying an "
+        f"unsealed bundle ships the malware-flagged artifact (got reseal={reseal_idx} "
+        f"replace={replace_idx})"
+    )
+
+    # 2. 构建产物的 xattr 清除必须在复制前（ditto 会传播 xattr）。
+    xattr_build = next(
+        (ln for ln in lines if 'xattr -cr "{{ upgrade_work }}' in ln), None
+    )
+    assert xattr_build is not None, (
+        "upgrade_prompt.j2 must clear xattrs on the BUILT artifact (xattr -cr on "
+        "the dist app) before copying — ditto propagates source xattrs."
+    )
+    assert lines.index(xattr_build) < replace_idx, (
+        "built-artifact xattr clear must precede the Replace/copy step"
+    )
+
+    # 3. 运行副本的 xattr 清除必须存在（step 4 copy 后）。
+    xattr_run = next(
+        (ln for ln in lines if "xattr -cr ~/Applications/EMRG.app" in ln), None
+    )
+    assert xattr_run is not None, (
+        "upgrade_prompt.j2 must clear xattrs on the run copy "
+        "(xattr -cr ~/Applications/EMRG.app) after copying."
+    )
+
+    # 4. verify：3e sanity + step5 install/run 双检 = 至少 3 次 codesign --verify
+    verify = [ln for ln in lines if "codesign --verify --deep --strict" in ln]
+    assert len(verify) >= 3, (
+        "upgrade_prompt.j2 must verify signatures at least 3 times (pre-copy sanity "
+        f"+ install + run copy). Found {len(verify)}: {verify}"
+    )
