@@ -73,6 +73,8 @@ Evolution Cycle (every 30 min)
 
 **Real example**: Someone ranted "TUI needs `/` autocomplete like Codex." The next evolution cycle built it — prefix filtering and arrow-key navigation, merged and deployed. **What you rant about, it improves.**
 
+**Measured feedback loop**: the reader-feedback → merged-fix latency is a measured number, not a claim. `python scripts/reader_fix_latency.py` scans closed issues, follows each "Fixes #N" link to its earliest merged PR, and reports the median issue-to-merge time (e.g. issue #1000 → fix PR #1003: 49m19s). Run it any time to see how fast the loop actually is.
+
 **How to contribute?** Use it. Connect GitHub in Settings, and rant. Your rants become real PRs — the evolution cycle codes, tests, and ships them. No fork, no clone, no code required. **Using EMRG is contributing to EMRG.**
 
 ---

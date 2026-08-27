@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useI18n } from "../lib/i18n";
 import { SettingsPanel } from "./SettingsPanel";
+import { sessionRowView, type SessionRow } from "../lib/openSession";
 import {
   buildEvolveProjects,
   preprocessRantMarkdown,
@@ -33,6 +34,11 @@ export interface WorkspaceViewProps {
   projects?: ProjectRec[];
   tasks?: TaskRec[];
   rants?: RantRec[];
+  /** 当前项目会话列表（Batch 5 接线：Shell 经 listProjectSessions 加载） */
+  projectSessions?: SessionRow[] | null;
+  projectSessionsError?: string | null;
+  /** 激活会话（会话行 "当前" 标记，vanilla App.state.sessionId 语义） */
+  currentSid?: string | null;
   activeView: WorkspaceViewId;
   onSwitch?: (view: WorkspaceViewId) => void;
   /** 设置面板关于 tab 数据（Shell appState 注入，Batch 5 slice 6） */
@@ -59,6 +65,9 @@ export function WorkspaceView({
   projects = [],
   tasks = [],
   rants = [],
+  projectSessions = null,
+  projectSessionsError = null,
+  currentSid = null,
   activeView,
   onSwitch,
   version,
@@ -106,6 +115,9 @@ export function WorkspaceView({
             {sessionsProject ? (
               <ProjectSessions
                 project={sessionsProject}
+                sessions={projectSessions}
+                error={projectSessionsError}
+                currentSid={currentSid}
                 onBack={() => setSessionsProject(null)}
                 onSelect={(sid) => onSelectProjectSession?.(sessionsProject, sid)}
               />
@@ -263,10 +275,16 @@ function ProjectList({
 /** 项目会话子视图（点击项目"查看会话"后展示） */
 function ProjectSessions({
   project,
+  sessions,
+  error,
+  currentSid,
   onBack,
   onSelect,
 }: {
   project: ProjectRec;
+  sessions: SessionRow[] | null;
+  error?: string | null;
+  currentSid?: string | null;
   onBack: () => void;
   onSelect: (sid: string) => void;
 }) {
@@ -279,7 +297,30 @@ function ProjectSessions({
         </button>
         <span className="task-name">{t("projects.sessionsOf", { project: project.name || project.path || "" })}</span>
       </div>
-      <div className="task-empty">{t("projects.noSessions")}</div>
+      {error ? (
+        <div className="task-empty" data-testid="project-sessions-error">{t("openSession.loadFailed", { msg: error })}</div>
+      ) : sessions === null ? (
+        <div className="task-empty" data-testid="project-sessions-loading">{t("dlg.loading")}</div>
+      ) : sessions.length === 0 ? (
+        <div className="task-empty" data-testid="project-sessions-empty">{t("projects.noSessions")}</div>
+      ) : (
+        sessions.map((s) => {
+          const v = sessionRowView(s, currentSid ?? null, t);
+          return (
+            <button
+              type="button"
+              className="help-row"
+              key={s.session_id}
+              data-testid="project-session-row"
+              style={{ width: "100%", textAlign: "left", cursor: "pointer", background: "none", border: "none" }}
+              onClick={() => onSelect(s.session_id)}
+            >
+              <span className="help-cmd">{v.label}</span>
+              <span className="help-hint">{v.marks.join(" · ")}</span>
+            </button>
+          );
+        })
+      )}
     </div>
   );
 }

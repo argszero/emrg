@@ -185,4 +185,72 @@ describe("WorkspaceView", () => {
     await userEvent.click(screen.getByText("待处理"));
     expect(screen.getByTestId("rants-empty")).toHaveTextContent("该状态下暂无 Rant");
   });
+
+  // ── 项目会话子视图（Batch 5 接线：真实 listProjectSessions 数据） ──
+
+  it("项目会话：loading → 会话行（title||id + 当前标记）→ 点击选择", async () => {
+    const onSelect = vi.fn();
+    const { rerender } = render(
+      <I18nProvider lang="zh">
+        <WorkspaceView
+          activeView="projects"
+          projects={[project("p1")]}
+          projectSessions={null}
+          onSelectProjectSession={onSelect}
+        />
+      </I18nProvider>,
+    );
+    await userEvent.click(screen.getByTitle("查看会话"));
+    // loading 态
+    expect(screen.getByTestId("project-sessions-loading")).toBeTruthy();
+    // 数据到达 → 会话行
+    rerender(
+      <I18nProvider lang="zh">
+        <WorkspaceView
+          activeView="projects"
+          projects={[project("p1")]}
+          projectSessions={[
+            { session_id: "s1", title: "会话甲", updated_at: "2026-08-26T10:00:00+08:00" },
+            { session_id: "s2", updated_at: null },
+          ]}
+          currentSid="s1"
+          onSelectProjectSession={onSelect}
+        />
+      </I18nProvider>,
+    );
+    const rows = screen.getAllByTestId("project-session-row");
+    expect(rows.length).toBe(2);
+    expect(rows[0]).toHaveTextContent("会话甲"); // title 优先
+    expect(rows[0]).toHaveTextContent("当前"); // currentSid 标记
+    expect(rows[1]).toHaveTextContent("s2"); // 无 title → 完整 id
+    await userEvent.click(rows[1]);
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect.mock.calls[0][0]).toMatchObject({ name: "p1", path: "/proj/p1" });
+    expect(onSelect.mock.calls[0][1]).toBe("s2");
+  });
+
+  it("项目会话：空列表 → noSessions；错误 → loadFailed", async () => {
+    const { rerender } = render(
+      <I18nProvider lang="zh">
+        <WorkspaceView
+          activeView="projects"
+          projects={[project("p1")]}
+          projectSessions={[]}
+        />
+      </I18nProvider>,
+    );
+    await userEvent.click(screen.getByTitle("查看会话"));
+    expect(screen.getByTestId("project-sessions-empty")).toHaveTextContent("暂无会话");
+    rerender(
+      <I18nProvider lang="zh">
+        <WorkspaceView
+          activeView="projects"
+          projects={[project("p1")]}
+          projectSessions={null}
+          projectSessionsError="boom"
+        />
+      </I18nProvider>,
+    );
+    expect(screen.getByTestId("project-sessions-error")).toHaveTextContent("boom");
+  });
 });
