@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import {
   type AssistantEntry,
@@ -45,12 +45,68 @@ export function TranscriptView({ store, sid = null, renderer }: TranscriptViewPr
 
   void version; // 版本号变化 → 重新读取 entries（同一数组引用被原地变更）
 
+  // ── 滚动跟随（rant 2026-08-28T22:36:18：React 迁移丢失 vanilla 的 autoScroll/回到底部） ──
+  // React 版之前无任何 scroll/autoScroll 追踪 → 新消息不断落到底部遮罩区，需手动滚动。
+  // 以下镜像 vanilla app.js:773-776（autoScroll 标志 + 底部 40px 容差）与 app.js:1711-1719
+  // （回到底部悬浮按钮）。scroll 事件不冒泡 → 用 capture:true 监听（vanilla 同）。
+  const viewportRef = useRef<HTMLDivElement>(null);
+  // autoScroll 用 ref（滚动高频，避免每帧 setState 重渲染）；atBottom 用 state（驱动按钮显隐）
+  const autoScrollRef = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
+
+  const updateAutoScroll = useCallback((el: HTMLDivElement) => {
+    const ab = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+    autoScrollRef.current = ab;
+    setAtBottom(ab);
+  }, []);
+
+  // scroll 监听（capture，因 scroll 不冒泡；挂在 .transcript-view 自身上，捕获子元素滚动）
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    const onScroll = () => updateAutoScroll(el);
+    el.addEventListener("scroll", onScroll, { capture: true });
+    return () => el.removeEventListener("scroll", onScroll, { capture: true });
+  }, [updateAutoScroll]);
+
+  // 新消息 append/流入 → 若 autoScroll 为 true 则滚到底。
+  // 依赖 version（每次 store 变更 +1）而非 entries.length：流式文本是原地 append
+  // 进已有 assistant 段（数组长度不变），依赖 length 会让流式期间不跟随 → 新消息
+  // 落到底部遮罩区。version 变化覆盖 delta/tool/done 全部写入，autoScroll 为真即贴底。
+  useEffect(() => {
+    const el = viewportRef.current;
+    if (!el) return;
+    if (autoScrollRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+    // 首次无条目时不误滚；version 变更即触发
+  }, [version]);
+
+  const scrollToBottom = () => {
+    const el = viewportRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    autoScrollRef.current = true;
+    setAtBottom(true);
+  };
+
   return (
-    <div className="transcript-view" data-testid="transcript-view">
+    <div className="transcript-view" data-testid="transcript-view" ref={viewportRef}>
       {loadBar ? <div className="history-load-bar">{loadBar}</div> : null}
       {entries.map((entry, i) => (
         <EntryView key={i} entry={entry} index={i} t={t} md={md} store={store} sid={sid} />
       ))}
+      {!atBottom ? (
+        <button
+          type="button"
+          className="transcript-back-to-bottom"
+          data-testid="back-to-bottom"
+          onClick={scrollToBottom}
+          title={t("chat.backToBottom")}
+        >
+          ↓ {t("chat.backToBottom")}
+        </button>
+      ) : null}
     </div>
   );
 }

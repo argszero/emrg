@@ -298,12 +298,13 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       if (rid) {
         let entryIndex = s.groupIndex.get(rid);
         let entry = entryIndex !== undefined ? s.entries[entryIndex] : undefined;
-        if (!entry || entry.kind !== "assistant") {
-          // G104：tool_start 也建组（LLM 先出 tool_calls 后出文本）
-          const e: AssistantEntry = { kind: "assistant", rid, isOwn: ownStreamRequestId === rid, segments: [] };
-          s.entries.push(e);
-          s.groupIndex.set(rid, s.entries.length - 1);
-        } else if (assistantHasText(entry)) {
+        // rant 2026-08-28T22:40:33：不再预建空 AssistantEntry。tool_start 不含任何文本，
+        // 若在此建一个空 assistant 节点，它会固定在 entries 中被推到所有工具之前，
+        // 后续 message_delta 经 groupIndex 找到这个空节点把文本塞进去 → 文本被渲染在
+        // 工具上方（「文本 → 全部工具」）。文本只在真正的 message_delta 到达时
+        // （handleDelta）才新建 AssistantEntry，使工具行按真实到达顺序进入 entries，
+        // 顺序恢复为「工具1→工具2→…→文本」。
+        if (entry && entry.kind === "assistant" && assistantHasText(entry)) {
           // rant 21:57:10：已有文本段之后来了工具 → 封存当前段
           const active = entry.segments[entry.segments.length - 1];
           active.sealed = true;

@@ -153,4 +153,41 @@ describe("TranscriptView", () => {
     expect(div).not.toBeNull();
     expect(div!.textContent).toBe("legacy");
   });
+
+  it("上翻离底显示「回到底部」按钮，点击回底 + 设 autoScroll（rant 2026-08-28T22:36:18）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("bottom message", "s1");
+    // 手动把滚动属性置为「已在底部」→ 按钮隐藏
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    // 模拟用户上翻：scrollTop=0（远小于 scrollHeight）
+    Object.defineProperty(viewport, "scrollTop", { value: 0, configurable: true, writable: true });
+    Object.defineProperty(viewport, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
+    // 触发 scroll（capture listener 会拾取）
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+    expect(container.querySelector(".transcript-back-to-bottom")).not.toBeNull();
+    // 点击回底
+    act(() => {
+      container.querySelector(".transcript-back-to-bottom")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(viewport.scrollTop).toBe(1000); // 滚到底
+  });
+
+  it("新消息到达时若在底部则自动滚底（autoScroll 标志）", () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    const { container } = setup(store, "s1");
+    const viewport = container.querySelector(".transcript-view") as HTMLElement;
+    Object.defineProperty(viewport, "scrollTop", { value: 1000, configurable: true, writable: true });
+    Object.defineProperty(viewport, "scrollHeight", { value: 1000, configurable: true });
+    Object.defineProperty(viewport, "clientHeight", { value: 400, configurable: true });
+    act(() => {
+      viewport.dispatchEvent(new Event("scroll", { bubbles: false }));
+    });
+    // 底部 → autoScroll=true；新消息到达 → 自动滚到底
+    store.addUserMessage("new", "s1");
+    expect(viewport.scrollTop).toBe(1000); // autoScroll 触发 scrollTop=scrollHeight
+  });
 });
