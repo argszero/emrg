@@ -342,7 +342,8 @@
   box-shadow: 0 0 0 3px var(--accent-soft), var(--shadow-md);
 }
 
-#input {
+#input,
+.tiptap-input {
   flex: 1;
   border: none;
   background: transparent;
@@ -351,10 +352,38 @@
   max-height: 150px;
   line-height: 1.6;
   padding: var(--sp-2) 0;
+  outline: none;
+  overflow-y: auto;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text-1);
+  caret-color: var(--accent);
 }
-#input:focus {
+#input:focus,
+.tiptap-input:focus,
+.tiptap-input:focus-visible {
   border: none;
   box-shadow: none;
+  outline: none;
+}
+
+/* tiptap 内容可编辑区内部段落：默认 p 有 margin，输入框内收紧 */
+.tiptap-input .ProseMirror {
+  min-height: 1.6em;
+}
+.tiptap-input .ProseMirror p {
+  margin: 0;
+}
+.tiptap-input .ProseMirror p.is-editor-empty:first-child {
+  position: relative;
+}
+.tiptap-input .ProseMirror p.is-editor-empty:first-child::before {
+  position: absolute;
+  left: 0;
+  top: 0;
+  content: attr(data-placeholder);
+  color: var(--text-3);
+  pointer-events: none;
 }
 
 .composer-hint {

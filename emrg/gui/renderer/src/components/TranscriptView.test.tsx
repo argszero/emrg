@@ -34,10 +34,24 @@ describe("TranscriptView", () => {
     store.addHistoryMessage("old message", "s1");
     store.setLoadBar("加载历史中…", "s1");
     const { container } = setup(store, "s1");
-    expect(screen.getByText("hello")).toHaveClass("msg", "user");
+    // Stage 1：用户/历史消息走 markdown 渲染 → 文本在 .msg.user 内的渲染 span 里
     expect(screen.getByText("system note")).toHaveClass("msg", "system");
-    expect(screen.getByText("old message")).toHaveClass("history");
+    const userDiv = container.querySelector(".msg.user");
+    expect(userDiv).not.toBeNull();
+    expect(userDiv!.textContent).toBe("hello");
+    const historyDiv = container.querySelector(".msg.user.history");
+    expect(historyDiv).not.toBeNull();
+    expect(historyDiv!.textContent).toBe("old message");
     expect(container.querySelector(".history-load-bar")).toHaveTextContent("加载历史中…");
+  });
+
+  it("用户消息 markdown 渲染：富文本不字面显示（rant 2026-08-28T14:07:29 验收）", async () => {
+    const store = createTranscriptStore({ t: (k) => k });
+    store.addUserMessage("**bold** `code` [link](https://x)", "s1");
+    const { container } = setup(store, "s1");
+    // 假渲染器把 markdown 包进 .md-test → 证明走了 markdown 路径而非纯文本直出
+    const mdDiv = await screen.findByText("**bold** `code` [link](https://x)", { selector: ".md-test" });
+    expect(mdDiv).toBeInTheDocument();
   });
 
   it("流式显示纯文本，done 后渲染 markdown（✦ 前缀不破坏块语法）", async () => {
@@ -139,7 +153,9 @@ describe("TranscriptView", () => {
   it("sid=null 缺省桶：无 sid 事件渲染到默认视图", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.addUserMessage("legacy", null);
-    setup(store);
-    expect(screen.getByText("legacy")).toHaveClass("msg", "user");
+    const { container } = setup(store);
+    const div = container.querySelector(".msg.user");
+    expect(div).not.toBeNull();
+    expect(div!.textContent).toBe("legacy");
   });
 });

@@ -67,9 +67,20 @@ interface EntryViewProps {
 function EntryView({ entry, index, t, md, store, sid }: EntryViewProps): ReactNode {
   switch (entry.kind) {
     case "user":
-      return <div className="msg user">{entry.text}</div>;
+      // Stage 1（rant 2026-08-28T14:07:29）：用户消息为 markdown 字符串（tiptap 序列化），
+      // 与 TUI 的 UserMarkdown 对齐渲染——否则 **bold** 会字面显示
+      return (
+        <div className="msg user">
+          <MarkdownText text={entry.text} md={md} stripMark={false} />
+        </div>
+      );
     case "history":
-      return <div className="msg user history">{entry.text}</div>;
+      // 历史消息同 markdown 渲染（旧纯文本是合法 markdown，回显不损坏）
+      return (
+        <div className="msg user history">
+          <MarkdownText text={entry.text} md={md} stripMark={false} />
+        </div>
+      );
     case "system":
       return <div className="msg system">{entry.text}</div>;
     case "assistant":
@@ -119,18 +130,19 @@ function AssistantSegmentView({
   );
 }
 
-/** done 后整体 markdown 渲染（与旧 done 渲染同源 renderMarkdown；✦ 标记在组件层，剥离前缀） */
-function MarkdownText({ text, md }: { text: string; md: MarkdownRenderer }) {
+/** done 后整体 markdown 渲染（与旧 done 渲染同源 renderMarkdown；✦ 标记剥离仅限助手消息） */
+function MarkdownText({ text, md, stripMark = true }: { text: string; md: MarkdownRenderer; stripMark?: boolean }) {
   const [html, setHtml] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    md.renderMarkdown(text.replace(/^✦\s*/, "")).then((h) => {
+    const src = stripMark ? text.replace(/^✦\s*/, "") : text;
+    md.renderMarkdown(src).then((h) => {
       if (!cancelled) setHtml(h);
     });
     return () => {
       cancelled = true;
     };
-  }, [text, md]);
+  }, [text, md, stripMark]);
   if (html === null) return <span className="assistant-plain">{text}</span>;
   return <span className="assistant-html" dangerouslySetInnerHTML={{ __html: html }} />;
 }
