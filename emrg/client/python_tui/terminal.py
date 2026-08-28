@@ -249,6 +249,17 @@ class Terminal:
         status_lines = _get_lines("status")[:1]
         composer_lines = _get_lines("composer")[:10]
         prompt_lines = _get_lines("prompts")[:1]
+        # rant 2026-08-28T22:53:24 — composer height must track the composer's
+        # actual rendered line count, not a hard-coded 3.  A multiline input
+        # (text containing "\n", e.g. pasted text or pressing Enter first)
+        # renders more lines than single-line input; a fixed height makes the
+        # viewport's region model (composer_height / chat_height / chat_region)
+        # disagree with what write_lines_to_buffer actually lays out, which is
+        # the reported "错行" (input content misaligned with the "> " prompt).
+        # Here we sync the model with reality so every downstream consumer uses
+        # the correct height.  The render loop already computes allocation from
+        # len(composer_lines) below; this keeps the viewport object in lockstep.
+        self.viewport.composer_height = len(composer_lines)
         # Get ALL chat lines first (without truncation) so we know the real
         # needed height.  Truncation depends on viewport_height, but
         # viewport_height should depend on content — not the other way around.

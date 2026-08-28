@@ -94,3 +94,52 @@ def test_shutdown_clears_screen():
     # 清屏后归位 (0,0)：CLEAR_SCREEN 之后必须紧跟 CURSOR_HOME
     from emrg.client.python_tui.output import CURSOR_HOME
     assert out.index(CLEAR_SCREEN) < out.index(CURSOR_HOME), "clear screen must precede cursor home"
+
+
+class FakeComposer:
+    """Composer fake that mimics InputWidget.render: one top/bottom separator line
+    plus one Line per logical input line (multi-line text → more than 3 rows).
+
+    rant 2026-08-28T22:53:24 — a fixed composer_height=3 mis-models multiline
+    input; the viewport must track the actual rendered row count.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.dirty = True
+
+    def render(self, ctx: RenderContext) -> list[Line]:
+        lines = [Line(spans=[Span(text="─" * ctx.width)])]
+        # Split on "\n": each logical line, including leading/trailing empty
+        # strings (matches InputWidget.render's raw = text.split("\n")).
+        for logical in self.text.split("\n"):
+            lines.append(Line(spans=[Span(text="> " + logical)]))
+        lines.append(Line(spans=[Span(text="─" * ctx.width)]))
+        return lines
+
+
+def test_composer_height_tracks_multiline_render():
+    """viewport.composer_height must reflect the composer's actual line count.
+
+    For a single-line input the composer renders 3 rows (sep + content + sep).
+    For multiline input (text containing "\n") it renders more. A hard-coded
+    height of 3 would make the viewport's region model disagree with the real
+    layout → the reported "错行" (composer content misaligned with "> ").
+    """
+    term = Terminal()
+    term.mount(composer=FakeComposer("hello"))
+    with redirect_stdout(io.StringIO()):
+        term.render(full=True)
+    assert term.viewport.composer_height == 3, "single-line → 3 rows (sep+content+sep)"
+
+    term2 = Terminal()
+    term2.mount(composer=FakeComposer("line1\nline2"))
+    with redirect_stdout(io.StringIO()):
+        term2.render(full=True)
+    assert term2.viewport.composer_height == 4, "2 logical lines → 4 rows"
+
+    term3 = Terminal()
+    term3.mount(composer=FakeComposer("\ntest"))
+    with redirect_stdout(io.StringIO()):
+        term3.render(full=True)
+    assert term3.viewport.composer_height == 4, "leading newline → 4 rows"
