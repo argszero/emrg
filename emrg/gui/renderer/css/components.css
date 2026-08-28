@@ -14,6 +14,13 @@
   transition:
     background-color var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease);
+  /* rant 2026-08-28T13:31:55：Electron 31.7.7 (Chromium 126) 在 macOS 26 上，
+     scroll 容器（.react-shell-sidebar overflow-y:auto）内 hover 的 background-color
+     150ms 过渡触发主线程 repaint 间歇性整行闪烁。持久提升到独立合成层
+     （translateZ(0) 建层，will-change 提示），过渡改为在 GPU 层进行，
+     不再与滚动容器的合成层抢主线程。 */
+  transform: translateZ(0);
+  will-change: background-color;
 }
 .conv-item:hover {
   background: var(--bg-soft);
