@@ -92,10 +92,6 @@
   padding: var(--sp-1) 0;
   user-select: none;
 }
-.msg.remote-label {
-  font-size: var(--fs-aux);
-  color: var(--text-3);
-}
 /* 历史消息（rant 14:15:12：只读展示，视觉弱化区分于实时消息） */
 .msg.user.history {
   opacity: 0.72;
