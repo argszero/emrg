@@ -34,6 +34,10 @@ export interface TaskRec {
   last_run_at?: string | null;
   saturation?: { heartbeat_active?: boolean; heartbeat_interval?: number } | null;
   config?: { project?: string; repo?: string; sandbox?: string } | null;
+  /** 任务面板「打开会话」所需字段（daemon TaskHandler.status() 返回，vanilla #924 迁移时丢失） */
+  session_id?: string;
+  project?: string;
+  project_path?: string;
 }
 
 export type TFunc = (key: string, vars?: Record<string, unknown>) => string;

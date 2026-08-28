@@ -51,6 +51,8 @@ export interface WorkspaceViewProps {
   onTriggerTask?: (task: TaskRec) => void;
   onEditTask?: (task: TaskRec) => void;
   onDeleteTask?: (task: TaskRec) => void;
+  /** 任务面板「打开会话」（vanilla #924：switchSession 到任务所属会话，无 session_id 时按钮禁用） */
+  onOpenSessionTask?: (task: TaskRec) => void;
   onNewRant?: () => void;
 }
 
@@ -79,6 +81,7 @@ export function WorkspaceView({
   onTriggerTask,
   onEditTask,
   onDeleteTask,
+  onOpenSessionTask,
   onNewRant,
 }: WorkspaceViewProps) {
   const { t } = useI18n();
@@ -156,6 +159,7 @@ export function WorkspaceView({
               tasks={tasks}
               t={t}
               onTrigger={onTriggerTask}
+              onOpenSession={onOpenSessionTask}
               onEdit={onEditTask}
               onDelete={onDeleteTask}
             />
@@ -331,12 +335,14 @@ function TaskList({
   tasks,
   t,
   onTrigger,
+  onOpenSession,
   onEdit,
   onDelete,
 }: {
   tasks: TaskRec[];
   t: (k: string, v?: Record<string, unknown>) => string;
   onTrigger?: (task: TaskRec) => void;
+  onOpenSession?: (task: TaskRec) => void;
   onEdit?: (task: TaskRec) => void;
   onDelete?: (task: TaskRec) => void;
 }) {
@@ -380,6 +386,17 @@ function TaskList({
                   onClick={() => onTrigger(task)}
                 >
                   {t("settings.taskTrigger")}
+                </button>
+              )}
+              {onOpenSession && (
+                <button
+                  type="button"
+                  className="model-action-btn"
+                  title={t("settings.taskOpenSession")}
+                  disabled={!task.session_id}
+                  onClick={() => onOpenSession(task)}
+                >
+                  {t("settings.taskOpenSession")}
                 </button>
               )}
               {onEdit && (

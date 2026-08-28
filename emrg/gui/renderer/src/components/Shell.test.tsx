@@ -25,7 +25,7 @@ function mockEmrg() {
   const clearSession = vi.fn().mockResolvedValue({ ok: true });
   const compactSession = vi.fn().mockResolvedValue({ ok: true });
   const listProjects = vi.fn().mockResolvedValue([{ name: "emrg", path: "/p/emrg" }]);
-  const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true }]);
+  const listTasks = vi.fn().mockResolvedValue([{ name: "evo", type: "evolution", enabled: true, session_id: "emrg-evolution-evo", project_path: "/p/emrg" }]);
   const listRants = vi.fn().mockResolvedValue([{ timestamp: "2026-08-26T12:00:00+08:00", project: "emrg", status: "pending", message: "x" }]);
   const listMemories = vi.fn().mockResolvedValue([]);
   const listSkills = vi.fn().mockResolvedValue([]);
@@ -37,6 +37,7 @@ function mockEmrg() {
   const taskTemplateList = vi.fn().mockResolvedValue([{ name: "journal" }]);
   const sendRant = vi.fn().mockResolvedValue({ ok: true, count: 11 });
   const relaunchGui = vi.fn().mockResolvedValue({ ok: true });
+  const switchSession = vi.fn().mockResolvedValue({ ok: true });
   (window as unknown as { emrg?: unknown }).emrg = {
     onEvent,
     sendMessage,
@@ -54,6 +55,7 @@ function mockEmrg() {
     taskTemplateList,
     sendRant,
     relaunchGui,
+    switchSession,
   };
   return {
     listeners,
@@ -69,6 +71,7 @@ function mockEmrg() {
     taskTemplateList,
     sendRant,
     relaunchGui,
+    switchSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
 }
@@ -292,6 +295,24 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(m.listTasks).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
     expect(screen.getByTestId("task-row")).toHaveTextContent("evo");
+  });
+
+  it("任务行「打开会话」→ switchSession(sessionId, projectPath) + 回到会话视图（vanilla #924）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("nav-tasks"));
+    await waitFor(() => expect(screen.getByTestId("task-row")).toBeInTheDocument());
+    // 打开会话按钮存在且可点（有 session_id）
+    const openBtn = screen.getByTitle("Open session");
+    expect(openBtn).toBeEnabled();
+    fireEvent.click(openBtn);
+    await waitFor(() =>
+      expect(m.switchSession).toHaveBeenCalledWith({ sessionId: "emrg-evolution-evo", projectPath: "/p/emrg" }),
+    );
+    // 切回会话视图（transcript + composer 可见）
+    await waitFor(() => expect(screen.getByTestId("composer")).toBeInTheDocument());
+    expect(screen.queryByTestId("panel-tasks")).not.toBeInTheDocument();
   });
 
   it("进入 Rant 面板 → 加载 listRants 并渲染 rant 行", async () => {

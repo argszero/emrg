@@ -104,15 +104,16 @@ describe("WorkspaceView", () => {
 
   it("任务列表：状态徽标 + 倒计时 + meta + 操作回调", async () => {
     const onTrigger = vi.fn();
+    const onOpenSession = vi.fn();
     const onEdit = vi.fn();
     const onDelete = vi.fn();
     const startedAt = Math.floor(Date.now() / 1000) - 100; // 100s 前启动
     const tasks = [
       task("daily-report", { running: true, started_at: startedAt }),
-      task("evolve", { next_run_in_seconds: 83 }),
+      task("evolve", { next_run_in_seconds: 83, session_id: "emrg-evolution-evolve", project_path: "/proj/evolve" }),
       task("idle", {}),
     ];
-    setup({ activeView: "tasks", tasks, onTriggerTask: onTrigger, onEditTask: onEdit, onDeleteTask: onDelete });
+    setup({ activeView: "tasks", tasks, onTriggerTask: onTrigger, onOpenSessionTask: onOpenSession, onEditTask: onEdit, onDeleteTask: onDelete });
     expect(screen.getAllByTestId("task-row")).toHaveLength(3);
     const badges = screen.getAllByTestId("task-status-badge");
     expect(badges[0]).toHaveTextContent("运行中");
@@ -123,6 +124,22 @@ describe("WorkspaceView", () => {
     expect(triggerBtns[0]).toBeDisabled();
     await userEvent.click(triggerBtns[2]);
     expect(onTrigger).toHaveBeenCalledWith(tasks[2]);
+    // 打开会话（vanilla #924 顺序：触发→打开会话→编辑→删除）：无 session_id 禁用
+    const openBtns = screen.getAllByTitle("打开会话");
+    expect(openBtns).toHaveLength(3);
+    expect(openBtns[0]).toBeDisabled();
+    expect(openBtns[1]).toBeEnabled();
+    expect(openBtns[2]).toBeDisabled();
+    await userEvent.click(openBtns[1]);
+    expect(onOpenSession).toHaveBeenCalledWith(tasks[1]);
+    // 行内按钮顺序：触发 → 打开会话 → 编辑 → 删除
+    const firstRowBtns = screen.getAllByTestId("task-row")[0].querySelectorAll(".model-action-btn");
+    expect(Array.from(firstRowBtns).map((b) => b.getAttribute("title"))).toEqual([
+      "触发",
+      "打开会话",
+      "编辑",
+      "删除",
+    ]);
     // 编辑/删除
     await userEvent.click(screen.getAllByTitle("编辑")[0]);
     expect(onEdit).toHaveBeenCalledWith(tasks[0]);
