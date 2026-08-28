@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
-import { EditorContent, useEditor, type Editor } from "@tiptap/react";
+import { EditorContent, useEditor, useEditorState, type Editor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import { Markdown } from "tiptap-markdown";
+import DOMPurify from "../../../vendor/dompurify.min.js";
 import { parseInput } from "../lib/commands";
 import {
   CMD_MENU_CLOSED,
@@ -26,7 +27,9 @@ import type { TranscriptStore } from "../lib/transcript";
  * - 保留现有功能：Enter=发送 / Shift+Enter=换行（hardBreak）/ Ctrl+Enter=发送、
  *   / 补全菜单（editor.onUpdate + keydown 拦截）、高度自适应 ≤150px（CSS max-height）、
  *   G143 requestId 预生成、P2 busy 队列注入（#655）、失败恢复（setContent 回填 markdown）。
- * - Stage 2（后续 cycle）：mini 格式栏 + 格式快捷键 + DOMPurify 粘贴净化。
+ * - Stage 2（本 cycle）：mini 格式栏（粗体/斜体/删除线/行内代码/链接/无序/有序/引用/标题）
+ *   + 格式快捷键（⌘B/I/⇧S/E/K/⇧7/⇧8/⇧B/Alt 1-3——K/⇧7/⇧8 为显式补挂，其余 StarterKit 内置）
+ *   + DOMPurify 粘贴净化（transformPastedHTML 拦截 HTML 粘贴路径，防恶意脚本）。
  * - sendMessage 注入式（测试传假实现；默认 window.emrg.sendMessage）。
  * - 类名与 vanilla 一致（composer-card / cmd-menu / cmd-menu-item / send-btn）。
  */
@@ -63,6 +66,44 @@ export interface ComposerProps {
 
 const MAX_INPUT_HEIGHT = 150;
 
+/** 格式命令（Stage 2）：以 editor 为参的纯函数——editor 单例闭包经 fmtRef 桥接给按钮/快捷键 */
+function cycleHeading(ed: Editor | null): void {
+  if (!ed) return;
+  // tiptap v3 isActive/getAttributes 在混合选区（heading + 尾随空段落）不可靠 →
+  // 从选区起点所在块节点直接读级别（toggleHeading 会把末块转标题并追加尾随空段落）
+  const { from } = ed.state.selection;
+  const parent = ed.state.doc.resolve(from).parent;
+  const level = parent.type.name === "heading" ? (parent.attrs.level as number) : 0;
+  const next = level >= 3 ? 0 : level + 1; // p → h1 → h2 → h3 → p
+  if (next === 0) ed.chain().focus().setParagraph().run();
+  else ed.chain().focus().toggleHeading({ level: next as 1 | 2 | 3 }).run();
+}
+
+function toggleLink(ed: Editor | null, t: TranslateFn): void {
+  if (!ed) return;
+  if (ed.isActive("link")) {
+    ed.chain().focus().extendMarkRange("link").unsetLink().run();
+    return;
+  }
+  const href = window.prompt(t("composer.linkPrompt"), "https://");
+  if (!href) return;
+  ed.chain().focus().extendMarkRange("link").setLink({ href }).run();
+}
+
+/** 格式栏按钮定义（id → 命令 + 标签类 + i18n key） */
+const FMT_BUTTONS = [
+  { id: "bold", label: "B", labelClass: "fmt-label-bold" },
+  { id: "italic", label: "I", labelClass: "fmt-label-italic" },
+  { id: "strike", label: "S", labelClass: "fmt-label-strike" },
+  { id: "code", label: "</>", labelClass: "fmt-label-code" },
+  { id: "link", label: "🔗", labelClass: "" },
+  { id: "bullet", label: "•", labelClass: "" },
+  { id: "ordered", label: "1.", labelClass: "" },
+  { id: "quote", label: "❝", labelClass: "" },
+  { id: "heading", label: "H", labelClass: "fmt-label-heading" },
+] as const;
+
+
 export function Composer({
   store,
   sid = null,
@@ -83,6 +124,19 @@ export function Composer({
   menuRef.current = menu;
   const tRef = useRef(t);
   tRef.current = t;
+  // 格式命令 ref 桥接（editor/菜单闭包只创建一次 → 变化值走 ref）
+  const fmtRef = useRef<Record<string, () => void>>({});
+  fmtRef.current = {
+    bold: () => editor?.chain().focus().toggleBold().run(),
+    italic: () => editor?.chain().focus().toggleItalic().run(),
+    strike: () => editor?.chain().focus().toggleStrike().run(),
+    code: () => editor?.chain().focus().toggleCode().run(),
+    bullet: () => editor?.chain().focus().toggleBulletList().run(),
+    ordered: () => editor?.chain().focus().toggleOrderedList().run(),
+    quote: () => editor?.chain().focus().toggleBlockquote().run(),
+    heading: () => cycleHeading(editor),
+    link: () => toggleLink(editor, tRef.current),
+  };
 
   // 发送函数解析（默认走 preload 桥）
   const sendFn =
@@ -138,8 +192,29 @@ export function Composer({
           void submitRef.current();
           return true;
         }
+        // 格式快捷键（Stage 2）：K/⇧7/⇧8 无内置绑定 → 显式补挂；其余（B/I/⇧S/E/⇧B/Alt 1-3）
+        // 由 StarterKit 内置 keymap 处理（这里 return false 放行）
+        const mod = event.metaKey || event.ctrlKey;
+        if (mod && event.code === "Digit8" && event.shiftKey) {
+          event.preventDefault();
+          fmtRef.current.bullet();
+          return true;
+        }
+        if (mod && event.code === "Digit7" && event.shiftKey) {
+          event.preventDefault();
+          fmtRef.current.ordered();
+          return true;
+        }
+        if (mod && event.key.toLowerCase() === "k") {
+          event.preventDefault();
+          fmtRef.current.link();
+          return true;
+        }
         return false;
       },
+      // Stage 2 粘贴安全：HTML 粘贴路径经 DOMPurify 净化（script/事件属性剥离；
+      // tiptap-markdown 的纯文本粘贴分支本身无 HTML 注入面）
+      transformPastedHTML: (html) => DOMPurify.sanitize(html),
     },
     onUpdate: ({ editor }) => {
       const text = editor.getText();
@@ -162,6 +237,31 @@ export function Composer({
       if (editorRef) editorRef.current = null;
     };
   }, [editor, editorRef]);
+
+  // 格式栏激活态（Stage 2）：订阅 editor 事务，按钮高亮当前格式（无 deps → 每次事务重算）
+  const active =
+    useEditorState({
+      editor,
+      selector: ({ editor: e }) => ({
+        bold: e?.isActive("bold") ?? false,
+        italic: e?.isActive("italic") ?? false,
+        strike: e?.isActive("strike") ?? false,
+        code: e?.isActive("code") ?? false,
+        bullet: e?.isActive("bulletList") ?? false,
+        ordered: e?.isActive("orderedList") ?? false,
+        quote: e?.isActive("blockquote") ?? false,
+        heading: e?.isActive("heading") ?? false,
+      }),
+    }) ?? {
+      bold: false,
+      italic: false,
+      strike: false,
+      code: false,
+      bullet: false,
+      ordered: false,
+      quote: false,
+      heading: false,
+    };
 
   async function submit(): Promise<void> {
     if (!editor) return;
@@ -244,6 +344,23 @@ export function Composer({
           ))}
         </div>
       ) : null}
+      <div className="fmt-bar" role="toolbar" aria-label={t("composer.formatBar")} data-testid="fmt-bar">
+        {FMT_BUTTONS.map((b) => (
+          <button
+            key={b.id}
+            type="button"
+            className={`fmt-btn${active[b.id as keyof typeof active] ? " active" : ""}`}
+            title={t(`composer.${b.id}`)}
+            aria-label={t(`composer.${b.id}`)}
+            aria-pressed={active[b.id as keyof typeof active]}
+            data-testid={`fmt-${b.id}`}
+            onMouseDown={(e) => e.preventDefault()} // 防失焦——保持选区，点击后命令可作用于选中文本
+            onClick={() => fmtRef.current[b.id]()}
+          >
+            <span className={b.labelClass}>{b.label}</span>
+          </button>
+        ))}
+      </div>
       <div className="composer-card">
         <EditorContent editor={editor} className="composer-editor" />
         <button

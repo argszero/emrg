@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { Editor } from "@tiptap/react";
@@ -37,11 +37,11 @@ function setup(
     });
   };
   /** 在编辑器 DOM 上派发真实 keydown（tiptap editorProps.handleKeyDown 拦截） */
-  const press = (key: string, mods: { shiftKey?: boolean; ctrlKey?: boolean } = {}) => {
+  const press = (key: string, mods: { shiftKey?: boolean; ctrlKey?: boolean } = {}, code?: string) => {
     act(() => {
       const dom = editorRef.current?.view.dom;
       if (!dom) throw new Error("editor not mounted");
-      dom.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...mods }));
+      dom.dispatchEvent(new KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true, ...mods }));
     });
   };
   return { ...utils, editor, input, type, press };
@@ -306,5 +306,235 @@ describe("Composer — 发送流", () => {
     // G124：ownStream 以 daemon 回显为准
     const version = store.getVersion();
     void version;
+  });
+});
+
+describe("Composer — 格式栏与快捷键（Stage 2, rant 14:07:29）", () => {
+  /** 全选 + 取 markdown（tiptap-markdown 序列化断言） */
+  function mdOf(s: ReturnType<typeof setup>, editor: Editor): string {
+    const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+    return md.trim();
+  }
+
+  it("格式栏渲染 9 个按钮（粗体/斜体/删除线/代码/链接/无序/有序/引用/标题）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    await waitEditor(s);
+    expect(screen.getByTestId("fmt-bar")).toBeInTheDocument();
+    const ids = ["bold", "italic", "strike", "code", "link", "bullet", "ordered", "quote", "heading"];
+    for (const id of ids) expect(screen.getByTestId(`fmt-${id}`)).toBeInTheDocument();
+  });
+
+  it("粗体按钮 → 选中文本序列化为 **bold**", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("hello bold");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-bold"));
+    expect(mdOf(s, editor)).toContain("**hello bold**");
+    // 激活态高亮
+    await waitFor(() => expect(screen.getByTestId("fmt-bold")).toHaveClass("active"));
+  });
+
+  it("斜体按钮 → *italic*", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("emph");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-italic"));
+    expect(mdOf(s, editor)).toContain("*emph*");
+  });
+
+  it("删除线按钮 → ~~strike~~", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("obsolete");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-strike"));
+    expect(mdOf(s, editor)).toContain("~~obsolete~~");
+  });
+
+  it("行内代码按钮 → `code`", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("const x");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-code"));
+    expect(mdOf(s, editor)).toContain("`const x`");
+  });
+
+  it("链接按钮（window.prompt 输入 URL）→ [label](url)；再次点击解除链接", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("https://example.com");
+    act(() => {
+      editor.commands.insertContent("my link");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-link"));
+    expect(mdOf(s, editor)).toContain("[my link](https://example.com)");
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+    // 已激活链接 → 再点解除（不再弹 prompt）
+    await userEvent.click(screen.getByTestId("fmt-link"));
+    expect(mdOf(s, editor)).not.toContain("[my link]");
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+    promptSpy.mockRestore();
+  });
+
+  it("无序列表按钮 → - item", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("todo");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-bullet"));
+    expect(mdOf(s, editor)).toContain("- todo");
+  });
+
+  it("有序列表按钮 → 1. item", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("step");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-ordered"));
+    expect(mdOf(s, editor)).toContain("1. step");
+  });
+
+  it("引用按钮 → > quote", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("noted");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-quote"));
+    expect(mdOf(s, editor)).toContain("> noted");
+  });
+
+  it("标题按钮循环 p→h1→h2→h3→p（单按钮四态）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("section");
+    });
+    // 每次点击前选中文本区间（0..7，"section" 长度）——selectAll 会把 toggleHeading
+    // 追加的尾随空段落也选上导致级别误读（tiptap v3 混合选区 isActive 不可靠）
+    const selectText = () => {
+      act(() => {
+        editor.commands.setTextSelection({ from: 0, to: 7 });
+      });
+    };
+    const click = async () => {
+      selectText();
+      await userEvent.click(screen.getByTestId("fmt-heading"));
+    };
+    await click();
+    expect(mdOf(s, editor)).toContain("# section");
+    await click();
+    expect(mdOf(s, editor)).toContain("## section");
+    await click();
+    expect(mdOf(s, editor)).toContain("### section");
+    await click();
+    expect(mdOf(s, editor)).toContain("section"); // 回到段落（无 # 前缀）
+    expect(mdOf(s, editor)).not.toMatch(/^#+ /);
+  });
+
+  it("⌘B 快捷键（StarterKit 内置）→ 粗体激活", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("shortcut");
+      editor.commands.selectAll();
+    });
+    s.press("b", { ctrlKey: true }); // jsdom 无 metaKey → ctrlKey 等价 Mod
+    await waitFor(() => expect(editor.isActive("bold")).toBe(true));
+    expect(mdOf(s, editor)).toContain("**shortcut**");
+  });
+
+  it("⌘K 快捷键（无内置绑定，显式补挂）→ 链接 prompt", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("https://shortcut.dev");
+    act(() => {
+      editor.commands.insertContent("kb");
+      editor.commands.selectAll();
+    });
+    s.press("k", { ctrlKey: true });
+    await waitFor(() => expect(mdOf(s, editor)).toContain("[kb](https://shortcut.dev)"));
+    expect(promptSpy).toHaveBeenCalledTimes(1);
+    promptSpy.mockRestore();
+  });
+
+  it("⌘⇧8 快捷键（无内置绑定）→ 无序列表", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("listy");
+      editor.commands.selectAll();
+    });
+    s.press("8", { ctrlKey: true, shiftKey: true }, "Digit8");
+    // isActive("bulletList") 在 tiptap v3 切换后选区不可靠 → 断言 markdown 输出
+    await waitFor(() => expect(mdOf(s, editor)).toContain("- listy"));
+  });
+
+  it("⌘⇧7 快捷键（无内置绑定）→ 有序列表", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("seq");
+      editor.commands.selectAll();
+    });
+    s.press("7", { ctrlKey: true, shiftKey: true }, "Digit7");
+    await waitFor(() => expect(mdOf(s, editor)).toContain("1. seq"));
+  });
+
+  it("粘贴净化：transformPastedHTML 剥离 script/事件属性（DOMPurify）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    const sanitize = editor.options.editorProps.transformPastedHTML as (html: string) => string;
+    const out = sanitize('<b>ok</b><script>alert(1)</script><img src="x" onerror="alert(2)"><a href="https://a.dev" onclick="evil()">lnk</a>');
+    expect(out).toContain("<b>ok</b>");
+    expect(out).toContain('href="https://a.dev"');
+    expect(out).not.toContain("<script");
+    expect(out).not.toContain("onerror");
+    expect(out).not.toContain("onclick");
+  });
+
+  it("格式命令作用于格式栏点击后选区保持（mousedown preventDefault 防失焦）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("keep selection");
+      editor.commands.selectAll();
+    });
+    await userEvent.click(screen.getByTestId("fmt-italic"));
+    // 点击格式按钮后选区仍在（mousedown preventDefault 防失焦）→ 命令作用于选中文本
+    expect(mdOf(s, editor)).toContain("*keep selection*");
   });
 });
