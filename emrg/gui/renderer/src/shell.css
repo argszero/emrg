@@ -103,6 +103,33 @@
   min-height: 0;
   overflow-y: auto;
   padding: 16px;
+  /* rant 2026-08-28T22:36:18：滚动容器需 position:relative，回到底部按钮才能绝对定位其内 */
+  position: relative;
+}
+
+/* 回到「底部」悬浮按钮（rant 2026-08-28T22:36:18：上翻离底时显示，点击滚到底 + 设 autoScroll）。
+   绝对定位在滚动容器右下，fixed 会错位（容器会随内容滚动）。 */
+.transcript-back-to-bottom {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-panel);
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.transcript-back-to-bottom:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .react-shell-main .composer {

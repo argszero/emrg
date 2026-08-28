@@ -91,6 +91,28 @@ describe("工具合并组（rant 21:28:49，镜像 tool-group.test.js）", () =>
     expect(entries.filter((e) => e.kind === "tool-group")).toHaveLength(0);
     expect(entries.filter((e) => e.kind === "tool-row")).toHaveLength(2);
   });
+
+  it("工具→文本顺序正确（rant 2026-08-28T22:40:33）：不预建空助手条目，文本排在工具之后", () => {
+    const s = store();
+    // 同一轮：多个工具先到，最后才来流式文本
+    s.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");
+    s.handleToolEnd({ tool_call_id: "t1", tool_name: "bash", elapsed: 0.4, content: "" }, "s1");
+    s.handleToolStart({ tool_call_id: "t2", tool_name: "read", request_id: "r1" }, "s1");
+    s.handleToolEnd({ tool_call_id: "t2", tool_name: "read", elapsed: 1.2, content: "" }, "s1");
+    s.handleToolStart({ tool_call_id: "t3", tool_name: "edit", request_id: "r1" }, "s1");
+    s.handleToolEnd({ tool_call_id: "t3", tool_name: "edit", elapsed: 0.3, content: "" }, "s1");
+    s.handleDelta([{ request_id: "r1", content: "汇总" }], "s1");
+
+    const entries = s.getEntries("s1");
+    // 最后一个条目是文本（assistant），工具（tool-group）在它之前 → 「工具1→工具2→…→文本」
+    expect(entries[entries.length - 1].kind).toBe("assistant");
+    expect(entries[entries.length - 1]).toMatchObject({ kind: "assistant", rid: "r1" });
+    expect(entries.filter((e) => e.kind === "tool-group")).toHaveLength(1);
+    // 首个非空文本段在工具组之后
+    const asIdx = entries.findIndex((e) => e.kind === "assistant" && e.rid === "r1");
+    const grpIdx = entries.findIndex((e) => e.kind === "tool-group");
+    expect(asIdx).toBeGreaterThan(grpIdx);
+  });
 });
 
 describe("流式 delta", () => {
@@ -136,9 +158,13 @@ describe("done 收尾", () => {
     const e = assistantOf(s.getEntries("s1"), "r1");
     expect(e).toBeDefined();
     expect(e!.segments[0].typing).toBe(false);
-    // done 后 groupIndex 移除：同 rid 再 tool_start → 新建助手条目
+    // done 后 groupIndex 移除：同 rid 再 tool_start 不建助手条目（rant 2026-08-28T22:40:33），
+    // 助手条目只在真正的文本（delta）到达时才由 handleDelta 新建；且该 rid 已 done，
+    // 后续迟到 delta 被 doneRids 丢弃（rant 14:11），故助手条目数保持 1。
     s.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");
-    expect(s.getEntries("s1").filter((x) => x.kind === "assistant")).toHaveLength(2);
+    expect(s.getEntries("s1").filter((x) => x.kind === "assistant")).toHaveLength(1);
+    s.handleDelta([{ request_id: "r1", content: "new text" }], "s1");
+    expect(s.getEntries("s1").filter((x) => x.kind === "assistant")).toHaveLength(1);
   });
 
   it("timeout → 系统消息（经注入 t 解析）", () => {
