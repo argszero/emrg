@@ -51,7 +51,7 @@ interface WorkspaceBridge {
   listProjectSessions(p: { projectPath: string }): Promise<{ sessions: SessionRow[] }>;
   listTasks(): Promise<TaskRec[]>;
   listRants(p: { status?: string }): Promise<RantRec[]>;
-  switchSession(p: { sessionId: string }): Promise<unknown>;
+  switchSession(p: { sessionId: string; projectPath?: string }): Promise<unknown>;
   pickProjectDir(): Promise<{ path?: string } | null>;
   registerProject(p: { path: string }): Promise<{ ok?: boolean; path?: string }>;
   removeProject(p: { name: string; path?: string }): Promise<{ ok?: boolean; error?: string; protected?: boolean }>;
@@ -205,6 +205,23 @@ export function Shell() {
     if (b?.switchSession) await b.switchSession({ sessionId: sid });
     setActiveSid(sid);
     setActiveView("sessions");
+  }
+
+  /** 任务面板「打开会话」：switchSession 到任务所属会话（vanilla #924 行为迁移） */
+  async function openTaskSession(task: TaskRec) {
+    if (!task.session_id) return;
+    const b = wsBridge();
+    if (!b?.switchSession) return;
+    try {
+      await b.switchSession({ sessionId: task.session_id, projectPath: task.project_path });
+      setActiveSid(task.session_id);
+      setActiveView("sessions");
+    } catch (e) {
+      transcript.addSystemMessage(
+        t("openSession.loadFailed", { msg: (e as Error)?.message ?? String(e) }),
+        activeSid,
+      );
+    }
   }
 
   async function triggerTask(task: TaskRec) {
@@ -456,6 +473,7 @@ export function Shell() {
               onAddProject={() => void addProject()}
               onDeleteProject={deleteProject}
               onTriggerTask={(task) => void triggerTask(task)}
+              onOpenSessionTask={(task) => void openTaskSession(task)}
               onEditTask={(task) => void openTaskForm(task)}
               onDeleteTask={(task) => deleteTask(task)}
               onNewRant={() => void newRant()}
