@@ -107,85 +107,52 @@ class TestMemoryReflection:
 
         asyncio.run(_test())
 
-
-class TestSessionConsolidation:
-    """Tests for _consolidate_session_memories (on-disconnect consolidation)."""
-
-    def test_skips_when_few_memories(self):
-        """Should NOT consolidate if less than 3 memories."""
+    def test_hygiene_self_review_always_present_below_threshold(self):
+        """Rant 2026-08-28T22:12:16 — the digest-style hygiene self-review must be
+        in EVERY reflection prompt, even when the index is small (below threshold).
+        The old behavior gated it behind >100 entries / >50KB, so small indexes
+        never got the consolidation instruction."""
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 cwd = Path(tmp)
-                session = Session.create_with_id("s_consol_skip", cwd)
+                session = Session.create_with_id("s_test_hygiene", cwd)
 
+                # Small index (1 memory) — below any soft threshold
                 store = session.memory_store
-                store.create("task", "Task 1", "body")
-                store.create("task", "Task 2", "body")
+                store.create("task", "One task", "body")
 
-                server = _make_server()
+                server = _make_server({"content": "no new memories"})
 
-                await server._consolidate_session_memories(session.session_id, cwd)
+                server._maybe_reflect_memory(
+                    session,
+                    "Any feedback?",
+                    "No, everything looks good for now.",
+                )
 
-                server.llm.chat.assert_not_called()
-
-        asyncio.run(_test())
-
-    def test_consolidates_when_enough_memories(self):
-        """Should consolidate when session has ≥3 memories."""
-        async def _test():
-            with tempfile.TemporaryDirectory() as tmp:
-                cwd = Path(tmp)
-                session = Session.create_with_id("s_consol_do", cwd)
-
-                store = session.memory_store
-                store.create("decision", "Decision A", "body A")
-                store.create("task", "Task B", "body B")
-                store.create("reference", "Ref C", "body C")
-
-                server = _make_server({"content": "no consolidation needed"})
-
-                await server._consolidate_session_memories(session.session_id, cwd)
+                await asyncio.sleep(0.15)
 
                 server.llm.chat.assert_called_once()
                 call_args = server.llm.chat.call_args[0][0]
                 prompt_text = call_args[0]["content"]
-                assert "memory consolidation" in prompt_text
-                assert "Decision A" in prompt_text
-                assert "Task B" in prompt_text
+                assert "Memory hygiene" in prompt_text
+                assert "optimal organization" in prompt_text
+                assert "no consolidation needed" in prompt_text  # forbidden skip
+                assert "化零为整" in prompt_text
+                assert "化整为零" in prompt_text
 
         asyncio.run(_test())
 
-    def test_handles_missing_session(self):
-        """Should gracefully handle non-existent session on disconnect."""
-        async def _test():
-            with tempfile.TemporaryDirectory() as tmp:
-                cwd = Path(tmp)
-                server = _make_server()
 
-                await server._consolidate_session_memories("nonexistent_session", cwd)
-                server.llm.chat.assert_not_called()
+class TestDisconnectConsolidationDisabled:
+    """Rant 2026-08-28T22:12:16 — the on-disconnect consolidation entry
+    (_consolidate_session_memories) is REMOVED. The single memory entry point is
+    the reflection path (_maybe_reflect_memory)."""
 
-        asyncio.run(_test())
+    def test_method_removed(self):
+        """The disconnect-consolidation method must no longer exist on EmrgServer."""
+        from emrg.server.daemon import EmrgServer
+        assert not hasattr(EmrgServer, "_consolidate_session_memories"), (
+            "_consolidate_session_memories was removed (rant 2026-08-28T22:12:16); "
+            "if it is back, the disconnect entry was re-introduced."
+        )
 
-    def test_client_disconnect_triggers_consolidation(self):
-        """When client disconnects, consolidation should be attempted."""
-        async def _test():
-            with tempfile.TemporaryDirectory() as tmp:
-                cwd = Path(tmp)
-                session = Session.create_with_id("s_client_cleanup", cwd)
-
-                store = session.memory_store
-                store.create("task", "Task 1", "body")
-                store.create("task", "Task 2", "body")
-                store.create("task", "Task 3", "body")
-
-                server = _make_server({"content": "consolidation done"})
-
-                await server._consolidate_session_memories(session.session_id, cwd)
-
-                server.llm.chat.assert_called_once()
-                call_args = server.llm.chat.call_args[0][0]
-                prompt_text = call_args[0]["content"]
-                assert "memory consolidation" in prompt_text
-
-        asyncio.run(_test())
