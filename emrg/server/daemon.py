@@ -889,12 +889,12 @@ class EmrgServer:
             except Exception:
                 pass
 
-            # Consolidate session memories on disconnect
-            if last_session_id and last_cwd:
-                try:
-                    await self._consolidate_session_memories(last_session_id, Path(last_cwd))
-                except Exception:
-                    logger.debug("session memory consolidation failed", exc_info=True)
+            # Rant 2026-08-28T22:12:16 — the on-disconnect consolidation entry
+            # (_consolidate_session_memories) is disabled: 9 real runs produced no
+            # writes (LLM answered "no consolidation needed" after read-only tool
+            # calls). Memory organization now happens through the single reflection
+            # entry (_maybe_reflect_memory) with its always-on digest-style
+            # self-review instruction.
 
     async def _send(self, ws, data: dict) -> bool:
         """Send a JSON message to the client.
@@ -4065,10 +4065,12 @@ class EmrgServer:
                     for m in existing
                 ) if existing else "(none yet)"
 
-                # Rant 2026-08-23T08:04:26 — index governance: when the session
-                # index crosses soft thresholds, steer the reflection LLM toward
-                # consolidation instead of append-only growth.
-                hygiene_note = ""
+                # Rant 2026-08-23T08:04:26 + 2026-08-28T22:12:16 — memory hygiene is
+                # a write-first self-review that accompanies EVERY reflection (not
+                # only above soft thresholds): before writing, review how existing
+                # memories are organized and reorganize digest-style
+                # (化零为整 / 化整为零) instead of append-only growth or skipping.
+                # The threshold is kept as an additional hint, not a gate.
                 try:
                     index_size = (
                         store.index_path.stat().st_size
@@ -4076,17 +4078,26 @@ class EmrgServer:
                     )
                 except OSError:
                     index_size = 0
+                hygiene_note = (
+                    "\n## Memory hygiene (digest-style self-review — always)\n"
+                    "- **Self-review before writing**: before creating/updating any "
+                    "memory, review the existing memories above. Ask: \"what is the "
+                    "optimal organization of these fragments right now?\" — there is "
+                    "always an answer; never skip with 'no consolidation needed'.\n"
+                    "- **化零为整 (many → one)**: absorb several fragments on one "
+                    "topic into a single holistic memory (edit the target file, mark "
+                    "old ones `status: superseded` / `merged`).\n"
+                    "- **化整为零 (one → many)**: split an overgrown memory into "
+                    "searchable entries by topic.\n"
+                    "- Update existing entries in place when new info refines them; "
+                    "MEMORY.md stays a pure index (one short line per entry, "
+                    "title ≤512 chars).\n"
+                )
                 if store.count > INDEX_COUNT_WARN or index_size > INDEX_SIZE_WARN:
-                    hygiene_note = (
-                        f"\n## ⚠️ Memory hygiene (index: {store.count} entries, "
-                        f"{index_size} bytes)\n"
-                        "- MEMORY.md must stay a **pure index**: one short line per "
-                        "entry (title ≤512 chars), never duplicated content.\n"
-                        "- Prefer **updating existing entries in place** over creating "
-                        "new ones when the new info refines an existing memory.\n"
-                        "- If the index has grown past ~50 entries, consolidate: merge "
-                        "redundant memories (mark old files `status: superseded` or "
-                        "`merged`) and keep only the most relevant entries in the index.\n"
+                    hygiene_note += (
+                        f"\n⚠️ Index currently {store.count} entries / {index_size} "
+                        "bytes (past the ~50-entry soft cap) — prioritize "
+                        "consolidation this round.\n"
                     )
 
                 prompt = (
@@ -4216,119 +4227,6 @@ class EmrgServer:
                 logger.debug("memory reflection failed", exc_info=True)
 
         asyncio.create_task(_reflect())
-
-    async def _consolidate_session_memories(
-        self, session_id: str, cwd: Path
-    ) -> None:
-        """On client disconnect: consolidate session-level memories.
-
-        If the session has ≥3 memories, ask LLM to:
-        - Merge overlapping/duplicate memories
-        - Identify memories worth promoting to project scope
-        - Mark done tasks as superseded
-        """
-        session_dir = cwd / ".emrg" / "sessions" / session_id
-        if not session_dir.exists():
-            return
-
-        store = SessionMemoryStore(session_dir)
-
-        if store.count < 3:
-            return
-
-        memories = store.list()
-        mem_list = "\n".join(
-            f"- [{m.type}] {m.title} (file: {m.filename}, status: {m.status})"
-            for m in memories
-        )
-
-        logger.info(
-            "consolidating %d session memories for %s", store.count, session_id,
-        )
-
-        try:
-            prompt = (
-                "You are the memory consolidation module of EMRG. "
-                "A session is ending. Review its memories and consolidate.\n\n"
-                "## Session memories\n"
-                f"{mem_list}\n\n"
-                "**Instructions**:\n"
-                "1. **Merge**: if 2+ memories cover the same topic, merge them into one "
-                "(edit the file, mark old ones `status: merged`)\n"
-                "2. **Promote**: if a memory has lasting value beyond this session, "
-                "move it from the session memory dir to the project memory dir "
-                f"(`{cwd}/.emrg/memory/`), update `scope` to `project`, and update "
-                "both MEMORY.md indexes\n"
-                "3. **Clean**: mark completed tasks as `status: superseded`\n"
-                "4. **Index cap** (rant 2026-08-23T08:04:26): the MEMORY.md index must "
-                "converge to **≤50 entries** — merge/archive redundant memories and keep "
-                "the index a pure index (one short line per entry, title ≤512 chars). "
-                "Detail .md files are the source of truth and may exceed 50; only the "
-                "index needs trimming.\n"
-                "5. **Skip**: if everything looks fine, just reply 'no consolidation needed'\n"
-                "\n"
-                f"Use the read/edit/write tools to make these changes. "
-                f"Session memory dir: `{store.directory}/` "
-                f"Project memory dir: `{cwd}/.emrg/memory/`"
-            )
-
-            # Tool loop: LLM may call read/edit/write tools for consolidation.
-            # Feed tool results back so the LLM can act on them.
-            tools_openai = self.tools.to_openai_tools()
-            messages: list[dict] = [{"role": "user", "content": prompt}]
-            max_rounds = 4
-            for _round in range(max_rounds):
-                msg = await self.llm.chat(messages, tools=tools_openai)
-                tool_calls = msg.get("tool_calls")
-                if not tool_calls:
-                    break
-
-                assistant_msg: dict = {"role": "assistant", "content": msg.get("content") or None}
-                openai_tool_calls = []
-                for tc in tool_calls:
-                    fn = tc.get("function", {})
-                    openai_tool_calls.append({
-                        "id": tc.get("id", ""), "type": "function",
-                        "function": {"name": fn.get("name", ""), "arguments": fn.get("arguments", "")},
-                    })
-                assistant_msg["tool_calls"] = openai_tool_calls
-                messages.append(assistant_msg)
-
-                for tc in tool_calls:
-                    fn = tc.get("function", {})
-                    tc_id = tc.get("id", "")
-                    tc_name = fn.get("name", "")
-                    tc_args_str = fn.get("arguments", "")
-                    try:
-                        args = json.loads(tc_args_str) if tc_args_str else {}
-                    except json.JSONDecodeError:
-                        args = {}
-
-                    tool = self.tools.get(tc_name)
-                    if tool:
-                        try:
-                            result = await tool.execute(args)
-                            result_text = result.content
-                        except Exception as e:
-                            result_text = f"Error: {e}"
-                    else:
-                        result_text = f"Unknown tool: {tc_name}"
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": self._tool_content_for_llm(result_text),
-                    })
-                    # Rant 2026-08-19T10:35:24: use the call's intent instead
-                    # of the static purpose.
-                    intent = (args or {}).get("intent") or "-"
-                    logger.debug(
-                        "consolidation tool: %s — %s → %s%s",
-                        tc_name, intent, _redact_string(result_text[:100]),
-                        "…" if len(result_text) > 100 else "",
-                    )
-        except Exception:
-            logger.debug("memory consolidation failed", exc_info=True)
 
 
 _EXIT_RECORD_PATH = Path.home() / ".emrg" / "emrgd-exit.log"
