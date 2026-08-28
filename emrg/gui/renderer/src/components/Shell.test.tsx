@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { Shell } from "./Shell";
 import { DaemonBridgeProvider } from "./DaemonBridgeProvider";
@@ -96,6 +97,12 @@ function deltaFrame(sid: string, text: string): DaemonEventFrame {
   return { type: "message_delta", sid, data: { chunks: [{ request_id: `req-${sid}`, content: text }] } };
 }
 
+/** 向 tiptap 编辑器输入文本（Stage 1：textarea → contenteditable，fireEvent.change 失效） */
+async function typeIntoComposer(text: string) {
+  const input = await screen.findByTestId("composer-input");
+  await userEvent.type(input, text);
+}
+
 describe("Shell (Batch 5 slice 3 chat wiring)", () => {
   afterEach(() => {
     delete (window as unknown as { emrg?: unknown }).emrg;
@@ -166,7 +173,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
   it("composer send with no active session shows the need-session hint", async () => {
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
-    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "hello" } });
+    await typeIntoComposer("hello");
     fireEvent.click(screen.getByTestId("composer-send"));
     await waitFor(() => expect(screen.getByText("Start a conversation first.")).toBeInTheDocument());
   });
@@ -176,7 +183,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
   it("/help command opens the help dialog", async () => {
     render(wrapper(<Shell />));
     await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
-    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "/help" } });
+    await typeIntoComposer("/help");
     fireEvent.click(screen.getByTestId("composer-send"));
     await waitFor(() => expect(screen.getByTestId("help-dialog")).toBeInTheDocument());
     expect(screen.getAllByTestId("help-row").length).toBeGreaterThanOrEqual(16);
@@ -189,7 +196,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
     m.emit(sessionsFrame([{ session_id: "s1", title: "Alpha" }]));
     await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
-    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "/rename" } });
+    await typeIntoComposer("/rename");
     fireEvent.click(screen.getByTestId("composer-send"));
     await waitFor(() => expect(screen.getByTestId("rename-dialog")).toBeInTheDocument());
   });
@@ -214,7 +221,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
     m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
     await waitFor(() => expect(screen.getAllByTestId("open-session-item")).toHaveLength(1));
-    fireEvent.change(screen.getByTestId("composer-input"), { target: { value: "/clear" } });
+    await typeIntoComposer("/clear");
     fireEvent.click(screen.getByTestId("composer-send"));
     await waitFor(() => expect(screen.getByText("Current conversation cleared.")).toBeInTheDocument());
   });
