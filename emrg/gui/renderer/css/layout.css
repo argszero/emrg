@@ -393,6 +393,44 @@
   margin-top: var(--sp-2);
 }
 
+/* ── Stage 2 mini 格式栏（rant 2026-08-28T14:07:29：粗体/斜体/删除线/代码/链接/列表/引用/标题） ── */
+.fmt-bar {
+  display: flex;
+  gap: 2px;
+  padding: 0 var(--sp-2) var(--sp-2);
+}
+.fmt-btn {
+  min-width: 28px;
+  height: 26px;
+  padding: 0 var(--sp-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-input);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-secondary);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease);
+}
+.fmt-btn:hover {
+  background: var(--bg-soft);
+  color: var(--text-1);
+}
+.fmt-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.fmt-label-bold { font-weight: 700; }
+.fmt-label-italic { font-style: italic; }
+.fmt-label-strike { text-decoration: line-through; }
+.fmt-label-code { font-family: var(--font-mono, monospace); font-size: 12px; }
+.fmt-label-heading { font-weight: 600; }
+
 /* ── 断连横幅 ───────────────────────────── */
 #conn-banner {
   position: absolute;
