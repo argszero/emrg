@@ -1010,7 +1010,12 @@ vision = false
 
   // 记录/刷新一个打开会话（复用连接、恢复重开、recoverAll 均刷新）
   function touchOpenSession(sid, projectPath) {
+    // ⚠️ (rant 2026-08-28T22:28:47) 保留已有 v 字段（含 title）：
+    // 每次 message_delta 重写时若丢弃 title，侧边栏会在「名字→id」间抖动；
+    // 异步 listSessions 拉回的 title 必须跨调用保留。
+    const v = openSessions.get(sid) || {};
     openSessions.set(sid, {
+      ...v,
       projectName: projectNameOf(projectPath),
       projectPath,
       lastActive: new Date().toISOString(),

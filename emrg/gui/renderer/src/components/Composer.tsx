@@ -12,9 +12,10 @@ import {
   queueSend,
   type CmdMenuState,
 } from "../lib/composer";
-import { genRequestId, type TranslateFn } from "../lib/utils";
+import { genRequestId } from "../lib/utils";
 import { useI18n } from "../lib/i18n";
 import type { TranscriptStore } from "../lib/transcript";
+import { LinkDialog } from "./LinkDialog";
 
 /**
  * Composer — 输入框 + / 补全菜单 + 发送流（tiptap 版，rant 2026-08-28T14:07:29 Stage 1）。
@@ -79,17 +80,6 @@ function cycleHeading(ed: Editor | null): void {
   else ed.chain().focus().toggleHeading({ level: next as 1 | 2 | 3 }).run();
 }
 
-function toggleLink(ed: Editor | null, t: TranslateFn): void {
-  if (!ed) return;
-  if (ed.isActive("link")) {
-    ed.chain().focus().extendMarkRange("link").unsetLink().run();
-    return;
-  }
-  const href = window.prompt(t("composer.linkPrompt"), "https://");
-  if (!href) return;
-  ed.chain().focus().extendMarkRange("link").setLink({ href }).run();
-}
-
 /** 格式栏按钮定义（id → 命令 + 标签类 + i18n key） */
 const FMT_BUTTONS = [
   { id: "bold", label: "B", labelClass: "fmt-label-bold" },
@@ -118,6 +108,9 @@ export function Composer({
   const [hasText, setHasText] = useState(false);
   const [internalBusy, setInternalBusy] = useState(false);
   const busy = busyProp ?? internalBusy;
+  // ⚠️ (rant 2026-08-28T22:27:01) 链接改用应用内对话框收集 URL（Electron 禁用 window.prompt）
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+  const [linkHref, setLinkHref] = useState("");
   const queuedRef = useRef<Map<string, Array<{ requestId: string; text: string; sandbox?: string | null }>>>(new Map());
   // tiptap 选项闭包只创建一次 → 变化值走 ref 桥接（menu/submit/selectCmd/t）
   const menuRef = useRef(menu);
@@ -135,7 +128,7 @@ export function Composer({
     ordered: () => editor?.chain().focus().toggleOrderedList().run(),
     quote: () => editor?.chain().focus().toggleBlockquote().run(),
     heading: () => cycleHeading(editor),
-    link: () => toggleLink(editor, tRef.current),
+    link: () => openLinkDialog(),
   };
 
   // 发送函数解析（默认走 preload 桥）
@@ -263,6 +256,33 @@ export function Composer({
       heading: false,
     };
 
+  // ⚠️ (rant 2026-08-28T22:27:01) 链接用应用内对话框收集 URL（Electron 禁用 window.prompt）
+  function openLinkDialog(): void {
+    if (!editor) return;
+    if (editor.isActive("link")) {
+      // 已激活链接 → 直接解除（不在对话框内处理，避免歧义）
+      editor.chain().focus().extendMarkRange("link").unsetLink().run();
+      return;
+    }
+    // 预填当前选区 href（若有）或默认 https://
+    let cur = "";
+    try {
+      cur = editor.getAttributes("link").href ?? "";
+    } catch {
+      cur = "";
+    }
+    setLinkHref(cur || "https://");
+    setLinkDialogOpen(true);
+  }
+  function applyLink(href: string): void {
+    if (!editor) return;
+    editor.chain().focus().extendMarkRange("link").setLink({ href }).run();
+    setLinkDialogOpen(false);
+  }
+  function cancelLink(): void {
+    setLinkDialogOpen(false);
+  }
+
   async function submit(): Promise<void> {
     if (!editor) return;
     // tiptap-markdown 的 storage 类型不并入 Editor.storage（Storage 泛型）——运行时存在，显式取值
@@ -375,6 +395,12 @@ export function Composer({
           ↑
         </button>
       </div>
+      <LinkDialog
+        open={linkDialogOpen}
+        currentHref={linkHref}
+        onApply={applyLink}
+        onCancel={cancelLink}
+      />
     </div>
   );
 }
