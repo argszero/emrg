@@ -59,9 +59,22 @@
   min-width: 220px;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  /* rant 2026-08-28T13:31:55：v0.2.82 (#1040) 加的 overflow-y:auto 是滚动链条缺失
+     的兜底（.react-sidebar 无高度 → #open-sessions 的 max-height:40% 无法解析）。
+     与 vanilla #sidebar（无 overflow）对齐：scroll 交给 .react-sidebar
+     （flex:1 + min-height:0，使 #open-sessions max-height:40% 生效）自身滚动。
+     去掉后侧边栏不再是 scroll 容器——消除 .conv-item hover 过渡的合成层闪烁根因之一。 */
   border-right: 1px solid var(--border);
   background: var(--bg-panel);
+}
+
+/* 侧边栏内容列：flex 撑满 → #open-sessions 的 max-height:40% + overflow-y:auto 生效
+   （对齐 vanilla #sidebar 的 #conv-list/#open-sessions 自滚动，无整栏滚动） */
+.react-shell-sidebar .react-sidebar {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 /* 结果面板右栏（对齐 vanilla #result-panel 280px；ResultPanel.tsx 已是 className=result-panel） */
