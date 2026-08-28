@@ -367,23 +367,33 @@
   outline: none;
 }
 
-/* tiptap 内容可编辑区内部段落：默认 p 有 margin，输入框内收紧 */
-.tiptap-input .ProseMirror {
+/* tiptap 内容可编辑区内部段落：默认 p 有 margin，输入框内收紧。
+   ⚠️ (rant 2026-08-28T22:26:29) DOM 中 .tiptap-input 与 .ProseMirror 是同一元素
+   （class="tiptap ProseMirror tiptap-input"），非嵌套关系——
+   旧选择器 .tiptap-input .ProseMirror 永不命中 → placeholder 不显示。 */
+.tiptap-input {
   min-height: 1.6em;
 }
-.tiptap-input .ProseMirror p {
+.tiptap-input p {
   margin: 0;
 }
-.tiptap-input .ProseMirror p.is-editor-empty:first-child {
+.tiptap-input p.is-editor-empty:first-child {
   position: relative;
 }
-.tiptap-input .ProseMirror p.is-editor-empty:first-child::before {
+.tiptap-input p.is-editor-empty:first-child::before {
   position: absolute;
   left: 0;
   top: 0;
   content: attr(data-placeholder);
   color: var(--text-3);
   pointer-events: none;
+}
+/* 编辑器外层（EditorContent className="composer-editor"）——
+   ⚠️ (rant 2026-08-28T22:26:29) 无 CSS 定义时编辑器只占内容宽度，
+   send-btn 被文本推着走；须 flex:1 撑满 .composer-card。 */
+.composer-editor {
+  flex: 1;
+  min-width: 0;
 }
 
 .composer-hint {

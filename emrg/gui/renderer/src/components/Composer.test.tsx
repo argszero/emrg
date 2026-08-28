@@ -375,23 +375,26 @@ describe("Composer — 格式栏与快捷键（Stage 2, rant 14:07:29）", () =>
     expect(mdOf(s, editor)).toContain("`const x`");
   });
 
-  it("链接按钮（window.prompt 输入 URL）→ [label](url)；再次点击解除链接", async () => {
+  it("链接按钮（LinkDialog 输入 URL）→ [label](url)；再次点击解除链接", async () => {
     const store = createTranscriptStore();
     const s = setup(store);
     const editor = await waitEditor(s);
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("https://example.com");
     act(() => {
       editor.commands.insertContent("my link");
       editor.commands.selectAll();
     });
+    // 点击链接按钮 → 弹出应用内 LinkDialog（非 window.prompt；Electron 禁用 prompt）
     await userEvent.click(screen.getByTestId("fmt-link"));
+    const urlInput = screen.getByTestId("link-url");
+    expect(urlInput).toBeInTheDocument();
+    await userEvent.clear(urlInput);
+    await userEvent.type(urlInput, "https://example.com");
+    await userEvent.click(screen.getByTestId("link-ok"));
     expect(mdOf(s, editor)).toContain("[my link](https://example.com)");
-    expect(promptSpy).toHaveBeenCalledTimes(1);
-    // 已激活链接 → 再点解除（不再弹 prompt）
+    // 已激活链接 → 再点解除（LinkDialog 关闭）
     await userEvent.click(screen.getByTestId("fmt-link"));
     expect(mdOf(s, editor)).not.toContain("[my link]");
-    expect(promptSpy).toHaveBeenCalledTimes(1);
-    promptSpy.mockRestore();
+    expect(screen.queryByTestId("link-dialog")).not.toBeInTheDocument();
   });
 
   it("无序列表按钮 → - item", async () => {
@@ -472,19 +475,22 @@ describe("Composer — 格式栏与快捷键（Stage 2, rant 14:07:29）", () =>
     expect(mdOf(s, editor)).toContain("**shortcut**");
   });
 
-  it("⌘K 快捷键（无内置绑定，显式补挂）→ 链接 prompt", async () => {
+  it("⌘K 快捷键（无内置绑定，显式补挂）→ 打开 LinkDialog", async () => {
     const store = createTranscriptStore();
     const s = setup(store);
     const editor = await waitEditor(s);
-    const promptSpy = vi.spyOn(window, "prompt").mockReturnValue("https://shortcut.dev");
     act(() => {
       editor.commands.insertContent("kb");
       editor.commands.selectAll();
     });
     s.press("k", { ctrlKey: true });
-    await waitFor(() => expect(mdOf(s, editor)).toContain("[kb](https://shortcut.dev)"));
-    expect(promptSpy).toHaveBeenCalledTimes(1);
-    promptSpy.mockRestore();
+    // ⌘K 打开应用内 LinkDialog（非 window.prompt）；输入 URL 后确认
+    const urlInput = await screen.findByTestId("link-url");
+    expect(urlInput).toBeInTheDocument();
+    await userEvent.clear(urlInput);
+    await userEvent.type(urlInput, "https://shortcut.dev");
+    await userEvent.click(screen.getByTestId("link-ok"));
+    expect(mdOf(s, editor)).toContain("[kb](https://shortcut.dev)");
   });
 
   it("⌘⇧8 快捷键（无内置绑定）→ 无序列表", async () => {
