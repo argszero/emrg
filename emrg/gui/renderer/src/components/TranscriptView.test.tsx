@@ -137,17 +137,12 @@ describe("TranscriptView", () => {
     expect(container.querySelector(".tool-group-summary")).toHaveTextContent("3 个工具执行 · 1.9s");
   });
 
-  it("其他客户端的广播流带 remote 标签；own stream 不带", () => {
+  it("广播流与 own stream 均不显示 remote 标签（rant 2026-08-28T22:16:36 去掉）", () => {
     const store = createTranscriptStore({ t: (k) => k });
     store.handleDelta([{ request_id: "r1", content: "broadcast" }], "s1");
     const { container } = setup(store, "s1");
-    expect(screen.getByText("（来自其他客户端）")).toBeInTheDocument();
-    // own stream → 无标签
-    const store2 = createTranscriptStore({ t: (k) => k });
-    store2.setOwnStream("r2");
-    store2.handleDelta([{ request_id: "r2", content: "own" }], "s1");
-    const { container: c2 } = setup(store2, "s1");
-    expect(c2.querySelector(".remote-label")).not.toBeInTheDocument();
+    expect(screen.queryByText("（来自其他客户端）")).not.toBeInTheDocument();
+    expect(container.querySelector(".remote-label")).not.toBeInTheDocument();
   });
 
   it("sid=null 缺省桶：无 sid 事件渲染到默认视图", () => {

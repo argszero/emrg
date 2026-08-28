@@ -116,7 +116,6 @@ function AssistantSegmentView({
 }) {
   return (
     <div className="msg assistant">
-      {!entry.isOwn ? <div className="remote-label">{t("chat.fromOtherClient")}</div> : null}
       <div className={segment.typing ? "msg-body typing" : "msg-body"}>
         <span className="msg-assistant-mark">✦ </span>
         {segment.typing ? (
