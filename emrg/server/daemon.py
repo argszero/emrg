@@ -3119,6 +3119,20 @@ class EmrgServer:
         if old_bias <= 0:
             return
         shift = abs(new_bias - old_bias) / old_bias
+        # Issue #1072 (heinrichneb, Dev.to 3dlo4): make "never fired"
+        # measurable — log EVERY computed shift unconditionally so the
+        # detector's heartbeat is visible in emrgd.log (grep
+        # "anchor-bias-heartbeat"), distinguishing "detector runs, providers
+        # stable" from "detector dead". The warning below stays reserved for
+        # actual drift.
+        logger.debug(
+            "anchor-bias-heartbeat session=%s bias_shift=%.4f threshold=%.2f "
+            "old_bias=%.3f new_bias=%.3f — %s",
+            session.session_id, shift, _SILENT_DRIFT_THRESHOLD,
+            old_bias, new_bias,
+            "within threshold, no drift"
+            if shift < _SILENT_DRIFT_THRESHOLD else "DRIFT — emitting event",
+        )
         if shift < _SILENT_DRIFT_THRESHOLD:
             return
         try:
