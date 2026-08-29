@@ -775,13 +775,17 @@ def test_usage_anchor_drift_measured_on_reanchor(tmp_path, monkeypatch):
     assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 2
 
 
-def test_silent_provider_drift_emits_event(tmp_path, monkeypatch):
+def test_silent_provider_drift_emits_event(tmp_path, monkeypatch, caplog):
     """Issue #1027 — heinrichneb (Dev.to 3dicj): a provider silently changing
     under an unchanged base_url/model alias keeps the old provider's real
     prompt_tokens as the projection base — the anchor "looks healthy while it
     drifts". A fresh real_pt whose bias (real/est) deviates from the previous
     anchored round beyond the threshold must emit a countable
-    anchor_provider_drift event and re-anchor on the new real number."""
+    anchor_provider_drift event and re-anchor on the new real number.
+
+    Issue #1072 (Dev.to 3dlo4) — planted-fire measurable: the unconditional
+    bias-shift heartbeat (grep "anchor-bias-heartbeat") must appear in the
+    log even when drift fires, proving the detector ran this round."""
     stats = tmp_path / "usage-anchor.jsonl"
     monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
     server = _make_server()
@@ -789,7 +793,8 @@ def test_silent_provider_drift_emits_event(tmp_path, monkeypatch):
     # Provider A round: real 222K vs est 148K → bias 1.5 (the #946 shape)
     server._usage_anchors[sid] = (222_000, 148_000)
     # Provider B round (same base_url): real 360K vs est 150K → bias 2.4
-    server._detect_silent_anchor_drift(_SidSession(sid), 360_000, 150_000)
+    with caplog.at_level("DEBUG", logger="emrg.server.daemon"):
+        server._detect_silent_anchor_drift(_SidSession(sid), 360_000, 150_000)
 
     lines = stats.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
@@ -800,6 +805,11 @@ def test_silent_provider_drift_emits_event(tmp_path, monkeypatch):
     assert ev["prev_est"] == 148_000 and ev["estimate"] == 150_000
     assert ev["bias_shift"] == pytest.approx(0.6, abs=0.01)  # (2.4-1.5)/1.5
     assert ev["model"] == "gpt-4o-mini" and ev["provider"] == "localhost"
+    # Heartbeat (issue #1072): unconditional shift log present + DRIFT flag
+    assert "anchor-bias-heartbeat session=silent-drift" in caplog.text
+    assert "bias_shift=0.6000" in caplog.text
+    assert "DRIFT — emitting event" in caplog.text
+    assert "usage anchor silent drift session=silent-drift" in caplog.text
     # Re-anchor on the new provider's real number (natural anchor overwrite)
     server._usage_anchors[sid] = (360_000, 150_000)
     # Same provider bias again → no second event (stable after re-anchor)
@@ -807,22 +817,31 @@ def test_silent_provider_drift_emits_event(tmp_path, monkeypatch):
     assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 1
 
 
-def test_silent_drift_below_threshold_silent(tmp_path, monkeypatch):
+def test_silent_drift_below_threshold_silent(tmp_path, monkeypatch, caplog):
     """Issue #1027 — a small per-round bias wobble (same provider, estimate
     noise) must NOT emit a drift event: the threshold separates real
-    tokenizer changes from normal variance."""
+    tokenizer changes from normal variance. Issue #1072 — the unconditional
+    heartbeat still proves the detector ran (no event, no warning)."""
     stats = tmp_path / "usage-anchor.jsonl"
     monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
     server = _make_server()
     sid = "no-drift"
     server._usage_anchors[sid] = (222_000, 148_000)  # bias 1.5
     # Same provider: real 240K vs est 150K → bias 1.6 → shift 6.7% < 25%
-    server._detect_silent_anchor_drift(_SidSession(sid), 240_000, 150_000)
+    with caplog.at_level("DEBUG", logger="emrg.server.daemon"):
+        server._detect_silent_anchor_drift(_SidSession(sid), 240_000, 150_000)
     assert not stats.exists() or stats.read_text(encoding="utf-8").strip() == ""
+    # Heartbeat present with "within threshold" verdict; no drift warning
+    assert "anchor-bias-heartbeat session=no-drift" in caplog.text
+    assert "bias_shift=0.0667" in caplog.text
+    assert "within threshold, no drift" in caplog.text
+    assert "usage anchor silent drift" not in caplog.text
 
     # No anchor at all → no-op (first round, nothing to compare against)
+    caplog.clear()
     server._detect_silent_anchor_drift(_SidSession("fresh"), 10_000, 9_000)
     assert not stats.exists() or stats.read_text(encoding="utf-8").strip() == ""
+    assert "anchor-bias-heartbeat" not in caplog.text  # no old anchor → skip
 
 
 def test_usage_anchor_cross_provider_window_attributable(tmp_path, monkeypatch):
