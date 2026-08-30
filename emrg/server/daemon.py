@@ -3134,6 +3134,32 @@ class EmrgServer:
             if shift < _SILENT_DRIFT_THRESHOLD else "DRIFT — emitting event",
         )
         if shift < _SILENT_DRIFT_THRESHOLD:
+            # Issue #1075 (reidmarlow, Dev.to 3dn2b): "A guard that has never
+            # fired and a guard that stopped running look identical on disk".
+            # The sub-threshold distribution IS the calibration data — without
+            # it, _SILENT_DRIFT_THRESHOLD stays an a-priori 25% guess and the
+            # detector's silence cannot be told apart from its death. Accumulate
+            # every within-threshold shift as a countable
+            # anchor_bias_observation so
+            # scripts/calibrate_silent_drift_threshold.py can tune the
+            # threshold from the empirical noise floor (same event shape as the
+            # drift event above, minus the type, so the script sees both sides
+            # of the boundary).
+            try:
+                _append_usage_anchor_event({
+                    "type": "anchor_bias_observation",
+                    "session": session.session_id,
+                    "prev_real": old_real,
+                    "real_pt": real_pt,
+                    "prev_est": old_est,
+                    "estimate": estimate,
+                    # signed ratio: +0.6 = tokenizer counts ~60% more than before
+                    "bias_shift": round((new_bias - old_bias) / old_bias, 4),
+                    "model": self.llm.config.model,
+                    "provider": _provider_slug(self.llm.config.base_url),
+                })
+            except OSError as exc:
+                logger.warning("usage-anchor stats append failed: %s", exc)
             return
         try:
             _append_usage_anchor_event({

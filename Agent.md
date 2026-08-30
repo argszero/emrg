@@ -119,7 +119,7 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.token; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (1147) — import check: `uv run python -c "from emrg.client.app import run_client"`
+Python: `uv run pytest tests/ -v` (1172) — import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (95: 45 daemon_client + 20 conn-manager + 8 integration + 6 build-config + 7 gui-state + 3 preload-api + 4 boot-contract + 2 theme-guard) — syntax: `node --check main.js preload.js daemon_client.js`
 Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (476: 5 snapshot-store + 9 utils + 3 ErrorBoundary + 2 App smoke + 11 commands + 4 copywriting + 11 i18n + 11 markdown + 16 transcript + 10 TranscriptView + 15 history + 22 composer + 31 Composer + 6 LinkDialog + 12 sidebar + 17 Sidebar + 9 fileTree + 9 FileTree + 16 resultPanel + 8 ResultPanel + 27 workspaceView + 10 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 10 dialogLists + 3 HelpDialog + 9 MemoryDialog + 6 SkillsDialog + 9 openSession + 6 WelcomeDialog + 8 OpenSessionDialog + 7 NewSessionDialog + 7 rewind + 8 RewindDialog + 7 GithubDeviceDialog + 15 daemonBridge + 7 DaemonBridgeProvider + 26 Shell + 15 DialogHost + 20 SettingsPanel + 6 TaskFormDialog + 5 RantDialog + 4 vendorMarkdown) + `npm run build` → `renderer/dist/`
 CI: `uv run pytest` (ubuntu + **windows-2025 matrix** — Windows pytest 回归在 PR CI 即失败，v0.2.29 教训 #725) + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
