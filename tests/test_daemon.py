@@ -807,6 +807,7 @@ def test_silent_provider_drift_emits_event(tmp_path, monkeypatch, caplog):
     assert ev["model"] == "gpt-4o-mini" and ev["provider"] == "localhost"
     # Heartbeat (issue #1072): unconditional shift log present + DRIFT flag
     assert "anchor-bias-heartbeat session=silent-drift" in caplog.text
+    assert "anchored=true" in caplog.text  # issue #1078: anchored state explicit
     assert "bias_shift=0.6000" in caplog.text
     assert "DRIFT — emitting event" in caplog.text
     assert "usage anchor silent drift session=silent-drift" in caplog.text
@@ -847,23 +848,100 @@ def test_silent_drift_below_threshold_silent(tmp_path, monkeypatch, caplog):
     assert ev["provider"] == "localhost"
     # Heartbeat present with "within threshold" verdict; no drift event/warning
     assert "anchor-bias-heartbeat session=no-drift" in caplog.text
+    assert "anchored=true" in caplog.text  # issue #1078: anchored state explicit
     assert "bias_shift=0.0667" in caplog.text
     assert "within threshold, no drift" in caplog.text
     assert "usage anchor silent drift" not in caplog.text
 
-    # Negative states — no observation may be written:
-    # 1) No anchor at all → no-op (first round, nothing to compare against)
+    # Negative states — no observation may be written, but issue #1078 makes
+    # each skipped round a LABELED anchored=false heartbeat (not an absence):
+    # set_level persists (at_level would restore WARNING on exit, silencing
+    # the DEBUG heartbeats below).
+    caplog.set_level("DEBUG", logger="emrg.server.daemon")
+    # 1) No anchor at all → anchored=false reason=no_anchor (first round)
     caplog.clear()
     server._detect_silent_anchor_drift(_SidSession("fresh"), 10_000, 9_000)
     assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 1
-    assert "anchor-bias-heartbeat" not in caplog.text  # no old anchor → skip
-    # 2) Non-positive estimate → no-op (guard: estimate <= 0)
+    assert ("anchor-bias-heartbeat session=fresh anchored=false "
+            "reason=no_anchor") in caplog.text
+    # 2) Non-positive estimate → anchored=false reason=invalid_estimate
+    caplog.clear()
     server._detect_silent_anchor_drift(_SidSession(sid), 240_000, 0)
     assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 1
-    # 3) Non-positive old bias → no-op (guard: old_bias <= 0)
+    assert ("anchor-bias-heartbeat session=no-drift anchored=false "
+            "reason=invalid_estimate") in caplog.text
+    # 3) Non-positive old bias → anchored=false reason=invalid_bias
+    caplog.clear()
     server._usage_anchors["bad-bias"] = (0, 148_000)
     server._detect_silent_anchor_drift(_SidSession("bad-bias"), 240_000, 150_000)
     assert len(stats.read_text(encoding="utf-8").strip().splitlines()) == 1
+    assert ("anchor-bias-heartbeat session=bad-bias anchored=false "
+            "reason=invalid_bias") in caplog.text
+
+
+def test_anchor_heartbeat_every_round_labeled(tmp_path, monkeypatch, caplog):
+    """Issue #1078 (pm25coder, Dev.to 3dn6k — vinhnguyenthanhdn): the
+    heartbeat used to live only INSIDE the detector, so a round that skipped
+    it (no usage / no prompt_tokens) produced zero heartbeat lines —
+    byte-identical to the detector having stopped. The round-loop helper
+    ``_refresh_usage_anchor`` must emit exactly one labeled heartbeat per
+    round: ``anchored=false reason=no_usage`` / ``reason=no_prompt_tokens``
+    on the skip paths, and pass through to the detector (anchored=true) on a
+    normal round."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    server = _make_server()
+    sid = "labeled-rounds"
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+    ]
+    # Persistent DEBUG for the whole test (at_level would restore WARNING on
+    # block exit, silencing later heartbeats).
+    caplog.set_level("DEBUG", logger="emrg.server.daemon")
+
+    # 1) No final_usage at all → anchored=false reason=no_usage
+    server._refresh_usage_anchor(_SidSession(sid), None, messages)
+    assert ("anchor-bias-heartbeat session=labeled-rounds anchored=false "
+            "reason=no_usage") in caplog.text
+    assert "reason=no_prompt_tokens" not in caplog.text
+    assert sid not in server._usage_anchors  # nothing to anchor from
+
+    # 2) Empty usage dict → anchored=false reason=no_usage (falsy)
+    caplog.clear()
+    server._refresh_usage_anchor(_SidSession(sid), {}, messages)
+    assert ("anchor-bias-heartbeat session=labeled-rounds anchored=false "
+            "reason=no_usage") in caplog.text
+    assert sid not in server._usage_anchors
+
+    # 3) Usage present but prompt_tokens missing → reason=no_prompt_tokens
+    caplog.clear()
+    server._refresh_usage_anchor(
+        _SidSession(sid), {"completion_tokens": 5}, messages)
+    assert ("anchor-bias-heartbeat session=labeled-rounds anchored=false "
+            "reason=no_prompt_tokens") in caplog.text
+    assert sid not in server._usage_anchors
+
+    # 4) prompt_tokens == 0 (falsy) → reason=no_prompt_tokens
+    caplog.clear()
+    server._refresh_usage_anchor(
+        _SidSession(sid), {"prompt_tokens": 0}, messages)
+    assert ("anchor-bias-heartbeat session=labeled-rounds anchored=false "
+            "reason=no_prompt_tokens") in caplog.text
+    assert sid not in server._usage_anchors
+
+    # 5) Normal round → pass-through to detector (anchored=true) + anchor set
+    caplog.clear()
+    est = server._estimate_tokens(messages)
+    server._usage_anchors[sid] = (est, est)  # bias 1.0 (self-consistent)
+    server._refresh_usage_anchor(_SidSession(sid), {"prompt_tokens": est}, messages)
+    assert "anchored=true" in caplog.text
+    assert "within threshold, no drift" in caplog.text
+    anchor = server._usage_anchors[sid]
+    assert anchor == (est, est)  # re-anchored on new real prompt_tokens
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["type"] == "anchor_bias_observation"
 
 
 def test_usage_anchor_cross_provider_window_attributable(tmp_path, monkeypatch):

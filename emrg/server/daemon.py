@@ -2586,24 +2586,15 @@ class EmrgServer:
                 })
                 return
 
-            # Rant 2026-08-23T13:28:50: refresh the usage anchor from the
-            # provider's real prompt_tokens + the local estimate of exactly
-            # what was sent (messages is still the sent set here — assistant
-            # reply / tool results are appended below). The next round's
-            # auto-compact projection uses this as its base.
-            if final_usage:
-                pt = final_usage.get("prompt_tokens")
-                if pt:
-                    estimate = self._estimate_tokens(messages)
-                    # Issue #1027: detect a provider/tokenizer silently changing
-                    # under an unchanged base_url/model alias (gateway reroute,
-                    # silent model update) BEFORE the anchor is overwritten —
-                    # the old anchor is the last known same-provider baseline.
-                    self._detect_silent_anchor_drift(session, pt, estimate)
-                    self._usage_anchors[session.session_id] = (
-                        pt, estimate
-                    )
-                    self._record_anchor_drift(session, pt)
+            # Rant 2026-08-23T13:28:50 + issue #1078: refresh the usage anchor
+            # from the provider's real prompt_tokens + the local estimate of
+            # exactly what was sent (messages is still the sent set here —
+            # assistant reply / tool results are appended below). The next
+            # round's auto-compact projection uses this as its base. Every
+            # round emits exactly one anchor-bias-heartbeat with an explicit
+            # state (anchored=true / anchored=false + reason) so a skipped
+            # round is a labeled observation, not an absence.
+            self._refresh_usage_anchor(session, final_usage, messages)
 
             full_content = "".join(content_parts)
             # llm.py yields the ACCUMULATED reasoning snapshot on every chunk
@@ -3091,6 +3082,45 @@ class EmrgServer:
         except OSError as exc:
             logger.warning("usage-anchor stats append failed: %s", exc)
 
+    def _refresh_usage_anchor(self, session, final_usage, messages) -> None:
+        """Round-loop usage processing (rant 2026-08-23T13:28:50 + issue
+        #1078): refresh the usage anchor from the provider's real
+        prompt_tokens + the local estimate of exactly what was sent. The next
+        round's auto-compact projection uses this as its base.
+
+        Issue #1078 (pm25coder, Dev.to 3dn6k — vinhnguyenthanhdn): the
+        heartbeat used to live INSIDE ``_detect_silent_anchor_drift``, so a
+        round that skipped the detector (no usage, no prompt_tokens, no
+        anchor, invalid estimate) produced zero heartbeat lines — byte-
+        identical to the detector having stopped. This helper makes every
+        round emit exactly one ``anchor-bias-heartbeat`` line with an
+        explicit state: ``anchored=true`` (detector ran, logged inside it) or
+        ``anchored=false`` with a reason. "Log unconditionally, alert
+        conditionally" now holds one level higher.
+        """
+        if not final_usage:
+            logger.debug(
+                "anchor-bias-heartbeat session=%s anchored=false reason=no_usage",
+                session.session_id,
+            )
+            return
+        pt = final_usage.get("prompt_tokens")
+        if not pt:
+            logger.debug(
+                "anchor-bias-heartbeat session=%s anchored=false "
+                "reason=no_prompt_tokens",
+                session.session_id,
+            )
+            return
+        estimate = self._estimate_tokens(messages)
+        # Issue #1027: detect a provider/tokenizer silently changing under an
+        # unchanged base_url/model alias (gateway reroute, silent model update)
+        # BEFORE the anchor is overwritten — the old anchor is the last known
+        # same-provider baseline.
+        self._detect_silent_anchor_drift(session, pt, estimate)
+        self._usage_anchors[session.session_id] = (pt, estimate)
+        self._record_anchor_drift(session, pt)
+
     def _detect_silent_anchor_drift(self, session, real_pt: int, estimate: int) -> None:
         """Detect a provider/tokenizer silently changing under an unchanged
         base_url/model alias (issue #1027, Dev.to 3dicj — heinrichneb: gateway
@@ -3111,12 +3141,30 @@ class EmrgServer:
         Called with the OLD anchor still in place (before the overwrite).
         """
         old = self._usage_anchors.get(session.session_id)
-        if not old or old[1] <= 0 or estimate <= 0:
+        # Issue #1078: every skip path emits a labeled anchored=false heartbeat
+        # so a skipped round is a first-class observation, not an absence —
+        # "log unconditionally, alert conditionally" one level up.
+        if not old or old[1] <= 0:
+            logger.debug(
+                "anchor-bias-heartbeat session=%s anchored=false reason=no_anchor",
+                session.session_id,
+            )
+            return
+        if estimate <= 0:
+            logger.debug(
+                "anchor-bias-heartbeat session=%s anchored=false "
+                "reason=invalid_estimate",
+                session.session_id,
+            )
             return
         old_real, old_est = old
         old_bias = old_real / old_est
         new_bias = real_pt / estimate
         if old_bias <= 0:
+            logger.debug(
+                "anchor-bias-heartbeat session=%s anchored=false reason=invalid_bias",
+                session.session_id,
+            )
             return
         shift = abs(new_bias - old_bias) / old_bias
         # Issue #1072 (heinrichneb, Dev.to 3dlo4): make "never fired"
@@ -3124,10 +3172,11 @@ class EmrgServer:
         # detector's heartbeat is visible in emrgd.log (grep
         # "anchor-bias-heartbeat"), distinguishing "detector runs, providers
         # stable" from "detector dead". The warning below stays reserved for
-        # actual drift.
+        # actual drift. Issue #1078: this is the anchored=true case — the
+        # round produced a real bias measurement.
         logger.debug(
-            "anchor-bias-heartbeat session=%s bias_shift=%.4f threshold=%.2f "
-            "old_bias=%.3f new_bias=%.3f — %s",
+            "anchor-bias-heartbeat session=%s anchored=true bias_shift=%.4f "
+            "threshold=%.2f old_bias=%.3f new_bias=%.3f — %s",
             session.session_id, shift, _SILENT_DRIFT_THRESHOLD,
             old_bias, new_bias,
             "within threshold, no drift"
