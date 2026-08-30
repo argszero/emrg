@@ -86,6 +86,58 @@ class TestSplitEvents:
         assert noise == [0.05] and drift == []
 
 
+class TestProviderGroups:
+    def _obs(self, prov: str, shift: float) -> dict:
+        return {
+            "type": "anchor_bias_observation",
+            "provider": prov,
+            "bias_shift": shift,
+        }
+
+    def _drift(self, prov: str, shift: float) -> dict:
+        return {
+            "type": "anchor_provider_drift",
+            "provider": prov,
+            "bias_shift": shift,
+        }
+
+    def test_separates_providers_and_types(self) -> None:
+        groups = cal.provider_groups([
+            self._obs("api.openai.com", 0.05),
+            self._obs("api.openai.com", 0.07),
+            self._obs("localhost", 0.2),
+            self._drift("localhost", 0.9),
+        ])
+        assert groups["api.openai.com"]["noise"] == [0.05, 0.07]
+        assert groups["api.openai.com"]["drift"] == []
+        assert groups["localhost"]["noise"] == [0.2]
+        assert groups["localhost"]["drift"] == [0.9]
+
+    def test_empty_events(self) -> None:
+        assert cal.provider_groups([]) == {}
+
+    def test_missing_provider_falls_to_question_mark(self) -> None:
+        groups = cal.provider_groups([
+            {"type": "anchor_bias_observation", "bias_shift": 0.05},
+        ])
+        assert groups["?"]["noise"] == [0.05]
+
+    def test_unrelated_and_biasless_events_skipped(self) -> None:
+        groups = cal.provider_groups([
+            {"type": "anchor_loss", "provider": "x", "est": 100},
+            {"type": "anchor_bias_observation", "provider": "x"},  # no bias
+            {"type": "anchor_bias_observation", "bias_shift": 0.03},  # no prov
+        ])
+        assert groups == {"?": {"noise": [0.03], "drift": []}}
+
+    def test_negative_shift_folds_per_provider(self) -> None:
+        groups = cal.provider_groups([
+            self._obs("p", -0.06),
+            self._obs("p", 0.04),
+        ])
+        assert sorted(groups["p"]["noise"]) == [0.04, 0.06]
+
+
 class TestLoadEvents:
     def test_valid_and_malformed_mixed(self, tmp_path) -> None:
         f = tmp_path / "usage-anchor.jsonl"
@@ -162,10 +214,14 @@ class TestMain:
     def test_end_to_end_report(self, tmp_path, capsys) -> None:
         f = tmp_path / "usage-anchor.jsonl"
         rows = [
-            {"type": "anchor_bias_observation", "bias_shift": 0.02},
-            {"type": "anchor_bias_observation", "bias_shift": -0.04},
-            {"type": "anchor_bias_observation", "bias_shift": 0.05},
-            {"type": "anchor_provider_drift", "bias_shift": 0.8},
+            {"type": "anchor_bias_observation", "bias_shift": 0.02,
+             "provider": "api.openai.com"},
+            {"type": "anchor_bias_observation", "bias_shift": -0.04,
+             "provider": "api.openai.com"},
+            {"type": "anchor_bias_observation", "bias_shift": 0.05,
+             "provider": "api.openai.com"},
+            {"type": "anchor_provider_drift", "bias_shift": 0.8,
+             "provider": "localhost"},
         ]
         f.write_text(
             "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
@@ -177,6 +233,9 @@ class TestMain:
         assert "anchor_provider_drift: 1" in out
         assert "distribution (n=3)" in out
         assert "Recommended _SILENT_DRIFT_THRESHOLD: 0.25" in out
+        # per-provider table present with both providers, one without noise
+        assert "api.openai.com: noise n=3 drift n=0" in out
+        assert "localhost: noise n=0 drift n=1" in out
 
     def test_no_data_report(self, tmp_path, capsys) -> None:
         f = tmp_path / "usage-anchor.jsonl"

@@ -120,6 +120,35 @@ def split_events(events: list[dict]) -> tuple[list[float], list[float]]:
     return noise, drift
 
 
+def provider_groups(events: list[dict]) -> dict[str, dict[str, list[float]]]:
+    """Group events by provider, split into per-provider noise/drift lists.
+
+    A global threshold hides provider-specific noise floors: OpenAI's
+    tokenizer may sit at a ~1.5x bias with tiny per-round wobble while a
+    local endpoint wobbles 20%+ — aggregating them into one distribution can
+    produce a "no-clean-separation" verdict even though every provider is
+    cleanly separable on its own (the script's own no-clean-separation
+    message says "consider per-provider thresholds" — this table is the data
+    to do that). Events without a numeric bias_shift are skipped; events
+    without a provider field fall under "?".
+    """
+    groups: dict[str, dict[str, list[float]]] = {}
+    for ev in events:
+        shift = bias_abs(ev)
+        if shift is None:
+            continue
+        ev_type = ev.get("type")
+        if ev_type not in ("anchor_bias_observation", "anchor_provider_drift"):
+            continue
+        prov = ev.get("provider") or "?"
+        group = groups.setdefault(prov, {"noise": [], "drift": []})
+        if ev_type == "anchor_bias_observation":
+            group["noise"].append(shift)
+        else:
+            group["drift"].append(shift)
+    return groups
+
+
 def percentile(sorted_vals: list[float], p: float) -> float:
     """Nearest-rank percentile (0 < p <= 100) of an already-sorted list.
 
@@ -211,6 +240,7 @@ def main(argv: list[str] | None = None) -> int:
 
     events, malformed = load_events(args.path)
     noise, drift = split_events(events)
+    groups = provider_groups(events)
     stats = recommend_threshold(noise, drift, current=args.current)
 
     first_ts = next((e.get("timestamp") for e in events if e.get("timestamp")), "?")
@@ -247,6 +277,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"real-drift events seen: {stats['n_drift']} (over-threshold sightings)")
     else:
         print("real-drift events seen: 0 (guard has never fired)")
+
+    if groups:
+        print("\nper-provider |bias_shift| (noise n, drift n, noise p90/p99):")
+        for prov in sorted(groups, key=lambda p: (-len(groups[p]["noise"]), p)):
+            group = groups[prov]
+            n = sorted(group["noise"])
+            n_drift = len(group["drift"])
+            if n:
+                p90 = percentile(n, 90)
+                p99 = percentile(n, 99)
+                flag = "  <-- CROWDING (p99 >= 90% of current threshold)" \
+                    if p99 >= 0.9 * args.current else ""
+                print(
+                    f"  {prov}: noise n={len(n)} drift n={n_drift} "
+                    f"p90={_fmt(p90)} p99={_fmt(p99)}{flag}"
+                )
+            else:
+                print(
+                    f"  {prov}: noise n=0 drift n={n_drift} "
+                    f"(no sub-threshold observations)"
+                )
 
     if reason == "noise-crowding-boundary":
         print(
