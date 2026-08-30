@@ -543,4 +543,54 @@ describe("Composer — 格式栏与快捷键（Stage 2, rant 14:07:29）", () =>
     // 点击格式按钮后选区仍在（mousedown preventDefault 防失焦）→ 命令作用于选中文本
     expect(mdOf(s, editor)).toContain("*keep selection*");
   });
+
+  it("沙箱切换器：默认 workspace-write 激活 + 三档渲染（重构回归恢复，rant 2026-08-30T16:34:29）", async () => {
+    const store = createTranscriptStore();
+    setup(store);
+    await waitFor(() => expect(screen.getByTestId("sandbox-switcher")).toBeTruthy());
+    expect(screen.getByTestId("sandbox-workspace-write").className).toContain("active");
+    expect(screen.getByTestId("sandbox-read-only").getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByTestId("sandbox-danger-full-access").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("沙箱切换器：切到 read-only → 发送消息带 read-only sandbox", async () => {
+    const store = createTranscriptStore();
+    const sent: Array<{ sandbox?: string | null }> = [];
+    const s = setup(store, {
+      sendMessage: async (o) => {
+        sent.push({ sandbox: o.sandbox });
+        return { requestId: o.requestId };
+      },
+    });
+    const editor = await waitEditor(s);
+    await userEvent.click(screen.getByTestId("sandbox-read-only"));
+    expect(screen.getByTestId("sandbox-read-only").className).toContain("active");
+    expect(screen.getByTestId("sandbox-workspace-write").className).not.toContain("active");
+    act(() => {
+      editor.commands.insertContent("readonly mode");
+    });
+    s.press("Enter");
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].sandbox).toBe("read-only");
+  });
+
+  it("沙箱切换器：切到 danger-full-access → 发送消息带 danger-full-access sandbox", async () => {
+    const store = createTranscriptStore();
+    const sent: Array<{ sandbox?: string | null }> = [];
+    const s = setup(store, {
+      sendMessage: async (o) => {
+        sent.push({ sandbox: o.sandbox });
+        return { requestId: o.requestId };
+      },
+    });
+    const editor = await waitEditor(s);
+    await userEvent.click(screen.getByTestId("sandbox-danger-full-access"));
+    expect(screen.getByTestId("sandbox-danger-full-access").className).toContain("active");
+    act(() => {
+      editor.commands.insertContent("full access mode");
+    });
+    s.press("Enter");
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].sandbox).toBe("danger-full-access");
+  });
 });

@@ -67,6 +67,16 @@ export interface ComposerProps {
 
 const MAX_INPUT_HEIGHT = 150;
 
+/** 沙箱三档（rant 2026-08-20T18:18，vanilla mode-switcher 同款；重构回归恢复） */
+export const SANDBOX_TIERS = ["read-only", "workspace-write", "danger-full-access"] as const;
+export type SandboxTier = (typeof SANDBOX_TIERS)[number];
+const SANDBOX_SET: ReadonlySet<string> = new Set(SANDBOX_TIERS);
+
+/** 校验 sandbox 值（vanilla setSandbox 同款：非法值忽略 → null → 调用方回落默认） */
+function sanitizeSandbox(v: string | null | undefined): SandboxTier | null {
+  return v != null && SANDBOX_SET.has(v) ? (v as SandboxTier) : null;
+}
+
 /** 格式命令（Stage 2）：以 editor 为参的纯函数——editor 单例闭包经 fmtRef 桥接给按钮/快捷键 */
 function cycleHeading(ed: Editor | null): void {
   if (!ed) return;
@@ -108,6 +118,9 @@ export function Composer({
   const [hasText, setHasText] = useState(false);
   const [internalBusy, setInternalBusy] = useState(false);
   const busy = busyProp ?? internalBusy;
+  // 沙箱档位（重构回归恢复，rant 2026-08-30T16:34:29）：默认 workspace-write（vanilla 同款），
+  // 发送时随消息下发；切换仅允许三档（与 vanilla setSandbox 校验一致）。
+  const [tier, setTier] = useState<SandboxTier>(sanitizeSandbox(sandbox) ?? "workspace-write");
   // ⚠️ (rant 2026-08-28T22:27:01) 链接改用应用内对话框收集 URL（Electron 禁用 window.prompt）
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [linkHref, setLinkHref] = useState("");
@@ -316,10 +329,10 @@ export function Composer({
     const requestId = genRequestId();
     store.setOwnStream(requestId);
     if (wasBusy) {
-      queueSend(queuedRef.current, sid, { requestId, text: value, sandbox });
+      queueSend(queuedRef.current, sid, { requestId, text: value, sandbox: tier });
     }
     try {
-      const res = await sendFn({ sessionId: sid, text: value, requestId, sandbox });
+      const res = await sendFn({ sessionId: sid, text: value, requestId, sandbox: tier });
       store.setOwnStream(res.requestId || requestId); // G124：以 daemon 回显为准
     } catch {
       setInternalBusy(false);
@@ -380,6 +393,37 @@ export function Composer({
             <span className={b.labelClass}>{b.label}</span>
           </button>
         ))}
+      </div>
+      <div className="mode-switcher" role="group" aria-label={t("composer.sandboxTitle")} data-testid="sandbox-switcher">
+        {SANDBOX_TIERS.map((tierKey) => {
+          const i18nKey =
+            tierKey === "read-only"
+              ? "composer.sandboxReadOnly"
+              : tierKey === "workspace-write"
+                ? "composer.sandboxWorkspaceWrite"
+                : "composer.sandboxFullAccess";
+          const shortKey =
+            tierKey === "read-only"
+              ? "composer.sandboxShortReadOnly"
+              : tierKey === "workspace-write"
+                ? "composer.sandboxShortWorkspaceWrite"
+                : "composer.sandboxShortFullAccess";
+          return (
+            <button
+              key={tierKey}
+              type="button"
+              className={`mode-btn${tier === tierKey ? " active" : ""}`}
+              data-sandbox={tierKey}
+              title={t(i18nKey)}
+              aria-label={t(i18nKey)}
+              aria-pressed={tier === tierKey}
+              data-testid={`sandbox-${tierKey}`}
+              onClick={() => setTier(tierKey)}
+            >
+              {t(shortKey)}
+            </button>
+          );
+        })}
       </div>
       <div className="composer-card">
         <EditorContent editor={editor} className="composer-editor" />
