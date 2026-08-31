@@ -54,6 +54,13 @@ from typing import Any
 DEFAULT_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
 DEFAULT_CURRENT = 0.25
 
+# Issue #1087: the scheduled planted-fire drill (daemon.py) rides the real
+# tokenizer-switch path under this reserved session id, so every
+# anchor_provider_drift event it produces is a SYNTHETIC switch — it must be
+# excluded from calibration (it is not real drift; including it would skew
+# the empirical distribution toward the fabricated shift).
+DRILL_SESSION = "planted-fire-drill"
+
 
 def load_events(path: Path) -> tuple[list[dict], int]:
     """Parse a usage-anchor.jsonl file into events.
@@ -109,6 +116,10 @@ def split_events(events: list[dict]) -> tuple[list[float], list[float]]:
     noise: list[float] = []
     drift: list[float] = []
     for ev in events:
+        # Issue #1087: skip synthetic drill events (reserved session id) —
+        # they are fabricated switches, not real drift.
+        if ev.get("session") == DRILL_SESSION:
+            continue
         shift = bias_abs(ev)
         if shift is None:
             continue
@@ -134,6 +145,9 @@ def provider_groups(events: list[dict]) -> dict[str, dict[str, list[float]]]:
     """
     groups: dict[str, dict[str, list[float]]] = {}
     for ev in events:
+        # Issue #1087: skip synthetic drill events (reserved session id).
+        if ev.get("session") == DRILL_SESSION:
+            continue
         shift = bias_abs(ev)
         if shift is None:
             continue

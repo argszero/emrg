@@ -85,6 +85,17 @@ class TestSplitEvents:
         ])
         assert noise == [0.05] and drift == []
 
+    def test_drill_events_excluded(self) -> None:
+        """Issue #1087: synthetic planted-fire drill events (reserved session
+        id) must never enter the calibration distribution — they are
+        fabricated switches, not real drift."""
+        noise, drift = cal.split_events([
+            self._ev(type="anchor_provider_drift", bias_shift=0.9,
+                     session=cal.DRILL_SESSION),
+            self._ev(bias_shift=0.06),
+        ])
+        assert noise == [0.06] and drift == []
+
 
 class TestProviderGroups:
     def _obs(self, prov: str, shift: float) -> dict:
@@ -115,6 +126,18 @@ class TestProviderGroups:
 
     def test_empty_events(self) -> None:
         assert cal.provider_groups([]) == {}
+
+    def test_drill_events_excluded_from_groups(self) -> None:
+        """Issue #1087: drill events (reserved session id) are synthetic —
+        excluded from per-provider calibration groups too."""
+        groups = cal.provider_groups([
+            self._drift("api.openai.com", 0.9),
+            self._obs("api.openai.com", 0.06),
+            {**self._drift("api.openai.com", 1.2),
+             "session": cal.DRILL_SESSION},
+        ])
+        assert groups["api.openai.com"]["drift"] == [0.9]
+        assert groups["api.openai.com"]["noise"] == [0.06]
 
     def test_missing_provider_falls_to_question_mark(self) -> None:
         groups = cal.provider_groups([
