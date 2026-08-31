@@ -257,151 +257,181 @@ class LlmClient:
             content_parts[:] = []
             reasoning_parts[:] = []
             tc_by_index.clear()
+            # True once a delta has been yielded to the caller. Retrying after
+            # that point would duplicate already-streamed content/broadcasts,
+            # so transport errors mid-stream after a yield are NOT retried
+            # (rant 2026-08-31T12:53:13).
+            yielded_delta = False
 
-            async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                if resp.status_code != 200:
-                    text = await resp.aread()
-                    if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
-                        delay = RETRY_BASE_DELAY * (2 ** attempt)
-                        logger.warning(
-                            "LLM stream transient error %d, retrying in %.1fs "
-                            "(attempt %d/%d): %s",
-                            resp.status_code, delay, attempt + 1, MAX_RETRIES,
-                            _redact_text(text[:200]),
+            try:
+                async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                    if resp.status_code != 200:
+                        text = await resp.aread()
+                        if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
+                            delay = RETRY_BASE_DELAY * (2 ** attempt)
+                            logger.warning(
+                                "LLM stream transient error %d, retrying in %.1fs "
+                                "(attempt %d/%d): %s",
+                                resp.status_code, delay, attempt + 1, MAX_RETRIES,
+                                _redact_text(text[:200]),
+                            )
+                            await asyncio.sleep(delay)
+                            last_error = RuntimeError(
+                                f"LLM stream request failed: {resp.status_code} - {_redact_text(text[:500])}"
+                            )
+                            continue
+                        logger.error("LLM stream error: %s %s", resp.status_code, _redact_text(text[:500]))
+                        hdr = _redact_headers(dict(resp.headers))
+                        raise RuntimeError(
+                            f"LLM stream request failed: {resp.status_code} "
+                            f"headers={hdr} body={_redact_text(text[:1000])}"
                         )
-                        await asyncio.sleep(delay)
-                        last_error = RuntimeError(
-                            f"LLM stream request failed: {resp.status_code} - {_redact_text(text[:500])}"
+
+                    # Capture response metadata for llm.jsonl logging
+                    self.last_response_status = resp.status_code
+                    self.last_response_headers = dict(resp.headers)
+
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line or line == "[DONE]" or not line.startswith("data: "):
+                            continue
+
+                        json_str = line[6:]
+                        try:
+                            chunk = json.loads(json_str)
+                        except json.JSONDecodeError:
+                            logger.debug("SSE parse skip: %s", json_str[:80])
+                            continue
+
+                        choices = chunk.get("choices", [])
+                        if not choices:
+                            continue
+
+                        delta = choices[0].get("delta", {})
+                        finish = choices[0].get("finish_reason")
+
+                        # Accumulate text content
+                        text_content = delta.get("content", "")
+                        if text_content:
+                            content_parts.append(text_content)
+
+                        # Accumulate reasoning / think block (rant 2026-08-18T09:43:23):
+                        # DeepSeek sends `reasoning_content`, OpenAI-compatible
+                        # endpoints may send `reasoning` — accept both field names,
+                        # accumulating per-delta like content_parts.
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                        if reasoning:
+                            reasoning_parts.append(reasoning)
+
+                        # Accumulate tool_calls from delta
+                        for tc in delta.get("tool_calls", []):
+                            idx = tc.get("index", 0)
+                            if idx not in tc_by_index:
+                                tc_by_index[idx] = {
+                                    "index": idx,
+                                    "id": tc.get("id", ""),
+                                    "function": {"name": "", "arguments": ""},
+                                }
+                            acc = tc_by_index[idx]
+                            if tc.get("id"):
+                                acc["id"] = tc["id"]
+                            fn = tc.get("function", {})
+                            if fn.get("name"):
+                                acc["function"]["name"] = fn["name"]
+                            if fn.get("arguments"):
+                                acc["function"]["arguments"] += fn["arguments"]
+
+                        # Build current accumulated tool_calls list
+                        current_tool_calls: list[dict] | None = None
+                        if tc_by_index:
+                            current_tool_calls = [
+                                tc_by_index[i] for i in sorted(tc_by_index.keys())
+                            ]
+
+                        # Capture usage from chunk (may appear in any chunk or only in final)
+                        usage = chunk.get("usage")
+                        # reasoning_tokens may sit at the top level or nested under
+                        # completion_tokens_details (rant 2026-08-18T09:43:23)
+                        reasoning_tokens = (
+                            usage.get("reasoning_tokens")
+                            if usage and usage.get("reasoning_tokens") is not None
+                            else (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                            if usage else None
                         )
-                        continue
-                    logger.error("LLM stream error: %s %s", resp.status_code, _redact_text(text[:500]))
-                    hdr = _redact_headers(dict(resp.headers))
-                    raise RuntimeError(
-                        f"LLM stream request failed: {resp.status_code} "
-                        f"headers={hdr} body={_redact_text(text[:1000])}"
-                    )
-
-                # Capture response metadata for llm.jsonl logging
-                self.last_response_status = resp.status_code
-                self.last_response_headers = dict(resp.headers)
-
-                async for line in resp.aiter_lines():
-                    line = line.strip()
-                    if not line or line == "[DONE]" or not line.startswith("data: "):
-                        continue
-
-                    json_str = line[6:]
-                    try:
-                        chunk = json.loads(json_str)
-                    except json.JSONDecodeError:
-                        logger.debug("SSE parse skip: %s", json_str[:80])
-                        continue
-
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-
-                    delta = choices[0].get("delta", {})
-                    finish = choices[0].get("finish_reason")
-
-                    # Accumulate text content
-                    text_content = delta.get("content", "")
-                    if text_content:
-                        content_parts.append(text_content)
-
-                    # Accumulate reasoning / think block (rant 2026-08-18T09:43:23):
-                    # DeepSeek sends `reasoning_content`, OpenAI-compatible
-                    # endpoints may send `reasoning` — accept both field names,
-                    # accumulating per-delta like content_parts.
-                    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                    if reasoning:
-                        reasoning_parts.append(reasoning)
-
-                    # Accumulate tool_calls from delta
-                    for tc in delta.get("tool_calls", []):
-                        idx = tc.get("index", 0)
-                        if idx not in tc_by_index:
-                            tc_by_index[idx] = {
-                                "index": idx,
-                                "id": tc.get("id", ""),
-                                "function": {"name": "", "arguments": ""},
+                        # cache_hit_tokens: DeepSeek native `prompt_cache_hit_tokens`
+                        # (top level) or OpenAI-compatible `prompt_tokens_details.cached_tokens`
+                        # (nested) — same dual-location pattern as reasoning_tokens
+                        # (rant 2026-08-23T09:17:14, LLM usage cache hit/miss visibility).
+                        # Omitted when the API does not report caching, so non-cache
+                        # endpoints keep the exact same record shape (no new fields).
+                        cache_hit_tokens = (
+                            usage.get("prompt_cache_hit_tokens")
+                            if usage and usage.get("prompt_cache_hit_tokens") is not None
+                            else (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
+                            if usage else None
+                        )
+                        usage_out: dict | None = None
+                        if usage:
+                            usage_out = {
+                                "prompt_tokens": usage.get("prompt_tokens"),
+                                "completion_tokens": usage.get("completion_tokens"),
+                                "reasoning_tokens": reasoning_tokens,
                             }
-                        acc = tc_by_index[idx]
-                        if tc.get("id"):
-                            acc["id"] = tc["id"]
-                        fn = tc.get("function", {})
-                        if fn.get("name"):
-                            acc["function"]["name"] = fn["name"]
-                        if fn.get("arguments"):
-                            acc["function"]["arguments"] += fn["arguments"]
+                            if cache_hit_tokens is not None:
+                                usage_out["cache_hit_tokens"] = cache_hit_tokens
 
-                    # Build current accumulated tool_calls list
-                    current_tool_calls: list[dict] | None = None
-                    if tc_by_index:
-                        current_tool_calls = [
-                            tc_by_index[i] for i in sorted(tc_by_index.keys())
-                        ]
-
-                    # Capture usage from chunk (may appear in any chunk or only in final)
-                    usage = chunk.get("usage")
-                    # reasoning_tokens may sit at the top level or nested under
-                    # completion_tokens_details (rant 2026-08-18T09:43:23)
-                    reasoning_tokens = (
-                        usage.get("reasoning_tokens")
-                        if usage and usage.get("reasoning_tokens") is not None
-                        else (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
-                        if usage else None
-                    )
-                    # cache_hit_tokens: DeepSeek native `prompt_cache_hit_tokens`
-                    # (top level) or OpenAI-compatible `prompt_tokens_details.cached_tokens`
-                    # (nested) — same dual-location pattern as reasoning_tokens
-                    # (rant 2026-08-23T09:17:14, LLM usage cache hit/miss visibility).
-                    # Omitted when the API does not report caching, so non-cache
-                    # endpoints keep the exact same record shape (no new fields).
-                    cache_hit_tokens = (
-                        usage.get("prompt_cache_hit_tokens")
-                        if usage and usage.get("prompt_cache_hit_tokens") is not None
-                        else (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
-                        if usage else None
-                    )
-                    usage_out: dict | None = None
-                    if usage:
-                        usage_out = {
-                            "prompt_tokens": usage.get("prompt_tokens"),
-                            "completion_tokens": usage.get("completion_tokens"),
-                            "reasoning_tokens": reasoning_tokens,
+                        # Any yield = the caller has seen (and likely broadcast)
+                        # this delta — no retry past this point.
+                        yielded_delta = True
+                        yield {
+                            "content": text_content or None,
+                            "tool_calls": current_tool_calls,
+                            "finish_reason": finish,
+                            "usage": usage_out,
+                            # accumulated think text; None when the model does not
+                            # reason (rant 2026-08-18T09:43:23 — only on response side)
+                            "reasoning": "".join(reasoning_parts) or None,
                         }
-                        if cache_hit_tokens is not None:
-                            usage_out["cache_hit_tokens"] = cache_hit_tokens
 
-                    yield {
-                        "content": text_content or None,
-                        "tool_calls": current_tool_calls,
-                        "finish_reason": finish,
-                        "usage": usage_out,
-                        # accumulated think text; None when the model does not
-                        # reason (rant 2026-08-18T09:43:23 — only on response side)
-                        "reasoning": "".join(reasoning_parts) or None,
-                    }
-
-                    # On finish, we're done with this stream
-                    if finish:
-                        return
-
-                # Stream ended without finish_reason (e.g. connection drop
-                # mid-stream). Treat as transient error — retry if attempts remain.
+                        # On finish, we're done with this stream
+                        if finish:
+                            return
+            except httpx.TransportError as exc:
+                # Transient transport failure while streaming — httpx.ReadTimeout
+                # (no data block for the 120s read timeout), ConnectError,
+                # RemoteProtocolError (connection dropped), etc. Previously these
+                # bubbled straight out of the iterator, skipping the retry loop
+                # and killing the whole tool round (rant 2026-08-31T12:53:13).
+                # Retry only while no delta has been yielded yet — once the
+                # caller has seen a yield, a retry would duplicate the already
+                # streamed/broadcast content.
                 last_error = RuntimeError(
-                    "LLM stream ended without finish_reason"
+                    f"LLM stream transport error: {type(exc).__name__}"
                 )
-                if attempt < MAX_RETRIES:
+                if not yielded_delta and attempt < MAX_RETRIES:
                     delay = RETRY_BASE_DELAY * (2 ** attempt)
                     logger.warning(
-                        "LLM stream ended prematurely, retrying in %.1fs "
-                        "(attempt %d/%d)",
-                        delay, attempt + 1, MAX_RETRIES,
+                        "LLM stream %s, retrying in %.1fs (attempt %d/%d)",
+                        type(exc).__name__, delay, attempt + 1, MAX_RETRIES,
                     )
                     await asyncio.sleep(delay)
                     continue
+                raise
+
+            # Stream ended without finish_reason (e.g. connection drop
+            # mid-stream). Treat as transient error — retry if attempts remain.
+            last_error = RuntimeError(
+                "LLM stream ended without finish_reason"
+            )
+            if attempt < MAX_RETRIES:
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "LLM stream ended prematurely, retrying in %.1fs "
+                    "(attempt %d/%d)",
+                    delay, attempt + 1, MAX_RETRIES,
+                )
+                await asyncio.sleep(delay)
+                continue
 
         raise last_error  # type: ignore[misc]
 

@@ -415,6 +415,94 @@ def test_stream_retry_logs_attempt_counter(monkeypatch, client, caplog):
     assert "LLM stream transient error 500" in caplog.text
 
 
+# ── Streaming transport-error retry (rant 2026-08-31T12:53:13) ──
+
+class _TransportErrorStream:
+    """A 200 stream whose aiter_lines raises the given transport error,
+    optionally after yielding some SSE chunks first."""
+
+    def __init__(self, exc, chunks_before_raise=()):
+        self.status_code = 200
+        self.headers = {}
+        self._exc = exc
+        self._chunks = list(chunks_before_raise)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def aiter_lines(self):
+        import json
+        for obj in self._chunks:
+            yield "data: " + json.dumps(obj)
+        raise self._exc
+
+
+def test_stream_readtimeout_retries_before_any_delta(monkeypatch, client, caplog):
+    """Transport error mid-stream (httpx.ReadTimeout — no data block within the
+    120s read timeout) is retried with backoff while no delta has been yielded
+    yet (rant 2026-08-31T12:53:13 — previously the exception bubbled out of
+    aiter_lines, skipped the retry loop, and killed the whole tool round)."""
+    import logging
+    import httpx
+    _patch_fast_sleep(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="emrg.server.llm")
+
+    fake = _FakeStreamClient([
+        _TransportErrorStream(httpx.ReadTimeout("timed out")),
+        _make_stream(
+            {"choices": [{"delta": {"content": "hi"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ),
+    ])
+    client._client = fake
+    parts = _drain_stream(client, fake)
+    assert parts == ["hi"]
+    assert fake.calls == 2
+    assert "LLM stream ReadTimeout, retrying in" in caplog.text
+
+
+def test_stream_transport_error_after_delta_not_retried(monkeypatch, client, caplog):
+    """Once a delta has been yielded (the caller has broadcast it), a transport
+    error is NOT retried — retrying would duplicate already-streamed content."""
+    import logging
+    import httpx
+    import pytest
+    _patch_fast_sleep(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="emrg.server.llm")
+
+    fake = _FakeStreamClient([
+        _TransportErrorStream(
+            httpx.ReadTimeout("timed out"),
+            chunks_before_raise=[{"choices": [{"delta": {"content": "partial"}}]}],
+        ),
+    ])
+    client._client = fake
+    with pytest.raises(httpx.ReadTimeout):
+        _drain_stream(client, fake)
+    assert fake.calls == 1
+    assert "retrying in" not in caplog.text
+
+
+def test_stream_transport_error_exhausts_retries(monkeypatch, client):
+    """Persistent transport errors raise after MAX_RETRIES attempts."""
+    import httpx
+    import pytest
+    _patch_fast_sleep(monkeypatch)
+    fake = _FakeStreamClient([
+        _TransportErrorStream(httpx.ReadTimeout("t1")),
+        _TransportErrorStream(httpx.ReadTimeout("t2")),
+        _TransportErrorStream(httpx.ReadTimeout("t3")),
+        _TransportErrorStream(httpx.ReadTimeout("t4")),
+    ])
+    client._client = fake
+    with pytest.raises(httpx.ReadTimeout):
+        _drain_stream(client, fake)
+    assert fake.calls == 4
+
+
 # ── Reasoning / think-block capture (rant 2026-08-18T09:43:23) ──
 
 def _make_stream(*objs):
