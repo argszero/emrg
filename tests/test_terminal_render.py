@@ -8,6 +8,7 @@ render 检测到缩窄时先 CLEAR_SCREEN 再全量重绘。本测试验证该�
 from __future__ import annotations
 
 import io
+import os
 import sys
 from contextlib import redirect_stdout
 
@@ -143,3 +144,45 @@ def test_composer_height_tracks_multiline_render():
     with redirect_stdout(io.StringIO()):
         term3.render(full=True)
     assert term3.viewport.composer_height == 4, "leading newline → 4 rows"
+
+
+def test_probe_terminal_zero_winsize_falls_back_to_80x24(monkeypatch):
+    """rant 2026-08-31T11:36:22 — os.get_terminal_size() may return 0x0 when
+    the PTY winsize hasn't been reported yet (macOS Terminal at startup).
+
+    _probe_terminal() must not let width=0 overwrite the 80x24 default —
+    width 0 would collapse RenderContext.width to 0 and split every CJK
+    char (cell_len=2) onto its own line ("中文错行"). shutil's guard rejects
+    0 values and falls back to the explicit (80, 24).
+    """
+    from emrg.client.python_tui import terminal as term_mod
+
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.delenv("LINES", raising=False)
+    monkeypatch.setattr(os, "get_terminal_size", lambda fd=None: os.terminal_size((0, 0)))
+
+    caps = term_mod._probe_terminal()
+    assert caps.width == 80, f"width must fall back to 80, got {caps.width}"
+    assert caps.height == 24, f"height must fall back to 24, got {caps.height}"
+
+
+def test_handle_resize_zero_winsize_keeps_last_known_good(monkeypatch):
+    """rant 2026-08-31T11:36:22 — handle_resize() races the same 0x0 probe
+    (a SIGWINCH can fire before Terminal.app reports the real winsize).
+
+    It must fall back to the last known-good dimensions instead of collapsing
+    to 0 (which would again split CJK chars onto separate lines).
+    """
+    term = Terminal()
+    term.caps.width = 120
+    term.caps.height = 40
+    term.viewport.resize(term.caps.height, term.caps.width)
+
+    monkeypatch.setattr(os, "get_terminal_size", lambda fd=None: os.terminal_size((0, 0)))
+
+    with redirect_stdout(io.StringIO()):
+        term.handle_resize()
+
+    assert term.caps.width == 120, f"width must keep last-known-good 120, got {term.caps.width}"
+    assert term.caps.height == 40, f"height must keep last-known-good 40, got {term.caps.height}"
+    assert term.viewport.viewport_width == 120
