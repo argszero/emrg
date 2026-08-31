@@ -127,17 +127,39 @@ describe("流式 delta", () => {
     expect(e!.isOwn).toBe(false);
   });
 
-  it("上一文本段被工具封存后，新 delta 开新段", () => {
+  it("上一文本段被工具封存后，新 delta 开新 AssistantEntry（rant 2026-08-31T12:30:33）", () => {
     const s = store();
     s.handleDelta([{ request_id: "r1", content: "思考中…" }], "s1");
     s.handleToolStart({ tool_call_id: "t1", tool_name: "bash", request_id: "r1" }, "s1");
     s.handleDelta([{ request_id: "r1", content: "继续输出" }], "s1");
-    const e = assistantOf(s.getEntries("s1"), "r1");
-    expect(e!.segments).toHaveLength(2);
-    expect(e!.segments[0].sealed).toBe(true);
-    expect(e!.segments[0].typing).toBe(false); // 封存时移除 typing（rant 21:09）
-    expect(e!.segments[1].text).toBe("继续输出");
-    expect(e!.segments[1].sealed).toBe(false);
+    const entries = s.getEntries("s1");
+    const assistants = entries.filter((x): x is AssistantEntry => x.kind === "assistant" && x.rid === "r1");
+    // 工具后文本必须开新 entry（排在工具行之后），不能回挂到工具上方的旧 entry
+    expect(assistants).toHaveLength(2);
+    expect(assistants[0].segments).toHaveLength(1);
+    expect(assistants[0].segments[0].text).toBe("思考中…");
+    expect(assistants[0].segments[0].sealed).toBe(true);
+    expect(assistants[0].segments[0].typing).toBe(false); // 封存时移除 typing（rant 21:09）
+    expect(assistants[1].segments[0].text).toBe("继续输出");
+    expect(assistants[1].segments[0].sealed).toBe(false);
+    // 渲染顺序：文本1 → 工具行 → 文本2（与 TUI 到达顺序对齐）
+    expect(entries.map((x) => x.kind)).toEqual(["assistant", "tool-row", "assistant"]);
+  });
+
+  it("多工具交错：文本→工具A→文本→工具B→文本 生成 A1→T_A→A2→T_B→A3（rant 2026-08-31T12:30:33）", () => {
+    const s = store();
+    s.handleDelta([{ request_id: "r1", content: "A1" }], "s1");
+    s.handleToolStart({ tool_call_id: "ta", tool_name: "bash", request_id: "r1" }, "s1");
+    s.handleDelta([{ request_id: "r1", content: "A2" }], "s1");
+    s.handleToolStart({ tool_call_id: "tb", tool_name: "read", request_id: "r1" }, "s1");
+    s.handleDelta([{ request_id: "r1", content: "A3" }], "s1");
+    const kinds = s.getEntries("s1").map((x) => x.kind);
+    expect(kinds).toEqual(["assistant", "tool-row", "assistant", "tool-row", "assistant"]);
+    const as = s.getEntries("s1").filter((x): x is AssistantEntry => x.kind === "assistant");
+    expect(as.map((a) => a.segments.map((seg) => seg.text).join(""))).toEqual(["A1", "A2", "A3"]);
+    // 工具交错后同 rid 文本各自独立 entry，groupIndex 指向最新 entry → done 只停最新 typing
+    s.handleDone({ request_id: "r1" }, "s1");
+    expect(as[2].segments[0].typing).toBe(false);
   });
 
   it("done 之后到达的残留 delta 被丢弃（rant 14:11）", () => {
