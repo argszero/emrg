@@ -1018,6 +1018,66 @@ def test_planted_fire_unparsable_marker_no_alarm(tmp_path, monkeypatch, caplog):
     assert "planted-fire-stale" not in caplog.text
 
 
+def test_planted_fire_drill_rides_real_path_fires(tmp_path, monkeypatch, caplog):
+    """Issue #1087 (same-door constraint, heinrichneb Dev.to 3doei): the
+    scheduled drill must ride the REAL tokenizer-switch path — it fabricates
+    a round whose real_pt deviates beyond _SILENT_DRIFT_THRESHOLD and pushes
+    it through _refresh_usage_anchor (the exact production entry point a
+    genuine provider change takes), then asserts the detector fired
+    (anchor_provider_drift event + PASS log). A drill passing means the real
+    path plus the detector work end to end, not just the detector call."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    marker = tmp_path / "planted-fire-heartbeat"
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+    with caplog.at_level("DEBUG", logger="emrg.server.daemon"):
+        fired = server._run_planted_fire_drill()
+    assert fired is True
+    assert "planted-fire-drill: PASS" in caplog.text
+    # The fabricated switch produced a countable drift event attributed to
+    # the reserved drill session (distinguishable from real switches).
+    lines = stats.read_text(encoding="utf-8").strip().splitlines()
+    drill_events = [
+        json.loads(ln) for ln in lines
+        if json.loads(ln).get("session") == daemon_mod._PLANTED_FIRE_DRILL_SESSION
+    ]
+    assert any(ev["type"] == "anchor_provider_drift" for ev in drill_events)
+    # The synthetic anchor must not leak into real state.
+    assert daemon_mod._PLANTED_FIRE_DRILL_SESSION not in server._usage_anchors
+
+
+def test_planted_fire_drill_no_detection_reports_fail(tmp_path, monkeypatch, caplog):
+    """Issue #1087 negative: when the fabricated switch is NOT detected (the
+    detector is dead — the #1072/#1075 failure shape), the drill must report
+    FAIL and emit NO drift event: a silent guard is surfaced loudly rather
+    than swallowed."""
+    stats = tmp_path / "usage-anchor.jsonl"
+    monkeypatch.setattr(daemon_mod, "_USAGE_ANCHOR_STATS_PATH", stats)
+    marker = tmp_path / "planted-fire-heartbeat"
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+    # Simulate the detector being broken: the real path runs but produces no
+    # drift event (guard stopped running while looking alive).
+    monkeypatch.setattr(server, "_detect_silent_anchor_drift", lambda *a, **k: None)
+    with caplog.at_level("DEBUG", logger="emrg.server.daemon"):
+        fired = server._run_planted_fire_drill()
+    assert fired is False
+    assert "planted-fire-drill: FAIL" in caplog.text
+    # No drift event leaked into the stats for the drill session (the file
+    # may not even exist — nothing was written).
+    if stats.exists():
+        lines = stats.read_text(encoding="utf-8").strip().splitlines()
+        drill_drift = [
+            json.loads(ln) for ln in lines
+            if json.loads(ln).get("type") == "anchor_provider_drift"
+            and json.loads(ln).get("session") == daemon_mod._PLANTED_FIRE_DRILL_SESSION
+        ]
+        assert drill_drift == []
+    # Synthetic anchor still cleaned up on the fail path.
+    assert daemon_mod._PLANTED_FIRE_DRILL_SESSION not in server._usage_anchors
+
+
 def test_usage_anchor_cross_provider_window_attributable(tmp_path, monkeypatch):
     """Issue #1011 — heinrichneb: 'a counter that can't say WHICH provider
     went silent is half a counter'. The loss window's identity must survive

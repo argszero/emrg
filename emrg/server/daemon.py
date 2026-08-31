@@ -27,6 +27,7 @@ import time
 import traceback
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -430,6 +431,12 @@ class EmrgServer:
         # last_planted heartbeat is older than _PLANTED_FIRE_STALE_DAYS.
         self._planted_fire_alarm_task = asyncio.create_task(
             self._planted_fire_alarm_loop())
+
+        # Issue #1087: scheduled planted-fire drill (daily). Rides the REAL
+        # tokenizer-switch path (_refresh_usage_anchor → detector) so a drill
+        # passing means the production path plus the detector work end to end.
+        self._planted_fire_drill_task = asyncio.create_task(
+            self._planted_fire_drill_loop())
 
         try:
             await self._server.serve_forever()
@@ -3153,6 +3160,99 @@ class EmrgServer:
             except Exception:
                 logger.debug("planted-fire alarm tick failed", exc_info=True)
 
+    async def _planted_fire_drill_loop(self) -> None:
+        """Issue #1087: scheduled planted-fire drill (same-door constraint).
+        Daily cadence — the drill rides the REAL tokenizer-switch path, so a
+        drill that passes means the production switch path (plus the
+        detector) works end to end; a drill that fails means the planted fire
+        is dead even though real switches may not have happened recently.
+        Failures are logged at debug and never crash the daemon."""
+        while True:
+            await asyncio.sleep(_PLANTED_FIRE_DRILL_INTERVAL)
+            try:
+                self._run_planted_fire_drill()
+            except Exception:
+                logger.debug("planted-fire drill tick failed", exc_info=True)
+
+    def _run_planted_fire_drill(self) -> bool:
+        """Issue #1087 (heinrichneb, Dev.to 3doei): ride the REAL
+        tokenizer-switch path — same door as a genuine provider/tokenizer
+        change. Instead of calling the detector directly (a bypass that
+        proves less), fabricate a synthetic round whose real_pt deviates
+        beyond _SILENT_DRIFT_THRESHOLD and push it through
+        ``_refresh_usage_anchor`` — the exact production entry point the
+        detector guards. When the fabricated switch is detected, the drill
+        has proven the full path works; return True. A drill that does NOT
+        fire is the planted-fire failure mode (the guard is dead while
+        looking alive — the #1072/#1075 failure shape).
+
+        The drill is identifiable in logs via the reserved session id
+        (``planted-fire-drill``) that flows through every heartbeat/drift
+        event, so operators can distinguish drill-triggered switches from
+        real ones. It never touches real anchors (dedicated session id) and
+        cleans up its synthetic anchor afterwards.
+        """
+        sid = _PLANTED_FIRE_DRILL_SESSION
+        session = SimpleNamespace(session_id=sid)
+        messages = [{"role": "user", "content": "planted-fire drill round"}]
+        estimate = self._estimate_tokens(messages)
+        if estimate <= 0:
+            logger.debug("planted-fire-drill: estimate invalid, skipped")
+            return False
+        # Count existing drift events for the drill session so the drill can
+        # assert THIS run emitted a fresh one (not a previous drill's).
+        before = self._count_drill_drift_events()
+        # Plant a known anchor (bias 1.0) so the detector has a baseline.
+        self._usage_anchors[sid] = (estimate, estimate)
+        # Fabricate the switch: real_pt deviates beyond the threshold.
+        switched_real = estimate + max(1, int(estimate * _SILENT_DRIFT_THRESHOLD * 2))
+        try:
+            # Ride the REAL path — a genuine provider change would take
+            # exactly this entry point.
+            self._refresh_usage_anchor(
+                session, {"prompt_tokens": switched_real}, messages)
+        finally:
+            # Never leak the synthetic anchor into real state.
+            self._usage_anchors.pop(sid, None)
+        after = self._count_drill_drift_events()
+        fired = after > before
+        if fired:
+            logger.warning(
+                "planted-fire-drill: PASS — synthetic tokenizer switch "
+                "(real %d vs est %d, bias_shift>%.0f%%) detected via the real "
+                "path (session=%s)",
+                switched_real, estimate, _SILENT_DRIFT_THRESHOLD * 100, sid,
+            )
+        else:
+            logger.warning(
+                "planted-fire-drill: FAIL — synthetic tokenizer switch "
+                "(real %d vs est %d) NOT detected; the planted fire is dead "
+                "or the detector is broken (session=%s)",
+                switched_real, estimate, sid,
+            )
+        return fired
+
+    def _count_drill_drift_events(self) -> int:
+        """Issue #1087: count ``anchor_provider_drift`` events attributed to
+        the reserved drill session in the usage-anchor stats file. Best-effort:
+        an unreadable/missing file counts 0 (the drill must never crash the
+        daemon; a stats write failing is itself a signal the #1072
+        measurability contract is broken, surfaced as drill FAIL)."""
+        n = 0
+        try:
+            with open(_USAGE_ANCHOR_STATS_PATH, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        ev = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (ev.get("type") == "anchor_provider_drift"
+                            and ev.get("session") == _PLANTED_FIRE_DRILL_SESSION):
+                        n += 1
+        except OSError:
+            pass
+        return n
+
     def _refresh_usage_anchor(self, session, final_usage, messages) -> None:
         """Round-loop usage processing (rant 2026-08-23T13:28:50 + issue
         #1078): refresh the usage anchor from the provider's real
@@ -4466,6 +4566,18 @@ _PLANTED_FIRE_STALE_DAYS = 7
 # consistent with #585/#1073). Check every 6 hours: a planted fire that died
 # is caught within 6h of the N-day threshold instead of after a full day.
 _PLANTED_FIRE_ALARM_INTERVAL = 6 * 3600  # seconds
+
+# Issue #1087 (heinrichneb, Dev.to 3doei — same-door constraint): the
+# scheduled planted-fire drill uses a reserved session id so every heartbeat
+# / drift event it produces is identifiable as a drill in logs and stats
+# (distinguishing drill-triggered switches from real ones).
+_PLANTED_FIRE_DRILL_SESSION = "planted-fire-drill"
+
+# Issue #1087: daily drill cadence. The drill rides the real tokenizer-switch
+# path and asserts the detector fires; once a day is frequent enough to catch
+# a dead planted fire within 24h without flooding the stats file with
+# synthetic drift events.
+_PLANTED_FIRE_DRILL_INTERVAL = 24 * 3600  # seconds
 
 # Issue #1027: relative bias-ratio shift (real_pt / local_estimate) between
 # consecutive anchored rounds that is treated as a silent provider/tokenizer
