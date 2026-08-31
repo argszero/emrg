@@ -12,6 +12,7 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None
 import logging
 import os
+import shutil
 import sys
 try:
     import termios
@@ -43,12 +44,15 @@ def _probe_terminal() -> TerminalCapabilities:
     caps = TerminalCapabilities()
 
     # Terminal size
-    try:
-        size = os.get_terminal_size()
-        caps.width = size.columns
-        caps.height = size.lines
-    except (OSError, ValueError):
-        pass
+    # rant 2026-08-31T11:36:22 — os.get_terminal_size() returns 0x0 when the
+    # PTY winsize hasn't been reported yet (macOS Terminal at startup), which
+    # would overwrite the 80x24 default with width=0 → viewport_width=0 →
+    # RenderContext.width=0 → every CJK char (cell_len=2) is split onto its
+    # own line ("中文错行"). shutil.get_terminal_size() rejects 0 values and
+    # falls back to COLUMNS/LINES env, then the explicit fallback — never 0.
+    size = shutil.get_terminal_size(fallback=(80, 24))
+    caps.width = size.columns
+    caps.height = size.lines
 
     # Color depth
     term = os.environ.get("TERM", "")
@@ -184,12 +188,14 @@ class Terminal:
         Re-probes terminal dimensions, resizes viewport and double-buffers,
         then triggers a full re-render to fix layout after resize.
         """
-        try:
-            size = os.get_terminal_size()
-            self.caps.width = size.columns
-            self.caps.height = size.lines
-        except (OSError, ValueError):
-            return
+        # rant 2026-08-31T11:36:22 — same 0x0 guard as _probe_terminal(): a
+        # resize probe racing the PTY winsize report must not collapse the
+        # viewport to width 0 (CJK chars would each get their own line).
+        # Fall back to the last known-good dimensions instead of the 80x24
+        # defaults so a premature SIGWINCH doesn't shrink the layout.
+        size = shutil.get_terminal_size(fallback=(self.caps.width, self.caps.height))
+        self.caps.width = size.columns
+        self.caps.height = size.lines
         self.viewport.resize(self.caps.height, self.caps.width)
         w, h = self.viewport.viewport_width, self.viewport.viewport_height
         if self._front_buffer:
