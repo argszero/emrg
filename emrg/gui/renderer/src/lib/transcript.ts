@@ -251,10 +251,21 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
           s.entries.push(e);
           s.groupIndex.set(rid, s.entries.length - 1);
         }
-        const as = s.entries[s.groupIndex.get(rid)!] as AssistantEntry;
+        let as = s.entries[s.groupIndex.get(rid)!] as AssistantEntry;
         const active = as.segments[as.segments.length - 1];
         if (!active || active.sealed) {
-          // rant 21:57:10：上一文本段被工具行“封存”→ 新文本段开新节点
+          if (active && active.sealed) {
+            // rant 2026-08-31T12:30:33：上一文本段被工具行“封存”后，本 rid 的后续
+            // 文本必须开【新的独立 AssistantEntry】push 到 entries 尾部并更新
+            // groupIndex[rid]，而不是在原 entry 内追加 segment —— 否则工具后产生的
+            // 文本会经 groupIndex 回挂到工具上方的旧 entry，被渲染在工具上方
+            // （“文本→工具”错序：工具后文本永远在工具之上）。新 entry 排在工具行
+            // 之后，与 TUI 的到达顺序语义对齐（文本1→工具→文本2）。
+            const e: AssistantEntry = { kind: "assistant", rid, isOwn: ownStreamRequestId === rid, segments: [] };
+            s.entries.push(e);
+            s.groupIndex.set(rid, s.entries.length - 1);
+            as = e;
+          }
           as.segments.push({ text: "", hasText: false, sealed: false, typing: true });
         }
         const seg = as.segments[as.segments.length - 1];
