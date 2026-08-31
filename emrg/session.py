@@ -240,7 +240,12 @@ class Session:
         with open(self._daily_history_path(), "a", encoding="utf-8") as f:
             f.write(line)
 
-        self._message_count += 1
+        # message_count counts message-type records only — tool_result / summary
+        # records are persisted but do not inflate the user-facing message count
+        # (rant 2026-08-31T14:18:14: count previously grew for every record,
+        # including tool_results, and compact never decremented it).
+        if record.get("type", "message") == "message":
+            self._message_count += 1
         self._updated_at = datetime.now().isoformat()
         self._save_meta()
 
@@ -449,6 +454,15 @@ class Session:
 
         new_history = [summary_record] + recent
         self._write_history(new_history)
+
+        # Recompute message_count from the surviving records — compact replaces
+        # the compacted messages with one summary, so the count must shrink with
+        # them (rant 2026-08-31T14:18:14: previously the count was never
+        # decremented, inflating the TUI/GUI "msgs" display). Same semantics as
+        # the rewind handler (daemon.py): count message-type records only.
+        self._message_count = sum(
+            1 for r in new_history if r.get("type", "message") == "message"
+        )
 
         self._compact_count += 1
         self._last_compact_at = datetime.now().isoformat()
