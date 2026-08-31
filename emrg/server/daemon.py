@@ -2449,7 +2449,7 @@ class EmrgServer:
 
             # Auto-compact: if token count exceeds threshold, compact before this round
             if self.llm.config.auto_compact_threshold > 0.0:
-                estimated = self._estimate_tokens(messages)
+                estimated = self._estimate_tokens(messages, tools_openai)
                 # Rant 2026-08-23T13:28:50: usage-anchored projection —
                 # last real prompt_tokens from the API + only the estimate
                 # delta since then. The local estimator systematically
@@ -2607,7 +2607,7 @@ class EmrgServer:
             # round emits exactly one anchor-bias-heartbeat with an explicit
             # state (anchored=true / anchored=false + reason) so a skipped
             # round is a labeled observation, not an absence.
-            self._refresh_usage_anchor(session, final_usage, messages)
+            self._refresh_usage_anchor(session, final_usage, messages, tools_openai)
 
             full_content = "".join(content_parts)
             # llm.py yields the ACCUMULATED reasoning snapshot on every chunk
@@ -3253,7 +3253,13 @@ class EmrgServer:
             pass
         return n
 
-    def _refresh_usage_anchor(self, session, final_usage, messages) -> None:
+    def _refresh_usage_anchor(
+        self,
+        session,
+        final_usage,
+        messages,
+        tools: Optional[list[dict]] = None,
+    ) -> None:
         """Round-loop usage processing (rant 2026-08-23T13:28:50 + issue
         #1078): refresh the usage anchor from the provider's real
         prompt_tokens + the local estimate of exactly what was sent. The next
@@ -3274,6 +3280,12 @@ class EmrgServer:
         low-frequency staleness alarm has a persisted last_heartbeat to read.
         Written unconditionally at the top — a round that skips the detector
         still proves the round-loop itself is alive.
+
+        Issue #1090 (pm25coder, Dev.to 3dom2 — izgorodin): the local estimate
+        must include the request-level ``tools`` schema, or the anchor base
+        drifts low as the tool-set grows mid-session. ``tools`` is threaded
+        through from the tool loop so the anchor reflects exactly what was
+        sent.
         """
         self._touch_planted_fire_marker()
         if not final_usage:
@@ -3290,7 +3302,7 @@ class EmrgServer:
                 session.session_id,
             )
             return
-        estimate = self._estimate_tokens(messages)
+        estimate = self._estimate_tokens(messages, tools)
         # Issue #1027: detect a provider/tokenizer silently changing under an
         # unchanged base_url/model alias (gateway reroute, silent model update)
         # BEFORE the anchor is overwritten — the old anchor is the last known
@@ -3421,7 +3433,11 @@ class EmrgServer:
     # API usage, so this only needs to be in the right ballpark.
     _TOKENS_PER_IMAGE = 1000
 
-    def _estimate_tokens(self, messages: list[dict]) -> int:
+    def _estimate_tokens(
+        self,
+        messages: list[dict],
+        tools: Optional[list[dict]] = None,
+    ) -> int:
         """Rough token estimation from OpenAI-format messages.
 
         Character-aware: CJK ≈ 2 chars/token, ASCII ≈ 4 chars/token.
@@ -3431,6 +3447,13 @@ class EmrgServer:
         {"type": "text" | "image_url", ...}) — text parts are char-counted,
         each image_url block gets a fixed _TOKENS_PER_IMAGE allowance, and
         unknown dict parts fall back to JSON char-counting.
+
+        Tools-aware (issue #1090, pm25coder Dev.to 3dom2 / izgorodin): the
+        request-level ``tools`` array is billed by the API as part of
+        prompt_tokens, so mid-session tool-set growth (skills/dynamic tools
+        loaded between rounds) must be counted or the auto-compact projection
+        silently drifts low. Each tool schema is JSON-char-counted plus a
+        small per-tool overhead, mirroring how message metadata is counted.
         """
         total = 0
         for m in messages:
@@ -3443,6 +3466,26 @@ class EmrgServer:
             for tc in (m.get("tool_calls") or []):
                 tc_str = json.dumps(tc, ensure_ascii=False)
                 total += self._count_chars_for_tokens(tc_str)
+        total += self._estimate_tools(tools)
+        return total
+
+    @staticmethod
+    def _estimate_tools(tools: Optional[list[dict]]) -> int:
+        """Estimate token cost of the request-level ``tools`` array.
+
+        Each tool schema is JSON-char-counted (matching the message/tool_calls
+        convention) plus a +3 overhead per tool, mirroring the per-message
+        metadata allowance. OpenAI bills this array as part of prompt_tokens,
+        so ignoring it (the #1090 bug) makes auto-compact projections ignore
+        mid-session tool-set growth.
+        """
+        if not tools:
+            return 0
+        total = 0
+        for tool in tools:
+            total += 3  # per-tool overhead
+            tool_str = json.dumps(tool, ensure_ascii=False)
+            total += EmrgServer._count_chars_for_tokens(tool_str)
         return total
 
     @staticmethod

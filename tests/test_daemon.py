@@ -1269,6 +1269,73 @@ def test_estimate_tokens_vision_empty_list():
     assert server._estimate_tokens(msgs) == 3
 
 
+def test_estimate_tokens_no_tools_default():
+    """Omitting tools (default None) adds zero tool cost."""
+    server = _make_server()
+    msgs = [{"role": "user", "content": "hello world"}]
+    # 3 (overhead) + count_chars("hello world"=11) → 3 + 2 = 5
+    assert server._estimate_tokens(msgs) == 5
+
+
+def test_estimate_tokens_tools_add_cost():
+    """Request-level tools schema adds per-tool token cost (issue #1090)."""
+    server = _make_server()
+    msgs = [{"role": "user", "content": "hello"}]
+    tools = [{"type": "function",
+              "function": {"name": "bash", "description": "run a command",
+                           "parameters": {"type": "object"}}}]
+    base = server._estimate_tokens(msgs)
+    with_tools = server._estimate_tokens(msgs, tools)
+    # One tool → +3 overhead + JSON char-count of the schema, must exceed base
+    assert with_tools > base
+
+
+def test_estimate_tools_empty_none():
+    """_estimate_tools([]) and _estimate_tools(None) both return 0."""
+    server = _make_server()
+    assert server._estimate_tools([]) == 0
+    assert server._estimate_tools(None) == 0
+
+
+def test_estimate_tools_multiple_tools_scales():
+    """More tools → strictly more estimated tokens."""
+    server = _make_server()
+    tools_single = [{"type": "function",
+                     "function": {"name": "bash", "description": "x",
+                                  "parameters": {"type": "object"}}}]
+    tools_two = list(tools_single) + [
+        {"type": "function",
+         "function": {"name": "read", "description": "read file",
+                      "parameters": {"type": "object"}}}]
+    assert server._estimate_tools(tools_two) > server._estimate_tools(tools_single)
+
+
+def test_estimate_tokens_mid_session_tool_growth_visible():
+    """Issue #1090: growing the tool-set mid-session raises the projection.
+
+    Two identical messages, but a larger tools array → higher estimate, so
+    auto-compact sees the growth instead of projecting a flat context.
+    """
+    server = _make_server()
+    messages = [
+        {"role": "user", "content": "list the files"},
+        {"role": "assistant", "content": "ok"},
+    ]
+    small_tools = [{"type": "function",
+                    "function": {"name": "bash", "description": "sh",
+                                 "parameters": {"type": "object"}}}]
+    big_tools = small_tools + [
+        {"type": "function",
+         "function": {"name": "grep", "description": "search",
+                      "parameters": {"type": "object"}}},
+        {"type": "function",
+         "function": {"name": "glob", "description": "find",
+                      "parameters": {"type": "object"}}},
+    ]
+    assert (server._estimate_tokens(messages, big_tools)
+            > server._estimate_tokens(messages, small_tools))
+
+
 # ── _estimate_single ──────────────────────────────────────────────
 
 
