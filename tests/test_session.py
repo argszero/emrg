@@ -400,6 +400,16 @@ class TestSessionAppendMessage:
         records = session._read_history()
         assert records[0]["timestamp"] == ts
 
+    def test_append_tool_result_does_not_increment_count(self, tmp_path):
+        """tool_result records persist but do not inflate message_count."""
+        session = Session.create(tmp_path)
+        session.append_message({"type": "message", "role": "user", "content": "hi"})
+        session.append_message({"type": "tool_result", "tool_call_id": "c1", "content": "ok"})
+        session.append_message({"type": "message", "role": "assistant", "content": "done"})
+
+        assert session.message_count == 2  # user + assistant, tool_result excluded
+        assert len(session._read_history()) == 3  # all three persisted
+
     def test_append_llm_writes_to_llm_file(self, tmp_path):
         """append_llm() writes records to llm.jsonl."""
         session = Session.create(tmp_path)
@@ -483,6 +493,41 @@ class TestSessionCompact:
         meta = json.loads(session._meta_path.read_text())
         assert meta["compact_count"] == 1
         assert meta["last_compact_at"] is not None
+
+    def test_compact_recomputes_message_count(self, tmp_path):
+        """compact() decrements message_count to match surviving message records.
+
+        Regression for rant 2026-08-31T14:18:14 — the count previously only grew
+        (append_message incremented for every record incl. tool_results) and
+        compact never decremented it, inflating the TUI/GUI "msgs" display.
+        """
+        session = Session.create(tmp_path)
+        for i in range(8):
+            session.append_message({"type": "message", "role": "user", "content": f"msg {i}"})
+            session.append_message({"type": "tool_result", "tool_call_id": f"c{i}", "content": "ok"})
+        # 8 user messages + 8 tool_results → count is message-only
+        assert session.message_count == 8
+
+        session.compact("summary of first 5", keep_recent=3)
+        records = session._read_history()
+        # new_history = [summary] + 3 recent records ([c6, msg7, c7] — keep_recent
+        # slices raw records, not message-only records)
+        assert records[0]["type"] == "summary"
+        surviving_messages = sum(1 for r in records if r.get("type", "message") == "message")
+        assert session.message_count == surviving_messages
+        assert session.message_count == 1  # only the last user message survives
+        assert len(records) == 4  # summary + 3 recent
+
+    def test_compact_count_persists_after_reload(self, tmp_path):
+        """compact() recomputed message_count survives a reload from meta."""
+        session = Session.create(tmp_path)
+        for i in range(6):
+            session.append_message({"type": "message", "role": "user", "content": f"msg {i}"})
+            session.append_message({"type": "tool_result", "tool_call_id": f"c{i}", "content": "ok"})
+
+        session.compact("summary", keep_recent=2)
+        loaded = Session.load(session.session_id, tmp_path)
+        assert loaded.message_count == 1  # only the last user message survives
 
     def test_compact_keeps_exact_keep_recent(self, tmp_path):
         """compact() with keep_recent=1 replaces all but the last message."""
