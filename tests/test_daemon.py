@@ -12,7 +12,7 @@ import json
 import os
 import re
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -942,6 +942,80 @@ def test_anchor_heartbeat_every_round_labeled(tmp_path, monkeypatch, caplog):
     lines = stats.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["type"] == "anchor_bias_observation"
+
+
+def test_planted_fire_marker_written_every_round(tmp_path, monkeypatch):
+    """Issue #1086 (heinrichneb, Dev.to 3doei): every round must persist a
+    last-heartbeat marker so the staleness alarm has a timestamp to read.
+    The marker is touched even on the skip paths (no usage / no
+    prompt_tokens) — a round that skips the detector still proves the
+    round-loop is alive. Marker is a single overwritten line, not append."""
+    marker = tmp_path / "planted-fire-heartbeat"
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+    sid = "pf-marker"
+    messages = [{"role": "user", "content": "hi"}]
+
+    # 1) Skip path (no final_usage) still touches the marker
+    server._refresh_usage_anchor(_SidSession(sid), None, messages)
+    assert marker.exists()
+    t1 = datetime.fromisoformat(marker.read_text(encoding="utf-8").strip())
+
+    # 2) Normal round overwrites it (fresh timestamp, still one line)
+    est = server._estimate_tokens(messages)
+    server._refresh_usage_anchor(
+        _SidSession(sid), {"prompt_tokens": est}, messages)
+    t2 = datetime.fromisoformat(marker.read_text(encoding="utf-8").strip())
+    assert len(marker.read_text(encoding="utf-8").strip().splitlines()) == 1
+    assert t2 >= t1  # marker advanced (same-second tolerance)
+
+
+def test_planted_fire_stale_alarm_fires(tmp_path, monkeypatch, caplog):
+    """Issue #1086: a marker older than _PLANTED_FIRE_STALE_DAYS must log the
+    greppable ``planted-fire-stale`` warning and return True. This is the
+    accepted idle boundary (option a): a stale marker means the detector died
+    OR the daemon was idle — both are the same actionable signal."""
+    marker = tmp_path / "planted-fire-heartbeat"
+    old_ts = datetime.now().astimezone() - timedelta(days=8)
+    marker.write_text(old_ts.isoformat() + "\n", encoding="utf-8")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+    assert server._check_planted_fire_stale() is True
+    assert "planted-fire-stale" in caplog.text
+
+
+def test_planted_fire_fresh_marker_no_alarm(tmp_path, monkeypatch, caplog):
+    """Issue #1086: a fresh marker (age < N days) must NOT alarm — heartbeat
+    still proving liveness."""
+    marker = tmp_path / "planted-fire-heartbeat"
+    marker.write_text(datetime.now().astimezone().isoformat() + "\n",
+                      encoding="utf-8")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+    assert server._check_planted_fire_stale() is False
+    assert "planted-fire-stale" not in caplog.text
+
+
+def test_planted_fire_no_marker_no_alarm(tmp_path, monkeypatch, caplog):
+    """Issue #1086: a missing marker (fresh daemon, never ran a round) is NOT
+    a stale alarm by itself — the alarm only fires once a marker exists and
+    its age exceeds the threshold. Logs at debug, returns False."""
+    marker = tmp_path / "planted-fire-heartbeat"
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+    assert server._check_planted_fire_stale() is False
+    assert "planted-fire-stale" not in caplog.text
+
+
+def test_planted_fire_unparsable_marker_no_alarm(tmp_path, monkeypatch, caplog):
+    """Issue #1086: a corrupted marker (unparsable timestamp) must not crash
+    the alarm or false-positive — logged at debug, returns False."""
+    marker = tmp_path / "planted-fire-heartbeat"
+    marker.write_text("not-a-timestamp\n", encoding="utf-8")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    server = _make_server()
+    assert server._check_planted_fire_stale() is False
+    assert "planted-fire-stale" not in caplog.text
 
 
 def test_usage_anchor_cross_provider_window_attributable(tmp_path, monkeypatch):

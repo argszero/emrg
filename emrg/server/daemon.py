@@ -425,6 +425,12 @@ class EmrgServer:
         # provides the session-runner callback.
         self._upgrade_tick_task = asyncio.create_task(self._upgrade_tick_loop())
 
+        # Issue #1086: planted-fire staleness alarm (low-frequency, 6h).
+        # Watches the per-round marker; logs planted-fire-stale when the
+        # last_planted heartbeat is older than _PLANTED_FIRE_STALE_DAYS.
+        self._planted_fire_alarm_task = asyncio.create_task(
+            self._planted_fire_alarm_loop())
+
         try:
             await self._server.serve_forever()
         except asyncio.CancelledError:
@@ -3082,6 +3088,71 @@ class EmrgServer:
         except OSError as exc:
             logger.warning("usage-anchor stats append failed: %s", exc)
 
+    def _touch_planted_fire_marker(self) -> None:
+        """Issue #1086: persist the last-heartbeat timestamp to the planted-
+        fire marker file (single overwritten line, not append-only). Called at
+        the top of every round's usage-anchor refresh so the marker tracks
+        round-loop liveness, not just detector runs. Best-effort: an OSError
+        is logged at debug — a stats write must never take the daemon down
+        (same contract as _append_usage_anchor_event)."""
+        try:
+            marker = _PLANTED_FIRE_MARKER_PATH
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(
+                datetime.now().astimezone().isoformat() + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.debug("planted-fire marker write failed: %s", exc)
+
+    def _check_planted_fire_stale(self) -> bool:
+        """Issue #1086: stateless age check on the planted-fire marker. Reads
+        the last-heartbeat timestamp; when ``now - last_heartbeat`` exceeds
+        ``_PLANTED_FIRE_STALE_DAYS`` days, log the greppable
+        ``planted-fire-stale`` warning and return True. A missing/unparsable
+        marker is NOT a stale alarm by itself (a freshly installed daemon has
+        never run a round) — it logs at debug and returns False; the alarm
+        only fires once a marker exists and its age exceeds the threshold.
+        This implements the accepted idle boundary (pm25coder option a):
+        an idle daemon produces no markers, so a marker that IS older than N
+        days means either the detector died or the daemon was idle that long —
+        both are the same actionable signal (surface-the-silence, #585/#1073).
+        """
+        try:
+            if not _PLANTED_FIRE_MARKER_PATH.exists():
+                logger.debug(
+                    "planted-fire: no marker yet (fresh daemon / no rounds) — "
+                    "staleness check skipped")
+                return False
+            raw = _PLANTED_FIRE_MARKER_PATH.read_text(encoding="utf-8").strip()
+            last = datetime.fromisoformat(raw)
+        except (OSError, ValueError) as exc:
+            logger.debug("planted-fire marker read failed: %s", exc)
+            return False
+        age_days = (datetime.now().astimezone() - last).total_seconds() / 86400.0
+        if age_days > _PLANTED_FIRE_STALE_DAYS:
+            logger.warning(
+                "planted-fire-stale: last_planted heartbeat %.1f days ago "
+                "(> %d days) — the anchor-bias-heartbeat planted fire has "
+                "stopped firing or the daemon has been idle; detector "
+                "liveness cannot be proven (issue #1086)",
+                age_days, _PLANTED_FIRE_STALE_DAYS,
+            )
+            return True
+        return False
+
+    async def _planted_fire_alarm_loop(self) -> None:
+        """Issue #1086: low-frequency staleness alarm. Rides a 6h cadence
+        (not the per-round heartbeat) — checking a timestamp's age is cheap
+        and stateless. Failures are logged at debug and never crash the
+        daemon."""
+        while True:
+            await asyncio.sleep(_PLANTED_FIRE_ALARM_INTERVAL)
+            try:
+                self._check_planted_fire_stale()
+            except Exception:
+                logger.debug("planted-fire alarm tick failed", exc_info=True)
+
     def _refresh_usage_anchor(self, session, final_usage, messages) -> None:
         """Round-loop usage processing (rant 2026-08-23T13:28:50 + issue
         #1078): refresh the usage anchor from the provider's real
@@ -3097,7 +3168,14 @@ class EmrgServer:
         explicit state: ``anchored=true`` (detector ran, logged inside it) or
         ``anchored=false`` with a reason. "Log unconditionally, alert
         conditionally" now holds one level higher.
+
+        Issue #1086 (heinrichneb, Dev.to 3doei): every round ALSO touches the
+        planted-fire marker file (a single overwritten timestamp line) so the
+        low-frequency staleness alarm has a persisted last_heartbeat to read.
+        Written unconditionally at the top — a round that skips the detector
+        still proves the round-loop itself is alive.
         """
+        self._touch_planted_fire_marker()
         if not final_usage:
             logger.debug(
                 "anchor-bias-heartbeat session=%s anchored=false reason=no_usage",
@@ -4365,6 +4443,29 @@ def _write_exit_record(reason: str, exit_code: int, traceback_text: str | None) 
 
 
 _USAGE_ANCHOR_STATS_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
+
+# Issue #1086 (heinrichneb, Dev.to 3doei — reader suggestion): a planted fire
+# that stops being scheduled rots as silently as the detector it guards. The
+# per-round ``anchor-bias-heartbeat`` log proves the detector ran THIS round,
+# but nothing watches for "no heartbeat in N days". Marker file: a single
+# overwritten timestamp line (not an append-only log) so the stateless age
+# check reads one line. Written by _refresh_usage_anchor on every round;
+# read by _planted_fire_alarm_loop at a low-frequency cadence.
+_PLANTED_FIRE_MARKER_PATH = Path.home() / ".emrg" / "logs" / "planted-fire-heartbeat"
+
+# Issue #1086: staleness threshold (days). ``now - last_heartbeat > N`` →
+# log the ``planted-fire-stale`` warning. Kept next to _SILENT_DRIFT_THRESHOLD
+# per the issue discussion (how2how2how2-arch: "keep it configurable
+# alongside _SILENT_DRIFT_THRESHOLD").
+_PLANTED_FIRE_STALE_DAYS = 7
+
+# Issue #1086: low-frequency alarm cadence. The daemon's heartbeat fires per
+# round, so an idle daemon (no rounds) naturally produces no markers — per
+# the accepted idle boundary (pm25coder, option a) "no rounds for N days"
+# IS the same actionable signal as "marker stale" (surface-the-silence,
+# consistent with #585/#1073). Check every 6 hours: a planted fire that died
+# is caught within 6h of the N-day threshold instead of after a full day.
+_PLANTED_FIRE_ALARM_INTERVAL = 6 * 3600  # seconds
 
 # Issue #1027: relative bias-ratio shift (real_pt / local_estimate) between
 # consecutive anchored rounds that is treated as a silent provider/tokenizer
