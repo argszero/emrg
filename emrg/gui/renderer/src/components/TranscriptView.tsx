@@ -33,9 +33,13 @@ export interface TranscriptViewProps {
   sid?: string | null;
   /** 注入 markdown 渲染器（测试/浏览器接线用；缺省按 t 构造降级渲染器） */
   renderer?: MarkdownRenderer;
+  /** 滚动到顶加载更早历史（rant 2026-09-01T20:19:40）：hasMore && !loading 时允许触发 */
+  canLoadOlder?: boolean;
+  /** 滚动到顶回调（触发方防抖；vanilla loadOlderHistory 语义） */
+  onLoadOlder?: () => void;
 }
 
-export function TranscriptView({ store, sid = null, renderer }: TranscriptViewProps) {
+export function TranscriptView({ store, sid = null, renderer, canLoadOlder = false, onLoadOlder }: TranscriptViewProps) {
   // 版本号快照：每次 store 变更 +1（getSnapshot 稳定引用，满足 useSyncExternalStore 要求）
   const version = useSyncExternalStore(store.subscribe, store.getVersion);
   const { t } = useI18n();
@@ -64,10 +68,17 @@ export function TranscriptView({ store, sid = null, renderer }: TranscriptViewPr
   useEffect(() => {
     const el = viewportRef.current;
     if (!el) return;
-    const onScroll = () => updateAutoScroll(el);
+    const onScroll = () => {
+      updateAutoScroll(el);
+      // 滚动到顶 → 加载更早一页（rant 2026-09-01T20:19:40：scrollTop<=2 && canLoadOlder；
+      // 防抖由 onLoadOlder 触发方负责）
+      if (onLoadOlder && canLoadOlder && el.scrollTop <= 2) {
+        onLoadOlder();
+      }
+    };
     el.addEventListener("scroll", onScroll, { capture: true });
     return () => el.removeEventListener("scroll", onScroll, { capture: true });
-  }, [updateAutoScroll]);
+  }, [updateAutoScroll, canLoadOlder, onLoadOlder]);
 
   // 新消息 append/流入 → 若 autoScroll 为 true 则滚到底。
   // 依赖 version（每次 store 变更 +1）而非 entries.length：流式文本是原地 append

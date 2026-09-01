@@ -99,6 +99,8 @@ export interface SessionTranscript {
   entries: TranscriptEntry[];
   /** 顶部历史加载条（rant 14:15:12；text=null 移除） */
   loadBar: string | null;
+  /** 输入框草稿（rant 2026-09-01T20:28:31：按 sid 隔离，切视图/切会话不丢） */
+  draft: string;
   /** rid → entries 下标（助手条目映射；done 后删除，迟到 delta 由 doneRids 拦截） */
   groupIndex: Map<string, number>;
   /** callId → { entry: 条目下标, row: 组内行号（独立行 = null） } */
@@ -154,6 +156,9 @@ export interface TranscriptStore {
   /** 更早一页历史 prepend 到顶部（vanilla addHistoryMessage prepend 语义；loadBar 独立字段渲染在上方） */
   prependHistoryMessage(text: string, sid?: string | null): void;
   setLoadBar(text: string | null, sid?: string | null): void;
+  /** 输入框草稿读写（rant 2026-09-01T20:28:31：按 sid 隔离，切视图/切会话不丢） */
+  getComposerDraft(sid?: string | null): string;
+  setComposerDraft(text: string, sid?: string | null): void;
   toggleRowOutput(sid: string | null, callId: string): void;
   expandRowContent(sid: string | null, callId: string): void;
   toggleGroup(sid: string | null, entryIndex: number): void;
@@ -205,6 +210,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         sid: sid || null,
         entries: [],
         loadBar: null,
+        draft: "",
         groupIndex: new Map(),
         toolRowIndex: new Map(),
         doneRids: new Set(),
@@ -291,9 +297,6 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
           }
           s.groupIndex.delete(rid); // 渲染完成 → 移除映射（chat.js groupNodes.delete）
         }
-      }
-      if (data.timeout) {
-        s.entries.push({ kind: "system", text: t("chat.timeoutWarn") });
       }
       // 工具调用次数上限中断（跨项目教训：截断的工作不提示 = 用户拿半成品）
       if (data.content && /exceeded/i.test(data.content) && /max|limit|round/i.test(data.content)) {
@@ -421,6 +424,7 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     st,
     getEntries: (sid) => st(sid).entries,
     getLoadBar: (sid) => st(sid).loadBar,
+    getComposerDraft: (sid) => st(sid).draft,
     setOwnStream: (rid) => {
       mutate(() => {
         ownStreamRequestId = rid;
@@ -455,6 +459,11 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
     setLoadBar: (text, sid) => {
       mutate(() => {
         st(sid).loadBar = text;
+      });
+    },
+    setComposerDraft: (text, sid) => {
+      mutate(() => {
+        st(sid).draft = text;
       });
     },
     toggleRowOutput: (sid, callId) => {

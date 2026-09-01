@@ -594,3 +594,67 @@ describe("Composer — 格式栏与快捷键（Stage 2, rant 14:07:29）", () =>
     expect(sent[0].sandbox).toBe("danger-full-access");
   });
 });
+
+describe("Composer — 草稿持久化（rant 2026-09-01T20:28:31）", () => {
+  it("输入 → 草稿实时写入 store（onUpdate 序列化 markdown）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("hello draft");
+    });
+    await waitFor(() => expect(store.getComposerDraft("s1")).toContain("hello draft"));
+  });
+
+  it("卸载重挂载 → 草稿恢复（onCreate setContent 回填）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("**bold** draft");
+    });
+    await waitFor(() => expect(store.getComposerDraft("s1")).toContain("bold"));
+    s.unmount();
+    const s2 = setup(store);
+    const editor2 = await waitEditor(s2);
+    await waitFor(() => expect(editor2.getText()).toContain("draft"));
+  });
+
+  it("发送成功 → 草稿清空（clearContent → onUpdate 空内容）", async () => {
+    const store = createTranscriptStore();
+    const sendMessage = vi.fn().mockResolvedValue({ requestId: "r1" });
+    const s = setup(store, { sendMessage });
+    const editor = await waitEditor(s);
+    act(() => {
+      editor.commands.insertContent("send me");
+    });
+    await waitFor(() => expect(store.getComposerDraft("s1")).toContain("send me"));
+    s.press("Enter");
+    await waitFor(() => expect(sendMessage).toHaveBeenCalled());
+    await waitFor(() => expect(store.getComposerDraft("s1")).toBe(""));
+  });
+
+  it("会话切换（同挂载 prop 变化）→ 旧会话草稿保留 + 新会话草稿载入", async () => {
+    const store = createTranscriptStore();
+    const editorRef: MutableRefObject<Editor | null> = { current: null };
+    const ui = (sid: string) => (
+      <I18nProvider lang="zh">
+        <Composer store={store} sid={sid} sandbox="workspace-write" editorRef={editorRef} />
+      </I18nProvider>
+    );
+    const s = render(ui("s1"));
+    await waitFor(() => expect(editorRef.current).not.toBeNull());
+    act(() => {
+      editorRef.current!.commands.insertContent("draft for s1");
+    });
+    await waitFor(() => expect(store.getComposerDraft("s1")).toContain("draft for s1"));
+    // 预置 s2 草稿（模拟之前在该会话输入过）
+    act(() => {
+      store.setComposerDraft("draft for s2", "s2");
+    });
+    s.rerender(ui("s2"));
+    await waitFor(() => expect(editorRef.current!.getText()).toContain("draft for s2"));
+    // 旧会话草稿仍在 store（切回 s1 可恢复）
+    expect(store.getComposerDraft("s1")).toContain("draft for s1");
+  });
+});
