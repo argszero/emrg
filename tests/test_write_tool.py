@@ -233,3 +233,28 @@ def test_write_workspace_write_blocks_protected_config(temp_dir):
     }))
     assert result.error
     assert "protected daemon file" in result.content
+
+
+def test_write_workspace_write_allows_evolution_memory(tmp_path, monkeypatch):
+    """Issue #1093 self-regression: the evolution module writes its cycle records
+    to ~/.emrg/evolution/.emrg/memory/, which is OUTSIDE the repo checkout
+    workspace. The workspace-write boundary must trust that data root so the
+    evolution module can still record its own history (positive state)."""
+    import os
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    evo_data = Path(os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg")))
+    evo_data.mkdir(parents=True, exist_ok=True)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    target = evo_data / "memory" / "cycle-20260901-000000.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tool = WriteTool()
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "content": "cycle record",
+        "sandbox": "workspace-write",
+        "workspace": str(ws),
+    }))
+    assert not result.error
+    assert target.exists()
+    assert target.read_text() == "cycle record"

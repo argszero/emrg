@@ -197,6 +197,56 @@ def _protected_paths() -> list[str]:
     return out
 
 
+def _trusted_write_zones() -> list[str]:
+    """Canonicalized write roots that a ``workspace-write`` session may target.
+
+    These are trusted alongside the injected workspace root and the OS temp
+    area — targets inside them are never blocked by the ``workspace-write``
+    boundary:
+
+    - ``~/.emrg/evolution/.emrg/`` — the evolution module's own data root
+      (cycle records under ``memory/``, ``sessions/`` scratch). The evolution
+      task runs at ``workspace-write`` with ``workspace`` = the repo checkout
+      (``~/.emrg/evolution/emrg``), so its own record writes to
+      ``~/.emrg/evolution/.emrg/memory/*.md`` fall OUTSIDE ``workspace`` and
+      would be blocked — a self-regression from PR #1092 (issue #1093). Trust
+      this root like the daemon's own ``~/.emrg`` state, so the evolution
+      module can still record its history.
+    """
+    out: list[str] = []
+    evo_data = os.path.expanduser("~/.emrg/evolution/.emrg")
+    try:
+        out.append(os.path.realpath(evo_data))
+    except OSError:
+        pass
+    return out
+
+
+def _temp_write_roots() -> set[str]:
+    r"""Canonicalized OS-temp write roots, normalized for the ``Temp\<suffix>``
+    discrepancy (issue #1093 proposal #3).
+
+    ``tempfile.gettempdir()`` may return ``C:\\...\\AppData\\Local\\Temp\\2``
+    (8.3 short name + ``\\2`` suffix) on Windows, while helpers/scripts are
+    written to the plain ``...\\Temp\\`` root. When ``gettempdir()`` points at
+    a ``Temp``-named parent with a suffix child, also trust the parent ``Temp``
+    root so both spellings are allowed.
+    """
+    roots: set[str] = set()
+    t = tempfile.gettempdir()
+    try:
+        roots.add(os.path.realpath(t))
+    except OSError:
+        pass
+    parent = os.path.dirname(t)
+    if os.path.basename(parent).lower() == "temp":
+        try:
+            roots.add(os.path.realpath(parent))
+        except OSError:
+            pass
+    return roots
+
+
 def _is_absolute_path(p: str) -> bool:
     """True when ``p`` is absolute (or drive-less rooted, e.g. ``/etc/hosts``
     on Windows — ntpath.isabs returns False for those, but they still do not
@@ -276,7 +326,15 @@ def check_workspace_write(file_path: str, workspace: str | None = None) -> str |
     workspace_real = (
         os.path.realpath(os.path.expanduser(workspace)) if workspace else None
     )
-    if workspace_real and not _is_within(real, workspace_real) and not _is_within(real, tempfile.gettempdir()):
+    # Allow: inside workspace, inside the OS-temp roots (normalized), or inside
+    # a trusted zone (~/.emrg/evolution/.emrg — the evolution module's own data
+    # root, issue #1093 self-regression). Everything else is blocked.
+    allowed_srcs = [workspace_real] if workspace_real else []
+    allowed_srcs += list(_trusted_write_zones())
+    allowed_srcs += list(_temp_write_roots())
+    if not any(
+        src and (_is_within(real, src) or real == src) for src in allowed_srcs
+    ):
         return (
             f"workspace-write sandbox: blocked write outside workspace {file_path!r}"
         )
@@ -363,7 +421,12 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
                 f"workspace-write sandbox: blocked destructive write to {t!r} "
                 "(would erase the daemon's data directory)"
             ), "partial"
-        if workdir_real and not _is_within(real, workdir_real) and not _is_within(real, tempfile.gettempdir()):
+        allowed_srcs = [workdir_real] if workdir_real else []
+        allowed_srcs += list(_trusted_write_zones())
+        allowed_srcs += list(_temp_write_roots())
+        if not any(
+            src and (_is_within(real, src) or real == src) for src in allowed_srcs
+        ):
             return False, (
                 f"workspace-write sandbox: blocked write outside workspace {t!r}"
             ), "partial"
