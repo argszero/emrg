@@ -35,7 +35,7 @@ wheels = [
 
 [[package]]
 name = "emrg"
-version = "0.2.90"
+version = "0.2.91"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
