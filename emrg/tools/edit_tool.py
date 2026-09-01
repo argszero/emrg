@@ -7,7 +7,7 @@ from pathlib import Path
 
 from emrg.server.tool_types import ToolDefinition, ToolResult
 from emrg.tools.base import ToolExecutor
-from emrg.tools.bash_tool import check_read_only_file_write
+from emrg.tools.bash_tool import check_read_only_file_write, check_workspace_write
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,17 @@ class EditTool(ToolExecutor):
         # dirty-tree guard forced read-only. Workspace boundary injected by the
         # daemon (session cwd); None in non-daemon use → fail-open.
         if arguments.get("sandbox") == "read-only":
-            reason = check_read_only_file_write(str(path), arguments.get("workspace"))
+            reason = check_read_only_file_write(file_path, arguments.get("workspace"))
+            if reason:
+                return ToolResult(name="edit", content=reason, error=True)
+
+        # workspace-write sandbox (rant 2026-09-01T15:10:23): mirror the bash
+        # tool's boundary so edit is symmetric with bash — a workspace-write
+        # session must not edit outside the session cwd (or OS temp / protected
+        # daemon state). Pass the ORIGINAL file_path (not the resolved one) so
+        # relative paths keep the "assumed in-workspace" semantics.
+        if arguments.get("sandbox") == "workspace-write":
+            reason = check_workspace_write(file_path, arguments.get("workspace"))
             if reason:
                 return ToolResult(name="edit", content=reason, error=True)
 

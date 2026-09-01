@@ -154,3 +154,82 @@ def test_write_no_sandbox_unchanged(temp_dir):
     }))
     assert not result.error
     assert target.read_text() == "hi"
+
+
+# ── workspace-write sandbox (rant 2026-09-01T15:10:23) ────────────────────
+
+
+def test_write_workspace_write_blocks_outside_workspace(temp_dir, monkeypatch):
+    """Rant 2026-09-01T15:10:23: a workspace-write session must not write to
+    an absolute path outside the session cwd — mirror the bash tool's block
+    so write/edit are symmetric with bash (the asymmetric hole)."""
+    import tempfile as _tf
+
+    # The test workspace + target live in the OS temp dir, which is always
+    # allowed — patch gettempdir to a distinct sentinel so the target is not
+    # treated as an OS-temp write root.
+    monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
+    tool = WriteTool()
+    workspace = temp_dir / "ws"
+    workspace.mkdir()
+    target = temp_dir / "sibling" / "poem.txt"  # outside workspace
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "content": "should be blocked",
+        "sandbox": "workspace-write",
+        "workspace": str(workspace),
+    }))
+    assert result.error
+    assert "workspace-write sandbox" in result.content
+    assert not target.exists()
+
+
+def test_write_workspace_write_allows_inside_workspace(temp_dir):
+    """A workspace-write session may still write inside the session cwd."""
+    tool = WriteTool()
+    workspace = temp_dir / "ws"
+    workspace.mkdir()
+    target = workspace / "note.txt"
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "content": "ok",
+        "sandbox": "workspace-write",
+        "workspace": str(workspace),
+    }))
+    assert not result.error
+    assert target.exists()
+    assert target.read_text() == "ok"
+
+
+def test_write_workspace_write_allows_os_temp(temp_dir):
+    """OS temp is an allowed write root (mirrors dsh's workspace + temp area)."""
+    import tempfile
+    tool = WriteTool()
+    workspace = temp_dir / "ws"
+    workspace.mkdir()
+    target = Path(tempfile.gettempdir()) / "emrg_sandbox_test.txt"
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "content": "temp",
+        "sandbox": "workspace-write",
+        "workspace": str(workspace),
+    }))
+    assert not result.error
+    target.unlink(missing_ok=True)
+    assert not target.exists()
+
+
+def test_write_workspace_write_blocks_protected_config(temp_dir):
+    """Daemon state files (~/.emrg/config.toml) are always blocked from a
+    workspace-write session."""
+    tool = WriteTool()
+    workspace = temp_dir / "ws"
+    workspace.mkdir()
+    result = _run(tool.execute({
+        "file_path": "~/.emrg/config.toml",
+        "content": "tamper",
+        "sandbox": "workspace-write",
+        "workspace": str(workspace),
+    }))
+    assert result.error
+    assert "protected daemon file" in result.content
