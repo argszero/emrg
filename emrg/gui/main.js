@@ -18,6 +18,11 @@ const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = requir
 const { externalNavPolicy } = require("./nav-policy");
 const APP_VERSION = require("./package.json").version;
 
+// issue #1100 加固：导航策略只放行应用自身 renderer dist 前缀内的 file:// URL
+// （loadFile/reload/SPA 自导航），其余本地文件一律 deny——防任意本地 HTML 加载进
+// 特权主窗口（继承 window.emrg 全量桥）。以 / 结尾保证前缀边界匹配。
+const RENDERER_DIST_URL = pathToFileURL(path.join(__dirname, "renderer", "dist")).href + "/";
+
 // ── 单实例锁（G85/G120：第二个实例退出并 focus 已有窗口）──
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -125,9 +130,10 @@ function main() {
       logger.warn("[gui] renderer unresponsive");
     });
     // Rant 2026-09-01T20:33:44：主窗口导航拦截——聊天区链接点击不得把应用导航成网页。
-    // file:// 放行（loadFile/reload），其余外链一律交系统浏览器（shell.openExternal）。
+    // 仅 renderer dist 前缀内 file:// 放行（loadFile/reload），其余 file:// deny，
+    // 外链一律交系统浏览器（shell.openExternal）——issue #1100 加固。
     win.webContents.on("will-navigate", (event, url) => {
-      const policy = externalNavPolicy(url);
+      const policy = externalNavPolicy(url, RENDERER_DIST_URL);
       if (policy === "allow") return;
       event.preventDefault();
       if (policy === "open-external") {
@@ -136,7 +142,7 @@ function main() {
     });
     // 防 target=_blank / window.open（与 will-navigate 互补）
     win.webContents.setWindowOpenHandler(({ url }) => {
-      if (externalNavPolicy(url) === "open-external") {
+      if (externalNavPolicy(url, RENDERER_DIST_URL) === "open-external") {
         shell.openExternal(url).catch((e) => logger.warn(`[gui] openExternal failed: ${e.message}`));
       }
       return { action: "deny" };
