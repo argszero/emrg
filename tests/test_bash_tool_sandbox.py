@@ -17,6 +17,7 @@ from emrg.tools.bash_tool import (
     SANDBOX_MODES,
     _check_sandbox,
     _extract_write_targets,
+    check_workspace_write,
 )
 
 
@@ -248,6 +249,74 @@ def test_check_workspace_write_blocks_outside_workspace():
         "echo x > /etc/hosts", "workspace-write", workdir="/workspace"
     )
     assert allowed is False
+
+
+# ── workspace-write trusted zone (issue #1093 self-regression) ─────────────
+# PR #1092 added check_workspace_write to write/edit (mirroring bash) and
+# blocked absolute targets outside the injected workspace. The evolution task
+# runs at workspace-write with workspace = the repo checkout, but writes its
+# own cycle records to ~/.emrg/evolution/.emrg/memory/* — which is OUTSIDE that
+# workspace. That was a self-regression (the evolution module couldn't record
+# its own history). The fix trusts ~/.emrg/evolution/.emrg as a write zone and
+# normalizes the OS-temp root for the Temp\<suffix> discrepancy. Both positive
+# and negative states must be verified.
+
+
+def test_workspace_write_allows_evolution_memory(monkeypatch, tmp_path):
+    """write/edit/bash may target ~/.emrg/evolution/.emrg/memory (the evolution
+    module's own data root) even though it is outside the repo workspace."""
+    import emrg.tools.bash_tool as bt
+    # Pin the user home + evolution data root so the test is hermetic and does
+    # not depend on this host's real ~/.emrg layout.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # Recompute the trusted zone against the pinned HOME.
+    evo_data = os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg"))
+    ws = str(tmp_path / "ws")
+    # check_workspace_write (write/edit tools)
+    meta = evo_data + "/memory/cycle-20260901-000000.md"
+    assert check_workspace_write(meta, ws) is None
+    # bash _check_sandbox (redirect to memory index)
+    allowed, reason, _ = _check_sandbox(
+        f"echo x > {evo_data}/memory/MEMORY.md", "workspace-write", ws
+    )
+    assert allowed is True, f"should allow evolution memory write (got {reason!r})"
+
+
+def test_workspace_write_still_blocks_emrg_home(monkeypatch, tmp_path):
+    """Even with the trusted evolution-data zone, ~/.emrg itself is still
+    blocked from destructive write (the guard is not widened)."""
+    check = check_workspace_write("~/.emrg", str(tmp_path / "ws"))
+    assert check is not None
+    assert "daemon's data directory" in check
+    allowed, reason, _ = _check_sandbox("rm -rf ~/.emrg", "workspace-write", str(tmp_path / "ws"))
+    assert allowed is False
+    assert "daemon's data directory" in reason
+
+
+def test_workspace_write_still_blocks_protected_file():
+    """Protected daemon state files remain blocked regardless of the trusted
+    evolution-data zone."""
+    check = check_workspace_write("~/.emrg/config.toml", "/workspace")
+    assert check is not None
+    assert "protected daemon file" in check
+
+
+def test_workspace_write_temp_root_normalized(monkeypatch):
+    r"""Temp\<suffix> discrepancy (Windows): when gettempdir() returns a
+    Temp\<suffix> path, the parent Temp root is also allowed so helpers written
+    to the plain Temp root are not blocked."""
+    import tempfile as _tf
+    import emrg.tools.bash_tool as bt
+    fake_suffix = "/fake/Temp/2"
+    fake_parent = "/fake/Temp"
+    monkeypatch.setattr(_tf, "gettempdir", lambda: fake_suffix)
+    # _temp_write_roots must include both the suffix path and the parent Temp root.
+    roots = bt._temp_write_roots()
+    assert any(r == os.path.realpath(fake_suffix) for r in roots)
+    assert any(r == os.path.realpath(fake_parent) for r in roots)
+    # A write to the parent Temp root is not blocked.
+    check = check_workspace_write("/fake/Temp/emrg_probe.py", "/workspace")
+    assert check is None
 
 
 # ── execute() integration ─────────────────────────────────────────────────
