@@ -15,6 +15,7 @@ const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
 const { generateSessionId, SESSION_ID_RE } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
 const { guiStatePath, sanitizeOpenSessions, saveGuiState, DEFAULT_CAP } = require("./gui-state");
+const { externalNavPolicy } = require("./nav-policy");
 const APP_VERSION = require("./package.json").version;
 
 // ── 单实例锁（G85/G120：第二个实例退出并 focus 已有窗口）──
@@ -122,6 +123,23 @@ function main() {
     });
     win.webContents.on("unresponsive", () => {
       logger.warn("[gui] renderer unresponsive");
+    });
+    // Rant 2026-09-01T20:33:44：主窗口导航拦截——聊天区链接点击不得把应用导航成网页。
+    // file:// 放行（loadFile/reload），其余外链一律交系统浏览器（shell.openExternal）。
+    win.webContents.on("will-navigate", (event, url) => {
+      const policy = externalNavPolicy(url);
+      if (policy === "allow") return;
+      event.preventDefault();
+      if (policy === "open-external") {
+        shell.openExternal(url).catch((e) => logger.warn(`[gui] openExternal failed: ${e.message}`));
+      }
+    });
+    // 防 target=_blank / window.open（与 will-navigate 互补）
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      if (externalNavPolicy(url) === "open-external") {
+        shell.openExternal(url).catch((e) => logger.warn(`[gui] openExternal failed: ${e.message}`));
+      }
+      return { action: "deny" };
     });
   }
 

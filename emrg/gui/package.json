@@ -50,6 +50,7 @@
       "conn-manager.js",
       "gui-state.js",
       "daemon_client.js",
+      "nav-policy.js",
       "package.json",
       "scripts/**"
     ],
