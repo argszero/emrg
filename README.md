@@ -153,23 +153,23 @@ In the TUI: `Esc` interrupts streaming, `Ctrl+C` / `exit` quits (config is share
 
 ## vs. the competition
 
-|  | Claude Code | Codex | DeepSeek Harness | **EMRG** |
-|---|---|---|---|---|
-| AI-powered coding | ✅ | ✅ | ✅ | ✅ |
-| Tool-calling (bash, read, write, edit, glob, grep) | ✅ | ✅ | ✅ | ✅ |
-| Session memory & context | ✅ | ✅ | ✅ | ✅ |
-| `/` command autocomplete | ✅ | ✅ | ✅ | ✅ |
-| ESC interrupt | ✅ | ✅ | — | ✅ |
-| Plugin architecture | ❌ | ❌ | ✅ *everything is a plugin* | ❌ |
-| Sandboxed execution | ❌ | ❌ | ✅ | ❌ |
-| Subagents | ❌ | ❌ | ✅ | ❌ |
-| Web UI | ❌ | ❌ | ✅ *browser* | ✅ *Electron* |
-| **Self-evolution** | ❌ | ❌ | ❌ | ✅ *autonomous* |
-| **Background daemon** | ❌ | ❌ | ❌ | ✅ *persistent* |
-| **Learns from rants** | ❌ | ❌ | ❌ | ✅ */rant → PR* |
-| **Open source** | ❌ | ✅ *Apache-2.0* | ✅ *MIT* | ✅ *MIT* |
+|  | Claude Code | Codex | DeepSeek Harness | **EMRG** | **Grok Bot** |
+|---|---|---|---|---|---|
+| AI-powered coding | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Tool-calling (bash, read, write, edit, glob, grep) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Session memory & context | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `/` command autocomplete | ✅ | ✅ | ✅ | ✅ | ~ *@ mention + command palette* |
+| ESC interrupt | ✅ | ✅ | — | ✅ | ✅ |
+| Plugin architecture | ❌ | ❌ | ✅ *everything is a plugin* | ❌ | ✅ |
+| Sandboxed execution | ❌ | ❌ | ✅ | ✅ *read-only / workspace-write / danger-full-access* | ~ *protectedBoxPaths + /workspace* |
+| Subagents | ❌ | ❌ | ✅ | ❌ | ✅ *assistants/automations* |
+| Web UI | ❌ | ❌ | ✅ *browser* | ✅ *Electron* | ✅ *Electron* |
+| **Self-evolution** | ❌ | ❌ | ❌ | ✅ *autonomous* | ❌ |
+| **Background daemon** | ❌ | ❌ | ❌ | ✅ *persistent* | ✅ *host + node-agent-coordinator* |
+| **Learns from rants** | ❌ | ❌ | ❌ | ✅ */rant → PR* | ❌ |
+| **Open source** | ❌ | ✅ *Apache-2.0* | ✅ *MIT* | ✅ *MIT* | ❌ *commercial* |
 
-> *DeepSeek Harness is a plugin-based agent harness with deep engineering (sandboxing, subagents, workflows) — but it does not evolve itself. EMRG's differentiator is closing the loop: self-evolution, a persistent background daemon, and rant-driven improvement.*
+> *DeepSeek Harness is a plugin-based agent harness with deep engineering (sandboxing, subagents, workflows) — but it does not evolve itself. EMRG ships its own three-tier sandbox (read-only / workspace-write / danger-full-access) and closes the loop: self-evolution, a persistent background daemon, and rant-driven improvement. Grok Bot is a commercial Electron app by Anysphere with plugin/assistant ecosystems, but is not open source and does not self-evolve.*
 
 EMRG doesn't just keep up — it catches up on its own.
 
