@@ -163,3 +163,60 @@ def test_edit_no_sandbox_unchanged(temp_file):
     }))
     assert not result.error
     assert "baz qux" in temp_file.read_text()
+
+
+# ── workspace-write sandbox (rant 2026-09-01T15:10:23) ────────────────────
+
+
+def test_edit_workspace_write_blocks_outside_workspace(temp_file, monkeypatch):
+    """Rant 2026-09-01T15:10:23: a workspace-write session must not edit an
+    absolute path outside the session cwd — mirror the bash tool's block so
+    write/edit are symmetric with bash (the asymmetric hole)."""
+    import tempfile as _tf
+
+    # Build the sibling scratch dir first (TemporaryDirectory needs the real
+    # OS temp), then patch gettempdir so the tool's check doesn't treat the
+    # sibling as an OS-temp write root.
+    with _tf.TemporaryDirectory() as d:
+        sibling = Path(d) / "outside.txt"
+        sibling.write_text("dangerous line\n", encoding="utf-8")
+        monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
+        tool = EditTool()
+        result = _run(tool.execute({
+            "file_path": str(sibling),
+            "old_string": "dangerous",
+            "new_string": "tampered",
+            "sandbox": "workspace-write",
+            "workspace": str(temp_file.parent),  # different boundary (session cwd)
+        }))
+        assert result.error
+        assert "workspace-write sandbox" in result.content
+        assert sibling.read_text() == "dangerous line\n"  # untouched
+
+
+def test_edit_workspace_write_allows_inside_workspace(temp_file):
+    """A workspace-write session may still edit inside the session cwd."""
+    tool = EditTool()
+    result = _run(tool.execute({
+        "file_path": str(temp_file),
+        "old_string": "foo bar",
+        "new_string": "baz qux",
+        "sandbox": "workspace-write",
+        "workspace": str(temp_file.parent),
+    }))
+    assert not result.error
+    assert "baz qux" in temp_file.read_text()
+
+
+def test_edit_workspace_write_blocks_protected_config(temp_file):
+    """Daemon state files are always blocked from a workspace-write session."""
+    tool = EditTool()
+    result = _run(tool.execute({
+        "file_path": "~/.emrg/config.toml",
+        "old_string": "foo",
+        "new_string": "bar",
+        "sandbox": "workspace-write",
+        "workspace": str(temp_file.parent),
+    }))
+    assert result.error
+    assert "protected daemon file" in result.content

@@ -241,6 +241,48 @@ def check_read_only_file_write(file_path: str, workspace: str | None = None) -> 
     return None
 
 
+def check_workspace_write(file_path: str, workspace: str | None = None) -> str | None:
+    """workspace-write sandbox check for the write/edit tools (rant 2026-09-01T15:10:23).
+
+    Returns a block reason when the target file is a protected daemon state file,
+    is ``~/.emrg`` itself, or is an absolute path outside the workspace root
+    (OS temp allowed — mirrors dsh's workspace + backend-promised temp area);
+    returns None when allowed.
+
+    Relative paths are assumed in-workspace (cwd = the workspace root), matching
+    the bash tool's workspace-write semantics (2026-08-20T15:46:50) and dsh's
+    writableRoots single-source + tool-symmetry design. Without this check the
+    write/edit tools let ``workspace-write`` sessions write anywhere outside the
+    session cwd, while the bash tool is correctly blocked — the asymmetric hole
+    this function closes.
+    """
+    if not file_path:
+        return None
+    expanded = os.path.expanduser(file_path)
+    if not _is_absolute_path(expanded):
+        # Relative target: assumed in-workspace (cwd = the workspace root).
+        return None
+    real = os.path.realpath(expanded)
+    if real in _protected_paths():
+        return (
+            f"workspace-write sandbox: blocked write to protected daemon file {file_path!r}"
+        )
+    emrg_home = os.path.realpath(os.path.expanduser("~/.emrg"))
+    if real == emrg_home:
+        return (
+            f"workspace-write sandbox: blocked destructive write to {file_path!r} "
+            "(would erase the daemon's data directory)"
+        )
+    workspace_real = (
+        os.path.realpath(os.path.expanduser(workspace)) if workspace else None
+    )
+    if workspace_real and not _is_within(real, workspace_real) and not _is_within(real, tempfile.gettempdir()):
+        return (
+            f"workspace-write sandbox: blocked write outside workspace {file_path!r}"
+        )
+    return None
+
+
 def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
     """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
 
