@@ -15,6 +15,12 @@ import { WorkspaceView, type WorkspaceViewId } from "./WorkspaceView";
 import { TranscriptView } from "./TranscriptView";
 import { Composer, type CommandRouting } from "./Composer";
 import { DialogHost, type DialogHostHandle } from "./DialogHost";
+import {
+  HISTORY_PAGE,
+  applyHistoryPage,
+  createHistoryPages,
+  historyPageState,
+} from "../lib/history";
 
 /**
  * Shell — React 布局（Batch 0 骨架 + Batch 3 Sidebar/ResultPanel/WorkspaceView
@@ -61,8 +67,20 @@ interface WorkspaceBridge {
   taskDelete(p: { name: string }): Promise<unknown>;
   taskTemplateList(): Promise<{ name: string }[]>;
   sendRant(p: { message: string; project?: string }): Promise<{ ok?: boolean; count?: number }>;
-  /** 升级横幅重启：仅重启 GUI 进程本身（emrg:relaunchGui），绝不触碰 daemon */
-  relaunchGui?(): Promise<unknown>;
+  /**
+   * 升级横幅重启（rant 2026-09-01T20:09:41）：调 emrg:restartDaemon —— 完整 stop
+   * 链（TUI→daemon，--skip-gui 跳过 GUI 防自杀）→ GUI 自己 relaunch → 新 GUI
+   * ensureDaemon 用新安装代码 spawn 新 daemon。此前仅重启 GUI 外壳导致版本号死循环
+   * （daemon 内存 _run_version 不更新 → 心跳持续报版本差 → 横幅永不消失）。
+   */
+  restartDaemon?(): Promise<unknown>;
+  /** /model 直切模型（rant 2026-09-01T20:22:00：对齐 TUI，preload.js 已暴露 emrg:setModel） */
+  setModel?(p: { model: string }): Promise<unknown>;
+  /** 历史分页加载（rant 2026-09-01T20:19:40：切会话/滚动到顶；daemon list_history） */
+  listHistory?(p: { sessionId: string; limit?: number; offset?: number }): Promise<{
+    messages: Array<{ record_index?: number; content?: string; preview?: string; timestamp?: string }>;
+    hasMore?: boolean;
+  }>;
 }
 
 function wsBridge(): WorkspaceBridge | undefined {
@@ -92,12 +110,38 @@ export function Shell() {
   // 同一版本，不重复弹）；restarting 防重复点击（relaunch 后进程即退出）。
   const [dismissedUpgrade, setDismissedUpgrade] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
+  // 会话信息行（rant 2026-09-01T20:16:55：对齐 TUI 状态栏——id/name/project/消息数/busy 计时）
+  const [elapsed, setElapsed] = useState(0);
+  const busyStartRef = useRef<number | null>(null);
+  const activeBusy = activeSid ? (appState.busyBySid[activeSid] ?? false) : false;
+  useEffect(() => {
+    if (activeBusy) {
+      busyStartRef.current = Date.now();
+      setElapsed(0);
+      const iv = setInterval(() => {
+        const base = busyStartRef.current ?? Date.now();
+        setElapsed(Math.floor((Date.now() - base) / 1000));
+      }, 500);
+      return () => clearInterval(iv);
+    }
+    busyStartRef.current = null;
+    setElapsed(0);
+  }, [activeBusy]);
+  const activeSessionEntry = appState.openSessions.find((o) => o.sid === activeSid);
+  const activeKnown = appState.sessions.find((s) => s.session_id === activeSid);
+  const activeTitle = activeSessionEntry?.title || activeKnown?.title || t("app.unnamed");
+  const activeProject = activeSessionEntry?.projectName || "";
+  const activeMsgCount = (activeKnown as { message_count?: number } | undefined)?.message_count ?? 0;
+  const mmss = `${String(Math.floor(elapsed / 60)).padStart(2, "0")}:${String(elapsed % 60).padStart(2, "0")}`;
 
   // open_sessions 广播到达且尚无激活会话 → 自动选第一个（vanilla 同语义）
   useEffect(() => {
     if (activeSid === null && appState.openSessions.length > 0) {
-      setActiveSid(appState.openSessions[0].sid);
+      const sid = appState.openSessions[0].sid;
+      setActiveSid(sid);
+      void loadHistory(sid);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appState.openSessions, activeSid]);
 
   // ── workspace 面板数据加载（vanilla loadTaskMeta/renderRantList 语义） ──
@@ -205,6 +249,7 @@ export function Shell() {
     if (b?.switchSession) await b.switchSession({ sessionId: sid });
     setActiveSid(sid);
     setActiveView("sessions");
+    void loadHistory(sid);
   }
 
   /** 任务面板「打开会话」：switchSession 到任务所属会话（vanilla #924 行为迁移） */
@@ -216,6 +261,7 @@ export function Shell() {
       await b.switchSession({ sessionId: task.session_id, projectPath: task.project_path });
       setActiveSid(task.session_id);
       setActiveView("sessions");
+      void loadHistory(task.session_id);
     } catch (e) {
       transcript.addSystemMessage(
         t("openSession.loadFailed", { msg: (e as Error)?.message ?? String(e) }),
@@ -332,6 +378,83 @@ export function Shell() {
   function selectSession(sid: string | null): void {
     setActiveSid(sid);
     setActiveView("sessions");
+    if (sid) void loadHistory(sid);
+  }
+
+  // ── 历史按需加载（rant 2026-09-01T20:19:40：GUI 打开会话不显示历史——链路从未接线）──
+  // vanilla historyPages 移植：切会话加载最近一页（limit 50，offset 从最新往回数），
+  // 滚动到顶加载更早一页。TranscriptView 滚动监听已在（capture），这里补加载函数 +
+  // canLoadOlder/onLoadOlder 接线。historyLoaded 集合防重复加载（切换走/回来不重复 append）。
+  const historyPagesRef = useRef<ReturnType<typeof createHistoryPages>>(createHistoryPages());
+  const historyLoadedRef = useRef<Set<string>>(new Set());
+  const historyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /** 切会话：加载最近一页历史（用户消息气泡，只读；vanilla loadHistory）。 */
+  async function loadHistory(sid: string) {
+    if (historyLoadedRef.current.has(sid)) return;
+    const b = wsBridge();
+    if (!b?.listHistory) return;
+    const st = historyPageState(historyPagesRef.current, sid);
+    if (st.loading) return;
+    st.loading = true;
+    try {
+      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st.offset });
+      const msgs = res.messages || [];
+      for (const m of msgs) {
+        transcript.addHistoryMessage((m as { preview?: string; content?: string }).preview
+          || (m as { preview?: string; content?: string }).content
+          || "", sid);
+      }
+      applyHistoryPage(st, msgs.length, !!res.hasMore);
+      transcript.setLoadBar(st.hasMore ? t("app.historyLoadMore") : null, sid);
+      historyLoadedRef.current.add(sid);
+    } catch (e) {
+      transcript.addSystemMessage(
+        t("app.historyFailed", { msg: (e as Error)?.message ?? String(e) }),
+        sid,
+      );
+    } finally {
+      st.loading = false;
+    }
+  }
+
+  /** 滚动到顶：加载更早一页（prepend + 滚差补偿由渲染层处理；vanilla loadOlderHistory）。 */
+  async function loadOlderHistory(sid: string | null) {
+    if (!sid) return;
+    const b = wsBridge();
+    if (!b?.listHistory) return;
+    const st = historyPageState(historyPagesRef.current, sid);
+    if (!st.hasMore || st.loading) return;
+    st.loading = true;
+    try {
+      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st.offset });
+      const msgs = res.messages || [];
+      // prepend：倒序 unshift 保持时间序（vanilla insertAfter(bar) 同序插入会页内倒序——
+      // React 版修正为逐条 unshift，倒序迭代使页底 = 上一页顶部，无缝衔接）
+      for (const m of [...msgs].reverse()) {
+        transcript.prependHistoryMessage(
+          (m as { preview?: string; content?: string }).preview
+          || (m as { preview?: string; content?: string }).content
+          || "",
+          sid,
+        );
+      }
+      applyHistoryPage(st, msgs.length, !!res.hasMore);
+      transcript.setLoadBar(st.hasMore ? t("app.historyLoadMore") : t("app.historyNoMore"), sid);
+    } catch (e) {
+      transcript.addSystemMessage(
+        t("app.historyFailed", { msg: (e as Error)?.message ?? String(e) }),
+        sid,
+      );
+    } finally {
+      st.loading = false;
+    }
+  }
+
+  /** 滚动到顶触发（TranscriptView onScroll → 这里防抖 150ms，vanilla 同）。 */
+  function onScrollTop() {
+    if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+    historyTimerRef.current = setTimeout(() => void loadOlderHistory(activeSid), 150);
   }
 
   const isPanelView = activeView !== "sessions";
@@ -376,20 +499,87 @@ export function Shell() {
       case "/image":
         void h.runDirect(routing.cmd, routing.args ?? []);
         break;
+      // rant 2026-09-01T20:22:00：/model /rant /trigger 接线（此前落 cmdUnknown）
+      case "/model":
+        void handleModelCommand(routing.args ?? []);
+        break;
+      case "/rant":
+        void handleRantCommand(routing.args ?? []);
+        break;
+      case "/trigger":
+        void handleTriggerCommand(routing.args ?? []);
+        break;
       default:
-        // /model /rant /trigger — 待 workspace/settings slice 接线
         transcript.addSystemMessage(t("app.cmdUnknown", { cmd: routing.cmd }), activeSid);
     }
   }
 
-  /** 升级横幅重启：调 emrg:relaunchGui（仅重启 GUI 进程，不碰 daemon ——
-   *  服务端是 EMRG 生命本体，不得走 restartDaemon 的 stop 链）。失败 → 系统消息。 */
+  /** /model：有参 → 直切模型（对齐 TUI /model <name>）；无参 → 设置面板。 */
+  async function handleModelCommand(args: string[]) {
+    const name = args[0]?.trim();
+    if (name) {
+      const b = wsBridge();
+      if (!b?.setModel) return;
+      try {
+        await b.setModel({ model: name });
+        transcript.addSystemMessage(t("app.modelSwitched", { model: name }), activeSid);
+      } catch (e) {
+        transcript.addSystemMessage(
+          t("app.modelSwitchFailed", { msg: (e as Error)?.message ?? String(e) }),
+          activeSid,
+        );
+      }
+    } else {
+      switchView("settings");
+    }
+  }
+
+  /** /rant：有参 → 直发（/@project 前缀指定项目，对齐 TUI）；无参/空内容 → 对话框。 */
+  async function handleRantCommand(args: string[]) {
+    const first = args[0] ?? "";
+    let project = "";
+    let message = args.join(" ");
+    if (first.startsWith("@")) {
+      project = first.slice(1);
+      message = args.slice(1).join(" ");
+    }
+    if (!message.trim()) {
+      await newRant();
+      return;
+    }
+    await submitRant({ message, project });
+  }
+
+  /** /trigger：有参 → 直发任务；无参 → 任务面板。 */
+  async function handleTriggerCommand(args: string[]) {
+    const name = args[0]?.trim();
+    if (name) {
+      const b = wsBridge();
+      if (!b?.triggerTask) return;
+      try {
+        await b.triggerTask({ name });
+        transcript.addSystemMessage(t("app.triggered", { n: name }), activeSid);
+        await loadTasks();
+      } catch (e) {
+        transcript.addSystemMessage(
+          t("app.triggerFailed", { msg: (e as Error)?.message ?? String(e) }),
+          activeSid,
+        );
+      }
+    } else {
+      switchView("tasks");
+    }
+  }
+
+  /** 升级横幅重启（rant 2026-09-01T20:09:41）：调 emrg:restartDaemon 完整重启链
+   *  （stop_all --skip-gui → GUI relaunch → 新 daemon）。TUI 会被 stop 链杀掉，
+   *   用户需手动重开（设计如此）。失败 → 系统消息。 */
   async function handleUpgradeRestart() {
     const b = wsBridge();
-    if (!b?.relaunchGui) return;
+    if (!b?.restartDaemon) return;
     setRestarting(true);
     try {
-      await b.relaunchGui();
+      await b.restartDaemon();
       // 成功：进程即将退出重启，无需清理（restarting 状态随进程消亡）
     } catch (e) {
       setRestarting(false);
@@ -437,6 +627,15 @@ export function Shell() {
       ) : null}
       <header className="react-shell-header">
         <span className="react-shell-brand">✦ EMRG</span>
+        {activeSid ? (
+          <span className="react-shell-session" data-testid="session-info" title={activeSid}>
+            {activeTitle} ({activeSid})
+            {activeProject ? ` · ${activeProject}` : ""}
+            {" · "}
+            {t("app.msgCount", { count: activeMsgCount })}
+            {activeBusy ? ` [${mmss}]` : ""}
+          </span>
+        ) : null}
         <span className="react-shell-conn" data-testid="conn-status" title={t("sidebar.statusTitle")}>
           <span className={`conn-dot ${appState.connected ? "green" : "gray"}`} />
           {appState.connected ? appState.model : t("copy.disconnected")}
@@ -485,7 +684,20 @@ export function Shell() {
                   {t("app.sessionDisconnected")}
                 </div>
               ) : null}
-              <TranscriptView store={transcript} sid={activeSid} renderer={mdRenderer} />
+              <TranscriptView
+                store={transcript}
+                sid={activeSid}
+                renderer={mdRenderer}
+                canLoadOlder={
+                  activeSid
+                    ? (() => {
+                        const hs = historyPageState(historyPagesRef.current, activeSid);
+                        return hs.hasMore && !hs.loading;
+                      })()
+                    : false
+                }
+                onLoadOlder={onScrollTop}
+              />
               <Composer store={transcript} sid={activeSid} busy={busy} onCommand={handleCommand} />
             </>
           )}

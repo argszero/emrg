@@ -189,13 +189,6 @@ describe("done 收尾", () => {
     expect(s.getEntries("s1").filter((x) => x.kind === "assistant")).toHaveLength(1);
   });
 
-  it("timeout → 系统消息（经注入 t 解析）", () => {
-    const s = store();
-    s.handleDone({ request_id: "r1", timeout: true }, "s1");
-    const entries = s.getEntries("s1");
-    expect(entries.some((e) => e.kind === "system" && e.text === "chat.timeoutWarn")).toBe(true);
-  });
-
   it("maxRounds 截断 → 系统提示", () => {
     const s = store();
     s.handleDone({ request_id: "r1", content: "exceeded max tool rounds" }, "s1");

@@ -231,6 +231,17 @@
   opacity: 0.75;
 }
 
+.react-shell-session {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
 .conn-dot {
   width: 8px;
   height: 8px;

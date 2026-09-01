@@ -37,7 +37,9 @@ function mockEmrg() {
   const taskDelete = vi.fn().mockResolvedValue({ ok: true });
   const taskTemplateList = vi.fn().mockResolvedValue([{ name: "journal" }]);
   const sendRant = vi.fn().mockResolvedValue({ ok: true, count: 11 });
-  const relaunchGui = vi.fn().mockResolvedValue({ ok: true });
+  const restartDaemon = vi.fn().mockResolvedValue({ ok: true });
+  const setModel = vi.fn().mockResolvedValue({ ok: true });
+  const triggerTask = vi.fn().mockResolvedValue({ ok: true });
   const switchSession = vi.fn().mockResolvedValue({ ok: true });
   (window as unknown as { emrg?: unknown }).emrg = {
     onEvent,
@@ -55,7 +57,9 @@ function mockEmrg() {
     taskDelete,
     taskTemplateList,
     sendRant,
-    relaunchGui,
+    restartDaemon,
+    setModel,
+    triggerTask,
     switchSession,
   };
   return {
@@ -71,7 +75,9 @@ function mockEmrg() {
     taskDelete,
     taskTemplateList,
     sendRant,
-    relaunchGui,
+    restartDaemon,
+    setModel,
+    triggerTask,
     switchSession,
     emit: (evt: DaemonEventFrame) => listeners.forEach((cb) => cb(evt)),
   };
@@ -453,7 +459,7 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.queryByTestId("rant-dialog")).not.toBeInTheDocument();
   });
 
-  it("upgrade 事件 → 渲染升级横幅；重启按钮调 relaunchGui（仅 GUI，不碰 daemon）；dismiss 后同版本不重现", async () => {
+  it("upgrade 事件 → 渲染升级横幅；重启按钮调 restartDaemon（完整重启链，修版本号死循环）；dismiss 后同版本不重现", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));
     await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
@@ -467,9 +473,10 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(banner).toBeInTheDocument();
     // from→to 文案（en 词典）
     expect(screen.getByText(/upgraded from 0\.2\.83 to 0\.2\.84/i)).toBeInTheDocument();
-    // 重启按钮 → relaunchGui（仅 GUI 进程重启，绝不走 restartDaemon stop 链）
+    // 重启按钮 → restartDaemon（rant 2026-09-01T20:09:41：完整 stop 链 + GUI relaunch，
+    // 否则 daemon 内存版本不更新 → 心跳持续报版本差 → 横幅死循环）
     fireEvent.click(screen.getByTestId("upgrade-banner-restart"));
-    await waitFor(() => expect(m.relaunchGui).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(m.restartDaemon).toHaveBeenCalledTimes(1));
     // dismiss → 隐藏；同版本心跳重发不重现（vanilla lastKnownVersion 语义）
     fireEvent.click(screen.getByTestId("upgrade-banner-dismiss"));
     expect(screen.queryByTestId("upgrade-banner")).not.toBeInTheDocument();
@@ -477,5 +484,70 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
       m.emit({ type: "upgrade", data: { current_version: "0.2.83", installed_version: "0.2.84" } });
     });
     expect(screen.queryByTestId("upgrade-banner")).not.toBeInTheDocument();
+  });
+});
+
+describe("Shell — 会话信息行 + /指令接线（rant 2026-09-01T20:16:55 / 20:22:00）", () => {
+  afterEach(() => {
+    delete (window as unknown as { emrg?: unknown }).emrg;
+  });
+
+  it("header 显示会话信息：title (sid) · project · N msgs（对齐 TUI 状态栏）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }, { sid: "s2", title: "Beta" }]));
+    m.emit({
+      type: "sessions",
+      data: {
+        sessions: [
+          { session_id: "s1", title: "Alpha", message_count: 5 },
+          { session_id: "s2", title: "Beta", message_count: 9 },
+        ],
+      },
+    });
+    await waitFor(() => expect(screen.getByTestId("session-info")).toBeInTheDocument());
+    const info = screen.getByTestId("session-info");
+    expect(info.textContent).toContain("Alpha");
+    expect(info.textContent).toContain("(s1)");
+    expect(info.textContent).toContain("5 msgs");
+  });
+
+  it("/model <name> → setModel 直切（对齐 TUI）；无参 → 设置面板", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    await typeIntoComposer("/model deepseek-chat");
+    const input = await screen.findByTestId("composer-input");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => expect(m.setModel).toHaveBeenCalledWith({ model: "deepseek-chat" }));
+  });
+
+  it("/trigger <name> → triggerTask 直发（对齐 TUI）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    await typeIntoComposer("/trigger evo");
+    const input = await screen.findByTestId("composer-input");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() => expect(m.listTasks).toHaveBeenCalled());
+  });
+
+  it("/rant @emrg hello → sendRant 直发（对齐 TUI @project 前缀）", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    m.emit(openSessionsFrame([{ sid: "s1", title: "Alpha" }]));
+    await waitFor(() => expect(screen.getByTestId("composer-input")).toBeInTheDocument());
+    await typeIntoComposer("/rant @emrg hello world");
+    const input = await screen.findByTestId("composer-input");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    await waitFor(() =>
+      expect(m.sendRant).toHaveBeenCalledWith({ message: "hello world", project: "emrg" }),
+    );
   });
 });

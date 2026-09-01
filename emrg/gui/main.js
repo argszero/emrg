@@ -382,10 +382,11 @@ vision = false
       return { ok: true };
     });
 
-    // 升级横幅重启（rant 2026-08-27T21:54:51）：仅重启 GUI 进程本身，绝不触碰
-    // daemon —— 服务端是 EMRG 生命本体（MANIFESTO 最高原则），不得走上面的
-    // restartDaemon stop 链。新 GUI 进程启动后复用已在运行的 daemon；若 daemon
-    // 本身也需用新代码重启，由 heartbeat 的 installed≠current 驱动用户再次点击。
+    // 升级横幅重启（rant 2026-08-27T21:54:51 旧决策 → 2026-09-01T20:09:41 更正）：
+    // 旧实现仅重启 GUI 进程本身（relaunchGui），绝不触碰 daemon —— 但 daemon 内存
+    // _run_version 不更新 → 心跳持续报 installed≠current → 横幅死循环、版本显示
+    // 永远落后。更正：升级横幅按钮改调 emrg:restartDaemon（完整 stop 链 + GUI relaunch
+    // + 新 daemon）。relaunchGui 保留仅为其他"仅重启外壳"场景（无版本更新诉求）。
     ipcMain.handle("emrg:relaunchGui", async () => {
       app.relaunch();
       app.exit(0);

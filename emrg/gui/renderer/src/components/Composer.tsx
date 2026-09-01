@@ -130,6 +130,11 @@ export function Composer({
   menuRef.current = menu;
   const tRef = useRef(t);
   tRef.current = t;
+  // 草稿读写（rant 2026-09-01T20:28:31）：useEditor 闭包只创建一次 → store/sid 走 ref 桥接
+  const storeRef = useRef(store);
+  storeRef.current = store;
+  const sidRef = useRef(sid);
+  sidRef.current = sid;
   // 格式命令 ref 桥接（editor/菜单闭包只创建一次 → 变化值走 ref）
   const fmtRef = useRef<Record<string, () => void>>({});
   fmtRef.current = {
@@ -229,12 +234,42 @@ export function Composer({
       // / 指令补全：以 / 开头且无空格（仍处于指令词）→ 弹出菜单
       if (trimmed.startsWith("/") && !trimmed.includes(" ")) setMenu(menuForPrefix(trimmed, tRef.current));
       else setMenu(CMD_MENU_CLOSED);
+      // 草稿持久化（rant 2026-09-01T20:28:31）：实时写 store（markdown 序列化），
+      // 切视图（组件卸载）不丢；发送后 clearContent → onUpdate 空内容 → 草稿自动清空
+      const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+      storeRef.current.setComposerDraft(md, sidRef.current);
     },
     onCreate: ({ editor }) => {
       setHasText(!editor.isEmpty);
+      // 草稿恢复（rant 2026-09-01T20:28:31）：重挂载后经 tiptap-markdown setContent 解析回填
+      const d = storeRef.current.getComposerDraft(sidRef.current);
+      if (d) {
+        editor.commands.setContent(d);
+        setHasText(true);
+      }
     },
     immediatelyRender: false,
   });
+
+  // 会话切换：保存旧会话草稿 → 载入新会话草稿（组件不卸载，editor 复用）
+  const prevSidRef = useRef(sid);
+  useEffect(() => {
+    const prev = prevSidRef.current;
+    if (prev === sid || !editor) return;
+    if (prev != null) {
+      const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+      storeRef.current.setComposerDraft(md, prev);
+    }
+    const d = sid != null ? storeRef.current.getComposerDraft(sid) : "";
+    if (d) {
+      editor.commands.setContent(d);
+      setHasText(true);
+    } else {
+      editor.commands.clearContent();
+      setHasText(false);
+    }
+    prevSidRef.current = sid;
+  }, [sid, editor, store]);
 
   // 测试注入：editor 实例回填
   useEffect(() => {

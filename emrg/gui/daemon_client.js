@@ -33,7 +33,6 @@ const MAX_PAYLOAD = 16 * 1024 * 1024; // G62/G105：16MB 双向一致（工具�
 const AUTH_TIMEOUT_MS = 10_000;
 const SPAWN_WAIT_MS = 5_000;
 const PENDING_TIMEOUT_MS = 5_000;
-const STREAM_END_TIMEOUT_MS = 30_000; // G94：最后帧后 30s 无 done 强制结束
 // Rant 2026-08-09T13:16:36 ⑤（防风暴总闸）：单个"连接生命周期"内最多 spawn
 // MAX_SPAWN_ATTEMPTS 次 daemon——之后不再拉起，只把真实错误（含 emrgd.log 尾部）
 // 抛给上层，杜绝 GUI 每 5s 反复 spawn（每次 spawn 都是一个新的 cmd 窗口来源）。
@@ -678,7 +677,6 @@ class DaemonClient {
 
   _onDelta(frame) {
     this._touchGroup(frame.request_id, frame.session_id);
-    this._resetStreamTimer(frame.request_id);
   }
 
   _onDone(frame) {
@@ -686,8 +684,8 @@ class DaemonClient {
     if (rid && this._currentStream && this._currentStream.requestId === rid) {
       this.clearActiveStream();
     }
-    // G65：仅自有流的 done 释放锁（广播 done 不影响）；timeout 兜底同样只清自有
-    if (rid === this.ownStreamRequestId || (frame.timeout && this.ownStream)) {
+    // G65：仅自有流的 done 释放锁（广播 done 不影响）
+    if (rid === this.ownStreamRequestId) {
       this._releaseOwnStream();
     }
     // G83：done 清理分组缓存（DOM 保留）
@@ -739,19 +737,6 @@ class DaemonClient {
     this._currentStream = { requestId };
   }
 
-  _resetStreamTimer(requestId) {
-    if (this._currentStream && this._currentStream.requestId === requestId) {
-      if (this._currentStream.timer) clearTimeout(this._currentStream.timer);
-      this._currentStream.timer = setTimeout(() => {
-        // G94：最后帧后 30s 无 done → 强制结束
-        this.logger.warn("[gui] stream end timeout — forcing done");
-        this._emit("done", { request_id: requestId, content: "", done: true, delta: false, timeout: true });
-        this.clearActiveStream();
-      }, STREAM_END_TIMEOUT_MS);
-      this._currentStream.timer.unref?.();
-    }
-  }
-
   clearActiveStream() {
     if (this._currentStream) {
       if (this._currentStream.timer) clearTimeout(this._currentStream.timer);
@@ -765,7 +750,7 @@ class DaemonClient {
     this.connected = false;
     this._releaseOwnStream(); // 断连即释放 G65 自有流锁（防锁泄漏）
     this._rejectAllPending("connection closed");
-    this.clearActiveStream(); // G94 timer 清理：断连后 30s 超时 timer 不应再触发（防虚假"响应超时"提示）
+    this.clearActiveStream(); // 清理当前流缓存
     this.clearGroups(); // G97：断连清空广播分组缓存（含 10 分钟 timer），防"幽灵"分组残留
     this._emit("disconnected", {});
     this.logger.info("[gui] daemon connection closed");
