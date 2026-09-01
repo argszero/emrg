@@ -282,6 +282,24 @@ def test_workspace_write_allows_evolution_memory(monkeypatch, tmp_path):
     assert allowed is True, f"should allow evolution memory write (got {reason!r})"
 
 
+def test_workspace_write_allows_evolution_session_scratch(monkeypatch, tmp_path):
+    """The trusted evolution-data zone covers session scratch (sessions/) too,
+    per the _trusted_write_zones() docstring — lock it in so a future narrowing
+    of the zone to memory/ alone cannot silently break session writes."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    evo_data = os.path.realpath(os.path.expanduser("~/.emrg/evolution/.emrg"))
+    ws = str(tmp_path / "ws")
+    # check_workspace_write (write/edit tools)
+    session = evo_data + "/sessions/emrg-evolution-emrg-task/history.jsonl"
+    assert check_workspace_write(session, ws) is None
+    # bash _check_sandbox (redirect to a session scratch file)
+    allowed, reason, _ = _check_sandbox(
+        f"echo x > {evo_data}/sessions/emrg-evolution-emrg-task/notes.txt",
+        "workspace-write", ws,
+    )
+    assert allowed is True, f"should allow evolution session-scratch write (got {reason!r})"
+
+
 def test_workspace_write_still_blocks_emrg_home(monkeypatch, tmp_path):
     """Even with the trusted evolution-data zone, ~/.emrg itself is still
     blocked from destructive write (the guard is not widened)."""
