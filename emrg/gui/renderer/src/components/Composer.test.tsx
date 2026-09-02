@@ -20,6 +20,7 @@ function setup(
     sid?: string | null;
     sendMessage?: (o: { sessionId: string | null; text: string; requestId: string; sandbox?: string | null }) => Promise<SendResult>;
     busy?: boolean;
+    cancel?: () => Promise<unknown>;
     onCommand?: (r: { type: "command" | "unknown"; cmd: string; args?: string[] }) => void;
   } = {},
 ) {
@@ -306,6 +307,67 @@ describe("Composer — 发送流", () => {
     // G124：ownStream 以 daemon 回显为准
     const version = store.getVersion();
     void version;
+  });
+});
+
+describe("Composer — 停止回复（rant 2026-09-02T20:30:05：React 迁移丢了 send↔stop 切换）", () => {
+  it("busy 时发送按钮切换为停止按钮；点击 → cancel 调用 + 系统消息（chat.interrupted）", async () => {
+    const store = createTranscriptStore();
+    const cancelled: string[] = [];
+    const s = setup(store, {
+      busy: true,
+      cancel: async () => {
+        cancelled.push("cancelled");
+      },
+    });
+    await waitEditor(s);
+    // busy → send 按钮隐藏、stop 按钮可见（■ / composer.stop 文案）
+    expect(screen.queryByTestId("composer-send")).not.toBeInTheDocument();
+    const stop = screen.getByTestId("composer-stop");
+    expect(stop).toBeInTheDocument();
+    expect(stop).toHaveAttribute("aria-label", "停止回复");
+    expect(stop.textContent).toBe("■");
+    await userEvent.click(stop);
+    await waitFor(() => expect(cancelled).toHaveLength(1));
+    // 本地乐观系统消息（对齐 TUI ESC 中断提示「⏸ Interrupted」）
+    expect(
+      store.getEntries("s1").some((e) => e.kind === "system" && e.text === "⏹ 已停止响应。"),
+    ).toBe(true);
+  });
+
+  it("非 busy 时仍显示发送按钮（无 stop）", async () => {
+    const store = createTranscriptStore();
+    const s = setup(store);
+    await waitEditor(s);
+    expect(screen.getByTestId("composer-send")).toBeInTheDocument();
+    expect(screen.queryByTestId("composer-stop")).not.toBeInTheDocument();
+  });
+
+  it("busy + Esc → 停止（菜单未开）；菜单开着时 Esc 只关菜单不误停", async () => {
+    const store = createTranscriptStore();
+    const cancelled: string[] = [];
+    const s = setup(store, {
+      busy: true,
+      cancel: async () => {
+        cancelled.push("cancelled");
+      },
+    });
+    const editor = await waitEditor(s);
+    // 无菜单 → Esc → stop：cancel 调用 + 系统消息
+    s.press("Escape");
+    await waitFor(() => expect(cancelled).toHaveLength(1));
+    expect(
+      store.getEntries("s1").some((e) => e.kind === "system" && e.text === "⏹ 已停止响应。"),
+    ).toBe(true);
+
+    // / 菜单开着时 Esc 只关菜单——busy 也不触发第二次 stop
+    act(() => {
+      editor.commands.insertContent("/c");
+    });
+    expect(screen.getByTestId("cmd-menu")).toBeInTheDocument();
+    s.press("Escape");
+    expect(screen.queryByTestId("cmd-menu")).not.toBeInTheDocument();
+    expect(cancelled).toHaveLength(1); // 未追加
   });
 });
 
