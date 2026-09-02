@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ReactNode } from "react";
 import {
   type AssistantEntry,
@@ -8,7 +8,7 @@ import {
   type TranscriptEntry,
   type TranscriptStore,
 } from "../lib/transcript";
-import { createMarkdownRenderer, type MarkdownRenderer } from "../lib/markdown";
+import { createMarkdownRenderer, type MarkdownRenderer, type StreamState } from "../lib/markdown";
 import { toolPhrases } from "../lib/copywriting";
 import { useI18n, type TranslateFn } from "../lib/i18n";
 
@@ -19,9 +19,13 @@ import { useI18n, type TranslateFn } from "../lib/i18n";
  * .tool-row / .tool-group / .history-load-bar 等类名不变，Batch 5 切换时复用
  * vanilla CSS，无需改样式表）。
  *
- * - 流式（typing）→ 纯文本；done → createMarkdownRenderer 整体渲染（与旧
- *   done 渲染同源 renderMarkdown；vendor marked/DOMPurify/hljs 构造注入，
- *   无 vendor 时降级转义）。✦ 标记独立于渲染文本，避免破坏块语法解析。
+ * - 流式（typing）→ 块投影即时 markdown 渲染（rant 2026-09-02T21:07:35 方案 B：引擎
+ *   markdown.ts streamProject 把已稳定块完整渲染并缓存 DOM，尾部 live 块只渲染已稳定
+ *   部分；未闭合代码围栏保持纯文本，与 TUI fence_count%2 启发式一致——流式期间不再
+ *   整段等 done 才格式化，与 TUI / react-markdown 竞品对齐）。done → streamFinalize
+ *   全量校正；渲染器无 marked / 投影异常 → 回退纯文本 + renderMarkdown 整体渲染（旧
+ *   路径；vendor marked/DOMPurify/hljs 构造注入，无 vendor 时降级转义）。✦ 标记独立于
+ *   渲染文本，避免破坏块语法解析。
  * - 工具行：running 转圈 → done ✓ / failed；耗时 · Ns（仅成功）；输出默认隐藏，
  *   点击行展开（G91/G131 >2000 字符截断 + 展开全文按钮）。
  * - 合并组：bar 摘要（chat.toolGroupSummary）+ 收起/展开，user-expanded 后不再自动收起。
@@ -170,6 +174,15 @@ function AssistantView({ entry, t, md }: { entry: AssistantEntry; t: TranslateFn
   );
 }
 
+/**
+ * 助手文本段（每 rid 内按工具封存分段）。
+ * typing（流式）期间：React 只挂一个空 host 节点，块投影引擎（markdown.ts
+ * streamProject）把「✦ + div.md-stream（稳定块缓存 + 尾部 live 块）」增量写进 host——
+ * 已闭合的段落/列表/代码围栏即时按 markdown 渲染，未闭合围栏（esp. 代码围栏）保持
+ * 纯文本，不再等 done 才格式化。渲染器无 marked / 投影异常（返回 false）→ 回退纯文本
+ * 追加（旧行为）。done/封存：project 模式 streamFinalize 一次性全量校正；plain 模式由
+ * MarkdownText 整体渲染兜底。
+ */
 function AssistantSegmentView({
   entry,
   segment,
@@ -181,15 +194,67 @@ function AssistantSegmentView({
   t: TranslateFn;
   md: MarkdownRenderer;
 }) {
+  // 块投影 host：引擎把「✦ + .md-stream」写入此节点（streamProject 返回 true 后显示；
+  // React 不管理其 children，避免与引擎增量 DOM 冲突）
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const stateRef = useRef<StreamState | null>(null);
+  const projectedRef = useRef<boolean | null>(null); // null=未探测
+  const [projected, setProjected] = useState<boolean | null>(null);
+
+  // 流式每帧：把累计文本投影进 host。useLayoutEffect → 投影发生在浏览器绘制前，
+  // typing 首帧即显示渲染结果（无「先纯文本后跳变」闪烁）。
+  useLayoutEffect(() => {
+    if (!segment.typing) return;
+    const el = hostRef.current;
+    if (!el) return;
+    if (projectedRef.current === false) return; // 引擎不可用 → React 侧纯文本回退
+    if (!stateRef.current) stateRef.current = { stableCount: 0, rawText: "" };
+    let ok = false;
+    try {
+      ok = md.streamProject(el, segment.text, stateRef.current);
+    } catch {
+      ok = false;
+    }
+    if (!ok) {
+      // 投影失败：清掉可能的部分写入，回退纯文本（assistant-plain 显示完整文本）
+      stateRef.current = null;
+      el.innerHTML = "";
+    }
+    if (projectedRef.current !== ok) {
+      projectedRef.current = ok;
+      setProjected(ok);
+    }
+  }, [segment.typing, segment.text, md]);
+
+  // done/封存（typing 移除）：project 模式 → streamFinalize 把 live 块一次性校正为全量
+  // markdown（与旧 renderMarkdown 整体渲染同源）；plain 模式由 MarkdownText 兜底。
+  useEffect(() => {
+    if (segment.typing || projectedRef.current !== true) return;
+    const el = hostRef.current;
+    if (!el) return;
+    md.streamFinalize(el, segment.text).catch(() => {
+      /* finalize 失败不阻断（引擎内部已有转义降级） */
+    });
+  }, [segment.typing, segment.text, md]);
+
   return (
     <div className="msg assistant">
       <div className={segment.typing ? "msg-body typing" : "msg-body"}>
-        <span className="msg-assistant-mark">✦ </span>
-        {segment.typing ? (
-          // 流式纯文本（chat.js 无投影时的 textContent 追加路径；投影优化在浏览器接线批次）
-          <span className="assistant-plain">{segment.text}</span>
-        ) : (
-          <MarkdownText text={segment.text} md={md} />
+        <div
+          ref={hostRef}
+          className="md-stream-host"
+          style={{ display: projected === true ? undefined : "none" }}
+        />
+        {projected === true ? null : (
+          <>
+            <span className="msg-assistant-mark">✦ </span>
+            {segment.typing ? (
+              // 流式纯文本（chat.js 无投影时的 textContent 追加路径——引擎不可用时回退）
+              <span className="assistant-plain">{segment.text}</span>
+            ) : (
+              <MarkdownText text={segment.text} md={md} />
+            )}
+          </>
         )}
       </div>
     </div>

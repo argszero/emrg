@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { act } from "react";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { TranscriptView } from "./TranscriptView";
 import { createTranscriptStore, type TranscriptStore } from "../lib/transcript";
 import { I18nProvider } from "../lib/i18n";
-import type { MarkdownRenderer } from "../lib/markdown";
+import {
+  createMarkdownRenderer,
+  type MarkdownRenderer,
+  type MarkedLike,
+} from "../lib/markdown";
 
 /**
  * TranscriptView.test.tsx — 聊天区 React 组件测试（Batch 2，设计 §5 Batch 2 项 6 验收）。
@@ -18,10 +22,95 @@ const fakeMd: MarkdownRenderer = {
   streamFinalize: async () => {},
 };
 
-function setup(store: TranscriptStore, sid?: string | null) {
+/**
+ * 文本驱动 fake marked（rant 2026-09-02T21:07:35 验收）：按 ``` 围栏切分 段落/code token，
+ * 闭合状态由是否存在收尾围栏决定——让块投影引擎在「闭合围栏 → 渲染 / 未闭合围栏 →
+ * live 纯文本」之间真实切换（与真实 marked lexer 语义对齐：code token 的 raw 含未闭合
+ * 围栏时 isFenceClosed 为 false）。
+ */
+function makeTextDrivenMarked(): { marked: MarkedLike; dompurify: { sanitize(h: string): string } } {
+  let codeRenderer: ((code: string, infostring: string, escaped: boolean) => string) | null = null;
+  const dompurify = { sanitize: (h: string) => h.replace(/<script[\s\S]*?<\/script>/gi, "") };
+
+  function tokenize(text: string): Array<Record<string, unknown>> {
+    const lines = text.split("\n");
+    const tokens: Array<Record<string, unknown>> = [];
+    let fence: string | null = null; // 当前围栏起始标记（``` 或 ~~~）
+    let lang = "";
+    const codeBuf: string[] = [];
+    const paraBuf: string[] = [];
+    const flushPara = () => {
+      const t = paraBuf.join("\n").trim();
+      if (t) tokens.push({ type: "paragraph", raw: t, text: t });
+      paraBuf.length = 0;
+    };
+    for (const line of lines) {
+      const m = /^(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)[ \t]*$/.exec(line);
+      if (!fence && m) {
+        flushPara();
+        fence = m[1];
+        lang = m[2] || "";
+        continue;
+      }
+      if (fence && m && m[1][0] === fence[0] && m[1].length >= fence.length) {
+        tokens.push({
+          type: "code",
+          raw: fence + "\n" + codeBuf.join("\n") + "\n" + fence,
+          text: codeBuf.join("\n"),
+          lang,
+        });
+        fence = null;
+        continue;
+      }
+      if (fence) {
+        codeBuf.push(line);
+        continue;
+      }
+      paraBuf.push(line);
+    }
+    if (fence) {
+      // 未闭合：raw 无收尾围栏 → engine isFenceClosed 为 false → live 纯文本路径
+      tokens.push({ type: "code", raw: fence + "\n" + codeBuf.join("\n"), text: codeBuf.join("\n"), lang });
+    } else {
+      flushPara();
+    }
+    return tokens;
+  }
+
+  const renderToken = (tok: Record<string, unknown>): string => {
+    if (tok.type === "code") {
+      const code = String(tok.text ?? "");
+      const lg = String(tok.lang ?? "");
+      return codeRenderer ? codeRenderer(code, lg, false) : `<pre>${code}</pre>`;
+    }
+    return `<p>${String(tok.text ?? "")}</p>`;
+  };
+
+  return {
+    dompurify,
+    marked: {
+      parse(text: string) {
+        // 全量渲染：EOF 未闭合围栏也按 code 块收尾（与真实 marked 语义一致）
+        return tokenize(text).map(renderToken).join("");
+      },
+      lexer(text: string) {
+        return tokenize(text);
+      },
+      parser(tokens: Array<Record<string, unknown>>) {
+        return tokens.map(renderToken).join("");
+      },
+      use(opts) {
+        if (opts.renderer?.code) codeRenderer = opts.renderer.code;
+        return undefined;
+      },
+    },
+  };
+}
+
+function setup(store: TranscriptStore, sid?: string | null, renderer?: MarkdownRenderer) {
   return render(
     <I18nProvider lang="zh">
-      <TranscriptView store={store} sid={sid} renderer={fakeMd} />
+      <TranscriptView store={store} sid={sid} renderer={renderer ?? fakeMd} />
     </I18nProvider>,
   );
 }
@@ -70,6 +159,45 @@ describe("TranscriptView", () => {
     expect(mdDiv).toBeInTheDocument();
     // ✦ 标记独立于渲染文本
     expect(container.querySelector(".msg-assistant-mark")).toHaveTextContent("✦");
+  });
+
+  it("流式期间块投影：闭合代码围栏即时渲染、未闭合围栏保持纯文本，done 全量校正（rant 2026-09-02T21:07:35 方案 B）", async () => {
+    const { marked, dompurify } = makeTextDrivenMarked();
+    const streamMd = createMarkdownRenderer({ marked, DOMPurify: dompurify });
+    const store = createTranscriptStore({ t: (k) => k });
+    store.handleDelta([{ request_id: "r1", content: "intro\n\n```js\nconst a = 1;\n```" }], "s1");
+    const { container } = setup(store, "s1", streamMd);
+    // typing 中：引擎已在 host 里投影「✦ + .md-stream」——不再纯文本等 done
+    const body = container.querySelector(".msg-body")!;
+    expect(body).toHaveClass("typing");
+    expect(container.querySelector(".md-stream")).not.toBeNull();
+    expect(container.querySelector(".md-stream-host .msg-assistant-mark")).toHaveTextContent("✦");
+    // 闭合 js 围栏在流式期间已渲染成 code-block（含复制按钮）
+    expect(container.querySelector(".md-block .code-block")).not.toBeNull();
+    expect(body.textContent).not.toContain("```js");
+    // 追加未闭合 py 围栏 → live 块保持纯文本（.stream-code，无 code-block）
+    act(() => {
+      store.handleDelta([{ request_id: "r1", content: "\n\n```py\nstill typing..." }], "s1");
+    });
+    expect(container.querySelector(".msg-body")).toHaveClass("typing");
+    const live = container.querySelector(".md-block.live") as HTMLElement;
+    expect(live).not.toBeNull();
+    expect(live.querySelector(".code-block")).toBeNull();
+    expect(live.querySelector(".stream-code")?.textContent).toContain("still typing...");
+    // 之前的稳定块被缓存：intro 段 + 闭合 js 块为稳定 .md-block，live 块独立
+    expect(container.querySelectorAll(".md-block:not(.live)")).toHaveLength(2);
+    expect(container.querySelectorAll(".code-block")).toHaveLength(1); // 未重复渲染
+    // done → typing 移除 + streamFinalize 全量校正（live/.stream-code 消失，整段全量 markdown）
+    act(() => {
+      store.handleDone({ request_id: "r1" }, "s1");
+    });
+    expect(container.querySelector(".msg-body")).not.toHaveClass("typing");
+    await waitFor(() => {
+      expect(container.querySelector(".stream-code")).toBeNull();
+    });
+    expect(container.querySelectorAll(".md-block")).toHaveLength(0); // finalize 整段替换
+    expect(container.querySelectorAll(".code-block")).toHaveLength(2); // js + py（EOF 收尾）
+    expect(container.querySelector(".msg-body")?.textContent).toContain("still typing...");
   });
 
   it("工具行 running → done：label 切换 + ✓ + 耗时 + 输出默认隐藏、点击展开", () => {

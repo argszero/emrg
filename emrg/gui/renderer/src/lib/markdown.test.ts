@@ -161,3 +161,111 @@ describe("createMarkdownRenderer：块投影流式（jsdom）", () => {
     expect(stream!.innerHTML).toContain("final text");
   });
 });
+
+describe("块投影：live 代码围栏 未闭合→纯文本 / 闭合→完整渲染（rant 2026-09-02T21:07:35 验收）", () => {
+  /** 文本驱动 fake marked：按 ``` 围栏切分 段落/code token；闭合状态由收尾围栏决定 */
+  function makeTextMarked(): { marked: MarkedLike; dompurify: { sanitize: (h: string) => string } } {
+    let codeRenderer: ((code: string, infostring: string, escaped: boolean) => string) | null = null;
+    const dompurify = { sanitize: (h: string) => h.replace(/<script[\s\S]*?<\/script>/gi, "") };
+
+    function tokenize(text: string): Array<Record<string, unknown>> {
+      const lines = text.split("\n");
+      const tokens: Array<Record<string, unknown>> = [];
+      let fence: string | null = null;
+      let lang = "";
+      const codeBuf: string[] = [];
+      const paraBuf: string[] = [];
+      const flushPara = () => {
+        const t = paraBuf.join("\n").trim();
+        if (t) tokens.push({ type: "paragraph", raw: t, text: t });
+        paraBuf.length = 0;
+      };
+      for (const line of lines) {
+        const m = /^(`{3,}|~{3,})[ \t]*([A-Za-z0-9_+-]*)[ \t]*$/.exec(line);
+        if (!fence && m) {
+          flushPara();
+          fence = m[1];
+          lang = m[2] || "";
+          continue;
+        }
+        if (fence && m && m[1][0] === fence[0] && m[1].length >= fence.length) {
+          tokens.push({ type: "code", raw: fence + "\n" + codeBuf.join("\n") + "\n" + fence, text: codeBuf.join("\n"), lang });
+          fence = null;
+          continue;
+        }
+        if (fence) {
+          codeBuf.push(line);
+          continue;
+        }
+        paraBuf.push(line);
+      }
+      if (fence) {
+        // 未闭合：raw 无收尾围栏 → engine isFenceClosed false → live 纯文本路径
+        tokens.push({ type: "code", raw: fence + "\n" + codeBuf.join("\n"), text: codeBuf.join("\n"), lang });
+      } else {
+        flushPara();
+      }
+      return tokens;
+    }
+
+    const renderToken = (tok: Record<string, unknown>): string => {
+      if (tok.type === "code") {
+        const code = String(tok.text ?? "");
+        const lg = String(tok.lang ?? "");
+        return codeRenderer ? codeRenderer(code, lg, false) : `<pre>${code}</pre>`;
+      }
+      return `<p>${String(tok.text ?? "")}</p>`;
+    };
+
+    return {
+      dompurify,
+      marked: {
+        parse(text: string) {
+          return tokenize(text).map(renderToken).join("");
+        },
+        lexer(text: string) {
+          return tokenize(text);
+        },
+        parser(tokens: Array<Record<string, unknown>>) {
+          return tokens.map(renderToken).join("");
+        },
+        use(opts) {
+          if (opts.renderer?.code) codeRenderer = opts.renderer.code;
+          return undefined;
+        },
+      },
+    };
+  }
+
+  it("未闭合围栏：live 保持纯文本 .stream-code（不高亮、无复制按钮）", () => {
+    const fake = makeTextMarked();
+    const r = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify });
+    const body = document.createElement("div");
+    const state = { stableCount: 0, rawText: "" };
+    const ok = r.streamProject(body, "intro\n\n```py\nstill open", state);
+    expect(ok).toBe(true);
+    // intro 段落已稳定渲染（stable），未闭合围栏在 live 块
+    expect(state.stableCount).toBe(1);
+    const live = body.querySelector(".md-block.live")!;
+    expect(live.querySelector(".stream-code")?.textContent).toContain("still open");
+    expect(live.querySelector(".code-block")).toBeNull();
+  });
+
+  it("围栏追加闭合行 → live 由纯文本转为完整 code-block（增量收敛）", () => {
+    const fake = makeTextMarked();
+    const r = createMarkdownRenderer({ marked: fake.marked, DOMPurify: fake.dompurify });
+    const body = document.createElement("div");
+    const state = { stableCount: 0, rawText: "" };
+    r.streamProject(body, "intro\n\n```py\nstill open", state);
+    expect(body.querySelector(".md-block.live .stream-code")).not.toBeNull();
+    // 追加收尾围栏后再次投影：live 块内容替换为完整渲染（引擎 parser 路径）
+    r.streamProject(body, "intro\n\n```py\nstill open\n```", state);
+    const live = body.querySelector(".md-block.live")!;
+    expect(live.querySelector(".stream-code")).toBeNull();
+    expect(live.querySelector(".code-block")).not.toBeNull();
+    expect(live.textContent).toContain("still open");
+    // 稳定块未重投影（intro 段落缓存不动）
+    expect(state.stableCount).toBe(1);
+    expect(body.querySelectorAll(".md-block:not(.live)")).toHaveLength(1);
+  });
+});
