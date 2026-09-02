@@ -137,6 +137,10 @@ export interface TranscriptStore {
   subscribe(listener: () => void): () => void;
   /** 单调版本号：每次变更 +1（getSnapshot 缓存值，稳定引用） */
   getVersion(): number;
+  /** 草稿独立变更通道（#1100 次要项：击键不 bump 主版本 → TranscriptView 不因打字重渲染） */
+  subscribeDraft(listener: () => void): () => void;
+  /** 草稿版本号：仅 setComposerDraft 递增，与主版本互不干扰 */
+  getDraftVersion(): number;
   registerSession(sid: string | null): void;
   unregisterSession(sid?: string | null): void;
   st(sid?: string | null): SessionTranscript;
@@ -192,11 +196,19 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
   const sessions = new Map<string, SessionTranscript>();
   let ownStreamRequestId: string | null = null;
   let version = 0;
+  let draftVersion = 0;
   const listeners = new Set<() => void>();
+  const draftListeners = new Set<() => void>();
 
   function notify(): void {
     version++;
     for (const listener of [...listeners]) listener();
+  }
+
+  /** 草稿通道通知：只 bump draftVersion，不碰主版本（打字只重渲染草稿订阅者） */
+  function notifyDraft(): void {
+    draftVersion++;
+    for (const listener of [...draftListeners]) listener();
   }
 
   function key(sid?: string | null): string {
@@ -225,6 +237,12 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
   function mutate(fn: () => void): void {
     fn();
     notify();
+  }
+
+  /** 草稿变更包装：只通知草稿订阅者（不触发聊天区重渲染） */
+  function mutateDraft(fn: () => void): void {
+    fn();
+    notifyDraft();
   }
 
   function findRow(
@@ -414,6 +432,13 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       };
     },
     getVersion: () => version,
+    subscribeDraft: (listener) => {
+      draftListeners.add(listener);
+      return () => {
+        draftListeners.delete(listener);
+      };
+    },
+    getDraftVersion: () => draftVersion,
     registerSession: (sid) => {
       st(sid);
     },
@@ -484,7 +509,8 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
       });
     },
     setComposerDraft: (text, sid) => {
-      mutate(() => {
+      // #1100 次要项：草稿写走独立通道，不 bump 主版本 → 打字不重渲染 TranscriptView
+      mutateDraft(() => {
         st(sid).draft = text;
       });
     },

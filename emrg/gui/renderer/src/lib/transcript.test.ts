@@ -309,3 +309,34 @@ describe("历史消息角色（rant 2026-09-02T10:03:29：GUI 历史缺 assistan
     expect(asst.segments[0].text).toBe("older assistant");
   });
 });
+
+describe("Composer 草稿与主版本解耦（#1100 次要项：击键不重渲染聊天区）", () => {
+  it("setComposerDraft 不 bump 主版本 / 不通知主订阅者；草稿通道独立递增", () => {
+    const s = store();
+    let calls = 0;
+    let draftCalls = 0;
+    const unsub = s.subscribe(() => calls++);
+    const unsubDraft = s.subscribeDraft(() => draftCalls++);
+    s.setComposerDraft("hi", "s1");
+    expect(calls).toBe(0); // 主通道静默 —— TranscriptView 不因打字重渲染
+    expect(s.getVersion()).toBe(0); // 主版本未动
+    expect(draftCalls).toBe(1);
+    expect(s.getDraftVersion()).toBe(1);
+    expect(s.getComposerDraft("s1")).toBe("hi"); // 读写语义不变
+    unsub();
+    unsubDraft();
+    s.setComposerDraft("again", "s1");
+    expect(calls).toBe(0);
+    expect(draftCalls).toBe(1); // 退订后草稿通道也不再通知
+  });
+
+  it("主通道变更不 bump draftVersion（两通道互不干扰）", () => {
+    const s = store();
+    s.addSystemMessage("x", "s1");
+    expect(s.getVersion()).toBe(1);
+    expect(s.getDraftVersion()).toBe(0);
+    s.setComposerDraft("d", "s1");
+    expect(s.getVersion()).toBe(1);
+    expect(s.getDraftVersion()).toBe(1);
+  });
+});
