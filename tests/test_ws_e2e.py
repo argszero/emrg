@@ -1855,6 +1855,74 @@ class TestWSHistoryPagination:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_include_assistant_returns_both_roles(self):
+        """include_assistant=True → user + assistant messages in record order.
+
+        Rant 2026-09-02T10:03:29: the GUI history loader consumed the same
+        user-only list_history built for TUI /rewind, so assistant bubbles
+        never appeared. The flag keeps /rewind backward compatible while the
+        GUI asks for both roles. Empty assistant content (tool-only turns)
+        must be skipped so the GUI does not render empty bubbles.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                sid = "s_hist"
+                from emrg.session import Session
+                sess = Session(sid, cwd)
+                records = [
+                    {"type": "message", "role": "user", "content": "u1",
+                     "timestamp": "2026-09-02T00:01:00"},
+                    {"type": "message", "role": "assistant", "content": "a1",
+                     "timestamp": "2026-09-02T00:02:00"},
+                    {"type": "message", "role": "assistant", "content": "",
+                     "timestamp": "2026-09-02T00:03:00"},  # tool-only turn
+                    {"type": "message", "role": "user", "content": "u2",
+                     "timestamp": "2026-09-02T00:04:00"},
+                    {"type": "message", "role": "assistant", "content": "a2",
+                     "timestamp": "2026-09-02T00:05:00"},
+                ]
+                sess._write_history(records)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        # Flag on → both roles, record order, empty assistant skipped
+                        resp = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_assistant": True,
+                        })
+                        msgs = resp["messages"]
+                        assert [(m["role"], m["content"]) for m in msgs] == [
+                            ("user", "u1"), ("assistant", "a1"),
+                            ("user", "u2"), ("assistant", "a2"),
+                        ]
+                        # record_index points at raw history records
+                        assert [m["record_index"] for m in msgs] == [0, 1, 3, 4]
+                        # Flag off (default) → user-only backward compat (/rewind)
+                        resp2 = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd),
+                        })
+                        assert [m["content"] for m in resp2["messages"]] == ["u1", "u2"]
+                        assert all("role" not in m or m["role"] == "user"
+                                   for m in resp2["messages"])
+                        # Pagination counts over the full (both-role) list
+                        resp3 = await self._cmd(ws, {
+                            "type": "list_history", "session_id": sid,
+                            "cwd": str(cwd), "include_assistant": True,
+                            "limit": 2,
+                        })
+                        assert [(m["role"], m["content"]) for m in resp3["messages"]] == [
+                            ("user", "u2"), ("assistant", "a2"),
+                        ]
+                        assert resp3.get("has_more") is True
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
 
 class TestWSTaskWire:
     """GUI task CRUD wire frames — task type field contract (rant 2026-08-14T21:48:00).

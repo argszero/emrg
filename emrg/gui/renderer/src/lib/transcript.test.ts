@@ -276,3 +276,36 @@ describe("clear / clearTyping / 行交互", () => {
     expect(calls).toBe(1);
   });
 });
+
+describe("历史消息角色（rant 2026-09-02T10:03:29：GUI 历史缺 assistant 气泡）", () => {
+  it("role=assistant → 助手条目（封存段、无 typing）", () => {
+    const s = store();
+    s.addHistoryMessage("assistant reply", "s1", "assistant");
+    const entries = s.getEntries("s1");
+    expect(entries).toHaveLength(1);
+    expect(entries[0].kind).toBe("assistant");
+    const e = entries[0] as AssistantEntry;
+    expect(e.segments).toEqual([
+      { text: "assistant reply", hasText: true, sealed: true, typing: false },
+    ]);
+  });
+
+  it("无 role → history 条目（user 样式，向后兼容）", () => {
+    const s = store();
+    s.addHistoryMessage("user msg", "s1");
+    const entries = s.getEntries("s1");
+    expect(entries[0]).toEqual({ kind: "history", text: "user msg" });
+  });
+
+  it("prepend 顺序：assistant + user 交错保持时间序", () => {
+    const s = store();
+    // 更早一页 prepend：倒序调用（页底 = 上一页顶部）
+    s.addHistoryMessage("newer user", "s1");
+    s.prependHistoryMessage("older assistant", "s1", "assistant");
+    s.prependHistoryMessage("older user", "s1");
+    const entries = s.getEntries("s1");
+    expect(entries.map((e) => e.kind)).toEqual(["history", "assistant", "history"]);
+    const asst = entries[1] as AssistantEntry;
+    expect(asst.segments[0].text).toBe("older assistant");
+  });
+});

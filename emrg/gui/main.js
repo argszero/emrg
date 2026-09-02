@@ -543,7 +543,7 @@ vision = false
       return { ok: true };
     });
 
-    ipcMain.handle("emrg:listHistory", async (_e, { sessionId, limit, offset } = {}) => {
+    ipcMain.handle("emrg:listHistory", async (_e, { sessionId, limit, offset, includeAssistant } = {}) => {
       // GUI / 指令 P2：/rewind + rant 14:15:12 历史按需加载（limit/offset 可选）
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       // Rant 2026-08-25T17:38:56 根因 1（P0）：历史/记忆命令的 cwd 必须取会话真实
@@ -551,6 +551,9 @@ vision = false
       const payload = { session_id: sessionId, cwd: resolveSessionCwd(sessionId) || DEFAULT_CWD };
       if (limit != null) payload.limit = limit;
       if (offset != null) payload.offset = offset;
+      // Rant 2026-09-02T10:03:29：includeAssistant=true（历史加载）→ daemon 同时返回
+      // user + assistant 消息；缺省（/rewind 弹窗）保持 user-only 向后兼容。
+      if (includeAssistant != null) payload.include_assistant = includeAssistant;
       const frame = await requireConn().sendCommandAndWait("list_history", payload, 5000);
       return { messages: frame.messages || [], hasMore: !!frame.has_more };
     });
