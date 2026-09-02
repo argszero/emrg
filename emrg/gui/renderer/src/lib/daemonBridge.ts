@@ -88,6 +88,8 @@ export interface DaemonAppState {
   openSessions: OpenSessionEntry[];
   /** 每会话 busy 锁（P3 slice 1：done/cancelled 按 sid 释放，不误清激活会话） */
   busyBySid: Record<string, boolean>;
+  /** 每会话 turn 开始时刻（epoch ms；rant 2026-09-02T10:36:26 daemon turn_start 权威广播） */
+  turnStartBySid: Record<string, number>;
   /** 每会话 own stream request id（决定"来自其他客户端"标签） */
   ownStreamRidBySid: Record<string, string | null>;
   /** 每会话断线标记（P3 finalize：后台会话断线不触发全局 UI） */
@@ -112,6 +114,7 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     sessions: [],
     openSessions: [],
     busyBySid: {},
+    turnStartBySid: {},
     ownStreamRidBySid: {},
     disconnectedBySid: {},
     upgradeBanner: null,
@@ -176,6 +179,19 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     const k = KEY(sid);
     store.update((s) => ({ ...s, busyBySid: { ...s.busyBySid, [k]: busy } }));
   }
+
+  /** 清除该会话的 turn 计时（turn_end/done/cancelled/disconnected 幂等调用）。 */
+  function clearTurnTimer(sid: string | null): void {
+    const k = KEY(sid);
+    const { [k]: _drop, ...rest } = store.get().turnStartBySid;
+    if (_drop !== undefined || store.get().busyBySid[k]) {
+      store.update((s) => ({
+        ...s,
+        busyBySid: { ...s.busyBySid, [k]: false },
+        turnStartBySid: rest,
+      }));
+    }
+  }
   function sidOwnRid(sid: string | null, rid: string | null): void {
     const k = KEY(sid);
     store.update((s) => ({ ...s, ownStreamRidBySid: { ...s.ownStreamRidBySid, [k]: rid } }));
@@ -235,12 +251,38 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
     const { type, data } = frame;
     const sid = frame.sid ?? null;
     switch (type) {
+      case "turn_start": {
+        // Rant 2026-09-02T10:36:26：daemon 权威 turn 开始（含后台演化/其他客户端
+        // turn）——记 start 时刻并置 busy；计时基准与 TUI 同一来源。
+        const startedAt = (data as { started_at?: number }).started_at;
+        const k = KEY(sid);
+        if (typeof startedAt === "number" && startedAt > 0) {
+          store.update((s) => ({
+            ...s,
+            busyBySid: { ...s.busyBySid, [k]: true },
+            turnStartBySid: { ...s.turnStartBySid, [k]: startedAt * 1000 },
+          }));
+        }
+        break;
+      }
+      case "turn_end": {
+        // daemon 权威 turn 结束——清 busy + 计时（与 done/cancelled 幂等）。
+        const k = KEY(sid);
+        const { [k]: _drop, ...rest } = store.get().turnStartBySid;
+        store.update((s) => ({
+          ...s,
+          busyBySid: { ...s.busyBySid, [k]: false },
+          turnStartBySid: rest,
+        }));
+        break;
+      }
       case "message_delta":
         transcript.handleDelta(data.chunks || [data], sid);
         break;
       case "done":
         transcript.handleDone(data as DoneData, sid);
         releaseOwnStream(sid, (data as DoneData).request_id, Boolean((data as DoneData).timeout));
+        clearTurnTimer(sid);
         break;
       case "tool_started":
         transcript.handleToolStart(data as ToolStartData, sid);
@@ -251,6 +293,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       case "cancelled":
         transcript.clearTyping(sid);
         releaseOwnStream(sid, null, true);
+        clearTurnTimer(sid);
         break;
       case "task_queued":
         transcript.addSystemMessage(tt("app.queued", { pos: (data as QueuedData).position ?? 0 }), sid);
@@ -319,6 +362,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
         sidBusy(sid, false);
         sidOwnRid(sid, null);
         sidDisconnected(sid, true);
+        clearTurnTimer(sid);
         queuedSends.delete(KEY(sid));
         if (!sid) {
           store.update((s) => ({ ...s, connected: false }));

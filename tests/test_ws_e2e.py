@@ -551,6 +551,91 @@ class TestWSProtocol:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_turn_start_end_broadcast_lifecycle(self):
+        """Rant 2026-09-02T10:36:26: daemon broadcasts authoritative turn
+        lifecycle frames (TUI/GUI timer alignment baseline).
+
+        turn_start (started_at) precedes the turn's output; turn_end follows
+        done. A task queued while the session is busy executes as its own turn
+        only after the first turn's turn_end (queued_requeue → re-send) —
+        its turn_start arrives then, proving started_at is the actual
+        execution start, not the send time (queued requests must not
+        over-count their elapsed timer).
+        """
+        import time as _time
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    async def slow_chat_stream(messages, tools=None):
+                        yield {"content": "处理中", "tool_calls": None, "finish_reason": None, "usage": None}
+                        await asyncio.sleep(0.4)
+                        yield {"content": "完成", "tool_calls": None, "finish_reason": "stop", "usage": None}
+                    server.llm.chat_stream = slow_chat_stream
+                    async def no_drain(session, messages):
+                        return 0, False
+                    server._inject_pending_messages = no_drain  # type: ignore[assignment]
+                    ws_a = await connect_to_server()
+                    ws_b = await connect_to_server()
+                    try:
+                        task = {
+                            "type": "task", "id": "t-turn-a", "session_id": "s_turn",
+                            "cwd": str(cwd), "prompt": "hi", "stream": True,
+                            "timestamp": "2026-09-02T00:00:00",
+                        }
+                        await ws_a.send(json.dumps(task, ensure_ascii=False))
+                        # Turn A: turn_start must arrive with a valid started_at
+                        start_a = await _recv_until(
+                            ws_a, lambda f: f.get("type") == "turn_start",
+                            what="turn_start A")
+                        ts_a = start_a.get("started_at")
+                        assert isinstance(ts_a, (int, float)) and ts_a > 0
+                        assert ts_a <= _time.time() + 1
+                        await asyncio.sleep(0.2)  # let A's lock settle
+                        task_b = {**task, "id": "t-turn-b"}
+                        await ws_b.send(json.dumps(task_b, ensure_ascii=False))
+                        resp = json.loads(await asyncio.wait_for(ws_b.recv(), timeout=5))
+                        assert resp.get("type") == "task_queued"
+                        # Turn A ends → done then turn_end
+                        await _recv_until(
+                            ws_a,
+                            lambda f: f.get("done") and f.get("request_id") == "t-turn-a",
+                            what="turn A done")
+                        te_a = await _recv_until(
+                            ws_a, lambda f: f.get("type") == "turn_end",
+                            what="turn_end A")
+                        assert te_a.get("session_id") == "s_turn"
+                        # Re-send B after queued_requeue → executes as its own turn
+                        requeue = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "queued_requeue",
+                            what="queued_requeue")
+                        assert "t-turn-b" in requeue.get("request_ids", [])
+                        await ws_b.send(json.dumps(task_b, ensure_ascii=False))
+                        start_b = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "turn_start",
+                            what="turn_start B")
+                        ts_b = start_b.get("started_at")
+                        assert isinstance(ts_b, (int, float)) and ts_b > 0
+                        # The queued turn's started_at is the actual execution
+                        # start (after turn A's turn_end), not B's send time.
+                        assert ts_b >= ts_a
+                        await _recv_until(
+                            ws_b,
+                            lambda f: f.get("done") and f.get("request_id") == "t-turn-b",
+                            what="turn B done")
+                        te_b = await _recv_until(
+                            ws_b, lambda f: f.get("type") == "turn_end",
+                            what="turn_end B")
+                        assert te_b.get("session_id") == "s_turn"
+                    finally:
+                        await ws_a.close()
+                        await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_tool_intent_logged_and_ignored_by_execution(self):
         """Rant 2026-08-19T10:35:24: the agent's per-call `intent` is carried
         in the tool_start broadcast and logged, but NOT passed to the tool
@@ -847,6 +932,9 @@ class TestWSBroadcast:
                         # B (wrong cwd) must NOT see any of A's stream frames
                         with pytest.raises(asyncio.TimeoutError):
                             await asyncio.wait_for(ws_b.recv(), timeout=1.0)
+                        # A's own turn_end lifecycle frame arrives after done —
+                        # consume it so the symmetric direction below starts clean.
+                        await _drain(ws_a)
 
                         # Symmetric direction: B's task at cwd_b reaches B only
                         server.llm.chat_stream = _make_fake_chat_stream()  # fresh round counter

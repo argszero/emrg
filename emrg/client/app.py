@@ -571,6 +571,16 @@ async def interactive(init_auto_evolve: bool = False):
                     term.render()
                     continue
 
+                if data.get("type") == "turn_start":
+                    # Rant 2026-09-02T10:36:26：daemon 权威 turn 开始帧——把本地计时
+                    # 对齐到实际执行时刻（排队请求目前从发送时刻起算，计时偏大）。
+                    # 仅当本端 busy（该 turn 属于本会话）时对齐；started_at 为 epoch 秒。
+                    started = data.get("started_at")
+                    if busy and isinstance(started, (int, float)) and started > 0:
+                        _request_start = float(started)
+                        logger.info("turn_start aligned: _request_start=%.3f", _request_start)
+                    continue
+
                 resp = TaskResponse.from_dict(data)
                 if resp.delta and resp.content:
                     if need_new_assistant:
@@ -701,11 +711,18 @@ async def interactive(init_auto_evolve: bool = False):
                             f"Compact complete — {compacted} messages compressed into summary.\n"
                             f"Summary: {summary[:200]}..."
                         )
-                    busy = False
+                    # Rant 2026-09-02T10:31:11：auto-compact 可在 tool loop round 之间
+                    # 触发（turn 未结束）——此时 compact_result 是旁路事件，绝不能把
+                    # busy 置 False（否则 _run_elapsed_timer 的 while busy 退出，计时器
+                    # 死亡、状态栏 elapsed 被清空、终端标题残留停住）。仅当 turn 空闲
+                    # （手动 /compact）时才按终态处理。msg_count 两种情况下都应减去。
+                    if not busy:
+                        busy = False
+                        status.elapsed = ""
+                        status.update(center=server_id or "emrg")
                     msg_count = max(0, msg_count - compacted)
                     _update_left_extra()
-                    status.elapsed = ""
-                    status.update(center=server_id or "emrg"); term.render()
+                    term.render()
                     continue
 
                 # Sessions list
@@ -1248,6 +1265,9 @@ async def interactive(init_auto_evolve: bool = False):
                 _elapsed_task.cancel()
                 _elapsed_task = None
             status.elapsed = ""
+            # Rant 2026-09-02T10:31:11：与 done 路径（:617）一致的标题复位——ESC 中断
+            # 漏清 term.set_title 会让标题残留 [m:ss] 计时停住。
+            term.set_title(f"{session_title or session_id} @ {project_name}")
             # Send cancel to daemon so it stops tool/LLM processing
             await conn.send_command("cancel")
             chat.add("system", "⏸ Interrupted — response stopped. You can continue.")

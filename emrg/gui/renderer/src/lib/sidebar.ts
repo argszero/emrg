@@ -57,3 +57,16 @@ export function sortOpenSessions(entries: OpenSessionEntry[]): OpenSessionEntry[
 export function isActive(sid: string | null | undefined, activeSid: string | null | undefined): boolean {
   return !!sid && sid === activeSid;
 }
+
+/**
+ * 运行计时格式化（rant 2026-09-02T10:36:26）：与 TUI 状态栏一致的 `[m:ss]`。
+ * startedAtMs/nowMs 均为 epoch 毫秒；startedAtMs 缺失（非运行中）→ ""（不显示）。
+ * 负 elapsed（时钟偏差）钳制为 0。
+ */
+export function formatElapsed(startedAtMs: number | undefined, nowMs: number): string {
+  if (!startedAtMs || startedAtMs <= 0) return "";
+  const elapsed = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  return `[${mins}:${secs.toString().padStart(2, "0")}]`;
+}
