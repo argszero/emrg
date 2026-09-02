@@ -77,8 +77,14 @@ interface WorkspaceBridge {
   /** /model 直切模型（rant 2026-09-01T20:22:00：对齐 TUI，preload.js 已暴露 emrg:setModel） */
   setModel?(p: { model: string }): Promise<unknown>;
   /** 历史分页加载（rant 2026-09-01T20:19:40：切会话/滚动到顶；daemon list_history） */
-  listHistory?(p: { sessionId: string; limit?: number; offset?: number }): Promise<{
-    messages: Array<{ record_index?: number; content?: string; preview?: string; timestamp?: string }>;
+  listHistory?(p: {
+    sessionId: string;
+    limit?: number;
+    offset?: number;
+    /** rant 2026-09-02T10:03:29：true → daemon 同时返回 user + assistant 消息 */
+    includeAssistant?: boolean;
+  }): Promise<{
+    messages: Array<{ record_index?: number; role?: string; content?: string; preview?: string; timestamp?: string }>;
     hasMore?: boolean;
   }>;
 }
@@ -408,12 +414,14 @@ export function Shell() {
     if (st.loading) return;
     st.loading = true;
     try {
-      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st.offset });
+      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st.offset, includeAssistant: true });
       const msgs = res.messages || [];
       for (const m of msgs) {
-        transcript.addHistoryMessage((m as { preview?: string; content?: string }).preview
+        const text = (m as { preview?: string; content?: string }).preview
           || (m as { preview?: string; content?: string }).content
-          || "", sid);
+          || "";
+        // rant 2026-09-02T10:03:29：assistant 角色 → 助手气泡；user → history 气泡
+        transcript.addHistoryMessage(text, sid, (m as { role?: string }).role === "assistant" ? "assistant" : undefined);
       }
       applyHistoryPage(st, msgs.length, !!res.hasMore);
       transcript.setLoadBar(st.hasMore ? t("app.historyLoadMore") : null, sid);
@@ -437,17 +445,16 @@ export function Shell() {
     if (!st.hasMore || st.loading) return;
     st.loading = true;
     try {
-      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st.offset });
+      const res = await b.listHistory({ sessionId: sid, limit: HISTORY_PAGE, offset: st.offset, includeAssistant: true });
       const msgs = res.messages || [];
       // prepend：倒序 unshift 保持时间序（vanilla insertAfter(bar) 同序插入会页内倒序——
       // React 版修正为逐条 unshift，倒序迭代使页底 = 上一页顶部，无缝衔接）
       for (const m of [...msgs].reverse()) {
-        transcript.prependHistoryMessage(
-          (m as { preview?: string; content?: string }).preview
+        const text = (m as { preview?: string; content?: string }).preview
           || (m as { preview?: string; content?: string }).content
-          || "",
-          sid,
-        );
+          || "";
+        // rant 2026-09-02T10:03:29：assistant 角色 → 助手气泡；user → history 气泡
+        transcript.prependHistoryMessage(text, sid, (m as { role?: string }).role === "assistant" ? "assistant" : undefined);
       }
       applyHistoryPage(st, msgs.length, !!res.hasMore);
       transcript.setLoadBar(st.hasMore ? t("app.historyLoadMore") : t("app.historyNoMore"), sid);
