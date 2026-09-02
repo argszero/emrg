@@ -2039,19 +2039,36 @@ class EmrgServer:
                 return
             session = self._get_or_create_session(session_id, Path(cwd))
             records = session._read_history()
-            # Collect user messages with their record index
-            user_messages: list[dict] = []
+            # Collect message records with their record index. Default is
+            # user-only (TUI /rewind needs user rewind points; backward
+            # compatible). include_assistant=True (GUI history loader, rant
+            # 2026-09-02T10:03:29 — GUI showed only user bubbles because
+            # list_history was user-only) returns both roles in record order.
+            include_assistant = bool(msg.get("include_assistant"))
+            history_messages: list[dict] = []
             for i, r in enumerate(records):
-                if r.get("type") == "message" and r.get("role") == "user":
-                    content = r.get("content", "")
-                    # Truncate long messages for display
-                    preview = content[:80] + ("…" if len(content) > 80 else "")
-                    user_messages.append({
-                        "record_index": i,
-                        "content": content,
-                        "preview": preview,
-                        "timestamp": r.get("timestamp", ""),
-                    })
+                if r.get("type") != "message":
+                    continue
+                role = r.get("role")
+                if role == "user":
+                    pass
+                elif include_assistant and role == "assistant":
+                    # Tool-only turns persist with empty content — skip them
+                    # so the GUI does not render empty assistant bubbles.
+                    if not str(r.get("content", "") or "").strip():
+                        continue
+                else:
+                    continue
+                content = r.get("content", "")
+                # Truncate long messages for display
+                preview = content[:80] + ("…" if len(content) > 80 else "")
+                history_messages.append({
+                    "record_index": i,
+                    "role": role,
+                    "content": content,
+                    "preview": preview,
+                    "timestamp": r.get("timestamp", ""),
+                })
             # Optional pagination (rant 2026-08-13T14:15:12): limit/offset
             # count from the NEWEST message backwards (offset=0 = latest).
             # Absent limit = full list (backward compatible, used by /rewind).
@@ -2059,15 +2076,15 @@ class EmrgServer:
             offset = msg.get("offset", 0)
             has_more = False
             if limit is not None:
-                total = len(user_messages)
+                total = len(history_messages)
                 end = max(0, total - offset)
                 start = max(0, end - limit)
                 has_more = start > 0
-                user_messages = user_messages[start:end]
+                history_messages = history_messages[start:end]
             await self._send(ws, {
                 "type": "history_list",
                 "session_id": session_id,
-                "messages": user_messages,
+                "messages": history_messages,
                 "has_more": has_more,
             })
 

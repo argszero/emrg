@@ -152,9 +152,10 @@ export interface TranscriptStore {
   clear(sid?: string | null): void;
   addUserMessage(text: string, sid?: string | null): void;
   addSystemMessage(text: string, sid?: string | null): void;
-  addHistoryMessage(text: string, sid?: string | null): void;
+  /** 历史消息（rant 2026-09-02T10:03:29：role="assistant" → 助手气泡，否则 user 样式 history 气泡） */
+  addHistoryMessage(text: string, sid?: string | null, role?: string): void;
   /** 更早一页历史 prepend 到顶部（vanilla addHistoryMessage prepend 语义；loadBar 独立字段渲染在上方） */
-  prependHistoryMessage(text: string, sid?: string | null): void;
+  prependHistoryMessage(text: string, sid?: string | null, role?: string): void;
   setLoadBar(text: string | null, sid?: string | null): void;
   /** 输入框草稿读写（rant 2026-09-01T20:28:31：按 sid 隔离，切视图/切会话不丢） */
   getComposerDraft(sid?: string | null): string;
@@ -446,14 +447,35 @@ export function createTranscriptStore(opts: { t?: TranslateFn } = {}): Transcrip
         st(sid).entries.push({ kind: "system", text });
       });
     },
-    addHistoryMessage: (text, sid) => {
+    addHistoryMessage: (text, sid, role) => {
       mutate(() => {
-        st(sid).entries.push({ kind: "history", text });
+        const s = st(sid);
+        if (role === "assistant") {
+          // 历史助手消息：封存段（无 typing），✦ 标记由渲染层统一加
+          s.entries.push({
+            kind: "assistant",
+            rid: `hist-${s.entries.length}`,
+            isOwn: false,
+            segments: [{ text, hasText: !!text, sealed: true, typing: false }],
+          });
+        } else {
+          s.entries.push({ kind: "history", text });
+        }
       });
     },
-    prependHistoryMessage: (text, sid) => {
+    prependHistoryMessage: (text, sid, role) => {
       mutate(() => {
-        st(sid).entries.unshift({ kind: "history", text });
+        const s = st(sid);
+        if (role === "assistant") {
+          s.entries.unshift({
+            kind: "assistant",
+            rid: `hist-${s.entries.length}`,
+            isOwn: false,
+            segments: [{ text, hasText: !!text, sealed: true, typing: false }],
+          });
+        } else {
+          s.entries.unshift({ kind: "history", text });
+        }
       });
     },
     setLoadBar: (text, sid) => {
