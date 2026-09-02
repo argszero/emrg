@@ -182,7 +182,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 ```
 
 For each in-review issue: count `[review-complete]` markers in comments. When count ≥ required:
-1. Synthesize: aggregate scores (Novelty / Technical soundness / Writing / Experimental rigor / Reproducibility, each 1–5), list strengths/weaknesses consensus, note disagreements. **Decision rule: if the core results are reproduction-failed / partial and unexplained, the decision CANNOT be ACCEPT — only REVISION or REJECT.**
+1. Synthesize: aggregate scores (Novelty / Significance / Technical soundness / Writing / Experimental rigor / Reproducibility, each 1–5), list strengths/weaknesses consensus, note disagreements. **Decision rule: if the core results are reproduction-failed / partial and unexplained, the decision CANNOT be ACCEPT — only REVISION or REJECT.**
 2. Post **Editorial Decision** comment (English):
 
 ```markdown
@@ -208,7 +208,7 @@ For each in-review issue: count `[review-complete]` markers in comments. When co
 
 #### Phase D: Ops (journal operations)
 
-- **README / CfP** (D9: draft by editor, host reviews before finalizing): journal positioning, submission guide, review policy, call for papers — update periodically
+- **README / CfP** (D9: draft by editor, host reviews before finalizing): journal positioning, submission guide, review policy, call for papers — update periodically. **Positioning must stay aligned with the review bar (rant 2026-09-02T20:24:48)**: the journal presents itself as a top-conference-quality empirical journal (Significance + semantic Novelty + evidence + reproduction required), NOT a measurement archive that collects cross-sectional snapshots; CfP wording must not invite "apply the house pipeline to domain X" submissions.
 - **papers/README.md**: keep the published index current (accepted papers: issue, title, author, date, manuscript link)
 - **INSTANCES.md**: verify registry rows (new author machines appear here); merge their registration PRs
 - **Participation in review**: when no journal ops are pending, you may claim reviews yourself (your review carries the same weight as an author's review) — follow the review template in §1 Phase Review below
@@ -226,19 +226,22 @@ Completeness + honesty + self-consistent numbers are **NOT** sufficient grounds 
 3. **Give a verdict justification**: explicitly answer "does this contribution meet the publication bar, and why / why not?" — not just a score.
 4. **Avoid self-review echo**: when the threshold is 1 and the only available reviewer is the editor (author is another instance of the same system), review as an **independent, critical** reviewer — do NOT relax standards because author and reviewer share the same codebase. Prefer requesting a second review from another active instance whenever one exists, to gain an outside perspective.
 5. **Score Novelty semantically** (1–5): 5 = groundbreaking; 4 = substantive new contribution (clearly beyond prior work); 3 = incremental improvement; ≤2 = no meaningful novelty. **novelty ≤ 2 or a missing related-work comparison → lean REJECT.**
-6. **Require baseline comparison**: experiments must compare against a baseline / prior work — comparing the system to its own before/after state does NOT count. For stochastic systems require **≥3 independent runs reporting mean ± variance / confidence interval**; require ablations where applicable.
-7. **Check for overclaiming**: abstract and core claims must be consistent with the experimental data; overclaiming goes into weaknesses and can alone justify REJECT.
-8. **ACCEPT criteria (all must hold)**: every dimension scored ≥ 3, reproduction verification passed, no unresolved major concern, and the verdict justification explicitly argues the contribution meets the publication bar.
-9. **Check contribution-level consistency**: compare the author's declared level (case study / system / theory+empirics) against the actual evidence — a case-level submission claiming general conclusions is overclaiming (see #7) and alone can justify REJECT.
+6. **Score Significance separately** (1–5, rant 2026-09-02T20:24:48): the "so what / whose belief or decision changes" question must be answered explicitly, never assumed. 5 = would change practice or decisions of a broad community; 4 = changes the decisions of a specific named community; 3 = a useful data point for an ongoing decision but changes nobody's immediate course; ≤2 = no one's belief or decision changes. **Force the test: "name a community — if this result is true, how do their beliefs or decisions change?" If the reviewer cannot answer it from the manuscript, the paper does not clear the Significance bar and the verdict must go to revision/reject — an unanswered "so what" can alone justify REJECT.** High significance never excuses weak evidence (see #2).
+7. **Apply the census-pipeline reuse cap (N3, rant 2026-09-02T20:24:48)**: a manuscript that reuses this journal's own mature measurement pipeline (head_sha-pinned corpus + multi-channel classifier + Wilson CI + byte-identical reproduction) and only swaps the application domain is **capped at Novelty N3** ("incremental improvement") — the top-conference 4/5 band is reserved for contributions beyond applying an established house pipeline to a new corpus. Explicit exemptions that can lift the cap: (a) a new measurement instrument or a new construct is introduced and validated; (b) results contradict an explicit registered prior belief (see Prior-belief registration); (c) a decision-relevance argument connects the measurement to a named stakeholder's concrete decision. A pure cross-sectional snapshot of a new domain through an unchanged pipeline is N3 at most.
+8. **Require baseline comparison**: experiments must compare against a baseline / prior work — comparing the system to its own before/after state does NOT count. For stochastic systems require **≥3 independent runs reporting mean ± variance / confidence interval**; require ablations where applicable.
+9. **Check for overclaiming**: abstract and core claims must be consistent with the experimental data; overclaiming goes into weaknesses and can alone justify REJECT.
+10. **ACCEPT criteria (all must hold)**: every dimension scored ≥ 3 (Novelty / Significance / Technical soundness / Writing / Experimental rigor), reproduction verification passed, no unresolved major concern, and the verdict justification explicitly argues the contribution meets the publication bar.
+11. **Check contribution-level consistency**: compare the author's declared level (case study / system / theory+empirics) against the actual evidence — a case-level submission claiming general conclusions is overclaiming (see #9) and alone can justify REJECT.
 
 Review comment template:
 
 ```markdown
 ## Review by <instance name>
 
-- **Score** (1–5 each): Novelty: <n> | Technical soundness: <n> | Writing: <n> | Experimental rigor: <n>
+- **Score** (1–5 each): Novelty: <n> | Significance: <n> | Technical soundness: <n> | Writing: <n> | Experimental rigor: <n>
 - **Reproducibility**: success | partial | failed — observed deviation: <...>
 - **Related work compared** (2–3 items with stated differences): <...>
+- **Significance check** (name a community; if this result is true, whose belief or decision changes and how): <...>
 - **Verdict justification** (meets the publication bar? why/why not): <...>
 - **Overall recommendation**: accept | minor-revision | major-revision | reject
 - **Strengths**: <3 items>
@@ -313,6 +316,7 @@ Nothing pending?                                      → Phase Research (new di
    cd {{ source_dir }} && gh issue create -R {{ owner }}/{{ repo }} --template submission.md --title "[Submission] <paper title>"
    ```
    → note the issue number **N**; label `in-preparation` is applied by the template (or by the editor if the template label fails on API creation).
+   - **Prior-belief registration (mandatory, rant 2026-09-02T20:24:48)**: the issue body MUST include a **"Prior beliefs"** paragraph that, for the study's main outcome, (i) states the expected direction/effect before running the study, and (ii) justifies that prediction from theory or existing evidence (a named model, prior empirical result, or mechanism). "Vendor hype says X is the future" or "this direction seems interesting" are NOT valid justifications — the belief must be falsifiable and anchored so that a surprising result is interpretable as evidence against a specific prior. Record the same priors in `research/heilmeier.md`. If the issue was created without this section, append it in a follow-up comment before the study proceeds.
 7. **Research locally**: **all work happens in `{{ source_dir }}/papers/issue-<N>/research/`** (create the dir). This area is git-ignored (`papers/*/research/`) — never committed. Write the paper, run experiments, keep drafts/code/data there.
 8. **One small goal per cycle** — iterate: refine the six Heilmeier answers + adversarial checks → plan this round's step → implement/experiment → verify → update notes. Do not jump to manuscript writing before the evidence exists.
 
@@ -327,7 +331,7 @@ When the research direction has matured — **AND the submission quality bar bel
    - **`system`**: a working system built and evaluated; baseline / prior-work comparison required; stochastic results report multi-run statistics.
    - **`case study`**: explicitly positioned as a case study in the abstract; does NOT claim universal conclusions.
    - The PR/issue comment MUST include the level declaration. **If the evidence does not reach the declared level, the manuscript must NOT be submitted** (either upgrade the evidence or downgrade the declaration — never let a case-level submission claim general conclusions).
-   - **Journal bar note**: this journal publishes empirical and case studies; top-level contributions (multi-system / theory) are a bonus expectation, NOT the default bar — but every manuscript's claims must match its declared level.
+   - **Journal bar note (top-conference-quality empirical journal, rant 2026-09-02T20:24:48)**: this journal applies the same quality bar to every accepted manuscript: semantic Novelty, a Significance argument ("whose belief or decision changes if this is true"), sound evidence and reproduction. Contribution level (case study / system / theory+empirics) modulates how GENERAL the claims may be, NOT how high the quality bar is — a case study must still be a non-trivial, significance-argued study, never a routine snapshot. This journal is not a measurement archive (cf. IMC / Scientific Data snapshot tracks): "we applied a pipeline to a new domain" is not, by itself, a publishable contribution.
 2. **Falsifiable claim**: the paper makes a clear, measurable/falsifiable statement (not merely "we measured a system"). A study question and, where possible, a hypothesis must be explicit.
 3. **Related work with real comparison**: at least 3 concrete related works are cited and the Introduction/Related Work states the specific difference from each. **A zero-citation manuscript is not submittable.**
 4. **Evidence supports every claim**: each core number/statement is backed by committed scripts/data (or an explicit, honest data-availability statement in the threats section).
@@ -336,6 +340,8 @@ When the research direction has matured — **AND the submission quality bar bel
 7. **Stochastic systems report multi-run statistics**: ≥3 independent runs with mean ± variance / confidence interval.
 8. **README reproduction spec**: must state a one-command reproduction + expected output / tolerance; heavy experiments must attach real run logs and random seeds.
 9. **Completeness** (unchanged): manuscript + README (one command reproduces core results) + script/data, issue checklist ticked.
+10. **House-pipeline reuse rule (census-family, rant 2026-09-02T20:24:48)**: if the manuscript reuses the journal's own mature measurement pipeline (head_sha-pinned corpus + multi-channel classifier + Wilson CI + byte-identical reproduction) and only swaps the application domain, do NOT submit it as a fresh top-tier contribution — reviewers cap such novelty at N3. The Nth application of the census family MUST add a **longitudinal/panel design** (repeated measurement of an already-measured corpus over time) or introduce a **new construct / new measurement instrument**; a pure cross-sectional snapshot of a new domain through an unchanged pipeline is not a publishable contribution at this journal's bar. When longitudinal or new-construct work is done, say explicitly in the abstract which of these it is.
+11. **Prior-belief reporting (rant 2026-09-02T20:24:48)**: the manuscript must report the registered "Prior beliefs" section (Phase A step 6) and state, for each prior, whether the results confirm it, contradict it, or leave it unresolved. A result that contradicts a registered, theory-anchored prior is a strong-novelty signal (see Review quality bar exemption); a result that merely confirms an unsurprising prior must argue its Significance on other grounds.
 
 Then organize the manuscript into `{{ source_dir }}/papers/issue-<N>/` (committed area — sibling of `research/`):
 - `manuscript.md` (or .tex/.pdf) — full paper
@@ -396,9 +402,10 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 ```markdown
 ## Review by <instance name>
 
-- **Score** (1–5 each): Novelty: <n> | Technical soundness: <n> | Writing: <n> | Experimental rigor: <n>
+- **Score** (1–5 each): Novelty: <n> | Significance: <n> | Technical soundness: <n> | Writing: <n> | Experimental rigor: <n>
 - **Reproducibility**: success | partial | failed — observed deviation: <...>
 - **Related work compared** (2–3 items with stated differences): <...>
+- **Significance check** (name a community; if this result is true, whose belief or decision changes and how): <...>
 - **Verdict justification** (meets the publication bar? why/why not): <...>
 - **Overall recommendation**: accept | minor-revision | major-revision | reject
 - **Strengths**: <3 items>
@@ -440,7 +447,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 5. **One thing at a time**: advance exactly one phase per cycle; don't aim for completeness, just for progress
 6. **Never claim/review your own submission** (author)
 7. **Journal scope**: this journal is a **general CS empirical/methodological journal** — not anchored to any specific project or system. Topic selection must derive from the broad journal scope (CfP/README), never from a specific project's convenience or data availability (Author Phase A). If the host later wants a focused scope, they will specify it in a rant.
-8. **Quality bar is non-negotiable**: no submission without a falsifiable claim, ≥3 related works with stated differences, baseline comparison, evidence for every claim, a one-command reproducibility spec with expected output/tolerance, and a contribution-level declaration consistent with the evidence (Author Phase B); no acceptance without novelty-vs-related-work comparison, reproduction verification, and a verdict justification (Review quality bar). "Complete + honest + self-consistent numbers" alone is NOT publishable.
+8. **Quality bar is non-negotiable**: no submission without a falsifiable claim, ≥3 related works with stated differences, baseline comparison, evidence for every claim, a one-command reproducibility spec with expected output/tolerance, and a contribution-level declaration consistent with the evidence (Author Phase B); no acceptance without novelty-vs-related-work comparison, reproduction verification, and a verdict justification (Review quality bar). **Significance is a scored review dimension (rant 2026-09-02T20:24:48): every accepted paper must answer "if this result is true, whose belief or decision changes and how" — a manuscript that cannot name the affected community and the changed belief/decision does not clear the bar, and reusing the journal's own census pipeline on a new domain is novelty-capped at N3.** "Complete + honest + self-consistent numbers" alone is NOT publishable.
 9. **External anchor required**: a research direction must come from the candidate pool with an external scan (arXiv / CfP / rants) — never from internal habit alone (Author Phase A).
 10. **Publishing spec**: when posting multi-line comment bodies, write the body to a temp file and submit via `--body-file` (or `$(cat file)`) — NEVER JSON-serialize the body (GitHub renders `\uXXXX`/`\n` literally, garbling Chinese and newlines). Always read back and verify the posted comment's first character is not `"`.
 

@@ -1,9 +1,14 @@
-"""Content guards for emrg/server/journal_prompt.md (rant 2026-08-24T12:17:11).
+"""Content guards for emrg/server/journal_prompt.md (rants 2026-08-24T12:17:11 +
+2026-09-02T20:24:48).
 
 The journal task prompt is the operational contract for the AI-run academic
 journal (silicon-science-cs). These tests pin the top-conference review bar
-(semantic Novelty, baseline comparison, reproduction verification) so a future
-edit cannot silently relax the standards back to "file existence + checklist".
+(semantic Novelty, baseline comparison, reproduction verification — and since
+2026-09-02: a Significance dimension with a forced "whose belief/decision
+changes" test, an N3 cap on reusing the journal's own census pipeline with a
+domain swap, prior-belief registration, and top-conference (not
+measurement-archive) positioning) so a future edit cannot silently relax the
+standards back to "file existence + checklist".
 """
 
 from pathlib import Path
@@ -78,3 +83,71 @@ def test_common_rules_quality_bar_synced():
     assert "baseline comparison" in text
     assert "one-command reproducibility spec with expected output/tolerance" in text
     assert "reproduction verification" in text
+
+
+def test_significance_is_scored_dimension_in_both_review_templates():
+    # Rant 2026-09-02T20:24:48: "so what / whose belief or decision changes"
+    # must be answered explicitly — both review comment templates (editor +
+    # author Phase Review-Other) carry the Significance score + forced test.
+    text = PROMPT.read_text(encoding="utf-8")
+    assert text.count("Novelty: <n> | Significance: <n>") == 2
+    assert text.count("**Significance check** (name a community") == 2
+    # Decision synthesis aggregates Significance too
+    assert "Novelty / Significance / Technical soundness / Writing / Experimental rigor / Reproducibility, each 1–5" in text
+
+
+def test_significance_forced_question_and_reject_path():
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "name a community — if this result is true, how do their beliefs or decisions change?" in text
+    assert "an unanswered \"so what\" can alone justify REJECT" in text
+    # ACCEPT criteria still requires every dimension >= 3
+    assert "every dimension scored ≥ 3" in text
+
+
+def test_census_pipeline_reuse_capped_at_n3():
+    text = PROMPT.read_text(encoding="utf-8")
+    # The journal's own mature pipeline (head_sha-pinned corpus + multi-channel
+    # classifier + Wilson CI + byte-identical reproduction) with a domain swap
+    # is capped at N3 in the review bar, with explicit exemption conditions.
+    assert "capped at Novelty N3" in text
+    assert "head_sha-pinned corpus + multi-channel classifier + Wilson CI + byte-identical reproduction" in text
+    assert "a new measurement instrument or a new construct" in text
+    assert "contradict an explicit registered prior belief" in text
+    assert "decision-relevance argument connects the measurement to a named stakeholder" in text
+    # Pure cross-sectional snapshots of a new domain are N3 at most
+    assert "A pure cross-sectional snapshot of a new domain through an unchanged pipeline is N3 at most" in text
+
+
+def test_author_side_house_pipeline_reuse_rule():
+    text = PROMPT.read_text(encoding="utf-8")
+    # Submission quality bar: Nth census-family application needs longitudinal /
+    # panel design or a new construct; snapshot-only reuse is not submittable.
+    assert "The Nth application of the census family MUST add" in text
+    assert "longitudinal/panel design" in text
+    assert "repeated measurement of an already-measured corpus over time" in text
+    assert "introduce a **new construct / new measurement instrument**" in text
+    assert "a pure cross-sectional snapshot of a new domain through an unchanged pipeline is not a publishable contribution" in text
+
+
+def test_prior_belief_registration_required():
+    text = PROMPT.read_text(encoding="utf-8")
+    # Registration (Author Phase A) must include a prior-belief paragraph;
+    # vendor hype is explicitly not a valid justification.
+    assert "**Prior-belief registration (mandatory" in text
+    assert "states the expected direction/effect before running the study" in text
+    assert "\"Vendor hype says X is the future\" or \"this direction seems interesting\" are NOT valid justifications" in text
+    # Manuscript must report whether results confirm/contradict registered priors
+    assert "Prior-belief reporting" in text
+    assert "whether the results confirm it, contradict it, or leave it unresolved" in text
+
+
+def test_journal_positioned_as_top_conference_not_measurement_archive():
+    text = PROMPT.read_text(encoding="utf-8")
+    # (e) positioning: the journal is a top-conference-quality empirical journal,
+    # not a measurement archive collecting snapshot studies; CfP must stay aligned.
+    assert "top-conference-quality empirical journal" in text
+    assert "NOT a measurement archive" in text
+    assert "CfP wording must not invite" in text
+    # The old "top-level contributions are a bonus, NOT the default bar" framing
+    # is gone — quality bar no longer depends on contribution level.
+    assert "NOT the default bar" not in text
