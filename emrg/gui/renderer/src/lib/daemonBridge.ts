@@ -16,6 +16,7 @@ import type { TranslateFn } from "./utils";
 import { createSnapshotStore, type SnapshotStore } from "./snapshot-store";
 import type { TranscriptStore, DeltaChunk, DoneData, ToolStartData, ToolEndData } from "./transcript";
 import type { OpenSessionEntry } from "./sidebar";
+import type { ImageAttach } from "./composer";
 
 /* ── 事件帧（与 main.js 广播契约一致：{ type, data, sid }） ── */
 
@@ -128,6 +129,8 @@ export interface SendMessagePayload {
   text: string;
   requestId?: string;
   sandbox?: string;
+  /** 图片附件（rant 2026-09-02T15:23:53：透传 sendTask → daemon vision） */
+  images?: ImageAttach[] | null;
 }
 
 /** window.emrg.init() 返回值（main.js emrg:init 处理器 → preload.init） */
@@ -173,7 +176,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
 
   // P2 queue-injection（#655）：busy 时发送的消息入 daemon 队列，queued_requeue
   // 以原 requestId 重发（不重加用户行）。逐 sid 记录（后台会话独立跟踪）。
-  const queuedSends = new Map<string, { requestId: string; text: string; sandbox?: string }[]>();
+  const queuedSends = new Map<string, { requestId: string; text: string; sandbox?: string; images?: ImageAttach[] | null }[]>();
 
   function sidBusy(sid: string | null, busy: boolean): void {
     const k = KEY(sid);
@@ -231,6 +234,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
             text: item.text,
             requestId: item.requestId,
             sandbox: item.sandbox,
+            ...(item.images ? { images: item.images } : {}),
           });
           sidOwnRid(sid, res?.requestId ?? item.requestId);
         } catch {

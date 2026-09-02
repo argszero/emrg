@@ -10,7 +10,12 @@ import {
   menuForPrefix,
   menuNavigate,
   queueSend,
+  imagePlaceholder,
+  toSafeImageLabel,
+  normalizePlaceholders,
+  resolveSendImages,
   type CmdMenuState,
+  type ImageAttach,
 } from "../lib/composer";
 import { genRequestId } from "../lib/utils";
 import { useI18n } from "../lib/i18n";
@@ -40,9 +45,23 @@ export interface SendOptions {
   text: string;
   requestId: string;
   sandbox?: string | null;
+  /** 图片附件（rant 2026-09-02T15:23:53：粘贴/拖拽 → 落盘 → 随消息发送） */
+  images?: ImageAttach[] | null;
 }
 export interface SendResult {
   requestId?: string;
+}
+/** emrg:saveImage 入参（renderer → main IPC，base64 数据 + 展示标签） */
+export interface SaveImagePayload {
+  sessionId?: string | null;
+  data: string;
+  label: string;
+  mime?: string;
+}
+/** emrg:saveImage 返回值（落盘路径 + 归一 mime） */
+export interface SaveImageResult {
+  path: string;
+  mime?: string;
 }
 /** 指令路由入参（parseInput 结果；type:"unknown" 无 args——vanilla 走 default 提示） */
 export interface CommandRouting {
@@ -59,6 +78,8 @@ export interface ComposerProps {
   busy?: boolean;
   /** 注入发送函数（默认 window.emrg.sendMessage；测试传假实现） */
   sendMessage?: (opts: SendOptions) => Promise<SendResult>;
+  /** 注入图片落盘函数（默认 window.emrg.saveImage；测试传假实现） */
+  saveImage?: (payload: SaveImagePayload) => Promise<SaveImageResult>;
   /** / 指令路由回调（Batch 5 接线：/clear /model /memory …） */
   onCommand?: (routing: CommandRouting) => void;
   /** 测试注入：挂载后回填 tiptap Editor 实例（命令驱动测试用） */
@@ -110,6 +131,7 @@ export function Composer({
   sandbox = null,
   busy: busyProp,
   sendMessage: send,
+  saveImage: saveImageProp,
   onCommand,
   editorRef,
 }: ComposerProps) {
@@ -124,7 +146,13 @@ export function Composer({
   // ⚠️ (rant 2026-08-28T22:27:01) 链接改用应用内对话框收集 URL（Electron 禁用 window.prompt）
   const [linkDialogOpen, setLinkDialogOpen] = useState(false);
   const [linkHref, setLinkHref] = useState("");
-  const queuedRef = useRef<Map<string, Array<{ requestId: string; text: string; sandbox?: string | null }>>>(new Map());
+  const queuedRef = useRef<Map<string, Array<{ requestId: string; text: string; sandbox?: string | null; images?: ImageAttach[] | null }>>>(new Map());
+  // 图片附加（rant 2026-09-02T15:23:53）：pending 语义对齐 TUI _pending_images——
+  // 占位符删除即弃图（发送时 filter）；ref 镜像供 tiptap 一次性闭包读写
+  const [pending, setPending] = useState<ImageAttach[]>([]);
+  const pendingRef = useRef<ImageAttach[]>([]);
+  const attachRef = useRef<(files: File[], at?: number | null) => void>(() => {});
+  const insertRawRef = useRef<(text: string, at?: number | null) => void>(() => {});
   // tiptap 选项闭包只创建一次 → 变化值走 ref 桥接（menu/submit/selectCmd/t）
   const menuRef = useRef(menu);
   menuRef.current = menu;
@@ -156,6 +184,17 @@ export function Composer({
       return (window as unknown as { emrg?: { sendMessage: (o: SendOptions) => Promise<SendResult> } }).emrg?.sendMessage(opts) ??
         Promise.reject(new Error("window.emrg.sendMessage unavailable"));
     });
+
+  // 图片落盘函数解析（rant 2026-09-02T15:23:53：默认走 preload 桥 emrg:saveImage）
+  const saveFn =
+    saveImageProp ??
+    ((payload: SaveImagePayload) =>
+      (window as unknown as { emrg?: { saveImage?: (p: SaveImagePayload) => Promise<SaveImageResult> } }).emrg
+        ?.saveImage?.(payload) ?? Promise.reject(new Error("window.emrg.saveImage unavailable")));
+  const saveRef = useRef(saveFn);
+  saveRef.current = saveFn;
+  // tiptap 一次性闭包内读写 editor 的桥（editor 变量在 useEditor 之后才声明）
+  const editorBoxRef = useRef<Editor | null>(null);
 
   const editor = useEditor({
     extensions: [
@@ -226,6 +265,38 @@ export function Composer({
       // Stage 2 粘贴安全：HTML 粘贴路径经 DOMPurify 净化（script/事件属性剥离；
       // tiptap-markdown 的纯文本粘贴分支本身无 HTML 注入面）
       transformPastedHTML: (html) => DOMPurify.sanitize(html),
+      // rant 2026-09-02T15:23:53：剪贴板图片粘贴——同带 text/plain 先插文本
+      // （对齐 TUI「文本粘贴后追加图」），图片逐张走「附加图片」落盘 + 占位符
+      handlePaste: (_view, event) => {
+        const cd = event.clipboardData;
+        if (!cd) return false;
+        const files = Array.from(cd.files || []);
+        const imgs = files.filter((f) => f.type && f.type.startsWith("image/"));
+        if (imgs.length === 0) return false;
+        event.preventDefault();
+        const text = cd.getData("text/plain");
+        const ed = editorBoxRef.current;
+        if (text && ed) {
+          const from = ed.state.selection.from;
+          insertRawRef.current(text, from);
+          attachRef.current(imgs, from + text.length);
+        } else {
+          attachRef.current(imgs, null);
+        }
+        return true;
+      },
+      // rant 2026-09-02T15:23:53：拖拽图片文件进输入区
+      handleDrop: (_view, event) => {
+        const dt = event.dataTransfer;
+        if (!dt) return false;
+        const files = Array.from(dt.files || []);
+        if (files.length === 0) return false;
+        const imgs = files.filter((f) => f.type && f.type.startsWith("image/"));
+        if (imgs.length === 0) return false;
+        event.preventDefault();
+        attachRef.current(imgs, null);
+        return true;
+      },
     },
     onUpdate: ({ editor }) => {
       const text = editor.getText();
@@ -269,12 +340,17 @@ export function Composer({
       setHasText(false);
     }
     prevSidRef.current = sid;
+    // 会话切换：pending 图片属旧会话输入（TUI 语义——占位符即图的生命周期），丢弃
+    pendingRef.current = [];
+    setPending([]);
   }, [sid, editor, store]);
 
-  // 测试注入：editor 实例回填
+  // 测试注入：editor 实例回填（兼作 tiptap 一次性闭包的实例桥）
   useEffect(() => {
+    editorBoxRef.current = editor;
     if (editorRef) editorRef.current = editor;
     return () => {
+      editorBoxRef.current = null;
       if (editorRef) editorRef.current = null;
     };
   }, [editor, editorRef]);
@@ -334,9 +410,15 @@ export function Composer({
   async function submit(): Promise<void> {
     if (!editor) return;
     // tiptap-markdown 的 storage 类型不并入 Editor.storage（Storage 泛型）——运行时存在，显式取值
-    const md = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+    const mdRaw = (editor.storage as unknown as { markdown: { getMarkdown(): string } }).markdown.getMarkdown();
+    // rant 2026-09-02T15:23:53：tiptap-markdown 会把占位符转义成 \[📷 …\]（防被当链接语法），
+    // 发送前还原字面量——daemon 收到的文本与 TUI 完全一致（历史互操作）
+    const md = normalizePlaceholders(mdRaw, pendingRef.current.map((p) => p.label));
     const value = md.trim();
     if (!value) return;
+    // 图片收敛（TUI 同语义）：占位符仍在文本中的保留（删了占位符即弃图）；
+    // position = 字面占位符在文本中的字符偏移（daemon 按 position 切块）
+    const images = resolveSendImages(pendingRef.current, value);
     const parsed = parseInput(value);
     if (parsed.type !== "message") {
       // 指令：清输入 + 关菜单 + 路由（vanilla rant 19:44 P1：/ 开头不进 sendMessage）
@@ -364,11 +446,20 @@ export function Composer({
     const requestId = genRequestId();
     store.setOwnStream(requestId);
     if (wasBusy) {
-      queueSend(queuedRef.current, sid, { requestId, text: value, sandbox: tier });
+      queueSend(queuedRef.current, sid, { requestId, text: value, sandbox: tier, images });
     }
     try {
-      const res = await sendFn({ sessionId: sid, text: value, requestId, sandbox: tier });
+      const res = await sendFn({
+        sessionId: sid,
+        text: value,
+        requestId,
+        sandbox: tier,
+        images: images.length ? images : null,
+      });
       store.setOwnStream(res.requestId || requestId); // G124：以 daemon 回显为准
+      // 发送成功 → 清 pending（图片已随消息交给 daemon；失败保留以便重发）
+      pendingRef.current = [];
+      setPending([]);
     } catch {
       setInternalBusy(false);
       store.setOwnStream(null);
@@ -390,8 +481,100 @@ export function Composer({
   const selectCmdRef = useRef<(cmd: string) => void>(selectCmd);
   selectCmdRef.current = selectCmd;
 
+  /* ── 图片附加（rant 2026-09-02T15:23:53：粘贴/拖拽 → IPC 落盘 → 光标处占位符）── */
+
+  /** 原始文本直插（不经 tiptap-markdown 解析——粘贴文本/占位符都要字面量） */
+  function insertRawText(text: string, at?: number | null): void {
+    const ed = editorBoxRef.current;
+    if (!ed) return;
+    const pos = at ?? ed.state.selection.from;
+    ed.view.dispatch(ed.state.tr.insertText(text, pos));
+  }
+  insertRawRef.current = insertRawText;
+
+  /** File → base64（FileReader，保留字节序与 data URL 解码一致） */
+  function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => {
+        const dataUrl = String(r.result || "");
+        resolve(dataUrl.split(",", 2)[1] ?? "");
+      };
+      r.onerror = () => reject(r.error ?? new Error("FileReader error"));
+      r.readAsDataURL(file);
+    });
+  }
+
+  /** 受支持图片 mime（与 main.js emrg:saveImage 的扩展名白名单一致） */
+  const SUPPORTED_IMAGE_MIME: ReadonlySet<string> = new Set([
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/svg+xml",
+  ]);
+
+  /**
+   * 逐张「附加图片」：落盘（IPC saveImage，返回绝对路径）→ 光标处插入占位符 →
+   * 记 pendingImages（path/label/position 语义同 TUI _pending_images）。
+   */
+  async function attachImages(files: File[], at?: number | null): Promise<void> {
+    const ed = editorBoxRef.current;
+    const sid = sidRef.current;
+    if (!ed || !sid) return;
+    const imgs = files.filter((f) => f.type && SUPPORTED_IMAGE_MIME.has(f.type.toLowerCase()));
+    if (imgs.length === 0) return;
+    let pos = at ?? ed.state.selection.from;
+    for (const file of imgs) {
+      const mime = file.type.toLowerCase();
+      let b64: string;
+      try {
+        b64 = await fileToBase64(file);
+      } catch {
+        continue;
+      }
+      const n = pendingRef.current.length + 1;
+      const stem = file.name ? file.name.replace(/\.[^.]+$/, "") : "";
+      const display = stem ? toSafeImageLabel(stem) : `Image ${n}`;
+      let res: SaveImageResult;
+      try {
+        res = await saveRef.current({ sessionId: sid, data: b64, label: display, mime });
+      } catch {
+        continue; // 落盘失败（无会话/类型不支持/超限）→ 跳过，不插幽灵占位符
+      }
+      const placeholder = imagePlaceholder(display);
+      insertRawText(placeholder, pos);
+      pos += placeholder.length;
+      pendingRef.current = [...pendingRef.current, { path: res.path, label: placeholder, mime: res.mime || mime }];
+      setPending(pendingRef.current);
+    }
+    ed.commands.focus();
+  }
+  attachRef.current = (files, at) => {
+    void attachImages(files, at);
+  };
+
   return (
-    <div className="composer" data-testid="composer">
+    <div
+      className="composer"
+      data-testid="composer"
+      onDragOver={(e) => {
+        // 允许图片文件拖入（否则浏览器显示 no-drop，drop 事件不触发）
+        const t = e.dataTransfer?.types;
+        if (t && Array.from(t).includes("Files")) e.preventDefault();
+      }}
+      onDrop={(e) => {
+        if (e.defaultPrevented) return; // tiptap handleDrop 已处理（编辑器内）
+        const dt = e.dataTransfer;
+        if (!dt) return;
+        const files = Array.from(dt.files || []);
+        const imgs = files.filter((f) => f.type && f.type.startsWith("image/"));
+        if (!imgs.length) return;
+        e.preventDefault();
+        attachRef.current(imgs, null);
+      }}
+    >
       {menu.items.length > 0 ? (
         <div className="cmd-menu" role="menu" data-testid="cmd-menu">
           {menu.items.map((it, i) => (

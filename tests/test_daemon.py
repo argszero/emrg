@@ -2795,6 +2795,51 @@ def test_tool_content_for_llm_missing_image(tmp_path):
     assert "Image unavailable" in out
 
 
+# ── _build_user_content images (rant 2026-09-02T15:23:53: GUI image input) ──
+
+
+def test_build_user_content_mime_metadata(tmp_path):
+    """images[].mime drives the data-URL mime (GUI drag-in JPEG previously
+    hardcoded to image/png → wrong mime; default stays png for TUI/history)."""
+    import base64 as _b64
+
+    server = _make_server()
+    server.llm.config.vision = True
+    jpg = tmp_path / "pic.jpg"
+    jpg.write_bytes(b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+
+    # mime metadata present → data URL uses it
+    out = EmrgServer._build_user_content(
+        "[📷 pic] hi",
+        [{"path": str(jpg), "label": "[📷 pic]", "position": 0, "mime": "image/jpeg"}],
+        vision=True,
+    )
+    assert isinstance(out, list)
+    urls = [p["image_url"]["url"] for p in out if p.get("type") == "image_url"]
+    assert urls and urls[0].startswith("data:image/jpeg;base64,"), urls
+    assert _b64.b64decode(urls[0].split(",", 1)[1]) == jpg.read_bytes()
+
+    # no mime → png default (back-compat with TUI/history records)
+    out2 = EmrgServer._build_user_content(
+        "plain", [{"path": str(jpg), "label": "[📷 pic]", "position": 0}], vision=True
+    )
+    assert isinstance(out2, list)
+    urls2 = [p["image_url"]["url"] for p in out2 if p.get("type") == "image_url"]
+    assert urls2 and urls2[0].startswith("data:image/png;base64,"), urls2
+
+
+def test_build_user_content_non_vision_degrade():
+    """vision=False → images degrade to a text placeholder, message text kept."""
+    out = EmrgServer._build_user_content(
+        "hello",
+        [{"path": "/tmp/x.png", "label": "[📷 shot]", "position": 0}],
+        vision=False,
+    )
+    assert isinstance(out, str)
+    assert "[📷 shot]" in out
+    assert "hello" in out
+
+
 # ── Daemon observability (rant 2026-08-25T09:25:32 — silent death) ──
 
 
