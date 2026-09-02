@@ -106,6 +106,41 @@ describe("createDaemonBridge", () => {
     expect(entriesText(transcript, "s2")).toContain("s:queued:3");
   });
 
+  it("turn_start → busy + turnStartBySid（epoch ms 换算，含后台/其他客户端 turn）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "turn_start", data: { started_at: 1756785600.5 }, sid: "s1" });
+    const st = bridge.store.get();
+    expect(st.busyBySid["s1"]).toBe(true);
+    expect(st.turnStartBySid["s1"]).toBe(1756785600500);
+  });
+
+  it("turn_end → 清 busy + turnStartBySid（幂等，与 done 重复不炸）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "turn_start", data: { started_at: 1756785600.5 }, sid: "s1" });
+    emit({ type: "turn_end", data: {}, sid: "s1" });
+    let st = bridge.store.get();
+    expect(st.busyBySid["s1"]).toBe(false);
+    expect(st.turnStartBySid["s1"]).toBeUndefined();
+    // 幂等：done 后再 turn_end 不抛错、状态保持
+    emit({ type: "turn_end", data: {}, sid: "s1" });
+    st = bridge.store.get();
+    expect(st.busyBySid["s1"]).toBe(false);
+    expect(st.turnStartBySid["s1"]).toBeUndefined();
+  });
+
+  it("done / cancelled → 顺带清 turn 计时（幂等兜底）", () => {
+    const { emit, bridge } = setup();
+    emit({ type: "turn_start", data: { started_at: 1756785600 }, sid: "s1" });
+    emit({ type: "done", data: { request_id: "r1" }, sid: "s1" });
+    let st = bridge.store.get();
+    expect(st.turnStartBySid["s1"]).toBeUndefined();
+    emit({ type: "turn_start", data: { started_at: 1756785601 }, sid: "s1" });
+    emit({ type: "cancelled", data: {}, sid: "s1" });
+    st = bridge.store.get();
+    expect(st.busyBySid["s1"]).toBe(false);
+    expect(st.turnStartBySid["s1"]).toBeUndefined();
+  });
+
   it("error → 错误系统消息 + 释放锁", () => {
     const { emit, bridge, transcript } = setup();
     bridge.handleFrame({ type: "message_delta", data: { chunks: [{ request_id: "r1", content: "x" }] }, sid: "s1" });

@@ -28,6 +28,7 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     sessions: [],
     openSessions: [],
     busyBySid: {},
+    turnStartBySid: {},
     ownStreamRidBySid: {},
     disconnectedBySid: {},
     upgradeBanner: null,

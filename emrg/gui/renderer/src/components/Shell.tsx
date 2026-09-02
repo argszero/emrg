@@ -127,6 +127,16 @@ export function Shell() {
     busyStartRef.current = null;
     setElapsed(0);
   }, [activeBusy]);
+
+  // Rant 2026-09-02T10:36:26：侧边栏每个运行会话的 [m:ss] 计时——任意会话 busy 时
+  // 共享一个 1s tick 触发重渲染（Sidebar 读 Date.now() 计算 elapsed；多会话复用同一定时器）。
+  const [, setSidebarTick] = useState(0);
+  const hasRunningSessions = Object.keys(appState.turnStartBySid).length > 0;
+  useEffect(() => {
+    if (!hasRunningSessions) return;
+    const iv = setInterval(() => setSidebarTick((t) => t + 1), 1000);
+    return () => clearInterval(iv);
+  }, [hasRunningSessions]);
   const activeSessionEntry = appState.openSessions.find((o) => o.sid === activeSid);
   const activeKnown = appState.sessions.find((s) => s.session_id === activeSid);
   const activeTitle = activeSessionEntry?.title || activeKnown?.title || t("app.unnamed");
@@ -648,6 +658,7 @@ export function Shell() {
             knownSessions={appState.sessions}
             activeSid={activeSid}
             activeView={activeView}
+            turnStartBySid={appState.turnStartBySid}
             onSelect={selectSession}
             onSwitchView={switchView}
             onNewChat={() => dialogHost.current?.openNewSession()}

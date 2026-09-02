@@ -2313,12 +2313,29 @@ class EmrgServer:
         # Rant 2026-08-25T17:38:56 根因 3：广播按任务 cwd 过滤——记录本任务真实 cwd，
         # 幽灵连接（错误 cwd 订阅）在任务期间收不到该会话实时流。
         self._session_task_cwds[session_id] = str(session.cwd)
+        # Rant 2026-09-02T10:36:26：权威 turn 生命周期广播——started_at 为任务
+        # 实际开始执行时刻（队列等待之后）。TUI/GUI 据此对齐各自计时（排队请求
+        # 不再从发送时刻起算）；覆盖所有 turn 来源：TUI/GUI 请求、演化任务
+        # （emrg-evolution-*）、upgrade 会话（都经此 locked 包装执行）。
+        await self._broadcast(session_id, {
+            "type": "turn_start",
+            "session_id": session_id,
+            "started_at": time.time(),
+        })
         normal_end = False
         try:
             await self._run_tool_loop(req, ws, session, cancel_event, allow_tools)
             normal_end = True
         finally:
             self._session_busy[session_id] = False
+            # Rant 2026-09-02T10:36:26：turn 生命周期结束——客户端清除该会话
+            # 运行计时（与 done/cancelled 帧幂等，仅作权威清理信号）。
+            # 必须在 _session_task_cwds 清空之前广播：turn 帧属于任务流，
+            # 需按任务 cwd 过滤（错误 cwd 的幽灵连接收不到，rant 2026-08-25T17:38:56）。
+            await self._broadcast(session_id, {
+                "type": "turn_end",
+                "session_id": session_id,
+            })
             self._session_task_cwds.pop(session_id, None)
             # P1 (rant 21:55:37): messages still queued when the loop ends are
             # not lost. We do NOT start a follow-up task here (_tool_task /

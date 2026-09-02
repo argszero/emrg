@@ -1,5 +1,6 @@
 import { useI18n } from "../lib/i18n";
 import {
+  formatElapsed,
   isActive,
   resolveEntryTitle,
   sessionLabel,
@@ -41,6 +42,8 @@ export interface SidebarProps {
   onContextMenu?: (entry: OpenSessionEntry, event: React.MouseEvent) => void;
   /** 可注入的标题格式化函数（测试用；默认 sessionLabel） */
   labelFn?: (project: string, title: string, sid: string) => string;
+  /** 每会话 turn 开始时刻（epoch ms；rant 2026-09-02T10:36:26 — busy 会话显示 [m:ss] 计时） */
+  turnStartBySid?: Record<string, number>;
   /** 新对话按钮 → NewSessionDialog（Batch 5 slice 4） */
   onNewChat?: () => void;
   /** 打开会话按钮 → OpenSessionDialog（Batch 5 slice 4） */
@@ -58,6 +61,7 @@ export function Sidebar({
   onSelect,
   onContextMenu,
   labelFn = sessionLabel,
+  turnStartBySid = {},
   onNewChat,
   onOpenChat,
   activeView = "sessions",
@@ -65,6 +69,7 @@ export function Sidebar({
 }: SidebarProps) {
   const { t } = useI18n();
   const entries = sortOpenSessions(openSessions);
+  const nowMs = Date.now();
 
   // vanilla #side-nav：五个导航按钮（sessions/projects/tasks/rants/settings）
   const navRail = (
@@ -123,6 +128,9 @@ export function Sidebar({
           const title = resolveEntryTitle(entry, knownSessions);
           const label = labelFn(entry.projectName || "", title, entry.sid);
           const active = isActive(entry.sid, activeSid);
+          // Rant 2026-09-02T10:36:26：daemon turn_start 权威计时——正在运行的会话
+          // 在标题后显示 [m:ss]（与 TUI 状态栏同格式同基准）。
+          const timer = formatElapsed(turnStartBySid[entry.sid], nowMs);
           return (
             <div
               key={entry.sid}
@@ -135,7 +143,10 @@ export function Sidebar({
                 onContextMenu && onContextMenu(entry, e);
               }}
             >
-              <span className="conv-title">{label}</span>
+              <span className="conv-title">
+                {label}
+                {timer ? <span className="open-session-timer" data-testid="open-session-timer">{timer}</span> : null}
+              </span>
             </div>
           );
         })}

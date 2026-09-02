@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatElapsed,
   isActive,
   resolveEntryTitle,
   sessionLabel,
@@ -89,5 +90,29 @@ describe("isActive", () => {
     expect(isActive(null, "s1")).toBe(false);
     expect(isActive("s1", null)).toBe(false);
     expect(isActive(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("formatElapsed（rant 2026-09-02T10:36:26：与 TUI 状态栏同格式 [m:ss]）", () => {
+  const T0 = 1_756_800_000_000; // 任意 epoch ms 基准
+
+  it("无 startedAt（非运行）→ 空串", () => {
+    expect(formatElapsed(undefined, T0)).toBe("");
+    expect(formatElapsed(0, T0)).toBe("");
+  });
+
+  it("<60s → [0:ss]（补零）", () => {
+    expect(formatElapsed(T0, T0 + 5000)).toBe("[0:05]");
+    expect(formatElapsed(T0, T0 + 59_000)).toBe("[0:59]");
+  });
+
+  it("≥60s → [m:ss]（m 不补零，与 TUI divmod 一致）", () => {
+    expect(formatElapsed(T0, T0 + 60_000)).toBe("[1:00]");
+    expect(formatElapsed(T0, T0 + 97_800)).toBe("[1:37]"); // 宿主实测样例 97.8s
+    expect(formatElapsed(T0, T0 + 3_600_000)).toBe("[60:00]");
+  });
+
+  it("负 elapsed（时钟偏差）钳制为 0", () => {
+    expect(formatElapsed(T0 + 5000, T0)).toBe("[0:00]");
   });
 });
