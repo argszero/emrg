@@ -60,7 +60,10 @@
   border-bottom-right-radius: 6px;
   padding: 10px 16px;
   max-width: 72%;
-  white-space: pre-wrap;
+  /* rant 14:02:06：marked.parse 输出以裸 \n 结尾 → <p> 后文本节点在 pre-wrap 下渲染为
+     可见空行（气泡底部多一空行）。用户消息已走 markdown 段落化（Stage 1 rant
+     2026-08-28T14:07:29），换行由 block 级 <p> 结构承担，pre-wrap 为 vanilla 纯文本
+     时代遗留，移除后实时+历史消息一并修复。 */
   word-break: break-word;
   animation: msg-in var(--dur-med) var(--ease);
 }
