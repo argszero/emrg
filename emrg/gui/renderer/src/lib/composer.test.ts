@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 import {
   CMD_MENU_CLOSED,
   clearQueued,
+  imagePlaceholder,
   menuForPrefix,
   menuNavigate,
+  normalizePlaceholders,
   partitionRequeue,
   queueSend,
+  resolveSendImages,
   steerCommitted,
+  toSafeImageLabel,
   trackAfterResend,
 } from "./composer";
 
@@ -174,5 +178,69 @@ describe("clearQueued", () => {
 
   it("returns false when nothing queued for the session", () => {
     expect(clearQueued(new Map(), "s1")).toBe(false);
+  });
+});
+
+/* ── 图片附加纯函数（rant 2026-09-02T15:23:53：GUI 粘贴/拖拽图片）── */
+
+describe("imagePlaceholder / toSafeImageLabel", () => {
+  it("builds the TUI-identical literal placeholder", () => {
+    expect(imagePlaceholder("shot")).toBe("[📷 shot]");
+    expect(imagePlaceholder("Image 1")).toBe("[📷 Image 1]");
+  });
+
+  it("sanitizes labels like TUI safe_label (alnum/._- else _, cap 40, strip trailing ._)", () => {
+    expect(toSafeImageLabel("my photo")).toBe("my_photo");
+    expect(toSafeImageLabel("a.b")).toBe("a.b");
+    expect(toSafeImageLabel("x__.")).toBe("x"); // rstrip 语义同 TUI：清整段尾部 ._
+    expect(toSafeImageLabel("!!!")).toBe("image");
+    expect(toSafeImageLabel("")).toBe("image");
+    expect(toSafeImageLabel("🙂")).toBe("image");
+    expect(toSafeImageLabel("a".repeat(60)).length).toBe(40);
+  });
+});
+
+describe("normalizePlaceholders", () => {
+  it("reverts tiptap-markdown backslash-escaped placeholders to literal text", () => {
+    expect(normalizePlaceholders("\\[📷 shot\\] hello", ["[📷 shot]"])).toBe("[📷 shot] hello");
+  });
+
+  it("leaves already-literal placeholders untouched", () => {
+    expect(normalizePlaceholders("[📷 shot] hello", ["[📷 shot]"])).toBe("[📷 shot] hello");
+  });
+
+  it("does not alter unrelated escaped brackets (only known labels)", () => {
+    expect(normalizePlaceholders("\\[keep\\] [📷 a]", ["[📷 a]"])).toBe("\\[keep\\] [📷 a]");
+  });
+
+  it("handles multiple placeholders", () => {
+    const md = "\\[📷 a\\] mid \\[📷 b\\] end";
+    expect(normalizePlaceholders(md, ["[📷 a]", "[📷 b]"])).toBe("[📷 a] mid [📷 b] end");
+  });
+});
+
+describe("resolveSendImages", () => {
+  const img = (label: string, path = `/p/${label}.png`, mime = "image/png") => ({ path, label, mime });
+
+  it("keeps images whose placeholder is still in the text, computing positions (TUI semantics)", () => {
+    const pending = [img("[📷 a]"), img("[📷 b]")];
+    const out = resolveSendImages(pending, "lead [📷 b] tail [📷 a] end");
+    // both kept; positions = indexOf literal label; sorted ascending
+    expect(out.map((i) => i.label)).toEqual(["[📷 b]", "[📷 a]"]);
+    expect(out[0].position).toBe("lead ".length);
+    expect(out[1].position).toBe("lead [📷 b] tail ".length);
+  });
+
+  it("drops images whose placeholder was deleted from the text", () => {
+    const pending = [img("[📷 kept]"), img("[📷 gone]")];
+    const out = resolveSendImages(pending, "only [📷 kept] here");
+    expect(out).toHaveLength(1);
+    expect(out[0].label).toBe("[📷 kept]");
+    expect(out[0].position).toBe(5);
+  });
+
+  it("returns empty array when nothing remains", () => {
+    expect(resolveSendImages([img("[📷 a]")], "no placeholders here")).toEqual([]);
+    expect(resolveSendImages([], "text")).toEqual([]);
   });
 });

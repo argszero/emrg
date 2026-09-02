@@ -11,6 +11,7 @@ const os = require("os");
 const path = require("path");
 const { pathToFileURL } = require("url");
 const { spawn } = require("child_process");
+const crypto = require("crypto");
 const { parse: parseToml, stringify: stringifyToml } = require("smol-toml");
 const { generateSessionId, SESSION_ID_RE } = require("./daemon_client");
 const { ConnManager } = require("./conn-manager");
@@ -279,6 +280,25 @@ vision = false
     return typeof t === "string" && t.length > 0 && t.length <= 20000;
   }
 
+  // rant 2026-09-02T15:23:53：images 透传护栏（{path,label?,position?,mime?}[]）
+  function validateImages(imgs) {
+    if (imgs === null || imgs === undefined) return true;
+    if (!Array.isArray(imgs) || imgs.length > 12) return false;
+    for (const it of imgs) {
+      if (!it || typeof it !== "object") return false;
+      if (typeof it.path !== "string" || !it.path || it.path.length > 1024) return false;
+      if (it.label !== undefined && (typeof it.label !== "string" || it.label.length > 200)) return false;
+      if (
+        it.position !== undefined &&
+        (typeof it.position !== "number" || !Number.isInteger(it.position) || it.position < 0 || it.position > 20000)
+      ) {
+        return false;
+      }
+      if (it.mime !== undefined && (typeof it.mime !== "string" || !/^image\/[\w.+-]+$/.test(it.mime))) return false;
+    }
+    return true;
+  }
+
   function validateConfig(c) {
     // 设计 §7.1：直接接收所需字段 + 基本类型检查（防写坏 config.toml 的健壮性，非安全设计）
     const out = {};
@@ -336,9 +356,10 @@ vision = false
       };
     });
 
-    ipcMain.handle("emrg:sendMessage", async (_e, { sessionId, text, requestId, sandbox }) => {
+    ipcMain.handle("emrg:sendMessage", async (_e, { sessionId, text, requestId, sandbox, images }) => {
       if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
       if (!validateText(text)) throw new Error("invalid text");
+      if (!validateImages(images)) throw new Error("invalid images"); // rant 2026-09-02T15:23:53
       if (requestId !== undefined && (typeof requestId !== "string" || requestId.length < 8 || requestId.length > 64)) {
         throw new Error("invalid request_id"); // G143：renderer 预生成 id 的格式护栏
       }
@@ -355,12 +376,44 @@ vision = false
         // G143：renderer 预生成 requestId（send 前标记自有流，消除 IPC 往返竞态窗口）
         // Rant 2026-08-20T18:18：sandbox 档位（read-only / workspace-write / danger-full-access）
         // G65：conn.sendTask 内部标记 ownStream（每连接独立锁）
-        rid = conn.sendTask({ sessionId, cwd: sessionCwd, prompt: text, requestId, sandbox });
+        // rant 2026-09-02T15:23:53：images 透传（daemon_client.sendTask 早已支持）
+        rid = conn.sendTask({ sessionId, cwd: sessionCwd, prompt: text, requestId, sandbox, images: images ?? null });
       } catch (e) {
         conn._releaseOwnStream(); // sendTask 抛异常（ws.send 失败）→ 释放锁，防 G65 锁泄漏
         throw e;
       }
       return { ok: true, requestId: rid }; // G124：回传 requestId → renderer 识别自有流
+    });
+
+    // rant 2026-09-02T15:23:53：图片落盘——<projectRoot>/.emrg/sessions/<sid>/images/
+    // {safeLabel}_{blake2b4}.{ext}（TUI 同款命名约定：label 清洗 + 8-hex hash 前缀，
+    // 同图重复粘贴去重）。⚠️ 哈希算法与 TUI 不同：TUI 用 Python blake2b(digest_size=4)
+    // （Node crypto 不支持变长 blake2b），GUI 取 blake2b-512 前 8 hex —— 两端同字节
+    // 文件名 hash 不同（同一图在 TUI/GUI 各贴一次会各存一份，功能无碍，仅存储），
+    // GUI 自身去重自洽（同字节 → 同文件名 → 跳过写盘）。
+    ipcMain.handle("emrg:saveImage", async (_e, { sessionId, data, label, mime } = {}) => {
+      if (!validateSessionId(sessionId)) throw new Error("invalid session_id");
+      if (typeof data !== "string" || !data || data.length > 28_000_000) throw new Error("invalid image data"); // ~21MB base64
+      if (typeof label !== "string" || !label || label.length > 200) throw new Error("invalid label");
+      const mm = /^image\/([\w.+-]+)$/.exec(mime || "image/png");
+      if (!mm) throw new Error("invalid mime");
+      // 扩展名白名单（与 Composer SUPPORTED_IMAGE_MIME 一致）
+      const EXT_BY_SUB = { png: "png", jpeg: "jpg", gif: "gif", webp: "webp", bmp: "bmp", "svg+xml": "svg" };
+      const ext = EXT_BY_SUB[mm[1].toLowerCase()];
+      if (!ext) throw new Error("unsupported image type");
+      const buf = Buffer.from(data, "base64");
+      if (buf.length === 0) throw new Error("invalid image data");
+      const projectRoot = resolveSessionCwd(sessionId) || DEFAULT_CWD;
+      const imagesDir = path.join(projectRoot, ".emrg", "sessions", sessionId, "images");
+      fs.mkdirSync(imagesDir, { recursive: true });
+      // 文件名字面清洗镜像 TUI safe_label（. 保留以便 .png 类后缀友好，去尾部 ._）
+      const safeLabel = label.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 40).replace(/[._]+$/, "") || "image";
+      const h = crypto.createHash("blake2b512").update(buf).digest("hex").slice(0, 8);
+      const filename = `${safeLabel}_${h}.${ext}`;
+      const finalPath = path.join(imagesDir, filename);
+      if (!fs.existsSync(finalPath)) fs.writeFileSync(finalPath, buf); // 同名去重
+      logger.info(`[gui:saveImage] ${filename} (${buf.length} bytes)`);
+      return { path: finalPath, mime: `image/${mm[1].toLowerCase()}` };
     });
 
     ipcMain.handle("emrg:listSessions", async () => listSessions());

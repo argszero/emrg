@@ -2247,12 +2247,15 @@ class EmrgServer:
                 if chunk.strip():
                     content.append({"type": "text", "text": chunk})
                 last_pos = pos
-            # Encode image
+            # Encode image (rant 2026-09-02T15:23:53: GUI drag-in JPEG was
+            # previously hardcoded to image/png → wrong mime; mime metadata now
+            # drives the data URL, defaulting to png for TUI/history records)
             try:
+                mime = img.get("mime") or "image/png"
                 b64 = base64.b64encode(Path(img["path"]).read_bytes()).decode()
                 content.append({
                     "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64}"},
+                    "image_url": {"url": f"data:{mime};base64,{b64}"},
                 })
             except (OSError, FileNotFoundError) as e:
                 logger.warning("failed to read image %s: %s", img.get("path"), e)

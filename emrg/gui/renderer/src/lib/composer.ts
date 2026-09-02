@@ -54,6 +54,8 @@ export interface QueuedSend {
   requestId: string;
   text: string;
   sandbox?: string | null;
+  /** 图片附件（rant 2026-09-02T15:23:53：busy 重发须携带原图，否则丢图） */
+  images?: ImageAttach[] | null;
 }
 
 /** sendMessage busy 时入队（vanilla：queuedSends 不存在则建 [] 再 push） */
@@ -120,3 +122,65 @@ export function trackAfterResend(
 export function clearQueued(queuedSends: Map<string, QueuedSend[]>, sid: string): boolean {
   return queuedSends.delete(sid);
 }
+
+/* ── 图片附加（rant 2026-09-02T15:23:53：GUI 粘贴/拖拽图片，语义对齐 TUI）── */
+
+/**
+ * 输入图元数据（对齐 TUI _pending_images 语义）：
+ * - label = **完整占位符文本**（"[📷 …]"）——TUI 发送前以 `label in text` 判活、
+ *   daemon 非 vision 降级文案直接引用该字段。
+ * - position 在发送时计算（= 序列化 markdown 中占位符的字符偏移）。
+ */
+export interface ImageAttach {
+  path: string;
+  label: string;
+  position?: number;
+  mime?: string;
+}
+
+/** 构建占位符文本（双端一致的字面量：TUI 用 f"[📷 {label}]"） */
+export function imagePlaceholder(display: string): string {
+  return `[📷 ${display}]`;
+}
+
+/**
+ * 文件名/展示标签清洗（镜像 TUI safe_label 规则）：非 [a-zA-Z0-9._-] → "_"，
+ * 截 40 字符、去尾 ._、空则回落 "image"。
+ */
+export function toSafeImageLabel(raw: string): string {
+  const cleaned = raw
+    .split("")
+    .map((c) => (c.match(/[a-zA-Z0-9._-]/) ? c : "_"))
+    .join("")
+    .slice(0, 40)
+    .replace(/[._]+$/, "");
+  return cleaned || "image";
+}
+
+/**
+ * tiptap-markdown 序列化会把字面占位符转义为 `\[📷 …\]`（防被当作链接/图片语法），
+ * 发送前还原已知标签的字面量——保证 daemon 收到的文本与 TUI 完全一致（位置/判活
+ * 都以还原后的字面量占位符为基准）。
+ */
+export function normalizePlaceholders(md: string, labels: string[]): string {
+  let out = md;
+  for (const label of labels) {
+    const escaped = label.replace(/[\[\]]/g, (ch) => `\\${ch}`);
+    if (escaped !== label) out = out.split(escaped).join(label);
+  }
+  return out;
+}
+
+/**
+ * 发送前收敛 pending 图片：占位符仍在文本中的保留（删了占位符即丢弃，TUI 同语义），
+ * position = 字面占位符在文本中的字符偏移；返回按 position 升序的新数组。
+ */
+export function resolveSendImages(pending: ImageAttach[], text: string): ImageAttach[] {
+  const out: ImageAttach[] = [];
+  for (const img of pending) {
+    const pos = text.indexOf(img.label);
+    if (pos >= 0) out.push({ ...img, position: pos });
+  }
+  return out.sort((a, b) => (a.position ?? -1) - (b.position ?? -1));
+}
+

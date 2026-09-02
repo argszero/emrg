@@ -9,6 +9,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 const api = {
   init: () => ipcRenderer.invoke("emrg:init"),
   sendMessage: (payload) => ipcRenderer.invoke("emrg:sendMessage", payload),
+  // rant 2026-09-02T15:23:53：图片落盘（粘贴/拖拽 → base64 → main 写 <cwd>/.emrg/sessions/<sid>/images/）
+  saveImage: (payload) => ipcRenderer.invoke("emrg:saveImage", payload),
   listSessions: () => ipcRenderer.invoke("emrg:listSessions"),
   restartDaemon: () => ipcRenderer.invoke("emrg:restartDaemon"),
   relaunchGui: () => ipcRenderer.invoke("emrg:relaunchGui"),
