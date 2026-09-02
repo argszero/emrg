@@ -80,6 +80,8 @@ export interface ComposerProps {
   sendMessage?: (opts: SendOptions) => Promise<SendResult>;
   /** 注入图片落盘函数（默认 window.emrg.saveImage；测试传假实现） */
   saveImage?: (payload: SaveImagePayload) => Promise<SaveImageResult>;
+  /** 注入中断函数（默认 window.emrg.cancel；busy 时发送按钮切换为停止按钮，rant 2026-09-02T20:30:05） */
+  cancel?: () => Promise<unknown>;
   /** / 指令路由回调（Batch 5 接线：/clear /model /memory …） */
   onCommand?: (routing: CommandRouting) => void;
   /** 测试注入：挂载后回填 tiptap Editor 实例（命令驱动测试用） */
@@ -132,6 +134,7 @@ export function Composer({
   busy: busyProp,
   sendMessage: send,
   saveImage: saveImageProp,
+  cancel: cancelProp,
   onCommand,
   editorRef,
 }: ComposerProps) {
@@ -140,6 +143,9 @@ export function Composer({
   const [hasText, setHasText] = useState(false);
   const [internalBusy, setInternalBusy] = useState(false);
   const busy = busyProp ?? internalBusy;
+  // busy 的 ref 桥接（keydown 一次性闭包内读实时 busy——Esc 停止判断，rant 2026-09-02T20:30:05）
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
   // 沙箱档位（重构回归恢复，rant 2026-08-30T16:34:29）：默认 workspace-write（vanilla 同款），
   // 发送时随消息下发；切换仅允许三档（与 vanilla setSandbox 校验一致）。
   const [tier, setTier] = useState<SandboxTier>(sanitizeSandbox(sandbox) ?? "workspace-write");
@@ -184,6 +190,16 @@ export function Composer({
       return (window as unknown as { emrg?: { sendMessage: (o: SendOptions) => Promise<SendResult> } }).emrg?.sendMessage(opts) ??
         Promise.reject(new Error("window.emrg.sendMessage unavailable"));
     });
+
+  // 中断函数解析（rant 2026-09-02T20:30:05：busy 时发送按钮切换为停止按钮，
+  // 默认走 preload 桥 emrg:cancel；测试注入假实现）
+  const cancelFn =
+    cancelProp ??
+    (() =>
+      (window as unknown as { emrg?: { cancel?: () => Promise<unknown> } }).emrg?.cancel?.() ??
+      Promise.resolve());
+  const cancelRef = useRef(cancelFn);
+  cancelRef.current = cancelFn;
 
   // 图片落盘函数解析（rant 2026-09-02T15:23:53：默认走 preload 桥 emrg:saveImage）
   const saveFn =
@@ -234,6 +250,13 @@ export function Composer({
             setMenu(CMD_MENU_CLOSED);
             return true;
           }
+        }
+        // Escape 停止回复（rant 2026-09-02T20:30:05：busy 时副入口，对齐 TUI ESC 中断肌肉记忆）。
+        // 菜单开着时上方分支已拦截 Esc 只关菜单不误停；非 busy 时 Esc 放行（无副作用）。
+        if (event.key === "Escape" && busyRef.current) {
+          event.preventDefault();
+          stopRef.current();
+          return true;
         }
         // Enter（非 Shift）与 Ctrl+Enter 同发送（Ctrl+Enter 的 ctrlKey 不影响首分支）；
         // Shift+Enter 交给 tiptap hardBreak（换行）
@@ -471,6 +494,24 @@ export function Composer({
   const submitRef = useRef<() => Promise<void>>(submit);
   submitRef.current = submit;
 
+  /**
+   * 停止回复（rant 2026-09-02T20:30:05）：busy 时 stop-btn / Esc 触发。
+   * 本地乐观恢复（清 typing + 系统消息，对齐 TUI ESC 中断提示「⏸ Interrupted」）；
+   * daemon cancelled 广播随后幂等清外部 busy（daemonBridge releaseOwnStream，无需在此处理）。
+   */
+  function stop(): void {
+    setInternalBusy(false);
+    const st = storeRef.current;
+    const cur = sidRef.current;
+    if (cur) {
+      st.clearTyping(cur);
+      st.addSystemMessage(tRef.current("chat.interrupted"), cur);
+    }
+    void cancelRef.current();
+  }
+  const stopRef = useRef<() => void>(stop);
+  stopRef.current = stop;
+
   /** 选择补全项：填充输入框 + 关菜单（用户可继续回车执行，vanilla selectCmd） */
   function selectCmd(cmd: string): void {
     if (!editor) return;
@@ -645,17 +686,30 @@ export function Composer({
       </div>
       <div className="composer-card">
         <EditorContent editor={editor} className="composer-editor" />
-        <button
-          type="button"
-          className="send-btn"
-          disabled={!hasText}
-          title={t("composer.send")}
-          aria-label={t("composer.send")}
-          onClick={() => void submit()}
-          data-testid="composer-send"
-        >
-          ↑
-        </button>
+        {busy ? (
+          <button
+            type="button"
+            className="stop-btn"
+            title={t("composer.stop")}
+            aria-label={t("composer.stop")}
+            onClick={() => stop()}
+            data-testid="composer-stop"
+          >
+            ■
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="send-btn"
+            disabled={!hasText}
+            title={t("composer.send")}
+            aria-label={t("composer.send")}
+            onClick={() => void submit()}
+            data-testid="composer-send"
+          >
+            ↑
+          </button>
+        )}
       </div>
       <LinkDialog
         open={linkDialogOpen}
