@@ -979,6 +979,10 @@ def test_planted_fire_stale_alarm_fires(tmp_path, monkeypatch, caplog):
     old_ts = datetime.now().astimezone() - timedelta(days=8)
     marker.write_text(old_ts.isoformat() + "\n", encoding="utf-8")
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    # Issue #1114: never-completed-round path must not read the real home
+    # dir's round-complete file — point it at an empty tmp path.
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
     server = _make_server()
     assert server._check_planted_fire_stale() is True
     assert "planted-fire-stale" in caplog.text
@@ -991,6 +995,8 @@ def test_planted_fire_fresh_marker_no_alarm(tmp_path, monkeypatch, caplog):
     marker.write_text(datetime.now().astimezone().isoformat() + "\n",
                       encoding="utf-8")
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
     server = _make_server()
     assert server._check_planted_fire_stale() is False
     assert "planted-fire-stale" not in caplog.text
@@ -1002,6 +1008,8 @@ def test_planted_fire_no_marker_no_alarm(tmp_path, monkeypatch, caplog):
     its age exceeds the threshold. Logs at debug, returns False."""
     marker = tmp_path / "planted-fire-heartbeat"
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
     server = _make_server()
     assert server._check_planted_fire_stale() is False
     assert "planted-fire-stale" not in caplog.text
@@ -1013,9 +1021,79 @@ def test_planted_fire_unparsable_marker_no_alarm(tmp_path, monkeypatch, caplog):
     marker = tmp_path / "planted-fire-heartbeat"
     marker.write_text("not-a-timestamp\n", encoding="utf-8")
     monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
     server = _make_server()
     assert server._check_planted_fire_stale() is False
     assert "planted-fire-stale" not in caplog.text
+
+
+def test_planted_fire_round_complete_touch_single_line(tmp_path, monkeypatch):
+    """Issue #1114: the completed-round helper writes a single overwritten
+    ISO timestamp line to its own file (sibling of the per-exchange marker),
+    never appending."""
+    complete = tmp_path / "planted-fire-round-complete"
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", complete)
+    server = _make_server()
+    server._touch_planted_fire_round_complete()
+    assert complete.exists()
+    t1 = datetime.fromisoformat(complete.read_text(encoding="utf-8").strip())
+    server._touch_planted_fire_round_complete()
+    t2 = datetime.fromisoformat(complete.read_text(encoding="utf-8").strip())
+    assert len(complete.read_text(encoding="utf-8").strip().splitlines()) == 1
+    assert t2 >= t1  # advanced (same-second tolerance)
+
+
+def test_planted_fire_round_complete_stale_alarms_with_fresh_marker(
+        tmp_path, monkeypatch, caplog):
+    """Issue #1114 (crash/stuck class): the per-exchange marker is FRESH
+    (LLM exchanges still happening) but no round has COMPLETED in > N days —
+    the crash-after-anchor-refresh and stuck-tool-execution shapes Vinh
+    (Dev.to 3eac0) called out. The stale alarm must fire on the
+    completed-round file even though the old marker-only check would stay
+    silent."""
+    marker = tmp_path / "planted-fire-heartbeat"
+    marker.write_text(datetime.now().astimezone().isoformat() + "\n",
+                      encoding="utf-8")
+    complete = tmp_path / "planted-fire-round-complete"
+    old_ts = datetime.now().astimezone() - timedelta(days=8)
+    complete.write_text(old_ts.isoformat() + "\n", encoding="utf-8")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", complete)
+    server = _make_server()
+    assert server._check_planted_fire_stale() is True
+    assert "planted-fire-stale" in caplog.text
+
+
+def test_planted_fire_fresh_round_complete_no_alarm(tmp_path, monkeypatch, caplog):
+    """Issue #1114 positive: a round completed within N days proves the full
+    user path was alive recently — no alarm even if the per-exchange marker
+    is absent/old (a completion implies its final exchange happened)."""
+    complete = tmp_path / "planted-fire-round-complete"
+    complete.write_text(datetime.now().astimezone().isoformat() + "\n",
+                        encoding="utf-8")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH",
+                        tmp_path / "planted-fire-heartbeat")  # never created
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", complete)
+    server = _make_server()
+    assert server._check_planted_fire_stale() is False
+    assert "planted-fire-stale" not in caplog.text
+
+
+def test_planted_fire_both_stale_alarms_once(tmp_path, monkeypatch, caplog):
+    """Issue #1114: when BOTH files are stale (daemon idle past the accepted
+    #1086 boundary), the alarm fires once via the completed-round file — one
+    warning, not two."""
+    old_ts = datetime.now().astimezone() - timedelta(days=9)
+    marker = tmp_path / "planted-fire-heartbeat"
+    marker.write_text(old_ts.isoformat() + "\n", encoding="utf-8")
+    complete = tmp_path / "planted-fire-round-complete"
+    complete.write_text(old_ts.isoformat() + "\n", encoding="utf-8")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", complete)
+    server = _make_server()
+    assert server._check_planted_fire_stale() is True
+    assert caplog.text.count("planted-fire-stale") == 1
 
 
 def test_planted_fire_drill_rides_real_path_fires(tmp_path, monkeypatch, caplog):

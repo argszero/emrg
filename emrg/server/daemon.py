@@ -426,9 +426,11 @@ class EmrgServer:
         # provides the session-runner callback.
         self._upgrade_tick_task = asyncio.create_task(self._upgrade_tick_loop())
 
-        # Issue #1086: planted-fire staleness alarm (low-frequency, 6h).
-        # Watches the per-round marker; logs planted-fire-stale when the
-        # last_planted heartbeat is older than _PLANTED_FIRE_STALE_DAYS.
+        # Issue #1086/#1114: planted-fire staleness alarm (low-frequency, 6h).
+        # Watches the per-exchange marker AND the completed-round file; logs
+        # planted-fire-stale when no round completed within
+        # _PLANTED_FIRE_STALE_DAYS (or, pre-first-completion, when the
+        # per-exchange heartbeat is that old).
         self._planted_fire_alarm_task = asyncio.create_task(
             self._planted_fire_alarm_loop())
 
@@ -2700,6 +2702,13 @@ class EmrgServer:
 
                 # Fire-and-forget: reflect on whether to save memories
                 self._maybe_reflect_memory(session, req.prompt, full_content)
+                # Issue #1114: a round GENUINELY completed here (final text
+                # answer, no more tool calls) — stamp the completed-round file
+                # so the staleness alarm can answer "how long since a
+                # completed round". The per-exchange marker was already
+                # refreshed by _refresh_usage_anchor, but that only proves
+                # this LLM exchange happened, not that the round finished.
+                self._touch_planted_fire_round_complete()
                 return
 
             # Case 2: LLM wants to call tools
@@ -2897,6 +2906,11 @@ class EmrgServer:
 
             # Fire-and-forget: reflect on whether to save memories
             self._maybe_reflect_memory(session, req.prompt, full_content)
+            # Issue #1114: max-tokens/other-stop with the final answer
+            # persisted + broadcast = a genuinely completed round — stamp the
+            # completed-round file (see Case 1; NOT done on the cancellation /
+            # stream-error / max-rounds exits above).
+            self._touch_planted_fire_round_complete()
             return
 
     def _log_llm_exchange(
@@ -3134,11 +3148,14 @@ class EmrgServer:
 
     def _touch_planted_fire_marker(self) -> None:
         """Issue #1086: persist the last-heartbeat timestamp to the planted-
-        fire marker file (single overwritten line, not append-only). Called at
-        the top of every round's usage-anchor refresh so the marker tracks
-        round-loop liveness, not just detector runs. Best-effort: an OSError
-        is logged at debug — a stats write must never take the daemon down
-        (same contract as _append_usage_anchor_event)."""
+        fire marker file (single overwritten line, not append-only). Its event
+        class is per-LLM-exchange (issue #1114): called from the usage-anchor
+        refresh as soon as a provider's usage arrives, BEFORE that exchange's
+        tool executions and finalization — so the marker proves "LLM exchanges
+        are happening", not "rounds complete". Completed-round liveness is
+        tracked separately by _touch_planted_fire_round_complete (#1114).
+        Best-effort: an OSError is logged at debug — a stats write must never
+        take the daemon down (same contract as _append_usage_anchor_event)."""
         try:
             marker = _PLANTED_FIRE_MARKER_PATH
             marker.parent.mkdir(parents=True, exist_ok=True)
@@ -3149,38 +3166,98 @@ class EmrgServer:
         except OSError as exc:
             logger.debug("planted-fire marker write failed: %s", exc)
 
-    def _check_planted_fire_stale(self) -> bool:
-        """Issue #1086: stateless age check on the planted-fire marker. Reads
-        the last-heartbeat timestamp; when ``now - last_heartbeat`` exceeds
-        ``_PLANTED_FIRE_STALE_DAYS`` days, log the greppable
-        ``planted-fire-stale`` warning and return True. A missing/unparsable
-        marker is NOT a stale alarm by itself (a freshly installed daemon has
-        never run a round) — it logs at debug and returns False; the alarm
-        only fires once a marker exists and its age exceeds the threshold.
-        This implements the accepted idle boundary (pm25coder option a):
-        an idle daemon produces no markers, so a marker that IS older than N
-        days means either the detector died or the daemon was idle that long —
-        both are the same actionable signal (surface-the-silence, #585/#1073).
-        """
+    def _touch_planted_fire_round_complete(self) -> None:
+        """Issue #1114 (Vinh, Dev.to 3eac0): persist the last COMPLETED-round
+        timestamp to a separate planted-fire file (single overwritten line,
+        sibling of the per-exchange marker). Event class is "a user round
+        finished": written ONLY at tool-loop finalization — a genuine final
+        text answer (Case 1) or the max-tokens/other-stop terminal branch
+        (Case 3) — never on per-exchange anchor refreshes, cancellation,
+        stream errors or the max-rounds error exit. A crash loop that
+        refreshes the per-exchange marker and dies before finalization, or a
+        round stuck in tool execution, therefore ages THIS file while the
+        marker stays fresh — the stale alarm catches it instead of racing the
+        marker (issue #1114). The daily drill (#1087) rides
+        _refresh_usage_anchor only and does NOT finalize a tool loop, so it
+        deliberately never stamps this file. Best-effort: OSError logged at
+        debug (same contract as _touch_planted_fire_marker)."""
         try:
-            if not _PLANTED_FIRE_MARKER_PATH.exists():
-                logger.debug(
-                    "planted-fire: no marker yet (fresh daemon / no rounds) — "
-                    "staleness check skipped")
-                return False
-            raw = _PLANTED_FIRE_MARKER_PATH.read_text(encoding="utf-8").strip()
-            last = datetime.fromisoformat(raw)
-        except (OSError, ValueError) as exc:
-            logger.debug("planted-fire marker read failed: %s", exc)
+            complete = _PLANTED_FIRE_ROUND_COMPLETE_PATH
+            complete.parent.mkdir(parents=True, exist_ok=True)
+            complete.write_text(
+                datetime.now().astimezone().isoformat() + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.debug("planted-fire round-complete write failed: %s", exc)
+
+    def _check_planted_fire_stale(self) -> bool:
+        """Issue #1086/#1114: stateless age check on the planted-fire files.
+        Reads the completed-round timestamp (when one exists — the daemon has
+        finished at least one round); when ``now - last_completed`` exceeds
+        ``_PLANTED_FIRE_STALE_DAYS`` days, log the greppable
+        ``planted-fire-stale`` warning and return True. This answers the
+        #1114 question "how long since a COMPLETED round" — a crash loop that
+        refreshes the per-exchange marker and dies before finalization, or a
+        round stuck in tool execution, ages this file immediately while the
+        marker stays fresh. An idle daemon also ages it (the accepted #1086
+        idle boundary: no completed rounds for N days is the same actionable
+        surface-the-silence signal, #585/#1073; the daily drill keeps proving
+        the detector path via its own PASS/FAIL lines but is not a round).
+
+        Fallback: when NO round has ever completed (fresh daemon mid-first-
+        round), fall back to the per-exchange marker exactly as #1086 defined
+        — missing/unparsable marker is NOT a stale alarm by itself (logs at
+        debug, returns False); the alarm only fires once a file exists and
+        its age exceeds the threshold. The in-process reader cannot fire
+        while the process is down (crash-loop class needs a supervisor-side
+        reader — documented limitation, issue #1114).
+        """
+        def _read_age(path) -> float | None:
+            try:
+                raw = path.read_text(encoding="utf-8").strip()
+                return (datetime.now().astimezone()
+                        - datetime.fromisoformat(raw)).total_seconds() / 86400.0
+            except (OSError, ValueError) as exc:
+                logger.debug("planted-fire read failed (%s): %s", path.name, exc)
+                return None
+
+        if (not _PLANTED_FIRE_MARKER_PATH.exists()
+                and not _PLANTED_FIRE_ROUND_COMPLETE_PATH.exists()):
+            logger.debug(
+                "planted-fire: no marker yet (fresh daemon / no rounds) — "
+                "staleness check skipped")
             return False
-        age_days = (datetime.now().astimezone() - last).total_seconds() / 86400.0
-        if age_days > _PLANTED_FIRE_STALE_DAYS:
+
+        complete_age = _read_age(_PLANTED_FIRE_ROUND_COMPLETE_PATH)
+        if complete_age is not None:
+            if complete_age > _PLANTED_FIRE_STALE_DAYS:
+                logger.warning(
+                    "planted-fire-stale: last completed round %.1f days ago "
+                    "(> %d days) — no user round has finished since then "
+                    "(idle daemon, or rounds starting but never finalizing: "
+                    "crash after the per-exchange refresh / stuck tool "
+                    "execution); detector liveness cannot be proven "
+                    "(issues #1086/#1114)",
+                    complete_age, _PLANTED_FIRE_STALE_DAYS,
+                )
+                return True
+            # A round completed within N days proves the full user path was
+            # alive recently — no alarm regardless of marker age.
+            return False
+
+        # Never completed a round yet → #1086 per-exchange heartbeat semantics.
+        marker_age = _read_age(_PLANTED_FIRE_MARKER_PATH)
+        if marker_age is None:
+            logger.debug("planted-fire marker read failed (fresh daemon?)")
+            return False
+        if marker_age > _PLANTED_FIRE_STALE_DAYS:
             logger.warning(
                 "planted-fire-stale: last_planted heartbeat %.1f days ago "
                 "(> %d days) — the anchor-bias-heartbeat planted fire has "
                 "stopped firing or the daemon has been idle; detector "
                 "liveness cannot be proven (issue #1086)",
-                age_days, _PLANTED_FIRE_STALE_DAYS,
+                marker_age, _PLANTED_FIRE_STALE_DAYS,
             )
             return True
         return False
@@ -3317,6 +3394,13 @@ class EmrgServer:
         low-frequency staleness alarm has a persisted last_heartbeat to read.
         Written unconditionally at the top — a round that skips the detector
         still proves the round-loop itself is alive.
+
+        Issue #1114 (Vinh, Dev.to 3eac0): this marker's event class is
+        per-LLM-exchange (it fires as soon as usage arrives, before the
+        exchange's tool executions and finalization) — it does NOT record
+        "a round completed". The completed-round timestamp is therefore a
+        separate file written ONLY at tool-loop finalization (Cases 1/3 in
+        _run_tool_loop), never here.
 
         Issue #1090 (pm25coder, Dev.to 3dom2 — izgorodin): the local estimate
         must include the request-level ``tools`` schema, or the anchor base
@@ -4632,6 +4716,17 @@ _USAGE_ANCHOR_STATS_PATH = Path.home() / ".emrg" / "logs" / "usage-anchor.jsonl"
 # check reads one line. Written by _refresh_usage_anchor on every round;
 # read by _planted_fire_alarm_loop at a low-frequency cadence.
 _PLANTED_FIRE_MARKER_PATH = Path.home() / ".emrg" / "logs" / "planted-fire-heartbeat"
+
+# Issue #1114 (Vinh, Dev.to 3eac0): the marker above records "an LLM exchange
+# happened" (event class = per-exchange), so a crash loop that refreshes it
+# and dies before finalization never ages it — a race, not a design. Second
+# file with event class = "a user round COMPLETED": written only at tool-loop
+# finalization (Cases 1/3 in _run_tool_loop), read by _check_planted_fire_stale
+# for the "how long since a completed round" question. Same single-line
+# overwrite format. Never written by the daily drill (#1087) — the drill
+# rides _refresh_usage_anchor only and does not finalize a tool loop.
+_PLANTED_FIRE_ROUND_COMPLETE_PATH = (
+    Path.home() / ".emrg" / "logs" / "planted-fire-round-complete")
 
 # Issue #1086: staleness threshold (days). ``now - last_heartbeat > N`` →
 # log the ``planted-fire-stale`` warning. Kept next to _SILENT_DRIFT_THRESHOLD
