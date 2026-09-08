@@ -746,6 +746,121 @@ class TestWSProtocol:
                     await cleanup()
         asyncio.run(_test())
 
+    def test_round_complete_marker_written_on_normal_completion(
+            self, tmp_path, monkeypatch):
+        """Issue #1114: a genuinely completed round (final text answer after
+        a tool round) must stamp the completed-round file — the per-exchange
+        marker alone only proves LLM exchanges happened, not that the round
+        finished. Mirrors test_streaming_task_with_tool_calls."""
+        import datetime
+        import emrg.server.daemon as daemon_mod
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                marker = Path(tmp_path) / "planted-fire-heartbeat"
+                complete = Path(tmp_path) / "planted-fire-round-complete"
+                monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+                monkeypatch.setattr(
+                    daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", complete)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        task = {
+                            "type": "task",
+                            "id": "t-pf-complete",
+                            "session_id": "s_pf_complete",
+                            "cwd": str(cwd),
+                            "prompt": "你好",
+                            "stream": True,
+                            "timestamp": "2026-09-08T00:00:00",
+                        }
+                        await ws.send(json.dumps(task, ensure_ascii=False))
+                        got_done = False
+                        while True:
+                            frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                            resp = json.loads(frame)
+                            if resp.get("done"):
+                                got_done = True
+                                break
+                        assert got_done
+                        # The multi-exchange tool round completed → both the
+                        # per-exchange marker AND the completed-round file
+                        # must exist with one parseable ISO timestamp.
+                        assert marker.exists()
+                        assert complete.exists()
+                        raw = complete.read_text(encoding="utf-8").strip()
+                        datetime.datetime.fromisoformat(raw)
+                        assert len(raw.splitlines()) == 1
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_round_complete_marker_not_written_on_cancel(
+            self, tmp_path, monkeypatch):
+        """Issue #1114 negative: a cancelled task is NOT a completed round —
+        the completed-round file must stay absent (the per-exchange marker
+        may have been touched, but finalization never ran). The stream is
+        slowed so the cancel lands mid-round deterministically — the default
+        fake stream can finish the whole round before a 0.3s cancel arrives,
+        which would make this test race instead of assert."""
+        import emrg.server.daemon as daemon_mod
+
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                marker = Path(tmp_path) / "planted-fire-heartbeat"
+                complete = Path(tmp_path) / "planted-fire-round-complete"
+                monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH", marker)
+                monkeypatch.setattr(
+                    daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH", complete)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    # Slow stream: the round is still in-flight when the
+                    # cancel lands (mirrors test_turn_start_end_broadcast's
+                    # slow_chat_stream pattern).
+                    async def slow_chat_stream(messages, tools=None):
+                        yield {"content": "处理中", "tool_calls": None,
+                               "finish_reason": None, "usage": None}
+                        await asyncio.sleep(0.5)
+                        yield {"content": "完成", "tool_calls": None,
+                               "finish_reason": "stop",
+                               "usage": {"prompt_tokens": 10,
+                                         "completion_tokens": 5}}
+                    server.llm.chat_stream = slow_chat_stream
+                    ws = await connect_to_server()
+                    try:
+                        task = {
+                            "type": "task",
+                            "id": "t-pf-cancel",
+                            "session_id": "s_pf_cancel",
+                            "cwd": str(cwd),
+                            "prompt": "你好",
+                            "stream": True,
+                            "timestamp": "2026-09-08T00:00:00",
+                        }
+                        await ws.send(json.dumps(task, ensure_ascii=False))
+                        await asyncio.sleep(0.2)  # mid-stream
+                        await ws.send(json.dumps(
+                            {"type": "cancel", "session_id": "s_pf_cancel"}))
+                        interrupted = False
+                        while True:
+                            frame = await asyncio.wait_for(ws.recv(), timeout=10)
+                            resp = json.loads(frame)
+                            if resp.get("done") and resp.get("cancelled"):
+                                interrupted = True
+                                break
+                        assert interrupted
+                        assert not complete.exists()
+                    finally:
+                        await ws.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
     def test_large_message_roundtrip(self):
         """>1MB JSON payload round-trips without truncation (max_size=16MB)."""
         async def _test():
