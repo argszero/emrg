@@ -365,6 +365,51 @@ _NESTED_DEFINITION_FORM = re.compile(
     re.M,
 )
 
+# The **fifth** escape, and the one that shows the limit of line anchoring itself
+# (measured this cycle, cyc20260911-011300, with the real runner): a definition
+# written on the same line as the statement before it needs no exotic spelling at
+# all - it is an ordinary `it(` that simply cannot start the line.
+#
+#     describe("s", () => { it("inner", () => {}) });     -> vitest: 1 test
+#
+# Every pattern above is `^\s*`-anchored (deliberately: that is what keeps prose
+# about these spellings from reddening the file), so this file recounted as **0**
+# while the runner executed **1** - a whole file's worth of cases recorded as
+# none, with all four guard patterns and all four tripwires silent. The anchor
+# that gives prose immunity is the same anchor that creates this blind spot.
+#
+# Anchored on the *previous* statement's terminator (`;` or `{`) rather than on
+# `\b`, so it stays prose-immune and cannot match a method call: unanchored,
+# `it(` also appears inside `path.split(`, which is 184 hits across the 54
+# tracked test files. Measured with the `[;{]` anchor: **0** hits on the real
+# tree, and it fires on the probe above. Same-line only - `\n` in the separator
+# cross-matches the ordinary `});\nit(` layout (595 false hits), because formatters
+# put the terminator and the next definition on consecutive lines by default.
+_MIDLINE_DEFINITION_FORM = re.compile(
+    rf"[;{{][ \t]*(?:{_DEFINITION_KEYWORD})[ \t]*{_TRIPWIRE_TERMINAL}"
+)
+
+
+def _midline_definitions(text: str) -> list[str]:
+    """Mid-line definitions, ignoring comment lines.
+
+    Comments are skipped because this tripwire differs from the four before it in
+    a material way: those are anchored with `^\\s*`, which makes a *comment*
+    mentioning `it.each(` harmless for free. This one must match in the middle of
+    a line by construction, so line-start anchoring cannot be the filter - and a
+    commented-out definition (`// ... { it('x', () => {}) }`) is prose about the
+    spelling, not a call. Measured: without this, the tripwire fired on its own
+    documentation. Whole-line comments only (`//`, `*`, `/*`); nothing else in the
+    guard tries to parse JS.
+    """
+    found: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("//", "*", "/*")):
+            continue
+        found.extend(_MIDLINE_DEFINITION_FORM.findall(line))
+    return found
+
 
 def _count_definitions(path: Path) -> int:
     """Count a JS/TS test file's definitions, red on forms the count cannot see.
@@ -411,6 +456,18 @@ def _count_definitions(path: Path) -> int:
         "a file recounts as 1 against a runner total of 3. Teach "
         "_count_definitions to count this form (and sync Agent.md) before "
         "using it."
+    )
+    midline = _midline_definitions(text)
+    assert not midline, (
+        f"{path} defines test cases on the same line as a preceding statement, "
+        f"which the doc-count guard cannot count: {sorted(set(midline))}. The "
+        "guard counts `it(`/`test(` only at the start of a line - that anchor is "
+        "what keeps prose about these spellings from reddening it - so a "
+        "definition sharing a line (`describe('s', () => { it(...) })`) recounts "
+        "as 0 while the runner executes it. Measured 2026-09-11 with vitest: "
+        "such a file is 1 executed case, 0 counted. Put the definition on its "
+        "own line, or teach _count_definitions this form (and sync Agent.md) "
+        "before using it."
     )
     return len(_DEFINITION_FORM.findall(text))
 
@@ -1076,3 +1133,95 @@ def test_nested_definition_tripwire_is_empty_on_the_real_tree() -> None:
         f"would under-report it: {tripped}. Teach _count_definitions to count the "
         "form and sync Agent.md."
     )
+
+
+# --- The mid-line definition form (fifth escape, cyc20260911-011300) ----------
+#
+# A definition that shares its line with the preceding statement is an ordinary
+# `it(`/`test(` needing no exotic spelling - which is what makes it interesting:
+# the previous four escapes were all *spellings* the regex could not express,
+# while this one is the anchor itself. Every pattern in the guard is `^\s*`-anchored
+# to keep prose immunity, so `describe('s', () => { it(...) })` is uncountable by
+# construction. These tests pin the tripwire from both sides: it must fire on the
+# real shape, and it must stay silent on the tree's actual layout (where the
+# terminator and the next definition are always on consecutive lines).
+
+_MIDLINE_PROBE = "describe('s', () => { it('a', () => {}) });\n"  # kept for the docstring below
+
+
+def test_renderer_counts_fail_loud_on_a_midline_definition(tmp_path, monkeypatch) -> None:
+    """A definition on a shared line must be reported, not silently lost."""
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    body = "describe('s', () => { it('a', () => {}) });\n"
+    _renderer_tree(tmp_path, {"lib/midline.test.ts": body})
+    with pytest.raises(AssertionError, match="same line"):
+        mod._static_renderer_counts()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "before(); it('b', () => {});\n",
+        "if (x) { test('c', () => {}); }\n",
+        "const a = 1; it('d', () => {});\n",
+    ],
+)
+def test_midline_tripwire_fires_after_any_statement_terminator(tmp_path, monkeypatch, body) -> None:
+    """`;` and `{` both introduce the form - not just a closing suite brace."""
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    _renderer_tree(tmp_path, {"lib/variants.test.ts": body})
+    with pytest.raises(AssertionError, match="same line"):
+        mod._static_renderer_counts()
+
+
+def test_midline_tripwire_is_empty_on_the_real_tree() -> None:
+    """Measured boundary: no real test file defines a case on a shared line.
+
+    The same-line-only separator is what makes this true - allowing a newline
+    between the terminator and the definition matches the ordinary
+    `});`-then-`it(` layout and reports 595 false hits across the 54 files, so a
+    pattern that spanned lines would be deleted rather than obeyed.
+    """
+    guard = _loaded_guard_module()
+    test_files = sorted(
+        list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.ts"))
+        + list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.tsx"))
+        + list((REPO_ROOT / "emrg" / "gui" / "test").rglob("*.test.js"))
+    )
+    assert len(test_files) >= 50, f"expected >=50 test files, found {len(test_files)}"
+    tripped = {
+        path.relative_to(REPO_ROOT).as_posix(): guard._midline_definitions(
+            path.read_text(encoding="utf-8")
+        )
+        for path in test_files
+    }
+    tripped = {name: found for name, found in tripped.items() if found}
+    assert not tripped, (
+        "a real test file now defines a case on the same line as a preceding "
+        f"statement, so the static count under-reports it: {tripped}. Put it on "
+        "its own line, or teach _count_definitions the form and sync Agent.md."
+    )
+
+
+def test_midline_tripwire_ignores_prose_and_method_calls() -> None:
+    """The anchor, not a bare keyword, is what keeps this tripwire usable.
+
+    Unanchored, `it(`/`test(` also appears inside calls like `path.split(` - 184
+    hits across the tracked test files - so no `\\b`-style pattern can be used.
+    Anchoring on the previous statement's terminator keeps both the prose about
+    `it.each(` (this file is full of it) and the tree's real code silent.
+    """
+    guard = _loaded_guard_module()
+    for line in (
+        "expect(FENCE_END_RE.test('```'))",
+        'const parts = path.split(",");',
+        "// describe('s', () => { it('x', () => {}) });",
+    ):
+        assert not guard._midline_definitions(line), (
+            f"the mid-line tripwire fires on non-definition text: {line!r}"
+        )
+    # ...and it must still fire on a real call, so the immunity above is not
+    # simply the tripwire being blind.
+    assert guard._midline_definitions("describe('s', () => { it('a', () => {}) });")
