@@ -411,6 +411,67 @@ def _midline_definitions(text: str) -> list[str]:
     return found
 
 
+# The **sixth** escape: a definition whose *execution count* is decided by an
+# enclosing iteration construct rather than by its spelling.
+#
+#     for (const n of [1, 2, 3]) {          -> vitest: 3 tests
+#       it(`case ${n}`, () => {})              static counter: 1
+#     }
+#
+# This one is not a spelling the regexes miss - `it(` starts its own line, so
+# `_DEFINITION_FORM` counts it once. The count is wrong because the *line* runs
+# once per iteration. Measured 2026-09-11 (cyc20260911-024442) with the real
+# runner in `emrg/gui/renderer`: a file whose only visible definition sits inside
+# a 3-element `for...of` reports `Tests 3 passed (3)` while every pattern above
+# returns 1 and **the five tripwires that existed then stayed silent** (measured
+# before this one was written - with this tripwire in place the same file is
+# reported instead of counted). `forEach`, an arrow
+# `map` body producing definitions, and a `describe` nested inside a loop behave
+# the same (the last measured: one visible `it(` -> `Tests 3 passed (3)`).
+#
+# The other five escapes are all *lexical*; this one is *structural*, which is
+# why no amount of pattern tuning reaches it. Detection is therefore a small
+# block-structure check rather than a regex for a spelling: a definition on its
+# own line is uncountable when an iteration block enclosing it is still open.
+_LOOP_HEADER = re.compile(r"(?:^|[^\w.])(?:for|while)\s*\(|\.(?:forEach|map)\s*\(")
+_LOOP_DEFINITION_FORM = re.compile(rf"^(\s*){_DEFINITION_KEYWORD}\s*{_TRIPWIRE_TERMINAL}")
+
+
+def _loop_wrapped_definitions(text: str) -> list[str]:
+    """Definitions counted once but executed once per enclosing iteration.
+
+    Brace depth, not indentation: `for (...) { ... }` closed on a later line and
+    `for (...) doWork(x)` closed on its own line must not be confused, and a `}`
+    or `{` inside a string literal is rare enough that brace counting is the
+    cheap correct-enough reading here (`describe`/`it` bodies are statements, not
+    strings). A loop header only opens a block when it does not close its own
+    braces on the same line - otherwise a one-liner `for (x of y) a(x);` would
+    leave a phantom open block and red every file that has one.
+
+    Measured against all 54 tracked test files: **0** hits, so this is silent on
+    the real tree and only speaks about a file that would actually drift.
+    """
+    depth = 0
+    open_loops: list[int] = []  # brace depths at which an iteration block opened
+    found: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("//", "*", "/*")):
+            # Keep the brace balance honest across comment lines; nothing else.
+            depth += line.count("{") - line.count("}")
+            continue
+        before, opens, closes = depth, line.count("{"), line.count("}")
+        match = _LOOP_DEFINITION_FORM.match(line)
+        if match is not None and any(level < before + 1 for level in open_loops):
+            found.append(stripped)
+        if _LOOP_HEADER.search(line) and opens > 0:
+            if opens > closes or not stripped.rstrip().endswith("}"):
+                open_loops.append(before + opens)
+        depth = before + opens - closes
+        open_loops = [level for level in open_loops if level <= depth]
+    return found
+
+
 def _count_definitions(path: Path) -> int:
     """Count a JS/TS test file's definitions, red on forms the count cannot see.
 
@@ -468,6 +529,18 @@ def _count_definitions(path: Path) -> int:
         "such a file is 1 executed case, 0 counted. Put the definition on its "
         "own line, or teach _count_definitions this form (and sync Agent.md) "
         "before using it."
+    )
+    looped = _loop_wrapped_definitions(text)
+    assert not looped, (
+        f"{path} defines test cases inside a loop, which the doc-count guard "
+        f"cannot count: {sorted(set(looped))}. The guard counts each `it(`/`test(` "
+        "once, but a definition inside `for`/`while`/`forEach`/`map` runs once "
+        "per iteration, so the runner executes more cases than Agent.md records "
+        "while the file still *looks* counted. Measured 2026-09-11 with vitest: "
+        "one visible definition inside a 3-element loop is 3 executed cases, 1 "
+        "counted, with every other tripwire silent. Generate the cases with "
+        "`it.each([...])` (one definition per row, counted) or write them out on "
+        "their own lines, then sync Agent.md."
     )
     return len(_DEFINITION_FORM.findall(text))
 
@@ -1225,3 +1298,137 @@ def test_midline_tripwire_ignores_prose_and_method_calls() -> None:
     # ...and it must still fire on a real call, so the immunity above is not
     # simply the tripwire being blind.
     assert guard._midline_definitions("describe('s', () => { it('a', () => {}) });")
+
+
+# --- Loop-wrapped definitions (sixth escape, cyc20260911-024442) --------------
+#
+# The first five escapes were all *lexical*: spellings the counted regex could
+# not express (`it.each`, tagged templates, chain links, nesting, a shared line).
+# This one is *structural* - the spelling is ordinary and countable, but the line
+# executes once per iteration of an enclosing loop. Measured 2026-09-11 with the
+# real vitest runner in emrg/gui/renderer: one visible `it(` inside a 3-element
+# `for...of` is `Tests 3 passed (3)` while the other five tripwires stay silent,
+# and a `describe` nested inside a loop behaves identically.
+#
+# Both directions are pinned, because a tripwire that fires on ordinary code is
+# worse than none: silence on all 54 real test files (they contain 18 loop
+# constructs, none of them wrapping a definition) and fire on every shape that
+# actually multiplies the count.
+
+_LOOP_PROBES = {
+    "for-of block": (
+        "describe('x', () => {\n"
+        "  for (const n of [1, 2, 3]) {\n"
+        "    it(`case ${n}`, () => {});\n"
+        "  }\n"
+        "});\n"
+    ),
+    "classic for": (
+        "for (let i = 0; i < 3; i++) {\n"
+        "  it('case ' + i, () => {});\n"
+        "}\n"
+    ),
+    "while": (
+        "let i = 0;\n"
+        "while (i < 3) {\n"
+        "  it('case ' + i, () => {});\n"
+        "  i++;\n"
+        "}\n"
+    ),
+    "forEach": (
+        "const cases = [1, 2, 3];\n"
+        "cases.forEach((n) => {\n"
+        "  it(`case ${n}`, () => {});\n"
+        "});\n"
+    ),
+    "describe nested in a loop": (
+        "for (const c of ['a', 'b', 'c']) {\n"
+        "  describe(`suite ${c}`, () => {\n"
+        "    it('inner', () => {});\n"
+        "  });\n"
+        "}\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("body", _LOOP_PROBES.values(), ids=list(_LOOP_PROBES))
+def test_renderer_counts_fail_loud_on_a_loop_wrapped_definition(
+    tmp_path, monkeypatch, body
+) -> None:
+    """A definition inside a loop must be reported, not counted once and passed.
+
+    Each of these is a real case the runner multiplies and the static counter
+    records once - the failure mode the previous five tripwires cannot see.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    _renderer_tree(tmp_path, {"lib/looped.test.ts": body})
+    with pytest.raises(AssertionError, match="inside a loop"):
+        mod._static_renderer_counts()
+
+
+def test_loop_tripwire_is_empty_on_the_real_tree() -> None:
+    """Measured boundary: no real test file defines a case inside a loop.
+
+    Stated as a measurement, not an assumption - if a real file ever adopts the
+    form, this fails first and the fix is to teach the counter, which is exactly
+    the signal the tripwire exists to give. The tree does contain loop
+    constructs (18 of them); a tripwire that fired on those would be deleted, so
+    the check must distinguish a loop that *wraps a definition* from one that
+    merely precedes later code.
+    """
+    guard = _loaded_guard_module()
+    test_files = sorted(
+        list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.ts"))
+        + list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.tsx"))
+        + list((REPO_ROOT / "emrg" / "gui" / "test").rglob("*.test.js"))
+    )
+    assert len(test_files) >= 50, f"expected >=50 test files, found {len(test_files)}"
+    tripped = {
+        path.relative_to(REPO_ROOT).as_posix(): guard._loop_wrapped_definitions(
+            path.read_text(encoding="utf-8")
+        )
+        for path in test_files
+    }
+    tripped = {name: found for name, found in tripped.items() if found}
+    assert not tripped, (
+        "a real test file now defines a case inside a loop, so the static count "
+        f"under-reports it: {tripped}. Use `it.each([...])` (counted, one "
+        "definition per row), write the cases out on their own lines, or teach "
+        "_count_definitions the form and sync Agent.md."
+    )
+
+
+def test_loop_tripwire_ignores_loops_that_do_not_wrap_a_definition() -> None:
+    """The negative half: ordinary loops and prose must stay silent.
+
+    Every line here is legal TypeScript in a test file that contains no
+    loop-generated case. A false positive would force a rewrite of innocent
+    code, and a guard that cries wolf gets deleted - so the boundary is pinned
+    rather than assumed.
+    """
+    guard = _loaded_guard_module()
+    for line in (
+        # A loop closed on its own line, with unrelated code after it.
+        "for (const x of [1, 2]) { doWork(x); }\ndescribe('after', () => {\n  it('a', () => {});\n});\n",
+        # A loop fully closed before the definition, on separate lines.
+        "for (const x of [1, 2]) {\n  doWork(x);\n}\nit('after', () => {});\n",
+        # A loop *inside* a test body (the definition is outside it).
+        "it('runs a loop', () => {\n  for (const x of [1, 2]) { expect(x).toBe(x); }\n});\n",
+        # A one-liner iteration followed by an ordinary definition.
+        "cases.forEach((c) => a(c));\nit('after', () => {});\n",
+        # Prose about the form, which this file is full of.
+        "// for (const n of cases) { it(`c`, () => {}) }\nit('real', () => {});\n",
+        # Brace-like characters inside string literals must not unbalance it.
+        "it('braces', () => {\n  expect(x).toBe('{');\n});\nit('next', () => {});\n",
+        # A plain file with no loops at all.
+        "describe('d', () => {\n  it('a', () => {});\n  it('b', () => {});\n});\n",
+    ):
+        assert not guard._loop_wrapped_definitions(line), (
+            f"the loop tripwire fires on ordinary code, which would force a "
+            f"rewrite of innocent tests: {line!r}"
+        )
+    # ...and it must still fire on a real loop-wrapped definition, so the
+    # silence above is not simply the tripwire being blind.
+    assert guard._loop_wrapped_definitions(_LOOP_PROBES["for-of block"])
+
