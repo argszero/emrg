@@ -13,20 +13,34 @@ The same class was then reproduced in ``scripts/check_nonlocal.py``: its
 success line ``✅ nonlocal integrity check passed`` turns a passing check into
 ``rc=1`` plus a traceback under ``PYTHONIOENCODING=gbk`` or ``ascii``.
 
-Both guards here, deliberately different in kind:
+Three guards here, deliberately different in kind:
 
-* **static** — every string literal a script can print or write to
-  stdout/stderr is ASCII-only. This covers output paths a behavioural test
-  does not drive (the "what does the new entry path bypass?" gap that let the
-  original defect past three reviews).
+* **static, printed literals** — every string literal a script can print or
+  write to stdout/stderr is ASCII-only. This covers output paths a behavioural
+  test does not drive (the "what does the new entry path bypass?" gap that let
+  the original defect past three reviews).
+* **static, help text** — a script's module docstring, when the script prints
+  it, and every ``description=``/``epilog=``/``help=`` literal are ASCII-only.
+  Docstrings are not exempt: ``argparse`` prints ``description=__doc__``, so a
+  docstring is ordinary output on the ``--help`` path.
 * **behavioural** — ``check_nonlocal.py`` runs as a *subprocess* with raw byte
-  capture under two hostile codecs, in the positive (pass) and negative
-  (fail) state, asserting the exit code, the verdict text and ASCII output.
+  capture under two hostile codecs, in the positive (pass) and negative (fail)
+  state, asserting the exit code, the verdict text and ASCII output; and every
+  argparse script's ``--help`` is run the same way.
+
+A third instance of the class, found while reviewing this very change: three of
+the five scripts below pass ``description=__doc__`` and their docstrings kept
+the em dash this repo's prose uses, so ``--help`` exited 1 with a traceback
+under ``PYTHONIOENCODING=ascii``. Fixing the *printed* literals had left the
+docstring half of the same output path unguarded — the first version of this
+file asserted the opposite ("docstrings cannot crash a caller"), which is true
+of a docstring nobody prints and false of one argparse prints.
 
 Boundary (stated, not implied): these pin literal output. Data-driven output —
 say a CJK path interpolated into a message — is not covered, and neither are
 shell scripts: bash writes bytes straight to the fd, so a legacy console shows
 mojibake instead of raising, which is a different (and non-fatal) failure.
+Comments are exempt — nothing in Python prints a comment.
 """
 
 from __future__ import annotations
@@ -46,11 +60,14 @@ SCRIPTS = REPO_ROOT / "scripts"
 
 
 def _printed_literals(path: Path) -> list[tuple[int, str]]:
-    """Every string literal reachable by print()/stdout.write()/stderr.write().
+    """Every string literal written at a print()/stdout.write()/stderr.write() call.
 
     Only the literal *segments* are returned: an f-string's interpolations are
     values, not text the author chose, so a name or path holding non-ASCII is
-    out of scope here (see the module docstring's boundary note).
+    out of scope here (see the module docstring's boundary note). Also out of
+    scope: a literal defined elsewhere and printed by name (``MSG = "...";
+    print(MSG)``) — this rule reads the call site, not the dataflow. The
+    behavioural tests are what cover indirection.
     """
     found: list[tuple[int, str]] = []
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -105,6 +122,66 @@ def test_script_printed_literals_are_ascii() -> None:
         "host scripts must print ASCII-only literals so their output is "
         "encodable by any console codec; found non-ASCII in printed/written "
         "strings:\n  " + "\n  ".join(offenders)
+    )
+
+
+def _help_text_literals(path: Path) -> list[tuple[str, str]]:
+    """Literals argparse writes to stdout on ``--help``.
+
+    ``description`` (conventionally ``__doc__``), ``epilog`` and every
+    ``help=`` are printed by argparse, so they reach a caller's console exactly
+    like a ``print()`` does. The module docstring is included when the script
+    references ``__doc__``, which is the usual way it becomes help text.
+    """
+    src = path.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    found: list[tuple[str, str]] = []
+    if "__doc__" in src:
+        doc = ast.get_docstring(tree, clean=False)
+        if doc:
+            found.append(("module docstring (printed as __doc__)", doc))
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        for kw in node.keywords:
+            if kw.arg not in ("description", "epilog", "help"):
+                continue
+            value = kw.value
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                found.append((f"{kw.arg}= on line {node.lineno}", value.value))
+            elif isinstance(value, ast.JoinedStr):
+                for seg in value.values:
+                    if isinstance(seg, ast.Constant) and isinstance(seg.value, str):
+                        found.append((f"{kw.arg}= on line {node.lineno}", seg.value))
+    return found
+
+
+def test_script_help_text_is_ascii() -> None:
+    """``--help`` output must be encodable too — argparse prints docstrings.
+
+    Verified incident (this repo, cycle 2026-09-10, found by review of the
+    sibling test): ``scripts/reader_fix_latency.py`` and two others build their
+    parser with ``description=__doc__``; the docstrings carried U+2014, so
+    ``PYTHONIOENCODING=ascii script --help`` exited 1 with
+    ``UnicodeEncodeError`` — on the one command a user runs to learn how to
+    call the script. A docstring is output, not a comment.
+    """
+    scripts = sorted(SCRIPTS.glob("*.py"))
+    assert scripts, f"no scripts found under {SCRIPTS}"
+
+    offenders: list[str] = []
+    for script in scripts:
+        for where, text in _help_text_literals(script):
+            bad = sorted({ch for ch in text if ord(ch) > 127})
+            if bad:
+                codes = " ".join(f"U+{ord(ch):04X}" for ch in bad)
+                offenders.append(f"{script.name}: {where}: {codes}")
+    assert not offenders, (
+        "help text and docstrings printed by argparse must be ASCII-only so "
+        "`--help` survives any console codec; found non-ASCII in:\n  "
+        + "\n  ".join(offenders)
     )
 
 
@@ -188,3 +265,46 @@ def test_check_nonlocal_verdict_survives_a_non_utf8_stdout(tmp_path, codec) -> N
     assert failed.stderr.isascii(), failed.stderr
     assert b"state_var" in failed.stderr, "the missing declaration must be named"
     assert b"Traceback" not in failed.stderr, failed.stderr
+
+
+def _argparse_scripts() -> list[Path]:
+    """Scripts that answer ``--help`` (their own source imports argparse)."""
+    return [
+        script
+        for script in sorted(SCRIPTS.glob("*.py"))
+        if "argparse" in script.read_text(encoding="utf-8")
+    ]
+
+
+@pytest.mark.parametrize("codec", ["ascii", "gbk"])
+def test_script_help_survives_a_non_utf8_stdout(codec: str) -> None:
+    """Every script's ``--help`` must exit 0 with ASCII output under any codec.
+
+    This is the behavioural half of the review finding: the static guard names
+    the offending literal, this one proves the crash is gone through a real
+    subprocess, and neither can be satisfied by accident — a passing run needs
+    the whole help text (and only that) to be ASCII.
+    """
+    scripts = _argparse_scripts()
+    assert scripts, f"no argparse scripts found under {SCRIPTS}"
+
+    failures: list[str] = []
+    for script in scripts:
+        proc = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            cwd=REPO_ROOT,
+            env=dict(os.environ, PYTHONIOENCODING=codec),
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode != 0 or b"Traceback" in proc.stderr:
+            tail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+            failures.append(
+                f"{script.name}: rc={proc.returncode} {tail[-1] if tail else '(no stderr)'}"
+            )
+        elif not proc.stdout.isascii():
+            failures.append(f"{script.name}: rc=0 but --help output is not ASCII")
+    assert not failures, (
+        f"`--help` must survive PYTHONIOENCODING={codec}; failures:\n  "
+        + "\n  ".join(failures)
+    )

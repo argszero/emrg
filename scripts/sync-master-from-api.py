@@ -5,12 +5,12 @@ EMRG has repeatedly hit github.com:443 being unreachable while api.github.com
 stays up (10+ documented cycles, e.g. 08-22..08-26). The usual fallback flow:
 the local repo already contains the content (a branch pushed via the Git Data
 API that later got squash-merged upstream), so advancing local refs only needs
-the missing *commit* objects — reconstructed byte-exact from the API's
+the missing *commit* objects - reconstructed byte-exact from the API's
 verification payload + signature, including web-flow GPG-signed squash merges.
 
 
 When the head commit's *content* objects (blobs/trees) are also missing locally
-(e.g. a parallel PR introduced files this repo never had — first hit in cycle
+(e.g. a parallel PR introduced files this repo never had - first hit in cycle
 cyc20260826-154904 with #994's GUI assets), the script now auto-fetches them via
 the Git Data API: blobs via `git/blobs/{sha}` + `git hash-object -w`, trees via
 `git/trees/{sha}` + `git mktree` (canonical ordering), recursing bottom-up. The
@@ -27,7 +27,7 @@ Behavior:
     `git hash-object -t commit -w` (byte-exact, GPG signature preserved)
   * verifies the root tree sha matches the remote; if content objects are
     missing, fetches missing blobs/trees via the Git Data API (disable with
-    --no-fetch-objects) and re-verifies — fail-loud only if still mismatched
+    --no-fetch-objects) and re-verifies - fail-loud only if still mismatched
   * updates refs/heads/<ref> and refs/remotes/origin/<ref>
 
 Requirements: git on PATH; api.github.com reachable. Auth: optional for public
