@@ -609,6 +609,52 @@ def test_the_invisible_entry_points_are_reported() -> None:
     )
 
 
+def test_the_async_family_is_out_of_scope_by_construction() -> None:
+    """The rule's boundary: asyncio's subprocess family cannot be text-mode.
+
+    This is the deliberate scope edge, pinned so a future reader can tell
+    "excluded because it cannot happen" from "excluded because nobody looked".
+    The package has 8 `asyncio.create_subprocess_*` call sites and every one of
+    them decodes explicitly (`stdout.decode("utf-8", ...)`), so they are correct
+    today - but they are correct for a *structural* reason, and that reason is
+    what this test keeps honest.
+
+    Measured on this interpreter (3.13): the async variants reject every text
+    spelling, so there is no unpinned-decode site for this rule to miss:
+
+    ```
+    asyncio.create_subprocess_exec(..., text=True)                -> ValueError: text must be False
+    asyncio.create_subprocess_exec(..., universal_newlines=True)  -> ValueError: universal_newlines must be False
+    asyncio.create_subprocess_exec(..., encoding="utf-8")         -> ValueError: encoding must be None
+    ```
+
+    If that ever changes (a future Python gaining text mode for the async
+    family), this test fails and the rule has to be widened to cover it - which
+    is the outcome we want from a scope edge rather than silence.
+    """
+    import asyncio
+
+    async def _probe() -> list[str]:
+        failures: list[str] = []
+        for kwarg in ({"text": True}, {"universal_newlines": True}, {"encoding": "utf-8"}):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, "-c", "print(1)",
+                    stdout=asyncio.subprocess.PIPE, **kwarg,
+                )
+                await proc.communicate()
+            except ValueError as exc:
+                failures.append(f"{sorted(kwarg)}: {exc}")
+        return failures
+
+    failures = asyncio.run(_probe())
+    assert len(failures) == 3, (
+        "asyncio's subprocess family is only out of scope while it rejects every "
+        "text spelling; if it now accepts one, this rule must cover those sites "
+        "too (the package has 8 of them). Measured: " + " | ".join(failures)
+    )
+
+
 def test_the_entry_points_really_decode_with_the_locale_codec() -> None:
     """Behavioural half: the three shapes yield no usable text on a hostile locale.
 
