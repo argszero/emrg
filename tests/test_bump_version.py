@@ -342,4 +342,4 @@ def test_cli_check_without_positional_still_uses_the_base_version(
 ):
     monkeypatch.setattr(mod, "REPO_ROOT", fake_repo)
     assert mod.main(["--check"]) == 0
-    assert "0.2.93" in capsys.readouterr().out
+    assert mod.read_current_version(fake_repo) in capsys.readouterr().out
