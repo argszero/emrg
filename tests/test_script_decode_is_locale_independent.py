@@ -481,7 +481,7 @@ def test_the_scan_catches_an_unpinned_site() -> None:
     )
 
 
-def test_the_scan_covers_every_first_party_file_and_no_vendored_one() -> None:
+def test_the_scan_covers_every_first_party_file_and_no_vendored_one(tmp_path: Path) -> None:
     """The scan's file set equals the first-party set, so its reach is not a guess.
 
     Two failures this pins, both measured:
@@ -511,11 +511,21 @@ def test_the_scan_covers_every_first_party_file_and_no_vendored_one() -> None:
         "file that is not scanned is a silent hole in the rule, and a scanned file "
         "that is not tracked is vendored code"
     )
-    vendored = [p for p in PACKAGE.rglob("*.py") if _VENDORED_DIRS & set(p.parts)]
-    assert vendored, (
-        "no vendored tree was found - if node_modules was removed this assertion "
-        "can go, but until then its absence means the exclusion is untested"
-    )
+
+    # The exclusion is exercised on a synthetic tree, not on `emrg/gui/node_modules`:
+    # that tree exists only where someone ran `npm install`, so asserting it exists
+    # here made this test itself depend on a local artifact and fail on both CI jobs
+    # while passing locally - the exact asymmetry the module guards against, written
+    # by the cycle that was fixing it.
+    tree = tmp_path / "pkg" / "node_modules" / "vendored"
+    tree.mkdir(parents=True)
+    (tree / "third_party.py").write_text("x = 1\n", encoding="utf-8")
+    (tree.parent.parent / "ours.py").write_text("x = 1\n", encoding="utf-8")
+    found = [p for p in (tmp_path / "pkg").rglob("*.py")]
+    assert len(found) == 2, "the fixture must contain one vendored and one first-party file"
+    assert [p for p in found if not _VENDORED_DIRS & set(p.parts)] == [
+        tmp_path / "pkg" / "ours.py"
+    ], "the vendored exclusion must drop the third-party file and keep ours"
 
 
 def test_the_exemption_decides_on_the_child_not_the_file() -> None:
