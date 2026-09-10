@@ -307,3 +307,39 @@ def test_cli_check_against_an_explicit_version(mod, fake_repo, monkeypatch, caps
     monkeypatch.setattr(mod, "REPO_ROOT", fake_repo)
     assert mod.main(["--check", "9.9.9"]) == 1
     assert "drift" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# --check positional validation (#1119 review, how2how2how2-arch)
+# --------------------------------------------------------------------------
+
+
+def test_cli_check_rejects_tag_style_version(mod, fake_repo, monkeypatch, capsys):
+    """`--check v0.2.94` must error, not silently ignore the argument.
+
+    Release tags are vX.Y.Z, so the leading `v` is a natural slip. Previously
+    it fell through to "compare against emrg/__init__.py", discarding the
+    argument and exiting 0 with a green line about a version the caller never
+    named — a false OK on the one command whose whole job is to gate a release.
+    """
+    monkeypatch.setattr(mod, "REPO_ROOT", fake_repo)
+    rc = mod.main(["--check", "v0.2.94"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "not a semver" in err
+    assert "0.2.94" in err, "should hint at the corrected form"
+
+
+def test_cli_check_rejects_other_non_semver(mod, fake_repo, monkeypatch, capsys):
+    monkeypatch.setattr(mod, "REPO_ROOT", fake_repo)
+    for bad in ("banana", "0.2", "0.2.94-rc1", ""):
+        assert mod.main(["--check", bad]) == 2, bad
+        capsys.readouterr()
+
+
+def test_cli_check_without_positional_still_uses_the_base_version(
+    mod, fake_repo, monkeypatch, capsys
+):
+    monkeypatch.setattr(mod, "REPO_ROOT", fake_repo)
+    assert mod.main(["--check"]) == 0
+    assert "0.2.93" in capsys.readouterr().out

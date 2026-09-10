@@ -26,6 +26,11 @@ Usage
     python3 scripts/bump-version.py 0.2.94           # bump every source
     python3 scripts/bump-version.py 0.2.94 --dry-run # preview, write nothing
     python3 scripts/bump-version.py --check          # report drift, no writes
+    python3 scripts/bump-version.py --check 0.2.94   # drift against a target
+
+The positional is validated as semver in *both* modes — ``--check v0.2.94``
+(the natural slip, since release tags are ``vX.Y.Z``) is an error rather than
+a silently ignored argument (#1119 review).
 
 ``--check`` closes the CI/host symmetry loop: the host can self-verify
 before pushing, instead of discovering drift after a wasted build round.
@@ -211,7 +216,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.check:
-        if args.version and SEMVER.match(args.version):
+        # Validate the positional in the --check path too. #1119 review
+        # (how2how2how2-arch): `--check v0.2.94` — the natural tag-style slip,
+        # since release tags are vX.Y.Z — previously fell through to the
+        # "compare against emrg/__init__.py" branch, *silently discarding* the
+        # argument and exiting 0 with a green line about a version the caller
+        # never asked about. Never silently reinterpret input.
+        # `is not None` rather than truthiness: an explicitly passed empty
+        # argument must be rejected, not quietly treated as "no argument".
+        if args.version is not None and not SEMVER.match(args.version):
+            print(
+                f"error: not a semver x.y.z: {args.version!r}"
+                + (
+                    f" (drop the leading 'v': {args.version.lstrip('v')!r})"
+                    if args.version.startswith("v")
+                    else ""
+                ),
+                file=sys.stderr,
+            )
+            return 2
+        if args.version is not None:
             base = args.version
             print(f"checking all {FILE_COUNT} files against {base} …")
         else:
