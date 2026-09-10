@@ -262,6 +262,44 @@ _CHAINED_DEFINITION_FORM = re.compile(
 )
 
 
+# A definition can also be *nested* inside another one, and node:test's nested
+# forms are reached without ever putting `it(`/`test(` at the start of a line -
+# so the counted pattern and both tripwires above are blind to them. Measured
+# with the real runner (cyc20260911-001002) on a file whose single visible
+# `test('outer')` body holds two more cases:
+#
+#     test('outer', async (t) => { await t.test('inner', ...); });   -> tests 3
+#     test('outer', async () => { await test('inner', ...); });      -> tests 3
+#
+# In both files `_DEFINITION_FORM` and both tripwires above returned 0 for the
+# nested calls, so the static count said **1** while the runner executed **3**:
+# two executed cases recorded as zero with every guard green. Same silent drift
+# as the tagged-template form, arriving through *nesting* rather than spelling.
+#
+# Two shapes, both line-anchored:
+#   1. a receiver member chain - `t.test(`, `ctx.test(`, `sub.it(`. `t` is only
+#      the conventional name (node:test's examples use it); the spec reserves
+#      nothing, so pinning `t` would pin one spelling of an open set and any
+#      dotted member chain is the honest shape.
+#   2. an `await`-prefixed bare keyword - `await test(`, `await it(`. The
+#      counted pattern requires the keyword at the start of the line, so the
+#      `await` moves it out of reach, and the call still registers.
+#
+# Prose immunity, measured the same cycle: **0** line-anchored hits for either
+# shape across all 54 renderer/GUI test files. The tree is full of *method*
+# calls like `expect(FENCE_END_RE.test("```"))` (markdown.test.ts:58), but those
+# put an identifier before the dot and a parenthesis before it on the line, so
+# neither shape matches; the `^\s*` anchor keeps a comment or a docstring line
+# that merely mentions `t.test(` from redding the guard, and this file is
+# written in prose about exactly these spellings.
+_NESTED_DEFINITION_FORM = re.compile(
+    rf"^\s*(?:await\s+)?(?:[A-Za-z_$][\w$]*{_NEWLINE_THEN_INDENT}\.)+"
+    rf"(?:it|test|specify){_NEWLINE_THEN_INDENT}{_TRIPWIRE_TERMINAL}"
+    rf"|^\s*await\s+(?:it|test|specify){_NEWLINE_THEN_INDENT}{_TRIPWIRE_TERMINAL}",
+    re.M,
+)
+
+
 def _count_definitions(path: Path) -> int:
     """Count a JS/TS test file's definitions, red on forms the count cannot see.
 
@@ -295,6 +333,17 @@ def _count_definitions(path: Path) -> int:
         "it executes more times than Agent.md records while the runner's own "
         "total stays honest - the same silent drift, one level up. Teach "
         "_count_definitions to expand this form (and sync Agent.md) before "
+        "using it."
+    )
+    nested = _NESTED_DEFINITION_FORM.findall(text)
+    assert not nested, (
+        f"{path} uses *nested* test-definition forms the doc-count guard cannot "
+        f"count: {sorted(set(nested))}. The guard counts only `it(`/`test(` at "
+        "the start of a line, so a nested definition - `t.test(...)` (node:test "
+        "subtests) or `await test(...)` - is executed by the runner while "
+        "Agent.md's breakdown records nothing for it. Measured 2026-09-11: such "
+        "a file recounts as 1 against a runner total of 3. Teach "
+        "_count_definitions to count this form (and sync Agent.md) before "
         "using it."
     )
     return len(_DEFINITION_FORM.findall(text))
@@ -865,3 +914,99 @@ def test_renderer_counts_stay_green_on_ordinary_calls(tmp_path, monkeypatch, bod
     assert mod._static_renderer_counts() == {
         "utils": len(mod._DEFINITION_FORM.findall(body))
     }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "test('outer', async (t) => {\n  await t.test('inner', () => {});\n});\n",
+        "test('outer', async () => {\n  await test('inner', () => {});\n});\n",
+        "describe('outer', () => {\n  await t.it('inner', () => {});\n});\n",
+    ],
+    ids=["receiver-subtest", "awaited-bare-keyword", "receiver-it"],
+)
+def test_renderer_counts_fail_loud_on_a_nested_definition(tmp_path, monkeypatch, body) -> None:
+    """A definition can be *nested*, reached without the keyword starting a line.
+
+    Measured with the real runner (cyc20260911-001002) - the same probe file, one
+    visible `test('outer')` holding two nested cases:
+
+        test('outer', async (t) => { await t.test('inner', ...); ... })  -> tests 3
+        test('outer', async () => { await test('inner', ...); ... })     -> tests 3
+
+    In both, `_DEFINITION_FORM` and both existing tripwires returned 0 for the
+    nested calls, so the static count said **1** against a runner total of **3**:
+    two executed cases documented as zero with every guard green.
+
+    This is the fourth composition axis in four cycles - after "which members
+    exist?" (a chain is not one link deep), "which line?" (a call can be split
+    from its paren) and "which terminal?" (a definition can be tagged) comes
+    "where is it nested?". The counted pattern is still `^it(|^test(`; a nested
+    form is therefore *reported* rather than silently mis-counted.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"\*nested\*"):
+        mod._static_renderer_counts()
+
+
+def test_doc_counts_stay_green_on_method_calls_and_prose_about_nesting(
+    tmp_path, monkeypatch
+) -> None:
+    """Counter-test for the nested tripwire: it must fire on calls, not text.
+
+    The tree is full of *method* calls whose name ends in `test` -
+    `expect(FENCE_END_RE.test("```"))` (markdown.test.ts:58) - and the line
+    anchor plus the `\\.`-before-keyword requirement is what keeps those quiet.
+    A docstring or comment mentioning `t.test(` must stay quiet too; this file is
+    written in prose about exactly these spellings, and a guard that reds on a
+    sentence gets deleted.
+
+    Measured the same cycle: 0 line-anchored hits across all 54 renderer/GUI test
+    files for the nested shapes, so this is a tripwire for a form the tree does
+    not use, not a filter over forms it does.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "it('a', () => {\n"
+        "  // t.test( is how node:test nests, but this line is a comment\n"
+        "  expect(FENCE_END_RE.test('```')).toBe(true);\n"
+        "  const re = /^it\\.each\\(/;\n"
+        "});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    counts = mod._static_renderer_counts()
+    assert counts == {"utils": 1}, counts
+
+
+def test_nested_definition_tripwire_is_empty_on_the_real_tree() -> None:
+    """The pinned boundary, on the real tree: the tripwire covers forms none use.
+
+    Stated as a measurement rather than an assumption - if a real test file ever
+    adopts a nested definition, this fails first and the fix is to teach the
+    counter, which is exactly the signal the tripwire is for.
+    """
+    guard = _loaded_guard_module()
+    # Walk the same two trees the static counters walk.
+    test_files = sorted(
+        list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.ts"))
+        + list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.tsx"))
+        + list((REPO_ROOT / "emrg" / "gui" / "test").rglob("*.test.js"))
+    )
+    assert len(test_files) >= 50, f"expected >=50 test files, found {len(test_files)}"
+    hits = {
+        path.relative_to(REPO_ROOT).as_posix(): guard._NESTED_DEFINITION_FORM.findall(
+            path.read_text(encoding="utf-8")
+        )
+        for path in test_files
+    }
+    tripped = {name: found for name, found in hits.items() if found}
+    assert not tripped, (
+        "a real test file now uses a nested definition form, so the static count "
+        f"would under-report it: {tripped}. Teach _count_definitions to count the "
+        "form and sync Agent.md."
+    )
