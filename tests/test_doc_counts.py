@@ -311,6 +311,339 @@ def test_evolution_prompt_no_quick_ref_block() -> None:
 
 _RENDERER_TEST_SUFFIX = ".test"
 
+# The definition regex below sees only `it(` / `test(` at the start of a line.
+# vitest and `node --test` also register *chained* forms whose executed-case
+# count this regex cannot reproduce, because the `(` follows a modifier instead
+# of the keyword: `it.each([...])("name", ...)` runs one case per row/table, and
+# `test.skip/only/todo/fails/concurrent/skipIf/...(...)` register a case without
+# ever matching `test(`. A file using one of them would be under-counted while
+# both guards stayed green - the same silent-drift shape as the label collision
+# fixed in #1120 and the 445 -> 448 renderer drift before it. Today's tree has
+# none of these spellings (measured 2026-09-10: 0 matches across the 54 renderer
+# and GUI test files), so this is a tripwire, not a filter.
+_DEFINITION_KEYWORD = r"(?:it|test)"
+
+# The keyword and its call can be separated by a *newline*, and the call is still
+# one call the runner registers. Measured with the real runner (cyc20260910-234907):
+# a file containing
+#     it
+#       ('a', () => {})
+# reported `Tests 2 passed (2)` while the static count said **1** - the drift this
+# guard exists to catch, arriving through line position rather than spelling.
+# Prettier rejoins the statement when it reformats a file, but nothing in this repo
+# runs prettier (no config, no CI step), so a hand-authored file carries it.
+#
+# The separator admits a newline but deliberately **not** a bare space: `it (` is
+# legal JS, yet on a line of its own it is indistinguishable from prose such as
+# "it (the count) is 514", and this file is written in prose about these exact
+# spellings. A guard that reds on a sentence is a guard that gets deleted.
+_NEWLINE_THEN_INDENT = r"(?:\n\s*)?"
+_DEFINITION_FORM = re.compile(
+    rf"^\s*{_DEFINITION_KEYWORD}{_NEWLINE_THEN_INDENT}\(", re.M
+)
+
+# A definition form is not always *called* - it can be *tagged*. `it.each` is also
+# a tag function in vitest, so the table syntax
+#     it.each`
+#       a    | b
+#       ${1} | ${2}
+#     `('adds $a to $b', ({ a, b }) => { ... })
+# registers one case **per table row** while ending in a backtick rather than a
+# paren. Measured with the real runner (cyc20260910-001002): that file reported
+# `Tests 2 passed (2)` while the counted pattern and both tripwires returned **0** -
+# two executed cases recorded as zero, with every guard green. `it.skip.each` and
+# `it.only.each` behave the same (measured: `1 skipped` / `1 passed`).
+#
+# So the tripwires accept either terminal. The *counted* pattern (`_DEFINITION_FORM`
+# above) deliberately still requires `(`: widening it would change the count itself,
+# and the tree currently has no tagged form (measured: 0 across all 54 tracked
+# `.test.ts`/`.test.tsx`/`.test.js` files), so the honest move is to be *told* to
+# teach the counter if one ever appears - which is exactly what these tripwires say.
+_TRIPWIRE_TERMINAL = r"[(`]"
+
+# The *suite* a definition can hang off. `it`/`test` are the counted keywords;
+# `describe` is not counted at all, but both runners let it own parameterised
+# definitions that still register cases the plain regex never sees:
+#   vitest    - `describe.each([...])("name", () => { ... })` runs the whole
+#               callback once per row, so every `it(` inside it is executed N
+#               times while the static count records them once.
+#   node:test - `describe.for(rows)("name", ...)` is the parameterised suite form
+#               (`test.each` is undefined in node:test).
+# A second regex rather than a wider first one: the counted count must stay
+# `^it(|^test(` only, or the count itself changes.
+#
+# Same nesting rule as the chained pattern below, for the same measured reason:
+# `@vitest/runner`'s `ChainableSuiteAPI` (tasks.d-*.d.ts:1204) is
+# `TypedChainableFunction<ChainableSuiteContextMap, ..., { each, for }>`, so
+# `describe.skip.each([...])` is valid and registers its rows. Verified
+# (cyc20260910-232400) with the real runner: `describe.skip.each([[1],[2]])`
+# reported `Tests 2 skipped (2)` while the single-link pattern found 0.
+_SUITE_KEYWORD = r"(?:describe)"
+_SUITE_PARAMETERISED_FORM = re.compile(
+    rf"^\s*{_SUITE_KEYWORD}{_NEWLINE_THEN_INDENT}\."
+    rf"(?:[A-Za-z_$][\w$]*{_NEWLINE_THEN_INDENT}\.)*"
+    rf"(?:each|for){_NEWLINE_THEN_INDENT}{_TRIPWIRE_TERMINAL}",
+    re.M,
+)
+
+# Every *callable* member the two runners put on the definition function, none of
+# which the regex above can match (it requires `(` right after the keyword), and
+# every one of which registers a case the runner still executes:
+#   vitest  - `each`/`for` (one case per row/table) plus the option setters
+#             `skip`/`only`/`todo`/`fails`/`concurrent`/`sequential`/`skipIf`/`runIf`
+#             (ChainableTestContextMap + TestForFunction in @vitest/runner).
+#   node:test - `skip`/`todo`/`only` (`test.each` is undefined there).
+# Derived from the counted keyword so the two cannot drift apart.
+#
+# Anchored to line start (`^\s*`, as the counted regex and MODULE_SKIP_ENTRY
+# are) rather than `\b`: called anywhere in the line, this pattern is *text*,
+# so a comment or a string literal merely mentioning `it.each(` would trip it.
+# The guard's job is to stop drift, not to police prose about drift - prose is
+# what this file is full of. A real call is the statement on its own line.
+#
+# The chain is not one link deep. `@vitest/runner`'s `ChainableTestAPI`
+# (tasks.d-*.d.ts:721) is `TypedChainableFunction<ChainableTestContextMap,
+# ..., { each, for }>` - the *same* object exposes the option setters *and*
+# `each`/`for`, so `it.skip.each([...])` and `it.concurrent.each([...])` are
+# valid and were silently invisible to the single-link version of this pattern
+# (measured cyc20260910-232400: `npx vitest run` on a probe file reported
+# `Tests 3 passed | 2 skipped (5)` for `it.concurrent.each` + `test.skip.each`
+# while both regexes reported 0 hits). Intermediate links are therefore any
+# dotted member, and only the *terminal* one is required to be a known
+# collectable - a real call the first pattern cannot count, one or more
+# modifiers deep.
+#
+# Stated boundary: the anchor means an *indirect* construction such as
+# `const run = it.each(cases);` is still not seen. That is a deliberate trade
+# for prose immunity, not an oversight - a guard that reds on a comment gets
+# deleted, and this file is written in prose about these exact spellings.
+_CHAINED_DEFINITION_FORM = re.compile(
+    rf"^\s*{_DEFINITION_KEYWORD}{_NEWLINE_THEN_INDENT}\."
+    rf"(?:[A-Za-z_$][\w$]*{_NEWLINE_THEN_INDENT}\.)*"
+    rf"(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)"
+    rf"{_NEWLINE_THEN_INDENT}{_TRIPWIRE_TERMINAL}",
+    re.M,
+)
+
+
+# A definition can also be *nested* inside another one, and node:test's nested
+# forms are reached without ever putting `it(`/`test(` at the start of a line -
+# so the counted pattern and both tripwires above are blind to them. Measured
+# with the real runner (cyc20260911-001002) on a file whose single visible
+# `test('outer')` body holds two more cases:
+#
+#     test('outer', async (t) => { await t.test('inner', ...); });   -> tests 3
+#     test('outer', async () => { await test('inner', ...); });      -> tests 3
+#
+# In both files `_DEFINITION_FORM` and both tripwires above returned 0 for the
+# nested calls, so the static count said **1** while the runner executed **3**:
+# two executed cases recorded as zero with every guard green. Same silent drift
+# as the tagged-template form, arriving through *nesting* rather than spelling.
+#
+# Two shapes, both line-anchored:
+#   1. a receiver member chain - `t.test(`, `ctx.test(`, `sub.it(`. `t` is only
+#      the conventional name (node:test's examples use it); the spec reserves
+#      nothing, so pinning `t` would pin one spelling of an open set and any
+#      dotted member chain is the honest shape.
+#   2. an `await`-prefixed bare keyword - `await test(`, `await it(`. The
+#      counted pattern requires the keyword at the start of the line, so the
+#      `await` moves it out of reach, and the call still registers.
+#
+# Prose immunity, measured the same cycle: **0** line-anchored hits for either
+# shape across all 54 renderer/GUI test files. The tree is full of *method*
+# calls like `expect(FENCE_END_RE.test("```"))` (markdown.test.ts:58), but those
+# put an identifier before the dot and a parenthesis before it on the line, so
+# neither shape matches; the `^\s*` anchor keeps a comment or a docstring line
+# that merely mentions `t.test(` from redding the guard, and this file is
+# written in prose about exactly these spellings.
+_NESTED_DEFINITION_FORM = re.compile(
+    rf"^\s*(?:await\s+)?(?:[A-Za-z_$][\w$]*{_NEWLINE_THEN_INDENT}\.)+"
+    rf"(?:it|test|specify){_NEWLINE_THEN_INDENT}{_TRIPWIRE_TERMINAL}"
+    rf"|^\s*await\s+(?:it|test|specify){_NEWLINE_THEN_INDENT}{_TRIPWIRE_TERMINAL}",
+    re.M,
+)
+
+# The **fifth** escape, and the one that shows the limit of line anchoring itself
+# (measured this cycle, cyc20260911-011300, with the real runner): a definition
+# written on the same line as the statement before it needs no exotic spelling at
+# all - it is an ordinary `it(` that simply cannot start the line.
+#
+#     describe("s", () => { it("inner", () => {}) });     -> vitest: 1 test
+#
+# Every pattern above is `^\s*`-anchored (deliberately: that is what keeps prose
+# about these spellings from reddening the file), so this file recounted as **0**
+# while the runner executed **1** - a whole file's worth of cases recorded as
+# none, with all four guard patterns and all four tripwires silent. The anchor
+# that gives prose immunity is the same anchor that creates this blind spot.
+#
+# Anchored on the *previous* statement's terminator (`;` or `{`) rather than on
+# `\b`, so it stays prose-immune and cannot match a method call: unanchored,
+# `it(` also appears inside `path.split(`, which is 184 hits across the 54
+# tracked test files. Measured with the `[;{]` anchor: **0** hits on the real
+# tree, and it fires on the probe above. Same-line only - `\n` in the separator
+# cross-matches the ordinary `});\nit(` layout (595 false hits), because formatters
+# put the terminator and the next definition on consecutive lines by default.
+_MIDLINE_DEFINITION_FORM = re.compile(
+    rf"[;{{][ \t]*(?:{_DEFINITION_KEYWORD})[ \t]*{_TRIPWIRE_TERMINAL}"
+)
+
+
+def _midline_definitions(text: str) -> list[str]:
+    """Mid-line definitions, ignoring comment lines.
+
+    Comments are skipped because this tripwire differs from the four before it in
+    a material way: those are anchored with `^\\s*`, which makes a *comment*
+    mentioning `it.each(` harmless for free. This one must match in the middle of
+    a line by construction, so line-start anchoring cannot be the filter - and a
+    commented-out definition (`// ... { it('x', () => {}) }`) is prose about the
+    spelling, not a call. Measured: without this, the tripwire fired on its own
+    documentation. Whole-line comments only (`//`, `*`, `/*`); nothing else in the
+    guard tries to parse JS.
+    """
+    found: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("//", "*", "/*")):
+            continue
+        found.extend(_MIDLINE_DEFINITION_FORM.findall(line))
+    return found
+
+
+# The **sixth** escape: a definition whose *execution count* is decided by an
+# enclosing iteration construct rather than by its spelling.
+#
+#     for (const n of [1, 2, 3]) {          -> vitest: 3 tests
+#       it(`case ${n}`, () => {})              static counter: 1
+#     }
+#
+# This one is not a spelling the regexes miss - `it(` starts its own line, so
+# `_DEFINITION_FORM` counts it once. The count is wrong because the *line* runs
+# once per iteration. Measured 2026-09-11 (cyc20260911-024442) with the real
+# runner in `emrg/gui/renderer`: a file whose only visible definition sits inside
+# a 3-element `for...of` reports `Tests 3 passed (3)` while every pattern above
+# returns 1 and **the five tripwires that existed then stayed silent** (measured
+# before this one was written - with this tripwire in place the same file is
+# reported instead of counted). `forEach`, an arrow
+# `map` body producing definitions, and a `describe` nested inside a loop behave
+# the same (the last measured: one visible `it(` -> `Tests 3 passed (3)`).
+#
+# The other five escapes are all *lexical*; this one is *structural*, which is
+# why no amount of pattern tuning reaches it. Detection is therefore a small
+# block-structure check rather than a regex for a spelling: a definition on its
+# own line is uncountable when an iteration block enclosing it is still open.
+_LOOP_HEADER = re.compile(r"(?:^|[^\w.])(?:for|while)\s*\(|\.(?:forEach|map)\s*\(")
+_LOOP_DEFINITION_FORM = re.compile(rf"^(\s*){_DEFINITION_KEYWORD}\s*{_TRIPWIRE_TERMINAL}")
+
+
+def _loop_wrapped_definitions(text: str) -> list[str]:
+    """Definitions counted once but executed once per enclosing iteration.
+
+    Brace depth, not indentation: `for (...) { ... }` closed on a later line and
+    `for (...) doWork(x)` closed on its own line must not be confused, and a `}`
+    or `{` inside a string literal is rare enough that brace counting is the
+    cheap correct-enough reading here (`describe`/`it` bodies are statements, not
+    strings). A loop header only opens a block when it does not close its own
+    braces on the same line - otherwise a one-liner `for (x of y) a(x);` would
+    leave a phantom open block and red every file that has one.
+
+    Measured against all 54 tracked test files: **0** hits, so this is silent on
+    the real tree and only speaks about a file that would actually drift.
+    """
+    depth = 0
+    open_loops: list[int] = []  # brace depths at which an iteration block opened
+    found: list[str] = []
+    for line in text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("//", "*", "/*")):
+            # Keep the brace balance honest across comment lines; nothing else.
+            depth += line.count("{") - line.count("}")
+            continue
+        before, opens, closes = depth, line.count("{"), line.count("}")
+        match = _LOOP_DEFINITION_FORM.match(line)
+        if match is not None and any(level < before + 1 for level in open_loops):
+            found.append(stripped)
+        if _LOOP_HEADER.search(line) and opens > 0:
+            if opens > closes or not stripped.rstrip().endswith("}"):
+                open_loops.append(before + opens)
+        depth = before + opens - closes
+        open_loops = [level for level in open_loops if level <= depth]
+    return found
+
+
+def _count_definitions(path: Path) -> int:
+    """Count a JS/TS test file's definitions, red on forms the count cannot see.
+
+    Used by both static counters so the renderer and GUI guards share one
+    counting rule (and one tripwire). Note the negative case: a *method* call
+    such as `expect(FENCE_END_RE.test("```"))` is not a definition - the chained
+    form above requires a modifier keyword after the dot, so RegExp's own
+    `.test(` matches neither regex, and a file full of such calls still counts
+    correctly. Likewise a comment *describing* `it.each(` is not a definition;
+    both patterns are line-anchored so prose cannot red the guard.
+
+    Both checks are line-anchored, so each is tripped by a real call and only a
+    real call. A tripwire that fires on prose would be trained away, and one
+    that misses a spelling is worse than none because it reads as coverage.
+    """
+    text = path.read_text(encoding="utf-8")
+    uncounted = _CHAINED_DEFINITION_FORM.findall(text)
+    assert not uncounted, (
+        f"{path} uses test-definition forms the doc-count guard cannot count: "
+        f"{sorted(set(uncounted))}. The guard counts only `it(`/`test(` at the "
+        "start of a line, so these definitions would be missing from Agent.md's "
+        "breakdown while the runner still registers them. Teach "
+        "_count_definitions to count this form (and sync Agent.md) before "
+        "using it."
+    )
+    suites = _SUITE_PARAMETERISED_FORM.findall(text)
+    assert not suites, (
+        f"{path} uses parameterised *suite* forms the doc-count guard cannot "
+        f"count: {sorted(set(suites))}. The guard counts `it(`/`test(` once "
+        "each, but a suite body runs once per row, so every definition inside "
+        "it executes more times than Agent.md records while the runner's own "
+        "total stays honest - the same silent drift, one level up. Teach "
+        "_count_definitions to expand this form (and sync Agent.md) before "
+        "using it."
+    )
+    nested = _NESTED_DEFINITION_FORM.findall(text)
+    assert not nested, (
+        f"{path} uses *nested* test-definition forms the doc-count guard cannot "
+        f"count: {sorted(set(nested))}. The guard counts only `it(`/`test(` at "
+        "the start of a line, so a nested definition - `t.test(...)` (node:test "
+        "subtests) or `await test(...)` - is executed by the runner while "
+        "Agent.md's breakdown records nothing for it. Measured 2026-09-11: such "
+        "a file recounts as 1 against a runner total of 3. Teach "
+        "_count_definitions to count this form (and sync Agent.md) before "
+        "using it."
+    )
+    midline = _midline_definitions(text)
+    assert not midline, (
+        f"{path} defines test cases on the same line as a preceding statement, "
+        f"which the doc-count guard cannot count: {sorted(set(midline))}. The "
+        "guard counts `it(`/`test(` only at the start of a line - that anchor is "
+        "what keeps prose about these spellings from reddening it - so a "
+        "definition sharing a line (`describe('s', () => { it(...) })`) recounts "
+        "as 0 while the runner executes it. Measured 2026-09-11 with vitest: "
+        "such a file is 1 executed case, 0 counted. Put the definition on its "
+        "own line, or teach _count_definitions this form (and sync Agent.md) "
+        "before using it."
+    )
+    looped = _loop_wrapped_definitions(text)
+    assert not looped, (
+        f"{path} defines test cases inside a loop, which the doc-count guard "
+        f"cannot count: {sorted(set(looped))}. The guard counts each `it(`/`test(` "
+        "once, but a definition inside `for`/`while`/`forEach`/`map` runs once "
+        "per iteration, so the runner executes more cases than Agent.md records "
+        "while the file still *looks* counted. Measured 2026-09-11 with vitest: "
+        "one visible definition inside a 3-element loop is 3 executed cases, 1 "
+        "counted, with every other tripwire silent. Write the cases out as "
+        "separate `it(...)` lines (the only shape this guard can count), then "
+        "sync Agent.md. Note: `it.each([...])` is NOT a valid repair here - it "
+        "is itself an uncounted form and trips the chained-form tripwire above, "
+        "so it would replace one silent drift with a loud one."
+    )
+    return len(_DEFINITION_FORM.findall(text))
+
 
 def _static_renderer_counts() -> dict[str, int]:
     """Count renderer vitest cases per file, keyed by Agent.md's own label.
@@ -343,9 +676,7 @@ def _static_renderer_counts() -> dict[str, int]:
             "cannot distinguish them and one file's definitions would be "
             "silently dropped from the total. Rename one file."
         )
-        counts[label] = len(
-            re.findall(r"^\s*(?:it|test)\(", f.read_text(encoding="utf-8"), re.M)
-        )
+        counts[label] = _count_definitions(f)
     return counts
 
 
@@ -458,10 +789,7 @@ def _static_gui_counts() -> dict[str, int]:
     files = sorted(base.glob(f"*{_GUI_TEST_SUFFIX}"))
     assert files, "no GUI test files found under emrg/gui/test"
     return {
-        f.name[: -len(_GUI_TEST_SUFFIX)]: len(
-            re.findall(r"^\s*(?:it|test)\(", f.read_text(encoding="utf-8"), re.M)
-        )
-        for f in files
+        f.name[: -len(_GUI_TEST_SUFFIX)]: _count_definitions(f) for f in files
     }
 
 
@@ -550,3 +878,702 @@ def test_renderer_counts_accept_distinct_labels(tmp_path, monkeypatch) -> None:
     _renderer_tree(tmp_path, {"lib/utils.test.ts": body, "components/other.test.tsx": body})
     counts = mod._static_renderer_counts()
     assert counts == {"utils": 2, "other": 2}
+
+
+def _gui_tree(root: Path, files: dict[str, str]) -> None:
+    """Build a minimal GUI test tree under a fake REPO_ROOT."""
+    base = root / "emrg" / "gui" / "test"
+    for rel, body in files.items():
+        path = base / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it.each([[1], [2]])('%i runs', () => {});\n",
+        "it.for([1, 2])('%i runs', () => {});\n",
+        "test.skipIf(process.platform === 'win32')('a', () => {});\n",
+        "test.runIf(process.platform === 'darwin')('a', () => {});\n",
+        "it.todo('later');\n",
+        "it.fails('known broken', () => {});\n",
+    ],
+    ids=["each", "for", "skipIf", "runIf", "todo", "fails"],
+)
+def test_renderer_counts_fail_loud_on_a_parameterized_form(tmp_path, monkeypatch, body) -> None:
+    """Every chained spelling must be red, not silently under-counted.
+
+    `it.each([...])('name', ...)` runs one case per row and `test.skipIf(cond)(...)`
+    registers a case either way - the plain definition regex matches neither, so
+    before this tripwire a file could add cases that never reached Agent.md's
+    breakdown while both renderer guards stayed green.
+
+    Measured while widening the tripwire (cyc20260910-202123): `for`, `skipIf`
+    and `runIf` were still counted as 0 with no complaint, i.e. the first four
+    spellings tripped while these three stayed invisible. The list is now every
+    callable member of the runners' definition API, pinned one test per spelling.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    modifier = body.split("(")[0].split(".")[-1]
+    with pytest.raises(AssertionError, match=rf"\.{modifier}\("):
+        mod._static_renderer_counts()
+
+
+def test_gui_counts_fail_loud_on_a_skipped_form(tmp_path, monkeypatch) -> None:
+    """The GUI counter shares the same tripwire (it shares the same helper)."""
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _gui_tree(
+        tmp_path,
+        {"state.test.js": "test('a', () => {});\ntest.skip('later', () => {});\n"},
+    )
+    with pytest.raises(AssertionError, match=r"test\.skip\("):
+        mod._static_gui_counts()
+
+
+def test_count_definitions_ignores_a_regex_method_call(tmp_path, monkeypatch) -> None:
+    """The negative half: `expect(RE.test(...))` is not a definition.
+
+    Measured 2026-09-10: `markdown.test.ts` has 13 definitions but 17 loose
+    `\\b(it|test)\\(` matches - the extra 4 are `FENCE_END_RE.test(...)` calls.
+    An over-broad tripwire would make every such file red.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "it('a', () => { expect(FENCE_END_RE.test('```')).toBe(true); });\n"
+        "test('b', () => {});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/markdown.test.ts": body})
+    assert mod._static_renderer_counts() == {"markdown": 2}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "describe.each([[1], [2]])('suite %i', () => {\n  it('a', () => {});\n});\n",
+        "describe.for([1, 2])('suite %i', () => {\n  it('a', () => {});\n});\n",
+        "describe.skip.each([[1], [2]])('suite %i', () => {\n  it('a', () => {});\n});\n",
+        "describe.only.each([[1]])('suite %i', () => {\n  it('a', () => {});\n});\n",
+    ],
+    ids=["vitest-describe-each", "node-test-describe-for", "describe-skip-each", "describe-only-each"],
+)
+def test_doc_counts_fail_loud_on_a_parameterized_suite(tmp_path, monkeypatch, body) -> None:
+    """A parameterised *suite* hides the same drift one level up.
+
+    `describe.each([...])(...)` is vitest's parameterised suite and
+    `describe.for(rows)(...)` is node:test's; both run the whole callback once
+    per row, so the `it(` definitions inside execute N times while the static
+    count records them once. The prior tripwire's own comment named
+    `describe.for` as a live form while its pattern could not match it - a
+    documented hole that read as coverage (cyc20260910-230247).
+
+    Suites chain too: `ChainableSuiteAPI` carries the option setters *and*
+    `each`/`for`, so `describe.skip.each(...)` registers its rows as well -
+    measured with the real runner, which reported `Tests 2 skipped (2)` for it
+    while the single-link pattern found 0 (cyc20260910-232400).
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"parameterised \*suite\*"):
+        mod._static_renderer_counts()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it.concurrent.each([[1], [2], [3]])('%i runs', () => {});\n",
+        "it.skip.each([[1], [2]])('%i runs', () => {});\n",
+        "it.only.each([[1]])('%i runs', () => {});\n",
+    ],
+    ids=["concurrent-each", "skip-each", "only-each"],
+)
+def test_renderer_counts_fail_loud_on_a_nested_chained_form(tmp_path, monkeypatch, body) -> None:
+    """A chain is not one link deep, so the pattern must not be either.
+
+    `ChainableTestAPI` in @vitest/runner exposes the option setters *and*
+    `each`/`for` on the same object (`tasks.d-*.d.ts:721`), so
+    `it.concurrent.each([...])` is a real definition form. Measured
+    (cyc20260910-232400) with the real runner: a probe file with
+    `it.concurrent.each` + `test.skip.each` reported
+    `Tests 3 passed | 2 skipped (5)`, while the single-link pattern found **0**
+    of them - i.e. five executed cases documented as zero. The previous
+    revision of this tripwire enumerated every *terminal* member but assumed
+    one link, so it missed every nested spelling.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"cannot count"):
+        mod._static_renderer_counts()
+
+
+def test_doc_counts_stay_green_on_prose_about_a_chained_form(tmp_path, monkeypatch) -> None:
+    """A comment mentioning a chained form must NOT trip the tripwire.
+
+    Both patterns are line-anchored (`^\\s*`), so only a real call - the
+    statement on its own line - counts as a hit. A text-level pattern would make
+    this file's own explanatory comments unspeakable, and a guard that fires on
+    prose is a guard that gets disabled rather than fixed.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "// chain forms like it.each(...) or test.skip(...) are not counted,\n"
+        "// and a parameterised suite such as describe.for(...) hides it\n"
+        "const NOTE = 'call test.only( to isolate a case';\n"
+        "it('a', () => {});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    assert mod._static_renderer_counts() == {"utils": 1}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it\n  .each([[1], [2]])('%i runs', () => {});\n",
+        "it\n    .each([[1]])('%i runs', () => {});\n",
+        "it\n  .skip\n  .each([[1]])('%i runs', () => {});\n",
+    ],
+    ids=["split-before-each", "split-4-space", "split-multi-link"],
+)
+def test_renderer_counts_fail_loud_on_a_line_split_chain(tmp_path, monkeypatch, body) -> None:
+    """A chain split across lines is still one chain the runner executes.
+
+    The multi-link fix covered chains that are *written* on one line; it still
+    required the dot to follow the keyword on the same line. Measured with the
+    real runner (cyc20260910-234907): a probe file containing
+
+        it
+          .each([[1], [2]])('%i', () => {})
+
+    reported `Tests 2 passed (2)` while both patterns found **0** - two executed
+    cases recorded as zero, reached through line position rather than spelling.
+
+    Prettier rejoins the statement (verified: `prettier --parser typescript
+    --print-width 80` collapses it back to one line), but nothing in this repo
+    runs prettier - there is no config and no CI step - so a hand-authored file
+    carries the split. The boundary is stated rather than hidden: `it (` with a
+    bare space stays uncounted, because on its own line that is indistinguishable
+    from prose and this guard must not fire on a sentence.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"cannot count"):
+        mod._static_renderer_counts()
+
+
+def test_renderer_count_matches_the_runner_for_a_line_split_call(tmp_path, monkeypatch) -> None:
+    """A plain call split from its paren must be *counted*, not tripped.
+
+    This is the case the tripwire alone cannot cover, because the form is
+    countable once the pattern tolerates the newline. Measured with the real
+    runner (cyc20260910-234907): a file with
+
+        it
+        ('a', () => {})
+        it('b', () => {})
+
+    reported `Tests 2 passed (2)` while the static count said **1** - a silent
+    under-count with every guard green, i.e. exactly the drift class this file
+    exists to prevent. The pattern now counts both, so the count equals the
+    runner's total and the guard stays quiet.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "describe('split-call', () => {\n"
+        "  it\n"
+        "  ('a', () => { expect(1).toBe(1); });\n"
+        "  it('b', () => { expect(1).toBe(1); });\n"
+        "});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    assert mod._static_renderer_counts() == {"utils": 2}
+
+
+def test_doc_counts_stay_green_on_prose_about_a_split_call(tmp_path, monkeypatch) -> None:
+    """Prose using the keyword followed by a parenthetical must stay green.
+
+    The newline tolerance is the one change here that could plausibly turn a
+    sentence into a false positive, so it gets its own counter-test. `it (the
+    runner) registers two cases` is prose, not a call - which is why the
+    separator admits a newline but not a bare space.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "// It (the runner) registers two cases here, per the measurement.\n"
+        "// test (singular) is node:test's spelling.\n"
+        "it('a', () => {});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    assert mod._static_renderer_counts() == {"utils": 1}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it.each`\n  a    | b\n  ${1} | ${2}\n`('%i runs', () => {});\n",
+        "test.each`\n  a\n  ${1}\n`('%i runs', () => {});\n",
+        "it.skip.each`\n  a\n  ${1}\n`('%i runs', () => {});\n",
+        "it.only.each`\n  a\n  ${1}\n`('%i runs', () => {});\n",
+    ],
+    ids=["it-each-tagged", "test-each-tagged", "skip-tagged", "only-tagged"],
+)
+def test_renderer_counts_fail_loud_on_a_tagged_template_each(tmp_path, monkeypatch, body) -> None:
+    """A definition form can be *tagged* rather than *called*.
+
+    `it.each` is a tag function in vitest, so the table syntax
+
+        it.each`
+          a    | b
+          ${1} | ${2}
+        `('adds $a to $b', ({ a, b }) => { ... })
+
+    registers one case per table row while ending in a **backtick**, not a paren.
+    Measured with the real runner (cyc20260910-001002): that file reported
+    `Tests 2 passed (2)` while the counted pattern **and both tripwires** returned
+    0 - two executed cases documented as zero with every guard green.
+    `it.skip.each` / `it.only.each` behave the same (measured `1 skipped` /
+    `1 passed`, and a valid tagged `it`-family member at the top level).
+
+    This is the third composition axis found in three cycles - after "which
+    members exist?" (a chain is not one link deep) and "which line?" (a call can
+    be split from its paren) comes "which terminal?" (a definition can be tagged).
+    The counted pattern deliberately still requires `(`, so a tagged form is
+    *reported* rather than silently mis-counted.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"cannot count"):
+        mod._static_renderer_counts()
+
+
+def test_renderer_counts_fail_loud_on_a_tagged_parameterised_suite(tmp_path, monkeypatch) -> None:
+    """The tagged template works for suites too, so the suite guard needs it.
+
+    Measured with the real runner (cyc20260910-001002): `describe.each\\`...\\`(...)`
+    is valid and runs its body once per table row. It reaches the guard through the
+    *suite* pattern, which is a separate regex (widening the counted pattern would
+    change the count), so it needs the same two-terminal treatment.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = "describe.each`\n  a\n  ${1}\n`('suite %i', () => {\n  it('a', () => {});\n});\n"
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"parameterised \*suite\*"):
+        mod._static_renderer_counts()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it('a', () => {});\n",
+        "it('a', () => {});\nit('b', () => {});\n",
+    ],
+    ids=["one-call", "two-calls"],
+)
+def test_renderer_counts_stay_green_on_ordinary_calls(tmp_path, monkeypatch, body) -> None:
+    """Counter-test for the two-terminal change: ordinary calls must stay quiet.
+
+    Adding a backtick alternative to the terminal must not make an ordinary call
+    trip - this pins the boundary the widening could have broken. Note the array
+    forms (`it.each([...])`, `describe.each([...])`) are deliberately **not** here:
+    they are uncountable and *should* trip, which their own tests assert.
+
+    `it\\`...\\`` (the bare keyword as a tag) is intentionally absent too: it is a
+    runtime `TypeError: it(...) is not a function` (measured with the real runner),
+    so it is not a definition and the guard is right to stay silent.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    assert mod._static_renderer_counts() == {
+        "utils": len(mod._DEFINITION_FORM.findall(body))
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "test('outer', async (t) => {\n  await t.test('inner', () => {});\n});\n",
+        "test('outer', async () => {\n  await test('inner', () => {});\n});\n",
+        "describe('outer', () => {\n  await t.it('inner', () => {});\n});\n",
+    ],
+    ids=["receiver-subtest", "awaited-bare-keyword", "receiver-it"],
+)
+def test_renderer_counts_fail_loud_on_a_nested_definition(tmp_path, monkeypatch, body) -> None:
+    """A definition can be *nested*, reached without the keyword starting a line.
+
+    Measured with the real runner (cyc20260911-001002) - the same probe file, one
+    visible `test('outer')` holding two nested cases:
+
+        test('outer', async (t) => { await t.test('inner', ...); ... })  -> tests 3
+        test('outer', async () => { await test('inner', ...); ... })     -> tests 3
+
+    In both, `_DEFINITION_FORM` and both existing tripwires returned 0 for the
+    nested calls, so the static count said **1** against a runner total of **3**:
+    two executed cases documented as zero with every guard green.
+
+    This is the fourth composition axis in four cycles - after "which members
+    exist?" (a chain is not one link deep), "which line?" (a call can be split
+    from its paren) and "which terminal?" (a definition can be tagged) comes
+    "where is it nested?". The counted pattern is still `^it(|^test(`; a nested
+    form is therefore *reported* rather than silently mis-counted.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"\*nested\*"):
+        mod._static_renderer_counts()
+
+
+def test_doc_counts_stay_green_on_method_calls_and_prose_about_nesting(
+    tmp_path, monkeypatch
+) -> None:
+    """Counter-test for the nested tripwire: it must fire on calls, not text.
+
+    The tree is full of *method* calls whose name ends in `test` -
+    `expect(FENCE_END_RE.test("```"))` (markdown.test.ts:58) - and the line
+    anchor plus the `\\.`-before-keyword requirement is what keeps those quiet.
+    A docstring or comment mentioning `t.test(` must stay quiet too; this file is
+    written in prose about exactly these spellings, and a guard that reds on a
+    sentence gets deleted.
+
+    Measured the same cycle: 0 line-anchored hits across all 54 renderer/GUI test
+    files for the nested shapes, so this is a tripwire for a form the tree does
+    not use, not a filter over forms it does.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "it('a', () => {\n"
+        "  // t.test( is how node:test nests, but this line is a comment\n"
+        "  expect(FENCE_END_RE.test('```')).toBe(true);\n"
+        "  const re = /^it\\.each\\(/;\n"
+        "});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    counts = mod._static_renderer_counts()
+    assert counts == {"utils": 1}, counts
+
+
+def test_nested_definition_tripwire_is_empty_on_the_real_tree() -> None:
+    """The pinned boundary, on the real tree: the tripwire covers forms none use.
+
+    Stated as a measurement rather than an assumption - if a real test file ever
+    adopts a nested definition, this fails first and the fix is to teach the
+    counter, which is exactly the signal the tripwire is for.
+    """
+    guard = _loaded_guard_module()
+    # Walk the same two trees the static counters walk.
+    test_files = sorted(
+        list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.ts"))
+        + list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.tsx"))
+        + list((REPO_ROOT / "emrg" / "gui" / "test").rglob("*.test.js"))
+    )
+    assert len(test_files) >= 50, f"expected >=50 test files, found {len(test_files)}"
+    hits = {
+        path.relative_to(REPO_ROOT).as_posix(): guard._NESTED_DEFINITION_FORM.findall(
+            path.read_text(encoding="utf-8")
+        )
+        for path in test_files
+    }
+    tripped = {name: found for name, found in hits.items() if found}
+    assert not tripped, (
+        "a real test file now uses a nested definition form, so the static count "
+        f"would under-report it: {tripped}. Teach _count_definitions to count the "
+        "form and sync Agent.md."
+    )
+
+
+# --- The mid-line definition form (fifth escape, cyc20260911-011300) ----------
+#
+# A definition that shares its line with the preceding statement is an ordinary
+# `it(`/`test(` needing no exotic spelling - which is what makes it interesting:
+# the previous four escapes were all *spellings* the regex could not express,
+# while this one is the anchor itself. Every pattern in the guard is `^\s*`-anchored
+# to keep prose immunity, so `describe('s', () => { it(...) })` is uncountable by
+# construction. These tests pin the tripwire from both sides: it must fire on the
+# real shape, and it must stay silent on the tree's actual layout (where the
+# terminator and the next definition are always on consecutive lines).
+
+_MIDLINE_PROBE = "describe('s', () => { it('a', () => {}) });\n"  # kept for the docstring below
+
+
+def test_renderer_counts_fail_loud_on_a_midline_definition(tmp_path, monkeypatch) -> None:
+    """A definition on a shared line must be reported, not silently lost."""
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    body = "describe('s', () => { it('a', () => {}) });\n"
+    _renderer_tree(tmp_path, {"lib/midline.test.ts": body})
+    with pytest.raises(AssertionError, match="same line"):
+        mod._static_renderer_counts()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "before(); it('b', () => {});\n",
+        "if (x) { test('c', () => {}); }\n",
+        "const a = 1; it('d', () => {});\n",
+    ],
+)
+def test_midline_tripwire_fires_after_any_statement_terminator(tmp_path, monkeypatch, body) -> None:
+    """`;` and `{` both introduce the form - not just a closing suite brace."""
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    _renderer_tree(tmp_path, {"lib/variants.test.ts": body})
+    with pytest.raises(AssertionError, match="same line"):
+        mod._static_renderer_counts()
+
+
+def test_midline_tripwire_is_empty_on_the_real_tree() -> None:
+    """Measured boundary: no real test file defines a case on a shared line.
+
+    The same-line-only separator is what makes this true - allowing a newline
+    between the terminator and the definition matches the ordinary
+    `});`-then-`it(` layout and reports 595 false hits across the 54 files, so a
+    pattern that spanned lines would be deleted rather than obeyed.
+    """
+    guard = _loaded_guard_module()
+    test_files = sorted(
+        list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.ts"))
+        + list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.tsx"))
+        + list((REPO_ROOT / "emrg" / "gui" / "test").rglob("*.test.js"))
+    )
+    assert len(test_files) >= 50, f"expected >=50 test files, found {len(test_files)}"
+    tripped = {
+        path.relative_to(REPO_ROOT).as_posix(): guard._midline_definitions(
+            path.read_text(encoding="utf-8")
+        )
+        for path in test_files
+    }
+    tripped = {name: found for name, found in tripped.items() if found}
+    assert not tripped, (
+        "a real test file now defines a case on the same line as a preceding "
+        f"statement, so the static count under-reports it: {tripped}. Put it on "
+        "its own line, or teach _count_definitions the form and sync Agent.md."
+    )
+
+
+def test_midline_tripwire_ignores_prose_and_method_calls() -> None:
+    """The anchor, not a bare keyword, is what keeps this tripwire usable.
+
+    Unanchored, `it(`/`test(` also appears inside calls like `path.split(` - 184
+    hits across the tracked test files - so no `\\b`-style pattern can be used.
+    Anchoring on the previous statement's terminator keeps both the prose about
+    `it.each(` (this file is full of it) and the tree's real code silent.
+    """
+    guard = _loaded_guard_module()
+    for line in (
+        "expect(FENCE_END_RE.test('```'))",
+        'const parts = path.split(",");',
+        "// describe('s', () => { it('x', () => {}) });",
+    ):
+        assert not guard._midline_definitions(line), (
+            f"the mid-line tripwire fires on non-definition text: {line!r}"
+        )
+    # ...and it must still fire on a real call, so the immunity above is not
+    # simply the tripwire being blind.
+    assert guard._midline_definitions("describe('s', () => { it('a', () => {}) });")
+
+
+# --- Loop-wrapped definitions (sixth escape, cyc20260911-024442) --------------
+#
+# The first five escapes were all *lexical*: spellings the counted regex could
+# not express (`it.each`, tagged templates, chain links, nesting, a shared line).
+# This one is *structural* - the spelling is ordinary and countable, but the line
+# executes once per iteration of an enclosing loop. Measured 2026-09-11 with the
+# real vitest runner in emrg/gui/renderer: one visible `it(` inside a 3-element
+# `for...of` is `Tests 3 passed (3)` while the other five tripwires stay silent,
+# and a `describe` nested inside a loop behaves identically.
+#
+# Both directions are pinned, because a tripwire that fires on ordinary code is
+# worse than none: silence on all 54 real test files (they contain 18 loop
+# constructs, none of them wrapping a definition) and fire on every shape that
+# actually multiplies the count.
+
+_LOOP_PROBES = {
+    "for-of block": (
+        "describe('x', () => {\n"
+        "  for (const n of [1, 2, 3]) {\n"
+        "    it(`case ${n}`, () => {});\n"
+        "  }\n"
+        "});\n"
+    ),
+    "classic for": (
+        "for (let i = 0; i < 3; i++) {\n"
+        "  it('case ' + i, () => {});\n"
+        "}\n"
+    ),
+    "while": (
+        "let i = 0;\n"
+        "while (i < 3) {\n"
+        "  it('case ' + i, () => {});\n"
+        "  i++;\n"
+        "}\n"
+    ),
+    "forEach": (
+        "const cases = [1, 2, 3];\n"
+        "cases.forEach((n) => {\n"
+        "  it(`case ${n}`, () => {});\n"
+        "});\n"
+    ),
+    "describe nested in a loop": (
+        "for (const c of ['a', 'b', 'c']) {\n"
+        "  describe(`suite ${c}`, () => {\n"
+        "    it('inner', () => {});\n"
+        "  });\n"
+        "}\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("body", _LOOP_PROBES.values(), ids=list(_LOOP_PROBES))
+def test_renderer_counts_fail_loud_on_a_loop_wrapped_definition(
+    tmp_path, monkeypatch, body
+) -> None:
+    """A definition inside a loop must be reported, not counted once and passed.
+
+    Each of these is a real case the runner multiplies and the static counter
+    records once - the failure mode the previous five tripwires cannot see.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    _renderer_tree(tmp_path, {"lib/looped.test.ts": body})
+    with pytest.raises(AssertionError, match="inside a loop"):
+        mod._static_renderer_counts()
+
+
+def test_loop_tripwire_is_empty_on_the_real_tree() -> None:
+    """Measured boundary: no real test file defines a case inside a loop.
+
+    Stated as a measurement, not an assumption - if a real file ever adopts the
+    form, this fails first and the fix is to teach the counter, which is exactly
+    the signal the tripwire exists to give. The tree does contain loop
+    constructs (18 of them); a tripwire that fired on those would be deleted, so
+    the check must distinguish a loop that *wraps a definition* from one that
+    merely precedes later code.
+    """
+    guard = _loaded_guard_module()
+    test_files = sorted(
+        list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.ts"))
+        + list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.tsx"))
+        + list((REPO_ROOT / "emrg" / "gui" / "test").rglob("*.test.js"))
+    )
+    assert len(test_files) >= 50, f"expected >=50 test files, found {len(test_files)}"
+    tripped = {
+        path.relative_to(REPO_ROOT).as_posix(): guard._loop_wrapped_definitions(
+            path.read_text(encoding="utf-8")
+        )
+        for path in test_files
+    }
+    tripped = {name: found for name, found in tripped.items() if found}
+    assert not tripped, (
+        "a real test file now defines a case inside a loop, so the static count "
+        f"under-reports it: {tripped}. Write the cases out as separate `it(...)` "
+        "lines (the only shape this guard counts) or teach _count_definitions "
+        "the form and sync Agent.md - note that `it.each([...])` is itself "
+        "uncounted and would trip the chained-form tripwire instead."
+    )
+
+
+def test_loop_tripwire_ignores_loops_that_do_not_wrap_a_definition() -> None:
+    """The negative half: ordinary loops and prose must stay silent.
+
+    Every line here is legal TypeScript in a test file that contains no
+    loop-generated case. A false positive would force a rewrite of innocent
+    code, and a guard that cries wolf gets deleted - so the boundary is pinned
+    rather than assumed.
+    """
+    guard = _loaded_guard_module()
+    for line in (
+        # A loop closed on its own line, with unrelated code after it.
+        "for (const x of [1, 2]) { doWork(x); }\ndescribe('after', () => {\n  it('a', () => {});\n});\n",
+        # A loop fully closed before the definition, on separate lines.
+        "for (const x of [1, 2]) {\n  doWork(x);\n}\nit('after', () => {});\n",
+        # A loop *inside* a test body (the definition is outside it).
+        "it('runs a loop', () => {\n  for (const x of [1, 2]) { expect(x).toBe(x); }\n});\n",
+        # A one-liner iteration followed by an ordinary definition.
+        "cases.forEach((c) => a(c));\nit('after', () => {});\n",
+        # Prose about the form, which this file is full of.
+        "// for (const n of cases) { it(`c`, () => {}) }\nit('real', () => {});\n",
+        # Brace-like characters inside string literals must not unbalance it.
+        "it('braces', () => {\n  expect(x).toBe('{');\n});\nit('next', () => {});\n",
+        # A plain file with no loops at all.
+        "describe('d', () => {\n  it('a', () => {});\n  it('b', () => {});\n});\n",
+    ):
+        assert not guard._loop_wrapped_definitions(line), (
+            f"the loop tripwire fires on ordinary code, which would force a "
+            f"rewrite of innocent tests: {line!r}"
+        )
+    # ...and it must still fire on a real loop-wrapped definition, so the
+    # silence above is not simply the tripwire being blind.
+    assert guard._loop_wrapped_definitions(_LOOP_PROBES["for-of block"])
+
+
+def test_repair_hints_name_a_form_the_counter_actually_counts() -> None:
+    """A hint is a product: the shape it recommends must be a shape that works.
+
+    Written after catching this in my own change: the loop tripwire's first
+    draft told the reader to generate cases with `it.each([...])`, which is
+    **itself uncounted** (`_DEFINITION_FORM` requires `(` immediately after the
+    keyword, so it scores 0) and trips the chained-form tripwire above. Following
+    that advice would swap a silent undercount for a loud failure - the same
+    defect class as reporting an unrecognised conflict layout as a content
+    conflict, and only findable by running the recommendation.
+
+    The contract: any `it…(…)` form a repair hint recommends must score exactly
+    one under `_DEFINITION_FORM` and trip none of the tripwires.
+    """
+    guard = _loaded_guard_module()
+    recommended = [
+        "it('case', () => {});\n",
+        "test('case', () => {});\n",
+    ]
+    for body in recommended:
+        assert len(guard._DEFINITION_FORM.findall(body)) == 1, (
+            f"a hint recommends {body!r} but the counter does not count it once"
+        )
+        for name in (
+            "_CHAINED_DEFINITION_FORM",
+            "_SUITE_PARAMETERISED_FORM",
+            "_NESTED_DEFINITION_FORM",
+        ):
+            assert not getattr(guard, name).findall(body), (
+                f"a hint recommends {body!r} but {name} trips on it, so the "
+                "recommendation would fail loudly instead of fixing the count"
+            )
+        assert not guard._midline_definitions(body)
+        assert not guard._loop_wrapped_definitions(body)
+
+    # The counter-example, measured: this is what the draft hint said to use.
+    # It is pinned as *uncounted*, so a future edit cannot quietly re-recommend
+    # it without this test failing.
+    each = "it.each([1, 2, 3])('case %i', () => {});\n"
+    assert len(guard._DEFINITION_FORM.findall(each)) == 0
+    assert guard._CHAINED_DEFINITION_FORM.findall(each)
+
+
