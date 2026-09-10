@@ -179,22 +179,43 @@ _CHILD = (
     "    label = 'PINNED' if pinned else 'UNPINNED'\n"
     "    try:\n"
     "        out = subprocess.run(child, capture_output=True, **kw).stdout\n"
-    # Report the *length* only: the decoded text contains U+FFFD, and printing it
-    # here would make the child's own stdout raise under the hostile locale -
-    # i.e. the probe would fail for a reason unrelated to what it measures.
-    "        print(label, 'OK', len(out))\n"
-    "    except UnicodeDecodeError as e:\n"
-    "        print(label, 'RAISED', type(e).__name__)\n"
+    "    except UnicodeDecodeError:\n"
+    # POSIX: the decode happens in the parent, so the error propagates here.
+    "        print(label, 'NO-TEXT', 'raised')\n"
+    "        continue\n"
+    # Windows: the decode happens in subprocess's reader thread, `threading`
+    # swallows the error, and the stream comes back as None. Both shapes are the
+    # same failure - "no usable text" - so the probe must accept either, or it
+    # would report the Windows behaviour as a pass for the wrong reason.
+    "    if not isinstance(out, str):\n"
+    "        print(label, 'NO-TEXT', 'none')\n"
+    "        continue\n"
+    # Only the *length* is printed: the decoded text holds U+FFFD, and printing
+    # it here would make the child's own stdout raise under the hostile locale.
+    "    print(label, 'TEXT', len(out))\n"
 )
 
 
 @pytest.mark.parametrize("locale_codec", ["C", "en_US.ISO-8859-1"])
 def test_pinned_decoding_survives_a_hostile_locale(locale_codec: str) -> None:
-    """Behavioural half: pinning returns text exactly where the unpinned shape raises.
+    """Behavioural half: pinning returns text exactly where the unpinned shape does not.
 
-    Both shapes run in the same child under an explicitly non-UTF-8 locale, so
-    the difference is real on any host - including a UTF-8 developer machine,
-    where an unpinned decode would succeed and this test would prove nothing.
+    Both shapes run in the same child under an explicitly non-UTF-8 locale, so the
+    difference is real on any host - including a UTF-8 developer machine, where an
+    unpinned decode would succeed and this test would prove nothing.
+
+    The unpinned failure has **two measured shapes**, and the probe accepts both
+    because the first version of this test accepted only the first one and went
+    red on the Windows CI job:
+
+    * POSIX - the decode runs in the parent, so `UnicodeDecodeError` propagates
+      out of `subprocess.run`;
+    * Windows - the decode runs in subprocess's reader thread, `threading`
+      swallows the error, and the stream comes back as `None`.
+
+    The second shape is the one issue #1132 is about, and it is only visible on
+    the platform where this class of bug actually bites: on a POSIX host the
+    `None` branch is unreachable, so nothing here would have caught it.
     """
     env = dict(os.environ, PYTHONUTF8="0", LC_ALL=locale_codec, LANG=locale_codec)
     proc = subprocess.run(
@@ -207,12 +228,14 @@ def test_pinned_decoding_survives_a_hostile_locale(locale_codec: str) -> None:
         check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "PINNED OK" in proc.stdout, (
+    assert "PINNED TEXT" in proc.stdout, (
         "pinned decoding must return text; got:\n" + proc.stdout + proc.stderr
     )
-    assert "UNPINNED RAISED" in proc.stdout, (
-        "the unpinned shape must be shown to fail here, else this test would "
-        "pass on a UTF-8 host and prove nothing:\n" + proc.stdout + proc.stderr
+    assert "UNPINNED NO-TEXT" in proc.stdout, (
+        "the unpinned shape must be shown to yield no usable text here, else this "
+        "test would pass on a UTF-8 host and prove nothing:\n"
+        + proc.stdout
+        + proc.stderr
     )
 
 
