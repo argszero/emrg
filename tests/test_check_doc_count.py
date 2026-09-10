@@ -91,6 +91,15 @@ def test_tool_pattern_agrees_with_the_guard(mod) -> None:
     text = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
     guard_match = guard.search(text)
     assert guard_match, "the guard's own pattern no longer matches Agent.md"
+    # Fail with the reason, not an IndexError: a pattern edit that drops the
+    # capture group is exactly the failure this test exists to catch -- measured,
+    # the first version of this test raised `IndexError: no such group` here and
+    # said nothing about the guard having changed.
+    assert guard.groups >= 1, (
+        "the guard's count pattern no longer captures the number as group 1; "
+        "this test compares through that group, so it must be updated alongside "
+        f"the guard: {_guard_pattern()!r}"
+    )
     assert int(guard_match.group(1)) == mod.documented_count(text)
 
 
