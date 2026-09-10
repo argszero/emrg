@@ -31,6 +31,20 @@ Two orthogonal rules (either alone has a blind spot — #1119 review)
    canonical paths that declares the repo's own version in a *declaration
    position*. Catches an **un-bumped** copy at a renamed path.
 
+Coverage boundary, stated rather than implied — a copy that is *both* renamed
+and bumped escapes both rules (verified: `.emrg-gap/snapshot.py` containing
+``__version__ = "1.1.1"`` is flagged by neither). The observed incident *is*
+covered, because copying the version sources preserves their filenames and
+that is what the path rule keys on. Closing the residual case would need a
+version-agnostic *shape* rule plus an explicit exception list for files that
+legitimately carry a version literal (`emrg/gui/renderer/package*.json` is a
+genuinely separate JS package, `tests/test_skills_registry.py` uses
+``"version"`` for skill records, plus the bump tool and its tests). Proposed
+by how2how2how2-arch during #1119 review and deliberately **not** adopted: an
+allowlist like that is itself a maintenance liability, and the path rule
+already covers the mechanism this repo's release workflow actually produces.
+This docstring says so instead of implying the whole class is closed.
+
 Version-matching alone was the original design and was ineffective against the
 actual incident: `.emrg-cmp2/` was bumped to `1.1.1`, so no marker built from
 the repo's current version could ever match it — a reconstructed leak shape
