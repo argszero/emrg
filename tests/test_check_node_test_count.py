@@ -307,3 +307,57 @@ def test_real_tree_is_consistent() -> None:
         f"Agent.md documents {documented} but the runners executed {(renderer, gui)} "
         "- run scripts/check-node-test-count.py --write"
     )
+
+
+def test_ci_gate_uses_the_check_mode_not_the_preview(mod) -> None:
+    """The CI step must call the bare form, whose exit code actually gates.
+
+    Measured 2026-09-11, while wiring this tool into `test.yml`: on a drifted doc
+    the bare invocation exits **1**, `--write` exits 0 (it repaired), and
+    `--dry-run` exits **0** too - it prints `FAIL` and then reports what a repair
+    *would* do. A gate written as `--dry-run` is therefore green forever, which is
+    the failure mode this whole file exists to prevent: a check that reads as
+    coverage while checking nothing.
+
+    Asserted at the level of the exit codes *and* the workflow text, because
+    either half alone can drift: the codes could stay right while the step adds a
+    flag, or the step could be correct while a refactor changes the codes.
+    """
+    # Exit-code contract, driven with an injected drift.
+    import pathlib
+    import tempfile
+
+    doc = REPO_ROOT / "Agent.md"
+    text = doc.read_text(encoding="utf-8")
+    drifted = mod.GUI_LINE.sub(lambda m: m.group("head") + "1" + m.group("tail"), text, count=1)
+    assert drifted != text, "the GUI count line must patch for this test to mean anything"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = pathlib.Path(tmp) / "Agent.md"
+        fake.write_text(drifted, encoding="utf-8")
+        mod.DOC = fake
+        mod.measured_renderer = lambda: 514
+        mod.measured_gui = lambda: 100
+
+        assert mod.main([]) == 1, "the bare form must fail on drift - CI gates on it"
+        assert mod.main(["--dry-run"]) == 0, (
+            "if this ever becomes 1, the comment above is stale and the workflow "
+            "step may safely use either form"
+        )
+
+    workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(encoding="utf-8")
+    hits = [
+        line.strip()
+        for line in workflow.splitlines()
+        if "check-node-test-count.py" in line
+    ]
+    assert hits, (
+        "no CI step runs scripts/check-node-test-count.py, so the static model in "
+        "tests/test_doc_counts.py is never corroborated by the real runners - the "
+        "exact gap #1126 built this tool to close"
+    )
+    for hit in hits:
+        assert "--dry-run" not in hit and "--write" not in hit, (
+            f"the CI step must use the bare check form: {hit!r} - `--dry-run` exits "
+            "0 on drift and `--write` would rewrite the repo under CI"
+        )

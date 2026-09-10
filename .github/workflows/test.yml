@@ -25,15 +25,35 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
+      - name: Install Node deps (GUI + renderer)
+        run: |
+          # GUI: `--omit=dev` keeps electron/electron-builder out (the suite is
+          # plain `node --test`), exactly as the pre-existing step did. Renderer
+          # needs its devDependencies - vitest, tsc and vite all live there.
+          (cd emrg/gui && npm ci --omit=dev)
+          (cd emrg/gui/renderer && npm ci)
+      # #1125 lesson: pytest guards the Agent.md counts *statically* (it counts
+      # `it(`/`test(` in the source), and the pytest job has no node_modules to
+      # check that model against the runners. Four separate escapes have been
+      # found by hand (chained members, line-split calls, tagged templates,
+      # nested subtests) - each one a form the static regex cannot see while the
+      # runner executes it. `check-node-test-count.py` closes that loop the other
+      # way round: it asks vitest and `node --test` what they actually executed
+      # and fails if Agent.md disagrees. It needs node_modules, which is why it
+      # lives here rather than in the pytest job.
+      #
+      # ⚠️ No flag: the *bare* invocation is the check mode (exit 1 on drift,
+      # writes nothing). `--dry-run` is the preview of a repair and exits 0 even
+      # when it prints FAIL - measured 2026-09-11, so gating on it would have
+      # been a green step that never fails. `--write` is for a human/host.
+      - name: Agent.md Node counts match the real runners
+        run: uv run --no-sync python3 scripts/check-node-test-count.py
       - name: GUI unit tests (G55)
         working-directory: emrg/gui
-        run: |
-          npm ci --omit=dev
-          EMRG_SKIP_INTEGRATION=1 npm test
+        run: EMRG_SKIP_INTEGRATION=1 npm test
       - name: GUI renderer React suite (migration Batch 0)
         working-directory: emrg/gui/renderer
         run: |
-          npm ci
           npm run typecheck
           npm test
           npm run build
