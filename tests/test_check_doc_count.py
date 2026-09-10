@@ -289,3 +289,62 @@ def test_real_tree_is_consistent() -> None:
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "OK: Agent.md documents" in proc.stdout
+
+
+# --- the repair hint itself must be a command that runs -----------------------
+
+
+def test_every_repair_hint_prints_one_runnable_command(mod, monkeypatch, tmp_path, capsys) -> None:
+    """Every site that tells someone how to repair the count must agree.
+
+    Measured (cycle cyc20260910-191242, main clone): the canonical form exits 0,
+    while the bare `python3` form the drift hint used to print exits 2 having
+    measured nothing - the host's `python3` cannot import pytest. The guard's
+    message, this tool's error hint and Agent.md already used the canonical form,
+    so the drift hint was the one site sending the reader into a second failure.
+    A hint that fails is worse than no hint: it looks like a next step.
+
+    All four sites are checked here (tool source, tool drift output, tool error
+    output, guard message, plus Agent.md), because the defect was precisely a
+    disagreement between them.
+    """
+    canonical = "uv run --no-sync python3 scripts/check-doc-count.py"
+    assert mod.INVOCATION == canonical
+
+    source = SCRIPT.read_text(encoding="utf-8")
+    hits = list(re.finditer(r"python3 scripts/check-doc-count\.py", source))
+    assert hits, "the tool no longer mentions its own invocation at all"
+    for hit in hits:
+        prefix = source[max(0, hit.start() - len("uv run --no-sync ")) : hit.start()]
+        assert prefix == "uv run --no-sync ", (
+            "a hint in scripts/check-doc-count.py spells the invocation without the "
+            f"project runner: ...{source[max(0, hit.start() - 40) : hit.end() + 20]!r}"
+        )
+
+    doc = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
+    assert canonical in doc, "Agent.md no longer documents the canonical invocation"
+    assert any(
+        f"Fix with: {canonical} --write" in message
+        for message in _guard_assert_messages()
+    ), "the pytest guard's failure message no longer prints the canonical fix command"
+
+    # Drift state, for real: the printed line must be the runnable one.
+    mod.DOC = _doc(tmp_path, 1307)
+    monkeypatch.setattr(mod, "measured_count", lambda: 1308)
+    assert mod.main([]) == 1
+    assert f"Fix with: {canonical} --write" in capsys.readouterr().out
+
+    # Error state: the interpreter advice must be the same spelling. A fresh
+    # module, because `measured_count` on `mod` is stubbed above to reach the
+    # drift path, and this half needs the real function to run.
+    fresh = _load_module()
+
+    class _Proc:
+        returncode = 4
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(fresh.DocCountError) as excinfo:
+        fresh.measured_count()
+    assert f"`{canonical}`" in str(excinfo.value)

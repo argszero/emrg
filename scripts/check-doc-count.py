@@ -63,6 +63,16 @@ COUNT_LINE = re.compile(r"(?P<head>uv run pytest tests/ -v` \()(?P<count>\d+)(?P
 
 COLLECTED = re.compile(r"(\d+) tests? collected")
 
+# The one spelling of "run this tool" that every hint in this repo prints: this
+# module's two hints, the pytest guard's failure message, and Agent.md's doc
+# line. Measured 2026-09-10 (cyc20260910-191242) in the main clone: this form
+# exits 0, while the bare `python3` form the drift hint used to print exits 2
+# without measuring anything - the host's `python3` has no pytest, so a hint
+# spelled that way sends the reader straight into a second failure. A hint is
+# only worth printing if it runs; keep the spelling here and let
+# tests/test_check_doc_count.py prove the other sites agree with it.
+INVOCATION = "uv run --no-sync python3 scripts/check-doc-count.py"
+
 
 class DocCountError(Exception):
     """The doc or the tree is not in a shape this tool can act on."""
@@ -81,7 +91,7 @@ def measured_count() -> int:
             f"pytest --collect-only failed (rc={proc.returncode}):\n"
             + (proc.stdout[-2000:] + proc.stderr[-2000:]).strip()
             + "\n\nhint: run this with the project interpreter, e.g."
-            " `uv run --no-sync python3 scripts/check-doc-count.py`"
+            f" `{INVOCATION}`"
         )
     match = COLLECTED.search(proc.stdout)
     if not match:
@@ -165,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         f"but {measured} are collected"
     )
     if not (args.write or args.dry_run):
-        print("\nFix with: python3 scripts/check-doc-count.py --write")
+        print(f"\nFix with: {INVOCATION} --write")
         return 1
 
     if args.dry_run:
