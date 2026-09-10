@@ -272,7 +272,7 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
     if not chain:
         raise PushError("internal: empty commit chain")
 
-    print(f"  base: {base or '(new branch — nothing on remote yet)'}")
+    print(f"  base: {base or '(new branch - nothing on remote yet)'}")
     print(f"  uploading {len(chain)} commit(s)...", flush=True)
 
     # ---- upload objects bottom-up, mapping local -> remote shas

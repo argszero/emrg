@@ -36,14 +36,39 @@ docstring half of the same output path unguarded — the first version of this
 file asserted the opposite ("docstrings cannot crash a caller"), which is true
 of a docstring nobody prints and false of one argparse prints.
 
+A fourth instance, reported by an external contributor and reproduced here: the
+first version of the static rule collected only an f-string's literal *segments*,
+so a literal inside a replacement field was invisible to it —
+
+    print(f"  base: {base or '(new branch — nothing on remote yet)'}")
+
+— and exactly that shape survived on ``push-branch-from-api.py`` (the same em
+dash was fixed at a sibling call site in the same file, and this rule passed the
+file). Measured: with the em dash real, that line exits 1 with
+``UnicodeEncodeError`` under ``ascii``/``latin-1`` and rc=0 under ``gbk``, on the
+script's normal "new branch" path. The rule now descends the whole argument
+subtree (and ``print``'s ``end=``/``sep=`` keywords), and
+``test_nested_print_literal_is_both_flagged_and_fatal`` pins the shape.
+
 Boundary (stated, not implied): these pin literal output. Data-driven output —
 say a CJK path interpolated into a message — is not covered, and neither are
 shell scripts: bash writes bytes straight to the fd, so a legacy console shows
 mojibake instead of raising, which is a different (and non-fatal) failure.
-Comments are exempt: no Python path prints one, and where a traceback echoes a
-source line the interpreter escapes the unencodable character (verified: a
-trailing ``# ... \u2014 ...`` on a failing line prints as ``\\u2014`` under
-``PYTHONIOENCODING=ascii`` with exit 1, not ``UnicodeEncodeError``).
+
+Two exclusions, both **measured** rather than assumed (a claim of this kind was
+already wrong once in this file):
+
+* **Comments** — no Python path prints one, and where a traceback echoes a
+  source line the interpreter escapes the unencodable character. Measured with a
+  *real* U+2014 in a trailing comment on a failing line: ``rc=1``, stderr
+  ASCII-encodable, the character rendered as ``\\u2014``, no
+  ``UnicodeEncodeError`` under ``ascii`` or ``latin-1``.
+* **``raise SomeError("…—…")`` and ``sys.exit("…—…")``** — their messages go
+  through CPython's traceback writer, which escapes the same way (measured: the
+  same probe shape, ``rc=1``, message printed as ``remote ref update rejected
+  (non-fast-forward?) \\u2014 …``, stderr encodable). They are not crash paths
+  and are deliberately not covered; this is why ``push-branch-from-api.py``'s
+  ``raise PushError(...)`` keeps its em dash while its ``print`` did not.
 """
 
 from __future__ import annotations
@@ -63,14 +88,29 @@ SCRIPTS = REPO_ROOT / "scripts"
 
 
 def _printed_literals(path: Path) -> list[tuple[int, str]]:
-    """Every string literal written at a print()/stdout.write()/stderr.write() call.
+    """Every string literal anywhere inside a print()/stdout.write() argument.
 
-    Only the literal *segments* are returned: an f-string's interpolations are
-    values, not text the author chose, so a name or path holding non-ASCII is
-    out of scope here (see the module docstring's boundary note). Also out of
-    scope: a literal defined elsewhere and printed by name (``MSG = "...";
-    print(MSG)``) — this rule reads the call site, not the dataflow. The
-    behavioural tests are what cover indirection.
+    The scan descends the whole argument subtree, so a literal nested inside an
+    f-string's replacement field counts:
+
+        print(f"  base: {base or '(new branch — nothing on remote yet)'}")
+
+    That is text the author chose and pyflakes-style reading of the *literal
+    segments* misses it — which is exactly how one site survived the first
+    version of this rule (``push-branch-from-api.py``: the same em dash was
+    fixed at one call site and passed over at another; see the module docstring).
+    ``print``'s ``end=``/``sep=`` keywords are covered too, since they are written
+    to the same stream.
+
+    Deliberately an over-approximation: a non-ASCII literal that appears in the
+    argument subtree but never reaches the stream (say an f-string subscript key,
+    ``print(d["键"])``) is flagged as well. The cost is one trivial edit for the
+    author; the alternative is a rule whose stated scope is wider than what it
+    reads, which is the failure mode this file exists to avoid.
+
+    Still out of scope: a literal defined elsewhere and printed by name
+    (``MSG = "..."; print(MSG)``) — this rule reads the call site, not the
+    dataflow. The behavioural tests are what cover indirection.
     """
     found: list[tuple[int, str]] = []
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -87,16 +127,11 @@ def _printed_literals(path: Path) -> list[tuple[int, str]]:
         )
         if not (is_print or is_write):
             continue
-        for arg in node.args:
-            if isinstance(arg, ast.Constant):
-                segments = [arg]
-            elif isinstance(arg, ast.JoinedStr):
-                segments = [v for v in arg.values if isinstance(v, ast.Constant)]
-            else:
-                continue
-            for seg in segments:
-                if isinstance(seg.value, str):
-                    found.append((seg.lineno, seg.value))
+        roots = [*node.args, *(kw.value for kw in node.keywords)]
+        for root in roots:
+            for inner in ast.walk(root):
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    found.append((inner.lineno, inner.value))
     return found
 
 
@@ -126,6 +161,46 @@ def test_script_printed_literals_are_ascii() -> None:
         "encodable by any console codec; found non-ASCII in printed/written "
         "strings:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_nested_print_literal_is_both_flagged_and_fatal(tmp_path: Path) -> None:
+    """The rule must read inside an f-string's replacement field.
+
+    The first version of this rule collected only the literal *segments* of an
+    f-string, so this shape was invisible to it:
+
+        print(f"  base: {base or '(new branch - nothing on remote yet)'}")
+
+    One such site survived on ``push-branch-from-api.py`` for exactly that
+    reason — the same em dash had been fixed at a sibling call site in the same
+    file, and this rule passed the file. The test pins both halves: the helper
+    reports the nested literal, and a file with that line really does abort
+    under a codec that cannot encode it. Anchoring the rule to a measured crash
+    (rather than a plausible one) is the point — the previous boundary claim in
+    this file was wrong because it was asserted, not run.
+    """
+    dash = "\u2014"
+    probe = tmp_path / "nested_probe.py"
+    probe.write_text(
+        "base = None\n"
+        "print(f\"  base: {base or '(new branch " + dash + " nothing on remote yet)'}\")\n",
+        encoding="utf-8",
+    )
+    # Guard the guard: the em dash must be a real character, not an escape
+    # sequence that would make this test pass vacuously.
+    assert dash.encode("utf-8") in probe.read_bytes()
+
+    nested = [(line, text) for line, text in _printed_literals(probe) if not text.isascii()]
+    assert nested, "a literal inside an f-string replacement field was not scanned"
+
+    proc = subprocess.run(
+        [sys.executable, str(probe)],
+        env=dict(os.environ, PYTHONIOENCODING="ascii"),
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert b"UnicodeEncodeError" in proc.stderr, proc.stderr
 
 
 def _help_text_literals(path: Path) -> list[tuple[str, str]]:
