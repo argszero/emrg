@@ -38,6 +38,15 @@ def _tracked_source_files() -> list[str]:
     construction. It also skips the untracked/ignored trees (`.venv/`,
     `node_modules/`, `dist/`, `.pytest_cache/`) for free, which is why the test
     stays fast.
+
+    ⚠️ git emits the index path with the *platform* separator: POSIX gives
+    `tests/x.py`, Windows gives a backslash. Measured 2026-09-10 on the
+    `windows-2025` CI runner: the first version of this fix failed there
+    because the returned names carried backslashes while the assertions
+    compared them against forward-slash paths. Normalising via
+    `Path.as_posix()` makes the names comparable on every platform, and
+    `Path` still accepts forward slashes on Windows, so the names stay
+    usable for opening the files.
     """
     listed = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.py", "*.md"],
@@ -50,7 +59,7 @@ def _tracked_source_files() -> list[str]:
         encoding="utf-8",
         check=True,
     ).stdout
-    return sorted(name for name in listed.split("\0") if name)
+    return sorted(Path(name).as_posix() for name in listed.split("\0") if name)
 
 
 def _collect_source_files() -> list[Path]:
@@ -94,6 +103,27 @@ def test_scan_reaches_outside_the_emrg_package():
         f"expected most tracked sources to live outside emrg/, got "
         f"{len(outside)} outside vs {len(inside)} inside"
     )
+
+
+def test_scanned_names_use_forward_slashes():
+    """Scanned paths must be normalised, not platform-dependent.
+
+    Regression guard for a real CI failure: `git ls-files` emits the index path
+    with the platform separator, so on `windows-2025` these names came back as
+    `tests\\test_conflict_markers.py` and every forward-slash assertion in
+    `test_scan_reaches_outside_the_emrg_package` failed - a guard that passes on
+    the developer's machine and fails only in CI. Asserting on the *form* of
+    the names, not just their presence, is what pins this: the names are paths
+    into a repo whose canonical form is forward slashes.
+    """
+    names = _tracked_source_files()
+    assert names, "no tracked source files returned"
+    backslashed = [name for name in names if "\\" in name]
+    assert not backslashed, (
+        "scanned paths contain backslashes, so they are not normalised and will "
+        f"not compare equal to repo-relative paths on every platform: {backslashed[:5]}"
+    )
+    assert all(not name.startswith("/") for name in names), "paths must be repo-relative"
 
 
 def test_no_conflict_markers():
