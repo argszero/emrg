@@ -43,12 +43,18 @@ def _tracked_source_files() -> list[str]:
     `tests/x.py`, Windows gives a backslash. Measured 2026-09-10 on the
     `windows-2025` CI runner: the first version of this fix failed there
     because the returned names carried backslashes while the assertions
-    compared them against forward-slash paths. Normalising via
-    `Path(name).as_posix()` would fix Windows only by accident - `Path` *is*
-    `WindowsPath` there, and on POSIX it leaves a backslash untouched, so the
-    behaviour could not be exercised on the machine that writes the code.
-    `_split_ls_files` normalises the string explicitly instead, which behaves
-    identically everywhere and is directly testable.
+    compared them against forward-slash paths.
+
+    There are therefore **two** places a backslash can enter, and fixing only
+    the first left CI red for a second round (measured 2026-09-10):
+
+    1. the string git emits - handled by `_split_ls_files`;
+    2. `str(Path.relative_to(...))`, which uses the platform separator too, so
+       every consumer below must use `.as_posix()`.
+
+    Both are pinned by `test_scanned_names_use_forward_slashes`, which drives
+    the string-level split with Windows-shaped input and asserts on the form of
+    the names actually collected.
     """
     listed = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.py", "*.md"],
@@ -96,7 +102,7 @@ def test_scan_reaches_outside_the_emrg_package():
     scope is pinned. Measured 2026-09-10: 85 of the 143 tracked `.py`/`.md`
     files live outside `emrg/`.
     """
-    scanned = {str(p.relative_to(REPO_ROOT)) for p in _collect_source_files()}
+    scanned = {p.relative_to(REPO_ROOT).as_posix() for p in _collect_source_files()}
     for required in (
         "Agent.md",
         "README.md",
@@ -141,6 +147,13 @@ def test_scanned_names_use_forward_slashes():
     assert _split_ls_files("tests/x.py\0Agent.md\0") == ["Agent.md", "tests/x.py"]
     assert _split_ls_files("") == []
 
+    # The second entry point for backslashes: str(Path.relative_to(...)).
+    # On Windows this yields `tests\\x.py`, so every consumer has to use
+    # .as_posix(). Skipping this check left CI red for a second round.
+    assert (REPO_ROOT / "tests" / "test_conflict_markers.py").relative_to(
+        REPO_ROOT
+    ).as_posix() == "tests/test_conflict_markers.py"
+
     # And the real tree, on whatever platform this runs.
     names = _tracked_source_files()
     assert names, "no tracked source files returned"
@@ -170,7 +183,7 @@ def test_no_conflict_markers():
             stripped = line.strip()
             if stripped.startswith(CONFLICT_START) or stripped.startswith(CONFLICT_END):
                 violations.append(
-                    (str(file_path.relative_to(REPO_ROOT)), lineno, stripped[:80])
+                    (file_path.relative_to(REPO_ROOT).as_posix(), lineno, stripped[:80])
                 )
 
     if violations:
