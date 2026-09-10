@@ -6,7 +6,15 @@ node_modules/
 .emrg/logs/
 .emrg/decisions/
 .here-claude/
+# `.emrg` is an exact match, so it does NOT cover the scratch trees this repo's
+# own workflows create (`.emrg-cmp`, `.emrg-cmp2`, `.emrg-wt-*`, `.emrg-verify`).
+# Those are verification artifacts, never deliverables: one leaked into a PR as
+# ~272 KB / 5518 lines of a duplicated version tree (caught by an external
+# contributor, cycle cyc20260910-150729). Widen the pattern so the intent that
+# line states is actually enforced. Verified safe: `git ls-files | grep '^\.emrg'`
+# is empty, so no tracked path is swept by this.
 .emrg
+.emrg-*/
 .claude
 .pytest_cache/
 /dist/
