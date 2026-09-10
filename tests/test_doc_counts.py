@@ -160,17 +160,38 @@ _RENDERER_TEST_SUFFIX = ".test"
 _DEFINITION_KEYWORD = r"(?:it|test)"
 _DEFINITION_FORM = re.compile(rf"^\s*{_DEFINITION_KEYWORD}\(", re.M)
 
+# The *suite* a definition can hang off. `it`/`test` are the counted keywords;
+# `describe` is not counted at all, but both runners let it own parameterised
+# definitions that still register cases the plain regex never sees:
+#   vitest    - `describe.each([...])("name", () => { ... })` runs the whole
+#               callback once per row, so every `it(` inside it is executed N
+#               times while the static count records them once.
+#   node:test - `describe.for(rows)("name", ...)` is the parameterised suite form
+#               (`test.each` is undefined in node:test).
+# A second regex rather than a wider first one: the counted count must stay
+# `^it(|^test(` only, or the count itself changes.
+_SUITE_KEYWORD = r"(?:describe)"
+_SUITE_PARAMETERISED_FORM = re.compile(
+    rf"^\s*{_SUITE_KEYWORD}\.(?:each|for)\(", re.M
+)
+
 # Every *callable* member the two runners put on the definition function, none of
 # which the regex above can match (it requires `(` right after the keyword), and
 # every one of which registers a case the runner still executes:
 #   vitest  - `each`/`for` (one case per row/table) plus the option setters
 #             `skip`/`only`/`todo`/`fails`/`concurrent`/`sequential`/`skipIf`/`runIf`
 #             (ChainableTestContextMap + TestForFunction in @vitest/runner).
-#   node:test - `skip`/`todo`/`only` (`test.each` is undefined there; its
-#             parameterised form is `for` on the *suite*, i.e. `describe.for`).
+#   node:test - `skip`/`todo`/`only` (`test.each` is undefined there).
 # Derived from the counted keyword so the two cannot drift apart.
+#
+# Anchored to line start (`^\s*`, as the counted regex and MODULE_SKIP_ENTRY
+# are) rather than `\b`: called anywhere in the line, this pattern is *text*,
+# so a comment or a string literal merely mentioning `it.each(` would trip it.
+# The guard's job is to stop drift, not to police prose about drift - prose is
+# what this file is full of. A real call is the statement on its own line.
 _CHAINED_DEFINITION_FORM = re.compile(
-    rf"\b{_DEFINITION_KEYWORD}\.(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)\("
+    rf"^\s*{_DEFINITION_KEYWORD}\.(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)\(",
+    re.M,
 )
 
 
@@ -182,13 +203,12 @@ def _count_definitions(path: Path) -> int:
     such as `expect(FENCE_END_RE.test("```"))` is not a definition - the chained
     form above requires a modifier keyword after the dot, so RegExp's own
     `.test(` matches neither regex, and a file full of such calls still counts
-    correctly.
+    correctly. Likewise a comment *describing* `it.each(` is not a definition;
+    both patterns are line-anchored so prose cannot red the guard.
 
-    The chained list is every callable member the runners expose, not just the
-    ones seen in this tree today (measured 2026-09-10: widening it to
-    `for`/`skipIf`/`runIf` found those three were still silently under-counted as
-    0 while the first four spellings tripped). A tripwire that misses a spelling
-    is worse than none, because it reads as coverage.
+    Both checks are line-anchored, so each is tripped by a real call and only a
+    real call. A tripwire that fires on prose would be trained away, and one
+    that misses a spelling is worse than none because it reads as coverage.
     """
     text = path.read_text(encoding="utf-8")
     uncounted = _CHAINED_DEFINITION_FORM.findall(text)
@@ -198,6 +218,16 @@ def _count_definitions(path: Path) -> int:
         "start of a line, so these definitions would be missing from Agent.md's "
         "breakdown while the runner still registers them. Teach "
         "_count_definitions to count this form (and sync Agent.md) before "
+        "using it."
+    )
+    suites = _SUITE_PARAMETERISED_FORM.findall(text)
+    assert not suites, (
+        f"{path} uses parameterised *suite* forms the doc-count guard cannot "
+        f"count: {sorted(set(suites))}. The guard counts `it(`/`test(` once "
+        "each, but a suite body runs once per row, so every definition inside "
+        "it executes more times than Agent.md records while the runner's own "
+        "total stays honest - the same silent drift, one level up. Teach "
+        "_count_definitions to expand this form (and sync Agent.md) before "
         "using it."
     )
     return len(_DEFINITION_FORM.findall(text))
@@ -510,3 +540,50 @@ def test_count_definitions_ignores_a_regex_method_call(tmp_path, monkeypatch) ->
     )
     _renderer_tree(tmp_path, {"lib/markdown.test.ts": body})
     assert mod._static_renderer_counts() == {"markdown": 2}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "describe.each([[1], [2]])('suite %i', () => {\n  it('a', () => {});\n});\n",
+        "describe.for([1, 2])('suite %i', () => {\n  it('a', () => {});\n});\n",
+    ],
+    ids=["vitest-describe-each", "node-test-describe-for"],
+)
+def test_doc_counts_fail_loud_on_a_parameterized_suite(tmp_path, monkeypatch, body) -> None:
+    """A parameterised *suite* hides the same drift one level up.
+
+    `describe.each([...])(...)` is vitest's parameterised suite and
+    `describe.for(rows)(...)` is node:test's; both run the whole callback once
+    per row, so the `it(` definitions inside execute N times while the static
+    count records them once. The prior tripwire's own comment named
+    `describe.for` as a live form while its pattern could not match it - a
+    documented hole that read as coverage (cyc20260910-230247).
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"parameterised \*suite\*"):
+        mod._static_renderer_counts()
+
+
+def test_doc_counts_stay_green_on_prose_about_a_chained_form(tmp_path, monkeypatch) -> None:
+    """A comment mentioning a chained form must NOT trip the tripwire.
+
+    Both patterns are line-anchored (`^\\s*`), so only a real call - the
+    statement on its own line - counts as a hit. A text-level pattern would make
+    this file's own explanatory comments unspeakable, and a guard that fires on
+    prose is a guard that gets disabled rather than fixed.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "// chain forms like it.each(...) or test.skip(...) are not counted,\n"
+        "// and a parameterised suite such as describe.for(...) hides it\n"
+        "const NOTE = 'call test.only( to isolate a case';\n"
+        "it('a', () => {});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    assert mod._static_renderer_counts() == {"utils": 1}
