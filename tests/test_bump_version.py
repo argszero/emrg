@@ -244,6 +244,63 @@ def test_bump_is_noop_when_already_at_target(mod, fake_repo):
     assert before == after, "a no-op bump must not rewrite files"
 
 
+def test_bump_refuses_noop_when_another_source_is_drifted(mod, fake_repo):
+    """A dropped target must not be reported as success while drift remains.
+
+    #1119 review (pm25coder, verified independently): the already-at-target
+    check ran *before* validation, so this exact tree — ``emrg/__init__.py``
+    already at the target version, another source stale — printed "already at
+    <target> — nothing to do" and exited 0, leaving the drift in place. The
+    repair mode silently disagreed with ``--check``, which names the same
+    drift and exits 1 for it. That is precisely the #408 / #1065 shape this
+    tool exists to prevent, and the natural way the mistake is made: hand-edit
+    the base file, then run the tool.
+
+    Correct behaviour is to refuse loudly (exit 2 for the CLI), never to
+    report success for a state that was not verified.
+    """
+    current = mod.read_current_version(fake_repo)
+    drifted = fake_repo / "emrg/gui/package.json"
+    drifted.write_text(
+        drifted.read_text(encoding="utf-8").replace(current, _sentinel(current)),
+        encoding="utf-8",
+    )
+    before = {rel: (fake_repo / rel).read_text(encoding="utf-8") for rel in SOURCE_FILES}
+
+    with pytest.raises(mod.BumpError, match="already inconsistent"):
+        mod.bump(current, root=fake_repo)
+
+    # ...and it must refuse without half-writing anything.
+    after = {rel: (fake_repo / rel).read_text(encoding="utf-8") for rel in SOURCE_FILES}
+    assert before == after, "a refused bump must not modify any source"
+
+    # A consistent tree at the target still short-circuits as a no-op, so the
+    # ordering change tightened the drifted case without losing the clean one.
+    drifted.write_text(
+        drifted.read_text(encoding="utf-8").replace(_sentinel(current), current),
+        encoding="utf-8",
+    )
+    assert mod.bump(current, root=fake_repo) == []
+
+
+def test_bump_refuses_when_base_file_was_hand_edited_forward(mod, fake_repo):
+    """Sibling shape: the *base* file is the one moved ahead of the others.
+
+    ``emrg/__init__.py`` reads as authoritative, so editing it to the target and
+    running ``bump <target>`` is the other natural way to reach a drifted tree.
+    Same contract: refuse, do not report "nothing to do".
+    """
+    current = mod.read_current_version(fake_repo)
+    target = _sentinel(current)
+    base_file = fake_repo / "emrg/__init__.py"
+    base_file.write_text(
+        base_file.read_text(encoding="utf-8").replace(current, target), encoding="utf-8"
+    )
+
+    with pytest.raises(mod.BumpError, match="already inconsistent"):
+        mod.bump(target, root=fake_repo)
+
+
 # --------------------------------------------------------------------------
 # positive state — drift is reported, and bump() repairs it everywhere
 # --------------------------------------------------------------------------

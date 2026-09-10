@@ -152,7 +152,9 @@ def bump(
 
     Two passes: every source is validated (anchor present, expected count,
     consistent with ``BASE_FILE``) before *any* file is written, so a
-    validation failure leaves the tree byte-for-byte untouched.
+    validation failure leaves the tree byte-for-byte untouched. The
+    already-at-target case is also decided *after* that validation, so a
+    drifted tree is refused rather than reported as "nothing to do".
 
     Only the version literal inside each matched anchor is replaced, so the
     surrounding formatting (quote style, trailing ``> "$DIST/version.txt"``,
@@ -163,8 +165,6 @@ def bump(
         raise BumpError(f"not a semver x.y.z: {new_version!r}")
 
     old_version = read_current_version(root)
-    if old_version == new_version:
-        return []
 
     def _swap(m: re.Match[str]) -> str:
         return m.group(0).replace(old_version, new_version)
@@ -202,6 +202,17 @@ def bump(
                 f"`python3 scripts/bump-version.py --check` first"
             )
         planned.append((rel, pattern, count, text))
+
+    # "Nothing to do" — decided only *after* pass 1 proved every source is
+    # consistent. Testing it first let a drifted tree report success: with
+    # `emrg/__init__.py` already at the target (the natural way this mistake is
+    # made — hand-edit the base file, then run the tool), `bump(<target>)`
+    # printed "already at <target> — nothing to do" and exited 0 while other
+    # sources were left stale, so the *repair* path silently disagreed with
+    # `--check`, which names the same drift and exits 1. Never report success
+    # for a state that was not verified (#1119 review, pm25coder).
+    if old_version == new_version:
+        return []
 
     # Pass 2 — every source is known good, so nothing below can abort on
     # content. Only I/O failures remain, and a partial write there is the
