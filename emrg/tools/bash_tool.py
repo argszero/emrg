@@ -525,9 +525,20 @@ def _decode_output(data: bytes, os_name: str | None = None) -> str:
     (GBK/cp936 on zh-CN), while git/gh emit UTF-8. Both must decode
     correctly, so we try the locale encoding **strictly** first and fall
     back to UTF-8 (also strict), then to UTF-8 with replacement as a last
-    resort. A non-strict first attempt would silently mojibake UTF-8
-    output and never reach the fallback (rant 2026-08-08T09:35:30 —
-    U+FFFD garbage from decoding GBK bytes as UTF-8).
+    resort (rant 2026-08-08T09:35:30 — U+FFFD garbage from decoding GBK
+    bytes as UTF-8).
+
+    Scope of what strictness buys: it catches the case where the UTF-8 bytes
+    are *invalid* in the locale codec. It does not catch the case where they
+    are *also valid* there - a 2-byte UTF-8 sequence is exactly the shape of a
+    GBK pair, so the first pass succeeds and the fallback is never reached.
+    Measured on a cp936 host (this function, ``os_name="nt"``): 6 of 8
+    Latin-1-range samples are silently mojibaked - ``café`` -> ``caf茅``,
+    ``über`` -> ``眉ber``, ``señor`` -> ``se帽or`` - while 3-byte
+    sequences (CJK, the inputs this policy was written for) fall through
+    correctly. A path is filesystem bytes, not console bytes: readers that
+    carry paths pin ``encoding="utf-8"`` outright rather than relying on this
+    heuristic (see ``tests/test_script_decode_is_locale_independent.py``).
 
     ``os_name`` is injectable for tests (defaults to ``os.name``).
     """

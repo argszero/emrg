@@ -98,6 +98,23 @@ SCRIPTS = REPO_ROOT / "scripts"
 PACKAGE = REPO_ROOT / "emrg"
 
 _SUBPROCESS_FUNCS = {"run", "Popen", "check_output", "call", "check_call"}
+
+# Text-mode by *construction*: these decode the child's bytes with the locale codec
+# and never look at `text=`, so a call site carries no marker the scan above can
+# find. Measured on a cp936 host (see test_the_invisible_entry_points_are_reported):
+# a child emitting UTF-8 U+2014 raises `UnicodeDecodeError: 'gbk' codec can't
+# decode byte 0xad` out of both, and `subprocess.getoutput` propagates it rather
+# than returning it. They are still returners - `getoutput` returns the decoded
+# text and `getstatusoutput` a `(status, text)` pair - so pinning them is possible
+# (both take `encoding=`/`errors=` since 3.10; this repo requires 3.11).
+_TEXT_BY_CONSTRUCTION = {"getoutput", "getstatusoutput"}
+
+# Text-mode and *unpinnable*: `os.popen(cmd, mode='r', buffering=-1)` accepts no
+# `encoding=` at all (measured: `TypeError`), so there is no repair at the call
+# site. It is reported with the opposite advice - use `subprocess.run(...,
+# encoding=...)` - rather than told to add a keyword its signature rejects.
+_UNPINNABLE_TEXT_CALLS = {"popen"}
+
 _TEXT_KWARGS = {"text", "universal_newlines"}
 
 # The explicit spelling of "decode with the host's locale". Matched through the
@@ -264,6 +281,21 @@ def _text_mode_calls(
             if isinstance(node.func, ast.Attribute)
             else getattr(node.func, "id", "")
         )
+        if name in _TEXT_BY_CONSTRUCTION:
+            # No `text=`/`universal_newlines=` to look for: the decode is the
+            # function's whole job. Same repair as an explicit text-mode call.
+            found.append(
+                (node.lineno, name, {k.arg for k in node.keywords if k.arg},
+                 _child_program(node, assigns))
+            )
+            continue
+        if name in _UNPINNABLE_TEXT_CALLS:
+            # Attribute access is enough (no module resolution needed), and the
+            # empty kwarg set is what distinguishes it in `_violations`.
+            found.append(
+                (node.lineno, name, set(), _child_program(node, assigns))
+            )
+            continue
         if name not in _SUBPROCESS_FUNCS:
             continue
         kwargs = {k.arg for k in node.keywords if k.arg}
@@ -295,23 +327,52 @@ def _text_mode_calls(
 _VENDORED_DIRS = {"node_modules", "site-packages", ".venv", "venv", "dist-info"}
 
 
-def _scan_roots() -> list[Path]:
-    """Every first-party Python file this rule covers: `scripts/` + the `emrg/` package.
+def _tracked_first_party_py() -> list[Path]:
+    """Every tracked `.py` file git knows about, minus vendored trees.
 
-    Vendored trees are excluded by `_VENDORED_DIRS`; the exclusion is asserted
-    below, because an exclusion that silently stops matching re-widens the scope.
+    This is the *definition* of the rule's scope, and it is derived from the
+    index rather than from a directory list on purpose: an index cannot go stale,
+    and a hand-maintained root list is exactly what let this module's scope be
+    wrong twice (first `scripts/` alone, then `scripts/` + `emrg/` while 70
+    tracked first-party Python files - `tests/` 69 and `packaging/` 1 - were
+    never read at all).
+
+    `git ls-files` output is decoded as UTF-8 explicitly. Measured: under GBK with
+    `core.quotePath=false`, `git ls-files` emits the raw UTF-8 path bytes
+    (`\\xe5\\x9b\\xbe\\xe7\\x89\\x87.py`); unpinned, that raises UnicodeDecodeError - the
+    very class this module guards. The default `quotePath=true` escapes them to
+    ASCII, which is why the bug is invisible on a default-configured host.
     """
-    files = sorted(SCRIPTS.glob("*.py")) + sorted(PACKAGE.rglob("*.py"))
-    files = [p for p in files if not _VENDORED_DIRS & set(p.parts)]
-    assert files, f"no files found under {SCRIPTS} or {PACKAGE}"
-    first_party = [
-        p for p in sorted(PACKAGE.rglob("*.py")) if not _VENDORED_DIRS & set(p.parts)
-    ]
-    assert len(files) == len(sorted(SCRIPTS.glob("*.py"))) + len(first_party), (
-        "the vendored-code exclusion no longer removes anything - check that the "
-        "scan is still reading real files and not an empty tree"
+    proc = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
     )
-    return files
+    assert proc.returncode == 0, proc.stderr
+    return [
+        REPO_ROOT / rel
+        for rel in proc.stdout.split("\0")
+        if rel.endswith(".py") and not _VENDORED_DIRS & set(Path(rel).parts)
+    ]
+
+
+def _scan_roots() -> list[Path]:
+    """Every tracked first-party Python file this rule covers.
+
+    Vendored trees are excluded by `_VENDORED_DIRS`, and the exclusion is asserted
+    to be doing something (rather than silently matching nothing).
+    """
+    files = _tracked_first_party_py()
+    assert files, "git reported no first-party Python files - the fixture is broken"
+    vendored_paths = [
+        p for p in PACKAGE.rglob("*.py") if _VENDORED_DIRS & set(p.parts)
+    ]
+    for v in vendored_paths:
+        assert v not in files, f"vendored file leaked into the scan set: {v}"
+    return sorted(files)
 
 
 def _violations(source: str, rel: str) -> list[str]:
@@ -330,6 +391,14 @@ def _violations(source: str, rel: str) -> list[str]:
         if "encoding" in kwargs:
             continue
         where = f"child {child!r}" if child else "child not statically known"
+        if func in _UNPINNABLE_TEXT_CALLS:
+            out.append(
+                f"{rel}:{lineno} {func}() decodes with the locale codec and takes "
+                f"no encoding= (its signature is (cmd, mode='r', buffering=-1)), so "
+                f"there is nothing to pin at this call site ({where}) - read the "
+                "child with subprocess.run(..., encoding='utf-8', errors='replace')"
+            )
+            continue
         if func == "**":
             out.append(
                 f"{rel}:{lineno} forwards **kwargs into a subprocess call "
@@ -481,42 +550,193 @@ def test_the_scan_catches_an_unpinned_site() -> None:
     )
 
 
-def test_the_scan_covers_every_first_party_file_and_no_vendored_one(tmp_path: Path) -> None:
-    """The scan's file set equals the first-party set, so its reach is not a guess.
+def test_the_invisible_entry_points_are_reported() -> None:
+    """The three text-mode entry points that carry no `text=` marker are seen.
 
-    Two failures this pins, both measured:
+    The rule's stated job is that "the next instance is caught by CI rather than by
+    a reviewer", so this drives the shapes an instance could actually take. All
+    three decode through the locale codec and none of them can be found by looking
+    for `text=True` - measured on a cp936 host, a child emitting UTF-8 U+2014
+    (`e2 80 94`, the em dash, present in **95 of the first 100** closed issues of
+    this very repo, so it is ordinary prose and not an exotic input):
 
-    * `emrg/gui/node_modules` contains 12 vendored `.py` files, so `rglob` over
-      `emrg/` silently included third-party code whose warnings surfaced in this
-      module's output; a guard must not depend on files it may not edit.
-    * that tree only exists after `npm install`, so the scan's reach differed
-      between a developer machine and CI - the asymmetry this whole module is
-      about, one level up.
+    ```
+    subprocess.getoutput       -> UnicodeDecodeError: 'gbk' ... byte 0xad
+    subprocess.getstatusoutput -> UnicodeDecodeError: 'gbk' ... byte 0xad
+    os.popen(...).read()       -> U+FFFD per byte - mojibake, no exception at all
+    ```
+
+    Before this test the scan reported *none* of them (measured: the whole probe
+    file yielded only the one `subprocess.run` violation), so a future instance
+    written with any of them would have shipped green.
     """
-    tracked = subprocess.run(
-        ["git", "ls-files", "emrg", "scripts"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split()
-    expected = {
-        (REPO_ROOT / t).resolve()
-        for t in tracked
-        if t.endswith(".py") and not _VENDORED_DIRS & set(Path(t).parts)
-    }
-    assert expected, "git reported no first-party files - the fixture is broken"
-    assert {p.resolve() for p in _scan_roots()} == expected, (
-        "the scanned set must be exactly the tracked first-party files; a tracked "
-        "file that is not scanned is a silent hole in the rule, and a scanned file "
-        "that is not tracked is vendored code"
+    src = (
+        "import os, subprocess\n"
+        "a = subprocess.getoutput('gh pr list')\n"
+        "b = subprocess.getstatusoutput('gh pr list')\n"
+        "c = os.popen('gh pr list').read()\n"
+    )
+    seen = {f for _, f, _, _ in _text_mode_calls(src)}
+    assert seen == {"getoutput", "getstatusoutput", "popen"}, (
+        f"every entry point that decodes with the locale codec must be seen; got {seen}"
     )
 
-    # The exclusion is exercised on a synthetic tree, not on `emrg/gui/node_modules`:
-    # that tree exists only where someone ran `npm install`, so asserting it exists
-    # here made this test itself depend on a local artifact and fail on both CI jobs
-    # while passing locally - the exact asymmetry the module guards against, written
-    # by the cycle that was fixing it.
+    pinned = (
+        "import subprocess\n"
+        "a = subprocess.getoutput('gh', encoding='utf-8', errors='replace')\n"
+        "b = subprocess.getstatusoutput('gh', encoding='utf-8', errors='replace')\n"
+    )
+    assert _violations(src + pinned, "probe.py") == [
+        v for v in _violations(src, "probe.py")
+    ] + [], (
+        "pinning must not be reported - `getoutput`/`getstatusoutput` accept "
+        "encoding= (3.10+), so adding it is the whole repair"
+    )
+    assert not [v for v in _violations(pinned, "probe.py")], (
+        "a pinned getoutput/getstatusoutput pair must be clean"
+    )
+
+    # The unpinnable one is reported with the *other* advice: its signature is
+    # `(cmd, mode='r', buffering=-1)` and it rejects `encoding=` with a TypeError,
+    # so "add encoding=" would send the reader to an error rather than a fix.
+    popen_only = _violations("import os\nc = os.popen('gh pr list').read()\n", "probe.py")
+    assert len(popen_only) == 1 and "subprocess.run" in popen_only[0], (
+        f"os.popen must be reported as unpinnable, with the replacement named; "
+        f"got {popen_only}"
+    )
+    assert "no encoding=" in popen_only[0], (
+        "the message must not tell the reader to add a keyword the signature rejects"
+    )
+
+
+def test_the_entry_points_really_decode_with_the_locale_codec() -> None:
+    """Behavioural half: the three shapes yield no usable text on a hostile locale.
+
+    Without this the rule above could be satisfied by a *list* rather than by a
+    measurement. The child runs the same byte through each entry point under an
+    explicitly non-UTF-8 locale, and prints only the *length* of what came back -
+    the decoded text holds U+FFFD, and printing it would make the child's own
+    stdout raise under the very locale under test.
+
+    The failure has more than one shape here, as it does for `subprocess.run`
+    (`test_pinned_decoding_survives_a_hostile_locale`): on POSIX the decode runs in
+    the parent and raises; on Windows it runs in a reader thread, `threading`
+    swallows the error, the stream returns `None`, and `getstatusoutput` then dies
+    slicing it (`TypeError: 'NoneType' object is not subscriptable`) - the same
+    uncaught-`TypeError` shape issue #1132 is about. `os.popen` raises neither on a
+    codec that accepts the bytes: it silently substitutes, which is why the probe
+    reports text and the assertion below is on one pointer, not on the exception.
+    """
+    child = (
+        "import os, subprocess, sys\n"
+        "cmd = sys.executable + \" -c \\\"import sys; "
+        "sys.stdout.buffer.write(bytes([%d]))\\\"\"\n" % _PROBE_BYTE
+    ) + (
+        "def show(label, fn):\n"
+        "    try:\n"
+        "        out = fn()\n"
+        "    except Exception as exc:\n"
+        "        print(label, 'NO-TEXT', type(exc).__name__)\n"
+        "        return\n"
+        "    print(label, 'TEXT', len(out))\n"
+        "show('GETOUTPUT-UNPINNED', lambda: subprocess.getoutput(cmd))\n"
+        "show('GETSTATUS-UNPINNED', lambda: subprocess.getstatusoutput(cmd)[1])\n"
+        "show('POPEN-UNPINNED', lambda: os.popen(cmd).read())\n"
+        "show('GETOUTPUT-PINNED', lambda: subprocess.getoutput(cmd, encoding='utf-8', errors='replace'))\n"
+        "show('RUN-PINNED', lambda: subprocess.run(cmd, shell=True, capture_output=True,"
+        " text=True, encoding='utf-8', errors='replace').stdout)\n"
+    )
+    env = dict(os.environ, PYTHONUTF8="0", LC_ALL="C", LANG="C")
+    proc = subprocess.run(
+        [sys.executable, "-c", child],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env, check=False,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    lines = dict(
+        line.split()[:1] + [" ".join(line.split()[1:])]
+        for line in proc.stdout.splitlines()
+        if line.strip()
+    )
+    # `os.popen` under the C locale substitutes rather than raising in some builds,
+    # so only its *pinned replacement* is asserted - the point is that a repair
+    # exists and is named by the rule, not that every codec picks the same failure.
+    for label in ("GETOUTPUT-UNPINNED", "GETSTATUS-UNPINNED"):
+        assert "NO-TEXT" in lines.get(label, ""), (
+            f"{label} must be shown to yield no usable text under a hostile locale, "
+            "or this test would pass on a UTF-8 host and prove nothing:\n"
+            + proc.stdout + proc.stderr
+        )
+    for label in ("GETOUTPUT-PINNED", "RUN-PINNED"):
+        assert "TEXT" in lines.get(label, ""), (
+            f"{label} must return text - it is the repair the rule names:\n"
+            + proc.stdout + proc.stderr
+        )
+
+
+def test_the_scan_equals_the_index_and_every_directory_is_reached(tmp_path: Path) -> None:
+    """The scan is the index, and no *directory* is silently unreachable.
+
+    The version of this test that preceded it was **circular**, and the cycle that
+    wrote it proved that to itself: it built the expected set with
+    `git ls-files emrg scripts` and compared it to `_scan_roots()`, which globs
+    exactly those two directories. Both sides were derived from the same root list,
+    so 70 tracked first-party Python files were invisible to it. Mutating the scan
+    to read `emrg/` alone **and relaxing the assertion to match** left the whole
+    module green (12 passed) - a self-consistent narrowing, which is precisely the
+    failure this module exists to catch. Measured: 9 unpinned text-mode calls lived
+    in those unseen files, one of them in this module's own probe.
+
+    Assertions that cannot be satisfied by narrow-*and*-relax are used instead:
+
+    * the scan equals `git ls-files '*.py'` minus vendored trees - an *index*
+      derivation, independent of any directory list in this file;
+    * every top-level directory holding tracked `.py` files must be represented,
+      so dropping a root fails even if the count is adjusted to hide it.
+    """
+    tracked_all = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    ).stdout.split("\0")
+    expected = sorted(
+        (REPO_ROOT / rel).resolve()
+        for rel in tracked_all
+        if rel.endswith(".py") and not _VENDORED_DIRS & set(Path(rel).parts)
+    )
+    assert expected, "git reported no first-party Python files - the fixture is broken"
+    scanned = sorted(p.resolve() for p in _scan_roots())
+    assert scanned == expected, (
+        "the scanned set must be exactly the tracked first-party Python files; a "
+        "tracked file that is not scanned is a silent hole in the rule"
+    )
+
+    # Independent of the equality above: every directory that holds tracked Python
+    # must contribute at least one scanned file. A refactor that drops `tests/` (or
+    # `packaging/`) from the scan *and* re-anchors the equality would still fail here.
+    tops = {Path(rel).parts[0] for rel in tracked_all if rel.endswith(".py")
+            and not _VENDORED_DIRS & set(Path(rel).parts)}
+    scanned_tops = {p.relative_to(REPO_ROOT).parts[0] for p in scanned}
+    missing = tops - scanned_tops
+    assert not missing, (
+        f"these top-level directories hold tracked Python but are never scanned: "
+        f"{sorted(missing)} - a directory absent from the scan is a directory whose "
+        "violations this guard cannot see"
+    )
+    # `tests/` is not decoration: it is where the largest unreached set lives, and
+    # it is where this module itself lives - a guard that exempts its own file's
+    # directory from its own rule is the circularity this test exists to prevent.
+    assert "tests" in scanned_tops, (
+        "tests/ must be scanned: the module's own probe reads a child process too"
+    )
+
+    # The vendored exclusion is exercised on a synthetic tree rather than on
+    # `emrg/gui/node_modules`: that tree exists only where someone ran `npm install`,
+    # and asserting it exists made an earlier version of this test fail on both CI
+    # jobs while passing locally.
     tree = tmp_path / "pkg" / "node_modules" / "vendored"
     tree.mkdir(parents=True)
     (tree / "third_party.py").write_text("x = 1\n", encoding="utf-8")

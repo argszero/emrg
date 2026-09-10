@@ -273,7 +273,13 @@ def test_git_origin_url_real_repo():
 
     from emrg.server.git_utils import git_origin_url
 
-    repo = real_subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    repo = real_subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+        # This is a *path*: a checkout under a non-ASCII directory name (e.g.
+        # ~/项目/emrg) makes an unpinned decode raise UnicodeDecodeError under a
+        # GBK/cp1252 host locale. Measured, not assumed.
+        encoding="utf-8", errors="replace",
+    )
     if repo.returncode != 0:
         return  # not in a git repo (packaged source) — skip
     url = git_origin_url(repo.stdout.strip())

@@ -413,6 +413,11 @@ def test_real_tree_is_consistent() -> None:
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
+        # The tool prints paths and counts; decode them as UTF-8, never with the
+        # host locale (the class tests/test_script_decode_is_locale_independent.py
+        # exists to keep out of the tree).
+        encoding="utf-8",
+        errors="replace",
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "OK: Agent.md documents" in proc.stdout

@@ -16,7 +16,10 @@ WIN_SCRIPT_EXTS = (".cmd", ".bat", ".ps1")
 
 
 def _win_scripts():
-    out = subprocess.check_output(["git", "ls-files"], cwd=str(REPO_ROOT), text=True)
+    out = subprocess.check_output(
+        ["git", "ls-files"], cwd=str(REPO_ROOT), text=True,
+        encoding="utf-8", errors="replace",
+    )
     for rel in out.splitlines():
         if rel.lower().endswith(WIN_SCRIPT_EXTS):
             yield REPO_ROOT / rel

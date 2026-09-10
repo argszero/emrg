@@ -52,6 +52,7 @@ def test_win32_no_window_kwargs_splats_into_subprocess_run(win):
     result = subprocess.run(
         [sys.executable, "-c", "print('ok')"],
         capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
         **win.win32_no_window_kwargs(),
     )
     assert result.returncode == 0

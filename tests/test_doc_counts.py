@@ -32,6 +32,10 @@ def _collected_pytest_count() -> int:
         cwd=str(REPO_ROOT),
         text=True,
         stderr=subprocess.STDOUT,
+        # Test IDs can be non-ASCII (parametrised names, file names); decode as
+        # UTF-8 rather than with the host locale.
+        encoding="utf-8",
+        errors="replace",
     )
     m = re.search(r"(\d+) tests? collected", out)
     assert m, f"could not parse collected count from pytest output:\n{out[-2000:]}"

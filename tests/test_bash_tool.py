@@ -129,16 +129,48 @@ def test_decode_output_empty_and_none():
 
 
 def test_decode_output_fallback_chain_no_mojibake(monkeypatch):
-    """A UTF-8 string must not be silently mojibake'd by the GBK first try.
+    """A 3-byte UTF-8 string must not be silently mojibake'd by the GBK first try.
 
-    If the first decode were non-strict (errors='replace'), UTF-8 bytes would
+    If the first decode were non-strict (errors='replace'), these bytes would
     decode as GBK to garbage and never reach the UTF-8 fallback — the
     regression this test pins.
+
+    Narrowed from "a UTF-8 string": measured, the property holds for sequences
+    that are *invalid* GBK (3-byte CJK and above) and fails for the 2-byte
+    Latin-1 range, which is GBK-pair shaped. The boundary is pinned by
+    `test_decode_output_strictness_only_covers_invalid_locale_bytes`.
     """
     monkeypatch.setattr("emrg.tools.bash_tool.locale.getpreferredencoding",
                         lambda default=False: "gbk")
     payload = "git log 输出中文".encode("utf-8")
     assert _decode_output(payload, os_name="nt") == "git log 输出中文"
+
+
+def test_decode_output_strictness_only_covers_invalid_locale_bytes(monkeypatch):
+    """The boundary of the fallback chain, measured rather than assumed.
+
+    The docstring above this file's subject claimed a plain "a UTF-8 string must
+    not be silently mojibake'd by the GBK first try". That is true of the 3-byte
+    CJK sequences the policy was written for, and **false** of the 2-byte
+    Latin-1 range: a 2-byte UTF-8 sequence is exactly a GBK pair, so the strict
+    first pass succeeds, the fallback never runs, and the text is mojibaked
+    without an exception. Pinning the boundary keeps the next reader from
+    building on a guarantee the function does not have - a path-bearing reader
+    must pin `encoding="utf-8"` instead of leaning on this heuristic.
+    """
+    monkeypatch.setattr("emrg.tools.bash_tool.locale.getpreferredencoding",
+                        lambda default=False: "gbk")
+    # Still correct: 3-byte sequences are invalid GBK, so the fallback is reached.
+    assert _decode_output("\u4e2d\u6587".encode("utf-8"), os_name="nt") == "\u4e2d\u6587"
+
+    # Silently mojibaked: the bytes are a valid GBK pair, so the strict first
+    # pass accepts them and the function returns wrong text rather than failing.
+    for text in ("caf\u00e9", "\u00fcber", "se\u00f1or", "\u00c9mile"):
+        assert _decode_output(text.encode("utf-8"), os_name="nt") != text, (
+            f"{text!r} must not be relied on to round-trip through the locale "
+            "heuristic; if this ever starts round-tripping, the docstring's "
+            "boundary is out of date rather than the policy being wrong"
+        )
 
 
 def test_client_log_handler_uses_utf8_encoding():
