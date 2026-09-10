@@ -20,6 +20,8 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -159,12 +161,27 @@ def _static_renderer_counts() -> dict[str, int]:
     base = REPO_ROOT / "emrg" / "gui" / "renderer" / "src"
     files = sorted(base.rglob("*.test.ts")) + sorted(base.rglob("*.test.tsx"))
     assert files, "no renderer test files found under emrg/gui/renderer/src"
-    return {
-        f.stem[: -len(_RENDERER_TEST_SUFFIX)]: len(
+    counts: dict[str, int] = {}
+    for f in files:
+        label = f.stem[: -len(_RENDERER_TEST_SUFFIX)]
+        # One label per file is an implicit requirement of Agent.md's breakdown
+        # format, and `rglob` spans subdirectories, so two files may share a
+        # stem. Without this assertion the dict keeps only the later file and
+        # the earlier one's definitions vanish from the total - measured: a
+        # second `utils` file (9 definitions) left the helper reporting 514
+        # while the tree really had 523, and BOTH renderer guards stayed green
+        # (the pre-refactor sum-over-every-file version caught it). Turn the
+        # collision red instead of dropping definitions.
+        assert label not in counts, (
+            f"two renderer test files share the label {label!r} "
+            f"({counts[label]} already counted); Agent.md's per-file breakdown "
+            "cannot distinguish them and one file's definitions would be "
+            "silently dropped from the total. Rename one file."
+        )
+        counts[label] = len(
             re.findall(r"^\s*(?:it|test)\(", f.read_text(encoding="utf-8"), re.M)
         )
-        for f in files
-    }
+    return counts
 
 
 def _static_renderer_count() -> int:
@@ -314,3 +331,57 @@ def test_gui_breakdown_matches_static_counts() -> None:
         f"Agent.md's GUI headline is {headline} but the test files define "
         f"{total} tests"
     )
+
+
+# --- self-tests: the guard's own machinery -----------------------------------
+#
+# The renderer/GUI guards above are the only thing standing between the
+# Agent.md breakdown and silent drift, so the one behaviour they depend on but
+# cannot observe in today's tree - two test files sharing a label - is pinned
+# here. Measured before the assertion existed: a second `utils` file left the
+# helper reporting 514 against a real 523, and both renderer guards stayed green.
+
+
+def _loaded_guard_module():
+    """Load this module by path, the repo's pattern for importing a test file.
+
+    `monkeypatch.setattr("test_doc_counts.REPO_ROOT", ...)` does not resolve -
+    pytest imports these files as `tests.test_doc_counts`, and a name that only
+    exists as a plain top-level module raises at patch time.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_guard_under_test", Path(__file__))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _renderer_tree(root: Path, files: dict[str, str]) -> None:
+    """Build a minimal renderer source tree under a fake REPO_ROOT."""
+    base = root / "emrg" / "gui" / "renderer" / "src"
+    for rel, body in files.items():
+        path = base / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+
+def test_renderer_counts_fail_loud_on_a_label_collision(tmp_path, monkeypatch) -> None:
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = "it('a', () => {});\nit('b', () => {});\n"
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body, "components/utils.test.tsx": body})
+    with pytest.raises(AssertionError, match="share the label 'utils'"):
+        mod._static_renderer_counts()
+
+
+def test_renderer_counts_accept_distinct_labels(tmp_path, monkeypatch) -> None:
+    """The positive half: unique labels still count normally."""
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = "it('a', () => {});\nit('b', () => {});\n"
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body, "components/other.test.tsx": body})
+    counts = mod._static_renderer_counts()
+    assert counts == {"utils": 2, "other": 2}
