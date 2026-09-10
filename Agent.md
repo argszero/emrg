@@ -119,13 +119,25 @@ Community needs voiced in HN agent-UI discussions map directly to EMRG's design:
 pkill -f "emrg.server"; rm -f ~/.emrg/emrgd.token; python -m emrg
 ```
 
-Python: `uv run pytest tests/ -v` (1243) — import check: `uv run python -c "from emrg.client.app import run_client"`
+Python: `uv run pytest tests/ -v` (1277) — import check: `uv run python -c "from emrg.client.app import run_client"`
 GUI: `cd emrg/gui && npm test` (100: 44 daemon_client + 20 conn-manager + 7 integration + 7 nav-policy + 7 gui-state + 6 build-config + 4 boot-contract + 3 preload-api + 2 theme-guard) — syntax: `node --check main.js preload.js daemon_client.js`
 Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (514: 5 snapshot-store + 9 utils + 3 ErrorBoundary + 2 App smoke + 11 commands + 4 copywriting + 11 i18n + 13 markdown + 21 transcript + 11 TranscriptView + 15 history + 31 composer + 41 Composer + 6 LinkDialog + 16 sidebar + 17 Sidebar + 9 fileTree + 9 FileTree + 16 resultPanel + 8 ResultPanel + 27 workspaceView + 10 WorkspaceView + 10 dialog + 6 Dialog + 9 ConfirmDialog + 9 RenameDialog + 10 dialogLists + 3 HelpDialog + 9 MemoryDialog + 6 SkillsDialog + 8 openSession + 6 WelcomeDialog + 9 OpenSessionDialog + 7 NewSessionDialog + 7 rewind + 8 RewindDialog + 7 GithubDeviceDialog + 18 daemonBridge + 7 DaemonBridgeProvider + 30 Shell + 15 DialogHost + 20 SettingsPanel + 6 TaskFormDialog + 5 RantDialog + 4 vendorMarkdown) + `npm run build` → `renderer/dist/`
 CI: `uv run pytest` (ubuntu + **windows-2025 matrix** — Windows pytest 回归在 PR CI 即失败，v0.2.29 教训 #725) + GUI tests + **actionlint workflow lint** (`rhysd/actionlint@v1.7.12` gate, #444 — workflow 解析错误在 PR CI 即失败，如 `if:` secrets 上下文)
 Re-trigger: `scripts/re-trigger-ci.sh [branch]` (workflow_dispatch, #527 — 替代空 commit 重触发：Actions outage 会整段丢弃 push 事件，dispatch 走 API 路径不受影响)
+Release bump: `python3 scripts/bump-version.py <x.y.z>` — 一次改齐 8 处版本声明（`emrg/__init__.py`、`pyproject.toml`、`emrg/gui/package.json`、`emrg/gui/package-lock.json` 根 + `packages[""]`、`uv.lock`、`packaging/{build-runtime,make-installer,make-run-installer}.sh`）；`--check` 只报告漂移（宿主侧自检，与 CI 的 test_version_sync 对称），`--dry-run` 预览不落盘。锚点缺失/数量不符即 fail-loud，绝不猜测；`uv.lock` 只改 `name = "emrg"` 那一行（v0.2.94 教训：直接 `uv run` 会把 lock 里所有 registry URL 重写成镜像，556 行环境噪声）。bump 后用 `uv run --no-sync pytest` 避免 uv 重生成 lock。详见 Agent.md「Releasing」
 Git-over-https 兜底: `python scripts/sync-master-from-api.py [--repo owner/name] [--ref master]` — 受限网络下 github.com:443 不可达而 api.github.com 可达时，用 Git Data API 的 verification payload + signature 字节级重建上游 commit（含 web-flow GPG 签名 squash merge，reconstruct_commit 经 hermetic 测试验证 sha 一致）并推进本地 refs；内容对象缺失时 fail-loud 提示改用 git fetch（10+ 周期实证的恢复路径）
 Git-over-https push 兜底: `python scripts/push-branch-from-api.py --branch feature/x [--ref HEAD] [--force]` — 同一宕机场景下的 push 方向（#988 配对）：从本地 ref 沿一父链找到远端基点（已有分支头或首个远端已知祖先），自底向上上传 blobs（原始字节）/trees（`git mktree` 语义复算）/commits（结构化创建，author/committer 携带原始 +0800 偏移、消息去尾随换行——GitHub 规范化行为），更新远端 ref 后把本地分支 ref 重写为远端 sha 并 `git diff` 验证内容一致；失败即止不触碰 refs（hermetic 测试经忠实假 API 验证字节级 sha 一致）
+
+## Releasing
+
+A release is a 4-stage flow; every stage is verifiable by the evolution itself (no host action required):
+
+1. **Bump** — `python3 scripts/bump-version.py <x.y.z>` edits all 8 version declarations in one shot, then `uv run --no-sync pytest tests/test_version_sync.py -q` proves consistency (the guard covers every source, incl. both `package-lock.json` occurrences, #1065). Commit on `feature/release-v<x.y.z>` → PR → 3 LGTMs from different cycles → squash merge. Never self-merge a release PR.
+2. **Tag** — `git tag v<x.y.z> && git push origin v<x.y.z>`. This is the *only* trigger for `build-release.yml` (the Test workflow on push/PR never exercises signing/notarization, the v0.2.7 lesson).
+3. **Verify** — `gh run list --workflow=build-release.yml --limit 5` must show the tagged run green across the 4-platform matrix; the GUI leg reruns `npm run build` (Vite) + `npm run dist` (electron-builder), so `app.asar` is always rebuilt from source and cannot ship stale.
+4. **Confirm** — GitHub Release published as Latest (not draft/prerelease) with the full asset set.
+
+`scripts/bump-version.py --check` is the host-side counterpart to the CI guard: run it before pushing instead of discovering drift after a wasted build round. `--dry-run` previews without writing.
 
 ## Packaging
 
