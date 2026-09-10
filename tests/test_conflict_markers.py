@@ -44,9 +44,11 @@ def _tracked_source_files() -> list[str]:
     `windows-2025` CI runner: the first version of this fix failed there
     because the returned names carried backslashes while the assertions
     compared them against forward-slash paths. Normalising via
-    `Path.as_posix()` makes the names comparable on every platform, and
-    `Path` still accepts forward slashes on Windows, so the names stay
-    usable for opening the files.
+    `Path(name).as_posix()` would fix Windows only by accident - `Path` *is*
+    `WindowsPath` there, and on POSIX it leaves a backslash untouched, so the
+    behaviour could not be exercised on the machine that writes the code.
+    `_split_ls_files` normalises the string explicitly instead, which behaves
+    identically everywhere and is directly testable.
     """
     listed = subprocess.run(
         ["git", "ls-files", "-z", "--", "*.py", "*.md"],
@@ -59,7 +61,18 @@ def _tracked_source_files() -> list[str]:
         encoding="utf-8",
         check=True,
     ).stdout
-    return sorted(Path(name).as_posix() for name in listed.split("\0") if name)
+    return _split_ls_files(listed)
+
+
+def _split_ls_files(listed: str) -> list[str]:
+    """`git ls-files -z` output -> sorted repo-relative names, `/`-separated.
+
+    Split out from `_tracked_source_files` so the separator normalisation can be
+    driven directly with Windows-shaped input on any platform (see
+    `test_scanned_names_use_forward_slashes`). Takes a string rather than
+    running git, so the test needs no Windows checkout.
+    """
+    return sorted(name.replace("\\", "/") for name in listed.split("\0") if name)
 
 
 def _collect_source_files() -> list[Path]:
@@ -116,6 +129,19 @@ def test_scanned_names_use_forward_slashes():
     the names, not just their presence, is what pins this: the names are paths
     into a repo whose canonical form is forward slashes.
     """
+    # Windows-shaped output, verbatim as the failing CI job produced it.
+    windows_out = "tests\\test_conflict_markers.py\0.github\\workflows\\README.md\0Agent.md\0"
+    assert _split_ls_files(windows_out) == [
+        ".github/workflows/README.md",
+        "Agent.md",
+        "tests/test_conflict_markers.py",
+    ]
+
+    # POSIX-shaped output must be unchanged by the same call.
+    assert _split_ls_files("tests/x.py\0Agent.md\0") == ["Agent.md", "tests/x.py"]
+    assert _split_ls_files("") == []
+
+    # And the real tree, on whatever platform this runs.
     names = _tracked_source_files()
     assert names, "no tracked source files returned"
     backslashed = [name for name in names if "\\" in name]
