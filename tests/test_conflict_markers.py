@@ -30,13 +30,16 @@ when the fix was written. #1126 then added two tracked files and the sentence
 became false while every test stayed green: stale prose that still reads as a
 measurement, in a module whose whole subject is states nobody is looking at.
 What is *durable* is the shape the guard actually asserts: the scan reaches the
-repository root and covers far more than the `emrg/` package
-(`test_scan_reaches_outside_the_emrg_package` requires a non-empty outside set,
-an inside set, and `total > 2 * inside` - the `.py`/`.md`-only scope was
-*mostly* outside because the package is Python, while the tracked tree as a
-whole is majority `emrg/gui`, so a raw `outside > inside` would invert it and
-would have been a false constraint). **Need the current figure? Measure it -
-do not trust this paragraph.**
+repository root, keeps both halves of the tree non-empty, and reaches whole
+file *families* rather than a list of extensions
+(`test_scan_reaches_outside_the_emrg_package` requires the `.py`/`.md` files
+plus one tracked file from each of the other families - `.js`, `.ts`, `.yml`,
+`.sh` - and a non-empty set on each side of `emrg/`). ⚠️ Neither
+`outside > inside` nor `total > 2 * inside` is asserted: the first held only
+while the scope was the `.py`/`.md` pair (the `emrg/` package is Python) and
+both invert on the whole index, where `emrg/gui` is the majority - pinning
+either would have failed the *correct* widening. **Need the current figure?
+Measure it - do not trust this paragraph.**
 """
 
 import re
@@ -150,43 +153,93 @@ def test_scan_reaches_outside_the_emrg_package():
     constraint that the *correct* widening fails. What is durable is that both
     halves are non-empty and that the scan is the whole tree rather than one
     package's worth of it.
+
+    The rule itself lives in `_scope_violations` so it can be *driven* - see
+    `test_scope_rule_rejects_the_narrowed_scan_it_exists_to_prevent`, which feeds
+    it each previous defect's scope and requires a rejection.
     """
     scanned = {p.relative_to(REPO_ROOT).as_posix() for p in _collect_source_files()}
-    for required in (
-        "Agent.md",
-        "README.md",
-        "README.cn.md",
-        "MANIFESTO.md",
-        "tests/test_conflict_markers.py",
-        "scripts/check-doc-count.py",
-        # A tracked file from each non-Python, non-Markdown family the index
-        # carries. These are the files the `.py`/`.md`-only scope could not see,
-        # so requiring them is what makes the widening itself the assertion.
-        "emrg/gui/preload.js",
-        "emrg/gui/renderer/src/lib/markdown.ts",
-        ".github/workflows/test.yml",
-        "packaging/make-installer.sh",
-    ):
-        assert required in scanned, (
-            f"{required} is not scanned for conflict markers, so a leftover "
-            f"conflict there would go unnoticed. Scanned {len(scanned)} files."
-        )
-    inside = [name for name in scanned if name.startswith("emrg/")]
-    outside = [name for name in scanned if not name.startswith("emrg/")]
-    assert outside, "nothing outside emrg/ is scanned - the scan is rooted too deep"
-    assert inside, "nothing inside emrg/ is scanned - the scan is not the whole tree"
+    problems = _scope_violations(scanned)
+    assert not problems, (
+        "the marker scan's scope is wrong - a leftover marker in the missing "
+        "file/family would go unnoticed: " + "; ".join(problems)
+    )
 
-    # The contract of the widening, asserted without re-deriving the set (which
-    # would only re-run the code under test): the scan must reach *file families*,
-    # not a hand-maintained list. Re-introducing the defect (`-- '*.py' '*.md'`)
-    # removes whole families and fails here.
+
+# One tracked file per non-Python, non-Markdown family the index carries. These
+# are the files the `.py`/`.md`-only scope could not see, so requiring them is
+# what makes the widening itself the assertion.
+FAMILY_WITNESSES = (
+    "emrg/gui/preload.js",
+    "emrg/gui/renderer/src/lib/markdown.ts",
+    ".github/workflows/test.yml",
+    "packaging/make-installer.sh",
+)
+SCOPE_WITNESSES = (
+    "Agent.md",
+    "README.md",
+    "README.cn.md",
+    "MANIFESTO.md",
+    "tests/test_conflict_markers.py",
+    "scripts/check-doc-count.py",
+) + FAMILY_WITNESSES
+REQUIRED_FAMILIES = (".py", ".md", ".js", ".ts", ".tsx", ".sh", ".yml", ".json")
+
+
+def _scope_violations(scanned: set[str]) -> list[str]:
+    """Ways the scanned set fails to cover the whole tracked repo (empty = fine).
+
+    Split out of the test below so the rule can be *driven* with a narrowed set
+    instead of only being asserted against whatever the real tree happens to be.
+    Without this the detection power was a claim, not a measurement: the
+    "re-introducing the defect fails here" sentence in the test could not be
+    checked by any test, because nothing could hand the rule a scope to reject.
+    """
+    problems = [
+        f"{required} is not scanned for conflict markers"
+        for required in SCOPE_WITNESSES
+        if required not in scanned
+    ]
+    if not any(name.startswith("emrg/") for name in scanned):
+        problems.append("nothing inside emrg/ is scanned")
+    if not any(not name.startswith("emrg/") for name in scanned):
+        problems.append("nothing outside emrg/ is scanned - the scan is rooted too deep")
     families = {Path(name).suffix for name in scanned}
-    for family in (".py", ".md", ".js", ".ts", ".tsx", ".sh", ".yml", ".json"):
-        assert family in families, (
-            f"no tracked `{family}` file is scanned - the scan set is a list of "
-            f"extensions rather than the git index, which is the defect this "
-            f"guard was widened to fix. Scanned suffixes: {sorted(families)}"
-        )
+    problems += [
+        f"no tracked `{family}` file is scanned (scanned suffixes: {sorted(families)})"
+        for family in REQUIRED_FAMILIES
+        if family not in families
+    ]
+    return problems
+
+
+def test_scope_rule_rejects_the_narrowed_scan_it_exists_to_prevent():
+    """Drive the scope rule: the previous scopes must be *rejected*, by name.
+
+    The two defects this module has had are both scope defects - a scan rooted at
+    `emrg/`, then a scan restricted to `-- '*.py' '*.md'`. A rule asserted only
+    against the current tree documents those defects but cannot detect their
+    return; this feeds it the real index reduced the way each defect reduced it,
+    so the widening is exercised rather than described.
+    """
+    real = {p.relative_to(REPO_ROOT).as_posix() for p in _collect_source_files()}
+    assert _scope_violations(real) == [], _scope_violations(real)
+
+    # Defect 1: rooted at emrg/ (the original walk).
+    deeper = {n for n in real if n.startswith("emrg/")}
+    assert _scope_violations(deeper), "a scan rooted at emrg/ must not pass"
+
+    # Defect 2: `git ls-files -- '*.py' '*.md'` - keeps Agent.md and every
+    # Python file, so only the *families* (and the witness files) catch it.
+    py_md = {n for n in real if n.endswith((".py", ".md"))}
+    assert _scope_violations(py_md), "a .py/.md-only scan must not pass"
+    assert all(
+        witness not in py_md for witness in FAMILY_WITNESSES
+    ), "the witnesses must be files the .py/.md scope cannot see"
+
+    # Both defects at once, and the degenerate empty scan.
+    assert _scope_violations(py_md & deeper)
+    assert _scope_violations(set())
 
 
 def test_scanned_names_use_forward_slashes():
@@ -231,10 +284,10 @@ def test_scanned_names_use_forward_slashes():
 
 
 def test_no_conflict_markers():
-    """Every tracked `.py` and `.md` file must be free of git conflict markers."""
+    """Every tracked text file must be free of git conflict markers."""
     violations: list[tuple[str, int, str]] = []
     files = _collect_source_files()
-    assert files, "git ls-files returned no .py/.md files; the scan cannot be trusted"
+    assert files, "git ls-files returned no source files; the scan cannot be trusted"
     assert REPO_ROOT / "Agent.md" in files, (
         "Agent.md is missing from the scanned set - the scan is not reaching the "
         "repository root, which is the exact defect this test fixes"
