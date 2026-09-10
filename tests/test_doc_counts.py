@@ -170,9 +170,16 @@ _DEFINITION_FORM = re.compile(rf"^\s*{_DEFINITION_KEYWORD}\(", re.M)
 #               (`test.each` is undefined in node:test).
 # A second regex rather than a wider first one: the counted count must stay
 # `^it(|^test(` only, or the count itself changes.
+#
+# Same nesting rule as the chained pattern below, for the same measured reason:
+# `@vitest/runner`'s `ChainableSuiteAPI` (tasks.d-*.d.ts:1204) is
+# `TypedChainableFunction<ChainableSuiteContextMap, ..., { each, for }>`, so
+# `describe.skip.each([...])` is valid and registers its rows. Verified
+# (cyc20260910-232400) with the real runner: `describe.skip.each([[1],[2]])`
+# reported `Tests 2 skipped (2)` while the single-link pattern found 0.
 _SUITE_KEYWORD = r"(?:describe)"
 _SUITE_PARAMETERISED_FORM = re.compile(
-    rf"^\s*{_SUITE_KEYWORD}\.(?:each|for)\(", re.M
+    rf"^\s*{_SUITE_KEYWORD}\.(?:[A-Za-z_$][\w$]*\.)*(?:each|for)\(", re.M
 )
 
 # Every *callable* member the two runners put on the definition function, none of
@@ -189,8 +196,26 @@ _SUITE_PARAMETERISED_FORM = re.compile(
 # so a comment or a string literal merely mentioning `it.each(` would trip it.
 # The guard's job is to stop drift, not to police prose about drift - prose is
 # what this file is full of. A real call is the statement on its own line.
+#
+# The chain is not one link deep. `@vitest/runner`'s `ChainableTestAPI`
+# (tasks.d-*.d.ts:721) is `TypedChainableFunction<ChainableTestContextMap,
+# ..., { each, for }>` - the *same* object exposes the option setters *and*
+# `each`/`for`, so `it.skip.each([...])` and `it.concurrent.each([...])` are
+# valid and were silently invisible to the single-link version of this pattern
+# (measured cyc20260910-232400: `npx vitest run` on a probe file reported
+# `Tests 3 passed | 2 skipped (5)` for `it.concurrent.each` + `test.skip.each`
+# while both regexes reported 0 hits). Intermediate links are therefore any
+# dotted member, and only the *terminal* one is required to be a known
+# collectable - a real call the first pattern cannot count, one or more
+# modifiers deep.
+#
+# Stated boundary: the anchor means an *indirect* construction such as
+# `const run = it.each(cases);` is still not seen. That is a deliberate trade
+# for prose immunity, not an oversight - a guard that reds on a comment gets
+# deleted, and this file is written in prose about these exact spellings.
 _CHAINED_DEFINITION_FORM = re.compile(
-    rf"^\s*{_DEFINITION_KEYWORD}\.(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)\(",
+    rf"^\s*{_DEFINITION_KEYWORD}\.(?:[A-Za-z_$][\w$]*\.)*"
+    r"(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)\(",
     re.M,
 )
 
@@ -547,8 +572,10 @@ def test_count_definitions_ignores_a_regex_method_call(tmp_path, monkeypatch) ->
     [
         "describe.each([[1], [2]])('suite %i', () => {\n  it('a', () => {});\n});\n",
         "describe.for([1, 2])('suite %i', () => {\n  it('a', () => {});\n});\n",
+        "describe.skip.each([[1], [2]])('suite %i', () => {\n  it('a', () => {});\n});\n",
+        "describe.only.each([[1]])('suite %i', () => {\n  it('a', () => {});\n});\n",
     ],
-    ids=["vitest-describe-each", "node-test-describe-for"],
+    ids=["vitest-describe-each", "node-test-describe-for", "describe-skip-each", "describe-only-each"],
 )
 def test_doc_counts_fail_loud_on_a_parameterized_suite(tmp_path, monkeypatch, body) -> None:
     """A parameterised *suite* hides the same drift one level up.
@@ -559,12 +586,47 @@ def test_doc_counts_fail_loud_on_a_parameterized_suite(tmp_path, monkeypatch, bo
     count records them once. The prior tripwire's own comment named
     `describe.for` as a live form while its pattern could not match it - a
     documented hole that read as coverage (cyc20260910-230247).
+
+    Suites chain too: `ChainableSuiteAPI` carries the option setters *and*
+    `each`/`for`, so `describe.skip.each(...)` registers its rows as well -
+    measured with the real runner, which reported `Tests 2 skipped (2)` for it
+    while the single-link pattern found 0 (cyc20260910-232400).
     """
     mod = _loaded_guard_module()
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
 
     _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
     with pytest.raises(AssertionError, match=r"parameterised \*suite\*"):
+        mod._static_renderer_counts()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it.concurrent.each([[1], [2], [3]])('%i runs', () => {});\n",
+        "it.skip.each([[1], [2]])('%i runs', () => {});\n",
+        "it.only.each([[1]])('%i runs', () => {});\n",
+    ],
+    ids=["concurrent-each", "skip-each", "only-each"],
+)
+def test_renderer_counts_fail_loud_on_a_nested_chained_form(tmp_path, monkeypatch, body) -> None:
+    """A chain is not one link deep, so the pattern must not be either.
+
+    `ChainableTestAPI` in @vitest/runner exposes the option setters *and*
+    `each`/`for` on the same object (`tasks.d-*.d.ts:721`), so
+    `it.concurrent.each([...])` is a real definition form. Measured
+    (cyc20260910-232400) with the real runner: a probe file with
+    `it.concurrent.each` + `test.skip.each` reported
+    `Tests 3 passed | 2 skipped (5)`, while the single-link pattern found **0**
+    of them - i.e. five executed cases documented as zero. The previous
+    revision of this tripwire enumerated every *terminal* member but assumed
+    one link, so it missed every nested spelling.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"cannot count"):
         mod._static_renderer_counts()
 
 
