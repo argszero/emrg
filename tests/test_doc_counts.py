@@ -178,6 +178,25 @@ _DEFINITION_FORM = re.compile(
     rf"^\s*{_DEFINITION_KEYWORD}{_NEWLINE_THEN_INDENT}\(", re.M
 )
 
+# A definition form is not always *called* - it can be *tagged*. `it.each` is also
+# a tag function in vitest, so the table syntax
+#     it.each`
+#       a    | b
+#       ${1} | ${2}
+#     `('adds $a to $b', ({ a, b }) => { ... })
+# registers one case **per table row** while ending in a backtick rather than a
+# paren. Measured with the real runner (cyc20260910-001002): that file reported
+# `Tests 2 passed (2)` while the counted pattern and both tripwires returned **0** -
+# two executed cases recorded as zero, with every guard green. `it.skip.each` and
+# `it.only.each` behave the same (measured: `1 skipped` / `1 passed`).
+#
+# So the tripwires accept either terminal. The *counted* pattern (`_DEFINITION_FORM`
+# above) deliberately still requires `(`: widening it would change the count itself,
+# and the tree currently has no tagged form (measured: 0 across all 54 tracked
+# `.test.ts`/`.test.tsx`/`.test.js` files), so the honest move is to be *told* to
+# teach the counter if one ever appears - which is exactly what these tripwires say.
+_TRIPWIRE_TERMINAL = r"[(`]"
+
 # The *suite* a definition can hang off. `it`/`test` are the counted keywords;
 # `describe` is not counted at all, but both runners let it own parameterised
 # definitions that still register cases the plain regex never sees:
@@ -199,7 +218,7 @@ _SUITE_KEYWORD = r"(?:describe)"
 _SUITE_PARAMETERISED_FORM = re.compile(
     rf"^\s*{_SUITE_KEYWORD}{_NEWLINE_THEN_INDENT}\."
     rf"(?:[A-Za-z_$][\w$]*{_NEWLINE_THEN_INDENT}\.)*"
-    rf"(?:each|for){_NEWLINE_THEN_INDENT}\(",
+    rf"(?:each|for){_NEWLINE_THEN_INDENT}{_TRIPWIRE_TERMINAL}",
     re.M,
 )
 
@@ -238,7 +257,7 @@ _CHAINED_DEFINITION_FORM = re.compile(
     rf"^\s*{_DEFINITION_KEYWORD}{_NEWLINE_THEN_INDENT}\."
     rf"(?:[A-Za-z_$][\w$]*{_NEWLINE_THEN_INDENT}\.)*"
     rf"(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)"
-    rf"{_NEWLINE_THEN_INDENT}\(",
+    rf"{_NEWLINE_THEN_INDENT}{_TRIPWIRE_TERMINAL}",
     re.M,
 )
 
@@ -759,3 +778,90 @@ def test_doc_counts_stay_green_on_prose_about_a_split_call(tmp_path, monkeypatch
     )
     _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
     assert mod._static_renderer_counts() == {"utils": 1}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it.each`\n  a    | b\n  ${1} | ${2}\n`('%i runs', () => {});\n",
+        "test.each`\n  a\n  ${1}\n`('%i runs', () => {});\n",
+        "it.skip.each`\n  a\n  ${1}\n`('%i runs', () => {});\n",
+        "it.only.each`\n  a\n  ${1}\n`('%i runs', () => {});\n",
+    ],
+    ids=["it-each-tagged", "test-each-tagged", "skip-tagged", "only-tagged"],
+)
+def test_renderer_counts_fail_loud_on_a_tagged_template_each(tmp_path, monkeypatch, body) -> None:
+    """A definition form can be *tagged* rather than *called*.
+
+    `it.each` is a tag function in vitest, so the table syntax
+
+        it.each`
+          a    | b
+          ${1} | ${2}
+        `('adds $a to $b', ({ a, b }) => { ... })
+
+    registers one case per table row while ending in a **backtick**, not a paren.
+    Measured with the real runner (cyc20260910-001002): that file reported
+    `Tests 2 passed (2)` while the counted pattern **and both tripwires** returned
+    0 - two executed cases documented as zero with every guard green.
+    `it.skip.each` / `it.only.each` behave the same (measured `1 skipped` /
+    `1 passed`, and a valid tagged `it`-family member at the top level).
+
+    This is the third composition axis found in three cycles - after "which
+    members exist?" (a chain is not one link deep) and "which line?" (a call can
+    be split from its paren) comes "which terminal?" (a definition can be tagged).
+    The counted pattern deliberately still requires `(`, so a tagged form is
+    *reported* rather than silently mis-counted.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"cannot count"):
+        mod._static_renderer_counts()
+
+
+def test_renderer_counts_fail_loud_on_a_tagged_parameterised_suite(tmp_path, monkeypatch) -> None:
+    """The tagged template works for suites too, so the suite guard needs it.
+
+    Measured with the real runner (cyc20260910-001002): `describe.each\\`...\\`(...)`
+    is valid and runs its body once per table row. It reaches the guard through the
+    *suite* pattern, which is a separate regex (widening the counted pattern would
+    change the count), so it needs the same two-terminal treatment.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = "describe.each`\n  a\n  ${1}\n`('suite %i', () => {\n  it('a', () => {});\n});\n"
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"parameterised \*suite\*"):
+        mod._static_renderer_counts()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it('a', () => {});\n",
+        "it('a', () => {});\nit('b', () => {});\n",
+    ],
+    ids=["one-call", "two-calls"],
+)
+def test_renderer_counts_stay_green_on_ordinary_calls(tmp_path, monkeypatch, body) -> None:
+    """Counter-test for the two-terminal change: ordinary calls must stay quiet.
+
+    Adding a backtick alternative to the terminal must not make an ordinary call
+    trip - this pins the boundary the widening could have broken. Note the array
+    forms (`it.each([...])`, `describe.each([...])`) are deliberately **not** here:
+    they are uncountable and *should* trip, which their own tests assert.
+
+    `it\\`...\\`` (the bare keyword as a tag) is intentionally absent too: it is a
+    runtime `TypeError: it(...) is not a function` (measured with the real runner),
+    so it is not a definition and the guard is right to stay silent.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    assert mod._static_renderer_counts() == {
+        "utils": len(mod._DEFINITION_FORM.findall(body))
+    }
