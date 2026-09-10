@@ -204,6 +204,23 @@ def test_dry_run_reports_but_does_not_write(mod, tmp_path, monkeypatch, capsys) 
     assert doc.read_text() == before
 
 
+def test_write_and_dry_run_together_are_rejected() -> None:
+    """The two modes contradict each other, so the pair must fail loud.
+
+    Measured before this was enforced: `--write --dry-run` printed the dry-run
+    line, wrote nothing and exited 0 -- the caller asked for a repair and the
+    tool dropped the request without a word. That is the "silently reinterpret
+    input" class this repo already rejected once (bump-version.py's `--check
+    v0.2.94`, which discarded its argument and reported green about a version
+    nobody asked about). argparse's own exit code for a usage error is 2, which
+    matches this tool's convention for "cannot act on what you gave me".
+    """
+    with pytest.raises(SystemExit) as excinfo:
+        mod_main = _load_module()
+        mod_main.main(["--write", "--dry-run"])
+    assert excinfo.value.code == 2
+
+
 def test_real_tree_is_consistent() -> None:
     """Integration: the tool reports OK on the checked-in tree.
 

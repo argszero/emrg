@@ -7,6 +7,12 @@ Usage
     uv run --no-sync python3 scripts/check-doc-count.py --write   # rewrite Agent.md
     uv run --no-sync python3 scripts/check-doc-count.py --dry-run # show the change
 
+`--write` and `--dry-run` are mutually exclusive: one repairs, the other must not
+write, so the pair is rejected outright rather than silently resolved in favour
+of one of them (measured before this was enforced: `--write --dry-run` printed
+the dry-run line, wrote nothing, and exited 0 - the requested action was dropped
+without a word).
+
 Run it with the project interpreter: the measurement shells out to pytest, so a
 bare `python3` that cannot import pytest fails loud with that reason rather than
 reporting a bogus count.
@@ -126,12 +132,13 @@ def main(argv: list[str] | None = None) -> int:
         epilog=__doc__.split("Usage\n-----", 1)[-1].strip(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--write",
         action="store_true",
         help="rewrite Agent.md with the measured count",
     )
-    parser.add_argument(
+    mode.add_argument(
         "--dry-run",
         action="store_true",
         help="show the change without writing",
