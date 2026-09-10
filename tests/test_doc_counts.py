@@ -227,8 +227,19 @@ def test_count_line_kind_guard_catches_a_numbered_duplicate() -> None:
         if ln.startswith("GUI: ")
     ]
     assert len(real) == 1, f"Agent.md must state one GUI count line, has {len(real)}"
-    stale = (
-        real[0].replace("(100: ", "(97: ", 1).replace("44 daemon_client", "41 daemon_client", 1)
+
+    # The stale copy is *derived* from whatever the real line currently says, not
+    # pinned to today's numbers. An earlier version hardcoded the headline and its
+    # first breakdown part (`(100: ` / `44 daemon_client`); the moment a GUI test is
+    # added - the single most common change to this line - those literals no longer
+    # match, the substitution becomes a no-op, and `stale != real[0]` fails. That
+    # turns the guard's own driver into a time bomb that reds the very line it
+    # exists to keep honest. Derived here, it cannot go stale: only the *shape*
+    # (a headline number that differs) is required.
+    headline = re.search(r"\((\d+): ", real[0])
+    assert headline, f"no `(N: ` headline in the GUI count line: {real[0]!r}"
+    stale = real[0].replace(
+        f"({headline.group(1)}: ", f"({int(headline.group(1)) - 3}: ", 1
     )
     assert stale != real[0], "the stale copy must differ from the real line"
 
