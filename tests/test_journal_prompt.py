@@ -151,3 +151,57 @@ def test_journal_positioned_as_top_conference_not_measurement_archive():
     # The old "top-level contributions are a bonus, NOT the default bar" framing
     # is gone — quality bar no longer depends on contribution level.
     assert "NOT the default bar" not in text
+
+
+def test_editor_review_bar_requires_citation_authenticity_check():
+    text = PROMPT.read_text(encoding="utf-8")
+    # Rant 2026-09-10T11:28:43: the editor must spot-check citations itself
+    # (never trusting the author's self-report), and fabrication alone can REJECT.
+    assert "Spot-check citation authenticity independently" in text
+    assert "never trust the author's self-check report alone" in text
+    assert "A fabricated or unverifiable citation is a major concern and can alone justify REJECT" in text
+    # The verification method is declarative (API endpoints + judgement criteria)
+    assert 'curl -s "https://api.crossref.org/works/<doi>"' in text
+    assert "https://api.crossref.org/works?query.bibliographic=<title>" in text
+
+
+def test_reference_count_threshold_and_in_text_coverage():
+    text = PROMPT.read_text(encoding="utf-8")
+    # Rant 2026-09-10T11:28:43: >=100 references, all genuinely cited; padding
+    # entries do not count; the bar is level-independent (case studies included).
+    assert "Check the reference-count threshold and in-text coverage" in text
+    assert "at least 100 references" in text
+    assert "each one must be genuinely cited in the body text" in text
+    assert "is padding and does not count toward the total" in text
+    assert "applied to every manuscript alike (including case studies" in text
+    # The citation gradient: 3 comparisons -> 100 references -> authenticity
+    assert "3 comparisons (floor) → 100 references (volume) → authenticity verification (quality)" in text
+
+
+def test_author_side_citation_integrity_requirements():
+    text = PROMPT.read_text(encoding="utf-8")
+    # Author Phase B item 12: verify EVERY reference before submitting.
+    assert "Citation authenticity verification (mandatory, rant 2026-09-10T11:28:43)" in text
+    assert "fabricated citations are academic misconduct, not a formatting slip" in text
+    assert "delete it or replace it with a real reference" in text
+    assert "Never submit an unverifiable citation" in text
+    # The authenticity report is a committed artifact of the submission
+    assert "papers/issue-<N>/reference-check.md" in text
+    assert "- `reference-check.md` — citation authenticity report (item 12)" in text
+
+
+def test_citation_gate_wired_into_triage_and_common_rules():
+    text = PROMPT.read_text(encoding="utf-8")
+    # Triage (editor Phase A step 3) verifies the gate before moving to in-review.
+    assert "citation gate (rant 2026-09-10T11:28:43)" in text
+    assert "author's authenticity report — the independent spot-check still happens at review" in text
+    # Common Rules item 8 carries it too, so the bar is visible outside the phases.
+    assert "Citation integrity is part of the bar (rant 2026-09-10T11:28:43)" in text
+
+
+def test_citation_verification_row_in_both_review_templates():
+    # Both review templates (editor + author Phase Review-Other) must carry the
+    # independent spot-check row, mirroring the Significance-check duplication.
+    text = PROMPT.read_text(encoding="utf-8")
+    assert text.count("**Citation verification** (independent spot-check)") == 2
+    assert text.count("total references <T> (≥100 required), uncited entries <u>") == 2
