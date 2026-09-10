@@ -91,6 +91,93 @@ def test_gui_breakdown_sums_to_headline() -> None:
         )
 
 
+# The canonical test-command lines in Agent.md. Each is a *kind* that may appear
+# at most once: this line is the repo's most-conflicted (four merges in one day,
+# #1119/#1120/#1121/#1122), and a hand-resolved conflict can leave a second copy.
+COUNT_LINE_KINDS = ("Python: ", "GUI: ", "Renderer: ")
+
+
+def _duplicated_count_line_kinds(text: str) -> dict[str, list[str]]:
+    """Count-line kinds stated more than once in a doc, with the offending lines.
+
+    Takes the doc's text (not a path) so the rule below can be *driven* against
+    a two-line document. Keyed by kind rather than by whole line, because the
+    realistic conflict artifact is **not** an exact copy: the two sides carry
+    different numbers (e.g. `(100: ` and `(97: `), so an exact-line comparison
+    sees nothing. That is why the pre-existing
+    `test_no_duplicate_npm_test_command_lines` (#617, a *copy-paste* guard) does
+    not cover this state.
+    """
+    found: dict[str, list[str]] = {}
+    for kind in COUNT_LINE_KINDS:
+        lines = [ln.rstrip() for ln in text.splitlines() if ln.startswith(kind)]
+        if len(lines) > 1:
+            found[kind] = lines
+    return found
+
+
+def test_count_line_kinds_appear_once_per_doc() -> None:
+    """Each doc states each test-count line at most once, even with different numbers.
+
+    Measured 2026-09-10: this is the state every guard missed. A duplicated
+    `GUI: \\`cd emrg/gui && npm test\\` (97: ...)` line placed beside the correct
+    `(100: ...)` line left **all 9 guards green** once the stale copy was made
+    internally consistent - `test_no_duplicate_npm_test_command_lines` compares
+    whole lines (so different numbers are invisible), and
+    `test_gui_breakdown_sums_to_headline` validates each line against *itself*
+    (so a stale line that sums correctly is accepted). The result is a doc that
+    claims two different GUI test counts, with nothing flagging the ambiguity.
+
+    Note the distinction from the exact-duplicate guard: that one catches
+    copy-paste, this one catches *ambiguity*. Both are needed - an exact
+    duplicate is caught by either, a numbered stale copy only by this one.
+    """
+    for doc in ("README.md", "README.cn.md", "Agent.md"):
+        text = (REPO_ROOT / doc).read_text(encoding="utf-8")
+        found = _duplicated_count_line_kinds(text)
+        assert not found, (
+            f"{doc} states the same test-count line kind more than once, so the "
+            "doc claims two different values with no way to tell which is real: "
+            + "; ".join(
+                f"{kind.strip()} stated {len(lines)}x -> {lines}"
+                for kind, lines in sorted(found.items())
+            )
+            + ". A hand-resolved merge left a stale copy - delete it, then "
+            "re-measure with `uv run --no-sync python3 scripts/check-doc-count.py --write`."
+        )
+
+
+def test_count_line_kind_guard_catches_a_numbered_duplicate() -> None:
+    """Drive the kind guard against the shape the other two guards miss.
+
+    Two `GUI:` lines whose numbers differ: not an exact duplicate (the #617
+    guard's criterion), and each self-consistent (the sum guard's criterion),
+    yet the doc now contradicts itself. The rule is invoked with the two-line
+    text, so what is exercised is the guard's own logic rather than a
+    restatement of its assertion message.
+    """
+    real = [
+        ln for ln in (REPO_ROOT / "Agent.md").read_text(encoding="utf-8").splitlines()
+        if ln.startswith("GUI: ")
+    ]
+    assert len(real) == 1, f"Agent.md must state one GUI count line, has {len(real)}"
+    stale = (
+        real[0].replace("(100: ", "(97: ", 1).replace("44 daemon_client", "41 daemon_client", 1)
+    )
+    assert stale != real[0], "the stale copy must differ from the real line"
+
+    # negative half: the real doc is clean, and one line is not a duplicate
+    assert _duplicated_count_line_kinds(
+        (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
+    ) == {}
+    assert _duplicated_count_line_kinds(real[0] + "\n") == {}
+
+    # positive half: two GUI lines, different numbers, both self-consistent
+    found = _duplicated_count_line_kinds("\n".join([real[0], stale]) + "\n")
+    assert set(found) == {"GUI: "}, found
+    assert found["GUI: "] == [real[0], stale]
+
+
 def test_no_duplicate_npm_test_command_lines() -> None:
     """Each doc must not contain an identical `npm test` command line twice.
 
