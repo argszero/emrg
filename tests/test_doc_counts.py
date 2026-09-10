@@ -142,20 +142,34 @@ def test_evolution_prompt_no_quick_ref_block() -> None:
 
 
 
-def _static_renderer_count() -> int:
-    """Count renderer vitest cases statically (no node_modules needed).
+_RENDERER_TEST_SUFFIX = ".test"
+
+
+def _static_renderer_counts() -> dict[str, int]:
+    """Count renderer vitest cases per file, keyed by Agent.md's own label.
 
     Matches vitest's executed total exactly: for every renderer test file the
     ``^\\s*(it|test)(`` definition count equals the number of executed cases
-    (verified for all 44 files, R2254). Files are under
-    ``emrg/gui/renderer/src`` with ``.test.ts`` / ``.test.tsx`` suffixes.
+    (verified for all 45 files, R2254). Files are under
+    ``emrg/gui/renderer/src`` with ``.test.ts`` / ``.test.tsx`` suffixes, and
+    Agent.md labels each one by its stem minus ``.test`` (``App.test.tsx`` ->
+    ``App``, ``snapshot-store.test.ts`` -> ``snapshot-store``); a trailing
+    descriptive word (``2 App smoke``) is not part of the label.
     """
     base = REPO_ROOT / "emrg" / "gui" / "renderer" / "src"
-    total = 0
-    for f in sorted(base.rglob("*.test.ts")) + sorted(base.rglob("*.test.tsx")):
-        text = f.read_text(encoding="utf-8")
-        total += len(re.findall(r"^\s*(?:it|test)\(", text, re.M))
-    return total
+    files = sorted(base.rglob("*.test.ts")) + sorted(base.rglob("*.test.tsx"))
+    assert files, "no renderer test files found under emrg/gui/renderer/src"
+    return {
+        f.stem[: -len(_RENDERER_TEST_SUFFIX)]: len(
+            re.findall(r"^\s*(?:it|test)\(", f.read_text(encoding="utf-8"), re.M)
+        )
+        for f in files
+    }
+
+
+def _static_renderer_count() -> int:
+    """Total renderer vitest cases (static, no node_modules needed)."""
+    return sum(_static_renderer_counts().values())
 
 
 def test_renderer_count_matches_docs() -> None:
@@ -176,6 +190,54 @@ def test_renderer_count_matches_docs() -> None:
         f"{label}: documents {headline} renderer tests but {static} are "
         f"counted statically (vitest-equivalent). Sync Agent.md when "
         "adding/removing renderer tests."
+    )
+
+
+def _renderer_doc_breakdown() -> tuple[int, dict[str, int]]:
+    """Parse Agent.md's Renderer line into (headline, {label: count})."""
+    text = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
+    line = next((ln for ln in text.splitlines() if "Renderer:" in ln), None)
+    assert line, "Agent.md must document the Renderer suite (a 'Renderer:' line)"
+    m = re.search(r"\((\d+): ([^)]+)\)", line)
+    assert m, f"could not parse the Agent.md Renderer breakdown: {line}"
+    parts: dict[str, int] = {}
+    for part in m.group(2).split("+"):
+        pm = re.match(r"\s*(\d+)\s+(\S+)", part)
+        assert pm, f"could not parse Agent.md Renderer breakdown part: {part!r}"
+        parts[pm.group(2)] = int(pm.group(1))
+    return int(m.group(1)), parts
+
+
+def test_renderer_breakdown_matches_static_counts() -> None:
+    """Agent.md's per-file renderer counts must match the real definitions.
+
+    The R2254 guard pins the renderer *headline* to the static total, and
+    ``test_gui_breakdown_sums_to_headline`` pins the parts to the headline.
+    Together they constrain the sum but not the parts: two compensating edits
+    on the 45-entry breakdown (``13 markdown + 4 vendorMarkdown`` mistyped as
+    ``14 markdown + 3 vendorMarkdown``) satisfy both and leave the doc wrong
+    in two places. #1117 closed the same gap for the GUI line per file; this
+    closes it for the renderer, so a new/renamed/deleted renderer test file or
+    a transposed count turns red in the pytest job (no node_modules needed).
+    """
+    headline, documented = _renderer_doc_breakdown()
+    static = _static_renderer_counts()
+
+    assert set(documented) == set(static), (
+        "Agent.md Renderer breakdown does not match the renderer test files — "
+        f"undocumented files: {sorted(set(static) - set(documented))}; "
+        f"stale labels: {sorted(set(documented) - set(static))}"
+    )
+    for label, count in sorted(static.items()):
+        assert documented[label] == count, (
+            f"Agent.md documents {documented[label]} {label} renderer tests "
+            f"but {count} are defined in the file labelled {label} — sync the "
+            "doc when adding/removing renderer tests."
+        )
+    total = sum(static.values())
+    assert headline == total, (
+        f"Agent.md's Renderer headline is {headline} but the test files define "
+        f"{total} tests"
     )
 
 
