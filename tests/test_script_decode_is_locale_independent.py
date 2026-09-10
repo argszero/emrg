@@ -72,6 +72,16 @@ providers are now resolved (one local-assignment hop included, for
 `kw = _no_window()`), so the rule reports the calls it cannot prove safe rather
 than every call whose keywords are spelled indirectly.
 
+A provider is resolved by **value**, not by name - and that distinction was itself
+a defect, found by driving the rule rather than reading it. The first version keyed
+the splat table on the *expression text* (`"_PATH_DECODE"`), so rebinding
+`_PATH_DECODE` to a dict without `encoding` inside a scanned file left every test
+green: the scan credited the name, never the binding. A name is not a value. A dict
+literal is now read from its own assignment, so the pin has to actually be there to
+be credited; the two call-form providers, whose key set belongs to another module
+and cannot be read from the call site, are declared *and* verified - see
+`test_the_declared_provider_key_sets_match_the_real_functions`.
+
 The same mistake in the other direction, and the fix
 ----------------------------------------------------
 The correction above then over-corrected: the first `emrg/` version reported every
@@ -172,28 +182,45 @@ _CONSOLE_PROGRAMS = {
 _PROBE_BYTE = 0x81
 
 
-# Splat expressions whose keys are knowable without running the program, and
-# what they may contribute. This module had a first version that reported every
-# `**expr` call as unreadable and therefore unsafe - 27 false positives, because
-# three of the four providers in this repo can only ever supply `creationflags`,
-# and one (`_PATH_DECODE`) *is* the pin. Resolving providers keeps the rule
-# honest in both directions; a splat from an unknown provider is still reported.
+# Call-form splat providers, declared to supply `creationflags` and nothing else.
+# The `**`-splat into `subprocess.run` is the #592 window-storm fix, so these
+# calls appear at every site that starts a child; reporting them would drown the
+# rule in the 27 false positives its first `emrg/` version produced.
 #
-# Format: provider expression -> (keys it may pass, why it is safe to skip).
-_SPLAT_PROVIDERS = {
-    "win32_no_window_kwargs()": (
-        {"creationflags"},
-        "emrg/_win.py returns creationflags only, on every platform",
+# These are declared by *name*, because their key set is a property of another
+# module - so the declaration is verified instead of trusted: `test_the_declared
+# _provider_key_sets_match_the_real_functions` parses each function below and
+# requires its returned dict keys to be exactly the declared set. Without that
+# check the table is a claim about code the scan never reads.
+#
+# Note what is *not* here: a name-bound provider such as `**_PATH_DECODE`.
+# `_PATH_DECODE` appears in the table's history - and keying it by name was a
+# false negative, measured: rebinding it inside a real file
+# (`_PATH_DECODE = {"creationflags": 0}`, i.e. no pin at all) left all 15 guard
+# tests green, because the scan consulted the name rather than the binding. A
+# name is not a value. `_PATH_DECODE` is now resolved from its own assignment in
+# the file under scan, so the pin has to *be there* to be credited.
+#
+# Format: function name -> (defining file, why its keys are safe to skip).
+_CREATIONFLAGS_PROVIDERS = {
+    "win32_no_window_kwargs": (
+        "emrg/_win.py",
+        "returns {'creationflags': CREATE_NO_WINDOW} on Windows, {} elsewhere",
     ),
-    "_no_window()": (
-        {"creationflags"},
-        "emrg/_stop_all.py returns creationflags only (mirrors _win.py)",
-    ),
-    "_PATH_DECODE": (
-        {"encoding", "errors"},
-        "the pin itself: {'encoding': 'utf-8', 'errors': 'replace'}",
+    "_no_window": (
+        "emrg/_stop_all.py",
+        "returns {'creationflags': ...} on Windows, {} elsewhere (mirrors _win.py)",
     ),
 }
+
+# What those providers are declared to supply. Also the value of `_dict_splat_keys`
+# for a name whose binding is a dict literal.
+_CREATIONFLAGS_KEYS = {"creationflags"}
+
+# Spellings that count as a UTF-8 pin when they are the *value* of `encoding=`.
+# Narrow on purpose: `"locale"`, `"gbk"`, `"cp936"` and anything computed are not
+# pins, and a dict that carries one must not make a call look pinned.
+_UTF8_SPELLINGS = {"utf-8", "utf8"}
 
 
 def _leading_text(value: ast.expr) -> str:
@@ -237,6 +264,71 @@ def _child_program(node: ast.Call, assigns: dict[str, ast.expr]) -> str:
     return parts[0] if parts else ""
 
 
+def _dict_literal_keys(value: ast.expr) -> set[str] | None:
+    """The keys a dict literal may contribute, or None when the value is not one.
+
+    Returning None (rather than an empty set) is what keeps "I can see this dict
+    and it carries nothing relevant" distinct from "I cannot see this value" - the
+    two are treated oppositely by the caller.
+
+    `encoding` is credited only when its value is a literal UTF-8 spelling.
+    Crediting the key alone would be the same name-over-value mistake this
+    function exists to fix, one level down: `{"encoding": "locale"}` (or
+    `{"encoding": "gbk"}`) is a *deliberate* locale decode and must not make a
+    call look pinned. A non-literal value is dropped for the same reason - the
+    conservative direction is to report the call.
+    """
+    if not isinstance(value, ast.Dict):
+        return None
+    keys: set[str] = set()
+    for key, val in zip(value.keys, value.values):
+        if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            return None  # `**{**a, **b}` or a computed key: not statically known
+        if key.value == "encoding":
+            literal = val.value if isinstance(val, ast.Constant) else None
+            if not (isinstance(literal, str) and literal.lower().replace("_", "-") in _UTF8_SPELLINGS):
+                continue  # not a UTF-8 pin: contribute nothing
+        keys.add(key.value)
+    return keys
+
+
+def _splat_keys(value: ast.expr, assigns: dict[str, ast.expr]) -> set[str] | None:
+    """Keys a `**expr` splat may contribute, or None when not statically knowable.
+
+    Every shape is resolved by *value*, and the difference between the shapes is
+    the point:
+
+    * a dict literal, directly or through a one-hop name binding
+      (`_PATH_DECODE = {"encoding": ...}`), is read from the assignment, so its
+      value decides what is credited - a binding that stops pinning an encoding
+      stops being credited, which a name-keyed table silently could not express;
+    * a declared call provider (`win32_no_window_kwargs()`, `_no_window()`),
+      directly or as the binding of a local (`kw = _no_window()`), contributes
+      `creationflags` - see `_CREATIONFLAGS_PROVIDERS`, whose declaration is
+      verified against the real functions by a test.
+
+    Anything else returns None, and the caller reports the call as unreadable
+    rather than assuming its options are visible.
+    """
+    if isinstance(value, ast.Name):
+        if value.id in assigns:
+            # One hop through the binding: `kw = {...}` or `kw = _no_window()`.
+            return _splat_keys(assigns[value.id], {})
+        if value.id in _CREATIONFLAGS_PROVIDERS:
+            return _CREATIONFLAGS_KEYS
+        return None
+    if isinstance(value, ast.Call):
+        name = (
+            value.func.attr
+            if isinstance(value.func, ast.Attribute)
+            else getattr(value.func, "id", "")
+        )
+        if name in _CREATIONFLAGS_PROVIDERS:
+            return _CREATIONFLAGS_KEYS
+        return None
+    return _dict_literal_keys(value)
+
+
 def _text_mode_calls(
     source: str, label: str = "<string>"
 ) -> list[tuple[int, str, set[str], str]]:
@@ -244,26 +336,13 @@ def _text_mode_calls(
 
     A call is text-mode if it asks for text (`text=True` / `universal_newlines=True`)
     directly, or if it splats a provider that could supply either key. Locally
-    assigned names (``kw = _no_window(); ... **kw``) are resolved one step, which
-    is what `emrg/_stop_all.py` does 14 times.
+    assigned names (``kw = _no_window(); ... **kw``) are resolved through
+    `_splat_keys`, which reads a dict literal from its binding.
 
     Keywords forwarded through an *unknown* splat cannot be read, so such a call
     reports the empty name `"**"` in place of the func name - the caller can then
     refuse to treat it as clean instead of assuming the options are visible.
     """
-    forwarders = {
-        t.id
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
-        for t in node.targets
-        if isinstance(t, ast.Name)
-        and (
-            node.value.func.attr
-            if isinstance(node.value.func, ast.Attribute)
-            else getattr(node.value.func, "id", "")
-        )
-        in {"_no_window", "win32_no_window_kwargs"}
-    }
     tree = ast.parse(source)
     assigns: dict[str, ast.expr] = {
         t.id: node.value
@@ -303,13 +382,11 @@ def _text_mode_calls(
         for k in node.keywords:
             if k.arg is not None:
                 continue
-            expr = ast.unparse(k.value)
-            if expr in _SPLAT_PROVIDERS:
-                kwargs |= _SPLAT_PROVIDERS[expr][0]
-            elif isinstance(k.value, ast.Name) and k.value.id in forwarders:
-                kwargs |= {"creationflags"}
-            else:
+            supplied = _splat_keys(k.value, assigns)
+            if supplied is None:
                 unknown = True
+            else:
+                kwargs |= supplied
         if unknown:
             # options are forwarded; text= and encoding= may both be in there
             found.append((node.lineno, "**", kwargs, _child_program(node, assigns)))
@@ -548,6 +625,95 @@ def test_the_scan_catches_an_unpinned_site() -> None:
     assert [f for _, f, _, _ in _text_mode_calls(beside)] == ["run"], (
         "a splat must not hide a text=True written beside it"
     )
+
+
+def test_a_splat_provider_is_resolved_by_value_not_by_name() -> None:
+    """A named splat counts only for what its *binding* actually supplies.
+
+    This is the regression guard for a false negative measured this cycle: the
+    first version of the `emrg/` scan keyed the splat table on the expression
+    text, so `_PATH_DECODE` was credited as "the pin" wherever that name
+    appeared. Rebinding it to a dict with no `encoding` (or to an empty dict, or
+    to one naming the locale codec) inside a scanned file therefore left the
+    whole guard green - the rule asserted a property of a *name*, and the name
+    was all it ever read.
+
+    Driven in both directions: a binding that pins is credited, and every binding
+    that does not is reported. The negative half is what the previous version
+    could not express at all.
+    """
+    pinned = (
+        "import subprocess\n"
+        '_PATH_DECODE = {"encoding": "utf-8", "errors": "replace"}\n'
+        "def f():\n"
+        "    return subprocess.run(['gh'], text=True, **_PATH_DECODE)\n"
+    )
+    assert _violations(pinned, "probe.py") == [], "a real pin must still be credited"
+
+    for label, binding in (
+        ("no encoding key at all", '{"creationflags": 0}'),
+        ("an empty dict", "{}"),
+        ("the locale codec spelled out", '{"encoding": "locale"}'),
+        ("another name bound to a non-pinning dict", '{"errors": "replace"}'),
+    ):
+        src = (
+            "import subprocess\n"
+            f"_PATH_DECODE = {binding}\n"
+            "def f():\n"
+            "    return subprocess.run(['gh'], text=True, **_PATH_DECODE)\n"
+        )
+        assert _violations(src, "probe.py"), (
+            f"a `_PATH_DECODE` bound to {label} supplies no pin, so the call it is "
+            "splatted into is a locale-dependent decode and must be reported - "
+            "crediting the name instead of the binding is the false negative this "
+            "checks for"
+        )
+
+
+def test_the_declared_provider_key_sets_match_the_real_functions() -> None:
+    """A declared call provider's keys are verified, not trusted.
+
+    `win32_no_window_kwargs()` and `_no_window()` are declared to supply
+    `creationflags` and nothing else. That is a claim about code in *other* files
+    which the scan never reads, so it is checked here by parsing each function and
+    collecting the string keys of every dict it returns. If either function ever
+    returns `encoding=`, `text=` or anything else, the exemption stops being true
+    and this test says so rather than letting the blind spot widen silently - the
+    same reason `_CONSOLE_DECODE_ALLOWED` has a dead-entry test.
+
+    The check is deliberately narrow (dict-literal return keys): these functions
+    are three lines each and return literals, so anything that defeats the parse
+    should be looked at by a human, not guessed at.
+    """
+    returns: dict[str, set[str]] = {}
+    for func_name, (rel, reason) in _CREATIONFLAGS_PROVIDERS.items():
+        path = REPO_ROOT / rel
+        assert path.exists(), f"{rel} (declared for {func_name}) is gone: {reason}"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == func_name:
+                found = node
+        assert found is not None, f"{func_name} is not defined in {rel} any more"
+        keys: set[str] = set()
+        for node in ast.walk(found):
+            if isinstance(node, ast.Return) and node.value is not None:
+                literal = _dict_literal_keys(node.value)
+                assert literal is not None, (
+                    f"{rel}:{func_name} no longer returns a dict literal "
+                    f"({ast.unparse(node.value)}) - the declaration in "
+                    "_CREATIONFLAGS_PROVIDERS has to be re-checked by hand"
+                )
+                keys |= literal
+        returns[func_name] = keys
+
+    for func_name, keys in returns.items():
+        assert keys == _CREATIONFLAGS_KEYS, (
+            f"{func_name} returns {sorted(keys)}, but it is declared to supply "
+            f"{sorted(_CREATIONFLAGS_KEYS)} - a provider that supplies more than "
+            "creationflags can carry text=/encoding= into a call the scan would "
+            "otherwise have to report"
+        )
 
 
 def test_the_invisible_entry_points_are_reported() -> None:
