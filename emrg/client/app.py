@@ -108,6 +108,26 @@ def _auto_title_from_prompt(text: str, max_len: int = 30) -> str | None:
 
 # ── Clipboard image support (platform-adaptive) ─────────────
 
+# Reading a clipboard *file path* must not go through the console locale codec.
+#
+# Every subprocess below asks a native tool (osascript / xclip / powershell) for a
+# file path, and a path follows the OS filesystem encoding - UTF-8 on macOS and
+# Linux - not the console code page. `text=True` with no `encoding=` decodes with
+# the *locale* codec, which on a cp936/GBK or cp1252 host is not UTF-8:
+#
+#   measured (PYTHONUTF8=0 LANG=zh_CN.GBK LC_ALL=zh_CN.GBK), clipboard holding
+#   图片.png: the label came back as U+9365 U+5267 instead of U+56FE U+7247, and
+#   a name containing a byte GBK cannot map raised UnicodeDecodeError straight
+#   into the `except Exception` below - i.e. pasting an image whose filename is
+#   not ASCII either mislabels it or silently reports "no image on the clipboard".
+#
+# Pinning UTF-8 is correct here in a way it is NOT for console output: these tools
+# emit bytes, and the byte source is a path, not the console. `emrg/tools/bash_tool.py`
+#   keeps the opposite policy (locale first, then UTF-8) for exactly that reason -
+# it reads *console* output, which on Windows really does use the console code page.
+_PATH_DECODE = {"encoding": "utf-8", "errors": "replace"}
+
+
 def _detect_clipboard_image() -> tuple[bool, str | None]:
     """Check system clipboard for image data.
     Returns (has_image, label_or_None).
@@ -117,7 +137,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
         if system == "Darwin":
             result = subprocess.run(
                 ['osascript', '-e', 'clipboard info'],
-                capture_output=True, text=True, timeout=3,
+                capture_output=True, text=True, timeout=3, **_PATH_DECODE,
                 **win32_no_window_kwargs(),
             )
             out = result.stdout
@@ -134,7 +154,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                     ['osascript', '-e',
                      'try\n  set f to (the clipboard as «class furl»)\n'
                      '  return POSIX path of f\nend try'],
-                    capture_output=True, text=True, timeout=2,
+                    capture_output=True, text=True, timeout=2, **_PATH_DECODE,
                     **win32_no_window_kwargs(),
             )
                 if r2.stdout.strip():
@@ -146,7 +166,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
         elif system == "Linux":
             result = subprocess.run(
                 ['xclip', '-selection', 'clipboard', '-t', 'TARGETS', '-o'],
-                capture_output=True, text=True, timeout=3,
+                capture_output=True, text=True, timeout=3, **_PATH_DECODE,
                 **win32_no_window_kwargs(),
             )
             out = result.stdout
@@ -159,7 +179,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                     r2 = subprocess.run(
                         ['xclip', '-selection', 'clipboard', '-t',
                          'text/uri-list', '-o'],
-                        capture_output=True, text=True, timeout=2,
+                        capture_output=True, text=True, timeout=2, **_PATH_DECODE,
                         **win32_no_window_kwargs(),
             )
                     uri = r2.stdout.strip()
@@ -177,7 +197,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
             )
             result = subprocess.run(
                 ['powershell', '-Command', ps_cmd],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, **_PATH_DECODE,
                 **win32_no_window_kwargs(),
             )
             if 'IMAGE' not in result.stdout:
@@ -191,7 +211,7 @@ def _detect_clipboard_image() -> tuple[bool, str | None]:
                      '$files = [System.Windows.Forms.Clipboard]::GetFileDropList(); '
                      'if ($files -ne $null -and $files.Count -gt 0) '
                      '{ Write-Output $files[0] }'],
-                    capture_output=True, text=True, timeout=3,
+                    capture_output=True, text=True, timeout=3, **_PATH_DECODE,
                     **win32_no_window_kwargs(),
             )
                 if r2.stdout.strip():
