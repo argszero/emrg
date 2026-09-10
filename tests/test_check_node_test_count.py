@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -361,3 +362,125 @@ def test_ci_gate_uses_the_check_mode_not_the_preview(mod) -> None:
             f"the CI step must use the bare check form: {hit!r} - `--dry-run` exits "
             "0 on drift and `--write` would rewrite the repo under CI"
         )
+
+
+# --- host portability: Windows argv + non-locale decoding (issue #1132) -------
+#
+# The tool's whole purpose is to be run *by the host* after touching a Node test
+# file, but its CI gate runs on `ubuntu-latest` only (`test-windows` runs pytest
+# and iscc), so two defects survived every green run: `npm` cannot be started by
+# bare name on Windows (subprocess appends only `.exe`, while npm ships as
+# `npm.CMD`), and decoding with the locale codec turns node's `ℹ` summary glyph
+# into a swallowed reader-thread UnicodeDecodeError whose `None` stdout then
+# crashed on the concatenation. Both were measured on the merged tree - the
+# first produced `cannot run 'npm': [WinError 2]`, the second
+# `TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'`.
+#
+# The probes below are platform-independent: the argv half monkeypatches
+# `shutil.which`, and the decoding half runs a real child that writes a byte
+# invalid under *any* UTF-8 locale, so the failure shape reproduces on
+# Linux/macOS too rather than only on the machine that filed the issue.
+
+
+def test_run_resolves_the_command_through_which(mod, monkeypatch) -> None:
+    """`npm` must reach the runner by its resolved path, not as a bare name."""
+    seen: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return _Proc()
+
+    monkeypatch.setattr(mod.shutil, "which", lambda name: f"/resolved/{name}")
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    mod._run(["npm", "test"], mod.RENDERER_ROOT)
+
+    assert seen == [["/resolved/npm", "test"]], (
+        f"the runner was invoked as {seen} - an unresolved bare `npm` is a file "
+        "that does not exist on Windows (npm.CMD)"
+    )
+
+
+def test_run_leaves_an_unresolvable_command_alone(mod, monkeypatch) -> None:
+    """A name `which` cannot find keeps its spelling, so the error names it.
+
+    Inventing a path here would replace a precise `cannot run 'nope'` with a
+    confusing failure about a file nobody asked for.
+    """
+    seen: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: (seen.append(list(cmd)), _Proc())[1])
+    mod._run(["nope", "test"], mod.RENDERER_ROOT)
+
+    assert seen == [["nope", "test"]]
+
+
+def test_missing_runner_still_names_the_command(mod, monkeypatch) -> None:
+    """The FileNotFoundError path survives the resolution (negative control)."""
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+
+    def _boom(cmd, **kwargs):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(mod.subprocess, "run", _boom)
+    with pytest.raises(mod.NodeCountError, match="cannot run 'npm'"):
+        mod._run(["npm", "test"], mod.RENDERER_ROOT)
+
+
+def test_run_decodes_output_that_is_not_valid_utf8(mod) -> None:
+    """A byte the locale codec cannot decode must not lose the whole output.
+
+    This is the measured Windows failure (cp936 vs node's `ℹ` U+2139): the
+    decode error happened inside subprocess's reader thread, `threading`
+    swallowed it, `proc.stdout` came back `None`, and main() - which catches
+    `NodeCountError` and `OSError` only - printed a traceback instead of the
+    reason the tool already knows how to print.
+    """
+    child = "import sys; sys.stdout.buffer.write(b'\\xb9 tests 7\\nfail 0\\n')"
+    out = mod._run([sys.executable, "-c", child], mod.RENDERER_ROOT)
+    assert "tests 7" in out, f"output was lost: {out!r}"
+    assert mod.NODE_TESTS.search(out), (
+        "the summary no longer parses once the undecodable glyph is replaced"
+    )
+
+
+def test_unreadable_output_raises_the_tools_own_error(mod, monkeypatch) -> None:
+    """`None` streams are reported, never concatenated.
+
+    The guard half of the same defect: if a stream really is unusable, the tool
+    must say so in its own vocabulary - a `TypeError` escaping main() is not a
+    diagnosis.
+    """
+
+    class _Proc:
+        returncode = 0
+        stdout = None
+        stderr = None
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: _Proc())
+    with pytest.raises(mod.NodeCountError, match="no readable output"):
+        mod._run(["npm", "test"], mod.RENDERER_ROOT)
+
+
+def test_main_catches_every_failure_its_run_can_produce(mod, monkeypatch, capsys) -> None:
+    """The end-to-end shape: a bad decode exits 2 with a message, not a traceback."""
+    monkeypatch.setattr(
+        mod, "measured_renderer", lambda: (_ for _ in ()).throw(
+            mod.NodeCountError("`npm test` produced no readable output")
+        )
+    )
+    rc = mod.main([])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "no readable output" in captured.err
+    assert "Traceback" not in captured.err

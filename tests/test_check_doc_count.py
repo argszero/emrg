@@ -475,3 +475,42 @@ def test_every_repair_hint_prints_one_runnable_command(mod, monkeypatch, tmp_pat
     with pytest.raises(fresh.DocCountError) as excinfo:
         fresh.measured_count()
     assert f"`{canonical}`" in str(excinfo.value)
+
+
+def test_collect_output_is_decoded_independently_of_the_locale(mod) -> None:
+    """The collected count must not depend on the host's locale codec.
+
+    The sibling tool's identical defect was measured and filed as issue #1132:
+    decoding with the locale codec left `proc.stdout` as `None` once subprocess's
+    reader thread swallowed the `UnicodeDecodeError`, and the concatenation
+    raised a bare `TypeError` past every handler in `main()` (which catches
+    `DocCountError` and `OSError` only). pytest's own output is ASCII today
+    (measured: 0 non-ASCII lines in 1337), but a collected id or warning is not
+    under this repo's control - one non-ASCII byte on a cp936 host would produce
+    a traceback instead of the count.
+    """
+    child = "import sys; sys.stdout.buffer.write(b'\\xb9 7 tests collected\\n')"
+    proc = subprocess.run(
+        [sys.executable, "-c", child],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.stdout is not None, "the fix no longer protects the stream"
+    match = mod.COLLECTED.search(proc.stdout)
+    assert match, f"the summary no longer parses: {proc.stdout!r}"
+    assert int(match.group(1)) == 7
+
+
+def test_unreadable_collect_output_raises_the_tools_own_error(mod, monkeypatch) -> None:
+    """A `None` stream is reported in this tool's vocabulary, never concatenated."""
+
+    class _Proc:
+        returncode = 0
+        stdout = None
+        stderr = None
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: _Proc())
+    with pytest.raises(mod.DocCountError, match="no readable output"):
+        mod.measured_count()
