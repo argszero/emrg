@@ -78,6 +78,17 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync
+      # issue #1132 教训（v0.2.94 后）：`check-node-test-count.py` 的两个缺陷
+      # （裸 `npm` 在 Windows 起不来 = WinError 2；locale 解码吞掉 UnicodeDecodeError
+      # 后 `stdout=None` 抛裸 TypeError）都**只在这个平台可见**，却双双穿过全绿 CI。
+      # 根因是这里只跑 pytest：那些探针在 `shutil.which("npm")` 为 None 时
+      # `pytest.skip`（合理——缺工具链不是 `_run` 的缺陷），于是"本平台有没有 Node"
+      # 变成了**镜像预装的偶然**，而不是这条 job 声明过的前提。
+      # 显式 setup-node 让前提成立：真 runner 探针在此真正执行（pre-fix 会红），
+      # 而不是悄悄跳过。ubuntu 的 `test` job 早已这样钉住（见其上 Node deps 步骤）。
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
       - name: Python tests (Windows)
         run: uv run pytest tests/ -v
       # v0.2.30 教训（Build Release 31661378619）：Test 全绿 ≠ .iss 能编译。
