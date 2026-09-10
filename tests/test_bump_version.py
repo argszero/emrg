@@ -31,6 +31,8 @@ import os
 import re
 import shutil
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -524,3 +526,126 @@ def test_cli_check_without_positional_still_uses_the_base_version(
     monkeypatch.setattr(mod, "REPO_ROOT", fake_repo)
     assert mod.main(["--check"]) == 0
     assert mod.read_current_version(fake_repo) in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------
+# host-codec safety — the self-check a host runs before pushing a release
+# --------------------------------------------------------------------------
+
+
+def _tool_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """Materialise the tool *and* its sources under ``tmp_path``.
+
+    The tool resolves ``REPO_ROOT`` from ``__file__`` (not from the process cwd
+    or an env var), so a subprocess run needs its own copy of the script placed
+    next to its own sources. Patching the module attribute — the in-process
+    tests' route — cannot reach a child process.
+    """
+    tool = tmp_path / "scripts" / "bump-version.py"
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(SCRIPT, tool)
+    for rel in SOURCE_FILES:
+        dst = tmp_path / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / rel, dst)
+    return tool, tmp_path
+
+
+def _run_tool(
+    tool: Path, args: list[str], cwd: Path, codec: str
+) -> subprocess.CompletedProcess[bytes]:
+    """Run the CLI as a *subprocess* with a non-UTF-8 stdout codec.
+
+    Raw byte capture (``capture_output=True`` without ``text=True``) is
+    deliberate: a text-mode capture makes the *parent* decode the child's bytes,
+    which hides the defect — the child's own traceback is what a host sees.
+    """
+    env = dict(os.environ, PYTHONIOENCODING=codec)
+    return subprocess.run(
+        [sys.executable, str(tool), *args],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("codec", ["ascii", "gbk"])
+def test_cli_verdicts_survive_a_non_utf8_stdout(tmp_path, codec, mod):
+    """A healthy tree must report rc=0 even when stdout cannot encode Unicode.
+
+    #1119 review (pm25coder, reproduced independently by how2how2how2-arch and
+    here): the verdict lines printed ``✓`` / ``✗`` (U+2713 / U+2717). Any
+    invocation whose stdout is a pipe or a file rather than a UTF-8 console
+    raised ``UnicodeEncodeError`` on that print, so
+
+    * a **consistent** tree exited 1 — reporting the exact "drift found" that
+      this pre-push self-check exists to report, from a tree it had just proven
+      consistent; and
+    * a drifted tree exited 1 only by accident, through a traceback that threw
+      away the list of drifted files.
+
+    Neither the suite nor CI could see it: every other CLI test drives
+    ``main()`` in-process, so stdout is a Python buffer and no codec is
+    involved. ``ascii`` here is the general invariant (any console codec can
+    encode ASCII); ``gbk`` is the codec from the report.
+    """
+    tool, root = _tool_tree(tmp_path)
+    base = mod.read_current_version(root)
+
+    clean = _run_tool(tool, ["--check"], root, codec)
+    assert clean.stdout.isascii(), clean.stdout
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+    assert clean.stderr == b"", clean.stderr
+    assert b"OK: all 8 version sources agree on" in clean.stdout
+
+    # Drifted: both the exit code and the diagnosis must survive the codec.
+    stale = root / "emrg/gui/package.json"
+    stale_text = stale.read_text(encoding="utf-8")
+    stale.write_text(stale_text.replace(base, _sentinel(base)), encoding="utf-8")
+
+    drifted = _run_tool(tool, ["--check"], root, codec)
+    assert drifted.stdout.isascii(), drifted.stdout
+    assert drifted.returncode == 1, drifted.stdout + drifted.stderr
+    assert b"FAIL:" in drifted.stdout
+    assert b"emrg/gui/package.json" in drifted.stdout, "the drift must be named"
+
+    # The writer path prints its own verdict plus a next-steps block, and
+    # ``--help`` sources its epilog from the module docstring — both are output
+    # surfaces a host reads, so both go through the same codec.
+    stale.write_text(stale_text, encoding="utf-8")
+    bumped = _run_tool(tool, [TARGET], root, codec)
+    assert bumped.stdout.isascii(), bumped.stdout
+    assert bumped.returncode == 0, bumped.stdout + bumped.stderr
+    assert b"LGTMs" in bumped.stdout, bumped.stdout
+    assert _run_tool(tool, ["--check"], root, codec).returncode == 0
+    assert _run_tool(tool, ["--help"], root, codec).returncode == 0
+
+    rejected = _run_tool(tool, ["--check", "v0.2.94"], root, codec)
+    assert rejected.returncode == 2, rejected.stdout + rejected.stderr
+    assert rejected.stderr.isascii(), rejected.stderr
+
+
+def test_tool_source_stays_ascii_only():
+    """Static backstop for the crash above: keep every output byte printable.
+
+    The behavioural test only exercises the output paths that exist today; a
+    new ``print`` added on a path it does not drive would slip past it — the
+    same "what does the new entry path bypass?" gap that let the original
+    defect through three reviews. Restricting the *whole file* to ASCII is the
+    one invariant that covers unknown future paths, so this script is kept
+    ASCII-only on purpose (including comments): use ``-`` and ``->`` rather
+    than the em dash/arrow this repo's prose normally carries.
+    """
+    raw = SCRIPT.read_bytes()
+    offenders = sorted({byte for byte in raw if byte > 127})
+    # The message names code points only: a failure report that itself contains
+    # a character the console cannot encode would replace a clear assertion
+    # error with a UnicodeEncodeError.
+    codes = " ".join(f"0x{byte:02x}" for byte in offenders)
+    assert not offenders, (
+        "scripts/bump-version.py must stay ASCII-only so its output is "
+        f"encodable by any console codec; found non-ASCII byte values: {codes}. "
+        "This script prints a release verdict that hosts read through pipes, "
+        "files and non-UTF-8 consoles; use '-' and '->' in its prose."
+    )

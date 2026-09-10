@@ -6,16 +6,16 @@ Why this exists (rant 2026-09-10T14:07:19, release v0.2.94)
 Bumping the release version is a mechanical edit across **8 version
 declarations in 8 files**. It has gone wrong repeatedly:
 
-* #408 — `emrg/gui/package.json` was forgotten; the release shipped with a
+* #408 - `emrg/gui/package.json` was forgotten; the release shipped with a
   mismatched GUI version and had to be deleted, retagged and rebuilt.
-* #1065 — `emrg/gui/package-lock.json` (root + ``packages[""]``) had no
+* #1065 - `emrg/gui/package-lock.json` (root + ``packages[""]``) had no
   guard at all, so a missed bump produced no error.
-* v0.2.94 — ``uv run`` silently rewrote every registry URL in ``uv.lock``
+* v0.2.94 - ``uv run`` silently rewrote every registry URL in ``uv.lock``
   to a local mirror, turning a 1-line version bump into 556 lines of
   environment noise that had to be reverted by hand.
 
 ``tests/test_version_sync.py`` catches drift *after* the edit, and
-``tests/test_doc_counts.py`` guards the docs — but neither tells you
+``tests/test_doc_counts.py`` guards the docs - but neither tells you
 *what to edit*, and neither can stop ``uv`` from churning ``uv.lock``.
 This script is the missing host-side counterpart: it edits all 8 sources
 deterministically, refuses to run if any anchor is missing, and never
@@ -30,7 +30,7 @@ Usage
     python3 scripts/bump-version.py --check          # report drift, no writes
     python3 scripts/bump-version.py --check 0.2.94   # drift against a target
 
-The positional is validated as semver in *both* modes — ``--check v0.2.94``
+The positional is validated as semver in *both* modes - ``--check v0.2.94``
 (the natural slip, since release tags are ``vX.Y.Z``) is an error rather than
 a silently ignored argument (#1119 review).
 
@@ -40,7 +40,7 @@ before pushing, instead of discovering drift after a wasted build round.
 After bumping, the release flow is (see Agent.md "Releasing"):
 
     1. ``uv run --no-sync pytest tests/test_version_sync.py -q``  # guard
-    2. commit on ``feature/release-vX.Y.Z`` → PR → 3 LGTMs → merge
+    2. commit on ``feature/release-vX.Y.Z`` -> PR -> 3 LGTMs -> merge
     3. ``git tag vX.Y.Z && git push origin vX.Y.Z``  # triggers Build Release
     4. confirm all 4 platform legs green in ``build-release.yml``
 
@@ -67,7 +67,7 @@ SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
 # (relative path, anchor regex, expected occurrence count)
 #
 # Each regex must match *exactly* the version declaration it is meant to
-# rewrite — never a dependency's version. ``package-lock.json`` legitimately
+# rewrite - never a dependency's version. ``package-lock.json`` legitimately
 # carries the app version twice (root field + ``packages[""]``) while the rest
 # of its 300+ ``"version"`` fields belong to dependencies, so the count is
 # asserted rather than assumed.
@@ -76,7 +76,7 @@ VERSION_SOURCES: list[tuple[str, re.Pattern[str], int]] = [
     ("pyproject.toml", re.compile(r'^version\s*=\s*"\d+\.\d+\.\d+"', re.M), 1),
     ("emrg/gui/package.json", re.compile(r'"version"\s*:\s*"\d+\.\d+\.\d+"'), 1),
     # Anchored on the preceding "name": "emrg-gui" line. package-lock.json
-    # holds 334 "version" fields (one per dependency) — a bare version matcher
+    # holds 334 "version" fields (one per dependency) - a bare version matcher
     # would rewrite all of them, so the app version must be identified by the
     # lockfile's own package name instead of by position or indentation.
     (
@@ -95,7 +95,7 @@ FILE_COUNT = len({path for path, _, _ in VERSION_SOURCES})
 
 
 class BumpError(RuntimeError):
-    """Raised when an anchor is missing or ambiguous — fail loud, never guess."""
+    """Raised when an anchor is missing or ambiguous - fail loud, never guess."""
 
 
 def read_current_version(root: Path | None = None) -> str:
@@ -121,7 +121,7 @@ def check(expected: str | None = None, root: Path | None = None) -> list[str]:
     """Return a list of drift descriptions (empty when everything agrees).
 
     ``root`` is resolved at call time (never bound as a default argument), so
-    callers — including tests — can redirect the whole module at one point.
+    callers - including tests - can redirect the whole module at one point.
     """
     root = REPO_ROOT if root is None else root
     base = expected or read_current_version(root)
@@ -169,21 +169,21 @@ def bump(
     def _swap(m: re.Match[str]) -> str:
         return m.group(0).replace(old_version, new_version)
 
-    # Pass 1 — validate *every* source before writing any of them.
+    # Pass 1 - validate *every* source before writing any of them.
     #
     # Interleaving validation with writes is not atomic: a source that fails
     # late (a bumped-but-different version, a changed file layout) aborted the
     # loop only *after* the earlier files had already been rewritten, leaving
     # the repo half-bumped. Observed live (#1119 review): `emrg/__init__.py`
     # was left at 0.2.95 while the other seven stayed at 0.2.94, and the tool
-    # then refused to continue — turning "refused, no harm" into manual
+    # then refused to continue - turning "refused, no harm" into manual
     # cleanup (`git checkout -- .`). Validate all, then write.
     planned: list[tuple[str, re.Pattern[str], int, str]] = []
     for rel, pattern, count in VERSION_SOURCES:
         path = root / rel
         if not path.exists():
             raise BumpError(
-                f"{rel}: MISSING FILE — the file layout changed; update "
+                f"{rel}: MISSING FILE - the file layout changed; update "
                 f"VERSION_SOURCES in scripts/bump-version.py"
             )
         text = path.read_text(encoding="utf-8")
@@ -191,30 +191,30 @@ def bump(
         if len(versions) != count:
             raise BumpError(
                 f"{rel}: expected {count} version declaration(s) matching the "
-                f"anchor, found {len(versions)} — the file layout changed; "
+                f"anchor, found {len(versions)} - the file layout changed; "
                 f"update VERSION_SOURCES in scripts/bump-version.py"
             )
         stale = [v for v in versions if v != old_version]
         if stale:
             raise BumpError(
                 f"{rel}: contains {sorted(set(stale))} but {BASE_FILE} says "
-                f"{old_version} — sources are already inconsistent; run "
+                f"{old_version} - sources are already inconsistent; run "
                 f"`python3 scripts/bump-version.py --check` first"
             )
         planned.append((rel, pattern, count, text))
 
-    # "Nothing to do" — decided only *after* pass 1 proved every source is
+    # "Nothing to do" - decided only *after* pass 1 proved every source is
     # consistent. Testing it first let a drifted tree report success: with
     # `emrg/__init__.py` already at the target (the natural way this mistake is
-    # made — hand-edit the base file, then run the tool), `bump(<target>)`
-    # printed "already at <target> — nothing to do" and exited 0 while other
+    # made - hand-edit the base file, then run the tool), `bump(<target>)`
+    # printed "already at <target> - nothing to do" and exited 0 while other
     # sources were left stale, so the *repair* path silently disagreed with
     # `--check`, which names the same drift and exits 1. Never report success
     # for a state that was not verified (#1119 review, pm25coder).
     if old_version == new_version:
         return []
 
-    # Pass 2 — every source is known good, so nothing below can abort on
+    # Pass 2 - every source is known good, so nothing below can abort on
     # content. Only I/O failures remain, and a partial write there is the
     # filesystem's problem, not a validation surprise.
     changed: list[str] = []
@@ -254,8 +254,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         # Validate the positional in the --check path too. #1119 review
-        # (how2how2how2-arch): `--check v0.2.94` — the natural tag-style slip,
-        # since release tags are vX.Y.Z — previously fell through to the
+        # (how2how2how2-arch): `--check v0.2.94` - the natural tag-style slip,
+        # since release tags are vX.Y.Z - previously fell through to the
         # "compare against emrg/__init__.py" branch, *silently discarding* the
         # argument and exiting 0 with a green line about a version the caller
         # never asked about. Never silently reinterpret input.
@@ -274,18 +274,18 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if args.version is not None:
             base = args.version
-            print(f"checking all {FILE_COUNT} files against {base} …")
+            print(f"checking all {FILE_COUNT} files against {base} ...")
         else:
             base = current
-            print(f"checking all {FILE_COUNT} files against {base} ({BASE_FILE}) …")
+            print(f"checking all {FILE_COUNT} files against {base} ({BASE_FILE}) ...")
         problems = check(base)
         if problems:
-            print(f"\n✗ {len(problems)} drift(s) found:")
+            print(f"\nFAIL: {len(problems)} drift(s) found:")
             for p in problems:
                 print(f"  - {p}")
             print("\nFix with: python3 scripts/bump-version.py <version>")
             return 1
-        print(f"✓ all {len(VERSION_SOURCES)} version sources agree on {base}")
+        print(f"OK: all {len(VERSION_SOURCES)} version sources agree on {base}")
         return 0
 
     if not args.version:
@@ -298,22 +298,22 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not changed:
-        print(f"already at {args.version} — nothing to do")
+        print(f"already at {args.version} - nothing to do")
         return 0
 
     verb = "would update" if args.dry_run else "updated"
-    print(f"{verb} {args.version} (from {current}) — {len(changed)} files:")
+    print(f"{verb} {args.version} (from {current}) - {len(changed)} files:")
     for rel in changed:
         print(f"  - {rel}")
 
     if args.dry_run:
-        print("\n(dry run — no files written)")
+        print("\n(dry run - no files written)")
         return 0
 
     print(
         "\nNext:\n"
         "  1. uv run --no-sync pytest tests/test_version_sync.py -q\n"
-        f"  2. commit on feature/release-v{args.version} → PR → 3 LGTMs → merge\n"
+        f"  2. commit on feature/release-v{args.version} -> PR -> 3 LGTMs -> merge\n"
         f"  3. git tag v{args.version} && git push origin v{args.version}\n"
         "  4. confirm all 4 platforms green in build-release.yml\n"
         "\nNote: use `uv run --no-sync` so uv does not regenerate uv.lock."
