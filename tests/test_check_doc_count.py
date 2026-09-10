@@ -61,24 +61,102 @@ def _doc(tmp_path: Path, count: int | None) -> Path:
 
 
 def _guard_pattern() -> str:
-    """The count pattern out of the guard itself, so the two cannot drift apart."""
+    """The doc-count pattern out of the guard itself, so the two cannot drift apart.
+
+    The guard may hold the regex either way, and may reach it through however
+    many module-level helpers it likes:
+
+    * inline - `re.search(r"...", text)` written directly in
+      `test_python_count_matches_docs` (how the guard read until cycle
+      `cyc20260910-213455`);
+    * named constant, reached through a helper chain - e.g. the test calls
+      `_single_documented_python_count`, which calls
+      `_documented_python_counts`, which applies a module-level
+      `PYTHON_COUNT_LINE = re.compile(r"...")` (how it reads now).
+
+    So the search follows module-level *functions* as well as constants. That
+    collects more than one candidate: the chain also reaches
+    `_collected_pytest_count`, whose regex parses pytest's *output*
+    (`"(\\d+) tests? collected"`) and never matches the doc. Candidates are
+    therefore discriminated by the very property this test asserts - matching
+    the real `Agent.md` - and the result is required to be unique. If two
+    candidates ever both match, this fails instead of silently picking one.
+
+    Hardcoding the constant's name would break the "cannot drift apart" promise
+    the moment someone renames it: the extractor would deny its existence.
+    """
     tree = ast.parse(GUARD.read_text(encoding="utf-8"))
-    func = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "test_python_count_matches_docs"
+    functions = {
+        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
+    assert "test_python_count_matches_docs" in functions, (
+        "the guard function was renamed; point this extractor at the new one"
     )
-    for node in ast.walk(func):
+
+    seen: set[str] = set()
+    queue = ["test_python_count_matches_docs"]
+    candidates: list[tuple[str, str]] = []
+    while queue:
+        name = queue.pop(0)
+        if name in seen:
+            continue
+        seen.add(name)
+        for node in ast.walk(functions[name]):
+            if not isinstance(node, ast.Call):
+                continue
+            # inline literal: `re.search(r"...", ...)` (or any `.search(...)`)
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "search"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                candidates.append((f"{name}: re.search", node.args[0].value))
+                continue
+            # a module-level compiled constant used as `NAME.search(...)` /
+            # `NAME.findall(...)` / any other regex method
+            if (
+                isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+            ):
+                compiled = _compiled_pattern_for(tree, node.func.value.id)
+                if compiled is not None:
+                    candidates.append((node.func.value.id, compiled))
+                    continue
+            # module-level helper referenced by name
+            if isinstance(node.func, ast.Name) and node.func.id in functions:
+                queue.append(node.func.id)
+
+    text = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
+    matching = [(where, pat) for where, pat in candidates if re.search(pat, text)]
+    assert len(matching) == 1, (
+        "expected exactly one pattern reachable from the guard to match Agent.md's "
+        f"count line, found {len(matching)}: {[w for w, _ in matching]}. All "
+        f"candidates reached: {[w for w, _ in candidates]}. This test cannot tell "
+        "which regex is the doc anchor, so it refuses to guess."
+    )
+    return matching[0][1]
+
+
+def _compiled_pattern_for(tree: ast.Module, name: str) -> str | None:
+    """Return the literal pattern of a module-level `name = re.compile(r"...")`."""
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t for t in node.targets if isinstance(t, ast.Name) and t.id == name]
+        if not targets or not isinstance(node.value, ast.Call):
+            continue
+        call = node.value
         if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and node.func.attr == "search"
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "compile"
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
         ):
-            return node.args[0].value
-    raise AssertionError("could not find the guard's count pattern")
+            return call.args[0].value
+    return None
 
 
 def test_tool_pattern_agrees_with_the_guard(mod) -> None:

@@ -64,6 +64,44 @@ def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
     return found
 
 
+PYTHON_COUNT_LINE = re.compile(r"uv run pytest tests/ -v` \((\d+)\)")
+
+
+def _documented_python_counts(text: str) -> list[int]:
+    r"""Every documented Python count in a doc, in order.
+
+    Returns a list rather than a single value so a caller can tell "the doc
+    states this once" from "the doc states it twice". Only the ordering form
+    ``uv run pytest tests/ -v` (N)`` in a shell fence counts; the prose
+    no-fence form (``python -m emrg``, or a CI note mentioning a count) does
+    not — measured on the real ``Agent.md``: one line matches, and a naive
+    "any line with a number" rule would count three.
+    """
+    return [int(value) for value in PYTHON_COUNT_LINE.findall(text)]
+
+
+def _single_documented_python_count(doc: str, text: str) -> int:
+    """The guard proper: the one count `doc` states, refusing an ambiguous doc.
+
+    Extracted from the test below so the ambiguous case can be *driven* (a doc
+    is just text) rather than described. This line is the repo's
+    most-conflicted one — #1119/#1120/#1121/#1122, then #1124/#1125/#1126 —
+    and a hand-resolved conflict can leave the stale line *above* the correct
+    one. A first-match guard then reads the stale number and reports the
+    *opposite* of the real problem ("documents 1315 but 1338 are collected"),
+    so any doc with two lines is ambiguous and must be repaired, never
+    rank-ordered.
+    """
+    counts = _documented_python_counts(text)
+    assert counts, f"no documented Python count found in {doc}"
+    assert len(counts) == 1, (
+        f"{doc} states a Python test count {len(counts)} times: {counts}. This "
+        "line is the repo's most-conflicted line and a hand-resolved merge can "
+        "leave a stale copy. Delete the stale line, then re-measure."
+    )
+    return counts[0]
+
+
 def test_python_count_matches_docs() -> None:
     collected = _collected_pytest_count()
     # rant 2026-08-11T19:50:37: README.md/README.cn.md dropped hardcoded counts in
@@ -72,13 +110,41 @@ def test_python_count_matches_docs() -> None:
     doc = "Agent.md"
     text = (REPO_ROOT / doc).read_text(encoding="utf-8")
     # Agent.md: "pytest tests/ -v` (N)"
-    m = re.search(r"uv run pytest tests/ -v` \((\d+)\)", text)
-    assert m, f"no documented Python count found in {doc}"
-    documented = int(m.group(1))
+    documented = _single_documented_python_count(doc, text)
     assert documented == collected, (
         f"{doc} documents {documented} Python tests but {collected} are collected "
         f"(--collect-only). Sync the doc (and this guard) when adding/removing tests."
     )
+
+
+DUPLICATED_DOC = (
+    "Python: `uv run pytest tests/ -v` (1338) — import check: `uv run python -c …`\n"
+    "Python: `uv run pytest tests/ -v` (1315) — import check: `uv run python -c …`\n"
+)
+
+
+def test_python_count_guard_refuses_a_duplicate_line() -> None:
+    """Drive the real guard against a doc that states the count twice.
+
+    The guard itself is invoked (with a doc's text), and the assertion message
+    is the guard's own — not a copy of it. A test that re-stated the message
+    inline would keep passing after the guard's message changed, which is the
+    exact shape #1124 was rejected for: a string a host never sees satisfying a
+    test that claims to pin the host's experience.
+    """
+    with pytest.raises(AssertionError, match=r"states a Python test count 2 times"):
+        _single_documented_python_count("Agent.md", DUPLICATED_DOC)
+
+
+def test_python_count_guard_still_sees_a_single_line() -> None:
+    """The negative half: one line must keep working (no fail-loud on the norm).
+
+    Measured 2026-09-10 on `Agent.md`: exactly one line matches, and it is the
+    fence form — the prose `python -m emrg` line and the CI note mentioning a
+    count do not, so a naive "any line with a number" rule would count 3.
+    """
+    assert _single_documented_python_count("Agent.md", DUPLICATED_DOC.splitlines()[0] + "\n") == 1338
+    assert _documented_python_counts("no count line here\n") == []
 
 
 def test_gui_breakdown_sums_to_headline() -> None:
