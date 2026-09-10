@@ -35,6 +35,19 @@ SCRIPT = REPO_ROOT / "scripts" / "check-doc-count.py"
 GUARD = REPO_ROOT / "tests" / "test_doc_counts.py"
 
 
+def _load_guard():
+    """Load the guard module so its function can be driven in both states.
+
+    By path, the same way `test_doc_counts.py` loads itself: pytest imports
+    these files as `tests.test_doc_counts`, and a plain top-level name does not
+    resolve.
+    """
+    spec = importlib.util.spec_from_file_location("_doc_count_guard", GUARD)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _load_module():
     spec = importlib.util.spec_from_file_location("check_doc_count", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
@@ -117,6 +130,11 @@ def test_guard_failure_names_a_runnable_repair_command(mod, capsys) -> None:
     `--write` must be a flag the tool really accepts. A hint spelled
     consistently is not a repair path; a repair path that only exists in a
     comment is not one either.
+
+    Necessary, not sufficient: this reads the hint out of the guard's source, and
+    a string that lives in an assert the drift path never reaches satisfies it.
+    `test_guard_drift_message_names_the_repair_command` is the half that drives
+    the guard and checks the message a host actually sees.
     """
     messages = _guard_assert_messages()
     hinted = [m for m in messages if "scripts/check-doc-count.py" in m]
@@ -133,6 +151,37 @@ def test_guard_failure_names_a_runnable_repair_command(mod, capsys) -> None:
         mod.main(["--help"])
     assert excinfo.value.code == 0
     assert "--write" in capsys.readouterr().out
+
+
+def test_guard_drift_message_names_the_repair_command(mod, monkeypatch) -> None:
+    """The hint must be in the message a host actually gets, in the drift state.
+
+    The static checks next door read the hint out of the guard's source, which
+    makes them necessary but not sufficient. Measured (cyc20260910-192726): moving
+    that same hint string onto the assert that fires when the *anchor* is missing
+    left both of them green, while a drifting host saw a message with no hint at
+    all - the exact regression this branch exists to prevent. So drive the guard
+    the way drift drives it: stub the collected count (no subprocess, ~0s) and
+    read the raised message.
+    """
+    guard = _load_guard()
+    canonical = "uv run --no-sync python3 scripts/check-doc-count.py --write"
+    documented = mod.documented_count((REPO_ROOT / "Agent.md").read_text(encoding="utf-8"))
+
+    # Positive state: a consistent tree leaves the guard silent. Without this
+    # half, a guard that compared nothing would still pass the negative one.
+    monkeypatch.setattr(guard, "_collected_pytest_count", lambda: documented)
+    assert guard.test_python_count_matches_docs() is None
+
+    # Negative state: one test's worth of drift - the real incident shape.
+    monkeypatch.setattr(guard, "_collected_pytest_count", lambda: documented + 1)
+    with pytest.raises(AssertionError) as excinfo:
+        guard.test_python_count_matches_docs()
+    message = str(excinfo.value)
+    assert f"Fix with: {canonical}" in message, (
+        "the message a host sees on drift no longer names the repair command; "
+        f"it says: {message!r}"
+    )
 
 
 def test_tool_pattern_agrees_with_the_guard(mod) -> None:
