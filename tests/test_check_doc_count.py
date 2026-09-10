@@ -81,6 +81,60 @@ def _guard_pattern() -> str:
     raise AssertionError("could not find the guard's count pattern")
 
 
+def _guard_assert_messages() -> list[str]:
+    """Every assertion message in the count guard, as static text.
+
+    Read from the AST, not by regex, so a reworded message is still read as the
+    message it is. Adjacent string constants inside an f-string are joined; the
+    `{doc}` / `{documented}` placeholders are `FormattedValue` nodes and drop
+    out, which is fine - the hint this test cares about is static text.
+    """
+    tree = ast.parse(GUARD.read_text(encoding="utf-8"))
+    func = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "test_python_count_matches_docs"
+    )
+    messages = []
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assert) and node.msg is not None:
+            messages.append(
+                "".join(
+                    part.value
+                    for part in ast.walk(node.msg)
+                    if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                )
+            )
+    return messages
+
+
+def test_guard_failure_names_a_runnable_repair_command(mod, capsys) -> None:
+    """The guard must fail with a command the host can actually run.
+
+    Reporting drift without naming the repair path leaves the host to find the
+    tool - and the tool exists precisely for this failure. Both halves are
+    needed, so both are asserted: the path in the message must exist, and
+    `--write` must be a flag the tool really accepts. A hint spelled
+    consistently is not a repair path; a repair path that only exists in a
+    comment is not one either.
+    """
+    messages = _guard_assert_messages()
+    hinted = [m for m in messages if "scripts/check-doc-count.py" in m]
+    assert hinted, (
+        "the guard's failure message no longer names the repair tool, so a host "
+        f"who hits it in CI has no next step; messages found: {messages}"
+    )
+    assert any("--write" in m for m in hinted), (
+        f"the hint does not offer the repair flag, only a path: {hinted[0]!r}"
+    )
+    assert SCRIPT.exists(), f"the guard points at {SCRIPT}, which does not exist"
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main(["--help"])
+    assert excinfo.value.code == 0
+    assert "--write" in capsys.readouterr().out
+
+
 def test_tool_pattern_agrees_with_the_guard(mod) -> None:
     """The guard and this tool must key on the same phrase in the real Agent.md.
 
