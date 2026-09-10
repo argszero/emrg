@@ -428,7 +428,7 @@ def main() -> int:
     print(f"repo {repo} branch {args.branch}")
     print(f"  remote sha: {result['sha']}")
     if result["result"] == "no-op":
-        print("  nothing to do — ref already at that commit")
+        print("  nothing to do - ref already at that commit")
     else:
         print(f"  original local tip: {result['original_local_tip']}")
         print(f"  content identical to local tip: {result['content_identical']}")

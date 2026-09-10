@@ -228,7 +228,7 @@ def main() -> int:
                                 capture_output=True, text=True)
     if local_tree.returncode != 0 or local_tree.stdout.strip() != tree:
         if not args.no_fetch_objects:
-            print(f"  root tree {tree[:7]} missing locally — fetching blobs/trees via Git Data API")
+            print(f"  root tree {tree[:7]} missing locally - fetching blobs/trees via Git Data API")
             _fetch_tree(repo, tree)
             local_tree = subprocess.run(["git", "rev-parse", head + "^{tree}"],
                                         capture_output=True, text=True)

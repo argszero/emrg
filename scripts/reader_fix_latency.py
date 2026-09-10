@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
 
     samples = collect_latencies(args.repo, args.limit)
     if not samples:
-        print("no closed issues with a merged fix PR found — nothing to measure")
+        print("no closed issues with a merged fix PR found - nothing to measure")
         return 0
 
     vals = [s[1] for s in samples]
