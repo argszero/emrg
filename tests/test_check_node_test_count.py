@@ -382,7 +382,24 @@ def test_ci_gate_uses_the_check_mode_not_the_preview(mod) -> None:
 # Linux/macOS too rather than only on the machine that filed the issue.
 
 
-def test_run_resolves_the_command_through_which(mod, monkeypatch) -> None:
+@pytest.fixture
+def fake_cwd(tmp_path):
+    """A cwd whose `node_modules` exists, so `_run`'s pre-check is satisfied.
+
+    The new probes are about argv resolution and decoding, not about the
+    toolchain - but they must not borrow `RENDERER_ROOT` to run, because CI's
+    pytest job runs *before* the `npm ci` step, so the real renderer has no
+    `node_modules` there and every probe would fail the pre-check instead of
+    reaching the behaviour under test (measured on both the ubuntu and
+    windows-2025 jobs: 5 failed with `...renderer has no node_modules`). A
+    temporary directory makes the probes independent of whether the host has
+    installed the Node toolchain.
+    """
+    (tmp_path / "node_modules").mkdir()
+    return tmp_path
+
+
+def test_run_resolves_the_command_through_which(mod, monkeypatch, fake_cwd) -> None:
     """`npm` must reach the runner by its resolved path, not as a bare name."""
     seen: list[list[str]] = []
 
@@ -397,7 +414,7 @@ def test_run_resolves_the_command_through_which(mod, monkeypatch) -> None:
 
     monkeypatch.setattr(mod.shutil, "which", lambda name: f"/resolved/{name}")
     monkeypatch.setattr(mod.subprocess, "run", _fake_run)
-    mod._run(["npm", "test"], mod.RENDERER_ROOT)
+    mod._run(["npm", "test"], fake_cwd)
 
     assert seen == [["/resolved/npm", "test"]], (
         f"the runner was invoked as {seen} - an unresolved bare `npm` is a file "
@@ -405,7 +422,7 @@ def test_run_resolves_the_command_through_which(mod, monkeypatch) -> None:
     )
 
 
-def test_run_leaves_an_unresolvable_command_alone(mod, monkeypatch) -> None:
+def test_run_leaves_an_unresolvable_command_alone(mod, monkeypatch, fake_cwd) -> None:
     """A name `which` cannot find keeps its spelling, so the error names it.
 
     Inventing a path here would replace a precise `cannot run 'nope'` with a
@@ -420,12 +437,12 @@ def test_run_leaves_an_unresolvable_command_alone(mod, monkeypatch) -> None:
 
     monkeypatch.setattr(mod.shutil, "which", lambda name: None)
     monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: (seen.append(list(cmd)), _Proc())[1])
-    mod._run(["nope", "test"], mod.RENDERER_ROOT)
+    mod._run(["nope", "test"], fake_cwd)
 
     assert seen == [["nope", "test"]]
 
 
-def test_missing_runner_still_names_the_command(mod, monkeypatch) -> None:
+def test_missing_runner_still_names_the_command(mod, monkeypatch, fake_cwd) -> None:
     """The FileNotFoundError path survives the resolution (negative control)."""
     monkeypatch.setattr(mod.shutil, "which", lambda name: None)
 
@@ -434,10 +451,10 @@ def test_missing_runner_still_names_the_command(mod, monkeypatch) -> None:
 
     monkeypatch.setattr(mod.subprocess, "run", _boom)
     with pytest.raises(mod.NodeCountError, match="cannot run 'npm'"):
-        mod._run(["npm", "test"], mod.RENDERER_ROOT)
+        mod._run(["npm", "test"], fake_cwd)
 
 
-def test_run_decodes_output_that_is_not_valid_utf8(mod) -> None:
+def test_run_decodes_output_that_is_not_valid_utf8(mod, fake_cwd) -> None:
     """A byte the locale codec cannot decode must not lose the whole output.
 
     This is the measured Windows failure (cp936 vs node's `ℹ` U+2139): the
@@ -447,14 +464,14 @@ def test_run_decodes_output_that_is_not_valid_utf8(mod) -> None:
     reason the tool already knows how to print.
     """
     child = "import sys; sys.stdout.buffer.write(b'\\xb9 tests 7\\nfail 0\\n')"
-    out = mod._run([sys.executable, "-c", child], mod.RENDERER_ROOT)
+    out = mod._run([sys.executable, "-c", child], fake_cwd)
     assert "tests 7" in out, f"output was lost: {out!r}"
     assert mod.NODE_TESTS.search(out), (
         "the summary no longer parses once the undecodable glyph is replaced"
     )
 
 
-def test_unreadable_output_raises_the_tools_own_error(mod, monkeypatch) -> None:
+def test_unreadable_output_raises_the_tools_own_error(mod, monkeypatch, fake_cwd) -> None:
     """`None` streams are reported, never concatenated.
 
     The guard half of the same defect: if a stream really is unusable, the tool
@@ -469,7 +486,7 @@ def test_unreadable_output_raises_the_tools_own_error(mod, monkeypatch) -> None:
 
     monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: _Proc())
     with pytest.raises(mod.NodeCountError, match="no readable output"):
-        mod._run(["npm", "test"], mod.RENDERER_ROOT)
+        mod._run(["npm", "test"], fake_cwd)
 
 
 def test_main_catches_every_failure_its_run_can_produce(mod, monkeypatch, capsys) -> None:
