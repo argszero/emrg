@@ -538,9 +538,11 @@ def _count_definitions(path: Path) -> int:
         "per iteration, so the runner executes more cases than Agent.md records "
         "while the file still *looks* counted. Measured 2026-09-11 with vitest: "
         "one visible definition inside a 3-element loop is 3 executed cases, 1 "
-        "counted, with every other tripwire silent. Generate the cases with "
-        "`it.each([...])` (one definition per row, counted) or write them out on "
-        "their own lines, then sync Agent.md."
+        "counted, with every other tripwire silent. Write the cases out as "
+        "separate `it(...)` lines (the only shape this guard can count), then "
+        "sync Agent.md. Note: `it.each([...])` is NOT a valid repair here - it "
+        "is itself an uncounted form and trips the chained-form tripwire above, "
+        "so it would replace one silent drift with a loud one."
     )
     return len(_DEFINITION_FORM.findall(text))
 
@@ -1393,9 +1395,10 @@ def test_loop_tripwire_is_empty_on_the_real_tree() -> None:
     tripped = {name: found for name, found in tripped.items() if found}
     assert not tripped, (
         "a real test file now defines a case inside a loop, so the static count "
-        f"under-reports it: {tripped}. Use `it.each([...])` (counted, one "
-        "definition per row), write the cases out on their own lines, or teach "
-        "_count_definitions the form and sync Agent.md."
+        f"under-reports it: {tripped}. Write the cases out as separate `it(...)` "
+        "lines (the only shape this guard counts) or teach _count_definitions "
+        "the form and sync Agent.md - note that `it.each([...])` is itself "
+        "uncounted and would trip the chained-form tripwire instead."
     )
 
 
@@ -1431,4 +1434,48 @@ def test_loop_tripwire_ignores_loops_that_do_not_wrap_a_definition() -> None:
     # ...and it must still fire on a real loop-wrapped definition, so the
     # silence above is not simply the tripwire being blind.
     assert guard._loop_wrapped_definitions(_LOOP_PROBES["for-of block"])
+
+
+def test_repair_hints_name_a_form_the_counter_actually_counts() -> None:
+    """A hint is a product: the shape it recommends must be a shape that works.
+
+    Written after catching this in my own change: the loop tripwire's first
+    draft told the reader to generate cases with `it.each([...])`, which is
+    **itself uncounted** (`_DEFINITION_FORM` requires `(` immediately after the
+    keyword, so it scores 0) and trips the chained-form tripwire above. Following
+    that advice would swap a silent undercount for a loud failure - the same
+    defect class as reporting an unrecognised conflict layout as a content
+    conflict, and only findable by running the recommendation.
+
+    The contract: any `it…(…)` form a repair hint recommends must score exactly
+    one under `_DEFINITION_FORM` and trip none of the tripwires.
+    """
+    guard = _loaded_guard_module()
+    recommended = [
+        "it('case', () => {});\n",
+        "test('case', () => {});\n",
+    ]
+    for body in recommended:
+        assert len(guard._DEFINITION_FORM.findall(body)) == 1, (
+            f"a hint recommends {body!r} but the counter does not count it once"
+        )
+        for name in (
+            "_CHAINED_DEFINITION_FORM",
+            "_SUITE_PARAMETERISED_FORM",
+            "_NESTED_DEFINITION_FORM",
+        ):
+            assert not getattr(guard, name).findall(body), (
+                f"a hint recommends {body!r} but {name} trips on it, so the "
+                "recommendation would fail loudly instead of fixing the count"
+            )
+        assert not guard._midline_definitions(body)
+        assert not guard._loop_wrapped_definitions(body)
+
+    # The counter-example, measured: this is what the draft hint said to use.
+    # It is pinned as *uncounted*, so a future edit cannot quietly re-recommend
+    # it without this test failing.
+    each = "it.each([1, 2, 3])('case %i', () => {});\n"
+    assert len(guard._DEFINITION_FORM.findall(each)) == 0
+    assert guard._CHAINED_DEFINITION_FORM.findall(each)
+
 
