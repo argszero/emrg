@@ -146,6 +146,43 @@ def test_evolution_prompt_no_quick_ref_block() -> None:
 
 _RENDERER_TEST_SUFFIX = ".test"
 
+# The definition regex below sees only `it(` / `test(` at the start of a line.
+# vitest and `node --test` also register *chained* forms whose executed-case
+# count this regex cannot reproduce: `it.each([...])("name", ...)` runs one case
+# per row, and `test.skip/only/todo/concurrent/...(...)` are registered without
+# ever matching `test(`. A file using one of them would be under-counted while
+# both guards stayed green - the same silent-drift shape as the label collision
+# fixed in #1120 and the 445 -> 448 renderer drift before it. Today's tree has
+# none of these forms (measured 2026-09-10: 0 matches across renderer + GUI),
+# so this is a tripwire, not a filter.
+_UNCOUNTED_DEFINITION_FORM = re.compile(
+    r"\b(?:it|test)\.(?:each|skip|only|todo|concurrent|fails|sequential)\("
+)
+
+_DEFINITION_FORM = re.compile(r"^\s*(?:it|test)\(", re.M)
+
+
+def _count_definitions(path: Path) -> int:
+    """Count a JS/TS test file's definitions, red on forms the count cannot see.
+
+    Used by both static counters so the renderer and GUI guards share one
+    counting rule (and one tripwire). Note the negative case: a *method* call
+    such as `expect(FENCE_END_RE.test("```"))` is not a definition - the chained
+    form above requires a modifier keyword after the dot, so `.test(` never
+    matches either regex.
+    """
+    text = path.read_text(encoding="utf-8")
+    uncounted = _UNCOUNTED_DEFINITION_FORM.findall(text)
+    assert not uncounted, (
+        f"{path} uses test-definition forms the doc-count guard cannot count: "
+        f"{sorted(set(uncounted))}. The guard counts only `it(`/`test(` at the "
+        "start of a line, so these definitions would be missing from Agent.md's "
+        "breakdown while the runner still registers them. Teach "
+        "_count_definitions to count this form (and sync Agent.md) before "
+        "using it."
+    )
+    return len(_DEFINITION_FORM.findall(text))
+
 
 def _static_renderer_counts() -> dict[str, int]:
     """Count renderer vitest cases per file, keyed by Agent.md's own label.
@@ -178,9 +215,7 @@ def _static_renderer_counts() -> dict[str, int]:
             "cannot distinguish them and one file's definitions would be "
             "silently dropped from the total. Rename one file."
         )
-        counts[label] = len(
-            re.findall(r"^\s*(?:it|test)\(", f.read_text(encoding="utf-8"), re.M)
-        )
+        counts[label] = _count_definitions(f)
     return counts
 
 
@@ -293,10 +328,7 @@ def _static_gui_counts() -> dict[str, int]:
     files = sorted(base.glob(f"*{_GUI_TEST_SUFFIX}"))
     assert files, "no GUI test files found under emrg/gui/test"
     return {
-        f.name[: -len(_GUI_TEST_SUFFIX)]: len(
-            re.findall(r"^\s*(?:it|test)\(", f.read_text(encoding="utf-8"), re.M)
-        )
-        for f in files
+        f.name[: -len(_GUI_TEST_SUFFIX)]: _count_definitions(f) for f in files
     }
 
 
@@ -385,3 +417,59 @@ def test_renderer_counts_accept_distinct_labels(tmp_path, monkeypatch) -> None:
     _renderer_tree(tmp_path, {"lib/utils.test.ts": body, "components/other.test.tsx": body})
     counts = mod._static_renderer_counts()
     assert counts == {"utils": 2, "other": 2}
+
+
+def _gui_tree(root: Path, files: dict[str, str]) -> None:
+    """Build a minimal GUI test tree under a fake REPO_ROOT."""
+    base = root / "emrg" / "gui" / "test"
+    for rel, body in files.items():
+        path = base / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+
+
+def test_renderer_counts_fail_loud_on_a_parameterized_form(tmp_path, monkeypatch) -> None:
+    """A form the regex cannot count must be red, not silently under-counted.
+
+    `it.each([...])('name', ...)` runs one case per row; the plain definition
+    regex never matches it, so before this tripwire a file could add cases that
+    never reached Agent.md's breakdown while both renderer guards stayed green.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = "it.each([[1], [2]])('%i runs', () => {});\n"
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"it\.each\("):
+        mod._static_renderer_counts()
+
+
+def test_gui_counts_fail_loud_on_a_skipped_form(tmp_path, monkeypatch) -> None:
+    """The GUI counter shares the same tripwire (it shares the same helper)."""
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _gui_tree(
+        tmp_path,
+        {"state.test.js": "test('a', () => {});\ntest.skip('later', () => {});\n"},
+    )
+    with pytest.raises(AssertionError, match=r"test\.skip\("):
+        mod._static_gui_counts()
+
+
+def test_count_definitions_ignores_a_regex_method_call(tmp_path, monkeypatch) -> None:
+    """The negative half: `expect(RE.test(...))` is not a definition.
+
+    Measured 2026-09-10: `markdown.test.ts` has 13 definitions but 17 loose
+    `\\b(it|test)\\(` matches - the extra 4 are `FENCE_END_RE.test(...)` calls.
+    An over-broad tripwire would make every such file red.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "it('a', () => { expect(FENCE_END_RE.test('```')).toBe(true); });\n"
+        "test('b', () => {});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/markdown.test.ts": body})
+    assert mod._static_renderer_counts() == {"markdown": 2}
