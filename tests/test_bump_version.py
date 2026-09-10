@@ -351,10 +351,10 @@ def test_uv_lock_changes_only_the_emrg_version_line(mod, fake_repo):
 def test_bump_refuses_when_sources_are_already_inconsistent(mod, fake_repo):
     """A pre-drifted tree must abort instead of propagating the wrong version.
 
-    ⚠️ The stamp must not share a leading digit with the real version: the
-    tool writes ``matched_text.replace(old, new)``, so an ``0.0.1`` stamp on a
-    ``0.2.94`` tree is partially rewritten to ``0.9.9``, silently repairing the
-    drift this test exists to create.
+    ⚠️ The stamp must differ from the tree's own version: ``replace(old, new)``
+    is a no-op when they coincide, so the drift this test exists to create would
+    silently not appear (measured: 0 drifts reported on a tree stamped with its
+    own version). ``_sentinel`` derives a value that cannot coincide.
     """
     target = fake_repo / "pyproject.toml"
     stamp = _sentinel(mod.read_current_version(fake_repo))
