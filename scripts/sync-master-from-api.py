@@ -85,8 +85,14 @@ def api_get(url: str) -> dict:
     except urllib.error.HTTPError as e:
         if e.code == 403 and not token:
             # anonymous rate-limited; try gh CLI which uses keyring auth
+            # encoding="utf-8": the API returns UTF-8 JSON (issue/pull titles,
+            # author logins), and the host locale is not always UTF-8 - a cp936
+            # host raised UnicodeDecodeError on the CJK bytes rather than
+            # falling back to the urllib path this branch is a fallback for.
+            # tests/test_script_decode_is_locale_independent.py guards the class.
             out = subprocess.run(["gh", "api", url.replace(API, ""), "--jq", "."],
-                                 capture_output=True, text=True, timeout=30)
+                                 capture_output=True, text=True, timeout=30,
+                                 encoding="utf-8", errors="replace")
             if out.returncode == 0 and out.stdout.strip():
                 return json.loads(out.stdout)
         raise
@@ -183,7 +189,11 @@ def rev_parse(ref: str) -> str:
 
 
 def repo_from_origin() -> str:
-    r = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
+    # encoding="utf-8": the origin URL is echoed back in SystemExit below, and a
+    # clone directory may carry a non-ASCII byte; the locale codec would raise
+    # on it instead of reporting the infer failure this function exists to give.
+    r = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace")
     url = r.stdout.strip()
     m = re.search(r"(?:github\.com[:/])([^/]+)/([^/.]+)", url)
     if not m:
@@ -225,13 +235,15 @@ def main() -> int:
     # Verify the root tree matches (fail-loud if content objects are missing).
     tree = api_get(f"{API}/repos/{repo}/git/commits/{head}")["tree"]["sha"]
     local_tree = subprocess.run(["git", "rev-parse", head + "^{tree}"],
-                                capture_output=True, text=True)
+                                capture_output=True, text=True,
+                                encoding="utf-8", errors="replace")
     if local_tree.returncode != 0 or local_tree.stdout.strip() != tree:
         if not args.no_fetch_objects:
             print(f"  root tree {tree[:7]} missing locally - fetching blobs/trees via Git Data API")
             _fetch_tree(repo, tree)
             local_tree = subprocess.run(["git", "rev-parse", head + "^{tree}"],
-                                        capture_output=True, text=True)
+                                        capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace")
             if local_tree.returncode == 0 and local_tree.stdout.strip() == tree:
                 print(f"  materialized root tree {tree[:7]} (blobs + subtrees) OK")
         if local_tree.returncode != 0 or local_tree.stdout.strip() != tree:
