@@ -4,20 +4,20 @@
 Counterpart of scripts/sync-master-from-api.py (fetch direction). EMRG repeatedly
 hits github.com:443 unreachable while api.github.com stays up (10+ documented
 cycles, 08-22..08-26). When a fix must be pushed during an outage, the old flow
-was a hand-written ephemeral script re-derived each time from memory notes —
+was a hand-written ephemeral script re-derived each time from memory notes -
 cycle 2026-08-26 00:59 recorded four gotchas learned the hard way:
 
   1. blobs must be uploaded from the *committed* object bytes (`git cat-file
      blob <sha>`), not working-tree bytes (CRLF normalization differs)
   2. `git ls-tree` needs `-r` to enumerate nested paths
-  3. the API displays dates as UTC ('Z') but stores the raw offset (+0800) —
+  3. the API displays dates as UTC ('Z') but stores the raw offset (+0800) -
      recreate commits with the original epoch+offset or the sha will not match
   4. subprocess text I/O must use encoding='utf-8', errors='replace' (GBK
      console crashes on non-ASCII commit messages)
 
 This script automates that recipe:
 
-  * walks the local chain from <ref> (default HEAD) down to the remote base —
+  * walks the local chain from <ref> (default HEAD) down to the remote base -
     the existing branch head, or the first ancestor the remote already has
     (GET /repos/{repo}/commits/{sha})
   * uploads blobs (raw bytes, byte-exact) and trees (structured entries,
@@ -272,7 +272,7 @@ def push_branch(repo: str, branch: str, ref: str, force: bool, cwd: str | None =
     if not chain:
         raise PushError("internal: empty commit chain")
 
-    print(f"  base: {base or '(new branch — nothing on remote yet)'}")
+    print(f"  base: {base or '(new branch - nothing on remote yet)'}")
     print(f"  uploading {len(chain)} commit(s)...", flush=True)
 
     # ---- upload objects bottom-up, mapping local -> remote shas
@@ -428,7 +428,7 @@ def main() -> int:
     print(f"repo {repo} branch {args.branch}")
     print(f"  remote sha: {result['sha']}")
     if result["result"] == "no-op":
-        print("  nothing to do — ref already at that commit")
+        print("  nothing to do - ref already at that commit")
     else:
         print(f"  original local tip: {result['original_local_tip']}")
         print(f"  content identical to local tip: {result['content_identical']}")
