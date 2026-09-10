@@ -148,18 +148,29 @@ _RENDERER_TEST_SUFFIX = ".test"
 
 # The definition regex below sees only `it(` / `test(` at the start of a line.
 # vitest and `node --test` also register *chained* forms whose executed-case
-# count this regex cannot reproduce: `it.each([...])("name", ...)` runs one case
-# per row, and `test.skip/only/todo/concurrent/...(...)` are registered without
+# count this regex cannot reproduce, because the `(` follows a modifier instead
+# of the keyword: `it.each([...])("name", ...)` runs one case per row/table, and
+# `test.skip/only/todo/fails/concurrent/skipIf/...(...)` register a case without
 # ever matching `test(`. A file using one of them would be under-counted while
 # both guards stayed green - the same silent-drift shape as the label collision
 # fixed in #1120 and the 445 -> 448 renderer drift before it. Today's tree has
-# none of these forms (measured 2026-09-10: 0 matches across renderer + GUI),
-# so this is a tripwire, not a filter.
-_UNCOUNTED_DEFINITION_FORM = re.compile(
-    r"\b(?:it|test)\.(?:each|skip|only|todo|concurrent|fails|sequential)\("
-)
+# none of these spellings (measured 2026-09-10: 0 matches across the 54 renderer
+# and GUI test files), so this is a tripwire, not a filter.
+_DEFINITION_KEYWORD = r"(?:it|test)"
+_DEFINITION_FORM = re.compile(rf"^\s*{_DEFINITION_KEYWORD}\(", re.M)
 
-_DEFINITION_FORM = re.compile(r"^\s*(?:it|test)\(", re.M)
+# Every *callable* member the two runners put on the definition function, none of
+# which the regex above can match (it requires `(` right after the keyword), and
+# every one of which registers a case the runner still executes:
+#   vitest  - `each`/`for` (one case per row/table) plus the option setters
+#             `skip`/`only`/`todo`/`fails`/`concurrent`/`sequential`/`skipIf`/`runIf`
+#             (ChainableTestContextMap + TestForFunction in @vitest/runner).
+#   node:test - `skip`/`todo`/`only` (`test.each` is undefined there; its
+#             parameterised form is `for` on the *suite*, i.e. `describe.for`).
+# Derived from the counted keyword so the two cannot drift apart.
+_CHAINED_DEFINITION_FORM = re.compile(
+    rf"\b{_DEFINITION_KEYWORD}\.(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)\("
+)
 
 
 def _count_definitions(path: Path) -> int:
@@ -168,11 +179,18 @@ def _count_definitions(path: Path) -> int:
     Used by both static counters so the renderer and GUI guards share one
     counting rule (and one tripwire). Note the negative case: a *method* call
     such as `expect(FENCE_END_RE.test("```"))` is not a definition - the chained
-    form above requires a modifier keyword after the dot, so `.test(` never
-    matches either regex.
+    form above requires a modifier keyword after the dot, so RegExp's own
+    `.test(` matches neither regex, and a file full of such calls still counts
+    correctly.
+
+    The chained list is every callable member the runners expose, not just the
+    ones seen in this tree today (measured 2026-09-10: widening it to
+    `for`/`skipIf`/`runIf` found those three were still silently under-counted as
+    0 while the first four spellings tripped). A tripwire that misses a spelling
+    is worse than none, because it reads as coverage.
     """
     text = path.read_text(encoding="utf-8")
-    uncounted = _UNCOUNTED_DEFINITION_FORM.findall(text)
+    uncounted = _CHAINED_DEFINITION_FORM.findall(text)
     assert not uncounted, (
         f"{path} uses test-definition forms the doc-count guard cannot count: "
         f"{sorted(set(uncounted))}. The guard counts only `it(`/`test(` at the "
@@ -428,19 +446,37 @@ def _gui_tree(root: Path, files: dict[str, str]) -> None:
         path.write_text(body, encoding="utf-8")
 
 
-def test_renderer_counts_fail_loud_on_a_parameterized_form(tmp_path, monkeypatch) -> None:
-    """A form the regex cannot count must be red, not silently under-counted.
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it.each([[1], [2]])('%i runs', () => {});\n",
+        "it.for([1, 2])('%i runs', () => {});\n",
+        "test.skipIf(process.platform === 'win32')('a', () => {});\n",
+        "test.runIf(process.platform === 'darwin')('a', () => {});\n",
+        "it.todo('later');\n",
+        "it.fails('known broken', () => {});\n",
+    ],
+    ids=["each", "for", "skipIf", "runIf", "todo", "fails"],
+)
+def test_renderer_counts_fail_loud_on_a_parameterized_form(tmp_path, monkeypatch, body) -> None:
+    """Every chained spelling must be red, not silently under-counted.
 
-    `it.each([...])('name', ...)` runs one case per row; the plain definition
-    regex never matches it, so before this tripwire a file could add cases that
-    never reached Agent.md's breakdown while both renderer guards stayed green.
+    `it.each([...])('name', ...)` runs one case per row and `test.skipIf(cond)(...)`
+    registers a case either way - the plain definition regex matches neither, so
+    before this tripwire a file could add cases that never reached Agent.md's
+    breakdown while both renderer guards stayed green.
+
+    Measured while widening the tripwire (cyc20260910-202123): `for`, `skipIf`
+    and `runIf` were still counted as 0 with no complaint, i.e. the first four
+    spellings tripped while these three stayed invisible. The list is now every
+    callable member of the runners' definition API, pinned one test per spelling.
     """
     mod = _loaded_guard_module()
     monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
 
-    body = "it.each([[1], [2]])('%i runs', () => {});\n"
     _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
-    with pytest.raises(AssertionError, match=r"it\.each\("):
+    modifier = body.split("(")[0].split(".")[-1]
+    with pytest.raises(AssertionError, match=rf"\.{modifier}\("):
         mod._static_renderer_counts()
 
 
