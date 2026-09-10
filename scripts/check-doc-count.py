@@ -83,6 +83,19 @@ CONFLICT_BLOCK = re.compile(
     re.S | re.M,
 )
 
+# `merge.conflictStyle = diff3` (and `zdiff3`) inserts a `||||||| <base>` section
+# between the two sides - measured 2026-09-11 on this machine with a real
+# `git merge`: the base line is a third copy of the conflicted line. The subtle
+# part, also measured: `CONFLICT_BLOCK` does *not* simply fail to match this
+# layout - it matches while swallowing the base line into `ours`, so the two
+# captured sides are `"<ours>\n||||||| <base>"` and `"<theirs>"`. The block is
+# therefore misread as a content conflict: the reader is told the sides "differ
+# by more than the count", which is false (all three differ only in the number)
+# and points them at hand-picking a side, the one repair this tool exists to
+# prevent. Detecting the layout *before* matching turns that into an accurate
+# refusal. Do not reorder these two checks.
+CONFLICT_BASE_SECTION = re.compile(r"^\|\|\|\|\|\|\|[^\n]*\n", re.M)
+
 # The one spelling of "run this tool" that every hint in this repo prints: this
 # module's two hints, the pytest guard's failure message, and Agent.md's doc
 # line. Measured 2026-09-10 (cyc20260910-191242) in the main clone: this form
@@ -152,6 +165,14 @@ def resolve_conflict(text: str) -> str:
     measuring are separate steps because the number must come from the tree, not
     from either side.
     """
+    if CONFLICT_BASE_SECTION.search(text):
+        raise DocCountError(
+            "the conflict uses the diff3 layout (`||||||| <base>`), which this "
+            "tool does not parse: it cannot tell whether the conflict is the "
+            "count line, so it must not resolve it. Re-merge with git's "
+            "default layout (`git config merge.conflictStyle merge` and "
+            "recreate the conflict), or resolve by hand"
+        )
     matches = list(CONFLICT_BLOCK.finditer(text))
     if not matches:
         raise DocCountError(
@@ -180,7 +201,9 @@ def resolve_conflict(text: str) -> str:
     if masked(ours) != masked(theirs):
         raise DocCountError(
             "the conflicted line differs by more than the count, so this is a "
-            "content conflict and the tool must not choose a side"
+            "content conflict and the tool must not choose a side (the block "
+            "either changes text other than the number, or spans more than the "
+            "one count line)"
         )
 
     resolved = text[: block.start()] + ours + text[block.end() :]

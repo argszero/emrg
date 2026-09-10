@@ -470,6 +470,63 @@ def test_resolve_conflict_refuses_when_the_sides_differ_by_more_than_the_number(
         mod.resolve_conflict(text[: match.start()] + block + text[match.end() :])
 
 
+# The diff3 layout, captured verbatim from a real `git merge` (measured
+# 2026-09-11 on this machine: two branches changing only the number, merged with
+# `merge.conflictStyle = diff3`). `CONFLICT_BLOCK` does not recognise this shape,
+# so the resolver cannot tell whether the conflict is the count line - and the
+# important part is that it says so. Before this test, the same input produced
+# "the conflicted line differs by more than the count": false (all three lines
+# differ only in the number) and it steered the reader toward picking a side,
+# which is the one repair the tool exists to prevent.
+_DIFF3_CONFLICT = (
+    "head\n"
+    "<<<<<<< HEAD\n"
+    "Python: `uv run pytest tests/ -v` (1372)\n"
+    "||||||| c6cd3d6\n"
+    "Python: `uv run pytest tests/ -v` (1335)\n"
+    "=======\n"
+    "Python: `uv run pytest tests/ -v` (1337)\n"
+    ">>>>>>> other\n"
+    "tail\n"
+)
+
+
+def test_resolve_conflict_names_the_diff3_layout_it_cannot_parse(mod, tmp_path) -> None:
+    """An unrecognised conflict layout must be named, not misdiagnosed.
+
+    Negative state (refusal) checked here; the positive control is
+    `test_resolve_conflict_still_resolves_the_supported_layout` below - without
+    it, a blanket refusal would pass this test while breaking the resolver.
+    """
+    text = _doc(tmp_path, 1249).read_text()
+    with pytest.raises(mod.DocCountError, match="diff3"):
+        mod.resolve_conflict(text + _DIFF3_CONFLICT)
+
+
+def test_resolve_conflict_still_resolves_the_supported_layout(mod, tmp_path) -> None:
+    """Positive control for the diff3 refusal: the supported layout still works."""
+    doc = _doc(tmp_path, 1249)
+    text = doc.read_text()
+    resolved = mod.resolve_conflict(_conflicted(text, 1372, 1337))
+    assert "|||||||" not in resolved and "<<<<<<<" not in resolved
+
+
+def test_resolve_conflict_does_not_blame_the_number_for_a_multiline_block(
+    mod, tmp_path
+) -> None:
+    """A block spanning extra lines is not "differing by more than the count".
+
+    The refusal must survive, but its wording has to stay true: the two sides of
+    this block differ by an entire line, not merely by the number.
+    """
+    text = _doc(tmp_path, 1249).read_text()
+    match = re.search(r"^Python: .*$", text, re.M)
+    line = match.group(0)
+    block = f"<<<<<<< HEAD\n{line}\nextra: only ours\n=======\n{line}\n>>>>>>> master"
+    with pytest.raises(mod.DocCountError, match="content conflict"):
+        mod.resolve_conflict(text[: match.start()] + block + text[match.end() :])
+
+
 def test_resolve_conflict_mode_writes_the_measured_value(
     mod, tmp_path, monkeypatch, capsys
 ) -> None:
