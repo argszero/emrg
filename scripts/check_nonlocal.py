@@ -175,7 +175,7 @@ def check_nonlocal(app_path: str) -> int:
             exit_code = 1
 
     if exit_code == 0:
-        print("✅ nonlocal integrity check passed")
+        print("OK: nonlocal integrity check passed")
 
     return exit_code
 

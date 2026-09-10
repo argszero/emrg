@@ -2,7 +2,7 @@
 """Measure the reader-feedback -> merged-fix loop: median issue-to-fix latency.
 
 Issue #1027 secondary suggestion (reader comment heinrichneb, Dev.to 3dicj):
-"add a README metric — median time from reader-found boundary to merged fix
+"add a README metric - median time from reader-found boundary to merged fix
 (the 50-min loop claim becomes a measured number)."
 
 The Dev.to article claimed a ~50-minute issue-to-merged-fix loop (#1000: issue
@@ -16,10 +16,10 @@ auto-close link), the latency is:
     issue.created_at  ->  merged_at of the EARLIEST merged linked PR
 
 The median across all such issues is the headline number. Only the earliest
-merged PR counts — a fix is "shipped" when its first merged PR lands.
+merged PR counts - a fix is "shipped" when its first merged PR lands.
 
 The script also reports the OPEN side of the loop (issue #1056, Dev.to
-comment 3djoa, heinrichneb 2026-08-27): an open-issue age counter — how
+comment 3djoa, heinrichneb 2026-08-27): an open-issue age counter - how
 many open issues exist, their median age in days, and the oldest few. A
 median only over already-fixed issues hides issues that are still waiting;
 the two numbers together bound the loop from both ends.
@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
 
     samples = collect_latencies(args.repo, args.limit)
     if not samples:
-        print("no closed issues with a merged fix PR found — nothing to measure")
+        print("no closed issues with a merged fix PR found - nothing to measure")
         return 0
 
     vals = [s[1] for s in samples]

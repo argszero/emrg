@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"\nNo sub-threshold observations accumulated yet "
             f"(n_noise=0, n_drift={stats['n_drift']}). The detector writes an "
-            f"anchor_bias_observation per anchored round — re-run after the "
+            f"anchor_bias_observation per anchored round - re-run after the "
             f"daemon has seen some usage. Current threshold stays "
             f"{args.current}."
         )
@@ -316,7 +316,7 @@ def main(argv: list[str] | None = None) -> int:
     if reason == "noise-crowding-boundary":
         print(
             f"\nNOISE CROWDING THE BOUNDARY: p99 ({_fmt(stats['p99'])}) is within "
-            f"10% of the current threshold {args.current} — per-round estimate "
+            f"10% of the current threshold {args.current} - per-round estimate "
             f"noise is close to tripping the guard. Recommended "
             f"_SILENT_DRIFT_THRESHOLD: {stats['recommended']} "
             f"(= max(current, p99 * 1.5))."
@@ -324,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     elif reason == "noise-well-below-boundary":
         print(
             f"\nNoise is well below the boundary (p99={_fmt(stats['p99'])}, "
-            f"current={args.current}) — the guard demonstrably fires only on "
+            f"current={args.current}) - the guard demonstrably fires only on "
             f"real drift. Recommended _SILENT_DRIFT_THRESHOLD: "
             f"{stats['recommended']} (unchanged)."
         )
@@ -333,7 +333,7 @@ def main(argv: list[str] | None = None) -> int:
             f"\nNO CLEAN SEPARATION: noise tail p99 ({_fmt(stats['p99'])}) * 1.5 "
             f"exceeds the smallest observed drift "
             f"({_fmt(stats['min_drift']) if stats['min_drift'] is not None else 'n/a'} "
-            f"* 0.75 headroom) — a single fixed threshold cannot separate the "
+            f"* 0.75 headroom) - a single fixed threshold cannot separate the "
             f"two populations. Keeping current threshold {args.current}; "
             f"consider per-provider thresholds or investigating the noisy "
             f"providers."
