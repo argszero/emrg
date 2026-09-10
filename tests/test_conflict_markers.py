@@ -2,28 +2,41 @@
 
 Squash merges can silently commit conflict markers to master, causing
 SyntaxError in Python files and broken docs in Markdown files.
-This test scans every tracked source file and fails if any markers exist.
+This test scans every tracked text file and fails if any markers exist.
 
 Scope (measured 2026-09-10, cycle `cyc20260910-222254`): the scan used to walk
-`emrg/` only, so leftover markers in the tracked `.py`/`.md` files *outside*
-`emrg/` were invisible - including `Agent.md`, this repo's most-conflicted
-file. Driven with markers appended to `README.md`, the old scan passed while
-the repo docs were plainly broken; a tool the host runs only ever reported
-"OK" on the same tree. The walk is now rooted at the repository and derived
-from `git ls-files`, so it cannot silently miss a directory the way a
-hardcoded root does: whatever git tracks is what gets scanned.
+`emrg/` only, so leftover markers in the tracked files *outside* `emrg/` were
+invisible - including `Agent.md`, this repo's most-conflicted file. Driven with
+markers appended to `README.md`, the old scan passed while the repo docs were
+plainly broken; a tool the host runs only ever reported "OK" on the same tree.
+The walk is now rooted at the repository and derived from `git ls-files`, so it
+cannot silently miss a directory the way a hardcoded root does.
+
+The scan set is **every tracked file**, not the `.py`/`.md` pair an earlier
+version named (measured 2026-09-10, cycle `cyc20260911-011300`): that version's
+own docstring promised "whatever git tracks is what gets scanned" while the
+command was `git ls-files -- '*.py' '*.md'` - a Python/Markdown subset of the
+index, leaving the whole tracked JavaScript/TypeScript/shell/workflow surface
+unseen. A marker left in a tracked `.js`/`.ts`/`.yml` was invisible, and driven
+with markers appended to `emrg/gui/preload.js` the guard passed green. Same
+defect shape as the one this module exists to fix (a claim wider than the
+implementation), so the set is now the index minus binary assets, and the
+extensions are *not* enumerated: an allow-list has to be maintained, the index
+does not.
 
 ⚠️ **The proportions here are stated as a shape, not as literal counts.** An
 earlier version of this docstring pinned "85 of the 143" - the figure measured
 when the fix was written. #1126 then added two tracked files and the sentence
 became false while every test stayed green: stale prose that still reads as a
 measurement, in a module whose whole subject is states nobody is looking at.
-What is *durable* is the invariant the guard actually asserts - **most tracked
-`.py`/`.md` files live outside `emrg/`**
-(`test_scan_reaches_outside_the_emrg_package` requires a non-empty outside set
-and `outside > inside`). When the fix was written that was 87 of 153 (66
-inside); the count grows, the shape does not. Need the current figure? Measure
-it - do not trust this paragraph.
+What is *durable* is the shape the guard actually asserts: the scan reaches the
+repository root and covers far more than the `emrg/` package
+(`test_scan_reaches_outside_the_emrg_package` requires a non-empty outside set,
+an inside set, and `total > 2 * inside` - the `.py`/`.md`-only scope was
+*mostly* outside because the package is Python, while the tracked tree as a
+whole is majority `emrg/gui`, so a raw `outside > inside` would invert it and
+would have been a false constraint). **Need the current figure? Measure it -
+do not trust this paragraph.**
 """
 
 import re
@@ -42,7 +55,7 @@ BINARY_SUFFIXES = (".png", ".ico", ".icns", ".jpg", ".jpeg", ".gif", ".webp", ".
 
 
 def _tracked_source_files() -> list[str]:
-    """Repo-relative paths of every tracked `.py`/`.md` file, via `git ls-files`.
+    """Repo-relative paths of every tracked file, via `git ls-files`.
 
     Using git's own index instead of a directory walk is the point of the fix:
     a walk rooted at `emrg/` was exactly the bug, and a walk rooted at the repo
@@ -51,6 +64,15 @@ def _tracked_source_files() -> list[str]:
     construction. It also skips the untracked/ignored trees (`.venv/`,
     `node_modules/`, `dist/`, `.pytest_cache/`) for free, which is why the test
     stays fast.
+
+    **No extension filter** (added cycle `cyc20260911-011300`): the first version
+    of this fix passed `-- '*.py' '*.md'` while its own docstring promised
+    "whatever git tracks is what gets scanned" - 153 of 451 tracked files, and a
+    marker in a tracked `.js`/`.ts`/`.yml` was invisible (measured: markers
+    appended to `emrg/gui/preload.js` left the guard green). An allow-list of
+    extensions has to be maintained and goes false silently; the index does not.
+    Binary assets are skipped by suffix in `_collect_source_files`, since "does
+    this file contain a conflict marker" is a text question.
 
     ⚠️ git emits the index path with the *platform* separator: POSIX gives
     `tests/x.py`, Windows gives a backslash. Measured 2026-09-10 on the
@@ -70,7 +92,7 @@ def _tracked_source_files() -> list[str]:
     the names actually collected.
     """
     listed = subprocess.run(
-        ["git", "ls-files", "-z", "--", "*.py", "*.md"],
+        ["git", "ls-files", "-z"],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
@@ -95,7 +117,7 @@ def _split_ls_files(listed: str) -> list[str]:
 
 
 def _collect_source_files() -> list[Path]:
-    """Tracked `.py`/`.md` files as absolute paths, skipping binary suffixes."""
+    """Every tracked text file as an absolute path, skipping binary suffixes."""
     return [
         REPO_ROOT / name
         for name in _tracked_source_files()
@@ -117,9 +139,17 @@ def test_scan_reaches_outside_the_emrg_package():
     The counts below are **computed, not pinned** — deliberately. The module
     docstring once stated "85 of the 143" as a literal measured figure and
     silently went stale when #1126 added two tracked files. The durable claim is
-    the *shape* (`outside > inside`, non-empty), so that is what is asserted;
-    the failure message prints the current numbers, keeping them available
-    without making a test depend on a value that grows every few commits.
+    a *shape*, so that is what is asserted; the failure message prints the
+    current numbers, keeping them available without making a test depend on a
+    value that grows every few commits.
+
+    Note the shape is **not** `outside > inside`. That held while the scan set
+    was the `.py`/`.md` pair (87 of 153 outside, because the `emrg/` package is
+    Python) but inverts for the whole index (115 outside vs 336 inside, since
+    `emrg/gui` is majority of the tree) - asserting it would have been a false
+    constraint that the *correct* widening fails. What is durable is that both
+    halves are non-empty and that the scan is the whole tree rather than one
+    package's worth of it.
     """
     scanned = {p.relative_to(REPO_ROOT).as_posix() for p in _collect_source_files()}
     for required in (
@@ -129,6 +159,13 @@ def test_scan_reaches_outside_the_emrg_package():
         "MANIFESTO.md",
         "tests/test_conflict_markers.py",
         "scripts/check-doc-count.py",
+        # A tracked file from each non-Python, non-Markdown family the index
+        # carries. These are the files the `.py`/`.md`-only scope could not see,
+        # so requiring them is what makes the widening itself the assertion.
+        "emrg/gui/preload.js",
+        "emrg/gui/renderer/src/lib/markdown.ts",
+        ".github/workflows/test.yml",
+        "packaging/make-installer.sh",
     ):
         assert required in scanned, (
             f"{required} is not scanned for conflict markers, so a leftover "
@@ -137,10 +174,19 @@ def test_scan_reaches_outside_the_emrg_package():
     inside = [name for name in scanned if name.startswith("emrg/")]
     outside = [name for name in scanned if not name.startswith("emrg/")]
     assert outside, "nothing outside emrg/ is scanned - the scan is rooted too deep"
-    assert len(outside) > len(inside), (
-        f"expected most tracked sources to live outside emrg/, got "
-        f"{len(outside)} outside vs {len(inside)} inside"
-    )
+    assert inside, "nothing inside emrg/ is scanned - the scan is not the whole tree"
+
+    # The contract of the widening, asserted without re-deriving the set (which
+    # would only re-run the code under test): the scan must reach *file families*,
+    # not a hand-maintained list. Re-introducing the defect (`-- '*.py' '*.md'`)
+    # removes whole families and fails here.
+    families = {Path(name).suffix for name in scanned}
+    for family in (".py", ".md", ".js", ".ts", ".tsx", ".sh", ".yml", ".json"):
+        assert family in families, (
+            f"no tracked `{family}` file is scanned - the scan set is a list of "
+            f"extensions rather than the git index, which is the defect this "
+            f"guard was widened to fix. Scanned suffixes: {sorted(families)}"
+        )
 
 
 def test_scanned_names_use_forward_slashes():
