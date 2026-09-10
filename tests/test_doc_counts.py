@@ -158,7 +158,25 @@ _RENDERER_TEST_SUFFIX = ".test"
 # none of these spellings (measured 2026-09-10: 0 matches across the 54 renderer
 # and GUI test files), so this is a tripwire, not a filter.
 _DEFINITION_KEYWORD = r"(?:it|test)"
-_DEFINITION_FORM = re.compile(rf"^\s*{_DEFINITION_KEYWORD}\(", re.M)
+
+# The keyword and its call can be separated by a *newline*, and the call is still
+# one call the runner registers. Measured with the real runner (cyc20260910-234907):
+# a file containing
+#     it
+#       ('a', () => {})
+# reported `Tests 2 passed (2)` while the static count said **1** - the drift this
+# guard exists to catch, arriving through line position rather than spelling.
+# Prettier rejoins the statement when it reformats a file, but nothing in this repo
+# runs prettier (no config, no CI step), so a hand-authored file carries it.
+#
+# The separator admits a newline but deliberately **not** a bare space: `it (` is
+# legal JS, yet on a line of its own it is indistinguishable from prose such as
+# "it (the count) is 514", and this file is written in prose about these exact
+# spellings. A guard that reds on a sentence is a guard that gets deleted.
+_NEWLINE_THEN_INDENT = r"(?:\n\s*)?"
+_DEFINITION_FORM = re.compile(
+    rf"^\s*{_DEFINITION_KEYWORD}{_NEWLINE_THEN_INDENT}\(", re.M
+)
 
 # The *suite* a definition can hang off. `it`/`test` are the counted keywords;
 # `describe` is not counted at all, but both runners let it own parameterised
@@ -179,7 +197,10 @@ _DEFINITION_FORM = re.compile(rf"^\s*{_DEFINITION_KEYWORD}\(", re.M)
 # reported `Tests 2 skipped (2)` while the single-link pattern found 0.
 _SUITE_KEYWORD = r"(?:describe)"
 _SUITE_PARAMETERISED_FORM = re.compile(
-    rf"^\s*{_SUITE_KEYWORD}\.(?:[A-Za-z_$][\w$]*\.)*(?:each|for)\(", re.M
+    rf"^\s*{_SUITE_KEYWORD}{_NEWLINE_THEN_INDENT}\."
+    rf"(?:[A-Za-z_$][\w$]*{_NEWLINE_THEN_INDENT}\.)*"
+    rf"(?:each|for){_NEWLINE_THEN_INDENT}\(",
+    re.M,
 )
 
 # Every *callable* member the two runners put on the definition function, none of
@@ -214,8 +235,10 @@ _SUITE_PARAMETERISED_FORM = re.compile(
 # for prose immunity, not an oversight - a guard that reds on a comment gets
 # deleted, and this file is written in prose about these exact spellings.
 _CHAINED_DEFINITION_FORM = re.compile(
-    rf"^\s*{_DEFINITION_KEYWORD}\.(?:[A-Za-z_$][\w$]*\.)*"
-    r"(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)\(",
+    rf"^\s*{_DEFINITION_KEYWORD}{_NEWLINE_THEN_INDENT}\."
+    rf"(?:[A-Za-z_$][\w$]*{_NEWLINE_THEN_INDENT}\.)*"
+    rf"(?:each|for|skip|only|todo|fails|concurrent|sequential|skipIf|runIf)"
+    rf"{_NEWLINE_THEN_INDENT}\(",
     re.M,
 )
 
@@ -645,6 +668,93 @@ def test_doc_counts_stay_green_on_prose_about_a_chained_form(tmp_path, monkeypat
         "// chain forms like it.each(...) or test.skip(...) are not counted,\n"
         "// and a parameterised suite such as describe.for(...) hides it\n"
         "const NOTE = 'call test.only( to isolate a case';\n"
+        "it('a', () => {});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    assert mod._static_renderer_counts() == {"utils": 1}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "it\n  .each([[1], [2]])('%i runs', () => {});\n",
+        "it\n    .each([[1]])('%i runs', () => {});\n",
+        "it\n  .skip\n  .each([[1]])('%i runs', () => {});\n",
+    ],
+    ids=["split-before-each", "split-4-space", "split-multi-link"],
+)
+def test_renderer_counts_fail_loud_on_a_line_split_chain(tmp_path, monkeypatch, body) -> None:
+    """A chain split across lines is still one chain the runner executes.
+
+    The multi-link fix covered chains that are *written* on one line; it still
+    required the dot to follow the keyword on the same line. Measured with the
+    real runner (cyc20260910-234907): a probe file containing
+
+        it
+          .each([[1], [2]])('%i', () => {})
+
+    reported `Tests 2 passed (2)` while both patterns found **0** - two executed
+    cases recorded as zero, reached through line position rather than spelling.
+
+    Prettier rejoins the statement (verified: `prettier --parser typescript
+    --print-width 80` collapses it back to one line), but nothing in this repo
+    runs prettier - there is no config and no CI step - so a hand-authored file
+    carries the split. The boundary is stated rather than hidden: `it (` with a
+    bare space stays uncounted, because on its own line that is indistinguishable
+    from prose and this guard must not fire on a sentence.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    with pytest.raises(AssertionError, match=r"cannot count"):
+        mod._static_renderer_counts()
+
+
+def test_renderer_count_matches_the_runner_for_a_line_split_call(tmp_path, monkeypatch) -> None:
+    """A plain call split from its paren must be *counted*, not tripped.
+
+    This is the case the tripwire alone cannot cover, because the form is
+    countable once the pattern tolerates the newline. Measured with the real
+    runner (cyc20260910-234907): a file with
+
+        it
+        ('a', () => {})
+        it('b', () => {})
+
+    reported `Tests 2 passed (2)` while the static count said **1** - a silent
+    under-count with every guard green, i.e. exactly the drift class this file
+    exists to prevent. The pattern now counts both, so the count equals the
+    runner's total and the guard stays quiet.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "describe('split-call', () => {\n"
+        "  it\n"
+        "  ('a', () => { expect(1).toBe(1); });\n"
+        "  it('b', () => { expect(1).toBe(1); });\n"
+        "});\n"
+    )
+    _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
+    assert mod._static_renderer_counts() == {"utils": 2}
+
+
+def test_doc_counts_stay_green_on_prose_about_a_split_call(tmp_path, monkeypatch) -> None:
+    """Prose using the keyword followed by a parenthetical must stay green.
+
+    The newline tolerance is the one change here that could plausibly turn a
+    sentence into a false positive, so it gets its own counter-test. `it (the
+    runner) registers two cases` is prose, not a call - which is why the
+    separator admits a newline but not a bare space.
+    """
+    mod = _loaded_guard_module()
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    body = (
+        "// It (the runner) registers two cases here, per the measurement.\n"
+        "// test (singular) is node:test's spelling.\n"
         "it('a', () => {});\n"
     )
     _renderer_tree(tmp_path, {"lib/utils.test.ts": body})
