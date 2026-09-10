@@ -40,7 +40,10 @@ Boundary (stated, not implied): these pin literal output. Data-driven output —
 say a CJK path interpolated into a message — is not covered, and neither are
 shell scripts: bash writes bytes straight to the fd, so a legacy console shows
 mojibake instead of raising, which is a different (and non-fatal) failure.
-Comments are exempt — nothing in Python prints a comment.
+Comments are exempt: no Python path prints one, and where a traceback echoes a
+source line the interpreter escapes the unencodable character (verified: a
+trailing ``# ... \u2014 ...`` on a failing line prints as ``\\u2014`` under
+``PYTHONIOENCODING=ascii`` with exit 1, not ``UnicodeEncodeError``).
 """
 
 from __future__ import annotations
