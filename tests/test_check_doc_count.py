@@ -35,6 +35,19 @@ SCRIPT = REPO_ROOT / "scripts" / "check-doc-count.py"
 GUARD = REPO_ROOT / "tests" / "test_doc_counts.py"
 
 
+def _load_guard():
+    """Load the guard module so its function can be driven in both states.
+
+    By path, the same way `test_doc_counts.py` loads itself: pytest imports
+    these files as `tests.test_doc_counts`, and a plain top-level name does not
+    resolve.
+    """
+    spec = importlib.util.spec_from_file_location("_doc_count_guard", GUARD)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def _load_module():
     spec = importlib.util.spec_from_file_location("check_doc_count", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
@@ -157,6 +170,96 @@ def _compiled_pattern_for(tree: ast.Module, name: str) -> str | None:
         ):
             return call.args[0].value
     return None
+
+
+def _guard_assert_messages() -> list[str]:
+    """Every assertion message in the count guard, as static text.
+
+    Read from the AST, not by regex, so a reworded message is still read as the
+    message it is. Adjacent string constants inside an f-string are joined; the
+    `{doc}` / `{documented}` placeholders are `FormattedValue` nodes and drop
+    out, which is fine - the hint this test cares about is static text.
+    """
+    tree = ast.parse(GUARD.read_text(encoding="utf-8"))
+    func = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "test_python_count_matches_docs"
+    )
+    messages = []
+    for node in ast.walk(func):
+        if isinstance(node, ast.Assert) and node.msg is not None:
+            messages.append(
+                "".join(
+                    part.value
+                    for part in ast.walk(node.msg)
+                    if isinstance(part, ast.Constant) and isinstance(part.value, str)
+                )
+            )
+    return messages
+
+
+def test_guard_failure_names_a_runnable_repair_command(mod, capsys) -> None:
+    """The guard must fail with a command the host can actually run.
+
+    Reporting drift without naming the repair path leaves the host to find the
+    tool - and the tool exists precisely for this failure. Both halves are
+    needed, so both are asserted: the path in the message must exist, and
+    `--write` must be a flag the tool really accepts. A hint spelled
+    consistently is not a repair path; a repair path that only exists in a
+    comment is not one either.
+
+    Necessary, not sufficient: this reads the hint out of the guard's source, and
+    a string that lives in an assert the drift path never reaches satisfies it.
+    `test_guard_drift_message_names_the_repair_command` is the half that drives
+    the guard and checks the message a host actually sees.
+    """
+    messages = _guard_assert_messages()
+    hinted = [m for m in messages if "scripts/check-doc-count.py" in m]
+    assert hinted, (
+        "the guard's failure message no longer names the repair tool, so a host "
+        f"who hits it in CI has no next step; messages found: {messages}"
+    )
+    assert any("--write" in m for m in hinted), (
+        f"the hint does not offer the repair flag, only a path: {hinted[0]!r}"
+    )
+    assert SCRIPT.exists(), f"the guard points at {SCRIPT}, which does not exist"
+
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main(["--help"])
+    assert excinfo.value.code == 0
+    assert "--write" in capsys.readouterr().out
+
+
+def test_guard_drift_message_names_the_repair_command(mod, monkeypatch) -> None:
+    """The hint must be in the message a host actually gets, in the drift state.
+
+    The static checks next door read the hint out of the guard's source, which
+    makes them necessary but not sufficient. Measured (cyc20260910-192726): moving
+    that same hint string onto the assert that fires when the *anchor* is missing
+    left both of them green, while a drifting host saw a message with no hint at
+    all - the exact regression this branch exists to prevent. So drive the guard
+    the way drift drives it: stub the collected count (no subprocess, ~0s) and
+    read the raised message.
+    """
+    guard = _load_guard()
+    canonical = "uv run --no-sync python3 scripts/check-doc-count.py --write"
+    documented = mod.documented_count((REPO_ROOT / "Agent.md").read_text(encoding="utf-8"))
+
+    # Positive state: a consistent tree leaves the guard silent. Without this
+    # half, a guard that compared nothing would still pass the negative one.
+    monkeypatch.setattr(guard, "_collected_pytest_count", lambda: documented)
+    assert guard.test_python_count_matches_docs() is None
+
+    # Negative state: one test's worth of drift - the real incident shape.
+    monkeypatch.setattr(guard, "_collected_pytest_count", lambda: documented + 1)
+    with pytest.raises(AssertionError) as excinfo:
+        guard.test_python_count_matches_docs()
+    message = str(excinfo.value)
+    assert f"Fix with: {canonical}" in message, (
+        "the message a host sees on drift no longer names the repair command; "
+        f"it says: {message!r}"
+    )
 
 
 def test_tool_pattern_agrees_with_the_guard(mod) -> None:
@@ -313,3 +416,62 @@ def test_real_tree_is_consistent() -> None:
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "OK: Agent.md documents" in proc.stdout
+
+
+# --- the repair hint itself must be a command that runs -----------------------
+
+
+def test_every_repair_hint_prints_one_runnable_command(mod, monkeypatch, tmp_path, capsys) -> None:
+    """Every site that tells someone how to repair the count must agree.
+
+    Measured (cycle cyc20260910-191242, main clone): the canonical form exits 0,
+    while the bare `python3` form the drift hint used to print exits 2 having
+    measured nothing - the host's `python3` cannot import pytest. The guard's
+    message, this tool's error hint and Agent.md already used the canonical form,
+    so the drift hint was the one site sending the reader into a second failure.
+    A hint that fails is worse than no hint: it looks like a next step.
+
+    All four sites are checked here (tool source, tool drift output, tool error
+    output, guard message, plus Agent.md), because the defect was precisely a
+    disagreement between them.
+    """
+    canonical = "uv run --no-sync python3 scripts/check-doc-count.py"
+    assert mod.INVOCATION == canonical
+
+    source = SCRIPT.read_text(encoding="utf-8")
+    hits = list(re.finditer(r"python3 scripts/check-doc-count\.py", source))
+    assert hits, "the tool no longer mentions its own invocation at all"
+    for hit in hits:
+        prefix = source[max(0, hit.start() - len("uv run --no-sync ")) : hit.start()]
+        assert prefix == "uv run --no-sync ", (
+            "a hint in scripts/check-doc-count.py spells the invocation without the "
+            f"project runner: ...{source[max(0, hit.start() - 40) : hit.end() + 20]!r}"
+        )
+
+    doc = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
+    assert canonical in doc, "Agent.md no longer documents the canonical invocation"
+    assert any(
+        f"Fix with: {canonical} --write" in message
+        for message in _guard_assert_messages()
+    ), "the pytest guard's failure message no longer prints the canonical fix command"
+
+    # Drift state, for real: the printed line must be the runnable one.
+    mod.DOC = _doc(tmp_path, 1307)
+    monkeypatch.setattr(mod, "measured_count", lambda: 1308)
+    assert mod.main([]) == 1
+    assert f"Fix with: {canonical} --write" in capsys.readouterr().out
+
+    # Error state: the interpreter advice must be the same spelling. A fresh
+    # module, because `measured_count` on `mod` is stubbed above to reach the
+    # drift path, and this half needs the real function to run.
+    fresh = _load_module()
+
+    class _Proc:
+        returncode = 4
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(fresh.DocCountError) as excinfo:
+        fresh.measured_count()
+    assert f"`{canonical}`" in str(excinfo.value)

@@ -113,7 +113,8 @@ def test_python_count_matches_docs() -> None:
     documented = _single_documented_python_count(doc, text)
     assert documented == collected, (
         f"{doc} documents {documented} Python tests but {collected} are collected "
-        f"(--collect-only). Sync the doc (and this guard) when adding/removing tests."
+        f"(--collect-only). Sync the doc (and this guard) when adding/removing tests.\n"
+        "Fix with: uv run --no-sync python3 scripts/check-doc-count.py --write"
     )
 
 
