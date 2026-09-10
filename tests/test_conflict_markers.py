@@ -5,15 +5,28 @@ SyntaxError in Python files and broken docs in Markdown files.
 This test scans every tracked source file and fails if any markers exist.
 
 Scope (measured 2026-09-10, cycle `cyc20260910-222254`): the scan used to walk
-`emrg/` only, so leftover markers in the *other* 85 tracked `.py`/`.md` files
-were invisible - including `Agent.md`, this repo's most-conflicted file. Driven
-with markers appended to `README.md`, the old scan passed while the repo docs
-were plainly broken; a tool the host runs only ever reported "OK" on the same
-tree. The walk is now rooted at the repository and derived from `git ls-files`,
-so it cannot silently miss a directory the way a hardcoded root does: whatever
-git tracks is what gets scanned.
+`emrg/` only, so leftover markers in the tracked `.py`/`.md` files *outside*
+`emrg/` were invisible - including `Agent.md`, this repo's most-conflicted
+file. Driven with markers appended to `README.md`, the old scan passed while
+the repo docs were plainly broken; a tool the host runs only ever reported
+"OK" on the same tree. The walk is now rooted at the repository and derived
+from `git ls-files`, so it cannot silently miss a directory the way a
+hardcoded root does: whatever git tracks is what gets scanned.
+
+⚠️ **The proportions here are stated as a shape, not as literal counts.** An
+earlier version of this docstring pinned "85 of the 143" - the figure measured
+when the fix was written. #1126 then added two tracked files and the sentence
+became false while every test stayed green: stale prose that still reads as a
+measurement, in a module whose whole subject is states nobody is looking at.
+What is *durable* is the invariant the guard actually asserts - **most tracked
+`.py`/`.md` files live outside `emrg/`**
+(`test_scan_reaches_outside_the_emrg_package` requires a non-empty outside set
+and `outside > inside`). When the fix was written that was 87 of 153 (66
+inside); the count grows, the shape does not. Need the current figure? Measure
+it - do not trust this paragraph.
 """
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -99,8 +112,14 @@ def test_scan_reaches_outside_the_emrg_package():
     than only on the "no markers present" outcome) is what makes that failure
     mode detectable: a scan that inspects nothing is trivially marker-free, and
     a green marker-free scan is indistinguishable from a correct one unless the
-    scope is pinned. Measured 2026-09-10: 85 of the 143 tracked `.py`/`.md`
-    files live outside `emrg/`.
+    scope is pinned.
+
+    The counts below are **computed, not pinned** — deliberately. The module
+    docstring once stated "85 of the 143" as a literal measured figure and
+    silently went stale when #1126 added two tracked files. The durable claim is
+    the *shape* (`outside > inside`, non-empty), so that is what is asserted;
+    the failure message prints the current numbers, keeping them available
+    without making a test depend on a value that grows every few commits.
     """
     scanned = {p.relative_to(REPO_ROOT).as_posix() for p in _collect_source_files()}
     for required in (
@@ -200,3 +219,49 @@ def test_no_conflict_markers():
             "conflicts blindly."
         )
         pytest.fail("\n".join(msg_lines))
+
+
+def test_module_docstring_states_no_literal_tracked_count():
+    """The docstring must not pin a literal count that grows every few commits.
+
+    Measured history: this module's docstring said "85 of the 143 tracked
+    `.py`/`.md` files live outside `emrg/`". #1126 added two tracked files
+    (`scripts/check-node-test-count.py`, `tests/test_check_node_test_count.py`)
+    and the sentence became false while every test stayed green - stale prose
+    that still reads as a measurement, in a module whose entire subject is
+    detecting states nobody is looking at.
+
+    The rule is deliberately narrow: an un-dated `N [of M] tracked` claim is what
+    goes stale. The durable replacement is the *shape* the guard already asserts,
+    and a figure explicitly framed as historical is allowed - so this cannot
+    creep into policing every number in the file.
+    """
+    docstring = (
+        REPO_ROOT / "tests" / "test_conflict_markers.py"
+    ).read_text(encoding="utf-8").split('"""')[1]
+    pattern = r"\b\d+\s+(?:of\s+(?:the\s+)?\d+\s+)?tracked\b"
+
+    stale = re.findall(pattern, docstring)
+    assert not stale, (
+        f"the module docstring pins a literal tracked-file count ({stale}), "
+        "which goes false whenever a tracked file is added - while every test "
+        "stays green. State the shape instead (most tracked sources live "
+        "outside emrg/), or mark the figure as a historical measurement."
+    )
+
+    # Positive half: the sentence that actually went stale must be caught,
+    # in both forms it appeared in.
+    for sentence in (
+        "so leftover markers in the *other* 85 tracked `.py`/`.md` files were invisible",
+        "Measured 2026-09-10: 85 of the 143 tracked `.py`/`.md` files live outside `emrg/`.",
+    ):
+        assert re.findall(pattern, sentence), (
+            f"the stale-prose matcher misses the form that motivated it: {sentence!r}"
+        )
+
+    # Negative half: the durable, cycle-framed form must stay allowed, so the
+    # rule does not become a blanket ban on numbers.
+    allowed = "When the fix was written that was 87 of 153 (66 inside); the count grows"
+    assert not re.findall(pattern, allowed), (
+        "the matcher rejects the durable form - the rule is too wide"
+    )
