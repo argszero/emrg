@@ -19,7 +19,9 @@ declarations in 8 files**. It has gone wrong repeatedly:
 *what to edit*, and neither can stop ``uv`` from churning ``uv.lock``.
 This script is the missing host-side counterpart: it edits all 8 sources
 deterministically, refuses to run if any anchor is missing, and never
-touches ``uv.lock`` beyond the ``name = "emrg"`` version line.
+touches ``uv.lock`` beyond the ``name = "emrg"`` version line. Validation and
+writes are two separate passes (see ``bump``), so a failure never leaves the
+repo half-bumped.
 
 Usage
 -----
@@ -148,6 +150,10 @@ def bump(
 ) -> list[str]:
     """Rewrite every version source to ``new_version``; return changed paths.
 
+    Two passes: every source is validated (anchor present, expected count,
+    consistent with ``BASE_FILE``) before *any* file is written, so a
+    validation failure leaves the tree byte-for-byte untouched.
+
     Only the version literal inside each matched anchor is replaced, so the
     surrounding formatting (quote style, trailing ``> "$DIST/version.txt"``,
     lockfile structure) is preserved byte-for-byte.
@@ -160,9 +166,26 @@ def bump(
     if old_version == new_version:
         return []
 
-    changed: list[str] = []
+    def _swap(m: re.Match[str]) -> str:
+        return m.group(0).replace(old_version, new_version)
+
+    # Pass 1 — validate *every* source before writing any of them.
+    #
+    # Interleaving validation with writes is not atomic: a source that fails
+    # late (a bumped-but-different version, a changed file layout) aborted the
+    # loop only *after* the earlier files had already been rewritten, leaving
+    # the repo half-bumped. Observed live (#1119 review): `emrg/__init__.py`
+    # was left at 0.2.95 while the other seven stayed at 0.2.94, and the tool
+    # then refused to continue — turning "refused, no harm" into manual
+    # cleanup (`git checkout -- .`). Validate all, then write.
+    planned: list[tuple[str, re.Pattern[str], int, str]] = []
     for rel, pattern, count in VERSION_SOURCES:
         path = root / rel
+        if not path.exists():
+            raise BumpError(
+                f"{rel}: MISSING FILE — the file layout changed; update "
+                f"VERSION_SOURCES in scripts/bump-version.py"
+            )
         text = path.read_text(encoding="utf-8")
         versions = _find_versions(text, pattern)
         if len(versions) != count:
@@ -178,15 +201,18 @@ def bump(
                 f"{old_version} — sources are already inconsistent; run "
                 f"`python3 scripts/bump-version.py --check` first"
             )
+        planned.append((rel, pattern, count, text))
 
-        def _swap(m: re.Match[str]) -> str:
-            return m.group(0).replace(old_version, new_version)
-
+    # Pass 2 — every source is known good, so nothing below can abort on
+    # content. Only I/O failures remain, and a partial write there is the
+    # filesystem's problem, not a validation surprise.
+    changed: list[str] = []
+    for rel, pattern, count, text in planned:
         new_text, n = pattern.subn(_swap, text)
         if n != count:  # defensive: subn must agree with finditer
             raise BumpError(f"{rel}: replaced {n} occurrence(s), expected {count}")
         if not dry_run:
-            path.write_text(new_text, encoding="utf-8")
+            (root / rel).write_text(new_text, encoding="utf-8")
         changed.append(rel)
 
     return changed
