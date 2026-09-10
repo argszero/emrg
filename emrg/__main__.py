@@ -112,7 +112,35 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _harden_redirected_output() -> None:
+    """Keep redirected CLI output from aborting on a legacy codec.
+
+    When stdout/stderr is a pipe or a file, Python encodes with the *locale*
+    codec — ASCII under ``LANG=C``/POSIX, ``cp1252`` on older Windows, GBK on
+    zh-CN hosts. Typography the CLI prints freely (em dash, arrows in the
+    ``emrg update`` hints) has no mapping in some of those, so the ``print``
+    raises ``UnicodeEncodeError`` mid-write and the command dies with a
+    traceback: ``emrg --help > log.txt`` under an ASCII locale exited 1 and
+    printed nothing at all.
+
+    ``errors="replace"`` degrades an unencodable character to ``?`` instead of
+    aborting. That is the right trade for human-facing CLI text — the typography
+    is decorative, and a readable line beats a traceback. Interactive terminals
+    are deliberately left alone: they can encode the text, and the TUI must not
+    have its output rewritten.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if not stream.isatty():
+                stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # Not a TextIOWrapper (already wrapped/closed), or the platform
+            # forbids it — the status quo is no worse than before the call.
+            pass
+
+
 def main() -> None:
+    _harden_redirected_output()
     parser = _build_parser()
     parsed = parser.parse_args()
 
