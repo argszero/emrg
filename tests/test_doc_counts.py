@@ -177,3 +177,78 @@ def test_renderer_count_matches_docs() -> None:
         f"counted statically (vitest-equivalent). Sync Agent.md when "
         "adding/removing renderer tests."
     )
+
+
+_GUI_DOC_MARKER = "`cd emrg/gui && npm test`"
+_GUI_TEST_SUFFIX = ".test.js"
+
+
+def _gui_doc_breakdown() -> tuple[int, dict[str, int]]:
+    """Parse Agent.md's GUI line into (headline, {test-file stem: count})."""
+    text = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
+    line = next((ln for ln in text.splitlines() if _GUI_DOC_MARKER in ln), None)
+    assert line, f"Agent.md must document the GUI suite as {_GUI_DOC_MARKER}"
+    m = re.search(r"\((\d+): ([^)]+)\)", line)
+    assert m, f"could not parse the Agent.md GUI breakdown: {line}"
+    parts: dict[str, int] = {}
+    for part in m.group(2).split("+"):
+        pm = re.match(r"\s*(\d+)\s+(\S+)", part)
+        assert pm, f"could not parse Agent.md GUI breakdown part: {part!r}"
+        parts[pm.group(2)] = int(pm.group(1))
+    return int(m.group(1)), parts
+
+
+def _static_gui_counts() -> dict[str, int]:
+    """Count node --test cases per GUI test file (keyed by file stem).
+
+    ``npm test`` runs ``node --test "test/*.test.js"``; node reports one
+    entry per ``test(``/``it(`` definition, so the definition count is the
+    executed total. The one exception is integration.test.js's conditional
+    module-level ``skip(<reason>)`` entry (#906), which is registered only
+    when a live daemon owns the fixed port or EMRG_SKIP_INTEGRATION=1 — it
+    is a runtime *reason* entry, not a test definition, so it is excluded
+    here (the doc's 100 counts definitions; CI's ``EMRG_SKIP_INTEGRATION=1
+    npm test`` prints 101 including that skip entry).
+    """
+    base = REPO_ROOT / "emrg" / "gui" / "test"
+    files = sorted(base.glob(f"*{_GUI_TEST_SUFFIX}"))
+    assert files, "no GUI test files found under emrg/gui/test"
+    return {
+        f.name[: -len(_GUI_TEST_SUFFIX)]: len(
+            re.findall(r"^\s*(?:it|test)\(", f.read_text(encoding="utf-8"), re.M)
+        )
+        for f in files
+    }
+
+
+def test_gui_breakdown_matches_static_counts() -> None:
+    """Agent.md's per-file GUI counts must match the real definitions.
+
+    R2254 gave the *renderer* headline a static guard because it drifted
+    (445 -> 448) without the doc being bumped; the GUI line still had only
+    the #584 sum check, which validates the doc against itself. #906 flagged
+    the gap explicitly when it hand-synced 260 -> 254 after #896-#905 drifted
+    ("the doc-count guard only checks breakdown-sum consistency, not actual
+    collection"). This guard closes it per file, so a new/renamed GUI test
+    file or a stale label turns red in the pytest job (no node_modules
+    needed) instead of waiting for a human to notice.
+    """
+    headline, documented = _gui_doc_breakdown()
+    static = _static_gui_counts()
+
+    assert set(documented) == set(static), (
+        "Agent.md GUI breakdown does not match emrg/gui/test/*.test.js — "
+        f"undocumented files: {sorted(set(static) - set(documented))}; "
+        f"stale labels: {sorted(set(documented) - set(static))}"
+    )
+    for label, count in sorted(static.items()):
+        assert documented[label] == count, (
+            f"Agent.md documents {documented[label]} {label} GUI tests but "
+            f"{count} are defined in emrg/gui/test/{label}{_GUI_TEST_SUFFIX} "
+            "— sync the doc when adding/removing GUI tests."
+        )
+    total = sum(static.values())
+    assert headline == total, (
+        f"Agent.md's GUI headline is {headline} but the test files define "
+        f"{total} tests"
+    )
