@@ -168,12 +168,32 @@ class TestRealInvocationSurface:
         assert proc.returncode == 0
         assert "base branch" in proc.stdout
 
-    def test_unreachable_gh_exits_2_not_0(self) -> None:
+    def test_missing_gh_exits_2_not_1(self, monkeypatch) -> None:
+        """A missing `gh` must take the "could not look" path (rc 2), not rc 1.
+
+        This is the failure CI caught on Windows (run 34605389233): `gh` is not
+        installed on that runner, `subprocess.run(["gh", ...])` raised
+        `FileNotFoundError`, and an uncaught exception exits **1** - which for
+        this tool means "a PR is based on a dead end". A caller would then hunt
+        for a PR to retarget that does not exist, while the truth is that the
+        state could not be read at all. Pinned here by simulating the missing
+        binary rather than depending on `gh` being absent on the test machine.
+        """
+        mod = _load()
+
+        def no_gh(*args, **kwargs):
+            raise FileNotFoundError(2, "No such file or directory", "gh")
+
+        monkeypatch.setattr(mod.subprocess, "run", no_gh)
+        assert mod.main(["--repo", "argszero/emrg"]) == 2
+
+    def test_unreachable_repo_exits_2_not_0(self) -> None:
         """With a bogus repo gh fails; the tool must not report a clean bill."""
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--repo", "argszero/definitely-not-a-repo-xyz"],
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin:/opt/homebrew/bin", "HOME": str(Path.home())},
         )
+        # On a machine with no `gh` at all (e.g. the Windows runner) this is 2 as
+        # well - the code path is now the same, which is the point.
         assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)

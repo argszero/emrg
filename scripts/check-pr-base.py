@@ -65,14 +65,29 @@ MASTER = "master"
 
 
 def _gh(*args: str) -> str:
-    """Run `gh`, failing loud rather than guessing."""
-    proc = subprocess.run(
-        ["gh", *args],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    """Run `gh`, failing loud rather than guessing.
+
+    A **missing** `gh` is a failure of the same kind as a failing one, and must
+    take the same exit path. It is not a hypothetical: on the Windows CI runner
+    `gh` is not installed, so the test that drives this tool against a bogus repo
+    raised `FileNotFoundError` out of `subprocess.run` - an uncaught exception,
+    which CPython reports as **rc 1**, i.e. "a PR is on a dead end". That is the
+    exact wrong answer this tool exists to prevent: a caller reading rc 1 would
+    go looking for a PR to retarget that does not exist, while the real state is
+    "could not look". Caught by CI (run 34605389233), not by review.
+    """
+    try:
+        proc = subprocess.run(
+            ["gh", *args],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"gh is not available on this machine ({exc}); cannot determine PR bases"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(
             f"gh failed (rc={proc.returncode}): gh {' '.join(args)}\n"
@@ -116,25 +131,16 @@ def _repo_path(repo: str | None) -> str:
 
 def _branch_heads(repo: str | None) -> dict[str, str]:
     """branch name -> head sha, for every branch on the remote."""
-    proc = subprocess.run(
-        ["gh", "api", f"repos/{_repo_path(repo)}/branches", "--paginate"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"gh failed (rc={proc.returncode}): listing branches\n"
-            f"{proc.stderr.strip()}"
-        )
+    # `_gh` (not a bare subprocess.run) so a missing `gh` raises the same
+    # RuntimeError as a failing one and takes the rc-2 path.
+    out = _gh("api", f"repos/{_repo_path(repo)}/branches", "--paginate")
     # --paginate concatenates page arrays, which is not valid JSON as a whole;
     # the endpoint returns an array per page, so parse per document if it parses,
     # else fall back to line-delimited objects.
     try:
-        payload = json.loads(proc.stdout)
+        payload = json.loads(out)
     except json.JSONDecodeError:
-        payload = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+        payload = [json.loads(line) for line in out.splitlines() if line.strip()]
     if not isinstance(payload, list):
         raise RuntimeError("branch listing was not a list")
     heads = {}
