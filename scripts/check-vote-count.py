@@ -29,9 +29,24 @@ every vote in this repo is posted with `gh pr review --comment`, so GitHub recor
 `COMMENTED` for both "✅ LGTM" and "❌ needs fix". The state field is useless here,
 which is worth knowing before writing something that trusts it.
 
-* first line names ❌ -> a veto
-* first line names ✅ (or says LGTM) -> an approval
+* the verdict mark is read at the first content character **after markdown
+  decoration** (`**❌`, `- ❌`, `> ❌`, `## ❌`, `1. ❌`), so a decorated veto is
+  still a veto;
+* that **leading** mark then decides the line: ❌ -> a veto, ✅ -> an approval. A
+  ✅ line that later mentions ❌ is still an approval, because that mention is
+  prose *about* the veto ("no ❌ at this head", "0 ❌ at this head") and the ways
+  of saying "none" are an open set no word list can cover;
+* a line with no leading mark is a verdict written as prose, and there a refusal
+  ("Not LGTM", "can't LGTM this") is a veto, a claim of LGTM is an approval, and
+  a non-negated ❌ is a veto ("Result: ❌ needs fix");
 * anything else -> an ordinary comment, ignored
+
+Getting this wrong is not symmetric. Reading an approval as a veto **under**counts
+(the failure the first version shipped with, which made an 11-vote PR look like 9 -
+and "not ready yet" is a plausible enough state that nobody investigates). Reading
+a veto as a comment does not merely undercount either: comments are skipped, so the
+veto never resets the run and stale approvals in front of it still read READY 3/3 -
+the tool would call a PR mergeable on reviews a ❌ had already answered.
 
 The cycle id is read from the body (`cyc20260911-091230`); a vote without one is
 reported as unattributable rather than counted, since distinctness cannot be shown.
@@ -82,11 +97,88 @@ INVOCATION = "uv run --no-sync python3 scripts/check-vote-count.py"
 # `cyc20260911-091230` - the cycle id the vote comments carry.
 _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
 
-# A veto wins over an approval on the same line: "✅ but ❌ on the second point"
-# is a request for changes, and undercounting the veto is the dangerous direction
-# (it would let a PR merge on a review that asked for a fix).
+# A **leading** veto wins over everything on the line: "❌ needs fix" is a request
+# for changes no matter what follows it. A leading ✅ is the mirror image, and it
+# keeps the whole line: every real approving body that also mentions ❌ mentions it
+# to say there *isn't* one ("(no ❌ at this head)", "(0 ❌ at this head)"), and the
+# phrasing of that is an open set no negation list can cover. Only when the line
+# has no leading mark is the veto scan below applied, where it catches a veto
+# written as prose - and there a veto still wins, because prose gives the line no
+# mark to be read through.
 _VETO_MARK = "\u274c"  # ❌
 _LGTM_MARK = "\u2705"  # ✅
+
+# Markdown decoration that can precede the mark when a reviewer bolds, bullets,
+# quotes or heads their first line: "**❌ Needs fix**", "- ❌ ...", "> ❌ ...",
+# "## ❌ ...". None of these characters can begin a verdict on their own, so
+# stripping them cannot hide one.
+_DECORATION = "*_~`#>|[]()- \t"
+
+# "1. ❌ ..." / "2) ✅ ..." - an ordered list item, which `_DECORATION` misses.
+_ORDERED_ITEM_RE = re.compile(r"^\d+[.)]\s*")
+
+# A mark preceded by a negation is prose *about* the mark, not a statement of it.
+# `[^\w]{0,4}` bounds the gap by non-word characters, so this cannot cross a word:
+# "not bad, LGTM" is an approval, "not LGTM" is not.
+_NEGATION_WORDS = (
+    r"\b(?:not|no|never|without|nothing|isn'?t|aren'?t|wasn'?t|weren'?t|"
+    r"don'?t|doesn'?t|didn'?t|cannot|can'?t|won'?t)\b"
+)
+
+
+def _negation(exclude: str = "") -> str:
+    """The negation pattern, optionally refusing to cross the given characters.
+
+    `_refuses` passes the marks: a line that negates ❌ is precisely a line that is
+    *not* negating LGTM, so a window that can reach across "❌, " would read the
+    prose approval "Results: no ❌, LGTM" as a refusal. Deriving both from one
+    vocabulary keeps them from drifting apart.
+    """
+    return _NEGATION_WORDS + r"[^\w" + exclude + r"]{0,4}"
+
+
+_NEGATION = _negation()
+
+
+def _negated(line: str, mark: str) -> bool:
+    """Is `mark` negated on this line - is its absence being described?"""
+    return re.search(_NEGATION + re.escape(mark), line, re.IGNORECASE) is not None
+
+
+def _refuses(line: str) -> bool:
+    """A negated LGTM: the reviewer is declining, not approving.
+
+    "Not LGTM" must not fall through to the plain "LGTM" substring test - that
+    would count a refusal as a *vote*, and as an *approval*, so the earlier votes
+    it was written to answer would still read as the run.
+
+    The negation may not cross a **mark**, because a line that negates ❌ is
+    precisely a line that is *not* negating LGTM. The un-narrowed window
+    (`[^\\w]{0,4}`) reaches past "❌, " to the LGTM, so "Results: no ❌, LGTM" - a
+    prose approval - was read as the refusal "no ❌, LGTM" and vetoed (measured
+    this cycle). A refusal is written about LGTM itself, so the window excludes
+    both marks.
+    """
+    window = _negation(exclude="\u274c\u2705")
+    return re.search(window + "LGTM", line, re.IGNORECASE) is not None
+
+
+def _verdict_line(body: str) -> str:
+    """The body's first line that has content, with leading decoration stripped.
+
+    Decoration-only lines are skipped, so a reviewer who opens with a `---` rule
+    has still stated their verdict on the line after it.
+    """
+    for line in body.splitlines():
+        text = line
+        while True:
+            reduced = _ORDERED_ITEM_RE.sub("", text.lstrip(_DECORATION), count=1)
+            if reduced == text:
+                break
+            text = reduced
+        if text.strip():
+            return text
+    return ""
 
 
 def _gh_json(args: list[str]) -> object:
@@ -151,29 +243,95 @@ def _gh_json_paginated(args: list[str]) -> list:
 
 
 def _classify(body: str) -> str:
-    """`veto`, `approve` or `comment`, from the mark the body *begins* with.
+    """`veto`, `approve` or `comment`, from the verdict mark on the first line.
 
-    Leading mark, not "a mark somewhere in the first line": measured 2026-09-11,
-    the first version searched the line and read this approval as a veto -
+    Two wrong versions came before this one, and they failed in opposite
+    directions. Both are pinned by tests; both mistakes are worth naming because
+    the second is the more tempting one.
+
+    **First: "a mark anywhere in the first line".** Measured 2026-09-11, this read
+    a real approval as a veto -
 
         ✅ **LGTM — third vote at this head** ... (two prior ✅; no ❌ at this head)
 
-    The body begins with ✅ (it is a vote), and the ❌ is prose *about* the absence
-    of a veto. Searching anywhere in the line cannot tell those apart, and the
-    failure direction is bad: it silently voids a real vote, so an 11-vote PR looks
-    like it has 9. The repo's convention is that the verdict mark is the first
-    character, so that is what is read.
+    The body begins with ✅ (it is a vote), and the ❌ is prose *about the absence*
+    of a veto. The failure direction is bad: it silently voids a real vote, so an
+    11-vote PR looks like it has 9 - and "not ready yet" is a plausible enough
+    state that nobody investigates.
+
+    **Second: "read the body's first character"** (the version this replaces). It
+    fixed the above by refusing to look past the first character, which is correct
+    only when the mark is literally first. It therefore recognised a veto *only* in
+    the exact shape this repo happened to use, and read every decorated veto as an
+    ordinary comment:
+
+        **❌ Needs fix:** ...     -> comment        - ❌ needs fix   -> comment
+        > ❌ needs fix           -> comment        ## ❌ Needs fix  -> comment
+
+    A veto classified as a comment is not merely uncounted: `check_pr` skips
+    comments entirely, so the run is never reset and three *stale* approvals in
+    front of it still read as READY 3/3. The tool would report a PR as mergeable on
+    the strength of reviews that a later ❌ had already answered. It is also
+    asymmetric - "**✅ LGTM**" still reached approval through the LGTM fallback,
+    which is what made the bug easy to miss - so the fix has to handle *both*
+    marks, not just add a veto branch.
+
+    So: the mark is looked for at the **first content character after decoration**
+    (bold/list/quote/heading markers, which cannot themselves begin a verdict), and
+    a mark preceded by a negation ("no ❌", "not LGTM") is prose about the mark and
+    not a statement of it.
+
+    **Third, and the one that took a review to find: a leading mark decides the
+    line, and the line-wide veto scan is only a fallback.** The version below this
+    one ran the veto scan *first*, over the whole line, which made any ✅ body that
+    merely *mentions* ❌ a veto unless the negation list recognised the phrasing:
+
+        ✅ LGTM - cycle c (0 ❌ at this head)      -> veto    (it is an approval)
+        ✅ LGTM - cycle c (no prior ❌)            -> veto    (it is an approval)
+
+    "0 ❌" is *zero vetoes*, i.e. the strongest possible approval. Reading it as a
+    veto resets the run and discards every approval before it - measured: a PR with
+    three approving cycles reported `SHORT 1/3` where master reported `READY`. The
+    failure direction is again the quiet one ("not ready yet"), and it is not
+    fixable by extending the word list: the list is bounded by `[^\\w]{0,4}`, so
+    "no prior ❌", "no single ❌", "not a single ❌" and even five spaces defeat it.
+    Any negation vocabulary is an open set that an approval can outrun.
+
+    So the precedence is: the **leading** mark decides (that is this repo's stated
+    convention, and it is the only shape that is unambiguously a verdict); the
+    line-wide veto scan applies only to a line that does *not* open with a mark,
+    where it catches verdicts written as prose ("Result: ❌ needs fix"). A leading
+    ✅ with a later ❌ is therefore an approval, which is the reading that survives
+    every negation phrasing - and it is what master already did, so the change
+    cannot void a vote that was being counted.
     """
-    stripped = body.lstrip()
-    if stripped.startswith(_VETO_MARK):
+    line = _verdict_line(body)
+    if not line:
+        return "comment"
+
+    # The leading mark decides. Nothing after it can retract it, because prose
+    # *about* the other mark is exactly what an approving body contains - and the
+    # phrasing of that prose is an open set no negation list can enumerate.
+    if line.startswith(_VETO_MARK):
         return "veto"
-    if stripped.startswith(_LGTM_MARK):
+    if line.startswith(_LGTM_MARK):
         return "approve"
-    # A body that does not open with a mark is an ordinary comment unless its first
-    # line claims LGTM; those are the human-written reviews this repo also has.
-    first = next((ln for ln in body.splitlines() if ln.strip()), "")
-    if "LGTM" in first.upper():
+
+    # No leading mark: a verdict written as prose, so read the line.
+    #   1. A declined approval is a veto - "Not LGTM", "can't LGTM this".
+    #   2. A prose claim of LGTM is an approval, and any mark on that line is a
+    #      *mention* of the other mark - the same reasoning that lets a leading ✅
+    #      keep its line, applied to the shape prose actually takes. Running the
+    #      veto scan before this turned "no ❌, LGTM" and "zero ❌ so LGTM" into
+    #      vetoes: the negation list is bounded by `[^\w]{0,4}` and stops at the
+    #      first punctuation, so every such phrasing defeated it.
+    #   3. Otherwise a veto mark is a veto: "Result: ❌ needs fix".
+    if _refuses(line):
+        return "veto"
+    if "LGTM" in line.upper():
         return "approve"
+    if _VETO_MARK in line and not _negated(line, _VETO_MARK):
+        return "veto"
     return "comment"
 
 
@@ -350,17 +508,24 @@ def main(argv: list[str] | None = None) -> int:
                 f"(head {v.head_sha[:8]}, pushed {v.push_time}){src}"
             )
             for vote in v.votes:
-                # The mark column reports *counting*, not the vote's kind: an
-                # approval that predates the head push is a real ✅ and still does
-                # not count, and rendering it "OK ... VOID" says both at once
-                # (measured 2026-09-11 on #1133: four lines read "OK - VOID"). The
-                # kind is already visible in the reason, so the column is free to
-                # answer the only question the reader has.
-                if vote.valid:
+                # The mark column answers *counting*, except that a veto is never
+                # rendered "OK": a veto submitted at the current head is `valid`
+                # (it is about this head, and it carries a cycle id) while meaning
+                # the opposite of approval. Measured 2026-09-11 (cycle
+                # cyc20260911-130120): the valid-branch-first ordering printed all
+                # five real vetoes as "OK ... counts" - an objection in the
+                # approval column, and the one line a reader checks before merging.
+                # Counting is still reported, in the note.
+                if vote.kind == "veto":
+                    mark = "NO  "
+                    note = "counts - resets the run" if vote.valid else vote.why
+                elif vote.valid:
                     mark, note = "OK  ", "counts"
-                elif vote.kind == "veto":
-                    mark, note = "NO  ", vote.why
                 else:
+                    # An approval that predates the head push is a real ✅ and still
+                    # does not count; rendering it "OK ... VOID" would contradict
+                    # itself (measured 2026-09-11 on #1133: four lines read
+                    # "OK - VOID").
                     mark, note = "VOID", vote.why
                 print(f"    {vote.at} {mark} {vote.cycle or '(no cycle id)'} - {note}")
 
