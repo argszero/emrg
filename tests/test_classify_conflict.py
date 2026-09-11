@@ -615,6 +615,126 @@ class TestRevisionPrefixesAreNotDisjointAdditions:
         assert label == mod.DISJOINT
         assert "KEEP BOTH" in advice
 
+
+class TestACountLineRevisedBesideATextRevision:
+    """A block mixing a count line with a text edit is one revision, not two adds.
+
+    Measured 2026-09-11 (`cyc20260911-194733`), reproduced with a real
+    `git merge-file` on adjacent lines: ours pairs the Python count line with a
+    `Doc count sync:` line, theirs carries the same two lines edited divergently.
+    The head's prefix rule cannot see it - neither line is a prefix of its
+    counterpart, because the count digits sit *inside* the line and everything
+    after them was rewritten - so the fallback answered `disjoint - KEEP BOTH
+    (concatenate)` at rc 0, and the concatenation holds two
+    ``Python: `uv run pytest` `` lines. That is the state
+    `tests/test_doc_counts.py::_duplicated_count_line_kinds` rejects, i.e. a doc
+    claiming two different pytest counts.
+
+    Across the last 400 commits touching `Agent.md`, 5 hunks reach the fallback in
+    a multi-line block with a count line in it (`cb651a4` 2v2, `5c039b4` 3v3,
+    `3335877` `444e1d5` 1v2, `18fd0af` 1v13) and all 5 would emit that duplicate.
+    Deriving this by running the parent rule and this rule over the same blocks
+    gives exactly those 5, and `cb651a4` and `5c039b4` are the two *aligned* ones:
+    the previous rule saw equal-length sides whose pairs all carry a documented
+    count and answered `count-line` only when the masking made the pairs equal,
+    which a text revision beyond the number defeats - so `5c039b4` (`disjoint` at
+    the parent head) is one of the 5 this rule fixes, not one the previous rule
+    caught.
+
+    There are also two further hunks with a count line (`e46c160`, `0c8a212`,
+    both 2v2) which the parent rule already answers `count-line`; this rule leaves
+    them there. So 7 hunks reach the fallback region with a count line and 5 of
+    them change verdict.
+    """
+
+    def test_a_count_line_beside_a_text_revision_escalates(self, mod) -> None:
+        ours = (
+            "Python: `uv run pytest tests/ -v` (1393) — x\n"
+            "Doc count sync: `check-doc-count.py [--write|--dry-run]` — 测量树里\n"
+        )
+        theirs = (
+            "Python: `uv run pytest tests/ -v` (1382) — x\n"
+            "Doc count sync: `check-doc-count.py [--write]` — 测量当前树上的\n"
+        )
+        assert not (set(mod._content_lines(ours)) & set(mod._content_lines(theirs)))
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING, (
+            "KEEP BOTH would concatenate two Python count lines, so the doc would "
+            "claim two different pytest counts"
+        )
+        assert "KEEP BOTH (concatenate)" not in advice
+        assert "human must read" in advice
+
+    def test_the_predicate_is_narrow_about_what_counts_as_the_same_count(self, mod) -> None:
+        """Two *different* count lines are two facts, not a revision of one.
+
+        The masking must be the evidence: only a pair that is equal once digits
+        are removed is "one fact re-measured". `Python:` against `Renderer:` is a
+        different fact, and two genuinely separate additions may carry different
+        counts - escalating those is right for the count-duplication reason, but
+        the predicate must not fire on lines that share no count shape at all.
+        """
+        ours = (
+            "Python: `uv run pytest tests/ -v` (1393) — x\n"
+            "Some unrelated prose that was added here\n"
+        )
+        theirs = (
+            "Renderer: `cd emrg/gui/renderer && npm test` (514) — y\n"
+            "Entirely different prose, also added\n"
+        )
+        assert not mod._looks_like_a_count_revision(
+            mod._content_lines(ours), mod._content_lines(theirs)
+        )
+
+    def test_two_numbers_that_are_not_counts_do_not_escalate(self, mod) -> None:
+        """A bare numeric difference in code is not a count revision.
+
+        Index-alignment alone must not be the evidence: `x = compute(1)` beside
+        `x = compute(2)` is a code change, not a documented count left behind by a
+        revision, and it already reaches `overlapping` through the declared-symbol
+        path. The gate that keeps this rule off it is the *documented count* shape
+        (a parenthesised number), the same condition the aligned
+        `_differ_only_by_number` applies - without it, removing digits makes any
+        two locally-numbered code lines a "count pair". Measured on the 931-block
+        corpus, dropping the gate fires on 19 blocks that are not counts at all,
+        e.g. `emrg/gui/package-lock.json` `"version": "0.2.91"` against
+        `"version": "0.2.92"`; a test that only ever changes digits is silent to it,
+        so the case must differ in the surrounding text too.
+        """
+        assert not mod._looks_like_a_count_revision(
+            ["x = compute(1)"], ["x = compute(2)"]
+        )
+        assert not mod._looks_like_a_count_revision(
+            ['  "version": "0.2.91",'], ['  "version": "0.2.92",']
+        )
+        # ...while the documented-count pair still escalates (identical prose, so
+        # the digits are the *only* difference - one fact re-measured).
+        assert mod._looks_like_a_count_revision(
+            ["Python: `uv run pytest tests/ -v` (1393) — x"],
+            ["Python: `uv run pytest tests/ -v` (1382) — x"],
+        )
+
+    def test_unaligned_sides_still_escalate(self, mod) -> None:
+        """A 1-line side against a 2-line side is still a count revision.
+
+        Measured 2026-09-11: three of the five Agent.md hunks this rule fixes are
+        unaligned (`3335877` 1v2, `444e1d5` 1v2, `18fd0af` 1v13 - 1v13 because the
+        rest of the count block reads as an addition beside ours' single stale
+        line), and all three got `disjoint - KEEP BOTH`. Requiring both
+        sides to be the same length is what hid them - the count lines pair up at
+        the front regardless, and the concatenation still holds two
+        ``Python: `uv run pytest` `` lines.
+        """
+        ours = "Python: `uv run pytest tests/ -v` (1393) — x\n"
+        theirs = (
+            "Python: `uv run pytest tests/ -v` (1382) — x\n"
+            "Doc count sync: `check-doc-count.py [--write]` — 测量当前树上的\n"
+        )
+        assert mod._looks_like_a_count_revision(
+            mod._content_lines(ours), mod._content_lines(theirs)
+        )
+        assert mod.classify(ours, theirs)[0] == mod.OVERLAPPING
+
     def test_the_reported_summary_names_the_classes(self, mod, tmp_path, capsys) -> None:
         f = tmp_path / "z.py"
         f.write_text(
