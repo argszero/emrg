@@ -115,11 +115,18 @@ def test_a_vote_that_merely_mentions_the_absence_of_a_veto_is_still_an_approval(
     direction matters: an under-count looks like "not ready yet", which is a
     plausible-enough state that nobody investigates.
 
-    Measured again this cycle over all 176 reviews on the 40 most recent PRs: 45
-    bodies carry both marks, and **every one of the 6 that approves while
-    mentioning ❌ on its first line does so in this negated form**. So
-    negation-awareness is what makes a line-wide veto test safe, and it is pinned
-    here rather than assumed.
+    Measured again over all 176 reviews on the 40 most recent PRs: 45 bodies carry
+    both marks, and **every one of the 6 that approves while mentioning ❌ on its
+    first line does so in this negated form**. So this shape is real and common,
+    and it is pinned here rather than assumed.
+
+    The *reason* it survives is no longer the negation list, though. A later
+    version kept the line-wide veto scan first and only recognised the absence
+    when the negation was one of a fixed set of words within four characters of
+    the mark - so `(0 ❌ at this head)`, `(zero ❌)`, `(none ❌)` and `(no prior ❌)`
+    all classified as vetoes, discarding real approvals. See
+    `test_a_leading_mark_decides_the_line` below for how that was closed: no
+    vocabulary list can enumerate every way to say "none".
     """
     from_check = _load_module()
     body = (
@@ -184,14 +191,72 @@ def test_a_negated_mark_is_not_a_statement_of_that_mark(mod):
     assert mod._classify("Not bad, LGTM - cycle `c`") == "approve"
 
 
-def test_a_veto_wins_when_both_marks_are_on_the_verdict_line(mod):
-    """The rule the `_VETO_MARK` comment has always asserted, now actually held.
+def test_a_leading_mark_decides_the_line(mod):
+    """An approving body may *mention* the other mark, in any words it likes.
 
-    "✅ but ❌ on the second point" is a request for changes. The version that read
-    only the first character returned `approve` here - the comment described
-    behaviour the code did not have.
+    The version that ran the line-wide veto scan *first* could only stay correct
+    by recognising the absence-form, and it did so with a fixed word list bounded
+    to four non-word characters before the mark. Measured 2026-09-11 against that
+    version, all of these real approval shapes classified as **veto**:
+
+        ✅ LGTM - cycle `c` (0 ❌ at this head)     -> veto
+        ✅ LGTM - cycle `c` (zero ❌)              -> veto
+        ✅ LGTM - cycle `c` (none ❌)              -> veto
+        ✅ LGTM - cycle `c` (no prior ❌)          -> veto
+        ✅ LGTM - cycle `c` (no      ❌)           -> veto   (5-space gap)
+
+    "0 ❌" is zero vetoes - the strongest possible approval - and reading it as a
+    veto resets the run and discards every approval before it. The list cannot be
+    repaired by extending it: the ways to say "none" are an open set, and an
+    approval only has to outrun the vocabulary once. So the leading mark decides,
+    and the scan below is the fallback for verdicts written as prose.
     """
-    assert mod._classify("\u2705 LGTM, but \u274c on the second point - cycle `c`") == "veto"
+    assert mod._classify("\u2705 LGTM - cycle `c` (0 \u274c at this head)") == "approve"
+    assert mod._classify("\u2705 LGTM - cycle `c` (zero \u274c)") == "approve"
+    assert mod._classify("\u2705 LGTM - cycle `c` (none \u274c)") == "approve"
+    assert mod._classify("\u2705 LGTM - cycle `c` (no prior \u274c)") == "approve"
+    assert mod._classify("\u2705 LGTM - cycle `c` (no     \u274c)") == "approve"
+    assert mod._classify("\u2705 LGTM - cycle `c` (not a single \u274c)") == "approve"
+    # The fallback still catches a veto written as prose, and still lets it win
+    # there: with no leading mark there is nothing to read the line through.
+    assert mod._classify("Result: \u274c needs fix - cycle `c`") == "veto"
+    assert mod._classify("Result: \u274c because \u2705 was premature") == "veto"
+    # ...but a prose line that *claims* LGTM is an approval, and the mark on it is
+    # a mention of the other mark - the same reasoning as the leading case, applied
+    # to the shape prose takes. Each of these was read as a veto before:
+    assert mod._classify("Results: no \u274c; LGTM - cycle `c`") == "approve"
+    assert mod._classify("Results: no \u274c, LGTM - cycle `c`") == "approve"
+    assert mod._classify("Summary: zero \u274c so LGTM from me") == "approve"
+    assert mod._classify("Findings: no \u274c -> LGTM") == "approve"
+    # The leading mark is read as a *mark*, not inferred from the word "LGTM":
+    # 37 of the 173 measured bodies state their verdict with a bare ✅ and no
+    # "LGTM" anywhere. Without the leading branches these fall through to the
+    # substring test and stop counting as votes at all.
+    assert mod._classify("\u2705 - third vote at this head, verified from scratch") == "approve"
+    assert mod._classify("\u274c LGTM was premature - cycle `c`") == "veto"
+    # A prose line that names the absence of a veto is not a veto either - the
+    # scan below is negation-aware for the same reason.
+    assert mod._classify("Results: no \u274c anywhere in this diff") == "comment"
+    # and a refusal is still a veto, since it is a claim *against* LGTM:
+    assert mod._classify("Not LGTM - cycle `c`") == "veto"
+    assert mod._classify("I can't LGTM this") == "veto"
+
+
+def test_an_approval_mentioning_a_veto_does_not_reset_the_run(mod, monkeypatch, capsys):
+    """The regression above, at the level that decides a merge.
+
+    Three approvals, the third written `✅ LGTM (0 ❌ at this head)`. Reported as a
+    veto it resets the run to 1/3 and the PR looks unready; the reviews that
+    approved it are all still there.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+                   _review("2026-09-11T03:00:00Z",
+                           "\u2705 LGTM - cycle `cyc20260911-030000` (0 \u274c at this head)")])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "READY 3/3" in out
 
 
 def test_the_verdict_is_read_from_the_first_content_line(mod):

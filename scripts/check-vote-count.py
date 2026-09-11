@@ -94,12 +94,14 @@ INVOCATION = "uv run --no-sync python3 scripts/check-vote-count.py"
 # `cyc20260911-091230` - the cycle id the vote comments carry.
 _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
 
-# A veto wins over an approval on the same line: "✅ but ❌ on the second point"
-# is a request for changes, and undercounting the veto is the dangerous direction
-# (it would let a PR merge on a review that asked for a fix). "Undercounting"
-# includes *negated* prose - "(no ❌ at this head)" is an approval describing the
-# absence of a veto, so the veto test has to be negation-aware to hold this rule
-# and the leading-✅ case below at the same time.
+# A **leading** veto wins over everything on the line: "❌ needs fix" is a request
+# for changes no matter what follows it. A leading ✅ is the mirror image, and it
+# keeps the whole line: every real approving body that also mentions ❌ mentions it
+# to say there *isn't* one ("(no ❌ at this head)", "(0 ❌ at this head)"), and the
+# phrasing of that is an open set no negation list can cover. Only when the line
+# has no leading mark is the veto scan below applied, where it catches a veto
+# written as prose - and there a veto still wins, because prose gives the line no
+# mark to be read through.
 _VETO_MARK = "\u274c"  # ❌
 _LGTM_MARK = "\u2705"  # ✅
 
@@ -115,10 +117,24 @@ _ORDERED_ITEM_RE = re.compile(r"^\d+[.)]\s*")
 # A mark preceded by a negation is prose *about* the mark, not a statement of it.
 # `[^\w]{0,4}` bounds the gap by non-word characters, so this cannot cross a word:
 # "not bad, LGTM" is an approval, "not LGTM" is not.
-_NEGATION = (
+_NEGATION_WORDS = (
     r"\b(?:not|no|never|without|nothing|isn'?t|aren'?t|wasn'?t|weren'?t|"
-    r"don'?t|doesn'?t|didn'?t|cannot|can'?t|won'?t)\b[^\w]{0,4}"
+    r"don'?t|doesn'?t|didn'?t|cannot|can'?t|won'?t)\b"
 )
+
+
+def _negation(exclude: str = "") -> str:
+    """The negation pattern, optionally refusing to cross the given characters.
+
+    `_refuses` passes the marks: a line that negates ❌ is precisely a line that is
+    *not* negating LGTM, so a window that can reach across "❌, " would read the
+    prose approval "Results: no ❌, LGTM" as a refusal. Deriving both from one
+    vocabulary keeps them from drifting apart.
+    """
+    return _NEGATION_WORDS + r"[^\w" + exclude + r"]{0,4}"
+
+
+_NEGATION = _negation()
 
 
 def _negated(line: str, mark: str) -> bool:
@@ -129,14 +145,19 @@ def _negated(line: str, mark: str) -> bool:
 def _refuses(line: str) -> bool:
     """A negated LGTM: the reviewer is declining, not approving.
 
-    "Not LGTM" must not fall through to the plain "LGTM" substring test at the
-    bottom - that would count a refusal as a vote, and worse, it would count it as
-    an *approval*, so the earlier votes it was written to answer would still read
-    as the run. The shape is absent from the 176 reviews measured this cycle, so
-    this is latent like the decoration case; it is handled because it is the one
-    way to decline in prose, and prose is exactly what the fallback path is for.
+    "Not LGTM" must not fall through to the plain "LGTM" substring test - that
+    would count a refusal as a *vote*, and as an *approval*, so the earlier votes
+    it was written to answer would still read as the run.
+
+    The negation may not cross a **mark**, because a line that negates ❌ is
+    precisely a line that is *not* negating LGTM. The un-narrowed window
+    (`[^\\w]{0,4}`) reaches past "❌, " to the LGTM, so "Results: no ❌, LGTM" - a
+    prose approval - was read as the refusal "no ❌, LGTM" and vetoed (measured
+    this cycle). A refusal is written about LGTM itself, so the window excludes
+    both marks.
     """
-    return re.search(_NEGATION + "LGTM", line, re.IGNORECASE) is not None
+    window = _negation(exclude="\u274c\u2705")
+    return re.search(window + "LGTM", line, re.IGNORECASE) is not None
 
 
 def _verdict_line(body: str) -> str:
@@ -257,29 +278,57 @@ def _classify(body: str) -> str:
     a mark preceded by a negation ("no ❌", "not LGTM") is prose about the mark and
     not a statement of it.
 
-    Third, the veto wins when both marks are present and neither is negated, as the
-    `_VETO_MARK` comment above requires: "✅ but ❌ on the second point" is a request
-    for changes, and reading it as approval would merge a PR on a review that asked
-    for a fix. The previous version's docstring claimed this rule while its code
-    returned `approve` - a comment asserting behaviour the code did not have.
+    **Third, and the one that took a review to find: a leading mark decides the
+    line, and the line-wide veto scan is only a fallback.** The version below this
+    one ran the veto scan *first*, over the whole line, which made any ✅ body that
+    merely *mentions* ❌ a veto unless the negation list recognised the phrasing:
+
+        ✅ LGTM - cycle c (0 ❌ at this head)      -> veto    (it is an approval)
+        ✅ LGTM - cycle c (no prior ❌)            -> veto    (it is an approval)
+
+    "0 ❌" is *zero vetoes*, i.e. the strongest possible approval. Reading it as a
+    veto resets the run and discards every approval before it - measured: a PR with
+    three approving cycles reported `SHORT 1/3` where master reported `READY`. The
+    failure direction is again the quiet one ("not ready yet"), and it is not
+    fixable by extending the word list: the list is bounded by `[^\\w]{0,4}`, so
+    "no prior ❌", "no single ❌", "not a single ❌" and even five spaces defeat it.
+    Any negation vocabulary is an open set that an approval can outrun.
+
+    So the precedence is: the **leading** mark decides (that is this repo's stated
+    convention, and it is the only shape that is unambiguously a verdict); the
+    line-wide veto scan applies only to a line that does *not* open with a mark,
+    where it catches verdicts written as prose ("Result: ❌ needs fix"). A leading
+    ✅ with a later ❌ is therefore an approval, which is the reading that survives
+    every negation phrasing - and it is what master already did, so the change
+    cannot void a vote that was being counted.
     """
     line = _verdict_line(body)
     if not line:
         return "comment"
 
-    # Veto first, and the veto test is negation-aware so it holds the rule the
-    # `_VETO_MARK` comment above states without contradicting the leading-✅ case.
-    if _VETO_MARK in line and not _negated(line, _VETO_MARK):
+    # The leading mark decides. Nothing after it can retract it, because prose
+    # *about* the other mark is exactly what an approving body contains - and the
+    # phrasing of that prose is an open set no negation list can enumerate.
+    if line.startswith(_VETO_MARK):
         return "veto"
-    # A declined approval is not an approval. Checked before the plain "LGTM"
-    # substring below, which would otherwise read "Not LGTM" as a vote *for*.
+    if line.startswith(_LGTM_MARK):
+        return "approve"
+
+    # No leading mark: a verdict written as prose, so read the line.
+    #   1. A declined approval is a veto - "Not LGTM", "can't LGTM this".
+    #   2. A prose claim of LGTM is an approval, and any mark on that line is a
+    #      *mention* of the other mark - the same reasoning that lets a leading ✅
+    #      keep its line, applied to the shape prose actually takes. Running the
+    #      veto scan before this turned "no ❌, LGTM" and "zero ❌ so LGTM" into
+    #      vetoes: the negation list is bounded by `[^\w]{0,4}` and stops at the
+    #      first punctuation, so every such phrasing defeated it.
+    #   3. Otherwise a veto mark is a veto: "Result: ❌ needs fix".
     if _refuses(line):
         return "veto"
-    if line.startswith(_LGTM_MARK) or "LGTM" in line.upper():
-        # The fallback covers the human-written "LGTM, verified locally." reviews
-        # this repo also has; it is safe now because a refusal is handled above
-        # and the veto branch has already returned.
+    if "LGTM" in line.upper():
         return "approve"
+    if _VETO_MARK in line and not _negated(line, _VETO_MARK):
+        return "veto"
     return "comment"
 
 
