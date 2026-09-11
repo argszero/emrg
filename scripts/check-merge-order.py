@@ -159,15 +159,29 @@ def _fetch_head(repo: str, number: int) -> str:
     By ref, not by local branch name: a local branch called `pr<N>` may point at a
     stale commit, and the whole value of this tool is that it measures the trees
     that would actually merge.
+
+    The refspec is **forced** (`+`), and must be. A PR head is routinely re-pushed
+    to a commit that is not a descendant of the previous one - every conflict
+    resolution in this repo pushes a new head over the old - so the second run of
+    this tool against a branch whose head moved would otherwise be rejected:
+
+        ! [rejected]  pull/1148/head -> refs/emrg-forecast/pr1148  (non-fast-forward)
+
+    The fetch then exits 1 **and leaves the stale ref in place**, so the failure is
+    not merely noisy: the ref the run would have measured is still the *old* head,
+    i.e. the tool would answer about a tree that is no longer the PR. Reproduced
+    against a real pair of divergent heads (`cyc20260911-235001`); with the `+` the
+    same two fetches both succeed and the ref ends at the true head.
     """
     ref = f"refs/emrg-forecast/pr{number}"
     proc = _run(
-        ["git", "fetch", "--quiet", "origin", f"pull/{number}/head:{ref}"]
+        ["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"]
     )
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"could not fetch PR #{number}: {proc.stderr.strip() or 'unknown error'}"
-        )
+        # Not `--quiet`: it suppresses the rejection diagnostic as well, which is
+        # how this surfaced as an undiagnosable "unknown error" with empty stderr.
+        detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
+        raise RuntimeError(f"could not fetch PR #{number}: {detail}")
     return ref
 
 

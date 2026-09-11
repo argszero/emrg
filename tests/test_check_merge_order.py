@@ -298,3 +298,130 @@ class TestAgainstRealGitHistory:
         mod = _load_module()
         assert mod._conflict_paths("main", "clean") == []
         assert mod._conflict_paths("main", "grow") == ["f.txt"]
+
+
+class TestARePushedHeadIsFetchedNotRejected:
+    """A PR head routinely moves to a commit that is not its descendant.
+
+    Every conflict resolution in this repo pushes a new head over the old one, so
+    a second run of the tool against that PR finds a divergent head. The
+    unforced refspec is rejected - and rejected *quietly*, because `--quiet`
+    suppresses the diagnostic - leaving the stale ref in place, which is worse
+    than an error: the run would measure the previous head as if it were current.
+    """
+
+    def test_the_refspec_is_forced(self, mod) -> None:
+        source = SCRIPT.read_text(encoding="utf-8")
+        assert (
+            'f"+pull/{number}/head:{ref}"' in source
+        ), "the PR-head refspec must be forced, or a re-pushed head is rejected"
+
+    def test_a_failed_fetch_reports_the_process_diagnostic(self, mod, monkeypatch) -> None:
+        """An empty stderr must not become an undiagnosable ``unknown error``.
+
+        `--quiet` swallows the rejection text, which is how this shipped as
+        "could not fetch PR #1151: unknown error" with nothing to act on.
+        """
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(
+                argv, 1, "", " ! [rejected]  pull/1/head -> refs/x  (non-fast-forward)"
+            ),
+        )
+        with pytest.raises(RuntimeError, match="non-fast-forward"):
+            mod._fetch_head("argszero/emrg", 1)
+
+    def test_a_failed_fetch_falls_back_to_stdout(self, mod, monkeypatch) -> None:
+        """Some git failures write to stdout; either stream is a real diagnostic."""
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 1, "fatal: could not read", ""),
+        )
+        with pytest.raises(RuntimeError, match="could not read"):
+            mod._fetch_head("argszero/emrg", 1)
+
+    def test_only_a_truly_silent_failure_says_unknown(self, mod, monkeypatch) -> None:
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 1, "", ""),
+        )
+        with pytest.raises(RuntimeError, match="unknown error"):
+            mod._fetch_head("argszero/emrg", 1)
+
+    def test_a_real_re_pushed_head_is_fetched_twice(self, tmp_path, monkeypatch) -> None:
+        """End-to-end on real git, driving the *helper itself* over real divergence.
+
+        The mocked tests above cannot distinguish "the refspec is forced" from "the
+        mock never modelled rejection" - and that gap is exactly the shipped bug.
+        Here the origin exposes a real `refs/pull/1/head`, so `_fetch_head` runs
+        unchanged. The head is then moved to a commit that does **not** descend from
+        the first one (a sibling of it, as a rebase or a rewritten PR head produces):
+        the unforced refspec is rejected and leaves the stale ref behind, while the
+        tool must land on the true head.
+        """
+        origin = tmp_path / "origin"
+        work = tmp_path / "work"
+        origin.mkdir()
+
+        def git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        assert git(origin, "init", "-q", "-b", "main").returncode == 0
+        git(origin, "config", "user.email", "t@example.com")
+        git(origin, "config", "user.name", "t")
+        (origin / "f.txt").write_text("base\n", encoding="utf-8")
+        git(origin, "add", "-A")
+        git(origin, "commit", "-qm", "base")
+
+        # Two siblings off the same root: neither descends from the other, which is
+        # what a re-pushed (rebased) PR head looks like.
+        git(origin, "checkout", "-q", "-b", "one")
+        (origin / "a.txt").write_text("one\n", encoding="utf-8")
+        git(origin, "add", "-A")
+        git(origin, "commit", "-qm", "head one")
+        first_sha = git(origin, "rev-parse", "HEAD").stdout.strip()
+
+        git(origin, "checkout", "-q", "-b", "two", "main")
+        (origin / "b.txt").write_text("two\n", encoding="utf-8")
+        git(origin, "add", "-A")
+        git(origin, "commit", "-qm", "head two")
+        second_sha = git(origin, "rev-parse", "HEAD").stdout.strip()
+        assert second_sha != first_sha
+        assert (
+            git(origin, "merge-base", "--is-ancestor", first_sha, second_sha).returncode
+            != 0
+        ), "the two heads must be divergent, or this test proves nothing"
+
+        git(origin, "update-ref", "refs/pull/1/head", first_sha)
+
+        assert git(tmp_path, "clone", "-q", str(origin), str(work)).returncode == 0
+        git(work, "config", "user.email", "t@example.com")
+        git(work, "config", "user.name", "t")
+
+        monkeypatch.chdir(work)
+        mod = _load_module()
+
+        # Run 1: the helper fetches the PR head and returns the ref name it used.
+        ref = mod._fetch_head("ignored", 1)
+        assert git(work, "rev-parse", ref).stdout.strip() == first_sha
+
+        # The PR head is re-pushed to the sibling commit.
+        git(origin, "update-ref", "refs/pull/1/head", second_sha)
+
+        # Run 2: the helper must land on the NEW head rather than leaving the stale
+        # one - an unforced refspec fails here with rc 1 and keeps `first_sha`.
+        ref2 = mod._fetch_head("ignored", 1)
+        assert ref2 == ref
+        assert git(work, "rev-parse", ref).stdout.strip() == second_sha, (
+            "a re-pushed head must be fetched, not silently rejected - a stale ref "
+            "would make the tool answer about the previous head"
+        )
