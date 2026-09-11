@@ -197,10 +197,35 @@ def _fence_flags(lines: list[str]) -> list[bool]:
     and leaves stale approvals live, which is the failure this module documents at
     length. Failing toward "read it as prose" keeps the honest reading of a body
     whose formatting is broken.
+
+    That fallback covers only the region *from* the unmatched opener onward, not
+    the whole body. An earlier version returned `[False] * len(lines)`, which
+    re-opened every fence in the body - including the ones already balanced and
+    closed, which are not ambiguous at all. Measured 2026-09-11 (cyc20260911-180347),
+    reported by a contributor on the PR and reproduced here: a body that quotes a
+    veto inside a *closed* fence and then leaves one stray opener anywhere after it
+
+        Reviewed on Windows.
+
+        ```              <- closed, balanced
+        ❌ Needs fix: quoted example
+        ```
+
+        Note on formatting.
+        ```              <- stray opener
+
+    came back as a *stated* veto under the body-wide fallback (`master` read it as
+    a comment). Driven end-to-end through this module's own run-walk, three genuine
+    approvals followed by that body gave `master -> run 3` but the body-wide version
+    `-> run 0`: the quoted mark discarded the run this tool exists to protect, which
+    is the same outcome as the bug the fence fix was written for. Restricting the
+    fallback to the tail fixes it and moves nothing else - measured over 477 real
+    bodies, 0 change class.
     """
     flags: list[bool] = []
     open_char = ""
     open_len = 0
+    open_at = 0
     for line in lines:
         m = _FENCE_RE.match(line)
         if m:
@@ -208,6 +233,7 @@ def _fence_flags(lines: list[str]) -> list[bool]:
             if open_len == 0:
                 # not inside a fence: this opens one
                 open_char, open_len = char, len(m.group(1))
+                open_at = len(flags)
                 flags.append(True)  # the marker line itself is not content
                 continue
             if char == open_char and len(m.group(1)) >= open_len and not rest.strip():
@@ -220,7 +246,10 @@ def _fence_flags(lines: list[str]) -> list[bool]:
             continue
         flags.append(open_len != 0)
     if open_len != 0:
-        return [False] * len(lines)
+        # Only the unmatched tail is ambiguous; the closed regions above it keep
+        # the reading they already earned.
+        for i in range(open_at, len(flags)):
+            flags[i] = False
     return flags
 
 

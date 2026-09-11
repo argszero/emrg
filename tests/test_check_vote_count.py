@@ -363,6 +363,35 @@ def test_an_unbalanced_fence_does_not_hide_a_real_veto(mod):
     )
 
 
+def test_the_unbalanced_fallback_covers_only_the_tail_not_closed_fences(mod):
+    """A stray opener must not re-open fences that are already closed.
+
+    A body-wide fallback (`[False] * len(lines)`) un-fences every region in the
+    body, including ones that closed properly and are therefore not ambiguous. A
+    review that quotes a veto inside a *closed* fence and later leaves one stray
+    opener then came back as a *stated* veto, resetting the run and discarding the
+    approvals in front of it - the exact outcome the fence fix exists to prevent.
+    Reported by a contributor on the PR (how2how2how2-arch) and reproduced here.
+
+    Only the region from the unmatched opener onward is ambiguous; the closed
+    regions above it keep the reading they earned.
+    """
+    closed_then_stray_open = (
+        "Reviewed on Windows.\n\n```\n\u274c Needs fix: quoted example\n```\n\nNote.\n```\n"
+    )
+    assert mod._classify(closed_then_stray_open) == "comment", (
+        "a mark quoted in a *closed* fence is a quotation, not a statement, even "
+        "when a stray opener appears later in the same body"
+    )
+    # The closed region above the stray opener stays fenced; only the tail is prose.
+    flags = mod._fence_flags(closed_then_stray_open.splitlines())
+    assert flags[2:5] == [True, True, True], "the closed fence must stay fenced"
+    assert flags[6] is False and flags[7] is False, "the unmatched tail reads as prose"
+    # And the tail-only rule must not re-introduce the failure the fallback was for:
+    # a real veto below a genuinely unclosed fence is still a veto.
+    assert mod._classify("Intro.\n\n```\ncode\n\n\u274c Needs fix: real\n") == "veto"
+
+
 def test_only_a_stated_veto_counts_not_a_mention_of_one(mod):
     """The opposite error: reading a passing mention as a veto.
 
