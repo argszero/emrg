@@ -66,7 +66,31 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+def _resolve_root() -> Path:
+    """The tree to measure: the checkout the caller is *standing in*.
+
+    Derived from the cwd when that is a checkout, not from `__file__`. Measured
+    2026-09-11, in exactly the situation this tool exists for: unblocking a PR
+    means working in a git worktree, where running the main checkout's copy of
+    this script reported `OK: Agent.md documents 1420` while the worktree's own
+    `Agent.md` said 1401 - it had read the wrong tree and called it consistent.
+    `--write` in that position edits the *other* checkout, which is how a
+    confirm-step silently corrupts a tree the caller was not looking at.
+
+    Falling back to the script's own root keeps `python3 scripts/...` working from
+    anywhere (the documented invocation), and a mismatch is stated rather than
+    silently resolved: if the cwd is a checkout that is not this script's root,
+    the caller gets told which tree answered, because "which tree did you measure"
+    is the one thing this tool must never leave ambiguous.
+    """
+    here = Path(__file__).resolve().parent.parent
+    cwd = Path.cwd()
+    if (cwd / "Agent.md").is_file() and (cwd / "scripts").is_dir():
+        return cwd
+    return here
+
+
+REPO_ROOT = _resolve_root()
 DOC = REPO_ROOT / "Agent.md"
 
 # The anchor `tests/test_doc_counts.py::test_python_count_matches_docs` keys on.
@@ -303,6 +327,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    # Say which tree answered. A tool whose whole job is "measure the tree you are
+    # about to merge" must not leave "which tree" ambiguous - the 2026-09-11 defect
+    # was precisely a confident `OK` about a checkout the caller was not in.
+    print(f"tree: {REPO_ROOT}")
 
     if args.resolve_conflict:
         return _resolve_conflict_mode()

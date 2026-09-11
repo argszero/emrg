@@ -361,3 +361,30 @@ def test_ci_gate_uses_the_check_mode_not_the_preview(mod) -> None:
             f"the CI step must use the bare check form: {hit!r} - `--dry-run` exits "
             "0 on drift and `--write` would rewrite the repo under CI"
         )
+
+
+# --- which tree was measured -------------------------------------------------
+
+
+def test_the_tree_is_the_checkout_you_are_standing_in(mod, monkeypatch, tmp_path):
+    """Same defect as the doc-count tool's, measured 2026-09-11.
+
+    Unblocking a PR means working in a git worktree, where running the main
+    checkout's copy of this script reported the *main* tree's numbers. `--write`
+    in that position edits that other checkout - a confirm-step silently
+    corrupting a tree the caller was not looking at.
+    """
+    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "Agent.md").write_text("Renderer: `npm test` (1: x)\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert mod._resolve_root() == tmp_path.resolve(), (
+        "the tool must measure the checkout the caller is standing in"
+    )
+    assert mod._resolve_root() != SCRIPT.parent.parent
+
+
+def test_a_directory_that_is_not_a_checkout_falls_back_to_the_script_root(
+    mod, monkeypatch, tmp_path
+):
+    monkeypatch.chdir(tmp_path)
+    assert mod._resolve_root() == SCRIPT.parent.parent.resolve()
