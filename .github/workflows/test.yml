@@ -3,8 +3,13 @@ name: Test
 on:
   push:
     branches: [master]
+  # No `branches` filter on purpose: a base branch can be any branch. Filtering to
+  # master gave the stacked PR #1148 (base = a feature branch) **zero** check runs,
+  # while its base-on-master parent #1147 was double-green automatically - the gate
+  # only ran when someone remembered `gh workflow run test.yml`, and the
+  # check-run-based vote helper reads a missing check as "no vote" rather than as a
+  # failure. Covered by tests/test_test_workflow_covers_pr_bases.py.
   pull_request:
-    branches: [master]
   workflow_dispatch:
 
 jobs:
