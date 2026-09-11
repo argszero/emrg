@@ -320,6 +320,54 @@ class TestTheDiff3LayoutIsRefusedNotMisread:
         )
         assert mod.main([str(f)]) == 0
 
+    def test_a_file_that_only_mentions_the_marker_is_not_refused(self, mod, tmp_path, capsys) -> None:
+        """The false positive: a marker line is not a conflict.
+
+        The first version matched `|||||||` anywhere in the file. A prose file
+        that merely *mentions* the marker - or a doc, or a test fixture - has no
+        conflict at all, yet was refused with "the file uses the diff3 layout"
+        and told to re-merge. Measured 2026-09-11 (cyc20260911-165337) against
+        this three-line file: rc 1 and a re-merge instruction about a document
+        with nothing to re-merge.
+        """
+        f = tmp_path / "prose.md"
+        f.write_text(
+            "The diff3 layout inserts a marker line:\n"
+            "||||||| merged common ancestors\n"
+            "which this tool cannot read.\n",
+            encoding="utf-8",
+        )
+        rc = mod.main([str(f)])
+        out = capsys.readouterr().out
+        assert "unparsed-layout" not in out, (
+            "the refusal must be about a conflict block, not about the marker "
+            "line appearing anywhere - this file has no conflict to refuse"
+        )
+        assert "re-merge" not in out, "nothing here needs re-merging"
+        assert rc == 2, "no conflict blocks -> the usage error, not a refusal"
+
+    def test_a_marker_after_a_closed_block_is_not_refused(self, mod, tmp_path, capsys) -> None:
+        """The other half of the anchoring: the block must *close*.
+
+        Without this, "the marker is inside an open region" could be satisfied by
+        latching `open_block` on forever - the first `<<<<<<<` anywhere would make
+        every later marker a conflict. This file has one default-layout block
+        (fully readable) plus a stray marker afterwards, which is the shape a doc
+        describing a merge has.
+        """
+        f = tmp_path / "after.md"
+        f.write_text(
+            "<<<<<<< HEAD\ndef only_ours():\n    pass\n=======\n"
+            "def only_theirs():\n    pass\n>>>>>>> master\n"
+            "\nAfter merging, git leaves a base marker like:\n"
+            "||||||| merged common ancestors\n",
+            encoding="utf-8",
+        )
+        assert mod.main([str(f)]) == 0
+        out = capsys.readouterr().out
+        assert "unparsed-layout" not in out
+        assert "disjoint" in out, "the real block must still be classified"
+
     def test_the_shape_this_repo_actually_hits_is_refused_too(self, mod, tmp_path, capsys) -> None:
         """The realistic case is Agent.md's count line, not a code hunk.
 

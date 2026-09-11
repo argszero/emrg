@@ -74,10 +74,9 @@ CONFLICT_BLOCK = re.compile(
 # that neither side wants - and the advice arrives with exit 0, i.e. as a
 # verdict, when the honest answer is "I cannot read this layout". The sibling
 # tool reached the same conclusion first and refuses the layout by name
-# (`check-doc-count.py`, `CONFLICT_BASE_SECTION`); a tool whose whole value is
-# its discrimination must not keep advising on a shape it mis-reads.
-CONFLICT_BASE_SECTION = re.compile(r"^\|{7}[^\n]*\n", re.MULTILINE)
-
+# (`check-doc-count.py`); a tool whose whole value is its discrimination must
+# not keep advising on a shape it mis-reads.
+#
 # The label for a block this tool refuses to read: it is an answer in its own
 # right ("a human must look"), not a failure of the classification rules.
 UNPARSED_LAYOUT = "unparsed-layout"
@@ -291,13 +290,34 @@ def conflicts_in(text: str) -> list[tuple[str, str, str]]:
 
 
 def base_section(text: str) -> str | None:
-    """The `|||||||` marker line if `text` uses the diff3 layout, else None.
+    """The base marker of a diff3 conflict block, or None if there is none.
 
-    The marker *line* is returned whole, label included: the caller prints it,
-    and the label is what tells a human which commit the base came from.
+    Returns the marker *line* whole, label included: the caller prints it, and
+    the label is what tells a human which commit the base came from.
+
+    The marker is matched only *inside* an open `<<<<<<<` .. `>>>>>>>` region,
+    not anywhere in the file. Matching it anywhere is the obvious first version
+    and it is wrong: a file that merely *mentions* the marker - a test fixture, a
+    doc, this tool's own comment - has no conflict at all, yet was refused with
+    "the file uses the diff3 layout" and told to re-merge. Measured 2026-09-11
+    (cyc20260911-165337) against a three-line prose file. Anchoring the marker
+    inside a real block is what makes the refusal mean what it says, and it is
+    the ordering the sibling tool already uses (`check-doc-count.py` matches the
+    block first, then looks for the base section).
+
+    The scan is line-by-line rather than one regex because the *sides* can
+    contain the other markers; once a block is open, a `|||||||` line is the
+    base section - which is exactly the state this tool cannot parse.
     """
-    match = CONFLICT_BASE_SECTION.search(text)
-    return match.group(0).rstrip("\n") if match else None
+    open_block = False
+    for line in text.splitlines():
+        if line.startswith("<<<<<<<"):
+            open_block = True
+        elif open_block and line.startswith(">>>>>>>"):
+            open_block = False
+        elif open_block and line.startswith("|||||||"):
+            return line
+    return None
 
 
 def _unmerged_paths() -> list[str]:
