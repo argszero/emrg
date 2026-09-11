@@ -63,6 +63,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -138,6 +139,34 @@ class NodeCountError(Exception):
 
 
 def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
+    """Run a Node test runner and return its decoded output.
+
+    Two host-hostile details, both measured on Windows (issue #1132) and both
+    invisible from this repo's CI, which runs the gate on `ubuntu-latest` only
+    while `test-windows` runs pytest and iscc:
+
+    * **argv must be resolved.** `subprocess` appends only `.exe` on Windows, and
+      npm ships as `npm.CMD`, so the bare `"npm"` in `measured_renderer()` reached
+      `CreateProcess` as a file that does not exist: `cannot run 'npm': [WinError
+      2]`. The tool whose docstring tells the reader to run it after touching a
+      Node test file could not start the runner on the platform it was written
+      for. `shutil.which` resolves that (and returns `/usr/bin/npm` unchanged on
+      Linux/macOS, so the argv CI sees is identical); a name `which` cannot find
+      is left alone so the existing `FileNotFoundError` path still names it.
+    * **decoding cannot depend on the locale.** `text=True` alone decodes with the
+      locale codec, and `node --test` prefixes its summary with `ℹ` (U+2139) -
+      the very character `NODE_TESTS` is written to tolerate. Under cp936 that
+      raises `UnicodeDecodeError` **inside the reader thread**, where `threading`
+      swallows it, leaving `proc.stdout` as `None`; the failure then surfaced as
+      `TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'` on the
+      concatenation below - a traceback the user cannot act on, for a condition
+      the tool already knows how to report. `scripts/push-branch-from-api.py`
+      documents this same GBK lesson at line 15; `errors="replace"` renders an
+      undecodable byte as U+FFFD instead of losing the whole output.
+    """
+    resolved = shutil.which(cmd[0])
+    if resolved:
+        cmd = [resolved, *cmd[1:]]
     if not (cwd / "node_modules").exists():
         raise NodeCountError(
             f"{cwd} has no node_modules; run `npm install` there first - this "
@@ -151,6 +180,8 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
             cwd=str(cwd),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=900,
             env=full_env,
         )
@@ -158,6 +189,14 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> str:
         raise NodeCountError(f"cannot run {cmd[0]!r}: {exc}") from exc
     except subprocess.TimeoutExpired as exc:
         raise NodeCountError(f"`{' '.join(cmd)}` timed out after 900s") from exc
+    # A `None` stream is what a swallowed decode error leaves behind - report it
+    # as this tool's own error rather than letting the concatenation raise
+    # TypeError past every handler in main().
+    if proc.stdout is None or proc.stderr is None:
+        raise NodeCountError(
+            f"`{' '.join(cmd)}` in {cwd} produced no readable output "
+            "(its output could not be decoded)"
+        )
     output = _plain(proc.stdout + proc.stderr)
     if proc.returncode != 0:
         raise NodeCountError(
