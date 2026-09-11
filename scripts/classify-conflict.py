@@ -263,6 +263,9 @@ def _looks_like_a_count_revision(ours: list[str], theirs: list[str]) -> bool:
     `444e1d5` (1v2), `18fd0af` (1v13), which are unaligned. This function
     escalates all of the remaining five.
 
+    Only a pair whose *first* line is a documented count escalates - the evidence
+    is a count left unchanged beside a revision of the same block, not any
+    alignment of differing lines - which is what keeps this rule off code blocks.
     Index-aligned rather than length-equal: the count lines pair up at the front
     in every measured case, and requiring equal lengths is what made `cb651a4`
     and `5c039b4` invisible. The masking is the whole evidence - a count pair that
