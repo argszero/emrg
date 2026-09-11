@@ -489,6 +489,30 @@ def test_unreadable_output_raises_the_tools_own_error(mod, monkeypatch, fake_cwd
         mod._run(["npm", "test"], fake_cwd)
 
 
+def test_a_bare_name_starts_the_real_runner(mod, fake_cwd) -> None:
+    """No stub: the argv half must work against a real runner, not a mock.
+
+    Reported by a reference implementation on Windows (pm25coder, 2026-09-10):
+    every probe above stubs the path under test (`shutil.which`,
+    `subprocess.run`), so they pin the *shape* of the fix rather than that a
+    named runner starts at all. GitHub's ubuntu and windows-2025 images both put
+    Node on PATH, so this one probe would have gone red pre-fix on Windows and
+    green post-fix - and its absence is why the defect shipped with five green
+    probes: with `which` mocked, the platform is exactly what stops being
+    visible. `test_run_resolves_the_command_through_which` asserts the tool calls
+    `which`; this asserts the result is usable.
+
+    Skipped, not failed, where no runner is installed: this repo's pytest job can
+    run before `npm ci`, and a missing toolchain is not a defect in `_run`.
+    """
+    if mod.shutil.which("npm") is None:
+        pytest.skip("npm is not on PATH")
+    out = mod._run(["npm", "--version"], fake_cwd)  # bare name, as the tool calls it
+    assert re.match(r"\d+\.\d+", out.strip()), (
+        f"a bare `npm` must start a real runner through the resolution; got {out!r}"
+    )
+
+
 def test_main_catches_every_failure_its_run_can_produce(mod, monkeypatch, capsys) -> None:
     """The end-to-end shape: a bad decode exits 2 with a message, not a traceback."""
     monkeypatch.setattr(
