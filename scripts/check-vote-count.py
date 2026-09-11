@@ -163,14 +163,81 @@ def _refuses(line: str) -> bool:
     return re.search(window + "LGTM", line, re.IGNORECASE) is not None
 
 
+# An opening or closing code fence, indented up to 3 spaces (the markdown limit).
+# ``` and ~~~ are both valid fence markers; the run length matters (see below).
+_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _fence_flags(lines: list[str]) -> list[bool]:
+    """Per-line: is this line inside a *balanced* fenced code region?
+
+    A quote is not a statement. `_decorated_lines` strips backticks as decoration,
+    so without this a line-opening mark inside a fenced block is indistinguishable
+    from prose - and a body that *quotes* a veto (a reproduction snippet, a table
+    of example verdicts) was read as *stating* one. Measured 2026-09-11
+    (cyc20260911-171843) through this tool's own `check_pr`: three approvals
+    followed by a review that documents a veto inside a fence gave
+
+        master -> comment  (the body is skipped, run stays 3)
+        head   -> veto     (run resets to 0, every approval discarded)
+
+    so quoting the shape was the one way to void the run the tool exists to
+    protect. `master` was right here by accident: it never looked past line one.
+
+    Fences nest by *length*, per CommonMark: a fence opened with N backticks is
+    closed only by a fence of the same character and at least N of them, with
+    nothing but whitespace after. A first version toggled a boolean on any fence
+    line, which broke on exactly the bodies this exists for - a ``` example quoted
+    inside a ```` block (measured on a real review body: the inner ``` flipped the
+    flag and the quoted veto came back as prose). Inside a longer fence the shorter
+    marker is content, as a reader sees it.
+
+    Unbalanced fences (a stray opener) are treated as ordinary text. An odd marker
+    must not silently hide the rest of a body - that direction drops a *real* veto
+    and leaves stale approvals live, which is the failure this module documents at
+    length. Failing toward "read it as prose" keeps the honest reading of a body
+    whose formatting is broken.
+    """
+    flags: list[bool] = []
+    open_char = ""
+    open_len = 0
+    for line in lines:
+        m = _FENCE_RE.match(line)
+        if m:
+            char, rest = m.group(1)[0], m.group(2)
+            if open_len == 0:
+                # not inside a fence: this opens one
+                open_char, open_len = char, len(m.group(1))
+                flags.append(True)  # the marker line itself is not content
+                continue
+            if char == open_char and len(m.group(1)) >= open_len and not rest.strip():
+                # a real closing fence
+                open_char, open_len = "", 0
+                flags.append(True)
+                continue
+            # a shorter (or otherwise non-closing) marker inside a fence: content
+            flags.append(True)
+            continue
+        flags.append(open_len != 0)
+    if open_len != 0:
+        return [False] * len(lines)
+    return flags
+
+
 def _decorated_lines(body: str) -> list[str]:
     """Every content line, decorated form stripped, in order.
 
     Decoration-only lines are dropped, so a reviewer who opens with a `---` rule
-    has still stated their verdict on the line after it.
+    has still stated their verdict on the line after it. Fenced code is dropped
+    too: a mark inside a quotation is not the reviewer stating it (see
+    `_fence_flags`).
     """
+    raw = body.splitlines()
+    flags = _fence_flags(raw)
     out: list[str] = []
-    for line in body.splitlines():
+    for line, fenced in zip(raw, flags):
+        if fenced:
+            continue
         text = line
         while True:
             reduced = _ORDERED_ITEM_RE.sub("", text.lstrip(_DECORATION), count=1)
@@ -324,6 +391,37 @@ def _classify(body: str) -> str:
     The first line still decides whenever it states anything, so the third fix's
     rule is untouched. Measured: 0 of 381 bodies on the 60 most recent PRs change
     class under this addition - the shape it catches is real but currently unused.
+
+    **Fifth: the later-line scan read a *quotation* as a *statement*.** The fourth
+    fix introduced this, and it is the one live regression in the series - the
+    first three were all pre-existing. `_decorated_lines` strips backticks as
+    decoration, so a mark inside a fenced code block became indistinguishable from
+    prose, and a review that *documents* a veto (a reproduction snippet, a table of
+    example verdicts) was classified as *stating* it. Driven through `check_pr`:
+
+        three approvals, then a review quoting a veto in a fence
+        master -> run 3   (the body is a comment, skipped)
+        head   -> run 0   (a veto, so the run and every approval in front of it go)
+
+    That is the exact failure the fourth fix exists to prevent, reached backwards:
+    the tool would discard a genuine three-approval run because someone quoted the
+    shape it looks for. Found independently by two outside contributors on the PR
+    (how2how2how2-arch, pm25coder) and reproduced here before accepting it - it is
+    also why this cycle did *not* merge the PR at 2/3.
+
+    Fixed by dropping fenced regions in `_decorated_lines` (see `_fence_flags`).
+    The rule this preserves is that a mark counts only when the *reviewer* states
+    it: in a fence the mark opens its line, but the body is quoting, not stating.
+    Measured: 0 of 309 corpus bodies change class under the fence fix alone (the
+    two affected bodies already sat on the right side), so it removes the hazard
+    without moving any existing verdict.
+
+    **Not adopted.** A contribution on the PR also proposed scanning past a later
+    ✅ (so a stated veto anywhere wins) and answering `approve` for a stated ✅
+    below a prose intro. Measured on the same 309 bodies: that widening flips 6
+    bodies, among them 4 approvals into `comment`/`approve` churn on bodies whose
+    first line states a verdict - more motion for no demonstrated defect. Fence
+    awareness is the cheap half and is needed either way, so only that half ships.
     """
     line = _verdict_line(body)
     if not line:

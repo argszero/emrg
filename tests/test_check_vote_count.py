@@ -298,6 +298,71 @@ def test_a_veto_stated_below_a_prose_intro_is_still_a_veto(mod):
     assert mod._classify("Checked all three.\n\n\u2705 LGTM - cycle `c`") == "comment"
 
 
+def test_a_quoted_veto_in_a_code_fence_is_not_a_stated_one(mod):
+    """The fifth defect: a *quotation* is not a *statement*.
+
+    `_decorated_lines` strips backticks as decoration, so a mark inside a fenced
+    block was indistinguishable from prose. A review that *documents* a veto - the
+    reproduction snippets this very tool's reviews are made of - was therefore read
+    as *stating* one. Measured 2026-09-11 (cyc20260911-171843) through `check_pr`:
+    three approvals followed by such a review left the run at 0 instead of 3, i.e.
+    quoting the shape was the one way to void the run the tool exists to protect.
+    Found independently by how2how2how2-arch and pm25coder on the PR.
+    """
+    quoted = "Tested on Windows.\n\n```text\n\u274c Needs fix: x\n```\n\nNothing else.\n"
+    assert mod._classify(quoted) == "comment", (
+        "a fenced example is the reviewer quoting output, not stating a verdict"
+    )
+    # A real (unfenced) veto below a prose intro must still read as a veto - the
+    # fence fix must not close the hole it was built on top of.
+    assert mod._classify("Checked all three.\n\n\u274c Needs fix: the third leaks\n") == "veto"
+    # The first line is a quote too, when it is inside a fence.
+    assert mod._classify("```text\n\u274c Needs fix: template\n```\n\nAll fine.\n") == "comment"
+    # ~~~ is a fence as well.
+    assert mod._classify("Intro.\n\n~~~\n\u274c Needs fix: x\n~~~\n\nOutro.\n") == "comment"
+    # And a genuine approval that quotes the shape stays an approval.
+    assert mod._classify("\u2705 LGTM\n\nReproduced:\n\n```\n\u274c Needs fix\n```\n") == "approve"
+
+
+def test_nested_fences_close_by_length_not_by_toggle(mod):
+    """A ``` example quoted inside a ```` block is content, not a fence.
+
+    The obvious implementation toggles a boolean on any fence-looking line, and it
+    is wrong on precisely the bodies this exists for: this repo quotes fenced
+    examples inside longer fences (````text ... ``` ... ````), and the inner marker
+    flipped the flag - so the quoted veto came back as prose and the body was a
+    `veto` again. Measured 2026-09-11 on a real review body on #1145. CommonMark
+    closes a fence only with the same character and at least the opener's length.
+    """
+    nested = (
+        "Intro.\n\n"
+        "````text\n"
+        "```text\n"
+        "\u274c Needs fix: quoted inner\n"
+        "```\n"
+        "````\n\n"
+        "Outro.\n"
+    )
+    assert mod._classify(nested) == "comment"
+    assert mod._fence_flags(nested.splitlines()).count(True) == 5, (
+        "the outer opener, inner opener, quoted veto, inner closer and outer closer"
+    )
+
+
+def test_an_unbalanced_fence_does_not_hide_a_real_veto(mod):
+    """An odd marker must not swallow the rest of the body.
+
+    If a stray opener hid everything after it, a genuine veto below it would be
+    dropped and the stale approvals in front would read as live - the failure this
+    module documents at length. Failing toward "read it as prose" is the honest
+    reading of a body whose formatting is broken.
+    """
+    assert mod._classify("Intro.\n\n```text\n\u274c Needs fix: real, never closed\n") == "veto"
+    assert mod._fence_flags(["a", "```", "b"]) == [False, False, False], (
+        "an unclosed fence is not a region - the whole body reads as prose"
+    )
+
+
 def test_only_a_stated_veto_counts_not_a_mention_of_one(mod):
     """The opposite error: reading a passing mention as a veto.
 
