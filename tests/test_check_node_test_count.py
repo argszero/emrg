@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -361,3 +362,166 @@ def test_ci_gate_uses_the_check_mode_not_the_preview(mod) -> None:
             f"the CI step must use the bare check form: {hit!r} - `--dry-run` exits "
             "0 on drift and `--write` would rewrite the repo under CI"
         )
+
+
+# --- host portability: Windows argv + non-locale decoding (issue #1132) -------
+#
+# The tool's whole purpose is to be run *by the host* after touching a Node test
+# file, but its CI gate runs on `ubuntu-latest` only (`test-windows` runs pytest
+# and iscc), so two defects survived every green run: `npm` cannot be started by
+# bare name on Windows (subprocess appends only `.exe`, while npm ships as
+# `npm.CMD`), and decoding with the locale codec turns node's `ℹ` summary glyph
+# into a swallowed reader-thread UnicodeDecodeError whose `None` stdout then
+# crashed on the concatenation. Both were measured on the merged tree - the
+# first produced `cannot run 'npm': [WinError 2]`, the second
+# `TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'`.
+#
+# The probes below are platform-independent: the argv half monkeypatches
+# `shutil.which`, and the decoding half runs a real child that writes a byte
+# invalid under *any* UTF-8 locale, so the failure shape reproduces on
+# Linux/macOS too rather than only on the machine that filed the issue.
+
+
+@pytest.fixture
+def fake_cwd(tmp_path):
+    """A cwd whose `node_modules` exists, so `_run`'s pre-check is satisfied.
+
+    The new probes are about argv resolution and decoding, not about the
+    toolchain - but they must not borrow `RENDERER_ROOT` to run, because CI's
+    pytest job runs *before* the `npm ci` step, so the real renderer has no
+    `node_modules` there and every probe would fail the pre-check instead of
+    reaching the behaviour under test (measured on both the ubuntu and
+    windows-2025 jobs: 5 failed with `...renderer has no node_modules`). A
+    temporary directory makes the probes independent of whether the host has
+    installed the Node toolchain.
+    """
+    (tmp_path / "node_modules").mkdir()
+    return tmp_path
+
+
+def test_run_resolves_the_command_through_which(mod, monkeypatch, fake_cwd) -> None:
+    """`npm` must reach the runner by its resolved path, not as a bare name."""
+    seen: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return _Proc()
+
+    monkeypatch.setattr(mod.shutil, "which", lambda name: f"/resolved/{name}")
+    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
+    mod._run(["npm", "test"], fake_cwd)
+
+    assert seen == [["/resolved/npm", "test"]], (
+        f"the runner was invoked as {seen} - an unresolved bare `npm` is a file "
+        "that does not exist on Windows (npm.CMD)"
+    )
+
+
+def test_run_leaves_an_unresolvable_command_alone(mod, monkeypatch, fake_cwd) -> None:
+    """A name `which` cannot find keeps its spelling, so the error names it.
+
+    Inventing a path here would replace a precise `cannot run 'nope'` with a
+    confusing failure about a file nobody asked for.
+    """
+    seen: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: (seen.append(list(cmd)), _Proc())[1])
+    mod._run(["nope", "test"], fake_cwd)
+
+    assert seen == [["nope", "test"]]
+
+
+def test_missing_runner_still_names_the_command(mod, monkeypatch, fake_cwd) -> None:
+    """The FileNotFoundError path survives the resolution (negative control)."""
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+
+    def _boom(cmd, **kwargs):
+        raise FileNotFoundError(2, "The system cannot find the file specified")
+
+    monkeypatch.setattr(mod.subprocess, "run", _boom)
+    with pytest.raises(mod.NodeCountError, match="cannot run 'npm'"):
+        mod._run(["npm", "test"], fake_cwd)
+
+
+def test_run_decodes_output_that_is_not_valid_utf8(mod, fake_cwd) -> None:
+    """A byte the locale codec cannot decode must not lose the whole output.
+
+    This is the measured Windows failure (cp936 vs node's `ℹ` U+2139): the
+    decode error happened inside subprocess's reader thread, `threading`
+    swallowed it, `proc.stdout` came back `None`, and main() - which catches
+    `NodeCountError` and `OSError` only - printed a traceback instead of the
+    reason the tool already knows how to print.
+    """
+    child = "import sys; sys.stdout.buffer.write(b'\\xb9 tests 7\\nfail 0\\n')"
+    out = mod._run([sys.executable, "-c", child], fake_cwd)
+    assert "tests 7" in out, f"output was lost: {out!r}"
+    assert mod.NODE_TESTS.search(out), (
+        "the summary no longer parses once the undecodable glyph is replaced"
+    )
+
+
+def test_unreadable_output_raises_the_tools_own_error(mod, monkeypatch, fake_cwd) -> None:
+    """`None` streams are reported, never concatenated.
+
+    The guard half of the same defect: if a stream really is unusable, the tool
+    must say so in its own vocabulary - a `TypeError` escaping main() is not a
+    diagnosis.
+    """
+
+    class _Proc:
+        returncode = 0
+        stdout = None
+        stderr = None
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: _Proc())
+    with pytest.raises(mod.NodeCountError, match="no readable output"):
+        mod._run(["npm", "test"], fake_cwd)
+
+
+def test_a_bare_name_starts_the_real_runner(mod, fake_cwd) -> None:
+    """No stub: the argv half must work against a real runner, not a mock.
+
+    Reported by a reference implementation on Windows (pm25coder, 2026-09-10):
+    every probe above stubs the path under test (`shutil.which`,
+    `subprocess.run`), so they pin the *shape* of the fix rather than that a
+    named runner starts at all. GitHub's ubuntu and windows-2025 images both put
+    Node on PATH, so this one probe would have gone red pre-fix on Windows and
+    green post-fix - and its absence is why the defect shipped with five green
+    probes: with `which` mocked, the platform is exactly what stops being
+    visible. `test_run_resolves_the_command_through_which` asserts the tool calls
+    `which`; this asserts the result is usable.
+
+    Skipped, not failed, where no runner is installed: this repo's pytest job can
+    run before `npm ci`, and a missing toolchain is not a defect in `_run`.
+    """
+    if mod.shutil.which("npm") is None:
+        pytest.skip("npm is not on PATH")
+    out = mod._run(["npm", "--version"], fake_cwd)  # bare name, as the tool calls it
+    assert re.match(r"\d+\.\d+", out.strip()), (
+        f"a bare `npm` must start a real runner through the resolution; got {out!r}"
+    )
+
+
+def test_main_catches_every_failure_its_run_can_produce(mod, monkeypatch, capsys) -> None:
+    """The end-to-end shape: a bad decode exits 2 with a message, not a traceback."""
+    monkeypatch.setattr(
+        mod, "measured_renderer", lambda: (_ for _ in ()).throw(
+            mod.NodeCountError("`npm test` produced no readable output")
+        )
+    )
+    rc = mod.main([])
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert "no readable output" in captured.err
+    assert "Traceback" not in captured.err

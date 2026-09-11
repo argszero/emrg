@@ -112,13 +112,30 @@ class DocCountError(Exception):
 
 
 def measured_count() -> int:
-    """How many tests pytest actually collects in this tree."""
+    """How many tests pytest actually collects in this tree.
+
+    `encoding="utf-8"` / `errors="replace"` rather than the locale codec: the
+    identical defect was measured in `scripts/check-node-test-count.py` (issue
+    #1132, where a locale mismatch left `proc.stdout` as `None` after the decode
+    error was swallowed by subprocess's reader thread, and the concatenation
+    below raised a bare `TypeError` past every handler). Any collected id or
+    warning carrying a non-ASCII byte would do the same here on a cp936 host, so
+    the decoding is pinned before that can happen. `push-branch-from-api.py`
+    records the same lesson at its line 15.
+    """
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q"],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    if proc.stdout is None or proc.stderr is None:
+        raise DocCountError(
+            "pytest --collect-only produced no readable output "
+            "(its output could not be decoded)"
+        )
     if proc.returncode != 0:
         raise DocCountError(
             f"pytest --collect-only failed (rc={proc.returncode}):\n"
