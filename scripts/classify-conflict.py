@@ -169,7 +169,14 @@ def _differ_only_by_number(ours: list[str], theirs: list[str]) -> bool:
     parenthesised number, as in the Agent.md count line. Without that condition
     `x = compute(1)` vs `x = compute(2)` matched, and the tool answered "measure,
     never pick a side, exit 0" about a code change - advice that is not merely
-    unhelpful but actively closes the one case a human must read.
+    unhelpful but actively closes the one case a human must read. The masking
+    comparison below is the *second* half of the same guard and is equally
+    load-bearing: it is what makes the pair "one count re-measured" rather than
+    "two counts". Measured 2026-09-11 (`cyc20260911-204842`): removing it left all
+    45 tests passing while flipping the verdict on 4 of 937 real corpus blocks, e.g.
+    `Python: ... (1407)` against `Node: ... (1410)` - two different facts, answered
+    with "measure, never pick a side" at rc 0, the caller's signal that every block
+    was classified and the advice is safe to act on.
 
     The sides must also be the **same length**: a block that only differs by
     numbers is an aligned pair of revisions, and an unaligned hunk is a different
