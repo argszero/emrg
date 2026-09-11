@@ -277,6 +277,79 @@ def test_a_body_that_does_not_open_with_a_mark_but_claims_lgtm_counts(mod):
     assert mod._classify("## Review\nThis needs work") == "comment"
 
 
+def test_a_veto_stated_below_a_prose_intro_is_still_a_veto(mod):
+    """Found in cyc20260911-153707 by probing `_classify` itself.
+
+    Reading only the *first* content line means a veto whose mark sits below a
+    prose intro is classified `comment` - and `check_pr` **skips comments**, so
+    the run is never reset and the stale approvals in front of it stay live. That
+    is the same dangerous direction the decorated-mark fix closed, reached by a
+    different route: not "the mark is decorated" but "the mark is not on line one".
+
+    A reviewer who writes a sentence first and then their verdict is ordinary
+    practice, so the shape is worth handling even though no real body in the
+    corpus currently uses it (all of them state the mark first).
+    """
+    assert mod._classify("Checked all three fixes.\n\n\u274c Needs fix: the third leaks") == "veto"
+    assert mod._classify("Reviewed head abc.\n\n\n\u274c needs fix") == "veto"
+    assert mod._classify("Here is my review.\n\n**\u274c Needs fix:** decorated") == "veto"
+    assert mod._classify("Intro.\n\n- \u274c needs fix") == "veto", "bullet below the intro"
+    # The mirror: an approval stated below a prose intro.
+    assert mod._classify("Checked all three.\n\n\u2705 LGTM - cycle `c`") == "comment"
+
+
+def test_only_a_stated_veto_counts_not_a_mention_of_one(mod):
+    """The opposite error: reading a passing mention as a veto.
+
+    This repo's approvals routinely *describe* a veto they resolved ("The earlier
+    ❌ was resolved by pushing the fix myself") and the finding write-ups name the
+    shape they were about. Treating those as vetoes would reset the run and
+    discard every approval before them - so a mark only counts as a stated veto
+    when it opens its line.
+    """
+    assert mod._classify("I tested on Windows.\n- README marked \u274c for security") == "comment"
+    assert mod._classify("Follow-up.\n\nI voted \u2705 on this head.") == "comment"
+    assert mod._classify("Intro.\n\nno \u274c found") == "comment", "a negated mention"
+    # A later line that states the *other* verdict stops the scan entirely.
+    assert mod._classify("Intro\n\n\u2705 LGTM - cyc1\n\n\u274c but also this") == "comment"
+
+
+def test_a_prose_intro_then_a_veto_resets_the_run(mod, monkeypatch, capsys):
+    """The hole at the level that decides a merge.
+
+    Two approvals followed by a veto written under a prose intro. Classified as a
+    comment the run stays at 2/3 - three stale approvals would read as live and
+    the tool would call the PR mergeable. As a veto it resets to 0.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+                   _review("2026-09-11T03:00:00Z",
+                           "Checked all three fixes.\n\n"
+                           "\u274c Needs fix - cycle `cyc20260911-030000`")])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 0/3" in out, out
+    assert "NO  " in out, "a veto must not render in the approval column"
+    assert "resets the run" in out
+
+
+def test_an_unattributable_veto_still_resets_the_run(mod, monkeypatch, capsys):
+    """A veto with no cycle id cannot be *counted*, but it must still reset.
+
+    The two questions are separate: attributability decides whether a vote can be
+    numbered, while a veto's effect on the sequence does not depend on our ability
+    to attribute it. Letting an unidentifiable veto be skipped would mean the
+    approvals it answered still read as the run.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+                   _review("2026-09-11T02:00:00Z", "\u274c Needs fix, no cycle id given")])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 0/3" in out, out
+
+
 # --- the run rule ----------------------------------------------------------
 
 

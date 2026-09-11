@@ -163,12 +163,13 @@ def _refuses(line: str) -> bool:
     return re.search(window + "LGTM", line, re.IGNORECASE) is not None
 
 
-def _verdict_line(body: str) -> str:
-    """The body's first line that has content, with leading decoration stripped.
+def _decorated_lines(body: str) -> list[str]:
+    """Every content line, decorated form stripped, in order.
 
-    Decoration-only lines are skipped, so a reviewer who opens with a `---` rule
+    Decoration-only lines are dropped, so a reviewer who opens with a `---` rule
     has still stated their verdict on the line after it.
     """
+    out: list[str] = []
     for line in body.splitlines():
         text = line
         while True:
@@ -177,8 +178,14 @@ def _verdict_line(body: str) -> str:
                 break
             text = reduced
         if text.strip():
-            return text
-    return ""
+            out.append(text)
+    return out
+
+
+def _verdict_line(body: str) -> str:
+    """The body's first line that has content, with leading decoration stripped."""
+    lines = _decorated_lines(body)
+    return lines[0] if lines else ""
 
 
 def _gh_json(args: list[str]) -> object:
@@ -304,6 +311,19 @@ def _classify(body: str) -> str:
     ✅ with a later ❌ is therefore an approval, which is the reading that survives
     every negation phrasing - and it is what master already did, so the change
     cannot void a vote that was being counted.
+
+    **Fourth: the first line was the only line.** Reading just it means a veto
+    whose mark sits *below* a prose intro ("Checked all three fixes.\\n\\n❌ Needs
+    fix: …") classifies as `comment`, and `check_pr` skips comments - so the run is
+    never reset, the same dangerous direction as the decorated-mark bug, reached by
+    a different route (the mark is not decorated; it is simply not on line one).
+    Found in cyc20260911-153707 by probing this function. A body whose first line
+    states no verdict at all now scans its later lines for a **stated** veto - the
+    mark must open the line, so this repo's approvals that *describe* a resolved
+    veto ("The earlier ❌ was resolved by pushing the fix myself") stay approvals.
+    The first line still decides whenever it states anything, so the third fix's
+    rule is untouched. Measured: 0 of 381 bodies on the 60 most recent PRs change
+    class under this addition - the shape it catches is real but currently unused.
     """
     line = _verdict_line(body)
     if not line:
@@ -332,6 +352,33 @@ def _classify(body: str) -> str:
         return "approve"
     if _VETO_MARK in line and not _negated(line, _VETO_MARK):
         return "veto"
+
+    # The first line stated no verdict at all - it is neither a mark nor prose
+    # about LGTM ("Checked all three fixes.", "Here is my review."). So look for a
+    # **stated** veto further down: a later line whose own first character (after
+    # decoration) is the mark.
+    #
+    # Why this is needed (found in cyc20260911-153707, by probing this very
+    # function): reading only the first line means a veto whose mark sits below a
+    # prose intro classifies as `comment`, and `check_pr` **skips comments**, so the
+    # run is never reset - the exact dangerous direction this function exists to
+    # close. Measured: `approve, approve, "Checked all three fixes.\n\n❌ Needs fix:
+    # …"` leaves the run at 2, i.e. three stale approvals still read as live.
+    #
+    # Only a *stated* mark counts. A body that merely mentions ❌ in passing is how
+    # this repo's approvals describe a veto they resolved ("The earlier ❌ was
+    # resolved by pushing the fix myself"), and reading those as vetoes would reset
+    # the run - the opposite error, equally costly. So the mark must open the line,
+    # and a negated or mid-sentence mention is not one.
+    #
+    # The first line still decides whenever it states anything, so this cannot
+    # revive the bug that let a leading ✅ lose to a later ❌ (see the docstring):
+    # an approving body's first line is a ✅ or an "LGTM", and neither reaches here.
+    for other in _decorated_lines(body)[1:]:
+        if other.startswith(_VETO_MARK):
+            return "veto"
+        if other.startswith(_LGTM_MARK):
+            return "comment"  # a later line states the opposite: not a veto
     return "comment"
 
 
