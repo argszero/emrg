@@ -32,10 +32,13 @@ which is worth knowing before writing something that trusts it.
 * the verdict mark is read at the first content character **after markdown
   decoration** (`**❌`, `- ❌`, `> ❌`, `## ❌`, `1. ❌`), so a decorated veto is
   still a veto;
-* a mark preceded by a negation is prose *about* the mark, not a statement of it
-  ("no ❌ at this head" is an approval; "Not LGTM" is a veto);
-* ❌ -> a veto, and it wins when both marks appear on the line
-* ✅ (or a line that says LGTM) -> an approval
+* that **leading** mark then decides the line: ❌ -> a veto, ✅ -> an approval. A
+  ✅ line that later mentions ❌ is still an approval, because that mention is
+  prose *about* the veto ("no ❌ at this head", "0 ❌ at this head") and the ways
+  of saying "none" are an open set no word list can cover;
+* a line with no leading mark is a verdict written as prose, and there a refusal
+  ("Not LGTM", "can't LGTM this") is a veto, a claim of LGTM is an approval, and
+  a non-negated ❌ is a veto ("Result: ❌ needs fix");
 * anything else -> an ordinary comment, ignored
 
 Getting this wrong is not symmetric. Reading an approval as a veto **under**counts
