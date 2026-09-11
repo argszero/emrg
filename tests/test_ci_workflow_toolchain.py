@@ -2,9 +2,8 @@
 
 Why this module exists
 ----------------------
-`tests/test_check_node_test_count.py` starts real Node runners in the probe that
-matters most (`test_a_bare_name_starts_the_real_runner`), and **skips** when
-`shutil.which("npm")` is `None`:
+The suite starts real Node runners, and some of those probes **skip** when the
+toolchain is absent:
 
     if mod.shutil.which("npm") is None:
         pytest.skip("npm is not on PATH")
@@ -25,8 +24,9 @@ guards were Windows-only). A gate that *can* silently not run is not a gate.
 The rule, and its boundary
 --------------------------
 * a job that runs the test suite **must set up the Node toolchain** if any test
-  file in the suite starts a real Node runner (detected from the source, not from
-  a hardcoded file list);
+  file in the suite starts a real Node runner (detected from the suite's **source
+  structure** - real calls, parsed with `ast` - not from a hardcoded file list and
+  not from a text search, which a docstring can satisfy);
 * a job is exempt when it is declared not to need Node - `test-windows` was, until
   this guard's first run, exactly that. The exemption is explicit and asserted
   live, so it cannot go stale silently.
@@ -48,13 +48,78 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "test.yml"
 TESTS = REPO_ROOT / "tests"
 
-# A call that would fail (not skip) if the Node toolchain is absent. Detected by
-# this marker rather than by the test's name, so renaming a probe cannot silently
-# drop it out of the rule's reach.
-_SKIP_ON_MISSING_NODE = re.compile(
-    r"""pytest\.skip\([^)]*(?:npm|node)[^)]*\)""", re.I
-)
-_REAL_NODE_RUNNER = re.compile(r"""subprocess\.run\(\s*\[[^\]]*["'](?:npm|node)["']""")
+# Detection is AST-based, not a regex over the text. Measured during review of this
+# guard: the regex form matched this module's **own docstring**, which quotes the
+# skip line as an illustration - so the premise test below passed on prose while no
+# probe existed anywhere in the tree. Deleting every real `pytest.skip` in the suite
+# still left all four tests green. That is this repo's recurring shape one level up
+# (matching a pattern *about* the thing rather than the thing): a guard whose
+# evidence is its own prose cannot notice the subject disappearing.
+_NODE_TOOLCHAIN_WORDS = ("npm", "node")
+
+
+def _mentions_node_toolchain(node: ast.expr) -> bool:
+    """Whether an argument node carries an npm/node spelling.
+
+    Walks the node so f-strings count by their literal parts (`f"no node_modules
+    under {root}"` mentions Node) - which is what the real skips look like.
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            low = sub.value.lower()
+            if any(word in low for word in _NODE_TOOLCHAIN_WORDS):
+                return True
+    return False
+
+
+def _skip_on_missing_node_calls(path: Path) -> list[int]:
+    """Line numbers of real `pytest.skip(...)` calls naming npm/node.
+
+    A `skip` quoted in a docstring or a comment is text, not a call, so it does not
+    satisfy the premise - which is the whole point of parsing instead of grepping.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr == "skip"):
+            continue
+        if any(_mentions_node_toolchain(arg) for arg in node.args):
+            found.append(node.lineno)
+    return found
+
+
+def _starts_a_real_node_runner(path: Path) -> list[int]:
+    """Line numbers of calls whose argv is a literal list naming npm/node.
+
+    Covers the indirection the real probe actually uses (`mod._run(["npm", ...])`),
+    not only the `subprocess.run([...])` spelling - the regex this replaced reached
+    only the latter, so the "real runner" half could never match the probe it was
+    written for. Measured: zero matches in `tests/test_check_node_test_count.py`.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not node.args:
+            continue
+        argv = node.args[0]
+        if isinstance(argv, ast.List) and any(
+            _mentions_node_toolchain(elt) for elt in argv.elts
+        ):
+            found.append(node.lineno)
+    return found
+
+
+def _node_dependent_test_files() -> dict[str, list[int]]:
+    """Test file -> the lines at which it starts Node or skips without npm."""
+    found: dict[str, list[int]] = {}
+    for path in sorted(TESTS.glob("test_*.py")):
+        lines = _skip_on_missing_node_calls(path) + _starts_a_real_node_runner(path)
+        if lines:
+            found[path.relative_to(REPO_ROOT).as_posix()] = sorted(lines)
+    return found
 
 
 def _workflow_jobs() -> dict[str, str]:
@@ -108,11 +173,7 @@ def test_the_workflow_parse_finds_the_jobs_and_their_steps() -> None:
 
 def _suite_starts_a_real_node_runner() -> bool:
     """Whether any test file would start a real Node process (and skip without it)."""
-    for path in sorted(TESTS.glob("test_*.py")):
-        source = path.read_text(encoding="utf-8")
-        if _SKIP_ON_MISSING_NODE.search(source) or _REAL_NODE_RUNNER.search(source):
-            return True
-    return False
+    return bool(_node_dependent_test_files())
 
 
 def test_the_suite_really_does_depend_on_a_real_node_runner() -> None:
@@ -121,21 +182,37 @@ def test_the_suite_really_does_depend_on_a_real_node_runner() -> None:
     Without this, the rule below could pass because the detection is broken
     (nobody needs Node) rather than because every job provides it - the two are
     indistinguishable from the verdict alone.
+
+    The assertion is on **calls**, not on text. Its predecessor matched a regex
+    over the file contents and was satisfied by this module's own docstring, so it
+    stayed green with no probe left in the suite; that is recorded here because the
+    difference is invisible from the verdict alone, which is the same reason this
+    premise exists at all.
     """
-    assert _suite_starts_a_real_node_runner(), (
-        "no test file was found that starts a real Node runner or skips without "
-        "npm - if the probe was removed, this guard (and the CI setup it checks) "
-        "can be retired with it"
+    dependent = _node_dependent_test_files()
+    assert dependent, (
+        "no test file actually *calls* something that starts a real Node runner or "
+        "skips without npm - if the probe was removed, this guard (and the CI setup "
+        "it checks) can be retired with it. A mention of npm/node in a docstring or "
+        "comment does not count"
     )
-    skipping = [
-        p.relative_to(REPO_ROOT).as_posix()
-        for p in sorted(TESTS.glob("test_*.py"))
-        if _SKIP_ON_MISSING_NODE.search(p.read_text(encoding="utf-8"))
-    ]
+    skipping = {
+        name: lines
+        for name, lines in dependent.items()
+        if _skip_on_missing_node_calls(REPO_ROOT / name)
+    }
     assert skipping, (
-        "the premise is 'the probe skips without npm', but no skip-on-missing-node "
-        "call was found - the probe may now fail loudly instead, which is better; "
-        "update this guard rather than deleting it"
+        "the premise is 'the probe skips without npm', but no real skip-on-missing-"
+        "node call was found - the probe may now fail loudly instead, which is "
+        "better; update this guard rather than deleting it"
+    )
+    # And the guard must not satisfy its own premise: a rule about the suite cannot
+    # be met by the rule's own file, or removing the subject leaves it green.
+    assert not any(
+        name == Path(__file__).name for name in skipping
+    ), (
+        f"{Path(__file__).name} is itself counted as a Node-dependent test file - "
+        "the rule is measuring its own prose instead of the suite"
     )
 
 
