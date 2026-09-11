@@ -121,6 +121,78 @@ class TestDuplicateVersusDisjoint:
         label, advice = mod.classify("alpha\nbeta\n", "alpha\nbeta\ngamma\n")
         assert label == mod.DUPLICATE
 
+
+class TestASidePickMustNotSilentlyDropAnEdit:
+    """The subset test alone is not enough — found by adversarial probing.
+
+    `duplicate` was decided purely on *declared names*, so "theirs declares every
+    name ours does" was read as "theirs contains ours". Those are different
+    claims: when both sides contain `test_alpha` but with **different bodies**,
+    taking theirs discards ours' edit with no signal — the exact data loss this
+    tool exists to prevent, hidden behind the one verdict that recommends a
+    side-pick.
+    """
+
+    def test_superset_names_with_a_modified_shared_body_is_not_a_duplicate(self, mod) -> None:
+        ours = "def test_alpha():\n    assert compute() == 1\n"
+        theirs = (
+            "def test_alpha():\n    assert compute() == 2\n"
+            "def test_beta():\n    assert True\n"
+        )
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING, (
+            "ours' edit to test_alpha would vanish if this were resolved by taking "
+            "theirs; the shared symbol's body must be compared, not just its name"
+        )
+        assert "human" in advice.lower()
+
+    def test_a_true_superset_with_identical_shared_bodies_is_still_a_duplicate(self, mod) -> None:
+        """The #1136 shape must keep working: shared bodies identical → take theirs."""
+        ours = "def test_alpha():\n    assert True\n"
+        theirs = (
+            "def test_alpha():\n    assert True\n\n\n"
+            "def test_beta():\n    assert True\n"
+        )
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.DUPLICATE
+        assert "THEIRS" in advice
+
+    def test_a_modified_shared_body_in_the_no_symbol_path_is_escalated(self, mod) -> None:
+        """One line per side, no symbols, no count: ambiguous, so do not guess."""
+        label, _ = mod.classify("x = compute(1)\n", "x = compute(2)\n")
+        assert label == mod.OVERLAPPING, (
+            "KEEP BOTH here would concatenate into nonsense; with a single "
+            "differing line and no symbol or count, no verdict is the honest answer"
+        )
+
+
+class TestCountLineIsADocumentedCountNotAnyInteger:
+    """`count-line` must not fire on code that merely contains a literal.
+
+    The one-line-vs-one-line numeric rule matched `x = compute(1)` vs
+    `x = compute(2)`, so a plain code change was answered "MEASURE ... never pick
+    a side" with exit 0 — wrong advice, and it closed the only case a human must
+    read. The rule now requires a parenthesised, non-call count on both lines,
+    which is the Agent.md shape.
+    """
+
+    def test_code_differing_by_a_literal_is_not_a_count_line(self, mod) -> None:
+        label, advice = mod.classify("x = compute(1)\n", "x = compute(2)\n")
+        assert label != mod.COUNT_LINE
+        assert "measure" not in advice.lower()
+
+    def test_the_documented_count_line_still_fires(self, mod) -> None:
+        ours = "Python: `uv run pytest tests/ -v` (1407) - import check: x\n"
+        theirs = "Python: `uv run pytest tests/ -v` (1410) - import check: x\n"
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.COUNT_LINE
+        assert "never pick a side" in advice.lower()
+
+    def test_a_call_argument_at_line_start_is_still_code(self, mod) -> None:
+        """`(5)` as a bare tuple element is not a documented count either."""
+        label, _ = mod.classify("log(1)\n", "log(2)\n")
+        assert label != mod.COUNT_LINE
+
     def test_classes_are_mutually_exclusive(self, mod) -> None:
         """Every verdict is one of the five labels, never a mix."""
         labels = {

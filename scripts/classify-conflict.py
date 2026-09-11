@@ -58,6 +58,17 @@ CONFLICT_BLOCK = re.compile(
 # Agent.md count lines are the recurring case ("... (1401) — import check: ...").
 _NUMBER = re.compile(r"\d+")
 
+# A *documented* count: a parenthesised number that is not a call argument, i.e.
+# the `(` is at the start of the line or preceded by a non-word character. This
+# is what separates the Agent.md count line ("`uv run pytest tests/ -v` (1401)")
+# from code that happens to differ by a literal ("x = compute(1)").
+#
+# Without it the count-line rule fired on any one-line numeric difference, so a
+# bare code change was labelled `count-line`, given "MEASURE ... never pick a
+# side", and exited 0 - wrong advice on code and, worse, a verdict that closes
+# the only case left for a human to look at.
+_DOC_COUNT = re.compile(r"(?:^|[^\w])\(\s*\d")
+
 # Symbols a hunk *declares*. This is the axis that decides duplicate-vs-disjoint,
 # and it is not the same as "which text lines are shared": my first version
 # compared content lines and classified the two real #1140 conflicts as
@@ -85,11 +96,20 @@ def _content_lines(text: str) -> list[str]:
 
 
 def _differ_only_by_number(ours: list[str], theirs: list[str]) -> bool:
-    """True when both sides are one line each and differ only in an integer."""
+    """True when both sides are one line each and differ only in an integer.
+
+    Both lines must also carry a *documented* count (see `_DOC_COUNT`): a
+    parenthesised number, as in the Agent.md count line. Without that second
+    condition `x = compute(1)` vs `x = compute(2)` matched, and the tool answered
+    "measure, never pick a side, exit 0" about a code change - advice that is not
+    merely unhelpful but actively closes the one case a human must read.
+    """
     if len(ours) != 1 or len(theirs) != 1:
         return False
     a, b = ours[0], theirs[0]
     if a == b:
+        return False
+    if not (_DOC_COUNT.search(a) and _DOC_COUNT.search(b)):
         return False
     return _NUMBER.sub("#", a) == _NUMBER.sub("#", b)
 
@@ -97,6 +117,32 @@ def _differ_only_by_number(ours: list[str], theirs: list[str]) -> bool:
 def _symbols(text: str) -> set[str]:
     """Names of the functions/classes a hunk declares (empty for non-code)."""
     return set(_SYMBOL.findall(text))
+
+
+def _symbol_bodies(text: str) -> dict[str, str]:
+    """Map each declared symbol to its *normalised* body text.
+
+    Bodies are compared alongside the name sets so that "theirs declares every
+    name ours does" cannot be read as "theirs contains ours". The two are not the
+    same claim: when both sides contain `test_alpha` but with different bodies,
+    taking theirs silently discards ours' edit - the exact data loss this tool
+    exists to prevent, hidden behind a subset test that only ever looked at names.
+    """
+    bodies: dict[str, str] = {}
+    matches = list(_SYMBOL.finditer(text))
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = "\n".join(_content_lines(text[m.end() : end]))
+        bodies[m.group(1)] = body
+    return bodies
+
+
+def _shared_bodies_agree(ours_bodies: dict[str, str], theirs_bodies: dict[str, str]) -> bool:
+    """True when every symbol declared on *both* sides has the same body."""
+    for name in set(ours_bodies) & set(theirs_bodies):
+        if ours_bodies[name] != theirs_bodies[name]:
+            return False
+    return True
 
 
 def classify(ours_text: str, theirs_text: str) -> tuple[str, str]:
@@ -136,6 +182,19 @@ def classify(ours_text: str, theirs_text: str) -> tuple[str, str]:
                 "both sides declare the SAME names - a human must read both sides "
                 "and reconcile the bodies (this is a real edit collision)",
             )
+        # A subset verdict may only stand if the *shared* symbols are also
+        # identical. Otherwise the side-pick drops ours' edits to those symbols:
+        # `test_alpha` present on both sides with different bodies would be taken
+        # from theirs, and the change would vanish with no signal.
+        ours_bodies = _symbol_bodies(ours_text)
+        theirs_bodies = _symbol_bodies(theirs_text)
+        if not _shared_bodies_agree(ours_bodies, theirs_bodies):
+            return (
+                OVERLAPPING,
+                "one side's names are a superset, but a symbol declared on BOTH "
+                "sides has a different body - a side-pick would silently discard "
+                "that edit, so a human must reconcile the shared symbol(s)",
+            )
         if not only_theirs:
             return (
                 DUPLICATE,
@@ -157,7 +216,25 @@ def classify(ours_text: str, theirs_text: str) -> tuple[str, str]:
             f"(concatenate); either side-pick silently drops one side's work",
         )
 
-    # No declarations to compare: fall back to content lines.
+    # No declarations to compare: fall back to content lines. Unlike the symbol
+    # path, containment *is* sufficient here - `ours_set < theirs_set` means every
+    # line ours has appears byte-identically in theirs, so a superset pick cannot
+    # drop an edit. (Audited when the symbol path's body check was added above.)
+    #
+    # One line against one line is exempt: with no symbols and no documented
+    # count, a single differing line is ambiguous - it is either one line edited
+    # (a human must pick) or two adjacent additions (keep both) - and `KEEP BOTH`
+    # is wrong for the first (`x = f(1)` vs `x = f(2)` would concatenate into
+    # nonsense). No evidence means no verdict, so escalate rather than guess.
+    if len(ours) == 1 and len(theirs) == 1:
+        return (
+            OVERLAPPING,
+            "one differing line on each side with no declared symbol and no "
+            "documented count - this is either an edit to that line or two "
+            "adjacent additions, and the lines do not say which, so a human must "
+            "read it",
+        )
+
     ours_set, theirs_set = set(ours), set(theirs)
     if not ours_set & theirs_set:
         return (
