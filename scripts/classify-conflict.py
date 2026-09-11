@@ -230,6 +230,56 @@ def _looks_like_a_revision(ours: list[str], theirs: list[str]) -> bool:
     return False
 
 
+def _looks_like_a_count_revision(ours: list[str], theirs: list[str]) -> bool:
+    """True when an aligned pair of differing lines is the same documented count.
+
+    The content-line fallback answers `KEEP BOTH` when the sides share no line,
+    on the reasoning that "no shared line" means "two separate additions". That
+    reasoning fails whenever the sides are the same lines at two revisions, and
+    the failure is silent in the worst direction: concatenation emits the stale
+    copy *and* the current copy.
+
+    `_looks_like_a_revision` catches the pure text case (a line one side merely
+    continues). This function catches the case that check structurally cannot:
+    the differing pair is a **count line against a longer revision of itself**,
+    where a strict prefix does not hold because the numbers sit *inside* the line
+    and everything after them was rewritten.
+
+    Measured 2026-09-11 (`cyc20260911-194733`). Reproduced with a real
+    `git merge-file` on adjacent lines: ours `Python: ... (1393)` beside a
+    `Doc count sync:` line, theirs the same two lines edited divergently. Both
+    master and the parent PR's more general alignment rule (which requires the
+    sides to be the same length *and* every differing pair to be count-shaped)
+    answer `disjoint - KEEP BOTH (concatenate)` at rc 0, and the concatenation
+    contains two `Python: \\`uv run pytest\\`` lines - the state
+    `tests/test_doc_counts.py::_duplicated_count_line_kinds` rejects, i.e. a doc
+    claiming two different pytest counts.
+
+    Over the last 400 commits touching `Agent.md`, **7** hunks reach the fallback
+    with a count line in them and every one of them gets content-duplicating
+    advice: `e46c160` and `0c8a212` (aligned, now `count-line`), `cb651a4` (2v2)
+    and `5c039b4` (3v3) - also aligned, but mixing a count line with a text
+    revision, hence invisible to the equal-length rule - and `3335877` (1v2),
+    `444e1d5` (1v2), `18fd0af` (1v13), which are unaligned. This function
+    escalates all of the remaining five.
+
+    Index-aligned rather than length-equal: the count lines pair up at the front
+    in every measured case, and requiring equal lengths is what made `cb651a4`
+    and `5c039b4` invisible. The masking is the whole evidence - a count pair that
+    is equal once digits are removed is one fact re-measured, and a fact stated
+    twice with two values is what the repo's own guard rejects, so `KEEP BOTH`
+    cannot be right for it whatever else the block holds. Escalating is the cheap
+    error: a read costs a minute, a silent duplicate ships.
+    """
+    for a, b in zip(ours, theirs):
+        if a == b:
+            continue
+        if _DOC_COUNT.search(a) and _DOC_COUNT.search(b):
+            if _NUMBER.sub("#", a) == _NUMBER.sub("#", b):
+                return True
+    return False
+
+
 def _symbols(text: str) -> set[str]:
     """Names of the functions/classes a hunk declares (empty for non-code)."""
     return set(_SYMBOL.findall(text))
@@ -357,13 +407,14 @@ def classify(ours_text: str, theirs_text: str) -> tuple[str, str]:
         # be the same lines at two revisions, which are never byte-equal. Treat the
         # prefix relation as the evidence that this is what happened, and escalate
         # - see `_looks_like_a_revision`.
-        if _looks_like_a_revision(ours, theirs):
+        if _looks_like_a_revision(ours, theirs) or _looks_like_a_count_revision(ours, theirs):
             return (
                 OVERLAPPING,
-                "the sides share no line, but a line on one side continues a line "
-                "on the other - these are the same lines at two revisions, so KEEP "
-                "BOTH would emit both copies and a side-pick may drop a change; a "
-                "human must read it",
+                "the sides share no line, but they are the same lines at two "
+                "revisions (a line on one side continues a line on the other, or "
+                "one side left the documented count where the other revised it) - "
+                "so KEEP BOTH would emit both copies and a side-pick may drop a "
+                "change; a human must read it",
             )
         return (
             DISJOINT,
