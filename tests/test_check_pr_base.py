@@ -100,18 +100,57 @@ class TestClassifyBase:
         assert verdict == "DEAD"
         assert "not on master" in why
 
-    def test_a_live_stacked_base_is_ok(self, mod, monkeypatch) -> None:
-        """A stacked PR whose parent is still on master is legitimate, not a defect.
-
-        This is the other half of the discrimination: if everything non-master were
-        flagged, the check would cry wolf on the normal stacked workflow.
-        """
+    def test_a_base_already_on_master_is_ok(self, mod, monkeypatch) -> None:
+        """A base whose head is on master has nothing left to reach - `OK`."""
         monkeypatch.setattr(mod, "_ref_is_on_master", lambda sha, repo: True)
         verdict, why = mod.classify_base(
-            "feature/live-parent", {"feature/live-parent": "abc12345" * 5}, "owner/repo"
+            "feature/landed", {"feature/landed": "abc12345" * 5}, "owner/repo"
         )
         assert verdict == "OK"
         assert "already on master" in why
+
+    def test_a_live_stacked_base_is_live_not_ok(self, mod, monkeypatch) -> None:
+        """The **in-flight** parent: the state a stacked PR is normally in.
+
+        This is the discrimination the check exists for, and it is the one the
+        previous version of this test got wrong: it stubbed "live" as
+        `_ref_is_on_master -> True`, i.e. *a branch already merged into master* -
+        the one state a live parent can never be in. It therefore asserted the
+        conclusion (`OK`) instead of the discrimination, and would have kept
+        passing with the in-flight case dropped from the tool entirely.
+
+        A parent that is in flight necessarily has commits master does not, so the
+        compare status is `ahead` (or `diverged`, once master moves for any
+        unrelated reason) - byte-identical to the squash-merged branch. The only
+        thing that separates them is whether an open PR's head *is* that branch.
+        """
+        monkeypatch.setattr(mod, "_ref_is_on_master", lambda sha, repo: False)
+        verdict, why = mod.classify_base(
+            "feature/live-parent",
+            {"feature/live-parent": "abc12345" * 5},
+            "owner/repo",
+            {"feature/live-parent"},
+        )
+        assert verdict == "LIVE", "an in-flight parent is not a dead end"
+        assert "still in flight" in why
+
+    def test_a_stacked_base_with_no_open_parent_is_dead(self, mod, monkeypatch) -> None:
+        """Same branch, same compare status, no open PR naming it -> the #1148 shape.
+
+        The two states above are only decidable *together*: the status is identical
+        (`_ref_is_on_master -> False` in both), so a tool that reads only the status
+        must return the same verdict for both. It does not - this is the half that
+        would catch a revert of the fix.
+        """
+        monkeypatch.setattr(mod, "_ref_is_on_master", lambda sha, repo: False)
+        verdict, why = mod.classify_base(
+            "feature/dead-parent",
+            {"feature/dead-parent": "abc12345" * 5},
+            "owner/repo",
+            {"feature/some-other-open-pr"},
+        )
+        assert verdict == "DEAD"
+        assert "not the head of any open PR" in why
 
 
 class TestMainExitCodes:
@@ -135,6 +174,30 @@ class TestMainExitCodes:
         ]
         self._wire(mod, monkeypatch, prs, {"feature/live": "s2"}, lambda sha: True)
         assert mod.main(["--repo", "owner/repo"]) == 0
+
+    def test_exit_0_for_a_stacked_pr_on_an_open_parent(self, mod, monkeypatch) -> None:
+        """A stacked child of an open parent: reported, but not a failure.
+
+        End-to-end (through `main`, not just `classify_base`) because the parent is
+        usually *not* among the PRs being asked about - the verdict depends on the
+        full open-PR list, so a filter applied before `open_heads` is built would
+        silently turn this back into `DEAD`.
+        """
+        prs = [
+            {"number": 1147, "baseRefName": "master", "headRefName": "feature/parent"},
+            {"number": 1148, "baseRefName": "feature/parent", "headRefName": "feature/child"},
+        ]
+        self._wire(mod, monkeypatch, prs, {"feature/parent": "s1"}, lambda sha: False)
+        # Asking only about the child: the parent is in the payload but not selected.
+        assert mod.main(["--repo", "owner/repo", "1148"]) == 0
+
+    def test_exit_1_for_a_stacked_child_whose_parent_is_gone(self, mod, monkeypatch) -> None:
+        """The #1148 shape end-to-end: the parent branch exists, but no open PR names it."""
+        prs = [
+            {"number": 1148, "baseRefName": "feature/parent", "headRefName": "feature/child"},
+        ]
+        self._wire(mod, monkeypatch, prs, {"feature/parent": "s1"}, lambda sha: False)
+        assert mod.main(["--repo", "owner/repo", "1148"]) == 1
 
     def test_exit_2_when_the_state_cannot_be_read(self, mod, monkeypatch) -> None:
         """A check that reports OK when it could not look is worse than none."""
