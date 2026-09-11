@@ -273,12 +273,43 @@ def _looks_like_a_count_revision(ours: list[str], theirs: list[str]) -> bool:
     twice with two values is what the repo's own guard rejects, so `KEEP BOTH`
     cannot be right for it whatever else the block holds. Escalating is the cheap
     error: a read costs a minute, a silent duplicate ships.
+
+    **Equal once masked is too narrow a test for "the same count kind"**
+    (`cyc20260912-002444`). It requires the *whole rest of the line* to match, so a
+    count line that was also **re-breakdown** - the same measured kind, its
+    parenthesised detail revised - does not qualify, and the block falls through to
+    `disjoint - KEEP BOTH` at rc 0. Measured on an authentic block from merge
+    `47af6bc2`: ours `GUI: `cd emrg/gui && npm test` (92: ... + 3 preload-api +
+    3 boot-contract)` against master's `(89: ... + 3 preload-api)` (one component
+    removed *and* the total moved 92 -> 89). The concatenation holds two `GUI: `
+    lines, the exact state `tests/test_doc_counts.py::_duplicated_count_line_kinds`
+    rejects - driven through that guard, not inferred - and the sides' line counts
+    are 1 vs 2, so neither the equal-length rule nor the index-pairing mask
+    comparison can see it. Over **185** conflict blocks rebuilt from this repo's
+    real merge commits (legacy `git merge-tree` on each merge's three real blobs),
+    this rule changes exactly **1** class: that block, `disjoint` -> `overlapping`.
+
+    The gap is measured in the right unit: **the same documented-count kind stated
+    twice**, which is what the repo's guard keys on - not "the lines are equal".
+    Two lines agreeing on everything up to and including the first count, then
+    differing in the parenthesised breakdown, are one count kind at two revisions,
+    and keeping both is what duplicates it. That test is strictly narrower than
+    "both lines carry a count" (which would fire on unrelated blocks that happen
+    to mention counts), so it cannot widen the rule beyond the shape it targets.
     """
     for a, b in zip(ours, theirs):
         if a == b:
             continue
         if _DOC_COUNT.search(a) and _DOC_COUNT.search(b):
-            if _NUMBER.sub("#", a) == _NUMBER.sub("#", b):
+            masked_a, masked_b = _NUMBER.sub("#", a), _NUMBER.sub("#", b)
+            if masked_a == masked_b:
+                return True
+            # Same count kind, revised breakdown: identical through the first
+            # count. `split` keeps everything *before* the digits, so this fires
+            # only when the line's own text - the part naming the command and the
+            # kind - is byte-identical, i.e. one fact re-measured with a different
+            # breakdown, not two facts that both happen to carry numbers.
+            if masked_a.split("#", 1)[0] == masked_b.split("#", 1)[0]:
                 return True
     return False
 

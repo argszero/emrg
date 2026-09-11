@@ -735,6 +735,82 @@ class TestACountLineRevisedBesideATextRevision:
         )
         assert mod.classify(ours, theirs)[0] == mod.OVERLAPPING
 
+    def test_a_count_line_re_breakdown_is_the_same_kind_not_a_disjoint_add(
+        self, mod
+    ) -> None:
+        """The same count kind at two revisions, whose parenthesised detail moved.
+
+        A real block, not a shape I imagined: it is the conflict git produced when
+        merge `47af6bc2` met master (rebuilt from that merge's three real blobs with
+        `git merge-tree`). Ours states the GUI count at `(92: ... + 3 preload-api +
+        3 boot-contract)`; master states the same kind at `(89: ... + 3 preload-api)`
+        - one component removed *and* the total re-measured 92 -> 89. The two sides
+        share no line and are not the same length (1 vs 2), so neither the
+        equal-length rule nor the "equal once digits are masked" comparison sees
+        them, and the block was answered `disjoint - KEEP BOTH (concatenate)` at
+        rc 0.
+
+        The concatenation contains two `GUI: ` lines, which is precisely the state
+        `tests/test_doc_counts.py::_duplicated_count_line_kinds` rejects - this test
+        drives that guard over the concatenation rather than asserting the shape by
+        eye. The correct verdict is `overlapping`: a human reads it.
+
+        The axis that catches it is the unit the repo's own guard uses - *the same
+        documented-count kind stated twice* - not "the lines are equal". Measured
+        over 185 conflict blocks rebuilt from this repo's real merge commits, this
+        rule changes exactly one class: this block. Nothing else moves.
+        """
+        ours = (
+            "GUI: `cd emrg/gui && npm test` (92: 45 daemon_client + 20 conn-manager "
+            "+ 8 integration + 6 build-config + 7 gui-state + 3 preload-api + "
+            "3 boot-contract) — syntax: `node --check main.js`\n"
+        )
+        theirs = (
+            "GUI: `cd emrg/gui && npm test` (89: 45 daemon_client + 20 conn-manager "
+            "+ 8 integration + 6 build-config + 7 gui-state + 3 preload-api) — "
+            "syntax: `node --check main.js`\n"
+            "Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (445: "
+            "5 snapshot-store)\n"
+        )
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING, (
+            "one count kind at two revisions must not be called two separate "
+            "additions: `KEEP BOTH` emits both copies"
+        )
+        assert "human must read" in advice
+
+        # The consequence, driven through the repo's own guard rather than asserted:
+        # concatenating duplicates the `GUI: ` kind, which is the rejected state.
+        sys.path.insert(0, str(REPO_ROOT))
+        try:
+            from tests.test_doc_counts import _duplicated_count_line_kinds
+        finally:
+            sys.path.pop(0)
+        concat = ours.rstrip("\n") + "\n" + theirs
+        assert _duplicated_count_line_kinds(concat), (
+            "the KEEP BOTH result must be the state the repo's guard rejects, "
+            "otherwise this rule is not protecting anything"
+        )
+
+    def test_a_count_re_breakdown_of_a_different_kind_does_not_escalate(
+        self, mod
+    ) -> None:
+        """The negative control: the rule keys on the *kind*, not on "carries a count".
+
+        Two genuinely different count lines - `Python:` against `GUI:` - are two
+        facts, not one re-measured, so escalating them would be noise that sends a
+        human to read a block no human needs to read. The text before the first
+        count is what separates the two cases.
+        """
+        assert not mod._looks_like_a_count_revision(
+            ["Python: `uv run pytest tests/ -v` (1494: 1 skipped) — x"],
+            ["GUI: `cd emrg/gui && npm test` (100: 44 daemon_client) — y"],
+        )
+        assert not mod._looks_like_a_count_revision(
+            ["Python: `uv run pytest tests/ -v` (1494) — x"],
+            ["Renderer: `npm test` (514) — y"],
+        )
+
     def test_the_reported_summary_names_the_classes(self, mod, tmp_path, capsys) -> None:
         f = tmp_path / "z.py"
         f.write_text(
