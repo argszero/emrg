@@ -102,7 +102,28 @@ _DOC_COUNT = re.compile(r"(?:^|[^\w])\(\s*\d")
 # `overlapping` because both sides happened to contain `    """` and `    )` -
 # structural boilerplate, not work. Measured on the same blocks, the declared
 # names are fully disjoint, which is the property that actually matters.
-_SYMBOL = re.compile(r"^(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)", re.MULTILINE)
+#
+# The declaration may be **indented**: the first version anchored at column 0, so
+# every method in a class body was invisible - and that is the shape this repo's
+# conflicts actually take. Measured 2026-09-11 (cyc20260911-171843) over this
+# repo's own `tests/` + `scripts/`: 1262 of 2155 declarations (58.6%) sit at
+# column 0, i.e. **893 (41.4%) were invisible**, across 46 of 80 files. The
+# consequence is not a missing label but an *inverted* one for the same collision,
+# differing only in indentation:
+#
+#     def test_alpha(x=1):        |    def test_alpha(self, x=2):
+#         assert compute(x)==1    |        assert compute(x)==2
+#     -> overlapping, rc 1        |    -> disjoint "KEEP BOTH", rc 0
+#
+# Concatenating the right-hand block leaves two same-name definitions where the
+# second wins, so one side's edit disappears - at rc 0, i.e. as actionable advice.
+# Reported by how2how2how2-arch, reproduced here before accepting it.
+#
+# `^\s*` also matches a `def` inside a multi-line string literal. That trade is
+# made knowingly: a fixture quoting a declaration is read as declaring it, which
+# can only move a verdict *toward* `overlapping` (a human reads it), never toward
+# a silent side-pick.
+_SYMBOL = re.compile(r"^[ \t]*(?:async\s+)?(?:def|class)\s+([A-Za-z_]\w*)", re.MULTILINE)
 
 # Classification labels.
 IDENTICAL = "identical"

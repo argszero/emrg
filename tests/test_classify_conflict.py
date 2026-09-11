@@ -122,6 +122,65 @@ class TestDuplicateVersusDisjoint:
         assert label == mod.DUPLICATE
 
 
+class TestIndentedDeclarationsAreVisible:
+    """The symbol axis must see a class-body method, not only a column-0 def.
+
+    `_SYMBOL` was anchored at column 0, so every method in a class body was
+    invisible - measured 2026-09-11 (cyc20260911-171843): 893 of 2155 declarations
+    in this repo's own `tests/` + `scripts/` (41.4%), across 46 of 80 files. The
+    result was not a missing label but an inverted one for the same collision,
+    differing only in indentation: `overlapping`/rc 1 at column 0, and
+    `disjoint` → "KEEP BOTH"/rc 0 when indented - which concatenates two same-name
+    definitions, so one side's edit disappears at rc 0. Reported by
+    how2how2how2-arch.
+    """
+
+    def test_a_class_body_method_collision_is_overlapping_not_disjoint(self, mod) -> None:
+        ours = "    def test_alpha(self, x=1):\n        assert compute(x) == 1\n"
+        theirs = "    def test_alpha(self, x=2):\n        assert compute(x) == 2\n"
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING, (
+            "the same collision at column 0 already escalates; indentation must "
+            "not change the verdict"
+        )
+        assert "KEEP BOTH" not in advice
+
+    def test_an_indented_async_def_is_seen_too(self, mod) -> None:
+        ours = "    async def fetch(self, u=1):\n        return u\n"
+        theirs = "    async def fetch(self, u=2):\n        return u\n"
+        assert mod.classify(ours, theirs)[0] == mod.OVERLAPPING
+
+    def test_indented_disjoint_additions_stay_disjoint(self, mod) -> None:
+        """Positive control: the widening must not over-escalate.
+
+        Before the fix this was `overlapping` - the names were invisible, so the
+        content-line path saw no shared line and no symbols and guessed the wrong
+        way. Seeing the names is what makes KEEP BOTH correct here.
+        """
+        ours = "    def added_ours():\n        pass\n"
+        theirs = "    def added_theirs():\n        pass\n"
+        label, _ = mod.classify(ours, theirs)
+        assert label == mod.DISJOINT
+
+    def test_an_indented_duplicate_is_still_a_duplicate(self, mod) -> None:
+        ours = "    def keep(self):\n        pass\n"
+        theirs = "    def keep(self):\n        pass\n\n    def added(self):\n        pass\n"
+        assert mod.classify(ours, theirs)[0] == mod.DUPLICATE
+
+    def test_two_differently_named_indented_classes_are_disjoint(self, mod) -> None:
+        """`class` counts as a declaration, which the content-line path cannot see.
+
+        Both sides add a class whose *body* is identical (`pass`), so the line
+        path finds a shared line and partially overlaps. The names are what make
+        them different additions, and KEEP BOTH is correct for both.
+        """
+        ours = "    class Alpha:\n        pass\n"
+        theirs = "    class Beta:\n        pass\n"
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.DISJOINT, "same body, different names - both are wanted"
+        assert "KEEP BOTH" in advice
+
+
 class TestASidePickMustNotSilentlyDropAnEdit:
     """The subset test alone is not enough — found by adversarial probing.
 
