@@ -21,11 +21,30 @@ distinction is measurable, so it should not have to be re-derived by hand in
 every cycle that runs this cascade — which, while the queue is deep, is every
 cycle.
 
-This tool is a **decision aid, not an automatic resolver**. It never edits a
+Two further shapes were fixed on 2026-09-11 (`cyc20260911-190629`), both found by
+differencing this tool against **every real conflict block in the open-PR queue**
+rather than against fixtures I wrote myself — which is the point: the fixtures I
+write encode the shapes I already believe in, and both of these sat outside that
+set while the tests stayed green.
+
+* **Several count lines in one block.** 3 of the last 51 commits touching
+  `Agent.md` moved 2+ documented counts at once, and git then emits one block
+  covering all of them. The one-line-only count rule let that block reach the
+  content-line fallback, which answered `KEEP BOTH` (concatenate) at rc 0 and
+  emitted two copies of every count line — the exact state this repo's
+  `_duplicated_count_line_kinds` guard rejects. Aligned sides that differ only in
+  their numbers are now `count-line`, at any length.
+* **The same lines at two revisions.** Sharing no byte-equal line is *not*
+  evidence of separate additions: an older and a newer revision of a paragraph are
+  never equal. #1140's live `Agent.md` block had ours' two paragraph lines as
+  strict prefixes of master's (890 vs 539 and 601 vs 471 characters), and the
+  fallback's `KEEP BOTH` would have emitted the stale *and* the current copy of
+  each paragraph, at rc 0. A strict prefix relation now escalates to a human.
+
+The tool is a **decision aid, not an automatic resolver**. It never edits a
 file: it classifies each conflict block and prints the resolution the evidence
-supports, so the class is explicit and reviewable instead of inferred. The one
-case it cannot decide (`overlapping`) is the one where a human must read both
-sides.
+supports, so the class is explicit and reviewable instead of inferred. The cases
+it cannot decide (`overlapping`) are where a human must read both sides.
 
 Usage:
     python3 scripts/classify-conflict.py <file> [<file> ...]
@@ -144,22 +163,71 @@ def _content_lines(text: str) -> list[str]:
 
 
 def _differ_only_by_number(ours: list[str], theirs: list[str]) -> bool:
-    """True when both sides are one line each and differ only in an integer.
+    """True when the sides are aligned and differ only in integers (all counts).
 
-    Both lines must also carry a *documented* count (see `_DOC_COUNT`): a
-    parenthesised number, as in the Agent.md count line. Without that second
-    condition `x = compute(1)` vs `x = compute(2)` matched, and the tool answered
-    "measure, never pick a side, exit 0" about a code change - advice that is not
-    merely unhelpful but actively closes the one case a human must read.
+    Every corresponding pair must carry a *documented* count (see `_DOC_COUNT`): a
+    parenthesised number, as in the Agent.md count line. Without that condition
+    `x = compute(1)` vs `x = compute(2)` matched, and the tool answered "measure,
+    never pick a side, exit 0" about a code change - advice that is not merely
+    unhelpful but actively closes the one case a human must read.
+
+    The sides must also be the **same length**: a block that only differs by
+    numbers is an aligned pair of revisions, and an unaligned hunk is a different
+    shape (there is no pairing to compare).
+
+    Several count lines at once, not just one. The first version required both
+    sides to be exactly one line, which was measured 2026-09-11
+    (`cyc20260911-190629`) to be too narrow in a *silent* way: 3 of the last 51
+    Agent.md commits moved 2+ documented counts at once, and git then emits one
+    block covering all of them. That block fell through to the content-line
+    fallback, which saw "the two sides share no content line" - true, the numbers
+    differ - and answered KEEP BOTH (concatenate) at rc 0, concatenating two
+    copies of every count line: precisely the state this repo's own
+    `_duplicated_count_line_kinds` guard rejects. Measured on a real `git merge`
+    of an aligned two-count block, and reproduced for three counts.
     """
-    if len(ours) != 1 or len(theirs) != 1:
+    if not ours or len(ours) != len(theirs):
         return False
-    a, b = ours[0], theirs[0]
-    if a == b:
-        return False
-    if not (_DOC_COUNT.search(a) and _DOC_COUNT.search(b)):
-        return False
-    return _NUMBER.sub("#", a) == _NUMBER.sub("#", b)
+    for a, b in zip(ours, theirs):
+        if a == b:
+            continue
+        if not (_DOC_COUNT.search(a) and _DOC_COUNT.search(b)):
+            return False
+        # Masking every digit run is what makes this "differs only by numbers":
+        # all non-digit characters must still line up, so a text difference - a
+        # renamed test, a reworded sentence - cannot pass as a count change.
+        if _NUMBER.sub("#", a) != _NUMBER.sub("#", b):
+            return False
+    return True
+
+
+def _looks_like_a_revision(ours: list[str], theirs: list[str]) -> bool:
+    """True when a line on one side is a strict prefix of a line on the other.
+
+    Sharing no byte-identical line is **not** evidence that the sides are separate
+    additions: two sides can be the same lines at different revisions, and those
+    are never equal. A strict prefix relation is the cheap exact signal of that -
+    the newer side merely continues where the older one stopped.
+
+    Measured on #1140's live Agent.md block (2026-09-11, `cyc20260911-190629`):
+    ours' two paragraph lines are strict prefixes of master's two (890 vs 539 and
+    601 vs 471 characters, same order), so "the two sides share no content line -
+    KEEP BOTH" would have emitted **both the stale and the current copy of each
+    paragraph**. Advice that duplicates content is as wrong as advice that drops
+    it, and this one arrived at rc 0, i.e. as a verdict.
+
+    The conservative answer is taken deliberately. The prefix relation is real
+    evidence that the shorter side is an older revision, but it is weaker than the
+    symbol path's name-subset test (a prefix is not a claim about the rest of the
+    line), so it escalates to a human instead of recommending a side-pick. The two
+    errors are not symmetric: escalating costs one read, a wrong "take theirs"
+    silently drops a line.
+    """
+    for a in ours:
+        for b in theirs:
+            if a != b and (b.startswith(a) or a.startswith(b)):
+                return True
+    return False
 
 
 def _symbols(text: str) -> set[str]:
@@ -285,6 +353,18 @@ def classify(ours_text: str, theirs_text: str) -> tuple[str, str]:
 
     ours_set, theirs_set = set(ours), set(theirs)
     if not ours_set & theirs_set:
+        # No shared line is *not* automatically disjoint additions: the sides can
+        # be the same lines at two revisions, which are never byte-equal. Treat the
+        # prefix relation as the evidence that this is what happened, and escalate
+        # - see `_looks_like_a_revision`.
+        if _looks_like_a_revision(ours, theirs):
+            return (
+                OVERLAPPING,
+                "the sides share no line, but a line on one side continues a line "
+                "on the other - these are the same lines at two revisions, so KEEP "
+                "BOTH would emit both copies and a side-pick may drop a change; a "
+                "human must read it",
+            )
         return (
             DISJOINT,
             "the two sides share no content line - KEEP BOTH (concatenate)",
