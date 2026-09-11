@@ -6,12 +6,25 @@ Usage
     uv run --no-sync python3 scripts/check-doc-count.py           # report drift, exit 1
     uv run --no-sync python3 scripts/check-doc-count.py --write   # rewrite Agent.md
     uv run --no-sync python3 scripts/check-doc-count.py --dry-run # show the change
+    uv run --no-sync python3 scripts/check-doc-count.py --resolve-conflict
 
 `--write` and `--dry-run` are mutually exclusive: one repairs, the other must not
 write, so the pair is rejected outright rather than silently resolved in favour
 of one of them (measured before this was enforced: `--write --dry-run` printed
 the dry-run line, wrote nothing, and exited 0 - the requested action was dropped
 without a word).
+
+`--resolve-conflict` is for the state `--write` cannot act on. During a merge the
+count line arrives wrapped in `<<<<<<<`/`=======`/`>>>>>>>` markers, so the doc
+holds *two* counts and plain `--write` refuses (rc=2, correctly - it will not
+guess which is real). The resolution is not to pick a side: both sides are stale
+by construction, which is exactly why they conflicted. This mode removes the
+marker block, keeps the surrounding structure, and then writes the number
+*measured on the merged tree*, so the value never comes from either side of the
+conflict. Measured 2026-09-11: three consecutive unblocks of PRs that had gone
+dirty after a merge each needed that strip-markers-then-measure dance by hand.
+It refuses when the conflict is anywhere other than the count line, so it
+cannot be used as a general "delete the markers" button.
 
 Run it with the project interpreter: the measurement shells out to pytest, so a
 bare `python3` that cannot import pytest fails loud with that reason rather than
@@ -62,6 +75,26 @@ DOC = REPO_ROOT / "Agent.md"
 COUNT_LINE = re.compile(r"(?P<head>uv run pytest tests/ -v` \()(?P<count>\d+)(?P<tail>\))")
 
 COLLECTED = re.compile(r"(\d+) tests? collected")
+
+# A full conflict block: `<<<<<<< label`, both sides, `>>>>>>> label`. Kept as one
+# pattern with named sides so the resolver can be driven without a real merge.
+CONFLICT_BLOCK = re.compile(
+    r"^<<<<<<<[^\n]*\n(?P<ours>.*?)^=======\n(?P<theirs>.*?)^>>>>>>>[^\n]*\n",
+    re.S | re.M,
+)
+
+# `merge.conflictStyle = diff3` (and `zdiff3`) inserts a `||||||| <base>` section
+# between the two sides - measured 2026-09-11 on this machine with a real
+# `git merge`: the base line is a third copy of the conflicted line. The subtle
+# part, also measured: `CONFLICT_BLOCK` does *not* simply fail to match this
+# layout - it matches while swallowing the base line into `ours`, so the two
+# captured sides are `"<ours>\n||||||| <base>"` and `"<theirs>"`. The block is
+# therefore misread as a content conflict: the reader is told the sides "differ
+# by more than the count", which is false (all three differ only in the number)
+# and points them at hand-picking a side, the one repair this tool exists to
+# prevent. Detecting the layout *before* matching turns that into an accurate
+# refusal. Do not reorder these two checks.
+CONFLICT_BASE_SECTION = re.compile(r"^\|\|\|\|\|\|\|[^\n]*\n", re.M)
 
 # The one spelling of "run this tool" that every hint in this repo prints: this
 # module's two hints, the pytest guard's failure message, and Agent.md's doc
@@ -135,6 +168,69 @@ def documented_count(text: str) -> int:
     return int(matches[0].group("count"))
 
 
+def resolve_conflict(text: str) -> str:
+    """Strip the count line's conflict block, leaving the structure, not a side.
+
+    Refuses unless the conflict is *exactly* the count line: if any other part of
+    the document is conflicted, resolving here would silently drop whichever
+    lines lost - and git, not this tool, is what should decide that. The check is
+    therefore structural: after removing the block, the document must be free of
+    conflict markers, and the two sides must be the same line modulo the number.
+
+    Returns the unresolved text (markers gone, count still ambiguous) so the
+    caller can print a real `documented -> measured` transition - resolving and
+    measuring are separate steps because the number must come from the tree, not
+    from either side.
+    """
+    if CONFLICT_BASE_SECTION.search(text):
+        raise DocCountError(
+            "the conflict uses the diff3 layout (`||||||| <base>`), which this "
+            "tool does not parse: it cannot tell whether the conflict is the "
+            "count line, so it must not resolve it. Re-merge with git's "
+            "default layout (`git config merge.conflictStyle merge` and "
+            "recreate the conflict), or resolve by hand"
+        )
+    matches = list(CONFLICT_BLOCK.finditer(text))
+    if not matches:
+        raise DocCountError(
+            f"no conflict block found in {DOC.name}; nothing to resolve "
+            "(use --write for a plain drift)"
+        )
+    if len(matches) > 1:
+        raise DocCountError(
+            f"{len(matches)} conflict blocks found in {DOC.name}; this tool only "
+            "resolves the count line - resolve the others by hand"
+        )
+
+    block = matches[0]
+    ours, theirs = block.group("ours"), block.group("theirs")
+    if COUNT_LINE.search(ours) is None or COUNT_LINE.search(theirs) is None:
+        raise DocCountError(
+            "the conflict is not the count line; this tool only resolves that "
+            "line - resolve this one by hand"
+        )
+
+    # The two sides must be the same line but for the number, or this is a
+    # conflict about content and picking either side would be a real choice.
+    def masked(side: str) -> str:
+        return COUNT_LINE.sub(lambda m: m.group("head") + "#" + m.group("tail"), side)
+
+    if masked(ours) != masked(theirs):
+        raise DocCountError(
+            "the conflicted line differs by more than the count, so this is a "
+            "content conflict and the tool must not choose a side (the block "
+            "either changes text other than the number, or spans more than the "
+            "one count line)"
+        )
+
+    resolved = text[: block.start()] + ours + text[block.end() :]
+    if CONFLICT_BLOCK.search(resolved) or ">>>>>>>" in resolved:
+        raise DocCountError(
+            "conflict markers remain outside the count line; resolve by hand"
+        )
+    return resolved
+
+
 def patch(text: str, measured: int) -> str:
     """Replace the documented count. Only that number may change."""
     match = COUNT_LINE.search(text)
@@ -151,6 +247,50 @@ def patch(text: str, measured: int) -> str:
             "refusing to write: the patch would change more than the count"
         )
     return patched
+
+
+def _resolve_conflict_mode() -> int:
+    """`--resolve-conflict`: strip the count line's conflict, then measure.
+
+    The measurement happens *after* the markers are gone, on the tree as it
+    stands, so the written number is the merged tree's own - not ours, not
+    theirs, not a remembered value.
+    """
+    try:
+        text = DOC.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"error: cannot read {DOC}: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        resolved = resolve_conflict(text)
+    except DocCountError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        documented = documented_count(resolved)
+        measured = measured_count()
+    except DocCountError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        patched = patch(resolved, measured)
+        DOC.write_text(patched, encoding="utf-8")
+    except DocCountError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"error: cannot write {DOC}: {exc}", file=sys.stderr)
+        return 2
+
+    print(
+        f"resolved {DOC.name}: conflict block removed, "
+        f"{documented} -> {measured} (measured on the merged tree)"
+    )
+    print("Next: uv run --no-sync pytest tests/test_doc_counts.py -q")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -170,7 +310,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="show the change without writing",
     )
+    mode.add_argument(
+        "--resolve-conflict",
+        action="store_true",
+        help=(
+            "resolve a conflicted count line by measurement: strip the conflict "
+            "block and write the count measured on the merged tree (refuses if "
+            "the conflict is anywhere other than the count line)"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.resolve_conflict:
+        return _resolve_conflict_mode()
 
     try:
         text = DOC.read_text(encoding="utf-8")

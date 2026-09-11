@@ -402,6 +402,183 @@ def test_write_and_dry_run_together_are_rejected() -> None:
     assert excinfo.value.code == 2
 
 
+# ---------------------------------------------------------------------------
+# `--resolve-conflict`: the merge-time state plain `--write` cannot act on.
+#
+# Measured 2026-09-11 (cyc20260911-020021): merging #1130 made the three sibling
+# PRs dirty, and each unblock needed the same hand dance - view the conflict,
+# strip the markers, then measure. The rule the dance encodes is that neither
+# side may win: both are stale by construction, which is *why* they conflicted.
+# The tests below pin that rule as an executable refusal, not as advice.
+
+
+def _conflicted(doc_text: str, ours: int, theirs: int) -> str:
+    """Wrap the count line in a conflict block with two different numbers."""
+    match = re.search(r"^Python: `uv run pytest tests/ -v` \(\d+\).*$", doc_text, re.M)
+    assert match, "no count line to conflict"
+    sides = []
+    for value in (ours, theirs):
+        sides.append(re.sub(r"\(\d+\)", f"({value})", match.group(0), count=1))
+    block = (
+        f"<<<<<<< HEAD\n{sides[0]}\n=======\n{sides[1]}\n>>>>>>> master"
+    )
+    return doc_text[: match.start()] + block + doc_text[match.end() :]
+
+
+def test_resolve_conflict_strips_markers_and_leaves_structure(mod, tmp_path) -> None:
+    """The block goes; everything around it stays byte-identical."""
+    doc = _doc(tmp_path, 1249)
+    text = doc.read_text()
+    resolved = mod.resolve_conflict(_conflicted(text, 1372, 1337))
+    assert "<<<<<<<" not in resolved and ">>>>>>>" not in resolved
+    assert "=======" not in resolved.splitlines()
+    # Only the conflicted line changed - one of the two sides is now the only
+    # count, and the rest of the document is untouched.
+    assert resolved.replace("(1372)", "(1249)") == text
+
+
+def test_resolve_conflict_refuses_a_doc_with_no_conflict(mod, tmp_path) -> None:
+    with pytest.raises(mod.DocCountError, match="no conflict block found"):
+        mod.resolve_conflict(_doc(tmp_path, 1249).read_text())
+
+
+def test_resolve_conflict_refuses_a_conflict_that_is_not_the_count_line(
+    mod, tmp_path
+) -> None:
+    """A tool that deletes markers anywhere is not this tool.
+
+    The dangerous failure mode: someone reaches for the resolver on a content
+    conflict and one side's lines vanish silently. It must refuse, and the
+    refusal must name the reason.
+    """
+    text = _doc(tmp_path, 1249).read_text()
+    text += "<<<<<<< HEAD\nRenderer: 514\n=======\nRenderer: 517\n>>>>>>> master\n"
+    with pytest.raises(mod.DocCountError, match="not the count line"):
+        mod.resolve_conflict(text)
+
+
+def test_resolve_conflict_refuses_when_the_sides_differ_by_more_than_the_number(
+    mod, tmp_path
+) -> None:
+    """Same line, different content = a real choice; the tool must not make it."""
+    text = _doc(tmp_path, 1249).read_text()
+    match = re.search(r"^Python: .*$", text, re.M)
+    line = match.group(0)
+    other = line.replace("import check: x", "import check: DIFFERENT")
+    block = f"<<<<<<< HEAD\n{line}\n=======\n{other}\n>>>>>>> master"
+    with pytest.raises(mod.DocCountError, match="differs by more than the count"):
+        mod.resolve_conflict(text[: match.start()] + block + text[match.end() :])
+
+
+# The diff3 layout, captured verbatim from a real `git merge` (measured
+# 2026-09-11 on this machine: two branches changing only the number, merged with
+# `merge.conflictStyle = diff3`). `CONFLICT_BLOCK` does not recognise this shape,
+# so the resolver cannot tell whether the conflict is the count line - and the
+# important part is that it says so. Before this test, the same input produced
+# "the conflicted line differs by more than the count": false (all three lines
+# differ only in the number) and it steered the reader toward picking a side,
+# which is the one repair the tool exists to prevent.
+_DIFF3_CONFLICT = (
+    "head\n"
+    "<<<<<<< HEAD\n"
+    "Python: `uv run pytest tests/ -v` (1372)\n"
+    "||||||| c6cd3d6\n"
+    "Python: `uv run pytest tests/ -v` (1335)\n"
+    "=======\n"
+    "Python: `uv run pytest tests/ -v` (1337)\n"
+    ">>>>>>> other\n"
+    "tail\n"
+)
+
+
+def test_resolve_conflict_names_the_diff3_layout_it_cannot_parse(mod, tmp_path) -> None:
+    """An unrecognised conflict layout must be named, not misdiagnosed.
+
+    Negative state (refusal) checked here; the positive control is
+    `test_resolve_conflict_still_resolves_the_supported_layout` below - without
+    it, a blanket refusal would pass this test while breaking the resolver.
+    """
+    text = _doc(tmp_path, 1249).read_text()
+    with pytest.raises(mod.DocCountError, match="diff3"):
+        mod.resolve_conflict(text + _DIFF3_CONFLICT)
+
+
+def test_resolve_conflict_still_resolves_the_supported_layout(mod, tmp_path) -> None:
+    """Positive control for the diff3 refusal: the supported layout still works."""
+    doc = _doc(tmp_path, 1249)
+    text = doc.read_text()
+    resolved = mod.resolve_conflict(_conflicted(text, 1372, 1337))
+    assert "|||||||" not in resolved and "<<<<<<<" not in resolved
+
+
+def test_resolve_conflict_does_not_blame_the_number_for_a_multiline_block(
+    mod, tmp_path
+) -> None:
+    """A block spanning extra lines is not "differing by more than the count".
+
+    The refusal must survive, but its wording has to stay true: the two sides of
+    this block differ by an entire line, not merely by the number.
+    """
+    text = _doc(tmp_path, 1249).read_text()
+    match = re.search(r"^Python: .*$", text, re.M)
+    line = match.group(0)
+    block = f"<<<<<<< HEAD\n{line}\nextra: only ours\n=======\n{line}\n>>>>>>> master"
+    with pytest.raises(mod.DocCountError, match="content conflict"):
+        mod.resolve_conflict(text[: match.start()] + block + text[match.end() :])
+
+
+def test_resolve_conflict_mode_writes_the_measured_value(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """End to end: conflicted doc in, measured count out - neither side wins.
+
+    The two sides say 1372 and 1337; the tree says 1339. Only 1339 may be
+    written, which is what distinguishes measurement from side-picking.
+    """
+    doc = _doc(tmp_path, 1249)
+    doc.write_text(_conflicted(doc.read_text(), 1372, 1337))
+    mod.DOC = doc
+    monkeypatch.setattr(mod, "measured_count", lambda: 1339)
+
+    assert mod.main(["--resolve-conflict"]) == 0
+    out = capsys.readouterr().out
+    assert "conflict block removed" in out and "-> 1339" in out
+    resolved = doc.read_text()
+    assert mod.documented_count(resolved) == 1339
+    assert "<<<<<<<" not in resolved
+
+
+def test_resolve_conflict_mode_leaves_a_conflict_free_doc_alone(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """No conflict = nothing to resolve; rc=2 and the file is not rewritten."""
+    doc = _doc(tmp_path, 1249)
+    before = doc.read_text()
+    mod.DOC = doc
+    monkeypatch.setattr(mod, "measured_count", lambda: 1339)
+
+    assert mod.main(["--resolve-conflict"]) == 2
+    assert doc.read_text() == before
+
+
+def test_resolve_conflict_is_mutually_exclusive_with_write_and_dry_run() -> None:
+    """Three modes, one action: asking for two must fail loud, not pick one."""
+    for pair in (["--resolve-conflict", "--write"], ["--resolve-conflict", "--dry-run"]):
+        with pytest.raises(SystemExit) as excinfo:
+            _load_module().main(pair)
+        assert excinfo.value.code == 2
+
+
+def test_real_tree_has_no_conflict_to_resolve(mod) -> None:
+    """Integration: the checked-in tree is clean, so the resolver refuses.
+
+    The counterpart to `test_resolve_conflict_mode_writes_the_measured_value`:
+    on a healthy tree this mode is a no-op that says so, rather than a repair
+    that runs because it was asked to.
+    """
+    assert mod.main(["--resolve-conflict"]) == 2
+
+
 def test_real_tree_is_consistent() -> None:
     """Integration: the tool reports OK on the checked-in tree.
 
