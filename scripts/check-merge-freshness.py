@@ -47,6 +47,11 @@ is an ancestor-descendant of master **and** a run exists for that exact SHA.
 
 Keyed on the SHA, not the branch: a branch pushed twice has two runs, and reading
 the older one as the current verdict is the same class of mistake in miniature.
+The query asks GitHub for that SHA's runs directly, so there is no window to fall
+out of either. It is also pinned to the workflow whose verdict is being claimed -
+`test.yml` - because "some passing run" is only the test verdict while nothing
+else happens to run on a PR head.
+
 The run is also required to have *passed* - a failing or cancelled run is not a
 stale verdict, it is a verdict the committer has to deal with on its own terms,
 and this tool says so rather than calling it fresh.
@@ -101,6 +106,16 @@ _STALE_STATUSES = frozenset({"behind", "diverged"})
 # expire - it is a verdict still being formed. Reported as such, never as fresh.
 _UNFINISHED = frozenset({"", "pending", "queued", "in_progress", "requested", "waiting"})
 
+# The workflow whose verdict this tool speaks about, by the name GitHub reports.
+# `test.yml` ("Test") is the only workflow triggered by `pull_request` in this
+# repo, so it is the one whose greenness a merge rests on. Pinned rather than
+# "any passing run": the claim "the verdict is about the tests" was otherwise
+# carried by coincidence (today nothing else runs on a PR head), and the first
+# workflow added on a branch would silently become the verdict instead. A PR head
+# that has runs *but none from this workflow* is reported distinctly, so a rename
+# here reads as "the verdict workflow did not run", not as "the branch has no CI".
+_VERDICT_WORKFLOW = "Test"
+
 
 def _gh_json(args: list[str]) -> object:
     """Run `gh` and parse JSON, failing loud rather than guessing.
@@ -140,29 +155,39 @@ class Verdict:
     reason: str
 
 
-def _latest_run_for_head(head: str, branch: str) -> dict | None:
-    """The newest run whose head is exactly this commit, or None if there is none.
+def _latest_run_for_head(head: str) -> dict | None:
+    """The newest `_VERDICT_WORKFLOW` run for this exact commit, or None.
 
-    Keyed on the SHA: a branch pushed twice has two runs, and reading the older
-    one as the current verdict is the same mistake as reading a stale verdict,
-    one step smaller.
+    Asked by `head_sha`, not by branch + a window: the run set wanted is directly
+    addressable, and the branch form has two failure modes with one cause. It
+    carried `--limit 30`, so a branch pushed more than 30 times would report
+    "no CI run" for a head that has one - fail-loud, but with the wrong reason
+    (measured 2026-09-11 by pm25coder on #1138, who also confirmed the SHA form
+    returns the identical answer). It also assumed the run is reachable under the
+    head *branch* name, which a fork PR or a renamed branch breaks.
+
+    Filtering to `_VERDICT_WORKFLOW` is the second half of the same point: a
+    passing run from *any* workflow is not a test verdict.
     """
-    runs_raw = _gh_json(
+    payload = _gh_json(
         [
-            "run",
-            "list",
-            "-R",
-            REPO,
-            "--branch",
-            branch,
-            "--limit",
-            "30",
-            "--json",
-            "headSha,createdAt,conclusion",
+            "api",
+            f"repos/{REPO}/actions/runs?head_sha={head}&per_page=100",
+            "--jq",
+            "{runs: [.workflow_runs[] | {headSha: .head_sha, name, "
+            "createdAt: .created_at, conclusion}]}",
         ]
     )
+    assert isinstance(payload, dict)
+    runs_raw = payload.get("runs")
     assert isinstance(runs_raw, list)
-    matching = [r for r in runs_raw if isinstance(r, dict) and r.get("headSha") == head]
+    matching = [
+        r
+        for r in runs_raw
+        if isinstance(r, dict)
+        and r.get("headSha") == head
+        and r.get("name") == _VERDICT_WORKFLOW
+    ]
     if not matching:
         return None
     return max(matching, key=lambda r: str(r.get("createdAt") or ""))
@@ -177,12 +202,11 @@ def check_pr(number: int) -> Verdict:
             "-R",
             REPO,
             "--json",
-            "number,title,headRefOid,headRefName",
+            "number,title,headRefOid",
         ]
     )
     assert isinstance(view, dict)
     head_sha = str(view["headRefOid"])
-    branch = str(view["headRefName"])
 
     cmp_raw = _gh_json(
         [
@@ -198,7 +222,7 @@ def check_pr(number: int) -> Verdict:
     behind_by = int(cmp_raw["behind_by"])
     merge_base = str(cmp_raw["merge_base"])
 
-    run = _latest_run_for_head(head_sha, branch)
+    run = _latest_run_for_head(head_sha)
     created = str(run.get("createdAt") or "") if run else None
     conclusion = str(run.get("conclusion") or "") if run else None
 
@@ -236,9 +260,9 @@ def check_pr(number: int) -> Verdict:
             **common,
             stale=True,
             reason=(
-                f"master is an ancestor (status={status}) but there is NO CI run for head "
-                f"{head_sha[:8]} - an unjudged head, which `gh pr checks` reports as "
-                "'no checks reported'"
+                f"master is an ancestor (status={status}) but there is NO {_VERDICT_WORKFLOW} "
+                f"run for head {head_sha[:8]} - an unjudged head, which `gh pr checks` reports "
+                "as 'no checks reported'"
             ),
         )
     if conclusion in _UNFINISHED:

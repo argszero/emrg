@@ -88,10 +88,10 @@ class FakeGh:
         if args[:2] == ["pr", "view"]:
             return self.pr_view
         if args[0] == "api":
+            if any("actions/runs" in a for a in args):
+                return {"runs": self.runs if self.runs is not None else []}
             assert any(a.startswith("repos/") and "/compare/" in a for a in args), args
             return self.compare
-        if args[:2] == ["run", "list"]:
-            return self.runs if self.runs is not None else []
         raise AssertionError(f"unexpected gh call: {args}")
 
 
@@ -101,6 +101,15 @@ def _compare(status: str, ahead: int, behind: int, base: str = BASE) -> dict:
 
 def _view(sha: str = HEAD, branch: str = "feature/x") -> dict:
     return {"number": 1, "title": "t", "headRefOid": sha, "headRefName": branch}
+
+
+def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00:00:00Z") -> dict:
+    """A workflow run, as the actions/runs payload reports it.
+
+    `name` is not decoration: the tool pins the verdict to the `Test` workflow, so
+    a fixture without it is a run the tool is right to ignore.
+    """
+    return {"headSha": sha, "name": "Test", "conclusion": conclusion, "createdAt": at}
 
 
 def _install(mod, monkeypatch, fake: FakeGh) -> None:
@@ -116,7 +125,7 @@ def _run(mod, monkeypatch, fake: FakeGh, argv: list[str] | None = None) -> int:
 
 
 def test_fresh_when_head_contains_master_and_has_a_passing_run(mod, monkeypatch, capsys):
-    fake = FakeGh(_view(), _compare("ahead", 4, 0), [{"headSha": HEAD, "conclusion": "success"}])
+    fake = FakeGh(_view(), _compare("ahead", 4, 0), [_run_()])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert rc == 0
@@ -127,7 +136,7 @@ def test_fresh_when_head_contains_master_and_has_a_passing_run(mod, monkeypatch,
 
 def test_fresh_when_master_has_not_moved_at_all(mod, monkeypatch, capsys):
     """`identical` means master's tip *is* the head - trivially current."""
-    fake = FakeGh(_view(), _compare("identical", 0, 0), [{"headSha": HEAD, "conclusion": "success"}])
+    fake = FakeGh(_view(), _compare("identical", 0, 0), [_run_()])
     assert _run(mod, monkeypatch, fake) == 0
     assert "FRESH" in capsys.readouterr().out
 
@@ -138,7 +147,7 @@ def test_fresh_when_master_has_not_moved_at_all(mod, monkeypatch, capsys):
 def test_stale_when_the_head_does_not_contain_master(mod, monkeypatch, capsys):
     """The #1137 case: the verdict was green but about an older master."""
     fake = FakeGh(
-        _view(), _compare("diverged", 2, 1, base="cb651a4"), [{"headSha": HEAD, "conclusion": "success"}]
+        _view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()]
     )
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
@@ -160,7 +169,7 @@ def test_stale_when_there_is_no_ci_run_for_this_head(mod, monkeypatch, capsys):
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr()
     assert rc == 1
-    assert "NO CI run" in out.out
+    assert "NO Test run" in out.out
     assert "no checks reported" in out.out
 
 
@@ -170,14 +179,32 @@ def test_stale_when_a_run_exists_only_for_a_different_sha(mod, monkeypatch, caps
     A branch pushed twice has runs for both heads; reading the older one as the
     current verdict is the same mistake one step smaller.
     """
-    fake = FakeGh(_view(), _compare("ahead", 1, 0), [{"headSha": OTHER, "conclusion": "success"}])
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(OTHER)])
     rc = _run(mod, monkeypatch, fake)
     assert rc == 1
-    assert "NO CI run" in capsys.readouterr().out
+    assert "NO Test run" in capsys.readouterr().out
+
+
+def test_a_passing_run_from_another_workflow_is_not_the_verdict(mod, monkeypatch, capsys):
+    """The claim is "the *tests* passed", so the workflow is part of the query.
+
+    Today `test.yml` is the only workflow `pull_request` triggers, so accepting
+    any passing run happens to give the right answer - which is exactly the kind
+    of coincidence that stops being true silently, the first time a second
+    workflow is added to a branch. Pinned on a fixture whose only difference from
+    the fresh case is the workflow name.
+    """
+    other_workflow = _run_()
+    other_workflow["name"] = "Build Release"
+    fake = FakeGh(_view(), _compare("ahead", 4, 0), [other_workflow])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "NO Test run" in out, out
 
 
 def test_stale_and_distinguished_when_ci_is_still_running(mod, monkeypatch, capsys):
-    fake = FakeGh(_view(), _compare("ahead", 1, 0), [{"headSha": HEAD, "conclusion": "pending"}])
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(conclusion="pending")])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert rc == 1
@@ -186,7 +213,7 @@ def test_stale_and_distinguished_when_ci_is_still_running(mod, monkeypatch, caps
 
 def test_a_failing_verdict_is_reported_as_failing_not_as_stale(mod, monkeypatch, capsys):
     """Re-running CI will not help, so the wording must not suggest a rebase does."""
-    fake = FakeGh(_view(), _compare("ahead", 1, 0), [{"headSha": HEAD, "conclusion": "failure"}])
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(conclusion="failure")])
     rc = _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert rc == 1
@@ -199,8 +226,8 @@ def test_the_newest_run_for_the_head_wins(mod, monkeypatch, capsys):
         _view(),
         _compare("ahead", 1, 0),
         [
-            {"headSha": HEAD, "conclusion": "failure", "createdAt": "2026-09-11T00:00:00Z"},
-            {"headSha": HEAD, "conclusion": "success", "createdAt": "2026-09-11T01:00:00Z"},
+            _run_(conclusion="failure", at="2026-09-11T00:00:00Z"),
+            _run_(at="2026-09-11T01:00:00Z"),
         ],
     )
     rc = _run(mod, monkeypatch, fake)
@@ -217,7 +244,7 @@ def test_an_unrecognised_compare_status_is_refused_not_called_fresh(mod, monkeyp
     The freshness sets are named rather than written as `status == "ahead"` for
     exactly this case: anything unrecognised has to fail loud.
     """
-    fake = FakeGh(_view(), _compare("some_new_status", 1, 0), [{"headSha": HEAD, "conclusion": "success"}])
+    fake = FakeGh(_view(), _compare("some_new_status", 1, 0), [_run_()])
     rc = _run(mod, monkeypatch, fake)
     err = capsys.readouterr().err
     assert rc == 2
@@ -262,7 +289,7 @@ def test_the_helper_invokes_the_gh_program_by_name(mod, monkeypatch):
 
 
 def test_json_mode_is_machine_readable(mod, monkeypatch, capsys):
-    fake = FakeGh(_view(), _compare("ahead", 4, 0), [{"headSha": HEAD, "conclusion": "success"}])
+    fake = FakeGh(_view(), _compare("ahead", 4, 0), [_run_()])
     rc = _run(mod, monkeypatch, fake, ["1", "--json"])
     payload = json.loads(capsys.readouterr().out)
     assert rc == 0
