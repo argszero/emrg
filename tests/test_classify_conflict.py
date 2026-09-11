@@ -490,6 +490,131 @@ class TestCli:
         )
         assert mod.main([str(f)]) == 0
 
+
+class TestMultipleCountLinesInOneBlock:
+    """A block covering several documented counts is still a `count-line`.
+
+    Measured 2026-09-11 (`cyc20260911-190629`): 3 of the last 51 commits touching
+    Agent.md moved 2+ documented counts at once (e.g. `e46c160`, `5c039b4`,
+    `0c8a212`), and `git merge` then emits a single block spanning every one of
+    them. The one-line-only predicate let that block fall through to the
+    content-line fallback, which answered "share no content line - KEEP BOTH
+    (concatenate)" at rc 0 and concatenated two copies of each count line - the
+    exact state `tests/test_doc_counts.py::_duplicated_count_line_kinds` rejects.
+    Both shapes below were reproduced with a real `git merge` before the fix.
+    """
+
+    def test_two_aligned_count_lines_are_a_count_line(self, mod) -> None:
+        ours = (
+            "Python: `uv run pytest tests/ -v` (1438) - import check\n"
+            "GUI: `cd emrg/gui && npm test` (101: 44 daemon_client)\n"
+        )
+        theirs = (
+            "Python: `uv run pytest tests/ -v` (1477) - import check\n"
+            "GUI: `cd emrg/gui && npm test` (102: 45 daemon_client)\n"
+        )
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.COUNT_LINE, (
+            "an aligned multi-count block is the same shape as the single-line one; "
+            "calling it `disjoint` concatenates duplicate count lines"
+        )
+        assert "KEEP BOTH" not in advice
+        assert "measure" in advice.lower()
+
+    def test_three_aligned_count_lines_are_a_count_line(self, mod) -> None:
+        ours = (
+            "Python: `uv run pytest tests/ -v` (1438) - import check\n"
+            "GUI: `cd emrg/gui && npm test` (101: 44 daemon_client)\n"
+            "Renderer: `cd emrg/gui/renderer && npm test` (518: 5 snapshot-store)\n"
+        )
+        theirs = (
+            "Python: `uv run pytest tests/ -v` (1477) - import check\n"
+            "GUI: `cd emrg/gui && npm test` (102: 45 daemon_client)\n"
+            "Renderer: `cd emrg/gui/renderer && npm test` (520: 5 snapshot-store)\n"
+        )
+        assert mod.classify(ours, theirs)[0] == mod.COUNT_LINE
+
+    def test_a_multi_line_text_change_is_still_not_a_count_line(self, mod) -> None:
+        """Generalising the rule must not swallow real content.
+
+        Every *differing* pair must pass the documented-count test, so a renamed
+        test or a reworded sentence keeps its content classification (this is the
+        #1125-class mistake: a predicate that fires on code it should not).
+        """
+        ours = (
+            "Python: `uv run pytest tests/ -v` (1438) - import check\n"
+            "renamed_a_test_case: something_else\n"
+        )
+        theirs = (
+            "Python: `uv run pytest tests/ -v` (1477) - import check\n"
+            "renamed_a_test_case: something_different\n"
+        )
+        assert mod.classify(ours, theirs)[0] != mod.COUNT_LINE
+
+    def test_unaligned_sides_are_not_a_count_line(self, mod) -> None:
+        """No pairing to compare: different lengths is a different shape."""
+        ours = "Python: `uv run pytest tests/ -v` (1438) - import check\n"
+        theirs = (
+            "Python: `uv run pytest tests/ -v` (1477) - import check\n"
+            "GUI: `cd emrg/gui && npm test` (102: 45 daemon_client)\n"
+        )
+        assert mod.classify(ours, theirs)[0] != mod.COUNT_LINE
+
+
+class TestRevisionPrefixesAreNotDisjointAdditions:
+    """Sharing no byte-equal line is not evidence of separate additions.
+
+    The live case (`cyc20260911-190629`): #1140's Agent.md block 2 has ours' two
+    paragraph lines as strict *prefixes* of master's two - the same paragraphs at
+    an older revision (890 vs 539, 601 vs 471 characters, same order). The
+    fallback saw no shared line and said KEEP BOTH at rc 0, which emits the stale
+    **and** the current copy of each paragraph.
+    """
+
+    def test_a_stale_longer_copy_escalates_instead_of_keep_both(self, mod) -> None:
+        """Pinned to the live shape, including its *zero* shared lines.
+
+        The fixture must share no line at all - that is what routes the pair into
+        the `not ours_set & theirs_set` branch. A fixture with even one shared line
+        passes through the older partial-overlap branch instead, so it would keep
+        passing with the prefix rule removed (measured: an earlier version of this
+        test survived exactly that mutation).
+        """
+        ours = (
+            "Doc count sync: `uv run --no-sync python3 scripts/check-doc-count.py` "
+            "- measures the tree and checks Agent.md; root now resolves from cwd\n"
+            "Node count sync: `uv run --no-sync python3 scripts/check-node-test-count.py` "
+            "- asks the real runners\n"
+        )
+        theirs = (
+            "Doc count sync: `uv run --no-sync python3 scripts/check-doc-count.py`\n"
+            "Node count sync: `uv run --no-sync python3 scripts/check-node-test-count.py`\n"
+            "Vote count: `uv run --no-sync python3 scripts/check-vote-count.py <PR>...`\n"
+        )
+        assert not (set(mod._content_lines(ours)) & set(mod._content_lines(theirs)))
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING, (
+            "KEEP BOTH would emit both the stale and the current paragraph"
+        )
+        # Assert on the *recommendation*, not the substring: the advice explains
+        # why KEEP BOTH would be wrong, so it mentions the phrase.
+        assert "KEEP BOTH (concatenate)" not in advice
+        assert "human must read" in advice
+
+    def test_genuinely_unrelated_paragraphs_stay_disjoint(self, mod) -> None:
+        """The fix must not turn every prose conflict into an escalation.
+
+        Two lines per side on purpose: a single line per side is the *older*
+        rule's escalation (one line against one line has no evidence to decide
+        between an edit and an adjacent addition), so a one-line fixture would
+        pass for the wrong reason and would not exercise the prefix rule at all.
+        """
+        ours = "alpha beta gamma\ndelta epsilon zeta\n"
+        theirs = "eta theta iota\nkappa lambda mu\n"
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.DISJOINT
+        assert "KEEP BOTH" in advice
+
     def test_the_reported_summary_names_the_classes(self, mod, tmp_path, capsys) -> None:
         f = tmp_path / "z.py"
         f.write_text(
