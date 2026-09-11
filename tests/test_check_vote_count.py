@@ -102,11 +102,11 @@ def _run(mod, monkeypatch, fake: FakeGh, argv: list[str] | None = None) -> int:
     return mod.main(argv if argv is not None else ["1"])
 
 
-# --- classification: the leading mark, not a mark anywhere -----------------
+# --- classification: the mark, however it is decorated ---------------------
 
 
 def test_a_vote_that_merely_mentions_the_absence_of_a_veto_is_still_an_approval():
-    """The bug this classifier shipped with.
+    """The bug the second version shipped with.
 
     Measured 2026-09-11 on #1134: the first version searched the first *line* for
     the veto mark and read a real approval as a veto, because the body says
@@ -114,6 +114,12 @@ def test_a_vote_that_merely_mentions_the_absence_of_a_veto_is_still_an_approval(
     usable votes where it had 11, silently discarding two - and the failure
     direction matters: an under-count looks like "not ready yet", which is a
     plausible-enough state that nobody investigates.
+
+    Measured again this cycle over all 176 reviews on the 40 most recent PRs: 45
+    bodies carry both marks, and **every one of the 6 that approves while
+    mentioning ❌ on its first line does so in this negated form**. So
+    negation-awareness is what makes a line-wide veto test safe, and it is pinned
+    here rather than assumed.
     """
     from_check = _load_module()
     body = (
@@ -123,12 +129,81 @@ def test_a_vote_that_merely_mentions_the_absence_of_a_veto_is_still_an_approval(
     assert from_check._classify(body) == "approve"
 
 
-def test_the_verdict_is_read_from_the_first_character(mod):
+def test_the_verdict_mark_is_read_after_markdown_decoration(mod):
+    """The bug the third version fixed - a veto behind `**`, `-`, `>` or `#`.
+
+    Measured 2026-09-11 (cycle cyc20260911-130120) against the version that read
+    the body's first *character*: 0 of 176 real bodies use any of these shapes, so
+    the defect was latent. Latent is not the same as harmless, and the reason is
+    the direction it fails in - a veto that classifies as a comment is skipped
+    wholesale by `check_pr`, so it never resets the run:
+
+        ✅ (cycle X)  ✅ (cycle Y)  **❌ Needs fix**  ✅ (cycle Z)
+                                ^ read as comment
+        -> run = 3 -> READY 3/3, on reviews a ❌ had already answered.
+
+    It was also asymmetric: "**✅ LGTM**" still reached approval through the LGTM
+    fallback below, so only the veto side was ever wrong - which is why the fix
+    has to cover both marks.
+    """
+    assert mod._classify("**\u274c Needs fix:** something") == "veto", "bold veto"
+    assert mod._classify("- \u274c needs fix") == "veto", "bullet veto"
+    assert mod._classify("> \u274c needs fix") == "veto", "quoted veto"
+    assert mod._classify("## \u274c Needs fix") == "veto", "heading veto"
+    assert mod._classify("1. \u274c needs fix") == "veto", "ordered-list veto"
+    assert mod._classify("**\u2705 LGTM** - cycle `c`") == "approve", "bold approval"
+    assert mod._classify("- \u2705 LGTM - cycle `c`") == "approve", "bullet approval"
+    assert mod._classify("> \u2705 LGTM - cycle `c`") == "approve", "quoted approval"
+
+
+def test_a_decorated_veto_resets_the_run_instead_of_being_skipped(mod, monkeypatch, capsys):
+    """The consequence above, at the level that actually matters: the count.
+
+    Two approvals then a decorated veto then a third approval is **one** vote.
+    Reading the veto as a comment reports READY 3/3 and would merge on a review
+    that asked for a fix - the one outcome this tool exists to prevent.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+                   _review("2026-09-11T03:00:00Z",
+                           "**\u274c Needs fix:** cycle `cyc20260911-030000`"),
+                   _approve("cyc20260911-040000", "2026-09-11T04:00:00Z")])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 1/3" in out
+    assert "NO  " in out, "the veto must be listed as a veto, not skipped as a comment"
+
+
+def test_a_negated_mark_is_not_a_statement_of_that_mark(mod):
+    """"no ❌" is prose about the veto; "Not LGTM" is a refusal, not an approval."""
+    assert mod._classify("\u2705 LGTM - cycle `c` (no \u274c at this head)") == "approve"
+    assert mod._classify("Not LGTM - cycle `c`") == "veto", "a refusal must not count as a vote"
+    assert mod._classify("no \u2705 from me yet, cycle `c`") == "comment"
+    # The negation must not reach across a word: "not bad" is praise.
+    assert mod._classify("Not bad, LGTM - cycle `c`") == "approve"
+
+
+def test_a_veto_wins_when_both_marks_are_on_the_verdict_line(mod):
+    """The rule the `_VETO_MARK` comment has always asserted, now actually held.
+
+    "✅ but ❌ on the second point" is a request for changes. The version that read
+    only the first character returned `approve` here - the comment described
+    behaviour the code did not have.
+    """
+    assert mod._classify("\u2705 LGTM, but \u274c on the second point - cycle `c`") == "veto"
+
+
+def test_the_verdict_is_read_from_the_first_content_line(mod):
     assert mod._classify("\u2705 LGTM - cycle `c`") == "approve"
     assert mod._classify("\u274c Needs fix: something") == "veto"
     assert mod._classify("  \u2705 LGTM - cycle `c`") == "approve", "leading whitespace is common"
     assert mod._classify("Just a comment about the code") == "comment"
     assert mod._classify("") == "comment"
+    assert mod._classify("\n\n   \n") == "comment", "whitespace-only body is not a vote"
+    # A decoration-only first line is skipped: the verdict is on the line after it.
+    assert mod._classify("---\n\u274c needs fix - cycle `c`") == "veto"
+    assert mod._classify("---\n\u2705 LGTM - cycle `c`") == "approve"
 
 
 def test_a_body_that_does_not_open_with_a_mark_but_claims_lgtm_counts(mod):
