@@ -269,3 +269,41 @@ def test_json_mode_is_machine_readable(mod, monkeypatch, capsys):
     assert payload[0]["stale"] is False
     assert payload[0]["head"] == HEAD
     assert payload[0]["merge_base"] == BASE
+
+
+def test_no_function_has_an_unused_parameter() -> None:
+    """Every declared parameter must be read somewhere in its own body.
+
+    Added because this script shipped one: `_latest_run_for_head(head, branch,
+    number)` never read `number`, left over from a draft that used it to build the
+    error message. A dead parameter is not cosmetic here - it tells the next reader
+    the function needs the PR number to do its job, which is exactly the kind of
+    false signal about a *merge-gate* helper that this repo treats as a defect.
+
+    Parsed with `ast` rather than a regex, and checked against the whole function
+    body including nested scopes, so a parameter read only inside a closure still
+    counts as used. `self` is excluded (methods), as are names prefixed with `_`.
+    """
+    import ast
+
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        args = node.args
+        declared = [a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)]
+        if args.vararg:
+            declared.append(args.vararg.arg)
+        if args.kwarg:
+            declared.append(args.kwarg.arg)
+        named = set(declared) - {"self"}
+        used = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+        used |= {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+        for param in sorted(named):
+            if param not in used:
+                offenders.append(f"{node.name}({param})")
+    assert not offenders, (
+        "unused parameter(s) - each declares a dependency the body does not have: "
+        f"{offenders}"
+    )

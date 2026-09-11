@@ -140,7 +140,7 @@ class Verdict:
     reason: str
 
 
-def _latest_run_for_head(head: str, branch: str, number: int) -> dict | None:
+def _latest_run_for_head(head: str, branch: str) -> dict | None:
     """The newest run whose head is exactly this commit, or None if there is none.
 
     Keyed on the SHA: a branch pushed twice has two runs, and reading the older
@@ -198,7 +198,7 @@ def check_pr(number: int) -> Verdict:
     behind_by = int(cmp_raw["behind_by"])
     merge_base = str(cmp_raw["merge_base"])
 
-    run = _latest_run_for_head(head_sha, branch, number)
+    run = _latest_run_for_head(head_sha, branch)
     created = str(run.get("createdAt") or "") if run else None
     conclusion = str(run.get("conclusion") or "") if run else None
 
