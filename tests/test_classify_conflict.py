@@ -241,6 +241,115 @@ class TestBlockParsing:
         assert mod.conflicts_in(text) == []
 
 
+# Captured verbatim from the shape `merge.conflictStyle = diff3` produces: the
+# base section sits between ours and the separator, and the sides are *reordered*
+# relative to git's default layout for this input (HEAD is added last).
+#
+# Without a base-section check `CONFLICT_BLOCK` still matches - it reads the base
+# into OURS, so the compared hunks are (ours + base) versus theirs. Measured
+# 2026-09-11 with the real block below:
+#
+#     ours   = "def test_alpha():\n    assert 1 == 1\n"
+#              "||||||| merged common ancestors\n"
+#              "def test_beta():\n    assert 2 == 2\n"
+#     theirs = "def test_gamma():\n    assert 3 == 3\n"
+#     -> "disjoint ... KEEP BOTH (concatenate)", exit 0
+#
+# Concatenating that keeps the *base* copy - a third version of the same hunk that
+# neither side wants. The advice is not merely imprecise; acting on it does the
+# wrong thing, which is what this tool exists to prevent.
+_DIFF3_BLOCK = (
+    "before\n"
+    "<<<<<<< HEAD\n"
+    "def test_alpha():\n"
+    "    assert 1 == 1\n"
+    "||||||| merged common ancestors\n"
+    "def test_beta():\n"
+    "    assert 2 == 2\n"
+    "=======\n"
+    "def test_gamma():\n"
+    "    assert 3 == 3\n"
+    ">>>>>>> master\n"
+    "after\n"
+)
+
+
+class TestTheDiff3LayoutIsRefusedNotMisread:
+    """The layout the tool cannot read must be named, not answered.
+
+    Same conclusion the sibling tool reached first: `check-doc-count.py` refuses a
+    `|||||||` base section by name, because it cannot tell whether the conflict is
+    the count line. Here the stakes are the advice itself.
+    """
+
+    def test_the_base_section_is_named(self, mod) -> None:
+        assert mod.base_section(_DIFF3_BLOCK) == "||||||| merged common ancestors"
+
+    def test_no_base_section_is_reported_as_none(self, mod) -> None:
+        """The discriminating signal must be absent for the layout we do parse."""
+        default_layout = (
+            "<<<<<<< HEAD\nours line\n=======\ntheirs line\n>>>>>>> master\n"
+        )
+        assert mod.base_section(default_layout) is None
+
+    def test_the_cli_refuses_the_diff3_layout(self, mod, tmp_path, capsys) -> None:
+        f = tmp_path / "diff3.py"
+        f.write_text(_DIFF3_BLOCK, encoding="utf-8")
+        assert mod.main([str(f)]) == 1, (
+            "a layout the tool cannot read must not exit 0 - rc 0 is the caller's "
+            "signal that every block was classified and the advice is safe to act on"
+        )
+        out = capsys.readouterr().out
+        assert "unparsed-layout" in out
+        assert "|||||||" in out, "the refusal must name the marker it found"
+        assert "KEEP BOTH" not in out, (
+            "the whole defect: this block was answered `disjoint - KEEP BOTH`, "
+            "which concatenates the base copy back in"
+        )
+
+    def test_the_default_layout_still_classifies(self, mod, tmp_path) -> None:
+        """Positive control: the refusal must not swallow the layout we do read.
+
+        Without this, a blanket refusal of every file would pass the test above.
+        """
+        f = tmp_path / "normal.py"
+        f.write_text(
+            "<<<<<<< HEAD\ndef only_ours():\n    pass\n=======\n"
+            "def only_theirs():\n    pass\n>>>>>>> origin/master\n",
+            encoding="utf-8",
+        )
+        assert mod.main([str(f)]) == 0
+
+    def test_the_shape_this_repo_actually_hits_is_refused_too(self, mod, tmp_path, capsys) -> None:
+        """The realistic case is Agent.md's count line, not a code hunk.
+
+        Measured with this very input before the fix: the block came back
+        `duplicate - ours is a strict superset - take OURS`, because the base
+        section (which carries the *stale* count) counted as one of ours' extra
+        lines. `take OURS` there discards the base the reviewer was shown and
+        says nothing about measuring the merged tree.
+        """
+        line_ours = "Python: `uv run pytest tests/ -v` (1438) - import check\n"
+        line_base = "Python: `uv run pytest tests/ -v` (1416) - import check\n"
+        f = tmp_path / "Agent.md"
+        f.write_text(
+            "head\n"
+            "<<<<<<< HEAD\n"
+            f"{line_ours}"
+            "||||||| 1a2b3c4\n"
+            f"{line_base}"
+            "=======\n"
+            f"{line_base}"
+            ">>>>>>> master\n"
+            "tail\n",
+            encoding="utf-8",
+        )
+        assert mod.main([str(f)]) == 1
+        out = capsys.readouterr().out
+        assert "unparsed-layout" in out
+        assert "duplicate" not in out and "COUNT-LINE" not in out
+
+
 class TestCli:
     def test_no_paths_is_a_usage_error(self, mod, capsys) -> None:
         assert mod.main([]) == 2

@@ -54,6 +54,34 @@ CONFLICT_BLOCK = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 
+# `merge.conflictStyle = diff3` (and `zdiff3`) inserts a `||||||| <base>` section
+# between ours and the separator, so it does **not** match `CONFLICT_BLOCK` - and
+# the old scan did not notice, it simply read the base into `ours`. Measured
+# 2026-09-11 with a real block:
+#
+#     <<<<<<< HEAD          ours    = "def test_alpha():\n    assert 1 == 1\n"
+#     def test_alpha():              + "||||||| merged common ancestors\n"
+#         assert 1 == 1              + "def test_beta():\n    assert 2 == 2\n"
+#     ||||||| merged common ancestors
+#     def test_beta():      theirs  = "def test_gamma():\n    assert 3 == 3\n"
+#         assert 2 == 2
+#     =======
+#     def test_gamma():
+#         assert 3 == 3
+#     >>>>>>> master        -> "disjoint ... KEEP BOTH (concatenate)"   exit 0
+#
+# Concatenating that keeps the **base** copy - a third version of the same hunk
+# that neither side wants - and the advice arrives with exit 0, i.e. as a
+# verdict, when the honest answer is "I cannot read this layout". The sibling
+# tool reached the same conclusion first and refuses the layout by name
+# (`check-doc-count.py`, `CONFLICT_BASE_SECTION`); a tool whose whole value is
+# its discrimination must not keep advising on a shape it mis-reads.
+CONFLICT_BASE_SECTION = re.compile(r"^\|{7}[^\n]*\n", re.MULTILINE)
+
+# The label for a block this tool refuses to read: it is an answer in its own
+# right ("a human must look"), not a failure of the classification rules.
+UNPARSED_LAYOUT = "unparsed-layout"
+
 # A single line that differs from another only by an integer. The repo's
 # Agent.md count lines are the recurring case ("... (1401) — import check: ...").
 _NUMBER = re.compile(r"\d+")
@@ -262,6 +290,16 @@ def conflicts_in(text: str) -> list[tuple[str, str, str]]:
     ]
 
 
+def base_section(text: str) -> str | None:
+    """The `|||||||` marker line if `text` uses the diff3 layout, else None.
+
+    The marker *line* is returned whole, label included: the caller prints it,
+    and the label is what tells a human which commit the base came from.
+    """
+    match = CONFLICT_BASE_SECTION.search(text)
+    return match.group(0).rstrip("\n") if match else None
+
+
 def _unmerged_paths() -> list[str]:
     """Paths git currently reports as unmerged, in index order."""
     proc = subprocess.run(
@@ -276,6 +314,26 @@ def _unmerged_paths() -> list[str]:
 
 def _report(path: str, text: str) -> list[str]:
     """Classify one file; return the labels found (for the exit code)."""
+    # The layout check comes FIRST, not inside the "no block matched" branch:
+    # `CONFLICT_BLOCK` *does* match a diff3 block (it swallows the base section
+    # into OURS), so a check placed after it would never run. The parser cannot
+    # be trusted on this layout, so it must not get a chance to answer.
+    base = base_section(text)
+    if base is not None:
+        print(f"{path}: block 1/1 -> {UNPARSED_LAYOUT}")
+        print(f"    the file uses the diff3 layout (`{base}`)")
+        print(
+            "    this tool does not parse that layout: `CONFLICT_BLOCK` reads the "
+            "base section as part of OURS, so the sides it compares - and the "
+            "advice it gives - would be wrong"
+        )
+        print(
+            "    re-merge with git's default layout (git config "
+            "merge.conflictStyle merge and recreate the conflict), or resolve "
+            "by hand"
+        )
+        return [UNPARSED_LAYOUT]
+
     blocks = conflicts_in(text)
     if not blocks:
         print(f"{path}: no conflict blocks")
@@ -343,6 +401,14 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "at least one block needs a human decision (overlapping) - this tool "
             "does not guess"
+        )
+        return 1
+    if UNPARSED_LAYOUT in counts:
+        # exit 1 too: the caller's loop treats rc 0 as "every block was classified,
+        # safe to act on the advice". A refused layout is not classified.
+        print(
+            "at least one block could not be read (unparsed-layout) - the file "
+            "must be re-merged in git's default layout, or resolved by hand"
         )
         return 1
     return 0
