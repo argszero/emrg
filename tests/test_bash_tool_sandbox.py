@@ -1005,6 +1005,120 @@ def test_git_verb_parsing_ignores_quoted_mentions():
         allowed, reason, _ = _check_sandbox(cmd, "read-only")
         assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
 
+
+def test_command_substitution_is_not_a_polite_spelling():
+    """`` `git checkout .` `` runs git; master blocked it and this parser did not.
+
+    `shlex`'s default punctuation set is `();<>|&` — it omits the backtick — so a
+    command substitution stayed glued to its words: `` `git checkout .` ``
+    tokenised as `` ['`git', 'checkout', '.`'] `` and the program word never
+    matched `git`. Measured against master 2026-09-12 (`cyc20260912-190602`):
+    master's raw-text guard blocked all four shapes below and the parsed guard
+    allowed all four — an under-block in the destructive direction, introduced by
+    the same migration that fixed the over-blocks. `$( … )` was never affected
+    because its `git` is already a separate token, which is exactly why the hole
+    survived the substitution cases that were covered.
+
+    The fix is structural (the tokenizer splits on the backtick) rather than a
+    strip in the name comparison, so it covers the wrapping shapes below and not
+    only the one where the substitution wraps the whole program word.
+    """
+    for cmd in (
+        "`git checkout .`",
+        "echo `git checkout .`",
+        "x=`git checkout .`",
+        "`git reset --hard`",
+        "y=`git stash`",
+        "$(git checkout .)",
+        "echo $(git checkout .)",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} runs git and must be blocked"
+
+    # The complement: a substitution that only *reads* stays allowed, so the fix
+    # is not "block anything with a backtick".
+    for cmd in (
+        "`git status`",
+        "echo `git log --oneline -3`",
+        "echo $(git status)",
+        "echo $(git rev-parse HEAD)",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
+
+
+def test_an_unquoted_git_argument_is_data_not_an_invocation():
+    """`grep -rn git .` searches for the word git; it does not run git.
+
+    The quoted-mention test above covers a string literal, which tokenising
+    keeps whole. The **unquoted** argument is the same defect one level down:
+    the parser saw the token `git` and resolved the *following* token as its
+    verb, so `grep -rn git .` became the invocation `git .` — and the fail-closed
+    default then refused an ordinary search. Measured against master 2026-09-12
+    (`cyc20260912-190602`): 9 of 30 read shapes regressed this way, all of them
+    a command that merely *names* git as an argument.
+
+    Guarded in both directions on purpose. The cheap fix — "only the first
+    token can be an invocation" — fixes these and silently allows
+    `env git checkout .`, trading a false block for data loss.
+    """
+    for cmd in (
+        "grep -rn git .",
+        "grep -rn git src/",
+        "grep -n git README.md",
+        "grep -rn git --include=*.py .",
+        "grep -r git .",
+        "echo git checkout .",
+        "printf %s git checkout .",
+        "find . -name git",
+        "man git",
+        "which git",
+        "ls -la git",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} names git as data and must be allowed ({reason!r})"
+
+
+def test_a_command_wrapper_still_makes_its_argument_an_invocation():
+    """The complement: a prefixed git really runs, so it must still block.
+
+    `env git checkout .` and `sudo git checkout .` are not position 0, and
+    `sudo -u root git checkout .` / `timeout 5 git checkout .` / `nice -n 5 git
+    checkout .` / `xargs -I{} git checkout .` / `stdbuf -o0 git checkout .` put a
+    flag *and its value* between the wrapper and the command — which is why the
+    position model skips a flag's value rather than only the flag. Measured: the
+    first version of the model, skipping flags alone, allowed 5 of these 44
+    mutator shapes (cyc20260912-190602).
+    """
+    for cmd in (
+        "env git checkout .",
+        "env FOO=1 git checkout .",
+        "sudo git checkout .",
+        "sudo -u root git checkout .",
+        "doas git checkout .",
+        "xargs git checkout .",
+        "xargs -I{} git checkout .",
+        "nohup git checkout .",
+        "time git checkout .",
+        "timeout 5 git checkout .",
+        "nice -n 5 git checkout .",
+        "command git checkout .",
+        "stdbuf -o0 git checkout .",
+        "setsid git checkout .",
+        "FOO=1 git checkout .",
+        "true && git checkout .",
+        "false || git checkout .",
+        "echo hi ; git checkout .",
+        "cat f | git checkout .",
+        "$(git checkout .)",
+        "(git checkout .)",
+        "! git checkout .",
+        "sh -c \"sh -c 'git checkout .'\"",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} runs git and must be blocked"
+
+
 def test_shell_wrapper_options_do_not_block_a_read():
     """The over-approximation must not refuse a wrapper that only reads.
 

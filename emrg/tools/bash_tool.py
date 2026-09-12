@@ -246,6 +246,20 @@ _GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--exec-path", "--git-dir",
                                     "--work-tree", "--namespace", "--super-prefix"})
 # Shell operators that separate one command from the next in a chain.
 _SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
+# Tokens that put what follows them in command position without being commands
+# themselves: grouping (`( … )`, `{ … }`) and shell negation (`! cmd`).
+_COMMAND_POSITION_OPERATORS = frozenset({"(", "{", "!", "`"})
+# Prefix commands that *run* their argument as a command. `env git checkout .`
+# and `sudo git checkout .` genuinely invoke git, so a `git` token after one of
+# these is an invocation even though it is not first in the stream. This is the
+# case that stops the over-block fix from becoming an under-block.
+_COMMAND_WRAPPERS = frozenset({
+    "env", "sudo", "doas", "xargs", "nohup", "time", "timeout", "nice",
+    "setsid", "stdbuf", "command", "exec", "ionice", "chrt", "watch",
+})
+# `FOO=1 git checkout .` — the shell strips leading assignments and runs the
+# rest, so an assignment is a prefix, not a command.
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 # Shells whose `-c <string>` argument is itself a command the shell will run.
 # The guard must read *that* text, not stop at the outer token stream: before
 # this, `sh -c 'git checkout .'` reached the mutator only because a raw-text
@@ -652,13 +666,88 @@ def _tokenize_command(cmd: str) -> list[str]:
     facet D). Falls back to a whitespace split when the input is unparseable
     (an unterminated quote), because a guard that crashes on odd input is worse
     than one that over-blocks it.
+
+    ⚠️ The punctuation set is explicit and **includes the backtick**. `shlex`'s
+    default punctuation set is `();<>|&` — it omits `` ` ``, so a command
+    substitution stayed glued to its words: `` `git checkout .` `` tokenised as
+    `` ['`git', 'checkout', '.`'] `` and the program word never matched `git`.
+    Measured against master 2026-09-12 (`cyc20260912-190602`): the raw-text guard
+    blocked all four backtick shapes and this parsed guard allowed all four —
+    an under-block in the destructive direction, introduced by the same
+    migration that fixed the over-blocks. `$( … )` was unaffected because its
+    `git` is already a separate token, which is what made the hole invisible to
+    the substitutions that were covered.
     """
     try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&`")
         lex.whitespace_split = True
         return list(lex)
     except ValueError:
         return cmd.split()
+
+
+def _runs_as_a_command(tokens: list[str], i: int) -> bool:
+    """Whether ``tokens[i]`` is in *command position* — i.e. the shell will run it.
+
+    This is the difference between an invocation and an argument, and it is the
+    whole reason a parser is used here rather than a scan: `grep -rn git .` and
+    `git status` both contain the token `git`, but only the second runs it.
+
+    A token is in command position when:
+      * it is first in the stream, or
+      * the token before it is a **command separator** (`&&`, `||`, `;`, `|`,
+        `&`, newline), a grouping/negation operator (`(`, `{`, `!`), or
+      * the tokens before it are **command wrappers** and their options/values
+        (`env`, `sudo`, `xargs`, `nohup`, `time`, `timeout`, `nice`, `doas`,
+        `setsid`, `stdbuf`, `command`, …), or
+      * the token before it is a `VAR=value` environment assignment
+        (`FOO=1 git checkout .` really does run git).
+
+    ⚠️ The wrapper case must keep working, and it needs the flag's **value**
+    skipped, not just the flag. The obvious fix for the over-block — "only
+    position 0 can be an invocation" — would under-block every wrapper prefix,
+    and `env git checkout .` genuinely destroys uncommitted work; a first attempt
+    that skipped only flags left `sudo -u root git checkout .`, `timeout 5 git
+    checkout .`, `nice -n 5 git checkout .`, `xargs -I{} git checkout .` and
+    `stdbuf -o0 git checkout .` all allowed (5 of 44 mutator shapes, measured).
+    So a non-flag token that follows a flag is treated as that flag's value and
+    skipped.
+
+    That value-test is an **over-approximation**, deliberately: whether a flag
+    takes a value is a per-command fact, and enumerating which flags do is the
+    same enumeration trap that made the wrapper's `-c` walk unsound. The cost is
+    that `xargs -I{} grep git` — where `grep` is the command and `git` its
+    argument — is read as a wrapper invocation and blocked. That is a false block
+    in the harmless direction, and it is the trade this guard always makes: a
+    refused command is loud, and silent data loss is not.
+    """
+    j = i - 1
+    while j >= 0:
+        tok = tokens[j]
+        if tok in _SHELL_SEPARATORS or tok in _COMMAND_POSITION_OPERATORS:
+            return True
+        if _is_env_assignment(tok):
+            j -= 1
+            continue
+        if _basename(tok) in _COMMAND_WRAPPERS:
+            # The candidate is this wrapper's command argument.
+            return True
+        if tok.startswith("-"):
+            j -= 1
+            continue
+        # A non-flag token: it belongs to a prefix (a flag's value, or a
+        # wrapper's own argument) when the token before it is a flag or a
+        # wrapper. Otherwise it is a command word and the candidate is one of
+        # its arguments — data, not an invocation.
+        if j - 1 >= 0:
+            left = tokens[j - 1]
+            if left.startswith("-"):
+                j -= 2
+                continue
+            if _basename(left) in _COMMAND_WRAPPERS:
+                return True
+        return False
+    return True
 
 
 def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
@@ -669,6 +758,15 @@ def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
     exactly where a raw-text regex expects the subcommand). Returns one entry
     per invocation, so a chained command is judged by all of its invocations.
 
+    ⚠️ Only a ``git`` token in **command position** is an invocation
+    (`_runs_as_a_command`). Treating every `git` token as one over-blocked any
+    command that merely *names* git as an argument — `grep -rn git .` was read
+    as the invocation `git .`, and the fail-closed default then refused a plain
+    search (measured against master 2026-09-12: 9 of 30 read shapes regressed,
+    all in that class). The quoted-mention case was already handled because
+    tokenising keeps a string literal whole; the *unquoted argument* is the same
+    defect one level down, and position is what distinguishes it.
+
     ``rest`` is the tokens after the verb, needed to decide flag/subcommand-
     dependent verbs (`git branch -D` writes, `git branch -a` reads).
     """
@@ -676,7 +774,7 @@ def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if _basename(tok) != "git":
+        if _basename(tok) != "git" or not _runs_as_a_command(tokens, i):
             i += 1
             continue
         j = i + 1
@@ -771,17 +869,38 @@ def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
     return verb
 
 
+def _is_env_assignment(tok: str) -> bool:
+    """Whether ``tok`` is a shell variable assignment (`FOO=1`, `PATH=/x:$PATH`).
+
+    Distinguished from a command word so `FOO=1 git checkout .` still reads as a
+    git invocation: the shell strips leading assignments and runs what follows.
+    """
+    return bool(_ENV_ASSIGNMENT_RE.match(tok))
+
+
 def _basename(tok: str) -> str:
-    """The command word without its directory prefix or Windows extension.
+    """The command word without its directory prefix or extension.
 
     `/usr/bin/git` and `git.exe` name the same program as `git`; a guard that
     only recognises the bare spelling is a guard against the polite form of
     the command. (On Windows the shell resolves `git` to `git.exe`, so the
     extension form is the one that actually runs there.)
+
+    A leading `VAR=` is stripped for the same reason: `FOO=1 git checkout .`
+    runs git, and the assignment is not part of the program word. Command
+    substitution used to need stripping here too, and does not any more — the
+    tokenizer now splits on the backtick, which is the *structural* fix; keeping
+    a strip here as well would have hidden the fact that the token stream was
+    wrong, and would only have covered the substitutions that happen to wrap the
+    program word rather than the shape.
     """
     base = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     if base.lower().endswith(".exe"):
         base = base[:-4]
+    if "=" in base:
+        head, _, tail = base.partition("=")
+        if head.isidentifier():
+            base = tail
     return base
 
 
