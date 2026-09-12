@@ -683,13 +683,77 @@ def test_the_push_time_fallback_is_disclosed_not_silently_used(mod, monkeypatch,
     """With no CI run, the commit date stands in - and the output must say so.
 
     A commit date can precede the push, so the fallback is the optimistic
-    direction: it can let a vote count that should not. It is flagged rather than
-    silently trusted, which is also the case where the PR has no CI at all.
+    direction: it can let a vote count that should not. It is also the case where
+    the PR has no CI run at all, and that is the third conjunct unverified, so the
+    same input now *blocks* as well as being disclosed. Both are asserted here:
+    the disclosure is still what tells a reader the count is approximate, and the
+    block is what keeps `READY` off a head nothing ever ran on.
     """
     fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=False)
     _run(mod, monkeypatch, fake)
     out = capsys.readouterr().out
     assert "push time approximated by commit date" in out
+    assert "BLOCKED" in out
+
+
+def test_a_head_with_no_ci_run_is_blocked_even_with_three_votes(mod, monkeypatch, capsys):
+    """The regression this pins: `CLEAN` does not mean checks ran.
+
+    `MergeStateStatus` counts *required* checks, and this repo has no branch
+    protection and no rulesets, so a head with zero check runs reports `CLEAN` -
+    the same value a double-green head reports. Measured 2026-09-12 on three
+    historical PRs (heads c0860a35 / af2e0efd / 5358d294: zero workflow runs each,
+    all three `MERGEABLE`/`CLEAN`). An earlier version read the merge state alone
+    and therefore printed READY, exit 0, for a head no CI had ever judged.
+    """
+    fake = FakeGh(
+        [_approve(f"cyc2026091{i}-010000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)],
+        exact=False,
+        mergeable="MERGEABLE",
+        merge_state="CLEAN",
+    )
+    rc = _run(mod, monkeypatch, fake)
+    assert rc == 1, "a head with no CI run must not exit 0"
+    out = capsys.readouterr().out
+    assert "BLOCKED" in out
+    assert "READY" not in out
+
+
+def test_the_no_ci_block_names_the_missing_run(mod, monkeypatch, capsys):
+    """The reason has to say what is missing, not just that something is.
+
+    `mergeable`/`mergeStateStatus` are both clean here, so a reader who is told
+    only "blocked" has nothing to act on - the state looks perfect.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=False)
+    _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert "no CI run" in err
+
+
+def test_a_head_with_a_ci_run_is_not_blocked_for_that_reason(mod, monkeypatch, capsys):
+    """The other arm of the same predicate: with a run, nothing here blocks.
+
+    Without this, a `blocked` that returned True unconditionally would pass every
+    test above."""
+    fake = FakeGh(
+        [_approve(f"cyc2026091{i}-010000", f"2026-09-1{i}T01:00:00Z") for i in (1, 2, 3)],
+        exact=True,
+    )
+    rc = _run(mod, monkeypatch, fake)
+    assert rc == 0
+    assert "READY" in capsys.readouterr().out
+
+
+def test_json_mode_carries_the_ci_conjunct(mod, monkeypatch, capsys):
+    """`ci_ran` is reported separately, so a caller does not have to infer it from
+    the verdict (the same reason the merge fields are exposed)."""
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")], exact=False)
+    _run(mod, monkeypatch, fake, ["1", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["ci_ran"] is False
+    assert payload[0]["blocked"] is True
+    assert payload[0]["ready"] is False
 
 
 def test_an_exact_push_time_is_not_flagged(mod, monkeypatch, capsys):

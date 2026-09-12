@@ -102,8 +102,19 @@ when GitHub received the push event - precisely the moment the earlier votes sto
 being about the current head. When no run exists for the head, this falls back to
 the head commit's committer date and **says so in the output**: a commit date can
 precede the push, so the fallback is the optimistic direction and must not be
-silently trusted. The fallback is also the case where the PR has no CI at all,
-which is not mergeable anyway.
+silently trusted. The fallback is also the case where the PR has no CI at all - and
+that is the third conjunct failing, so it **blocks** rather than just being disclosed.
+
+An earlier version of this note claimed such a PR "is not mergeable anyway" and used
+the fallback for the count alone. Measured 2026-09-12: the claim is false.
+`MergeStateStatus` is computed from *required* checks, and this repo has no branch
+protection and no rulesets, so a head with **zero** checks is not `PENDING` or
+`UNSTABLE` - it is `CLEAN`, indistinguishable in the merge state from a double-green
+head. Three historical PRs have exactly that shape (heads `c0860a35`, `af2e0efd`,
+`5358d294`; zero workflow runs each, all three reported `MERGEABLE`/`CLEAN`), and a
+probe with that payload reached `READY`/exit 0 on three votes. So a missing run is not
+a nuance about the count - it is the CI conjunct unverified, and it is treated as
+blocking.
 
 Usage
 -----
@@ -114,8 +125,9 @@ Usage
 Exit codes
 ----------
     0  every PR has >= --min-votes (default 3) valid votes **and** is
-       `MERGEABLE`/`CLEAN`
-    1  at least one PR is SHORT (too few votes) or BLOCKED (cannot be merged)
+       `MERGEABLE`/`CLEAN` **and** has a CI run for its head commit
+    1  at least one PR is SHORT (too few votes) or BLOCKED (cannot be merged:
+       conflicting, a non-clean merge state, or no CI run for the head)
     2  the check could not be made (gh failed, unparseable response, mergeability
        not computed yet, merge state not recognised) - fail loud; never report a
        count for a question that was not answered
@@ -476,8 +488,20 @@ class Verdict:
         `mergeable == CONFLICTING` and so reported `READY` for `MERGEABLE`/`UNSTABLE`
         (CI not green), `/BEHIND`, `/BLOCKED` and `/DRAFT` - a draft PR, which nobody
         can merge at all. The gate's spelling is the pair, so the pair is tested.
+
+        A head with **no CI run** is blocking too, and it is the case the merge state
+        cannot express: `MergeStateStatus` counts *required* checks, and with no
+        branch protection a head that ran nothing is not `PENDING` or `UNSTABLE` but
+        `CLEAN` - the same value a double-green head reports. Measured 2026-09-12 on
+        three historical PRs (`c0860a35`, `af2e0efd`, `5358d294`: zero runs, all
+        `MERGEABLE`/`CLEAN`). So the third conjunct is checked against the run
+        itself, not against the state that is documented not to carry it.
         """
-        return self.mergeable == _CONFLICTING or self.merge_state in _NON_CLEAN_STATES
+        return (
+            self.mergeable == _CONFLICTING
+            or self.merge_state in _NON_CLEAN_STATES
+            or not self.push_time_exact
+        )
 
     @property
     def block_reason(self) -> str:
@@ -487,6 +511,12 @@ class Verdict:
         reason = _NON_CLEAN_STATES.get(self.merge_state)
         if reason:
             return f"merge state is {self.merge_state} - {reason}"
+        if not self.push_time_exact:
+            return (
+                "no CI run exists for the head commit, so the CI conjunct is not "
+                "verified (the merge state cannot show this: with no required checks "
+                "a head that ran nothing still reads CLEAN)"
+            )
         return ""
 
     @property
@@ -696,6 +726,8 @@ def main(argv: list[str] | None = None) -> int:
                         "needed": v.needed,
                         "mergeable": v.mergeable,
                         "merge_state": v.merge_state,
+                        "ci_ran": v.push_time_exact,
+                        "blocked": v.blocked,
                         "verdict": v.mark,
                         "enough_votes": not v.short,
                         "ready": v.ok,
@@ -708,7 +740,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         for v in verdicts:
             mark = v.mark
-            src = "" if v.push_time_exact else "  (no CI run: push time approximated by commit date)"
+            # A missing run is both a caveat about the count *and* the CI conjunct
+            # unverified, so the line says which: `mark` is already BLOCKED here,
+            # and a reader should not have to infer why from a parenthetical.
+            src = (
+                ""
+                if v.push_time_exact
+                else "  (no CI run: push time approximated by commit date; blocked)"
+            )
             print(
                 f"#{v.pr} {mark} {v.valid_count}/{v.needed} valid votes "
                 f"(head {v.head_sha[:8]}, pushed {v.push_time}){src}"
