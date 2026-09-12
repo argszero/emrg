@@ -612,23 +612,37 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
     the one direction this guard must never move in. So the parsed design has
     to model the nesting explicitly.
 
-    The wrapper is recognised only when the shell binary and its `-c` flag are
-    *separate tokens* — that is what `sh -c ...` is. A shell keyword command
-    such as `-c` inside a single token (`set -c`) is not treated as one.
+    The wrapper is recognised by its *name*, and then **every remaining token
+    is treated as a possible payload** — the same over-approximation `eval`
+    already gets. Locating the `-c` flag instead looks tighter but is unsound:
+    it requires enumerating how a flag may be spelled, and the enumeration is
+    always incomplete. Measured 2026-09-12 against the first version of this
+    function, which walked to `-c`:
+
+      - short forms worked (`bash -c`, `bash -lc`, `bash -x -c`);
+      - but a **long option** or an **option value** ended the walk before
+        `-c` was ever reached, so `bash --login -c 'git checkout .'`,
+        `bash --noprofile -c ...`, `bash --posix -c ...`, `bash -o pipefail
+        -c ...` and `zsh --login -c ...` were all ALLOWED under read-only —
+        9 of 14 wrapper shapes, every one of them a mutator. Driven end to
+        end through `BashTool.execute`, 3 of 4 destroyed uncommitted work
+        that master blocks.
+      - this is the #461 class exactly: matching one spelling of a class while
+        the other spelling passes. A guard cannot win that enumeration, so it
+        must not depend on it.
+
+    Over-approximating costs only that a wrapper followed by a non-command
+    (e.g. `bash script.sh`) recurses into a filename, which parses to no git
+    invocation and stays allowed. Erring toward *blocking* is the safe
+    direction for this guard; erring toward data loss is not.
     """
     out: list[str] = []
     for i, tok in enumerate(tokens):
         if _basename(tok) in _SHELL_WRAPPERS:
-            # `sh -c <text>`: find the `-c` flag, then take what follows.
-            for j in range(i + 1, len(tokens)):
-                arg = tokens[j]
-                if arg.startswith("-") and not arg.startswith("--"):
-                    if "c" in arg[1:]:
-                        if j + 1 < len(tokens):
-                            out.append(tokens[j + 1])
-                        break
-                    continue
-                break
+            # `sh -c <text>` — take everything after the wrapper and let the
+            # recursive parse decide what is a command. Do NOT locate `-c`:
+            # every way of spelling an option before it is a hole.
+            out.extend(tokens[i + 1:])
         elif _basename(tok) in _SHELL_EVALUATORS:
             # `eval <text...>`: every remaining token is re-parsed as a command.
             out.extend(tokens[i + 1:])

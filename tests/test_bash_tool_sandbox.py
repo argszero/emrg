@@ -735,3 +735,58 @@ def test_find_git_mutator_terminates_on_self_reference():
     from emrg.tools.bash_tool import _find_git_mutator
 
     assert _find_git_mutator("sh -c \"sh -c 'sh -c \\\"echo hi\\\"'\"") is None
+
+
+def test_shell_wrapper_options_do_not_hide_the_payload():
+    """No option spelling before `-c` may stop the payload being recursed into.
+
+    The first version of this guard located the `-c` flag by walking forward
+    and `break`ing on the first token that was not a short flag. That looks
+    tighter than recursing blindly, but it makes correctness depend on
+    *enumerating every way a flag can be spelled* — and the enumeration is
+    always incomplete. Measured 2026-09-12: short spellings (`-c`, `-lc`,
+    `-x -c`) were blocked, while a long option (`--login`) or an option that
+    takes a value (`-o pipefail`) ended the walk early, so 9 of 14 wrapper
+    shapes were ALLOWED under read-only. Driven end to end through
+    `BashTool.execute`, 3 of those 4 destroyed a file with uncommitted
+    changes that master blocks.
+
+    This is the #461 class: matching one spelling of a class while another
+    spelling passes. So the cases below are grouped by option *class* — short
+    combined, long, and option-with-value — because the lesson is about the
+    class, not about the individual spellings that happened to be found.
+    """
+    # One entry per option class; each must still block the payload.
+    option_classes = {
+        "short": ["-c", "-lc", "-x -c", "-eu -c"],
+        "long": ["--login -c", "--noprofile -c", "--norc -c", "--posix -c"],
+        "option-with-value": ["-o pipefail -c", "-o errexit -c"],
+        "combined long+short": ["--login -l -c"],
+    }
+    for cls, spellings in option_classes.items():
+        for opt in spellings:
+            cmd = f"bash {opt} 'git checkout .'"
+            allowed, reason, _ = _check_sandbox(cmd, "read-only")
+            assert allowed is False, f"[{cls}] {cmd!r} must be blocked"
+    # A different wrapper binary takes the same options.
+    for cmd in ("zsh --login -c 'git checkout .'", "sh -o errexit -c 'git stash'"):
+        assert _check_sandbox(cmd, "read-only")[0] is False, cmd
+
+
+def test_shell_wrapper_options_do_not_block_a_read():
+    """The over-approximation must not refuse a wrapper that only reads.
+
+    Recursing into every token after a wrapper cannot miss a payload; the
+    price is that `bash script.sh` recurses into a *filename*. That parses to
+    no git invocation, so it stays allowed — and it must, or the fix for the
+    option gap would buy safety with a false block on ordinary work.
+    """
+    for cmd in (
+        "bash --login -c 'git status'",
+        "bash --login -c 'git log --oneline -3'",
+        "sh -c 'echo hi'",
+        "bash script.sh",
+        "zsh -o errexit -c 'git diff --stat'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
