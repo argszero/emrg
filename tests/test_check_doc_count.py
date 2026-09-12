@@ -654,6 +654,89 @@ def test_every_repair_hint_prints_one_runnable_command(mod, monkeypatch, tmp_pat
     assert f"`{canonical}`" in str(excinfo.value)
 
 
+# --- which tree was measured -------------------------------------------------
+
+
+def _fake_checkout(root: Path, count: int) -> Path:
+    """A minimal checkout shape: the two things `_resolve_root` looks for."""
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "Agent.md").write_text(
+        f"Python: `uv run pytest tests/ -v` ({count}) - import check: x\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_the_tree_is_the_checkout_you_are_standing_in(mod, monkeypatch, tmp_path):
+    """The defect, measured 2026-09-11 while unblocking PRs.
+
+    Unblocking means working in a git worktree; the natural invocation is
+    `<worktree>/.venv/bin/python <main-checkout>/scripts/check-doc-count.py`, and
+    the old root was `Path(__file__).parent.parent` - the *main* checkout. So the
+    tool reported `OK: Agent.md documents 1420` while the worktree's own Agent.md
+    said 1401. It read the wrong tree and called it consistent, which is the one
+    answer this tool must never give. With `--write` it edits that other tree.
+
+    Pinned on the predicate, not on the printed line: `_resolve_root` is the
+    decision, and a fixture that made `main()` agree could pass while the wrong
+    root was still chosen.
+    """
+    fake = _fake_checkout(tmp_path / "checkout", 1307)
+    monkeypatch.chdir(fake)
+    assert mod._resolve_root() == fake.resolve(), (
+        "the tool must measure the checkout the caller is standing in; deriving "
+        "the root from __file__ measures a different tree (the one the script "
+        "happens to live in) and reports its numbers as if they were yours"
+    )
+    assert mod._resolve_root() != SCRIPT.parent.parent, (
+        "the fixture must not be the script's own root, or this test proves nothing"
+    )
+
+
+def test_the_measured_tree_is_named_in_the_output(mod, monkeypatch, tmp_path, capsys):
+    """`which tree did you measure` must never be ambiguous.
+
+    A confident `OK` about a checkout the caller was not in is the failure above;
+    naming the tree turns that from a silent wrong answer into a visible one.
+    """
+    fake = _fake_checkout(tmp_path / "checkout", 1307)
+    monkeypatch.chdir(fake)
+    monkeypatch.setattr(mod, "measured_count", lambda: 1307)
+    # Re-resolve for the chdir'd cwd, the way a fresh process import would.
+    monkeypatch.setattr(mod, "REPO_ROOT", mod._resolve_root())
+    monkeypatch.setattr(mod, "DOC", mod.REPO_ROOT / "Agent.md")
+    assert mod.main([]) == 0
+    out = capsys.readouterr().out
+    assert f"tree: {fake.resolve()}" in out, out
+
+
+def test_a_directory_that_is_not_a_checkout_falls_back_to_the_script_root(
+    mod, monkeypatch, tmp_path
+):
+    """The documented invocation must keep working from anywhere.
+
+    `python3 scripts/check-doc-count.py` is run from the repo root in every hint
+    this tool prints, but an absolute-path call from elsewhere (a wrapper, an
+    editor task, `git -C`) has no checkout in the cwd to stand in.
+    """
+    monkeypatch.chdir(tmp_path)  # a bare temp dir: no Agent.md, no scripts/
+    assert mod._resolve_root() == SCRIPT.parent.parent.resolve()
+
+
+def test_a_directory_with_only_half_the_shape_is_not_a_checkout(mod, monkeypatch, tmp_path):
+    """Both markers are required, so a stray Agent.md does not claim the tree.
+
+    The check is a heuristic for "this is a checkout of this project"; requiring
+    both the doc and the scripts directory keeps it from matching, say, a report
+    directory that happens to contain an Agent.md.
+    """
+    (tmp_path / "Agent.md").write_text(
+        "Python: `uv run pytest tests/ -v` (1)\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert mod._resolve_root() == SCRIPT.parent.parent.resolve()
+
+
 def test_collect_output_is_decoded_independently_of_the_locale(mod) -> None:
     """The collected count must not depend on the host's locale codec.
 
@@ -691,3 +774,4 @@ def test_unreadable_collect_output_raises_the_tools_own_error(mod, monkeypatch) 
     monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: _Proc())
     with pytest.raises(mod.DocCountError, match="no readable output"):
         mod.measured_count()
+
