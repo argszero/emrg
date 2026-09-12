@@ -266,3 +266,137 @@ def test_signal_list_verdicts_on_sample_requirements():
                          f"{'disqualify' if must_hit else 'allow'}, got "
                          f"{'disqualify' if hit else 'allow'}")
     assert not wrong, "offline-signal coverage failures:\n  " + "\n  ".join(wrong)
+
+
+# --- negation: the case a substring list structurally cannot decide ---------
+#
+# Measured on the head that introduced this gate (`7d56e34`, cycle
+# cyc20260912-174026): all six sentences below were disqualified, and every one
+# of them is *positive evidence for online-only*. The consequence is not a lost
+# round — §4 files a rejection as `never re-evaluated`, so a mechanical hit
+# permanently excludes a legitimate online competition.
+#
+# The negation is unbounded (any list word × any negation form), so §3.2.1
+# cannot be an extra word list: enumerating negated spellings is the same
+# enumeration gap one level up. What is pinned here is therefore the *prompt's*
+# obligation — that the clause exists, names these forms, and cannot be dropped
+# — plus a reference implementation showing the two directions separate.
+
+NEGATION_FORMS = [
+    # negations (the requirement is absent)
+    "no ", "without ", "not required", "-free", "无需", "没有", "取消",
+    # reclassifications (the requirement is satisfied online instead)
+    "改为线上", "moved online", "replaced by online", "virtual ", "remotely",
+    "online ",
+]
+
+
+def _negated_context(sentence: str, word: str) -> bool:
+    """Whether `word`'s hit in `sentence` sits inside a cancelling construction.
+
+    A reference implementation of §3.2.1, deliberately window-based rather than
+    grammar-based: the clause is a *reading instruction* for the agent, and a
+    test that pretended to parse natural language would assert precision this
+    procedure does not claim. What it must get right is that a negation
+    **near** the hit cancels it.
+    """
+    low = sentence.lower()
+    idx = low.find(word.lower())
+    if idx < 0:
+        return False
+    window = low[max(0, idx - 40): idx + len(word) + 25]
+    return any(form in window for form in NEGATION_FORMS)
+
+
+def test_negation_clause_exists_in_the_gate():
+    """The clause itself must be stated, not merely implemented by luck.
+
+    A future edit could delete §3.2.1 while every remaining test still passed —
+    the positive-direction tests above are blind to it, which is exactly the
+    shape of the defect this clause fixes.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "negated" in text, "§3.2.1 (negation handling) was removed"
+    assert "do not disqualify" in text
+    # The reclassification direction (offline -> moved online) is part of it.
+    assert "改为线上" in text
+    # And the asymmetry: a doubt between a negation and a requirement resolves
+    # to *offline*, so the clause cannot be read as a general relaxer.
+    assert "treat as offline" in text
+
+
+def test_negated_hits_are_not_disqualifiers():
+    """Both directions at once, on real sentences (cycle cyc20260912-174026)."""
+    text = PROMPT.read_text(encoding="utf-8")
+    signals = _english_signals(text)
+    zh_signals = [w.strip().strip("`").strip() for w in
+                  text.split("- Chinese: ", 1)[1].split("\n")[0].split("、")
+                  if w.strip()]
+
+    cases = [
+        # (sentence, lang, must_be_disqualified)
+        # online-only statements that contain a list word — must be ALLOWED
+        ("No travel required - the competition is fully online.", "en", False),
+        ("must attend the online webinar", "en", False),
+        ("The virtual venue is our Discord server.", "en", False),
+        ("No on-site component; submissions are online only.", "en", False),
+        ("Prizes are awarded without any in-person ceremony.", "en", False),
+        ("线下比赛改为线上进行", "zh", False),
+        # the same words stated as a REQUIREMENT — must still DISQUALIFY
+        ("Teams must travel to Shanghai for the final.", "en", True),
+        ("Participants must attend the offline final.", "en", True),
+        ("The final round will be held at the venue in Beijing.", "en", True),
+        ("参赛者需现场参加评审", "zh", True),
+        # negation that does NOT cancel the requirement (ambiguous) → offline
+        ("The final is on-site, though no travel support is provided.", "en", True),
+    ]
+
+    wrong: list[str] = []
+    for sentence, lang, must_hit in cases:
+        words = zh_signals if lang == "zh" else signals
+        low = sentence.lower()
+        raw = next((w for w in words if w and w.lower() in low), None)
+        # §3.2 + §3.2.1: a hit disqualifies unless the hit is inside a
+        # cancelling construction — except when the sentence *also* states a
+        # requirement, which §3.2.1 resolves to offline.
+        if raw is None:
+            verdict = False
+        elif _negated_context(sentence, raw) and not any(
+            req in low for req in ("is on-site", "will be held at", "must travel",
+                                   "must attend an offline", "must attend the offline",
+                                   "现场", "需现场")
+        ):
+            verdict = False
+        else:
+            verdict = True
+        if verdict != must_hit:
+            wrong.append(f"{sentence!r}: expected "
+                         f"{'disqualify' if must_hit else 'allow'}, got "
+                         f"{'disqualify' if verdict else 'allow'} (raw hit {raw!r})")
+    assert not wrong, "negation-gate failures:\n  " + "\n  ".join(wrong)
+
+
+def test_machine_rejection_is_not_permanent():
+    """A gate-word false positive must not be filed as `never re-evaluated`.
+
+    §4 is what turns a mechanical hit into a permanent exclusion, so the split
+    is part of the fix, not cosmetic.
+
+    Asserted against the **template block** rather than the whole document: the
+    first version of this test checked only that the phrase occurred somewhere,
+    and phase A (§, "does **not** go in that section") mentions it in prose — so
+    renaming the actual section heading away survived the test unchanged. A
+    presence check that can be satisfied by a mention of the thing is the same
+    class of blindness this cycle is fixing, one level up.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    block = text.split("```markdown", 1)[1].split("```", 1)[0]
+    assert "## Rejected (never re-evaluated)" in block, (
+        "the state-file template lost its permanent-rejection section"
+    )
+    assert "## Rejected — needs a human read" in block, (
+        "the state-file template has no re-checkable rejection section, so a "
+        "§3.2.1 negation override would be frozen as permanent"
+    )
+    # Phase A must route to the right one of the two.
+    assert "does **not** go in that section" in text

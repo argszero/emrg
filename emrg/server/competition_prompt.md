@@ -91,7 +91,7 @@ Priority when several competitions are live:
 1. Scan the platform's competition listing (Tianchi / Kaggle / DataFountain / HuggingFace, etc.).
 2. Put each candidate through the **§3 online-only gate** (all three pages: rules, schedule/timeline, prizes — see §3.1).
 3. Candidates that pass → add to the state file's `Active` section.
-4. Candidates that fail → add to the state file's `Rejected` section **with the verbatim reason quoted from the rules page**, and **never re-evaluate them in later rounds**.
+4. Candidates that fail → add to the state file's `Rejected` section **with the verbatim reason quoted from the rules page**, and **never re-evaluate them in later rounds**. A candidate rejected only because a signal word appeared inside a **negation** (§3.2.1) or because of an unresolved ambiguity does **not** go in that section — it goes in `Rejected — needs a human read`, which is re-checked, because a mechanical hit is not the same evidence as a stated offline requirement.
 5. Also apply §0.6 compute feasibility during screening.
 
 Exit condition: at least one new candidate evaluated, or "no new competitions found" recorded.
@@ -163,9 +163,35 @@ Scope of the judgment (host, 2026-09-12): it means **"the participation/evaluati
 
 **Exception (does NOT count as an offline component)**: an offline description appearing **only** in an "award ceremony / award banquet" context (`颁奖典礼` / `领奖仪式` / `award ceremony` / `award banquet`) → do not disqualify. A mere award ceremony is not an offline participation requirement; treating it as one would exclude essentially every prize-bearing competition.
 
+#### 3.2.1 A hit inside a **negated** or **relevance-negating** construction is not a hit
+
+A bare substring list cannot tell "the final round is offline" from "**no** travel required, fully **online**", and both contain list words. Read the sentence around each hit before counting it:
+
+- `no <word>` / `without <word>` / `<word> not required` / `<word>-free` / `no <word> needed`
+- `not <word>` / `never <word>` / `<word> is not required` / `<word> avoided` / `无需 <word>` / `不用 <word>` / `没有 <word>` / `<word>不要求`
+- a **reclassification** that moves the process online: `<word>改为线上` / `<word>调整线上` / `取消<word>` / `<word> moved online` / `<word> replaced by online` / `virtual <word>` / `online <word>` / `<word> via video` / `<word> remotely`
+- a **platform/noun sense** rather than an offline-process requirement: `<word>` naming the *online* venue itself (a Discord/forum/streaming `venue`, an online `demo day`)
+
+In all of these the word is present but the *requirement* is not offline → **do not disqualify**, and record the override with the verbatim quote (§3.4 still applies).
+
+> Why this is a clause and not an extra word list: measurement on the head that
+> introduced this gate (`7d56e34`, cycle `cyc20260912-174026`) showed **6 of 6**
+> online-only sentences above being disqualified — `No travel required - the
+> competition is fully online.` hits `travel`, `must attend the online webinar`
+> hits `must attend`, `The virtual venue is our Discord server.` hits `venue`,
+> `No on-site component; submissions are online only.` hits `on-site`,
+> `Prizes are awarded without any in-person ceremony.` hits `in-person`,
+> `线下比赛改为线上进行` hits `线下`. The negation is **unbounded** (any list word
+> times any negation form), so enumerating negated spellings would be the same
+> enumeration gap one level up. The positive direction was verified at the same
+> time: bare `offline` in prose, `On-site final judging` and `需现场答辩，差旅自理`
+> all still disqualify.
+
+**Resolving a doubt between the two clauses**: if a sentence both states an offline requirement *and* contains a negation, that is a real ambiguity (§3.6) → treat as offline (do not enter). This clause removes only hits where the negation **cancels** the requirement, never hits where it merely sits nearby.
+
 #### 3.3 Require at least one piece of positive online evidence
 
-At least one of these must be present: `线上提交`、`在线评测`、`leaderboard`、`submission`、`在线提交`.
+At least one of these must be present: `线上提交`、`在线评测`、`leaderboard`、`submission`、`在线提交`. A sentence that negates an offline word is **not** positive online evidence on its own — §3.3 is an independent requirement, so a competition whose pages only ever say "no offline component" (without stating how entries are actually submitted) is still unverified → reject by default (§3.5).
 
 #### 3.4 Quote the matched text verbatim
 
@@ -190,7 +216,9 @@ Path: `{{ evolution_cwd }}/competition_{{ task.project }}_state.md`
 ## Active
 - <name> | <link> | platform | deadline <date> | online-only: PASS (verbatim evidence: "<quote>") | current score: x | best score: y | rank: n/N | phase: C | goal line: prize|standing | prize terms: <verbatim>
 ## Rejected (never re-evaluated)
-- <name> | link | rejected because: offline signal word hit "<verbatim quote>" | evaluated <date>
+- <name> | link | rejected because: offline signal word hit "<verbatim quote>" (the quote states an offline *requirement*; §3.2.1 checked and did not apply) | evaluated <date>
+## Rejected — needs a human read (§3.2.1 override or ambiguity)
+- <name> | link | reason: hit "<word>" occurs only inside a negation/reclassification, OR a sentence both states an offline requirement and contains a negation | verbatim quote: "<quote>" | re-check <date>
 ## Blocked (host action required)
 - <name> | blocker: real-name verification required | what the host must do: <...>
 ## Next step / Notes
