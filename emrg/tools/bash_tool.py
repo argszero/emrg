@@ -7,6 +7,7 @@ import locale
 import logging
 import os
 import re
+import shlex
 import signal
 import tempfile
 
@@ -141,21 +142,67 @@ _PROTECTED_FILES = (
 # these must be structurally impossible, not merely discouraged by a prompt
 # rule — "rules can regress; topology can't". Read-only git reads (status /
 # fetch / log / diff / remote) stay allowed.
-_GIT_MUTATOR_RE = re.compile(
-    r"\bgit\s+(?:stash|checkout|restore|clean|reset|commit|push|pull|merge|"
-    r"rebase|cherry-pick|cherry_pick|revert|rm|mv|switch|apply|am|archive|"
-    r"submodule|worktree)\b"
-)
-_GIT_DELETE_RE = re.compile(r"\bgit\s+(?:branch|tag)\s+-[dD]\b")
-# `git stash list` / `git stash show` are READ-ONLY stash inspection (reviewing
-# WIP) — the mutator regex above would false-positive on them because it matches
-# the bare `git stash` token. Exempt a pure stash read (no chain to a mutator).
-_GIT_STASH_READ_RE = re.compile(r"\bgit\s+stash\s+(?:list|show)(?:\s|$|\|)")
-# `git worktree list` / `git submodule status` are READ-ONLY inspection (same
-# false-positive class as `git stash list/show`): the mutator regex above
-# matches the bare `git worktree` / `git submodule` tokens. Exempt a pure
-# read; any worktree/submodule MUTATOR keyword below still blocks.
-_GIT_WT_READ_RE = re.compile(r"\bgit\s+(?:worktree\s+list|submodule\s+status)\b")
+#
+# ⚠️ These are matched against the **parsed** command (the resolved verb), not
+# against raw command text (issues #1156 + #1159). Both filed defects had the
+# same root cause: a regex over the raw string is a statement about *spelling*,
+# while the guard's purpose is a statement about *effect*.
+#
+#   - Under-block (#1156): a git global option sits exactly where the old
+#     pattern expected the subcommand, so `git -C . checkout .`,
+#     `git -c x=1 stash` and `git --work-tree=. reset --hard` were all allowed
+#     (7/7 mutators × 4/4 spellings).
+#   - Under-block (#1159): a verb never on the list — `git read-tree -u --reset
+#     HEAD` destroys uncommitted work and was allowed. `--reset` is a substring
+#     but not the verb, so it did not match.
+#   - Over-block: the same raw-text scan refused commands that merely *mention*
+#     a mutator (a string literal inside a heredoc), and `git merge-base` was
+#     refused as though it were `git merge`.
+#
+# Parsing fixes all three at once and is the reason this is a verb set rather
+# than more regex: the unit of protection becomes the resolved verb.
+_GIT_MUTATOR_VERBS = frozenset({
+    # working-tree / index / history writers (issue #979's data-loss set)
+    "stash", "checkout", "restore", "clean", "reset", "commit", "push", "pull",
+    "merge", "rebase", "cherry-pick", "cherry_pick", "revert", "rm", "mv",
+    "switch", "apply", "am", "archive", "submodule", "worktree", "add",
+    # plumbing writers that were never enumerated (issue #1159): `read-tree -u
+    # --reset` overwrites the working tree; the rest rewrite refs / objects /
+    # history, which is the same class of damage. Listed because they are
+    # *mutating*, not because someone remembered them.
+    "read-tree", "update-ref", "update-index", "symbolic-ref", "reflog",
+    "gc", "repack", "prune", "sparse-checkout", "filter-branch", "replace",
+    "pack-refs", "write-tree", "commit-tree", "mktag", "notes",
+    # flag-decided verbs: only a delete/force flag makes them destructive
+    "branch", "tag",
+    # subcommand-decided verbs: reads like `git remote -v` / `git config -l`
+    # stay allowed, writers (`set-url`, `core.hooksPath=…`) block
+    "remote", "config",
+})
+# `git branch -a` / `git tag -l` / `git tag` are reads; a delete or force flag
+# makes them destructive (`git branch -D old`, `git tag -d v1`).
+_GIT_WRITE_FLAGS = frozenset({"-d", "-D", "--delete", "-f", "--force", "-m",
+                              "-M", "--move", "--set-upstream-to", "-u"})
+# Verbs whose *subcommand* decides: `git stash list` reads, `git stash drop`
+# writes. The subcommand is the resolved word after the verb.
+_GIT_SUBCOMMAND_READERS = {
+    "stash": frozenset({"list", "show"}),
+    "worktree": frozenset({"list"}),
+    "submodule": frozenset({"status", "summary"}),
+    "remote": frozenset({"show", "get-url", "v"}),
+}
+# Verbs where *no* subcommand is a read (they print help / list). `git stash`
+# alone is NOT here: a bare `git stash` saves and cleans the tree — a mutator.
+_GIT_NO_SUBCOMMAND_READS = frozenset({"remote", "worktree", "submodule"})
+# `git config` reads unless it writes: read flags, or no positional key.
+_GIT_CONFIG_READ_FLAGS = frozenset({"--get", "--get-all", "--get-regexp",
+                                    "-l", "--list", "--get-urlmatch"})
+# git global options that take a SEPARATE argument — the parser must skip both
+# the option and its value to find the verb (`git -C . checkout .`).
+_GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--exec-path", "--git-dir",
+                                    "--work-tree", "--namespace", "--super-prefix"})
+# Shell operators that separate one command from the next in a chain.
+_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
 
 # ── Containment-escape guard (issue #1102) ─────────────────────────────────
 # Borrowed from Claude Code v2.1.257 ("Containment Escape"): block cloud
@@ -417,6 +464,124 @@ def check_workspace_write(file_path: str, workspace: str | None = None) -> str |
     return None
 
 
+def _tokenize_command(cmd: str) -> list[str]:
+    """Split a shell command into tokens, preserving operators like ``&&``.
+
+    Uses ``shlex`` so quoting is respected: a mutator mentioned inside a string
+    literal is one token, not a command word — which is what stops the guard
+    from refusing a command that merely *talks about* `git merge` (issue #1156
+    facet D). Falls back to a whitespace split when the input is unparseable
+    (an unterminated quote), because a guard that crashes on odd input is worse
+    than one that over-blocks it.
+    """
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        return cmd.split()
+
+
+def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
+    """Resolve every ``git`` invocation in a token stream to ``(verb, rest)``.
+
+    Walks the token stream, and at each ``git`` token skips git's *global*
+    options to find the resolved verb (issue #1156: a global option sits
+    exactly where a raw-text regex expects the subcommand). Returns one entry
+    per invocation, so a chained command is judged by all of its invocations.
+
+    ``rest`` is the tokens after the verb, needed to decide flag/subcommand-
+    dependent verbs (`git branch -D` writes, `git branch -a` reads).
+    """
+    out: list[tuple[str, list[str]]] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok != "git" and not tok.endswith("/git"):
+            i += 1
+            continue
+        j = i + 1
+        # Skip global options (and the separate value of options that take one).
+        while j < len(tokens):
+            nxt = tokens[j]
+            if nxt in _GIT_GLOBAL_WITH_VALUE:
+                j += 2
+                continue
+            if nxt.startswith("-"):
+                j += 1
+                continue
+            break
+        if j < len(tokens):
+            out.append((tokens[j], tokens[j + 1:]))
+        i = j + 1
+    return out
+
+
+def _git_invocation_is_mutator(verb: str, rest: list[str]) -> str | None:
+    """Classify one resolved git invocation. Returns the offending verb, or None.
+
+    The decision is on the *effect*, not the spelling: read-only inspections
+    that the raw-text scan had to special-case by regex (`git stash list`,
+    `git worktree list`, `git submodule status`, `git branch -a`,
+    `git remote -v`, `git config -l`) are read here from the resolved verb +
+    flags, so they stay allowed without an exemption pattern to keep in sync.
+    """
+    if verb not in _GIT_MUTATOR_VERBS:
+        return None
+    readers = _GIT_SUBCOMMAND_READERS.get(verb)
+    if readers is not None:
+        # Subcommand-decided: `stash list` reads, `stash drop` writes. A
+        # missing subcommand is a write for `stash` (bare `git stash` saves and
+        # cleans the tree) but a read for the listing verbs (`git remote -v`).
+        sub = next((t for t in rest if not t.startswith("-")), None)
+        if sub in readers:
+            return None
+        if sub is None and verb in _GIT_NO_SUBCOMMAND_READS:
+            return None
+        return verb
+    if verb in ("branch", "tag"):
+        # Only a delete/force/move flag makes these destructive; a bare
+        # `git branch` / `git tag` / `-a` / `-l` is a read.
+        if any(t in _GIT_WRITE_FLAGS or t.startswith("--delete") for t in rest):
+            return verb
+        return None
+    if verb == "config":
+        if any(t in _GIT_CONFIG_READ_FLAGS for t in rest):
+            return None
+        # `git config <key>` with no value is a read; `key=value` or `--set`
+        # writes. A lone positional key is ambiguous, so treat a single
+        # positional as a read and anything that looks like an assignment as
+        # a write.
+        positional = [t for t in rest if not t.startswith("-")]
+        if len(positional) >= 2 and "=" not in positional[0]:
+            return verb
+        if any("=" in t and not t.startswith("-") for t in positional):
+            return verb
+        return None
+    if verb == "remote":
+        # `git remote -v` / `show` / `get-url` read; `set-url`/`add`/`remove` write.
+        sub = next((t for t in rest if not t.startswith("-")), None)
+        if sub is None or sub in _GIT_SUBCOMMAND_READERS["remote"]:
+            return None
+        return verb
+    return verb
+
+
+def _find_git_mutator(cmd: str) -> str | None:
+    """The first mutating git verb in ``cmd``, or None when there is none.
+
+    Parses rather than scans (issues #1156 + #1159): every `git` invocation in
+    a chained command is resolved to its verb and classified by effect. Returns
+    a human-readable phrase for the block reason.
+    """
+    tokens = _tokenize_command(cmd)
+    for verb, rest in _git_verbs(tokens):
+        hit = _git_invocation_is_mutator(verb, rest)
+        if hit:
+            return f"git {hit}"
+    return None
+
+
 def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
     """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
 
@@ -455,30 +620,19 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
         # (stash / checkout . / reset --hard / clean) write no file targets
         # and escaped the target scan (community issue #979). Also blocks
         # working-tree writers: apply / am / archive / submodule / worktree.
-        # Pure read-only inspections are exempt (`git stash list/show`,
-        # `git worktree list`, `git submodule status`) — but a chain to a
-        # mutator (e.g. `&& git stash drop`, `; git worktree remove`) stays
-        # blocked.
-        m = _GIT_MUTATOR_RE.search(cmd) or _GIT_DELETE_RE.search(cmd)
-        if m:
-            read_only_inspection = (
-                _GIT_STASH_READ_RE.search(cmd)
-                or _GIT_WT_READ_RE.search(cmd)
-            )
-            mutator_keyword = (
-                re.search(r"\bgit\s+stash\s+(?:drop|pop|clear|apply|push|branch|create)\b", cmd)
-                or re.search(
-                    r"\bgit\s+(?:worktree\s+(?:add|remove|move|prune|lock|unlock)|"
-                    r"submodule\s+(?:update|add|deinit|set-url|sync|absorbgitdirs|"
-                    r"foreach))\b",
-                    cmd,
-                )
-            )
-            if not (read_only_inspection and not mutator_keyword and not re.search(r"&&|;", cmd)):
-                return False, (
-                    f"read-only sandbox: blocked git mutating command {m.group(0)!r} "
-                    "(dirty-tree guard, community issue #979)"
-                ), "partial"
+        #
+        # Decided by **parsed verb**, not raw text (issues #1156 + #1159): a
+        # global option between `git` and the subcommand used to defeat the
+        # alternation, `git read-tree -u --reset` was never on the list, and
+        # a command merely *mentioning* a mutator was refused. Chained commands
+        # are judged per invocation, so `git stash list && git stash drop` still
+        # blocks while a bare `git stash list` reads.
+        hit = _find_git_mutator(cmd)
+        if hit:
+            return False, (
+                f"read-only sandbox: blocked git mutating command {hit!r} "
+                "(dirty-tree guard, community issue #979)"
+            ), "partial"
         return True, None, "partial"
 
     # workspace-write

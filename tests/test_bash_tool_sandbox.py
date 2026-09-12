@@ -171,6 +171,139 @@ def test_check_read_only_blocks_git_mutators():
         assert enforcement == "partial"
 
 
+def test_check_read_only_blocks_git_mutators_with_global_options():
+    """Community issue #1156: a git global option must not defeat the guard.
+
+    The old raw-text scan required the subcommand immediately after `git\\s+`,
+    so a global option sat exactly where it expected the verb: 7 mutators × 4
+    spellings were ALL allowed while every bare form blocked. Generated rather
+    than hand-listed because the point is the cross product — the suite missed
+    this by covering 41 cases, all bare forms.
+    """
+    mutators = (
+        "stash", "checkout .", "checkout -- uv.lock", "restore uv.lock",
+        "reset --hard", "clean -fd", "commit -am x", "push origin master",
+        "merge master", "rebase master", "cherry-pick abc123", "rm foo.py",
+        "switch feature/x", "apply patch.diff", "am series.mbox",
+        "submodule update --init", "worktree add ../wt master",
+    )
+    prefixes = ("", "-C . ", "-c x=1 ", "--work-tree=. ",
+                "--git-dir=/var/tmp/x ", "--no-pager ")
+    for verb in mutators:
+        for prefix in prefixes:
+            cmd = f"git {prefix}{verb}"
+            allowed, reason, _ = _check_sandbox(cmd, "read-only")
+            assert allowed is False, (
+                f"{cmd!r} must be blocked (global option defeats the scan?)"
+            )
+            assert "git" in reason, cmd
+
+
+def test_check_read_only_blocks_unlisted_plumbing_mutators():
+    """Community issue #1159: verbs that were never on the list.
+
+    `git read-tree -u --reset HEAD` overwrites the working tree and destroys
+    uncommitted work — measured on a scratch repo, exiting 0 and silently — but
+    it was not in the alternation (`--reset` is a substring, not the verb). The
+    others rewrite refs/objects/history and are the same class of damage. A
+    list-based guard cannot be fixed by adding one more word: the decision is
+    the *verb*, so these must be decidable without anyone remembering them.
+    """
+    for cmd in (
+        "git read-tree -u --reset HEAD",
+        "git read-tree -m -u HEAD",
+        "git update-ref refs/heads/x HEAD",
+        "git update-index --assume-unchanged a.txt",
+        "git symbolic-ref HEAD refs/heads/x",
+        "git reflog expire --expire=now --all",
+        "git gc --prune=now",
+        "git repack -a -d",
+        "git filter-branch --force",
+        "git pack-refs --all",
+        "git replace abc123 def456",
+        "git add -A",
+        "git remote set-url origin https://example.com/x.git",
+        "git config core.hooksPath /tmp/hooks",
+        "git config user.name someone",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+
+def test_check_read_only_does_not_block_mentions_or_near_misses():
+    """The other direction: parsing must stop the raw-text over-block.
+
+    `git merge-base A B` is a read that the old scan refused as if it were
+    `git merge`. Guarded because a fix for the under-block that simply allows
+    arbitrary tokens before the verb would start blocking real reads.
+    """
+    for cmd in (
+        "git merge-base A B",
+        "git stash list", "git stash show -p", "git stash list | grep foo",
+        "git worktree list", "git worktree list --porcelain",
+        "git submodule status", "git branch -a", "git tag -l",
+        "git remote -v", "git config -l", "git config --get user.name",
+        "git status --porcelain", "git log --oneline -3", "git show HEAD --stat",
+        "git diff", "git diff --cached", "git rev-parse --abbrev-ref HEAD",
+        "git fetch origin master",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must stay allowed (got {reason!r})"
+
+
+def test_check_read_only_has_no_subcommand_but_write_for_stash():
+    """`git stash` alone mutates (saves + cleans the tree); listing verbs don't.
+
+    `git remote -v` / `git worktree` / `git submodule` with no subcommand only
+    print help or a listing; a bare `git stash` is a real mutator. The old
+    regex could not tell these apart because it matched tokens, not verbs.
+    """
+    for cmd in ("git stash", "git -C . stash", "git -c x=1 stash"):
+        allowed, _, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked (bare stash mutates)"
+    for cmd in ("git remote -v", "git remote", "git worktree", "git submodule"):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must stay allowed (got {reason!r})"
+
+
+def test_check_read_only_blocks_chained_mutator_under_a_prefix():
+    """A prefixed chain must block: the old scan fell through to `return True`.
+
+    When the prefix made the regex miss, `m` was None, so the exemption check
+    and the anti-chain logic never ran at all — `git -C . stash list && git -C
+    . stash drop` was ALLOWED. The bare chained form already blocked, so only
+    the prefixed one catches this.
+    """
+    for cmd in (
+        "git -C . stash list && git -C . stash drop",
+        "git -C . stash show -p && git -C . stash pop",
+        "git --no-pager stash list; git --no-pager stash clear",
+        "git -c x=1 worktree list && git -c x=1 worktree remove ../wt",
+        "git status && git -C . checkout .",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+
+def test_git_verb_parsing_ignores_quoted_mentions():
+    """A mutator inside a string literal is not a command (issue #1156 facet D).
+
+    The old scan refused a command that merely *contained* the phrase, which
+    made the guard's own regression tests unwritable from a read-only cycle.
+    Parsing keeps the mention as one token, so the text is data, not an
+    invocation.
+    """
+    for cmd in (
+        'echo "git merge origin/master"',
+        'printf %s "git reset --hard"',
+        "echo 'git clean -fd'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
+
+
 def test_check_read_only_blocks_git_mv():
     """`git mv a b` is blocked by the write-target scan (mv destination) —
     the git-mutator reason isn't required, the block is what matters."""
