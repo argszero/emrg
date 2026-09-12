@@ -299,12 +299,33 @@ def _negated_context(sentence: str, word: str) -> bool:
     test that pretended to parse natural language would assert precision this
     procedure does not claim. What it must get right is that a negation
     **near** the hit cancels it.
+
+    **Sentence-bounded, and that bound is the point** (`cyc20260912-180719`).
+    §3.2.1 removes a hit only where the negation **cancels** the requirement -
+    "never hits where it merely sits nearby" - so a negation belonging to an
+    earlier sentence must not reach across and cancel this one:
+
+        There is no issue with the entry requirements. Finalists must travel to
+        Shanghai for the award gala.
+
+    The `no ` negates *issue*, and the travel requirement stands, so this must
+    disqualify. A pure window (`idx-40`) reaches across the sentence boundary and
+    calls it cancelled - i.e. it cancels on exactly the "merely nearby" reading
+    the clause forbids. Measured: with the window alone this sentence read as an
+    allowance, and narrowing §3.2.1 in the prompt to a proximity rule left all
+    21 tests passing, so nothing pinned the distinction.
     """
     low = sentence.lower()
     idx = low.find(word.lower())
     if idx < 0:
         return False
-    window = low[max(0, idx - 40): idx + len(word) + 25]
+    head = low[max(0, idx - 40): idx]
+    # Keep only the hit's own sentence: a negation in an earlier one is a
+    # different statement about a different thing.
+    for sep in (". ", "? ", "! ", "; ", "。", "！", "？", "；"):
+        if sep in head:
+            head = head.rsplit(sep, 1)[1]
+    window = head + low[idx: idx + len(word) + 25]
     return any(form in window for form in NEGATION_FORMS)
 
 
@@ -323,6 +344,17 @@ def test_negation_clause_exists_in_the_gate():
     # And the asymmetry: a doubt between a negation and a requirement resolves
     # to *offline*, so the clause cannot be read as a general relaxer.
     assert "treat as offline" in text
+    # The clause cancels only where the negation *cancels the requirement*, never
+    # where it "merely sits nearby". Measured (`cyc20260912-180719`): rewriting
+    # §3.2.1 into a proximity rule ("the negation applies only when it appears
+    # immediately before the signal word") left all 21 tests passing, because
+    # nothing asserted this sentence - so the narrowing was invisible. A window
+    # of characters is not the clause's rule; the sentence the hit sits in is.
+    assert "merely sits nearby" in text, (
+        "§3.2.1 must keep the 'never merely sits nearby' restriction - without it "
+        "the clause can be narrowed to a proximity rule and a negation in an "
+        "earlier sentence would cancel a real requirement"
+    )
 
 
 def test_negated_hits_are_not_disqualifiers():
@@ -349,6 +381,19 @@ def test_negated_hits_are_not_disqualifiers():
         ("参赛者需现场参加评审", "zh", True),
         # negation that does NOT cancel the requirement (ambiguous) → offline
         ("The final is on-site, though no travel support is provided.", "en", True),
+        # A negation in an EARLIER sentence must not reach across and cancel this
+        # one: §3.2.1 removes only hits where the negation *cancels* the
+        # requirement, "never hits where it merely sits nearby".
+        #
+        # `travel` is the raw hit and none of the override phrases below appear,
+        # so the verdict here is decided by the negation model and nothing else.
+        # The first draft of these cases used sentences like "Finalists must
+        # travel to Shanghai", where `must travel` is itself an override phrase -
+        # they passed whatever the model said, and removing the model's
+        # sentence-bounding still left the suite green (measured). These do not.
+        ("There is no fee. Finalists travel to Shanghai for the award gala.", "en", True),
+        ("No fee is charged. Selected teams travel to Shanghai in June.", "en", True),
+        ("The portal is free. Winners travel to Shanghai for the ceremony.", "en", True),
     ]
 
     wrong: list[str] = []
