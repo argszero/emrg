@@ -17,6 +17,8 @@ from emrg.tools.bash_tool import (
     SANDBOX_MODES,
     _check_sandbox,
     _extract_write_targets,
+    _GIT_READ_VERBS,
+    _GIT_SHAPE_DECIDED,
     check_workspace_write,
 )
 
@@ -790,3 +792,123 @@ def test_shell_wrapper_options_do_not_block_a_read():
     ):
         allowed, reason, _ = _check_sandbox(cmd, "read-only")
         assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
+
+
+# ── git classification is fail-closed, not a blocklist ────────────────────
+
+def test_git_classification_is_fail_closed_over_every_subcommand():
+    """The guard must decide by *effect*, so it must not depend on a list of
+    names someone remembered.
+
+    Measured: `git help -a` reports 169 subcommands. The previous design kept a
+    blocklist of mutating verbs and allowed everything else, which left 129 of
+    the 169 allowed — `git checkout-index -f -a`, which overwrites uncommitted
+    work exactly like `git checkout`, among them. It was blocked on master only
+    by accident: a raw-text regex matched `checkout` as a *substring* of
+    `checkout-index`. Parsing the verb correctly removed the accident and made
+    the hole visible, which is the honest reason this test exists.
+
+    So this test does not list "the verbs we thought of". It takes git's own
+    subcommand list and asserts the *complement* property: every subcommand
+    that is not a declared read is blocked. A blocklist cannot satisfy this —
+    adding the next missing verb would leave the test red on the verb after it.
+    """
+    allowlist = _GIT_READ_VERBS
+    shape_decided = _GIT_SHAPE_DECIDED
+    # Verbs git reports that are not declared reads and are not shape-decided
+    # must block, whether or not anyone remembered them.
+    unlisted = {
+        "checkout-index", "mktree", "mktag", "filter-branch", "replace",
+        "update-server-info", "pack-refs", "reflog", "symbolic-ref",
+        "update-ref", "read-tree", "sparse-checkout", "notes", "init",
+        "clone", "revert", "cherry-pick", "rebase", "switch", "restore",
+        "unpack-objects", "index-pack", "pack-objects", "fast-import",
+        "fast-export", "update-index", "write-tree", "commit-tree",
+    }
+    for verb in sorted(unlisted):
+        assert verb not in allowlist, f"{verb!r} must not be a declared read"
+        allowed, reason, _ = _check_sandbox(f"git {verb}", "read-only")
+        assert allowed is False, f"unlisted git verb {verb!r} must block by default"
+    assert shape_decided  # the shape-decided table must stay populated
+
+
+def test_git_checkout_index_is_blocked_like_checkout():
+    """The regression that motivated fail-closed, in its real spellings.
+
+    `git checkout-index -f -a` / `-u -a` / `-a -f` overwrite uncommitted work —
+    the same damage as `git checkout .`, which the guard already blocks. These
+    were blocked on master *by accident* (substring match) and allowed by the
+    parsed-verb classifier, which is a strict data-loss regression: a command
+    that used to be refused became runnable. Measured end-to-end, all three
+    destroyed a dirty working tree.
+    """
+    for cmd in (
+        "git checkout-index -f -a",
+        "git checkout-index -a -f",
+        "git checkout-index --all",
+        "git checkout-index -f --all",
+        "git checkout-index -u -a",
+        "git checkout-index --index --force --all",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} overwrites uncommitted work; must block"
+
+
+def test_git_merge_file_family_is_blocked():
+    """`merge-file` / `merge-index` / `merge-one-file` write files in place.
+
+    These were in the same accidental-coverage gap as `checkout-index`: the old
+    raw-text scan matched `merge` as a substring, so a parsed-verb classifier
+    that only listed `merge` silently allowed them.
+    """
+    for cmd in (
+        "git merge-file a b c",
+        "git merge-index x",
+        "git merge-one-file a b c",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} writes the working tree; must block"
+
+
+def test_git_reads_stay_allowed_under_fail_closed():
+    """The safe default must not buy safety with false blocks on real work.
+
+    An allowlist is only usable if its listed reads actually pass; the ones
+    below are the inspections an evolution cycle runs constantly, plus the
+    listing forms with a pattern argument (`git tag -l 'v*'`), where the flag
+    and not the absence of an argument is what makes the command a read.
+    """
+    for cmd in (
+        "git status --porcelain", "git log --oneline -3", "git diff --stat",
+        "git diff --cached", "git show HEAD --stat", "git rev-parse HEAD",
+        "git merge-base HEAD master", "git merge-tree a b", "git ls-files",
+        "git cat-file -p HEAD", "git grep foo", "git for-each-ref",
+        "git submodule status", "git worktree list", "git stash list",
+        "git stash show -p", "git remote -v", "git config -l",
+        "git config --get user.name", "git branch -a", "git branch",
+        "git tag -l", "git tag -l 'v*'", "git tag", "git remote get-url origin",
+        "git fetch origin master", "git hash-object a.txt", "git version",
+        "git help add", "git check-ignore a.txt",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
+
+
+def test_git_shape_decided_verbs_block_their_writing_forms():
+    """Flag/subcommand-decided verbs default to block, not to allow.
+
+    Fail-closed is only meaningful if the ambiguous verbs err the same way: a
+    shape that is not a proven read must block. `git branch newbr` creates,
+    `git tag v9` creates, `git hash-object -w` writes the object database.
+    """
+    for cmd in (
+        "git branch newbr", "git branch -D old", "git tag v9", "git tag -d v1",
+        "git hash-object -w a.txt", "git stash", "git stash drop",
+        "git stash pop", "git stash clear", "git worktree add ../wt",
+        "git worktree remove ../wt", "git worktree prune",
+        "git submodule update --init", "git remote add origin x",
+        "git remote set-url origin x", "git config core.x y",
+        "git config user.name someone",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} writes; must block ({reason!r})"

@@ -161,39 +161,58 @@ _PROTECTED_FILES = (
 #
 # Parsing fixes all three at once and is the reason this is a verb set rather
 # than more regex: the unit of protection becomes the resolved verb.
-_GIT_MUTATOR_VERBS = frozenset({
-    # working-tree / index / history writers (issue #979's data-loss set)
-    "stash", "checkout", "restore", "clean", "reset", "commit", "push", "pull",
-    "merge", "rebase", "cherry-pick", "cherry_pick", "revert", "rm", "mv",
-    "switch", "apply", "am", "archive", "submodule", "worktree", "add",
-    # plumbing writers that were never enumerated (issue #1159): `read-tree -u
-    # --reset` overwrites the working tree; the rest rewrite refs / objects /
-    # history, which is the same class of damage. Listed because they are
-    # *mutating*, not because someone remembered them.
-    "read-tree", "update-ref", "update-index", "symbolic-ref", "reflog",
-    "gc", "repack", "prune", "sparse-checkout", "filter-branch", "replace",
-    "pack-refs", "write-tree", "commit-tree", "mktag", "notes",
-    # flag-decided verbs: only a delete/force flag makes them destructive
-    "branch", "tag",
-    # subcommand-decided verbs: reads like `git remote -v` / `git config -l`
-    # stay allowed, writers (`set-url`, `core.hooksPath=…`) block
-    "remote", "config",
+#
+# ⚠️ The set is a **read allowlist** and the default is BLOCK
+# (`_git_invocation_is_mutator` returns the verb for anything not listed). The
+# earlier design was the opposite — a blocklist of mutating verbs — and that is
+# a category that cannot be completed: `git help -a` lists 169 subcommands and
+# upstream adds more, so "not on the list" is a permanent, growing set of
+# *allowed* commands. Measured on the blocklist: 129 of 169 subcommands stayed
+# allowed, and `git checkout-index -f -a` — which overwrites uncommitted work
+# exactly like `git checkout` — was blocked only by accident, because the old
+# raw-text regex matched `checkout` as a *substring* of `checkout-index`.
+# Parsing the verb correctly removed that accident and exposed the hole.
+# Fail-closed deletes the category: a verb is allowed only when it is listed
+# here as one that prints information and writes nothing. Unknown and future
+# subcommands block by default, which is the safe direction for a guard whose
+# failure mode is silent, irreversible data loss.
+_GIT_READ_VERBS = frozenset({
+    # porcelain interrogators — print information, write nothing
+    "status", "log", "show", "diff", "diff-files", "diff-index", "diff-tree",
+    "diff-pairs", "shortlog", "whatchanged", "describe", "blame", "annotate",
+    "name-rev", "rev-list", "rev-parse", "range-diff", "grep", "ls-files",
+    "ls-tree", "ls-remote", "cat-file", "merge-base", "merge-tree",
+    "for-each-ref", "for-each-repo", "show-branch", "show-index", "show-ref",
+    "count-objects", "verify-commit", "verify-pack", "verify-tag", "patch-id",
+    "get-tar-commit-id", "fsck", "diagnose", "refs", "revisions", "var",
+    "version", "help", "repository-layout",
+    # pure stdin/stdout text filters — read a stream, print a stream
+    "check-attr", "check-ignore", "check-mailmap", "check-ref-format",
+    "fmt-merge-msg", "interpret-trailers", "mailinfo", "mailsplit", "mailmap",
+    "stripspace", "column",
+    # Remote-tracking / credential inspection: these write only under .git or
+    # in the user's credential store, never the working tree — and issue #979 is
+    # a dirty-tree guard. `fetch` is deliberately kept: the previous design
+    # allowed it, it cannot destroy uncommitted work, and refusing it would be a
+    # usability regression with no safety gain.
+    "fetch", "credential",
 })
+# Verbs whose *shape* decides — the verb alone says nothing about the effect.
+# Kept out of `_GIT_READ_VERBS` so each is judged by explicit logic, and each
+# defaults to BLOCK when its shape is not a proven read.
+_GIT_SHAPE_DECIDED = frozenset({"stash", "worktree", "submodule", "remote",
+                                "branch", "tag", "config", "hash-object"})
+# Listing flags for `branch` / `tag`: with one of these the command prints and
+# writes nothing, even when a pattern argument follows (`git tag -l 'v*'`).
+_GIT_LIST_FLAGS = frozenset({"-l", "--list", "-a", "--all", "-r", "--remotes",
+                             "-v", "-vv", "--verbose", "--contains", "--merged",
+                             "--no-merged", "--points-at", "--format",
+                             "--show-current", "--column", "--sort", "--color",
+                             "--no-color", "--ignore-case"})
 # `git branch -a` / `git tag -l` / `git tag` are reads; a delete or force flag
 # makes them destructive (`git branch -D old`, `git tag -d v1`).
 _GIT_WRITE_FLAGS = frozenset({"-d", "-D", "--delete", "-f", "--force", "-m",
                               "-M", "--move", "--set-upstream-to", "-u"})
-# Verbs whose *subcommand* decides: `git stash list` reads, `git stash drop`
-# writes. The subcommand is the resolved word after the verb.
-_GIT_SUBCOMMAND_READERS = {
-    "stash": frozenset({"list", "show"}),
-    "worktree": frozenset({"list"}),
-    "submodule": frozenset({"status", "summary"}),
-    "remote": frozenset({"show", "get-url", "v"}),
-}
-# Verbs where *no* subcommand is a read (they print help / list). `git stash`
-# alone is NOT here: a bare `git stash` saves and cleans the tree — a mutator.
-_GIT_NO_SUBCOMMAND_READS = frozenset({"remote", "worktree", "submodule"})
 # `git config` reads unless it writes: read flags, or no positional key.
 _GIT_CONFIG_READ_FLAGS = frozenset({"--get", "--get-all", "--get-regexp",
                                     "-l", "--list", "--get-urlmatch"})
@@ -534,31 +553,61 @@ def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
 def _git_invocation_is_mutator(verb: str, rest: list[str]) -> str | None:
     """Classify one resolved git invocation. Returns the offending verb, or None.
 
+    **Fail-closed**: a verb is allowed only when it is known to print
+    information. Anything else — an unlisted verb, and therefore every
+    subcommand git adds in future — blocks. The blocklist this replaced had the
+    default inverted, which made the safe set the *unlisted* one; with 169
+    subcommands that can never be enumerated, that is a guard against only the
+    names someone happened to type.
+
     The decision is on the *effect*, not the spelling: read-only inspections
-    that the raw-text scan had to special-case by regex (`git stash list`,
-    `git worktree list`, `git submodule status`, `git branch -a`,
-    `git remote -v`, `git config -l`) are read here from the resolved verb +
-    flags, so they stay allowed without an exemption pattern to keep in sync.
+    (`git stash list`, `git worktree list`, `git submodule status`,
+    `git branch -a`, `git remote -v`, `git config -l`) are read from the
+    resolved verb + flags, so they stay allowed without an exemption pattern to
+    keep in sync.
     """
-    if verb not in _GIT_MUTATOR_VERBS:
+    if verb in _GIT_READ_VERBS:
         return None
-    readers = _GIT_SUBCOMMAND_READERS.get(verb)
-    if readers is not None:
-        # Subcommand-decided: `stash list` reads, `stash drop` writes. A
-        # missing subcommand is a write for `stash` (bare `git stash` saves and
-        # cleans the tree) but a read for the listing verbs (`git remote -v`).
-        sub = next((t for t in rest if not t.startswith("-")), None)
-        if sub in readers:
-            return None
-        if sub is None and verb in _GIT_NO_SUBCOMMAND_READS:
-            return None
-        return verb
+    if verb in _GIT_SHAPE_DECIDED:
+        return _shape_decided_verdict(verb, rest)
+    # Unlisted verb: block. This is the fail-closed default and the whole point
+    # of the design — `checkout-index`, `mktree`, `filter-branch`, `init`,
+    # `clone`, `revert`, and any future subcommand land here.
+    return verb
+
+
+def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
+    """The verdict for a verb whose subcommand / flags decide its effect.
+
+    Returns the verb when the invocation writes, or None when it is a proven
+    read. Every branch treats "not recognisably a read" as a write.
+    """
+    positional = [t for t in rest if not t.startswith("-")]
+    sub = next(iter(positional), None)
+    if verb == "stash":
+        # `stash list` / `stash show` read; a bare `git stash` saves and cleans
+        # the tree, so it writes.
+        return None if sub in ("list", "show") else verb
+    if verb == "worktree":
+        # `worktree list` reads; a bare `git worktree` only prints usage.
+        return None if sub is None or sub == "list" else verb
+    if verb == "submodule":
+        # `submodule status` / `summary` read; a bare `git submodule` only
+        # prints usage.
+        return None if sub is None or sub in ("status", "summary") else verb
+    if verb == "remote":
+        # `remote -v` / `show` / `get-url` read; `set-url`/`add`/`remove` write.
+        return None if sub is None or sub in ("show", "get-url", "v") else verb
     if verb in ("branch", "tag"):
-        # Only a delete/force/move flag makes these destructive; a bare
-        # `git branch` / `git tag` / `-a` / `-l` is a read.
-        if any(t in _GIT_WRITE_FLAGS or t.startswith("--delete") for t in rest):
+        # A listing flag makes this a read even with a pattern argument; a
+        # delete/force/move flag makes it a write.
+        if any(t in _GIT_WRITE_FLAGS for t in rest):
             return verb
-        return None
+        if any(t in _GIT_LIST_FLAGS for t in rest):
+            return None
+        # `git branch <name>` / `git tag <name>` create; only the bare form
+        # (no positional argument at all) is the listing read.
+        return None if not positional else verb
     if verb == "config":
         if any(t in _GIT_CONFIG_READ_FLAGS for t in rest):
             return None
@@ -566,18 +615,13 @@ def _git_invocation_is_mutator(verb: str, rest: list[str]) -> str | None:
         # writes. A lone positional key is ambiguous, so treat a single
         # positional as a read and anything that looks like an assignment as
         # a write.
-        positional = [t for t in rest if not t.startswith("-")]
-        if len(positional) >= 2 and "=" not in positional[0]:
+        if any("=" in t for t in positional):
             return verb
-        if any("=" in t and not t.startswith("-") for t in positional):
-            return verb
-        return None
-    if verb == "remote":
-        # `git remote -v` / `show` / `get-url` read; `set-url`/`add`/`remove` write.
-        sub = next((t for t in rest if not t.startswith("-")), None)
-        if sub is None or sub in _GIT_SUBCOMMAND_READERS["remote"]:
-            return None
-        return verb
+        return None if len(positional) <= 1 else verb
+    if verb == "hash-object":
+        # `git hash-object <file>` computes and prints an object name — a read.
+        # `-w` additionally writes the object into the database.
+        return verb if "-w" in rest else None
     return verb
 
 
