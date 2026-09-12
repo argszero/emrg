@@ -203,6 +203,20 @@ _GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--exec-path", "--git-dir",
                                     "--work-tree", "--namespace", "--super-prefix"})
 # Shell operators that separate one command from the next in a chain.
 _SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
+# Shells whose `-c <string>` argument is itself a command the shell will run.
+# The guard must read *that* text, not stop at the outer token stream: before
+# this, `sh -c 'git checkout .'` reached the mutator only because a raw-text
+# regex happened to scan the whole line. Parsing the outer tokens alone sees
+# `sh`, `-c`, and one opaque string — so a wrapper no longer blocks unless the
+# nested text is parsed too. This is a return to the old behaviour by a
+# different route: the old scan was right about these 5 shapes and wrong about
+# the 7 it missed; parsing must not trade one half for the other.
+_SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
+# Commands whose entire argument list is a command the shell will re-parse and
+# run (`eval 'git checkout .'`). `xargs`/`env`/`nohup`/`time`/`command` prefix
+# a real invocation and are already handled, because the invocation is still in
+# the token stream.
+_SHELL_EVALUATORS = frozenset({"eval"})
 
 # ── Containment-escape guard (issue #1102) ─────────────────────────────────
 # Borrowed from Claude Code v2.1.257 ("Containment Escape"): block cloud
@@ -497,7 +511,7 @@ def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if tok != "git" and not tok.endswith("/git"):
+        if _basename(tok) != "git":
             i += 1
             continue
         j = i + 1
@@ -567,18 +581,82 @@ def _git_invocation_is_mutator(verb: str, rest: list[str]) -> str | None:
     return verb
 
 
-def _find_git_mutator(cmd: str) -> str | None:
+def _basename(tok: str) -> str:
+    """The command word without its directory prefix or Windows extension.
+
+    `/usr/bin/git` and `git.exe` name the same program as `git`; a guard that
+    only recognises the bare spelling is a guard against the polite form of
+    the command. (On Windows the shell resolves `git` to `git.exe`, so the
+    extension form is the one that actually runs there.)
+    """
+    base = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    return base
+
+
+def _nested_command_texts(tokens: list[str]) -> list[str]:
+    """The command strings a shell will itself re-parse out of ``tokens``.
+
+    Returns the argument of every `sh -c <text>` (and the other wrapper
+    shells) and every `eval <text>`, so the caller can recurse into them.
+
+    Why this is needed rather than optional: tokenising splits a command into
+    an outer invocation plus an opaque string literal, and a string literal is
+    data. `sh -c 'git checkout .'` therefore parses as the command `sh` with a
+    quoted payload — no git invocation at all. The pre-parsing guard blocked
+    it, because a raw-text regex over the whole line did not care where the
+    word sat. Dropping that scan silently made 5 wrapper shapes writable under
+    read-only (measured 2026-09-12 against master: `sh -c` / `bash -c` /
+    `zsh -c` / `dash -c` / `eval` all went from blocked to allowed), which is
+    the one direction this guard must never move in. So the parsed design has
+    to model the nesting explicitly.
+
+    The wrapper is recognised only when the shell binary and its `-c` flag are
+    *separate tokens* — that is what `sh -c ...` is. A shell keyword command
+    such as `-c` inside a single token (`set -c`) is not treated as one.
+    """
+    out: list[str] = []
+    for i, tok in enumerate(tokens):
+        if _basename(tok) in _SHELL_WRAPPERS:
+            # `sh -c <text>`: find the `-c` flag, then take what follows.
+            for j in range(i + 1, len(tokens)):
+                arg = tokens[j]
+                if arg.startswith("-") and not arg.startswith("--"):
+                    if "c" in arg[1:]:
+                        if j + 1 < len(tokens):
+                            out.append(tokens[j + 1])
+                        break
+                    continue
+                break
+        elif _basename(tok) in _SHELL_EVALUATORS:
+            # `eval <text...>`: every remaining token is re-parsed as a command.
+            out.extend(tokens[i + 1:])
+    return out
+
+
+def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     """The first mutating git verb in ``cmd``, or None when there is none.
 
     Parses rather than scans (issues #1156 + #1159): every `git` invocation in
     a chained command is resolved to its verb and classified by effect. Returns
     a human-readable phrase for the block reason.
+
+    Recurses into shell execution contexts (`sh -c <text>`, `eval <text>`), so
+    a mutator that the shell will run is judged wherever it is written. Depth
+    is capped rather than trusted: nesting is bounded by the shell itself, and
+    a guard must terminate on adversarial input.
     """
     tokens = _tokenize_command(cmd)
     for verb, rest in _git_verbs(tokens):
         hit = _git_invocation_is_mutator(verb, rest)
         if hit:
             return f"git {hit}"
+    if _depth < 3:
+        for nested in _nested_command_texts(tokens):
+            hit = _find_git_mutator(nested, _depth + 1)
+            if hit:
+                return hit
     return None
 
 

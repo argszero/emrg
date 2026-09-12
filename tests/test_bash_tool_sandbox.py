@@ -662,3 +662,76 @@ def test_execute_danger_tier_warns_but_runs():
     assert not result.error
     assert "containment-escape" in result.content
     assert "executed anyway" in result.content
+
+
+# ── nested execution contexts (parsed guard, regression from #1156/#1159 fix) ─
+
+def test_check_read_only_blocks_mutator_inside_shell_c_wrapper():
+    """A mutator the shell will *run* is blocked however it is written.
+
+    `sh -c 'git checkout .'` tokenises as the command `sh` plus one opaque
+    string, so a guard that only classifies the outer tokens sees no git
+    invocation at all. The pre-parsing regex scanned the whole line and
+    blocked these; parsing must not trade that away. Measured 2026-09-12
+    against master: all five of these were blocked before the parse rewrite
+    and became writable under read-only after it, so they are regression
+    guards, not new features.
+    """
+    for cmd in (
+        "sh -c 'git checkout .'",
+        'bash -c "git reset --hard"',
+        "zsh -c 'git clean -fd'",
+        "dash -c 'git stash'",
+        "eval 'git checkout .'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+
+def test_check_read_only_blocks_nested_mutator_under_a_chain():
+    """Nesting and chaining compose: the wrapper's payload is its own command
+    line, so a chained mutator inside it must still be found."""
+    for cmd in (
+        "sh -c 'cd /x; git read-tree -u --reset HEAD'",
+        "sh -c 'git status && git stash drop'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+
+def test_check_read_only_allows_shell_c_without_a_mutator():
+    """Recursing into a wrapper must not block the wrapper itself — the
+    payload is judged, and a read inside `sh -c` stays a read."""
+    for cmd in (
+        "sh -c 'git status'",
+        "sh -c 'git log --oneline'",
+        "bash -c 'echo hello'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
+
+
+def test_check_read_only_blocks_windows_spelled_git():
+    """`git.exe` is the name the command actually has on Windows, so the
+    extension and directory forms name the same program as `git`."""
+    for cmd in ("git.exe checkout .", "/usr/local/bin/git.exe reset --hard"):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+
+def test_check_read_only_blocks_nested_wrapper_spelled_with_a_path():
+    """`/bin/sh -c '...'` is the same wrapper as `sh -c '...'`."""
+    allowed, reason, _ = _check_sandbox("/bin/sh -c 'git checkout .'", "read-only")
+    assert allowed is False
+    assert "git" in reason
+
+
+def test_find_git_mutator_terminates_on_self_reference():
+    """Nesting is bounded: a payload that rewrites its own wrapper cannot
+    recurse forever (the guard caps depth rather than trusting the input)."""
+    from emrg.tools.bash_tool import _find_git_mutator
+
+    assert _find_git_mutator("sh -c \"sh -c 'sh -c \\\"echo hi\\\"'\"") is None
