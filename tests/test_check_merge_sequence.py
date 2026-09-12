@@ -433,3 +433,130 @@ def test_a_base_that_cannot_be_refreshed_is_a_measurement_error(mod, monkeypatch
     assert "could not refresh" in str(excinfo.value)
 
 
+# --- the base is not just fresh, it is the ref you named ---------------------
+#
+# Refreshing the base fixed *when* it is read; the next defect was *what* the
+# name points at. `origin/master` is ambiguous - git's precedence list consults
+# `refs/heads/<name>` before `refs/remotes/<name>` - and git creates exactly such
+# a local branch when a fetch destination is left unqualified, which is the trap
+# `_refresh_base`'s own docstring records. Measured on the real repo
+# (`cyc20260913-072845`) with a stray `refs/heads/origin/master` at `02e43c8`
+# while the remote-tracking ref was `245125e`:
+#
+#     base 02e43c82 (origin/master)      <- master was 245125e; the tool measured
+#                                           a two-cycle-old tree and said "master"
+#
+# The age of the commit is not the defect - the *identity* of the ref is. These
+# tests therefore use real repositories with real refs: a stubbed `_run` cannot
+# show which ref git would have picked, because the defect lives in git's own
+# resolution rules, and that is the thing under test.
+
+
+def _repo_with_two_refs(repo: Path, shadow: bool) -> tuple[str, str]:
+    """A real repo where `origin/master` is genuinely ambiguous-or-not.
+
+    Returns `(old, new)`: the commit a shadowing local branch is left at, and the
+    commit the remote-tracking ref is left at.
+    """
+    repo.mkdir()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+
+    def git(*argv: str) -> str:
+        out = subprocess.run(["git", *argv], cwd=repo, check=True, env=env,
+                             capture_output=True, text=True)
+        return out.stdout.strip()
+
+    git("init", "-q", ".")
+    (repo / "f").write_text("old\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "old")
+    old = git("rev-parse", "HEAD")
+    (repo / "f").write_text("new\n", encoding="utf-8")
+    git("commit", "-qam", "new")
+    new = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/master", new)
+    if shadow:
+        # The stray branch, exactly as git leaves it when a fetch destination is
+        # written unqualified - behind the remote-tracking ref, so the two
+        # answers are distinguishable.
+        git("update-ref", "refs/heads/origin/master", old)
+    return old, new
+
+
+def test_a_shadowing_local_branch_does_not_win(mod, tmp_path, monkeypatch, capsys):
+    """The commit returned is the remote-tracking one, not the shadowing branch.
+
+    Both refs exist, so a bare `git rev-parse origin/master` answers from the
+    local branch: the tool would report a base that is not master while printing
+    `origin/master`. Fails if the short name is resolved by git's precedence
+    instead of by full name.
+    """
+    repo = tmp_path / "repo"
+    old, new = _repo_with_two_refs(repo, shadow=True)
+    monkeypatch.chdir(repo)
+
+    assert mod._rev_parse("origin/master") == new, f"shadow won (old={old[:8]})"
+    # ... and the user is told about the stray ref, because it misleads every
+    # other short-name reader (`git checkout origin/master` included).
+    assert "ambiguous" in capsys.readouterr().err
+
+
+def test_without_the_shadow_the_same_name_resolves_identically(mod, tmp_path, monkeypatch, capsys):
+    """The negative state: no stray branch, same answer, and no warning.
+
+    The pair is what makes the first test mean something - a warning printed
+    unconditionally would be noise, and an assertion that only ever sees the
+    ambiguous case could not tell "handled" from "always warns".
+    """
+    repo = tmp_path / "repo"
+    _old, new = _repo_with_two_refs(repo, shadow=False)
+    monkeypatch.chdir(repo)
+
+    assert mod._rev_parse("origin/master") == new
+    assert capsys.readouterr().err == ""
+
+
+def test_a_name_that_denotes_only_a_local_branch_is_refused(mod, tmp_path, monkeypatch):
+    """No remote-tracking ref at all: exit 2, never that branch's commit.
+
+    Here nothing is ambiguous about git's answer - it is unambiguously the wrong
+    ref. A local branch that happens to be called `origin/master` is not remote
+    master, so the measurement is refused rather than labelled.
+    """
+    repo = tmp_path / "repo"
+    old, _new = _repo_with_two_refs(repo, shadow=True)
+    subprocess.run(["git", "update-ref", "-d", "refs/remotes/origin/master"],
+                   cwd=repo, check=True, capture_output=True)
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._rev_parse("origin/master")
+
+    message = str(excinfo.value)
+    assert "ambiguous" in message and "refs/heads/origin/master" in message, message
+    assert old[:8] not in message, "the refusal must not look like a resolution"
+
+
+def test_a_sha_or_qualified_ref_is_passed_through(mod, monkeypatch):
+    """Only short remote-tracking names are rewritten.
+
+    A SHA has no name to disambiguate, and a fully-qualified ref already selects
+    exactly one ref. Both must reach `rev-parse` unchanged - rewriting either
+    would invent a ref name that the caller never wrote.
+    """
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, cwd=None: (seen.append(argv), None)[1]
+    )
+
+    for ref in ("0" * 40, "refs/remotes/origin/master", "FETCH_HEAD", "localbase"):
+        assert mod._qualify_ref(ref) == ref, ref
+
+    assert seen == [], "a name that cannot be ambiguous costs no git call"
+
+
+
