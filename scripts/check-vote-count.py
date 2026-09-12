@@ -69,20 +69,29 @@ mergeable,mergeStateStatus`, and it can only ever **downgrade** a verdict:
   votes. Reported as `BLOCKED`, which is a *different* state from `SHORT`: short
   means "come back after more review", blocked means "review is done and this still
   cannot land" - the state that sat invisible behind six `READY` lines.
+* `MERGEABLE`, but any `mergeStateStatus` other than `CLEAN` - the gate is the
+  *pair*, so a `MERGEABLE` PR that is `UNSTABLE` (checks failing or unfinished),
+  `BEHIND`, `BLOCKED` or `DRAFT` is also blocked. Reading only `mergeable` is what
+  let a **draft** pull request - which no vote can merge - print `READY`.
 * `UNKNOWN` - GitHub has not computed mergeability yet (usual right after a push).
   Not a yes and not a no, so this fails loud (exit 2) rather than printing either.
-  An unrecognised value fails loud for the same reason.
-* `MERGEABLE` - the text merges. This is deliberately **not** taken as evidence that
-  merging is safe: as `check-merge-freshness.py` documents, GitHub answers "does this
-  textually merge", and a clean auto-merge of two same-valued count lines is the
-  *dangerous* case, not the safe one. The clause is used only in the direction where
-  it is decisive (a conflict is a hard no), and the states are printed so a reader
+  A `mergeStateStatus` this version does not recognise fails loud for the same
+  reason: an unknown state is not evidence of cleanliness. (Enumerating the states
+  and refusing the rest buys the rot-resistance that "never branch on the field" was
+  reaching for, without also passing every state that enumeration covers.)
+* `MERGEABLE`/`CLEAN` - the text merges and GitHub is not withholding the merge.
+  This is deliberately **not** taken as evidence that merging is safe: as
+  `check-merge-freshness.py` documents, GitHub answers "does this textually merge",
+  and a clean auto-merge of two same-valued count lines is the *dangerous* case, not
+  the safe one. The clause is used only in the direction where it is decisive (a
+  conflict or a withheld merge is a hard no), and the states are printed so a reader
   sees them without being told they are fine.
 
-Two sibling questions stay with their own tools, and are named here so this one does
-not quietly pretend to answer them: `check-merge-freshness.py` asks whether the CI
-verdict is still about the tree that would merge (so this tool does not re-check CI),
-and `check-merge-tree-health.py` (PR #1155) asks whether the merged tree passes the
+One sibling question stays with its own tool, named here so this one does not
+quietly pretend to answer it: `check-merge-freshness.py` asks whether the CI verdict
+is still about the tree that would merge (a question about *which* tree ran CI, not
+about whether checks pass - `UNSTABLE` answers that one, and is read above). Likewise
+`check-merge-tree-health.py` (PR #1155) asks whether the merged tree passes the
 repo's own guards.
 
 Push time, and the honest bound
@@ -104,11 +113,12 @@ Usage
 
 Exit codes
 ----------
-    0  every PR has >= --min-votes (default 3) valid votes **and** is mergeable
+    0  every PR has >= --min-votes (default 3) valid votes **and** is
+       `MERGEABLE`/`CLEAN`
     1  at least one PR is SHORT (too few votes) or BLOCKED (cannot be merged)
     2  the check could not be made (gh failed, unparseable response, mergeability
-       not computed yet) - fail loud; never report a count for a question that was
-       not answered
+       not computed yet, merge state not recognised) - fail loud; never report a
+       count for a question that was not answered
 
 The count is printed either way, so a PR that is BLOCKED still reports its votes;
 `--json` carries `valid_votes` and the merge states as separate fields for a
@@ -141,12 +151,44 @@ _MERGEABLE = "MERGEABLE"
 _CONFLICTING = "CONFLICTING"
 _UNKNOWN_MERGEABILITY = "UNKNOWN"
 
-# The merge-state states of the vet, in the sense of #455: the blocking state must
-# block, and the permissive state must not be read as a *health* claim.
-# `mergeStateStatus` is displayed but never *branched on*: it is a finer-grained view
-# of the same fact (DIRTY/BEHIND/BLOCKED/UNSTABLE/...), and pinning behaviour to a
-# value GitHub keeps adding states to is how a gate rots. `mergeable` is the decisive
-# field because it answers the one question `gh pr merge` itself refuses on.
+# The merge gate is spelled **`MERGEABLE`/`CLEAN`** - two fields - and an earlier
+# version of this tool read only the first, on the theory that `mergeStateStatus` is
+# "a finer-grained view of the same fact" and branching on it would rot as GitHub
+# adds states. That theory was wrong twice over, and the second time was measured
+# (cyc20260912-190602): with three valid votes the tool printed
+# **`READY` and exited 0** for `MERGEABLE`/`UNSTABLE` (checks failing or still
+# running), `/BEHIND`, `/BLOCKED` and `/DRAFT`. A **draft** pull request cannot be
+# merged by anyone, and `UNSTABLE` is precisely "CI is not green" - the third
+# conjunct this docstring claims only a sibling tool checks. So the second field is
+# read, and the spelling is the gate's own.
+#
+# Rot-resistance is bought the other way round from before: rather than *ignoring*
+# the field, the known states are enumerated and anything unrecognised **fails loud**
+# (exit 2). A state GitHub adds later is then reported as "could not check" instead
+# of silently passing as permission - which is what "never branch on it" was
+# actually trying to buy, at the cost of the false READY above.
+_CLEAN = "CLEAN"
+
+# The states in which the merge cannot proceed right now, each with the reason the
+# reader needs. GitHub's `MergeStateStatus` vocabulary:
+#
+#   DIRTY       the merge conflicts
+#   UNSTABLE    mergeable, but commit status is not passing  <- the CI conjunct
+#   BEHIND      the head is out of date with the base branch
+#   BLOCKED     GitHub blocks the merge (protection rules / required reviews)
+#   DRAFT       the pull request is a draft
+_NON_CLEAN_STATES = {
+    "DIRTY": "the merge conflicts",
+    "UNSTABLE": "checks are failing or have not finished",
+    "BEHIND": "the head is behind the base branch",
+    "BLOCKED": "GitHub reports the merge blocked (protection rules or required reviews)",
+    "DRAFT": "the pull request is a draft",
+}
+
+# `HAS_HOOKS` ("merge commits are conditioned on hooks") is deliberately NOT in the
+# map: whether it permits a merge is not something this tool can establish, and
+# guessing either way would put an unverified verdict behind a gate. It falls to the
+# fail-loud branch with every other unrecognised value.
 
 # The runnable form, as Agent.md documents it. A constant (the same convention as
 # check-doc-count.py) so the doc line and the guard that checks it cannot drift
@@ -423,14 +465,29 @@ class Verdict:
 
     @property
     def blocked(self) -> bool:
-        """Enough votes, but Git cannot merge the text - so `gh pr merge` refuses.
+        """The merge cannot proceed: the gate's `MERGEABLE`/`CLEAN` is not satisfied.
 
         Kept distinct from `short` because the two call for opposite responses:
         short means "come back after more review", blocked means "review is done and
         this still cannot land". Collapsing them is what let six CONFLICTING PRs sit
         behind six `READY` lines, each looking like it was waiting on a formality.
+
+        Covers every non-clean state, not only a conflict. An earlier version tested
+        `mergeable == CONFLICTING` and so reported `READY` for `MERGEABLE`/`UNSTABLE`
+        (CI not green), `/BEHIND`, `/BLOCKED` and `/DRAFT` - a draft PR, which nobody
+        can merge at all. The gate's spelling is the pair, so the pair is tested.
         """
-        return self.mergeable == _CONFLICTING
+        return self.mergeable == _CONFLICTING or self.merge_state in _NON_CLEAN_STATES
+
+    @property
+    def block_reason(self) -> str:
+        """Why this PR cannot merge, in the reader's terms."""
+        if self.mergeable == _CONFLICTING:
+            return "Git cannot merge the text (CONFLICTING)"
+        reason = _NON_CLEAN_STATES.get(self.merge_state)
+        if reason:
+            return f"merge state is {self.merge_state} - {reason}"
+        return ""
 
     @property
     def ok(self) -> bool:
@@ -526,6 +583,16 @@ def check_pr(number: int, needed: int) -> Verdict:
             f"#{number}: mergeable={mergeable!r} (mergeStateStatus={merge_state!r}) is "
             "not a computed mergeability - GitHub reports UNKNOWN until it finishes "
             "computing, and this check will not guess a verdict from it"
+        )
+    # The second half of the gate's spelling. `MERGEABLE` alone is not `MERGEABLE`/
+    # `CLEAN`: every other state either blocks the merge or says the CI conjunct is
+    # unmet, and a state this version does not know is not evidence of cleanliness.
+    if mergeable == _MERGEABLE and merge_state not in {_CLEAN, *_NON_CLEAN_STATES}:
+        raise RuntimeError(
+            f"#{number}: mergeStateStatus={merge_state!r} is not a state this check "
+            f"knows (known: CLEAN, {', '.join(sorted(_NON_CLEAN_STATES))}). It is not "
+            "read as permission - an unrecognised state may well block the merge, and "
+            "reporting READY from it would be a verdict this tool has not verified"
         )
 
     push_time, exact = _head_push_time(head)
@@ -682,12 +749,14 @@ def main(argv: list[str] | None = None) -> int:
     short = [v for v in verdicts if v.short and not v.blocked]
 
     if blocked:
-        also_short = " (their votes are short too, but resolving the conflict " \
+        also_short = " (their votes are short too, but resolving the block " \
             "replaces the head and voids them - review after the rebase, not before)"
+        reasons = "; ".join(
+            f"#{v.pr}: {v.block_reason}" for v in blocked
+        )
         print(
-            f"\n#{', #'.join(str(v.pr) for v in blocked)}: Git cannot merge the text "
-            f"({blocked[0].mergeable}). More review does not fix this - the branch has "
-            "to be brought up to date and the conflict resolved."
+            f"\n{reasons}. More review does not fix this - the branch or the pull "
+            "request has to be made mergeable first."
             + (also_short if any(v.short for v in blocked) else ""),
             file=sys.stderr,
         )

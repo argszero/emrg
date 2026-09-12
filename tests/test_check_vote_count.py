@@ -462,6 +462,95 @@ def test_the_mergeable_clause_never_raises_the_exit_code_above_one(mod, monkeypa
         assert _run(mod, monkeypatch, fake) == 1, (mergeable, state)
 
 
+# --- the gate is TWO fields, and the second one was ignored -----------------
+#
+# `MERGEABLE` alone is not the gate's spelling: evolution_prompt Step 5 requires
+# `MERGEABLE`/`CLEAN`. An earlier version of this tool read only `mergeable` and
+# documented the omission as deliberate ("`mergeStateStatus` is a finer-grained view
+# of the same fact ... never branched on"). Measured (cyc20260912-190602): with
+# three valid votes it printed `READY` and exited 0 for all four short cases below -
+# including `DRAFT`, which cannot be merged by anyone, and `UNSTABLE`, which *is*
+# the CI conjunct this tool's docstring says it leaves to a sibling. The existing
+# tests could not catch it: every one of them used `merge_state="CLEAN"` or
+# `"DIRTY"`, i.e. only the two states the code happened to branch on.
+
+
+def test_every_non_clean_merge_state_blocks_with_enough_votes(mod, monkeypatch, capsys):
+    """One case per state, because the bug was an unhandled *state*, not a state.
+
+    A single test asserting that one non-clean state blocks would have passed on the
+    old code (it handled `DIRTY`) while the other four stayed broken - which is
+    exactly how this shipped.
+    """
+    for state, why in [
+        ("DIRTY", "conflicts"),
+        ("UNSTABLE", "checks are failing"),
+        ("BEHIND", "behind the base"),
+        ("BLOCKED", "protected"),
+        ("DRAFT", "a draft"),
+    ]:
+        fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state=state)
+        rc = _run(mod, monkeypatch, fake)
+        captured = capsys.readouterr()
+        assert rc == 1, f"MERGEABLE/{state} must block, not exit 0"
+        assert "READY" not in captured.out, f"MERGEABLE/{state} rendered READY"
+        assert "BLOCKED" in captured.out, f"MERGEABLE/{state} should read BLOCKED"
+        assert state in captured.err, f"the reason must name {state}"
+
+
+def test_a_draft_pull_request_is_never_reported_as_ready(mod, monkeypatch, capsys):
+    """The clearest case, pinned on its own so it cannot be lost in a loop.
+
+    `DRAFT` is not a mergeability question at all - no reviewer vote can merge a
+    draft. Reporting it `READY` is not a near-miss reading; it is a false statement
+    about a PR that cannot land.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="DRAFT")
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "READY" not in out
+    assert "DRAFT" in out
+
+
+def test_unstable_is_named_as_the_ci_conjunct(mod, monkeypatch, capsys):
+    """`UNSTABLE` is "checks failing or unfinished" - i.e. CI is not green.
+
+    The tool's own docstring says the CI conjunct is a sibling's question; that is
+    true of *whether the verdict is stale*, but not of *whether checks pass*, and
+    GitHub already answers the latter here. So this is pinned as a blocked state,
+    with the reason saying checks, not "conflict" - the old single-reason message
+    would have told the reader to resolve a conflict that does not exist.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="UNSTABLE")
+    _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert "checks" in err
+    assert "conflict" not in err.lower(), (
+        "UNSTABLE is a CI problem; telling the reader to resolve a conflict sends "
+        "them after something that is not there"
+    )
+
+
+def test_an_unknown_merge_state_fails_loud_rather_than_passing(mod, monkeypatch, capsys):
+    """A state GitHub adds later must not be read as permission.
+
+    This is the rot-resistance the old "never branch on it" comment was reaching
+    for. Enumerating the *known* states and rejecting the rest buys the same
+    property without also passing every state the enumeration covers, which is what
+    the ignore-the-field version got wrong.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="HAS_HOOKS")
+    rc = _run(mod, monkeypatch, fake)
+    assert rc == 2, "an unrecognised merge state is a could-not-check, not a pass"
+    captured = capsys.readouterr()
+    assert "not a state this check knows" in captured.err
+    # Assert on the verdict stream, not on the error prose: the refusal message
+    # itself says "reporting READY from it would be ..." - a substring check on
+    # stderr would fail on the very sentence whose absence it means to prove.
+    assert "READY" not in captured.out
+
+
 def test_the_mergeable_query_is_asked_of_the_pr_it_reports_on(mod):
     """The states must come from the same `gh pr view` as the head they describe.
 
