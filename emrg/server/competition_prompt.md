@@ -149,7 +149,17 @@ Fetch **all three** pages: the **rules** page, the **schedule / timeline** page,
 Scope of the judgment (host, 2026-09-12): it means **"the participation/evaluation process must be offline"** — an offline defense, an on-site round, offline judging, an on-site training camp, etc. → disqualified.
 
 - Chinese: `线下`、`现场`、`决赛答辩`、`答辩`、`路演`、`决赛`、`集训`、`现场评审`、`差旅`、`差旅报销`
-- English: `on-site`、`onsite`、`offline round`、`in-person`、`final presentation`、`pitch event`、`demo day`、`venue`、`travel`
+- English: `offline`、`off-line`、`on-site`、`onsite`、`offline round`、`in-person`、`physical attendance`、`must attend`、`final presentation`、`pitch event`、`demo day`、`venue`、`travel`
+
+> The bare adjective `offline` is listed alongside the compounds on purpose. The
+> requirement is stated *about the process* ("the final round will be held
+> offline"), and that phrasing does not contain `offline round`, so a list of
+> compounds alone misses the most natural English wording of the very thing this
+> gate exists to catch. The Chinese list has no such gap because `线下` is bare.
+>
+> Match **case-insensitively**: prose capitalises these freely (`Offline
+> judging…`, `On-site final`), and a list that only matches the lowercase
+> spelling of itself is the same enumeration gap one level down.
 
 **Exception (does NOT count as an offline component)**: an offline description appearing **only** in an "award ceremony / award banquet" context (`颁奖典礼` / `领奖仪式` / `award ceremony` / `award banquet`) → do not disqualify. A mere award ceremony is not an offline participation requirement; treating it as one would exclude essentially every prize-bearing competition.
 

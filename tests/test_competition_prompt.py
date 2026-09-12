@@ -176,3 +176,93 @@ def test_error_handling_and_forbidden_sections_exist():
     assert "Do not modify `~/.emrg/config.toml`" in text
     # The offline gate is the first forbidden item: never enter an offline one.
     assert "**Never enter a competition with an offline component**" in text
+
+
+def _english_signals(text: str) -> list[str]:
+    """The English offline signals as listed in §3.2 of the prompt.
+
+    Parsed from the prompt rather than duplicated here, so this test tracks the
+    live list instead of a copy that can drift away from it.
+    """
+    for line in text.splitlines():
+        if line.startswith("- English:"):
+            listed = line.split(":", 1)[1]
+            return [w.strip().strip("`").strip() for w in listed.split("、") if w.strip()]
+    return []
+
+
+def test_english_signals_cover_the_bare_adjective():
+    """The list must contain the bare adjective, not only its compounds.
+
+    §3.1 defines the disqualifying class *semantically* — "the
+    participation/evaluation process must be offline" — while §3.2 enumerates
+    the signal words. Since a single hit disqualifies, a class member that is
+    absent from the enumeration is not merely under-detected: it reads as *no
+    offline component found* and the agent proceeds.
+
+    Measured 2026-09-12: the English list held only compounds (`offline round`,
+    `on-site`, …), so "The final round will be held offline." and "Final
+    evaluation is offline." — the natural way to state the requirement — both
+    missed, while the Chinese list caught every equivalent because `线下` is
+    listed bare. A test that asserts each listed word *is present* can never
+    see this: it pins the list against removals and is blind to omissions.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    signals = _english_signals(text)
+    assert signals, "§3.2 has no English signal line"
+    for bare in ("offline", "off-line"):
+        assert bare in signals, (
+            f"bare '{bare}' missing from the English list {signals} — the "
+            f"compound-only enumeration misses the requirement's own phrasing"
+        )
+    # The class is about the process, so at least one attendance form is needed
+    # to catch "participants must attend an on-site event" phrased without
+    # any of the venue/round nouns.
+    assert any(w in signals for w in ("on-site", "onsite", "in-person",
+                                      "physical attendance", "must attend")), signals
+
+
+def test_signal_list_verdicts_on_sample_requirements():
+    """Coverage check: sample requirements in, expected verdicts out.
+
+    Presence assertions cannot prove completeness, but a table of sentences
+    with the verdict the gate must reach *does* fail when a listed form stops
+    matching the way the requirement is normally phrased — which is the failure
+    that actually occurred. Verdicts are computed from the live list, so the
+    test moves with the prompt.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    signals = _english_signals(text)
+    zh_line = next((ln for ln in text.splitlines() if ln.startswith("- Chinese:")), "")
+    zh_signals = [w.strip().strip("`").strip() for w in
+                  zh_line.split(":", 1)[1].split("、") if w.strip()]
+
+    cases = [
+        # (sentence, language, must_be_disqualified)
+        ("The final round will be held offline.", "en", True),
+        ("Final evaluation is offline.", "en", True),
+        ("Offline judging will take place.", "en", True),
+        ("Participants must attend an offline event.", "en", True),
+        ("The final round will be held on-site.", "en", True),
+        ("Teams must travel to Shanghai for the final.", "en", True),
+        ("This is a completely online competition.", "en", False),
+        ("Submissions are scored on a public leaderboard.", "en", False),
+        ("本次比赛为线下比赛", "zh", True),
+        ("决赛在线上进行，需线下提交纸质材料", "zh", True),
+        ("参赛者需现场参加评审", "zh", True),
+        ("全程线上提交，在线评测", "zh", False),
+    ]
+    wrong: list[str] = []
+    for sentence, lang, must_hit in cases:
+        words = zh_signals if lang == "zh" else signals
+        # §3.2 requires a case-insensitive match: prose capitalises these
+        # freely ("Offline judging…"), and matching only the lowercase
+        # spelling of one's own list is the same enumeration gap one level
+        # down — so the check lowercases both sides.
+        low = sentence.lower()
+        hit = any(w and w.lower() in low for w in words)
+        if hit != must_hit:
+            wrong.append(f"{sentence!r} ({lang}): expected "
+                         f"{'disqualify' if must_hit else 'allow'}, got "
+                         f"{'disqualify' if hit else 'allow'}")
+    assert not wrong, "offline-signal coverage failures:\n  " + "\n  ".join(wrong)
