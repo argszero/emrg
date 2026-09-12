@@ -747,6 +747,34 @@ class TestACountLineRevisedBesideATextRevision:
         assert "disjoint=1" in out
 
 
+# The master each recorded branch was reconstructed against. This has to be a
+# fixed commit, never `origin/master`: the expectations below are statements
+# about *historical* merges, and `origin/master` moves.
+#
+# Concretely - and this is issue #1160, where it cost a red master - `a73eba58`
+# is #1140's head. While #1140 was open, merging it against master produced a
+# genuine `disjoint` (two independent additions). After #1140 merged (`6797821`),
+# merging that same branch against the new master puts master's own copy of the
+# change on the "theirs" side, so the answer is correctly `duplicate` - and the
+# recorded `disjoint` expectation fails on a tree where nothing is wrong. The
+# expectation did not go stale because the classifier changed; it went stale
+# because the base did. Measured (both cases, this file's own reconstruction):
+#
+#     base        a73eba58             7147666
+#     147a80c     disjoint, disjoint    duplicate
+#     efd6673     disjoint, disjoint    duplicate
+#     c641859     disjoint, disjoint    duplicate   <- pinned
+#     6797821     duplicate, duplicate  duplicate, identical, ...
+#
+# Pinned to `6797821^` - the master immediately before #1140 merged, which is
+# also this branch's fork point - because that is the only base on which *both*
+# recorded expectations hold at once.
+#
+# The pin is self-enforcing: reverting this to `origin/master` turns the suite
+# red immediately, since master has already moved past `6797821` for good.
+HISTORICAL_BASE = "c641859d687692a04d13f0574d8d1f8e30cfae39"
+
+
 @pytest.mark.parametrize(
     "branch,expect",
     [
@@ -761,9 +789,15 @@ def test_it_reproduces_the_real_historical_verdicts(mod, tmp_path, branch, expec
     """Drive the classifier against a reconstructed real merge.
 
     This is ground truth, not a fixture: both branches are reconstructed with
-    `git merge --no-commit` against the same master, and the expected labels are
-    the ones derived by hand during the cycle (and acted on, with verification
-    after). Skips if the objects are unavailable (e.g. a shallow clone).
+    `git merge --no-commit` against a *fixed* master (HISTORICAL_BASE), and the
+    expected labels are the ones derived by hand during the cycle (and acted on,
+    with verification after). Skips if the objects are unavailable (e.g. a
+    shallow clone).
+
+    The base is pinned rather than read from `origin/master` because these are
+    claims about specific historical merges: "the`disjoint` case" means the one
+    that existed while #1140 was open, not whatever the same two trees produce
+    once that PR is on master (issue #1160).
     """
     probe = subprocess.run(
         ["git", "cat-file", "-e", f"{branch}^{{commit}}"],
@@ -772,6 +806,14 @@ def test_it_reproduces_the_real_historical_verdicts(mod, tmp_path, branch, expec
     )
     if probe.returncode != 0:
         pytest.skip(f"{branch} is not available in this clone")
+
+    base_probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{HISTORICAL_BASE}^{{commit}}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    if base_probe.returncode != 0:
+        pytest.skip(f"pinned base {HISTORICAL_BASE[:8]} is not available in this clone")
 
     wt = tmp_path / "wt"
     subprocess.run(
@@ -782,7 +824,7 @@ def test_it_reproduces_the_real_historical_verdicts(mod, tmp_path, branch, expec
     )
     try:
         subprocess.run(
-            ["git", "merge", "--no-commit", "--no-ff", "origin/master"],
+            ["git", "merge", "--no-commit", "--no-ff", HISTORICAL_BASE],
             cwd=wt,
             capture_output=True,
         )
