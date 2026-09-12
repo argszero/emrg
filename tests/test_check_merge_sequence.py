@@ -29,15 +29,35 @@ What is pinned here, in both directions (#455 - never infer from one side):
 * the conflict case: no tree, no verdict, exit 0 - a conflict is not a finding,
   and reporting it as a failure would make the tool unusable on this queue.
 
-The measurement itself is faked (no git, no pipeline runs in CI): `_merge_commit`
+The git orchestration is faked (no git, no pipeline runs in CI): `_merge_commit`
 and `_guard_verdict` are replaced, and the replacements are asserted to have been
 called with the right commits - a test that passes because the code under test
 was never invoked proves nothing.
+
+The measurement itself is NOT faked (cycle cyc20260912-201557)
+--------------------------------------------------------------
+The orchestration tests above stub `_guard_verdict` in every case, which left the
+whole mapping from the guard's exit code to a verdict uncovered. Measured, not
+assumed: replacing that function with a body that returns `(True, "guard OK")`
+*without consulting the guard at all* kept all five tests above green. That is a
+**fail-open** mutant - the tool would print `OK` for every plan, including the
+dangerous one it exists to catch, and this suite would not notice. Fail-open is
+precisely the defect class this family of gates is written to prevent, so the
+measurement layer is now driven for real, in both directions, below.
+
+Why the real thing is affordable: `check-doc-count.py` collects through
+`sys.executable -m pytest --collect-only`, so a two-line tree gives a real verdict
+in a fraction of a second, with no `uv`, no network and no dependency on the
+project's own suite. The child guard is the repository's real file (copied
+byte-for-byte), because a stub of the guard would only re-test this suite's belief
+about it - the exact failure the mutant above demonstrates.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -45,6 +65,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-merge-sequence.py"
+CHILD_GUARD = REPO_ROOT / "scripts" / "check-doc-count.py"
 
 BASE = "a" * 40
 C1 = "b" * 40
@@ -200,3 +221,111 @@ def test_an_unmeasurable_step_is_not_a_pass(mod, monkeypatch, capsys):
 
     assert rc == 2
     assert "could not measure" in err
+
+
+# --- the measurement layer, driven for real ---------------------------------
+#
+# The tests above replace `_guard_verdict`, so none of them reads the guard's exit
+# code. A mutant that never consulted the guard passed all of them, so the real
+# path is exercised here: a tiny git tree whose own copy of the guard actually
+# runs. Two directions, because the whole point of the function is to tell the
+# two apart - a test that only proved "it can return False" would not show that a
+# healthy tree comes back True.
+
+
+def _tree_with(repo: Path, documented: int, tests: int) -> str:
+    """Build a commit whose guard is satisfied iff `documented == tests`.
+
+    Returns the commit's tree sha, which is what `_guard_verdict` takes.
+    """
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    # The real guard, byte for byte: `_guard_verdict` runs the tree's *own* copy,
+    # and a stand-in would test this fixture instead of the tool.
+    (repo / "scripts" / "check-doc-count.py").write_bytes(CHILD_GUARD.read_bytes())
+    (repo / "Agent.md").write_text(
+        f"# Doc\nPython: `uv run pytest tests/ -v` ({documented})\n", encoding="utf-8"
+    )
+    (repo / "tests" / "test_x.py").write_text(
+        "".join(f"def test_{i}():\n    assert True\n" for i in range(tests)),
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    for argv in (["git", "init", "-q", "."], ["git", "add", "-A"],
+                 ["git", "commit", "-qm", "i"]):
+        subprocess.run(argv, cwd=repo, check=True, env=env, capture_output=True)
+    out = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo,
+                         check=True, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def test_the_real_guard_verdict_accepts_a_self_consistent_tree(mod, tmp_path, monkeypatch):
+    """The OK direction through the real child guard.
+
+    Without this, a `_guard_verdict` that reported every tree as failing would
+    pass every orchestration test above (they inject the verdicts), and the tool
+    would be useless in the opposite direction from the mutant: it would flag the
+    whole queue. Both directions are needed; each is blind to the other's defect.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tree = _tree_with(repo, documented=2, tests=2)
+    # `_guard_verdict` archives the tree with `git archive`, which resolves
+    # objects from the process cwd - the tool runs inside the repo, so the test
+    # must too.
+    monkeypatch.chdir(repo)
+
+    ok, report = mod._guard_verdict(tree, tmp_path / "extract")
+
+    assert ok is True, report
+    assert "documents 2" in report, report
+
+
+def test_the_real_guard_verdict_rejects_a_stale_count(mod, tmp_path, monkeypatch):
+    """The DANGER direction through the real child guard.
+
+    The tree documents two tests and collects one - the drift shape the tool
+    exists to catch on a merge that git reported clean. Fails open if the guard's
+    exit code is read wrongly, which is what the surviving mutant did.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tree = _tree_with(repo, documented=2, tests=1)
+    monkeypatch.chdir(repo)
+
+    ok, report = mod._guard_verdict(tree, tmp_path / "extract")
+
+    assert ok is False
+    assert "documents 2" in report and "1 are collected" in report, report
+
+
+def test_a_tree_without_the_guard_is_a_measurement_error(mod, tmp_path, monkeypatch):
+    """No guard in the tree means "could not measure", never a pass.
+
+    The tool judges the merged tree's own copy of the guard, so a tree that
+    cannot be judged must surface as exit 2. A missing guard reported as healthy
+    would be the most dangerous reading available: it would cover exactly the
+    trees whose health is unknown.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tree = _tree_with(repo, documented=1, tests=1)
+    (repo / "scripts" / "check-doc-count.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "drop the guard"], cwd=repo, check=True,
+                   capture_output=True)
+    out = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo,
+                         check=True, capture_output=True, text=True)
+    tree = out.stdout.strip()
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._guard_verdict(tree, tmp_path / "extract")
+
+    assert "not present" in str(excinfo.value)
+
