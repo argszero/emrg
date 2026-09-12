@@ -167,7 +167,10 @@ def test_check_read_only_blocks_git_mutators():
         allowed, reason, enforcement = _check_sandbox(cmd, "read-only")
         assert allowed is False, f"{cmd!r} should be blocked"
         assert "read-only sandbox" in reason, cmd
-        assert "git" in reason, cmd
+        # Either the git-verb guard or the write-target scan may fire first
+        # (`git rm foo.py` now names the removed path, not the verb) — both
+        # are legitimate blocks; what must hold is that it *is* blocked.
+        assert "git" in reason or "destructive write" in reason, cmd
         assert enforcement == "partial"
 
 
@@ -529,3 +532,154 @@ def test_execute_danger_tier_warns_but_runs():
     assert not result.error
     assert "containment-escape" in result.content
     assert "executed anyway" in result.content
+
+
+# ── write-target parsing (issue #1162) ────────────────────────────────────
+#
+# The extractor used to regex-scan raw text, which was wrong in BOTH
+# directions and the two failures had one cause: it could not tell a `>`
+# that was an operator from one inside an argument. These tests pin both
+# sides, and then pin the invariant itself rather than the verb list.
+
+def test_quoted_redirect_is_not_a_write_target():
+    """Issue #1162: a `>` inside a quoted argument is data, not an operator.
+
+    Measured on master: every one of these was BLOCKED under read-only, with
+    reasons like `targeting 'b"'` and `targeting '0)"'`. One of them cost a
+    real cycle a retry — a `gh issue create` whose *title* contained `>`.
+    """
+    for cmd in (
+        'echo "a > b"',
+        'grep -n "x > y" file.txt',
+        'python3 -c "print(1 > 0)"',
+        'git log --oneline --grep="a > b"',
+        'gh issue create --title "fix a > b comparison" --body-file /tmp/x.md',
+        'echo "IGNORED -> writing here leaves porcelain clean"',
+    ):
+        assert _extract_write_targets(cmd) == [], cmd
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
+
+
+def test_real_redirects_are_still_write_targets():
+    """The positive control: dropping quoted ones must not drop real ones."""
+    assert _extract_write_targets("echo x > /tmp/y") == ["/tmp/y"]
+    assert _extract_write_targets("echo x >> /tmp/y") == ["/tmp/y"]
+    assert _extract_write_targets("cmd 2> err.txt") == ["err.txt"]
+    assert _extract_write_targets("cmd &> out.txt") == ["out.txt"]
+    for cmd in ("echo x > /tmp/y", "echo x >> /tmp/y", "cmd 2> err.txt"):
+        allowed, _, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, cmd
+
+
+def test_non_recursive_and_unlisted_writers_are_destructive():
+    """Issue #1162: one verb, two spellings, opposite verdicts.
+
+    `rm` was destructive only when a recursive flag was present, so
+    `rm a.txt` deleted a file the same guard refused to let `rm -rf dir`
+    touch. The listed-writers gap is the same defect one step further out.
+    """
+    for cmd, target in (
+        ("rm a.txt", "a.txt"),
+        ("rm -f a.txt", "a.txt"),
+        ("cp b.txt a.txt", "a.txt"),
+        ("truncate -s 0 a.txt", "a.txt"),
+        ("tee a.txt", "a.txt"),
+    ):
+        assert target in _extract_write_targets(cmd), cmd
+        allowed, _, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} deletes/overwrites and must be blocked"
+
+
+def test_sed_in_place_is_blocked_but_a_filter_is_not():
+    """`sed -i` rewrites its file arguments; a bare `sed` only writes stdout.
+
+    The flag can carry a suffix (`-i.bak`), so the decision is on the flag
+    prefix rather than an exact match.
+    """
+    for cmd in ("sed -i '' 's/x/y/' a.txt", "sed -i.bak 's/x/y/' a.txt"):
+        allowed, _, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, cmd
+    for cmd in ("sed 's/x/y/' a.txt", "sed -n 1p a.txt"):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is a filter and must be allowed ({reason!r})"
+
+
+def test_chain_separators_stop_the_argument_scan():
+    """A chain's later command is not an argument of the earlier one."""
+    assert _extract_write_targets("rm -rf /tmp/x; echo hi") == ["/tmp/x"]
+    assert _extract_write_targets("echo hi && rm x.txt") == ["x.txt"]
+    allowed, _, _ = _check_sandbox("ls -la && git status", "read-only")
+    assert allowed is True
+
+
+def test_write_guard_preserves_the_tree_it_promises_not_to_touch(tmp_path):
+    """The invariant, not the verb list (issue #1162's own suggestion).
+
+    Run each representative mutator in a scratch repo under its DECIDED
+    verdict and assert the tree is unchanged. A list-based test can only be
+    as complete as the list; this fails loudly when a spelling slips through
+    — which is exactly how `rm a.txt` and `sed -i` went unnoticed.
+    """
+    import subprocess as sp
+
+    repo = tmp_path / "scratch"
+    repo.mkdir()
+    (repo / "a.txt").write_text("original\n", encoding="utf-8")
+    (repo / "b.txt").write_text("other\n", encoding="utf-8")
+    sp.run(["git", "init", "-q"], cwd=repo, check=True)
+    sp.run(["git", "add", "-A"], cwd=repo, check=True)
+    sp.run(["git", "-c", "user.email=e@x", "-c", "user.name=t", "commit", "-qm", "init"],
+           cwd=repo, check=True)
+    (repo / "a.txt").write_text("uncommitted edit\n", encoding="utf-8")
+    before = sp.run(["git", "status", "--porcelain"], cwd=repo,
+                    capture_output=True, text=True, encoding="utf-8").stdout
+
+    for cmd in ("rm a.txt", "rm -f a.txt", "cp b.txt a.txt", "truncate -s 0 a.txt",
+                "tee a.txt", "sed -i '' 's/original/x/' a.txt"):
+        allowed, _, _ = _check_sandbox(cmd, "read-only", str(repo))
+        assert allowed is False, f"{cmd!r} must be blocked under read-only"
+        # The guard is static, so a block means the command never ran. Assert
+        # the file is intact rather than assuming it.
+        assert (repo / "a.txt").read_text(encoding="utf-8") == "uncommitted edit\n", cmd
+
+    after = sp.run(["git", "status", "--porcelain"], cwd=repo,
+                   capture_output=True, text=True, encoding="utf-8").stdout
+    assert after == before
+
+
+def test_option_values_are_not_mistaken_for_file_operands():
+    """Argument filtering must skip the *value* an option consumes.
+
+    Dropping every token that starts with ``-`` is not enough: in
+    ``truncate -s 0 a.txt`` the first non-flag token is the size ``0``, so a
+    naive filter reports ``0`` as the file to be written. That still blocks —
+    but it names a token that is not a path, and a guard whose message points
+    at the wrong thing is one nobody can act on. The operands are what the
+    message must name.
+    """
+    targets = _extract_write_targets("truncate -s 0 a.txt")
+    assert targets == ["a.txt"], targets
+    # Same shape via the verbose spelling, and for a file whose name could be
+    # confused with a value.
+    assert _extract_write_targets("truncate --size 12 report.txt") == ["report.txt"]
+    assert _extract_write_targets("tee -a log.txt") == ["log.txt"]
+    # `sed`'s first operand is the script, not a file to rewrite.
+    assert _extract_write_targets("sed -i s/a/b/ f.txt") == ["f.txt"]
+
+
+def test_find_delete_is_a_destructive_write_but_a_plain_find_is_not():
+    """`find ... -delete` removes matches; `find` alone only prints them.
+
+    Issue #1162 listed `find . -name "*.pyc" -delete` among the destructive
+    writes that read-only allowed. The guard must separate the two: blocking
+    every `find` would refuse an ordinary read, which is the over-block
+    failure this change exists to remove.
+    """
+    for cmd in ('find . -name "*.pyc" -delete', "find build -type f -delete"):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, cmd
+        assert "destructive write" in reason, reason
+    for cmd in ("find . -name '*.pyc'", "find . -name '*.pyc' -print", "find . -type d"):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
