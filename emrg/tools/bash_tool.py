@@ -7,6 +7,7 @@ import locale
 import logging
 import os
 import re
+import shlex
 import signal
 import tempfile
 
@@ -134,6 +135,30 @@ _PROTECTED_FILES = (
     "~/.emrg/rants.jsonl",
 )
 
+# Shell operators that separate one command from the next in a chain. After
+# tokenizing with punctuation_chars these arrive as their own tokens, which is
+# what lets `_args_after_command` stop at the next command.
+_COMMAND_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
+
+# Verbs whose *arguments are files they rewrite in place*. They were invisible
+# to the old spelling-based scan (issue #1162): `sed -i`, `truncate`, `tee`.
+# A read-only cycle exists to protect uncommitted work, and every one of these
+# can destroy it just as completely as `rm -rf`.
+_INPLACE_WRITER_VERBS = frozenset({"truncate", "tee", "shred"})
+
+# Options that take their value as the *next* token. Filtering arguments by
+# `not startswith("-")` alone cannot tell an option's value from an operand:
+# `truncate -s 0 a.txt` yields `0` (the size) as the first non-flag token, so
+# the block would name the size instead of the file. Only the options that
+# actually appear in the verbs covered below are listed — this stays a
+# decision aid, not a full getopt implementation.
+_OPTIONS_WITH_VALUE = frozenset({
+    "-s", "--size",          # truncate
+    "-o", "--output",        # tee
+    "-n", "-N", "-s", "--size",  # shred
+    "-e", "--expression",    # sed
+})
+
 # Git mutating commands — blocked under read-only (community issue #979,
 # heinrichneb dev.to comment on the 2026-08-20 data-loss postmortem): the
 # incident's actual killers (`git stash`, `git checkout .`, `git reset --hard`,
@@ -228,37 +253,159 @@ def _check_containment_escape(cmd: str) -> str | None:
     return None
 
 
+def _split_command_tokens(cmd: str) -> list[str]:
+    """Split a shell command into tokens, preserving operators like ``&&``.
+
+    ``shlex`` in POSIX mode with ``punctuation_chars`` keeps quoting semantics:
+    a ``>`` inside a quoted argument stays *inside* the token instead of
+    becoming an operator (issue #1162), and ``&&`` / ``;`` / ``|`` survive as
+    tokens so a chain can be walked.
+
+    Falls back to a whitespace split when the input is unparseable (an
+    unterminated quote), because a guard that raises on odd input is worse
+    than one that over-blocks it.
+    """
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        return cmd.split()
+
+
+def _command_word(tok: str) -> str:
+    """A command word without its directory prefix or Windows extension.
+
+    ``/usr/bin/rm`` and ``rm.exe`` name the same program as ``rm``; matching
+    only the bare spelling guards the polite form of the command.
+    """
+    base = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    return base
+
+
+def _args_after_command(tokens: list[str], i: int) -> list[str]:
+    """The argument tokens of the command starting at ``tokens[i]``.
+
+    Stops at the next command in a chain, so ``rm -rf a; echo hi`` yields only
+    ``a`` — the shell separators are their own tokens after tokenizing.
+    """
+    args: list[str] = []
+    for tok in tokens[i + 1:]:
+        if tok in _COMMAND_SEPARATORS or tok in ("<", ">", ">>", "&>", "&>>"):
+            break
+        args.append(tok)
+    return args
+
+
+def _positional_args(tokens: list[str], i: int) -> list[str]:
+    """The non-option *operands* of the command starting at ``tokens[i]``.
+
+    Unlike a plain "drop anything starting with ``-``" filter, this also drops
+    the value that follows an option which takes one. Without that,
+    ``truncate -s 0 a.txt`` reports the size ``0`` as the file to be written,
+    and the block names the wrong thing — a guard whose message points at a
+    token that is not a path is a guard nobody can trust. A lone ``--`` ends
+    option parsing, so everything after it is an operand.
+    """
+    out: list[str] = []
+    args = _args_after_command(tokens, i)
+    skip_next = False
+    for tok in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--":
+            continue
+        if tok.startswith("-") and tok != "-":
+            # `-s0` / `--size=0` carry their value in the same token; only the
+            # spaced form consumes the next one.
+            if tok in _OPTIONS_WITH_VALUE:
+                skip_next = True
+            continue
+        out.append(tok)
+    return out
+
+
 def _extract_write_targets(cmd: str) -> list[str]:
-    """Heuristic extraction of write targets from a command line.
+    """Write targets of ``cmd``: the paths a command appears to write.
 
     Returns path tokens the command appears to write to:
-      - ``rm -r/-rf/-R <path>`` and ``rmdir <path>`` → the removed path
-      - ``mv <src> <dst>`` / ``cp -r <src> <dst>`` → the destination
+      - ``rm <path>...`` and ``rmdir <path>`` → the removed paths
+      - ``mv <src> <dst>`` / ``cp <src> <dst>`` → the destination
       - ``> / >> / 2> / &>`` redirects → the redirect target
 
-    Deliberately non-exhaustive (the sandbox only catches obvious
-    destructive writes — the boundary is honest: enforcement=partial).
+    **Parsed, not scanned** (issue #1162). The previous version regex-scanned
+    raw text, which failed in both directions:
+
+      - it read a ``>`` *inside a quoted argument* as a redirect, so ordinary
+        reads were refused — ``echo "a > b"`` reported target ``'b"'``,
+        ``python3 -c "print(1 > 0)"`` reported ``'0)"'``, and any ``->`` in
+        prose was a redirect to the next word. Measured on master: 7 of 7
+        ordinary read commands blocked, including a ``gh issue create`` whose
+        *title* contained ``>`` (which cost the host a retry in a real cycle);
+      - it matched verbs by spelling, so ``rm <file>`` (no recursive flag) and
+        unlisted writers (``sed -i``, ``truncate``, ``tee``, ``cp`` without
+        ``-r``) were not destructive at all — 7 of 7 measured writes allowed.
+
+    Quoting is what distinguishes the two: the token stream already knows
+    whether ``>`` was an operator or a character in an argument, so both
+    directions are fixed by the same change.
+
+    Still deliberately non-exhaustive in *which verbs* it covers (an
+    interpreter can always write a file); the honest boundary stays
+    ``enforcement="partial"``.
     """
+    tokens = _split_command_tokens(cmd)
     targets: list[str] = []
-    # rm -r / rm -rf / rm -R ... <path>  (recursive delete)
-    for m in re.finditer(r"\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*\s+)+([^\s|;&]+)", cmd):
-        targets.append(m.group(1))
-    # rmdir <path>
-    for m in re.finditer(r"\brmdir\s+([^\s|;&]+)", cmd):
-        targets.append(m.group(1))
-    # mv <src> <dst> — the destination is the last bare token
-    for m in re.finditer(r"\bmv\s+((?:-[a-zA-Z]*\s+)*[^\s|;&]+\s+[^\s|;&]+)", cmd):
-        toks = m.group(1).split()
-        if len(toks) >= 2:
-            targets.append(toks[-1])
-    # cp -r <src> <dst> — the destination is the last bare token
-    for m in re.finditer(r"\bcp\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*\s+)+([^\s|;&]+\s+[^\s|;&]+)", cmd):
-        toks = m.group(1).split()
-        if len(toks) >= 2:
-            targets.append(toks[-1])
-    # shell redirects: > file / >> file / 2> file / &> file
-    for m in re.finditer(r"(?:\d*>>?|&>>?)\s*([^\s|;&]+)", cmd):
-        targets.append(m.group(1))
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        word = _command_word(tok)
+        # Redirects: `>` `>>` `&>` `&>>` are their own tokens, and a numeric
+        # fd prefix arrives as a separate token (`2` `>` `e`).
+        if tok in (">", ">>", "&>", "&>>") or re.fullmatch(r"\d*>>?", tok):
+            if i + 1 < len(tokens) and tokens[i + 1] not in _COMMAND_SEPARATORS:
+                targets.append(tokens[i + 1])
+                i += 2
+                continue
+        elif word == "rm" or word == "rmdir":
+            # Any operand is removed — NOT only with a recursive flag.
+            # `rm a.txt` destroys uncommitted work exactly like `rm -rf dir`;
+            # whether the delete recurses does not decide whether the file
+            # survives.
+            targets.extend(_positional_args(tokens, i))
+        elif word == "mv":
+            args = _positional_args(tokens, i)
+            if len(args) >= 2:
+                targets.append(args[-1])
+        elif word == "cp":
+            args = _positional_args(tokens, i)
+            if len(args) >= 2:
+                targets.append(args[-1])
+        elif word in _INPLACE_WRITER_VERBS:
+            targets.extend(_positional_args(tokens, i))
+        elif word == "sed":
+            # `sed -i` rewrites its file operands in place; a bare `sed` is a
+            # filter that writes only to stdout and must stay allowed. The flag
+            # may carry a suffix (`-i.bak`), so test the prefix.
+            args = _args_after_command(tokens, i)
+            if any(t == "-i" or t.startswith("-i") for t in args):
+                # The first operand of `sed` is the *script*, not a file —
+                # only the operands after it are rewritten. Naming the script
+                # (`sed -i s/a/b/ f.txt` → `s/a/b/`) would point the block at
+                # something that is not a path.
+                targets.extend(_positional_args(tokens, i)[1:])
+        elif word == "find":
+            # `find <paths> ... -delete` removes every match; the paths it was
+            # pointed at are the work at risk. Without `-delete` a `find` is a
+            # read and must stay allowed (issue #1162 listed `-delete` as an
+            # allowed destructive write on master).
+            args = _args_after_command(tokens, i)
+            if "-delete" in args:
+                targets.extend(_positional_args(tokens, i))
+        i += 1
     return targets
 
 
