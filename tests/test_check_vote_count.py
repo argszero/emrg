@@ -58,17 +58,32 @@ def mod():
 class FakeGh:
     """Routes gh calls to canned answers and records them."""
 
-    def __init__(self, reviews: list[dict], push_time: str = T0, exact: bool = True):
+    def __init__(
+        self,
+        reviews: list[dict],
+        push_time: str = T0,
+        exact: bool = True,
+        mergeable: str = "MERGEABLE",
+        merge_state: str = "CLEAN",
+    ):
         self.reviews = reviews
         self.push_time = push_time
         self.exact = exact
+        self.mergeable = mergeable
+        self.merge_state = merge_state
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str]) -> object:
         self.calls.append(list(args))
         assert args and args[0] in {"pr", "api", "run"}, args
         if args[:2] == ["pr", "view"]:
-            return {"number": 1, "title": "t", "headRefOid": HEAD}
+            return {
+                "number": 1,
+                "title": "t",
+                "headRefOid": HEAD,
+                "mergeable": self.mergeable,
+                "mergeStateStatus": self.merge_state,
+            }
         if args[0] == "api":
             joined = " ".join(args)
             if "actions/runs" in joined:
@@ -275,6 +290,214 @@ def test_a_body_that_does_not_open_with_a_mark_but_claims_lgtm_counts(mod):
     """Human-written reviews in this repo sometimes omit the mark."""
     assert mod._classify("LGTM, verified locally.") == "approve"
     assert mod._classify("## Review\nThis needs work") == "comment"
+
+
+# --- the mergeable clause: enough votes is not the same as mergeable -------
+
+
+def _three_votes() -> list[dict]:
+    return [
+        _approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+        _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+        _approve("cyc20260911-030000", "2026-09-11T03:00:00Z"),
+    ]
+
+
+def test_a_conflicting_pr_with_three_votes_is_blocked_not_ready(mod, monkeypatch, capsys):
+    """The bug: six PRs printed READY 3/3 while CONFLICTING and unmergeable.
+
+    Measured 2026-09-12 on the live repo - #1152/#1151/#1145/#1142/#1141/#1136 each
+    reported `READY 3/3` with `mergeable=CONFLICTING`, `mergeStateStatus=DIRTY`.
+    Every one of them was a merge `gh pr merge` refuses, so the queue read as six PRs
+    waiting on a formality when it was a deadlock.
+
+    Both halves are asserted: the verdict must not be READY, and the *count* must
+    still be reported. Suppressing the count would hide the review work that was
+    actually done, and this is a tool whose whole point is an honest count.
+    """
+    fake = FakeGh(_three_votes(), mergeable="CONFLICTING", merge_state="DIRTY")
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, "a PR that cannot be merged must not exit 0"
+    assert "READY" not in out, "CONFLICTING must never render as READY"
+    assert "BLOCKED 3/3" in out
+    assert "merge state: CONFLICTING/DIRTY" in out
+
+
+def test_the_blocked_reason_names_the_conflict_and_not_more_review(mod, monkeypatch, capsys):
+    """The cure differs from SHORT's, so the message must not be the SHORT one.
+
+    A reviewer told "not enough votes" goes and reviews; on a conflicting branch that
+    work is thrown away by the rebase that resolving the conflict requires, which
+    pushes a new head and voids every vote. The stderr line has to send them to the
+    conflict instead.
+    """
+    fake = FakeGh(_three_votes(), mergeable="CONFLICTING", merge_state="DIRTY")
+    _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert "cannot merge the text" in err
+    assert "Not enough votes yet" not in err, (
+        "three votes are present, so the shortfall message would be false"
+    )
+
+
+def test_a_pr_that_is_both_short_and_conflicting_is_reported_as_blocked(mod, monkeypatch, capsys):
+    """Blocked wins the headline, and the output says why the votes do not matter yet.
+
+    Reporting `SHORT 1/3` here would be the original bug one layer down: it names the
+    wrong cure. The conflict has to be resolved first, and doing that voids the vote
+    anyway - so the shortfall is real but not the thing to act on.
+    """
+    fake = FakeGh(
+        [_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")],
+        mergeable="CONFLICTING",
+        merge_state="DIRTY",
+    )
+    rc = _run(mod, monkeypatch, fake)
+    # One read for both streams: `readouterr()` drains, so a second call returns "".
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "BLOCKED 1/3" in captured.out, "the conflict is the blocking fact, not the vote deficit"
+    assert "voids them" in captured.err
+
+
+def test_a_mergeable_pr_with_three_votes_is_ready(mod, monkeypatch, capsys):
+    """The approving direction of the new clause (#455: pin both states).
+
+    Without this, a predicate that blocked *everything* would pass every other test
+    in this section - the failure would be in the safe direction, and safe-direction
+    failures are exactly the ones nobody investigates.
+    """
+    fake = FakeGh(_three_votes(), mergeable="MERGEABLE", merge_state="CLEAN")
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "READY 3/3" in out
+    assert "merge state: MERGEABLE/CLEAN" in out
+
+
+def test_a_mergeable_pr_with_too_few_votes_is_still_short(mod, monkeypatch, capsys):
+    """The mergeable clause can only downgrade; it must not upgrade a vote deficit."""
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z")],
+                  mergeable="MERGEABLE", merge_state="CLEAN")
+    rc = _run(mod, monkeypatch, fake)
+    assert rc == 1
+    assert "SHORT 1/3" in capsys.readouterr().out
+
+
+def test_an_uncomputed_mergeability_fails_loud(mod, monkeypatch, capsys):
+    """`UNKNOWN` is a question not yet answered, not an answer of "mergeable".
+
+    GitHub computes mergeability lazily, so a head pushed seconds ago reports
+    UNKNOWN. Reading that as permission would be the same class of mistake as
+    defaulting a missing field to "no conflict" - and the missing-field case is
+    already pinned below. Asserts the count is *not* printed: a verdict that was not
+    computed must not be shipped alongside a number that looks like one.
+    """
+    fake = FakeGh(_three_votes(), mergeable="UNKNOWN", merge_state="UNKNOWN")
+    rc = _run(mod, monkeypatch, fake)
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "not a computed mergeability" in err
+    assert "3/3" not in err
+
+
+def test_an_unrecognised_mergeability_value_fails_loud(mod, monkeypatch, capsys):
+    """A value this version does not know must not fall through to "not blocking".
+
+    Same reasoning as the `_FRESH_STATUSES` naming in check-merge-freshness.py: a new
+    GitHub state silently read as permission is a gate that rots without changing.
+    """
+    fake = FakeGh(_three_votes(), mergeable="SOMETHING_NEW", merge_state="CLEAN")
+    assert _run(mod, monkeypatch, fake) == 2
+    assert "not a computed mergeability" in capsys.readouterr().err
+
+
+def test_a_payload_without_mergeability_fails_loud(mod, monkeypatch, capsys):
+    """An absent field must fail loud, for the same reason the `at` check exists.
+
+    A dropped projection would leave `mergeable` empty, and empty is not CONFLICTING -
+    so a defaulting implementation would report READY for a PR nobody checked. That is
+    the exact shape of the `--jq` bug this file already hit once.
+    """
+    class NoMergeFields(FakeGh):
+        def __call__(self, args):
+            payload = super().__call__(args)
+            if isinstance(payload, dict) and "mergeable" in payload:
+                payload = dict(payload)
+                payload.pop("mergeable")
+                payload.pop("mergeStateStatus")
+            return payload
+
+    fake = NoMergeFields(_three_votes())
+    rc = _run(mod, monkeypatch, fake)
+    assert rc == 2
+    assert "no mergeability" in capsys.readouterr().err
+
+
+def test_json_mode_carries_the_merge_state_and_the_verdict(mod, monkeypatch, capsys):
+    """Machine callers need both facts separately: the count is still the count."""
+    fake = FakeGh(_three_votes(), mergeable="CONFLICTING", merge_state="DIRTY")
+    rc = _run(mod, monkeypatch, fake, ["1", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload[0]["valid_votes"] == 3
+    assert payload[0]["enough_votes"] is True, "the votes are enough; the merge is not"
+    assert payload[0]["mergeable"] == "CONFLICTING"
+    assert payload[0]["merge_state"] == "DIRTY"
+    assert payload[0]["verdict"] == "BLOCKED"
+    assert payload[0]["ready"] is False
+
+
+def test_the_mergeable_clause_never_raises_the_exit_code_above_one(mod, monkeypatch, capsys):
+    """Blocked is a finding (exit 1), not a could-not-check (exit 2).
+
+    The distinction matters because exit 2 means "ask again"; a conflict is a fact
+    about the branch, and reporting it as a transient error would have a caller
+    retry forever instead of resolving it. Pinned separately from the verdict test
+    because conflating the two exit codes is how a CI gate becomes a no-op.
+    """
+    for mergeable, state in [("CONFLICTING", "DIRTY"), ("CONFLICTING", "BEHIND")]:
+        fake = FakeGh(_three_votes(), mergeable=mergeable, merge_state=state)
+        assert _run(mod, monkeypatch, fake) == 1, (mergeable, state)
+
+
+def test_the_mergeable_query_is_asked_of_the_pr_it_reports_on(mod):
+    """The states must come from the same `gh pr view` as the head they describe.
+
+    A second call keyed on a different PR (or a list endpoint's cached state) would
+    let the merge state describe a different PR than the votes - the two facts would
+    be about different things, with nothing in the output to show it.
+    """
+    fake = FakeGh(_three_votes())
+    mod._gh_json = fake
+    view = fake(["pr", "view", "1", "-R", mod.REPO, "--json",
+                 "number,title,headRefOid,mergeable,mergeStateStatus"])
+    mergeable, state = mod._merge_state(view)
+    assert (mergeable, state) == ("MERGEABLE", "CLEAN")
+
+
+def test_the_pr_view_actually_requests_the_merge_fields(mod, monkeypatch, capsys):
+    """A fixture that answers from a keyed dict cannot catch a missing field.
+
+    `FakeGh.__call__` returns its canned payload whatever fields were asked for, so
+    the tests above would pass even if the real `--json` list never asked for
+    mergeability - the tool would then fail loud on every real PR while the suite
+    stayed green. So the requested field list itself is asserted.
+    """
+    seen: list[list[str]] = []
+
+    class Recording(FakeGh):
+        def __call__(self, args):
+            if args[:2] == ["pr", "view"]:
+                seen.append(list(args))
+            return super().__call__(args)
+
+    fake = Recording(_three_votes())
+    assert _run(mod, monkeypatch, fake) == 0
+    assert seen, "the tool must ask gh for the PR"
+    fields = " ".join(seen[0])
+    assert "mergeable" in fields and "mergeStateStatus" in fields, seen[0]
 
 
 # --- the run rule ----------------------------------------------------------
