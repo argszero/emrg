@@ -198,7 +198,14 @@ def test_check_read_only_blocks_git_mutators_with_global_options():
             assert allowed is False, (
                 f"{cmd!r} must be blocked (global option defeats the scan?)"
             )
-            assert "git" in reason, cmd
+            # Two layers can legitimately catch this: the git-verb classifier
+            # (`git commit -am x` writes no file target) or the write-target
+            # scan (`git rm foo.py` names an operand). Asserting *which* layer
+            # fired couples this test to the order of the checks, so it passed
+            # on this branch and failed once the write-target parser (#1168)
+            # landed — the same command, the same safe outcome, a different
+            # reason string. The invariant is "blocked with a sandbox reason".
+            assert "sandbox" in reason, cmd
 
 
 def test_check_read_only_blocks_unlisted_plumbing_mutators():
