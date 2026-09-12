@@ -141,6 +141,44 @@ def _rev_parse(ref: str) -> str:
     return proc.stdout.strip()
 
 
+def _refresh_base(base: str) -> None:
+    """Bring the base up to date when it names a remote-tracking branch.
+
+    Every PR head is fetched from the network; the base was not, so a checkout
+    whose `origin/master` is behind answered a different question than the one
+    asked, and printed the stale commit as if it were master (`cyc20260912-203927`).
+    Measured on this repo with `origin/master` left two commits behind:
+
+        base 02e43c82 (origin/master)   <- 02e43c8 is NOT master; 3dbc2f1 is
+
+    and the mislabelled base changes the verdict: over 25 plans, 16 differed
+    between a stale and a fresh base, e.g. the plan below reads as 2 DANGER steps
+    against the stale base and as a conflict (safe, no tree produced) against the
+    live one. A gate that answers about the wrong tree is the failure this file
+    already documents for `__file__`-relative tools; the base is the same trap in
+    the time dimension.
+
+    Only `origin/<branch>` is refreshed: any other ref is taken literally, and a
+    SHA is immutable by construction. A fetch failure is a measurement error -
+    the caller must not silently continue against a base it could not verify.
+
+    The destination is written **fully qualified**. A bare `origin/master` as a
+    fetch destination is ambiguous, and git resolves it by creating a *local
+    branch* named `origin/master` (`refs/heads/origin/master`) - so the first
+    version of this fix silently littered the checkout with a ref that shadows
+    the remote-tracking one and makes every later `origin/master` ambiguous
+    (`cyc20260912-203927`, caught by git's own "refname is ambiguous" warning).
+    """
+    if ":" in base or not base.startswith("origin/"):
+        return
+    branch = base[len("origin/"):]
+    dest = f"refs/remotes/origin/{branch}"
+    proc = _run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{dest}"])
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
+        raise MeasurementError(f"could not refresh {base}: {detail}")
+
+
 def _open_pr_numbers(repo: str) -> list[int]:
     """The open PR numbers, ascending - the default plan."""
     proc = _run(
@@ -265,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        _refresh_base(args.base)
         base = _rev_parse(args.base)
         numbers = args.prs or _open_pr_numbers(args.repo)
     except MeasurementError as exc:

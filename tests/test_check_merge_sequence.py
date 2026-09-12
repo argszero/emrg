@@ -329,3 +329,107 @@ def test_a_tree_without_the_guard_is_a_measurement_error(mod, tmp_path, monkeypa
 
     assert "not present" in str(excinfo.value)
 
+
+# --- the base is refreshed, not taken on faith ------------------------------
+#
+# Every PR head is fetched from the network, so the tool always answers about the
+# PRs as they are *now*. The base was not, which made the two halves of one
+# question come from different points in time. Measured on the real repo: with
+# `origin/master` left two commits behind, the tool printed
+#
+#     base 02e43c82 (origin/master)      <- 02e43c8 is not master; 3dbc2f1 is
+#
+# and over 25 plans, 16 changed verdict between a stale and a fresh base - the
+# plan below reads as 2 DANGER steps against the stale base and as a conflict
+# (safe: no tree, no verdict) against the live one. A stale base is not merely
+# conservative: it makes the tool answer about a tree nobody asked about.
+
+
+def test_a_remote_tracking_base_is_refreshed_before_use(mod, monkeypatch):
+    """`origin/<branch>` is fetched, so a stale ref cannot be used as the base."""
+    calls: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: (calls.append(argv), _Done())[1])
+
+    mod._refresh_base("origin/master")
+
+    assert len(calls) == 1, calls
+    assert calls[0][0] == "git" and "fetch" in calls[0]
+    joined = " ".join(calls[0])
+    # Fully qualified destination: a bare `origin/master` makes git create a local
+    # branch of that name, shadowing the remote-tracking ref (measured).
+    assert "refs/heads/master:refs/remotes/origin/master" in joined, calls[0]
+    assert "+" in joined, "the refspec must be forced, as for PR heads"
+
+
+def test_a_sha_or_local_ref_base_is_never_fetched(mod, monkeypatch):
+    """Only a remote-tracking name is refreshed; a SHA and a local branch are literal.
+
+    Fetching on a SHA would be meaningless (it is immutable), and treating a local
+    branch as remote would overwrite the caller's own ref with a same-named remote
+    one. Both are silent ways to measure a tree the caller did not name.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, cwd=None: (calls.append(argv), None)[1]
+    )
+
+    for ref in ("0" * 40, "localbase", "refs/heads/x", "FETCH_HEAD"):
+        mod._refresh_base(ref)
+
+    assert calls == [], calls
+
+
+def test_main_refreshes_the_base_before_measuring(mod, monkeypatch, capsys):
+    """`main` must actually call `_refresh_base` - a correct helper nobody calls is dead.
+
+    Pinned separately because the three tests above exercise the helper directly:
+    deleting the call from `main` leaves them all green while the defect this file
+    documents (a stale base reported as `origin/master`) returns in full. The
+    measured mutant that did exactly that survived all three.
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(mod, "_refresh_base", lambda ref: seen.append(ref))
+
+    class _Done:
+        returncode = 0
+        stdout = "0" * 40
+        stderr = ""
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Done())
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: "1" * 40)
+    monkeypatch.setattr(mod, "_merge_commit", lambda a, b: None)  # conflict: stops early
+
+    rc = mod.main(["1"])
+
+    assert seen == ["origin/master"], seen
+    assert rc == 0
+
+
+def test_a_base_that_cannot_be_refreshed_is_a_measurement_error(mod, monkeypatch):
+    """A failed fetch is exit 2, never a quiet fall-back to the stale commit.
+
+    This is the fail-open shape the sibling tests pin for the guard: continuing
+    against a base that could not be verified is exactly how the tool would answer
+    about the wrong tree while reporting a number.
+    """
+
+    class _Fail:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: couldn't find remote ref"
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Fail())
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._refresh_base("origin/master")
+
+    assert "could not refresh" in str(excinfo.value)
+
+
