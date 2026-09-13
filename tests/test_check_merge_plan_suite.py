@@ -382,6 +382,140 @@ def test_a_suite_that_cannot_run_is_not_reported_healthy(
     assert mod.main(["1", "--base", "master"]) == 0
 
 
+# --- rc 1 is a finding only if the suite's own report says so ------------------
+#
+# A pytest that never *started* exits 1, exactly like a failing run does. The two
+# are told apart by the report, never by the code: measured on this machine, an
+# interpreter without pytest prints `No module named pytest` and no per-test line,
+# while a real failure prints `FAILED <nodeid> - ...` and ends with a summary
+# (`1 failed, 1 passed in 0.01s`; an error in a fixture teardown ends
+# `3 passed, 1 error in 0.01s`). Reading the first as a red tree produces a health
+# finding about a tree no test ever ran on - invisible to the caller, because it
+# looks exactly like a finding.
+
+
+def test_an_interpreter_without_pytest_is_not_a_red_tree(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """The arm that made this guard necessary, as a real subprocess.
+
+    `-m <missing module>` is the shape of "pytest is not installed here": rc 1 with
+    nothing that looks like a test report. Exit 2 with the failure text on stderr,
+    and no `suite FAILED` on stdout - that phrase is a claim about the tree.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    monkeypatch.setattr(mod, "SUITE", ["-m", "emrg_no_such_pytest_here"])
+    assert mod.main(["1", "--base", "master"]) == 2
+    captured = capsys.readouterr()
+    assert "suite FAILED" not in captured.out
+    assert "could not measure" in captured.err
+    # The remedy names an invocation, and it is the one the docstring's Usage block
+    # gives: a reader who is told "use the project interpreter" without being told
+    # which command is no better off than before.
+    assert "uv run --no-sync" in captured.err
+
+    # Both states, same plan: with a runnable suite the tree is healthy, so the arm
+    # above measured the missing report rather than a broken fixture.
+    monkeypatch.setattr(mod, "SUITE", ["-m", "pytest", "tests/", "-q", "--no-header"])
+    assert mod.main(["1", "--base", "master"]) == 0
+    assert "suite OK" in capsys.readouterr().out
+
+
+def test_a_pytest_missing_from_the_interpreter_names_both_causes(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """A bare host `python3` and an unsynced `.venv` fail identically.
+
+    Measured in `check-doc-count.py` (cyc20260913-122923): a fresh worktree's `.venv`
+    is empty, so the documented invocation fails with this same text. Advising only
+    "use the project interpreter" there sends the reader in a circle, so the message
+    has to carry the second cause as well.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    # The exact text an interpreter without pytest prints, from a real subprocess.
+    monkeypatch.setattr(
+        mod,
+        "SUITE",
+        ["-c", "import sys; sys.stderr.write('No module named pytest\\n'); sys.exit(1)"],
+    )
+    assert mod.main(["1", "--base", "master"]) == 2
+    err = capsys.readouterr().err
+    assert "pytest is not installed" in err
+    assert "uv run --no-sync" in err  # cause 1: the wrong interpreter
+    assert "uv sync" in err  # cause 2: a worktree whose `.venv` is empty
+
+
+@pytest.mark.parametrize(
+    "report,quoted",
+    [
+        # A failing test: short-summary line plus the count summary. The node id is
+        # what the caller needs, so that is what is quoted.
+        (
+            "FAILED tests/test_fine.py::test_fine - assert True is False\n1 failed in 0.01s\n",
+            "tests/test_fine.py::test_fine",
+        ),
+        # An error in a fixture teardown, measured: no line starts with FAILED or
+        # ERROR but the summary names it, so the summary form is matched anywhere in
+        # the line. Anchoring it to the first word would have called this a missing
+        # report - and a missing report is now exit 2, i.e. a real failure silently
+        # downgraded to "could not measure".
+        ("3 passed, 1 error in 0.01s\n", "1 error in 0.01s"),
+    ],
+)
+def test_a_failure_the_report_names_is_still_the_finding(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys, report: str, quoted: str
+) -> None:
+    """The guard must not swallow the failures it exists to deliver.
+
+    Both shapes a red run can arrive in, and in both the tool quotes the report
+    rather than replacing it with a placeholder: the caller has to be able to read
+    which test failed off this tool's own output.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    src = "import sys; sys.stdout.write(%r); sys.exit(1)" % report
+    monkeypatch.setattr(mod, "SUITE", ["-c", src])
+    assert mod.main(["1", "--base", "master"]) == 1
+    out = capsys.readouterr().out
+    assert "suite FAILED" in out
+    assert quoted in out
+
+
+def test_a_real_failing_suite_is_reported_with_its_node_id(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """The same rule against a real pytest run, not a simulated report.
+
+    The arm above pins the discriminator; this one pins that a genuine red tree still
+    arrives as exit 1 with the failing test named, through the real `SUITE`
+    invocation.
+    """
+    repo, origin = queue
+    _branch_with(
+        repo,
+        "red",
+        {"tests/test_red.py": "def test_red():\n    assert 1 == 2\n"},
+    )
+    _publish(repo, origin, 1, "red")
+    monkeypatch.chdir(repo)
+
+    assert mod.main(["1", "--base", "master"]) == 1
+    out = capsys.readouterr().out
+    assert "suite FAILED" in out
+    assert "tests/test_red.py::test_red" in out
+
+
 def test_steps_sees_a_red_step_that_the_final_tree_hides(
     queue: tuple[Path, Path],
 ) -> None:

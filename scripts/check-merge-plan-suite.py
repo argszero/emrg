@@ -375,6 +375,60 @@ def build_plan_tip(base: str, heads: list[tuple[int, str]]) -> str:
     return steps[-1][2] if steps else base
 
 
+# A red tree has to be evidenced by the suite's own report: `rc == 1` alone is not a
+# verdict, because a pytest that never started exits 1 too. Measured on this machine
+# with the `SUITE` invocation above (`-q --no-header`) - a failing test prints
+# `FAILED tests/test_bad.py::test_bad - assert 1 == 2` and ends
+# `1 failed, 1 passed in 0.01s`; an error raised in a fixture teardown prints
+# `ERROR <nodeid> - ...` and ends `3 passed, 1 error in 0.01s`, which is why the
+# summary form is matched anywhere in the line rather than at its start. An
+# invocation that cannot import pytest prints `No module named pytest` and neither
+# form. Reading that as a red tree is a health finding about a tree no test ever ran
+# on, and it is the one misreading a caller cannot see: it looks like a finding.
+SUITE_FAILURE = re.compile(
+    r"^(?:FAILED|ERROR) \S|\b\d+ (?:failed|error)s?\b.*\bin \d+\.\d+s", re.M
+)
+
+
+def _last_line(out: str, default: str) -> str:
+    """The suite's own summary line - the last non-empty thing it printed."""
+    return next(
+        (line.strip() for line in reversed(out.splitlines()) if line.strip()), default
+    )
+
+
+def _no_suite_verdict(out: str) -> str:
+    """Why `rc == 1` here is not a finding, and what to do about it.
+
+    Two causes, and the obvious one is not the only one: a bare host `python3` has
+    no pytest, while an unsynced worktree's `.venv` is empty - so the invocation
+    this tool documents fails byte-identically there, and answering "use the project
+    interpreter" sends the reader in a circle (`check-doc-count.py` measured exactly
+    that, cyc20260913-122923). Both causes are named, and so is the command to run:
+    a remedy that names no invocation leaves the reader where they were. This is
+    what the exit code 2 the caller gets already promises - *the question could not
+    be answered*.
+    """
+    invocation = f"uv run --no-sync python3 scripts/{Path(__file__).name}"
+    tail = out[-1000:].strip()
+    if "No module named pytest" in out:
+        return (
+            "the suite could not be run: pytest is not installed in the interpreter "
+            f"running this tool ({sys.executable}), so nothing judged the tree:\n"
+            + tail
+            + "\n\nRun it with the project environment instead:\n"
+            f"    {invocation} <PR> [<PR> ...]\n"
+            "A fresh worktree or clone gets an empty `.venv`, where that same command "
+            "fails identically - there, `uv sync` first."
+        )
+    return (
+        "the suite exited 1 without a failure line in its own output, so this is not "
+        "a verdict about the tree:\n" + tail + "\n\nCheck the invocation with "
+        f"`{sys.executable} -m pytest --version`, then run this tool with the "
+        f"project environment:\n    {invocation} <PR> [<PR> ...]"
+    )
+
+
 def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
     """Run the repository's suite in a worktree of the planned tree.
 
@@ -402,26 +456,22 @@ def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
         proc = _run([sys.executable, *SUITE], cwd=str(worktree))
         out = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode == 0:
-            summary = next(
-                (line.strip() for line in reversed(out.splitlines()) if line.strip()),
-                "suite passed",
-            )
-            return True, summary, tree_sha
+            return True, _last_line(out, "suite passed"), tree_sha
         if proc.returncode == 1:
             failures = [
                 line.split(" ", 1)[1].strip()
                 for line in out.splitlines()
                 if line.startswith("FAILED ")
             ]
+            if not failures and not SUITE_FAILURE.search(out):
+                raise MeasurementError(_no_suite_verdict(out))
             summary = (
-                "; ".join(failures[:5])
-                if failures
-                else "suite FAILED (no per-test line in the output)"
+                "; ".join(failures[:5]) if failures else _last_line(out, "suite FAILED")
             )
             return False, summary, tree_sha
-        # 2 interrupted, 3 internal error, 4 usage error, 5 no tests collected, or
-        # pytest missing entirely. None of these is "the suite passed", and a
-        # missing pytest is the most likely way to get here by accident.
+        # 2 interrupted, 3 internal error, 4 usage error, 5 no tests collected. None
+        # of these is "the suite passed" - and rc 1 reaches here only with a failure
+        # report in hand, since a report is what the branch above asks for.
         raise MeasurementError(
             f"the suite could not be run (rc={proc.returncode}):\n" + out[-1000:].strip()
         )
