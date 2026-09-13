@@ -330,18 +330,29 @@ def test_a_missing_index_is_a_measurement_error(tmp_path, mod, capsys):
     assert "no index at" in capsys.readouterr().err
 
 
-def test_an_unreadable_index_is_a_measurement_error(tmp_path, mod, capsys):
+def test_a_decode_failure_is_a_measurement_error(tmp_path, mod, capsys):
     """A read that fails must not arrive as a rule violation.
 
     An escaping traceback exits the process with code 1, which this tool's contract
     reads as "the index violates the row rules" - a verdict about a file it never
-    read. Both spellings are pinned: a decode failure and a permission denial.
+    read. Bytes that are not UTF-8 fail the read the same way a denied read does, so
+    this arm is the cross-platform spelling; the denied read has its own test below.
     """
     index = tmp_path / "MEMORY.md"
     index.write_bytes(b"- [cyc20260901-100000](cycle-20260901-100000.md)\n\xff\xfe\n")
     assert mod.main([str(index), "--check"]) == 2
     assert "could not read" in capsys.readouterr().err
 
+
+@pytest.mark.skipif(sys.platform == "win32", reason="chmod 000 does not deny reading on Windows")
+def test_a_denied_read_is_a_measurement_error(tmp_path, mod, capsys):
+    """The other spelling of a failed read, end to end through the real filesystem.
+
+    Windows is skipped rather than asserted loosely: there `chmod(0o000)` only sets
+    the read-only attribute, which does not stop a read, so this arm can only mean
+    what it says on POSIX. (The Windows CI job is where a test that assumed POSIX
+    semantics was caught - `cyc20260914-042726`.)
+    """
     locked = tmp_path / "locked.md"
     locked.write_text(_row(OLD), encoding="utf-8")
     locked.chmod(0o000)
