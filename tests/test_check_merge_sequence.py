@@ -1087,3 +1087,68 @@ def test_the_base_question_does_not_read_an_unknown_report_as_no_count(
     )
     monkeypatch.chdir(root)
     assert mod._base_states_a_count("HEAD") is None
+
+
+def test_the_fold_does_not_need_an_ambient_git_identity(mod, tmp_path, monkeypatch):
+    """The fold must not depend on the machine's git config (measured defect).
+
+    Measured (cyc20260913-200715): with no ambient identity and
+    `user.useConfigOnly = true`, `git commit-tree` refuses - "Author identity
+    unknown ... no email was given and auto-detection is disabled" - so
+    `_merge_commit` raised `MeasurementError` and this tool reported that the guard
+    question could not be answered, in an environment where it can be answered.
+    Its sibling `check-merge-plan-suite.py` answered that same environment fine,
+    because it pins identity: the tool that folds a *plan* was the more robust of
+    the two, which is backwards.
+
+    Both halves are set up here on purpose, because either alone hides the defect:
+    `user.useConfigOnly` forbids the hostname fallback, and the global/system
+    configs are emptied so an identity configured on the machine running the tests
+    cannot answer in the tool's place (that is how a test of this could pass on a
+    developer's laptop and fail in a container).
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    identity = {
+        "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@emrg.invalid",
+        "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@emrg.invalid",
+    }
+    env = {**os.environ, **identity}
+
+    def git(*argv: str) -> str:
+        proc = subprocess.run(
+            ["git", *argv], cwd=repo, env=env, check=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        return proc.stdout.strip()
+
+    git("init", "-q", "-b", "master", ".")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    base = git("rev-parse", "HEAD")
+    git("checkout", "-q", "-b", "side", "master")
+    (repo / "side.txt").write_text("side\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-q", "-m", "side")
+    head = git("rev-parse", "HEAD")
+    git("checkout", "-q", "master")
+
+    # The hostile environment the tool has to survive: this repo refuses an
+    # inferred identity, and no config file can supply one.
+    git("config", "user.useConfigOnly", "true")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    for name in identity:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(repo)
+
+    commit = mod._merge_commit(base, head)
+    assert commit, (
+        "the fold must not depend on the machine's git config - an unpinned "
+        "commit-tree turns a false 'could not measure' into the finding"
+    )
+    # …and it is a function of its inputs, so a fold does not vary with the clock.
+    assert mod._merge_commit(base, head) == commit
