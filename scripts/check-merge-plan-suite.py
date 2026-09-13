@@ -52,11 +52,20 @@ Usage
 -----
     uv run --no-sync python3 scripts/check-merge-plan-suite.py 1136 1152 1185
     uv run --no-sync python3 scripts/check-merge-plan-suite.py      # all open, ascending
+    uv run --no-sync python3 scripts/check-merge-plan-suite.py --steps 1187 1188
+
+`--steps` judges every intermediate tree instead of only the final one, which is
+the other half of the same question and the open half of issue #1161: a plan whose
+last PR fixes what an earlier PR broke is green at the end and red on the way, and
+each of those in-between trees is master's tree for a while when the plan is landed
+one PR at a time. It costs one suite run per step, hence opt-in.
 
 Exit codes
 ----------
-    0  the plan's final tree was built and its suite passed
-    1  the plan's final tree was built and its suite FAILED - the finding
+    0  the plan's final tree was built and its suite passed (with `--steps`: every
+       step's tree passed)
+    1  the plan's final tree was built and its suite FAILED - the finding (with
+       `--steps`: at least one step's tree failed, and the step is named)
     2  the question could not be answered (git/gh failure, or the suite could not
        be run at all): fail loud, never report health that was not measured
     3  the plan has no final tree - a step conflicts. Not a health verdict: there
@@ -117,14 +126,31 @@ def _run(
     )
 
 
+# The date carried by every synthetic plan commit. Pinned, not read from the
+# clock: a fold must be a function of its inputs, and a commit's sha includes its
+# committer date, so an unpinned fold produced a *different* sha for the *same*
+# plan whenever two folds straddled a second boundary. Measured
+# (cyc20260913-194108, Windows CI run 34754517824 on #1190): the test comparing
+# `build_plan_tip` against the last step tree failed on exactly that - the two
+# folds differed and nothing was wrong with either tree. It also makes a `--steps`
+# tree sha comparable between runs, which is the point of printing one.
+PLAN_COMMIT_DATE = "2000-01-01T00:00:00 +0000"
+
+
 def _commit_env() -> dict[str, str]:
-    """Author/committer for the synthetic plan commits, independent of git config."""
+    """Author/committer for the synthetic plan commits, independent of git config.
+
+    Identity *and* date are pinned, so the same plan folds to the same commits on
+    every machine and at every speed (see `PLAN_COMMIT_DATE`).
+    """
     return {
         **os.environ,
         "GIT_AUTHOR_NAME": "emrg-plan-suite",
         "GIT_AUTHOR_EMAIL": "plan-suite@emrg.invalid",
         "GIT_COMMITTER_NAME": "emrg-plan-suite",
         "GIT_COMMITTER_EMAIL": "plan-suite@emrg.invalid",
+        "GIT_AUTHOR_DATE": PLAN_COMMIT_DATE,
+        "GIT_COMMITTER_DATE": PLAN_COMMIT_DATE,
     }
 
 
@@ -249,14 +275,22 @@ def _commit_tree(tree: str, parents: list[str], message: str) -> str:
     return proc.stdout.strip()
 
 
-def build_plan_tip(base: str, heads: list[tuple[int, str]]) -> str:
-    """Fold the plan: merge each head onto the accumulated commit.
+def build_plan_steps(base: str, heads: list[tuple[int, str]]) -> list[tuple[int, int, str]]:
+    """Fold the plan, keeping every intermediate commit: (step, PR, commit).
 
     The fold is the same shape as landing the plan with squash merges - each head
     is merged onto the tree the previous steps built - and it never touches the
     working tree or a branch, only the object store.
+
+    The intermediate commits are *kept* rather than discarded (they used to be a
+    local variable): a plan can produce a final tree that passes while a step on
+    the way is red, and the second half of issue #1161 is precisely that no gate
+    looked at the steps. Merging each head onto the accumulated commit is what
+    makes the step commits the trees that would exist if the plan were landed one
+    PR at a time, so they are the right thing to judge with `--steps`.
     """
     accumulated = base
+    steps: list[tuple[int, int, str]] = []
     for step, (number, head) in enumerate(heads, start=1):
         tree, paths = _merge_tree(accumulated, head)
         if tree is None:
@@ -264,7 +298,14 @@ def build_plan_tip(base: str, heads: list[tuple[int, str]]) -> str:
         accumulated = _commit_tree(
             tree, [accumulated, head], f"plan step {step}: #{number}"
         )
-    return accumulated
+        steps.append((step, number, accumulated))
+    return steps
+
+
+def build_plan_tip(base: str, heads: list[tuple[int, str]]) -> str:
+    """The final commit of the plan (the whole plan's tree, as one object)."""
+    steps = build_plan_steps(base, heads)
+    return steps[-1][2] if steps else base
 
 
 def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
@@ -322,6 +363,63 @@ def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
         _run(["git", "update-ref", "-d", TIP_REF])
 
 
+def _judge_every_step(base: str, heads: list[tuple[int, str]]) -> int:
+    """Run the suite on each intermediate tree, not only on the final one.
+
+    Issue #1161's open half: the tool judged the plan's *final* tree, so a rule
+    that breaks only at an intermediate step was invisible to it. That gap has a
+    shape, and it is not exotic - a plan whose last PR is the one that fixes what
+    an earlier PR broke is *green at the end and red on the way*, and the trees in
+    between are the ones a caller who lands the plan step by step will actually
+    have on master, one at a time, with CI reporting green for each.
+
+    Cost is one suite run per step (`~55s` here), which is why it is opt-in: the
+    final tree remains the default question, since that is what decides whether
+    master is healthy a minute after the whole plan lands.
+    """
+    try:
+        steps = build_plan_steps(base, heads)
+    except PlanConflict as exc:
+        print(f"no final tree: {exc}", file=sys.stderr)
+        print(
+            "\nA step of the plan conflicts, so the plan has no final tree to judge. "
+            "That is not a health verdict - resolve the conflict (and re-push) or "
+            "reorder with check-merge-sequence.py.",
+            file=sys.stderr,
+        )
+        return 3
+    except MeasurementError as exc:
+        print(f"could not measure: {exc}", file=sys.stderr)
+        return 2
+
+    red: list[tuple[int, int, str]] = []
+    for step, number, commit in steps:
+        try:
+            with tempfile.TemporaryDirectory(prefix="emrg-plan-step-") as tmp:
+                passed, summary, tree_sha = _suite_verdict(commit, Path(tmp))
+        except MeasurementError as exc:
+            print(f"could not measure step {step} (#{number}): {exc}", file=sys.stderr)
+            return 2
+        state = "OK" if passed else "FAILED"
+        print(f"step {step} (#{number}) tree {tree_sha[:12]} suite {state}: {summary}")
+        if not passed:
+            red.append((step, number, summary))
+
+    if not red:
+        print(f"every step healthy ({len(steps)} suite run(s))")
+        return 0
+    detail = "; ".join(f"step {step} (#{number}): {summary}" for step, number, summary in red)
+    print(f"suite FAILED at {len(red)} of {len(steps)} step(s): {detail}")
+    print(
+        "\nThe plan's final tree is not what this reports on: a step's tree is. Each "
+        "of these would be master's tree for a while if the plan is landed in order, "
+        "so fix it on the PR that owns the step (a push voids its votes). Landing the "
+        "whole plan at once would land the final tree, which is judged by default.",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -332,7 +430,17 @@ def main(argv: list[str] | None = None) -> int:
         "prs", nargs="*", type=int, help="PR numbers in landing order (default: all open)"
     )
     parser.add_argument("--repo", default="argszero/emrg", help="owner/name")
-    parser.add_argument("--base", default="origin/master", help="the ref to plan onto")
+    parser.add_argument(
+        "--base", default="origin/master", help="the ref to plan onto"
+    )
+    parser.add_argument(
+        "--steps",
+        action="store_true",
+        help=(
+            "judge every intermediate tree of the plan, not only the final one "
+            "(one suite run per step; issue #1161's open half)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -361,6 +469,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print("plan: " + " -> ".join(f"#{number}" for number, _ in heads))
+    if args.steps:
+        return _judge_every_step(base, heads)
     try:
         with tempfile.TemporaryDirectory(prefix="emrg-plan-suite-") as tmp:
             passed, summary, tree_sha = _suite_verdict(tip, Path(tmp))
