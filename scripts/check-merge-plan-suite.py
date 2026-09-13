@@ -73,6 +73,19 @@ Exit codes
 
 The plan and the tree that was measured are named in the output. "Which tree
 answered?" is the defect this family exists to remove.
+
+What a worktree run is not
+--------------------------
+The suite runs in a worktree of the tree under test, so it runs the suite a *fresh
+clone* of that tree would run: the tree's **tracked** files and nothing else. One
+test is environment-dependent, and it is skipped here but passes in a developer's
+checkout - `tests/test_check_node_test_count.py` skips itself with "no node_modules
+... cannot ask the runners", since `node_modules/` is untracked. Measured
+(`cyc20260913-203027`, master `947377b`): a worktree of that tree reported
+`1761 passed, 2 skipped` while the same tree in a populated checkout reported
+`1771 passed, 1 skipped` after nine new tests - the two extra numbers are this skip
+and those tests, not a difference in the trees. Compare worktree runs with worktree
+runs, and never read a skip/pass delta between the two harnesses as a regression.
 """
 
 from __future__ import annotations
