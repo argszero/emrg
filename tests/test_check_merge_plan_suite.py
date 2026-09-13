@@ -42,6 +42,7 @@ from __future__ import annotations
 import importlib.util
 import re
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -75,6 +76,7 @@ GIT_METADATA_TEST = '''"""A check that only a checked-out tree can satisfy."""
 
 import pathlib
 import subprocess
+import time
 
 
 def test_the_tree_has_git_metadata():
@@ -494,3 +496,38 @@ def test_the_step_commit_is_the_tree_the_steps_would_leave(
     assert _git(repo, "cat-file", "-p", f"{steps[1][2]}:other.md").strip() == "two"
     assert _git(repo, "merge-base", "--is-ancestor", steps[0][2], steps[1][2]) == ""
     assert mod.build_plan_tip(base, heads) == steps[-1][2]
+
+
+def test_the_same_plan_folds_to_the_same_commits_even_when_a_second_passes(
+    queue: tuple[Path, Path], mod, monkeypatch
+) -> None:
+    """A fold must be a function of its inputs, not of the clock.
+
+    Measured defect (cyc20260913-194108, Windows CI run 34754517824 on this PR):
+    the synthetic commits carried the wall clock, and a commit's sha contains its
+    committer date, so two folds of *one* plan produced different shas whenever
+    they straddled a second boundary. The test above asserts
+    `build_plan_tip(...) == steps[-1][2]` - two independent folds - so it failed on
+    a slow runner with nothing wrong with either tree, and it is the same reason a
+    reader could not compare a `--steps` tree sha between two runs.
+
+    Pinned in both directions: the date the fold carries is the constant (so a
+    removed pin is caught even on a fast machine), and a fold deliberately delayed
+    past a second boundary is the *same commit* (so the property, not just the
+    mechanism, is asserted).
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"notes.md": "one\n"})
+    _publish(repo, origin, 1, "one")
+
+    monkeypatch.chdir(repo)
+    base = _git(repo, "rev-parse", "master")
+    heads = [(1, mod._fetch_head(1))]
+
+    first = mod.build_plan_tip(base, heads)
+    # %at/%ct are epoch seconds: 946684800 is the constant's 2000-01-01T00:00:00Z,
+    # asserted this way so the test does not depend on how git spells a date.
+    assert _git(repo, "log", "-1", "--format=%at %ct", first) == "946684800 946684800"
+
+    time.sleep(1.1)  # the boundary the unpinned fold used to trip over
+    assert mod.build_plan_tip(base, heads) == first

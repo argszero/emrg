@@ -126,14 +126,31 @@ def _run(
     )
 
 
+# The date carried by every synthetic plan commit. Pinned, not read from the
+# clock: a fold must be a function of its inputs, and a commit's sha includes its
+# committer date, so an unpinned fold produced a *different* sha for the *same*
+# plan whenever two folds straddled a second boundary. Measured
+# (cyc20260913-194108, Windows CI run 34754517824 on #1190): the test comparing
+# `build_plan_tip` against the last step tree failed on exactly that - the two
+# folds differed and nothing was wrong with either tree. It also makes a `--steps`
+# tree sha comparable between runs, which is the point of printing one.
+PLAN_COMMIT_DATE = "2000-01-01T00:00:00 +0000"
+
+
 def _commit_env() -> dict[str, str]:
-    """Author/committer for the synthetic plan commits, independent of git config."""
+    """Author/committer for the synthetic plan commits, independent of git config.
+
+    Identity *and* date are pinned, so the same plan folds to the same commits on
+    every machine and at every speed (see `PLAN_COMMIT_DATE`).
+    """
     return {
         **os.environ,
         "GIT_AUTHOR_NAME": "emrg-plan-suite",
         "GIT_AUTHOR_EMAIL": "plan-suite@emrg.invalid",
         "GIT_COMMITTER_NAME": "emrg-plan-suite",
         "GIT_COMMITTER_EMAIL": "plan-suite@emrg.invalid",
+        "GIT_AUTHOR_DATE": PLAN_COMMIT_DATE,
+        "GIT_COMMITTER_DATE": PLAN_COMMIT_DATE,
     }
 
 
