@@ -130,11 +130,14 @@ def test_a_head_behind_the_base_has_paths_that_read_backwards(
     repo, base, head = _behind_repo(tmp_path)
     monkeypatch.chdir(repo)
 
-    tree, landed, apparent, backwards = mod.landing_reading(base, head)
+    tree, landed, apparent, backwards, reversed_inside = mod.landing_reading(base, head)
 
     assert landed == [("A", "src/feature.txt")]
     assert apparent == [("A", "src/feature.txt"), ("M", "src/shared.txt")]
     assert backwards == [("M", "src/shared.txt")]
+    # Here the shared file is untouched by the head, so nothing reads backwards
+    # *inside* a path - the name-set rule has this arm covered on its own.
+    assert reversed_inside == []
     # The landing tree is a tree of the merge, not the head's tree: if the tool had
     # answered about the head, landed would equal apparent and backwards would be [].
     assert tree != _git(repo, "rev-parse", f"{head}^{{tree}}")
@@ -163,10 +166,11 @@ def test_a_head_containing_the_base_tip_reads_cleanly(mod, tmp_path, monkeypatch
     repo, base, head = _fresh_repo(tmp_path)
     monkeypatch.chdir(repo)
 
-    tree, landed, apparent, backwards = mod.landing_reading(base, head)
+    tree, landed, apparent, backwards, reversed_inside = mod.landing_reading(base, head)
 
     assert landed == apparent == [("A", "src/feature.txt")]
     assert backwards == []
+    assert reversed_inside == []
     assert tree != ""
 
 
@@ -190,10 +194,117 @@ def test_a_removal_the_pr_really_makes_is_not_a_reversal(
     base = _git(repo, "rev-parse", "master")
     monkeypatch.chdir(repo)
 
-    _, landed, apparent, backwards = mod.landing_reading(base, head)
+    _, landed, apparent, backwards, reversed_inside = mod.landing_reading(base, head)
 
     assert landed == apparent == [("M", "src/keep.txt")]
     assert backwards == []
+    assert reversed_inside == []
+
+
+def _same_file_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """Both sides change **the same file**, far enough apart that the merge is clean.
+
+    The PR rewrites line 1; master rewrites line 30 after the branch point. The path
+    name is therefore in both lists - diff(base, head) lists it *and* the landing
+    changes it - while the reading of that path in diff(base, head) still prints
+    master's own later hunk as a deletion.
+    """
+    repo = tmp_path / "same-file"
+    _init_repo(repo)
+    lines = [f"line {i}" for i in range(1, 31)]
+    _write(repo, "src/app.py", "\n".join(lines) + "\n")
+    _commit(repo, "base")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    pr_lines = list(lines)
+    pr_lines[0] = "CHANGED BY THE PR"
+    _write(repo, "src/app.py", "\n".join(pr_lines) + "\n")
+    head = _commit(repo, "the PR changes line 1")
+
+    _git(repo, "checkout", "-q", "master")
+    master_lines = list(lines)
+    master_lines[-1] = "CHANGED BY MASTER LATER"
+    _write(repo, "src/app.py", "\n".join(master_lines) + "\n")
+    base = _commit(repo, "master moves on inside the same file")
+    return repo, base, head
+
+
+def test_a_shared_path_can_still_read_backwards_inside(mod, tmp_path, monkeypatch) -> None:
+    """The shape a path-name comparison cannot see.
+
+    The merge is clean and both lists contain src/app.py, so the name-set rule says
+    clean - yet the reading of that path is not the landing: master's own later hunk
+    is printed there as a deletion, which is the reading this tool exists to prevent.
+    """
+    repo, base, head = _same_file_repo(tmp_path)
+    monkeypatch.chdir(repo)
+
+    tree, landed, apparent, backwards, reversed_inside = mod.landing_reading(base, head)
+
+    assert landed == apparent == [("M", "src/app.py")]
+    assert backwards == []  # the name-set rule is blind here: the path *is* landed
+    assert reversed_inside == [("M", "src/app.py")]
+
+    # The evidence, read from git rather than from the tool: the reading of the path
+    # prints master's hunk as a deletion, and the landing does not.
+    reading = _git(repo, "diff", base, head, "--", "src/app.py")
+    assert "-CHANGED BY MASTER LATER" in reading
+    landing_commit = _git(
+        repo, "commit-tree", tree, "-p", base, "-p", head, "-m", "landing"
+    )
+    landed_diff = _git(repo, "diff", base, landing_commit, "--", "src/app.py")
+    assert "CHANGED BY MASTER LATER" not in landed_diff
+
+
+def test_the_report_names_a_path_that_reads_backwards_inside(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """What the reviewer is handed: the landing first, then the path to distrust."""
+    repo, base, head = _same_file_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    state, report = mod.check_pr(1, base)
+
+    assert state == "backwards"
+    assert "reads backwards inside: 1 of the 1 path(s)" in report
+    change, _, hazard = report.partition("  reads backwards inside:")
+    assert "M\tsrc/app.py" in change
+    assert "in diff(base, head) are landed, but the reading" in hazard
+    assert "base's own later hunks on them appear as deletions" in hazard
+    assert "M\tsrc/app.py" in hazard
+    # The name-set wording must not be used for this shape: the landing *does* change
+    # the path, so saying "are the base's own later changes" of it would be false.
+    assert "reads backwards:" not in report
+
+
+def test_both_shapes_are_reported_separately(mod, tmp_path, monkeypatch) -> None:
+    """A head carrying both hazards: one path the landing ignores, one it shares."""
+    repo = tmp_path / "both"
+    _init_repo(repo)
+    lines = [f"line {i}" for i in range(1, 31)]
+    _write(repo, "src/app.py", "\n".join(lines) + "\n")
+    _write(repo, "src/shared.txt", "one\n")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-q", "-b", "feature")
+    pr_lines = list(lines)
+    pr_lines[0] = "CHANGED BY THE PR"
+    _write(repo, "src/app.py", "\n".join(pr_lines) + "\n")
+    head = _commit(repo, "the PR changes src/app.py")
+    _git(repo, "checkout", "-q", "master")
+    master_lines = list(lines)
+    master_lines[-1] = "CHANGED BY MASTER LATER"
+    _write(repo, "src/app.py", "\n".join(master_lines) + "\n")
+    _write(repo, "src/shared.txt", "one\ntwo\n")
+    base = _commit(repo, "master moves on in both files")
+    monkeypatch.chdir(repo)
+
+    tree, landed, apparent, backwards, reversed_inside = mod.landing_reading(base, head)
+
+    assert landed == [("M", "src/app.py")]
+    assert apparent == [("M", "src/app.py"), ("M", "src/shared.txt")]
+    assert backwards == [("M", "src/shared.txt")]
+    assert reversed_inside == [("M", "src/app.py")]
 
 
 def _conflict_repo(tmp_path: Path) -> tuple[Path, str, str]:

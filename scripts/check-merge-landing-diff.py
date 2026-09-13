@@ -47,13 +47,41 @@ reason `check-merge-plan-suite.py` records) so that both diffs are
 commit-to-commit. Nothing is inferred from the two sides: the printed change is
 `git diff` of a tree the merge actually produces.
 
+Why the reading is compared per path, and not per path *name*
+-------------------------------------------------------------
+Comparing the two path *lists* is not enough, and the gap is one level below where
+this tool used to look (measured `cyc20260913-215412` on a fixture with both arms):
+
+    the PR changes line 1 of src/app.py; master changes line 30 of the same file
+    merge-tree <base> <head>            -> clean, one path, no conflict
+    diff(base, head)      lists M src/app.py    (two hunks: line 1 and line 30 back)
+    diff(base, landing)   lists M src/app.py    (one hunk: line 1)
+    the old rule                        -> backwards == []  => "clean"
+
+The path is in *both* lists, so the name-set rule sees nothing wrong, while
+`diff(base, head)` for it still prints master's own later hunk as a deletion - the
+reading this tool exists to prevent, inside a single file. So every shared path is
+compared by its *reading*: `diff(base, head, P)` against `diff(base, landing, P)`.
+When they differ, the base's own hunks on P are in the reading and not in the
+landing, and P is named as reading backwards - inside the path rather than in place
+of it.
+
+Reach of the shape, honestly: the fixture proves it, and the condition for it (a head
+behind the base which also touched one of the head's files) is the ordinary state of a
+queued PR - but in this clone's live population no *unflagged* instance was found
+(measured over the head refs against the master tips they were behind: the shared-path
+cases there conflict outright, or are caught by the name-set rule already). It is an
+arm that fires on a shape the two-list rule cannot see, not a repair of an observed
+false "clean".
+
 Exit codes
 ----------
-    0  nothing reads backwards: every path `diff(base, head)` lists is a path the
-       landing changes
-    1  at least one path reads backwards, and it is named. This is a *reading*
-       hazard, not a defect in the PR and not a blocker - the change the PR really
-       lands is printed above it
+    0  nothing reads backwards: every path `diff(base, head)` lists is both a path the
+       landing changes *and* one whose reading there is the landing
+    1  at least one path reads backwards (either the landing does not change it at all,
+       or the reading inside it is not the landing), and it is named. This is a
+       *reading* hazard, not a defect in the PR and not a blocker - the change the PR
+       really lands is printed above it
     2  the question could not be answered (git/gh failure): fail loud, never report
        health that was not measured
     3  the merge conflicts, so there is no landing tree to diff. Not a verdict:
@@ -364,17 +392,43 @@ def _behind_by(base: str, head: str) -> int:
         ) from exc
 
 
-def landing_reading(
-    base: str, head: str
-) -> tuple[str, list[tuple[str, str]], list[tuple[str, str]], list[tuple[str, str]]]:
+def _path_reading(a: str, b: str, path: str) -> str:
+    """The diff text for one path between two commits - the *reading* of that path.
+
+    Two readings of a path are the same change exactly when their text is the same:
+    a path diff is a function of the two blobs (and their modes), nothing else. So
+    comparing text is the definition, not a proxy for it - and it stays readable
+    about what was compared.
+    """
+    proc = _run(["git", "diff", "--no-renames", a, b, "--", path])
+    if proc.returncode != 0:
+        raise MeasurementError(
+            f"could not diff {a[:8]}..{b[:8]} for {path}: {_diagnosis(proc)}"
+        )
+    return proc.stdout
+
+
+def landing_reading(base: str, head: str) -> tuple[
+    str,
+    list[tuple[str, str]],
+    list[tuple[str, str]],
+    list[tuple[str, str]],
+    list[tuple[str, str]],
+]:
     """The measurement, without the report.
 
-    Returns `(landing_tree, landed, apparent, backwards)`:
+    Returns `(landing_tree, landed, apparent, backwards, reversed_inside)`:
 
     * `landed`    - what merging the head on the base changes (the reviewable change)
     * `apparent`  - what `diff(base, head)` lists (the reading to distrust)
-    * `backwards` - paths in `apparent` that the landing does not change, i.e. the
+    * `backwards` - paths in `apparent` the landing does not change at all, i.e. the
       base's own later commits, shown there as reversals this PR does not make
+    * `reversed_inside` - paths in `apparent` the landing *does* change, whose reading
+      is nevertheless not the landing: the base's own later hunks on them appear in
+      `diff(base, head)` as deletions this PR does not make (measured, docstring)
+
+    A path list is not enough for the second shape: the path name is in both lists,
+    which is why the comparison for a shared path is the *reading* of that path.
 
     Raises `Conflict` when the merge conflicts (no landing tree to diff) and
     `MeasurementError` when git failed: neither is a reading, and neither is a
@@ -395,18 +449,25 @@ def landing_reading(
     landed = _changed_paths(base, landing)
     apparent = _changed_paths(base, head)
     landed_paths = {path for _, path in landed}
-    backwards = [(status, path) for status, path in apparent if path not in landed_paths]
-    return tree, landed, apparent, backwards
+    backwards: list[tuple[str, str]] = []
+    reversed_inside: list[tuple[str, str]] = []
+    for status, path in apparent:
+        if path not in landed_paths:
+            backwards.append((status, path))
+        elif _path_reading(base, head, path) != _path_reading(base, landing, path):
+            reversed_inside.append((status, path))
+    return tree, landed, apparent, backwards, reversed_inside
+
 
 
 def check_pr(number: int, base: str) -> tuple[str, str]:
-    """One PR's landing change, plus the paths of `diff(base, head)` it does not land.
+    """One PR's landing change, plus the readings of `diff(base, head)` that are not it.
 
     Returns `(state, report)` with state in `{"clean", "backwards", "conflict"}`.
     """
     head = _fetch_head(number)
     try:
-        tree, landed, apparent, backwards = landing_reading(base, head)
+        tree, landed, apparent, backwards, reversed_inside = landing_reading(base, head)
     except Conflict as exc:
         return "conflict", f"  #{number}: {exc}"
     behind = _behind_by(base, head)
@@ -418,13 +479,22 @@ def check_pr(number: int, base: str) -> tuple[str, str]:
     lines += [f"    {status}\t{path}" for status, path in landed]
     if not landed:
         lines.append("    (nothing: this head adds no change to the base)")
-    if backwards:
-        lines.append(
-            f"  reads backwards: {len(backwards)} of the {len(apparent)} path(s) in "
-            f"diff(base, head) are the base's own later changes ({behind} commit(s) "
-            f"the head does not contain), shown there as reversals this PR does not make:"
-        )
-        lines += [f"    {status}\t{path}" for status, path in backwards]
+    if backwards or reversed_inside:
+        if backwards:
+            lines.append(
+                f"  reads backwards: {len(backwards)} of the {len(apparent)} path(s) in "
+                f"diff(base, head) are the base's own later changes ({behind} commit(s) "
+                f"the head does not contain), shown there as reversals this PR does not make:"
+            )
+            lines += [f"    {status}\t{path}" for status, path in backwards]
+        if reversed_inside:
+            lines.append(
+                f"  reads backwards inside: {len(reversed_inside)} of the "
+                f"{len(apparent)} path(s) in diff(base, head) are landed, but the reading "
+                f"there is not the landing - base's own later hunks on them appear as "
+                f"deletions this PR does not make:"
+            )
+            lines += [f"    {status}\t{path}" for status, path in reversed_inside]
         return "backwards", "\n".join(lines)
     lines.append(
         f"  diff(base, head) lists {len(apparent)} path(s), and every one of them is "
