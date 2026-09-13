@@ -47,6 +47,10 @@ def _run_report(root: Path, *extra: str) -> dict:
         capture_output=True,
         text=True,
         check=True,
+        # Model names and session ids come from the log; decode them as
+        # UTF-8, never with the host locale.
+        encoding="utf-8",
+        errors="replace",
     )
     return json.loads(out.stdout)
 
@@ -125,6 +129,10 @@ def test_cli_human_output_smoke(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         check=True,
+        # Model names and session ids come from the log; decode them as
+        # UTF-8, never with the host locale.
+        encoding="utf-8",
+        errors="replace",
     )
     assert "deepseek-v4-flash" in out.stdout
     assert "TOTAL" in out.stdout

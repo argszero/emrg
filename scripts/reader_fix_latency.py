@@ -93,12 +93,22 @@ def median(values: list[float]) -> float:
 
 
 def _gh(args: str | list[str]) -> Any:
-    """Run a gh api subprocess and parse the JSON payload."""
+    """Run a gh api subprocess and parse the JSON payload.
+
+    `encoding="utf-8"` rather than the locale codec: this reads issue JSON,
+    whose numbers and timestamps are ASCII but whose *titles* need not be, and
+    GitHub returns UTF-8. On a cp936 host the locale decode raised
+    `UnicodeDecodeError` on a CJK byte instead of returning the payload, so the
+    report failed on exactly the repositories this metric is for.
+    `tests/test_script_decode_is_locale_independent.py` guards the class.
+    """
     args_list = [args] if isinstance(args, str) else args
     out = subprocess.run(
         ["gh", "api", *args_list],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     return json.loads(out.stdout)

@@ -100,7 +100,15 @@ def _tracked_files() -> list[str]:
     """
     try:
         out = subprocess.check_output(
-            ["git", "ls-files"], cwd=str(REPO_ROOT), text=True, stderr=subprocess.PIPE
+            ["git", "ls-files"],
+            cwd=str(REPO_ROOT),
+            text=True,
+            stderr=subprocess.PIPE,
+            # `git ls-files` prints a path per line; a checkout under a non-ASCII
+            # directory (or a non-ASCII filename) is valid UTF-8 and would raise
+            # UnicodeDecodeError under a GBK/cp1252 host locale.
+            encoding="utf-8",
+            errors="replace",
         )
     except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover
         pytest.skip(f"git ls-files unavailable: {exc}")

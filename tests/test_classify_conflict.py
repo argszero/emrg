@@ -1087,6 +1087,8 @@ def test_it_reproduces_the_real_historical_verdicts(mod, tmp_path, branch, expec
             cwd=wt,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         ).stdout.split()
         if not unmerged:
             pytest.skip("no conflict state to classify (master already merged)")

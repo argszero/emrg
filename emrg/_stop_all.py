@@ -452,11 +452,28 @@ def stop_daemon() -> None:
             pass
 
 
+# Path-bearing subprocess output is decoded as UTF-8, not with the console locale.
+#
+# `ps` prints process command lines, which contain file paths; a path follows the
+# OS filesystem encoding (UTF-8 on macOS/Linux), not the locale code page. With
+# `text=True` and no `encoding=`, a non-UTF-8 host decodes those bytes with the
+# locale codec: measured under `PYTHONUTF8=0 LANG=zh_CN.GBK LC_ALL=zh_CN.GBK`, a
+# command line holding an undecodable path byte raised UnicodeDecodeError **past
+# `_ps_output`'s `except (OSError, subprocess.SubprocessError, TimeoutError)`**,
+# so the error escaped the stop machinery instead of being reported.
+#
+# This is deliberately NOT the `bash_tool._decode_output` policy (locale first,
+# then UTF-8): that one reads *console* output, which on Windows really is in the
+# console code page. This one reads paths, whose bytes are filesystem bytes.
+_PATH_DECODE = {"encoding": "utf-8", "errors": "replace"}
+
+
 def _ps_output() -> str | None:
     try:
         return subprocess.run(
             ["ps", "-axww", "-o", "pid=,command="],
             capture_output=True, text=True, timeout=10,
+            **_PATH_DECODE,
             **_no_window(),
         ).stdout
     except (OSError, subprocess.SubprocessError, TimeoutError):
@@ -1593,6 +1610,7 @@ def _caller_context() -> str:
             out = subprocess.run(
                 ["ps", "-o", "command=", "-p", str(ppid)],
                 capture_output=True, text=True, timeout=10,
+                **_PATH_DECODE,
             ).stdout.strip()
         if out:
             parent = out.splitlines()[0][:160]

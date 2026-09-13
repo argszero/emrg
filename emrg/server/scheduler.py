@@ -363,6 +363,16 @@ class TaskHandler:
             out = _sp.run(
                 ["git", "-C", source_dir, "status", "--porcelain"],
                 capture_output=True, text=True, timeout=10,
+                # Paths, not console output: `git status` emits UTF-8 filenames.
+                # Default `core.quotePath=true` escapes non-ASCII to ASCII octal
+                # (`"\345\233\276..."`), which hid this - a host with
+                # `core.quotePath=false` gets the raw UTF-8 bytes, and an
+                # unpinned decode mojibakes them under a non-UTF-8 locale
+                # (measured with a CJK filename under GBK: 0x9365/0x5267/0x5896
+                # instead of 0x56fe/0x7247). The dirty/clean verdict only needs
+                # "any output?", but a corrupt decode of a command-line reader is
+                # the same class the sibling `ps` readers were pinned for.
+                encoding="utf-8", errors="replace",
             )
         except (OSError, _sp.SubprocessError):
             return False
