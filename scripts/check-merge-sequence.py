@@ -475,9 +475,23 @@ def _refresh_base(base: str) -> None:
     already documents for `__file__`-relative tools; the base is the same trap in
     the time dimension.
 
-    Only `origin/<branch>` is refreshed: any other ref is taken literally, and a
-    SHA is immutable by construction. A fetch failure is a measurement error -
-    the caller must not silently continue against a base it could not verify.
+    A **remote-tracking** ref is refreshed, in either spelling the caller may write
+    it: `origin/<branch>` and `refs/remotes/origin/<branch>` are the same mutable
+    ref, and the fully-qualified one is not exotic - `check-merge-pairs.py`'s
+    `_resolve_base` passes `refs/...` through untouched and its refusal text tells
+    callers to "pass the fully-qualified ref you mean". Accepting only the short
+    spelling meant that one answered from whatever the ref happened to be, with the
+    stale commit printed as if it named the remote branch - the same wrong-tree
+    defect this docstring is about, one spelling over (`cyc20260913-223417`; the
+    sibling `check-merge-landing-diff.py` measured it first and the fix landed
+    there in #1193).
+
+    Anything else is taken literally: a SHA is immutable by construction, a local
+    branch is not the remote ref whatever it is called, and a refspec the caller
+    already wrote (`origin/x:dest`) is passed to git as given. A fetch failure - or
+    a `<remote>/HEAD` spelling that is not a symref to a remote-tracking branch of
+    `origin` - is a measurement error: the caller must not silently continue
+    against a base it could not verify.
 
     The destination is written **fully qualified**. A bare `origin/master` as a
     fetch destination is ambiguous, and git resolves it by creating a *local
@@ -485,11 +499,36 @@ def _refresh_base(base: str) -> None:
     version of this fix silently littered the checkout with a ref that shadows
     the remote-tracking one and makes every later `origin/master` ambiguous
     (`cyc20260912-203927`, caught by git's own "refname is ambiguous" warning).
+
+    A `<remote>/HEAD` spelling is resolved through its symref first: it names a
+    remote branch only by pointing at one, and a fetch *into* a symref cannot be
+    locked (git refuses and leaves the symref unchanged). Refreshing the *target* is
+    what makes `--base origin/HEAD` mean "origin's default branch as it is now" -
+    and it is the natural spelling for a checkout whose default branch is not
+    `master`, which used to fail with a fetch of the non-existent
+    `refs/heads/HEAD`. Under `refs/remotes/` the only symbolic ref git creates is
+    `<remote>/HEAD`, so the probe is confined to that name and an ordinary branch
+    spelling still costs exactly one call.
     """
-    if ":" in base or not base.startswith("origin/"):
+    if ":" in base:
         return
-    branch = base[len("origin/"):]
-    dest = f"refs/remotes/origin/{branch}"
+    if base.startswith("origin/"):
+        dest = f"refs/remotes/origin/{base[len('origin/'):]}"
+    elif base.startswith("refs/remotes/origin/"):
+        dest = base
+    else:
+        return
+    if dest.endswith("/HEAD"):
+        link = _run(["git", "symbolic-ref", "--quiet", dest])
+        target = link.stdout.strip()
+        if link.returncode != 0 or not target.startswith("refs/remotes/origin/"):
+            detail = link.stderr.strip() or "no such ref"
+            raise MeasurementError(
+                f"could not refresh {base}: {dest} is not a symbolic ref to a "
+                f"remote-tracking branch of origin ({detail})"
+            )
+        dest = target
+    branch = dest[len("refs/remotes/origin/"):]
     proc = _run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{dest}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
