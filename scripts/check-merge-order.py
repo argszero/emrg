@@ -83,6 +83,29 @@ name that denotes *only* a local branch is refused rather than measured (exit 2)
 The default path is unaffected: it fetches master into `FETCH_HEAD`, which is
 neither ambiguous nor remote-tracking, and is left exactly as it is.
 
+Resolving the name is only half of that; the other half is *when* the commit behind
+it is read
+------------------------------------------------------------------------------
+A ref that names the right thing can still hold the wrong commit, and an explicit
+base used to be read at whatever moment this checkout last fetched - unlike the
+default path, which fetches. So the tool answered `base -> PR` from two different
+times: every head below is fetched as it is now, while the base could be days old,
+and the forecast (which PRs conflict with the base, and which PRs dirty which) was
+computed against a tree the caller never named.
+
+Measured `cyc20260914-014536` in a hermetic clone whose `refs/remotes/origin/master`
+sat one commit behind the remote it was cloned from - the normal state of a checkout
+that has not fetched - with the commit dates pinned so both shas reproduce:
+
+    before this change   base 450c013804b6d98d67f98dbe1a4b25b5b9894f9a   (the stale ref)
+    after                base fd8cb9d103ce7c8eaa267a73566ee07e3ef88bb2   (the remote's tip)
+
+The refresh is the sibling's `_refresh_base` (called, not copied), on the ref the
+caller named: it runs after the refusal above, so a stray local branch is refused
+rather than fetched into existence, and before anything is measured. A base that
+cannot be refreshed is exit 2 - a forecast about a base nobody verified is exactly
+the answer this gate exists to refuse.
+
 The order it recommends
 -----------------------
 A merge costs one resolution per *later* PR it dirties. So the PR that dirties the
@@ -106,16 +129,19 @@ head rather than whatever a local branch of a similar name happens to point at.
 
 An explicit `--base` that names a remote-tracking ref (`origin/<branch>`) is taken
 by its **full name**, so a stray local branch of the same name cannot stand in for
-it; a name that denotes only a local branch is refused rather than measured. The
+it, and it is **refreshed** from the remote before it is read, so the base and the
+heads are taken at the same moment; a name that denotes only a local branch is
+refused rather than measured, and a base that cannot be refreshed is exit 2. The
 default (no `--base`) is unaffected - it fetches master itself.
 
 Exit codes
 ----------
     0  measurement made (which is not an endorsement of any order)
     1  at least one PR conflicts with the base - not mergeable as it stands
-    2  the measurement could not be made (gh/git failed, unparseable output, or a
-       base name that denotes only a local branch) - fail loud; never report an
-       order for a question that was not answered
+    2  the measurement could not be made (gh/git failed, unparseable output, a base
+       name that denotes only a local branch, or a base that could not be
+       refreshed) - fail loud; never report an order for a question that was not
+       answered
 
 `gh` and network access to GitHub are required to list PRs and fetch their heads;
 there is no offline mode.
@@ -364,6 +390,19 @@ def main(argv: list[str] | None = None) -> int:
         # sibling that already owns the rule - not by a second copy of it here.
         try:
             base = seq._qualify_ref(base)
+        except seq.MeasurementError as exc:
+            print(f"could not measure: {exc}", file=sys.stderr)
+            return 2
+        # Naming the ref correctly is half the rule; *when* its commit is read is the
+        # other half. The heads below are fetched as they are now, so a base read at
+        # whatever moment this checkout last fetched would answer `base -> PR` from
+        # two different times - and the whole forecast, base conflicts included, would
+        # be about a tree the caller did not name. Refreshed here, after the refusal
+        # above (a stray local branch is refused, never fetched into existence) and
+        # before anything is measured. A SHA, tag or local branch is left untouched by
+        # the sibling; a base that cannot be refreshed is exit 2, never answered from.
+        try:
+            seq._refresh_base(base)
         except seq.MeasurementError as exc:
             print(f"could not measure: {exc}", file=sys.stderr)
             return 2

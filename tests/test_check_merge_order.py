@@ -613,6 +613,10 @@ class TestTheBaseIsResolvedByItsFullName:
         """The arm that fails before the fix: the measure is the ref that was named."""
         repo, stray, tracking = self._repo_with_a_stray(tmp_path)
         monkeypatch.chdir(repo)
+        # This repo has no `origin` remote: the refresh is exercised for real in
+        # `TestTheBaseIsRefreshedBeforeItIsRead`, and stubbed here so the question
+        # under test stays the one this class asks (which commit the name denotes).
+        monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
 
         seen: dict[str, str] = {}
 
@@ -656,11 +660,17 @@ class TestTheBaseIsResolvedByItsFullName:
         monkeypatch.chdir(repo)
 
         calls: list[tuple] = []
+        refreshed: list[str] = []
         monkeypatch.setattr(mod, "forecast", lambda *a, **k: calls.append(a) or {})
+        monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: refreshed.append(ref))
         rc = mod.main(["--base", "origin/master", "1"])
 
         assert rc == 2, rc
         assert not calls, "a refused base must not produce a forecast at all"
+        assert refreshed == [], (
+            "the refusal comes first: refreshing a name that denotes only a local "
+            "branch would fetch the remote ref into existence and undo the refusal"
+        )
         err = capsys.readouterr().err
         assert "refs/heads/origin/master" in err
         assert "refs/remotes/origin/master" in err
@@ -671,8 +681,15 @@ class TestTheBaseIsResolvedByItsFullName:
         A SHA is immutable by construction, `FETCH_HEAD` is not remote-tracking, and
         a plain name is the caller's own ref. Rewriting any of them (or asking git
         whether they exist) would invent a meaning the caller did not give.
+
+        The *refresh* is called for every base - it is what decides that a SHA or a
+        branch is not a remote ref - and it is the thing that must not do anything to
+        them: only the remote-tracking spelling is refreshed, and it is refreshed here
+        as a stubbed call, because a real one reaches the network.
         """
         seen: list[str] = []
+        refreshed: list[str] = []
+        monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: refreshed.append(ref))
         monkeypatch.setattr(
             mod,
             "forecast",
@@ -685,6 +702,10 @@ class TestTheBaseIsResolvedByItsFullName:
             assert rc == 0, (spelling, rc)
 
         assert seen == ["abc1234", "FETCH_HEAD", "v0.2.95", "refs/remotes/origin/master"], seen
+        assert refreshed == seen, (
+            "the refresh is offered every explicit base and left to the sibling to "
+            "decide which spellings it can act on"
+        )
 
     def test_the_default_base_is_still_fetched_not_qualified(self, mod, monkeypatch) -> None:
         """No `--base`: the tool fetches master itself, and that path is untouched.
@@ -694,6 +715,8 @@ class TestTheBaseIsResolvedByItsFullName:
         fetch would crash the default invocation outright.
         """
         seen: list[str] = []
+        refreshed: list[str] = []
+        monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: refreshed.append(ref))
         monkeypatch.setattr(
             mod,
             "_run",
@@ -710,3 +733,167 @@ class TestTheBaseIsResolvedByItsFullName:
 
         assert rc == 0, rc
         assert seen == ["FETCH_HEAD"], seen
+        assert refreshed == [], (
+            "the default path fetches master itself; refreshing FETCH_HEAD or None "
+            "would either touch a name the sibling does not own or crash outright"
+        )
+
+
+class TestTheBaseIsRefreshedBeforeItIsRead:
+    """A ref that names the right thing can still hold the wrong commit.
+
+    An explicit base used to be read at whatever moment this checkout last fetched,
+    while every PR head below it is fetched as it is now - one question answered from
+    two times. So the whole forecast, the base conflicts included, was measured
+    against a tree the caller never named (`cyc20260914-014536`). The refresh is the
+    sibling's `_refresh_base` (called, not copied), on the ref the caller named, after
+    the refusal that protects a stray local branch and before anything is measured.
+    """
+
+    def test_the_short_name_never_reaches_the_refresh(
+        self, mod, monkeypatch, capsys, tmp_path
+    ) -> None:
+        """`--base origin/master`: the refresh is called with the full name, not the short one."""
+        events: list[tuple[str, str]] = []
+        monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: events.append(("read", ref)))
+
+        def fake_forecast(base: str, numbers, repo_name: str) -> dict:
+            # `forecast` is where the base is read, so record the read in the order it
+            # actually happens rather than asserting on a stub that skips it.
+            mod.seq._rev_parse(base)
+            events.append(("forecast", base))
+            return {"base": "", "prs": {}, "base_conflicts": []}
+
+        monkeypatch.setattr(mod, "forecast", fake_forecast)
+        remote = "refs/remotes/origin/master"
+        monkeypatch.setattr(mod.seq, "_qualify_ref", lambda ref: remote)
+        monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: events.append(("refresh", ref)))
+
+        rc = mod.main(["--base", "origin/master", "--json", "1"])
+        capsys.readouterr()
+
+        assert rc == 0, rc
+        assert ("refresh", "origin/master") not in events, (
+            "the short spelling is ambiguous; the refresh must be given the name the "
+            "caller's ref was resolved to, which is what the refusal above guarantees"
+        )
+        assert events == [
+            ("refresh", remote),
+            ("read", remote),
+            ("forecast", remote),
+        ], events
+
+    def test_a_stale_remote_tracking_base_follows_the_remote_with_real_git(
+        self, mod, monkeypatch, capsys, tmp_path
+    ) -> None:
+        """The defect's effect, with real git: the printed base is the remote's current tip.
+
+        A hermetic clone whose `refs/remotes/origin/master` sits one commit behind the
+        remote it was cloned from - the normal state of a checkout that has not
+        fetched. The arm states the discriminating reading first (the commit the ref
+        holds *is* the stale one), then runs `main` with real git for the refresh, the
+        naming and the read, faking only the network-shaped parts (the PR heads), so
+        the test neither reaches GitHub nor runs a pipeline. The commit dates are
+        pinned, so both shas reproduce on every run rather than being a timestamp.
+        """
+        import os
+
+        pinned = {
+            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00 +0000",
+            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00 +0000",
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@example.com",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@example.com",
+        }
+        env = {**os.environ, **pinned}
+
+        def git(cwd, *args: str) -> str:
+            out = subprocess.run(
+                ["git", *args],
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            assert out.returncode == 0, (args, out.stdout, out.stderr)
+            return out.stdout.strip()
+
+        bare = tmp_path / "remote.git"
+        bare.mkdir()
+        git(bare, "init", "-q", "--bare", "-b", "master")
+        seed = tmp_path / "seed"
+        seed.mkdir()
+        git(seed, "init", "-q", "-b", "master")
+        (seed / "a.txt").write_text("one\n", encoding="utf-8")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-qm", "first")
+        git(seed, "remote", "add", "origin", str(bare))
+        git(seed, "push", "-q", "origin", "master")
+
+        clone = tmp_path / "clone"
+        subprocess.run(
+            ["git", "clone", "-q", str(bare), str(clone)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+        )
+        track = "refs/remotes/origin/master"
+        stale = git(clone, "rev-parse", track)
+
+        (seed / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-qm", "the remote moves on")
+        git(seed, "push", "-q", "origin", "master")
+        advanced = git(seed, "rev-parse", "master")
+        assert stale != advanced, "precondition: the clone is behind the remote"
+
+        monkeypatch.chdir(clone)
+        # The PR heads are the network-shaped part: `forecast` fetches them through this
+        # module's own `_fetch_head`, so that is the call that is faked.
+        monkeypatch.setattr(mod, "_fetch_head", lambda repo_name, n: advanced)
+
+        assert git(clone, "rev-parse", track) == stale
+        # The discriminating reading before the fix: naming the ref is not refreshing
+        # it, so at this point the tool would print - and measure everything against -
+        # the stale commit.
+        assert mod._rev_parse(mod.seq._qualify_ref("origin/master")) == stale
+
+        rc = mod.main(["--base", "origin/master", "--json", "1"])
+        out = capsys.readouterr().out
+
+        assert rc == 0, out
+        assert advanced in out, out
+        assert stale not in out, "the stale base is what the refresh exists to prevent"
+        assert git(clone, "rev-parse", track) == advanced, "the tracking ref was refreshed"
+        assert git(clone, "rev-parse", "refs/heads/master") == stale, (
+            "the refresh moves the remote-tracking ref only, never the local branch"
+        )
+
+    def test_a_base_that_cannot_be_refreshed_is_not_answered(
+        self, mod, monkeypatch, capsys
+    ) -> None:
+        """A base that could not be verified is exit 2 - never measured from anyway.
+
+        A fetch error (offline, no such branch) is this tool's own loud failure:
+        answering below it would report an order for a question that was not asked
+        about the tree the caller named.
+        """
+        forecasts: list[tuple] = []
+
+        def boom(ref: str) -> None:
+            raise mod.seq.MeasurementError(f"could not refresh {ref}: fetch failed")
+
+        monkeypatch.setattr(mod.seq, "_refresh_base", boom)
+        monkeypatch.setattr(
+            mod, "forecast", lambda *a, **k: forecasts.append(a) or {"base": ""}
+        )
+        rc = mod.main(["--base", "origin/master", "1"])
+        err = capsys.readouterr().err
+
+        assert rc == 2, "an unverifiable base is not a pass"
+        assert "could not measure" in err, err
+        assert forecasts == [], "nothing may be forecast from a base that was not verified"
