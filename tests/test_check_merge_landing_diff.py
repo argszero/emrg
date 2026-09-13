@@ -468,3 +468,136 @@ def test_a_base_that_cannot_be_refreshed_is_a_measurement_error(mod, monkeypatch
     monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
     assert mod.main(["--base", "origin/master"]) == 2
     assert "could not measure" in capsys.readouterr().err
+
+
+# --- the base is not just fresh, it is the ref you named -------------------------
+#
+# Refreshing the base fixed *when* the ref is read; the other half of the same defect
+# is *what the name denotes*. `origin/master` is ambiguous - git consults
+# `refs/heads/<name>` before `refs/remotes/<name>`, and git itself creates exactly a
+# local branch of that name when a fetch destination is written unqualified, the trap
+# `_refresh_base` documents. Measured in review (`cyc20260913-212500`) in a clone with
+# a stray `refs/heads/origin/master` at `a2ac6f98` while the remote-tracking ref was
+# `0998ed95`:
+#
+#     rev-parse origin/master                       -> a2ac6f98   (local wins)
+#     rev-parse --symbolic-full-name origin/master  -> (empty, rc 0)
+#
+# so the first version of `_qualify_ref` returned the *typed* name in exactly the case
+# its own docstring is about, and `_rev_parse` measured the stray - meaning
+# `_refresh_base` wrote `refs/remotes/origin/master` and the next line read something
+# else: the refresh appeared to have no effect. The sibling
+# `check-merge-sequence.py` records the original measurement (`cyc20260913-072845`,
+# a two-cycle-old tree reported as `origin/master`) and resolves by full name.
+
+
+def _shadow_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """A clone whose short `origin/master` is ambiguous: a stray local branch shadows it.
+
+    Returns (repo, remote_tracking_head, stray_head) with the two deliberately different,
+    so any reader that follows git's precedence instead of the full name lands on the
+    stray. A bare local remote keeps it hermetic.
+    """
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _git(bare, "init", "-q", "--bare", "-b", "master")
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    _git(seed, "init", "-q", "-b", "master")
+    _git(seed, "config", "user.email", "t@example.com")
+    _git(seed, "config", "user.name", "t")
+    _write(seed, "a.txt", "one\n")
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "first")
+    _git(seed, "remote", "add", "origin", str(bare))
+    _git(seed, "push", "-q", "origin", "master")
+    stray = _git(seed, "rev-parse", "HEAD")
+
+    repo = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(repo)],
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+
+    _write(seed, "a.txt", "one\ntwo\n")
+    _git(seed, "add", "-A")
+    _git(seed, "commit", "-q", "-m", "second")
+    _git(seed, "push", "-q", "origin", "master")
+    tracking = _git(seed, "rev-parse", "HEAD")
+
+    _git(repo, "fetch", "-q", "origin")
+    _git(repo, "update-ref", "refs/remotes/origin/master", tracking)
+    # The stray: a local branch whose name is also a valid remote-tracking spelling.
+    _git(repo, "update-ref", "refs/heads/origin/master", stray)
+
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master") == tracking
+    assert _git(repo, "rev-parse", "refs/heads/origin/master") == stray
+    return repo, tracking, stray
+
+
+def test_an_ambiguous_base_resolves_to_the_ref_the_caller_named(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """`origin/master` means `refs/remotes/origin/master`, not whatever shadows it.
+
+    Git's precedence list puts `refs/heads/<name>` first, so the short spelling can
+    denote a stray local branch. Resolving by the full name is what makes the answer
+    independent of that; the warning tells the reader the checkout is polluted.
+    """
+    repo, tracking, stray = _shadow_repo(tmp_path)
+    monkeypatch.chdir(repo)
+
+    assert mod._qualify_ref("origin/master") == "refs/remotes/origin/master"
+    assert mod._rev_parse("origin/master") == tracking
+    assert mod._rev_parse("origin/master") != stray
+
+    err = capsys.readouterr().err
+    assert "ambiguous" in err and "shadows" in err, err
+    assert "git branch -D origin/master" in err, "the warning must name the fix"
+
+    # Not a regression of the reporting half: a local name still reports itself.
+    assert mod._qualify_ref("master") == "refs/heads/master"
+
+
+def test_a_name_that_denotes_only_a_local_branch_is_refused(mod, tmp_path, monkeypatch) -> None:
+    """Refused, not measured: `origin/x` that is only a local branch is not a remote.
+
+    This is the fail-loud half. Measuring it would answer about a tree the caller did not
+    name, and "the local branch happens to be at the same commit" is not knowable here.
+    """
+    repo = tmp_path / "refuse"
+    _init_repo(repo)
+    _write(repo, "a.txt", "one\n")
+    _commit(repo, "first")
+    _git(repo, "update-ref", "refs/heads/origin/master", _git(repo, "rev-parse", "HEAD"))
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._qualify_ref("origin/master")
+
+    assert "denotes only the local branch" in str(excinfo.value)
+
+
+def test_the_refresh_is_effective_even_with_a_shadowing_stray(mod, tmp_path, monkeypatch) -> None:
+    """The end-to-end arm: refresh, then resolve, gets the refreshed commit.
+
+    Each half passes on its own (the refresh moves the remote-tracking ref; the resolve
+    looks up the full name) while their composition is what the caller depends on. With
+    the shadow in place the unfixed pairing returned the stray: the refresh wrote one ref
+    and the measurement read another.
+    """
+    repo, tracking, stray = _shadow_repo(tmp_path)
+    monkeypatch.chdir(repo)
+
+    mod._refresh_base("origin/master")
+    resolved = mod._rev_parse("origin/master")
+
+    assert resolved == tracking
+    assert resolved != stray
+
+    # …and it is the same ref the header names, so the printed spelling and the measured
+    # commit agree - the property the whole file exists for.
+    assert mod._qualify_ref("origin/master") == "refs/remotes/origin/master"

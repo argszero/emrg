@@ -116,13 +116,24 @@ def _rev_parse(ref: str) -> str:
     mutable in a way a SHA is not (`fetch` rewrites `FETCH_HEAD`, and a local
     branch of the same name shadows `origin/master`), and this family has already
     answered about the wrong tree because of it.
+
+    A name is also *ambiguous* in a way a SHA is not, so `_qualify_ref` runs first: the
+    commit returned is the one the caller's name denotes, not the one git's precedence
+    rules would pick. Without it, `_refresh_base` writes `refs/remotes/origin/master`
+    and this function then measures a stray `refs/heads/origin/master` instead - the
+    refresh appears to have no effect (measured, `cyc20260913-212500`).
     """
-    proc = _run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"])
+    proc = _run(["git", "rev-parse", "--verify", f"{_qualify_ref(ref)}^{{commit}}"])
     if proc.returncode != 0:
         raise MeasurementError(
             f"could not resolve {ref!r} to a commit: {proc.stderr.strip()}"
         )
     return proc.stdout.strip()
+
+
+def _ref_exists(name: str) -> bool:
+    """Is `name` a ref, given it fully?"""
+    return _run(["git", "show-ref", "--verify", "--quiet", name]).returncode == 0
 
 
 def _qualify_ref(ref: str) -> str:
@@ -135,10 +146,45 @@ def _qualify_ref(ref: str) -> str:
 
     Naming the ref correctly is only half of that defect: the other half is *when*
     the name was last read, which is `_refresh_base`.
+
+    **The reporting is also not the resolving.** `rev-parse --symbolic-full-name` on the
+    ambiguous spelling prints *nothing* and exits 0, so the first version returned the
+    typed name in exactly the case this docstring is about - measured
+    (`cyc20260913-212500`) in a clone with a stray `refs/heads/origin/master` at
+    `a2ac6f98` while the remote-tracking ref was `0998ed95`:
+
+        rev-parse origin/master                 -> a2ac6f98   (git precedence: local wins)
+        rev-parse --symbolic-full-name origin/master -> (empty, rc 0) -> header prints "origin/master"
+
+    So the remote-tracking ref is now looked up **by its full name**, where precedence
+    does not apply - the sibling `check-merge-sequence.py` records the reasoning and the
+    original measurement (`cyc20260913-072845`, where a stray branch made it answer
+    about a two-cycle-old tree). A short name that denotes only a local branch is
+    refused rather than measured: it is not the remote branch, whatever it is called.
+    The shadow case *warns* instead of failing, because the qualified lookup makes the
+    answer right either way, and the warning is not cosmetic - the same stray branch
+    silently misleads every other short-name reader, `git checkout origin/master`
+    included.
     """
-    proc = _run(["git", "rev-parse", "--symbolic-full-name", ref])
-    name = proc.stdout.strip()
-    return name if proc.returncode == 0 and name else ref
+    if not ref.startswith("origin/") or ref.count("/") != 1:
+        proc = _run(["git", "rev-parse", "--symbolic-full-name", ref])
+        name = proc.stdout.strip()
+        return name if proc.returncode == 0 and name else ref
+    qualified = f"refs/remotes/{ref}"
+    if _ref_exists(qualified):
+        if _ref_exists(f"refs/heads/{ref}"):
+            print(
+                f"warning: {ref} is ambiguous - a local branch shadows it; "
+                f"measuring {qualified}. Delete the shadow: git branch -D {ref}",
+                file=sys.stderr,
+            )
+        return qualified
+    if _ref_exists(f"refs/heads/{ref}"):
+        raise MeasurementError(
+            f"{ref!r} is ambiguous and denotes only the local branch "
+            f"refs/heads/{ref}: no {qualified} exists"
+        )
+    return ref
 
 
 def _refresh_base(base: str) -> None:
