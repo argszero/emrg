@@ -68,7 +68,27 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+def _resolve_root() -> Path:
+    """The tree to measure: the checkout the caller is *standing in*.
+
+    Derived from the cwd when that is a checkout, not from `__file__`. Measured
+    2026-09-11 on the sibling tool: unblocking a PR means working in a git
+    worktree, where running the main checkout's copy reported on the *main*
+    tree - `OK: Agent.md documents 1420` while the worktree's own Agent.md said
+    1401. `--write` in that position edits the other checkout, silently
+    corrupting a tree the caller was not looking at.
+
+    Falling back to the script's own root keeps the documented invocation working
+    from anywhere.
+    """
+    here = Path(__file__).resolve().parent.parent
+    cwd = Path.cwd()
+    if (cwd / "Agent.md").is_file() and (cwd / "scripts").is_dir():
+        return cwd
+    return here
+
+
+REPO_ROOT = _resolve_root()
 DOC = REPO_ROOT / "Agent.md"
 GUI_ROOT = REPO_ROOT / "emrg" / "gui"
 RENDERER_ROOT = GUI_ROOT / "renderer"
@@ -279,6 +299,10 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--write", action="store_true", help="rewrite Agent.md")
     mode.add_argument("--dry-run", action="store_true", help="show the change, write nothing")
     args = parser.parse_args(argv)
+
+    # Say which tree answered - see `_resolve_root`. A tool that measures "the
+    # tree you are about to merge" must not leave "which tree" ambiguous.
+    print(f"tree: {REPO_ROOT}")
 
     try:
         text = DOC.read_text(encoding="utf-8")

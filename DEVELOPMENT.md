@@ -141,7 +141,7 @@ emrg/
 git clone https://github.com/argszero/emrg.git
 cd emrg
 uv sync              # install deps
-uv run pytest tests/ -v   # run tests (currently 681 items)
+uv run pytest tests/ -v   # run tests (the count is measured live, not stored — see scripts/check-doc-count.py)
 uv run python -m emrg     # launch TUI
 # CI includes actionlint workflow gate (#444): workflow parse errors fail PR CI
 ```
