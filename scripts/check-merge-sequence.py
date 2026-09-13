@@ -185,12 +185,9 @@ OK_IN_REPORT = re.compile(r"OK: no tracked file states the Python test count")
 TREE_IN_REPORT = re.compile(r"^tree: (.+)$", re.M)
 
 # The document whose count line the guard reads, and the one command that repairs
-# it after a merge (measured on the merged tree, never chosen). The remedy is
-# printed only where it can run, which takes two conditions and not one: the
-# conflict must be in this file, *and* the base must be measured to state the
-# count (`_base_states_a_count`). The file alone was the whole test until #1184 -
-# advice for a conflict in some other file, or for a documentation conflict in
-# this one, is advice that does not run.
+# it after a merge (measured on the merged tree, never chosen). Both are printed
+# in the empty-plan refusal, and only for the path they apply to: advice for a
+# conflict in some other file would be advice that does not run.
 COUNT_LINE_DOC = "Agent.md"
 RESOLVER = "uv run --no-sync python3 scripts/check-doc-count.py --resolve-conflict"
 

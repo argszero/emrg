@@ -40,7 +40,6 @@ was never invoked proves nothing.
 from __future__ import annotations
 
 import importlib.util
-import subprocess
 import sys
 from pathlib import Path
 
@@ -524,19 +523,18 @@ def test_a_conflict_elsewhere_gets_no_count_line_advice(mod, monkeypatch, capsys
 GUARD_SOURCE = REPO_ROOT / "scripts" / "check-doc-count.py"
 
 
-def _git(root: Path, *args: str) -> None:
-    proc = subprocess.run(
-        ["git", *args],
-        cwd=str(root),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+def _git(mod, root: Path, *args: str) -> None:
+    """Run git through the tool's own runner, so the pinning is not re-decided here.
+
+    `mod._run` is the same subprocess call the tool uses for every git command it
+    runs (capture, text, encoding pinned), so the fixture adds no second decoding
+    policy for the class guard to find.
+    """
+    proc = mod._run(["git", *args], cwd=str(root))
     assert proc.returncode == 0, f"git {' '.join(args)} failed: {proc.stderr}"
 
 
-def _tiny_checkout(root: Path, agent_md: str, tracked: list[str]) -> None:
+def _tiny_checkout(mod, root: Path, agent_md: str, tracked: list[str]) -> None:
     """A one-commit repo holding the files the guard resolves its root by.
 
     The guard's own copy is written from this repo and then `tracked` decides what
@@ -549,11 +547,11 @@ def _tiny_checkout(root: Path, agent_md: str, tracked: list[str]) -> None:
         GUARD_SOURCE.read_text(encoding="utf-8"), encoding="utf-8"
     )
     (root / "Agent.md").write_text(agent_md, encoding="utf-8")
-    _git(root, "init", "-q")
+    _git(mod, root, "init", "-q")
     for path in tracked:
-        _git(root, "add", path)
+        _git(mod, root, "add", path)
     _git(
-        root, "-c", "user.email=fixture@example.com", "-c", "user.name=fixture",
+        mod, root, "-c", "user.email=fixture@example.com", "-c", "user.name=fixture",
         "commit", "-q", "-m", "fixture",
     )
 
@@ -572,13 +570,13 @@ def test_the_base_question_is_measured_on_real_trees(mod, monkeypatch, tmp_path)
     """
     stores = tmp_path / "stores"
     stores.mkdir()
-    _tiny_checkout(stores, COUNT_LINE, BOTH)
+    _tiny_checkout(mod, stores, COUNT_LINE, BOTH)
     monkeypatch.chdir(stores)
     assert mod._base_states_a_count("HEAD") is True
 
     clean = tmp_path / "clean"
     clean.mkdir()
-    _tiny_checkout(clean, NO_COUNT_LINE, BOTH)
+    _tiny_checkout(mod, clean, NO_COUNT_LINE, BOTH)
     monkeypatch.chdir(clean)
     assert mod._base_states_a_count("HEAD") is False
 
@@ -596,7 +594,7 @@ def test_the_base_question_refuses_a_tree_the_guard_cannot_name(mod, monkeypatch
     """
     root = tmp_path / "guard-not-in-tree"
     root.mkdir()
-    _tiny_checkout(root, NO_COUNT_LINE, ["Agent.md"])  # guard exists, untracked
+    _tiny_checkout(mod, root, NO_COUNT_LINE, ["Agent.md"])  # guard exists, untracked
     monkeypatch.chdir(root)
     assert mod._base_states_a_count("HEAD") is None
 
@@ -622,7 +620,7 @@ def test_the_base_question_does_not_read_an_unknown_report_as_no_count(
     """
     root = tmp_path / "other-shape"
     root.mkdir()
-    _tiny_checkout(root, NO_COUNT_LINE, BOTH)
+    _tiny_checkout(mod, root, NO_COUNT_LINE, BOTH)
     (root / "scripts" / "check-doc-count.py").write_text(
         UNKNOWN_SHAPE_GUARD, encoding="utf-8"
     )
