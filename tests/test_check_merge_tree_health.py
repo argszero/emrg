@@ -100,6 +100,13 @@ def _commit(repo: Path, message: str) -> str:
 # The stub guard measures its own tree: it counts `tests/test_*.py` and compares
 # with the number Agent.md states. That is what makes the union matter - a model
 # that read the two sides could not see the merged tree's extra file.
+#
+# Its report carries the *current* guard's shape. Measured 2026-09-14
+# (`cyc20260914-033026`): these stubs printed the pre-#1158 wording (`documents N
+# but M are collected`) that the real guard stopped printing on 2026-09-13, so this
+# tool's parser could not read a real finding and reported the tail of the guard's
+# advice as the finding. `test_the_real_guard_failure_line_is_what_this_tool_requires`
+# pins the wording to the real guard, so the fixture cannot drift from it again.
 GUARD = '''#!/usr/bin/env python3
 import pathlib, re, sys
 
@@ -112,10 +119,10 @@ documented = int(m.group(1))
 found = len(list(pathlib.Path("tests").glob("test_*.py")))
 if documented == found:
     print("tree: .")
-    print(f"OK: Agent.md documents {found} collected Python tests")
+    print("OK: no tracked file states the Python test count")
     sys.exit(0)
 print("tree: .")
-print(f"FAIL: Agent.md documents {documented} Python tests but {found} are collected")
+print(f"FAIL: 1 tracked file(s) state the Python test count ({documented} documented, {found} collected)")
 print()
 print("Fix with: uv run --no-sync python3 scripts/check-doc-count.py --write")
 sys.exit(1)
@@ -125,6 +132,14 @@ GUARD_UNRUNNABLE = """#!/usr/bin/env python3
 import sys
 print("could not parse a collected count from pytest output", file=sys.stderr)
 sys.exit(2)
+"""
+
+# A guard that crashes: an unhandled exception exits 1, the same code the stub
+# above uses for a finding, and nothing in its report says a verdict was reached.
+# This is not hypothetical - the guard runs in a pristine export with
+# `sys.executable`, so any unimportable dependency lands here.
+GUARD_CRASHES = """#!/usr/bin/env python3
+import definitely_not_a_module
 """
 
 
@@ -162,7 +177,7 @@ def test_a_tree_whose_guard_passes_is_healthy(mod, tmp_path) -> None:
     head = _git(repo, "rev-parse", "HEAD")
     passed, report = _guard_verdict(mod, repo, tmp_path, head)
     assert passed is True
-    assert "documents 1" in report
+    assert "no stored count" in report
 
 
 def test_a_tree_whose_guard_fails_is_unhealthy(mod, tmp_path) -> None:
@@ -174,8 +189,8 @@ def test_a_tree_whose_guard_fails_is_unhealthy(mod, tmp_path) -> None:
     head = _commit(repo, "add an unaccounted test")
     passed, report = _guard_verdict(mod, repo, tmp_path, head)
     assert passed is False
-    # Both numbers are quoted from the guard, not re-derived here.
-    assert "documents 1" in report and "2 are collected" in report
+    # The finding is quoted from the guard's own line, not re-derived here.
+    assert "1 tracked file(s) state the test count" in report
 
 
 def test_a_guard_that_cannot_run_is_a_measurement_error_not_a_pass(mod, tmp_path) -> None:
@@ -196,6 +211,88 @@ def test_a_tree_without_the_guard_is_a_measurement_error(mod, tmp_path) -> None:
     head = _commit(repo, "base")
     with pytest.raises(mod.MeasurementError):
         _guard_verdict(mod, repo, tmp_path, head)
+
+
+def test_a_guard_that_crashes_is_a_measurement_error_not_a_finding(mod, tmp_path) -> None:
+    """Exit 1 is what an unhandled exception produces as well as a finding.
+
+    Without the guard's own failure line there is no verdict to report, and
+    "unhealthy" would be a finding about a tree nobody measured - the one
+    direction this tool must never take, because its whole output is a verdict on
+    whether a merge lands a healthy tree.
+    """
+    repo = tmp_path / "crashed"
+    _init_repo(repo)
+    _write(repo, GUARD_PATH, GUARD_CRASHES)
+    _write(repo, DOC_PATH, _doc(1))
+    head = _commit(repo, "base")
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        _guard_verdict(mod, repo, tmp_path, head)
+    # The error names the guard and the tree it was run from, so a reader can
+    # re-run exactly that instead of guessing.
+    assert GUARD_PATH in str(excinfo.value)
+
+
+def test_the_real_guard_failure_line_is_what_this_tool_requires(mod, tmp_path) -> None:
+    """Pin the marker to the real guard, so parser and guard cannot drift apart.
+
+    The stubs above are fixtures: they prove the parse, not that the guard still
+    prints a line this tool recognises as its failure line. Wording drift is
+    exactly what happened once already (the pre-#1158 `documents N but M are
+    collected`), and its effect is silent in one direction: a real finding would
+    become a measurement error rather than a report.
+    """
+    repo = tmp_path / "real"
+    _init_repo(repo)
+    _write(repo, GUARD_PATH, (REPO_ROOT / GUARD_PATH).read_text(encoding="utf-8"))
+    _write(repo, "tests/test_seed0.py", "def test_seed0():\n    assert True\n")
+    # A stored count: since #1181 that alone is the guard's finding, whatever the
+    # tree collects.
+    _write(repo, DOC_PATH, _doc(1))
+    head = _commit(repo, "a tree that stores the count")
+
+    passed, report = _guard_verdict(mod, repo, tmp_path, head)
+
+    assert passed is False, report
+    assert "state the test count" in report, report
+
+
+def test_the_real_guard_that_stores_no_count_is_healthy(mod, tmp_path) -> None:
+    """The other direction through the real guard: no stored count, no finding."""
+    repo = tmp_path / "real-ok"
+    _init_repo(repo)
+    _write(repo, GUARD_PATH, (REPO_ROOT / GUARD_PATH).read_text(encoding="utf-8"))
+    _write(repo, "tests/test_seed0.py", "def test_seed0():\n    assert True\n")
+    _write(repo, DOC_PATH, "# Doc\nPython: `uv run pytest tests/ -v`\n")
+    head = _commit(repo, "a tree that stores nothing")
+
+    passed, report = _guard_verdict(mod, repo, tmp_path, head)
+
+    assert passed is True, report
+    assert "no stored count" in report
+
+
+def test_a_healthy_report_that_is_not_recognised_is_not_claimed_as_a_check(
+    mod, tmp_path
+) -> None:
+    """Exit 0 without the guard's own OK line: report no more than it said.
+
+    The report is what a reviewer reads, so "no stored count" is a claim about the
+    tree - making it when the guard never said it would be this tool inventing a
+    verdict, which is the same defect class as reporting a crash as a finding, one
+    exit code over. Measured 2026-09-14 (`cyc20260914-033026`): a mutant that always
+    claimed the recognised line survived the whole suite.
+    """
+    repo = tmp_path / "quiet"
+    _init_repo(repo)
+    _write(repo, GUARD_PATH, "#!/usr/bin/env python3\nprint('tree: .')\n")
+    _write(repo, DOC_PATH, _doc(1))
+    head = _commit(repo, "a guard whose report is not recognised")
+
+    passed, report = _guard_verdict(mod, repo, tmp_path, head)
+
+    assert passed is True
+    assert report == "guard OK"
 
 
 # --- the merge question ---------------------------------------------------------
@@ -243,7 +340,7 @@ def test_a_clean_merge_that_lands_a_failing_tree_is_unhealthy(
 
     state, report = _drive(mod, repo, master, head, tmp_path, monkeypatch)
     assert state == "unhealthy", report
-    assert "documents 2" in report and "3 are collected" in report
+    assert "1 tracked file(s) state the test count" in report
 
 
 def test_each_side_alone_is_healthy_so_only_the_union_is_broken(

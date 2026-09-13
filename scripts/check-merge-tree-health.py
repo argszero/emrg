@@ -100,10 +100,21 @@ import tempfile
 from pathlib import Path
 
 # The guard is judged by its exit code, but its own report line is what names the
-# numbers, so it is captured and quoted rather than re-derived.
+# numbers, so it is captured and quoted rather than re-derived. Same constants as
+# check-merge-sequence.py, which asks the same guard the same question: two
+# spellings of one report would be one spelling too many. These two carried the
+# pre-#1158 wording (`documents N but M are collected`) after the guard stopped
+# printing it (2026-09-13), so a real finding was reported as the last line of the
+# report - the trailing "Measure it with:" hint - instead of as the finding itself.
 GUARD = "scripts/check-doc-count.py"
-COUNT_IN_REPORT = re.compile(r"documents (\d+).*?but (\d+) are collected")
-OK_IN_REPORT = re.compile(r"OK: .*?documents (\d+)")
+COUNT_IN_REPORT = re.compile(r"FAIL: (\d+) tracked file\(s\) state")
+OK_IN_REPORT = re.compile(r"OK: no tracked file states the Python test count")
+
+# The guard's own failure line, matched by its first characters at line start.
+# Python exits 1 for an unhandled exception too, so the exit code alone cannot
+# tell "this tree breaks the rule" from "this guard never reached a verdict": only
+# this line can, and the guard prints it exactly when it finds something.
+FAILURE_LINE = re.compile(r"^FAIL: ", re.MULTILINE)
 
 
 class MeasurementError(Exception):
@@ -356,7 +367,9 @@ def _guard_verdict(tree_sha: str, workdir: Path, cwd: str | None = None) -> tupl
     Returns (passed, one-line report). A guard that cannot be run at all (no
     script in the tree, no interpreter able to collect) is a measurement error,
     not a pass - the failure direction matters, because "I could not check"
-    reported as healthy is how a broken tree reaches master.
+    reported as healthy is how a broken tree reaches master. The same holds one
+    exit code over: a guard that exits 1 *without* printing its own failure line
+    never reached a verdict, so a crash is not a finding either.
     """
     if workdir.exists():
         shutil.rmtree(workdir)
@@ -379,16 +392,38 @@ def _guard_verdict(tree_sha: str, workdir: Path, cwd: str | None = None) -> tupl
     proc = _run([sys.executable, str(script)], cwd=str(workdir))
     out = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode == 0:
+        # Same convention as the sibling: the report names the guard's own line
+        # when it is recognised, and says no more than it can when it is not.
         m = OK_IN_REPORT.search(out)
-        detail = f"documents {m.group(1)}" if m else "guard reported OK"
-        return True, f"guard OK ({detail})"
+        return True, "guard OK (no stored count)" if m else "guard OK"
     if proc.returncode == 1:
+        # A red verdict has to be *evidenced by the guard's own report*. Python
+        # exits 1 for an unhandled exception as well as for a deliberate `exit(1)`,
+        # so the code alone cannot tell a tree that breaks the rule from a guard
+        # that never reached a verdict - and the second, reported as the first, is
+        # a finding about a tree that was never measured. Measured 2026-09-14
+        # (`cyc20260914-033026`): a guard that cannot import its own dependencies
+        # prints a traceback and exits 1, which this branch used to report as
+        # `guard FAIL (1 tracked file(s) state the test count)`.
+        #
+        # This is the same rule the sibling reader in check-merge-sequence.py
+        # already applies to the same guard (`_base_states_a_count`), and the same
+        # one its `_guard_verdict` now applies: rc == 1 *and* the guard's line.
+        if FAILURE_LINE.search(out) is None:
+            raise MeasurementError(
+                "the merged tree's guard exited 1 without reporting a finding, so it "
+                f"crashed instead of reaching a verdict: ran {GUARD} from the tree at "
+                f"{workdir}, with {sys.executable} - the code a bare interpreter and an "
+                f"unimportable tree both produce. Re-run it there:\n"
+                + out[-1000:].strip()
+            )
         m = COUNT_IN_REPORT.search(out)
-        detail = (
-            f"documents {m.group(1)} but {m.group(2)} are collected"
-            if m
-            else out.strip().splitlines()[-1] if out.strip() else "guard FAILED"
-        )
+        if m:
+            detail = f"{m.group(1)} tracked file(s) state the test count"
+        else:
+            # A finding in the same shape but another wording: quote the guard's
+            # own line, never the tail of its advice.
+            detail = FAILURE_LINE.split(out, maxsplit=1)[1].splitlines()[0].strip()
         return False, f"guard FAIL ({detail})"
     # Exit 2 from the guard means it could not measure the tree itself. Quoting
     # it is not enough to call the tree healthy.
