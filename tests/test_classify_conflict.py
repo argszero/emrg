@@ -615,6 +615,296 @@ class TestRevisionPrefixesAreNotDisjointAdditions:
         assert label == mod.DISJOINT
         assert "KEEP BOTH" in advice
 
+
+class TestACountLineRevisedBesideATextRevision:
+    """A block mixing a count line with a text edit is one revision, not two adds.
+
+    Measured 2026-09-11 (`cyc20260911-194733`), reproduced with a real
+    `git merge-file` on adjacent lines: ours pairs the Python count line with a
+    `Doc count sync:` line, theirs carries the same two lines edited divergently.
+    The head's prefix rule cannot see it - neither line is a prefix of its
+    counterpart, because the count digits sit *inside* the line and everything
+    after them was rewritten - so the fallback answered `disjoint - KEEP BOTH
+    (concatenate)` at rc 0, and the concatenation holds two
+    ``Python: `uv run pytest` `` lines. That is the state
+    `tests/test_doc_counts.py::_duplicated_count_line_kinds` rejects, i.e. a doc
+    claiming two different pytest counts.
+
+    Across the last 400 commits touching `Agent.md`, 5 hunks reach the fallback in
+    a multi-line block with a count line in it (`cb651a4` 2v2, `5c039b4` 3v3,
+    `3335877` `444e1d5` 1v2, `18fd0af` 1v13) and all 5 would emit that duplicate.
+    Deriving this by running the parent rule and this rule over the same blocks
+    gives exactly those 5, and `cb651a4` and `5c039b4` are the two *aligned* ones:
+    the previous rule saw equal-length sides whose pairs all carry a documented
+    count and answered `count-line` only when the masking made the pairs equal,
+    which a text revision beyond the number defeats - so `5c039b4` (`disjoint` at
+    the parent head) is one of the 5 this rule fixes, not one the previous rule
+    caught.
+
+    There are also two further hunks with a count line (`e46c160`, `0c8a212`,
+    both 2v2) which the parent rule already answers `count-line`; this rule leaves
+    them there. So 7 hunks reach the fallback region with a count line and 5 of
+    them change verdict.
+    """
+
+    def test_a_count_line_beside_a_text_revision_escalates(self, mod) -> None:
+        ours = (
+            "Python: `uv run pytest tests/ -v` (1393) — x\n"
+            "Doc count sync: `check-doc-count.py [--write|--dry-run]` — 测量树里\n"
+        )
+        theirs = (
+            "Python: `uv run pytest tests/ -v` (1382) — x\n"
+            "Doc count sync: `check-doc-count.py [--write]` — 测量当前树上的\n"
+        )
+        assert not (set(mod._content_lines(ours)) & set(mod._content_lines(theirs)))
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING, (
+            "KEEP BOTH would concatenate two Python count lines, so the doc would "
+            "claim two different pytest counts"
+        )
+        assert "KEEP BOTH (concatenate)" not in advice
+        assert "human must read" in advice
+
+    def test_the_predicate_is_narrow_about_what_counts_as_the_same_count(self, mod) -> None:
+        """Two *different* count lines are two facts, not a revision of one.
+
+        The masking must be the evidence: only a pair that is equal once digits
+        are removed is "one fact re-measured". `Python:` against `Renderer:` is a
+        different fact, and two genuinely separate additions may carry different
+        counts - escalating those is right for the count-duplication reason, but
+        the predicate must not fire on lines that share no count shape at all.
+        """
+        ours = (
+            "Python: `uv run pytest tests/ -v` (1393) — x\n"
+            "Some unrelated prose that was added here\n"
+        )
+        theirs = (
+            "Renderer: `cd emrg/gui/renderer && npm test` (514) — y\n"
+            "Entirely different prose, also added\n"
+        )
+        assert not mod._looks_like_a_count_revision(
+            mod._content_lines(ours), mod._content_lines(theirs)
+        )
+
+    def test_two_numbers_that_are_not_counts_do_not_escalate(self, mod) -> None:
+        """A bare numeric difference in code is not a count revision.
+
+        Index-alignment alone must not be the evidence: `x = compute(1)` beside
+        `x = compute(2)` is a code change, not a documented count left behind by a
+        revision, and it already reaches `overlapping` through the declared-symbol
+        path. The gate that keeps this rule off it is the *documented count* shape
+        (a parenthesised number), the same condition the aligned
+        `_differ_only_by_number` applies - without it, removing digits makes any
+        two locally-numbered code lines a "count pair". Measured on the 931-block
+        corpus, dropping the gate fires on 19 blocks that are not counts at all,
+        e.g. `emrg/gui/package-lock.json` `"version": "0.2.91"` against
+        `"version": "0.2.92"`; a test that only ever changes digits is silent to it,
+        so the case must differ in the surrounding text too.
+        """
+        assert not mod._looks_like_a_count_revision(
+            ["x = compute(1)"], ["x = compute(2)"]
+        )
+        assert not mod._looks_like_a_count_revision(
+            ['  "version": "0.2.91",'], ['  "version": "0.2.92",']
+        )
+        # ...while the documented-count pair still escalates (identical prose, so
+        # the digits are the *only* difference - one fact re-measured).
+        assert mod._looks_like_a_count_revision(
+            ["Python: `uv run pytest tests/ -v` (1393) — x"],
+            ["Python: `uv run pytest tests/ -v` (1382) — x"],
+        )
+
+    def test_unaligned_sides_still_escalate(self, mod) -> None:
+        """A 1-line side against a 2-line side is still a count revision.
+
+        Measured 2026-09-11: three of the five Agent.md hunks this rule fixes are
+        unaligned (`3335877` 1v2, `444e1d5` 1v2, `18fd0af` 1v13 - 1v13 because the
+        rest of the count block reads as an addition beside ours' single stale
+        line), and all three got `disjoint - KEEP BOTH`. Requiring both
+        sides to be the same length is what hid them - the count lines pair up at
+        the front regardless, and the concatenation still holds two
+        ``Python: `uv run pytest` `` lines.
+        """
+        ours = "Python: `uv run pytest tests/ -v` (1393) — x\n"
+        theirs = (
+            "Python: `uv run pytest tests/ -v` (1382) — x\n"
+            "Doc count sync: `check-doc-count.py [--write]` — 测量当前树上的\n"
+        )
+        assert mod._looks_like_a_count_revision(
+            mod._content_lines(ours), mod._content_lines(theirs)
+        )
+        assert mod.classify(ours, theirs)[0] == mod.OVERLAPPING
+
+    def test_a_count_line_re_breakdown_is_the_same_kind_not_a_disjoint_add(
+        self, mod
+    ) -> None:
+        """The same count kind at two revisions, whose parenthesised detail moved.
+
+        A real block, not a shape I imagined: it is the conflict git produced when
+        merge `47af6bc2` met master (rebuilt from that merge's three real blobs with
+        `git merge-tree`). Ours states the GUI count at `(92: ... + 3 preload-api +
+        3 boot-contract)`; master states the same kind at `(89: ... + 3 preload-api)`
+        - one component removed *and* the total re-measured 92 -> 89. The two sides
+        share no line and are not the same length (1 vs 2), so neither the
+        equal-length rule nor the "equal once digits are masked" comparison sees
+        them, and the block was answered `disjoint - KEEP BOTH (concatenate)` at
+        rc 0.
+
+        The concatenation contains two `GUI: ` lines, which is precisely the state
+        `tests/test_doc_counts.py::_duplicated_count_line_kinds` rejects - this test
+        drives that guard over the concatenation rather than asserting the shape by
+        eye. The correct verdict is `overlapping`: a human reads it.
+
+        The axis that catches it is the unit the repo's own guard uses - *the same
+        documented-count kind stated twice* - not "the lines are equal". Measured
+        over 185 conflict blocks rebuilt from this repo's real merge commits, this
+        rule changes exactly one class: this block. Nothing else moves.
+        """
+        ours = (
+            "GUI: `cd emrg/gui && npm test` (92: 45 daemon_client + 20 conn-manager "
+            "+ 8 integration + 6 build-config + 7 gui-state + 3 preload-api + "
+            "3 boot-contract) — syntax: `node --check main.js`\n"
+        )
+        theirs = (
+            "GUI: `cd emrg/gui && npm test` (89: 45 daemon_client + 20 conn-manager "
+            "+ 8 integration + 6 build-config + 7 gui-state + 3 preload-api) — "
+            "syntax: `node --check main.js`\n"
+            "Renderer: `cd emrg/gui/renderer && npm run typecheck && npm test` (445: "
+            "5 snapshot-store)\n"
+        )
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING, (
+            "one count kind at two revisions must not be called two separate "
+            "additions: `KEEP BOTH` emits both copies"
+        )
+        assert "human must read" in advice
+
+        # The consequence, driven through the repo's own guard rather than asserted:
+        # concatenating duplicates the `GUI: ` kind, which is the rejected state.
+        sys.path.insert(0, str(REPO_ROOT))
+        try:
+            from tests.test_doc_counts import _duplicated_count_line_kinds
+        finally:
+            sys.path.pop(0)
+        concat = ours.rstrip("\n") + "\n" + theirs
+        assert _duplicated_count_line_kinds(concat), (
+            "the KEEP BOTH result must be the state the repo's guard rejects, "
+            "otherwise this rule is not protecting anything"
+        )
+
+    def test_the_kind_prefix_is_the_kind_text_not_a_comment_marker(self, mod) -> None:
+        """The prefix must be the *kind text*, located by match position.
+
+        A claim about a file the file does not make, reproduced from review
+        `cyc20260912-070619`: the clause masked digits with `#` and then split on
+        `#` - but `#` begins a comment, so on a line whose prose contains a `#`
+        before its digits, the "prefix" collapsed to bare indentation. Measured at
+        the reviewed head, two unrelated comments both produced `'    '` and
+        escalated each other; lines beginning with a digit produced `''` and matched
+        on nothing at all.
+
+        This test recomputes the prefix directly rather than only observing the
+        verdict, so it fails on the *mechanism* and not merely on one consequence.
+        """
+        comment_a = "    # the daemon's OWN scheduler lost the file (93x) while retrying"
+        comment_b = "    # a different subsystem failed (41x) here"
+        # The prefix is the kind text, stripped: indentation names no kind, and
+        # stripping is what makes the "no kind supplied" case detectable below.
+        assert mod._count_kind_prefix(comment_a) == (
+            "# the daemon's OWN scheduler lost the file"
+        )
+        assert mod._count_kind_prefix(comment_b) == "# a different subsystem failed"
+        # Both are real kind text, not the bare indentation the split form produced.
+        assert mod._count_kind_prefix(comment_a) != mod._count_kind_prefix(comment_b)
+        # Two unrelated comments: different kinds, so no escalation.
+        assert not mod._looks_like_a_count_revision([comment_a], [comment_b])
+
+        # A digit-leading line still *has* kind text after the position lookup, so
+        # two different ones do not collapse into a match. Under the split form both
+        # masked to a leading `#` and produced `''`, so any two such lines were the
+        # "same kind".
+        assert mod._count_kind_prefix("3 things happened (12)") == "3 things happened"
+        assert not mod._looks_like_a_count_revision(
+            ["3 things happened (12)"], ["5 other things occurred (7)"]
+        )
+        # Whitespace only before the count is not kind text: with the tails also
+        # different (so the masked-equality test above cannot fire), the None guard
+        # is what keeps this pair from escalating on the strength of an empty
+        # string.
+        assert mod._count_kind_prefix("   (12) things") is None
+        assert not mod._looks_like_a_count_revision(
+            ["   (12) things"], ["   (7) other"]
+        )
+
+    def test_a_same_kind_line_with_a_different_tail_still_escalates(self, mod) -> None:
+        """The deliberate widening, pinned so it stays deliberate.
+
+        Review `cyc20260912-090216` asked for this widening to be stated and pinned
+        rather than argued: the clause now keys on the kind text, so a same-kind pair
+        that differs *after* the count fires too. `... (900) # 1 note` beside
+        `... (900) # 2 notes` is neither a re-breakdown nor "one fact re-measured
+        with a different breakdown" - it is the same kind with two different tails.
+
+        It is accepted because the verdict errs toward a human read: both sides state
+        the same count kind, so `KEEP BOTH` would concatenate a duplicate - the state
+        `_duplicated_count_line_kinds` rejects. The alternative (a strict "compare the
+        text between digit runs" test) was proposed and withdrawn in review
+        `cyc20260912-090216`; withdrawn in part because it was measured wrong, see
+        the re-breakdown test below.
+        """
+        assert mod._looks_like_a_count_revision(
+            ["Python: `uv run pytest tests/ -v` (900) # 1 note"],
+            ["Python: `uv run pytest tests/ -v` (900) # 2 notes"],
+        )
+        assert mod._looks_like_a_count_revision(
+            ["Python: `uv run pytest tests/ -v` (900) covers the reader"],
+            ["Python: `uv run pytest tests/ -v` (900) covers the writer"],
+        )
+
+    def test_the_rewritten_predicate_still_catches_the_re_breakdown(self, mod) -> None:
+        """The kind-prefix form keeps the rule's only reason to exist.
+
+        Review `cyc20260912-090216` withdrew an earlier fix on the grounds that a
+        "compare the text between the digit runs" test returns False on this shape.
+        That measurement is correct about *that* test, and does not apply to the
+        kind-prefix form the first review proposed: the prefix stops at the first
+        count, so a different number of digit runs is irrelevant. Measured here, both
+        forms side by side, so the distinction is pinned rather than remembered.
+        """
+        ours = "GUI: `cd emrg/gui && npm test` (92: 89 GUI + 3 renderer)"
+        theirs = "GUI: `cd emrg/gui && npm test` (89: 86 GUI + 3)"
+
+        # kind-prefix form: fires (the shape must not regress)
+        assert mod._looks_like_a_count_revision([ours], [theirs]), (
+            "the re-breakdown is this clause's whole reason to exist"
+        )
+        # "text between the digit runs": does not fire - which is why that form was
+        # the wrong proposal, not why this one is wrong.
+        def between_digit_runs(line: str) -> str:
+            return "|".join(mod._NUMBER.split(line))
+
+        assert between_digit_runs(ours) != between_digit_runs(theirs)
+        assert mod._count_kind_prefix(ours) == mod._count_kind_prefix(theirs)
+
+    def test_a_count_re_breakdown_of_a_different_kind_does_not_escalate(
+        self, mod
+    ) -> None:
+        """The negative control: the rule keys on the *kind*, not on "carries a count".
+
+        Two genuinely different count lines - `Python:` against `GUI:` - are two
+        facts, not one re-measured, so escalating them would be noise that sends a
+        human to read a block no human needs to read. The text before the first
+        count is what separates the two cases.
+        """
+        assert not mod._looks_like_a_count_revision(
+            ["Python: `uv run pytest tests/ -v` (1494: 1 skipped) — x"],
+            ["GUI: `cd emrg/gui && npm test` (100: 44 daemon_client) — y"],
+        )
+        assert not mod._looks_like_a_count_revision(
+            ["Python: `uv run pytest tests/ -v` (1494) — x"],
+            ["Renderer: `npm test` (514) — y"],
+        )
+
     def test_the_reported_summary_names_the_classes(self, mod, tmp_path, capsys) -> None:
         f = tmp_path / "z.py"
         f.write_text(
@@ -625,6 +915,34 @@ class TestRevisionPrefixesAreNotDisjointAdditions:
         mod.main([str(f)])
         out = capsys.readouterr().out
         assert "disjoint=1" in out
+
+
+# The master each recorded branch was reconstructed against. This has to be a
+# fixed commit, never `origin/master`: the expectations below are statements
+# about *historical* merges, and `origin/master` moves.
+#
+# Concretely - and this is issue #1160, where it cost a red master - `a73eba58`
+# is #1140's head. While #1140 was open, merging it against master produced a
+# genuine `disjoint` (two independent additions). After #1140 merged (`6797821`),
+# merging that same branch against the new master puts master's own copy of the
+# change on the "theirs" side, so the answer is correctly `duplicate` - and the
+# recorded `disjoint` expectation fails on a tree where nothing is wrong. The
+# expectation did not go stale because the classifier changed; it went stale
+# because the base did. Measured (both cases, this file's own reconstruction):
+#
+#     base        a73eba58             7147666
+#     147a80c     disjoint, disjoint    duplicate
+#     efd6673     disjoint, disjoint    duplicate
+#     c641859     disjoint, disjoint    duplicate   <- pinned
+#     6797821     duplicate, duplicate  duplicate, identical, ...
+#
+# Pinned to `6797821^` - the master immediately before #1140 merged, which is
+# also this branch's fork point - because that is the only base on which *both*
+# recorded expectations hold at once.
+#
+# The pin is self-enforcing: reverting this to `origin/master` turns the suite
+# red immediately, since master has already moved past `6797821` for good.
+HISTORICAL_BASE = "c641859d687692a04d13f0574d8d1f8e30cfae39"
 
 
 @pytest.mark.parametrize(
@@ -641,9 +959,15 @@ def test_it_reproduces_the_real_historical_verdicts(mod, tmp_path, branch, expec
     """Drive the classifier against a reconstructed real merge.
 
     This is ground truth, not a fixture: both branches are reconstructed with
-    `git merge --no-commit` against the same master, and the expected labels are
-    the ones derived by hand during the cycle (and acted on, with verification
-    after). Skips if the objects are unavailable (e.g. a shallow clone).
+    `git merge --no-commit` against a *fixed* master (HISTORICAL_BASE), and the
+    expected labels are the ones derived by hand during the cycle (and acted on,
+    with verification after). Skips if the objects are unavailable (e.g. a
+    shallow clone).
+
+    The base is pinned rather than read from `origin/master` because these are
+    claims about specific historical merges: "the`disjoint` case" means the one
+    that existed while #1140 was open, not whatever the same two trees produce
+    once that PR is on master (issue #1160).
     """
     probe = subprocess.run(
         ["git", "cat-file", "-e", f"{branch}^{{commit}}"],
@@ -652,6 +976,14 @@ def test_it_reproduces_the_real_historical_verdicts(mod, tmp_path, branch, expec
     )
     if probe.returncode != 0:
         pytest.skip(f"{branch} is not available in this clone")
+
+    base_probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{HISTORICAL_BASE}^{{commit}}"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+    )
+    if base_probe.returncode != 0:
+        pytest.skip(f"pinned base {HISTORICAL_BASE[:8]} is not available in this clone")
 
     wt = tmp_path / "wt"
     subprocess.run(
@@ -662,7 +994,7 @@ def test_it_reproduces_the_real_historical_verdicts(mod, tmp_path, branch, expec
     )
     try:
         subprocess.run(
-            ["git", "merge", "--no-commit", "--no-ff", "origin/master"],
+            ["git", "merge", "--no-commit", "--no-ff", HISTORICAL_BASE],
             cwd=wt,
             capture_output=True,
         )
