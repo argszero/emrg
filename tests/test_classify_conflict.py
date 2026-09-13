@@ -700,6 +700,182 @@ class TestRevisionPrefixesAreNotDisjointAdditions:
         assert "KEEP BOTH" in advice
 
 
+class TestAMidLineRevisionIsNotADisjointAddition:
+    """The same shape as the class above, with the edit *inside* the line (#1183).
+
+    A strict prefix only describes an edit at the **end** of a line, so the live
+    block that filed issue #1183 - one side's documentation line being the other
+    side's with a sentence inserted mid-line - matched no rule and still got
+    `disjoint - KEEP BOTH (concatenate)` at rc 0, i.e. as a verdict. Following
+    that advice emits the line **twice**, which is the state the repo's own doc
+    guards reject.
+
+    The fixtures below are the *live* shape, not a hand-made analogy: ours is one
+    line, theirs is three, and ours is theirs' first line with one run inserted at
+    offset 1091 (`cyc20260913-151530` measured the block while re-applying #1182
+    onto master `c9a7d8a`). Both sides were kept at realistic length because the
+    predicate is about offsets inside long lines; a three-word fixture cannot
+    exercise a mid-line edit at all.
+    """
+
+    # One documentation line, and the same line with one inserted run - the body
+    # before `[--base <ref>]` and the tail from `; health is` are byte-identical.
+    OLDER = (
+        "Merge sequence: `uv run --no-sync python3 scripts/check-merge-sequence.py "
+        "[--base <ref>] <PR>...` — asks whether the tree each step lands still "
+        "passes the guards; health is a property of the step"
+    )
+    NEWER = (
+        "Merge sequence: `uv run --no-sync python3 scripts/check-merge-sequence.py "
+        "[--base <ref>] <PR>...` — asks whether the tree each step lands still "
+        "passes the guards; the default plan is cumulative from "
+        "`cyc20260913-144807`, so a set whose pairs all merge cleanly is not a "
+        "sequence at all; health is a property of the step"
+    )
+
+    def _live_block(self) -> tuple[str, str]:
+        ours = self.NEWER + "\n"
+        theirs = (
+            self.OLDER + "\n"
+            "Merge pairs: `check-merge-pairs.py` — asks the neighbouring question\n"
+            "Merge tree health: `check-merge-tree-health.py` — the whole tree\n"
+        )
+        return ours, theirs
+
+    def test_the_fixture_really_is_a_mid_line_edit(self, mod) -> None:
+        """Guard the guard: the pair must be one inserted run, not a rewrite.
+
+        Without this, a fixture that drifted into "two mostly-different lines"
+        could keep the assertions below green through an unrelated branch - the
+        test would look like evidence for the predicate while testing nothing.
+        """
+        assert not self.OLDER.startswith(self.NEWER)
+        assert not self.NEWER.startswith(self.OLDER), (
+            "neither side is a prefix of the other - otherwise this is the older "
+            "test class's shape, which the tail rule already caught"
+        )
+        assert mod._one_contiguous_edit(self.OLDER, self.NEWER)
+        # …and it is exactly one run, not two: the shared head and tail must
+        # together account for all but one middle chunk.
+        head = len(self.OLDER) - len(self.OLDER.lstrip("Merge sequence: `uv run"))
+        assert self.NEWER[:head] == self.OLDER[:head]
+
+    def test_a_mid_line_revision_escalates_instead_of_keep_both(self, mod) -> None:
+        """The defect: KEEP BOTH advised at rc 0 for a same-line-two-revisions block."""
+        ours, theirs = self._live_block()
+        # The routing precondition: no byte-equal line, so the fallback decides.
+        assert not (set(mod._content_lines(ours)) & set(mod._content_lines(theirs)))
+        # …and it is not the one-line-vs-one-line escalation, which would pass
+        # even with the predicate removed.
+        assert len(mod._content_lines(ours)) != len(mod._content_lines(theirs))
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING, (
+            "KEEP BOTH would land the documentation line twice, at rc 0"
+        )
+        assert "KEEP BOTH (concatenate)" not in advice
+        assert "human must read" in advice
+
+    def test_the_advised_remedy_would_have_duplicated_the_line(self, mod) -> None:
+        """Why the escalation is a true positive, measured rather than asserted.
+
+        This is the *cost* of the old advice: mechanically following it leaves two
+        lines with the same head, i.e. the same documentation fact recorded twice -
+        the state `tests/test_doc_counts.py::_duplicated_count_line_kinds` exists
+        to reject.
+        """
+        ours, theirs = self._live_block()
+        concatenated = mod._content_lines(ours) + mod._content_lines(theirs)
+        heads = [line.strip()[:40] for line in concatenated]
+        duplicated = [head for head in set(heads) if heads.count(head) > 1]
+        assert len(duplicated) == 1, f"expected exactly one repeated line, got {duplicated}"
+        assert duplicated[0].startswith("Merge sequence:"), (
+            f"the repeated line must be the doc line both sides carried, got "
+            f"{duplicated[0]!r}"
+        )
+
+    def test_a_mid_line_deletion_is_the_same_rule(self, mod) -> None:
+        """Direction must not matter: the shorter side can be the older revision.
+
+        The corpus case was a wrapped prose line where *ours* is theirs minus a
+        run - so a rule written only for `theirs = ours + inserted` would miss it.
+
+        The fixture must share **no** line, and that is asserted rather than
+        assumed: an earlier version of this test put a byte-identical first line on
+        both sides, so `classify` reached the partial-overlap branch
+        (`len(both) == 1`) and never consulted the predicate at all - it stayed
+        green with the predicate deleted, measured this cycle
+        (`cyc20260913-185548`). A test that passes through a different branch than
+        the one it names is worse than a missing test, because it reads as coverage.
+        """
+        ours = (
+            "alpha alpha alpha alpha alpha alpha\n"
+            "    the queue was unblocked by naming both PRs\n"
+        )
+        theirs = (
+            "beta beta beta beta beta beta beta\n"
+            "    the queue was later unblocked by naming both PRs\n"
+        )
+        # The routing precondition: the predicate's branch is only reached when no
+        # line is shared.
+        assert not (set(mod._content_lines(ours)) & set(mod._content_lines(theirs)))
+        # The claim under test, isolated to the *second* line pair: exactly one
+        # contiguous insertion in the middle (read as a deletion from ours), and
+        # crucially neither side a prefix of the other - so only this predicate can
+        # escalate the block, and "revert to the prefix rule" must kill this test.
+        short = "    the queue was unblocked by naming both PRs"
+        long = "    the queue was later unblocked by naming both PRs"
+        assert mod._one_contiguous_edit(short, long)
+        assert not (long.startswith(short) or short.startswith(long)), (
+            "a prefix pair would let the rule this test exists to replace pass it"
+        )
+        # The first line pair must not fire anything either, or the block would
+        # escalate for a reason this test does not name.
+        assert not mod._one_contiguous_edit("alpha alpha alpha alpha alpha alpha",
+                                            "beta beta beta beta beta beta beta")
+        label, advice = mod.classify(ours, theirs)
+        assert label == mod.OVERLAPPING
+        assert "human must read" in advice
+
+    def test_two_separate_edits_are_two_strings_not_two_revisions(self, mod) -> None:
+        """The negative control: the predicate must count edits, not similarity.
+
+        Two insertions leave two non-empty middles, and that is the evidence these
+        are two different strings rather than two revisions of one line. Without
+        this control the rule could degrade into "the lines look alike", which
+        would escalate genuinely disjoint additions.
+        """
+        a = "def handler(self, request, context):  # the entry point"
+        b = "def _handler(self, request, context):  # the entry point of the app"
+        assert not mod._one_contiguous_edit(a, b), (
+            "a rename plus an inserted phrase is TWO edits - two facts, not one "
+            "line at two revisions"
+        )
+        label, advice = mod.classify(
+            a + "\n    return self._dispatch(request)\n",
+            b + "\n    return self._dispatch(context)\n",
+        )
+        assert label == mod.DISJOINT
+        assert "KEEP BOTH" in advice
+
+    def test_the_tail_rule_still_holds_after_the_generalisation(self, mod) -> None:
+        """Regression: the shape #1140 measured must not be lost.
+
+        The prefix relation is the special case where the common suffix is empty,
+        so generalising must keep it - a reader of this file should not have to
+        trust that "the new rule is a superset" was checked.
+        """
+        short = "Doc count sync: `uv run --no-sync python3 scripts/check-doc-count.py`"
+        long = (
+            "Doc count sync: `uv run --no-sync python3 scripts/check-doc-count.py` "
+            "- measures the tree and checks Agent.md"
+        )
+        assert mod._one_contiguous_edit(short, long)
+        assert not mod._one_contiguous_edit(short, short), (
+            "byte-equal lines are caught earlier as IDENTICAL, so the predicate "
+            "must not claim an edit for them"
+        )
+
+
 class TestACountLineRevisedBesideATextRevision:
     """A block mixing a count line with a text edit is one revision, not two adds.
 
