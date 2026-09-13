@@ -33,11 +33,19 @@ file lists, so it is asked of `git merge-tree` rather than inferred.
 
 What was measured
 -----------------
-`git merge-tree --write-tree <a> <b>` is run per pair. Exit 0 means git produced a
-merged tree with no conflicts; non-zero means it wrote conflicts, and the paths are
-in the output's first block (one `100644 <blob> <stage>\t<path>` line per side per
-conflicted path, stages 1/2/3). The paths are read from that block, so the report
-names **which** file collides, not merely that something did.
+`git merge-tree --write-tree <a> <b>` is run per pair. **The merged tree's name on
+the first line of its output is what answers the question; the exit code does not.**
+A clean merge names that OID and exits 0; a conflict names the same OID, then the
+stage block (one `100644 <blob> <stage>\t<path>` line per side per conflicted path,
+stages 1/2/3) and exits 1. But the code does not separate those two cases from
+"the question was not answered": a failure to merge the two *inputs* exits 1 with
+empty output, and `git merge-tree --write-tree --quiet` - a documented flag that
+suppresses exactly the tree name - exits **0 with empty output** for a clean merge
+(both measured 2026-09-14 in a scratch repo, `cyc20260914-055701`). So a report
+that names no tree is read as *not answered* whatever code came with it, and the
+paths are only read out of a report that did name one - which is what makes `[]`
+mean an *evidenced* clean merge rather than an inference. The report names **which**
+file collides, not merely that something did.
 
 This deliberately does **not** attempt the merge or touch the working tree: the
 question is "what would happen", and answering it must not itself dirty the
@@ -261,21 +269,58 @@ def _fetch_head(repo: str, number: int) -> str:
     return ref
 
 
+def _is_object_name(line: str) -> bool:
+    """Whether a line is a bare object name (the merged tree's).
+
+    Both the SHA-1 (40 hex) and SHA-256 (64 hex) object formats are accepted: the
+    question is the *shape* of the answer, which must not depend on the object
+    format of whichever clone happens to run this. The same rule and the same
+    spelling as `check-merge-plan-suite.py`, `check-merge-landing-diff.py` and
+    `check-merge-tree-health.py`, each of which reads its merge verdict this way.
+    It is spelled here because the sibling this tool loads (`seq`) does not carry
+    it on master - the rule reaches `seq` in #1207 - and once that has landed this
+    copy should come from there, the way *base* resolution already does.
+    """
+    return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
+
+
 def _conflict_paths(a: str, b: str) -> list[str] | None:
-    """Paths that conflict when `a` and `b` are merged; None if the run failed.
+    """Paths that conflict when `a` and `b` are merged; None if the merge is not answered.
 
     An empty list means the merge is clean - distinct from None, which means the
-    question was not answered (a bad ref, a git that rejects `--write-tree`).
+    question was not answered (a bad ref, a git that rejects `--write-tree`, or a
+    report that names no merged tree).
+
+    **The exit code is not the answer; the name on the first line is.** Both of the
+    answers this function can give have to be evidenced by `merge-tree`'s report,
+    because neither exit code identifies one: a clean merge names its tree *and*
+    `--quiet` exits 0 printing nothing, while a genuine conflict names the tree
+    and a failure to merge the two inputs exits 1 printing nothing (measured
+    2026-09-14 in a scratch repo, `cyc20260914-055701`). `rc == 0` alone therefore
+    is not evidence that a merge was produced: reading `[]` out of it hands the
+    caller the *clean* answer over a merge the tool never saw, and `[]` is the one
+    answer here that nothing downstream re-checks - `forecast` reports such a PR as
+    conflicting with nothing, so it can be recommended in an order it cannot take.
+    An unevidenced answer in the other direction was already refused (`paths or
+    None`), so the asymmetry was the whole defect: the *reassuring* answer was the
+    half that could be invented.
     """
     proc = _run(["git", "merge-tree", "--write-tree", a, b])
+    lines = proc.stdout.splitlines()
+    named = lines[0].strip() if lines else ""
+    if not _is_object_name(named):
+        # No merged tree was named, so there is nothing here to have an opinion
+        # about - whatever the exit code says.
+        return None
     if proc.returncode == 0:
+        # `[]` is the clean answer, and the named tree is what makes it evidenced.
         return []
     # A conflict exits 1 with the block on stdout; anything else is a failure to
     # measure rather than a conflict to report.
     if proc.returncode != 1:
         return None
     paths: list[str] = []
-    for line in proc.stdout.splitlines():
+    for line in lines:
         if not line.strip():
             break  # end of the conflict block; the rest is the message
         match = _CONFLICT_LINE.match(line)
