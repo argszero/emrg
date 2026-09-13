@@ -635,14 +635,31 @@ def test_a_local_branch_shadowing_the_base_name_does_not_replace_it(
 
 
 def test_a_base_that_cannot_be_fetched_is_a_measurement_error(
-    queue: tuple[Path, Path], mod, monkeypatch, capsys
+    queue: tuple[Path, Path], tmp_path: Path, mod, monkeypatch, capsys
 ) -> None:
-    """A remote-tracking base that does not exist is exit 2, not a literal ref."""
+    """A base the tool could not verify is exit 2, never a base it kept anyway.
+
+    Two arms, because they fail at different places and only the second one is
+    about the refresh: a name with no ref at all (`origin/nope`), and - the
+    dangerous one - an *existing* remote-tracking ref whose remote cannot be
+    reached. A tool that swallowed the fetch failure would answer about the ref it
+    could not verify, which is the defect the refresh exists to remove.
+    """
     repo, _origin = queue
     monkeypatch.chdir(repo)
 
     assert mod.main(["1", "--base", "origin/nope"]) == 2
+    captured = capsys.readouterr()
+    assert "base " not in captured.out
+    assert "could not measure" in captured.err
 
+    # Precondition of the second arm: the ref to be read is there, so what fails is
+    # the fetch and not the lookup - without this the arm below could pass for the
+    # first arm's reason.
+    assert _git(repo, "rev-parse", "--verify", "refs/remotes/origin/master")
+    _git(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+
+    assert mod.main(["1", "--base", "origin/master"]) == 2
     captured = capsys.readouterr()
     assert "base " not in captured.out
     assert "could not measure" in captured.err
