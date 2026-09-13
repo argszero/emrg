@@ -128,6 +128,16 @@ CONFLICT_BASE_SECTION = re.compile(r"^\|\|\|\|\|\|\|[^\n]*\n", re.M)
 # spelled that way sends the reader straight into a second failure. A hint is
 # only worth printing if it runs; keep the spelling here and let
 # tests/test_check_doc_count.py prove the other sites agree with it.
+#
+# Scope of that measurement, added 2026-09-13 (`cyc20260913-122923`) after
+# walking into it: "this form exits 0" is a property of a **synced** checkout.
+# The measurement above was taken in the main clone, which is synced. In a fresh
+# worktree the same spelling exits 2 without measuring anything, because
+# `uv run --no-sync` has created an empty `.venv` there and both `python` and
+# `python3` resolve to it - so the spelling is necessary but not sufficient, and
+# the hint it appears in must not be printed when the environment, not the
+# interpreter choice, is what is missing. See the pytest-missing branch in
+# `measured_count`.
 INVOCATION = "uv run --no-sync python3 scripts/check-doc-count.py"
 
 
@@ -161,9 +171,31 @@ def measured_count() -> int:
             "(its output could not be decoded)"
         )
     if proc.returncode != 0:
+        detail = (proc.stdout[-2000:] + proc.stderr[-2000:]).strip()
+        # Two causes, two remedies - and the second one is *not* "use the right
+        # interpreter". Measured 2026-09-13 (`cyc20260913-122923`) in a fresh
+        # review worktree: `uv run --no-sync` there had produced an empty `.venv`
+        # (`site-packages` holding only `_virtualenv.pth` and `_virtualenv.py`),
+        # and `python` and `python3` both resolve to it - so the invocation this
+        # tool prints as its own remedy failed with byte-identical output, rc 2,
+        # sending the reader in a circle. Reading that output as a wrong
+        # interpreter is the misdiagnosis: there is no interpreter in this
+        # checkout that has pytest, so advising a different one cannot help.
+        if "No module named pytest" in detail:
+            raise DocCountError(
+                "pytest is not installed in the interpreter running this tool "
+                f"({sys.executable}), so no test was collected:\n"
+                + detail
+                + "\n\nThis is an unsynced checkout, not a wrong-interpreter "
+                "problem - a fresh worktree or clone gets an empty `.venv`, and "
+                "`python` and `python3` both resolve to it, so re-running "
+                f"`{INVOCATION}` here fails identically. Run `uv sync` in this "
+                "checkout first, or run this tool from a checkout whose "
+                "environment is already synced."
+            )
         raise DocCountError(
             f"pytest --collect-only failed (rc={proc.returncode}):\n"
-            + (proc.stdout[-2000:] + proc.stderr[-2000:]).strip()
+            + detail
             + "\n\nhint: run this with the project interpreter, e.g."
             f" `{INVOCATION}`"
         )
