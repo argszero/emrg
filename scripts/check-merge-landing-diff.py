@@ -235,19 +235,58 @@ def _refresh_base(base: str) -> None:
     down; the reasoning is recorded in full in `check-merge-sequence.py`'s
     `_refresh_base`.
 
-    Only `origin/<branch>` is refreshed: any other ref is taken literally, and a SHA is
-    immutable by construction. The destination is written **fully qualified**, because a
-    bare `origin/master` as a fetch destination makes git create a *local branch* of
-    that name (`refs/heads/origin/master`), which then shadows the remote-tracking ref
-    and makes every later `origin/master` ambiguous - the trap the sibling measured.
+    A **remote-tracking** ref is refreshed, in either spelling the caller may write it:
+    `origin/<branch>` and `refs/remotes/origin/<branch>` denote the same mutable ref, and
+    the fully-qualified one is not exotic - `check-merge-pairs.py::_resolve_base` passes
+    `refs/...` through untouched and its refusal text tells callers to "pass the
+    fully-qualified ref you mean", so the family advertises it. Accepting only the short
+    spelling meant that one answered from whatever the ref happened to be, with rc 0 and
+    the stale commit in the header - the wrong-tree shape one level below the one
+    `_qualify_ref` fixes (measured `cyc20260913-221656`, in a clone whose
+    `refs/remotes/origin/master` sat one commit behind: `--base origin/master` refreshed
+    to the true base and reported the reversal, `--base refs/remotes/origin/master` read
+    the stale commit and reported `clean`, rc 0).
 
-    A fetch failure is a measurement error, never a quiet continuation against a base
-    that could not be verified.
+    Anything else is taken literally: a SHA is immutable by construction, a local branch
+    is not the remote ref whatever it is called, and a refspec the caller already wrote
+    (`origin/x:dest`) is passed to git as given. The destination is written **fully
+    qualified**, because a bare `origin/master` as a fetch destination makes git create a
+    *local branch* of that name (`refs/heads/origin/master`), which then shadows the
+    remote-tracking ref and makes every later `origin/master` ambiguous - the trap the
+    sibling measured.
+
+    A `<remote>/HEAD` spelling is resolved through its symref first: it names a remote
+    branch only by pointing at one, and a fetch *into* a symref cannot be locked (git
+    refuses and leaves the symref unchanged, measured). Refreshing the *target* is what
+    makes `--base origin/HEAD` mean "origin's default branch as it is now" - and it is
+    the natural spelling for a checkout whose default branch is not `master`, which used
+    to fail with a fetch of the non-existent `refs/heads/HEAD`. Under `refs/remotes/` the
+    only symbolic ref git creates is `<remote>/HEAD`, so the probe is confined to that
+    name and an ordinary branch spelling still costs exactly one call.
+
+    A fetch failure - or a `HEAD` spelling that is not a symref to a remote-tracking
+    branch of `origin` - is a measurement error, never a quiet continuation against a
+    base that could not be verified.
     """
-    if ":" in base or not base.startswith("origin/"):
+    if ":" in base:
         return
-    branch = base[len("origin/"):]
-    dest = f"refs/remotes/origin/{branch}"
+    if base.startswith("origin/"):
+        dest = f"refs/remotes/origin/{base[len('origin/'):]}"
+    elif base.startswith("refs/remotes/origin/"):
+        dest = base
+    else:
+        return
+    if dest.endswith("/HEAD"):
+        link = _run(["git", "symbolic-ref", "--quiet", dest])
+        target = link.stdout.strip()
+        if link.returncode != 0 or not target.startswith("refs/remotes/origin/"):
+            detail = link.stderr.strip() or "no such ref"
+            raise MeasurementError(
+                f"could not refresh {base}: {dest} is not a symbolic ref to a "
+                f"remote-tracking branch of origin ({detail})"
+            )
+        dest = target
+    branch = dest[len("refs/remotes/origin/"):]
     proc = _run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{dest}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
