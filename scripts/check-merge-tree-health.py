@@ -316,34 +316,67 @@ def _fetch_head(number: int) -> str:
     return ref
 
 
+def _is_object_name(line: str) -> bool:
+    """Whether a line is a bare object name (the merged tree's).
+
+    Both the SHA-1 (40 hex) and SHA-256 (64 hex) object formats are accepted: the
+    question is the *shape* of the answer, which must not depend on the object
+    format of whichever clone happens to run this. The same rule and the same
+    spelling as `check-merge-plan-suite.py` and `check-merge-sequence.py`.
+    """
+    return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
+
+
 def _merge_tree_paths(a: str, b: str, cwd: str | None = None) -> list[str] | None:
     """Conflicted paths when `a` and `b` are merged; None if unmeasurable.
 
     An empty list means the merge is clean, which is distinct from None (the
     question was not answered). Anything other than rc 0/1 is treated as a
     failure to measure, never as a conflict.
+
+    **The exit code is not the signal; the output is.** Measured 2026-09-14
+    (`cyc20260914-050817`): `merge-tree` exits 1 for a genuine conflict *and* for
+    a failure to merge the two inputs - an unknown ref, or an object that
+    dereferences to a blob - and only the first prints the merged tree's OID.
+    `git merge-tree --write-tree <commit> <blob>` exits 1 with **empty stdout**,
+    which the `rc == 1` branch below used to turn into `[]`: the *clean-merge*
+    answer, over a merge nobody made. That is the one direction a gate must never
+    invent, because the next step then judges a tree that was never built. Both
+    answers are read from the OID on the first line now, and an answer in neither
+    shape is None, i.e. "the question was not answered".
     """
     proc = _run(["git", "merge-tree", "--write-tree", a, b], cwd=cwd)
+    lines = proc.stdout.splitlines()
+    named = lines[0].strip() if lines else ""
     if proc.returncode == 0:
-        return []
-    if proc.returncode != 1:
+        # A clean merge names its tree too, so `[]` has to be evidenced by it.
+        return [] if _is_object_name(named) else None
+    if proc.returncode != 1 or not _is_object_name(named):
         return None
-    return [
-        line.split("\t", 1)[1]
-        for line in proc.stdout.splitlines()
-        if "\t" in line
-    ]
+    paths = [line.split("\t", 1)[1] for line in lines if "\t" in line]
+    # A conflict is described by its paths. An empty list here would be read as the
+    # clean answer above - the direction this function must never invent - so a
+    # conflict whose paths the report does not name is "not answered" instead.
+    # That keeps one invariant: `[]` means an *evidenced* clean merge.
+    return paths or None
 
 
 def _merged_tree_sha(a: str, b: str, cwd: str | None = None) -> str:
     """The tree sha of the clean merge of `a` and `b`."""
     proc = _run(["git", "merge-tree", "--write-tree", a, b], cwd=cwd)
-    if proc.returncode != 0:
+    lines = proc.stdout.splitlines()
+    named = lines[0].strip() if lines else ""
+    if proc.returncode != 0 or not _is_object_name(named):
+        # The OID is what makes this a tree rather than an exit code. Reading it
+        # positionally (`splitlines()[0]`) raised `IndexError` on an empty stdout,
+        # and an unhandled exception leaves this tool as exit 1 - the code that
+        # means "a clean merge landed an unhealthy tree", i.e. a crash reported as
+        # a finding about a tree nobody measured.
         raise MeasurementError(
             "merge-tree did not produce a tree for a merge reported clean: "
             + (proc.stdout[-500:] + proc.stderr[-500:]).strip()
         )
-    return proc.stdout.strip().splitlines()[0].strip()
+    return named
 
 
 def _git_cwd() -> str | None:

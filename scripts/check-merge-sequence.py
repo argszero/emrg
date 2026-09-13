@@ -618,6 +618,23 @@ def _commit_env() -> dict[str, str]:
     }
 
 
+def _is_object_name(line: str) -> bool:
+    """Whether a line is a bare object name (the merged tree's).
+
+    Both the SHA-1 (40 hex) and SHA-256 (64 hex) object formats are accepted: the
+    question is the *shape* of the answer, which must not depend on the object
+    format of whichever clone happens to run this. The same rule and the same
+    spelling as `check-merge-plan-suite.py`, which measured it first.
+    """
+    return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
+
+
+def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
+    """What git said, from both streams - a failure must not report itself as empty."""
+    detail = (proc.stdout[-500:] + proc.stderr[-500:]).strip()
+    return detail or f"no output (exit {proc.returncode})"
+
+
 def _merge_commit(a: str, b: str) -> str | None:
     """Materialise the merge of commits `a` and `b` as a commit, or None if it conflicts.
 
@@ -632,17 +649,49 @@ def _merge_commit(a: str, b: str) -> str | None:
     "conflict" for a git error would turn an unanswered question into a
     reassuring one. The identity/date of that synthetic commit are pinned by
     `_commit_env`, so the fold does not depend on the machine's git config.
+
+    **The exit code is not the signal; the output is.** Measured here
+    (`cyc20260914-050817`, this repo): a genuine conflict exits 1 and prints the
+    merged tree's OID on the first line of stdout - but so does a failure to
+    merge the two *inputs*: `git merge-tree --write-tree <commit> <an-object-
+    that-dereferences-to-a-blob>` exits **1 with empty stdout**. A bare
+    `if rc == 1: return None` read that as a conflict, so "I could not merge
+    these two inputs" was reported as a conflicting step, `_default_plan`
+    *excluded* the PR from the plan on that evidence, and the refusal that can
+    end there names conflicting paths that do not exist. An empty stdout is
+    never an answer, and a clean merge names its tree too, so both branches
+    require the OID. That also closes this branch's other direction: rc 0 with
+    empty stdout used to reach `splitlines()[0]` and raise `IndexError`, and an
+    unhandled exception leaves this tool as exit 1 - the code that means "a step
+    lands an unhealthy tree". A crash reported as a finding is a finding about a
+    tree nobody measured, which is the same defect one exit code over. The same
+    rule as `check-merge-plan-suite.py::_merge_tree`, which measured it first.
     """
     proc = _run(["git", "merge-tree", "--write-tree", a, b])
+    lines = proc.stdout.splitlines()
+    named = lines[0].strip() if lines else ""
+    if proc.returncode not in (0, 1):
+        raise MeasurementError("merge-tree failed: " + _diagnosis(proc))
+    if not _is_object_name(named):
+        raise MeasurementError(
+            f"merge-tree exited {proc.returncode} without naming a merged tree, so "
+            "this is not a conflict but a failure to merge the inputs: "
+            + _diagnosis(proc)
+        )
     if proc.returncode == 1:
         return None
-    if proc.returncode != 0:
-        raise MeasurementError(
-            "merge-tree failed: " + (proc.stdout[-400:] + proc.stderr[-400:]).strip()
-        )
-    tree = proc.stdout.strip().splitlines()[0].strip()
     commit = _run(
-        ["git", "commit-tree", tree, "-p", a, "-p", b, "-m", f"merge {b[:8]} into {a[:8]}"],
+        [
+            "git",
+            "commit-tree",
+            named,
+            "-p",
+            a,
+            "-p",
+            b,
+            "-m",
+            f"merge {b[:8]} into {a[:8]}",
+        ],
         env=_commit_env(),
     )
     if commit.returncode != 0:
