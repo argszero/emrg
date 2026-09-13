@@ -401,3 +401,91 @@ def test_a_queue_where_nothing_merges_is_not_a_pass(mod, monkeypatch, capsys):
     assert rc == 2, captured.out
     assert "conflict with" in captured.err, captured.err
     assert "pass the guards" not in captured.out, captured.out
+
+
+def test_the_default_plan_is_built_against_the_tree_the_steps_build(
+    mod, monkeypatch, capsys
+):
+    """A pairwise-clean candidate set is not a sequence, and the filter must know it.
+
+    The defect this pins (measured 2026-09-13, `cyc20260913-144807`, on the live
+    queue): the default filter kept every open PR that merges cleanly onto `base`,
+    while the loop merges each step onto *the tree the previous step produced*. On
+    that day's queue 11 of 13 PRs were pairwise-clean against master, yet the plan
+    still stopped at step 4 (`#1152: CONFLICT`, `3 of 11 step(s) were measured`,
+    exit 3) - the default invocation answering nothing, one indirection further in
+    than the case the filter was written for.
+
+    Here #2 merges cleanly onto the base and conflicts with the tree #1 builds, so
+    the two behaviours differ in a way the assertions can see: the base-only filter
+    plans `#1 -> #2 -> #3` and stops, while the cumulative one plans `#1 -> #3` and
+    measures every step it planned.
+    """
+    heads = {1: C1, 2: C2, 3: C3}
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2, 3])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: heads[n])
+
+    def fake_merge(a, b):
+        # #2 is clean against the base and conflicts with the tree #1 produces.
+        return None if (b == C2 and a != BASE) else b + "-merged"
+
+    monkeypatch.setattr(mod, "_merge_commit", fake_merge)
+    monkeypatch.setattr(mod, "_guard_verdict", lambda tree, workdir: (True, "documents 1"))
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}")),
+    )
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "plan: #1 -> #3" in out, out
+    assert "plan source: open PRs that can be merged in this order (2 of 3)" in out, out
+    assert "excluded as conflicting: #2" in out, out
+    assert "all 2 step(s) landed trees that pass the guards" in out, out
+    # The step the filter could not see must not be reported as measured, and the
+    # plan must not walk into it: "#2: CONFLICT" here would be the old behaviour.
+    assert "#2: OK" not in out and "#2: CONFLICT" not in out, out
+
+
+def test_a_candidate_that_conflicts_only_with_the_accumulated_tree_is_still_named(
+    mod, monkeypatch, capsys
+):
+    """Skipping must be disclosed, and must not become a silent drop.
+
+    The cumulative filter makes exclusions *more* likely than the base-only one (it
+    now also excludes PRs that only conflict with their predecessors), so the
+    disclosure is what keeps the plan from hiding an omission. `--all` is the
+    escape hatch and must still show the step.
+    """
+    heads = {1: C1, 2: C2}
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: heads[n])
+    monkeypatch.setattr(
+        mod, "_merge_commit", lambda a, b: None if a != BASE else b + "-merged"
+    )
+    monkeypatch.setattr(mod, "_guard_verdict", lambda tree, workdir: (True, "documents 1"))
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}")),
+    )
+
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "plan: #1" in out, out
+    assert "excluded as conflicting: #2" in out, out
+
+    # The same queue under --all is planned literally, and stops at the step that
+    # cannot be taken - which is how the reader sees it at all.
+    rc_all = mod.main(["--all"])
+    out_all = capsys.readouterr().out
+
+    assert rc_all == 3, out_all
+    assert "plan: #1 -> #2" in out_all, out_all
+    assert "#2: CONFLICT" in out_all, out_all
