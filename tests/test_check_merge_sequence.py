@@ -31,15 +31,35 @@ What is pinned here, in both directions (#455 - never infer from one side):
   "every step measured and passing", and a stopped plan measured a *prefix*
   (on this queue, usually none of it).
 
-The measurement itself is faked (no git, no pipeline runs in CI): `_merge_commit`
+The git orchestration is faked (no git, no pipeline runs in CI): `_merge_commit`
 and `_guard_verdict` are replaced, and the replacements are asserted to have been
 called with the right commits - a test that passes because the code under test
 was never invoked proves nothing.
+
+The measurement itself is NOT faked (cycle cyc20260912-201557)
+--------------------------------------------------------------
+The orchestration tests above stub `_guard_verdict` in every case, which left the
+whole mapping from the guard's exit code to a verdict uncovered. Measured, not
+assumed: replacing that function with a body that returns `(True, "guard OK")`
+*without consulting the guard at all* kept all five tests above green. That is a
+**fail-open** mutant - the tool would print `OK` for every plan, including the
+dangerous one it exists to catch, and this suite would not notice. Fail-open is
+precisely the defect class this family of gates is written to prevent, so the
+measurement layer is now driven for real, in both directions, below.
+
+Why the real thing is affordable: `check-doc-count.py` collects through
+`sys.executable -m pytest --collect-only`, so a two-line tree gives a real verdict
+in a fraction of a second, with no `uv`, no network and no dependency on the
+project's own suite. The child guard is the repository's real file (copied
+byte-for-byte), because a stub of the guard would only re-test this suite's belief
+about it - the exact failure the mutant above demonstrates.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -47,6 +67,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-merge-sequence.py"
+CHILD_GUARD = REPO_ROOT / "scripts" / "check-doc-count.py"
 
 BASE = "a" * 40
 C1 = "b" * 40
@@ -249,6 +270,360 @@ def test_an_unmeasurable_step_is_not_a_pass(mod, monkeypatch, capsys):
 
     assert rc == 2
     assert "could not measure" in err
+
+
+# --- the measurement layer, driven for real ---------------------------------
+#
+# The tests above replace `_guard_verdict`, so none of them reads the guard's exit
+# code. A mutant that never consulted the guard passed all of them, so the real
+# path is exercised here: a tiny git tree whose own copy of the guard actually
+# runs. Two directions, because the whole point of the function is to tell the
+# two apart - a test that only proved "it can return False" would not show that a
+# healthy tree comes back True.
+
+
+def _tree_with(repo: Path, documented: int | None, tests: int) -> str:
+    """Build a commit whose guard verdict is decided by whether a count is stored.
+
+    Returns the commit's tree sha, which is what `_guard_verdict` takes.
+
+    `documented=None` writes no count into `Agent.md`; any integer writes one. Since
+    #1181 the guard's rule is "no tracked file states the Python test count", so the
+    accepted shape is *no stored count* and any stored count is rejected whatever the
+    collected figure is - the pre-#1181 fixture (accept iff `documented == tests`) no
+    longer describes either direction, which is why both tests below were rewritten
+    when this branch was re-applied.
+    """
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "tests").mkdir()
+    # The real guard, byte for byte: `_guard_verdict` runs the tree's *own* copy,
+    # and a stand-in would test this fixture instead of the tool.
+    (repo / "scripts" / "check-doc-count.py").write_bytes(CHILD_GUARD.read_bytes())
+    count = "" if documented is None else f" ({documented})"
+    (repo / "Agent.md").write_text(
+        f"# Doc\nPython: `uv run pytest tests/ -v`{count}\n", encoding="utf-8"
+    )
+    (repo / "tests" / "test_x.py").write_text(
+        "".join(f"def test_{i}():\n    assert True\n" for i in range(tests)),
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    for argv in (["git", "init", "-q", "."], ["git", "add", "-A"],
+                 ["git", "commit", "-qm", "i"]):
+        subprocess.run(argv, cwd=repo, check=True, env=env, capture_output=True)
+    out = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo,
+                         check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return out.stdout.strip()
+
+
+def test_the_real_guard_verdict_accepts_a_tree_that_stores_no_count(mod, tmp_path, monkeypatch):
+    """The OK direction through the real child guard.
+
+    Without this, a `_guard_verdict` that reported every tree as failing would
+    pass every orchestration test above (they inject the verdicts), and the tool
+    would be useless in the opposite direction from the mutant: it would flag the
+    whole queue. Both directions are needed; each is blind to the other's defect.
+
+    The accepted shape is "no tracked file states the count" (#1181): the figure is
+    measured where it is needed, so a tree that documents none is healthy at any
+    collected count - which is why this tree collects two and states nothing.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tree = _tree_with(repo, documented=None, tests=2)
+    # `_guard_verdict` archives the tree with `git archive`, which resolves
+    # objects from the process cwd - the tool runs inside the repo, so the test
+    # must too.
+    monkeypatch.chdir(repo)
+
+    ok, report = mod._guard_verdict(tree, tmp_path / "extract")
+
+    assert ok is True, report
+    assert "no stored count" in report, report
+
+
+def test_the_real_guard_verdict_rejects_a_tree_that_stores_the_count(mod, tmp_path, monkeypatch):
+    """The DANGER direction through the real child guard.
+
+    The tree states a count and the repo's rule is that no tracked file may - the
+    shape that rides into master on a merge git reported clean (a stored count is
+    stale the moment another PR adds a test). Fails open if the guard's exit code is
+    read wrongly, which is what the surviving mutant did.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tree = _tree_with(repo, documented=2, tests=1)
+    monkeypatch.chdir(repo)
+
+    ok, report = mod._guard_verdict(tree, tmp_path / "extract")
+
+    assert ok is False
+    assert "state the test count" in report, report
+
+
+def test_a_tree_without_the_guard_is_a_measurement_error(mod, tmp_path, monkeypatch):
+    """No guard in the tree means "could not measure", never a pass.
+
+    The tool judges the merged tree's own copy of the guard, so a tree that
+    cannot be judged must surface as exit 2. A missing guard reported as healthy
+    would be the most dangerous reading available: it would cover exactly the
+    trees whose health is unknown.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tree = _tree_with(repo, documented=1, tests=1)
+    (repo / "scripts" / "check-doc-count.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t",
+                    "commit", "-qm", "drop the guard"], cwd=repo, check=True,
+                   capture_output=True)
+    out = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo,
+                         check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    tree = out.stdout.strip()
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._guard_verdict(tree, tmp_path / "extract")
+
+    assert "not present" in str(excinfo.value)
+
+
+# --- the base is refreshed, not taken on faith ------------------------------
+#
+# Every PR head is fetched from the network, so the tool always answers about the
+# PRs as they are *now*. The base was not, which made the two halves of one
+# question come from different points in time. Measured on the real repo: with
+# `origin/master` left two commits behind, the tool printed
+#
+#     base 02e43c82 (origin/master)      <- 02e43c8 is not master; 3dbc2f1 is
+#
+# and over 25 plans, 16 changed verdict between a stale and a fresh base - the
+# plan below reads as 2 DANGER steps against the stale base and as a conflict
+# (safe: no tree, no verdict) against the live one. A stale base is not merely
+# conservative: it makes the tool answer about a tree nobody asked about.
+
+
+def test_a_remote_tracking_base_is_refreshed_before_use(mod, monkeypatch):
+    """`origin/<branch>` is fetched, so a stale ref cannot be used as the base."""
+    calls: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: (calls.append(argv), _Done())[1])
+
+    mod._refresh_base("origin/master")
+
+    assert len(calls) == 1, calls
+    assert calls[0][0] == "git" and "fetch" in calls[0]
+    joined = " ".join(calls[0])
+    # Fully qualified destination: a bare `origin/master` makes git create a local
+    # branch of that name, shadowing the remote-tracking ref (measured).
+    assert "refs/heads/master:refs/remotes/origin/master" in joined, calls[0]
+    assert "+" in joined, "the refspec must be forced, as for PR heads"
+
+
+def test_a_sha_or_local_ref_base_is_never_fetched(mod, monkeypatch):
+    """Only a remote-tracking name is refreshed; a SHA and a local branch are literal.
+
+    Fetching on a SHA would be meaningless (it is immutable), and treating a local
+    branch as remote would overwrite the caller's own ref with a same-named remote
+    one. Both are silent ways to measure a tree the caller did not name.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, cwd=None: (calls.append(argv), None)[1]
+    )
+
+    for ref in ("0" * 40, "localbase", "refs/heads/x", "FETCH_HEAD"):
+        mod._refresh_base(ref)
+
+    assert calls == [], calls
+
+
+def test_main_refreshes_the_base_before_measuring(mod, monkeypatch, capsys):
+    """`main` must actually call `_refresh_base` - a correct helper nobody calls is dead.
+
+    Pinned separately because the three tests above exercise the helper directly:
+    deleting the call from `main` leaves them all green while the defect this file
+    documents (a stale base reported as `origin/master`) returns in full. The
+    measured mutant that did exactly that survived all three.
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(mod, "_refresh_base", lambda ref: seen.append(ref))
+
+    class _Done:
+        returncode = 0
+        stdout = "0" * 40
+        stderr = ""
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Done())
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: "1" * 40)
+    monkeypatch.setattr(mod, "_merge_commit", lambda a, b: None)  # conflict: stops early
+
+    rc = mod.main(["1"])
+
+    assert seen == ["origin/master"], seen
+    # 3, not 0: the single step conflicts, so no tree was judged and "every step was
+    # measured and healthy" (0) would be a claim about nothing (#1174). The refresh
+    # assertion above is this test's subject; the exit code is pinned so a future
+    # merge cannot quietly restore the old "a conflict is success" reading.
+    assert rc == 3, rc
+
+
+def test_a_base_that_cannot_be_refreshed_is_a_measurement_error(mod, monkeypatch):
+    """A failed fetch is exit 2, never a quiet fall-back to the stale commit.
+
+    This is the fail-open shape the sibling tests pin for the guard: continuing
+    against a base that could not be verified is exactly how the tool would answer
+    about the wrong tree while reporting a number.
+    """
+
+    class _Fail:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: couldn't find remote ref"
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Fail())
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._refresh_base("origin/master")
+
+    assert "could not refresh" in str(excinfo.value)
+
+
+# --- the base is not just fresh, it is the ref you named ---------------------
+#
+# Refreshing the base fixed *when* it is read; the next defect was *what* the
+# name points at. `origin/master` is ambiguous - git's precedence list consults
+# `refs/heads/<name>` before `refs/remotes/<name>` - and git creates exactly such
+# a local branch when a fetch destination is left unqualified, which is the trap
+# `_refresh_base`'s own docstring records. Measured on the real repo
+# (`cyc20260913-072845`) with a stray `refs/heads/origin/master` at `02e43c8`
+# while the remote-tracking ref was `245125e`:
+#
+#     base 02e43c82 (origin/master)      <- master was 245125e; the tool measured
+#                                           a two-cycle-old tree and said "master"
+#
+# The age of the commit is not the defect - the *identity* of the ref is. These
+# tests therefore use real repositories with real refs: a stubbed `_run` cannot
+# show which ref git would have picked, because the defect lives in git's own
+# resolution rules, and that is the thing under test.
+
+
+def _repo_with_two_refs(repo: Path, shadow: bool) -> tuple[str, str]:
+    """A real repo where `origin/master` is genuinely ambiguous-or-not.
+
+    Returns `(old, new)`: the commit a shadowing local branch is left at, and the
+    commit the remote-tracking ref is left at.
+    """
+    repo.mkdir()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+    }
+
+    def git(*argv: str) -> str:
+        out = subprocess.run(["git", *argv], cwd=repo, check=True, env=env,
+                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+        return out.stdout.strip()
+
+    git("init", "-q", ".")
+    (repo / "f").write_text("old\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "old")
+    old = git("rev-parse", "HEAD")
+    (repo / "f").write_text("new\n", encoding="utf-8")
+    git("commit", "-qam", "new")
+    new = git("rev-parse", "HEAD")
+    git("update-ref", "refs/remotes/origin/master", new)
+    if shadow:
+        # The stray branch, exactly as git leaves it when a fetch destination is
+        # written unqualified - behind the remote-tracking ref, so the two
+        # answers are distinguishable.
+        git("update-ref", "refs/heads/origin/master", old)
+    return old, new
+
+
+def test_a_shadowing_local_branch_does_not_win(mod, tmp_path, monkeypatch, capsys):
+    """The commit returned is the remote-tracking one, not the shadowing branch.
+
+    Both refs exist, so a bare `git rev-parse origin/master` answers from the
+    local branch: the tool would report a base that is not master while printing
+    `origin/master`. Fails if the short name is resolved by git's precedence
+    instead of by full name.
+    """
+    repo = tmp_path / "repo"
+    old, new = _repo_with_two_refs(repo, shadow=True)
+    monkeypatch.chdir(repo)
+
+    assert mod._rev_parse("origin/master") == new, f"shadow won (old={old[:8]})"
+    # ... and the user is told about the stray ref, because it misleads every
+    # other short-name reader (`git checkout origin/master` included).
+    assert "ambiguous" in capsys.readouterr().err
+
+
+def test_without_the_shadow_the_same_name_resolves_identically(mod, tmp_path, monkeypatch, capsys):
+    """The negative state: no stray branch, same answer, and no warning.
+
+    The pair is what makes the first test mean something - a warning printed
+    unconditionally would be noise, and an assertion that only ever sees the
+    ambiguous case could not tell "handled" from "always warns".
+    """
+    repo = tmp_path / "repo"
+    _old, new = _repo_with_two_refs(repo, shadow=False)
+    monkeypatch.chdir(repo)
+
+    assert mod._rev_parse("origin/master") == new
+    assert capsys.readouterr().err == ""
+
+
+def test_a_name_that_denotes_only_a_local_branch_is_refused(mod, tmp_path, monkeypatch):
+    """No remote-tracking ref at all: exit 2, never that branch's commit.
+
+    Here nothing is ambiguous about git's answer - it is unambiguously the wrong
+    ref. A local branch that happens to be called `origin/master` is not remote
+    master, so the measurement is refused rather than labelled.
+    """
+    repo = tmp_path / "repo"
+    old, _new = _repo_with_two_refs(repo, shadow=True)
+    subprocess.run(["git", "update-ref", "-d", "refs/remotes/origin/master"],
+                   cwd=repo, check=True, capture_output=True)
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._rev_parse("origin/master")
+
+    message = str(excinfo.value)
+    assert "ambiguous" in message and "refs/heads/origin/master" in message, message
+    assert old[:8] not in message, "the refusal must not look like a resolution"
+
+
+def test_a_sha_or_qualified_ref_is_passed_through(mod, monkeypatch):
+    """Only short remote-tracking names are rewritten.
+
+    A SHA has no name to disambiguate, and a fully-qualified ref already selects
+    exactly one ref. Both must reach `rev-parse` unchanged - rewriting either
+    would invent a ref name that the caller never wrote.
+    """
+    seen: list[list[str]] = []
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, cwd=None: (seen.append(argv), None)[1]
+    )
+
+    for ref in ("0" * 40, "refs/remotes/origin/master", "FETCH_HEAD", "localbase"):
+        assert mod._qualify_ref(ref) == ref, ref
+
+    assert seen == [], "a name that cannot be ambiguous costs no git call"
+
 
 
 def test_an_empty_open_pr_list_is_refused_at_its_source(mod, monkeypatch, capsys):

@@ -238,6 +238,61 @@ def _run(argv: list[str], cwd: str | None = None) -> subprocess.CompletedProcess
     )
 
 
+def _ref_exists(name: str) -> bool:
+    """Is `name` a ref, given it fully?"""
+    return _run(["git", "show-ref", "--verify", "--quiet", name]).returncode == 0
+
+
+def _qualify_ref(ref: str) -> str:
+    """Expand a short remote-tracking name to its fully-qualified form.
+
+    `--base` defaults to the short spelling `origin/master`, and that spelling is
+    ambiguous: git resolves a bare name by a precedence list, and
+    `refs/heads/<name>` is consulted *before* `refs/remotes/<name>`. A local
+    branch called `origin/master` - which git itself creates when a fetch
+    destination is written unqualified, the trap `_refresh_base` describes -
+    therefore shadows the remote-tracking ref, and every measurement after that
+    answers about the wrong tree. Reproduced on this repo (`cyc20260913-072845`):
+    with a local `refs/heads/origin/master` left at `02e43c8` while the real
+    remote-tracking ref was `245125e`, the tool printed
+
+        base 02e43c82 (origin/master)
+
+    and measured that two-cycle-old tree. As with a stale base, the defect is not
+    the age of the commit but the *identity* of the ref: the header named master
+    and the code used something else.
+
+    So the name is not resolved by guessing better - the remote-tracking ref is
+    looked up **by its full name**, where precedence does not apply. A short name
+    that denotes only a local branch is refused rather than measured: it is not
+    the remote master, whatever it is called.
+
+    The shadow case *warns* instead of failing because the qualified lookup makes
+    the answer right either way; refusing would block a checkout for a stray ref
+    that no longer affects this tool's verdict. The warning is not cosmetic - the
+    same stray branch silently misleads every other short-name reader, including
+    `git checkout origin/master`.
+    """
+    if not ref.startswith("origin/") or ref.count("/") != 1:
+        return ref
+    qualified = f"refs/remotes/{ref}"
+    if _ref_exists(qualified):
+        if _ref_exists(f"refs/heads/{ref}"):
+            print(
+                f"warning: {ref} is ambiguous - a local branch shadows it; "
+                f"measuring {qualified}. Delete the shadow: "
+                f"git branch -D {ref}",
+                file=sys.stderr,
+            )
+        return qualified
+    if _ref_exists(f"refs/heads/{ref}"):
+        raise MeasurementError(
+            f"{ref!r} is ambiguous and denotes only the local branch "
+            f"refs/heads/{ref}: no {qualified} exists"
+        )
+    return ref
+
+
 def _rev_parse(ref: str) -> str:
     """Resolve a ref to a commit SHA.
 
@@ -247,8 +302,12 @@ def _rev_parse(ref: str) -> str:
     That defect was measured in `check-merge-order.py`, and it bit this cycle's
     own probe: a harness loop that re-fetched left `FETCH_HEAD` pointing at the
     wrong PR, so "master" was silently one of the subjects.
+
+    A name is also *ambiguous* in a way a SHA is not, which is the second half of
+    the same defect: `_qualify_ref` runs first so the commit returned is the one
+    the caller's name denotes, not the one git's precedence rules would pick.
     """
-    proc = _run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"])
+    proc = _run(["git", "rev-parse", "--verify", f"{_qualify_ref(ref)}^{{commit}}"])
     if proc.returncode != 0:
         raise MeasurementError(
             f"could not resolve {ref!r} to a commit: {proc.stderr.strip()}"
@@ -388,6 +447,42 @@ def _conflict_summary(base: str, excluded: list[int], heads: dict[int, str]) -> 
             f" merged tree (`{RESOLVER}`), and push; the push re-plans the PR."
         )
     return out
+def _refresh_base(base: str) -> None:
+    """Bring the base up to date when it names a remote-tracking branch.
+
+    Every PR head is fetched from the network; the base was not, so a checkout
+    whose `origin/master` is behind answered a different question than the one
+    asked, and printed the stale commit as if it were master (`cyc20260912-203927`).
+    Measured on this repo with `origin/master` left two commits behind:
+
+        base 02e43c82 (origin/master)   <- 02e43c8 is NOT master; 3dbc2f1 is
+
+    and the mislabelled base changes the verdict: over 25 plans, 16 differed
+    between a stale and a fresh base, e.g. the plan below reads as 2 DANGER steps
+    against the stale base and as a conflict (safe, no tree produced) against the
+    live one. A gate that answers about the wrong tree is the failure this file
+    already documents for `__file__`-relative tools; the base is the same trap in
+    the time dimension.
+
+    Only `origin/<branch>` is refreshed: any other ref is taken literally, and a
+    SHA is immutable by construction. A fetch failure is a measurement error -
+    the caller must not silently continue against a base it could not verify.
+
+    The destination is written **fully qualified**. A bare `origin/master` as a
+    fetch destination is ambiguous, and git resolves it by creating a *local
+    branch* named `origin/master` (`refs/heads/origin/master`) - so the first
+    version of this fix silently littered the checkout with a ref that shadows
+    the remote-tracking one and makes every later `origin/master` ambiguous
+    (`cyc20260912-203927`, caught by git's own "refname is ambiguous" warning).
+    """
+    if ":" in base or not base.startswith("origin/"):
+        return
+    branch = base[len("origin/"):]
+    dest = f"refs/remotes/origin/{branch}"
+    proc = _run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{dest}"])
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
+        raise MeasurementError(f"could not refresh {base}: {detail}")
 
 
 def _open_pr_numbers(repo: str) -> list[int]:
@@ -522,7 +617,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        base = _rev_parse(args.base)
+        _refresh_base(args.base)
+        # The header must name the ref actually measured, not the spelling that
+        # was typed: those differ whenever a short name is ambiguous, and a header
+        # that reports `origin/master` for a commit that is not master is how the
+        # wrong-tree defect stays invisible (`cyc20260913-072845`).
+        base_ref = _qualify_ref(args.base)
+        base = _rev_parse(base_ref)
+        # One plan source, not two: an explicit list is used verbatim; otherwise the
+        # default plan is computed (and says what it left out).
         note: str | None = None
         if args.prs:
             numbers = args.prs
@@ -532,7 +635,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
 
-    print(f"base {base[:8]} ({args.base})")
+    print(f"base {base[:8]} ({base_ref})")
     if note is not None:
         # Always printed when the plan was chosen for the reader: which PRs it
         # considered, and which it left out, is part of the answer.
