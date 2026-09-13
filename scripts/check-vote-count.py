@@ -467,6 +467,10 @@ class Verdict:
     mergeable: str = ""
     merge_state: str = ""
     votes: list[Vote] = field(default_factory=list)
+    # Parallel to `votes`: whether each one contributes to `valid_count`. A valid
+    # approval whose cycle already appears earlier in the run does not, and the
+    # label column must say so rather than calling it "counts".
+    counted: list[bool] = field(default_factory=list)
     valid_count: int = 0
     needed: int = 3
 
@@ -674,14 +678,23 @@ def check_pr(number: int, needed: int) -> Verdict:
     # cycle at most once inside the trailing run.
     run = 0
     seen: set[str] = set()
+    # Which votes `run` is actually made of. The label column says "counts" only for
+    # these, because a valid approval can still fail to count: counting is per
+    # *cycle*, so a second vote from a cycle already in the run is valid (it is
+    # about this head, and it carries a cycle id) but contributes nothing.
+    counted: list[bool] = []
     for v in votes:
         if v.kind == "veto":
             run = 0
             seen.clear()
+            counted.append(True)
         elif v.valid and v.cycle is not None and v.cycle not in seen:
             seen.add(v.cycle)
             run += 1
-        # invalid approvals and repeat-cycle approvals leave the run untouched
+            counted.append(True)
+        else:
+            # invalid approvals and repeat-cycle approvals leave the run untouched
+            counted.append(False)
 
     return Verdict(
         pr=number,
@@ -692,6 +705,7 @@ def check_pr(number: int, needed: int) -> Verdict:
         mergeable=mergeable,
         merge_state=merge_state,
         votes=votes,
+        counted=counted,
         valid_count=run,
         needed=needed,
     )
@@ -757,7 +771,13 @@ def main(argv: list[str] | None = None) -> int:
             # contradiction this was fixed for, and it is worth being unable to
             # produce: `mark` already refuses to say READY in that case.
             print(f"    merge state: {v.mergeable}/{v.merge_state}")
-            for vote in v.votes:
+            for index, vote in enumerate(v.votes):
+                # Whether *this* vote is part of the count `run` -- not whether it
+                # could be: `valid` only says it is about this head. The two come
+                # apart for a cycle's second vote, which counts once.
+                contributes = (
+                    v.counted[index] if index < len(v.counted) else vote.valid
+                )
                 # The mark column answers *counting*, except that a veto is never
                 # rendered "OK": a veto submitted at the current head is `valid`
                 # (it is about this head, and it carries a cycle id) while meaning
@@ -770,7 +790,12 @@ def main(argv: list[str] | None = None) -> int:
                     mark = "NO  "
                     note = "counts - resets the run" if vote.valid else vote.why
                 elif vote.valid:
-                    mark, note = "OK  ", "counts"
+                    mark = "OK  "
+                    note = (
+                        "counts"
+                        if contributes
+                        else f"valid, but cycle {vote.cycle} already counted"
+                    )
                 else:
                     # An approval that predates the head push is a real ✅ and still
                     # does not count; rendering it "OK ... VOID" would contradict

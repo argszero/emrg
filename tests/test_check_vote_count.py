@@ -650,6 +650,32 @@ def test_a_repeat_cycle_inside_the_run_counts_once(mod, monkeypatch, capsys):
     assert "SHORT 1/3" in capsys.readouterr().out
 
 
+def test_a_repeat_cycle_vote_is_not_labelled_counts(mod, monkeypatch, capsys):
+    """The label column must agree with the count it summarises.
+
+    Counting is per cycle, so a cycle's second approval inside the run is valid but
+    contributes nothing. It used to be printed `OK ... counts` all the same, so the
+    per-vote lines disagreed with the `N/3` on the line above them - measured
+    2026-09-13 (`cyc20260913-114142`) on the live queue, where 5 of 14 open PRs
+    printed more `counts` lines than votes: #1151 showed five, then reported `3/3`.
+
+    What is pinned: exactly one line per *counted* vote says "counts", the redundant
+    ones name the repeat, and the number of "counts" lines equals `valid_count`. The
+    third assertion is the one that would have caught it - it compares the summary
+    against the detail instead of checking either against a literal.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+                   _approve("cyc20260911-020000", "2026-09-11T03:00:00Z"),
+                   _approve("cyc20260911-030000", "2026-09-11T04:00:00Z")])
+    assert _run(mod, monkeypatch, fake) == 0
+    out = capsys.readouterr().out
+
+    assert "READY 3/3" in out, out
+    assert out.count("- counts") == 3, out
+    assert "valid, but cycle cyc20260911-020000 already counted" in out, out
+
+
 def test_a_cycle_that_voted_before_a_veto_counts_again_after_it(mod, monkeypatch, capsys):
     """The veto resets the run, so the same cycle may vote again in the new run.
 
