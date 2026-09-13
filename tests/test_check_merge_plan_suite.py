@@ -531,3 +531,145 @@ def test_the_same_plan_folds_to_the_same_commits_even_when_a_second_passes(
 
     time.sleep(1.1)  # the boundary the unpinned fold used to trip over
     assert mod.build_plan_tip(base, heads) == first
+
+
+# --- the base: fetched first, then taken by the name it was written as ---------
+#
+# The plan is built *onto* a base, and the heads were fetched while the base was
+# not, so one answer came from two points in time; and `git rev-parse` consults
+# `refs/heads/<name>` before `refs/remotes/<name>`, so one stray local branch
+# spelled `origin/master` replaces the remote ref. Both were measured
+# (cyc20260914-002731) as *different trees judged under one name*:
+#
+#     PRE  --base origin/master  base ec7ce11a (origin/master)     tree 5427c8ecb011
+#     POST --base origin/master  base 3fbd101d (refs/remotes/...)  tree 43752830eb32
+#
+# The tests below pin the mechanism (the ref is fetched; the qualified name is the
+# one measured) and the property (the judged tree really contains the base's new
+# commit), because a header assertion alone would pass on a tool that fetched the
+# ref and then resolved the name by precedence anyway.
+
+
+def _advance_origin_elsewhere(origin: Path, tmp_path: Path, marker: str) -> str:
+    """Move the remote's `master` without the checkout under test noticing.
+
+    A commit pushed *from* `repo` also moves `repo`'s own remote-tracking ref, which
+    is the state this test has to create rather than avoid - so the commit is made
+    in a second clone of the same bare remote, exactly as upstream moves in reality.
+    """
+    other = tmp_path / marker
+    subprocess.run(
+        ["git", "clone", "-q", "-b", "master", str(origin), str(other)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    _git(other, "config", "user.email", "t@example.com")
+    _git(other, "config", "user.name", "t")
+    _git(other, "config", "commit.gpgsign", "false")
+    _write(other, "later.txt", "later\n")
+    sha = _commit(other, "later")
+    _git(other, "push", "-q", "origin", "master")
+    return sha
+
+
+def test_the_base_is_fetched_before_the_plan_is_built(
+    queue: tuple[Path, Path], tmp_path: Path, mod, monkeypatch, capsys
+) -> None:
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    stale = _git(repo, "rev-parse", "refs/remotes/origin/master")
+
+    true_master = _advance_origin_elsewhere(origin, tmp_path, "elsewhere")
+    # Preconditions, asserted rather than assumed: the ref is behind, it is behind
+    # the commit the remote actually holds, and the stale tree is missing the file
+    # the fresh one carries - without these the arm below could pass on a fixture
+    # that never created the state under test.
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master") == stale
+    assert _git(origin, "rev-parse", "master") == true_master != stale
+    assert "later.txt" not in _git(repo, "ls-tree", "-r", "--name-only", stale)
+
+    monkeypatch.chdir(repo)
+    assert mod.main(["1", "--base", "origin/master"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith(
+        f"base {true_master[:8]} (refs/remotes/origin/master)"
+    )
+    # The mechanism and the thing it is for: the ref moved, and the tree the suite
+    # judged is the base's new tree rather than the stale one.
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master") == true_master
+    tree = re.search(r"final tree [0-9a-f]{12} \(([0-9a-f]{40})\)", out)
+    assert tree, out
+    assert "later.txt" in _git(repo, "ls-tree", "-r", "--name-only", tree.group(1))
+
+
+def test_a_local_branch_shadowing_the_base_name_does_not_replace_it(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+
+    # A stray local branch spelled like the remote-tracking ref, at another commit.
+    _write(repo, "stray.txt", "stray\n")
+    stray = _commit(repo, "stray")
+    _git(repo, "branch", "origin/master", stray)
+    remote_tip = _git(repo, "rev-parse", "refs/remotes/origin/master")
+    # Precondition: a bare-name resolution really does reach the shadow, so the run
+    # below is a measurement of precedence rather than of nothing.
+    assert _git(repo, "rev-parse", "origin/master") == stray != remote_tip
+
+    monkeypatch.chdir(repo)
+    assert mod.main(["1", "--base", "origin/master"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.splitlines()[0].startswith(
+        f"base {remote_tip[:8]} (refs/remotes/origin/master)"
+    )
+    # The shadow is a local misconfiguration, not a reason to refuse: it is named so
+    # the reader can delete it, and it cannot change the answer either way.
+    assert "warning: origin/master is ambiguous" in captured.err
+
+
+def test_a_base_that_cannot_be_fetched_is_a_measurement_error(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """A remote-tracking base that does not exist is exit 2, not a literal ref."""
+    repo, _origin = queue
+    monkeypatch.chdir(repo)
+
+    assert mod.main(["1", "--base", "origin/nope"]) == 2
+
+    captured = capsys.readouterr()
+    assert "base " not in captured.out
+    assert "could not measure" in captured.err
+
+
+def test_a_sha_base_is_taken_literally_and_never_fetched(
+    queue: tuple[Path, Path], tmp_path: Path, mod, monkeypatch, capsys
+) -> None:
+    """Only a remote-tracking name is refreshed; a SHA is immutable by construction.
+
+    Discriminating in both directions: the same unreachable remote that makes the
+    `origin/master` arm exit 2 leaves the SHA arm at exit 0, so the arm above is
+    measuring the fetch rather than an unrelated failure.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    sha = _git(repo, "rev-parse", "master")
+    # the PR ref lives on the remote, not in this checkout
+    head = _git(origin, "rev-parse", "refs/pull/1/head")
+    # The heads are stubbed so the *only* network operation left is the base's.
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    _git(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    monkeypatch.chdir(repo)
+
+    assert mod.main(["1", "--base", sha]) == 0
+    assert capsys.readouterr().out.splitlines()[0].startswith(f"base {sha[:8]} ({sha})")
+
+    assert mod.main(["1", "--base", "origin/master"]) == 2
+    assert "could not measure" in capsys.readouterr().err
