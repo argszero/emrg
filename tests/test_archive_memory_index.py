@@ -328,3 +328,133 @@ def test_a_failed_post_write_check_restores_an_existing_archive(tmp_path, mod, m
 def test_a_missing_index_is_a_measurement_error(tmp_path, mod, capsys):
     assert mod.main([str(tmp_path / "nope.md"), "--check"]) == 2
     assert "no index at" in capsys.readouterr().err
+
+
+def test_an_unreadable_index_is_a_measurement_error(tmp_path, mod, capsys):
+    """A read that fails must not arrive as a rule violation.
+
+    An escaping traceback exits the process with code 1, which this tool's contract
+    reads as "the index violates the row rules" - a verdict about a file it never
+    read. Both spellings are pinned: a decode failure and a permission denial.
+    """
+    index = tmp_path / "MEMORY.md"
+    index.write_bytes(b"- [cyc20260901-100000](cycle-20260901-100000.md)\n\xff\xfe\n")
+    assert mod.main([str(index), "--check"]) == 2
+    assert "could not read" in capsys.readouterr().err
+
+    locked = tmp_path / "locked.md"
+    locked.write_text(_row(OLD), encoding="utf-8")
+    locked.chmod(0o000)
+    try:
+        assert mod.main([str(locked), "--check"]) == 2
+        assert "could not read" in capsys.readouterr().err
+    finally:
+        locked.chmod(0o600)
+
+
+# --- a row written in another shape must be reported, never silently skipped ----
+#
+# The counting path is where a false healthy verdict is invisible: the tool prints
+# `N cycle row(s)`, and N = 0 on an index of 52 cycle rows written as a table reads
+# as a clean index. Measured before these rules (`cyc20260914-042726`):
+#
+#     shape                                       --check              trim
+#     - [cyc<ts>](cycle-<ts>.md)                  rc 1, over cap       moves 2 rows
+#     - [cyc<ts>](memory/cycle-<ts>.md)           rc 0, "0 of 52" OK   nothing to move
+#     | cyc<ts> | cycle-<ts>.md |                 rc 0, "0 of 0" OK    nothing to move
+#     - cyc<ts> - cycle-<ts>.md -                 rc 0, "0 of 0" OK    nothing to move
+#
+# The path-prefixed link is a *readable* row once the id comes from the basename;
+# the two non-link shapes are unreadable rows, and the tool now says so instead of
+# answering `OK`. The last two tests are the other direction: a note or an
+# ordinary non-cycle row that merely mentions a cycle id is not an unreadable row,
+# so a guard that fires on everything cannot pass.
+
+
+def test_a_path_prefixed_link_is_still_a_cycle_row(tmp_path, mod, capsys):
+    """`memory/cycle-<ts>.md` names the same detail file: order it by its id."""
+    index = tmp_path / "MEMORY.md"
+    stamps = [f"2026090{i}-100000" for i in range(1, 5)]
+    _write_index(index, [_row(s, target=f"memory/cycle-{s}.md") for s in stamps])
+
+    assert mod.main([str(index), "--cap", "3", "--check"]) == 1, (
+        "a prefixed link is a cycle row, so four of them are over a cap of three"
+    )
+    assert "4 cycle row(s) of 4 row(s)" in capsys.readouterr().out
+
+    archive = tmp_path / "cycle-archive-X.md"
+    assert mod.main([str(index), "--cap", "3", "--archive", str(archive)]) == 0
+    kept = _targets(index)
+    assert f"memory/cycle-{stamps[0]}.md" not in kept, "the oldest id must move"
+    assert _targets(archive) == [f"memory/cycle-{stamps[0]}.md"]
+
+
+def test_a_table_row_naming_a_cycle_is_an_unreadable_row(tmp_path, mod, capsys):
+    """The measured false `OK`: 52 table rows were counted as zero.
+
+    Two ways to be wrong about this index, and the answer is neither: `OK` (the
+    measured pre-fix verdict) and `VIOLATION: 52 cycle rows` (a count taken over
+    the rows that happen to be readable). Which rows are cycle rows is not
+    knowable here, so nothing is counted and nothing is claimed.
+    """
+    index = tmp_path / "MEMORY.md"
+    body = "# Index\n\n" + "".join(
+        f"| cyc2026090{i}-100000 | cycle-2026090{i}-100000.md | row |\n" for i in range(1, 5)
+    )
+    index.write_text(body, encoding="utf-8")
+
+    assert mod.main([str(index), "--cap", "3", "--check"]) == 2
+    captured = capsys.readouterr()
+    assert "are not markdown link rows" in captured.err, captured.err
+    assert "MEMORY.md:3" in captured.err, "the first blocking line must be named"
+    for wrong in ("OK: the index respects the row rules", "cycle row(s)", "VIOLATION"):
+        assert wrong not in captured.out, f"nothing may be claimed: {captured.out}"
+
+
+def test_the_trim_refuses_rather_than_moving_the_rows_it_can_read(tmp_path, mod, capsys):
+    """A subset of the rows is not a move: the cap would stay violated."""
+    index = tmp_path / "MEMORY.md"
+    rows = [_row(f"2026090{i}-100000") for i in range(1, 5)]
+    offending = "| cyc20260905-100000 | cycle-20260905-100000.md | row |"
+    rows.append(offending + "\n")
+    before = _write_index(index, rows)
+    line_no = before.splitlines().index(offending) + 1
+    archive = tmp_path / "cycle-archive-X.md"
+
+    assert mod.main([str(index), "--cap", "3", "--archive", str(archive)]) == 2
+
+    assert index.read_text(encoding="utf-8") == before, "refusing means writing nothing"
+    assert not archive.exists()
+    err = capsys.readouterr().err
+    assert f"MEMORY.md:{line_no}" in err, f"the offending line must be named: {err}"
+    assert "nothing to move" not in err
+
+
+def test_a_note_that_mentions_a_cycle_id_is_not_an_unreadable_row(tmp_path, mod, capsys):
+    """The negative direction: prose, and a non-cycle row quoting an id."""
+    index = tmp_path / "MEMORY.md"
+    text = (
+        "# Index\n"
+        "\n"
+        "> Rebuilt by cycle cyc20260913-180238 after the file was damaged.\n"
+        "\n"
+        f"- [state](state.md) - task - active - cyc20260914-040021: master unchanged\n"
+        + _row("20260901-100000")
+    )
+    index.write_text(text, encoding="utf-8")
+
+    assert mod.main([str(index), "--check"]) == 0, capsys.readouterr().out
+    assert "OK: the index respects the row rules" in capsys.readouterr().out
+
+
+def test_a_plain_index_is_still_clean_in_both_modes(tmp_path, mod, capsys):
+    """No unreadable row anywhere: the rule must not turn a normal index into work."""
+    index = tmp_path / "MEMORY.md"
+    _write_index(index, [_row(NEW), _row(MID), _row(OLD)])
+
+    assert mod.main([str(index), "--cap", "50", "--check"]) == 0
+    assert "OK" in capsys.readouterr().out
+
+    archive = tmp_path / "cycle-archive-X.md"
+    assert mod.main([str(index), "--cap", "2", "--archive", str(archive)]) == 0
+    assert len(_targets(index)) == 2 and _targets(archive) == [f"cycle-{OLD}.md"]

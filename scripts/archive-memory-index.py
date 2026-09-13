@@ -35,13 +35,30 @@ things a hand-written one-liner cannot guarantee explicit:
 The archive is the backup for exactly this operation, so an archiver that moves
 the wrong end destroys the redundancy it is writing.
 
+What a row is, and what happens to a line that is almost one
+------------------------------------------------------------
+A row is a markdown link (`- [title](cycle-<ts>.md)`); the id is taken from the
+target's **basename**, so a row that links the same detail file through a path is
+still a cycle row. But an index can also *hold* a cycle row written in a shape
+this parser does not read - a table row, a bare text row. Those lines are not
+silently skipped: they are the reason the tool answers nothing at all. A move that
+took the rows it *could* see would leave the cap violated while printing `OK`, and
+a `--check` alongside it would print a count taken over a subset (measured
+2026-09-14: 52 cycle rows written as a table reported as `0 cycle row(s) of 0
+row(s)` with `OK`, and the trim answered `nothing to move` for a 52-row index).
+Both modes now exit 2 and name the lines. Prose that merely mentions a cycle id is
+not a row and is left alone.
+
 Exit codes
 ----------
 ``0``  the index is within its cap (nothing to move), or the move was made and
-       verified. ``1``  ``--check`` found a row-rule violation (too many rows, a
-       row over the 512-char cap, or a duplicate target). ``2``  the question
-       could not be answered, or the move did not verify - a measurement error is
-       never reported as a healthy index.
+       verified. ``1``  ``--check`` found a row-rule violation in an index it could
+       read (too many cycle rows, a row over the 512-char cap, a duplicate target).
+       ``2``  the question could not be answered - no index at that path, an index
+       that could not be read, an index holding lines that name a cycle but are not
+       rows this tool can read (so which rows are cycle rows is unknowable), or a
+       move that did not verify. A measurement error is never reported as a healthy
+       index, and never as a rule violation.
 
 Usage
 -----
@@ -64,8 +81,19 @@ from pathlib import Path
 #: detail file. Only the target is load-bearing here, so the link text is free.
 ROW_RE = re.compile(r"^\s*-\s+\[[^\]]*\]\((?P<target>[^)\s]+)\)")
 
-#: A cycle record row, whose target carries the cycle id the ordering uses.
-CYCLE_RE = re.compile(r"^cycle-(?P<stamp>\d{8}-\d{6})\.md$")
+#: A cycle record row, whose target carries the cycle id the ordering uses. The
+#: test is on the target's **basename**: `cycle-<ts>.md` is the same detail file
+#: whether a row names it from beside the index or through a path
+#: (`memory/cycle-<ts>.md`), and where a file sits is not what its id means.
+CYCLE_RE = re.compile(r"cycle-(?P<stamp>\d{8}-\d{6})\.md$")
+
+#: A cycle id, wherever it appears - used to notice a row the parser cannot read.
+CYCLE_ID_IN_LINE = re.compile(r"\bcyc\d{8}-\d{6}\b")
+
+#: The shapes a *row* is written in: a list item, an ordered item, or a table row.
+#: Prose that merely mentions a cycle id (a `>` note explaining the protocol, a
+#: heading) is not a row and must not be mistaken for one.
+ROW_LIKE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\|)")
 
 #: The protocol's per-row cap, in **characters** (the index is embedded in the
 #: system prompt, so a byte count would under-report CJK rows).
@@ -107,7 +135,7 @@ def parse_rows(text: str) -> list[Row]:
         if not match:
             continue
         target = match.group("target")
-        cycle = CYCLE_RE.match(target)
+        cycle = CYCLE_RE.search(target)
         rows.append(
             Row(
                 lineno=lineno,
@@ -117,6 +145,37 @@ def parse_rows(text: str) -> list[Row]:
             )
         )
     return rows
+
+
+def unreadable_rows(text: str) -> list[tuple[int, str]]:
+    """Row-like lines that name a cycle but are not rows this tool can read.
+
+    Returns `(line number, line)` pairs, numbered from 1 the way an editor counts
+    (``Row.lineno`` is an internal 0-based index and is never shown to a reader).
+
+    Why this exists: a *move* whose source set is wrong is worse than a refusal.
+    A cycle row written as a table (`| cyc... | cycle-....md |`) or as plain text
+    (`- cyc... - cycle-....md`) is not a markdown link, so `parse_rows` does not
+    see it at all - the tool would count the rows it *can* read, report `OK`, and
+    print `nothing to move` for an index that is over its cap. That is a healthy
+    verdict on a question it did not answer, which is exactly what exit code 2 is
+    reserved for. Measured before this rule (`cyc20260914-042726`): 52 cycle rows
+    written as a table gave `0 cycle row(s) of 0 row(s)` and `OK: the index
+    respects the row rules`.
+
+    Only row-like lines count - a `>` note or a heading may mention a cycle id
+    without being a row (the session index's own header does), and a non-cycle
+    *link* row may quote one in its text (the source-project index's single row
+    does). Those are notes and rows, not unreadable rows.
+    """
+    readable = {row.lineno for row in parse_rows(text)}
+    return [
+        (lineno, line)
+        for lineno, line in enumerate(text.splitlines(), start=1)
+        if lineno - 1 not in readable
+        and ROW_LIKE.match(line)
+        and CYCLE_ID_IN_LINE.search(line)
+    ]
 
 
 def row_texts(text: str) -> list[str]:
@@ -233,7 +292,13 @@ def verify_plan(plan: Plan, cap: int) -> list[str]:
 
 
 def check_rules(index_path: Path, cap: int) -> list[str]:
-    """The row rules `--check` enforces (read-only)."""
+    """The row rules `--check` enforces (read-only).
+
+    Rows this parser cannot read are not a rule `--check` can test - `main` refuses
+    before either mode runs, because a rule list printed beside a count taken over
+    the rows it *could* see is the false OK this tool exists to prevent. What is
+    left here is what the protocol states about rows that are readable.
+    """
     text = index_path.read_text(encoding="utf-8")
     rows = parse_rows(text)
     problems: list[str] = []
@@ -313,6 +378,19 @@ def measure_on_disk(index_path: Path, archive_path: Path, plan: Plan, cap: int) 
     return problems
 
 
+def report_unreadable(index_path: Path, unreadable: list[tuple[int, str]]) -> None:
+    """Name the lines that block the question, numbered as an editor counts them."""
+    print(
+        f"error: {len(unreadable)} row-like line(s) in {index_path} name a cycle but "
+        "are not markdown link rows, so which rows are cycle rows cannot be answered:",
+        file=sys.stderr,
+    )
+    for lineno, line in unreadable[:20]:
+        print(f"  {index_path}:{lineno}: {line.strip()[:120]}", file=sys.stderr)
+    if len(unreadable) > 20:
+        print(f"  ... and {len(unreadable) - 20} more", file=sys.stderr)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -349,13 +427,32 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: no index at {index_path}", file=sys.stderr)
         return 2
 
+    # A read that fails is a measurement that did not happen: an escaping traceback
+    # would exit 1, which this tool's own contract reads as "the index violates the
+    # row rules" - the same false verdict in a different costume.
+    try:
+        index_text = index_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"error: could not read {index_path}: {exc}", file=sys.stderr)
+        return 2
+
+    # Refuse before either mode answers: a count printed over rows this tool cannot
+    # classify is the verdict this tool exists to prevent (measured 2026-09-14: 52
+    # cycle rows written as a table read as `0 cycle row(s) of 0 row(s)`, exit 0), and
+    # a move over a *subset* of the rows would leave the cap violated while reporting
+    # success. Nothing is answered, nothing is moved.
+    unreadable = unreadable_rows(index_text)
+    if unreadable:
+        report_unreadable(index_path, unreadable)
+        return 2
+
     archive_path: Path = args.archive or index_path.with_name(
         f"cycle-archive-{date.today():%Y%m%d}.md"
     )
 
     if args.check:
         problems = check_rules(index_path, args.cap)
-        rows = parse_rows(index_path.read_text(encoding="utf-8"))
+        rows = parse_rows(index_text)
         cycle_rows = [row for row in rows if row.is_cycle]
         print(f"index: {index_path}")
         print(f"{len(cycle_rows)} cycle row(s) of {len(rows)} row(s), cap {args.cap}")
