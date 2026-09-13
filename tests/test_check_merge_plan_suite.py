@@ -140,6 +140,24 @@ def _commit(repo: Path, message: str) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
+def _two_branch_conflict_on(repo: Path, name: str) -> None:
+    """Branches `ours` and `theirs` of `repo` that both edit `name`, so merging conflicts.
+
+    Both branches touch one line of one file, which is the smallest real conflict; the
+    file's *name* is the variable under test, so it is the only thing the caller picks.
+    """
+    _init_repo(repo)
+    _write(repo, name, "a\nb\nc\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "checkout", "-q", "-b", "ours")
+    _write(repo, name, "a\nOURS\nc\n")
+    _git(repo, "commit", "-qam", "ours")
+    _git(repo, "checkout", "-q", "-b", "theirs", "master")
+    _write(repo, name, "a\nTHEIRS\nc\n")
+    _git(repo, "commit", "-qam", "theirs")
+
+
 @pytest.fixture
 def queue(tmp_path: Path) -> tuple[Path, Path]:
     """A checkout on `master` plus a local bare remote, as GitHub would be.
@@ -454,35 +472,64 @@ class TestTheConflictedPathsAreTheRealFiles:
         with pytest.raises(mod.MeasurementError):
             mod._merge_tree("a" * 40, "b" * 40)
 
-    def test_the_shapes_git_really_prints(self, tmp_path, mod, monkeypatch) -> None:
-        """Measure the report on real git, not only on fixtures written by hand.
+    def test_a_non_ascii_name_comes_back_as_the_file_on_disk(
+        self, tmp_path, mod, monkeypatch
+    ) -> None:
+        """Measure the decode against a real report, not only a fixture.
 
-        A fixture is free to be a shape git never writes, and the two fixtures above
-        are a claim about that shape. Here git is asked for a conflict between two
-        branches that each edit a file whose name contains a tab and a file whose
-        name is non-ASCII, and the paths the tool returns are asserted against the
-        names on disk.
+        A fixture is free to be a shape git never writes. Here git is asked for a
+        conflict on `中文.txt` and the path the tool returns is checked against the
+        file on disk. This arm runs on every platform: a non-ASCII filename is legal
+        everywhere (`test_the_shapes_git_really_prints` covers the tab-named file,
+        which Windows cannot create — see its reason).
         """
-        repo = tmp_path / "real-conflict"
-        _init_repo(repo)
-        tab_name = "f\ttab.txt"
+        repo = tmp_path / "cjk-conflict"
         cjk_name = "中文.txt"
-        _write(repo, tab_name, "a\nb\nc\n")
-        _write(repo, cjk_name, "x\n")
-        _git(repo, "add", "-A")
-        _git(repo, "commit", "-qm", "base")
-        _git(repo, "checkout", "-q", "-b", "ours")
-        _write(repo, tab_name, "a\nOURS\nc\n")
-        _write(repo, cjk_name, "x2\n")
-        _git(repo, "commit", "-qam", "ours")
-        _git(repo, "checkout", "-q", "-b", "theirs", "master")
-        _write(repo, tab_name, "a\nTHEIRS\nc\n")
-        _write(repo, cjk_name, "x3\n")
-        _git(repo, "commit", "-qam", "theirs")
+        _two_branch_conflict_on(repo, cjk_name)
         monkeypatch.chdir(repo)
 
         raw = subprocess.run(
-            ["git", "-c", "core.quotePath=true", "merge-tree", "--write-tree", "ours", "theirs"],
+            ["git", "merge-tree", "--write-tree", "ours", "theirs"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert raw.returncode == 1, raw.stdout + raw.stderr
+        escaped = "".join(f"\\{byte:03o}" for byte in cjk_name.encode("utf-8"))
+        # The stage block names the path; whether git spells its bytes escaped
+        # (`core.quotePath=true`, the default) or raw is git's choice of spelling, and
+        # the tool must return the real name either way.
+        assert f'"{escaped}"' in raw.stdout or cjk_name in raw.stdout, raw.stdout
+
+        tree, paths = mod._merge_tree("ours", "theirs")
+        assert tree is None
+        assert set(paths) == {cjk_name}
+        assert (repo / cjk_name).exists()
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "Windows rejects a filename holding a control byte: CreateFile fails with "
+            "OSError [Errno 22] before git is involved (measured, test-windows run "
+            "34787962250). The rule it pins is still covered on Windows by the fixture "
+            "tests above, which are strings and platform-independent."
+        ),
+    )
+    def test_the_shapes_git_really_prints(self, tmp_path, mod, monkeypatch) -> None:
+        """The real report for the one name that breaks the old reading.
+
+        A tab in the name makes the stage block quote it *and* makes the prose below
+        the block tab-separated, which is the whole defect: measured here on real
+        git, with the old reading run over the same bytes as a control arm.
+        """
+        repo = tmp_path / "tab-conflict"
+        tab_name = "f\ttab.txt"
+        _two_branch_conflict_on(repo, tab_name)
+        monkeypatch.chdir(repo)
+
+        raw = subprocess.run(
+            ["git", "merge-tree", "--write-tree", "ours", "theirs"],
             cwd=str(repo),
             capture_output=True,
             text=True,
@@ -491,13 +538,21 @@ class TestTheConflictedPathsAreTheRealFiles:
         assert raw.returncode == 1, raw.stdout + raw.stderr
         assert '"f\\ttab.txt"' in raw.stdout, "the tab name must be quoted in the block"
         assert "Auto-merging f\ttab.txt" in raw.stdout, "the prose carries a real tab"
-        assert '\\344\\270\\255' in raw.stdout, "a non-ASCII name is octal-escaped"
 
         tree, paths = mod._merge_tree("ours", "theirs")
         assert tree is None
-        assert set(paths) == {tab_name, cjk_name}
+        assert set(paths) == {tab_name}
         for path in paths:
             assert (repo / path).exists(), f"{path!r} is not a file on disk"
+
+        # The control arm: the reading this change replaces, run over the same real
+        # report, names a file that does not exist. Without this the test would only
+        # show that the new reading works, not what it is a fix for.
+        old_reading = [
+            line.split("\t", 1)[1] for line in raw.stdout.splitlines() if "\t" in line
+        ]
+        assert "tab.txt" in old_reading, old_reading
+        assert not (repo / "tab.txt").exists()
 
 
 def test_a_failing_merge_tree_makes_the_run_unanswerable_not_conflicted(
