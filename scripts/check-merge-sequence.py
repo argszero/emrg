@@ -189,6 +189,7 @@ as "verified" now cannot be told the wrong thing.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -216,22 +217,36 @@ TREE_IN_REPORT = re.compile(r"^tree: (.+)$", re.M)
 COUNT_LINE_DOC = "Agent.md"
 RESOLVER = "uv run --no-sync python3 scripts/check-doc-count.py --resolve-conflict"
 
+# The date carried by every synthetic merge commit - the same constant and the
+# same reasoning as check-merge-plan-suite.py, so the two folds in this family
+# cannot drift apart. Pinned rather than read from the clock: a commit's sha
+# contains its committer date, so an unpinned fold is not a function of its
+# inputs, and a caller comparing two runs of the same plan would be comparing two
+# different shas for the same tree.
+PLAN_COMMIT_DATE = "2000-01-01T00:00:00 +0000"
+
 
 class MeasurementError(Exception):
     """The question could not be answered. Never a verdict."""
 
 
-def _run(argv: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    argv: list[str], cwd: str | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a command with the decoding pinned.
 
     `encoding`/`errors` are pinned for the reason recorded in
     `check-doc-count.py`: a locale mismatch leaves `stdout` as `None` after the
     reader thread swallows the decode error, and the `None` surfaces later as a
     bare `TypeError` past every handler.
+
+    `env` is only passed by the caller that creates the synthetic merge commits
+    (`_merge_commit`), for the reason recorded there.
     """
     return subprocess.run(
         argv,
         cwd=cwd,
+        env=env,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -514,6 +529,35 @@ def _fetch_head(number: int) -> str:
     return _rev_parse(ref)
 
 
+def _commit_env() -> dict[str, str]:
+    """Author/committer for the synthetic merge commits, independent of git config.
+
+    Measured defect (cyc20260913-200715): with no ambient identity and
+    `user.useConfigOnly = true` (a real setting, and the default in hardened
+    environments), `git commit-tree` refuses - "Author identity unknown ... no
+    email was given and auto-detection is disabled" - so this tool raised
+    `MeasurementError` and reported that the *guard question could not be
+    answered*, in an environment where it can be answered. Its sibling
+    `check-merge-plan-suite.py` answered the same environment correctly, because it
+    pins identity; the tool that folded a plan was the more robust of the two.
+
+    The date is pinned for the same reason as there: a commit's sha contains its
+    committer date, so an unpinned fold is not a function of its inputs. Here the
+    shas are only vehicles for the next step's merge (never printed, never compared
+    across runs), so the date half closes a latent trap rather than a measured
+    failure - the identity half is the measured one.
+    """
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "emrg-merge-sequence",
+        "GIT_AUTHOR_EMAIL": "merge-sequence@emrg.invalid",
+        "GIT_COMMITTER_NAME": "emrg-merge-sequence",
+        "GIT_COMMITTER_EMAIL": "merge-sequence@emrg.invalid",
+        "GIT_AUTHOR_DATE": PLAN_COMMIT_DATE,
+        "GIT_COMMITTER_DATE": PLAN_COMMIT_DATE,
+    }
+
+
 def _merge_commit(a: str, b: str) -> str | None:
     """Materialise the merge of commits `a` and `b` as a commit, or None if it conflicts.
 
@@ -526,7 +570,8 @@ def _merge_commit(a: str, b: str) -> str | None:
 
     A non-zero/one exit is a measurement failure, never a conflict: reporting
     "conflict" for a git error would turn an unanswered question into a
-    reassuring one.
+    reassuring one. The identity/date of that synthetic commit are pinned by
+    `_commit_env`, so the fold does not depend on the machine's git config.
     """
     proc = _run(["git", "merge-tree", "--write-tree", a, b])
     if proc.returncode == 1:
@@ -537,7 +582,8 @@ def _merge_commit(a: str, b: str) -> str | None:
         )
     tree = proc.stdout.strip().splitlines()[0].strip()
     commit = _run(
-        ["git", "commit-tree", tree, "-p", a, "-p", b, "-m", f"merge {b[:8]} into {a[:8]}"]
+        ["git", "commit-tree", tree, "-p", a, "-p", b, "-m", f"merge {b[:8]} into {a[:8]}"],
+        env=_commit_env(),
     )
     if commit.returncode != 0:
         raise MeasurementError(f"commit-tree failed: {commit.stderr.strip()}")
