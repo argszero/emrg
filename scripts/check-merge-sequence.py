@@ -222,7 +222,10 @@ RESOLVER = "uv run --no-sync python3 scripts/check-doc-count.py --resolve-confli
 # cannot drift apart. Pinned rather than read from the clock: a commit's sha
 # contains its committer date, so an unpinned fold is not a function of its
 # inputs, and a caller comparing two runs of the same plan would be comparing two
-# different shas for the same tree.
+# different shas for the same tree. A third copy lives in
+# check-merge-landing-diff.py, and the agreement of all three is enforced by
+# tests/test_synthetic_fold_date.py ("cannot drift" was a claim in comments with
+# nothing behind it until that guard existed).
 PLAN_COMMIT_DATE = "2000-01-01T00:00:00 +0000"
 
 

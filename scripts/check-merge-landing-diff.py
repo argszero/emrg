@@ -99,6 +99,11 @@ import sys
 # Pinned, not read from the clock: a commit's sha contains its committer date, so
 # an unpinned synthetic commit is not a function of its inputs. The same constant
 # and the same reasoning as the two folds in this family, so they cannot drift.
+# That agreement is what `tests/test_synthetic_fold_date.py` enforces - it is the
+# one place that can see all the copies at once, and it checks that this constant
+# is applied to both date variables of the environment a synthetic commit is made
+# with (`tests/test_synthetic_fold_date.py::test_every_definer_applies_the_pin_to_both_dates`),
+# since a constant that is declared and not used pins nothing.
 PLAN_COMMIT_DATE = "2000-01-01T00:00:00 +0000"
 
 
