@@ -14,9 +14,43 @@ is designed to prevent.
 
 from __future__ import annotations
 
+import argparse
 import ast
 import sys
 from pathlib import Path
+
+# The file this check guards, relative to the tree it resolves.
+TARGET = "emrg/client/app.py"
+
+
+def _resolve_root() -> Path:
+    """The tree to inspect: the checkout the caller is *standing in*.
+
+    Derived from the cwd when that is a checkout, not from `__file__`. Measured
+    2026-09-11, in exactly the situation this tool is used in: unblocking a PR
+    means working in a git worktree, where running the main checkout's copy of
+    this script inspected the *main* checkout and printed
+
+        OK: nonlocal integrity check passed
+
+    about the worktree — whose own copy of this script exited 2 there, having
+    found `interactive` renamed away. Both invocations printed a confident line;
+    only one of them was about the file the caller was looking at, and the line
+    is byte-identical either way, so the wrong answer is indistinguishable from
+    the right one by reading the output.
+
+    Falls back to the script's own root so the documented invocation keeps
+    working from anywhere; `main` states which tree answered rather than leaving
+    it to be inferred.
+    """
+    here = Path(__file__).resolve().parent.parent
+    cwd = Path.cwd()
+    if (cwd / TARGET).is_file() and (cwd / "scripts").is_dir():
+        return cwd
+    return here
+
+
+REPO_ROOT = _resolve_root()
 
 
 def _assigned_names(node: ast.AST) -> set[str]:
@@ -180,9 +214,23 @@ def check_nonlocal(app_path: str) -> int:
     return exit_code
 
 
-if __name__ == "__main__":
-    app_path = Path(__file__).resolve().parent.parent / "emrg" / "client" / "app.py"
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Verify nonlocal declarations in emrg/client/app.py are complete.",
+    )
+    args = parser.parse_args(argv)
+
+    # Say which tree answered. A check whose whole job is "inspect the file you
+    # are about to merge" must not leave "which tree" ambiguous — the 2026-09-11
+    # defect was precisely a confident `OK` about a checkout the caller was not in.
+    print(f"tree: {REPO_ROOT}")
+
+    app_path = REPO_ROOT / TARGET
     if not app_path.exists():
         print(f"ERROR: app.py not found at {app_path}", file=sys.stderr)
-        sys.exit(2)
-    sys.exit(check_nonlocal(str(app_path)))
+        return 2
+    return check_nonlocal(str(app_path))
+
+
+if __name__ == "__main__":
+    sys.exit(main())
