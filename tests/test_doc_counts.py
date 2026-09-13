@@ -148,6 +148,139 @@ def test_python_count_guard_still_sees_a_single_line() -> None:
     assert _documented_python_counts("no count line here\n") == []
 
 
+# A derived number stated in prose with no parser is a number nobody can keep
+# true. Measured 2026-09-13 (`cyc20260913-110421`): `DEVELOPMENT.md` advertised
+# "run tests (currently 681 items)" while the tree collected **1590** — a claim
+# off by 2.3x, in a file no check reads. Every guard in this repo covers
+# `Agent.md`; nothing looked at the second copy.
+#
+# The count therefore lives in exactly **one** place (`Agent.md`), where
+# `test_python_count_matches_docs` and `scripts/check-doc-count.py` keep it
+# honest — the same reason `README.md`/`README.cn.md` dropped their hardcoded
+# counts for the Tests badge (rant 2026-08-11T19:50:37). A second copy is not
+# merely a second drift site: it is a second conflict site on the *same line*
+# for every PR that adds a test, which is the cost issue #1158 measures (9 of 10
+# open PRs conflicted on that one line, and resolving it is what every recent
+# cycle's pushes have been).
+#
+# Four forms, because a claim is recognised by how it is written, not by the
+# number: this is a *lexical* rule and each form above is the shape it has
+# actually appeared in. Measured against all 16 tracked markdown files: zero
+# hits outside `Agent.md` and the stale `DEVELOPMENT.md` line, so the rule is
+# not noise-limited today.
+COUNT_CLAIM_PATTERNS = (
+    ("parenthesised count", re.compile(r"\(\s*(?:currently\s+)?\d+\s+(?:items|tests|passed)\s*\)")),
+    ("'currently N' claim", re.compile(r"\bcurrently\s+\d+\s+(?:items|tests|passed)\b")),
+    ("bare 'N items' claim", re.compile(r"\b\d{3,}\s+(?:items|tests|passed)\b")),
+    ("count after a pytest command", re.compile(r"pytest[^\n]{0,60}\(\s*\d+\s*\)")),
+)
+
+# The only file allowed to state it. Not a preference: this is the file the
+# guards above and in `scripts/check-doc-count.py` both read.
+SINGLE_COUNT_SOURCE = "Agent.md"
+
+
+def _count_claim(line: str) -> str | None:
+    """Which count-claim form this line is, if any; `None` for ordinary prose.
+
+    Takes text rather than a path so the rule below can be *driven* against a
+    stale line and against prose that merely mentions the test command — a guard
+    that is only ever pointed at the real tree is not known to discriminate.
+    """
+    for name, pattern in COUNT_CLAIM_PATTERNS:
+        if pattern.search(line):
+            return name
+    return None
+
+
+def _tracked_markdown() -> list[str]:
+    """Every tracked markdown file, via `git ls-files` (index, not a walk).
+
+    Same reasoning as `test_conflict_markers._tracked_source_files`: the index is
+    authoritative about what ships, and it skips `.venv/`, `node_modules/`,
+    `dist/` and this session's scratch copies for free — an `rglob` over the repo
+    picks up `.emrg/sessions/**/branch*.md`, which are snapshots of *old* docs and
+    would be read as live claims.
+
+    Explicit `encoding="utf-8"` and separator normalisation for the
+    `windows-2025` runner: git emits index paths as UTF-8 bytes and uses the
+    platform separator (both learned the hard way in `test_conflict_markers`).
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout
+    names = (name.replace("\\", "/") for name in listed.split("\0") if name)
+    return sorted(name for name in names if name.endswith(".md"))
+
+
+def test_the_python_test_count_is_stated_in_exactly_one_doc() -> None:
+    """No tracked doc other than Agent.md may state how many tests there are.
+
+    A claim outside Agent.md is unguarded by construction (nothing parses it) and
+    is a second conflict site for the same line. Deleting it loses nothing: the
+    command is what a reader needs, and the number is one `pytest` away.
+    """
+    seen = []
+    for name in _tracked_markdown():
+        if name == SINGLE_COUNT_SOURCE:
+            continue
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        for number, line in enumerate(text.splitlines(), 1):
+            claim = _count_claim(line)
+            if claim:
+                seen.append(f"{name}:{number} [{claim}] {line.strip()}")
+    assert not seen, (
+        "these docs state the Python test count, which is a derived number no "
+        "check reads and a second conflict site for the count line:\n  "
+        + "\n  ".join(seen)
+        + f"\nState it only in {SINGLE_COUNT_SOURCE} (kept true by "
+        "scripts/check-doc-count.py), or drop the number and keep the command."
+    )
+
+
+def test_the_single_count_source_really_states_the_count() -> None:
+    """The exemption above is load-bearing only if Agent.md still states it.
+
+    Without this, the scan is vacuous in the quiet direction: a rule whose
+    patterns match nothing reports "exactly one place" forever, and the day
+    Agent.md's count line changes shape the guard would still be green while
+    *nothing* in the repo states the number. So the allowed site is itself
+    checked, and a pattern that stops matching fails here rather than silently
+    widening the exemption.
+    """
+    text = (REPO_ROOT / SINGLE_COUNT_SOURCE).read_text(encoding="utf-8")
+    claims = [line for line in text.splitlines() if _count_claim(line)]
+    assert claims, (
+        f"no count-claim line found in {SINGLE_COUNT_SOURCE}: the scan in "
+        "test_the_python_test_count_is_stated_in_exactly_one_doc is now vacuous "
+        "(its patterns match nothing anywhere), so it cannot fail. Update "
+        "COUNT_CLAIM_PATTERNS to the line's current shape."
+    )
+
+
+def test_count_claim_rule_catches_a_stale_copy_and_ignores_prose() -> None:
+    """Both directions of the same predicate (never infer the rule from one side).
+
+    The positive case is the line this rule was written for, verbatim from
+    `DEVELOPMENT.md` — not a paraphrase that happens to match.
+    """
+    assert (
+        _count_claim("uv run pytest tests/ -v   # run tests (currently 681 items)")
+        == "parenthesised count"
+    )
+    # The bare command is what a doc *should* say: mentioning pytest is not a claim.
+    assert _count_claim("uv run pytest tests/ -v") is None
+    assert _count_claim("uv run pytest tests/ -v   # run tests") is None
+    # Prose about the suite without a number is not a claim either.
+    assert _count_claim("the suite has grown a lot over the years") is None
+    assert _count_claim("") is None
+
+
 def test_gui_breakdown_sums_to_headline() -> None:
     breakdowns = _gui_breakdowns()
     assert breakdowns, "no GUI test breakdowns found in README.md/Agent.md"
