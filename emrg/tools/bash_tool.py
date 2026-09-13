@@ -166,21 +166,114 @@ _OPTIONS_WITH_VALUE = frozenset({
 # these must be structurally impossible, not merely discouraged by a prompt
 # rule — "rules can regress; topology can't". Read-only git reads (status /
 # fetch / log / diff / remote) stay allowed.
-_GIT_MUTATOR_RE = re.compile(
-    r"\bgit\s+(?:stash|checkout|restore|clean|reset|commit|push|pull|merge|"
-    r"rebase|cherry-pick|cherry_pick|revert|rm|mv|switch|apply|am|archive|"
-    r"submodule|worktree)\b"
-)
-_GIT_DELETE_RE = re.compile(r"\bgit\s+(?:branch|tag)\s+-[dD]\b")
-# `git stash list` / `git stash show` are READ-ONLY stash inspection (reviewing
-# WIP) — the mutator regex above would false-positive on them because it matches
-# the bare `git stash` token. Exempt a pure stash read (no chain to a mutator).
-_GIT_STASH_READ_RE = re.compile(r"\bgit\s+stash\s+(?:list|show)(?:\s|$|\|)")
-# `git worktree list` / `git submodule status` are READ-ONLY inspection (same
-# false-positive class as `git stash list/show`): the mutator regex above
-# matches the bare `git worktree` / `git submodule` tokens. Exempt a pure
-# read; any worktree/submodule MUTATOR keyword below still blocks.
-_GIT_WT_READ_RE = re.compile(r"\bgit\s+(?:worktree\s+list|submodule\s+status)\b")
+#
+# ⚠️ These are matched against the **parsed** command (the resolved verb), not
+# against raw command text (issues #1156 + #1159). Both filed defects had the
+# same root cause: a regex over the raw string is a statement about *spelling*,
+# while the guard's purpose is a statement about *effect*.
+#
+#   - Under-block (#1156): a git global option sits exactly where the old
+#     pattern expected the subcommand, so `git -C . checkout .`,
+#     `git -c x=1 stash` and `git --work-tree=. reset --hard` were all allowed
+#     (7/7 mutators × 4/4 spellings).
+#   - Under-block (#1159): a verb never on the list — `git read-tree -u --reset
+#     HEAD` destroys uncommitted work and was allowed. `--reset` is a substring
+#     but not the verb, so it did not match.
+#   - Over-block: the same raw-text scan refused commands that merely *mention*
+#     a mutator (a string literal inside a heredoc), and `git merge-base` was
+#     refused as though it were `git merge`.
+#
+# Parsing fixes all three at once and is the reason this is a verb set rather
+# than more regex: the unit of protection becomes the resolved verb.
+#
+# ⚠️ The set is a **read allowlist** and the default is BLOCK
+# (`_git_invocation_is_mutator` returns the verb for anything not listed). The
+# earlier design was the opposite — a blocklist of mutating verbs — and that is
+# a category that cannot be completed: `git help -a` lists 169 subcommands and
+# upstream adds more, so "not on the list" is a permanent, growing set of
+# *allowed* commands. Measured on the blocklist: 129 of 169 subcommands stayed
+# allowed, and `git checkout-index -f -a` — which overwrites uncommitted work
+# exactly like `git checkout` — was blocked only by accident, because the old
+# raw-text regex matched `checkout` as a *substring* of `checkout-index`.
+# Parsing the verb correctly removed that accident and exposed the hole.
+# Fail-closed deletes the category: a verb is allowed only when it is listed
+# here as one that prints information and writes nothing. Unknown and future
+# subcommands block by default, which is the safe direction for a guard whose
+# failure mode is silent, irreversible data loss.
+_GIT_READ_VERBS = frozenset({
+    # porcelain interrogators — print information, write nothing
+    "status", "log", "show", "diff", "diff-files", "diff-index", "diff-tree",
+    "diff-pairs", "shortlog", "whatchanged", "describe", "blame", "annotate",
+    "name-rev", "rev-list", "rev-parse", "range-diff", "grep", "ls-files",
+    "ls-tree", "ls-remote", "cat-file", "merge-base", "merge-tree",
+    "for-each-ref", "for-each-repo", "show-branch", "show-index", "show-ref",
+    "count-objects", "verify-commit", "verify-pack", "verify-tag", "patch-id",
+    "get-tar-commit-id", "fsck", "diagnose", "refs", "revisions", "var",
+    "version", "help", "repository-layout",
+    # pure stdin/stdout text filters — read a stream, print a stream
+    "check-attr", "check-ignore", "check-mailmap", "check-ref-format",
+    "fmt-merge-msg", "interpret-trailers", "mailinfo", "mailsplit", "mailmap",
+    "stripspace", "column",
+    # Remote-tracking / credential inspection: these write only under .git or
+    # in the user's credential store, never the working tree — and issue #979 is
+    # a dirty-tree guard. `fetch` is deliberately kept: the previous design
+    # allowed it, it cannot destroy uncommitted work, and refusing it would be a
+    # usability regression with no safety gain.
+    "fetch", "credential",
+})
+# Verbs whose *shape* decides — the verb alone says nothing about the effect.
+# Kept out of `_GIT_READ_VERBS` so each is judged by explicit logic, and each
+# defaults to BLOCK when its shape is not a proven read.
+_GIT_SHAPE_DECIDED = frozenset({"stash", "worktree", "submodule", "remote",
+                                "branch", "tag", "config", "hash-object"})
+# Listing flags for `branch` / `tag`: with one of these the command prints and
+# writes nothing, even when a pattern argument follows (`git tag -l 'v*'`).
+_GIT_LIST_FLAGS = frozenset({"-l", "--list", "-a", "--all", "-r", "--remotes",
+                             "-v", "-vv", "--verbose", "--contains", "--merged",
+                             "--no-merged", "--points-at", "--format",
+                             "--show-current", "--column", "--sort", "--color",
+                             "--no-color", "--ignore-case"})
+# `git branch -a` / `git tag -l` / `git tag` are reads; a delete or force flag
+# makes them destructive (`git branch -D old`, `git tag -d v1`).
+_GIT_WRITE_FLAGS = frozenset({"-d", "-D", "--delete", "-f", "--force", "-m",
+                              "-M", "--move", "--set-upstream-to", "-u"})
+# `git config` reads unless it writes: read flags, or no positional key.
+_GIT_CONFIG_READ_FLAGS = frozenset({"--get", "--get-all", "--get-regexp",
+                                    "-l", "--list", "--get-urlmatch"})
+# git global options that take a SEPARATE argument — the parser must skip both
+# the option and its value to find the verb (`git -C . checkout .`).
+_GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--exec-path", "--git-dir",
+                                    "--work-tree", "--namespace", "--super-prefix"})
+# Shell operators that separate one command from the next in a chain.
+_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
+# Tokens that put what follows them in command position without being commands
+# themselves: grouping (`( … )`, `{ … }`) and shell negation (`! cmd`).
+_COMMAND_POSITION_OPERATORS = frozenset({"(", "{", "!", "`"})
+# Prefix commands that *run* their argument as a command. `env git checkout .`
+# and `sudo git checkout .` genuinely invoke git, so a `git` token after one of
+# these is an invocation even though it is not first in the stream. This is the
+# case that stops the over-block fix from becoming an under-block.
+_COMMAND_WRAPPERS = frozenset({
+    "env", "sudo", "doas", "xargs", "nohup", "time", "timeout", "nice",
+    "setsid", "stdbuf", "command", "exec", "ionice", "chrt", "watch",
+})
+# `FOO=1 git checkout .` — the shell strips leading assignments and runs the
+# rest, so an assignment is a prefix, not a command.
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Shells whose `-c <string>` argument is itself a command the shell will run.
+# The guard must read *that* text, not stop at the outer token stream: before
+# this, `sh -c 'git checkout .'` reached the mutator only because a raw-text
+# regex happened to scan the whole line. Parsing the outer tokens alone sees
+# `sh`, `-c`, and one opaque string — so a wrapper no longer blocks unless the
+# nested text is parsed too. This is a return to the old behaviour by a
+# different route: the old scan was right about these 5 shapes and wrong about
+# the 7 it missed; parsing must not trade one half for the other.
+_SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
+# Commands whose entire argument list is a command the shell will re-parse and
+# run (`eval 'git checkout .'`). `xargs`/`env`/`nohup`/`time`/`command` prefix
+# a real invocation and are already handled, because the invocation is still in
+# the token stream.
+_SHELL_EVALUATORS = frozenset({"eval"})
 
 # ── Containment-escape guard (issue #1102) ─────────────────────────────────
 # Borrowed from Claude Code v2.1.257 ("Containment Escape"): block cloud
@@ -564,6 +657,332 @@ def check_workspace_write(file_path: str, workspace: str | None = None) -> str |
     return None
 
 
+def _tokenize_command(cmd: str) -> list[str]:
+    """Split a shell command into tokens, preserving operators like ``&&``.
+
+    Uses ``shlex`` so quoting is respected: a mutator mentioned inside a string
+    literal is one token, not a command word — which is what stops the guard
+    from refusing a command that merely *talks about* `git merge` (issue #1156
+    facet D). Falls back to a whitespace split when the input is unparseable
+    (an unterminated quote), because a guard that crashes on odd input is worse
+    than one that over-blocks it.
+
+    ⚠️ The punctuation set is explicit and **includes the backtick**. `shlex`'s
+    default punctuation set is `();<>|&` — it omits `` ` ``, so a command
+    substitution stayed glued to its words: `` `git checkout .` `` tokenised as
+    `` ['`git', 'checkout', '.`'] `` and the program word never matched `git`.
+    Measured against master 2026-09-12 (`cyc20260912-190602`): the raw-text guard
+    blocked all four backtick shapes and this parsed guard allowed all four —
+    an under-block in the destructive direction, introduced by the same
+    migration that fixed the over-blocks. `$( … )` was unaffected because its
+    `git` is already a separate token, which is what made the hole invisible to
+    the substitutions that were covered.
+    """
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&`")
+        lex.whitespace_split = True
+        return list(lex)
+    except ValueError:
+        return cmd.split()
+
+
+def _runs_as_a_command(tokens: list[str], i: int) -> bool:
+    """Whether ``tokens[i]`` is in *command position* — i.e. the shell will run it.
+
+    This is the difference between an invocation and an argument, and it is the
+    whole reason a parser is used here rather than a scan: `grep -rn git .` and
+    `git status` both contain the token `git`, but only the second runs it.
+
+    A token is in command position when:
+      * it is first in the stream, or
+      * the token before it is a **command separator** (`&&`, `||`, `;`, `|`,
+        `&`, newline), a grouping/negation operator (`(`, `{`, `!`), or
+      * the tokens before it are **command wrappers** and their options/values
+        (`env`, `sudo`, `xargs`, `nohup`, `time`, `timeout`, `nice`, `doas`,
+        `setsid`, `stdbuf`, `command`, …), or
+      * the token before it is a `VAR=value` environment assignment
+        (`FOO=1 git checkout .` really does run git).
+
+    ⚠️ The wrapper case must keep working, and it needs the flag's **value**
+    skipped, not just the flag. The obvious fix for the over-block — "only
+    position 0 can be an invocation" — would under-block every wrapper prefix,
+    and `env git checkout .` genuinely destroys uncommitted work; a first attempt
+    that skipped only flags left `sudo -u root git checkout .`, `timeout 5 git
+    checkout .`, `nice -n 5 git checkout .`, `xargs -I{} git checkout .` and
+    `stdbuf -o0 git checkout .` all allowed (5 of 44 mutator shapes, measured).
+    So a non-flag token that follows a flag is treated as that flag's value and
+    skipped.
+
+    That value-test is an **over-approximation**, deliberately: whether a flag
+    takes a value is a per-command fact, and enumerating which flags do is the
+    same enumeration trap that made the wrapper's `-c` walk unsound. The cost is
+    that `xargs -I{} grep git` — where `grep` is the command and `git` its
+    argument — is read as a wrapper invocation and blocked. That is a false block
+    in the harmless direction, and it is the trade this guard always makes: a
+    refused command is loud, and silent data loss is not.
+    """
+    j = i - 1
+    while j >= 0:
+        tok = tokens[j]
+        if tok in _SHELL_SEPARATORS or tok in _COMMAND_POSITION_OPERATORS:
+            return True
+        if _is_env_assignment(tok):
+            j -= 1
+            continue
+        if _basename(tok) in _COMMAND_WRAPPERS:
+            # The candidate is this wrapper's command argument.
+            return True
+        if tok.startswith("-"):
+            j -= 1
+            continue
+        # A non-flag token: it belongs to a prefix (a flag's value, or a
+        # wrapper's own argument) when the token before it is a flag or a
+        # wrapper. Otherwise it is a command word and the candidate is one of
+        # its arguments — data, not an invocation.
+        if j - 1 >= 0:
+            left = tokens[j - 1]
+            if left.startswith("-"):
+                j -= 2
+                continue
+            if _basename(left) in _COMMAND_WRAPPERS:
+                return True
+        return False
+    return True
+
+
+def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
+    """Resolve every ``git`` invocation in a token stream to ``(verb, rest)``.
+
+    Walks the token stream, and at each ``git`` token skips git's *global*
+    options to find the resolved verb (issue #1156: a global option sits
+    exactly where a raw-text regex expects the subcommand). Returns one entry
+    per invocation, so a chained command is judged by all of its invocations.
+
+    ⚠️ Only a ``git`` token in **command position** is an invocation
+    (`_runs_as_a_command`). Treating every `git` token as one over-blocked any
+    command that merely *names* git as an argument — `grep -rn git .` was read
+    as the invocation `git .`, and the fail-closed default then refused a plain
+    search (measured against master 2026-09-12: 9 of 30 read shapes regressed,
+    all in that class). The quoted-mention case was already handled because
+    tokenising keeps a string literal whole; the *unquoted argument* is the same
+    defect one level down, and position is what distinguishes it.
+
+    ``rest`` is the tokens after the verb, needed to decide flag/subcommand-
+    dependent verbs (`git branch -D` writes, `git branch -a` reads).
+    """
+    out: list[tuple[str, list[str]]] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if _basename(tok) != "git" or not _runs_as_a_command(tokens, i):
+            i += 1
+            continue
+        j = i + 1
+        # Skip global options (and the separate value of options that take one).
+        while j < len(tokens):
+            nxt = tokens[j]
+            if nxt in _GIT_GLOBAL_WITH_VALUE:
+                j += 2
+                continue
+            if nxt.startswith("-"):
+                j += 1
+                continue
+            break
+        if j < len(tokens):
+            out.append((tokens[j], tokens[j + 1:]))
+        i = j + 1
+    return out
+
+
+def _git_invocation_is_mutator(verb: str, rest: list[str]) -> str | None:
+    """Classify one resolved git invocation. Returns the offending verb, or None.
+
+    **Fail-closed**: a verb is allowed only when it is known to print
+    information. Anything else — an unlisted verb, and therefore every
+    subcommand git adds in future — blocks. The blocklist this replaced had the
+    default inverted, which made the safe set the *unlisted* one; with 169
+    subcommands that can never be enumerated, that is a guard against only the
+    names someone happened to type.
+
+    The decision is on the *effect*, not the spelling: read-only inspections
+    (`git stash list`, `git worktree list`, `git submodule status`,
+    `git branch -a`, `git remote -v`, `git config -l`) are read from the
+    resolved verb + flags, so they stay allowed without an exemption pattern to
+    keep in sync.
+    """
+    if verb in _GIT_READ_VERBS:
+        return None
+    if verb in _GIT_SHAPE_DECIDED:
+        return _shape_decided_verdict(verb, rest)
+    # Unlisted verb: block. This is the fail-closed default and the whole point
+    # of the design — `checkout-index`, `mktree`, `filter-branch`, `init`,
+    # `clone`, `revert`, and any future subcommand land here.
+    return verb
+
+
+def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
+    """The verdict for a verb whose subcommand / flags decide its effect.
+
+    Returns the verb when the invocation writes, or None when it is a proven
+    read. Every branch treats "not recognisably a read" as a write.
+    """
+    positional = [t for t in rest if not t.startswith("-")]
+    sub = next(iter(positional), None)
+    if verb == "stash":
+        # `stash list` / `stash show` read; a bare `git stash` saves and cleans
+        # the tree, so it writes.
+        return None if sub in ("list", "show") else verb
+    if verb == "worktree":
+        # `worktree list` reads; a bare `git worktree` only prints usage.
+        return None if sub is None or sub == "list" else verb
+    if verb == "submodule":
+        # `submodule status` / `summary` read; a bare `git submodule` only
+        # prints usage.
+        return None if sub is None or sub in ("status", "summary") else verb
+    if verb == "remote":
+        # `remote -v` / `show` / `get-url` read; `set-url`/`add`/`remove` write.
+        return None if sub is None or sub in ("show", "get-url", "v") else verb
+    if verb in ("branch", "tag"):
+        # A listing flag makes this a read even with a pattern argument; a
+        # delete/force/move flag makes it a write.
+        if any(t in _GIT_WRITE_FLAGS for t in rest):
+            return verb
+        if any(t in _GIT_LIST_FLAGS for t in rest):
+            return None
+        # `git branch <name>` / `git tag <name>` create; only the bare form
+        # (no positional argument at all) is the listing read.
+        return None if not positional else verb
+    if verb == "config":
+        if any(t in _GIT_CONFIG_READ_FLAGS for t in rest):
+            return None
+        # `git config <key>` with no value is a read; `key=value` or `--set`
+        # writes. A lone positional key is ambiguous, so treat a single
+        # positional as a read and anything that looks like an assignment as
+        # a write.
+        if any("=" in t for t in positional):
+            return verb
+        return None if len(positional) <= 1 else verb
+    if verb == "hash-object":
+        # `git hash-object <file>` computes and prints an object name — a read.
+        # `-w` additionally writes the object into the database.
+        return verb if "-w" in rest else None
+    return verb
+
+
+def _is_env_assignment(tok: str) -> bool:
+    """Whether ``tok`` is a shell variable assignment (`FOO=1`, `PATH=/x:$PATH`).
+
+    Distinguished from a command word so `FOO=1 git checkout .` still reads as a
+    git invocation: the shell strips leading assignments and runs what follows.
+    """
+    return bool(_ENV_ASSIGNMENT_RE.match(tok))
+
+
+def _basename(tok: str) -> str:
+    """The command word without its directory prefix or extension.
+
+    `/usr/bin/git` and `git.exe` name the same program as `git`; a guard that
+    only recognises the bare spelling is a guard against the polite form of
+    the command. (On Windows the shell resolves `git` to `git.exe`, so the
+    extension form is the one that actually runs there.)
+
+    A leading `VAR=` is stripped for the same reason: `FOO=1 git checkout .`
+    runs git, and the assignment is not part of the program word. Command
+    substitution used to need stripping here too, and does not any more — the
+    tokenizer now splits on the backtick, which is the *structural* fix; keeping
+    a strip here as well would have hidden the fact that the token stream was
+    wrong, and would only have covered the substitutions that happen to wrap the
+    program word rather than the shape.
+    """
+    base = tok.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if base.lower().endswith(".exe"):
+        base = base[:-4]
+    if "=" in base:
+        head, _, tail = base.partition("=")
+        if head.isidentifier():
+            base = tail
+    return base
+
+
+def _nested_command_texts(tokens: list[str]) -> list[str]:
+    """The command strings a shell will itself re-parse out of ``tokens``.
+
+    Returns the argument of every `sh -c <text>` (and the other wrapper
+    shells) and every `eval <text>`, so the caller can recurse into them.
+
+    Why this is needed rather than optional: tokenising splits a command into
+    an outer invocation plus an opaque string literal, and a string literal is
+    data. `sh -c 'git checkout .'` therefore parses as the command `sh` with a
+    quoted payload — no git invocation at all. The pre-parsing guard blocked
+    it, because a raw-text regex over the whole line did not care where the
+    word sat. Dropping that scan silently made 5 wrapper shapes writable under
+    read-only (measured 2026-09-12 against master: `sh -c` / `bash -c` /
+    `zsh -c` / `dash -c` / `eval` all went from blocked to allowed), which is
+    the one direction this guard must never move in. So the parsed design has
+    to model the nesting explicitly.
+
+    The wrapper is recognised by its *name*, and then **every remaining token
+    is treated as a possible payload** — the same over-approximation `eval`
+    already gets. Locating the `-c` flag instead looks tighter but is unsound:
+    it requires enumerating how a flag may be spelled, and the enumeration is
+    always incomplete. Measured 2026-09-12 against the first version of this
+    function, which walked to `-c`:
+
+      - short forms worked (`bash -c`, `bash -lc`, `bash -x -c`);
+      - but a **long option** or an **option value** ended the walk before
+        `-c` was ever reached, so `bash --login -c 'git checkout .'`,
+        `bash --noprofile -c ...`, `bash --posix -c ...`, `bash -o pipefail
+        -c ...` and `zsh --login -c ...` were all ALLOWED under read-only —
+        9 of 14 wrapper shapes, every one of them a mutator. Driven end to
+        end through `BashTool.execute`, 3 of 4 destroyed uncommitted work
+        that master blocks.
+      - this is the #461 class exactly: matching one spelling of a class while
+        the other spelling passes. A guard cannot win that enumeration, so it
+        must not depend on it.
+
+    Over-approximating costs only that a wrapper followed by a non-command
+    (e.g. `bash script.sh`) recurses into a filename, which parses to no git
+    invocation and stays allowed. Erring toward *blocking* is the safe
+    direction for this guard; erring toward data loss is not.
+    """
+    out: list[str] = []
+    for i, tok in enumerate(tokens):
+        if _basename(tok) in _SHELL_WRAPPERS:
+            # `sh -c <text>` — take everything after the wrapper and let the
+            # recursive parse decide what is a command. Do NOT locate `-c`:
+            # every way of spelling an option before it is a hole.
+            out.extend(tokens[i + 1:])
+        elif _basename(tok) in _SHELL_EVALUATORS:
+            # `eval <text...>`: every remaining token is re-parsed as a command.
+            out.extend(tokens[i + 1:])
+    return out
+
+
+def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
+    """The first mutating git verb in ``cmd``, or None when there is none.
+
+    Parses rather than scans (issues #1156 + #1159): every `git` invocation in
+    a chained command is resolved to its verb and classified by effect. Returns
+    a human-readable phrase for the block reason.
+
+    Recurses into shell execution contexts (`sh -c <text>`, `eval <text>`), so
+    a mutator that the shell will run is judged wherever it is written. Depth
+    is capped rather than trusted: nesting is bounded by the shell itself, and
+    a guard must terminate on adversarial input.
+    """
+    tokens = _tokenize_command(cmd)
+    for verb, rest in _git_verbs(tokens):
+        hit = _git_invocation_is_mutator(verb, rest)
+        if hit:
+            return f"git {hit}"
+    if _depth < 3:
+        for nested in _nested_command_texts(tokens):
+            hit = _find_git_mutator(nested, _depth + 1)
+            if hit:
+                return hit
+    return None
+
+
 def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
     """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
 
@@ -602,30 +1021,19 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
         # (stash / checkout . / reset --hard / clean) write no file targets
         # and escaped the target scan (community issue #979). Also blocks
         # working-tree writers: apply / am / archive / submodule / worktree.
-        # Pure read-only inspections are exempt (`git stash list/show`,
-        # `git worktree list`, `git submodule status`) — but a chain to a
-        # mutator (e.g. `&& git stash drop`, `; git worktree remove`) stays
-        # blocked.
-        m = _GIT_MUTATOR_RE.search(cmd) or _GIT_DELETE_RE.search(cmd)
-        if m:
-            read_only_inspection = (
-                _GIT_STASH_READ_RE.search(cmd)
-                or _GIT_WT_READ_RE.search(cmd)
-            )
-            mutator_keyword = (
-                re.search(r"\bgit\s+stash\s+(?:drop|pop|clear|apply|push|branch|create)\b", cmd)
-                or re.search(
-                    r"\bgit\s+(?:worktree\s+(?:add|remove|move|prune|lock|unlock)|"
-                    r"submodule\s+(?:update|add|deinit|set-url|sync|absorbgitdirs|"
-                    r"foreach))\b",
-                    cmd,
-                )
-            )
-            if not (read_only_inspection and not mutator_keyword and not re.search(r"&&|;", cmd)):
-                return False, (
-                    f"read-only sandbox: blocked git mutating command {m.group(0)!r} "
-                    "(dirty-tree guard, community issue #979)"
-                ), "partial"
+        #
+        # Decided by **parsed verb**, not raw text (issues #1156 + #1159): a
+        # global option between `git` and the subcommand used to defeat the
+        # alternation, `git read-tree -u --reset` was never on the list, and
+        # a command merely *mentioning* a mutator was refused. Chained commands
+        # are judged per invocation, so `git stash list && git stash drop` still
+        # blocks while a bare `git stash list` reads.
+        hit = _find_git_mutator(cmd)
+        if hit:
+            return False, (
+                f"read-only sandbox: blocked git mutating command {hit!r} "
+                "(dirty-tree guard, community issue #979)"
+            ), "partial"
         return True, None, "partial"
 
     # workspace-write
