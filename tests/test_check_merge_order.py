@@ -24,6 +24,7 @@ history under `tmp_path`; nothing here touches the network or the working tree.
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import subprocess
 from pathlib import Path
@@ -155,6 +156,48 @@ class TestNoMutableRefNameReachesMergeTree:
         assert measured == [("aaaa1111", "bbbb2222")]
         assert all("FETCH_HEAD" not in pair for pair in measured)
 
+    def test_the_pairwise_question_is_also_asked_with_resolved_commits(
+        self, mod, monkeypatch
+    ) -> None:
+        """The pairwise call is a *second* call site, and it was uncovered.
+
+        Measured while reviewing #1153 (cycle cyc20260913-171619): replacing the
+        pairwise call's first argument with the mutable ref name -
+
+            paths = _conflict_paths(_fetch_head(repo, a), heads[b])
+
+        which is the exact shape of the defect this module shipped with - left all
+        19 tests green. The test above drives a single PR, so the pair loop never
+        runs, and the static scan accepted any line that merely mentioned
+        `heads[`. This drives a pair for real.
+        """
+        sha_by_ref = {
+            "FETCH_HEAD^{commit}": "aaaa1111",
+            "refs/emrg-forecast/pr1^{commit}": "bbbb2222",
+            "refs/emrg-forecast/pr2^{commit}": "cccc3333",
+        }
+        measured: list[tuple[str, str]] = []
+
+        def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, sha_by_ref[argv[-1]], "")
+            if argv[:2] == ["git", "merge-tree"]:
+                measured.append((argv[-2], argv[-1]))
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(mod, "_run", fake_run)
+        monkeypatch.setattr(mod, "_fetch_head", lambda repo, n: f"refs/emrg-forecast/pr{n}")
+        mod.forecast("FETCH_HEAD", [1, 2], "argszero/emrg")
+
+        # Two questions against the base, then the pair: every argument a commit.
+        assert measured == [
+            ("aaaa1111", "bbbb2222"),
+            ("aaaa1111", "cccc3333"),
+            ("bbbb2222", "cccc3333"),
+        ]
+        assert all("FETCH_HEAD" not in pair for pair in measured)
+
     def test_a_ref_that_does_not_resolve_fails_loudly(self, mod, monkeypatch) -> None:
         monkeypatch.setattr(
             mod,
@@ -168,22 +211,94 @@ class TestNoMutableRefNameReachesMergeTree:
             mod._rev_parse("FETCH_HEAD")
 
     def test_the_shipped_source_passes_only_commits_to_merge_tree(self, mod) -> None:
-        """Static backstop: `_conflict_paths` is always called with resolved SHAs.
+        """Static backstop: every `_conflict_paths` call is given a resolved SHA.
 
-        The behavioural test above pins `forecast`'s ordering; this one stops a
-        future edit from reintroducing a name at a call site that test does not
-        cover. Both are needed - a single mocked path is exactly how the original
-        defect would evade a behavioural-only suite.
+        By AST rather than by scanning the line's text. The scan this replaces
+        required only `"base_sha" in line or "heads[" in line`, so a defective
+        call whose *second* argument happened to be `heads[...]` satisfied it.
+        Measured while reviewing #1153 (cycle cyc20260913-171619): with
+        `_conflict_paths(_fetch_head(repo, a), heads[b])` in the file - the
+        original defect, back at the pairwise call site - all 19 tests were green.
+
+        The names are *derived*, not hard-coded: they are whatever the two
+        assignments that call `_rev_parse` bind, so renaming `base_sha` is not a
+        failure. That matters, because a rule keyed on a literal name is a rule
+        that can be satisfied by an unrelated line (exactly how the scan it
+        replaces went blind) or broken by a harmless rename.
+
+        Both call sites are read out of the parsed source and the count is
+        asserted to be at least the two the tool needs (a base question and a pair
+        question), so deleting a call site cannot pass by having nothing left to
+        inspect.
         """
         source = SCRIPT.read_text(encoding="utf-8")
         assert "_rev_parse(base)" in source, "the base must be resolved before use"
         assert "_rev_parse(_fetch_head(" in source, "heads must be resolved too"
-        for line in source.splitlines():
-            if "_conflict_paths(" in line and not line.strip().startswith("def "):
-                assert "base_sha" in line or "heads[" in line, (
-                    f"a merge question is asked with something other than a "
-                    f"resolved commit: {line.strip()}"
+
+        tree = ast.parse(source)
+
+        def calls_to(name: str) -> list[ast.Call]:
+            return [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == name
+            ]
+
+        def is_rev_parse(node: ast.AST, argument: str) -> bool:
+            return (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "_rev_parse"
+                and any(
+                    isinstance(arg, ast.Name) and arg.id == argument
+                    for arg in node.args
                 )
+            )
+
+        # `X = _rev_parse(base)` - the resolved base.
+        base_names = [
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign) and is_rev_parse(node.value, "base")
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        ]
+        # `Y = {n: _rev_parse(_fetch_head(repo, n)) for n in ...}` - the resolved heads.
+        heads_names = [
+            target.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.DictComp)
+            and isinstance(node.value.value, ast.Call)
+            and isinstance(node.value.value.func, ast.Name)
+            and node.value.value.func.id == "_rev_parse"
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        ]
+
+        assert base_names, "no assignment resolves the base through _rev_parse"
+        assert heads_names, "no assignment resolves the heads through _rev_parse"
+
+        conflict_calls = calls_to("_conflict_paths")
+        assert len(conflict_calls) >= 2, (
+            "expected at least the base question and the pair question, found "
+            f"{len(conflict_calls)} call(s) of _conflict_paths"
+        )
+        for call in conflict_calls:
+            first = call.args[0] if call.args else None
+            resolved = (
+                isinstance(first, ast.Name)
+                and first.id in base_names
+                or isinstance(first, ast.Subscript)
+                and isinstance(first.value, ast.Name)
+                and first.value.id in heads_names
+            )
+            assert resolved, (
+                "a merge question is asked with something other than a resolved "
+                f"commit: {ast.unparse(call)}"
+            )
 
 
 class TestTheReportNamesWhatCollides():
