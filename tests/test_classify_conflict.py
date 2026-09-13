@@ -252,6 +252,40 @@ class TestCountLineIsADocumentedCountNotAnyInteger:
         label, _ = mod.classify("log(1)\n", "log(2)\n")
         assert label != mod.COUNT_LINE
 
+    def test_two_different_counts_are_not_one_count_re_measured(self, mod) -> None:
+        """The masking comparison is what makes it "the same count", not "a count".
+
+        `_differ_only_by_number` requires every differing pair to carry a documented
+        count **and** the two lines to be equal once digits are masked. Only the
+        second condition says the pair is one fact re-measured; drop it and any two
+        aligned documented counts qualify, so a block adding a *new* count line
+        beside a moved one is answered "MEASURE ... never pick a side" with **rc 0**
+        - the caller's contract for "every block was classified, safe to act on the
+        advice" - when the correct reading is two separate facts.
+
+        Measured 2026-09-11 (`cyc20260911-204842`): removing that comparison inside
+        the function leaves **all 45 tests passing** while changing the verdict on 4
+        of 937 real corpus blocks; the two shapes below are the ones that turn on it.
+        """
+        assert mod.classify(
+            "Python: `uv run pytest tests/ -v` (1407) - import check\n",
+            "Node: `cd emrg/gui && npm test` (1410) - import check\n",
+        )[0] != mod.COUNT_LINE, (
+            "two different facts that both carry counts are not one count "
+            "re-measured; `count-line` says 'measure, never pick a side' at rc 0"
+        )
+        assert mod.classify(
+            "Python: `uv run pytest tests/ -v` (1407) - import check\n",
+            "Python: another run (1410) - rewritten prose\n",
+        )[0] != mod.COUNT_LINE, (
+            "the prose changed too, so the digits are not the only difference"
+        )
+        # ...and the same count re-measured still fires: digits are the only change.
+        assert mod.classify(
+            "Python: `uv run pytest tests/ -v` (1407) - import check\n",
+            "Python: `uv run pytest tests/ -v` (1410) - import check\n",
+        )[0] == mod.COUNT_LINE
+
     def test_classes_are_mutually_exclusive(self, mod) -> None:
         """Every verdict is one of the five labels, never a mix."""
         labels = {
