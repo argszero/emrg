@@ -20,8 +20,8 @@ per-PR fact.
 Measured 2026-09-12 (`cyc20260912-174026`) on master `02e43c8`, on the queue as
 it actually stood:
 
-    master + #1167                 -> CLEAN, documents 1541, collects 1541  ok
-    master + #1166                 -> CLEAN, documents 1541, collects 1541  ok
+    master + #1167                 -> CLEAN, guard OK (count-line era)      ok
+    master + #1166                 -> CLEAN, guard OK (count-line era)      ok
     master + #1167 then #1166      -> CLEAN, documents 1541, collects 1560  GUARD FAILS
 
 Both PRs set the count line to `(1541)`, so the second merge writes a line that
@@ -176,8 +176,12 @@ from pathlib import Path
 # as check-merge-tree-health.py: both tools judge the same guard, and two
 # spellings of its report would be one spelling too many.
 GUARD = "scripts/check-doc-count.py"
-COUNT_IN_REPORT = re.compile(r"documents (\d+).*?but (\d+) are collected")
-OK_IN_REPORT = re.compile(r"OK: .*?documents (\d+)")
+# The guard's report shape changed on 2026-09-13 (#1158): it no longer compares a
+# stored count against the collection, it reports files that store one at all, and
+# the count is measured on demand. Both regexes are kept so the step report names
+# what the guard found instead of a bare "guard OK".
+COUNT_IN_REPORT = re.compile(r"FAIL: (\d+) tracked file\(s\) state")
+OK_IN_REPORT = re.compile(r"OK: no tracked file states the Python test count")
 
 # The document whose count line the guard reads, and the one command that repairs
 # it after a merge (measured on the merged tree, never chosen). Both are printed
@@ -431,11 +435,11 @@ def _guard_verdict(tree_sha: str, workdir: Path) -> tuple[bool, str]:
     out = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode == 0:
         m = OK_IN_REPORT.search(out)
-        return True, f"documents {m.group(1)}" if m else "guard OK"
+        return True, "no stored count" if m else "guard OK"
     if proc.returncode == 1:
         m = COUNT_IN_REPORT.search(out)
         detail = (
-            f"documents {m.group(1)} but {m.group(2)} are collected"
+            f"{m.group(1)} tracked file(s) state the test count"
             if m
             else (out.strip().splitlines() or ["guard FAILED"])[-1]
         )
