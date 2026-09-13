@@ -47,6 +47,7 @@ TASK_TEMPLATES: dict[str, str] = {
     "open-source": "open_source_prompt.md",
     "promote": "promote_prompt.md",
     "journal": "journal_prompt.md",
+    "competition": "competition_prompt.md",
 }
 
 # ── Task CRUD constants (rant 2026-08-12T18:23:15 P2) ─────────────
@@ -1225,6 +1226,7 @@ class TaskScheduler:
         "open-source": TaskHandler,  # same handler, different template
         "promote": TaskHandler,  # same handler, different template
         "journal": TaskHandler,  # same handler, different template
+        "competition": TaskHandler,  # same handler, different template
     }
 
     def __init__(self, identity: InstanceIdentity) -> None:
