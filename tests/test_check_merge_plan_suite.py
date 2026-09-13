@@ -643,9 +643,15 @@ def test_a_base_that_cannot_be_fetched_is_a_measurement_error(
     about the refresh: a name with no ref at all (`origin/nope`), and - the
     dangerous one - an *existing* remote-tracking ref whose remote cannot be
     reached. A tool that swallowed the fetch failure would answer about the ref it
-    could not verify, which is the defect the refresh exists to remove.
+    could not verify, which is the defect the refresh exists to remove. The head
+    fetch is stubbed in that arm so the base's fetch is the only thing left that can
+    fail: otherwise the run exits 2 on the head instead, and a swallowed base
+    failure would pass this test by accident (it did, until the stub was added).
     """
-    repo, _origin = queue
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    head = _git(origin, "rev-parse", "refs/pull/1/head")
     monkeypatch.chdir(repo)
 
     assert mod.main(["1", "--base", "origin/nope"]) == 2
@@ -657,6 +663,7 @@ def test_a_base_that_cannot_be_fetched_is_a_measurement_error(
     # the fetch and not the lookup - without this the arm below could pass for the
     # first arm's reason.
     assert _git(repo, "rev-parse", "--verify", "refs/remotes/origin/master")
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
     _git(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
 
     assert mod.main(["1", "--base", "origin/master"]) == 2
