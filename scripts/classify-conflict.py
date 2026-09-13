@@ -421,8 +421,11 @@ def classify(ours_text: str, theirs_text: str) -> tuple[str, str]:
         return (
             COUNT_LINE,
             "differs only by a number - MEASURE on the merged tree, never pick a "
-            "side (both sides are stale by construction); for Agent.md's test "
-            "count use `check-doc-count.py --resolve-conflict`",
+            "side (both sides are stale by construction). For a *stored* count "
+            "(Agent.md's GUI/renderer breakdowns) that means re-measuring; the "
+            "Python test total is not stored at all since 2026-09-13, so "
+            "`check-doc-count.py --resolve-conflict` resolves that line by "
+            "dropping the claim",
         )
 
     ours_syms, theirs_syms = _symbols(ours_text), _symbols(theirs_text)

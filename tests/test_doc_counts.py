@@ -2,8 +2,8 @@
 
 Pattern history: #426 -> #430 -> #510 -> #511. Every time tests are added or
 removed, the documented counts drift and require a follow-up doc PR. This
-module asserts the documented Python count matches the real collection, and
-that the documented GUI breakdown sums to its headline number.
+module asserts that no tracked file stores the Python test count (it is a
+measurement), and that the documented GUI breakdown sums to its headline number.
 
 #584: README.cn.md was the only test-count doc NOT guarded — it drifted to
 91 (22 renderer smoke) while README.md/Agent.md said 96 (27 renderer smoke)
@@ -11,9 +11,14 @@ after #580 added 3 GUI tests. Both checks now cover all three docs
 (README.md, README.cn.md, Agent.md); CJK full-width parens and the
 "项：" separator are normalized before matching.
 #692: rant 2026-08-11T19:50:37 — README.md/README.cn.md switched to the
-Tests badge (no hardcoded counts); the python-count check now guards
+Tests badge (no hardcoded counts); the Python-count check then guarded
 Agent.md only, while the GUI-breakdown check still picks up any
 "(N: ...)" line it finds in any doc (Agent.md keeps the breakdown).
+2026-09-13 (`cyc20260913-132356`, issue #1158): the last stored copy (Agent.md's
+Python total) was removed too, because 11 of 11 conflicting PRs conflicted on
+that one line and two PRs writing the same value merged cleanly into a stale
+tree. The Python rule is now "no tracked file states it", and the rule lives in
+`scripts/check-doc-count.py` — loaded here, not re-spelled.
 """
 
 import re
@@ -23,19 +28,6 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _collected_pytest_count() -> int:
-    """Run pytest in collect-only mode and parse the total."""
-    out = subprocess.check_output(
-        [__import__("sys").executable, "-m", "pytest", "--collect-only", "-q"],
-        cwd=str(REPO_ROOT),
-        text=True,
-        stderr=subprocess.STDOUT,
-    )
-    m = re.search(r"(\d+) tests? collected", out)
-    assert m, f"could not parse collected count from pytest output:\n{out[-2000:]}"
-    return int(m.group(1))
 
 
 def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
@@ -64,88 +56,196 @@ def _gui_breakdowns() -> list[tuple[str, int, list[int]]]:
     return found
 
 
-PYTHON_COUNT_LINE = re.compile(r"uv run pytest tests/ -v` \((\d+)\)")
+# --- the Python total is measured, never stored -------------------------------
+#
+# This guard used to check that the count stored in `Agent.md` was still current.
+# Measured 2026-09-13 (`cyc20260913-132356`) on the live queue: 11 of the 14 open
+# PRs were conflicting and **all 11 conflicted on that one line** — every PR that
+# adds a test had to rewrite the same derived number, so the queue's conflicts
+# were not about the code at all. The dangerous half is the opposite one: two PRs
+# writing the *same* value merge cleanly and leave the merged tree stale (measured
+# that cycle: #1179 + #1180 both said 1601 while the merged tree collected 1603 —
+# no conflict marker anywhere, and the old guard could only catch it on the merged
+# tree).
+#
+# A derived fact stored in a document is therefore both a conflict magnet and a
+# silent-corruption site, and no better guard fixes that. The rule changed
+# direction: instead of checking that the stored number is current, it checks that
+# **no tracked file stores one**. That property is static, so it cannot go stale,
+# it needs no collection, and a merge cannot break it.
+#
+# The rule itself lives in `scripts/check-doc-count.py` — the host-side half,
+# which `scripts/check-merge-sequence.py` runs against merged trees. This module
+# loads that file instead of re-spelling the pattern (the shape it had before:
+# its own `PYTHON_COUNT_LINE`), and `test_the_guard_holds_no_second_copy_of_the_
+# claim_pattern` below keeps a second spelling from creeping back.
+
+DOC_COUNT_TOOL = REPO_ROOT / "scripts" / "check-doc-count.py"
 
 
-def _documented_python_counts(text: str) -> list[int]:
-    r"""Every documented Python count in a doc, in order.
+def _load_doc_count_tool():
+    """The one implementation of the rule, loaded by path.
 
-    Returns a list rather than a single value so a caller can tell "the doc
-    states this once" from "the doc states it twice". Only the ordering form
-    ``uv run pytest tests/ -v` (N)`` in a shell fence counts; the prose
-    no-fence form (``python -m emrg``, or a CI note mentioning a count) does
-    not — measured on the real ``Agent.md``: one line matches, and a naive
-    "any line with a number" rule would count three.
+    By path because the filename is not importable by name (the dash), the way
+    `tests/test_check_doc_count.py` and `_loaded_guard_module` below already load
+    these files.
     """
-    return [int(value) for value in PYTHON_COUNT_LINE.findall(text)]
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_doc_count_tool", DOC_COUNT_TOOL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def _single_documented_python_count(doc: str, text: str) -> int:
-    """The guard proper: the one count `doc` states, refusing an ambiguous doc.
+def test_no_tracked_file_states_the_python_test_count(monkeypatch) -> None:
+    """Nothing in this repo writes the Python test total down.
 
-    Extracted from the test below so the ambiguous case can be *driven* (a doc
-    is just text) rather than described. This line is the repo's
-    most-conflicted one — #1119/#1120/#1121/#1122, then #1124/#1125/#1126 —
-    and a hand-resolved conflict can leave the stale line *above* the correct
-    one. A first-match guard then reads the stale number and reports the
-    *opposite* of the real problem ("documents 1315 but 1338 are collected"),
-    so any doc with two lines is ambiguous and must be repaired, never
-    rank-ordered.
+    Both halves of the failure this replaces are gone by construction: there is
+    no value to conflict on when two branches add tests, and no value to go stale
+    when they merge. Reporting the offending file and line keeps the rule
+    actionable — a bare "the doc is wrong" was never enough to fix it.
     """
-    counts = _documented_python_counts(text)
-    assert counts, f"no documented Python count found in {doc}"
-    assert len(counts) == 1, (
-        f"{doc} states a Python test count {len(counts)} times: {counts}. This "
-        "line is the repo's most-conflicted line and a hand-resolved merge can "
-        "leave a stale copy. Delete the stale line, then re-measure."
+    tool = _load_doc_count_tool()
+    # Point the rule at *this* module's checkout: `_resolve_root()` answers "the
+    # tree the caller is standing in", which is right for a tool run by hand and
+    # wrong for a test that must measure its own tree wherever pytest started.
+    monkeypatch.setattr(tool, "REPO_ROOT", REPO_ROOT)
+    found = tool.offenders()
+    assert not found, (
+        "a tracked file states the Python test count, which is a measurement "
+        "rather than a stored fact: "
+        + "; ".join(
+            f"{name}:{lineno} [{shape}] {line[:80]}"
+            for name, lineno, shape, line in found
+        )
+        + ".\nDelete the number and name the command instead — a stored count goes "
+        "stale silently, and every PR that adds a test has to rewrite the same "
+        f"line (issue #1158). Measure it with `{tool.INVOCATION} --measure`."
     )
-    return counts[0]
 
 
-def test_python_count_matches_docs() -> None:
-    collected = _collected_pytest_count()
-    # rant 2026-08-11T19:50:37: README.md/README.cn.md dropped hardcoded counts in
-    # favor of the Tests badge (dynamic — no more doc drift). Agent.md keeps the
-    # number (project-context file, checked by the same guard).
-    doc = "Agent.md"
-    text = (REPO_ROOT / doc).read_text(encoding="utf-8")
-    # Agent.md: "pytest tests/ -v` (N)"
-    documented = _single_documented_python_count(doc, text)
-    assert documented == collected, (
-        f"{doc} documents {documented} Python tests but {collected} are collected "
-        f"(--collect-only). Sync the doc (and this guard) when adding/removing tests.\n"
-        "Fix with: uv run --no-sync python3 scripts/check-doc-count.py --write"
+def test_the_stored_count_rule_fires_on_the_line_it_replaced() -> None:
+    """Drive the rule against the exact line this change removed.
+
+    The rule is a product: it must be known to fire on the shape it exists to
+    delete, not merely to be silent on the tree that no longer has one. The line
+    is the real `Agent.md` text, kept as a fixture precisely because it is gone
+    from the tree.
+    """
+    tool = _load_doc_count_tool()
+    old_line = (
+        "Python: `uv run pytest tests/ -v` (1599) — import check: "
+        '`uv run python -c "from emrg.client.app import run_client"'
     )
+    assert [shape for _, shape, _ in tool.claims_in(old_line)] == [
+        "stored next to the test command"
+    ]
 
 
-DUPLICATED_DOC = (
-    "Python: `uv run pytest tests/ -v` (1338) — import check: `uv run python -c …`\n"
-    "Python: `uv run pytest tests/ -v` (1315) — import check: `uv run python -c …`\n"
-)
+def test_the_stored_count_rule_fires_on_the_stale_prose_copy() -> None:
+    """The second copy — in a file no check read until this one did.
 
-
-def test_python_count_guard_refuses_a_duplicate_line() -> None:
-    """Drive the real guard against a doc that states the count twice.
-
-    The guard itself is invoked (with a doc's text), and the assertion message
-    is the guard's own — not a copy of it. A test that re-stated the message
-    inline would keep passing after the guard's message changed, which is the
-    exact shape #1124 was rejected for: a string a host never sees satisfying a
-    test that claims to pin the host's experience.
+    `DEVELOPMENT.md` advertised "currently 681 items" while the tree collected
+    1590 (issue #1158's measurement, 2026-09-13): off by 2.3x, in prose, on a line
+    whose only job was to say how to run the tests. A rule keyed on the number
+    could not have found it (nothing knew the number was wrong); a rule keyed on
+    the *shape* of a claim does.
     """
-    with pytest.raises(AssertionError, match=r"states a Python test count 2 times"):
-        _single_documented_python_count("Agent.md", DUPLICATED_DOC)
+    tool = _load_doc_count_tool()
+    stale = "uv run pytest tests/ -v   # run tests (currently 681 items)"
+    assert [shape for _, shape, _ in tool.claims_in(stale)] == ["parenthesised count"]
 
 
-def test_python_count_guard_still_sees_a_single_line() -> None:
-    """The negative half: one line must keep working (no fail-loud on the norm).
+def test_the_stored_count_rule_is_silent_on_the_lines_that_replaced_those() -> None:
+    """The negative half, driven against the real replacement lines.
 
-    Measured 2026-09-10 on `Agent.md`: exactly one line matches, and it is the
-    fence form — the prose `python -m emrg` line and the CI note mentioning a
-    count do not, so a naive "any line with a number" rule would count 3.
+    A rule that fired on the wording which *replaced* the count would have made
+    this change impossible to land, and a rule only ever pointed at the real tree
+    is not known to discriminate. The lines are read out of the real docs rather
+    than restated here, so editing either one drives this test immediately.
     """
-    assert _single_documented_python_count("Agent.md", DUPLICATED_DOC.splitlines()[0] + "\n") == 1338
-    assert _documented_python_counts("no count line here\n") == []
+    tool = _load_doc_count_tool()
+    lines = [
+        line
+        for doc in ("Agent.md", "DEVELOPMENT.md")
+        for line in (REPO_ROOT / doc).read_text(encoding="utf-8").splitlines()
+        if "pytest tests/ -v" in line
+    ]
+    assert len(lines) >= 2, f"expected both replacement lines, found {lines}"
+    for line in lines:
+        assert not tool.claims_in(line), (
+            f"the rule fires on the wording that replaced the count: {line!r}"
+        )
+    # A small, specific count is not a claim about the total. The prose rule is
+    # deliberately scoped to three or more digits because "the 3 tests in this
+    # file" is a sentence about a subset while the total has four digits today;
+    # pinned so widening it stays a decision rather than an accident.
+    assert not tool.claims_in("this file holds 3 tests")
+
+
+def test_the_scan_scope_covers_every_tracked_doc(monkeypatch) -> None:
+    """The rule's exclusion must not be able to grow over a real claim.
+
+    `scripts/check-doc-count.py` skips `tests/` and `scripts/` (measured: every
+    hit there is a fixture or prose *about* the shape — the place the rule and its
+    probes live, and the only place that may spell the claim). A scope whose
+    exclusions are not witnessed is how a guard goes quiet: narrowing the scan
+    would turn this rule green while a stale number sat in the file nobody read —
+    exactly the `DEVELOPMENT.md` defect.
+    """
+    tool = _load_doc_count_tool()
+    monkeypatch.setattr(tool, "REPO_ROOT", REPO_ROOT)
+    scanned = set(tool.scanned_files())
+    assert scanned, "the rule scans nothing at all"
+
+    tracked = (
+        subprocess.check_output(
+            ["git", "ls-files", "*.md"],
+            cwd=str(REPO_ROOT),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        ).split()
+    )
+    assert tracked, "no tracked markdown found, so this witness would pass vacuously"
+    missing = sorted(set(tracked) - scanned)
+    assert not missing, (
+        "the rule skips tracked docs, so a claim in one of these would be "
+        f"invisible: {missing}"
+    )
+    for witness in (
+        "Agent.md",
+        "README.md",
+        "README.cn.md",
+        "DEVELOPMENT.md",
+        "MANIFESTO.md",
+    ):
+        assert witness in scanned, f"{witness} is not scanned for a stored count"
+
+
+def test_the_guard_holds_no_second_copy_of_the_claim_pattern() -> None:
+    """One implementation, two consumers — pinned structurally, not by prose.
+
+    Before this change the guard spelled the pattern itself
+    (`PYTHON_COUNT_LINE = re.compile(r"uv run pytest tests/ -v` \\((\\d+)\\)")`) while the
+    tool spelled it again. Two spellings can disagree while both stay green, and
+    the tool is the one `check-merge-sequence.py` runs on merged trees — so a
+    disagreement would mean CI and the merge guard judging different rules.
+
+    The namespace is checked rather than the source text, because this file's own
+    *fixtures* quote the stored shape on purpose.
+    """
+    guard = _loaded_guard_module()
+    stored = "Python: `uv run pytest tests/ -v` (1599) — import check: x"
+    for name, value in vars(guard).items():
+        if isinstance(value, re.Pattern):
+            assert not value.search(stored), (
+                f"{name} in tests/test_doc_counts.py is a second copy of the "
+                "stored-count pattern; the rule lives in "
+                "scripts/check-doc-count.py and this guard must call it "
+                "(tool.offenders()), not re-spell it"
+            )
 
 
 def test_gui_breakdown_sums_to_headline() -> None:
@@ -209,7 +309,7 @@ def test_count_line_kinds_appear_once_per_doc() -> None:
                 for kind, lines in sorted(found.items())
             )
             + ". A hand-resolved merge left a stale copy - delete it, then "
-            "re-measure with `uv run --no-sync python3 scripts/check-doc-count.py --write`."
+            "re-measure with `uv run --no-sync python3 scripts/check-doc-count.py --measure`."
         )
 
 
