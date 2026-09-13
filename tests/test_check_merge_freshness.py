@@ -29,6 +29,26 @@ is not enough to call a verdict current, so it is tested as its own state.
 Nothing here touches the network: `_gh_json` is replaced, and the replacement is
 asserted to receive the arguments the real helper would (so a test cannot pass by
 never calling it).
+
+Per-state remedies (cycle `cyc20260914-010711`)
+----------------------------------------------
+The remedy this tool prints used to be one sentence for every stale verdict:
+"re-merge master into each stale branch, then let CI run". Measured on the live
+queue that day (`#1197` 2 valid votes, `#1198` 1, `#1199`/`#1200` none, master
+`abe6f8b`) the sentence was a way to *lose* work: a refresh moves the head, and
+`check-vote-count.py` voids every vote predating a head push, so following it
+would have paid three cycles of review for a freshness the landing tree can be
+measured for free. Both directions are pinned here, because a remedy that is too
+cautious is as wrong as one that is too eager:
+
+* **with votes** - named, priced, and pointed at the landing-tree measurement;
+* **without votes** - the refresh is the cheap way to a current verdict and is
+  recommended unchanged;
+* **unreadable count** - said so, never rendered as `0`, which is the line that
+  means "refresh freely";
+* **not ancestry-shaped** (no run / still running / failing) - the remedy that
+  fits that state, since a rebase does not answer any of them, and no vote query
+  is spent on a state whose remedy does not depend on the count.
 """
 
 from __future__ import annotations
@@ -114,6 +134,38 @@ def _run_(sha: str = HEAD, conclusion: str = "success", at: str = "2026-09-11T00
 
 def _install(mod, monkeypatch, fake: FakeGh) -> None:
     monkeypatch.setattr(mod, "_gh_json", fake)
+
+
+@pytest.fixture(autouse=True)
+def _no_vote_network(mod, monkeypatch):
+    """No test reaches GitHub through the vote sibling either.
+
+    The price of a refresh is read from `check-vote-count.py`, whose entry points
+    run real `gh` commands. A test that forgot to fix the count would then not
+    only make a network call but *pass* with whatever the live queue happened to
+    be that minute. Both of the sibling's gh entry points are poisoned here, so an
+    unpatched read degrades to "unavailable" (which `_valid_votes` is built to
+    survive) instead of quietly answering with real data.
+    """
+    module = mod.votes_counter()
+
+    def boom(*args, **kwargs):
+        raise AssertionError("the sibling vote counter must not be reached in tests")
+
+    monkeypatch.setattr(module, "_gh_json", boom)
+    monkeypatch.setattr(module, "_gh_json_paginated", boom)
+
+
+def _votes(mod, monkeypatch, count: int | None, note: str = "") -> list[int]:
+    """Fix the count seam `main` uses, and record which PRs it was asked about."""
+    asked: list[int] = []
+
+    def fake(pr: int) -> tuple[int | None, str]:
+        asked.append(pr)
+        return count, note
+
+    monkeypatch.setattr(mod, "_valid_votes", fake)
+    return asked
 
 
 def _run(mod, monkeypatch, fake: FakeGh, argv: list[str] | None = None) -> int:
@@ -233,6 +285,204 @@ def test_the_newest_run_for_the_head_wins(mod, monkeypatch, capsys):
     rc = _run(mod, monkeypatch, fake)
     assert rc == 0
     assert "FRESH" in capsys.readouterr().out
+
+
+# --- the remedy is priced by the state, not printed blanket ----------------
+#
+# Every test here asserts on the prose the tool adds *after* the verdicts, which
+# is where the action lives: the verdict says what is wrong, the remedy says what
+# it costs, and the two were previously disconnected (a stale-with-votes PR was
+# told to do the one thing that voids its votes).
+
+
+def test_a_stale_branch_with_votes_is_told_what_a_refresh_would_cost(mod, monkeypatch, capsys):
+    """The measured queue: stale *and* carrying review.
+
+    #1197 sat at 2/3 and #1198 at 1/3 when the whole queue went stale. The advice
+    they got - "re-merge master into each stale branch" - would have returned them
+    to 0/3 to make CI's verdict current, which is not a trade the tool has any
+    business recommending silently.
+    """
+    fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
+    asked = _votes(mod, monkeypatch, 2)
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert asked == [1], "the price is read for the stale PR"
+    assert "2 valid vote(s) at risk" in err
+    assert "voids all 2" in err
+    assert "check-merge-plan-suite.py 1" in err
+    # A plain comment is named explicitly: it is the vehicle that carries the
+    # landing-tree reading without moving the head's vote count.
+    assert "gh pr comment" in err
+    assert "Re-merge master into each stale branch" not in err
+
+
+def test_a_stale_branch_with_no_votes_is_told_the_refresh_is_free(mod, monkeypatch, capsys):
+    """The other direction: with nothing to void, the refresh IS the remedy.
+
+    #1199/#1200 were stale at 0/3. Telling them to measure a landing tree by hand
+    instead would be the cautious-but-wrong output - CI on the real merged tree is
+    strictly better evidence, and it costs nothing here.
+    """
+    fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
+    _votes(mod, monkeypatch, 0)
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "0 valid votes - nothing to void" in err
+    assert "Re-merge master into the branch" in err
+    assert "at risk" not in err
+
+
+def test_an_unreadable_vote_count_is_said_so_and_never_read_as_zero(mod, monkeypatch, capsys):
+    """`0` is an answer, so a failed read must not produce it.
+
+    Zero is the only count that licenses the destructive action, which makes it
+    the one value this line must never invent. The failure cause is carried into
+    the message so a reader can tell a gh outage from a permissions problem.
+    """
+    fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
+    _votes(mod, monkeypatch, None, "RuntimeError: gh failed (rc=1)")
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "vote count unavailable (RuntimeError: gh failed (rc=1))" in err
+    assert "0 valid votes" not in err
+    assert "Re-merge master into the branch" not in err
+
+
+def test_a_missing_run_is_told_to_re_trigger_rather_than_refresh(mod, monkeypatch, capsys):
+    """An unjudged head is a real state, and a rebase is the expensive way out.
+
+    `gh pr checks` reports "no checks reported" after a dropped push event. A
+    refresh fixes that too - but by moving the head, so the cheaper remedy that
+    answers the same question on the same head is named instead. It is also the
+    arm that pins the query discipline: a state whose remedy does not depend on
+    the count must not spend a gh query asking for it.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [])
+    asked = _votes(mod, monkeypatch, 7)
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert asked == [], "no count is read for a state whose remedy ignores it"
+    assert "re-trigger CI on the same head" in err
+    assert "keeps the votes" in err
+    assert "Re-merge master into the branch" not in err
+
+
+def test_a_run_still_going_is_told_to_wait(mod, monkeypatch, capsys):
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(conclusion="pending")])
+    asked = _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert asked == []
+    assert "wait for the run" in err
+
+
+def test_a_failing_run_is_told_to_fix_the_failure_not_to_refresh(mod, monkeypatch, capsys):
+    """A red run is not an expired one, so no refresh-shaped advice may appear.
+
+    The verdict reason already says this; the remedy has to agree with it, or the
+    two halves of one output recommend opposite actions.
+    """
+    fake = FakeGh(_view(), _compare("ahead", 1, 0), [_run_(conclusion="failure")])
+    asked = _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert asked == []
+    assert "fix the failure" in err
+    assert "does not make a failing run pass" in err
+
+
+def test_json_carries_the_kind_and_the_count(mod, monkeypatch, capsys):
+    """A caller scripting the queue needs the remedy's inputs, not just the prose."""
+    fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
+    _votes(mod, monkeypatch, 3)
+    rc = _run(mod, monkeypatch, fake, ["1", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload[0]["stale_kind"] == "ancestry"
+    assert payload[0]["valid_votes"] == 3
+
+
+def test_a_fresh_verdict_carries_neither_a_kind_nor_a_count(mod, monkeypatch, capsys):
+    """Fresh is not a fifth kind, and it must not pay for a remedy query: a fresh
+    verdict has no remedy to price, and its query count staying at three is what
+    keeps the healthy path exactly as cheap as it was before this existed."""
+    fake = FakeGh(_view(), _compare("ahead", 4, 0), [_run_()])
+    asked = _votes(mod, monkeypatch, 9)
+    rc = _run(mod, monkeypatch, fake, ["1", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload[0]["stale_kind"] == ""
+    assert payload[0]["valid_votes"] is None
+    assert asked == []
+    assert len(fake.calls) == 3
+
+
+def test_the_count_comes_from_the_sibling_that_owns_it(mod, monkeypatch):
+    """The delegation, tested where it actually happens.
+
+    A local re-reading of the vote rule would be a second answer to "how many
+    votes does this PR have", and the count is now load-bearing for a destructive
+    recommendation. `needed` is asserted too: the gate is three, and a sibling
+    called with a made-up threshold would answer the wrong question.
+    """
+    seen: list[tuple[int, int]] = []
+
+    class _Verdict:
+        valid_count = 2
+
+    def fake_check_pr(pr: int, needed: int):
+        seen.append((pr, needed))
+        return _Verdict()
+
+    monkeypatch.setattr(mod.votes_counter(), "check_pr", fake_check_pr)
+    assert mod._valid_votes(41) == (2, "")
+    assert seen == [(41, 3)]
+
+
+def test_a_broken_count_read_degrades_to_unavailable(mod, monkeypatch):
+    """The seam's own failure path: the freshness answer survives a missing price."""
+    def boom(pr: int, needed: int):
+        raise RuntimeError("gh failed (rc=1): gh api repos/...")
+
+    monkeypatch.setattr(mod.votes_counter(), "check_pr", boom)
+    count, note = mod._valid_votes(41)
+    assert count is None
+    assert "gh failed" in note
+
+
+def test_a_broken_count_read_reaches_main_as_unavailable_not_zero(mod, monkeypatch, capsys):
+    """The same property one layer up, with the *real* reader in place.
+
+    `test_an_unreadable_vote_count_is_said_so_and_never_read_as_zero` fixes the
+    count seam, so it cannot see what the real reader returns when the sibling
+    breaks - and that return value is exactly where a helpful-looking `0` would
+    be written. Here the real `_valid_votes` runs against a broken sibling, and
+    the assertions are on what the user is told.
+    """
+    fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
+
+    def boom(pr: int, needed: int):
+        raise RuntimeError("gh failed (rc=1): gh api repos/argszero/emrg/commits/...")
+
+    monkeypatch.setattr(mod.votes_counter(), "check_pr", boom)
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1, "an unreadable price must not cost the answer to the real question"
+    assert "vote count unavailable (RuntimeError: gh failed (rc=1)" in err
+    assert "0 valid votes" not in err
+    assert "Re-merge master into the branch" not in err
+
+
+def test_the_sibling_is_loaded_once(mod, monkeypatch):
+    """Cached, not reloaded per PR: this runs once per stale PR in a queue."""
+    assert mod.votes_counter() is mod.votes_counter()
 
 
 # --- fail loud, never guess ------------------------------------------------

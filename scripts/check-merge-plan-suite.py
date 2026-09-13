@@ -48,6 +48,31 @@ empty environment, measured repeatedly in this repo - so the suite is run with
 `sys.executable`, i.e. the interpreter running this tool (under
 `uv run --no-sync`, the project environment), with the worktree as cwd.
 
+The base is fetched, then named
+-------------------------------
+A plan is built *onto* a base, and this tool fetched every PR head and no base, so
+the two halves of one answer came from different points in time and from different
+refs. Measured hermetic (`cyc20260914-002731`: a bare `origin`, real git, no
+network) on a clone whose `refs/remotes/origin/master` was left at the older commit
+while the bare origin held the true master, and, in a second arm family, with a
+stray local branch `refs/heads/origin/master` present to shadow it:
+
+    PRE   --base origin/master  base ec7ce11a (origin/master)     tree 5427c8ecb011
+    POST  --base origin/master  base 3fbd101d (refs/remotes/...)  tree 43752830eb32
+    PRE   (shadow present)      base 9c8b3410 (origin/master)     tree 088f2299677e
+
+Three different trees were judged for one question, and the header named
+`origin/master` in all three cases - the wrong-tree defect this family exists to
+remove, one level up from the per-PR gates. So the base is **fetched first**, and
+then **taken by full name**: `git rev-parse` consults `refs/heads/<name>` before
+`refs/remotes/<name>`, so one stray local branch of that name replaces the remote
+ref, while `refs/remotes/origin/<name>` means exactly one ref. Both halves are
+asked of `check-merge-sequence.py`'s `_refresh_base`/`_qualify_ref` rather than
+reimplemented here, so the rule cannot drift between the gates that ask about it.
+A SHA, a local branch name or a written refspec is taken literally; a
+remote-tracking name that cannot be fetched, or one that denotes only a local
+branch, is a measurement error (exit 2) rather than a base nobody verified.
+
 Usage
 -----
     uv run --no-sync python3 scripts/check-merge-plan-suite.py 1136 1152 1185
@@ -66,8 +91,9 @@ Exit codes
        step's tree passed)
     1  the plan's final tree was built and its suite FAILED - the finding (with
        `--steps`: at least one step's tree failed, and the step is named)
-    2  the question could not be answered (git/gh failure, or the suite could not
-       be run at all): fail loud, never report health that was not measured
+    2  the question could not be answered (git/gh failure, a base that names only
+       a local branch or cannot be fetched, or the suite could not be run at all):
+       fail loud, never report health that was not measured
     3  the plan has no final tree - a step conflicts. Not a health verdict: there
        is no tree to judge. That question belongs to `check-merge-sequence.py`.
 
@@ -91,6 +117,7 @@ runs, and never read a skip/pass delta between the two harnesses as a regression
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
@@ -101,9 +128,36 @@ from pathlib import Path
 TIP_REF = "refs/emrg-plan-suite/tip"
 SUITE = ["-m", "pytest", "tests/", "-q", "--no-header"]
 
+# The sibling tool that owns the base rule, loaded from its file rather than
+# imported by name: the scripts in this directory are not importable modules
+# (hyphenated names, no package), and this is the same loader the test suite
+# already uses for them. Taken from the sibling rather than copied so the *rule*
+# has one implementation - a base name must not mean different things to the
+# gates that ask about it.
+_SIBLING = Path(__file__).resolve().parent / "check-merge-sequence.py"
 
-class MeasurementError(Exception):
-    """The question could not be answered. Never a verdict."""
+
+def _load_sibling():
+    spec = importlib.util.spec_from_file_location("check_merge_sequence", _SIBLING)
+    if spec is None or spec.loader is None:  # pragma: no cover - file is in this repo
+        raise RuntimeError(f"could not load {_SIBLING}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+seq = _load_sibling()
+
+
+# The sibling's error class, aliased rather than declared: the base's half of the
+# question is asked *of the sibling*, and a second class of the same name would let
+# its refusals travel past `except MeasurementError` - a base that denotes only a
+# local branch would then reach the caller as a traceback instead of as the
+# measurement error it is. The first draft of this change did exactly that, and the
+# test that asserts exit 2 for such a base is what caught it.
+#   "The question could not be answered. Never a verdict."
+MeasurementError = seq.MeasurementError
 
 
 class PlanConflict(Exception):
@@ -444,7 +498,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--repo", default="argszero/emrg", help="owner/name")
     parser.add_argument(
-        "--base", default="origin/master", help="the ref to plan onto"
+        "--base",
+        default="origin/master",
+        help=(
+            "the ref to plan onto; a remote-tracking ref is fetched first and "
+            "taken by full name, anything else literally"
+        ),
     )
     parser.add_argument(
         "--steps",
@@ -457,14 +516,23 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        base = _rev_parse(args.base)
+        # The base, in the two dimensions it can be wrong by: *when* it was read
+        # and *which* ref the name denotes. Both are owned by the sibling, so both
+        # are asked of it rather than reimplemented here - a plan measured against
+        # a base nobody named is the defect this whole family exists to remove.
+        seq._refresh_base(args.base)
+        base_ref = seq._qualify_ref(args.base)
+        base = _rev_parse(base_ref)
         numbers = args.prs or _open_pr_numbers(args.repo)
         heads = [(number, _fetch_head(number)) for number in numbers]
     except MeasurementError as exc:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
 
-    print(f"base {base[:8]} ({args.base}), {len(numbers)} PR(s) planned")
+    # The ref measured, not the spelling typed: they differ whenever a short name
+    # is ambiguous, and a header that reports `origin/master` for a commit that is
+    # not master is how the wrong-tree defect stays invisible.
+    print(f"base {base[:8]} ({base_ref}), {len(numbers)} PR(s) planned")
 
     try:
         tip = build_plan_tip(base, heads)
