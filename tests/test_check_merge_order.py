@@ -13,6 +13,11 @@ These tests pin the parts that are easy to get subtly wrong, in both directions
 
 * a clean merge and a conflicting merge must be told apart, and a *failure to
   measure* must be neither (it must not be reported as a conflict);
+* both answers are read from the **merged tree's name** on `merge-tree`'s first
+  line, never from its exit code - exit 0 with nothing printed is what `--quiet`
+  does to a clean merge, and exit 1 with nothing printed is what an unmergeable
+  input pair does (measured, `cyc20260914-055701`), so an unnamed tree is "not
+  answered" whichever code came with it;
 * the conflicted **paths** are read from `merge-tree`'s output, so the report names
   what collides rather than only that something did;
 * **no mutable ref name reaches `merge-tree`** - the invariant this tool shipped
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 import subprocess
 from pathlib import Path
 
@@ -33,6 +39,15 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-merge-order.py"
+
+# The shape `git merge-tree --write-tree` actually prints, measured 2026-09-14
+# (`cyc20260914-055701`) in a scratch repo: the merged tree's OID on the first line
+# - for a clean merge *and* for a conflict - then the stage block, then a blank line
+# and the messages. A fixture without that first line models a report git never
+# writes, and after the change these tests pin, such a report is *not answered*
+# rather than a verdict, so those fixtures would stop exercising the code they were
+# written for. Hence every clean/conflict fixture below carries `_TREE` explicitly.
+_TREE = "9" * 40
 
 
 def _load_module():
@@ -48,18 +63,25 @@ def mod():
 
 
 class TestTheMergeQuestionIsAnswered():
-    """`merge-tree` rc 0 = clean, 1 = conflict, anything else = not answered."""
+    """Both answers come from the named tree; the exit code is not the answer.
+
+    `merge-tree` exits 0 for a clean merge *and* for `--quiet` on the same merge
+    (printing nothing), and exits 1 for a conflict *and* for a failure to merge
+    the two inputs (printing nothing) - measured 2026-09-14 (`cyc20260914-055701`).
+    So: "no merged tree named" = not answered, whatever the code says.
+    """
 
     def test_a_clean_merge_yields_no_paths(self, mod, monkeypatch) -> None:
         monkeypatch.setattr(
             mod,
             "_run",
-            lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+            lambda argv: subprocess.CompletedProcess(argv, 0, _TREE + "\n", ""),
         )
         assert mod._conflict_paths("a", "b") == []
 
     def test_a_conflicting_merge_names_the_paths(self, mod, monkeypatch) -> None:
         out = (
+            _TREE + "\n"
             "100644 f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0 1\tAgent.md\n"
             "100644 e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0 2\tAgent.md\n"
             "100644 d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 3\tAgent.md\n"
@@ -78,6 +100,7 @@ class TestTheMergeQuestionIsAnswered():
         self, mod, monkeypatch
     ) -> None:
         out = (
+            _TREE + "\n"
             "100644 f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0 1\tAgent.md\n"
             "100644 f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0 1\ttests/test_x.py\n"
             "100644 e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0 2\tAgent.md\n"
@@ -118,6 +141,77 @@ class TestTheMergeQuestionIsAnswered():
         )
         assert mod._conflict_paths("a", "b") is None
 
+    def test_a_clean_exit_with_no_named_tree_is_not_an_answer(
+        self, mod, monkeypatch
+    ) -> None:
+        """rc 0 and nothing printed is a shape git really writes - `--quiet`.
+
+        Measured 2026-09-14 (`cyc20260914-055701`) in a scratch repo:
+        `git merge-tree --write-tree --quiet <a> <b>` on a *clean* merge exits 0
+        with empty stdout, and on a conflict exits 1 with empty stdout. This tool
+        passed no `--quiet`, but it read the clean answer from the code exactly as
+        if it had: `[]` (= "the merge is clean") came out of an exit code, over a
+        report it never looked at. `[]` is the one answer downstream re-checks
+        nothing about - `forecast` then reports that PR as conflicting with
+        nothing and may recommend an order it cannot take - so it has to be
+        evidenced by the tree's name, like the conflict answer already was.
+        """
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+        )
+        assert mod._conflict_paths("a", "b") is None
+
+    def test_a_conflict_block_without_a_named_tree_is_not_answered(
+        self, mod, monkeypatch
+    ) -> None:
+        """The same rule on the conflict side: paths alone are not a verdict.
+
+        A report whose first line is not the merged tree's name did not answer the
+        merge question, so the paths in it are not evidence of one - they are read
+        only once the tree is named. This is the shape a fabricated-looking
+        fixture always had; it is asserted here so the rule covers both answers
+        rather than only the reassuring one.
+        """
+        out = (
+            "100644 f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0 1\tAgent.md\n"
+            "100644 e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0 2\tAgent.md\n"
+            "100644 d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 3\tAgent.md\n"
+        )
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 1, out, ""),
+        )
+        assert mod._conflict_paths("a", "b") is None
+
+    def test_only_an_object_name_counts_as_the_named_tree(
+        self, mod, monkeypatch
+    ) -> None:
+        """A first line that is merely *present* is not a named tree.
+
+        Without this, the rule degenerates into "the report was non-empty": any
+        diagnostic on the first line would be read as the merge's answer.
+        """
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(
+                argv, 0, "merge-tree: not something we can merge\n", ""
+            ),
+        )
+        assert mod._conflict_paths("a", "b") is None
+
+    def test_both_object_formats_name_a_tree(self, mod, monkeypatch) -> None:
+        """SHA-256 clones exist; the shape of the answer must not depend on the clone."""
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 0, "a" * 64 + "\n", ""),
+        )
+        assert mod._conflict_paths("a", "b") == []
+
 
 class TestNoMutableRefNameReachesMergeTree:
     """The invariant whose absence produced a plausible, wrong live answer.
@@ -144,7 +238,7 @@ class TestNoMutableRefNameReachesMergeTree:
                 return subprocess.CompletedProcess(argv, 0, sha_by_ref[argv[-1]], "")
             if argv[:2] == ["git", "merge-tree"]:
                 measured.append((argv[-2], argv[-1]))
-                return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, _TREE + "\n", "")
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(mod, "_run", fake_run)
@@ -183,7 +277,7 @@ class TestNoMutableRefNameReachesMergeTree:
                 return subprocess.CompletedProcess(argv, 0, sha_by_ref[argv[-1]], "")
             if argv[:2] == ["git", "merge-tree"]:
                 measured.append((argv[-2], argv[-1]))
-                return subprocess.CompletedProcess(argv, 0, "", "")
+                return subprocess.CompletedProcess(argv, 0, _TREE + "\n", "")
             return subprocess.CompletedProcess(argv, 0, "", "")
 
         monkeypatch.setattr(mod, "_run", fake_run)
@@ -303,7 +397,12 @@ class TestNoMutableRefNameReachesMergeTree:
 
 class TestTheReportNamesWhatCollides():
     def test_a_pr_that_dirties_nothing_says_so(self, mod, monkeypatch) -> None:
-        monkeypatch.setattr(mod, "_run", lambda argv: subprocess.CompletedProcess(argv, 0, "", ""))
+        def fake_run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "rev-parse"]:
+                return subprocess.CompletedProcess(argv, 0, "c" * 40, "")
+            return subprocess.CompletedProcess(argv, 0, _TREE + "\n", "")
+
+        monkeypatch.setattr(mod, "_run", fake_run)
         monkeypatch.setattr(mod, "_fetch_head", lambda repo, n: f"refs/emrg-forecast/pr{n}")
         report = mod.forecast("base", [1, 2], "argszero/emrg")
         assert all(entry["dirtied"] == [] for entry in report["prs"].values())
@@ -312,6 +411,7 @@ class TestTheReportNamesWhatCollides():
     def test_a_shared_conflicting_path_is_attributed_to_both(self, mod, monkeypatch) -> None:
         """A cascade is symmetric: each PR must list the other in `dirtied`."""
         out = (
+            _TREE + "\n"
             "100644 f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0 1\tAgent.md\n"
             "100644 e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0 2\tAgent.md\n"
         )
@@ -413,6 +513,67 @@ class TestAgainstRealGitHistory:
         mod = _load_module()
         assert mod._conflict_paths("main", "clean") == []
         assert mod._conflict_paths("main", "grow") == ["f.txt"]
+
+    def test_the_shapes_git_really_prints(self, tmp_path) -> None:
+        """Measure the output this tool reads its verdict from, on real git.
+
+        Every fixture above is a claim about what `merge-tree` prints, and a
+        fixture is free to be a shape git never writes - which is how the previous
+        version of this file modelled a clean merge as "exit 0, nothing printed"
+        and a conflict as a stage block with no tree at all. This pins the real
+        output instead: the merged tree's OID is the first line for a clean merge
+        **and** for a conflict, and `--write-tree --quiet` (a documented flag that
+        suppresses exactly that line) is the case where exit 0 and "nothing
+        printed" arrive together - which is why the exit code cannot be the answer.
+        """
+        repo = tmp_path / "r"
+        repo.mkdir()
+        self._git(repo, "init", "-q", "-b", "main")
+        self._git(repo, "config", "user.email", "t@example.com")
+        self._git(repo, "config", "user.name", "t")
+        (repo / "f.txt").write_text("a\nb\nc\n", encoding="utf-8")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "base")
+        base = self._git(repo, "rev-parse", "HEAD")
+
+        # A clean merge, against itself - the same commit on both sides.
+        proc = subprocess.run(
+            ["git", "merge-tree", "--write-tree", base, base],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert proc.returncode == 0
+        assert re.fullmatch(r"[0-9a-f]{40}", proc.stdout.splitlines()[0])
+        assert len(proc.stdout.splitlines()) == 1
+
+        # The same clean merge with the tree name suppressed: exit 0, no output.
+        quiet = subprocess.run(
+            ["git", "merge-tree", "--write-tree", "--quiet", base, base],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert (quiet.returncode, quiet.stdout) == (0, "")
+
+        # A real conflict: exit 1, and the tree's name is still the first line.
+        (repo / "f.txt").write_text("a\nOURS\nc\n", encoding="utf-8")
+        self._git(repo, "commit", "-qam", "ours")
+        self._git(repo, "checkout", "-q", "-b", "theirs", base)
+        (repo / "f.txt").write_text("a\nTHEIRS\nc\n", encoding="utf-8")
+        self._git(repo, "commit", "-qam", "theirs")
+        conflict = subprocess.run(
+            ["git", "merge-tree", "--write-tree", "theirs", "main"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert conflict.returncode == 1
+        assert re.fullmatch(r"[0-9a-f]{40}", conflict.stdout.splitlines()[0])
+        assert any("\tf.txt" in line for line in conflict.stdout.splitlines())
 
 
 class TestARePushedHeadIsFetchedNotRejected:
