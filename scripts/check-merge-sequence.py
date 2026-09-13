@@ -182,11 +182,15 @@ GUARD = "scripts/check-doc-count.py"
 # what the guard found instead of a bare "guard OK".
 COUNT_IN_REPORT = re.compile(r"FAIL: (\d+) tracked file\(s\) state")
 OK_IN_REPORT = re.compile(r"OK: no tracked file states the Python test count")
+TREE_IN_REPORT = re.compile(r"^tree: (.+)$", re.M)
 
 # The document whose count line the guard reads, and the one command that repairs
-# it after a merge (measured on the merged tree, never chosen). Both are printed
-# in the empty-plan refusal, and only for the path they apply to: advice for a
-# conflict in some other file would be advice that does not run.
+# it after a merge (measured on the merged tree, never chosen). The remedy is
+# printed only where it can run, which takes two conditions and not one: the
+# conflict must be in this file, *and* the base must be measured to state the
+# count (`_base_states_a_count`). The file alone was the whole test until #1184 -
+# advice for a conflict in some other file, or for a documentation conflict in
+# this one, is advice that does not run.
 COUNT_LINE_DOC = "Agent.md"
 RESOLVER = "uv run --no-sync python3 scripts/check-doc-count.py --resolve-conflict"
 
@@ -330,12 +334,7 @@ def _conflict_summary(base: str, excluded: list[int], heads: dict[int, str]) -> 
         + "."
     )
     if counts.get(COUNT_LINE_DOC):
-        out += (
-            f" {COUNT_LINE_DOC} carries the derived Python test count that {GUARD}"
-            f" measures, and two PRs that both rewrote it cannot be merged together"
-            f" - the way out is to merge the base in, re-measure the line on the"
-            f" merged tree (`{RESOLVER}`), and push; the push re-plans the PR."
-        )
+        out += _count_line_clause(base)
     return out
 
 
@@ -402,15 +401,12 @@ def _merge_commit(a: str, b: str) -> str | None:
     return commit.stdout.strip()
 
 
-def _guard_verdict(tree_sha: str, workdir: Path) -> tuple[bool, str]:
-    """Run the extracted tree's own guard on the extracted tree.
+def _extract_tree(tree_sha: str, workdir: Path) -> None:
+    """Materialise `tree_sha` in a scratch directory, replacing what is there.
 
-    The tree's *own* copy is run, at the same path CI uses, reading its own tree
-    - the guard cannot be modelled here, because the count is whatever the tree
-    collects (it depends on imports, conftest and parametrisation).
-
-    A guard that cannot run at all is a measurement error, not a pass: "I could
-    not check" reported as healthy is how a broken tree reaches master.
+    Shared by the two questions that need to look inside a tree (does the merged
+    tree pass the guards, and does the base state the count): only this step is
+    common, so only this step is shared.
     """
     if workdir.exists():
         import shutil
@@ -426,6 +422,19 @@ def _guard_verdict(tree_sha: str, workdir: Path) -> tuple[bool, str]:
         tar.extractall(workdir, filter="data")
     if archive.wait() != 0:
         raise MeasurementError(f"git archive failed for tree {tree_sha[:8]}")
+
+
+def _guard_verdict(tree_sha: str, workdir: Path) -> tuple[bool, str]:
+    """Run the extracted tree's own guard on the extracted tree.
+
+    The tree's *own* copy is run, at the same path CI uses, reading its own tree
+    - the guard cannot be modelled here, because the count is whatever the tree
+    collects (it depends on imports, conftest and parametrisation).
+
+    A guard that cannot run at all is a measurement error, not a pass: "I could
+    not check" reported as healthy is how a broken tree reaches master.
+    """
+    _extract_tree(tree_sha, workdir)
 
     script = workdir / GUARD
     if not script.is_file():
@@ -447,6 +456,100 @@ def _guard_verdict(tree_sha: str, workdir: Path) -> tuple[bool, str]:
     raise MeasurementError(
         f"the merged tree's guard could not run (rc={proc.returncode}):\n"
         + out[-1000:].strip()
+    )
+
+
+def _base_states_a_count(base: str) -> bool | None:
+    """Whether the base tree states the Python test count, asked of the guard.
+
+    Issue #1184: the empty-plan refusal used to conclude "the count is stored in
+    Agent.md" from "Agent.md is among the conflicting paths". Those were the same
+    fact until #1181 removed the stored count, and nothing tied the sentence to
+    the state it describes - so the refusal prescribes `--resolve-conflict` for a
+    conflict that command, by construction, refuses (it clears a count-line-only
+    difference, and the count line is gone).
+
+    The *checkout's* guard is run with the extracted tree as its working
+    directory, not the base's own copy: a base from before the rule changed
+    answers in its own words, and the question is what today's rule says about
+    that tree. Measured 2026-09-13: the current guard, run against a pre-#1181
+    tree, reports `FAIL: 2 tracked file(s) state the Python test count` and names
+    the tree it read.
+
+    `None` is a third answer - the guard's report was in neither shape - and the
+    caller must not read it as `False`, because "no count, therefore no remedy"
+    would then be printed about a tree nobody managed to read.
+    """
+    with tempfile.TemporaryDirectory(prefix="emrg-merge-seq-base-") as tmp:
+        workdir = Path(tmp) / "base"
+        _extract_tree(_tree_of(base), workdir)
+        script = Path(GUARD)
+        if not script.is_file():
+            raise MeasurementError(
+                f"{GUARD} is not present in this checkout, so the base's count "
+                f"state cannot be measured"
+            )
+        proc = _run([sys.executable, str(script.resolve())], cwd=str(workdir))
+    out = (proc.stdout or "") + (proc.stderr or "")
+    # The guard names the tree it read, and that is checked rather than assumed:
+    # run with a working directory that has no `scripts/`, it falls back to its
+    # own checkout and answers about *that* tree, in the same words - a wrong
+    # tree reported as a consistent one, which is the failure mode this file's
+    # read-the-ref-you-measured rule exists for.
+    named = TREE_IN_REPORT.search(out)
+    if not named or Path(named.group(1)).resolve() != workdir.resolve():
+        return None
+    if proc.returncode == 0 and OK_IN_REPORT.search(out):
+        return False
+    if proc.returncode == 1 and COUNT_IN_REPORT.search(out):
+        return True
+    return None
+
+
+def _tree_of(commit: str) -> str:
+    """The tree object of `commit` - what `git archive` takes.
+
+    Separate from `_rev_parse` because that one verifies a *commit* (`^{commit}`),
+    and appending another peel to a tree ref fails.
+    """
+    proc = _run(["git", "rev-parse", f"{commit}^{{tree}}"])
+    if proc.returncode != 0:
+        raise MeasurementError(
+            f"could not resolve the tree of {commit[:8]}: {proc.stderr.strip()}"
+        )
+    return proc.stdout.strip()
+
+
+def _count_line_clause(base: str) -> str:
+    """The remedy sentence for an `Agent.md` conflict, or none where it cannot run.
+
+    Three answers, three sentences: the base states the count (the resolver
+    applies and is named), the base states none (the conflicting lines are the
+    documentation the PRs add, and the resolver cannot clear those - so the
+    reader is left with the sides to read), or the state could not be measured,
+    which is said rather than guessed. The third exists because the whole defect
+    class in this family is a sentence that reads as verified when nothing
+    verified it.
+    """
+    stored = _base_states_a_count(base)
+    if stored is None:
+        return (
+            f" Whether {COUNT_LINE_DOC} states the derived Python test count on"
+            f" {base[:8]} could not be measured, so no remedy is offered for"
+            f" that path."
+        )
+    if stored:
+        return (
+            f" {COUNT_LINE_DOC} states the derived Python test count on {base[:8]}"
+            f" and two PRs that both rewrote that line cannot be merged together"
+            f" - the way out is to merge the base in, re-measure the line on the"
+            f" merged tree (`{RESOLVER}`), and push; the push re-plans the PR."
+        )
+    return (
+        f" {COUNT_LINE_DOC} states no derived Python test count on {base[:8]}"
+        f" (the count is measured, not stored), so this is not the count line:"
+        f" what conflicts is documentation the PRs add, which `{RESOLVER}` cannot"
+        f" clear - read the two sides and pick or combine them."
     )
 
 
@@ -508,10 +611,7 @@ def main(argv: list[str] | None = None) -> int:
                 conflicts.append(number)
                 break
             try:
-                ok, report = _guard_verdict(
-                    _run(["git", "rev-parse", f"{merged}^{{tree}}"]).stdout.strip(),
-                    workdir,
-                )
+                ok, report = _guard_verdict(_tree_of(merged), workdir)
             except MeasurementError as exc:
                 print(f"  #{number}: could not measure: {exc}", file=sys.stderr)
                 return 2

@@ -40,6 +40,7 @@ was never invoked proves nothing.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -433,10 +434,15 @@ def test_an_empty_plan_names_the_conflicting_paths_and_the_way_out(
     state - an explicitly named conflicting PR still conflicts. So the summary is
     computed from the merge output, and the remedy is printed for the path that has
     one: the repo re-measures the derived count rather than choosing a side.
+
+    The remedy also had to stop *assuming* that path carries a count (issue #1184):
+    the sentence is printed for a base measured to state one, and the measurement
+    itself is pinned separately below.
     """
     _queue_where_nothing_merges(
         mod, monkeypatch, "CONFLICT (content): Merge conflict in Agent.md\n"
     )
+    monkeypatch.setattr(mod, "_base_states_a_count", lambda base: True)
     rc = mod.main([])
     err = capsys.readouterr().err
 
@@ -445,6 +451,55 @@ def test_an_empty_plan_names_the_conflicting_paths_and_the_way_out(
     assert "--resolve-conflict" in err, err
     assert "push" in err, err
     assert "pass PR numbers explicitly" not in err, "the old, non-resolving remedy"
+
+
+def test_a_base_that_states_no_count_gets_no_count_line_remedy(
+    mod, monkeypatch, capsys
+):
+    """Issue #1184: an `Agent.md` conflict is not evidence of a count line.
+
+    Since #1181 the count is measured, not stored, so today's `Agent.md` conflicts
+    are between the documentation lines the PRs add - and `--resolve-conflict`
+    clears a count-line-only difference, so on this state it is advice that cannot
+    run. Measured on master `c9a7d8a` while re-applying six PRs: the refusal told
+    the reader `Agent.md` carries the count, on a tree whose own guard said no
+    tracked file states it.
+    """
+    _queue_where_nothing_merges(
+        mod, monkeypatch, "CONFLICT (content): Merge conflict in Agent.md\n"
+    )
+    monkeypatch.setattr(mod, "_base_states_a_count", lambda base: False)
+    rc = mod.main([])
+    err = capsys.readouterr().err
+
+    assert rc == 2, err
+    assert "Conflicting paths over those 2 PR(s): Agent.md x2." in err, err
+    assert "states no derived Python test count" in err, err
+    assert "read the two sides" in err, "the reader is left with the sides"
+    assert "the way out is to merge the base in" not in err, "the inapplicable remedy"
+    assert "is measured, not stored" in err, err
+
+
+def test_an_unmeasurable_base_says_so_rather_than_guessing(mod, monkeypatch, capsys):
+    """The third state: nothing was read, so nothing is claimed either way.
+
+    Collapsing this into "no count" would print a sentence about a tree the guard
+    did not manage to describe - the same defect as the one this clause was
+    written for, one step further along. The paths *were* measured, so they stay.
+    """
+    _queue_where_nothing_merges(
+        mod, monkeypatch, "CONFLICT (content): Merge conflict in Agent.md\n"
+    )
+    monkeypatch.setattr(mod, "_base_states_a_count", lambda base: None)
+    rc = mod.main([])
+    err = capsys.readouterr().err
+
+    assert rc == 2, err
+    assert "Conflicting paths over those 2 PR(s): Agent.md x2." in err, err
+    assert "could not be measured" in err, err
+    assert "no remedy is offered" in err, err
+    assert "--resolve-conflict" not in err, err
+    assert "states no derived Python test count" not in err, err
 
 
 def test_a_conflict_elsewhere_gets_no_count_line_advice(mod, monkeypatch, capsys):
@@ -464,3 +519,112 @@ def test_a_conflict_elsewhere_gets_no_count_line_advice(mod, monkeypatch, capsys
     assert rc == 2, err
     assert "emrg/tools/bash_tool.py x2." in err, err
     assert "--resolve-conflict" not in err, err
+
+
+GUARD_SOURCE = REPO_ROOT / "scripts" / "check-doc-count.py"
+
+
+def _git(root: Path, *args: str) -> None:
+    proc = subprocess.run(
+        ["git", *args],
+        cwd=str(root),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    assert proc.returncode == 0, f"git {' '.join(args)} failed: {proc.stderr}"
+
+
+def _tiny_checkout(root: Path, agent_md: str, tracked: list[str]) -> None:
+    """A one-commit repo holding the files the guard resolves its root by.
+
+    The guard's own copy is written from this repo and then `tracked` decides what
+    the commit contains: `git archive` only sees committed files, so a guard left
+    untracked on disk is exactly the shape where the *checkout* has one and the
+    extracted tree does not.
+    """
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "scripts" / "check-doc-count.py").write_text(
+        GUARD_SOURCE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (root / "Agent.md").write_text(agent_md, encoding="utf-8")
+    _git(root, "init", "-q")
+    for path in tracked:
+        _git(root, "add", path)
+    _git(
+        root, "-c", "user.email=fixture@example.com", "-c", "user.name=fixture",
+        "commit", "-q", "-m", "fixture",
+    )
+
+
+COUNT_LINE = "Python: `uv run pytest tests/ -v` (1599) - import check: x\n"
+NO_COUNT_LINE = "Python: `uv run pytest tests/ -v` - count is measured, not stored\n"
+BOTH = ["Agent.md", "scripts/check-doc-count.py"]
+
+
+def test_the_base_question_is_measured_on_real_trees(mod, monkeypatch, tmp_path):
+    """Both states, asked of real trees with the real guard - no stub of the answer.
+
+    A stub would prove only that the sentence follows the stub. This extracts the
+    tree, runs the checkout's guard against it and reads the guard's report, which
+    is the whole claim: the sentence now rests on a measurement of the base.
+    """
+    stores = tmp_path / "stores"
+    stores.mkdir()
+    _tiny_checkout(stores, COUNT_LINE, BOTH)
+    monkeypatch.chdir(stores)
+    assert mod._base_states_a_count("HEAD") is True
+
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    _tiny_checkout(clean, NO_COUNT_LINE, BOTH)
+    monkeypatch.chdir(clean)
+    assert mod._base_states_a_count("HEAD") is False
+
+
+def test_the_base_question_refuses_a_tree_the_guard_cannot_name(mod, monkeypatch, tmp_path):
+    """A third answer for "the guard read some other tree".
+
+    Measured 2026-09-13: run with a working directory that has no `scripts/`, the
+    guard falls back to its own checkout and reports on *that* tree - `tree:
+    <this repo>` - in the same words it would use about the tree that was asked
+    about. Accepting such a report is the wrong-tree failure this repo keeps
+    producing (a consistent-looking answer about a checkout nobody named), so the
+    reported `tree:` must be the extracted one, and it is not guessed when the
+    guard names a different one.
+    """
+    root = tmp_path / "guard-not-in-tree"
+    root.mkdir()
+    _tiny_checkout(root, NO_COUNT_LINE, ["Agent.md"])  # guard exists, untracked
+    monkeypatch.chdir(root)
+    assert mod._base_states_a_count("HEAD") is None
+
+
+UNKNOWN_SHAPE_GUARD = (
+    "import os, sys\n"
+    "print('tree:', os.getcwd())\n"
+    "print('a report this tool has never seen')\n"
+    "sys.exit(1)\n"
+)
+
+
+def test_the_base_question_does_not_read_an_unknown_report_as_no_count(
+    mod, monkeypatch, tmp_path
+):
+    """The other way to reach the third answer: a report in neither shape.
+
+    The guard names the right tree here, so the naming check passes and this is
+    only about the report. Reading an unrecognised report as "no count" would
+    print a *claim* about the base ("states no derived Python test count") off the
+    back of a report nobody could read - the same defect as the one this clause
+    exists to remove, so it is answered as unmeasured instead.
+    """
+    root = tmp_path / "other-shape"
+    root.mkdir()
+    _tiny_checkout(root, NO_COUNT_LINE, BOTH)
+    (root / "scripts" / "check-doc-count.py").write_text(
+        UNKNOWN_SHAPE_GUARD, encoding="utf-8"
+    )
+    monkeypatch.chdir(root)
+    assert mod._base_states_a_count("HEAD") is None
