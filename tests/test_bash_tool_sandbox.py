@@ -17,6 +17,8 @@ from emrg.tools.bash_tool import (
     SANDBOX_MODES,
     _check_sandbox,
     _extract_write_targets,
+    _GIT_READ_VERBS,
+    _GIT_SHAPE_DECIDED,
     check_workspace_write,
 )
 
@@ -683,3 +685,489 @@ def test_find_delete_is_a_destructive_write_but_a_plain_find_is_not():
     for cmd in ("find . -name '*.pyc'", "find . -name '*.pyc' -print", "find . -type d"):
         allowed, reason, _ = _check_sandbox(cmd, "read-only")
         assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
+
+# ── git mutator / shell-wrapper regression guards (from #1167) ──────────
+#
+# PR #1167's own guards. They are branch-only relative to master (master has
+# the write-target guards from #1168 instead), and the two sets are disjoint
+# — neither side's tests cover the other's feature. Kept whole rather than
+# side-picked: taking either side silently drops a class of coverage.
+
+def test_check_read_only_allows_shell_c_without_a_mutator():
+    """Recursing into a wrapper must not block the wrapper itself — the
+    payload is judged, and a read inside `sh -c` stays a read."""
+    for cmd in (
+        "sh -c 'git status'",
+        "sh -c 'git log --oneline'",
+        "bash -c 'echo hello'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
+
+def test_check_read_only_blocks_chained_mutator_under_a_prefix():
+    """A prefixed chain must block: the old scan fell through to `return True`.
+
+    When the prefix made the regex miss, `m` was None, so the exemption check
+    and the anti-chain logic never ran at all — `git -C . stash list && git -C
+    . stash drop` was ALLOWED. The bare chained form already blocked, so only
+    the prefixed one catches this.
+    """
+    for cmd in (
+        "git -C . stash list && git -C . stash drop",
+        "git -C . stash show -p && git -C . stash pop",
+        "git --no-pager stash list; git --no-pager stash clear",
+        "git -c x=1 worktree list && git -c x=1 worktree remove ../wt",
+        "git status && git -C . checkout .",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+def test_check_read_only_blocks_git_mutators_with_global_options():
+    """Community issue #1156: a git global option must not defeat the guard.
+
+    The old raw-text scan required the subcommand immediately after `git\\s+`,
+    so a global option sat exactly where it expected the verb: 7 mutators × 4
+    spellings were ALL allowed while every bare form blocked. Generated rather
+    than hand-listed because the point is the cross product — the suite missed
+    this by covering 41 cases, all bare forms.
+    """
+    mutators = (
+        "stash", "checkout .", "checkout -- uv.lock", "restore uv.lock",
+        "reset --hard", "clean -fd", "commit -am x", "push origin master",
+        "merge master", "rebase master", "cherry-pick abc123", "rm foo.py",
+        "switch feature/x", "apply patch.diff", "am series.mbox",
+        "submodule update --init", "worktree add ../wt master",
+    )
+    prefixes = ("", "-C . ", "-c x=1 ", "--work-tree=. ",
+                "--git-dir=/var/tmp/x ", "--no-pager ")
+    for verb in mutators:
+        for prefix in prefixes:
+            cmd = f"git {prefix}{verb}"
+            allowed, reason, _ = _check_sandbox(cmd, "read-only")
+            assert allowed is False, (
+                f"{cmd!r} must be blocked (global option defeats the scan?)"
+            )
+            # Two layers can legitimately catch this: the git-verb classifier
+            # (`git commit -am x` writes no file target) or the write-target
+            # scan (`git rm foo.py` names an operand). Asserting *which* layer
+            # fired couples this test to the order of the checks, so it passed
+            # on this branch and failed once the write-target parser (#1168)
+            # landed — the same command, the same safe outcome, a different
+            # reason string. The invariant is "blocked with a sandbox reason".
+            assert "sandbox" in reason, cmd
+
+def test_check_read_only_blocks_mutator_inside_shell_c_wrapper():
+    """A mutator the shell will *run* is blocked however it is written.
+
+    `sh -c 'git checkout .'` tokenises as the command `sh` plus one opaque
+    string, so a guard that only classifies the outer tokens sees no git
+    invocation at all. The pre-parsing regex scanned the whole line and
+    blocked these; parsing must not trade that away. Measured 2026-09-12
+    against master: all five of these were blocked before the parse rewrite
+    and became writable under read-only after it, so they are regression
+    guards, not new features.
+    """
+    for cmd in (
+        "sh -c 'git checkout .'",
+        'bash -c "git reset --hard"',
+        "zsh -c 'git clean -fd'",
+        "dash -c 'git stash'",
+        "eval 'git checkout .'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+def test_check_read_only_blocks_nested_mutator_under_a_chain():
+    """Nesting and chaining compose: the wrapper's payload is its own command
+    line, so a chained mutator inside it must still be found."""
+    for cmd in (
+        "sh -c 'cd /x; git read-tree -u --reset HEAD'",
+        "sh -c 'git status && git stash drop'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+def test_check_read_only_blocks_nested_wrapper_spelled_with_a_path():
+    """`/bin/sh -c '...'` is the same wrapper as `sh -c '...'`."""
+    allowed, reason, _ = _check_sandbox("/bin/sh -c 'git checkout .'", "read-only")
+    assert allowed is False
+    assert "git" in reason
+
+def test_check_read_only_blocks_unlisted_plumbing_mutators():
+    """Community issue #1159: verbs that were never on the list.
+
+    `git read-tree -u --reset HEAD` overwrites the working tree and destroys
+    uncommitted work — measured on a scratch repo, exiting 0 and silently — but
+    it was not in the alternation (`--reset` is a substring, not the verb). The
+    others rewrite refs/objects/history and are the same class of damage. A
+    list-based guard cannot be fixed by adding one more word: the decision is
+    the *verb*, so these must be decidable without anyone remembering them.
+    """
+    for cmd in (
+        "git read-tree -u --reset HEAD",
+        "git read-tree -m -u HEAD",
+        "git update-ref refs/heads/x HEAD",
+        "git update-index --assume-unchanged a.txt",
+        "git symbolic-ref HEAD refs/heads/x",
+        "git reflog expire --expire=now --all",
+        "git gc --prune=now",
+        "git repack -a -d",
+        "git filter-branch --force",
+        "git pack-refs --all",
+        "git replace abc123 def456",
+        "git add -A",
+        "git remote set-url origin https://example.com/x.git",
+        "git config core.hooksPath /tmp/hooks",
+        "git config user.name someone",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+def test_check_read_only_blocks_windows_spelled_git():
+    """`git.exe` is the name the command actually has on Windows, so the
+    extension and directory forms name the same program as `git`."""
+    for cmd in ("git.exe checkout .", "/usr/local/bin/git.exe reset --hard"):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked"
+        assert "git" in reason, cmd
+
+def test_check_read_only_does_not_block_mentions_or_near_misses():
+    """The other direction: parsing must stop the raw-text over-block.
+
+    `git merge-base A B` is a read that the old scan refused as if it were
+    `git merge`. Guarded because a fix for the under-block that simply allows
+    arbitrary tokens before the verb would start blocking real reads.
+    """
+    for cmd in (
+        "git merge-base A B",
+        "git stash list", "git stash show -p", "git stash list | grep foo",
+        "git worktree list", "git worktree list --porcelain",
+        "git submodule status", "git branch -a", "git tag -l",
+        "git remote -v", "git config -l", "git config --get user.name",
+        "git status --porcelain", "git log --oneline -3", "git show HEAD --stat",
+        "git diff", "git diff --cached", "git rev-parse --abbrev-ref HEAD",
+        "git fetch origin master",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must stay allowed (got {reason!r})"
+
+def test_check_read_only_has_no_subcommand_but_write_for_stash():
+    """`git stash` alone mutates (saves + cleans the tree); listing verbs don't.
+
+    `git remote -v` / `git worktree` / `git submodule` with no subcommand only
+    print help or a listing; a bare `git stash` is a real mutator. The old
+    regex could not tell these apart because it matched tokens, not verbs.
+    """
+    for cmd in ("git stash", "git -C . stash", "git -c x=1 stash"):
+        allowed, _, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked (bare stash mutates)"
+    for cmd in ("git remote -v", "git remote", "git worktree", "git submodule"):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must stay allowed (got {reason!r})"
+
+def test_find_git_mutator_terminates_on_self_reference():
+    """Nesting is bounded: a payload that rewrites its own wrapper cannot
+    recurse forever (the guard caps depth rather than trusting the input)."""
+    from emrg.tools.bash_tool import _find_git_mutator
+
+    assert _find_git_mutator("sh -c \"sh -c 'sh -c \\\"echo hi\\\"'\"") is None
+
+def test_git_checkout_index_is_blocked_like_checkout():
+    """The regression that motivated fail-closed, in its real spellings.
+
+    `git checkout-index -f -a` / `-u -a` / `-a -f` overwrite uncommitted work —
+    the same damage as `git checkout .`, which the guard already blocks. These
+    were blocked on master *by accident* (substring match) and allowed by the
+    parsed-verb classifier, which is a strict data-loss regression: a command
+    that used to be refused became runnable. Measured end-to-end, all three
+    destroyed a dirty working tree.
+    """
+    for cmd in (
+        "git checkout-index -f -a",
+        "git checkout-index -a -f",
+        "git checkout-index --all",
+        "git checkout-index -f --all",
+        "git checkout-index -u -a",
+        "git checkout-index --index --force --all",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} overwrites uncommitted work; must block"
+
+def test_git_classification_is_fail_closed_over_every_subcommand():
+    """The guard must decide by *effect*, so it must not depend on a list of
+    names someone remembered.
+
+    Measured: `git help -a` reports 169 subcommands. The previous design kept a
+    blocklist of mutating verbs and allowed everything else, which left 129 of
+    the 169 allowed — `git checkout-index -f -a`, which overwrites uncommitted
+    work exactly like `git checkout`, among them. It was blocked on master only
+    by accident: a raw-text regex matched `checkout` as a *substring* of
+    `checkout-index`. Parsing the verb correctly removed the accident and made
+    the hole visible, which is the honest reason this test exists.
+
+    So this test does not list "the verbs we thought of". It takes git's own
+    subcommand list and asserts the *complement* property: every subcommand
+    that is not a declared read is blocked. A blocklist cannot satisfy this —
+    adding the next missing verb would leave the test red on the verb after it.
+    """
+    allowlist = _GIT_READ_VERBS
+    shape_decided = _GIT_SHAPE_DECIDED
+    # Verbs git reports that are not declared reads and are not shape-decided
+    # must block, whether or not anyone remembered them.
+    unlisted = {
+        "checkout-index", "mktree", "mktag", "filter-branch", "replace",
+        "update-server-info", "pack-refs", "reflog", "symbolic-ref",
+        "update-ref", "read-tree", "sparse-checkout", "notes", "init",
+        "clone", "revert", "cherry-pick", "rebase", "switch", "restore",
+        "unpack-objects", "index-pack", "pack-objects", "fast-import",
+        "fast-export", "update-index", "write-tree", "commit-tree",
+    }
+    for verb in sorted(unlisted):
+        assert verb not in allowlist, f"{verb!r} must not be a declared read"
+        allowed, reason, _ = _check_sandbox(f"git {verb}", "read-only")
+        assert allowed is False, f"unlisted git verb {verb!r} must block by default"
+    assert shape_decided  # the shape-decided table must stay populated
+
+def test_git_merge_file_family_is_blocked():
+    """`merge-file` / `merge-index` / `merge-one-file` write files in place.
+
+    These were in the same accidental-coverage gap as `checkout-index`: the old
+    raw-text scan matched `merge` as a substring, so a parsed-verb classifier
+    that only listed `merge` silently allowed them.
+    """
+    for cmd in (
+        "git merge-file a b c",
+        "git merge-index x",
+        "git merge-one-file a b c",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} writes the working tree; must block"
+
+def test_git_reads_stay_allowed_under_fail_closed():
+    """The safe default must not buy safety with false blocks on real work.
+
+    An allowlist is only usable if its listed reads actually pass; the ones
+    below are the inspections an evolution cycle runs constantly, plus the
+    listing forms with a pattern argument (`git tag -l 'v*'`), where the flag
+    and not the absence of an argument is what makes the command a read.
+    """
+    for cmd in (
+        "git status --porcelain", "git log --oneline -3", "git diff --stat",
+        "git diff --cached", "git show HEAD --stat", "git rev-parse HEAD",
+        "git merge-base HEAD master", "git merge-tree a b", "git ls-files",
+        "git cat-file -p HEAD", "git grep foo", "git for-each-ref",
+        "git submodule status", "git worktree list", "git stash list",
+        "git stash show -p", "git remote -v", "git config -l",
+        "git config --get user.name", "git branch -a", "git branch",
+        "git tag -l", "git tag -l 'v*'", "git tag", "git remote get-url origin",
+        "git fetch origin master", "git hash-object a.txt", "git version",
+        "git help add", "git check-ignore a.txt",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
+
+def test_git_shape_decided_verbs_block_their_writing_forms():
+    """Flag/subcommand-decided verbs default to block, not to allow.
+
+    Fail-closed is only meaningful if the ambiguous verbs err the same way: a
+    shape that is not a proven read must block. `git branch newbr` creates,
+    `git tag v9` creates, `git hash-object -w` writes the object database.
+    """
+    for cmd in (
+        "git branch newbr", "git branch -D old", "git tag v9", "git tag -d v1",
+        "git hash-object -w a.txt", "git stash", "git stash drop",
+        "git stash pop", "git stash clear", "git worktree add ../wt",
+        "git worktree remove ../wt", "git worktree prune",
+        "git submodule update --init", "git remote add origin x",
+        "git remote set-url origin x", "git config core.x y",
+        "git config user.name someone",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} writes; must block ({reason!r})"
+
+def test_git_verb_parsing_ignores_quoted_mentions():
+    """A mutator inside a string literal is not a command (issue #1156 facet D).
+
+    The old scan refused a command that merely *contained* the phrase, which
+    made the guard's own regression tests unwritable from a read-only cycle.
+    Parsing keeps the mention as one token, so the text is data, not an
+    invocation.
+    """
+    for cmd in (
+        'echo "git merge origin/master"',
+        'printf %s "git reset --hard"',
+        "echo 'git clean -fd'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
+
+
+def test_command_substitution_is_not_a_polite_spelling():
+    """`` `git checkout .` `` runs git; master blocked it and this parser did not.
+
+    `shlex`'s default punctuation set is `();<>|&` — it omits the backtick — so a
+    command substitution stayed glued to its words: `` `git checkout .` ``
+    tokenised as `` ['`git', 'checkout', '.`'] `` and the program word never
+    matched `git`. Measured against master 2026-09-12 (`cyc20260912-190602`):
+    master's raw-text guard blocked all four shapes below and the parsed guard
+    allowed all four — an under-block in the destructive direction, introduced by
+    the same migration that fixed the over-blocks. `$( … )` was never affected
+    because its `git` is already a separate token, which is exactly why the hole
+    survived the substitution cases that were covered.
+
+    The fix is structural (the tokenizer splits on the backtick) rather than a
+    strip in the name comparison, so it covers the wrapping shapes below and not
+    only the one where the substitution wraps the whole program word.
+    """
+    for cmd in (
+        "`git checkout .`",
+        "echo `git checkout .`",
+        "x=`git checkout .`",
+        "`git reset --hard`",
+        "y=`git stash`",
+        "$(git checkout .)",
+        "echo $(git checkout .)",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} runs git and must be blocked"
+
+    # The complement: a substitution that only *reads* stays allowed, so the fix
+    # is not "block anything with a backtick".
+    for cmd in (
+        "`git status`",
+        "echo `git log --oneline -3`",
+        "echo $(git status)",
+        "echo $(git rev-parse HEAD)",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
+
+
+def test_an_unquoted_git_argument_is_data_not_an_invocation():
+    """`grep -rn git .` searches for the word git; it does not run git.
+
+    The quoted-mention test above covers a string literal, which tokenising
+    keeps whole. The **unquoted** argument is the same defect one level down:
+    the parser saw the token `git` and resolved the *following* token as its
+    verb, so `grep -rn git .` became the invocation `git .` — and the fail-closed
+    default then refused an ordinary search. Measured against master 2026-09-12
+    (`cyc20260912-190602`): 9 of 30 read shapes regressed this way, all of them
+    a command that merely *names* git as an argument.
+
+    Guarded in both directions on purpose. The cheap fix — "only the first
+    token can be an invocation" — fixes these and silently allows
+    `env git checkout .`, trading a false block for data loss.
+    """
+    for cmd in (
+        "grep -rn git .",
+        "grep -rn git src/",
+        "grep -n git README.md",
+        "grep -rn git --include=*.py .",
+        "grep -r git .",
+        "echo git checkout .",
+        "printf %s git checkout .",
+        "find . -name git",
+        "man git",
+        "which git",
+        "ls -la git",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} names git as data and must be allowed ({reason!r})"
+
+
+def test_a_command_wrapper_still_makes_its_argument_an_invocation():
+    """The complement: a prefixed git really runs, so it must still block.
+
+    `env git checkout .` and `sudo git checkout .` are not position 0, and
+    `sudo -u root git checkout .` / `timeout 5 git checkout .` / `nice -n 5 git
+    checkout .` / `xargs -I{} git checkout .` / `stdbuf -o0 git checkout .` put a
+    flag *and its value* between the wrapper and the command — which is why the
+    position model skips a flag's value rather than only the flag. Measured: the
+    first version of the model, skipping flags alone, allowed 5 of these 44
+    mutator shapes (cyc20260912-190602).
+    """
+    for cmd in (
+        "env git checkout .",
+        "env FOO=1 git checkout .",
+        "sudo git checkout .",
+        "sudo -u root git checkout .",
+        "doas git checkout .",
+        "xargs git checkout .",
+        "xargs -I{} git checkout .",
+        "nohup git checkout .",
+        "time git checkout .",
+        "timeout 5 git checkout .",
+        "nice -n 5 git checkout .",
+        "command git checkout .",
+        "stdbuf -o0 git checkout .",
+        "setsid git checkout .",
+        "FOO=1 git checkout .",
+        "true && git checkout .",
+        "false || git checkout .",
+        "echo hi ; git checkout .",
+        "cat f | git checkout .",
+        "$(git checkout .)",
+        "(git checkout .)",
+        "! git checkout .",
+        "sh -c \"sh -c 'git checkout .'\"",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} runs git and must be blocked"
+
+
+def test_shell_wrapper_options_do_not_block_a_read():
+    """The over-approximation must not refuse a wrapper that only reads.
+
+    Recursing into every token after a wrapper cannot miss a payload; the
+    price is that `bash script.sh` recurses into a *filename*. That parses to
+    no git invocation, so it stays allowed — and it must, or the fix for the
+    option gap would buy safety with a false block on ordinary work.
+    """
+    for cmd in (
+        "bash --login -c 'git status'",
+        "bash --login -c 'git log --oneline -3'",
+        "sh -c 'echo hi'",
+        "bash script.sh",
+        "zsh -o errexit -c 'git diff --stat'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is a read and must be allowed ({reason!r})"
+
+def test_shell_wrapper_options_do_not_hide_the_payload():
+    """No option spelling before `-c` may stop the payload being recursed into.
+
+    The first version of this guard located the `-c` flag by walking forward
+    and `break`ing on the first token that was not a short flag. That looks
+    tighter than recursing blindly, but it makes correctness depend on
+    *enumerating every way a flag can be spelled* — and the enumeration is
+    always incomplete. Measured 2026-09-12: short spellings (`-c`, `-lc`,
+    `-x -c`) were blocked, while a long option (`--login`) or an option that
+    takes a value (`-o pipefail`) ended the walk early, so 9 of 14 wrapper
+    shapes were ALLOWED under read-only. Driven end to end through
+    `BashTool.execute`, 3 of those 4 destroyed a file with uncommitted
+    changes that master blocks.
+
+    This is the #461 class: matching one spelling of a class while another
+    spelling passes. So the cases below are grouped by option *class* — short
+    combined, long, and option-with-value — because the lesson is about the
+    class, not about the individual spellings that happened to be found.
+    """
+    # One entry per option class; each must still block the payload.
+    option_classes = {
+        "short": ["-c", "-lc", "-x -c", "-eu -c"],
+        "long": ["--login -c", "--noprofile -c", "--norc -c", "--posix -c"],
+        "option-with-value": ["-o pipefail -c", "-o errexit -c"],
+        "combined long+short": ["--login -l -c"],
+    }
+    for cls, spellings in option_classes.items():
+        for opt in spellings:
+            cmd = f"bash {opt} 'git checkout .'"
+            allowed, reason, _ = _check_sandbox(cmd, "read-only")
+            assert allowed is False, f"[{cls}] {cmd!r} must be blocked"
+    # A different wrapper binary takes the same options.
+    for cmd in ("zsh --login -c 'git checkout .'", "sh -o errexit -c 'git stash'"):
+        assert _check_sandbox(cmd, "read-only")[0] is False, cmd
