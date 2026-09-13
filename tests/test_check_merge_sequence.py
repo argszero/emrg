@@ -401,3 +401,66 @@ def test_a_queue_where_nothing_merges_is_not_a_pass(mod, monkeypatch, capsys):
     assert rc == 2, captured.out
     assert "conflict with" in captured.err, captured.err
     assert "pass the guards" not in captured.out, captured.out
+
+
+def _queue_where_nothing_merges(mod, monkeypatch, conflict_line: str) -> None:
+    """Two open PRs, neither mergeable, conflicting in whatever `conflict_line` says.
+
+    The merge-tree output is faked at the `_run` layer rather than by replacing
+    `_conflict_paths`, so the path parsing under test actually runs - a stub of the
+    function being tested would pass whatever it was told to.
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: C1 if n == 1 else C2)
+
+    def fake_run(argv, cwd=None):
+        if argv[:3] == ["git", "merge-tree", "--write-tree"]:
+            return _FakeProc(conflict_line, returncode=1)
+        return _FakeProc(argv[-1].removesuffix("^{tree}"))
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+
+def test_an_empty_plan_names_the_conflicting_paths_and_the_way_out(
+    mod, monkeypatch, capsys
+):
+    """The refusal must describe the state it measured and offer a remedy that fixes it.
+
+    Measured 2026-09-13 (`cyc20260913-125509`): with 13 open PRs, all 13 conflicted
+    and every one of them in `Agent.md` (10 in that file alone). The refusal used to
+    offer "pass PR numbers explicitly, or use --all", and neither resolves that
+    state - an explicitly named conflicting PR still conflicts. So the summary is
+    computed from the merge output, and the remedy is printed for the path that has
+    one: the repo re-measures the derived count rather than choosing a side.
+    """
+    _queue_where_nothing_merges(
+        mod, monkeypatch, "CONFLICT (content): Merge conflict in Agent.md\n"
+    )
+    rc = mod.main([])
+    err = capsys.readouterr().err
+
+    assert rc == 2, err
+    assert "Conflicting paths over those 2 PR(s): Agent.md x2." in err, err
+    assert "--resolve-conflict" in err, err
+    assert "push" in err, err
+    assert "pass PR numbers explicitly" not in err, "the old, non-resolving remedy"
+
+
+def test_a_conflict_elsewhere_gets_no_count_line_advice(mod, monkeypatch, capsys):
+    """The remedy is printed only for the path it applies to.
+
+    This is the arm that keeps the previous test from passing on a hardcoded
+    sentence: if the count-line remedy were printed for every conflict, advice for
+    a conflict in some unrelated file would name a command that cannot fix it -
+    the same defect as a hint that cannot run, one tool further along.
+    """
+    _queue_where_nothing_merges(
+        mod, monkeypatch, "CONFLICT (content): Merge conflict in emrg/tools/bash_tool.py\n"
+    )
+    rc = mod.main([])
+    err = capsys.readouterr().err
+
+    assert rc == 2, err
+    assert "emrg/tools/bash_tool.py x2." in err, err
+    assert "--resolve-conflict" not in err, err
