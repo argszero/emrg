@@ -52,6 +52,8 @@ Usage:
 
 Exit codes:
     0  every block classified, none needs a human decision
+       (also: `--all` and git reports nothing unmerged - a clean merge is a
+       state, not a usage error; see the note in `main()`)
     1  at least one block is `overlapping` (human must decide)
     2  usage error / no conflict blocks found
 """
@@ -189,7 +191,14 @@ def _differ_only_by_number(ours: list[str], theirs: list[str]) -> bool:
     parenthesised number, as in the Agent.md count line. Without that condition
     `x = compute(1)` vs `x = compute(2)` matched, and the tool answered "measure,
     never pick a side, exit 0" about a code change - advice that is not merely
-    unhelpful but actively closes the one case a human must read.
+    unhelpful but actively closes the one case a human must read. The masking
+    comparison below is the *second* half of the same guard and is equally
+    load-bearing: it is what makes the pair "one count re-measured" rather than
+    "two counts". Measured 2026-09-11 (`cyc20260911-204842`): removing it left all
+    45 tests passing while flipping the verdict on 4 of 937 real corpus blocks, e.g.
+    `Python: ... (1407)` against `Node: ... (1410)` - two different facts, answered
+    with "measure, never pick a side" at rc 0, the caller's signal that every block
+    was classified and the advice is safe to act on.
 
     The sides must also be the **same length**: a block that only differs by
     numbers is an aligned pair of revisions, and an unaligned hunk is a different
@@ -637,6 +646,22 @@ def main(argv: list[str] | None = None) -> int:
     paths = [p for p in paths if not (p in seen or seen.add(p))]
 
     if not paths:
+        if args.all:
+            # `--all` was *answered*, not misused: git reports nothing unmerged.
+            # This is rc 0 rather than rc 2 because a clean merge is a state, not a
+            # malformed invocation - and the message must say so, because the old
+            # one ("pass files, or --all for every unmerged path") told the caller
+            # to pass the flag they had just passed, at the one moment when the
+            # silence is the interesting signal: `cyc20260913-082711` hit this with
+            # a merge that resolved *cleanly* and produced a tree that fails the
+            # doc-count guard (issue #1158), so "no conflicts" must not be read as
+            # "the tree is fine" - hence the pointer to the tool that measures that.
+            print(
+                "no unmerged paths: the merge is clean or already resolved - "
+                "nothing to classify. A clean merge is not evidence of a healthy "
+                "tree; check the resulting tree with scripts/check-merge-sequence.py"
+            )
+            return 0
         print(
             "error: no paths given (pass files, or --all for every unmerged path)",
             file=sys.stderr,
