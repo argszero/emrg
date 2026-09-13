@@ -51,6 +51,49 @@ the tool would call a PR mergeable on reviews a ❌ had already answered.
 The cycle id is read from the body (`cyc20260911-091230`); a vote without one is
 reported as unattributable rather than counted, since distinctness cannot be shown.
 
+Votes are necessary, not sufficient: the mergeable clause
+---------------------------------------------------------
+The merge rule has three conjuncts - 3 consecutive ✅ from different cycles, the PR
+is `MERGEABLE`/`CLEAN`, and CI is green. Counting votes answers only the first, and
+until now this tool printed `READY` on the strength of it alone. Measured
+2026-09-12: **six** PRs (#1152/#1151/#1145/#1142/#1141/#1136) each printed
+`READY 3/3` while `mergeable` was `CONFLICTING` and `mergeStateStatus` was `DIRTY` -
+every one of them a merge `gh pr merge` refuses. The queue read as six PRs waiting
+on a formality; it was a deadlock, and the one tool built to answer "can we merge
+this" was the thing saying yes.
+
+So the mergeable clause is read here, from `gh pr view --json
+mergeable,mergeStateStatus`, and it can only ever **downgrade** a verdict:
+
+* `CONFLICTING` - Git cannot merge the text, so the answer is no regardless of the
+  votes. Reported as `BLOCKED`, which is a *different* state from `SHORT`: short
+  means "come back after more review", blocked means "review is done and this still
+  cannot land" - the state that sat invisible behind six `READY` lines.
+* `MERGEABLE`, but any `mergeStateStatus` other than `CLEAN` - the gate is the
+  *pair*, so a `MERGEABLE` PR that is `UNSTABLE` (checks failing or unfinished),
+  `BEHIND`, `BLOCKED` or `DRAFT` is also blocked. Reading only `mergeable` is what
+  let a **draft** pull request - which no vote can merge - print `READY`.
+* `UNKNOWN` - GitHub has not computed mergeability yet (usual right after a push).
+  Not a yes and not a no, so this fails loud (exit 2) rather than printing either.
+  A `mergeStateStatus` this version does not recognise fails loud for the same
+  reason: an unknown state is not evidence of cleanliness. (Enumerating the states
+  and refusing the rest buys the rot-resistance that "never branch on the field" was
+  reaching for, without also passing every state that enumeration covers.)
+* `MERGEABLE`/`CLEAN` - the text merges and GitHub is not withholding the merge.
+  This is deliberately **not** taken as evidence that merging is safe: as
+  `check-merge-freshness.py` documents, GitHub answers "does this textually merge",
+  and a clean auto-merge of two same-valued count lines is the *dangerous* case, not
+  the safe one. The clause is used only in the direction where it is decisive (a
+  conflict or a withheld merge is a hard no), and the states are printed so a reader
+  sees them without being told they are fine.
+
+One sibling question stays with its own tool, named here so this one does not
+quietly pretend to answer it: `check-merge-freshness.py` asks whether the CI verdict
+is still about the tree that would merge (a question about *which* tree ran CI, not
+about whether checks pass - `UNSTABLE` answers that one, and is read above). Likewise
+`check-merge-tree-health.py` (PR #1155) asks whether the merged tree passes the
+repo's own guards.
+
 Push time, and the honest bound
 -------------------------------
 A vote counts only if it was submitted *after the head was pushed*. The push time is
@@ -59,8 +102,19 @@ when GitHub received the push event - precisely the moment the earlier votes sto
 being about the current head. When no run exists for the head, this falls back to
 the head commit's committer date and **says so in the output**: a commit date can
 precede the push, so the fallback is the optimistic direction and must not be
-silently trusted. The fallback is also the case where the PR has no CI at all,
-which is not mergeable anyway.
+silently trusted. The fallback is also the case where the PR has no CI at all - and
+that is the third conjunct failing, so it **blocks** rather than just being disclosed.
+
+An earlier version of this note claimed such a PR "is not mergeable anyway" and used
+the fallback for the count alone. Measured 2026-09-12: the claim is false.
+`MergeStateStatus` is computed from *required* checks, and this repo has no branch
+protection and no rulesets, so a head with **zero** checks is not `PENDING` or
+`UNSTABLE` - it is `CLEAN`, indistinguishable in the merge state from a double-green
+head. Three historical PRs have exactly that shape (heads `c0860a35`, `af2e0efd`,
+`5358d294`; zero workflow runs each, all three reported `MERGEABLE`/`CLEAN`), and a
+probe with that payload reached `READY`/exit 0 on three votes. So a missing run is not
+a nuance about the count - it is the CI conjunct unverified, and it is treated as
+blocking.
 
 Usage
 -----
@@ -70,10 +124,19 @@ Usage
 
 Exit codes
 ----------
-    0  every PR has >= --min-votes (default 3) valid votes
-    1  at least one PR is short
-    2  the check could not be made (gh failed, unparseable response) - fail loud;
-       never report a count for a question that was not answered
+    0  every PR has >= --min-votes (default 3) valid votes **and** is
+       `MERGEABLE`/`CLEAN` **and** has a CI run for its head commit
+    1  at least one PR is SHORT (too few votes) or BLOCKED (cannot be merged:
+       conflicting, a non-clean merge state, or no CI run for the head)
+    2  the check could not be made (gh failed, unparseable response, mergeability
+       not computed yet, merge state not recognised) - fail loud; never report a
+       count for a question that was not answered
+
+The count is printed either way, so a PR that is BLOCKED still reports its votes;
+`--json` carries `valid_votes` and the merge states as separate fields for a
+caller that wants to act on them. There is deliberately no flag that drops the
+mergeable clause: a mode in which this tool says "ready" about a PR that cannot
+merge is the exact reading it was just fixed for.
 
 `gh` and network access to GitHub are required; there is no offline mode.
 """
@@ -88,6 +151,56 @@ import sys
 from dataclasses import dataclass, field
 
 REPO = "argszero/emrg"
+
+# GitHub's three-valued mergeability, as `gh pr view --json mergeable` reports it.
+# Named rather than compared inline so an unrecognised value (a new GitHub state)
+# falls through to the fail-loud branch instead of being read as one of these.
+#
+# `UNKNOWN` is what GitHub returns before it has computed mergeability at all -
+# usual for a minute or two after a push. It is neither a yes nor a no, so it is
+# exit 2 (could not check) rather than either verdict.
+_MERGEABLE = "MERGEABLE"
+_CONFLICTING = "CONFLICTING"
+_UNKNOWN_MERGEABILITY = "UNKNOWN"
+
+# The merge gate is spelled **`MERGEABLE`/`CLEAN`** - two fields - and an earlier
+# version of this tool read only the first, on the theory that `mergeStateStatus` is
+# "a finer-grained view of the same fact" and branching on it would rot as GitHub
+# adds states. That theory was wrong twice over, and the second time was measured
+# (cyc20260912-190602): with three valid votes the tool printed
+# **`READY` and exited 0** for `MERGEABLE`/`UNSTABLE` (checks failing or still
+# running), `/BEHIND`, `/BLOCKED` and `/DRAFT`. A **draft** pull request cannot be
+# merged by anyone, and `UNSTABLE` is precisely "CI is not green" - the third
+# conjunct this docstring claims only a sibling tool checks. So the second field is
+# read, and the spelling is the gate's own.
+#
+# Rot-resistance is bought the other way round from before: rather than *ignoring*
+# the field, the known states are enumerated and anything unrecognised **fails loud**
+# (exit 2). A state GitHub adds later is then reported as "could not check" instead
+# of silently passing as permission - which is what "never branch on it" was
+# actually trying to buy, at the cost of the false READY above.
+_CLEAN = "CLEAN"
+
+# The states in which the merge cannot proceed right now, each with the reason the
+# reader needs. GitHub's `MergeStateStatus` vocabulary:
+#
+#   DIRTY       the merge conflicts
+#   UNSTABLE    mergeable, but commit status is not passing  <- the CI conjunct
+#   BEHIND      the head is out of date with the base branch
+#   BLOCKED     GitHub blocks the merge (protection rules / required reviews)
+#   DRAFT       the pull request is a draft
+_NON_CLEAN_STATES = {
+    "DIRTY": "the merge conflicts",
+    "UNSTABLE": "checks are failing or have not finished",
+    "BEHIND": "the head is behind the base branch",
+    "BLOCKED": "GitHub reports the merge blocked (protection rules or required reviews)",
+    "DRAFT": "the pull request is a draft",
+}
+
+# `HAS_HOOKS` ("merge commits are conditioned on hooks") is deliberately NOT in the
+# map: whether it permits a merge is not something this tool can establish, and
+# guessing either way would put an unverified verdict behind a gate. It falls to the
+# fail-loud branch with every other unrecognised value.
 
 # The runnable form, as Agent.md documents it. A constant (the same convention as
 # check-doc-count.py) so the doc line and the guard that checks it cannot drift
@@ -525,13 +638,85 @@ class Verdict:
     head_sha: str
     push_time: str
     push_time_exact: bool
+    mergeable: str = ""
+    merge_state: str = ""
     votes: list[Vote] = field(default_factory=list)
+    # Parallel to `votes`: whether each one contributes to `valid_count`. A valid
+    # approval whose cycle already appears earlier in the run does not, and the
+    # label column must say so rather than calling it "counts".
+    counted: list[bool] = field(default_factory=list)
     valid_count: int = 0
     needed: int = 3
 
     @property
     def short(self) -> bool:
+        """Too few votes. A statement about review, not about mergeability."""
         return self.valid_count < self.needed
+
+    @property
+    def blocked(self) -> bool:
+        """The merge cannot proceed: the gate's `MERGEABLE`/`CLEAN` is not satisfied.
+
+        Kept distinct from `short` because the two call for opposite responses:
+        short means "come back after more review", blocked means "review is done and
+        this still cannot land". Collapsing them is what let six CONFLICTING PRs sit
+        behind six `READY` lines, each looking like it was waiting on a formality.
+
+        Covers every non-clean state, not only a conflict. An earlier version tested
+        `mergeable == CONFLICTING` and so reported `READY` for `MERGEABLE`/`UNSTABLE`
+        (CI not green), `/BEHIND`, `/BLOCKED` and `/DRAFT` - a draft PR, which nobody
+        can merge at all. The gate's spelling is the pair, so the pair is tested.
+
+        A head with **no CI run** is blocking too, and it is the case the merge state
+        cannot express: `MergeStateStatus` counts *required* checks, and with no
+        branch protection a head that ran nothing is not `PENDING` or `UNSTABLE` but
+        `CLEAN` - the same value a double-green head reports. Measured 2026-09-12 on
+        three historical PRs (`c0860a35`, `af2e0efd`, `5358d294`: zero runs, all
+        `MERGEABLE`/`CLEAN`). So the third conjunct is checked against the run
+        itself, not against the state that is documented not to carry it.
+        """
+        return (
+            self.mergeable == _CONFLICTING
+            or self.merge_state in _NON_CLEAN_STATES
+            or not self.push_time_exact
+        )
+
+    @property
+    def block_reason(self) -> str:
+        """Why this PR cannot merge, in the reader's terms."""
+        if self.mergeable == _CONFLICTING:
+            return "Git cannot merge the text (CONFLICTING)"
+        reason = _NON_CLEAN_STATES.get(self.merge_state)
+        if reason:
+            return f"merge state is {self.merge_state} - {reason}"
+        if not self.push_time_exact:
+            return (
+                "no CI run exists for the head commit, so the CI conjunct is not "
+                "verified (the merge state cannot show this: with no required checks "
+                "a head that ran nothing still reads CLEAN)"
+            )
+        return ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.short and not self.blocked
+
+    @property
+    def mark(self) -> str:
+        """`BLOCKED` whenever the text cannot merge, `SHORT` for a vote deficit.
+
+        Blocked wins even when the votes are also short. The conflict is the
+        blocking fact: it has to be resolved first, and resolving it pushes a new
+        head, which voids every vote counted here. Reporting `SHORT` in that state
+        would read as "come back after more review" and send a reviewer to do work
+        that the next rebase throws away - the same misdirection as the original
+        bug, one layer down.
+        """
+        if self.blocked:
+            return "BLOCKED"
+        if self.short:
+            return "SHORT"
+        return "READY"
 
 
 def _head_push_time(head: str) -> tuple[str, bool]:
@@ -562,12 +747,61 @@ def _head_push_time(head: str) -> tuple[str, bool]:
     return committer_date, False
 
 
+def _merge_state(view: dict) -> tuple[str, str]:
+    """`(mergeable, mergeStateStatus)` from a `gh pr view` payload, checked.
+
+    `gh pr view --json mergeable` prints `MERGEABLE` / `CONFLICTING` / `UNKNOWN`.
+    The fields are required rather than defaulted: a payload that lost them (a
+    projection that did not apply, the failure mode this file already hit once with
+    `at`) must fail loud, because the absent value would read as "not blocking".
+    """
+    mergeable = str(view.get("mergeable") or "")
+    state = str(view.get("mergeStateStatus") or "")
+    if not mergeable or not state:
+        raise RuntimeError(
+            f"PR payload has no mergeability (mergeable={mergeable!r}, "
+            f"mergeStateStatus={state!r}) - refusing to report a verdict, since an "
+            "absent conflict is indistinguishable from no conflict"
+        )
+    return mergeable, state
+
+
 def check_pr(number: int, needed: int) -> Verdict:
     view = _gh_json(
-        ["pr", "view", str(number), "-R", REPO, "--json", "number,title,headRefOid"]
+        [
+            "pr",
+            "view",
+            str(number),
+            "-R",
+            REPO,
+            "--json",
+            "number,title,headRefOid,mergeable,mergeStateStatus",
+        ]
     )
     assert isinstance(view, dict)
     head = str(view["headRefOid"])
+
+    mergeable, merge_state = _merge_state(view)
+    # GitHub computes mergeability lazily, so a freshly pushed head reports UNKNOWN
+    # for a short while. That is a question not yet answered, and the failure to
+    # avoid is answering it anyway - either direction would be a guess about whether
+    # the text merges. Same for a value this version does not know.
+    if mergeable not in {_MERGEABLE, _CONFLICTING}:
+        raise RuntimeError(
+            f"#{number}: mergeable={mergeable!r} (mergeStateStatus={merge_state!r}) is "
+            "not a computed mergeability - GitHub reports UNKNOWN until it finishes "
+            "computing, and this check will not guess a verdict from it"
+        )
+    # The second half of the gate's spelling. `MERGEABLE` alone is not `MERGEABLE`/
+    # `CLEAN`: every other state either blocks the merge or says the CI conjunct is
+    # unmet, and a state this version does not know is not evidence of cleanliness.
+    if mergeable == _MERGEABLE and merge_state not in {_CLEAN, *_NON_CLEAN_STATES}:
+        raise RuntimeError(
+            f"#{number}: mergeStateStatus={merge_state!r} is not a state this check "
+            f"knows (known: CLEAN, {', '.join(sorted(_NON_CLEAN_STATES))}). It is not "
+            "read as permission - an unrecognised state may well block the merge, and "
+            "reporting READY from it would be a verdict this tool has not verified"
+        )
 
     push_time, exact = _head_push_time(head)
 
@@ -618,14 +852,23 @@ def check_pr(number: int, needed: int) -> Verdict:
     # cycle at most once inside the trailing run.
     run = 0
     seen: set[str] = set()
+    # Which votes `run` is actually made of. The label column says "counts" only for
+    # these, because a valid approval can still fail to count: counting is per
+    # *cycle*, so a second vote from a cycle already in the run is valid (it is
+    # about this head, and it carries a cycle id) but contributes nothing.
+    counted: list[bool] = []
     for v in votes:
         if v.kind == "veto":
             run = 0
             seen.clear()
+            counted.append(True)
         elif v.valid and v.cycle is not None and v.cycle not in seen:
             seen.add(v.cycle)
             run += 1
-        # invalid approvals and repeat-cycle approvals leave the run untouched
+            counted.append(True)
+        else:
+            # invalid approvals and repeat-cycle approvals leave the run untouched
+            counted.append(False)
 
     return Verdict(
         pr=number,
@@ -633,7 +876,10 @@ def check_pr(number: int, needed: int) -> Verdict:
         head_sha=head,
         push_time=push_time,
         push_time_exact=exact,
+        mergeable=mergeable,
+        merge_state=merge_state,
         votes=votes,
+        counted=counted,
         valid_count=run,
         needed=needed,
     )
@@ -666,7 +912,13 @@ def main(argv: list[str] | None = None) -> int:
                         "push_time_exact": v.push_time_exact,
                         "valid_votes": v.valid_count,
                         "needed": v.needed,
-                        "ready": not v.short,
+                        "mergeable": v.mergeable,
+                        "merge_state": v.merge_state,
+                        "ci_ran": v.push_time_exact,
+                        "blocked": v.blocked,
+                        "verdict": v.mark,
+                        "enough_votes": not v.short,
+                        "ready": v.ok,
                     }
                     for v in verdicts
                 ],
@@ -675,13 +927,31 @@ def main(argv: list[str] | None = None) -> int:
         )
     else:
         for v in verdicts:
-            mark = "READY" if not v.short else "SHORT"
-            src = "" if v.push_time_exact else "  (no CI run: push time approximated by commit date)"
+            mark = v.mark
+            # A missing run is both a caveat about the count *and* the CI conjunct
+            # unverified, so the line says which: `mark` is already BLOCKED here,
+            # and a reader should not have to infer why from a parenthetical.
+            src = (
+                ""
+                if v.push_time_exact
+                else "  (no CI run: push time approximated by commit date; blocked)"
+            )
             print(
                 f"#{v.pr} {mark} {v.valid_count}/{v.needed} valid votes "
                 f"(head {v.head_sha[:8]}, pushed {v.push_time}){src}"
             )
-            for vote in v.votes:
+            # The merge state is printed on its own line and always, so a reader
+            # never has to infer it. `READY` with `CONFLICTING` underneath is the
+            # contradiction this was fixed for, and it is worth being unable to
+            # produce: `mark` already refuses to say READY in that case.
+            print(f"    merge state: {v.mergeable}/{v.merge_state}")
+            for index, vote in enumerate(v.votes):
+                # Whether *this* vote is part of the count `run` -- not whether it
+                # could be: `valid` only says it is about this head. The two come
+                # apart for a cycle's second vote, which counts once.
+                contributes = (
+                    v.counted[index] if index < len(v.counted) else vote.valid
+                )
                 # The mark column answers *counting*, except that a veto is never
                 # rendered "OK": a veto submitted at the current head is `valid`
                 # (it is about this head, and it carries a cycle id) while meaning
@@ -694,7 +964,12 @@ def main(argv: list[str] | None = None) -> int:
                     mark = "NO  "
                     note = "counts - resets the run" if vote.valid else vote.why
                 elif vote.valid:
-                    mark, note = "OK  ", "counts"
+                    mark = "OK  "
+                    note = (
+                        "counts"
+                        if contributes
+                        else f"valid, but cycle {vote.cycle} already counted"
+                    )
                 else:
                     # An approval that predates the head push is a real ✅ and still
                     # does not count; rendering it "OK ... VOID" would contradict
@@ -703,14 +978,34 @@ def main(argv: list[str] | None = None) -> int:
                     mark, note = "VOID", vote.why
                 print(f"    {vote.at} {mark} {vote.cycle or '(no cycle id)'} - {note}")
 
-    if any(v.short for v in verdicts):
+    # Two ways to fail, with different cures, so they are reported separately rather
+    # than as one "not ready": a SHORT PR needs more review; a BLOCKED one needs the
+    # conflict resolved, and no amount of further review will change that. A PR that
+    # is both is listed under BLOCKED only - see `mark` for why that is the useful
+    # classification rather than the pessimistic one.
+    blocked = [v for v in verdicts if v.blocked]
+    short = [v for v in verdicts if v.short and not v.blocked]
+
+    if blocked:
+        also_short = " (their votes are short too, but resolving the block " \
+            "replaces the head and voids them - review after the rebase, not before)"
+        reasons = "; ".join(
+            f"#{v.pr}: {v.block_reason}" for v in blocked
+        )
+        print(
+            f"\n{reasons}. More review does not fix this - the branch or the pull "
+            "request has to be made mergeable first."
+            + (also_short if any(v.short for v in blocked) else ""),
+            file=sys.stderr,
+        )
+    if short:
         print(
             f"\nNot enough votes yet (need {args.min_votes} consecutive, from different "
             "cycles, none predating the head push). A rebase voids every earlier vote.",
             file=sys.stderr,
         )
-        return 1
-    return 0
+
+    return 1 if (short or blocked) else 0
 
 
 if __name__ == "__main__":
