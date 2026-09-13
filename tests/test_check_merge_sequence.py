@@ -1213,7 +1213,13 @@ def _queue_where_nothing_merges(mod, monkeypatch, conflict_line: str) -> None:
 
     def fake_run(argv, cwd=None):
         if argv[:3] == ["git", "merge-tree", "--write-tree"]:
-            return _FakeProc(conflict_line, returncode=1)
+            # Real shape, measured 2026-09-14: the merged tree's OID first, then the
+            # conflict block. The fixture used to carry only the CONFLICT line, a
+            # shape `git merge-tree --write-tree` never prints - and once
+            # `_merge_commit` stopped reading the exit code alone, that shape is a
+            # failure to merge both inputs rather than a conflict (which is exactly
+            # what the tool now says about it).
+            return _FakeProc("0" * 40 + "\n" + conflict_line, returncode=1)
         return _FakeProc(argv[-1].removesuffix("^{tree}"))
 
     monkeypatch.setattr(mod, "_run", fake_run)
@@ -1488,3 +1494,120 @@ def test_the_fold_does_not_need_an_ambient_git_identity(mod, tmp_path, monkeypat
     )
     # …and it is a function of its inputs, so a fold does not vary with the clock.
     assert mod._merge_commit(base, head) == commit
+
+
+# --- the exit code is not the merged tree ---------------------------------------
+
+
+def test_a_blob_input_is_not_a_conflicting_step(mod, tmp_path, monkeypatch):
+    """`rc == 1` alone read "I could not merge these inputs" as a conflict.
+
+    Measured 2026-09-14 (`cyc20260914-050817`, this repo): `git merge-tree
+    --write-tree <commit> <blob>` exits **1 with empty stdout**, the same code a
+    genuine conflict exits with, and only a genuine conflict prints the merged
+    tree's OID. This tool's `rc == 1: return None` therefore reported an
+    unanswered question as a conflicting step: `_default_plan` *excludes* a PR on
+    that evidence (and can end in the refusal that says every open PR conflicts),
+    and the paths named there come from a report that was never read. Real git, so
+    the shape is measured rather than described.
+    """
+    repo = tmp_path / "blob"
+    repo.mkdir()
+    _git(mod, repo, "init", "-q", "-b", "master")
+    (repo / "f.txt").write_text("base\n", encoding="utf-8")
+    _git(mod, repo, "add", "-A")
+    _git(
+        mod, repo, "-c", "user.email=f@example.com", "-c", "user.name=f",
+        "commit", "-q", "-m", "base",
+    )
+    commit = mod._run(["git", "rev-parse", "HEAD"], cwd=str(repo)).stdout.strip()
+    blob = mod._run(["git", "rev-parse", "HEAD:f.txt"], cwd=str(repo)).stdout.strip()
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._merge_commit(commit, blob)
+    assert "not a conflict" in str(excinfo.value)
+    assert "not something we can merge" in str(excinfo.value), (
+        "a failure must quote what git said rather than report itself as empty"
+    )
+
+
+def test_a_real_conflict_is_still_a_conflict(mod, tmp_path, monkeypatch):
+    """The other state of the same branch, on the same repo: no regression.
+
+    Two commits editing one line: `merge-tree` exits 1 *and* names a merged tree,
+    which is the answer this tool reads as a conflict.
+    """
+    repo = tmp_path / "conflict"
+    repo.mkdir()
+    _git(mod, repo, "init", "-q", "-b", "master")
+    (repo / "f.txt").write_text("a\n", encoding="utf-8")
+    _git(mod, repo, "add", "-A")
+    _git(
+        mod, repo, "-c", "user.email=f@example.com", "-c", "user.name=f",
+        "commit", "-q", "-m", "base",
+    )
+    _git(mod, repo, "checkout", "-q", "-b", "side")
+    (repo / "f.txt").write_text("side\n", encoding="utf-8")
+    _git(mod, repo, "add", "-A")
+    _git(
+        mod, repo, "-c", "user.email=f@example.com", "-c", "user.name=f",
+        "commit", "-q", "-m", "side",
+    )
+    theirs = mod._run(["git", "rev-parse", "HEAD"], cwd=str(repo)).stdout.strip()
+    _git(mod, repo, "checkout", "-q", "master")
+    (repo / "f.txt").write_text("master\n", encoding="utf-8")
+    _git(mod, repo, "add", "-A")
+    _git(
+        mod, repo, "-c", "user.email=f@example.com", "-c", "user.name=f",
+        "commit", "-q", "-m", "master",
+    )
+    ours = mod._run(["git", "rev-parse", "HEAD"], cwd=str(repo)).stdout.strip()
+    monkeypatch.chdir(repo)
+
+    assert ours != theirs
+    assert mod._merge_commit(ours, theirs) is None
+
+
+def test_an_exit_code_with_no_merged_tree_is_never_a_verdict(mod, monkeypatch):
+    """Both codes with an empty stdout: neither is a conflict, neither may crash.
+
+    rc 1 with no tree is the failure-to-merge case above; rc 0 with no tree used to
+    reach `splitlines()[0]` and raise `IndexError`, and an unhandled exception
+    leaves this tool as exit 1 - the code that means "a step lands an unhealthy
+    tree", i.e. a crash reported as a finding about a tree nobody measured.
+    """
+    for rc in (0, 1):
+        calls: list[list[str]] = []
+
+        def fake_run(argv, cwd=None, env=None):
+            calls.append(list(argv))
+            return _FakeProc("", returncode=rc, stderr="merge-tree: nope")
+
+        monkeypatch.setattr(mod, "_run", fake_run)
+        with pytest.raises(mod.MeasurementError):
+            mod._merge_commit(BASE, C1)
+        assert not any(argv[1] == "commit-tree" for argv in calls), (
+            "no commit may be folded out of an answer nobody gave"
+        )
+
+
+def test_a_conflict_that_names_its_tree_is_still_folded_from_that_line(mod, monkeypatch):
+    """The path that must keep working: the OID on line 1 is what is committed."""
+    tree = "a" * 40
+    calls: list[list[str]] = []
+
+    def fake_run(argv, cwd=None, env=None):
+        calls.append(list(argv))
+        if argv[1] == "merge-tree":
+            return _FakeProc(
+                tree + "\n100644 " + "b" * 40 + " 1\tf.txt\nCONFLICT (content): f.txt\n",
+                returncode=0,
+            )
+        return _FakeProc("c" * 40 + "\n", returncode=0)
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+    assert mod._merge_commit(BASE, C1) == "c" * 40
+    commit_tree = next(argv for argv in calls if argv[1] == "commit-tree")
+    assert tree in commit_tree, commit_tree
+    assert "CONFLICT" not in " ".join(commit_tree), commit_tree

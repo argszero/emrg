@@ -392,6 +392,93 @@ def test_a_conflicting_merge_is_a_conflict_not_a_health_verdict(
     assert "Agent.md" in report
 
 
+# --- an exit code is not a merged tree -------------------------------------------
+
+
+def _proc(returncode: int, stdout: str = "", stderr: str = ""):
+    """A `CompletedProcess` in the shape `_run` returns."""
+    return subprocess.CompletedProcess(["git"], returncode, stdout, stderr)
+
+
+def test_a_blob_input_is_not_the_clean_answer(mod, tmp_path) -> None:
+    """The exit code alone reads "I could not merge these inputs" as "clean".
+
+    Measured 2026-09-14 (`cyc20260914-050817`, this repo): `git merge-tree
+    --write-tree <commit> <blob>` exits **1 with empty stdout** - the code a
+    genuine conflict exits with - while a genuine conflict also prints the merged
+    tree's OID and its stage lines. The `rc == 1` branch used to return `[]`,
+    which this tool defines as *the merge is clean*, so a question nobody answered
+    came back as the healthy answer, and the next step would have judged a tree
+    that was never built. Real git here, so the shape is measured, not described.
+    """
+    repo = tmp_path / "blob"
+    _seed(repo, 1)
+    commit = _git(repo, "rev-parse", "master")
+    blob = _git(repo, "rev-parse", f"master:{DOC_PATH}")
+
+    assert mod._merge_tree_paths(commit, blob, cwd=str(repo)) is None
+    with pytest.raises(mod.MeasurementError):
+        mod._merged_tree_sha(commit, blob, cwd=str(repo))
+
+
+def test_the_same_repo_still_answers_a_merge_it_can_make(mod, tmp_path) -> None:
+    """The direction that must not change: a real merge the tool can make.
+
+    Same repo, same helper, the *commit* instead of the blob - so the test above
+    is about the unanswered question rather than about merge-tree refusing
+    everything this fixture builds.
+    """
+    repo = tmp_path / "blob-ok"
+    _seed(repo, 1)
+    commit = _git(repo, "rev-parse", "master")
+    assert mod._merge_tree_paths(commit, commit, cwd=str(repo)) == []
+    assert mod._merged_tree_sha(commit, commit, cwd=str(repo)) == _git(
+        repo, "rev-parse", f"{commit}^{{tree}}"
+    )
+
+
+def test_an_exit_code_with_no_tree_behind_it_is_never_an_answer(mod, monkeypatch) -> None:
+    """Both codes, both directions: the named tree is what makes an answer one."""
+    for rc in (0, 1):
+        monkeypatch.setattr(
+            mod, "_run", lambda *a, **k: _proc(rc, "", "not something we can merge")
+        )
+        assert mod._merge_tree_paths("a", "b") is None, rc
+        with pytest.raises(mod.MeasurementError):
+            mod._merged_tree_sha("a", "b")
+
+
+def test_a_conflict_whose_paths_are_not_named_is_not_the_clean_answer(mod, monkeypatch) -> None:
+    """One invariant, asserted: `[]` means an *evidenced* clean merge.
+
+    A conflict whose report names no path would otherwise reach the caller as an
+    empty list - i.e. as "clean" - which is the one direction this function must
+    never invent. It is answered as "not measured" instead.
+    """
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda *a, **k: _proc(1, "0" * 40 + "\nCONFLICT (content): no tab line here\n"),
+    )
+    assert mod._merge_tree_paths("a", "b") is None
+
+
+def test_an_evidenced_conflict_still_names_its_paths(mod, monkeypatch) -> None:
+    """The positive state of the same branch: the tree line plus the stage lines."""
+    report = (
+        "0" * 40
+        + "\n100644 "
+        + "1" * 40
+        + " 1\tAgent.md\n100644 "
+        + "2" * 40
+        + " 2\tAgent.md\n"
+    )
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: _proc(1, report))
+    # One entry per stage line, as before: the caller dedupes for display, and
+    # this change is about which answers count, not about the parse's shape.
+    assert set(mod._merge_tree_paths("a", "b") or []) == {"Agent.md"}
+
+
 # --- a mutable ref name must never reach merge-tree -----------------------------
 
 
