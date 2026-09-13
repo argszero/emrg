@@ -528,6 +528,56 @@ def test_measure_failure_names_the_invocation_and_how_to_fix_it(mod, monkeypatch
     assert f"`{mod.INVOCATION} --measure`" in str(excinfo.value)
 
 
+def test_a_missing_pytest_is_diagnosed_as_an_unsynced_checkout(monkeypatch) -> None:
+    """The remedy must not be the command that just failed.
+
+    Measured state this pins (2026-09-13, `cyc20260913-122923`): in a fresh
+    review worktree the tool printed its own `INVOCATION` as the fix, and running
+    that spelling produced byte-identical output, rc 2 - `uv run --no-sync` had
+    left an empty `.venv` there and both `python` and `python3` resolve to it, so
+    "use the project interpreter" is a circle. The message must name the
+    environment instead.
+    """
+    fresh = _load_module()
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "/some/checkout/.venv/bin/python3: No module named pytest\n"
+
+    monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(fresh.DocCountError) as excinfo:
+        fresh.measured_count()
+    message = str(excinfo.value)
+    assert "No module named pytest" in message
+    assert "/some/checkout/.venv/bin/python3" in message, "the child's own words"
+    assert "unsynced" in message, "the cause, named"
+    assert "uv sync" in message, "a remedy that can actually work here"
+
+
+def test_a_real_collection_failure_keeps_the_invocation_hint(monkeypatch) -> None:
+    """The other cause of the same non-zero exit: pytest ran, and it failed.
+
+    Without this arm, treating every non-zero collection as an unsynced checkout
+    would be green - which would take the invocation hint away from the case it
+    was written for.
+    """
+    fresh = _load_module()
+
+    class _Proc:
+        returncode = 2
+        stdout = "ERROR: file or directory not found: tests/\n"
+        stderr = ""
+
+    monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(fresh.DocCountError) as excinfo:
+        fresh.measured_count()
+    message = str(excinfo.value)
+    assert f"`{fresh.INVOCATION} --measure`" in message
+    assert "uv sync" not in message
+    assert "unsynced" not in message
+
+
 # --- which tree was scanned --------------------------------------------------
 
 
