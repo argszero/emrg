@@ -149,7 +149,7 @@ Fetch **all three** pages: the **rules** page, the **schedule / timeline** page,
 Scope of the judgment (host, 2026-09-12): it means **"the participation/evaluation process must be offline"** — an offline defense, an on-site round, offline judging, an on-site training camp, etc. → disqualified.
 
 - Chinese: `线下`、`现场`、`决赛答辩`、`答辩`、`路演`、`决赛`、`集训`、`现场评审`、`差旅`、`差旅报销`
-- English: `offline`、`off-line`、`on-site`、`onsite`、`offline round`、`in-person`、`physical attendance`、`must attend`、`final presentation`、`pitch event`、`demo day`、`venue`、`travel`
+- English: `offline`、`off-line`、`off line`、`on-site`、`on site`、`onsite`、`offline round`、`in-person`、`in person`、`physical attendance`、`must attend`、`final presentation`、`pitch event`、`demo day`、`venue`、`travel`
 
 > The bare adjective `offline` is listed alongside the compounds on purpose. The
 > requirement is stated *about the process* ("the final round will be held
@@ -160,6 +160,19 @@ Scope of the judgment (host, 2026-09-12): it means **"the participation/evaluati
 > Match **case-insensitively**: prose capitalises these freely (`Offline
 > judging…`, `On-site final`), and a list that only matches the lowercase
 > spelling of itself is the same enumeration gap one level down.
+>
+> **Hyphenation is optional in English**, so every hyphenated entry is listed in
+> its space-separated spelling as well (`off line`, `on site`, `in person`).
+> Measured on head `0244b77b` (cycle `cyc20260913-094149`): `Finalists will be
+> evaluated on site.`, `Final judging takes place on site.`, `Winners are
+> required to present in person.` and `Top teams present in person at the
+> awards.` each matched **0 of the 13** signals above, while the hyphenated
+> spellings hit — the same enumeration gap as the bare `offline`, one spelling
+> down. The two directions are not symmetric: §3.2 makes a single hit
+> disqualifying and §4 files a rejection as never re-evaluated, so a *miss*
+> enters a competition with an offline evaluation component (the host's hard
+> constraint broken silently), while a spurious hit only costs one entry. When a
+> spelling is plausible, list it.
 
 **Exception (does NOT count as an offline component)**: an offline description appearing **only** in an "award ceremony / award banquet" context (`颁奖典礼` / `领奖仪式` / `award ceremony` / `award banquet`) → do not disqualify. A mere award ceremony is not an offline participation requirement; treating it as one would exclude essentially every prize-bearing competition.
 

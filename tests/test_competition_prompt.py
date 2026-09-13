@@ -222,6 +222,37 @@ def test_english_signals_cover_the_bare_adjective():
                                       "physical attendance", "must attend")), signals
 
 
+def test_hyphenated_signals_are_listed_in_both_spellings():
+    """Every hyphenated signal must also be listed with a space.
+
+    Hyphenation is optional in English and prose uses both spellings
+    interchangeably: a rules page saying "the final will be judged on site"
+    states an offline evaluation requirement in the same sense as "on-site
+    judging". A list that carries only the hyphenated spelling therefore misses
+    the space-separated one, which is the bare-`offline` gap one spelling down.
+
+    Measured 2026-09-13 (cycle cyc20260913-094149) on head `0244b77b`:
+    `Finalists will be evaluated on site.`, `Final judging takes place on
+    site.`, `Winners are required to present in person.` and `Top teams present
+    in person at the awards.` each matched **0 of the 13** signals, while their
+    hyphenated spellings hit. The failure direction is the dangerous one — a
+    missed hit lets the agent enter a competition with an offline component,
+    whereas a spurious hit only costs an entry.
+
+    Asserted as a rule over the parsed list rather than as three presence
+    checks, so a *future* hyphenated entry added without its twin fails here.
+    """
+    signals = _english_signals(PROMPT.read_text(encoding="utf-8"))
+    assert signals, "§3.2 has no English signal line"
+    missing = [w for w in signals if "-" in w and w.replace("-", " ") not in signals]
+    assert not missing, (
+        f"hyphenated signal(s) {missing} have no space-separated spelling in "
+        f"the list {signals} — English hyphenation is optional, so only the "
+        f"hyphenated form misses the space-separated wording of the same "
+        f"requirement"
+    )
+
+
 def test_signal_list_verdicts_on_sample_requirements():
     """Coverage check: sample requirements in, expected verdicts out.
 
@@ -244,6 +275,8 @@ def test_signal_list_verdicts_on_sample_requirements():
         ("Offline judging will take place.", "en", True),
         ("Participants must attend an offline event.", "en", True),
         ("The final round will be held on-site.", "en", True),
+        ("Finalists will be evaluated on site.", "en", True),
+        ("Winners are required to present in person.", "en", True),
         ("Teams must travel to Shanghai for the final.", "en", True),
         ("This is a completely online competition.", "en", False),
         ("Submissions are scored on a public leaderboard.", "en", False),
