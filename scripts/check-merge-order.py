@@ -61,6 +61,28 @@ with `rev-parse` first, and the test
 `test_no_mutable_ref_name_reaches_merge_tree` asserts that invariant over the
 argv the tool builds, which is what would have caught this.
 
+An explicit `--base origin/master` names two refs, and git picks one of them
+--------------------------------------------------------------------------
+Resolving the base to a commit is only half the rule: the *name* is ambiguous, and
+`rev-parse` consults `refs/heads/<name>` **before** `refs/remotes/<name>`. Git
+itself creates a local branch called `origin/master` when a fetch destination is
+written unqualified, so one stray branch of that name replaces the remote-tracking
+ref and every number below is then a true answer about a base the caller never
+named. The printed SHA is what exposes it; the name alone does not.
+
+Measured `cyc20260913-234157` in a scratch clone (real git, no network) whose
+`refs/remotes/origin/master` sat at `5e45e3d` with a stray `refs/heads/origin/master`
+at `2f9c552`:
+
+    uv run --no-sync python3 scripts/check-merge-order.py 1196 --base origin/master
+    base 2f9c552403f30882da7856db4f14702f4df508b9, 1 open PR(s), 0 of 0 pairs conflict
+
+i.e. the stray, reported under the caller's name. So an explicit base that names a
+remote-tracking ref is resolved **by full name** before anything is measured, and a
+name that denotes *only* a local branch is refused rather than measured (exit 2).
+The default path is unaffected: it fetches master into `FETCH_HEAD`, which is
+neither ambiguous nor remote-tracking, and is left exactly as it is.
+
 The order it recommends
 -----------------------
 A merge costs one resolution per *later* PR it dirties. So the PR that dirties the
@@ -82,12 +104,18 @@ With no PR numbers, every open PR is used. Heads are resolved by fetching
 `refs/pull/<N>/head` into a temporary ref, so the measurement uses each PR's real
 head rather than whatever a local branch of a similar name happens to point at.
 
+An explicit `--base` that names a remote-tracking ref (`origin/<branch>`) is taken
+by its **full name**, so a stray local branch of the same name cannot stand in for
+it; a name that denotes only a local branch is refused rather than measured. The
+default (no `--base`) is unaffected - it fetches master itself.
+
 Exit codes
 ----------
     0  measurement made (which is not an endorsement of any order)
     1  at least one PR conflicts with the base - not mergeable as it stands
-    2  the measurement could not be made (gh/git failed, unparseable output) -
-       fail loud; never report an order for a question that was not answered
+    2  the measurement could not be made (gh/git failed, unparseable output, or a
+       base name that denotes only a local branch) - fail loud; never report an
+       order for a question that was not answered
 
 `gh` and network access to GitHub are required to list PRs and fetch their heads;
 there is no offline mode.
@@ -96,14 +124,36 @@ there is no offline mode.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 # `100644 <blob> <stage>\t<path>` - the conflict block merge-tree writes first,
 # one line per side per conflicted path. Stage 1/2/3 are base/ours/theirs.
 _CONFLICT_LINE = re.compile(r"^[0-7]{6} [0-9a-f]+ [123]\t(.+)$")
+
+# The sibling tool's base resolution, loaded from its file rather than imported by
+# name: the scripts in this directory are not importable modules (hyphenated names,
+# no package), and this is the same loader the test suite already uses for them.
+# Taken from the sibling rather than copied so the *rule* has one implementation -
+# a base name's meaning must not differ between the gates that ask about it.
+_SIBLING = Path(__file__).resolve().parent / "check-merge-sequence.py"
+
+
+def _load_sibling():
+    spec = importlib.util.spec_from_file_location("check_merge_sequence", _SIBLING)
+    if spec is None or spec.loader is None:  # pragma: no cover - file is in this repo
+        raise RuntimeError(f"could not load {_SIBLING}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+seq = _load_sibling()
 
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -287,7 +337,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("prs", nargs="*", type=int, help="PR numbers (default: all open)")
-    parser.add_argument("--base", default=None, help="base ref (default: origin/master)")
+    parser.add_argument(
+        "--base",
+        default=None,
+        help="base ref (default: origin/master); a remote-tracking name is taken by full name",
+    )
     parser.add_argument("--repo", default="argszero/emrg", help="GitHub owner/repo")
     parser.add_argument("--json", action="store_true", help="emit the report as JSON")
     args = parser.parse_args(argv)
@@ -302,6 +356,17 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         base = "FETCH_HEAD"
+    else:
+        # An explicit `--base origin/master` is ambiguous: `rev-parse` consults
+        # `refs/heads/origin/master` *before* the remote-tracking ref, so one stray
+        # local branch of that name replaces the base and the whole forecast is
+        # about a tree nobody named. Resolved by full name (or refused), by the
+        # sibling that already owns the rule - not by a second copy of it here.
+        try:
+            base = seq._qualify_ref(base)
+        except seq.MeasurementError as exc:
+            print(f"could not measure: {exc}", file=sys.stderr)
+            return 2
 
     try:
         numbers = sorted(args.prs) if args.prs else _open_pr_numbers(args.repo)

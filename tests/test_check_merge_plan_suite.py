@@ -382,6 +382,140 @@ def test_a_suite_that_cannot_run_is_not_reported_healthy(
     assert mod.main(["1", "--base", "master"]) == 0
 
 
+# --- rc 1 is a finding only if the suite's own report says so ------------------
+#
+# A pytest that never *started* exits 1, exactly like a failing run does. The two
+# are told apart by the report, never by the code: measured on this machine, an
+# interpreter without pytest prints `No module named pytest` and no per-test line,
+# while a real failure prints `FAILED <nodeid> - ...` and ends with a summary
+# (`1 failed, 1 passed in 0.01s`; an error in a fixture teardown ends
+# `3 passed, 1 error in 0.01s`). Reading the first as a red tree produces a health
+# finding about a tree no test ever ran on - invisible to the caller, because it
+# looks exactly like a finding.
+
+
+def test_an_interpreter_without_pytest_is_not_a_red_tree(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """The arm that made this guard necessary, as a real subprocess.
+
+    `-m <missing module>` is the shape of "pytest is not installed here": rc 1 with
+    nothing that looks like a test report. Exit 2 with the failure text on stderr,
+    and no `suite FAILED` on stdout - that phrase is a claim about the tree.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    monkeypatch.setattr(mod, "SUITE", ["-m", "emrg_no_such_pytest_here"])
+    assert mod.main(["1", "--base", "master"]) == 2
+    captured = capsys.readouterr()
+    assert "suite FAILED" not in captured.out
+    assert "could not measure" in captured.err
+    # The remedy names an invocation, and it is the one the docstring's Usage block
+    # gives: a reader who is told "use the project interpreter" without being told
+    # which command is no better off than before.
+    assert "uv run --no-sync" in captured.err
+
+    # Both states, same plan: with a runnable suite the tree is healthy, so the arm
+    # above measured the missing report rather than a broken fixture.
+    monkeypatch.setattr(mod, "SUITE", ["-m", "pytest", "tests/", "-q", "--no-header"])
+    assert mod.main(["1", "--base", "master"]) == 0
+    assert "suite OK" in capsys.readouterr().out
+
+
+def test_a_pytest_missing_from_the_interpreter_names_both_causes(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """A bare host `python3` and an unsynced `.venv` fail identically.
+
+    Measured in `check-doc-count.py` (cyc20260913-122923): a fresh worktree's `.venv`
+    is empty, so the documented invocation fails with this same text. Advising only
+    "use the project interpreter" there sends the reader in a circle, so the message
+    has to carry the second cause as well.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    # The exact text an interpreter without pytest prints, from a real subprocess.
+    monkeypatch.setattr(
+        mod,
+        "SUITE",
+        ["-c", "import sys; sys.stderr.write('No module named pytest\\n'); sys.exit(1)"],
+    )
+    assert mod.main(["1", "--base", "master"]) == 2
+    err = capsys.readouterr().err
+    assert "pytest is not installed" in err
+    assert "uv run --no-sync" in err  # cause 1: the wrong interpreter
+    assert "uv sync" in err  # cause 2: a worktree whose `.venv` is empty
+
+
+@pytest.mark.parametrize(
+    "report,quoted",
+    [
+        # A failing test: short-summary line plus the count summary. The node id is
+        # what the caller needs, so that is what is quoted.
+        (
+            "FAILED tests/test_fine.py::test_fine - assert True is False\n1 failed in 0.01s\n",
+            "tests/test_fine.py::test_fine",
+        ),
+        # An error in a fixture teardown, measured: no line starts with FAILED or
+        # ERROR but the summary names it, so the summary form is matched anywhere in
+        # the line. Anchoring it to the first word would have called this a missing
+        # report - and a missing report is now exit 2, i.e. a real failure silently
+        # downgraded to "could not measure".
+        ("3 passed, 1 error in 0.01s\n", "1 error in 0.01s"),
+    ],
+)
+def test_a_failure_the_report_names_is_still_the_finding(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys, report: str, quoted: str
+) -> None:
+    """The guard must not swallow the failures it exists to deliver.
+
+    Both shapes a red run can arrive in, and in both the tool quotes the report
+    rather than replacing it with a placeholder: the caller has to be able to read
+    which test failed off this tool's own output.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    src = "import sys; sys.stdout.write(%r); sys.exit(1)" % report
+    monkeypatch.setattr(mod, "SUITE", ["-c", src])
+    assert mod.main(["1", "--base", "master"]) == 1
+    out = capsys.readouterr().out
+    assert "suite FAILED" in out
+    assert quoted in out
+
+
+def test_a_real_failing_suite_is_reported_with_its_node_id(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """The same rule against a real pytest run, not a simulated report.
+
+    The arm above pins the discriminator; this one pins that a genuine red tree still
+    arrives as exit 1 with the failing test named, through the real `SUITE`
+    invocation.
+    """
+    repo, origin = queue
+    _branch_with(
+        repo,
+        "red",
+        {"tests/test_red.py": "def test_red():\n    assert 1 == 2\n"},
+    )
+    _publish(repo, origin, 1, "red")
+    monkeypatch.chdir(repo)
+
+    assert mod.main(["1", "--base", "master"]) == 1
+    out = capsys.readouterr().out
+    assert "suite FAILED" in out
+    assert "tests/test_red.py::test_red" in out
+
+
 def test_steps_sees_a_red_step_that_the_final_tree_hides(
     queue: tuple[Path, Path],
 ) -> None:
@@ -531,3 +665,169 @@ def test_the_same_plan_folds_to_the_same_commits_even_when_a_second_passes(
 
     time.sleep(1.1)  # the boundary the unpinned fold used to trip over
     assert mod.build_plan_tip(base, heads) == first
+
+
+# --- the base: fetched first, then taken by the name it was written as ---------
+#
+# The plan is built *onto* a base, and the heads were fetched while the base was
+# not, so one answer came from two points in time; and `git rev-parse` consults
+# `refs/heads/<name>` before `refs/remotes/<name>`, so one stray local branch
+# spelled `origin/master` replaces the remote ref. Both were measured
+# (cyc20260914-002731) as *different trees judged under one name*:
+#
+#     PRE  --base origin/master  base ec7ce11a (origin/master)     tree 5427c8ecb011
+#     POST --base origin/master  base 3fbd101d (refs/remotes/...)  tree 43752830eb32
+#
+# The tests below pin the mechanism (the ref is fetched; the qualified name is the
+# one measured) and the property (the judged tree really contains the base's new
+# commit), because a header assertion alone would pass on a tool that fetched the
+# ref and then resolved the name by precedence anyway.
+
+
+def _advance_origin_elsewhere(origin: Path, tmp_path: Path, marker: str) -> str:
+    """Move the remote's `master` without the checkout under test noticing.
+
+    A commit pushed *from* `repo` also moves `repo`'s own remote-tracking ref, which
+    is the state this test has to create rather than avoid - so the commit is made
+    in a second clone of the same bare remote, exactly as upstream moves in reality.
+    """
+    other = tmp_path / marker
+    subprocess.run(
+        ["git", "clone", "-q", "-b", "master", str(origin), str(other)],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    _git(other, "config", "user.email", "t@example.com")
+    _git(other, "config", "user.name", "t")
+    _git(other, "config", "commit.gpgsign", "false")
+    _write(other, "later.txt", "later\n")
+    sha = _commit(other, "later")
+    _git(other, "push", "-q", "origin", "master")
+    return sha
+
+
+def test_the_base_is_fetched_before_the_plan_is_built(
+    queue: tuple[Path, Path], tmp_path: Path, mod, monkeypatch, capsys
+) -> None:
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    stale = _git(repo, "rev-parse", "refs/remotes/origin/master")
+
+    true_master = _advance_origin_elsewhere(origin, tmp_path, "elsewhere")
+    # Preconditions, asserted rather than assumed: the ref is behind, it is behind
+    # the commit the remote actually holds, and the stale tree is missing the file
+    # the fresh one carries - without these the arm below could pass on a fixture
+    # that never created the state under test.
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master") == stale
+    assert _git(origin, "rev-parse", "master") == true_master != stale
+    assert "later.txt" not in _git(repo, "ls-tree", "-r", "--name-only", stale)
+
+    monkeypatch.chdir(repo)
+    assert mod.main(["1", "--base", "origin/master"]) == 0
+
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith(
+        f"base {true_master[:8]} (refs/remotes/origin/master)"
+    )
+    # The mechanism and the thing it is for: the ref moved, and the tree the suite
+    # judged is the base's new tree rather than the stale one.
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master") == true_master
+    tree = re.search(r"final tree [0-9a-f]{12} \(([0-9a-f]{40})\)", out)
+    assert tree, out
+    assert "later.txt" in _git(repo, "ls-tree", "-r", "--name-only", tree.group(1))
+
+
+def test_a_local_branch_shadowing_the_base_name_does_not_replace_it(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+
+    # A stray local branch spelled like the remote-tracking ref, at another commit.
+    _write(repo, "stray.txt", "stray\n")
+    stray = _commit(repo, "stray")
+    _git(repo, "branch", "origin/master", stray)
+    remote_tip = _git(repo, "rev-parse", "refs/remotes/origin/master")
+    # Precondition: a bare-name resolution really does reach the shadow, so the run
+    # below is a measurement of precedence rather than of nothing.
+    assert _git(repo, "rev-parse", "origin/master") == stray != remote_tip
+
+    monkeypatch.chdir(repo)
+    assert mod.main(["1", "--base", "origin/master"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.splitlines()[0].startswith(
+        f"base {remote_tip[:8]} (refs/remotes/origin/master)"
+    )
+    # The shadow is a local misconfiguration, not a reason to refuse: it is named so
+    # the reader can delete it, and it cannot change the answer either way.
+    assert "warning: origin/master is ambiguous" in captured.err
+
+
+def test_a_base_that_cannot_be_fetched_is_a_measurement_error(
+    queue: tuple[Path, Path], tmp_path: Path, mod, monkeypatch, capsys
+) -> None:
+    """A base the tool could not verify is exit 2, never a base it kept anyway.
+
+    Two arms, because they fail at different places and only the second one is
+    about the refresh: a name with no ref at all (`origin/nope`), and - the
+    dangerous one - an *existing* remote-tracking ref whose remote cannot be
+    reached. A tool that swallowed the fetch failure would answer about the ref it
+    could not verify, which is the defect the refresh exists to remove. The head
+    fetch is stubbed in that arm so the base's fetch is the only thing left that can
+    fail: otherwise the run exits 2 on the head instead, and a swallowed base
+    failure would pass this test by accident (it did, until the stub was added).
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    head = _git(origin, "rev-parse", "refs/pull/1/head")
+    monkeypatch.chdir(repo)
+
+    assert mod.main(["1", "--base", "origin/nope"]) == 2
+    captured = capsys.readouterr()
+    assert "base " not in captured.out
+    assert "could not measure" in captured.err
+
+    # Precondition of the second arm: the ref to be read is there, so what fails is
+    # the fetch and not the lookup - without this the arm below could pass for the
+    # first arm's reason.
+    assert _git(repo, "rev-parse", "--verify", "refs/remotes/origin/master")
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    _git(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+
+    assert mod.main(["1", "--base", "origin/master"]) == 2
+    captured = capsys.readouterr()
+    assert "base " not in captured.out
+    assert "could not measure" in captured.err
+
+
+def test_a_sha_base_is_taken_literally_and_never_fetched(
+    queue: tuple[Path, Path], tmp_path: Path, mod, monkeypatch, capsys
+) -> None:
+    """Only a remote-tracking name is refreshed; a SHA is immutable by construction.
+
+    Discriminating in both directions: the same unreachable remote that makes the
+    `origin/master` arm exit 2 leaves the SHA arm at exit 0, so the arm above is
+    measuring the fetch rather than an unrelated failure.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    sha = _git(repo, "rev-parse", "master")
+    # the PR ref lives on the remote, not in this checkout
+    head = _git(origin, "rev-parse", "refs/pull/1/head")
+    # The heads are stubbed so the *only* network operation left is the base's.
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+    _git(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    monkeypatch.chdir(repo)
+
+    assert mod.main(["1", "--base", sha]) == 0
+    assert capsys.readouterr().out.splitlines()[0].startswith(f"base {sha[:8]} ({sha})")
+
+    assert mod.main(["1", "--base", "origin/master"]) == 2
+    assert "could not measure" in capsys.readouterr().err

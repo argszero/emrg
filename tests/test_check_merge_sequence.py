@@ -282,7 +282,7 @@ def test_an_unmeasurable_step_is_not_a_pass(mod, monkeypatch, capsys):
 # healthy tree comes back True.
 
 
-def _tree_with(repo: Path, documented: int | None, tests: int) -> str:
+def _tree_with(repo: Path, documented: int | None, tests: int, guard: bytes | None = None) -> str:
     """Build a commit whose guard verdict is decided by whether a count is stored.
 
     Returns the commit's tree sha, which is what `_guard_verdict` takes.
@@ -297,8 +297,11 @@ def _tree_with(repo: Path, documented: int | None, tests: int) -> str:
     (repo / "scripts").mkdir(parents=True)
     (repo / "tests").mkdir()
     # The real guard, byte for byte: `_guard_verdict` runs the tree's *own* copy,
-    # and a stand-in would test this fixture instead of the tool.
-    (repo / "scripts" / "check-doc-count.py").write_bytes(CHILD_GUARD.read_bytes())
+    # and a stand-in would test this fixture instead of the tool. `guard` overrides
+    # it only for the test that needs a guard that cannot reach a verdict.
+    (repo / "scripts" / "check-doc-count.py").write_bytes(
+        CHILD_GUARD.read_bytes() if guard is None else guard
+    )
     count = "" if documented is None else f" ({documented})"
     (repo / "Agent.md").write_text(
         f"# Doc\nPython: `uv run pytest tests/ -v`{count}\n", encoding="utf-8"
@@ -390,6 +393,32 @@ def test_a_tree_without_the_guard_is_a_measurement_error(mod, tmp_path, monkeypa
         mod._guard_verdict(tree, tmp_path / "extract")
 
     assert "not present" in str(excinfo.value)
+
+
+def test_a_guard_that_crashes_is_a_measurement_error_not_a_finding(
+    mod, tmp_path, monkeypatch
+):
+    """Exit 1 is also what an unhandled exception produces.
+
+    The guard runs in a pristine export with `sys.executable`, so a tree whose
+    dependencies cannot be imported prints a traceback and exits 1 - the very code
+    the guard uses to report a violated tree. Reported as a finding, that is a
+    DANGER step about a tree nobody judged, and the reverse reading (a real finding
+    silently downgraded to "could not measure") is why the marker is the guard's
+    own line rather than the exit code alone.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    tree = _tree_with(
+        repo, documented=1, tests=1,
+        guard=b"#!/usr/bin/env python3\nimport definitely_not_a_module\n",
+    )
+    monkeypatch.chdir(repo)
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._guard_verdict(tree, tmp_path / "extract")
+
+    assert "without reporting a finding" in str(excinfo.value)
 
 
 # --- the base is refreshed, not taken on faith ------------------------------

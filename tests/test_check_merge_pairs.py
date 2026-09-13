@@ -75,6 +75,10 @@ def _scan(mod, monkeypatch, chain, verdicts, prs=(1, 2), base=BASE):
 
     monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: base)
     monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: heads[n])
+    # The base is refreshed for real in `main` (a `git fetch`), so it is stubbed here:
+    # a test that reaches the network is not a test of this tool. The call itself is
+    # asserted in `test_the_base_is_refreshed_before_it_is_read`.
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
 
     def fake_merge(a, b):
         calls.append((a, b))
@@ -232,6 +236,7 @@ def test_an_unmeasurable_pair_is_not_a_pass(mod, monkeypatch, capsys):
 
     monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: BASE)
     monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: C1)
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
     monkeypatch.setattr(mod.seq, "_merge_commit", boom)
     rc = mod.main(["1", "2"])
     err = capsys.readouterr().err
@@ -252,6 +257,7 @@ def test_the_guard_is_actually_consulted(mod, monkeypatch, capsys):
 
     monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: BASE)
     monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: {1: C1, 2: C2}[n])
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
     monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: chain.get((a, b)))
     monkeypatch.setattr(
         mod.seq,
@@ -289,6 +295,7 @@ def test_a_remote_tracking_base_is_resolved_by_full_name(mod, monkeypatch, capsy
         raise mod.seq.MeasurementError(f"no such ref {ref}")
 
     monkeypatch.setattr(mod.seq, "_rev_parse", fake_rev_parse)
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
     monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: {1: C1, 2: C2}[n])
     monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: chain.get((a, b)))
     monkeypatch.setattr(mod.seq, "_guard_verdict", lambda tree, workdir: (True, "documents 1564"))
@@ -322,6 +329,7 @@ def test_a_base_name_shadowed_by_a_local_branch_is_refused(mod, monkeypatch, cap
         raise mod.seq.MeasurementError(f"no such ref {ref}")
 
     monkeypatch.setattr(mod.seq, "_rev_parse", fake_rev_parse)
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
     monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: C1)
     monkeypatch.setattr(
         mod.seq, "_merge_commit", lambda a, b: merges.append((a, b)) or C1
@@ -347,6 +355,7 @@ def test_a_plain_base_is_left_alone(mod, monkeypatch, capsys):
         return BASE
 
     monkeypatch.setattr(mod.seq, "_rev_parse", fake_rev_parse)
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
     monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: {1: C1, 2: C2}[n])
     monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: chain.get((a, b)))
     monkeypatch.setattr(mod.seq, "_guard_verdict", lambda tree, workdir: (True, "documents 1564"))
@@ -357,3 +366,186 @@ def test_a_plain_base_is_left_alone(mod, monkeypatch, capsys):
 
     assert rc == 0
     assert asked == ["master"], asked
+
+
+# --- ... and it must be the base *as it is now* -----------------------------
+
+
+def test_the_base_is_refreshed_between_the_probe_and_the_read(mod, monkeypatch, capsys):
+    """The resolved ref is refreshed, and the order is probe -> refresh -> read.
+
+    Resolving a remote-tracking name *reads* it (does it exist?), so a "refresh first"
+    assertion cannot be "no read happens before the refresh" - it is that the read which
+    becomes the base comes after. Pinned on the sequence and on the ref: the short
+    spelling never reaches the refresh, and the refresh is not skipped, which is what
+    this tool did before (`cyc20260914-000319`).
+    """
+    events: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        mod.seq, "_refresh_base", lambda ref: events.append(("refresh", ref))
+    )
+    monkeypatch.setattr(
+        mod.seq, "_rev_parse", lambda ref: events.append(("read", ref)) or BASE
+    )
+    monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: C1)
+    # No pair lands, so the pair loop needs neither a merge nor a guard.
+    monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: None)
+    rc = mod.main(["--base", "origin/master", "1", "2"])
+    capsys.readouterr()
+    remote = "refs/remotes/origin/master"
+
+    assert rc == 0
+    assert events == [
+        ("read", remote),  # `_resolve_base` probing that the remote-tracking ref exists
+        ("refresh", remote),  # the base is brought up to date
+        ("read", remote),  # and only now is its commit the base
+    ], events
+
+    events.clear()
+    mod.main(["--base", "master", "1", "2"])
+    capsys.readouterr()
+    # No probe read: a plain name is not resolved by full name, so it goes through the
+    # refresh (which returns it untouched) and is read once. The refresh is still called
+    # for every base - it is what decides that a SHA or a branch is not a remote ref.
+    assert events == [("refresh", "master"), ("read", "master")], events
+
+
+def test_a_stale_remote_tracking_base_follows_the_remote_with_real_git(
+    mod, monkeypatch, capsys, tmp_path
+):
+    """The defect's effect, with real git: the printed base is the remote's current tip.
+
+    A hermetic clone whose `refs/remotes/origin/master` sits one commit behind the remote
+    it is a clone of - the normal state of a checkout that has not fetched. The arm states
+    the discriminating reading first (the ref the tool would have measured *is* the stale
+    commit), then runs `main` with real git for the refresh, the resolution and the read,
+    and fakes only the network-shaped parts (the PR heads, the merges, the guard), so the
+    test neither reaches GitHub nor runs a pipeline.
+
+    The shas are pinned (commit dates, `PLAN_COMMIT_DATE` in the sibling) so this is a
+    measurement and not a timestamp.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    pinned = {
+        "GIT_AUTHOR_DATE": "2000-01-01T00:00:00 +0000",
+        "GIT_COMMITTER_DATE": "2000-01-01T00:00:00 +0000",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+    }
+    env = {**os.environ, **pinned}
+
+    def git(cwd, *args):
+        out = subprocess.run(
+            ["git", *args], cwd=cwd, env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        )
+        assert out.returncode == 0, (args, out.stdout, out.stderr)
+        return out.stdout.strip()
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    git(bare, "init", "-q", "--bare", "-b", "master")
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git(seed, "init", "-q", "-b", "master")
+    (seed / "a.txt").write_text("one\n", encoding="utf-8")
+    git(seed, "add", "-A")
+    git(seed, "commit", "-qm", "first")
+    git(seed, "remote", "add", "origin", str(bare))
+    git(seed, "push", "-q", "origin", "master")
+
+    clone = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(clone)],
+        capture_output=True, text=True, encoding="utf-8", check=True,
+    )
+    track = "refs/remotes/origin/master"
+    stale = git(clone, "rev-parse", track)
+
+    (seed / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    git(seed, "add", "-A")
+    git(seed, "commit", "-qm", "the remote moves on")
+    git(seed, "push", "-q", "origin", "master")
+    advanced = git(seed, "rev-parse", "master")
+    assert stale != advanced, "precondition: the clone is behind the remote"
+
+    monkeypatch.chdir(clone)
+    # `main` makes a scratch dir for the guard; keep it inside the test's own tmp
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: advanced)
+    monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: b)
+    monkeypatch.setattr(mod.seq, "_guard_verdict", lambda tree, workdir: (True, "documents N"))
+
+    assert git(clone, "rev-parse", track) == stale
+    # The discriminating reading: resolving is not refreshing, so at this point the tool
+    # would print - and measure everything against - the stale commit.
+    assert git(clone, "rev-parse", mod.seq._rev_parse(mod._resolve_base("origin/master"))) == stale
+
+    rc = mod.main(["--base", "origin/master", "1", "2"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert f"base {advanced[:8]}" in out, out
+    assert f"base {stale[:8]}" not in out, "the stale base is what the refresh exists to prevent"
+    assert git(clone, "rev-parse", track) == advanced, "the remote-tracking ref was refreshed"
+    assert git(clone, "rev-parse", "refs/heads/master") == stale, (
+        "the refresh moves the remote-tracking ref only, never the local branch"
+    )
+
+
+def test_a_base_that_cannot_be_refreshed_is_not_answered(mod, monkeypatch, capsys):
+    """A base that could not be verified is exit 2 - never measured from anyway.
+
+    The refresh's failure is this tool's own loud failure (a fetch error, an unresolvable
+    remote HEAD spelling): answering below it would report a verdict about whatever the
+    ref happens to hold, which is the reading the refresh exists to remove.
+    """
+    merges: list[tuple[str, str]] = []
+
+    def boom(ref):
+        raise mod.seq.MeasurementError(f"could not refresh {ref}: fetch failed")
+
+    monkeypatch.setattr(mod.seq, "_refresh_base", boom)
+    monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: C1)
+    monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: merges.append((a, b)) or C1)
+    rc = mod.main(["--base", "origin/master", "1", "2"])
+    err = capsys.readouterr().err
+
+    assert rc == 2, "an unverifiable base is not a pass"
+    assert "could not measure" in err, err
+    assert merges == [], "nothing may be measured from a base that was not verified"
+
+
+def test_a_refused_base_is_never_refreshed(mod, monkeypatch, capsys):
+    """Resolving comes first, so a name refused as a stray is not refreshed into being.
+
+    The refusal's whole point is that the caller named a remote ref that is not there
+    while a *local* branch of that name is; refreshing before the refusal would fetch the
+    remote-tracking ref and quietly answer from it instead. Both behaviours are defensible
+    in isolation, so the order is pinned deliberately, and this test is what pins it.
+    """
+    refreshed: list[str] = []
+
+    def fake_rev_parse(ref):
+        if ref == "refs/heads/origin/master":
+            return BASE  # the shadowing local branch exists
+        raise mod.seq.MeasurementError(f"no such ref {ref}")
+
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: refreshed.append(ref))
+    monkeypatch.setattr(mod.seq, "_rev_parse", fake_rev_parse)
+    monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: C1)
+    monkeypatch.setattr(
+        mod.seq, "_merge_commit", lambda a, b: pytest.fail("measured a refused base")
+    )
+    rc = mod.main(["--base", "origin/master", "1", "2"])
+    err = capsys.readouterr().err
+
+    assert rc == 2, err
+    assert refreshed == [], "a base refused as a stray local branch must not be refreshed"

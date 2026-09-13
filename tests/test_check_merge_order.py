@@ -540,3 +540,173 @@ class TestARePushedHeadIsFetchedNotRejected:
             "a re-pushed head must be fetched, not silently rejected - a stale ref "
             "would make the tool answer about the previous head"
         )
+
+
+class TestTheBaseIsResolvedByItsFullName:
+    """`--base origin/master` names two refs, and git prefers the local branch.
+
+    Measured `cyc20260913-234157` in a scratch clone whose
+    `refs/remotes/origin/master` sat at `5e45e3d` with a stray
+    `refs/heads/origin/master` at `2f9c552`:
+
+        check-merge-order.py 1196 --base origin/master
+        base 2f9c552403f30882da7856db4f14702f4df508b9, 1 open PR(s), 0 of 0 pairs conflict
+
+    That is the stray, reported under the caller's name: a *true* forecast about a
+    base nobody asked for, and the whole ordering recommendation built on it. The
+    printed SHA is the only part that exposes it, so nothing downstream could tell.
+
+    The rule is the sibling's (`check-merge-pairs.py` documents the same incident
+    from `cyc20260913-102231`); it is called here rather than copied, so a base
+    name cannot come to mean two different things in two gates.
+    """
+
+    @staticmethod
+    def _git(repo: Path, *args: str) -> str:
+        proc = subprocess.run(
+            ["git", *args],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert proc.returncode == 0, f"git {' '.join(args)} failed: {proc.stderr}"
+        return proc.stdout.strip()
+
+    def _repo_with_a_stray(self, tmp_path: Path) -> tuple[Path, str, str]:
+        """A repo where the name `origin/master` denotes two different commits.
+
+        Real git, no network. Returns (repo, stray, tracking) - `stray` is what
+        `refs/heads/origin/master` points at (what git would pick for the bare
+        name), `tracking` what `refs/remotes/origin/master` holds (what the caller
+        named). Git itself creates a local branch of that name when a fetch
+        destination is written unqualified, so this is not a synthetic shape.
+        """
+        repo = tmp_path / "r"
+        repo.mkdir()
+        self._git(repo, "init", "-q", "-b", "main")
+        self._git(repo, "config", "user.email", "t@example.com")
+        self._git(repo, "config", "user.name", "t")
+        (repo / "f.txt").write_text("one\n", encoding="utf-8")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "one")
+        tracking = self._git(repo, "rev-parse", "HEAD")
+
+        self._git(repo, "update-ref", "refs/remotes/origin/master", tracking)
+        (repo / "f.txt").write_text("one\ntwo\n", encoding="utf-8")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "two")
+        stray = self._git(repo, "rev-parse", "HEAD")
+        self._git(repo, "update-ref", "refs/heads/origin/master", stray)
+
+        assert stray != tracking
+        assert self._git(repo, "rev-parse", "origin/master") == stray, (
+            "precondition: git resolves the bare name to the local branch - if this "
+            "ever changes the defect is gone, and this test should go with it"
+        )
+        self._git(repo, "checkout", "-q", "main")
+        return repo, stray, tracking
+
+    def test_a_stray_local_branch_cannot_stand_in_for_the_base(
+        self, mod, tmp_path, monkeypatch
+    ) -> None:
+        """The arm that fails before the fix: the measure is the ref that was named."""
+        repo, stray, tracking = self._repo_with_a_stray(tmp_path)
+        monkeypatch.chdir(repo)
+
+        seen: dict[str, str] = {}
+
+        def fake_forecast(base: str, numbers, repo_name: str) -> dict:
+            seen["base"] = base
+            seen["sha"] = mod._rev_parse(base)
+            return {"base": seen["sha"], "prs": {}, "base_conflicts": []}
+
+        monkeypatch.setattr(mod, "forecast", fake_forecast)
+        rc = mod.main(["--base", "origin/master", "--json", "1"])
+
+        assert rc == 0, rc
+        assert seen["base"] == "refs/remotes/origin/master", seen
+        assert seen["sha"] == tracking, (
+            "the base measured must be the remote-tracking commit, not the stray"
+        )
+        assert seen["sha"] != stray
+
+    def test_without_the_full_name_the_stray_is_what_gets_measured(
+        self, mod, tmp_path, monkeypatch
+    ) -> None:
+        """The other half of the discrimination, driven through git itself.
+
+        The same repo state, the base resolved the way the tool used to resolve it:
+        `rev-parse origin/master` returns the stray. Taken together with the arm
+        above, the pair proves the fix changes what is measured rather than merely
+        the spelling of the name.
+        """
+        repo, stray, tracking = self._repo_with_a_stray(tmp_path)
+        monkeypatch.chdir(repo)
+
+        assert mod._rev_parse("origin/master") == stray
+        assert mod._rev_parse("refs/remotes/origin/master") == tracking
+
+    def test_a_base_that_denotes_only_a_local_branch_is_refused(
+        self, mod, tmp_path, monkeypatch, capsys
+    ) -> None:
+        """Refused rather than measured - and nothing is measured before the refusal."""
+        repo, _stray, _tracking = self._repo_with_a_stray(tmp_path)
+        self._git(repo, "update-ref", "-d", "refs/remotes/origin/master")
+        monkeypatch.chdir(repo)
+
+        calls: list[tuple] = []
+        monkeypatch.setattr(mod, "forecast", lambda *a, **k: calls.append(a) or {})
+        rc = mod.main(["--base", "origin/master", "1"])
+
+        assert rc == 2, rc
+        assert not calls, "a refused base must not produce a forecast at all"
+        err = capsys.readouterr().err
+        assert "refs/heads/origin/master" in err
+        assert "refs/remotes/origin/master" in err
+
+    def test_a_sha_a_tag_and_an_unambiguous_name_are_left_alone(self, mod, monkeypatch) -> None:
+        """Only a remote-tracking spelling is rewritten; the rest are what was meant.
+
+        A SHA is immutable by construction, `FETCH_HEAD` is not remote-tracking, and
+        a plain name is the caller's own ref. Rewriting any of them (or asking git
+        whether they exist) would invent a meaning the caller did not give.
+        """
+        seen: list[str] = []
+        monkeypatch.setattr(
+            mod,
+            "forecast",
+            lambda base, numbers, repo_name: seen.append(base)
+            or {"base": "", "prs": {}, "base_conflicts": []},
+        )
+
+        for spelling in ("abc1234", "FETCH_HEAD", "v0.2.95", "refs/remotes/origin/master"):
+            rc = mod.main(["--base", spelling, "--json", "1"])
+            assert rc == 0, (spelling, rc)
+
+        assert seen == ["abc1234", "FETCH_HEAD", "v0.2.95", "refs/remotes/origin/master"], seen
+
+    def test_the_default_base_is_still_fetched_not_qualified(self, mod, monkeypatch) -> None:
+        """No `--base`: the tool fetches master itself, and that path is untouched.
+
+        The fix must not reach this path - `FETCH_HEAD` is not a remote-tracking
+        name, so qualifying it is meaningless, and qualifying `None` before the
+        fetch would crash the default invocation outright.
+        """
+        seen: list[str] = []
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 0, "", ""),
+        )
+        monkeypatch.setattr(
+            mod,
+            "forecast",
+            lambda base, numbers, repo_name: seen.append(base)
+            or {"base": "", "prs": {}, "base_conflicts": []},
+        )
+
+        rc = mod.main(["--json", "1"])
+
+        assert rc == 0, rc
+        assert seen == ["FETCH_HEAD"], seen

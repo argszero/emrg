@@ -69,6 +69,22 @@ origin/master` would otherwise pick up a stray local `origin/master` branch and 
 verdict below would be about a base the caller never named. The printed base line names
 the ref actually measured. Plain branch names, tags and SHAs are passed through unchanged.
 
+Naming the ref correctly is only half of that defect; the other half is *when* the name
+was read. That ref is therefore **refreshed** before it is read, by the sibling's own
+`_refresh_base` (imported, not copied, for the reason above) - the same call
+`check-merge-tree-health.py`, `check-merge-sequence.py` and `check-merge-landing-diff.py`
+make. Measured in a hermetic clone whose `refs/remotes/origin/master` sat one commit
+behind the remote (`cyc20260914-000319`), same state, same fakes, only that call toggled.
+It is pinned as the real-git arm in `tests/test_check_merge_pairs.py`, and the commit
+dates there are fixed, so both shas reproduce on every run:
+
+    without the refresh:  base 450c0138 (refs/remotes/origin/master)   <- the stale commit
+    with it:              base fd8cb9d1 (refs/remotes/origin/master)   <- the remote's tip
+
+Every verdict this tool prints is `base -> A -> B`, so a stale base makes the whole
+measurement - and the `master + A` cached first step under it - about a tree the caller
+did not name. A base that cannot be refreshed is exit 2, never an answer.
+
 Exit codes
 ----------
     0  every ordered pair was answered and none merges cleanly into a failing tree
@@ -129,6 +145,12 @@ def _resolve_base(ref: str) -> str:
     search entirely, and a name that denotes *only* a local branch is refused rather
     than measured. Plain branch names, tags and SHAs are passed through untouched,
     since for those the short name is what the caller meant.
+
+    Resolving it is the half that names the ref; the other half is *when* its commit is
+    read, and that is `seq._refresh_base`, called by `main` on the ref this returns. The
+    two are separate on purpose: a caller that asks for the fully-qualified ref still
+    gets it read at whatever moment the checkout last fetched, which is the same
+    wrong-tree defect one dimension over (`cyc20260914-000319`).
     """
     if ref.startswith("refs/") or "/" not in ref:
         return ref
@@ -169,6 +191,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         base_ref = _resolve_base(args.base)
+        # Refreshed *after* it is resolved to the ref the caller named, and before it is
+        # read: every PR head is fetched below, so the pairs are answered about the heads
+        # as they are now, while an unrefreshed base answers about the moment this
+        # checkout last fetched - the two halves of one question taken at two times.
+        # `base_ref` is passed, not `args.base`: resolving first keeps the refusal below
+        # intact (a short name that denotes only a stray local branch is refused, never
+        # refreshed into existence), and a resolved remote-tracking ref is a spelling the
+        # sibling refreshes. A SHA, tag or local branch is returned untouched by it.
+        seq._refresh_base(base_ref)
         base = seq._rev_parse(base_ref)
         # Deduplicated and ascending: a repeated number would otherwise pair a PR with
         # itself's twin and buy the same answer twice, and the ordering makes the output
