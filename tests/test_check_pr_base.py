@@ -227,6 +227,7 @@ class TestRealInvocationSurface:
             [sys.executable, str(SCRIPT), "--help"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         assert proc.returncode == 0
         assert "base branch" in proc.stdout
@@ -256,6 +257,7 @@ class TestRealInvocationSurface:
             [sys.executable, str(SCRIPT), "--repo", "argszero/definitely-not-a-repo-xyz"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         # On a machine with no `gh` at all (e.g. the Windows runner) this is 2 as
         # well - the code path is now the same, which is the point.
