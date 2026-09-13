@@ -249,3 +249,54 @@ def test_an_unmeasurable_step_is_not_a_pass(mod, monkeypatch, capsys):
 
     assert rc == 2
     assert "could not measure" in err
+
+
+def test_an_empty_plan_is_not_a_health_verdict(mod, monkeypatch, capsys):
+    """An empty plan must not be reported as "all 0 step(s) ... pass the guards".
+
+    Measured 2026-09-13 (`cyc20260913-112726`) on the parent revision: driving the
+    tool's own default source to return no PRs printed exactly that sentence and
+    exited 0 - a verdict about nothing, spelled as verification, and the only thing
+    a caller keying on the exit code can read. It is the same defect this file's
+    other tests pin for a stopped plan, one step further into vacuity: there the
+    tool at least said "plan stopped", here it *asserts* the pass.
+
+    The state is reachable only through the default source (`args.prs or
+    _open_pr_numbers(...)`), so it always means "the plan could not be obtained" -
+    never "the caller asked for an empty plan" - which is why it is 2 (the question
+    was not answered) and not 0.
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [])
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2, "an empty plan is an unanswerable question, not a verified one"
+    assert rc != 0, "0 promises every step was measured"
+    assert "empty" in captured.err, captured.err
+    assert "nothing" in captured.err.lower(), captured.err
+    # The false claim itself must be gone, not merely accompanied by a warning.
+    assert "pass the guards" not in captured.out, captured.out
+
+
+def test_the_default_plan_source_still_measures_a_real_plan(mod, monkeypatch, capsys):
+    """The other direction: the refusal above must not fire on a real plan.
+
+    Without this, "return 2 whenever no positional arguments were given" would pass
+    the test above while breaking the tool's documented default ("all open, ascending").
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: C1)
+    monkeypatch.setattr(mod, "_merge_commit", lambda a, b: C1)
+    monkeypatch.setattr(mod, "_guard_verdict", lambda tree, workdir: (True, "documents 1"))
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}")),
+    )
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "all 1 step(s) landed trees that pass the guards" in out, out
