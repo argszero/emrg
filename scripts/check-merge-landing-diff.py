@@ -132,10 +132,52 @@ def _qualify_ref(ref: str) -> str:
     wrong-tree defect stays invisible: the spelling typed and the ref measured differ
     whenever a short name is ambiguous (a local `origin/master` branch shadows
     `refs/remotes/origin/master`). A SHA has no symbolic name, so it is returned as is.
+
+    Naming the ref correctly is only half of that defect: the other half is *when*
+    the name was last read, which is `_refresh_base`.
     """
     proc = _run(["git", "rev-parse", "--symbolic-full-name", ref])
     name = proc.stdout.strip()
     return name if proc.returncode == 0 and name else ref
+
+
+def _refresh_base(base: str) -> None:
+    """Bring the base up to date when it names a remote-tracking branch.
+
+    Every PR head is fetched from the network, so this tool always answers about the
+    heads as they are *now*. The base was not, which makes the two halves of one
+    question come from different points in time - a gap inherited from the sibling
+    this tool was built beside, caught in review of this PR (`cyc20260913-210255`):
+
+        `refs/remotes/origin/master` moved back one commit (947377b, master 2f9c552):
+            this tool:  base 947377b3 (refs/remotes/origin/master), 1 PR(s) checked  rc 0
+            sibling:    base 2f9c5524 (refs/remotes/origin/master)                    # refreshed
+
+    The verdict is not freshness-neutral either: over the 26 head refs in that clone, 2
+    changed state between the stale base and the true one - and one of them was the
+    live PR under review, reading `clean`/exit 0 against the stale base and
+    `backwards`/exit 1 against master. Answering a different question because a local
+    ref is behind is the same wrong-tree defect the header guards against, one level
+    down; the reasoning is recorded in full in `check-merge-sequence.py`'s
+    `_refresh_base`.
+
+    Only `origin/<branch>` is refreshed: any other ref is taken literally, and a SHA is
+    immutable by construction. The destination is written **fully qualified**, because a
+    bare `origin/master` as a fetch destination makes git create a *local branch* of
+    that name (`refs/heads/origin/master`), which then shadows the remote-tracking ref
+    and makes every later `origin/master` ambiguous - the trap the sibling measured.
+
+    A fetch failure is a measurement error, never a quiet continuation against a base
+    that could not be verified.
+    """
+    if ":" in base or not base.startswith("origin/"):
+        return
+    branch = base[len("origin/"):]
+    dest = f"refs/remotes/origin/{branch}"
+    proc = _run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{dest}"])
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
+        raise MeasurementError(f"could not refresh {base}: {detail}")
 
 
 def _open_pr_numbers(repo: str) -> list[int]:
@@ -360,6 +402,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        # Refreshed before it is resolved, and before any head is fetched: a
+        # remote-tracking base read from a checkout that has not fetched answers about
+        # a base nobody asked for, and this tool's verdict depends on which base it is
+        # (measured, `_refresh_base`).
+        _refresh_base(args.base)
         base = _rev_parse(args.base)
         numbers = args.prs or _open_pr_numbers(args.repo)
     except MeasurementError as exc:
