@@ -340,14 +340,20 @@ def test_context_section_multiple_files(tmp_path):
 
 
 def test_context_section_truncation(tmp_path):
-    """Files over 8000 chars are truncated with a notice."""
+    """Files over the cap are truncated with a notice.
+
+    The cap comes from the daemon's constant, so this test and the truncation it
+    describes cannot drift apart (the brief-must-fit guard next door,
+    `tests/test_agent_md_prompt_cap.py`, reads the same number).
+    """
     server = _make_server()
-    big = "x" * 9000
+    over = 1000
+    big = "x" * (daemon_mod.PROJECT_CONTEXT_MAX_CHARS + over)
     (tmp_path / "CLAUDE.md").write_text(big)
     session = Session.create_with_id("ctx-test", tmp_path)
     result = server._collect_project_context(session)
     assert "truncated" in result[0]["content"]
-    assert "1000 chars" in result[0]["content"]  # 9000 - 8000 = 1000
+    assert f"{over} chars" in result[0]["content"]
 
 
 def test_context_section_manifesto(tmp_path):
