@@ -251,30 +251,42 @@ def test_an_unmeasurable_step_is_not_a_pass(mod, monkeypatch, capsys):
     assert "could not measure" in err
 
 
-def test_an_empty_plan_is_not_a_health_verdict(mod, monkeypatch, capsys):
-    """An empty plan must not be reported as "all 0 step(s) ... pass the guards".
+def test_an_empty_open_pr_list_is_refused_at_its_source(mod, monkeypatch, capsys):
+    """The reachable form of "zero measured steps is never a verdict".
 
-    Measured 2026-09-13 (`cyc20260913-112726`) on the parent revision: driving the
-    tool's own default source to return no PRs printed exactly that sentence and
-    exited 0 - a verdict about nothing, spelled as verification, and the only thing
-    a caller keying on the exit code can read. It is the same defect this file's
-    other tests pin for a stopped plan, one step further into vacuity: there the
-    tool at least said "plan stopped", here it *asserts* the pass.
+    The tool cannot print "all 0 step(s) ... pass the guards" because the default
+    plan source refuses an empty list before any step count exists: `numbers =
+    args.prs or _open_pr_numbers(...)` with `prs` declared `nargs="*"` means either
+    positional numbers were given, or the source raised.
 
-    The state is reachable only through the default source (`args.prs or
-    _open_pr_numbers(...)`), so it always means "the plan could not be obtained" -
-    never "the caller asked for an empty plan" - which is why it is 2 (the question
-    was not answered) and not 0.
+    Measured 2026-09-13 (`cyc20260913-114142`) with the real script and an empty
+    open-PR list (a stub `gh` on PATH printing nothing, exiting 0) - on master
+    `2017d8f` and on this branch alike:
+
+        could not measure: no open PRs reported - nothing to check
+        --- exit code: 2 ---
+
+    The refusal is as old as the tool (it is in `3dbc2f1`, and in `6456a98`), so
+    this pins existing behaviour rather than adding a guard. An earlier revision of
+    this branch tested the vacuous-pass shape instead, by replacing `_open_pr_numbers`
+    with a lambda returning `[]` - that substitution *removes* the refusal, which is
+    why it produced a state the program cannot enter (a measurement of the stub).
     """
     monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
-    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [])
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, cwd=None: _FakeProc(stdout="", returncode=0)
+    )
+
+    # The source itself refuses - this is what makes an empty plan unreachable.
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._open_pr_numbers("argszero/emrg")
+    assert "no open PRs reported" in str(excinfo.value)
+
     rc = mod.main([])
     captured = capsys.readouterr()
 
-    assert rc == 2, "an empty plan is an unanswerable question, not a verified one"
-    assert rc != 0, "0 promises every step was measured"
-    assert "empty" in captured.err, captured.err
-    assert "nothing" in captured.err.lower(), captured.err
+    assert rc == 2, "an unanswerable question must not be reported as health"
+    assert "no open PRs reported" in captured.err, captured.err
     # The false claim itself must be gone, not merely accompanied by a warning.
     assert "pass the guards" not in captured.out, captured.out
 

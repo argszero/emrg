@@ -80,31 +80,42 @@ Exit codes
 ----------
     0  every step of the plan was measured and landed a tree that passes the guards
     1  at least one clean step landed a tree that FAILS them (the finding)
-    2  the question could not be answered (git/gh/guard failure, or an empty plan) -
-       fail loud, never report health that was not measured
+    2  the question could not be answered (git/gh/guard failure, or an empty open-PR
+       list) - fail loud, never report health that was not measured
     3  the plan stopped at a conflict, so only a prefix was measured and the rest
        is unmeasured - "not measured" must not be spelled 0
 
-Why an empty plan is 2
-----------------------
-An empty plan cannot be asked for: `args.prs or _open_pr_numbers(...)` means zero
-steps only ever means *the plan could not be obtained* - no PR numbers were passed
-and the open-PR list came back empty. Measured 2026-09-13 (`cyc20260913-112726`),
-before this branch:
+A pass over zero steps is refused at its source, not counted
+------------------------------------------------------------
+The plan can never be empty, so "all 0 step(s) landed trees that pass the guards"
+is unreachable: the default source refuses an empty list itself -
 
-    $ ...  # default source stubbed to return no PRs
-    base 6456a98b (refs/remotes/origin/master)
-    plan:
+    numbers = [int(line) for line in proc.stdout.split() if line.strip()]
+    if not numbers:
+        raise MeasurementError("no open PRs reported - nothing to check")
 
-    all 0 step(s) landed trees that pass the guards
-    --- exit code: 0 ---
+- and `prs` is `nargs="*"`, so `args.prs or _open_pr_numbers(...)` makes an empty
+`numbers` impossible: either positional PR numbers were given, or the source
+raised. Measured 2026-09-13 (`cyc20260913-114142`) with the real script and an
+empty open-PR list (a stub `gh` on PATH printing nothing, exiting 0) on both
+master `2017d8f` and this branch:
 
-which does not merely stay silent about measuring nothing - it *asserts* a pass
-("all 0 step(s) ... pass the guards") and exits 0. That is the same defect as the
-stopped plan below, one step further into vacuity, and it is the same measurement
-on the parent revision (`6456a98`) as on this one: pre-existing, not a regression.
-A caller keying on the exit code was told "the plan is fine" by a run that
-measured no tree at all, so it is 2 - the question was not answered.
+    $ check-merge-sequence.py            # stub gh: prints nothing, rc 0
+    could not measure: no open PRs reported - nothing to check
+    --- exit code: 2 ---
+
+Correcting this branch's own first revision: it documented this state as a
+*measured* rc-0 pass, and added a check in `main` to convert it to 2. The rc-0
+shape is reproducible only by replacing the refusal -
+
+    mod._open_pr_numbers = lambda repo: []      # the guard removed
+    # "all 0 step(s) landed trees that pass the guards", rc 0
+
+- which is what produced that reading, and the same substitution its test made.
+The reading was therefore about the stub, not about the program, and the branch
+was dead code. The property it wanted ("zero measured steps is never a verdict")
+already holds here, at the source; what was missing is a test for that refusal,
+which is now `test_an_empty_open_pr_list_is_refused_at_its_source`.
 
 Why "stopped" is 3 and not 0 or 1
 ---------------------------------
@@ -310,19 +321,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         base = _rev_parse(args.base)
         numbers = args.prs or _open_pr_numbers(args.repo)
-        if not numbers:
-            # Only reachable through the default source: `args.prs or ...` means an
-            # empty plan is never something a caller asked for, it is a plan that
-            # could not be obtained. Report it as an unanswerable question rather
-            # than falling through to "all 0 step(s) ... pass the guards" + rc 0,
-            # which asserts a pass over zero measured trees (see the module
-            # docstring, "Why an empty plan is 2").
-            raise MeasurementError(
-                f"the plan is empty: no PR numbers were given and the open-PR list "
-                f"for {args.repo} is empty, so no step could be measured. Nothing "
-                f"here is a verdict about any tree - pass PR numbers, or check that "
-                f"the open-PR list is really empty"
-            )
     except MeasurementError as exc:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
