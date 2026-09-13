@@ -65,6 +65,16 @@ With no PR numbers, every open PR is checked. Heads come from
 `refs/pull/<N>/head`, so the check is about each PR's real head rather than a
 local branch of a similar name.
 
+A `--base` written as a remote-tracking ref (either `origin/<branch>` or
+`refs/remotes/origin/<branch>`) is **fetched before it is measured**, so the base
+half of the question is as current as the heads half - without it a clean merge is
+judged against a stale base and the tree it produces is not the tree that lands
+(measured: 3 of the 3 clean merges over the head refs saved in this clone landed a
+different tree). The base is then resolved by its **full name**, so a stray local
+branch called `origin/master` cannot shadow the remote ref; a name denoting only a
+local branch is refused rather than measured. A SHA, a local branch or a written
+refspec is taken literally. See `_refresh_base` for the measurements.
+
 Exit codes
 ----------
     0  every clean merge produced a tree that passes the repo's guards
@@ -118,6 +128,119 @@ def _run(argv: list[str], cwd: str | None = None) -> subprocess.CompletedProcess
     )
 
 
+def _ref_exists(name: str) -> bool:
+    """Is `name` a ref, given it fully?"""
+    return _run(["git", "show-ref", "--verify", "--quiet", name]).returncode == 0
+
+
+def _refresh_base(base: str) -> None:
+    """Bring the base up to date when it names a remote-tracking branch.
+
+    Every PR head is fetched from the network, so this tool always answers about
+    the heads as they are *now*. The base was not, and a base that is read from
+    whatever the local ref happens to hold makes the two halves of one question
+    come from different points in time - the wrong-tree defect this file's
+    `_rev_parse` docstring already records one level down, with the merge tree
+    being the thing that differs rather than just the header.
+
+    Measured on this repo (`cyc20260913-231848`) over the 25 PR head refs saved in
+    the clone, folding `merge-tree --write-tree <base> <head>` against master's
+    previous commit and against master: **22 conflict against both bases** (safe -
+    no tree is produced), and of the 3 that merge cleanly **all 3 land a different
+    tree** - the base's own advance flows into the tree being judged, so the gate
+    answers about a tree nobody will land. Here the difference was master's version
+    bump (8 files, all 8 version declarations agreeing in each tree), and the
+    doc-count guard this tool runs happened to pass in both, so **no verdict flip
+    was observed** in these three: what is measured is the wrong tree, not a wrong
+    verdict. The sibling tools measured verdict flips too, which is why they
+    refresh.
+
+    A **remote-tracking** ref is refreshed, in either spelling the caller may write
+    it: `origin/<branch>` and `refs/remotes/origin/<branch>` are the same mutable
+    ref, and the fully-qualified spelling is the one `check-merge-pairs.py`'s
+    refusal text tells callers to use. A `<remote>/HEAD` spelling is resolved
+    through its symref first (a fetch *into* a symref cannot be locked - git
+    refuses and leaves it unchanged), and **whether a ref is a symref is decided by
+    git, not by its name**: `<branch>/HEAD` is a legal branch name, so
+    `refs/remotes/origin/feature/HEAD` is an ordinary remote-tracking branch that
+    merely ends in `/HEAD`.
+
+    Anything else is taken literally: a SHA is immutable by construction, a local
+    branch is not the remote ref whatever it is called, and a refspec the caller
+    already wrote (`origin/x:dest`) is passed to git as given. The destination is
+    written **fully qualified**, because a bare `origin/master` as a fetch
+    destination makes git create a *local branch* of that name, which then shadows
+    the remote-tracking ref.
+
+    A fetch failure, or a `<remote>/HEAD` spelling whose symref leads outside
+    `origin`'s tracking refs, is a measurement error: the caller must not silently
+    continue against a base it could not verify.
+    """
+    if ":" in base:
+        return
+    if base.startswith("origin/"):
+        dest = f"refs/remotes/origin/{base[len('origin/'):]}"
+    elif base.startswith("refs/remotes/origin/"):
+        dest = base
+    else:
+        return
+    if dest.endswith("/HEAD"):
+        link = _run(["git", "symbolic-ref", "--quiet", dest])
+        if link.returncode == 0:
+            target = link.stdout.strip()
+            if not target.startswith("refs/remotes/origin/"):
+                raise MeasurementError(
+                    f"could not refresh {base}: {dest} is a symbolic ref to "
+                    f"{target}, which is not a remote-tracking branch of origin"
+                )
+            dest = target
+    branch = dest[len("refs/remotes/origin/"):]
+    proc = _run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{dest}"])
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
+        raise MeasurementError(f"could not refresh {base}: {detail}")
+
+
+def _qualify_ref(ref: str) -> str:
+    """Expand a short remote-tracking name to its fully-qualified form.
+
+    `--base` defaults to the short spelling `origin/master`, and that spelling is
+    ambiguous: git resolves a bare name by a precedence list, and
+    `refs/heads/<name>` is consulted *before* `refs/remotes/<name>`. A local branch
+    called `origin/master` - which git itself creates when a fetch destination is
+    written unqualified, the trap `_refresh_base` describes - therefore shadows the
+    remote-tracking ref, and every measurement after that answers about the wrong
+    tree. Measured on this repo (`cyc20260913-072845`) with a stray
+    `refs/heads/origin/master` at `02e43c8` while the real remote-tracking ref was
+    `245125e`, the sibling tool printed the two-cycle-old commit **as**
+    `origin/master`. The name is therefore looked up **by its full name**, where
+    precedence does not apply; a short name that denotes only a local branch is
+    refused rather than measured, and a name that a stray shadows is reported so
+    the stray can be removed.
+
+    The shadow case *warns* instead of failing because the qualified lookup makes
+    the answer right either way; refusing would block a checkout for a stray ref
+    that no longer affects this tool's verdict.
+    """
+    if not ref.startswith("origin/") or ref.count("/") != 1:
+        return ref
+    qualified = f"refs/remotes/{ref}"
+    if _ref_exists(qualified):
+        if _ref_exists(f"refs/heads/{ref}"):
+            print(
+                f"warning: {ref} is ambiguous - a local branch shadows it; "
+                f"measuring {qualified}. Delete the shadow: git branch -D {ref}",
+                file=sys.stderr,
+            )
+        return qualified
+    if _ref_exists(f"refs/heads/{ref}"):
+        raise MeasurementError(
+            f"{ref!r} is ambiguous and denotes only the local branch "
+            f"refs/heads/{ref}: no {qualified} exists"
+        )
+    return ref
+
+
 def _rev_parse(ref: str) -> str:
     """Resolve a ref to a commit SHA.
 
@@ -126,8 +249,12 @@ def _rev_parse(ref: str) -> str:
     name would answer about whatever the last fetch happened to leave behind.
     That defect was measured in `check-merge-order.py`, which is why the rule is
     asserted rather than remembered.
+
+    A name is also *ambiguous* in a way a SHA is not: `_qualify_ref` runs first, so
+    the commit returned is the one the caller's name denotes rather than the one
+    git's precedence rules would pick.
     """
-    proc = _run(["git", "rev-parse", "--verify", f"{ref}^{{commit}}"])
+    proc = _run(["git", "rev-parse", "--verify", f"{_qualify_ref(ref)}^{{commit}}"])
     if proc.returncode != 0:
         raise MeasurementError(
             f"could not resolve {ref!r} to a commit: {proc.stderr.strip()}"
@@ -305,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        _refresh_base(args.base)
         base = _rev_parse(args.base)
         numbers = args.prs or _open_pr_numbers(args.repo)
     except MeasurementError as exc:

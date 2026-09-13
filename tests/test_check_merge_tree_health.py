@@ -351,3 +351,383 @@ def test_an_unresolvable_base_fails_loud_rather_than_reporting_health() -> None:
 def test_agent_md_documents_the_canonical_invocation() -> None:
     text = (REPO_ROOT / DOC_PATH).read_text(encoding="utf-8")
     assert "scripts/check-merge-tree-health.py" in text
+
+
+# --- the base is refreshed before it is measured ---------------------------------
+#
+# The heads half of this tool's question is always current (every head is fetched
+# from `refs/pull/<N>/head`); the base half was not, so a clean merge was judged
+# against whatever the local ref happened to hold. Measured on this repo
+# (`cyc20260913-231848`) over the 25 head refs saved in the clone: 22 conflict
+# against both a stale and a fresh base (no tree - safe), and of the 3 that merge
+# cleanly **all 3 land a different tree** once the base advances. The doc-count guard
+# this tool runs passed in both trees there, so the measured damage is the wrong tree
+# (8 files of master's own version bump flowing in), not a wrong verdict.
+#
+# A name is also ambiguous in a way a SHA is not: `refs/heads/<name>` is consulted
+# before `refs/remotes/<name>`, so a stray local `origin/master` (which git itself
+# creates when a fetch destination is written unqualified) shadows the remote ref.
+
+
+def test_every_remote_tracking_spelling_is_refreshed(mod, monkeypatch) -> None:
+    """`refs/remotes/origin/<branch>` is the same mutable ref as `origin/<branch>`.
+
+    Pinned at the argv level so both spellings are visible in one place: a predicate
+    that admits only the short one is exactly the shape the siblings shipped, and it
+    is invisible to a test that only ever passes the short spelling.
+    """
+    calls: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: (calls.append(argv), _Done())[1])
+
+    for base in ("origin/master", "refs/remotes/origin/master"):
+        calls.clear()
+        mod._refresh_base(base)
+        assert len(calls) == 1, (base, calls)
+        joined = " ".join(calls[0])
+        # Fully qualified destination: a bare `origin/master` makes git create a local
+        # branch of that name, which would then shadow the remote-tracking ref.
+        assert "+refs/heads/master:refs/remotes/origin/master" in joined, (base, calls)
+
+
+def test_a_sha_or_local_ref_base_is_never_fetched(mod, monkeypatch) -> None:
+    """Only a remote-tracking name is refreshed; a SHA and a local branch are literal."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: (calls.append(argv), None)[1])
+
+    for ref in (
+        "0" * 40,
+        "localbase",
+        "refs/heads/x",
+        "FETCH_HEAD",
+        "refs/heads/origin/master",      # the shadowing stray
+        "refs/remotes/upstream/master",  # another remote
+        "refs/tags/v1.0.0",
+    ):
+        mod._refresh_base(ref)
+
+    assert calls == [], calls
+
+
+def test_a_branch_whose_name_ends_in_head_is_refreshed_not_refused(mod, monkeypatch) -> None:
+    """`<branch>/HEAD` is a legal branch name, so that spelling is an ordinary ref.
+
+    The discriminator is `git symbolic-ref`'s exit code, never the `/HEAD` suffix:
+    `git check-ref-format --branch feature/HEAD` accepts the name, so
+    `refs/remotes/origin/feature/HEAD` is the tracking ref of a branch called
+    `feature/HEAD` - and a predicate keyed on the name refused a base that only needed
+    filling in (the defect the siblings fixed in `cyc20260913-225642`).
+    """
+    calls: list[list[str]] = []
+
+    class _Plain:
+        returncode = 1
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, cwd=None):
+        calls.append(argv)
+        done = _Plain()
+        done.returncode = 1 if "symbolic-ref" in argv else 0
+        return done
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    for base in ("origin/feature/HEAD", "refs/remotes/origin/feature/HEAD"):
+        calls.clear()
+        mod._refresh_base(base)
+        fetches = [c for c in calls if "fetch" in c]
+        assert len(fetches) == 1, (base, calls)
+        joined = " ".join(fetches[0])
+        assert "+refs/heads/feature/HEAD:refs/remotes/origin/feature/HEAD" in joined, (
+            base,
+            calls,
+        )
+
+
+def test_a_head_spelling_is_refreshed_through_its_symref(mod, monkeypatch) -> None:
+    """`origin/HEAD` is fetched at the ref it points to, not at its own name.
+
+    `refs/heads/HEAD` does not exist upstream (the fetch fails) and writing into a
+    symref cannot be locked at all - git refuses and leaves it unchanged - so
+    "refresh it in place" is not an option git offers.
+    """
+    calls: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv, cwd=None):
+        calls.append(argv)
+        done = _Done()
+        if "symbolic-ref" in argv:
+            done.stdout = "refs/remotes/origin/trunk\n"
+        return done
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    for base in ("origin/HEAD", "refs/remotes/origin/HEAD"):
+        calls.clear()
+        mod._refresh_base(base)
+        fetches = [c for c in calls if "fetch" in c]
+        assert len(fetches) == 1, (base, calls)
+        assert "refs/heads/trunk:refs/remotes/origin/trunk" in " ".join(fetches[0]), (base, calls)
+
+
+def test_a_head_spelling_that_resolves_outside_origin_is_a_measurement_error(
+    mod, monkeypatch
+) -> None:
+    """A symref that does not lead to `origin`'s tracking refs is refused."""
+
+    class _Elsewhere:
+        returncode = 0
+        stdout = "refs/heads/master\n"
+        stderr = ""
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Elsewhere())
+
+    for base in ("origin/HEAD", "refs/remotes/origin/HEAD"):
+        with pytest.raises(mod.MeasurementError) as excinfo:
+            mod._refresh_base(base)
+        assert "symbolic ref" in str(excinfo.value), (base, excinfo.value)
+
+
+def test_main_refreshes_the_base_before_measuring(mod, monkeypatch, capsys) -> None:
+    """`main` must actually call `_refresh_base` - a correct helper nobody calls is dead.
+
+    Pinned separately because the tests above exercise the helper directly: deleting
+    the call from `main` leaves them all green while the defect returns in full.
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(mod, "_refresh_base", lambda ref: seen.append(ref))
+
+    class _Done:
+        returncode = 0
+        stdout = "0" * 40
+        stderr = ""
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None: _Done())
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: "refs/x")
+    monkeypatch.setattr(mod, "_merge_tree_paths", lambda a, b, cwd=None: [])
+    monkeypatch.setattr(mod, "_merged_tree_sha", lambda a, b, cwd=None: "0" * 40)
+    monkeypatch.setattr(mod, "_guard_verdict", lambda tree, workdir, cwd=None: (True, "guard OK"))
+
+    rc = mod.main(["--base", "origin/master", "1"])
+
+    assert seen == ["origin/master"], seen
+    assert rc == 0, rc
+
+
+def _stale_clone(tmp_path: Path) -> tuple[Path, Path, Path, str, str]:
+    """A clone whose `refs/remotes/origin/master` is one commit behind the remote.
+
+    Real git, no network: the remote is a local bare repo. Returns
+    (bare, seed, repo, stale, advanced) - `stale` is what the clone holds, `advanced`
+    what the remote moved on to, so any arm can be re-armed by writing `stale` back.
+    """
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _git(bare, "init", "-q", "--bare", "-b", "master")
+
+    seed = tmp_path / "seed"
+    _init_repo(seed)
+    _write(seed, "a.txt", "one\n")
+    _commit(seed, "first")
+    _git(seed, "remote", "add", "origin", str(bare))
+    _git(seed, "push", "-q", "origin", "master")
+
+    repo = tmp_path / "clone"
+    subprocess.run(
+        ["git", "clone", "-q", str(bare), str(repo)],
+        capture_output=True, text=True, encoding="utf-8", check=True,
+    )
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    stale = _git(repo, "rev-parse", "refs/remotes/origin/master")
+
+    _write(seed, "a.txt", "one\ntwo\n")
+    advanced = _commit(seed, "the remote moves on")
+    _git(seed, "push", "-q", "origin", "master")
+
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master") == stale, "precondition"
+    return bare, seed, repo, stale, advanced
+
+
+def test_a_stale_base_is_refreshed_with_real_git(mod, tmp_path, monkeypatch) -> None:
+    """The defect's effect, with real git: the ref the tool then reads is the remote's.
+
+    It is the arm that fails before the fix - `_refresh_base` returned immediately, so
+    the tool measured the stale commit and printed `origin/master` over it - and it is
+    re-armed between spellings so one arm cannot hand the next an already-current ref.
+    """
+    _bare, _seed, repo, stale, advanced = _stale_clone(tmp_path)
+    monkeypatch.chdir(repo)
+
+    for base in ("origin/master", "refs/remotes/origin/master", "origin/HEAD",
+                 "refs/remotes/origin/HEAD"):
+        _git(repo, "update-ref", "refs/remotes/origin/master", stale)
+        assert _git(repo, "rev-parse", "refs/remotes/origin/master") == stale, base
+        mod._refresh_base(base)
+        assert _git(repo, "rev-parse", "refs/remotes/origin/master") == advanced, base
+    assert _git(repo, "rev-parse", "master") == stale, (
+        "the refresh moves the remote-tracking ref only, never a local branch"
+    )
+
+
+def test_a_stale_base_lands_a_different_tree_so_the_refresh_matters(
+    mod, tmp_path, monkeypatch
+) -> None:
+    """Why the refresh is not cosmetic: the base decides the tree this tool judges.
+
+    The branch point is behind, the remote moves on, and the PR head does not contain
+    that move - the ordinary state of a queued PR. Folding the head onto the stale ref
+    and onto the true one gives **different trees**, so without the refresh the gate
+    answers "is this merge healthy" about a tree nobody is going to land. This is the
+    measurement over this clone's history, reproduced hermetically.
+    """
+    _bare, _seed, repo, stale, advanced = _stale_clone(tmp_path)
+    monkeypatch.chdir(repo)
+
+    # Bring the remote's newer commit into the object store **without** moving the
+    # tracking ref: the point of the arm is to compare the two bases, so the stale ref
+    # has to survive. `--refmap=` is what stops the clone's configured refspec from
+    # also updating `refs/remotes/origin/*` (an empty command-line refspec alone does
+    # not - git applies the configured one as well, measured here).
+    _git(repo, "fetch", "-q", "--refmap=", "origin",
+         "+refs/heads/master:refs/emrg-test/advanced")
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master") == stale, "still stale"
+
+    # a PR head branched off the original master, created in the clone so the object
+    # exists where the merge is folded
+    _git(repo, "checkout", "-q", "-b", "feature")
+    _write(repo, "feature.txt", "the PR's own file\n")
+    head = _commit(repo, "the PR adds a file")
+    _git(repo, "checkout", "-q", "master")
+
+    def merged_tree(base_ref: str) -> str:
+        proc = subprocess.run(
+            ["git", "merge-tree", "--write-tree", base_ref, head],
+            cwd=str(repo), capture_output=True, text=True, encoding="utf-8",
+        )
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        return proc.stdout.splitlines()[0].strip()
+
+    tree_stale = merged_tree(stale)
+    tree_fresh = merged_tree("refs/emrg-test/advanced")
+    assert tree_stale != tree_fresh, (
+        "precondition for this test: the two bases must land different trees"
+    )
+
+    # with the fix, the ref the tool resolves is the remote's, so it judges the real tree
+    mod._refresh_base("origin/master")
+    assert mod._rev_parse("origin/master") == advanced
+    resolved = merged_tree(mod._rev_parse("origin/master"))
+    assert resolved == tree_fresh
+    assert resolved != tree_stale, (
+        "measuring the stale ref would have produced a different tree - the wrong-tree reading"
+    )
+
+
+def test_a_shadowing_local_branch_cannot_replace_the_base(mod, tmp_path, monkeypatch) -> None:
+    """`origin/master` is resolved by its **full name**, so a stray cannot shadow it.
+
+    git's precedence list consults `refs/heads/<name>` before `refs/remotes/<name>`, and
+    git itself creates a local `origin/master` when a fetch destination is written
+    unqualified - so the bare spelling can silently denote the wrong commit. The
+    measured sibling case printed a two-cycle-old commit as `origin/master`.
+    """
+    _bare, _seed, repo, _stale, advanced = _stale_clone(tmp_path)
+    monkeypatch.chdir(repo)
+
+    mod._refresh_base("origin/master")
+    assert _git(repo, "rev-parse", "refs/remotes/origin/master") == advanced, "precondition"
+
+    # a different commit, reachable only as a local branch - the stray git itself would
+    # create if a fetch destination were written unqualified
+    _write(repo, "local.txt", "local\n")
+    stray = _commit(repo, "a local commit that must not be measured as origin/master")
+    _git(repo, "update-ref", "refs/heads/origin/master", stray)
+
+    # git's own precedence picks the local branch for the bare name - the trap
+    assert _git(repo, "rev-parse", "origin/master") == stray, "precondition: the trap exists"
+    # the tool resolves by full name, so it does not
+    assert mod._qualify_ref("origin/master") == "refs/remotes/origin/master"
+    assert mod._rev_parse("origin/master") == advanced, (
+        "the qualified lookup must answer with the remote-tracking commit, not the stray"
+    )
+    assert mod._rev_parse("refs/heads/origin/master") == stray, "the stray is still a ref"
+
+
+def test_a_name_that_denotes_only_a_local_branch_is_refused(mod, tmp_path, monkeypatch) -> None:
+    """A short name with no remote-tracking ref behind it is not the remote branch."""
+    _bare, _seed, repo, _stale, _advanced = _stale_clone(tmp_path)
+    monkeypatch.chdir(repo)
+
+    head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/heads/origin/missing", head)
+    assert not mod._ref_exists("refs/remotes/origin/missing")
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._qualify_ref("origin/missing")
+    assert "denotes only the local branch" in str(excinfo.value)
+
+
+def test_a_shadowing_stray_is_reported_so_it_can_be_removed(
+    mod, tmp_path, monkeypatch, capsys
+) -> None:
+    """Resolving by full name keeps the answer right, so the shadow only *warns*.
+
+    The warning is the load-bearing part: the same stray silently misleads every other
+    short-name reader in the checkout (`git checkout origin/master`), and this tool
+    cannot fix those - it can only say what to delete. A warning that is not asserted
+    is a warning that can be deleted without any test noticing.
+    """
+    _bare, _seed, repo, _stale, _advanced = _stale_clone(tmp_path)
+    monkeypatch.chdir(repo)
+
+    mod._refresh_base("origin/master")
+    _git(repo, "update-ref", "refs/heads/origin/master", _git(repo, "rev-parse", "HEAD"))
+
+    assert mod._qualify_ref("origin/master") == "refs/remotes/origin/master"
+    err = capsys.readouterr().err
+    assert "ambiguous" in err, err
+    assert "git branch -D origin/master" in err, err
+
+
+def test_a_base_that_cannot_be_refreshed_is_a_measurement_error(mod, monkeypatch) -> None:
+    """A failed fetch is exit 2, never a quiet fall-back to the stale commit.
+
+    The fail-open direction is the dangerous one: continuing against a base that could
+    not be verified is how this tool would report health for a tree nobody will land.
+    """
+    calls: list[list[str]] = []
+
+    class _Fail:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: couldn't find remote ref"
+
+    def fake_run(argv, cwd=None):
+        calls.append(argv)
+        done = _Fail()
+        if "symbolic-ref" in argv:
+            done.returncode = 1
+            done.stderr = ""
+        return done
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+    for base in ("origin/master", "origin/HEAD"):
+        with pytest.raises(mod.MeasurementError) as excinfo:
+            mod._refresh_base(base)
+        assert "could not refresh" in str(excinfo.value), (base, excinfo.value)
+    assert any("fetch" in c for c in calls), ("the fetch must be attempted", calls)
+
