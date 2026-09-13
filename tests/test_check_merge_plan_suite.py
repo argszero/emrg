@@ -378,3 +378,119 @@ def test_a_suite_that_cannot_run_is_not_reported_healthy(
     # the reason claimed (the suite could not run) and not for a broken fixture.
     monkeypatch.setattr(mod, "SUITE", ["-m", "pytest", "tests/", "-q", "--no-header"])
     assert mod.main(["1", "--base", "master"]) == 0
+
+
+def test_steps_sees_a_red_step_that_the_final_tree_hides(
+    queue: tuple[Path, Path],
+) -> None:
+    """Issue #1161's open half, as a measurement rather than an argument.
+
+    The shape: PR 1 lands a violation of a guard that is already on master, and PR 2
+    relaxes that guard. Merged together the tree passes - so the plan's *final* tree
+    is perfectly healthy, and the default invocation says so, correctly. But the
+    tree after PR 1 exists on master for as long as it takes PR 2 to land, and it is
+    red; landing the plan step by step is what produces it.
+
+    Both verdicts are pinned here, because "the tool now fails more often" is not
+    the finding - the finding is that it answers about a different tree when asked.
+    """
+    repo, origin = queue
+    _write(repo, "tests/test_no_token_under_data_or_src.py", GUARD_TEST)
+    _commit(repo, "the guard, already on master")
+    _git(repo, "push", "-q", "origin", "master")
+
+    # PR 1: adds the file the guard rejects. Master + PR 1 is a red tree.
+    _branch_with(repo, "violator", {"data/payload.txt": f"contains {TOKEN}\n"})
+    # PR 2: relaxes the guard so that file is allowed. Built off master, so it
+    # knows nothing about PR 1's file - only about the guard it amends.
+    # Relaxed in exactly one place: the violation is no longer recorded, so the
+    # guard still runs and still finds the file - it just stops rejecting it.
+    relaxed = GUARD_TEST.replace(
+        "                hits.append(str(path))", "                pass"
+    )
+    assert relaxed != GUARD_TEST
+    _branch_with(repo, "relaxer", {"tests/test_no_token_under_data_or_src.py": relaxed})
+    _publish(repo, origin, 1, "violator")
+    _publish(repo, origin, 2, "relaxer")
+
+    # The default question - is the plan's final tree healthy? - is answered yes,
+    # and that is not a bug: together the two PRs do produce a green tree.
+    final_only = _run_tool(repo, "1", "2")
+    assert final_only.returncode == 0, final_only.stdout + final_only.stderr
+    assert "suite OK" in final_only.stdout
+
+    # The step question finds the red one, names it, and does not claim the plan is
+    # unsafe as a whole (the final tree is still the default verdict).
+    every_step = _run_tool(repo, "1", "2", "--steps")
+    assert every_step.returncode == 1, every_step.stdout + every_step.stderr
+    assert "step 1 (#1)" in every_step.stdout
+    assert "FAILED" in every_step.stdout
+    assert "test_no_token_under_data_or_src" in (every_step.stdout + every_step.stderr)
+    # Step 2's tree is the final tree: the same one the default run measured.
+    assert "step 2 (#2)" in every_step.stdout
+    assert "suite OK" in every_step.stdout
+
+
+def test_steps_is_healthy_when_every_step_is(queue: tuple[Path, Path]) -> None:
+    """The control arm: `--steps` must not be a permanent failure.
+
+    Without this, "names the red step" and "always red" are the same evidence.
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"notes.md": "one\n"})
+    _branch_with(repo, "two", {"other.md": "two\n"})
+    _publish(repo, origin, 1, "one")
+    _publish(repo, origin, 2, "two")
+
+    proc = _run_tool(repo, "1", "2", "--steps")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "step 1 (#1) tree" in proc.stdout
+    assert "step 2 (#2) tree" in proc.stdout
+    assert "every step healthy (2 suite run(s))" in proc.stdout
+
+
+def test_steps_still_refuses_to_call_a_conflict_unhealthy(
+    queue: tuple[Path, Path],
+) -> None:
+    """A conflicting step is exit 3 under `--steps` too, not "a red step"."""
+    repo, origin = queue
+    _branch_with(repo, "left", {"README.md": "left\n"})
+    _branch_with(repo, "right", {"README.md": "right\n"})
+    _publish(repo, origin, 1, "left")
+    _publish(repo, origin, 2, "right")
+
+    proc = _run_tool(repo, "1", "2", "--steps")
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert "no final tree" in proc.stderr
+
+
+def test_the_step_commit_is_the_tree_the_steps_would_leave(
+    queue: tuple[Path, Path], mod, monkeypatch
+) -> None:
+    """The step commits are merge commits of the accumulated tree, in order.
+
+    Asserted against real git rather than against the shape of a return value:
+    the point of `--steps` is *which tree* is judged, so a change that returned the
+    right number of commits describing the wrong trees would be the defect this
+    family keeps finding (a verdict about a tree the caller was not looking at).
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"notes.md": "one\n"})
+    _branch_with(repo, "two", {"other.md": "two\n"})
+    _publish(repo, origin, 1, "one")
+    _publish(repo, origin, 2, "two")
+
+    monkeypatch.chdir(repo)
+    base = _git(repo, "rev-parse", "master")
+    # Heads are fetched by the tool itself; go through it rather than guessing refs.
+    heads = [(n, mod._fetch_head(n)) for n in (1, 2)]
+    steps = mod.build_plan_steps(base, heads)
+    assert [step for step, _, _ in steps] == [1, 2]
+    assert [number for _, number, _ in steps] == [1, 2]
+
+    # Step 1's commit holds the first PR's file and the second's does too, and
+    # step 2's commit is the plan tip the other path computes.
+    assert _git(repo, "cat-file", "-p", f"{steps[0][2]}:notes.md").strip() == "one"
+    assert _git(repo, "cat-file", "-p", f"{steps[1][2]}:other.md").strip() == "two"
+    assert _git(repo, "merge-base", "--is-ancestor", steps[0][2], steps[1][2]) == ""
+    assert mod.build_plan_tip(base, heads) == steps[-1][2]
