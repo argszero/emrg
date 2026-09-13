@@ -40,6 +40,14 @@ set while the tests stayed green.
   strict prefixes of master's (890 vs 539 and 601 vs 471 characters), and the
   fallback's `KEEP BOTH` would have emitted the stale *and* the current copy of
   each paragraph, at rc 0. A strict prefix relation now escalates to a human.
+* **…and the mid-line form of the same shape** (#1183, `cyc20260913-182526`). A
+  strict prefix only describes an edit at the *end* of a line, so a line with a
+  sentence inserted in the middle - `ours = theirs[:1091] + 187 chars +
+  theirs[1091:]` in the live block that filed the issue - matched neither rule and
+  still got `KEEP BOTH (concatenate)` at rc 0, which repeats the line. One
+  contiguous insertion/deletion anywhere now escalates to a human: it moves 4 of
+  the 67 real conflict blocks measured, all of them true positives, at a measured
+  false-escalation cost of 10 pairs per 200,000.
 
 The tool is a **decision aid, not an automatic resolver**. It never edits a
 file: it classifies each conflict block and prints the resolution the evidence
@@ -230,13 +238,41 @@ def _differ_only_by_number(ours: list[str], theirs: list[str]) -> bool:
     return True
 
 
+def _one_contiguous_edit(a: str, b: str) -> bool:
+    """True when `b` is `a` with exactly one contiguous chunk inserted or deleted.
+
+    Strip the maximal common prefix and suffix, bounded so the two middles cannot
+    overlap; the relation holds when one of the middles is empty. That covers a
+    single insertion, a single deletion, and their composition at the ends - and
+    it is deliberately *one* edit: two separate insertions leave both middles
+    non-empty, which is the evidence that these are two different strings rather
+    than two revisions of one line.
+
+    The prefix relation this generalises (`b.startswith(a) or a.startswith(b)`) is
+    the case where the common suffix is empty; the mid-line case is the one that
+    was missing, because an edit in the middle of a long line leaves neither side
+    a prefix of the other.
+    """
+    if a == b:
+        return False
+    limit = min(len(a), len(b))
+    prefix = 0
+    while prefix < limit and a[prefix] == b[prefix]:
+        prefix += 1
+    room = limit - prefix
+    suffix = 0
+    while suffix < room and a[len(a) - 1 - suffix] == b[len(b) - 1 - suffix]:
+        suffix += 1
+    return a[prefix : len(a) - suffix] == "" or b[prefix : len(b) - suffix] == ""
+
+
 def _looks_like_a_revision(ours: list[str], theirs: list[str]) -> bool:
-    """True when a line on one side is a strict prefix of a line on the other.
+    """True when a line on one side is a single contiguous edit of a line on the other.
 
     Sharing no byte-identical line is **not** evidence that the sides are separate
     additions: two sides can be the same lines at different revisions, and those
-    are never equal. A strict prefix relation is the cheap exact signal of that -
-    the newer side merely continues where the older one stopped.
+    are never equal. One contiguous insertion/deletion is the exact cheap signal
+    of that - the newer side differs from the older one in one place.
 
     Measured on #1140's live Agent.md block (2026-09-11, `cyc20260911-190629`):
     ours' two paragraph lines are strict prefixes of master's two (890 vs 539 and
@@ -245,18 +281,41 @@ def _looks_like_a_revision(ours: list[str], theirs: list[str]) -> bool:
     paragraph**. Advice that duplicates content is as wrong as advice that drops
     it, and this one arrived at rc 0, i.e. as a verdict.
 
-    The conservative answer is taken deliberately. The prefix relation is real
+    **The tail-continuation form was too narrow, and the missing case was the one
+    issue #1183 reported** (`cyc20260913-182526`). A strict prefix only describes
+    an edit at the *end* of a line. The live block that motivated the issue was a
+    documentation line with a sentence inserted **mid-line**:
+
+        ours   = theirs[:1091] + ours[1091:1278] + theirs[1091:]
+
+    so neither side is a prefix of the other, the fallback answered
+    `disjoint - KEEP BOTH (concatenate)` at rc 0, and the concatenation emits that
+    documentation line **twice** (1280 and 1093 characters, same head) - the state
+    the repo's own `_duplicated_count_line_kinds` guard rejects.
+
+    Measured as a differential over real merges rather than against fixtures: the
+    real heads of the recent PR queue merged into the current master in a scratch
+    worktree (16 of them conflict) yield **67 genuine conflict blocks**, and the
+    generalised predicate changes the class of exactly **4** - every one of them
+    `disjoint` -> `overlapping`, none in the other direction. Two of the four are
+    the documented-sentence shape above (`Merge sequence:`, 1280 vs 1093 chars,
+    and `Release bump:`, 782 vs 519 - ours is theirs plus one inserted run, and
+    the concatenation repeats a line head); the other two are a code comment and
+    a wrapped prose fragment, both the same line at two revisions.
+
+    The false-escalation rate was bounded on a negative corpus of 200,000 pairs of
+    unrelated real content lines (sampled from this repo's own files): the prefix
+    rule fires on 1 pair, the generalised one on 10 (0.005%) - the extra hits are
+    indentation/wrapping pairs like `def stop_all(...)` beside `def _stop_all(...)`,
+    which is a rename a human should look at anyway.
+
+    The conservative answer is taken deliberately. One contiguous edit is real
     evidence that the shorter side is an older revision, but it is weaker than the
-    symbol path's name-subset test (a prefix is not a claim about the rest of the
-    line), so it escalates to a human instead of recommending a side-pick. The two
-    errors are not symmetric: escalating costs one read, a wrong "take theirs"
-    silently drops a line.
+    symbol path's name-subset test, so it escalates to a human instead of
+    recommending a side-pick. The two errors are not symmetric: escalating costs
+    one read, a wrong "take theirs" silently drops a line.
     """
-    for a in ours:
-        for b in theirs:
-            if a != b and (b.startswith(a) or a.startswith(b)):
-                return True
-    return False
+    return any(_one_contiguous_edit(a, b) for a in ours for b in theirs)
 
 
 def _looks_like_a_count_revision(ours: list[str], theirs: list[str]) -> bool:
@@ -505,17 +564,18 @@ def classify(ours_text: str, theirs_text: str) -> tuple[str, str]:
     ours_set, theirs_set = set(ours), set(theirs)
     if not ours_set & theirs_set:
         # No shared line is *not* automatically disjoint additions: the sides can
-        # be the same lines at two revisions, which are never byte-equal. Treat the
-        # prefix relation as the evidence that this is what happened, and escalate
-        # - see `_looks_like_a_revision`.
+        # be the same lines at two revisions, which are never byte-equal. Treat a
+        # single contiguous insertion/deletion - anywhere in the line, not only at
+        # its end - as the evidence that this is what happened, and escalate - see
+        # `_looks_like_a_revision`.
         if _looks_like_a_revision(ours, theirs) or _looks_like_a_count_revision(ours, theirs):
             return (
                 OVERLAPPING,
                 "the sides share no line, but they are the same lines at two "
-                "revisions (a line on one side continues a line on the other, or "
-                "one side left the documented count where the other revised it) - "
-                "so KEEP BOTH would emit both copies and a side-pick may drop a "
-                "change; a human must read it",
+                "revisions (a line on one side is a line on the other plus or "
+                "minus one run of text, or one side left the documented count "
+                "where the other revised it) - so KEEP BOTH would emit both "
+                "copies and a side-pick may drop a change; a human must read it",
             )
         return (
             DISJOINT,
