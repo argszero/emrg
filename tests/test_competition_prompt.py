@@ -11,6 +11,7 @@ ceremony exception, "reject by default when the rules text is unobtainable",
 cannot silently relax the gate the host explicitly set.
 """
 
+import re
 from pathlib import Path
 
 PROMPT = (
@@ -178,17 +179,25 @@ def test_error_handling_and_forbidden_sections_exist():
     assert "**Never enter a competition with an offline component**" in text
 
 
-def _english_signals(text: str) -> list[str]:
-    """The English offline signals as listed in §3.2 of the prompt.
+def _signal_list(text: str, prefix: str) -> list[str]:
+    """One §3.2 signal list as the prompt prints it.
 
-    Parsed from the prompt rather than duplicated here, so this test tracks the
+    Parsed from the prompt rather than duplicated here, so the tests track the
     live list instead of a copy that can drift away from it.
     """
     for line in text.splitlines():
-        if line.startswith("- English:"):
+        if line.startswith(prefix):
             listed = line.split(":", 1)[1]
             return [w.strip().strip("`").strip() for w in listed.split("、") if w.strip()]
     return []
+
+
+def _english_signals(text: str) -> list[str]:
+    return _signal_list(text, "- English:")
+
+
+def _chinese_signals(text: str) -> list[str]:
+    return _signal_list(text, "- Chinese:")
 
 
 def test_english_signals_cover_the_bare_adjective():
@@ -234,10 +243,10 @@ def test_hyphenated_signals_are_listed_in_both_spellings():
     Measured 2026-09-13 (cycle cyc20260913-094149) on head `0244b77b`:
     `Finalists will be evaluated on site.`, `Final judging takes place on
     site.`, `Winners are required to present in person.` and `Top teams present
-    in person at the awards.` each matched **0 of the 13** signals, while their
-    hyphenated spellings hit. The failure direction is the dangerous one — a
-    missed hit lets the agent enter a competition with an offline component,
-    whereas a spurious hit only costs an entry.
+    in person at the awards.` each matched **none of the signals the list held
+    then**, while their hyphenated spellings hit. The failure direction is the
+    dangerous one — a missed hit lets the agent enter a competition with an
+    offline component, whereas a spurious hit only costs an entry.
 
     Asserted as a rule over the parsed list rather than as three presence
     checks, so a *future* hyphenated entry added without its twin fails here.
@@ -250,6 +259,42 @@ def test_hyphenated_signals_are_listed_in_both_spellings():
         f"the list {signals} — English hyphenation is optional, so only the "
         f"hyphenated form misses the space-separated wording of the same "
         f"requirement"
+    )
+
+
+def test_a_stated_signal_count_matches_the_parsed_list():
+    """A count the prompt states for a signal list must be that list's length.
+
+    The list's length is a *derived* fact: `_english_signals` /
+    `_chinese_signals` parse it from the prompt's own `- English:` line. A
+    hand-written copy of it has nothing keeping the two in sync, and the copy
+    is the one a reader believes.
+
+    Measured 2026-09-13 (cycle cyc20260913-094149): the §3.2 note said the four
+    sample phrasings "each matched **0 of the 13** signals above", and then the
+    same commit that added three space twins to the list left the number at 13
+    over a 16-entry list. The note's own subject is an incomplete enumeration, so
+    a stale count there is read as the list being shorter than it is — and no
+    test could see it, because every other test in this file reads the
+    `- English:` line and never the prose around it.
+
+    The rule is "a stated count is the current one", not "no counts": the point
+    is to fail loudly the moment a signal is added or removed, with the numbers
+    on both sides in the message. A historical measurement should be phrased as
+    one ("none of the signals the list held then") rather than as a bare count.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    lengths = {len(_english_signals(text)), len(_chinese_signals(text))}
+    # `\**` because the defect's number was bolded ("**0 of the 13** signals
+    # above") and a pattern requiring the digit to touch the word missed it —
+    # caught by mutating the fixed text back and watching this test stay green.
+    stated = [int(n) for n in
+              re.findall(r"(\d+)\**\s+(?:offline\s+)?signals?\b", text)]
+    stale = [n for n in stated if n not in lengths]
+    assert not stale, (
+        f"the prompt states {stale} signal(s), but the lists it prints hold "
+        f"{sorted(lengths)} entries (English / Chinese) — a hand-written count "
+        f"of a parsed list drifts silently the next time the list changes"
     )
 
 

@@ -166,9 +166,11 @@ Scope of the judgment (host, 2026-09-12): it means **"the participation/evaluati
 > Measured on head `0244b77b` (cycle `cyc20260913-094149`): `Finalists will be
 > evaluated on site.`, `Final judging takes place on site.`, `Winners are
 > required to present in person.` and `Top teams present in person at the
-> awards.` each matched **0 of the 13** signals above, while the hyphenated
-> spellings hit — the same enumeration gap as the bare `offline`, one spelling
-> down. The two directions are not symmetric: §3.2 makes a single hit
+> awards.` each matched **none of the signals the list held then**, while the
+> hyphenated spellings hit — the same enumeration gap as the bare `offline`, one
+> spelling down. (The list's length is deliberately not written down here: it is
+> derived by parsing the line above, and a hand-copied number has nothing keeping
+> it in sync.) The two directions are not symmetric: §3.2 makes a single hit
 > disqualifying and §4 files a rejection as never re-evaluated, so a *miss*
 > enters a competition with an offline evaluation component (the host's hard
 > constraint broken silently), while a spurious hit only costs one entry. When a
