@@ -52,6 +52,8 @@ Usage:
 
 Exit codes:
     0  every block classified, none needs a human decision
+       (also: `--all` and git reports nothing unmerged - a clean merge is a
+       state, not a usage error; see the note in `main()`)
     1  at least one block is `overlapping` (human must decide)
     2  usage error / no conflict blocks found
 """
@@ -162,6 +164,26 @@ def _content_lines(text: str) -> list[str]:
     return [line.rstrip() for line in text.splitlines() if line.strip()]
 
 
+def _count_kind_prefix(line: str) -> str | None:
+    """The text naming the count's *kind*, or None when the line supplies none.
+
+    This is everything before the first documented count (`_DOC_COUNT`), located by
+    the regex **match position** rather than by splitting the masked line: the mask
+    character is `#`, which is also the comment marker, so splitting on it lands on
+    a literal `#` in real prose and returns bare indentation. Two unrelated comments
+    then compare equal (`cyc20260912-070619`).
+
+    A line whose count comes first carries no kind text, so it supplies no evidence
+    that two sides are the same fact - returning None keeps it from firing on the
+    strength of an empty string.
+    """
+    match = _DOC_COUNT.search(line)
+    if match is None:
+        return None
+    prefix = line[: match.start()].strip()
+    return prefix or None
+
+
 def _differ_only_by_number(ours: list[str], theirs: list[str]) -> bool:
     """True when the sides are aligned and differ only in integers (all counts).
 
@@ -169,7 +191,14 @@ def _differ_only_by_number(ours: list[str], theirs: list[str]) -> bool:
     parenthesised number, as in the Agent.md count line. Without that condition
     `x = compute(1)` vs `x = compute(2)` matched, and the tool answered "measure,
     never pick a side, exit 0" about a code change - advice that is not merely
-    unhelpful but actively closes the one case a human must read.
+    unhelpful but actively closes the one case a human must read. The masking
+    comparison below is the *second* half of the same guard and is equally
+    load-bearing: it is what makes the pair "one count re-measured" rather than
+    "two counts". Measured 2026-09-11 (`cyc20260911-204842`): removing it left all
+    45 tests passing while flipping the verdict on 4 of 937 real corpus blocks, e.g.
+    `Python: ... (1407)` against `Node: ... (1410)` - two different facts, answered
+    with "measure, never pick a side" at rc 0, the caller's signal that every block
+    was classified and the advice is safe to act on.
 
     The sides must also be the **same length**: a block that only differs by
     numbers is an aligned pair of revisions, and an unaligned hunk is a different
@@ -273,12 +302,78 @@ def _looks_like_a_count_revision(ours: list[str], theirs: list[str]) -> bool:
     twice with two values is what the repo's own guard rejects, so `KEEP BOTH`
     cannot be right for it whatever else the block holds. Escalating is the cheap
     error: a read costs a minute, a silent duplicate ships.
+
+    **Equal once masked is too narrow a test for "the same count kind"**
+    (`cyc20260912-002444`). It requires the *whole rest of the line* to match, so a
+    count line that was also **re-breakdown** - the same measured kind, its
+    parenthesised detail revised - does not qualify, and the block falls through to
+    `disjoint - KEEP BOTH` at rc 0. Measured on an authentic block from merge
+    `47af6bc2`: ours `GUI: `cd emrg/gui && npm test` (92: ... + 3 preload-api +
+    3 boot-contract)` against master's `(89: ... + 3 preload-api)` (one component
+    removed *and* the total moved 92 -> 89). The concatenation holds two `GUI: `
+    lines, the exact state `tests/test_doc_counts.py::_duplicated_count_line_kinds`
+    rejects - driven through that guard, not inferred - and the sides' line counts
+    are 1 vs 2, so neither the equal-length rule nor the index-pairing mask
+    comparison can see it. Over **185** conflict blocks rebuilt from this repo's
+    real merge commits (legacy `git merge-tree` on each merge's three real blobs),
+    this rule changes exactly **1** class: that block, `disjoint` -> `overlapping`.
+
+    The gap is measured in the right unit: **the same documented-count kind stated
+    twice**, which is what the repo's guard keys on - not "the lines are equal".
+    Two lines naming the same kind and differing in the parenthesised breakdown are
+    one count kind at two revisions, and keeping both is what duplicates it.
+
+    The axis is the **kind text**: everything before the first documented count,
+    found by the regex match position (`_count_kind_prefix`). That is deliberately
+    wider than "the whole line is identical once masked" - it admits same-kind pairs
+    whose tails differ - because the re-breakdown shape *must* differ in its tail to
+    be the shape it is. The widening is accepted on the asymmetry the fallback
+    already relies on: both sides state the same count kind, so `KEEP BOTH`
+    concatenates a duplicate and escalating asks for a read. A read costs a minute; a
+    silent duplicate ships.
+
+    It is also narrower than "both lines carry a count", which is what keeps it off
+    unrelated blocks: a line with no kind text before its count supplies no evidence
+    (`None`), and two unrelated comments mentioning numbers have different text
+    before theirs. Both were real defects of the earlier `split("#", 1)` form, which
+    split on a literal `#` in prose - the mask character and the comment marker are
+    the same character (`cyc20260912-070619`).
     """
     for a, b in zip(ours, theirs):
         if a == b:
             continue
         if _DOC_COUNT.search(a) and _DOC_COUNT.search(b):
-            if _NUMBER.sub("#", a) == _NUMBER.sub("#", b):
+            masked_a, masked_b = _NUMBER.sub("#", a), _NUMBER.sub("#", b)
+            if masked_a == masked_b:
+                return True
+            # Same count kind, revised breakdown: the two sides name the same kind
+            # and only the parenthesised detail moved. The axis is the *kind text* -
+            # everything before the first documented count, which is the command and
+            # the label - so `GUI: ... (92: ...)` beside `GUI: ... (89: ...)` fires
+            # while `Python: ... (1500)` beside `GUI: ... (100)` does not.
+            #
+            # The widening is deliberate and is the reason this clause is safe to
+            # add: the masked-equality test above demands the *whole rest of the
+            # line* match, which the re-breakdown shape fails by construction (the
+            # breakdown moved). This one demands only the kind text match, so it
+            # also admits a same-kind pair whose tails differ
+            # (`... (900) # 1 note` beside `... (900) # 2 notes`,
+            # `cyc20260912-090216`). That is accepted rather than fixed: both sides
+            # still state the same count kind, so keeping both concatenates a
+            # duplicate - the state `_duplicated_count_line_kinds` rejects - and
+            # escalating asks a human to read instead. Escalating is the cheap
+            # error; a silent duplicate ships. Measured over 185 conflict blocks
+            # rebuilt from this repo's real merge commits, the clause changes
+            # exactly 1 class.
+            #
+            # Errors in the other direction are what the kind text prevents: it is
+            # `None` when the line supplies no kind (a count first, or no count),
+            # and two unrelated comment lines that merely mention numbers have
+            # different text before their counts. Both were live defects of the
+            # earlier `split("#", 1)` version (`cyc20260912-070619`).
+            prefix_a = _count_kind_prefix(a)
+            prefix_b = _count_kind_prefix(b)
+            if prefix_a is not None and prefix_a == prefix_b:
                 return True
     return False
 
@@ -335,8 +430,11 @@ def classify(ours_text: str, theirs_text: str) -> tuple[str, str]:
         return (
             COUNT_LINE,
             "differs only by a number - MEASURE on the merged tree, never pick a "
-            "side (both sides are stale by construction); for Agent.md's test "
-            "count use `check-doc-count.py --resolve-conflict`",
+            "side (both sides are stale by construction). For a *stored* count "
+            "(Agent.md's GUI/renderer breakdowns) that means re-measuring; the "
+            "Python test total is not stored at all since 2026-09-13, so "
+            "`check-doc-count.py --resolve-conflict` resolves that line by "
+            "dropping the claim",
         )
 
     ours_syms, theirs_syms = _symbols(ours_text), _symbols(theirs_text)
@@ -548,6 +646,22 @@ def main(argv: list[str] | None = None) -> int:
     paths = [p for p in paths if not (p in seen or seen.add(p))]
 
     if not paths:
+        if args.all:
+            # `--all` was *answered*, not misused: git reports nothing unmerged.
+            # This is rc 0 rather than rc 2 because a clean merge is a state, not a
+            # malformed invocation - and the message must say so, because the old
+            # one ("pass files, or --all for every unmerged path") told the caller
+            # to pass the flag they had just passed, at the one moment when the
+            # silence is the interesting signal: `cyc20260913-082711` hit this with
+            # a merge that resolved *cleanly* and produced a tree that fails the
+            # doc-count guard (issue #1158), so "no conflicts" must not be read as
+            # "the tree is fine" - hence the pointer to the tool that measures that.
+            print(
+                "no unmerged paths: the merge is clean or already resolved - "
+                "nothing to classify. A clean merge is not evidence of a healthy "
+                "tree; check the resulting tree with scripts/check-merge-sequence.py"
+            )
+            return 0
         print(
             "error: no paths given (pass files, or --all for every unmerged path)",
             file=sys.stderr,

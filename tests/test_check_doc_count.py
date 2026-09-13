@@ -1,22 +1,25 @@
-"""Tests for scripts/check-doc-count.py - the Agent.md Python-count sync tool.
+"""Tests for scripts/check-doc-count.py - the "no stored test count" rule.
 
-Background (cycle cyc20260910-175308)
--------------------------------------
-`Agent.md` documents the collected Python test count, and
-`tests/test_doc_counts.py::test_python_count_matches_docs` fails when the doc and
-the tree disagree. On 2026-09-10 the count line conflicted in **four** separate
-merges (`#1119`, `#1120`, `#1121`, `#1122`), each carrying a different number;
-master went 1277 -> 1283 -> 1284 depending on which branch landed. In a
-conflicted merge both sides are stale by construction, so the only correct value
-is the one you measure on the merged tree - which is what this tool does.
+Background (cycles cyc20260910-175308 -> cyc20260913-132356)
+-----------------------------------------------------------
+`Agent.md` used to state the collected Python test count and this tool kept it
+true. Measured 2026-09-13 on the live queue: 11 of 14 open PRs were conflicting
+and **all 11 conflicted on that one line** — every PR that adds a test had to
+rewrite the same derived number. The dangerous direction was the other one: two
+PRs writing the *same* value merge cleanly and leave the merged tree stale
+(measured: #1179 + #1180 both said 1601, the merged tree collected 1603, and no
+conflict marker appeared anywhere).
+
+So the tool changed subject rather than gaining a stronger check: it now reports
+any tracked file that *states* the count, and measures on demand (`--measure`).
 
 Both states are pinned here, never inferred from the failure case alone (#455):
 
-* negative - a consistent doc reports OK and writes nothing;
-* positive - a stale doc reports the measured value, and `--write` repairs it.
+* negative — the real tree states no count, and the rule is silent on the wording
+  that replaced the statement;
+* positive — every claim shape is reported, with file, line and shape.
 
-Nothing here runs the real pytest collection except the one integration test
-that invokes the tool on the real tree; the unit tests inject the measurement.
+The unit tests inject the tree; the two integration tests run on the real one.
 """
 
 from __future__ import annotations
@@ -27,18 +30,24 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "check-doc-count.py"
 GUARD = REPO_ROOT / "tests" / "test_doc_counts.py"
+CANONICAL = "uv run --no-sync python3 scripts/check-doc-count.py"
+
+# The guard's test that carries the host-visible failure message. Named here so
+# the AST reader below and a rename cannot disagree silently.
+GUARD_TEST = "test_no_tracked_file_states_the_python_test_count"
 
 
 def _load_guard():
-    """Load the guard module so its function can be driven in both states.
+    """Load the guard module so its message can be read and driven.
 
-    By path, the same way `test_doc_counts.py` loads itself: pytest imports
+    By path, the same way `test_doc_counts.py` loads the tool: pytest imports
     these files as `tests.test_doc_counts`, and a plain top-level name does not
     resolve.
     """
@@ -60,134 +69,29 @@ def mod():
     return _load_module()
 
 
-def _doc(tmp_path: Path, count: int | None) -> Path:
-    """A minimal Agent.md copy.
-
-    `count=None` writes a non-numeric placeholder in the same position, which is
-    the "anchor present but unreadable" state the tool must reject.
-    """
-    number = str(count) if count is not None else "TBD"
-    line = f"Python: `uv run pytest tests/ -v` ({number}) - import check: x\n"
-    path = tmp_path / "Agent.md"
-    path.write_text("# Agent.md\n\n" + line + "Renderer: other counts here\n")
-    return path
-
-
-def _guard_pattern() -> str:
-    """The doc-count pattern out of the guard itself, so the two cannot drift apart.
-
-    The guard may hold the regex either way, and may reach it through however
-    many module-level helpers it likes:
-
-    * inline - `re.search(r"...", text)` written directly in
-      `test_python_count_matches_docs` (how the guard read until cycle
-      `cyc20260910-213455`);
-    * named constant, reached through a helper chain - e.g. the test calls
-      `_single_documented_python_count`, which calls
-      `_documented_python_counts`, which applies a module-level
-      `PYTHON_COUNT_LINE = re.compile(r"...")` (how it reads now).
-
-    So the search follows module-level *functions* as well as constants. That
-    collects more than one candidate: the chain also reaches
-    `_collected_pytest_count`, whose regex parses pytest's *output*
-    (`"(\\d+) tests? collected"`) and never matches the doc. Candidates are
-    therefore discriminated by the very property this test asserts - matching
-    the real `Agent.md` - and the result is required to be unique. If two
-    candidates ever both match, this fails instead of silently picking one.
-
-    Hardcoding the constant's name would break the "cannot drift apart" promise
-    the moment someone renames it: the extractor would deny its existence.
-    """
-    tree = ast.parse(GUARD.read_text(encoding="utf-8"))
-    functions = {
-        node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
-    }
-    assert "test_python_count_matches_docs" in functions, (
-        "the guard function was renamed; point this extractor at the new one"
-    )
-
-    seen: set[str] = set()
-    queue = ["test_python_count_matches_docs"]
-    candidates: list[tuple[str, str]] = []
-    while queue:
-        name = queue.pop(0)
-        if name in seen:
-            continue
-        seen.add(name)
-        for node in ast.walk(functions[name]):
-            if not isinstance(node, ast.Call):
-                continue
-            # inline literal: `re.search(r"...", ...)` (or any `.search(...)`)
-            if (
-                isinstance(node.func, ast.Attribute)
-                and node.func.attr == "search"
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
-            ):
-                candidates.append((f"{name}: re.search", node.args[0].value))
-                continue
-            # a module-level compiled constant used as `NAME.search(...)` /
-            # `NAME.findall(...)` / any other regex method
-            if (
-                isinstance(node.func, ast.Attribute)
-                and isinstance(node.func.value, ast.Name)
-            ):
-                compiled = _compiled_pattern_for(tree, node.func.value.id)
-                if compiled is not None:
-                    candidates.append((node.func.value.id, compiled))
-                    continue
-            # module-level helper referenced by name
-            if isinstance(node.func, ast.Name) and node.func.id in functions:
-                queue.append(node.func.id)
-
-    text = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
-    matching = [(where, pat) for where, pat in candidates if re.search(pat, text)]
-    assert len(matching) == 1, (
-        "expected exactly one pattern reachable from the guard to match Agent.md's "
-        f"count line, found {len(matching)}: {[w for w, _ in matching]}. All "
-        f"candidates reached: {[w for w, _ in candidates]}. This test cannot tell "
-        "which regex is the doc anchor, so it refuses to guess."
-    )
-    return matching[0][1]
-
-
-def _compiled_pattern_for(tree: ast.Module, name: str) -> str | None:
-    """Return the literal pattern of a module-level `name = re.compile(r"...")`."""
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        targets = [t for t in node.targets if isinstance(t, ast.Name) and t.id == name]
-        if not targets or not isinstance(node.value, ast.Call):
-            continue
-        call = node.value
-        if (
-            isinstance(call.func, ast.Attribute)
-            and call.func.attr == "compile"
-            and call.args
-            and isinstance(call.args[0], ast.Constant)
-            and isinstance(call.args[0].value, str)
-        ):
-            return call.args[0].value
-    return None
+def _fake_tree(tmp_path: Path, name: str, text: str) -> Path:
+    """A minimal tree to scan: the file's directory, nothing else."""
+    (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / name).write_text(text, encoding="utf-8")
+    return tmp_path
 
 
 def _guard_assert_messages() -> list[str]:
-    """Every assertion message in the count guard, as static text.
+    """The string constants in the guard test's assertion messages.
 
-    Read from the AST, not by regex, so a reworded message is still read as the
-    message it is. Adjacent string constants inside an f-string are joined; the
-    `{doc}` / `{documented}` placeholders are `FormattedValue` nodes and drop
-    out, which is fine - the hint this test cares about is static text.
+    Read by AST because the message is the product: a hint that lives in a
+    comment, or in an assert the failure path never reaches, is not a hint. The
+    driven half is `test_the_reported_claim_names_the_measurement_command`.
     """
     tree = ast.parse(GUARD.read_text(encoding="utf-8"))
-    func = next(
+    funcs = [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "test_python_count_matches_docs"
-    )
+        if isinstance(node, ast.FunctionDef) and node.name == GUARD_TEST
+    ]
+    assert funcs, f"{GUARD_TEST} is gone from {GUARD.name}; point this reader at it"
     messages = []
-    for node in ast.walk(func):
+    for node in ast.walk(funcs[0]):
         if isinstance(node, ast.Assert) and node.msg is not None:
             messages.append(
                 "".join(
@@ -199,426 +103,402 @@ def _guard_assert_messages() -> list[str]:
     return messages
 
 
-def test_guard_failure_names_a_runnable_repair_command(mod, capsys) -> None:
-    """The guard must fail with a command the host can actually run.
-
-    Reporting drift without naming the repair path leaves the host to find the
-    tool - and the tool exists precisely for this failure. Both halves are
-    needed, so both are asserted: the path in the message must exist, and
-    `--write` must be a flag the tool really accepts. A hint spelled
-    consistently is not a repair path; a repair path that only exists in a
-    comment is not one either.
-
-    Necessary, not sufficient: this reads the hint out of the guard's source, and
-    a string that lives in an assert the drift path never reaches satisfies it.
-    `test_guard_drift_message_names_the_repair_command` is the half that drives
-    the guard and checks the message a host actually sees.
-    """
-    messages = _guard_assert_messages()
-    hinted = [m for m in messages if "scripts/check-doc-count.py" in m]
-    assert hinted, (
-        "the guard's failure message no longer names the repair tool, so a host "
-        f"who hits it in CI has no next step; messages found: {messages}"
-    )
-    assert any("--write" in m for m in hinted), (
-        f"the hint does not offer the repair flag, only a path: {hinted[0]!r}"
-    )
-    assert SCRIPT.exists(), f"the guard points at {SCRIPT}, which does not exist"
-
-    with pytest.raises(SystemExit) as excinfo:
-        mod.main(["--help"])
-    assert excinfo.value.code == 0
-    assert "--write" in capsys.readouterr().out
+# --- the rule: a stored count is reported, and the real tree has none ---------
 
 
-def test_guard_drift_message_names_the_repair_command(mod, monkeypatch) -> None:
-    """The hint must be in the message a host actually gets, in the drift state.
-
-    The static checks next door read the hint out of the guard's source, which
-    makes them necessary but not sufficient. Measured (cyc20260910-192726): moving
-    that same hint string onto the assert that fires when the *anchor* is missing
-    left both of them green, while a drifting host saw a message with no hint at
-    all - the exact regression this branch exists to prevent. So drive the guard
-    the way drift drives it: stub the collected count (no subprocess, ~0s) and
-    read the raised message.
-    """
-    guard = _load_guard()
-    canonical = "uv run --no-sync python3 scripts/check-doc-count.py --write"
-    documented = mod.documented_count((REPO_ROOT / "Agent.md").read_text(encoding="utf-8"))
-
-    # Positive state: a consistent tree leaves the guard silent. Without this
-    # half, a guard that compared nothing would still pass the negative one.
-    monkeypatch.setattr(guard, "_collected_pytest_count", lambda: documented)
-    assert guard.test_python_count_matches_docs() is None
-
-    # Negative state: one test's worth of drift - the real incident shape.
-    monkeypatch.setattr(guard, "_collected_pytest_count", lambda: documented + 1)
-    with pytest.raises(AssertionError) as excinfo:
-        guard.test_python_count_matches_docs()
-    message = str(excinfo.value)
-    assert f"Fix with: {canonical}" in message, (
-        "the message a host sees on drift no longer names the repair command; "
-        f"it says: {message!r}"
-    )
-
-
-def test_tool_pattern_agrees_with_the_guard(mod) -> None:
-    """The guard and this tool must key on the same phrase in the real Agent.md.
-
-    Without this, the guard's anchor could be edited while the tool kept matching
-    the old one - the tool would then report OK for a line nobody checks.
-    """
-    guard = re.compile(_guard_pattern())
-    text = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
-    guard_match = guard.search(text)
-    assert guard_match, "the guard's own pattern no longer matches Agent.md"
-    # Fail with the reason, not an IndexError: a pattern edit that drops the
-    # capture group is exactly the failure this test exists to catch -- measured,
-    # the first version of this test raised `IndexError: no such group` here and
-    # said nothing about the guard having changed.
-    assert guard.groups >= 1, (
-        "the guard's count pattern no longer captures the number as group 1; "
-        "this test compares through that group, so it must be updated alongside "
-        f"the guard: {_guard_pattern()!r}"
-    )
-    assert int(guard_match.group(1)) == mod.documented_count(text)
-
-
-def test_documented_count_reads_the_real_doc(mod, tmp_path) -> None:
-    assert mod.documented_count(_doc(tmp_path, 1284).read_text()) == 1284
-
-
-def test_missing_anchor_fails_loud(mod, tmp_path) -> None:
-    with pytest.raises(mod.DocCountError, match="no documented Python count"):
-        mod.documented_count(_doc(tmp_path, None).read_text())
-
-
-def test_duplicate_anchor_fails_loud(mod, tmp_path) -> None:
-    """Two counts in one doc = ambiguity; the tool must refuse, not pick one."""
-    text = _doc(tmp_path, 1284).read_text()
-    with pytest.raises(mod.DocCountError, match="2 documented Python counts"):
-        mod.documented_count(text + "Python: `uv run pytest tests/ -v` (999)\n")
-
-
-def test_patch_changes_only_the_number(mod, tmp_path) -> None:
-    text = _doc(tmp_path, 1249).read_text()
-    patched = mod.patch(text, 1284)
-    assert patched != text
-    assert "1249" not in patched
-    # Everything else - including the surrounding prose and the other counts - is
-    # untouched, which is the property that makes --write safe on a doc this size.
-    assert patched == text.replace("(1249)", "(1284)")
-
-
-def test_missing_anchor_is_a_tool_error_not_a_crash(mod, tmp_path) -> None:
-    mod.DOC = _doc(tmp_path, None)
-    assert mod.main([]) == 2
-
-
-def test_unparsable_measurement_fails_loud(mod, monkeypatch) -> None:
-    class _Proc:
-        returncode = 0
-        stdout = "no summary line here"
-        stderr = ""
-
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Proc())
-    with pytest.raises(mod.DocCountError, match="could not parse a collected count"):
-        mod.measured_count()
-
-
-def test_failed_collection_fails_loud(mod, monkeypatch) -> None:
-    class _Proc:
-        returncode = 4
-        stdout = "ERROR: usage error"
-        stderr = ""
-
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Proc())
-    with pytest.raises(mod.DocCountError, match="collect-only failed") as excinfo:
-        mod.measured_count()
-    # The host-facing half: a bare `python3` without pytest must be told how to
-    # run this, not left with "No module named pytest" and no next step.
-    assert "uv run --no-sync python3 scripts/check-doc-count.py" in str(excinfo.value)
-
-
-def test_consistent_doc_reports_ok_and_writes_nothing(mod, tmp_path, monkeypatch, capsys) -> None:
-    doc = _doc(tmp_path, 1284)
-    before = doc.read_text()
-    mod.DOC = doc
-    monkeypatch.setattr(mod, "measured_count", lambda: 1284)
-
+def test_the_real_tree_states_no_count(mod, capsys) -> None:
+    """The real tree must pass the rule this file exists to enforce."""
     assert mod.main([]) == 0
-    assert "OK: Agent.md documents 1284 collected Python tests" in capsys.readouterr().out
-    assert doc.read_text() == before
+    out = capsys.readouterr().out
+    assert "OK: no tracked file states the Python test count" in out, out
 
 
-def test_drift_is_reported_with_the_measured_value(mod, tmp_path, monkeypatch, capsys) -> None:
-    doc = _doc(tmp_path, 1249)
-    before = doc.read_text()
-    mod.DOC = doc
-    monkeypatch.setattr(mod, "measured_count", lambda: 1284)
+def test_measure_reports_the_real_count(mod, capsys) -> None:
+    """`--measure` really measures — the doc names this command instead of a number.
+
+    An integration test on purpose: the whole point of naming a command in the
+    doc is that the command works, so it is run here against the real tree
+    (`--collect-only`, ~10s) rather than modelled. Everything else in this file
+    injects the tree so the unit tests stay instant.
+    """
+    assert mod.main(["--measure"]) == 0
+    out = capsys.readouterr().out
+    match = re.search(r"measured: (\d+) collected Python tests", out)
+    assert match, out
+    assert int(match.group(1)) > 100, out
+
+
+def test_each_claim_shape_is_reported_with_its_location(
+    mod, monkeypatch, tmp_path, capsys
+) -> None:
+    """Every way a count can be written down must be reported, not just the old one.
+
+    The shapes are the ones this repo has actually carried: the `Agent.md` form
+    (stored beside the command) and the `DEVELOPMENT.md` prose form ("currently
+    681 items", off by 2.3x in a file no check read until issue #1158). A rule
+    that only knew the first would have left the second in place while reporting
+    `OK`.
+    """
+    claims = {
+        "stored next to the test command": "Python: `uv run pytest tests/ -v` (1599) - import check: x",
+        "parenthesised count": "# run tests (currently 681 items)",
+        "'currently N' claim": "currently 681 items are collected",
+        "bare 'N items' claim": "the suite holds 681 items",
+        "count after a pytest command": "hint: pytest (681)",
+    }
+    body = "\n".join(f"line {i}: {claim}" for i, claim in enumerate(claims.values(), 1))
+    _fake_tree(tmp_path, "docs.md", body + "\n")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "scanned_files", lambda: ["docs.md"])
 
     assert mod.main([]) == 1
     out = capsys.readouterr().out
-    assert "documents 1249 Python tests but 1284 are collected" in out
-    assert "--write" in out
-    assert doc.read_text() == before, "a reporting run must never write"
+    assert "FAIL: 1 tracked file(s) state the Python test count" in out, out
+    for shape in claims:
+        assert f"[{shape}]" in out, f"{shape} was not reported:\n{out}"
+    assert "docs.md:" in out, out
+    # The remedy must be a command that runs, and the one the docs name.
+    assert f"{CANONICAL} --measure" in out, out
 
 
-def test_write_repairs_the_doc(mod, tmp_path, monkeypatch, capsys) -> None:
-    doc = _doc(tmp_path, 1249)
-    mod.DOC = doc
-    monkeypatch.setattr(mod, "measured_count", lambda: 1284)
+def test_each_shape_is_recognised_by_the_rule_itself(mod) -> None:
+    """The per-shape names come from the rule, so the message above cannot drift.
 
-    assert mod.main(["--write"]) == 0
-    assert "updated Agent.md: 1249 -> 1284" in capsys.readouterr().out
-    assert mod.documented_count(doc.read_text()) == 1284
-
-
-def test_dry_run_reports_but_does_not_write(mod, tmp_path, monkeypatch, capsys) -> None:
-    doc = _doc(tmp_path, 1249)
-    before = doc.read_text()
-    mod.DOC = doc
-    monkeypatch.setattr(mod, "measured_count", lambda: 1284)
-
-    assert mod.main(["--dry-run"]) == 0
-    assert "dry run" in capsys.readouterr().out
-    assert doc.read_text() == before
-
-
-def test_write_and_dry_run_together_are_rejected() -> None:
-    """The two modes contradict each other, so the pair must fail loud.
-
-    Measured before this was enforced: `--write --dry-run` printed the dry-run
-    line, wrote nothing and exited 0 -- the caller asked for a repair and the
-    tool dropped the request without a word. That is the "silently reinterpret
-    input" class this repo already rejected once (bump-version.py's `--check
-    v0.2.94`, which discarded its argument and reported green about a version
-    nobody asked about). argparse's own exit code for a usage error is 2, which
-    matches this tool's convention for "cannot act on what you gave me".
+    A test that only read the CLI output could pass with the shapes in the wrong
+    order and overlapping each other; this pins the rule's own verdict per line.
     """
-    with pytest.raises(SystemExit) as excinfo:
-        mod_main = _load_module()
-        mod_main.main(["--write", "--dry-run"])
-    assert excinfo.value.code == 2
+    cases = {
+        "Python: `uv run pytest tests/ -v` (1599)": "stored next to the test command",
+        "(currently 681 items)": "parenthesised count",
+        "currently 681 items remain": "'currently N' claim",
+        "the suite holds 681 items": "bare 'N items' claim",
+        "hint: pytest (681)": "count after a pytest command",
+    }
+    for line, shape in cases.items():
+        found = mod.claims_in(line)
+        assert [s for _, s, _ in found] == [shape], (line, found, shape)
+    # One line, one claim: a line that matches several shapes must not be
+    # reported several times, or the count in the message says nothing.
+    assert len(mod.claims_in("python: pytest (681)")) == 1
 
 
-# ---------------------------------------------------------------------------
-# `--resolve-conflict`: the merge-time state plain `--write` cannot act on.
-#
-# Measured 2026-09-11 (cyc20260911-020021): merging #1130 made the three sibling
-# PRs dirty, and each unblock needed the same hand dance - view the conflict,
-# strip the markers, then measure. The rule the dance encodes is that neither
-# side may win: both are stale by construction, which is *why* they conflicted.
-# The tests below pin that rule as an executable refusal, not as advice.
+def test_a_claim_is_reported_once_per_line(mod) -> None:
+    """Two claims on two lines are two findings, numbered from 1."""
+    found = mod.claims_in("clean\nPython: `uv run pytest tests/ -v` (1)\n")
+    assert found == [(2, "stored next to the test command", "Python: `uv run pytest tests/ -v` (1)")]
 
 
-def _conflicted(doc_text: str, ours: int, theirs: int) -> str:
-    """Wrap the count line in a conflict block with two different numbers."""
-    match = re.search(r"^Python: `uv run pytest tests/ -v` \(\d+\).*$", doc_text, re.M)
-    assert match, "no count line to conflict"
-    sides = []
-    for value in (ours, theirs):
-        sides.append(re.sub(r"\(\d+\)", f"({value})", match.group(0), count=1))
-    block = (
-        f"<<<<<<< HEAD\n{sides[0]}\n=======\n{sides[1]}\n>>>>>>> master"
+def test_the_rule_skips_the_trees_that_must_spell_the_claim(mod, monkeypatch) -> None:
+    """`tests/` and `scripts/` are excluded — measured, and bounded by one list.
+
+    They are where the rule and its probes live, so they have to be able to write
+    the claim out. Driven through `scanned_files` with a payload, so the exclusion
+    is exercised rather than described; the "no exclusion may grow over a real
+    doc" half is witnessed in `tests/test_doc_counts.py`.
+    """
+
+    class _Proc:
+        returncode = 0
+        stdout = "scripts/x.py\ntests/y.py\nemrg/z.py\nAgent.md\n"
+        stderr = ""
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Proc())
+    assert mod.scanned_files() == ["Agent.md", "emrg/z.py"]
+
+
+def test_unlistable_files_fail_loud(mod, monkeypatch, tmp_path) -> None:
+    """A checkout whose listing fails must say so, never walk or report `OK`.
+
+    "I could not check" reported as healthy is how a broken tree reaches master:
+    an empty scan and a clean tree are indistinguishable in the output. The
+    fallback below (walk a tree with no `.git`) must not be reachable from a
+    checkout, or the scan set would silently change meaning.
+    """
+    (tmp_path / ".git").mkdir()
+
+    class _Proc:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: not a git repository"
+
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(mod.DocCountError, match="could not list tracked files"):
+        mod.scanned_files()
+
+
+def test_a_tree_with_no_git_is_walked(mod, monkeypatch, tmp_path) -> None:
+    """The `git archive` export `check-merge-sequence.py` judges has no `.git`.
+
+    Measured while writing this rule: that caller extracts a merged tree into a
+    temp directory and runs *the tree's own copy* of this guard there, so the
+    tracked-files path cannot run at all. A guard that raised there would make
+    every merge-sequence step a measurement error, and one that passed would be
+    worse. An export holds only tracked content, so walking it sees the same
+    files `git ls-files` would have listed.
+    """
+    _fake_tree(tmp_path, "docs.md", "no claim here\n")
+    _fake_tree(tmp_path, "tests/test_x.py", "spelled in a fixture: (681 items)\n")
+    _fake_tree(tmp_path, "scripts/y.py", "spelled in prose: (681 items)\n")
+    _fake_tree(tmp_path, "emrg/z.py", "code\n")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    assert mod.scanned_files() == ["docs.md", "emrg/z.py"]
+    assert mod.offenders() == []
+
+
+def test_the_walk_skips_build_output(mod, monkeypatch, tmp_path) -> None:
+    """A non-checkout tree may still carry build output; it is not part of it.
+
+    `dist/` and `node_modules/` hold vendored third-party sources, and a rule
+    that read them would report claims nobody in this repo wrote.
+    """
+    _fake_tree(tmp_path, "docs.md", "clean\n")
+    _fake_tree(tmp_path, "dist/runtime/lib/vendor.py", "pytest (681)\n")
+    _fake_tree(tmp_path, "node_modules/pkg/readme.md", "681 items were run\n")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    assert mod.scanned_files() == ["docs.md"]
+    assert mod.offenders() == []
+
+
+def test_a_checkout_is_scanned_through_git_not_by_walking(mod, monkeypatch, tmp_path) -> None:
+    """The two paths must not be interchangeable in a checkout.
+
+    Pinned on which path runs, not on the answer: an untracked file in a working
+    checkout must be invisible *because it is untracked*, which is a different
+    reason from it happening to be clean.
+    """
+    (tmp_path / ".git").mkdir()
+    _fake_tree(tmp_path, "untracked.md", "Python: `uv run pytest tests/ -v` (1599)\n")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+
+    class _Proc:
+        returncode = 0
+        stdout = "tracked.md\n"
+        stderr = ""
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Proc())
+    assert mod.scanned_files() == ["tracked.md"]
+
+
+def test_an_unreadable_file_does_not_fail_the_scan(mod, monkeypatch, tmp_path) -> None:
+    """A binary file is skipped, not fatal: a claim cannot live in bytes."""
+    _fake_tree(tmp_path, "img.png", "")
+    (tmp_path / "img.png").write_bytes(b"\xff\xfe\x00\x01")
+    _fake_tree(tmp_path, "docs.md", "no claim here\n")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "scanned_files", lambda: ["img.png", "docs.md"])
+    assert mod.offenders() == []
+
+
+# --- resolving a conflicted count line ---------------------------------------
+
+
+def _conflicted(ours: str, theirs: str) -> str:
+    return (
+        "before\n"
+        "<<<<<<< HEAD\n"
+        f"{ours}\n"
+        "=======\n"
+        f"{theirs}\n"
+        ">>>>>>> feature\n"
+        "after\n"
     )
-    return doc_text[: match.start()] + block + doc_text[match.end() :]
 
 
-def test_resolve_conflict_strips_markers_and_leaves_structure(mod, tmp_path) -> None:
-    """The block goes; everything around it stays byte-identical."""
-    doc = _doc(tmp_path, 1249)
-    text = doc.read_text()
-    resolved = mod.resolve_conflict(_conflicted(text, 1372, 1337))
-    assert "<<<<<<<" not in resolved and ">>>>>>>" not in resolved
-    assert "=======" not in resolved.splitlines()
-    # Only the conflicted line changed - one of the two sides is now the only
-    # count, and the rest of the document is untouched.
-    assert resolved.replace("(1372)", "(1249)") == text
+def test_resolve_conflict_drops_the_claim_and_keeps_the_structure(mod, tmp_path) -> None:
+    """The resolution is *deletion*, not a value: the count is a measurement.
 
-
-def test_resolve_conflict_refuses_a_doc_with_no_conflict(mod, tmp_path) -> None:
-    with pytest.raises(mod.DocCountError, match="no conflict block found"):
-        mod.resolve_conflict(_doc(tmp_path, 1249).read_text())
-
-
-def test_resolve_conflict_refuses_a_conflict_that_is_not_the_count_line(
-    mod, tmp_path
-) -> None:
-    """A tool that deletes markers anywhere is not this tool.
-
-    The dangerous failure mode: someone reaches for the resolver on a content
-    conflict and one side's lines vanish silently. It must refuse, and the
-    refusal must name the reason.
+    Two sides that are the same line but for the number carry no information
+    about which number is right (both were measured on trees that no longer
+    exist), so writing either one - or a fresh measurement - would be inventing a
+    stored fact this rule exists to remove.
     """
-    text = _doc(tmp_path, 1249).read_text()
-    text += "<<<<<<< HEAD\nRenderer: 514\n=======\nRenderer: 517\n>>>>>>> master\n"
-    with pytest.raises(mod.DocCountError, match="not the count line"):
+    text = _conflicted(
+        "Python: `uv run pytest tests/ -v` (1599) - import check: x",
+        "Python: `uv run pytest tests/ -v` (1603) - import check: x",
+    )
+    resolved = mod.resolve_conflict(text)
+    assert resolved == (
+        "before\n"
+        "Python: `uv run pytest tests/ -v` - import check: x\n"
+        "after\n"
+    )
+    assert mod.claims_in(resolved) == []
+
+
+def test_resolve_conflict_also_handles_one_side_already_count_free(mod) -> None:
+    """The shape a rebase onto this change produces: numbered vs count-free.
+
+    `git merge` against a master that no longer stores the count yields exactly
+    one side with a number and one without. Removing the claim makes them equal,
+    so the case is resolved by the same rule rather than by preferring a side.
+    """
+    text = _conflicted(
+        "Python: `uv run pytest tests/ -v` (1599) - import check: x",
+        "Python: `uv run pytest tests/ -v` - import check: x",
+    )
+    assert mod.resolve_conflict(text).count("import check: x") == 1
+    assert "(1599)" not in mod.resolve_conflict(text)
+
+
+def test_resolve_conflict_refuses_a_doc_with_no_conflict(mod) -> None:
+    with pytest.raises(mod.DocCountError, match="no conflict block found"):
+        mod.resolve_conflict("Python: `uv run pytest tests/ -v` (1599)\n")
+
+
+def test_resolve_conflict_refuses_a_conflict_that_is_not_the_count_line(mod) -> None:
+    """A different conflicted line is somebody else's decision, not this tool's."""
+    text = _conflicted("def a(): pass", "def b(): pass")
+    with pytest.raises(mod.DocCountError, match="is not the count line"):
         mod.resolve_conflict(text)
 
 
-def test_resolve_conflict_refuses_when_the_sides_differ_by_more_than_the_number(
-    mod, tmp_path
-) -> None:
-    """Same line, different content = a real choice; the tool must not make it."""
-    text = _doc(tmp_path, 1249).read_text()
-    match = re.search(r"^Python: .*$", text, re.M)
-    line = match.group(0)
-    other = line.replace("import check: x", "import check: DIFFERENT")
-    block = f"<<<<<<< HEAD\n{line}\n=======\n{other}\n>>>>>>> master"
-    with pytest.raises(mod.DocCountError, match="differs by more than the count"):
-        mod.resolve_conflict(text[: match.start()] + block + text[match.end() :])
+def test_resolve_conflict_refuses_when_the_sides_differ_by_more_than_the_count(mod) -> None:
+    """Measured on the real 2026-09-13 queue: this is the shape it must refuse.
 
-
-# The diff3 layout, captured verbatim from a real `git merge` (measured
-# 2026-09-11 on this machine: two branches changing only the number, merged with
-# `merge.conflictStyle = diff3`). `CONFLICT_BLOCK` does not recognise this shape,
-# so the resolver cannot tell whether the conflict is the count line - and the
-# important part is that it says so. Before this test, the same input produced
-# "the conflicted line differs by more than the count": false (all three lines
-# differ only in the number) and it steered the reader toward picking a side,
-# which is the one repair the tool exists to prevent.
-_DIFF3_CONFLICT = (
-    "head\n"
-    "<<<<<<< HEAD\n"
-    "Python: `uv run pytest tests/ -v` (1372)\n"
-    "||||||| c6cd3d6\n"
-    "Python: `uv run pytest tests/ -v` (1335)\n"
-    "=======\n"
-    "Python: `uv run pytest tests/ -v` (1337)\n"
-    ">>>>>>> other\n"
-    "tail\n"
-)
-
-
-def test_resolve_conflict_names_the_diff3_layout_it_cannot_parse(mod, tmp_path) -> None:
-    """An unrecognised conflict layout must be named, not misdiagnosed.
-
-    Negative state (refusal) checked here; the positive control is
-    `test_resolve_conflict_still_resolves_the_supported_layout` below - without
-    it, a blanket refusal would pass this test while breaking the resolver.
+    Every in-flight branch's line carried the old *wording* plus a number, while
+    the new form says something else entirely. Both sides differ in content, so
+    taking the count-free one is a judgement (it drops whatever the other side
+    was saying) — and a tool that makes that choice silently is the failure mode
+    the whole conflict doctrine exists to prevent.
     """
-    text = _doc(tmp_path, 1249).read_text()
-    with pytest.raises(mod.DocCountError, match="diff3"):
-        mod.resolve_conflict(text + _DIFF3_CONFLICT)
-
-
-def test_resolve_conflict_still_resolves_the_supported_layout(mod, tmp_path) -> None:
-    """Positive control for the diff3 refusal: the supported layout still works."""
-    doc = _doc(tmp_path, 1249)
-    text = doc.read_text()
-    resolved = mod.resolve_conflict(_conflicted(text, 1372, 1337))
-    assert "|||||||" not in resolved and "<<<<<<<" not in resolved
-
-
-def test_resolve_conflict_does_not_blame_the_number_for_a_multiline_block(
-    mod, tmp_path
-) -> None:
-    """A block spanning extra lines is not "differing by more than the count".
-
-    The refusal must survive, but its wording has to stay true: the two sides of
-    this block differ by an entire line, not merely by the number.
-    """
-    text = _doc(tmp_path, 1249).read_text()
-    match = re.search(r"^Python: .*$", text, re.M)
-    line = match.group(0)
-    block = f"<<<<<<< HEAD\n{line}\nextra: only ours\n=======\n{line}\n>>>>>>> master"
-    with pytest.raises(mod.DocCountError, match="content conflict"):
-        mod.resolve_conflict(text[: match.start()] + block + text[match.end() :])
-
-
-def test_resolve_conflict_mode_writes_the_measured_value(
-    mod, tmp_path, monkeypatch, capsys
-) -> None:
-    """End to end: conflicted doc in, measured count out - neither side wins.
-
-    The two sides say 1372 and 1337; the tree says 1339. Only 1339 may be
-    written, which is what distinguishes measurement from side-picking.
-    """
-    doc = _doc(tmp_path, 1249)
-    doc.write_text(_conflicted(doc.read_text(), 1372, 1337))
-    mod.DOC = doc
-    monkeypatch.setattr(mod, "measured_count", lambda: 1339)
-
-    assert mod.main(["--resolve-conflict"]) == 0
-    out = capsys.readouterr().out
-    assert "conflict block removed" in out and "-> 1339" in out
-    resolved = doc.read_text()
-    assert mod.documented_count(resolved) == 1339
-    assert "<<<<<<<" not in resolved
-
-
-def test_resolve_conflict_mode_leaves_a_conflict_free_doc_alone(
-    mod, tmp_path, monkeypatch
-) -> None:
-    """No conflict = nothing to resolve; rc=2 and the file is not rewritten."""
-    doc = _doc(tmp_path, 1249)
-    before = doc.read_text()
-    mod.DOC = doc
-    monkeypatch.setattr(mod, "measured_count", lambda: 1339)
-
-    assert mod.main(["--resolve-conflict"]) == 2
-    assert doc.read_text() == before
-
-
-def test_resolve_conflict_is_mutually_exclusive_with_write_and_dry_run() -> None:
-    """Three modes, one action: asking for two must fail loud, not pick one."""
-    for pair in (["--resolve-conflict", "--write"], ["--resolve-conflict", "--dry-run"]):
-        with pytest.raises(SystemExit) as excinfo:
-            _load_module().main(pair)
-        assert excinfo.value.code == 2
-
-
-def test_real_tree_has_no_conflict_to_resolve(mod) -> None:
-    """Integration: the checked-in tree is clean, so the resolver refuses.
-
-    The counterpart to `test_resolve_conflict_mode_writes_the_measured_value`:
-    on a healthy tree this mode is a no-op that says so, rather than a repair
-    that runs because it was asked to.
-    """
-    assert mod.main(["--resolve-conflict"]) == 2
-
-
-def test_real_tree_is_consistent() -> None:
-    """Integration: the tool reports OK on the checked-in tree.
-
-    Runs the real `pytest --collect-only` (1s), exactly as the guard it mirrors
-    does. `--collect-only` collects and never executes test bodies.
-    """
-    proc = subprocess.run(
-        [sys.executable, str(SCRIPT)],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        # The tool prints paths and counts; decode them as UTF-8, never with the
-        # host locale (the class tests/test_script_decode_is_locale_independent.py
-        # exists to keep out of the tree).
-        encoding="utf-8",
-        errors="replace",
+    text = _conflicted(
+        "Python: `uv run pytest tests/ -v` (1599) - import check: x",
+        "Python: `uv run pytest tests/ -v` - count is measured, not stored",
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "OK: Agent.md documents" in proc.stdout
+    with pytest.raises(mod.DocCountError, match="differ by more than the count"):
+        mod.resolve_conflict(text)
 
 
-# --- the repair hint itself must be a command that runs -----------------------
+def test_resolve_conflict_names_the_diff3_layout_it_cannot_parse(mod) -> None:
+    text = (
+        "before\n"
+        "<<<<<<< HEAD\n"
+        "Python: `uv run pytest tests/ -v` (1599)\n"
+        "||||||| base\n"
+        "Python: `uv run pytest tests/ -v` (1284)\n"
+        "=======\n"
+        "Python: `uv run pytest tests/ -v` (1307)\n"
+        ">>>>>>> feature\n"
+    )
+    with pytest.raises(mod.DocCountError, match="diff3 layout"):
+        mod.resolve_conflict(text)
 
 
-def test_every_repair_hint_prints_one_runnable_command(mod, monkeypatch, tmp_path, capsys) -> None:
-    """Every site that tells someone how to repair the count must agree.
+def test_resolve_conflict_refuses_more_than_one_block(mod) -> None:
+    text = _conflicted(
+        "Python: `uv run pytest tests/ -v` (1599) - x",
+        "Python: `uv run pytest tests/ -v` (1603) - x",
+    ) + _conflicted("other", "other2")
+    with pytest.raises(mod.DocCountError, match="2 conflict blocks"):
+        mod.resolve_conflict(text)
 
-    Measured (cycle cyc20260910-191242, main clone): the canonical form exits 0,
-    while the bare `python3` form the drift hint used to print exits 2 having
-    measured nothing - the host's `python3` cannot import pytest. The guard's
-    message, this tool's error hint and Agent.md already used the canonical form,
-    so the drift hint was the one site sending the reader into a second failure.
-    A hint that fails is worse than no hint: it looks like a next step.
 
-    All four sites are checked here (tool source, tool drift output, tool error
-    output, guard message, plus Agent.md), because the defect was precisely a
-    disagreement between them.
+def test_resolve_conflict_mode_writes_the_claim_free_doc(mod, monkeypatch, tmp_path, capsys) -> None:
+    """The mode is driven end to end: markers gone, claim gone, structure kept."""
+    _fake_tree(
+        tmp_path,
+        "Agent.md",
+        _conflicted(
+            "Python: `uv run pytest tests/ -v` (1599) - x",
+            "Python: `uv run pytest tests/ -v` (1603) - x",
+        ),
+    )
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    assert mod.main(["--resolve-conflict"]) == 0
+    written = (tmp_path / "Agent.md").read_text(encoding="utf-8")
+    assert "<<<<<<<" not in written and ">>>>>>>" not in written, written
+    assert "(1599)" not in written and "(1603)" not in written, written
+    assert written == "before\nPython: `uv run pytest tests/ -v` - x\nafter\n"
+    out = capsys.readouterr().out
+    assert "count claim dropped" in out, out
+
+
+def test_resolve_conflict_mode_leaves_a_conflict_free_doc_alone(mod, monkeypatch, tmp_path) -> None:
+    """Refusing must not touch the file: a resolver that writes on the way to an
+    error can turn a readable conflict into an unreadable one."""
+    _fake_tree(tmp_path, "Agent.md", "Python: `uv run pytest tests/ -v` (1599) - x\n")
+    before = (tmp_path / "Agent.md").read_text(encoding="utf-8")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    assert mod.main(["--resolve-conflict"]) == 2
+    assert (tmp_path / "Agent.md").read_text(encoding="utf-8") == before
+
+
+def test_resolve_conflict_is_mutually_exclusive_with_measure() -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _load_module().main(["--resolve-conflict", "--measure"])
+    assert excinfo.value.code == 2
+
+
+def test_the_real_tree_has_no_conflict_to_resolve(mod) -> None:
+    with pytest.raises(mod.DocCountError, match="no conflict block found"):
+        mod.resolve_conflict((REPO_ROOT / "Agent.md").read_text(encoding="utf-8"))
+
+
+# --- the reported claim must name a command that runs ------------------------
+
+
+def test_the_reported_claim_names_the_measurement_command(mod, monkeypatch, tmp_path, capsys) -> None:
+    """The message a host sees must offer the next step, not just a verdict.
+
+    The tool's own drift output is the state a host actually reaches, so it is
+    driven (stubbed tree, no collection) rather than read out of the source.
     """
-    canonical = "uv run --no-sync python3 scripts/check-doc-count.py"
-    assert mod.INVOCATION == canonical
+    _fake_tree(tmp_path, "docs.md", "Python: `uv run pytest tests/ -v` (1599)\n")
+    monkeypatch.setattr(mod, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(mod, "scanned_files", lambda: ["docs.md"])
+    assert mod.main([]) == 1
+    out = capsys.readouterr().out
+    assert f"Measure it with: {CANONICAL} --measure" in out, out
+    assert f"tree: {tmp_path}" in out, out
+
+
+def test_the_guard_message_names_the_one_command(mod, monkeypatch) -> None:
+    """The CI guard must fail with a runnable command too, and the same spelling.
+
+    Driven, not read: the guard's message is an f-string interpolating the tool's
+    own `INVOCATION`, and a source reader collects only its literal parts — so
+    reading it would prove nothing about what a host sees.
+    """
+    guard = _load_guard()
+    tool = SimpleNamespace(
+        offenders=lambda: [("Agent.md", 122, "stored next to the test command", "x")],
+        REPO_ROOT=REPO_ROOT,
+        INVOCATION=CANONICAL,
+    )
+    monkeypatch.setattr(guard, "_load_doc_count_tool", lambda: tool)
+    with pytest.raises(AssertionError) as excinfo:
+        guard.test_no_tracked_file_states_the_python_test_count(monkeypatch)
+    message = str(excinfo.value)
+    assert CANONICAL in message, message
+    assert "--measure" in message, message
+    assert "Agent.md:122" in message, message
+
+
+def test_guard_failure_names_the_tool_it_points_at(mod, capsys) -> None:
+    """The guard's message and the tool it names must both exist.
+
+    Necessary, not sufficient (the driven test above is the other half): a hint
+    naming a path that no longer exists is a next step that fails.
+    """
+    assert SCRIPT.exists(), f"the guard points at {SCRIPT}, which does not exist"
+    messages = _guard_assert_messages()
+    assert messages, "the guard test carries no assertion message at all"
+    with pytest.raises(SystemExit) as excinfo:
+        mod.main(["--help"])
+    assert excinfo.value.code == 0
+    assert "--measure" in capsys.readouterr().out
+
+
+def test_every_printed_invocation_uses_the_project_runner(mod) -> None:
+    """A hint that cannot import pytest sends the reader into a second failure.
+
+    Measured (cycle cyc20260910-191242, main clone): the canonical form exits 0
+    while a bare `python3` form exits 2 having measured nothing - the host's
+    `python3` has no pytest. Every site is checked: this tool's source, its error
+    hint, and Agent.md's doc line.
+    """
+    assert mod.INVOCATION == CANONICAL
 
     source = SCRIPT.read_text(encoding="utf-8")
     hits = list(re.finditer(r"python3 scripts/check-doc-count\.py", source))
@@ -631,45 +511,157 @@ def test_every_repair_hint_prints_one_runnable_command(mod, monkeypatch, tmp_pat
         )
 
     doc = (REPO_ROOT / "Agent.md").read_text(encoding="utf-8")
-    assert canonical in doc, "Agent.md no longer documents the canonical invocation"
-    assert any(
-        f"Fix with: {canonical} --write" in message
-        for message in _guard_assert_messages()
-    ), "the pytest guard's failure message no longer prints the canonical fix command"
+    assert CANONICAL in doc, "Agent.md no longer documents the canonical invocation"
 
-    # Drift state, for real: the printed line must be the runnable one.
-    mod.DOC = _doc(tmp_path, 1307)
-    monkeypatch.setattr(mod, "measured_count", lambda: 1308)
-    assert mod.main([]) == 1
-    assert f"Fix with: {canonical} --write" in capsys.readouterr().out
 
-    # Error state: the interpreter advice must be the same spelling. A fresh
-    # module, because `measured_count` on `mod` is stubbed above to reach the
-    # drift path, and this half needs the real function to run.
-    fresh = _load_module()
+def test_measure_failure_names_the_invocation_and_how_to_fix_it(mod, monkeypatch) -> None:
+    """An error state must carry the same spelling, for the same measured reason."""
 
     class _Proc:
         returncode = 4
         stdout = ""
         stderr = ""
 
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(mod.DocCountError) as excinfo:
+        mod.measured_count()
+    assert f"`{mod.INVOCATION} --measure`" in str(excinfo.value)
+
+
+def test_a_missing_pytest_is_diagnosed_as_an_unsynced_checkout(monkeypatch) -> None:
+    """The remedy must not be the command that just failed.
+
+    Measured state this pins (2026-09-13, `cyc20260913-122923`): in a fresh
+    review worktree the tool printed its own `INVOCATION` as the fix, and running
+    that spelling produced byte-identical output, rc 2 - `uv run --no-sync` had
+    left an empty `.venv` there and both `python` and `python3` resolve to it, so
+    "use the project interpreter" is a circle. The message must name the
+    environment instead.
+    """
+    fresh = _load_module()
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "/some/checkout/.venv/bin/python3: No module named pytest\n"
+
     monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
     with pytest.raises(fresh.DocCountError) as excinfo:
         fresh.measured_count()
-    assert f"`{canonical}`" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "No module named pytest" in message
+    assert "/some/checkout/.venv/bin/python3" in message, "the child's own words"
+    assert "unsynced" in message, "the cause, named"
+    assert "uv sync" in message, "a remedy that can actually work here"
+
+
+def test_a_real_collection_failure_keeps_the_invocation_hint(monkeypatch) -> None:
+    """The other cause of the same non-zero exit: pytest ran, and it failed.
+
+    Without this arm, treating every non-zero collection as an unsynced checkout
+    would be green - which would take the invocation hint away from the case it
+    was written for.
+    """
+    fresh = _load_module()
+
+    class _Proc:
+        returncode = 2
+        stdout = "ERROR: file or directory not found: tests/\n"
+        stderr = ""
+
+    monkeypatch.setattr(fresh.subprocess, "run", lambda *a, **k: _Proc())
+    with pytest.raises(fresh.DocCountError) as excinfo:
+        fresh.measured_count()
+    message = str(excinfo.value)
+    assert f"`{fresh.INVOCATION} --measure`" in message
+    assert "uv sync" not in message
+    assert "unsynced" not in message
+
+
+# --- which tree was scanned --------------------------------------------------
+
+
+def _fake_checkout(root: Path, count: int) -> Path:
+    """A minimal checkout shape: the two things `_resolve_root` looks for."""
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "Agent.md").write_text(
+        f"Python: `uv run pytest tests/ -v` ({count}) - import check: x\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_the_tree_is_the_checkout_you_are_standing_in(mod, monkeypatch, tmp_path):
+    """The defect, measured 2026-09-11 while unblocking PRs.
+
+    Unblocking means working in a git worktree; the natural invocation is
+    `<worktree>/.venv/bin/python <main-checkout>/scripts/check-doc-count.py`, and
+    the old root was `Path(__file__).parent.parent` - the *main* checkout. So the
+    tool reported `OK` about a checkout the caller was not in, which is the one
+    answer this tool must never give.
+
+    Pinned on the predicate, not on the printed line: `_resolve_root` is the
+    decision, and a fixture that made `main()` agree could pass while the wrong
+    root was still chosen.
+    """
+    fake = _fake_checkout(tmp_path / "checkout", 1307)
+    monkeypatch.chdir(fake)
+    assert mod._resolve_root() == fake.resolve(), (
+        "the tool must scan the checkout the caller is standing in; deriving the "
+        "root from __file__ scans a different tree (the one the script happens to "
+        "live in) and reports its verdict as if it were yours"
+    )
+    assert mod._resolve_root() != SCRIPT.parent.parent, (
+        "the fixture must not be the script's own root, or this test proves nothing"
+    )
+
+
+def test_the_scanned_tree_is_named_in_the_output(mod, monkeypatch, tmp_path, capsys):
+    """`which tree did you scan` must never be ambiguous."""
+    fake = _fake_checkout(tmp_path / "checkout", 1307)
+    monkeypatch.chdir(fake)
+    monkeypatch.setattr(mod, "REPO_ROOT", mod._resolve_root())
+    monkeypatch.setattr(mod, "scanned_files", lambda: [])
+    assert mod.main([]) == 0
+    out = capsys.readouterr().out
+    assert f"tree: {fake.resolve()}" in out, out
+
+
+def test_a_directory_that_is_not_a_checkout_falls_back_to_the_script_root(
+    mod, monkeypatch, tmp_path
+):
+    """The documented invocation must keep working from anywhere.
+
+    `python3 scripts/check-doc-count.py` is run from the repo root in every hint
+    this tool prints, but an absolute-path call from elsewhere (a wrapper, an
+    editor task, `git -C`) has no checkout in the cwd to stand in.
+    """
+    monkeypatch.chdir(tmp_path)  # a bare temp dir: no Agent.md, no scripts/
+    assert mod._resolve_root() == SCRIPT.parent.parent.resolve()
+
+
+def test_a_directory_with_only_half_the_shape_is_not_a_checkout(mod, monkeypatch, tmp_path):
+    """Both markers are required, so a stray Agent.md does not claim the tree."""
+    (tmp_path / "Agent.md").write_text(
+        "Python: `uv run pytest tests/ -v`\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert mod._resolve_root() == SCRIPT.parent.parent.resolve()
+
+
+# --- decoding, pinned before the locale can decide it ------------------------
 
 
 def test_collect_output_is_decoded_independently_of_the_locale(mod) -> None:
-    """The collected count must not depend on the host's locale codec.
+    """The measured count must not depend on the host's locale codec.
 
     The sibling tool's identical defect was measured and filed as issue #1132:
     decoding with the locale codec left `proc.stdout` as `None` once subprocess's
-    reader thread swallowed the `UnicodeDecodeError`, and the concatenation
-    raised a bare `TypeError` past every handler in `main()` (which catches
-    `DocCountError` and `OSError` only). pytest's own output is ASCII today
-    (measured: 0 non-ASCII lines in 1337), but a collected id or warning is not
-    under this repo's control - one non-ASCII byte on a cp936 host would produce
-    a traceback instead of the count.
+    reader thread swallowed the `UnicodeDecodeError`, and the concatenation raised
+    a bare `TypeError` past every handler in `main()` (which catches
+    `DocCountError` and `OSError` only). pytest's own output is ASCII today, but a
+    collected id or warning is not under this repo's control - one non-ASCII byte
+    on a cp936 host would produce a traceback instead of the count.
     """
     child = "import sys; sys.stdout.buffer.write(b'\\xb9 7 tests collected\\n')"
     proc = subprocess.run(
@@ -695,4 +687,17 @@ def test_unreadable_collect_output_raises_the_tools_own_error(mod, monkeypatch) 
 
     monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: _Proc())
     with pytest.raises(mod.DocCountError, match="no readable output"):
+        mod.measured_count()
+
+
+def test_unparsable_collect_output_fails_loud(mod, monkeypatch) -> None:
+    """A run that produces no summary is an error, not a count of zero."""
+
+    class _Proc:
+        returncode = 0
+        stdout = "collected 0 items\n"
+        stderr = ""
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda cmd, **kw: _Proc())
+    with pytest.raises(mod.DocCountError, match="could not parse a collected count"):
         mod.measured_count()

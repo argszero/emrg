@@ -421,6 +421,44 @@ def test_task_templates_cover_all_handlers():
         )
 
 
+def test_load_and_start_competition_task(tmp_path):
+    """Competition tasks start a TaskHandler with the competition template.
+
+    Rant 2026-09-12T14:57:33: `competition` is a new built-in task type. It
+    reuses the shared TaskHandler (only the template differs), so the failure
+    mode this guards is the wiring: a type registered in HANDLERS but missing
+    from TASK_TEMPLATES (or with a misnamed template file) crashes at start.
+    """
+    tasks_yml = tmp_path / "tasks.yml"
+    tasks_yml.write_text(yaml.safe_dump([
+        {"name": "competition-task", "type": "competition",
+         "config": {"project": "competitions"},
+         "interval": 3600, "enabled": True},
+    ]))
+
+    async def _run():
+        sched = TaskScheduler(InstanceIdentity())
+        sched._tasks_file = tasks_yml
+        return sched.load_and_start(), sched
+
+    from emrg.server import scheduler as mod
+    orig_config = mod.config_dir
+    mod.config_dir = lambda: tmp_path
+    try:
+        (coros, sched) = asyncio.run(_run())
+    finally:
+        mod.config_dir = orig_config
+
+    # competition task + self-healed emrg-task
+    assert len(coros) == 2
+    by_name = {h.name: h for h in sched._handlers}
+    assert by_name["competition-task"]._template_path.name == "competition_prompt.md"
+    assert by_name["emrg-task"]._template_path.name == "evolution_prompt.md"
+    sched.stop_all()
+    for c in coros:
+        c.cancel()
+
+
 def test_load_and_start_promote_task(tmp_path):
     """Promote tasks start an TaskHandler with the promote template."""
     tasks_yml = tmp_path / "tasks.yml"
