@@ -312,9 +312,16 @@ def test_a_stale_branch_with_votes_is_told_what_a_refresh_would_cost(mod, monkey
     assert "2 valid vote(s) at risk" in err
     assert "voids all 2" in err
     assert "check-merge-plan-suite.py 1" in err
-    # A plain comment is named explicitly: it is the vehicle that carries the
-    # landing-tree reading without moving the head's vote count.
-    assert "gh pr comment" in err
+    # The *review* is named as the vehicle, and the plain comment is explicitly the
+    # one that carries no vote. Reviews are the only channel check-vote-count.py
+    # reads, so a remedy that names the comment as the vehicle reads as "do not
+    # vote here" - and a stale PR whose only route to the threshold is the
+    # landing-tree vote would then never reach 3/3. Measured 2026-09-14
+    # (cyc20260914-040021): #1200's 2nd vote was a review on a stale head and
+    # counted; #1199/#1201 each merged on a 3rd vote cast the same way.
+    assert "gh pr review" in err
+    assert "not a review" not in err
+    assert "carries the reading but no vote" in err
     assert "Re-merge master into each stale branch" not in err
 
 
@@ -333,6 +340,17 @@ def test_a_stale_branch_with_no_votes_is_told_the_refresh_is_free(mod, monkeypat
     assert "0 valid votes - nothing to void" in err
     assert "Re-merge master into the branch" in err
     assert "at risk" not in err
+    # The other direction of the channel rule: with no vote at risk there is
+    # nothing to vote on, so the remedy line must name no channel at all. Asserted
+    # on that line rather than on the whole output, and on the concept rather than
+    # on a command string: naming a review here would offer a vote whose evidence
+    # is a local reading as an alternative to CI on the real merged tree, which is
+    # strictly better and free at 0 votes. (A mutant that said "or cast a review"
+    # survived the `gh pr review` version of this assertion.)
+    remedy = next(
+        line for line in err.splitlines() if "#1:" in line and "nothing to void" in line
+    )
+    assert "review" not in remedy and "comment" not in remedy, remedy
 
 
 def test_an_unreadable_vote_count_is_said_so_and_never_read_as_zero(mod, monkeypatch, capsys):

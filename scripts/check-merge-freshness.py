@@ -77,6 +77,16 @@ A stale verdict has two remedies and their prices are not interchangeable:
   The head does not move, so the count does not change. It is a local reading
   rather than a CI verdict, and it is the tree the merge actually lands.
 
+  The reading is recorded as a **review** (`gh pr review --comment`), not as a
+  plain comment: reviews are the only channel `check-vote-count.py` reads, so a
+  review cast after the head push is a vote even when the head is ancestry-stale,
+  while a plain comment carries the reading but no vote. Measured 2026-09-14
+  (`cyc20260914-040021`): `#1200`'s 2nd vote was a review on a stale head and the
+  counter read `2/3`; the cycle before, `#1199` and `#1201` each took their
+  deciding 3rd vote that way and merged. Naming the comment as the vehicle - which
+  this remedy did until then - reads as "do not vote here", and a stale PR whose
+  only route to the threshold is the landing-tree vote would then never reach it.
+
 Measured 2026-09-14 (`cyc20260914-010711`, master `abe6f8b`), the whole queue
 stale: `#1197` 2 valid votes, `#1198` 1, `#1199` and `#1200` none. The blanket
 advice this tool printed until then - "re-merge master into each stale branch" -
@@ -412,9 +422,12 @@ def _remedy(pr: int, kind: str, valid_votes: int | None, unread: str) -> str:
             f"#{pr}: {valid_votes} valid vote(s) at risk - a refresh moves the head, and the "
             f"vote counter voids all {valid_votes}. Measure the tree this merge would land "
             "instead (`git fetch origin master`, then `scripts/check-merge-plan-suite.py "
-            f"{pr}`) and post that reading as a plain comment (`gh pr comment`, not a "
-            "review): the head does not move, so the count does not change. Refresh only if "
-            "that tree fails - those votes were about a tree that can no longer be merged"
+            f"{pr}`) and cast the vote on it (`gh pr review {pr} --comment --body-file "
+            "<path>`), stating the landing tree the review is about: the head does not move, "
+            "so the votes already cast stay valid and this one is counted - reviews are the "
+            "channel the counter reads, a plain comment carries the reading but no vote. "
+            "Refresh only if that tree fails - those votes were about a tree that can no "
+            "longer be merged"
         )
     if kind == _KIND_NO_RUN:
         return (
