@@ -312,3 +312,92 @@ def test_the_default_plan_source_still_measures_a_real_plan(mod, monkeypatch, ca
 
     assert rc == 0, out
     assert "all 1 step(s) landed trees that pass the guards" in out, out
+
+
+# --- the default plan: what it plans, and what it names as left out ----------
+
+
+def _open_prs_with_one_conflict(mod, monkeypatch):
+    """Three open PRs; #2 conflicts with the base, #1 and #3 merge cleanly."""
+    heads = {1: C1, 2: C2, 3: C3}
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2, 3])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: heads[n])
+
+    def fake_merge(a, b):
+        return None if b == C2 else b + "-merged"
+
+    monkeypatch.setattr(mod, "_merge_commit", fake_merge)
+    monkeypatch.setattr(mod, "_guard_verdict", lambda tree, workdir: (True, "documents 1"))
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}")),
+    )
+
+
+def test_the_default_plan_leaves_out_prs_that_conflict_and_names_them(
+    mod, monkeypatch, capsys
+):
+    """A default plan that stops at step 1 answers nothing, so it plans what merges.
+
+    Measured 2026-09-13 (`cyc20260913-120524`): 13 of 14 open PRs conflicted with
+    the base, and the literal default plan - every open PR, ascending - reported
+    `plan stopped at a conflict, 0 of 13 steps measured`. It could not reach the
+    second half of any danger pair, which is the only thing this tool is for.
+
+    Both directions are pinned here: the conflicting PR is *absent from the plan*
+    (so its step is never measured), and it is *named in the disclosure* (so
+    omitting it is not silent).
+    """
+    _open_prs_with_one_conflict(mod, monkeypatch)
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "plan: #1 -> #3" in out, out
+    assert "excluded as conflicting: #2" in out, out
+    assert "#2: OK" not in out and "#2: DANGER" not in out, out
+    assert "all 2 step(s) landed trees that pass the guards" in out, out
+
+
+def test_all_plans_every_open_pr_conflicting_ones_included(mod, monkeypatch, capsys):
+    """`--all` is the literal old default, and it still stops at the conflict.
+
+    Without this, "filter the plan" could quietly become "never report a conflict",
+    which is the opposite of the tool's job: a conflicting step is a real answer
+    about the plan (exit 3), not something to drop.
+    """
+    _open_prs_with_one_conflict(mod, monkeypatch)
+    rc = mod.main(["--all"])
+    out = capsys.readouterr().out
+
+    assert rc == 3, out
+    assert "plan: #1 -> #2 -> #3" in out, out
+    assert "#2: CONFLICT" in out, out
+    assert "plan source: every open PR (--all)" in out, out
+
+
+def test_a_queue_where_nothing_merges_is_not_a_pass(mod, monkeypatch, capsys):
+    """No mergeable PR means the question was not answered - exit 2, never a pass.
+
+    This is the state the live queue was in on 2026-09-13 (13 of 14 open PRs
+    conflicting). Reporting `all 0 step(s) landed trees that pass the guards` here
+    would be the vacuous pass this file already refuses for an empty open-PR list,
+    one step further in: the list is not empty, the plan is.
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: C1 if n == 1 else C2)
+    monkeypatch.setattr(mod, "_merge_commit", lambda a, b: None)
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}")),
+    )
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2, captured.out
+    assert "conflict with" in captured.err, captured.err
+    assert "pass the guards" not in captured.out, captured.out
