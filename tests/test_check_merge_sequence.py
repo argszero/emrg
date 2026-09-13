@@ -316,7 +316,7 @@ def _tree_with(repo: Path, documented: int | None, tests: int) -> str:
                  ["git", "commit", "-qm", "i"]):
         subprocess.run(argv, cwd=repo, check=True, env=env, capture_output=True)
     out = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo,
-                         check=True, capture_output=True, text=True)
+                         check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return out.stdout.strip()
 
 
@@ -382,7 +382,7 @@ def test_a_tree_without_the_guard_is_a_measurement_error(mod, tmp_path, monkeypa
                     "commit", "-qm", "drop the guard"], cwd=repo, check=True,
                    capture_output=True)
     out = subprocess.run(["git", "rev-parse", "HEAD^{tree}"], cwd=repo,
-                         check=True, capture_output=True, text=True)
+                         check=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
     tree = out.stdout.strip()
     monkeypatch.chdir(repo)
 
@@ -533,7 +533,7 @@ def _repo_with_two_refs(repo: Path, shadow: bool) -> tuple[str, str]:
 
     def git(*argv: str) -> str:
         out = subprocess.run(["git", *argv], cwd=repo, check=True, env=env,
-                             capture_output=True, text=True)
+                             capture_output=True, text=True, encoding="utf-8", errors="replace")
         return out.stdout.strip()
 
     git("init", "-q", ".")
