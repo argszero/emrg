@@ -276,13 +276,110 @@ def _refuses(line: str) -> bool:
     return re.search(window + "LGTM", line, re.IGNORECASE) is not None
 
 
-def _verdict_line(body: str) -> str:
-    """The body's first line that has content, with leading decoration stripped.
+# An opening or closing code fence, indented up to 3 spaces (the markdown limit).
+# ``` and ~~~ are both valid fence markers; the run length matters (see below).
+_FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
 
-    Decoration-only lines are skipped, so a reviewer who opens with a `---` rule
-    has still stated their verdict on the line after it.
+
+def _fence_flags(lines: list[str]) -> list[bool]:
+    """Per-line: is this line inside a *balanced* fenced code region?
+
+    A quote is not a statement. `_decorated_lines` strips backticks as decoration,
+    so without this a line-opening mark inside a fenced block is indistinguishable
+    from prose - and a body that *quotes* a veto (a reproduction snippet, a table
+    of example verdicts) was read as *stating* one. Measured 2026-09-11
+    (cyc20260911-171843) through this tool's own `check_pr`: three approvals
+    followed by a review that documents a veto inside a fence gave
+
+        master -> comment  (the body is skipped, run stays 3)
+        head   -> veto     (run resets to 0, every approval discarded)
+
+    so quoting the shape was the one way to void the run the tool exists to
+    protect. `master` was right here by accident: it never looked past line one.
+
+    Fences nest by *length*, per CommonMark: a fence opened with N backticks is
+    closed only by a fence of the same character and at least N of them, with
+    nothing but whitespace after. A first version toggled a boolean on any fence
+    line, which broke on exactly the bodies this exists for - a ``` example quoted
+    inside a ```` block (measured on a real review body: the inner ``` flipped the
+    flag and the quoted veto came back as prose). Inside a longer fence the shorter
+    marker is content, as a reader sees it.
+
+    Unbalanced fences (a stray opener) are treated as ordinary text. An odd marker
+    must not silently hide the rest of a body - that direction drops a *real* veto
+    and leaves stale approvals live, which is the failure this module documents at
+    length. Failing toward "read it as prose" keeps the honest reading of a body
+    whose formatting is broken.
+
+    That fallback covers only the region *from* the unmatched opener onward, not
+    the whole body. An earlier version returned `[False] * len(lines)`, which
+    re-opened every fence in the body - including the ones already balanced and
+    closed, which are not ambiguous at all. Measured 2026-09-11 (cyc20260911-180347),
+    reported by a contributor on the PR and reproduced here: a body that quotes a
+    veto inside a *closed* fence and then leaves one stray opener anywhere after it
+
+        Reviewed on Windows.
+
+        ```              <- closed, balanced
+        ❌ Needs fix: quoted example
+        ```
+
+        Note on formatting.
+        ```              <- stray opener
+
+    came back as a *stated* veto under the body-wide fallback (`master` read it as
+    a comment). Driven end-to-end through this module's own run-walk, three genuine
+    approvals followed by that body gave `master -> run 3` but the body-wide version
+    `-> run 0`: the quoted mark discarded the run this tool exists to protect, which
+    is the same outcome as the bug the fence fix was written for. Restricting the
+    fallback to the tail fixes it and moves nothing else - measured over 477 real
+    bodies, 0 change class.
     """
-    for line in body.splitlines():
+    flags: list[bool] = []
+    open_char = ""
+    open_len = 0
+    open_at = 0
+    for line in lines:
+        m = _FENCE_RE.match(line)
+        if m:
+            char, rest = m.group(1)[0], m.group(2)
+            if open_len == 0:
+                # not inside a fence: this opens one
+                open_char, open_len = char, len(m.group(1))
+                open_at = len(flags)
+                flags.append(True)  # the marker line itself is not content
+                continue
+            if char == open_char and len(m.group(1)) >= open_len and not rest.strip():
+                # a real closing fence
+                open_char, open_len = "", 0
+                flags.append(True)
+                continue
+            # a shorter (or otherwise non-closing) marker inside a fence: content
+            flags.append(True)
+            continue
+        flags.append(open_len != 0)
+    if open_len != 0:
+        # Only the unmatched tail is ambiguous; the closed regions above it keep
+        # the reading they already earned.
+        for i in range(open_at, len(flags)):
+            flags[i] = False
+    return flags
+
+
+def _decorated_lines(body: str) -> list[str]:
+    """Every content line, decorated form stripped, in order.
+
+    Decoration-only lines are dropped, so a reviewer who opens with a `---` rule
+    has still stated their verdict on the line after it. Fenced code is dropped
+    too: a mark inside a quotation is not the reviewer stating it (see
+    `_fence_flags`).
+    """
+    raw = body.splitlines()
+    flags = _fence_flags(raw)
+    out: list[str] = []
+    for line, fenced in zip(raw, flags):
+        if fenced:
+            continue
         text = line
         while True:
             reduced = _ORDERED_ITEM_RE.sub("", text.lstrip(_DECORATION), count=1)
@@ -290,8 +387,14 @@ def _verdict_line(body: str) -> str:
                 break
             text = reduced
         if text.strip():
-            return text
-    return ""
+            out.append(text)
+    return out
+
+
+def _verdict_line(body: str) -> str:
+    """The body's first line that has content, with leading decoration stripped."""
+    lines = _decorated_lines(body)
+    return lines[0] if lines else ""
 
 
 def _gh_json(args: list[str]) -> object:
@@ -417,6 +520,50 @@ def _classify(body: str) -> str:
     ✅ with a later ❌ is therefore an approval, which is the reading that survives
     every negation phrasing - and it is what master already did, so the change
     cannot void a vote that was being counted.
+
+    **Fourth: the first line was the only line.** Reading just it means a veto
+    whose mark sits *below* a prose intro ("Checked all three fixes.\\n\\n❌ Needs
+    fix: …") classifies as `comment`, and `check_pr` skips comments - so the run is
+    never reset, the same dangerous direction as the decorated-mark bug, reached by
+    a different route (the mark is not decorated; it is simply not on line one).
+    Found in cyc20260911-153707 by probing this function. A body whose first line
+    states no verdict at all now scans its later lines for a **stated** veto - the
+    mark must open the line, so this repo's approvals that *describe* a resolved
+    veto ("The earlier ❌ was resolved by pushing the fix myself") stay approvals.
+    The first line still decides whenever it states anything, so the third fix's
+    rule is untouched. Measured: 0 of 381 bodies on the 60 most recent PRs change
+    class under this addition - the shape it catches is real but currently unused.
+
+    **Fifth: the later-line scan read a *quotation* as a *statement*.** The fourth
+    fix introduced this, and it is the one live regression in the series - the
+    first three were all pre-existing. `_decorated_lines` strips backticks as
+    decoration, so a mark inside a fenced code block became indistinguishable from
+    prose, and a review that *documents* a veto (a reproduction snippet, a table of
+    example verdicts) was classified as *stating* it. Driven through `check_pr`:
+
+        three approvals, then a review quoting a veto in a fence
+        master -> run 3   (the body is a comment, skipped)
+        head   -> run 0   (a veto, so the run and every approval in front of it go)
+
+    That is the exact failure the fourth fix exists to prevent, reached backwards:
+    the tool would discard a genuine three-approval run because someone quoted the
+    shape it looks for. Found independently by two outside contributors on the PR
+    (how2how2how2-arch, pm25coder) and reproduced here before accepting it - it is
+    also why this cycle did *not* merge the PR at 2/3.
+
+    Fixed by dropping fenced regions in `_decorated_lines` (see `_fence_flags`).
+    The rule this preserves is that a mark counts only when the *reviewer* states
+    it: in a fence the mark opens its line, but the body is quoting, not stating.
+    Measured: 0 of 309 corpus bodies change class under the fence fix alone (the
+    two affected bodies already sat on the right side), so it removes the hazard
+    without moving any existing verdict.
+
+    **Not adopted.** A contribution on the PR also proposed scanning past a later
+    ✅ (so a stated veto anywhere wins) and answering `approve` for a stated ✅
+    below a prose intro. Measured on the same 309 bodies: that widening flips 6
+    bodies, among them 4 approvals into `comment`/`approve` churn on bodies whose
+    first line states a verdict - more motion for no demonstrated defect. Fence
+    awareness is the cheap half and is needed either way, so only that half ships.
     """
     line = _verdict_line(body)
     if not line:
@@ -445,6 +592,33 @@ def _classify(body: str) -> str:
         return "approve"
     if _VETO_MARK in line and not _negated(line, _VETO_MARK):
         return "veto"
+
+    # The first line stated no verdict at all - it is neither a mark nor prose
+    # about LGTM ("Checked all three fixes.", "Here is my review."). So look for a
+    # **stated** veto further down: a later line whose own first character (after
+    # decoration) is the mark.
+    #
+    # Why this is needed (found in cyc20260911-153707, by probing this very
+    # function): reading only the first line means a veto whose mark sits below a
+    # prose intro classifies as `comment`, and `check_pr` **skips comments**, so the
+    # run is never reset - the exact dangerous direction this function exists to
+    # close. Measured: `approve, approve, "Checked all three fixes.\n\n❌ Needs fix:
+    # …"` leaves the run at 2, i.e. three stale approvals still read as live.
+    #
+    # Only a *stated* mark counts. A body that merely mentions ❌ in passing is how
+    # this repo's approvals describe a veto they resolved ("The earlier ❌ was
+    # resolved by pushing the fix myself"), and reading those as vetoes would reset
+    # the run - the opposite error, equally costly. So the mark must open the line,
+    # and a negated or mid-sentence mention is not one.
+    #
+    # The first line still decides whenever it states anything, so this cannot
+    # revive the bug that let a leading ✅ lose to a later ❌ (see the docstring):
+    # an approving body's first line is a ✅ or an "LGTM", and neither reaches here.
+    for other in _decorated_lines(body)[1:]:
+        if other.startswith(_VETO_MARK):
+            return "veto"
+        if other.startswith(_LGTM_MARK):
+            return "comment"  # a later line states the opposite: not a veto
     return "comment"
 
 

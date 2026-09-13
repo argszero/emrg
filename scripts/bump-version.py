@@ -55,13 +55,43 @@ import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-
 # The single source of truth: emrg/__init__.py's __version__.
 BASE_FILE = "emrg/__init__.py"
 BASE_PATTERN = re.compile(r'__version__\s*=\s*"(\d+\.\d+\.\d+)"')
 
 SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
+
+
+def _resolve_root() -> Path:
+    """The tree to bump: the checkout the caller is *standing in*.
+
+    Derived from the cwd when the cwd is a checkout, not from ``__file__``.
+    Measured 2026-09-11, in the situation this tool is most dangerous in: while
+    unblocking a PR you work in a git worktree, and running the *main* checkout's
+    copy of this script from inside that worktree targeted the main checkout.
+    The two disagree, so the run reported
+
+        checking all 8 files against 0.2.94 (emrg/__init__.py) ...
+        OK: all 8 version sources agree on 0.2.94
+
+    about the worktree - which was at 9.9.9 and drifted in 7 sources (its own
+    copy of this script exits 1 there). A false green on the one command whose
+    whole job is to gate a release, and ``bump()`` in that position rewrites the
+    *other* checkout's eight version sources, including the one that decides
+    what gets built.
+
+    Falls back to the script's own root so the documented invocation keeps
+    working from anywhere; ``main`` states which tree answered rather than
+    leaving it to be inferred.
+    """
+    here = Path(__file__).resolve().parent.parent
+    cwd = Path.cwd()
+    if (cwd / BASE_FILE).is_file() and (cwd / "scripts").is_dir():
+        return cwd
+    return here
+
+
+REPO_ROOT = _resolve_root()
 
 
 # (relative path, anchor regex, expected occurrence count)
@@ -245,6 +275,14 @@ def main(argv: list[str] | None = None) -> int:
         "--dry-run", action="store_true", help="show what would change, write nothing"
     )
     args = parser.parse_args(argv)
+
+    # Say which tree answered. The whole job of `--check` is to gate a release,
+    # and the 2026-09-11 defect was a confident `OK` about a checkout the caller
+    # was not in - so "which tree" must be printed, not inferred. This is
+    # stdout-safe for every existing caller: the tool is invoked by humans and
+    # its exit code is what gates CI (tests/test_version_sync.py has its own
+    # independent parser).
+    print(f"tree: {REPO_ROOT}")
 
     try:
         current = read_current_version()

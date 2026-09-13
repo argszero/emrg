@@ -183,6 +183,13 @@ GUARD = "scripts/check-doc-count.py"
 COUNT_IN_REPORT = re.compile(r"FAIL: (\d+) tracked file\(s\) state")
 OK_IN_REPORT = re.compile(r"OK: no tracked file states the Python test count")
 
+# The document whose count line the guard reads, and the one command that repairs
+# it after a merge (measured on the merged tree, never chosen). Both are printed
+# in the empty-plan refusal, and only for the path they apply to: advice for a
+# conflict in some other file would be advice that does not run.
+COUNT_LINE_DOC = "Agent.md"
+RESOLVER = "uv run --no-sync python3 scripts/check-doc-count.py --resolve-conflict"
+
 
 class MeasurementError(Exception):
     """The question could not be answered. Never a verdict."""
@@ -252,15 +259,23 @@ def _plan_from_open_prs(
         return numbers, f"plan source: every open PR (--all), {len(numbers)} in total"
     mergeable: list[int] = []
     excluded: list[int] = []
+    excluded_heads: dict[int, str] = {}
     for number in numbers:
         head = _fetch_head(number)
-        (mergeable if _merge_commit(base, head) is not None else excluded).append(number)
+        if _merge_commit(base, head) is not None:
+            mergeable.append(number)
+        else:
+            excluded.append(number)
+            excluded_heads[number] = head
     if not mergeable:
         raise MeasurementError(
             f"all {len(numbers)} open PR(s) conflict with {base[:8]}, so the default "
             f"plan is empty and no step could be measured. This is not a verdict "
-            f"about any tree - pass PR numbers explicitly, or use --all to plan the "
-            f"conflicting ones too (which will stop at the first)"
+            f"about any tree."
+            + _conflict_summary(base, excluded, excluded_heads)
+            + f" Naming a PR explicitly does not clear a conflict - it is a conflict "
+            f"wherever it is planned, and `--all` plans them all and stops at the "
+            f"first."
         )
     note = (
         f"plan source: open PRs that merge cleanly onto {base[:8]} "
@@ -271,6 +286,57 @@ def _plan_from_open_prs(
     else:
         note += "; none excluded)"
     return mergeable, note
+
+
+def _conflict_paths(a: str, b: str) -> list[str]:
+    """The paths `git merge-tree` reports as conflicted between `a` and `b`.
+
+    Reporting only. An empty list means git said nothing this parser recognises as
+    a path, so no caller may read "no paths" as "no conflict" - `_merge_commit`
+    is what decides whether a merge conflicts; this only describes one.
+    """
+    proc = _run(["git", "merge-tree", "--write-tree", a, b])
+    paths: list[str] = []
+    for line in (proc.stdout + proc.stderr).splitlines():
+        if not line.startswith("CONFLICT"):
+            continue
+        match = re.search(r"Merge conflict in (.+?)\s*$", line)
+        paths.append(match.group(1) if match else line.strip())
+    return sorted(set(paths))
+
+
+def _conflict_summary(base: str, excluded: list[int], heads: dict[int, str]) -> str:
+    """Which paths the excluded PRs conflict in, and what clears that here.
+
+    Why this exists, measured 2026-09-13 (`cyc20260913-125509`) on the queue as it
+    stood immediately after a merge moved the derived count: **every one of the 13
+    open PRs conflicted, all of them in `Agent.md`, 10 of them in that file alone**
+    - and the remedies this refusal used to offer ("pass PR numbers explicitly, or
+    use --all") resolve neither, because an explicitly named conflicting PR is
+    still a conflict. A refusal that names no working way out is the same defect as
+    a hint that cannot run, so the paths are counted here rather than asserted in
+    prose, and the remedy is printed only for the path that has one.
+    """
+    counts: dict[str, int] = {}
+    for number in excluded:
+        for path in _conflict_paths(base, heads[number]):
+            counts[path] = counts.get(path, 0) + 1
+    if not counts:
+        return ""
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    out = (
+        f" Conflicting paths over those {len(excluded)} PR(s): "
+        + ", ".join(f"{path} x{n}" for path, n in ranked[:4])
+        + "."
+    )
+    if counts.get(COUNT_LINE_DOC):
+        out += (
+            f" {COUNT_LINE_DOC} carries the derived Python test count that {GUARD}"
+            f" measures, and two PRs that both rewrote it cannot be merged together"
+            f" - the way out is to merge the base in, re-measure the line on the"
+            f" merged tree (`{RESOLVER}`), and push; the push re-plans the PR."
+        )
+    return out
 
 
 def _open_pr_numbers(repo: str) -> list[int]:
