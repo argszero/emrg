@@ -60,8 +60,8 @@ Usage
     # check the whole plan: master, then these PRs in this order
     uv run --no-sync python3 scripts/check-merge-sequence.py 1168 1167 1166
 
-    # the default plan: open PRs that merge cleanly onto the base, ascending
-    # (a starting point, not a recommendation - see "The default plan" below)
+    # the default plan: open PRs, ascending, each merged onto the tree built so
+    # far (a starting point, not a recommendation - see "The default plan" below)
     uv run --no-sync python3 scripts/check-merge-sequence.py
 
     # the literal every-open-PR plan, conflicting steps included
@@ -100,10 +100,35 @@ for: a danger pair is two PRs that are each clean, and a plan that cannot get pa
 step 1 never reaches the second one. Every pair found so far was found by naming
 both PRs explicitly.
 
-The default plan is therefore the open PRs whose merge onto the base is clean, and
-the line above the plan names the ones it left out:
+The default plan is therefore built by walking the open PRs and merging each one
+onto **the tree built so far**, keeping the steps that merge and naming the ones
+that do not:
 
-    plan source: open PRs that merge cleanly onto 11e5947 (1 of 14); excluded as conflicting: #1136 #1141 ...
+    plan source: open PRs that can be merged in this order (8 of 13); excluded as conflicting: #1152 #1153 #1170
+
+The first revision of this filter tested each candidate against `base` alone, and
+that is not the same question the loop asks: a step's input is the previous step's
+tree. Measured on this repo's live queue (`cyc20260913-144807`), with 13 open PRs
+of which 11 merge cleanly onto the base:
+
+    plan: #1141 -> #1145 -> #1151 -> #1152 -> #1153 -> ...
+    #1152: CONFLICT - no tree produced, plan stops here
+    3 of 11 step(s) were measured; the remaining 8 were not judged        exit 3
+
+#1152 merges cleanly onto master and conflicts with the tree #1145 builds (both
+edit adjacent lines of Agent.md), so a pairwise-clean set stopped the plan at step
+4 - the same "the default invocation answers nothing" failure the filter was added
+to fix, one indirection further in. The filter and the loop disagreed about what
+they were measuring; now they measure the same thing.
+
+This is the ascending greedy plan, and it is not necessarily the *largest*
+achievable set: skipping an early PR could in principle admit two later ones. What
+it guarantees is that every step it plans was measured, and that the ones it left
+out are named with the reason. On the queue above it is also maximal (8 of 13,
+matching the largest pairwise-clean subset), but that is a property of that queue,
+not of the algorithm. Because every planned step can be taken, the "stopped at a
+conflict" exit is no longer reachable from the default plan; it remains for `--all`
+and for positional numbers, which are taken exactly as given.
 
 Nothing is hidden: an excluded PR is named, `--all` gives the literal every-open-PR
 plan, and positional PR numbers are always taken exactly as given. If no open PR
@@ -234,22 +259,41 @@ def _rev_parse(ref: str) -> str:
 def _plan_from_open_prs(
     repo: str, base: str, include_conflicting: bool
 ) -> tuple[list[int], str]:
-    """The default plan: open PRs, ascending - and the note saying what it left out.
+    """The default plan: open PRs, ascending, each merged onto the tree built so far.
 
-    Why the default is not simply "every open PR" (measured 2026-09-13,
-    `cyc20260913-120524`, on the queue as it stood): **13 of 14 open PRs conflicted
-    with the base**, so the default plan stopped at its first step and judged
-    nothing at all - `plan stopped at a conflict, 0 of 13 steps measured`, exit 3.
-    That is exactly the invocation a reader reaches for first, and it answers
-    nothing. Worse, it cannot answer the question this tool exists for: a danger
-    pair is two PRs that are each clean, and a plan that cannot advance past step 1
-    never sees the second one. Every such pair found so far (#1173<->#1174,
-    #1174<->#1176, #1176<->#1178) was found by naming *both* PRs explicitly.
+    Two measurements shaped this, and the second corrected the first.
 
-    So the default plan is the open PRs whose merge onto `base` is clean. This is
-    not a loosening: a step that conflicts cannot be taken at all (the plan stops
-    there by definition), so carrying such a step in the default plan means every
-    step after it goes unmeasured - see the conflict note in the module docstring.
+    Measured 2026-09-13 (`cyc20260913-120524`, on the queue as it stood): **13 of 14
+    open PRs conflicted with the base**, so the literal default - every open PR,
+    ascending - stopped at its first step and judged nothing at all (`plan stopped
+    at a conflict, 0 of 13 steps measured`, exit 3). That is exactly the invocation a
+    reader reaches for first, and it answers nothing. Worse, it cannot answer the
+    question this tool exists for: a danger pair is two PRs that are each clean, and
+    a plan that cannot advance past step 1 never sees the second one. Every such pair
+    found so far (#1173<->#1174, #1174<->#1176, #1176<->#1178) was found by naming
+    *both* PRs explicitly.
+
+    Measured 2026-09-13 (`cyc20260913-144807`, the other measurement): filtering the
+    candidates to "merges cleanly onto `base`" fixed the all-conflicting queue and
+    left a subtler form of the same failure. On that day's queue - 13 open PRs, **11
+    of which merge cleanly onto the base** - the default plan still stopped at step 4
+    (`#1152: CONFLICT`, `3 of 11 step(s) were measured`, exit 3), because **a step's
+    input is the tree the previous step produced, while the filter tested each
+    candidate against `base` alone**. #1152 merges cleanly onto master and conflicts
+    with the tree #1145 builds. A pairwise-clean set is not a sequence; the filter
+    and the loop disagreed about what they were measuring.
+
+    So the plan is built by walking the candidates in ascending order and merging
+    each one onto the tree built so far, keeping the steps that merge and naming the
+    ones that do not. Every step of the returned plan can be taken, which is what
+    makes "every step was measured" reachable from the default at all.
+
+    This is the ascending greedy plan, not necessarily the *largest* achievable set:
+    skipping an early PR could in principle admit two later ones. What it guarantees
+    is that every planned step was measured and that the exclusions are named. On the
+    queue above it happens to be maximal too (8 of 13), but that is a property of
+    that queue, not of the algorithm.
+
     The excluded numbers are **named in the note** rather than dropped, because a
     plan that hides its own omissions is the defect this whole file is about. Use
     `--all` for the literal "every open PR" plan.
@@ -257,17 +301,24 @@ def _plan_from_open_prs(
     numbers = _open_pr_numbers(repo)
     if include_conflicting:
         return numbers, f"plan source: every open PR (--all), {len(numbers)} in total"
-    mergeable: list[int] = []
+    planned: list[int] = []
     excluded: list[int] = []
+    current = base
     excluded_heads: dict[int, str] = {}
     for number in numbers:
         head = _fetch_head(number)
-        if _merge_commit(base, head) is not None:
-            mergeable.append(number)
-        else:
+        merged = _merge_commit(current, head)
+        if merged is None:
+            # Not taken, and not judged: the next candidate is tested against the
+            # same tree this one was, so one bad step does not abandon the queue.
+            # The head is kept so the empty-plan refusal can name *which paths*
+            # conflicted (see `_conflict_summary`).
             excluded.append(number)
             excluded_heads[number] = head
-    if not mergeable:
+            continue
+        planned.append(number)
+        current = merged
+    if not planned:
         raise MeasurementError(
             f"all {len(numbers)} open PR(s) conflict with {base[:8]}, so the default "
             f"plan is empty and no step could be measured. This is not a verdict "
@@ -278,14 +329,14 @@ def _plan_from_open_prs(
             f"first."
         )
     note = (
-        f"plan source: open PRs that merge cleanly onto {base[:8]} "
-        f"({len(mergeable)} of {len(numbers)}"
+        f"plan source: open PRs that can be merged in this order "
+        f"({len(planned)} of {len(numbers)}"
     )
     if excluded:
         note += "); excluded as conflicting: " + " ".join(f"#{n}" for n in excluded)
     else:
         note += "; none excluded)"
-    return mergeable, note
+    return planned, note
 
 
 def _conflict_paths(a: str, b: str) -> list[str]:
@@ -462,7 +513,8 @@ def main(argv: list[str] | None = None) -> int:
         "--all", action="store_true",
         help=(
             "plan every open PR, including ones that conflict with the base "
-            "(default: only the open PRs whose merge onto the base is clean)"
+            "(default: only the open PRs that can be merged in ascending order, each "
+            "onto the tree the steps before it build)"
         ),
     )
     parser.add_argument("--repo", default="argszero/emrg", help="owner/name")
