@@ -252,6 +252,40 @@ class TestCountLineIsADocumentedCountNotAnyInteger:
         label, _ = mod.classify("log(1)\n", "log(2)\n")
         assert label != mod.COUNT_LINE
 
+    def test_two_different_counts_are_not_one_count_re_measured(self, mod) -> None:
+        """The masking comparison is what makes it "the same count", not "a count".
+
+        `_differ_only_by_number` requires every differing pair to carry a documented
+        count **and** the two lines to be equal once digits are masked. Only the
+        second condition says the pair is one fact re-measured; drop it and any two
+        aligned documented counts qualify, so a block adding a *new* count line
+        beside a moved one is answered "MEASURE ... never pick a side" with **rc 0**
+        - the caller's contract for "every block was classified, safe to act on the
+        advice" - when the correct reading is two separate facts.
+
+        Measured 2026-09-11 (`cyc20260911-204842`): removing that comparison inside
+        the function leaves **all 45 tests passing** while changing the verdict on 4
+        of 937 real corpus blocks; the two shapes below are the ones that turn on it.
+        """
+        assert mod.classify(
+            "Python: `uv run pytest tests/ -v` (1407) - import check\n",
+            "Node: `cd emrg/gui && npm test` (1410) - import check\n",
+        )[0] != mod.COUNT_LINE, (
+            "two different facts that both carry counts are not one count "
+            "re-measured; `count-line` says 'measure, never pick a side' at rc 0"
+        )
+        assert mod.classify(
+            "Python: `uv run pytest tests/ -v` (1407) - import check\n",
+            "Python: another run (1410) - rewritten prose\n",
+        )[0] != mod.COUNT_LINE, (
+            "the prose changed too, so the digits are not the only difference"
+        )
+        # ...and the same count re-measured still fires: digits are the only change.
+        assert mod.classify(
+            "Python: `uv run pytest tests/ -v` (1407) - import check\n",
+            "Python: `uv run pytest tests/ -v` (1410) - import check\n",
+        )[0] == mod.COUNT_LINE
+
     def test_classes_are_mutually_exclusive(self, mod) -> None:
         """Every verdict is one of the five labels, never a mix."""
         labels = {
@@ -460,6 +494,56 @@ class TestTheDiff3LayoutIsRefusedNotMisread:
 class TestCli:
     def test_no_paths_is_a_usage_error(self, mod, capsys) -> None:
         assert mod.main([]) == 2
+
+    def test_all_with_nothing_unmerged_is_a_state_not_a_usage_error(
+        self, mod, capsys, monkeypatch
+    ) -> None:
+        """`--all` answered with an empty list is rc 0, not the usage error (cyc20260913-082711).
+
+        Measured before this: with `--all` passed explicitly and no unmerged paths
+        (a merge that resolved cleanly), the tool printed "error: no paths given
+        (pass files, or --all for every unmerged path)" and exited 2 - telling the
+        caller to pass the flag they had just passed, and reporting a clean merge
+        as a malformed invocation. Hit in practice at the moment a clean merge had
+        produced a tree that fails the doc-count guard, i.e. exactly when the
+        silence needed an explanation rather than a usage complaint.
+        """
+        monkeypatch.setattr(mod, "_unmerged_paths", lambda: [])
+        rc = mod.main(["--all"])
+        captured = capsys.readouterr()
+        assert rc == 0, "a clean merge is a state, not a usage error"
+        assert "nothing to classify" in captured.out
+        assert "no paths given" not in captured.out + captured.err, (
+            "the caller did pass --all; the message must not ask for it again"
+        )
+        assert captured.err == "", "this is not an error, so nothing goes to stderr"
+
+        # The pointer must be to a real script: a hint at a renamed or deleted tool
+        # is worse than no hint, and it is read at the one moment the reader has just
+        # merged something and wants to know whether the resulting tree is healthy.
+        referenced = [t for t in captured.out.split() if t.endswith(".py")]
+        assert referenced, f"the message no longer points at a tool: {captured.out!r}"
+        for name in referenced:
+            assert (REPO_ROOT / name).is_file(), (
+                f"the message points at {name}, which does not exist in the repo"
+            )
+
+    def test_all_still_classifies_when_paths_are_unmerged(
+        self, mod, tmp_path, capsys, monkeypatch
+    ) -> None:
+        """The other direction: the new early return must not swallow the normal path."""
+        f = tmp_path / "x.py"
+        f.write_text(
+            "<<<<<<< HEAD\ndef ours_only():\n    pass\n=======\n"
+            "def theirs_only():\n    pass\n>>>>>>> origin/master\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(mod, "_unmerged_paths", lambda: [str(f)])
+        rc = mod.main(["--all"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "disjoint" in out.lower() or "KEEP BOTH" in out
+        assert "nothing to classify" not in out
 
     def test_missing_file_is_an_error(self, mod, tmp_path) -> None:
         assert mod.main([str(tmp_path / "nope.txt")]) == 2

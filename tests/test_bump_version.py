@@ -536,10 +536,16 @@ def test_cli_check_without_positional_still_uses_the_base_version(
 def _tool_tree(tmp_path: Path) -> tuple[Path, Path]:
     """Materialise the tool *and* its sources under ``tmp_path``.
 
-    The tool resolves ``REPO_ROOT`` from ``__file__`` (not from the process cwd
-    or an env var), so a subprocess run needs its own copy of the script placed
-    next to its own sources. Patching the module attribute — the in-process
-    tests' route — cannot reach a child process.
+    The tool resolves ``REPO_ROOT`` from the checkout the caller is standing in
+    (``cwd``), falling back to ``__file__``'s directory - so a subprocess run
+    needs its own copy of the script placed next to its own sources *and* must
+    use that directory as ``cwd``. Patching the module attribute - the
+    in-process tests' route - cannot reach a child process.
+
+    Measured 2026-09-11 (see ``test_the_tree_is_the_checkout_you_are_standing_in``):
+    before that fix the root came from ``__file__`` alone, so running the main
+    checkout's copy from inside a worktree gated the wrong tree entirely and
+    ``bump()`` rewrote it.
     """
     tool = tmp_path / "scripts" / "bump-version.py"
     tool.parent.mkdir(parents=True, exist_ok=True)
@@ -649,3 +655,107 @@ def test_tool_source_stays_ascii_only():
         "This script prints a release verdict that hosts read through pipes, "
         "files and non-UTF-8 consoles; use '-' and '->' in its prose."
     )
+
+
+# --------------------------------------------------------------------------
+# which tree was bumped - measured 2026-09-11
+# --------------------------------------------------------------------------
+
+
+def _fake_checkout(root: Path, version: str) -> Path:
+    """A checkout shape carrying one version source, and the two markers.
+
+    Only ``emrg/__init__.py`` (the base source) is needed: the resolver keys on
+    ``BASE_FILE`` plus ``scripts/``, and a one-source tree keeps the assertion
+    about *which tree* independent of the 8-source content.
+    """
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "emrg").mkdir(parents=True, exist_ok=True)
+    (root / "emrg" / "__init__.py").write_text(
+        f'__version__ = "{version}"\n', encoding="utf-8"
+    )
+    return root
+
+
+def test_the_tree_is_the_checkout_you_are_standing_in(mod, monkeypatch, tmp_path):
+    """The defect, measured 2026-09-11 while unblocking a PR.
+
+    Unblocking works in a git worktree, and the natural invocation is running
+    the *main* checkout's copy of this script from inside it. The old root was
+    ``Path(__file__).parent.parent`` - the main checkout - so the run reported
+
+        checking all 8 files against 0.2.94 (emrg/__init__.py) ...
+        OK: all 8 version sources agree on 0.2.94
+
+    about the worktree, which was at 9.9.9 and drifted in 7 sources (its own
+    copy of this script exits 1 there). A false green on the release gate, and
+    ``bump()`` in that position rewrites that other checkout's eight version
+    sources - including the one that decides what gets built.
+
+    Pinned on the predicate, not on the printed line: ``_resolve_root`` is the
+    decision, and a test that made ``main()`` agree could pass while the wrong
+    root was still chosen.
+    """
+    fake = _fake_checkout(tmp_path / "checkout", "9.9.9")
+    monkeypatch.chdir(fake)
+    assert mod._resolve_root() == fake.resolve(), (
+        "the tool must bump the checkout the caller is standing in; deriving "
+        "the root from __file__ targets whatever checkout the script happens "
+        "to live in and reports its version as if it were yours"
+    )
+    assert mod._resolve_root() != SCRIPT.parent.parent, (
+        "the fixture must not be the script's own root, or this test proves nothing"
+    )
+
+
+def test_the_measured_tree_is_named_in_the_output(mod, monkeypatch, tmp_path, capsys):
+    """`which tree did you bump` must never be ambiguous.
+
+    A confident ``OK`` about a checkout the caller was not in is the failure
+    above; naming the tree turns that from a silent wrong answer into a visible
+    one on the single command that gates a release.
+
+    Needs the complete 8-source layout: ``--check`` validates every source, so a
+    one-source tree exits 1 for reasons unrelated to the tree being named.
+    """
+    fake = tmp_path / "checkout"
+    for rel in SOURCE_FILES:
+        dst = fake / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO_ROOT / rel, dst)
+    (fake / "scripts").mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(fake)
+    monkeypatch.setattr(mod, "REPO_ROOT", mod._resolve_root())
+    assert mod.main(["--check"]) == 0
+    out = capsys.readouterr().out
+    assert f"tree: {fake.resolve()}" in out, out
+
+
+def test_a_directory_that_is_not_a_checkout_falls_back_to_the_script_root(
+    mod, monkeypatch, tmp_path
+):
+    """The documented invocation must keep working from anywhere.
+
+    ``python3 scripts/bump-version.py`` is run from the repo root in every hint
+    this tool prints, but an absolute-path call from elsewhere (a wrapper, an
+    editor task, ``git -C``) has no checkout in the cwd to stand in.
+    """
+    monkeypatch.chdir(tmp_path)  # a bare temp dir: no emrg/__init__.py, no scripts/
+    assert mod._resolve_root() == SCRIPT.parent.parent.resolve()
+
+
+def test_a_directory_with_only_half_the_shape_is_not_a_checkout(
+    mod, monkeypatch, tmp_path
+):
+    """Both markers are required, so a stray base file does not claim the tree.
+
+    The check is a heuristic for "this is a checkout of this project"; requiring
+    both the base source and the scripts directory keeps it from matching, say,
+    an extracted copy of the package that happens to sit under a temp dir.
+    """
+    (tmp_path / "emrg").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "emrg" / "__init__.py").write_text(
+        '__version__ = "0.2.94"\n', encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert mod._resolve_root() == SCRIPT.parent.parent.resolve()
