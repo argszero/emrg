@@ -264,9 +264,24 @@ def _refresh_base(base: str) -> None:
     only symbolic ref git creates is `<remote>/HEAD`, so the probe is confined to that
     name and an ordinary branch spelling still costs exactly one call.
 
-    A fetch failure - or a `HEAD` spelling that is not a symref to a remote-tracking
-    branch of `origin` - is a measurement error, never a quiet continuation against a
-    base that could not be verified.
+    Which ref it *is* is decided by git, not by that name: `<branch>/HEAD` is a legal
+    branch name (`git check-ref-format --branch feature/HEAD` accepts it), so
+    `refs/remotes/origin/feature/HEAD` is an ordinary remote-tracking branch that merely
+    ends in `/HEAD`. Keying the *refusal* on the suffix refused a base that needed no
+    resolving at all - and it was a regression, since the spelling was fetched correctly
+    before the `/HEAD` handling existed. Measured in a hermetic clone holding a
+    `feature/HEAD` branch one commit ahead of its tracking ref (`cyc20260913-225642`):
+
+        --base origin/feature/HEAD               -> MeasurementError, ref left stale
+        --base refs/remotes/origin/feature/HEAD  -> MeasurementError, ref left stale
+
+    A name git does not report as symbolic is therefore fetched like any other branch; a
+    name that resolves to something outside `origin`'s tracking refs is still a
+    measurement error.
+
+    A fetch failure, or a `<remote>/HEAD` spelling whose symref leads outside `origin`'s
+    tracking refs, is a measurement error, never a quiet continuation against a base that
+    could not be verified.
     """
     if ":" in base:
         return
@@ -278,14 +293,14 @@ def _refresh_base(base: str) -> None:
         return
     if dest.endswith("/HEAD"):
         link = _run(["git", "symbolic-ref", "--quiet", dest])
-        target = link.stdout.strip()
-        if link.returncode != 0 or not target.startswith("refs/remotes/origin/"):
-            detail = link.stderr.strip() or "no such ref"
-            raise MeasurementError(
-                f"could not refresh {base}: {dest} is not a symbolic ref to a "
-                f"remote-tracking branch of origin ({detail})"
-            )
-        dest = target
+        if link.returncode == 0:
+            target = link.stdout.strip()
+            if not target.startswith("refs/remotes/origin/"):
+                raise MeasurementError(
+                    f"could not refresh {base}: {dest} is a symbolic ref to "
+                    f"{target}, which is not a remote-tracking branch of origin"
+                )
+            dest = target
     branch = dest[len("refs/remotes/origin/"):]
     proc = _run(["git", "fetch", "--quiet", "origin", f"+refs/heads/{branch}:{dest}"])
     if proc.returncode != 0:
