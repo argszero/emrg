@@ -277,6 +277,173 @@ def test_a_body_that_does_not_open_with_a_mark_but_claims_lgtm_counts(mod):
     assert mod._classify("## Review\nThis needs work") == "comment"
 
 
+def test_a_veto_stated_below_a_prose_intro_is_still_a_veto(mod):
+    """Found in cyc20260911-153707 by probing `_classify` itself.
+
+    Reading only the *first* content line means a veto whose mark sits below a
+    prose intro is classified `comment` - and `check_pr` **skips comments**, so
+    the run is never reset and the stale approvals in front of it stay live. That
+    is the same dangerous direction the decorated-mark fix closed, reached by a
+    different route: not "the mark is decorated" but "the mark is not on line one".
+
+    A reviewer who writes a sentence first and then their verdict is ordinary
+    practice, so the shape is worth handling even though no real body in the
+    corpus currently uses it (all of them state the mark first).
+    """
+    assert mod._classify("Checked all three fixes.\n\n\u274c Needs fix: the third leaks") == "veto"
+    assert mod._classify("Reviewed head abc.\n\n\n\u274c needs fix") == "veto"
+    assert mod._classify("Here is my review.\n\n**\u274c Needs fix:** decorated") == "veto"
+    assert mod._classify("Intro.\n\n- \u274c needs fix") == "veto", "bullet below the intro"
+    # The mirror: an approval stated below a prose intro.
+    assert mod._classify("Checked all three.\n\n\u2705 LGTM - cycle `c`") == "comment"
+
+
+def test_a_quoted_veto_in_a_code_fence_is_not_a_stated_one(mod):
+    """The fifth defect: a *quotation* is not a *statement*.
+
+    `_decorated_lines` strips backticks as decoration, so a mark inside a fenced
+    block was indistinguishable from prose. A review that *documents* a veto - the
+    reproduction snippets this very tool's reviews are made of - was therefore read
+    as *stating* one. Measured 2026-09-11 (cyc20260911-171843) through `check_pr`:
+    three approvals followed by such a review left the run at 0 instead of 3, i.e.
+    quoting the shape was the one way to void the run the tool exists to protect.
+    Found independently by how2how2how2-arch and pm25coder on the PR.
+    """
+    quoted = "Tested on Windows.\n\n```text\n\u274c Needs fix: x\n```\n\nNothing else.\n"
+    assert mod._classify(quoted) == "comment", (
+        "a fenced example is the reviewer quoting output, not stating a verdict"
+    )
+    # A real (unfenced) veto below a prose intro must still read as a veto - the
+    # fence fix must not close the hole it was built on top of.
+    assert mod._classify("Checked all three.\n\n\u274c Needs fix: the third leaks\n") == "veto"
+    # The first line is a quote too, when it is inside a fence.
+    assert mod._classify("```text\n\u274c Needs fix: template\n```\n\nAll fine.\n") == "comment"
+    # ~~~ is a fence as well.
+    assert mod._classify("Intro.\n\n~~~\n\u274c Needs fix: x\n~~~\n\nOutro.\n") == "comment"
+    # And a genuine approval that quotes the shape stays an approval.
+    assert mod._classify("\u2705 LGTM\n\nReproduced:\n\n```\n\u274c Needs fix\n```\n") == "approve"
+
+
+def test_nested_fences_close_by_length_not_by_toggle(mod):
+    """A ``` example quoted inside a ```` block is content, not a fence.
+
+    The obvious implementation toggles a boolean on any fence-looking line, and it
+    is wrong on precisely the bodies this exists for: this repo quotes fenced
+    examples inside longer fences (````text ... ``` ... ````), and the inner marker
+    flipped the flag - so the quoted veto came back as prose and the body was a
+    `veto` again. Measured 2026-09-11 on a real review body on #1145. CommonMark
+    closes a fence only with the same character and at least the opener's length.
+    """
+    nested = (
+        "Intro.\n\n"
+        "````text\n"
+        "```text\n"
+        "\u274c Needs fix: quoted inner\n"
+        "```\n"
+        "````\n\n"
+        "Outro.\n"
+    )
+    assert mod._classify(nested) == "comment"
+    assert mod._fence_flags(nested.splitlines()).count(True) == 5, (
+        "the outer opener, inner opener, quoted veto, inner closer and outer closer"
+    )
+
+
+def test_an_unbalanced_fence_does_not_hide_a_real_veto(mod):
+    """An odd marker must not swallow the rest of the body.
+
+    If a stray opener hid everything after it, a genuine veto below it would be
+    dropped and the stale approvals in front would read as live - the failure this
+    module documents at length. Failing toward "read it as prose" is the honest
+    reading of a body whose formatting is broken.
+    """
+    assert mod._classify("Intro.\n\n```text\n\u274c Needs fix: real, never closed\n") == "veto"
+    assert mod._fence_flags(["a", "```", "b"]) == [False, False, False], (
+        "an unclosed fence is not a region - the whole body reads as prose"
+    )
+
+
+def test_the_unbalanced_fallback_covers_only_the_tail_not_closed_fences(mod):
+    """A stray opener must not re-open fences that are already closed.
+
+    A body-wide fallback (`[False] * len(lines)`) un-fences every region in the
+    body, including ones that closed properly and are therefore not ambiguous. A
+    review that quotes a veto inside a *closed* fence and later leaves one stray
+    opener then came back as a *stated* veto, resetting the run and discarding the
+    approvals in front of it - the exact outcome the fence fix exists to prevent.
+    Reported by a contributor on the PR (how2how2how2-arch) and reproduced here.
+
+    Only the region from the unmatched opener onward is ambiguous; the closed
+    regions above it keep the reading they earned.
+    """
+    closed_then_stray_open = (
+        "Reviewed on Windows.\n\n```\n\u274c Needs fix: quoted example\n```\n\nNote.\n```\n"
+    )
+    assert mod._classify(closed_then_stray_open) == "comment", (
+        "a mark quoted in a *closed* fence is a quotation, not a statement, even "
+        "when a stray opener appears later in the same body"
+    )
+    # The closed region above the stray opener stays fenced; only the tail is prose.
+    flags = mod._fence_flags(closed_then_stray_open.splitlines())
+    assert flags[2:5] == [True, True, True], "the closed fence must stay fenced"
+    assert flags[6] is False and flags[7] is False, "the unmatched tail reads as prose"
+    # And the tail-only rule must not re-introduce the failure the fallback was for:
+    # a real veto below a genuinely unclosed fence is still a veto.
+    assert mod._classify("Intro.\n\n```\ncode\n\n\u274c Needs fix: real\n") == "veto"
+
+
+def test_only_a_stated_veto_counts_not_a_mention_of_one(mod):
+    """The opposite error: reading a passing mention as a veto.
+
+    This repo's approvals routinely *describe* a veto they resolved ("The earlier
+    ❌ was resolved by pushing the fix myself") and the finding write-ups name the
+    shape they were about. Treating those as vetoes would reset the run and
+    discard every approval before them - so a mark only counts as a stated veto
+    when it opens its line.
+    """
+    assert mod._classify("I tested on Windows.\n- README marked \u274c for security") == "comment"
+    assert mod._classify("Follow-up.\n\nI voted \u2705 on this head.") == "comment"
+    assert mod._classify("Intro.\n\nno \u274c found") == "comment", "a negated mention"
+    # A later line that states the *other* verdict stops the scan entirely.
+    assert mod._classify("Intro\n\n\u2705 LGTM - cyc1\n\n\u274c but also this") == "comment"
+
+
+def test_a_prose_intro_then_a_veto_resets_the_run(mod, monkeypatch, capsys):
+    """The hole at the level that decides a merge.
+
+    Two approvals followed by a veto written under a prose intro. Classified as a
+    comment the run stays at 2/3 - three stale approvals would read as live and
+    the tool would call the PR mergeable. As a veto it resets to 0.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+                   _approve("cyc20260911-020000", "2026-09-11T02:00:00Z"),
+                   _review("2026-09-11T03:00:00Z",
+                           "Checked all three fixes.\n\n"
+                           "\u274c Needs fix - cycle `cyc20260911-030000`")])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 0/3" in out, out
+    assert "NO  " in out, "a veto must not render in the approval column"
+    assert "resets the run" in out
+
+
+def test_an_unattributable_veto_still_resets_the_run(mod, monkeypatch, capsys):
+    """A veto with no cycle id cannot be *counted*, but it must still reset.
+
+    The two questions are separate: attributability decides whether a vote can be
+    numbered, while a veto's effect on the sequence does not depend on our ability
+    to attribute it. Letting an unidentifiable veto be skipped would mean the
+    approvals it answered still read as the run.
+    """
+    fake = FakeGh([_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+                   _review("2026-09-11T02:00:00Z", "\u274c Needs fix, no cycle id given")])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 0/3" in out, out
+
+
 # --- the run rule ----------------------------------------------------------
 
 

@@ -26,8 +26,10 @@ advice to take the unsafe step.
 What is pinned here, in both directions (#455 - never infer from one side):
 * the DANGER case: a clean step whose tree fails the guard, exit 1;
 * the OK case: a clean step whose tree passes, exit 0, no warning;
-* the conflict case: no tree, no verdict, exit 0 - a conflict is not a finding,
-  and reporting it as a failure would make the tool unusable on this queue.
+* the conflict case: no tree, no verdict - a conflict is not a finding, so it is
+  exit 3, not 1; and it is not health either, so it is not 0: 0 is defined as
+  "every step measured and passing", and a stopped plan measured a *prefix*
+  (on this queue, usually none of it).
 
 The git orchestration is faked (no git, no pipeline runs in CI): `_merge_commit`
 and `_guard_verdict` are replaced, and the replacements are asserted to have been
@@ -186,24 +188,71 @@ def test_a_healthy_plan_exits_zero(mod, monkeypatch, capsys):
 
 
 def test_a_conflict_is_not_a_finding(mod, monkeypatch, capsys):
-    """No tree means no verdict.
+    """No tree means no verdict - and no verdict must not be spelled "verified".
 
     On this queue most PRs conflict on the count line, so a tool that failed on
-    conflicts would be red by default and read as noise. The step is reported and
-    the plan stops - the remaining steps cannot be measured against a tree that
-    does not exist.
+    conflicts would be red by default and read as noise: the step must not be
+    reported as a failure (exit 1). But exit 0 is documented as "every step of
+    the plan was measured and landed a tree that passes the guards", and a plan
+    stopped at step 1 measured nothing: measured on the live queue
+    (`cyc20260913-084752`), the *default* invocation - every open PR ascending -
+    stopped at `#1136` and exited 0 having judged no tree at all, a verdict
+    byte-identical to a fully verified plan. So the state is its own: exit 3.
     """
     heads = {1: C1, 2: C2}
     verdicts = {1: None, 2: (C2, (True, "documents 1541"))}
     rc, calls = _plan(mod, monkeypatch, heads, verdicts)
     out = capsys.readouterr().out
 
-    assert rc == 0
+    assert rc == 3, "a plan that stopped is not exit 0 (verified) nor 1 (a finding)"
+    assert rc != 0, "0 promises every step was measured and passed"
+    assert rc != 1, "a conflict is not a finding - nothing was judged wrong"
     assert "CONFLICT" in out
     assert "DANGER" not in out
+    # The reader must be told how much of the plan went unjudged, not just that
+    # something stopped: "plan stopped" alone reads as "the rest was fine".
+    assert "0 of 2 step(s) were measured" in out, out
+    assert "the remaining 2 were not judged" in out, out
     # Stopped at the conflict: step 2 must NOT have been measured against a
     # phantom tree.
     assert calls == [(BASE, C1)]
+
+
+def test_a_danger_before_a_conflict_is_still_the_finding(mod, monkeypatch, capsys):
+    """Exit 1 dominates exit 3: a measured bad step outranks an unmeasured tail."""
+    heads = {1: C1, 2: C2}
+    verdicts = {1: (C1, (False, "documents 1541 but 1560 are collected")), 2: None}
+    rc, _ = _plan(mod, monkeypatch, heads, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 1, "the finding must survive a later conflict"
+    assert "DANGER" in out
+    assert "CONFLICT" in out
+
+
+def test_a_fully_measured_healthy_plan_is_the_only_zero(mod, monkeypatch, capsys):
+    """Both directions of the same predicate, so 0 cannot be reached by stopping.
+
+    A test that only asserted "healthy -> 0" would stay green if a stopped plan
+    also returned 0 (which it did) - the code would be unverified in the one
+    direction that matters for a gate.
+    """
+    heads = {1: C1, 2: C2, 3: C3}
+    healthy = {
+        1: (C1, (True, "documents 1")),
+        2: (C2, (True, "documents 2")),
+        3: (C3, (True, "documents 3")),
+    }
+    assert _plan(mod, monkeypatch, heads, healthy, prs=(1, 2, 3))[0] == 0
+    capsys.readouterr()
+
+    stopped = {1: (C1, (True, "documents 1")), 2: None, 3: (C3, (True, "documents 3"))}
+    rc = _plan(mod, monkeypatch, heads, stopped, prs=(1, 2, 3))[0]
+    out = capsys.readouterr().out
+
+    assert rc == 3, "one conflict in the plan and 0 is no longer reachable"
+    assert "1 of 3 step(s) were measured" in out, out
+    assert "the remaining 2 were not judged" in out, out
 
 
 def test_an_unmeasurable_step_is_not_a_pass(mod, monkeypatch, capsys):
@@ -233,18 +282,26 @@ def test_an_unmeasurable_step_is_not_a_pass(mod, monkeypatch, capsys):
 # healthy tree comes back True.
 
 
-def _tree_with(repo: Path, documented: int, tests: int) -> str:
-    """Build a commit whose guard is satisfied iff `documented == tests`.
+def _tree_with(repo: Path, documented: int | None, tests: int) -> str:
+    """Build a commit whose guard verdict is decided by whether a count is stored.
 
     Returns the commit's tree sha, which is what `_guard_verdict` takes.
+
+    `documented=None` writes no count into `Agent.md`; any integer writes one. Since
+    #1181 the guard's rule is "no tracked file states the Python test count", so the
+    accepted shape is *no stored count* and any stored count is rejected whatever the
+    collected figure is - the pre-#1181 fixture (accept iff `documented == tests`) no
+    longer describes either direction, which is why both tests below were rewritten
+    when this branch was re-applied.
     """
     (repo / "scripts").mkdir(parents=True)
     (repo / "tests").mkdir()
     # The real guard, byte for byte: `_guard_verdict` runs the tree's *own* copy,
     # and a stand-in would test this fixture instead of the tool.
     (repo / "scripts" / "check-doc-count.py").write_bytes(CHILD_GUARD.read_bytes())
+    count = "" if documented is None else f" ({documented})"
     (repo / "Agent.md").write_text(
-        f"# Doc\nPython: `uv run pytest tests/ -v` ({documented})\n", encoding="utf-8"
+        f"# Doc\nPython: `uv run pytest tests/ -v`{count}\n", encoding="utf-8"
     )
     (repo / "tests" / "test_x.py").write_text(
         "".join(f"def test_{i}():\n    assert True\n" for i in range(tests)),
@@ -263,17 +320,21 @@ def _tree_with(repo: Path, documented: int, tests: int) -> str:
     return out.stdout.strip()
 
 
-def test_the_real_guard_verdict_accepts_a_self_consistent_tree(mod, tmp_path, monkeypatch):
+def test_the_real_guard_verdict_accepts_a_tree_that_stores_no_count(mod, tmp_path, monkeypatch):
     """The OK direction through the real child guard.
 
     Without this, a `_guard_verdict` that reported every tree as failing would
     pass every orchestration test above (they inject the verdicts), and the tool
     would be useless in the opposite direction from the mutant: it would flag the
     whole queue. Both directions are needed; each is blind to the other's defect.
+
+    The accepted shape is "no tracked file states the count" (#1181): the figure is
+    measured where it is needed, so a tree that documents none is healthy at any
+    collected count - which is why this tree collects two and states nothing.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    tree = _tree_with(repo, documented=2, tests=2)
+    tree = _tree_with(repo, documented=None, tests=2)
     # `_guard_verdict` archives the tree with `git archive`, which resolves
     # objects from the process cwd - the tool runs inside the repo, so the test
     # must too.
@@ -282,15 +343,16 @@ def test_the_real_guard_verdict_accepts_a_self_consistent_tree(mod, tmp_path, mo
     ok, report = mod._guard_verdict(tree, tmp_path / "extract")
 
     assert ok is True, report
-    assert "documents 2" in report, report
+    assert "no stored count" in report, report
 
 
-def test_the_real_guard_verdict_rejects_a_stale_count(mod, tmp_path, monkeypatch):
+def test_the_real_guard_verdict_rejects_a_tree_that_stores_the_count(mod, tmp_path, monkeypatch):
     """The DANGER direction through the real child guard.
 
-    The tree documents two tests and collects one - the drift shape the tool
-    exists to catch on a merge that git reported clean. Fails open if the guard's
-    exit code is read wrongly, which is what the surviving mutant did.
+    The tree states a count and the repo's rule is that no tracked file may - the
+    shape that rides into master on a merge git reported clean (a stored count is
+    stale the moment another PR adds a test). Fails open if the guard's exit code is
+    read wrongly, which is what the surviving mutant did.
     """
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -300,7 +362,7 @@ def test_the_real_guard_verdict_rejects_a_stale_count(mod, tmp_path, monkeypatch
     ok, report = mod._guard_verdict(tree, tmp_path / "extract")
 
     assert ok is False
-    assert "documents 2" in report and "1 are collected" in report, report
+    assert "state the test count" in report, report
 
 
 def test_a_tree_without_the_guard_is_a_measurement_error(mod, tmp_path, monkeypatch):
@@ -409,7 +471,11 @@ def test_main_refreshes_the_base_before_measuring(mod, monkeypatch, capsys):
     rc = mod.main(["1"])
 
     assert seen == ["origin/master"], seen
-    assert rc == 0
+    # 3, not 0: the single step conflicts, so no tree was judged and "every step was
+    # measured and healthy" (0) would be a claim about nothing (#1174). The refresh
+    # assertion above is this test's subject; the exit code is pinned so a future
+    # merge cannot quietly restore the old "a conflict is success" reading.
+    assert rc == 3, rc
 
 
 def test_a_base_that_cannot_be_refreshed_is_a_measurement_error(mod, monkeypatch):
@@ -560,3 +626,216 @@ def test_a_sha_or_qualified_ref_is_passed_through(mod, monkeypatch):
 
 
 
+def test_an_empty_open_pr_list_is_refused_at_its_source(mod, monkeypatch, capsys):
+    """The reachable form of "zero measured steps is never a verdict".
+
+    The tool cannot print "all 0 step(s) ... pass the guards" because the default
+    plan source refuses an empty list before any step count exists: `numbers =
+    args.prs or _open_pr_numbers(...)` with `prs` declared `nargs="*"` means either
+    positional numbers were given, or the source raised.
+
+    Measured 2026-09-13 (`cyc20260913-114142`) with the real script and an empty
+    open-PR list (a stub `gh` on PATH printing nothing, exiting 0) - on master
+    `2017d8f` and on this branch alike:
+
+        could not measure: no open PRs reported - nothing to check
+        --- exit code: 2 ---
+
+    The refusal is as old as the tool (it is in `3dbc2f1`, and in `6456a98`), so
+    this pins existing behaviour rather than adding a guard. An earlier revision of
+    this branch tested the vacuous-pass shape instead, by replacing `_open_pr_numbers`
+    with a lambda returning `[]` - that substitution *removes* the refusal, which is
+    why it produced a state the program cannot enter (a measurement of the stub).
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(
+        mod, "_run", lambda argv, cwd=None: _FakeProc(stdout="", returncode=0)
+    )
+
+    # The source itself refuses - this is what makes an empty plan unreachable.
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._open_pr_numbers("argszero/emrg")
+    assert "no open PRs reported" in str(excinfo.value)
+
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2, "an unanswerable question must not be reported as health"
+    assert "no open PRs reported" in captured.err, captured.err
+    # The false claim itself must be gone, not merely accompanied by a warning.
+    assert "pass the guards" not in captured.out, captured.out
+
+
+def test_the_default_plan_source_still_measures_a_real_plan(mod, monkeypatch, capsys):
+    """The other direction: the refusal above must not fire on a real plan.
+
+    Without this, "return 2 whenever no positional arguments were given" would pass
+    the test above while breaking the tool's documented default ("all open, ascending").
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: C1)
+    monkeypatch.setattr(mod, "_merge_commit", lambda a, b: C1)
+    monkeypatch.setattr(mod, "_guard_verdict", lambda tree, workdir: (True, "documents 1"))
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}")),
+    )
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "all 1 step(s) landed trees that pass the guards" in out, out
+
+
+# --- the default plan: what it plans, and what it names as left out ----------
+
+
+def _open_prs_with_one_conflict(mod, monkeypatch):
+    """Three open PRs; #2 conflicts with the base, #1 and #3 merge cleanly."""
+    heads = {1: C1, 2: C2, 3: C3}
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2, 3])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: heads[n])
+
+    def fake_merge(a, b):
+        return None if b == C2 else b + "-merged"
+
+    monkeypatch.setattr(mod, "_merge_commit", fake_merge)
+    monkeypatch.setattr(mod, "_guard_verdict", lambda tree, workdir: (True, "documents 1"))
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}")),
+    )
+
+
+def test_the_default_plan_leaves_out_prs_that_conflict_and_names_them(
+    mod, monkeypatch, capsys
+):
+    """A default plan that stops at step 1 answers nothing, so it plans what merges.
+
+    Measured 2026-09-13 (`cyc20260913-120524`): 13 of 14 open PRs conflicted with
+    the base, and the literal default plan - every open PR, ascending - reported
+    `plan stopped at a conflict, 0 of 13 steps measured`. It could not reach the
+    second half of any danger pair, which is the only thing this tool is for.
+
+    Both directions are pinned here: the conflicting PR is *absent from the plan*
+    (so its step is never measured), and it is *named in the disclosure* (so
+    omitting it is not silent).
+    """
+    _open_prs_with_one_conflict(mod, monkeypatch)
+    rc = mod.main([])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "plan: #1 -> #3" in out, out
+    assert "excluded as conflicting: #2" in out, out
+    assert "#2: OK" not in out and "#2: DANGER" not in out, out
+    assert "all 2 step(s) landed trees that pass the guards" in out, out
+
+
+def test_all_plans_every_open_pr_conflicting_ones_included(mod, monkeypatch, capsys):
+    """`--all` is the literal old default, and it still stops at the conflict.
+
+    Without this, "filter the plan" could quietly become "never report a conflict",
+    which is the opposite of the tool's job: a conflicting step is a real answer
+    about the plan (exit 3), not something to drop.
+    """
+    _open_prs_with_one_conflict(mod, monkeypatch)
+    rc = mod.main(["--all"])
+    out = capsys.readouterr().out
+
+    assert rc == 3, out
+    assert "plan: #1 -> #2 -> #3" in out, out
+    assert "#2: CONFLICT" in out, out
+    assert "plan source: every open PR (--all)" in out, out
+
+
+def test_a_queue_where_nothing_merges_is_not_a_pass(mod, monkeypatch, capsys):
+    """No mergeable PR means the question was not answered - exit 2, never a pass.
+
+    This is the state the live queue was in on 2026-09-13 (13 of 14 open PRs
+    conflicting). Reporting `all 0 step(s) landed trees that pass the guards` here
+    would be the vacuous pass this file already refuses for an empty open-PR list,
+    one step further in: the list is not empty, the plan is.
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: C1 if n == 1 else C2)
+    monkeypatch.setattr(mod, "_merge_commit", lambda a, b: None)
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}")),
+    )
+    rc = mod.main([])
+    captured = capsys.readouterr()
+
+    assert rc == 2, captured.out
+    assert "conflict with" in captured.err, captured.err
+    assert "pass the guards" not in captured.out, captured.out
+
+
+def _queue_where_nothing_merges(mod, monkeypatch, conflict_line: str) -> None:
+    """Two open PRs, neither mergeable, conflicting in whatever `conflict_line` says.
+
+    The merge-tree output is faked at the `_run` layer rather than by replacing
+    `_conflict_paths`, so the path parsing under test actually runs - a stub of the
+    function being tested would pass whatever it was told to.
+    """
+    monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2])
+    monkeypatch.setattr(mod, "_fetch_head", lambda n: C1 if n == 1 else C2)
+
+    def fake_run(argv, cwd=None):
+        if argv[:3] == ["git", "merge-tree", "--write-tree"]:
+            return _FakeProc(conflict_line, returncode=1)
+        return _FakeProc(argv[-1].removesuffix("^{tree}"))
+
+    monkeypatch.setattr(mod, "_run", fake_run)
+
+
+def test_an_empty_plan_names_the_conflicting_paths_and_the_way_out(
+    mod, monkeypatch, capsys
+):
+    """The refusal must describe the state it measured and offer a remedy that fixes it.
+
+    Measured 2026-09-13 (`cyc20260913-125509`): with 13 open PRs, all 13 conflicted
+    and every one of them in `Agent.md` (10 in that file alone). The refusal used to
+    offer "pass PR numbers explicitly, or use --all", and neither resolves that
+    state - an explicitly named conflicting PR still conflicts. So the summary is
+    computed from the merge output, and the remedy is printed for the path that has
+    one: the repo re-measures the derived count rather than choosing a side.
+    """
+    _queue_where_nothing_merges(
+        mod, monkeypatch, "CONFLICT (content): Merge conflict in Agent.md\n"
+    )
+    rc = mod.main([])
+    err = capsys.readouterr().err
+
+    assert rc == 2, err
+    assert "Conflicting paths over those 2 PR(s): Agent.md x2." in err, err
+    assert "--resolve-conflict" in err, err
+    assert "push" in err, err
+    assert "pass PR numbers explicitly" not in err, "the old, non-resolving remedy"
+
+
+def test_a_conflict_elsewhere_gets_no_count_line_advice(mod, monkeypatch, capsys):
+    """The remedy is printed only for the path it applies to.
+
+    This is the arm that keeps the previous test from passing on a hardcoded
+    sentence: if the count-line remedy were printed for every conflict, advice for
+    a conflict in some unrelated file would name a command that cannot fix it -
+    the same defect as a hint that cannot run, one tool further along.
+    """
+    _queue_where_nothing_merges(
+        mod, monkeypatch, "CONFLICT (content): Merge conflict in emrg/tools/bash_tool.py\n"
+    )
+    rc = mod.main([])
+    err = capsys.readouterr().err
+
+    assert rc == 2, err
+    assert "emrg/tools/bash_tool.py x2." in err, err
+    assert "--resolve-conflict" not in err, err
