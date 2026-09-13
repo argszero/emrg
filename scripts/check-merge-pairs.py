@@ -63,6 +63,12 @@ Usage
     # start from a ref other than master
     python3 scripts/check-merge-pairs.py --base origin/master 1173 1174
 
+A `--base` naming a remote-tracking ref is resolved **by full name** (`refs/remotes/…`),
+and a name that denotes only a same-named local branch is refused: `git rev-parse
+origin/master` would otherwise pick up a stray local `origin/master` branch and every
+verdict below would be about a base the caller never named. The printed base line names
+the ref actually measured. Plain branch names, tags and SHAs are passed through unchanged.
+
 Exit codes
 ----------
     0  every ordered pair was answered and none merges cleanly into a failing tree
@@ -103,6 +109,47 @@ seq = _load_sibling()
 MeasurementError = seq.MeasurementError
 
 
+def _resolve_base(ref: str) -> str:
+    """The ref actually to measure, resolved by full name - or a refusal.
+
+    `git rev-parse origin/master` consults `refs/heads/origin/master` **before**
+    `refs/remotes/origin/master`, so one stray local branch of that name silently
+    replaces the base and every verdict below is then about a merge nobody asked
+    for. Measured 2026-09-13 (`cyc20260913-102231`), with master at `5f0ee34`: after
+    `git branch origin/master 633a777`, this tool printed
+
+        base 633a7779 (origin/master)
+        #1173 -> #1174: DANGER - clean merge, but the tree FAILS: documents 1564 ...
+
+    i.e. the historical pair and a two-cycle-old base - a *true* answer about a base
+    the caller never named, which is the failure shape this whole tool family is
+    about. (The printed SHA is what exposes it; the ref name alone does not.)
+
+    So a remote-tracking name is resolved **by full name**, bypassing the short-name
+    search entirely, and a name that denotes *only* a local branch is refused rather
+    than measured. Plain branch names, tags and SHAs are passed through untouched,
+    since for those the short name is what the caller meant.
+    """
+    if ref.startswith("refs/") or "/" not in ref:
+        return ref
+    remote = f"refs/remotes/{ref}"
+    try:
+        seq._rev_parse(remote)
+    except MeasurementError:
+        local = f"refs/heads/{ref}"
+        try:
+            seq._rev_parse(local)
+        except MeasurementError:
+            return ref  # neither form exists: let the caller's own error explain it
+        raise MeasurementError(
+            f"--base {ref!r} denotes only the local branch {local!r}; there is no "
+            f"remote-tracking {remote!r}, so the tree this would measure is a local "
+            f"branch that merely looks like a remote, not the base you named. Fetch "
+            f"the remote or pass the fully-qualified ref you mean"
+        )
+    return remote
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -121,7 +168,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        base = seq._rev_parse(args.base)
+        base_ref = _resolve_base(args.base)
+        base = seq._rev_parse(base_ref)
         # Deduplicated and ascending: a repeated number would otherwise pair a PR with
         # itself's twin and buy the same answer twice, and the ordering makes the output
         # diffable between runs.
@@ -131,10 +179,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     pairs = [(a, b) for a in numbers for b in numbers if a != b]
-    print(f"base {base[:8]} ({args.base})")
+    print(f"base {base[:8]} ({base_ref})")
     print(
         f"pairs: {len(numbers)} PR(s) -> {len(pairs)} ordered pair(s), "
-        f"each measured as {args.base} -> A -> B"
+        f"each measured as {base_ref} -> A -> B"
     )
 
     # `master + A` is the same merge for every B, so it is materialised once per A rather

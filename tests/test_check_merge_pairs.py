@@ -266,3 +266,94 @@ def test_the_guard_is_actually_consulted(mod, monkeypatch, capsys):
 
     assert rc == 1, "both pairs are clean merges, so only the guard can make this a finding"
     assert len(asked) == 2, asked
+
+
+# --- the base must be the base you named -----------------------------------
+
+
+def test_a_remote_tracking_base_is_resolved_by_full_name(mod, monkeypatch, capsys):
+    """`origin/master` must be measured as a *remote-tracking* ref, not by short name.
+
+    `git rev-parse origin/master` searches `refs/heads/origin/master` before
+    `refs/remotes/origin/master`, so a stray local branch of that name replaces the
+    base. Asserted by the ref the tool asks for, not by a comment: the short name
+    must never be what reaches the resolver.
+    """
+    asked: list[str] = []
+    chain = {(BASE, C1): C1, (BASE, C2): C2, (C1, C2): C2, (C2, C1): C1}
+
+    def fake_rev_parse(ref):
+        asked.append(ref)
+        if ref == "refs/remotes/origin/master":
+            return BASE
+        raise mod.seq.MeasurementError(f"no such ref {ref}")
+
+    monkeypatch.setattr(mod.seq, "_rev_parse", fake_rev_parse)
+    monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: {1: C1, 2: C2}[n])
+    monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: chain.get((a, b)))
+    monkeypatch.setattr(mod.seq, "_guard_verdict", lambda tree, workdir: (True, "documents 1564"))
+    monkeypatch.setattr(
+        mod.seq, "_run", lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}"))
+    )
+    rc = mod.main(["--base", "origin/master", "1", "2"])
+    out = capsys.readouterr().out
+
+    assert "refs/remotes/origin/master" in asked, asked
+    assert "origin/master" not in asked, f"the shadowable short name was resolved: {asked}"
+    assert rc == 0, out
+    # The output names the ref actually measured, so a reader can check it.
+    assert "refs/remotes/origin/master" in out, out
+
+
+def test_a_base_name_shadowed_by_a_local_branch_is_refused(mod, monkeypatch, capsys):
+    """A name that is *only* a local branch is refused, not measured.
+
+    Measured live on 2026-09-13 (`cyc20260913-102231`) with master at `5f0ee34`: a
+    local branch named `origin/master` at `633a777` made the tool print `base
+    633a7779 (origin/master)` and report `#1173 -> #1174: DANGER` - the historical
+    pair, on a base nobody named. The refusal replaces a *true answer about the wrong
+    base*, and nothing below the resolver can detect it, so it has to happen here.
+    """
+    merges: list[tuple[str, str]] = []
+
+    def fake_rev_parse(ref):
+        if ref == "refs/heads/origin/master":
+            return BASE  # the shadowing local branch exists
+        raise mod.seq.MeasurementError(f"no such ref {ref}")
+
+    monkeypatch.setattr(mod.seq, "_rev_parse", fake_rev_parse)
+    monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: C1)
+    monkeypatch.setattr(
+        mod.seq, "_merge_commit", lambda a, b: merges.append((a, b)) or C1
+    )
+    rc = mod.main(["--base", "origin/master", "1", "2"])
+    err = capsys.readouterr().err
+
+    assert rc == 2, "measuring a local branch that merely looks like a remote is not a pass"
+    assert "refs/heads/origin/master" in err and "refs/remotes/origin/master" in err, err
+    assert merges == [], "nothing may be measured from a base that was not named"
+
+
+def test_a_plain_base_is_left_alone(mod, monkeypatch, capsys):
+    """The other direction: a branch name, tag or SHA is what the caller meant.
+
+    Without this, a mutant that refused every `--base` would pass the test above.
+    """
+    asked: list[str] = []
+    chain = {(BASE, C1): C1, (BASE, C2): C2, (C1, C2): C2, (C2, C1): C1}
+
+    def fake_rev_parse(ref):
+        asked.append(ref)
+        return BASE
+
+    monkeypatch.setattr(mod.seq, "_rev_parse", fake_rev_parse)
+    monkeypatch.setattr(mod.seq, "_fetch_head", lambda n: {1: C1, 2: C2}[n])
+    monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: chain.get((a, b)))
+    monkeypatch.setattr(mod.seq, "_guard_verdict", lambda tree, workdir: (True, "documents 1564"))
+    monkeypatch.setattr(
+        mod.seq, "_run", lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}"))
+    )
+    rc = mod.main(["--base", "master", "1", "2"])
+
+    assert rc == 0
+    assert asked == ["master"], asked
