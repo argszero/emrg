@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -189,20 +190,51 @@ def _fetch_head(number: int) -> str:
 def _merge_tree(ours: str, theirs: str) -> tuple[str | None, list[str]]:
     """The tree of the clean merge of two commits, or the conflicted paths.
 
-    Any exit code other than 0/1 is a failure to measure, never a conflict:
-    reporting an unanswerable question as a conflict invents a cascade the caller
-    then pays for.
+    **The exit code is not the signal; the output is.** Measured (`git merge-tree
+    --write-tree`, this repo): a genuine conflict exits 1 and prints the merged
+    tree's OID on the first line of stdout, but so does a failure to merge the two
+    *inputs* - an unknown ref, or an object that dereferences to a blob - which
+    exits 1 with **empty stdout** and a diagnostic on stderr. Reading only the exit
+    code therefore reports "I could not merge these two inputs" as a plan conflict,
+    with an empty path list, and sends the caller off to resolve a conflict that
+    does not exist. A clean merge always prints its tree OID too, so an empty stdout
+    is never an answer, whatever the code says.
     """
     proc = _run(["git", "merge-tree", "--write-tree", ours, theirs])
+    lines = proc.stdout.splitlines()
     if proc.returncode == 0:
-        return proc.stdout.strip().splitlines()[0].strip(), []
+        if not lines or not _is_object_name(lines[0].strip()):
+            raise MeasurementError(
+                "merge-tree reported success without naming the merged tree: "
+                + _diagnosis(proc)
+            )
+        return lines[0].strip(), []
     if proc.returncode != 1:
+        raise MeasurementError("merge-tree failed: " + _diagnosis(proc))
+    if not lines or not _is_object_name(lines[0].strip()):
         raise MeasurementError(
-            "merge-tree failed: " + (proc.stdout[-500:] + proc.stderr[-500:]).strip()
+            "merge-tree exited 1 without naming a merged tree (a failure to merge "
+            "the inputs, not a conflict): " + _diagnosis(proc)
         )
     return None, [
-        line.split("\t", 1)[1] for line in proc.stdout.splitlines() if "\t" in line
+        line.split("\t", 1)[1] for line in lines if "\t" in line
     ]
+
+
+def _is_object_name(line: str) -> bool:
+    """Whether a line is a bare object name (the merged tree's).
+
+    Both the SHA-1 (40 hex) and SHA-256 (64 hex) object formats are accepted: the
+    question is the *shape* of the answer, which must not depend on the object
+    format of whichever clone happens to run this.
+    """
+    return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
+
+
+def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
+    """What git said, from both streams - a failure must not report itself as empty."""
+    detail = (proc.stdout[-500:] + proc.stderr[-500:]).strip()
+    return detail or f"no output (exit {proc.returncode})"
 
 
 def _commit_tree(tree: str, parents: list[str], message: str) -> str:

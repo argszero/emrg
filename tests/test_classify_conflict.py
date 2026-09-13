@@ -798,23 +798,40 @@ class TestAMidLineRevisionIsNotADisjointAddition:
 
         The corpus case was a wrapped prose line where *ours* is theirs minus a
         run - so a rule written only for `theirs = ours + inserted` would miss it.
+
+        The fixture must share **no** line, and that is asserted rather than
+        assumed: an earlier version of this test put a byte-identical first line on
+        both sides, so `classify` reached the partial-overlap branch
+        (`len(both) == 1`) and never consulted the predicate at all - it stayed
+        green with the predicate deleted, measured this cycle
+        (`cyc20260913-185548`). A test that passes through a different branch than
+        the one it names is worse than a missing test, because it reads as coverage.
         """
         ours = (
-            "    #1174<->#1176, #1176<->#1178) was found by naming *both* PRs "
-            "explicitly.\n"
-            "    #1174<->#1176 was found while unblocking the queue\n"
+            "alpha alpha alpha alpha alpha alpha\n"
+            "    the queue was unblocked by naming both PRs\n"
         )
         theirs = (
-            "    #1174<->#1176, #1176<->#1178) was found by naming *both* PRs "
-            "explicitly.\n"
-            "    #1174<->#1176, #1176<->#1178 was found while unblocking the "
-            "queue\n"
+            "beta beta beta beta beta beta beta\n"
+            "    the queue was later unblocked by naming both PRs\n"
         )
-        assert mod._one_contiguous_edit(
-            "    *both* PRs explicitly.",
-            "    #1174<->#1176, #1176<->#1178) was found by naming *both* PRs "
-            "explicitly.",
+        # The routing precondition: the predicate's branch is only reached when no
+        # line is shared.
+        assert not (set(mod._content_lines(ours)) & set(mod._content_lines(theirs)))
+        # The claim under test, isolated to the *second* line pair: exactly one
+        # contiguous insertion in the middle (read as a deletion from ours), and
+        # crucially neither side a prefix of the other - so only this predicate can
+        # escalate the block, and "revert to the prefix rule" must kill this test.
+        short = "    the queue was unblocked by naming both PRs"
+        long = "    the queue was later unblocked by naming both PRs"
+        assert mod._one_contiguous_edit(short, long)
+        assert not (long.startswith(short) or short.startswith(long)), (
+            "a prefix pair would let the rule this test exists to replace pass it"
         )
+        # The first line pair must not fire anything either, or the block would
+        # escalate for a reason this test does not name.
+        assert not mod._one_contiguous_edit("alpha alpha alpha alpha alpha alpha",
+                                            "beta beta beta beta beta beta beta")
         label, advice = mod.classify(ours, theirs)
         assert label == mod.OVERLAPPING
         assert "human must read" in advice
