@@ -73,6 +73,25 @@ A SHA, a local branch name or a written refspec is taken literally; a
 remote-tracking name that cannot be fetched, or one that denotes only a local
 branch, is a measurement error (exit 2) rather than a base nobody verified.
 
+The conflicted paths are read from the stage block
+--------------------------------------------------
+Exit code 3 tells the caller to resolve a conflict, so the *names* in that refusal
+are what the caller acts on: a path that is not the conflicted one sends the
+resolution to a file that does not collide. Measured (2026-09-14,
+`cyc20260914-062927`, git 2.50.1) the names used to come from "the text after the
+first tab on any line of the report", and two shapes break that:
+
+* the report continues past the stage block with prose that embeds the path
+  (`Auto-merging f<TAB>tab.txt`), and a path containing a tab makes those prose
+  lines tab-separated too - `tab.txt` came back as a conflicted path, a file that
+  collides with nothing and does not exist;
+* git quotes a path holding a non-ASCII byte (the default `core.quotePath=true`),
+  so `中文.txt` arrives as `"\\344\\270\\255\\346\\226\\207.txt"` - the caller is
+  told to resolve a name that is not the file's.
+
+So the paths come from the stage block (`<mode> <blob> <stage>\\t<path>` lines up
+to the blank line git writes after it) and the quoted spelling is decoded.
+
 Usage
 -----
     uv run --no-sync python3 scripts/check-merge-plan-suite.py 1136 1152 1185
@@ -280,6 +299,118 @@ def _fetch_head(number: int) -> str:
     return _rev_parse(ref)
 
 
+#: A conflicted path as the *stage block* writes it: `<mode> <blob> <stage>\t<path>`.
+#: The block is the report's first block - one line per side per conflicted path,
+#: stages 1/2/3 - and it ends at the first blank line, after which git writes prose
+#: ("Auto-merging <path>", "CONFLICT (content): Merge conflict in <path>"). The mode
+#: is `[0-7]{6}` so a symlink (120000) or a gitlink (160000) is named like any other
+#: path. See `_conflict_block_paths` for why the shape is matched instead of the tab.
+_CONFLICT_LINE = re.compile(r"^[0-7]{6} [0-9a-f]+ [123]\t(?P<path>.+)$")
+
+#: The escapes git's path quoting uses - `quote_c_style`'s set, as bytes.
+_C_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "f": 0x0C,
+    "n": 0x0A,
+    "r": 0x0D,
+    "t": 0x09,
+    "v": 0x0B,
+    "\\": 0x5C,
+    '"': 0x22,
+}
+
+
+def _unquote_path(path: str) -> str:
+    """The path git *means*, from the path git wrote.
+
+    `merge-tree` quotes a path that holds a quote, a backslash, a control byte, or
+    - with the default `core.quotePath=true` - a non-ASCII byte, C-style:
+    `"f\\ttab.txt"`, and `中文.txt` as `"\\344\\270\\255\\346\\226\\207.txt"`
+    (measured 2026-09-14, `cyc20260914-062927`, git 2.50.1, in a scratch repo).
+    Passed through as written, either names a file nobody has: the caller is told
+    the step "conflicts on \"\\344\\270\\255...txt\"", which is not a path it can
+    open or resolve.
+
+    Decoding here also makes the path independent of the *reader's* locale: the
+    escapes are ASCII, so the real bytes are reassembled by this function rather
+    than by whatever encoding the subprocess reader happened to pin - the same
+    class of defect as the `git status --porcelain` decode pinned in
+    `emrg/server/scheduler.py`, where octal escapes of a CJK name under a GBK
+    locale were measured to arrive as different characters.
+    """
+    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
+        # Unquoted: git wrote the path's bytes as they are (with
+        # `core.quotePath=false`, or a path that needed no quoting at all).
+        return path
+    body = path[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        char = body[i]
+        if char != "\\":
+            out.extend(char.encode("utf-8"))
+            i += 1
+            continue
+        i += 1
+        if i >= len(body):
+            # A lone trailing backslash: not a quoted path after all. Keep it.
+            out.extend(b"\\")
+            break
+        escape = body[i]
+        if escape in _C_ESCAPES:
+            out.append(_C_ESCAPES[escape])
+            i += 1
+        elif escape in "01234567":
+            # Octal, always three digits in git's output; a short tail is taken
+            # as it comes rather than invented into a byte.
+            digits = body[i : i + 3]
+            i += len(digits)
+            out.append(int(digits, 8) & 0xFF)
+        else:
+            out.extend(escape.encode("utf-8"))
+            i += 1
+    # `errors="replace"`: the bytes may be any encoding, and the reader that
+    # produced `path` was already pinned to UTF-8 (see `_run`). A name outside
+    # UTF-8 degrades the same way here as it would anywhere else in this tool.
+    return out.decode("utf-8", errors="replace")
+
+
+def _conflict_block_paths(lines: list[str]) -> list[str]:
+    """The conflicted paths a conflict report's stage block names.
+
+    **The stage block, not "every line with a tab in it".** The old reading took
+    the text after the first tab from *any* line of the report, and the report
+    continues past the block with prose that embeds the conflicted paths: measured
+    (2026-09-14, `cyc20260914-062927`, git 2.50.1), a conflict in a file whose
+    name contains a tab reports
+
+        100644 <blob> 1\t"f\\ttab.txt"        <- the stage block: git's spelling
+        ...
+        Auto-merging f<TAB>tab.txt            <- prose: a real tab, not a path
+        CONFLICT (content): Merge conflict in f<TAB>tab.txt
+
+    and splitting those prose lines on their tab hands back `tab.txt` - a file
+    that collides with nothing and does not exist, named in the report as if it
+    did. The block ends at the blank line git writes after it, and every line in
+    it has the stage shape, so both are used here: the tab is not the separator
+    that identifies a path, the block is.
+
+    The paths are returned as the real names (see `_unquote_path`), one per stage
+    line, in the order git wrote them: stages 1/2/3 of the same path appear once
+    per stage, which is what lets a rename conflict name all three sides, and
+    callers dedupe before printing.
+    """
+    paths: list[str] = []
+    for line in lines[1:]:  # lines[0] is the merged tree's name
+        if not line.strip():
+            break  # end of the stage block; the rest of the report is prose
+        match = _CONFLICT_LINE.match(line)
+        if match:
+            paths.append(_unquote_path(match.group("path")))
+    return paths
+
+
 def _merge_tree(ours: str, theirs: str) -> tuple[str | None, list[str]]:
     """The tree of the clean merge of two commits, or the conflicted paths.
 
@@ -292,6 +423,12 @@ def _merge_tree(ours: str, theirs: str) -> tuple[str | None, list[str]]:
     with an empty path list, and sends the caller off to resolve a conflict that
     does not exist. A clean merge always prints its tree OID too, so an empty stdout
     is never an answer, whatever the code says.
+
+    The conflicted paths are read out of the stage block and unquoted
+    (`_conflict_block_paths`), and a conflict that names no path is a measurement
+    error rather than a `PlanConflict` with an empty list - the report says the
+    step "conflicts on " and names nothing, which is the same unevidenced answer
+    one field over.
     """
     proc = _run(["git", "merge-tree", "--write-tree", ours, theirs])
     lines = proc.stdout.splitlines()
@@ -309,9 +446,13 @@ def _merge_tree(ours: str, theirs: str) -> tuple[str | None, list[str]]:
             "merge-tree exited 1 without naming a merged tree (a failure to merge "
             "the inputs, not a conflict): " + _diagnosis(proc)
         )
-    return None, [
-        line.split("\t", 1)[1] for line in lines if "\t" in line
-    ]
+    paths = _conflict_block_paths(lines)
+    if not paths:
+        raise MeasurementError(
+            "merge-tree exited 1 naming a merged tree but no conflicted path, so "
+            "which files collide cannot be named: " + _diagnosis(proc)
+        )
+    return None, paths
 
 
 def _is_object_name(line: str) -> bool:
