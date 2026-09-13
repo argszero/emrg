@@ -73,13 +73,35 @@ Each step is reported as one of:
               (the silent case this tool exists for — git would not have told you)
     conflict  the merge conflicts, so no tree is produced and none is judged
               (not a failure: it is a question for a human / check-merge-order)
+              - but a step's input is the previous step's tree, so the plan stops
+              here and the steps *after* it are never measured (exit 3)
 
 Exit codes
 ----------
-    0  every clean step landed a tree that passes the guards
+    0  every step of the plan was measured and landed a tree that passes the guards
     1  at least one clean step landed a tree that FAILS them (the finding)
     2  the question could not be answered (git/gh/guard failure) - fail loud,
        never report health that was not measured
+    3  the plan stopped at a conflict, so only a prefix was measured and the rest
+       is unmeasured - "not measured" must not be spelled 0
+
+Why "stopped" is 3 and not 0 or 1
+---------------------------------
+A conflict is not a finding - nothing was judged wrong - so it must not be 1. But
+it is not health either: 0 is defined above as *every* step measured and passing,
+and a plan that stopped at its first step measured nothing at all. Measured on
+this repo's live queue (`cyc20260913-084752`): the default invocation - every open
+PR ascending - stopped at step 1 (`#1136` conflicts) and exited **0** having
+measured no tree, which as a verdict is indistinguishable from a fully verified
+plan. A caller testing the exit code reads "the plan is fine" for a plan that was
+never checked.
+
+The states have different remedies, which is why they get different codes (the
+same reason `check-vote-count.py` separates `BLOCKED` from `SHORT`): resolve the
+conflict and re-plan, versus re-order a step that is dangerous, versus retry a
+measurement that failed. A caller that wants "nothing was found wrong" can test
+`rc in (0, 3)` and still gets an explicit number to read; a caller that treats 0
+as "verified" now cannot be told the wrong thing.
 """
 
 from __future__ import annotations
@@ -276,6 +298,7 @@ def main(argv: list[str] | None = None) -> int:
 
     dangers: list[int] = []
     conflicts: list[int] = []
+    measured = 0
     with tempfile.TemporaryDirectory(prefix="emrg-merge-seq-") as tmp:
         workdir = Path(tmp) / "tree"
         current = base
@@ -307,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  #{number}: DANGER - clean merge, but the tree FAILS: {report}")
                 dangers.append(number)
             current = merged
+            measured += 1
 
     print()
     if dangers:
@@ -318,8 +342,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     if conflicts:
-        print(f"plan stopped at conflicting step(s): {conflicts} - not a health verdict")
-        return 0
+        # A break leaves `measured < len(numbers)`, so the sizes are the honest
+        # report: the conflicting step produced no tree either, so it counts as
+        # unjudged alongside the steps behind it.
+        print(
+            f"plan stopped at conflicting step(s): {conflicts} - not a health verdict\n"
+            f"{measured} of {len(numbers)} step(s) were measured; the remaining "
+            f"{len(numbers) - measured} were not judged, so nothing here says the "
+            f"plan is safe. Resolve the conflict (which re-plans it with a new head) "
+            f"and run this again. Not exit 0: 0 means every step was measured and "
+            f"healthy."
+        )
+        return 3
     print(f"all {len(numbers)} step(s) landed trees that pass the guards")
     return 0
 

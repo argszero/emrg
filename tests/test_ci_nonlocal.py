@@ -238,3 +238,99 @@ class TestEndToEnd:
         """))
         rc = check_nonlocal.check_nonlocal(str(app_py))
         assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Which tree does the check inspect?
+#
+# Measured 2026-09-11, in exactly the situation this tool is used in: unblocking
+# a PR means working in a git worktree, and the natural invocation there is
+# `<worktree>/.venv/bin/python <main-checkout>/scripts/check_nonlocal.py`. The
+# old root was `Path(__file__).resolve().parent.parent` — the *main* checkout.
+#
+# Reproduced live: with the worktree's `interactive` renamed away, the worktree's
+# own copy printed "ERROR: could not find interactive function in app.py" and
+# exited 2, while the main checkout's copy run from that same directory printed
+# "OK: nonlocal integrity check passed" and exited 0. Both lines are confident;
+# the OK line is also byte-identical to what a correct run prints, so the wrong
+# answer is indistinguishable from the right one by reading the output.
+# ---------------------------------------------------------------------------
+
+
+SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_nonlocal.py"
+
+
+def _fake_checkout(root: Path) -> Path:
+    """A directory that has the two markers `_resolve_root` keys on."""
+    (root / "scripts").mkdir(parents=True)
+    target = root / check_nonlocal.TARGET
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        "async def interactive():\n"
+        "    state = 0\n"
+        "\n"
+        "    async def handle_key(data):\n"
+        "        nonlocal state\n"
+        "        state = 1\n",
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_the_tree_is_the_checkout_you_are_standing_in(monkeypatch, tmp_path):
+    """The defect: the inspected tree came from `__file__`, not from the cwd.
+
+    Pinned on the predicate, not on the printed line: `_resolve_root` is the
+    decision, and a test that only made `main()` print the right path could pass
+    while the wrong root was still chosen.
+    """
+    fake = _fake_checkout(tmp_path / "checkout")
+    monkeypatch.chdir(fake)
+    assert check_nonlocal._resolve_root() == fake.resolve(), (
+        "the tool must inspect the checkout the caller is standing in; deriving "
+        "the root from __file__ inspects a different tree (the one the script "
+        "happens to live in) and reports its verdict as if it were yours"
+    )
+    assert check_nonlocal._resolve_root() != SCRIPT.parent.parent, (
+        "the fixture must not be the script's own root, or this test proves nothing"
+    )
+
+
+def test_the_inspected_tree_is_named_in_the_output(monkeypatch, tmp_path, capsys):
+    """`which tree did you inspect` must never be ambiguous.
+
+    Naming the tree turns the silent wrong answer above into a visible one.
+    """
+    fake = _fake_checkout(tmp_path / "checkout")
+    monkeypatch.chdir(fake)
+    monkeypatch.setattr(check_nonlocal, "REPO_ROOT", check_nonlocal._resolve_root())
+    assert check_nonlocal.main([]) == 0
+    out = capsys.readouterr().out
+    assert f"tree: {fake.resolve()}" in out, out
+
+
+def test_a_directory_that_is_not_a_checkout_falls_back_to_the_script_root(
+    monkeypatch, tmp_path
+):
+    """The documented invocation must keep working from anywhere.
+
+    `python3 scripts/check_nonlocal.py` runs from the repo root in every hint,
+    but an absolute-path call from elsewhere (a wrapper, an editor task, `git -C`)
+    has no checkout in the cwd to stand in — it must fall back, not fail.
+    """
+    monkeypatch.chdir(tmp_path)  # bare temp dir: no app.py, no scripts/
+    assert check_nonlocal._resolve_root() == SCRIPT.parent.parent.resolve()
+
+
+def test_a_directory_with_only_half_the_shape_is_not_a_checkout(monkeypatch, tmp_path):
+    """Both markers are required, so a stray app.py cannot claim the tree.
+
+    The predicate is a heuristic for "this is a checkout of this project";
+    requiring the scripts directory too keeps a report directory that happens to
+    contain an app.py from silently becoming the measured tree.
+    """
+    target = tmp_path / check_nonlocal.TARGET
+    target.parent.mkdir(parents=True)
+    target.write_text("async def interactive():\n    pass\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert check_nonlocal._resolve_root() == SCRIPT.parent.parent.resolve()
