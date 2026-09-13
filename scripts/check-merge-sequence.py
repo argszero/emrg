@@ -60,8 +60,12 @@ Usage
     # check the whole plan: master, then these PRs in this order
     uv run --no-sync python3 scripts/check-merge-sequence.py 1168 1167 1166
 
-    # plan every open PR, ascending (a default, not a recommendation)
+    # the default plan: open PRs that merge cleanly onto the base, ascending
+    # (a starting point, not a recommendation - see "The default plan" below)
     uv run --no-sync python3 scripts/check-merge-sequence.py
+
+    # the literal every-open-PR plan, conflicting steps included
+    uv run --no-sync python3 scripts/check-merge-sequence.py --all
 
     # start from a ref other than master
     uv run --no-sync python3 scripts/check-merge-sequence.py --base origin/master 1153
@@ -80,10 +84,63 @@ Exit codes
 ----------
     0  every step of the plan was measured and landed a tree that passes the guards
     1  at least one clean step landed a tree that FAILS them (the finding)
-    2  the question could not be answered (git/gh/guard failure) - fail loud,
-       never report health that was not measured
+    2  the question could not be answered (git/gh/guard failure, an empty open-PR
+       list, or a default plan with no mergeable PR in it) - fail loud, never report
+       health that was not measured
     3  the plan stopped at a conflict, so only a prefix was measured and the rest
        is unmeasured - "not measured" must not be spelled 0
+
+The default plan, and why it is not "every open PR"
+----------------------------------------------------
+Measured 2026-09-13 (`cyc20260913-120524`): **13 of the 14 open PRs conflicted with
+the base**, so the literal default - every open PR, ascending - stopped at step 1
+and judged nothing (`plan stopped at a conflict, 0 of 13 steps measured`, exit 3).
+That invocation answers nothing, and it cannot answer the question this tool exists
+for: a danger pair is two PRs that are each clean, and a plan that cannot get past
+step 1 never reaches the second one. Every pair found so far was found by naming
+both PRs explicitly.
+
+The default plan is therefore the open PRs whose merge onto the base is clean, and
+the line above the plan names the ones it left out:
+
+    plan source: open PRs that merge cleanly onto 11e5947 (1 of 14); excluded as conflicting: #1136 #1141 ...
+
+Nothing is hidden: an excluded PR is named, `--all` gives the literal every-open-PR
+plan, and positional PR numbers are always taken exactly as given. If no open PR
+merges cleanly the plan is empty, and that is 2 - the question was not answered -
+never a pass over zero steps.
+
+A pass over zero steps is refused at its source, not counted
+------------------------------------------------------------
+The plan can never be empty, so "all 0 step(s) landed trees that pass the guards"
+is unreachable: the default source refuses an empty list itself -
+
+    numbers = [int(line) for line in proc.stdout.split() if line.strip()]
+    if not numbers:
+        raise MeasurementError("no open PRs reported - nothing to check")
+
+- and `prs` is `nargs="*"`, so `args.prs or _open_pr_numbers(...)` makes an empty
+`numbers` impossible: either positional PR numbers were given, or the source
+raised. Measured 2026-09-13 (`cyc20260913-114142`) with the real script and an
+empty open-PR list (a stub `gh` on PATH printing nothing, exiting 0) on both
+master `2017d8f` and this branch:
+
+    $ check-merge-sequence.py            # stub gh: prints nothing, rc 0
+    could not measure: no open PRs reported - nothing to check
+    --- exit code: 2 ---
+
+Correcting this branch's own first revision: it documented this state as a
+*measured* rc-0 pass, and added a check in `main` to convert it to 2. The rc-0
+shape is reproducible only by replacing the refusal -
+
+    mod._open_pr_numbers = lambda repo: []      # the guard removed
+    # "all 0 step(s) landed trees that pass the guards", rc 0
+
+- which is what produced that reading, and the same substitution its test made.
+The reading was therefore about the stub, not about the program, and the branch
+was dead code. The property it wanted ("zero measured steps is never a verdict")
+already holds here, at the source; what was missing is a test for that refusal,
+which is now `test_an_empty_open_pr_list_is_refused_at_its_source`.
 
 Why "stopped" is 3 and not 0 or 1
 ---------------------------------
@@ -163,8 +220,57 @@ def _rev_parse(ref: str) -> str:
     return proc.stdout.strip()
 
 
+def _plan_from_open_prs(
+    repo: str, base: str, include_conflicting: bool
+) -> tuple[list[int], str]:
+    """The default plan: open PRs, ascending - and the note saying what it left out.
+
+    Why the default is not simply "every open PR" (measured 2026-09-13,
+    `cyc20260913-120524`, on the queue as it stood): **13 of 14 open PRs conflicted
+    with the base**, so the default plan stopped at its first step and judged
+    nothing at all - `plan stopped at a conflict, 0 of 13 steps measured`, exit 3.
+    That is exactly the invocation a reader reaches for first, and it answers
+    nothing. Worse, it cannot answer the question this tool exists for: a danger
+    pair is two PRs that are each clean, and a plan that cannot advance past step 1
+    never sees the second one. Every such pair found so far (#1173<->#1174,
+    #1174<->#1176, #1176<->#1178) was found by naming *both* PRs explicitly.
+
+    So the default plan is the open PRs whose merge onto `base` is clean. This is
+    not a loosening: a step that conflicts cannot be taken at all (the plan stops
+    there by definition), so carrying such a step in the default plan means every
+    step after it goes unmeasured - see the conflict note in the module docstring.
+    The excluded numbers are **named in the note** rather than dropped, because a
+    plan that hides its own omissions is the defect this whole file is about. Use
+    `--all` for the literal "every open PR" plan.
+    """
+    numbers = _open_pr_numbers(repo)
+    if include_conflicting:
+        return numbers, f"plan source: every open PR (--all), {len(numbers)} in total"
+    mergeable: list[int] = []
+    excluded: list[int] = []
+    for number in numbers:
+        head = _fetch_head(number)
+        (mergeable if _merge_commit(base, head) is not None else excluded).append(number)
+    if not mergeable:
+        raise MeasurementError(
+            f"all {len(numbers)} open PR(s) conflict with {base[:8]}, so the default "
+            f"plan is empty and no step could be measured. This is not a verdict "
+            f"about any tree - pass PR numbers explicitly, or use --all to plan the "
+            f"conflicting ones too (which will stop at the first)"
+        )
+    note = (
+        f"plan source: open PRs that merge cleanly onto {base[:8]} "
+        f"({len(mergeable)} of {len(numbers)}"
+    )
+    if excluded:
+        note += "); excluded as conflicting: " + " ".join(f"#{n}" for n in excluded)
+    else:
+        note += "; none excluded)"
+    return mergeable, note
+
+
 def _open_pr_numbers(repo: str) -> list[int]:
-    """The open PR numbers, ascending - the default plan."""
+    """Every open PR number, ascending - the source the default plan is drawn from."""
     proc = _run(
         [
             "gh", "pr", "list", "-R", repo,
@@ -282,18 +388,33 @@ def main(argv: list[str] | None = None) -> int:
         "prs", nargs="*", type=int,
         help="PR numbers, in the order they would be merged (default: all open, ascending)",
     )
+    parser.add_argument(
+        "--all", action="store_true",
+        help=(
+            "plan every open PR, including ones that conflict with the base "
+            "(default: only the open PRs whose merge onto the base is clean)"
+        ),
+    )
     parser.add_argument("--repo", default="argszero/emrg", help="owner/name")
     parser.add_argument("--base", default="origin/master", help="the ref to merge onto")
     args = parser.parse_args(argv)
 
     try:
         base = _rev_parse(args.base)
-        numbers = args.prs or _open_pr_numbers(args.repo)
+        note: str | None = None
+        if args.prs:
+            numbers = args.prs
+        else:
+            numbers, note = _plan_from_open_prs(args.repo, base, args.all)
     except MeasurementError as exc:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
 
     print(f"base {base[:8]} ({args.base})")
+    if note is not None:
+        # Always printed when the plan was chosen for the reader: which PRs it
+        # considered, and which it left out, is part of the answer.
+        print(note)
     print(f"plan: {' -> '.join('#' + str(n) for n in numbers)}")
 
     dangers: list[int] = []
