@@ -26,8 +26,10 @@ advice to take the unsafe step.
 What is pinned here, in both directions (#455 - never infer from one side):
 * the DANGER case: a clean step whose tree fails the guard, exit 1;
 * the OK case: a clean step whose tree passes, exit 0, no warning;
-* the conflict case: no tree, no verdict, exit 0 - a conflict is not a finding,
-  and reporting it as a failure would make the tool unusable on this queue.
+* the conflict case: no tree, no verdict - a conflict is not a finding, so it is
+  exit 3, not 1; and it is not health either, so it is not 0: 0 is defined as
+  "every step measured and passing", and a stopped plan measured a *prefix*
+  (on this queue, usually none of it).
 
 The measurement itself is faked (no git, no pipeline runs in CI): `_merge_commit`
 and `_guard_verdict` are replaced, and the replacements are asserted to have been
@@ -165,24 +167,71 @@ def test_a_healthy_plan_exits_zero(mod, monkeypatch, capsys):
 
 
 def test_a_conflict_is_not_a_finding(mod, monkeypatch, capsys):
-    """No tree means no verdict.
+    """No tree means no verdict - and no verdict must not be spelled "verified".
 
     On this queue most PRs conflict on the count line, so a tool that failed on
-    conflicts would be red by default and read as noise. The step is reported and
-    the plan stops - the remaining steps cannot be measured against a tree that
-    does not exist.
+    conflicts would be red by default and read as noise: the step must not be
+    reported as a failure (exit 1). But exit 0 is documented as "every step of
+    the plan was measured and landed a tree that passes the guards", and a plan
+    stopped at step 1 measured nothing: measured on the live queue
+    (`cyc20260913-084752`), the *default* invocation - every open PR ascending -
+    stopped at `#1136` and exited 0 having judged no tree at all, a verdict
+    byte-identical to a fully verified plan. So the state is its own: exit 3.
     """
     heads = {1: C1, 2: C2}
     verdicts = {1: None, 2: (C2, (True, "documents 1541"))}
     rc, calls = _plan(mod, monkeypatch, heads, verdicts)
     out = capsys.readouterr().out
 
-    assert rc == 0
+    assert rc == 3, "a plan that stopped is not exit 0 (verified) nor 1 (a finding)"
+    assert rc != 0, "0 promises every step was measured and passed"
+    assert rc != 1, "a conflict is not a finding - nothing was judged wrong"
     assert "CONFLICT" in out
     assert "DANGER" not in out
+    # The reader must be told how much of the plan went unjudged, not just that
+    # something stopped: "plan stopped" alone reads as "the rest was fine".
+    assert "0 of 2 step(s) were measured" in out, out
+    assert "the remaining 2 were not judged" in out, out
     # Stopped at the conflict: step 2 must NOT have been measured against a
     # phantom tree.
     assert calls == [(BASE, C1)]
+
+
+def test_a_danger_before_a_conflict_is_still_the_finding(mod, monkeypatch, capsys):
+    """Exit 1 dominates exit 3: a measured bad step outranks an unmeasured tail."""
+    heads = {1: C1, 2: C2}
+    verdicts = {1: (C1, (False, "documents 1541 but 1560 are collected")), 2: None}
+    rc, _ = _plan(mod, monkeypatch, heads, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 1, "the finding must survive a later conflict"
+    assert "DANGER" in out
+    assert "CONFLICT" in out
+
+
+def test_a_fully_measured_healthy_plan_is_the_only_zero(mod, monkeypatch, capsys):
+    """Both directions of the same predicate, so 0 cannot be reached by stopping.
+
+    A test that only asserted "healthy -> 0" would stay green if a stopped plan
+    also returned 0 (which it did) - the code would be unverified in the one
+    direction that matters for a gate.
+    """
+    heads = {1: C1, 2: C2, 3: C3}
+    healthy = {
+        1: (C1, (True, "documents 1")),
+        2: (C2, (True, "documents 2")),
+        3: (C3, (True, "documents 3")),
+    }
+    assert _plan(mod, monkeypatch, heads, healthy, prs=(1, 2, 3))[0] == 0
+    capsys.readouterr()
+
+    stopped = {1: (C1, (True, "documents 1")), 2: None, 3: (C3, (True, "documents 3"))}
+    rc = _plan(mod, monkeypatch, heads, stopped, prs=(1, 2, 3))[0]
+    out = capsys.readouterr().out
+
+    assert rc == 3, "one conflict in the plan and 0 is no longer reachable"
+    assert "1 of 3 step(s) were measured" in out, out
+    assert "the remaining 2 were not judged" in out, out
 
 
 def test_an_unmeasurable_step_is_not_a_pass(mod, monkeypatch, capsys):
