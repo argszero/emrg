@@ -487,6 +487,44 @@ _MIDLINE_DEFINITION_FORM = re.compile(
     rf"[;{{][ \t]*(?:{_DEFINITION_KEYWORD})[ \t]*{_TRIPWIRE_TERMINAL}"
 )
 
+# The eighth escape's span finder (see _commented_out_definitions below).
+# Non-greedy so adjacent comments cannot merge into one span, and `S` for
+# multi-line blocks. What the comment *contains* is judged by the counter's own
+# pattern (`_would_be_counted`), not by a lookalike of it: an earlier version used
+# a separate `_BLOCK_COMMENT_DEFINITION` regex and fired on inline comments the
+# counter had never counted, advising a repair for drift that did not exist.
+_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+# The detector's predicate is the **counter's own pattern**, not a lookalike.
+#
+# A reference implementation on the real runner (pm25coder, 2026-09-10, on this
+# branch's head) measured a shape where `_BLOCK_COMMENT_DEFINITION` fires although
+# the counter and the runner agree, and it is the shape this branch's own PR body
+# and comment used as the illustrative example:
+#
+#     describe("s", () => {
+#       /* it("disabled", () => {}); */      -> counter 1, runner 1, detector FIRES
+#       it("live", () => {});
+#     });
+#
+# The reason is lexical: `_DEFINITION_FORM` is `^\s*it(`, and `^\s*` cannot step
+# over the `/*` that precedes the call on that line, so the *counter* never counted
+# the inline definition - there is no drift, and the guard advises deleting or
+# restoring a definition that was never in the count. Measured by loading this
+# file's regexes and running both sides (4 shapes):
+#
+#   shape                       counter  detector(old)  detector(new)  drift
+#   definition starts the line        2      fires        fires        real, correct
+#   inline `/* it(..) */`             1      fires        silent       none - false positive
+#   star-decorated ` * it(..)`        1      silent       silent       none
+#   prose naming `it("x")`            1      silent       silent       none
+#
+# Predicating on `_DEFINITION_FORM` also gives the two sides one definition of
+# "counted", the property that was missing: the detector fires exactly when the
+# counter would have counted the definition and the runner would not have run it.
+def _would_be_counted(body: str) -> bool:
+    """True when the counter's own pattern would count a definition in `body`."""
+    return bool(_DEFINITION_FORM.search(body))
+
 
 def _midline_definitions(text: str) -> list[str]:
     """Mid-line definitions, ignoring comment lines.
@@ -506,6 +544,56 @@ def _midline_definitions(text: str) -> list[str]:
         if stripped.startswith(("//", "*", "/*")):
             continue
         found.extend(_MIDLINE_DEFINITION_FORM.findall(line))
+    return found
+
+
+# The **eighth** escape, and the first one that over-counts rather than
+# under-counts: a definition that is *commented out*. Seven escapes came before
+# it - multi-link chains, newline-split calls, tagged templates, nested forms,
+# mid-line definitions, loop-generated cases, parameterised suites - and every
+# one of them made the static count *smaller* than the runner's total, which is
+# why each was hunted by looking for a form the counter cannot see. This one has
+# the opposite shape and no exotic spelling at all:
+#
+#     describe("s", () => {
+#       /* it("disabled", () => { ... }); */
+#       it("live", () => { ... });
+#     });                            -> vitest: 1 test, static counter: 2
+#
+# Measured 2026-09-11 (cyc20260911-030808) with the real runner in
+# `emrg/gui/renderer`: a block-commented definition recounted as **2** while
+# `Tests 1 passed (1)` executed - the counter is blind in the *upward* direction,
+# so every previous tripwire's "does the runner execute more than we count?"
+# framing is silent by construction.
+#
+# The damage is not a wrong number, it is an unsatisfiable one, also measured:
+# commenting out one definition in `emrg/gui/test/theme-guard.test.js` leaves
+# `tests/test_doc_counts.py` **13 passed** (static guard green) while
+# `scripts/check-node-test-count.py` reports `FAIL: GUI: documents 100, runner
+# executed 99`. Following that gate's own advice (`--write`, which the guard
+# prints) sets the doc to 99 and turns the static guard red (`2 failed`), because
+# `_static_gui_counts()` still counts the commented definition. The two gates
+# then want different numbers and no doc value satisfies both - the same
+# unrecoverable state as the loop escape, reached from the mirror direction.
+#
+# Detection: the comment-aware view of the file, rather than a regex for a
+# spelling. A removal audit is line-anchored on both ends (`^\s*(?:it|test)\(`
+# and `*/\s*$`) so a definition *mentioned* inside a block comment cannot trip it
+# - the guard's job is to stop drift, and this file is written in prose about
+# exactly these spellings. Line comments are already handled (`//`-prefixed
+# lines are not counted to begin with), so only block comments can hide one.
+def _commented_out_definitions(text: str) -> list[str]:
+    """Definitions inside block comments: counted, but never executed.
+
+    The predicate is `_would_be_counted` (the counter's own pattern) rather than
+    the lookalike `_BLOCK_COMMENT_DEFINITION`, so the detector fires only where
+    there is real drift - see the measurement above `_would_be_counted`.
+    """
+    found: list[str] = []
+    for block in _BLOCK_COMMENT.finditer(text):
+        body = block.group(0)
+        if _would_be_counted(body):
+            found.append(body.splitlines()[0].strip())
     return found
 
 
@@ -641,6 +729,18 @@ def _count_definitions(path: Path) -> int:
         "sync Agent.md. Note: `it.each([...])` is NOT a valid repair here - it "
         "is itself an uncounted form and trips the chained-form tripwire above, "
         "so it would replace one silent drift with a loud one."
+    )
+    commented = _commented_out_definitions(text)
+    assert not commented, (
+        f"{path} has test definitions inside block comments, which the doc-count "
+        f"guard counts but the runner never executes: {sorted(set(commented))}. "
+        "Every other tripwire here asks whether the runner executes MORE than "
+        "the counter sees; a commented-out definition is the opposite, so it is "
+        "invisible to all of them. Measured 2026-09-11: one commented definition "
+        "makes the static guard green while the node runner gate reports one "
+        "executed test fewer - and following that gate's `--write` advice turns "
+        "this guard red, so the two gates want different numbers and no doc "
+        "value satisfies both. Delete the dead definition or restore it."
     )
     return len(_DEFINITION_FORM.findall(text))
 
@@ -1577,3 +1677,201 @@ def test_repair_hints_name_a_form_the_counter_actually_counts() -> None:
     assert guard._CHAINED_DEFINITION_FORM.findall(each)
 
 
+
+
+# --- eighth escape: definitions the counter counts but the runner never runs ---
+#
+# Every tripwire above hunts in one direction: a form the counter *cannot see*
+# while the runner still executes it. Measured this cycle, that framing has a
+# blind side - a block-commented definition is counted and never executed, so
+# the counter reports MORE than the runner. The probes below pin both halves of
+# that shape (the tripwire's positives, and prose that must stay silent), and
+# the counting rule itself is pinned by the real-runner pairing that follows
+# them: the static count must equal what `npx vitest run` reports, not merely
+# equal itself.
+
+# Only the shapes where the *counter* counted the definition belong here. An
+# earlier version of this table held two more - `it("live");\n/* it("x"); */` and a
+# leading `/* test.skip(...); */` - under the docstring "each probe counts 2
+# statically while the runner executes 1". Measured against the counter's own
+# pattern (`_DEFINITION_FORM`, `^\s*it(`), both count **1**, not 2, because `^\s*`
+# cannot step over the `/*` that precedes the call on that line. The runner also
+# executes 1, so there is no drift, so the guard must stay silent - and with the
+# detector predicated on the counter's pattern it does. The false-positive shape
+# is pinned explicitly by
+# `test_the_detector_does_not_fire_where_the_counter_never_counted` below.
+#
+# Two more shapes are in that class, and the first version of this table asserted
+# drift for both - so it was wrong in the same direction as the defect it was
+# written to catch:
+#
+#   * `specify(` is not counted at all here. `_DEFINITION_KEYWORD` is `(?:it|test)`
+#     (measured: `guard._DEFINITION_KEYWORD`), so `/*\nspecify(..)\n*/` counts 1,
+#     not 2 - the counter is simply blind to the third keyword alias, which is a
+#     separate matter from this tripwire.
+#   * a *modifier chain* (`test.skip(`) is never counted either: `_DEFINITION_FORM`
+#     requires `(` directly after the keyword. Chains are
+#     `_CHAINED_DEFINITION_FORM`'s subject, and that tripwire is unanchored to
+#     comments - it reds a commented-out chain in its own right.
+#
+# What remains is the honest boundary: the counter cannot step over an opening
+# `/*` on the same line (`^\s*`), so an *inline* block comment is never counted and
+# therefore can never over-count. Drift requires the definition to start its line
+# - either later in the block, or right after a newline inside it.
+_COMMENT_PROBES = {
+    "definition starts the line inside a block": (
+        'describe("s", () => {\n'
+        '  /*\n'
+        '  it("disabled", () => {});\n'
+        '  */\n'
+        '  it("live", () => {});\n'
+        '});\n'
+    ),
+    "comment opens on its own line, definition on the next": (
+        '/*\n'
+        'test("disabled", () => {}); */\n'
+        'it("live", () => {});\n'
+    ),
+}
+
+
+@pytest.mark.parametrize("body", _COMMENT_PROBES.values(), ids=list(_COMMENT_PROBES))
+def test_counts_fail_loud_on_a_commented_out_definition(tmp_path, monkeypatch, body) -> None:
+    """A definition the counter counted, inside a block comment, must be reported.
+
+    Each probe counts **2** against the counter's own pattern while the runner
+    executes 1 - an over-count, the mirror of every other escape in this file.
+    The count is asserted here rather than described, because the previous
+    version of this test described a 2 that two of its probes did not have.
+    """
+    guard = _loaded_guard_module()
+    assert len(guard._DEFINITION_FORM.findall(body)) == 2, (
+        "this probe is only interesting if the counter counted the commented "
+        "definition; otherwise there is no over-count to report"
+    )
+    monkeypatch.setattr(guard, "REPO_ROOT", tmp_path)
+    _renderer_tree(tmp_path, {"lib/commented.test.ts": body})
+    with pytest.raises(AssertionError, match="inside block comments"):
+        guard._static_renderer_counts()
+
+
+def test_the_detector_does_not_fire_where_the_counter_never_counted() -> None:
+    """The false-positive half: no over-count, no report.
+
+    Reported by a reference implementation on the real runner (pm25coder,
+    2026-09-10) and reproduced here by loading this file's regexes: for the
+    *inline* shape the counter never counted the definition, so the counter and
+    the runner **agree**. A detector firing there advises deleting or restoring
+    a definition that was never in the count - a guard trained away, which is
+    what the prose-immunity rules above exist to avoid.
+
+    The old predicate (`_BLOCK_COMMENT_DEFINITION`) fired on all three rows; the
+    counter's own pattern fires on exactly the first.
+    """
+    guard = _loaded_guard_module()
+    no_drift = {
+        "inline block comment": 'it("live", () => {});\n/* it("disabled", () => {}); */\n',
+        # `_DEFINITION_FORM` requires `(` right after the keyword, so a chain is
+        # never counted here - again counter == runner, again nothing to report.
+        "modifier chain in an inline comment": (
+            '/* test.skip("disabled", () => {}); */\nit("live", () => {});\n'
+        ),
+        # Not counted either: `_DEFINITION_KEYWORD` is `(?:it|test)`, so this
+        # alias is invisible to the counter on any line, comment or not.
+        "a keyword alias the counter does not know": (
+            '/*\nspecify("disabled", () => {});\n*/\nit("live", () => {});\n'
+        ),
+    }
+    for label, body in no_drift.items():
+        assert len(guard._DEFINITION_FORM.findall(body)) == 1, (
+            f"{label}: the counter must not have counted the commented definition "
+            "(1, not 2), or this row would be real drift and belong in the table above"
+        )
+        assert not guard._commented_out_definitions(body), (
+            f"{label}: the counter and the runner agree here, so the detector must "
+            "stay silent - firing would red a file with nothing to repair"
+        )
+
+
+def test_the_detector_and_the_counter_share_one_definition_of_counted() -> None:
+    """The two sides of this tripwire must not drift apart again.
+
+    The detector's whole question is "would the counter have counted this?" - so
+    it must be the counter's pattern that answers, not a lookalike that happens to
+    match more. This pins the provenance rather than the behaviour: an edit that
+    gives `_commented_out_definitions` its own regex again would restore the
+    false positives, and it would do so silently, because every probe in this file
+    would still be written against the shapes that happen to work.
+    """
+    import inspect
+
+    guard = _loaded_guard_module()
+    body = inspect.getsource(guard._commented_out_definitions)
+    assert "_would_be_counted" in body, (
+        "the detector must predicate on the counter's own pattern; a separate "
+        "regex drifts and fires on inline comments the counter never counted"
+    )
+    assert guard._DEFINITION_FORM.search('it("x", () => {});'), (
+        "`_would_be_counted` is only a predicate for the counter if "
+        "`_DEFINITION_FORM` is the pattern the counter uses"
+    )
+    # The counter's pattern is the one `_count_definitions` returns, so a change
+    # there without a change here is exactly the divergence to catch.
+    assert "return len(_DEFINITION_FORM.findall(text))" in inspect.getsource(
+        guard._count_definitions
+    ), "the count must still be derived from _DEFINITION_FORM"
+
+
+def test_commented_out_tripwire_ignores_prose_about_the_spelling() -> None:
+    """The negative half: a comment *naming* a definition is not a removal.
+
+    The guard's file is written in prose about `it(`/`test(` spellings, so a
+    tripwire that fires on a sentence about one would force a rewrite of
+    innocent comments and be trained away. Only a commented line that *is* a
+    definition counts.
+    """
+    guard = _loaded_guard_module()
+    for body in (
+        # A comment mentioning a definition mid-sentence.
+        "/* the old it('x') was removed in #123 */\nit('live', () => {});\n",
+        # A doc comment describing the form, with the call not at line start.
+        "/**\n * Toggles `test(` behaviour.\n */\nit('live', () => {});\n",
+        # A line comment (already invisible to the counter, so not a tripwire).
+        "// it('disabled', () => {});\nit('live', () => {});\n",
+        # A commented expectation, not a definition.
+        "it('live', () => {\n  /* expect(x).toBe(1); */\n});\n",
+        # An ordinary file with no comments at all.
+        "describe('d', () => {\n  it('a', () => {});\n});\n",
+    ):
+        assert not guard._commented_out_definitions(body), (
+            f"the commented-out tripwire fires on prose, which would force a "
+            f"rewrite of innocent comments: {body!r}"
+        )
+
+
+def test_commented_out_tripwire_is_empty_on_the_real_tree() -> None:
+    """Measured boundary: no tracked test file comments a definition out.
+
+    Stated as a measurement - if a real file ever adopts the form, this fails
+    first and the fix is to delete the dead definition, which is exactly the
+    signal the tripwire exists to give.
+    """
+    guard = _loaded_guard_module()
+    test_files = sorted(
+        list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.ts"))
+        + list((REPO_ROOT / "emrg" / "gui" / "renderer" / "src").rglob("*.test.tsx"))
+        + list((REPO_ROOT / "emrg" / "gui" / "test").rglob("*.test.js"))
+    )
+    assert len(test_files) >= 50, f"expected >=50 test files, found {len(test_files)}"
+    tripped = {
+        path.relative_to(REPO_ROOT).as_posix(): guard._commented_out_definitions(
+            path.read_text(encoding="utf-8")
+        )
+        for path in test_files
+    }
+    tripped = {name: found for name, found in tripped.items() if found}
+    assert not tripped, (
+        "a real test file comments a definition out, so the static count exceeds "
+        f"what the runner executes and no doc value satisfies both gates: {tripped}. "
+        "Delete the dead definition (or restore it) - do not sync Agent.md to it."
+    )

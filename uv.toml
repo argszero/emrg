@@ -1,0 +1,44 @@
+# Project-level uv configuration.
+#
+# Why this file exists (sandbox deadlock, issues #1157 / #1159)
+# -----------------------------------------------------------
+# `uv.lock` records the index every package was resolved from, and this repo's
+# lock records the canonical PyPI index:
+#
+#     registry = "https://pypi.org/simple"
+#
+# A machine-level `~/.config/uv/uv.toml` (a common accelerator config, e.g. a
+# regional mirror) overrides that for *every* project. So a bare `uv run` /
+# `uv lock` re-resolves against the mirror and rewrites all 20 registry entries
+# in `uv.lock` in place - measured: 0 -> 277 rewritten lines, and the write
+# happens even when uv exits non-zero.
+#
+# That is not cosmetic. Evolution cycles run in the source checkout, and a dirty
+# working tree forces the next cycle into a read-only sandbox
+# (`emrg/server/scheduler.py` `_is_dirty_tree_sync`: a non-empty
+# `git status --porcelain` means read-only). A single bare `uv run` therefore
+# flipped the workspace permanently read-only, and repairing it required a git
+# write that the read-only sandbox itself blocks. The condition was
+# self-sustaining: seven consecutive cycles could not write anything.
+#
+# Pinning the index here makes the invariant structural rather than a rule
+# someone has to remember. Measured in isolated trees - pristine lock 0 mirror /
+# 20 canonical:
+#
+#     no project uv.toml   -> uv lock rewrites to  277 mirror / 0 canonical
+#     index-url = pypi.org -> uv lock leaves it at   0 mirror / 20 canonical
+#     index-url = mirror   -> uv lock rewrites to  277 mirror / 0 canonical
+#
+# The third row is the control: it is the *index setting*, not `uv lock` itself,
+# that rewrites the file.
+#
+# If you do need a mirror on your own machine (slow or blocked route to
+# pypi.org), override it in the environment rather than in this file - uv's
+# environment variables take precedence over this project config, and the lock
+# stays canonical:
+#
+#     UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync
+#
+# Please do not change this to a mirror: a mirror URL written into the lock
+# pollutes every future diff and re-triggers the read-only deadlock above.
+index-url = "https://pypi.org/simple"
