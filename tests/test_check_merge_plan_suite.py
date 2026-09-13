@@ -264,6 +264,104 @@ def test_the_suite_runs_in_a_real_worktree_not_an_extracted_archive(
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def _fake_run(monkeypatch, mod, stdout: str, stderr: str, rc: int) -> None:
+    monkeypatch.setattr(
+        mod,
+        "_run",
+        lambda argv, cwd=None, env=None: subprocess.CompletedProcess(argv, rc, stdout, stderr),
+    )
+
+
+# Measured on this machine (`git merge-tree --write-tree`, git 2.4x): a failure to
+# merge two *inputs* is reported with **exit code 1**, the same code a conflict
+# uses. The exit code therefore does not discriminate - the output does.
+MERGE_TREE_INPUT_FAILURES = [
+    "merge-tree: no-such-branch - not something we can merge\n",
+    (
+        "error: 45cf141ba67d59203f02a54f03162f3fcef57830: expected commit type, "
+        "but the object dereferences to blob type\n"
+        "merge-tree: 45cf141ba67d59203f02a54f03162f3fcef57830 - not something we can merge\n"
+    ),
+]
+
+REAL_CONFLICT_STDOUT = "\n".join(
+    [
+        "a99bc22e7c9f58ab0d501ebf64d1e9e0b440f21c",
+        "100644 df967b96a579e45a18b8251732d16804b2e56a55 1\tREADME.md",
+        "100644 45cf141ba67d59203f02a54f03162f3fcef57830 2\tREADME.md",
+        "100644 c376d892e8b105bd712d06ec5162b5f31ce949c3 3\tREADME.md",
+        "",
+        "Auto-merging README.md",
+        "CONFLICT (content): Merge conflict in README.md",
+    ]
+)
+
+
+@pytest.mark.parametrize("stderr", MERGE_TREE_INPUT_FAILURES)
+def test_a_merge_tree_failure_with_exit_code_one_is_not_read_as_a_conflict(
+    mod, monkeypatch, stderr: str
+) -> None:
+    """`rc == 1` is not the conflict signal; an empty stdout is the failure signal.
+
+    Measured: "not something we can merge" (an unknown ref, or an object that
+    dereferences to a blob) exits 1 with empty stdout, while a real conflict exits 1
+    with the merged tree's OID on the first line. Reading only the exit code turns
+    this failure into a `PlanConflict` with an empty path list, i.e. it tells the
+    caller to go resolve a conflict that does not exist.
+    """
+    _fake_run(monkeypatch, mod, "", stderr, 1)
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._merge_tree("a" * 40, "b" * 40)
+    # The diagnostic has to survive into the message, or the caller cannot tell why.
+    assert "not something we can merge" in str(excinfo.value)
+
+
+def test_a_real_conflict_shape_still_parses_into_paths(mod, monkeypatch) -> None:
+    """The fix must not stop reading actual conflicts (pinned in both directions)."""
+    _fake_run(monkeypatch, mod, REAL_CONFLICT_STDOUT, "", 1)
+    tree, paths = mod._merge_tree("a" * 40, "b" * 40)
+    assert tree is None
+    assert set(paths) == {"README.md"}
+
+
+def test_a_clean_merge_without_a_tree_is_a_measurement_error_not_a_crash(
+    mod, monkeypatch
+) -> None:
+    """An empty stdout with rc 0 used to raise IndexError, i.e. it exited 1.
+
+    Exit 1 is this tool's "the plan's tree FAILED the suite" - the finding - so an
+    unmeasured merge reported as a verdict is exactly the confusion this family of
+    tools exists to remove.
+    """
+    _fake_run(monkeypatch, mod, "", "", 0)
+    with pytest.raises(mod.MeasurementError):
+        mod._merge_tree("a" * 40, "b" * 40)
+
+
+def test_a_failing_merge_tree_makes_the_run_unanswerable_not_conflicted(
+    queue: tuple[Path, Path], mod, monkeypatch
+) -> None:
+    """The caller reads exit codes: 2 is "could not measure", 3 is "no final tree"."""
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    real_run = mod._run
+
+    def failing_merge_tree(argv, cwd=None, env=None):
+        if "merge-tree" in argv:
+            return subprocess.CompletedProcess(
+                argv, 1, "", "merge-tree: deadbeef - not something we can merge\n"
+            )
+        return real_run(argv, cwd=cwd, env=env)
+
+    monkeypatch.setattr(mod, "_run", failing_merge_tree)
+    # 3 would tell the caller to resolve a conflict / reorder the plan. Nothing was
+    # conflicted; the question could not be answered.
+    assert mod.main(["1", "--base", "master"]) == 2
+
+
 def test_a_suite_that_cannot_run_is_not_reported_healthy(
     queue: tuple[Path, Path], mod, monkeypatch
 ) -> None:
