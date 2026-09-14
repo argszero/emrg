@@ -265,7 +265,6 @@ def test_prompt_memory_writes_land_where_the_sandbox_allows_them() -> None:
 # and reaching empty is what "no residue" means.
 PENDING_STATE_SWEEP = {
     "promote_prompt.md",
-    "paper_prompt.md",
     "journal_prompt.md",
 }
 
