@@ -50,6 +50,7 @@ from emrg.server.tool_types import ToolResult
 from emrg.memory import (
     INDEX_COUNT_WARN,
     INDEX_SIZE_WARN,
+    INDEX_TITLE_MAX_CHARS,
     ProjectMemoryStore,
     SessionMemoryStore,
 )
@@ -4528,12 +4529,30 @@ class EmrgServer:
                     "searchable entries by topic.\n"
                     "- Update existing entries in place when new info refines them; "
                     "MEMORY.md stays a pure index (one short line per entry, "
-                    "title ≤512 chars).\n"
+                    f"title ≤{INDEX_TITLE_MAX_CHARS} chars).\n"
                 )
-                if store.count > INDEX_COUNT_WARN or index_size > INDEX_SIZE_WARN:
+                # Which soft cap was passed, named from the constants that fire it.
+                # This used to state "(past the ~50-entry soft cap)" for *every*
+                # trigger. Measured 2026-09-14: `INDEX_COUNT_WARN` has been 100 since
+                # it was introduced (`e67a0a2`, #1057), and this message was written
+                # after that (`33d5700`, #1067), so the number it stated never matched
+                # the constant that fires the branch — and when only the *size* cap
+                # had been passed, the message still blamed the entry count. A
+                # reminder that names the wrong cause sends the agent to consolidate
+                # the wrong thing, or teaches it that the warning is not to be
+                # trusted. The store's own warnings (`_warn_index_thresholds`) each
+                # name their own number and their own measurement; this is that same
+                # fact said once, in the prompt the reflection module reads.
+                passed_caps: list[str] = []
+                if store.count > INDEX_COUNT_WARN:
+                    passed_caps.append(f"{INDEX_COUNT_WARN}-entry")
+                if index_size > INDEX_SIZE_WARN:
+                    passed_caps.append(f"{INDEX_SIZE_WARN // 1024}KB")
+                if passed_caps:
                     hygiene_note += (
                         f"\n⚠️ Index currently {store.count} entries / {index_size} "
-                        "bytes (past the ~50-entry soft cap) — prioritize "
+                        f"bytes — past the {' and '.join(passed_caps)} soft cap"
+                        f"{'s' if len(passed_caps) > 1 else ''} — prioritize "
                         "consolidation this round.\n"
                     )
 
@@ -4560,7 +4579,7 @@ class EmrgServer:
                     "- Prefer session-scope for tentative/evolving knowledge; "
                     "project-scope for stable, cross-session facts\n"
                     "- Keep MEMORY.md a pure index: one short line per entry "
-                    "(title ≤512 chars); update entries in place rather than appending\n"
+                    f"(title ≤{INDEX_TITLE_MAX_CHARS} chars); update entries in place rather than appending\n"
                     f"{hygiene_note}"
                     "\n"
                     "Memory format (YAML frontmatter + Markdown):\n"

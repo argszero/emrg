@@ -8,7 +8,12 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from emrg.memory import ProjectMemoryStore, SessionMemoryStore
+from emrg.memory import (
+    INDEX_COUNT_WARN,
+    INDEX_SIZE_WARN,
+    ProjectMemoryStore,
+    SessionMemoryStore,
+)
 from emrg.session import Session
 
 
@@ -139,6 +144,173 @@ class TestMemoryReflection:
                 assert "no consolidation needed" in prompt_text  # forbidden skip
                 assert "化零为整" in prompt_text
                 assert "化整为零" in prompt_text
+
+        asyncio.run(_test())
+
+
+class TestTheReminderNamesTheCapThatFired:
+    """The soft-cap reminder must name the cap that actually fired, from the constants.
+
+    Measured 2026-09-14: the reminder said `(past the ~50-entry soft cap)` for every
+    trigger, while `INDEX_COUNT_WARN` — the constant that fires the entry branch —
+    has been **100** since it was introduced (`e67a0a2`, #1057), and the reminder was
+    written after that (`33d5700`, #1067). So the number never matched its constant,
+    and a size-only trigger still blamed the entry count. These arms measure the
+    three states: below both caps (silent), size only, count only — plus the title
+    limit, which is stated from the constant that truncates it.
+    """
+
+    def test_below_both_caps_the_reminder_is_silent(self):
+        """The hygiene block is always there (rant 2026-08-28T22:12:16); the ⚠️ line is not."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                session = Session.create_with_id("s_cap_none", Path(tmp))
+                session.memory_store.create("task", "One task", "body")
+                server = _make_server({"content": "no new memories"})
+
+                server._maybe_reflect_memory(
+                    session, "Any feedback?", "No, everything looks good for now."
+                )
+                await asyncio.sleep(0.15)
+
+                prompt_text = server.llm.chat.call_args[0][0][0]["content"]
+                assert "Memory hygiene" in prompt_text
+                assert "Index currently" not in prompt_text, (
+                    "the caps were not passed, so no ⚠️ line may appear"
+                )
+
+        asyncio.run(_test())
+
+    def test_size_only_names_the_size_and_not_the_count(self):
+        """A size-only trigger names the size cap — and must not blame the entry count.
+
+        The size cap is tuned down to 1KB rather than writing 50KB, which also makes
+        this arm a *derivation* check: a reminder that re-spelled a number could not
+        follow the constant. The state is measured, not assumed — the first draft of
+        this arm set the cap to 100 bytes over an index of 92 and asserted a ⚠️ line
+        that was correctly absent, which is the arm doing its job.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                session = Session.create_with_id("s_cap_size", Path(tmp))
+                store = session.memory_store
+                for i in range(20):
+                    store.create("task", f"Task number {i}", "body")
+                assert store.count <= INDEX_COUNT_WARN, "the entry cap must not fire here"
+
+                import emrg.server.daemon as daemon_mod
+                original = daemon_mod.INDEX_SIZE_WARN
+                daemon_mod.INDEX_SIZE_WARN = 1024  # 1KB: the index below is ~1.6KB
+                try:
+                    assert store.index_path.stat().st_size > daemon_mod.INDEX_SIZE_WARN, (
+                        "the size cap must actually be passed, or this arm measures nothing"
+                    )
+                    server = _make_server({"content": "no new memories"})
+                    server._maybe_reflect_memory(
+                        session, "Any feedback?", "No, everything looks good for now."
+                    )
+                    await asyncio.sleep(0.15)
+                finally:
+                    daemon_mod.INDEX_SIZE_WARN = original
+
+                prompt_text = server.llm.chat.call_args[0][0][0]["content"]
+                assert "Index currently" in prompt_text, "the size cap was passed"
+                assert f"{1024 // 1024}KB" in prompt_text, (
+                    "the reminder must name the size cap it actually passed"
+                )
+                assert "50-entry" not in prompt_text
+                assert f"{INDEX_COUNT_WARN}-entry" not in prompt_text, (
+                    "only the size cap was passed, so the entry cap must not be blamed"
+                )
+
+        asyncio.run(_test())
+
+    def test_count_only_names_the_count_from_its_constant(self):
+        """The entry branch states `INDEX_COUNT_WARN` entries — measured, not typed."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                session = Session.create_with_id("s_cap_count", Path(tmp))
+                store = session.memory_store
+                for i in range(INDEX_COUNT_WARN + 1):
+                    store.create("task", f"Task {i}", "body")
+                assert store.count > INDEX_COUNT_WARN
+                assert store.index_path.stat().st_size <= INDEX_SIZE_WARN  # size not passed
+
+                server = _make_server({"content": "no new memories"})
+                server._maybe_reflect_memory(
+                    session, "Any feedback?", "No, everything looks good for now."
+                )
+                await asyncio.sleep(0.2)
+
+                prompt_text = server.llm.chat.call_args[0][0][0]["content"]
+                assert "Index currently" in prompt_text
+                assert f"{INDEX_COUNT_WARN}-entry" in prompt_text
+                assert "soft cap —" in prompt_text, "one cap passed => singular"
+
+        asyncio.run(_test())
+
+    def test_the_title_limit_is_stated_from_its_constant(self):
+        """`≤512 chars` is `INDEX_TITLE_MAX_CHARS`; a tuned constant moves the text."""
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                session = Session.create_with_id("s_cap_title", Path(tmp))
+                session.memory_store.create("task", "One task", "body")
+                server = _make_server({"content": "no new memories"})
+
+                import emrg.server.daemon as daemon_mod
+                original = daemon_mod.INDEX_TITLE_MAX_CHARS
+                daemon_mod.INDEX_TITLE_MAX_CHARS = 256
+                try:
+                    server._maybe_reflect_memory(
+                        session, "Any feedback?", "No, everything looks good for now."
+                    )
+                    await asyncio.sleep(0.15)
+                finally:
+                    daemon_mod.INDEX_TITLE_MAX_CHARS = original
+
+                prompt_text = server.llm.chat.call_args[0][0][0]["content"]
+                assert "≤256 chars" in prompt_text, (
+                    "the stated limit must follow INDEX_TITLE_MAX_CHARS"
+                )
+                assert "512 chars" not in prompt_text
+
+        asyncio.run(_test())
+
+
+    def test_both_caps_names_both(self):
+        """When both were passed the reminder says so, and says it in the plural.
+
+        Without this state the pluralisation and the join in the message are
+        unreached code — a mutant that always writes the singular would survive.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                session = Session.create_with_id("s_cap_both", Path(tmp))
+                store = session.memory_store
+                for i in range(20):
+                    store.create("task", f"Task number {i}", "body")
+
+                import emrg.server.daemon as daemon_mod
+                original_size = daemon_mod.INDEX_SIZE_WARN
+                original_count = daemon_mod.INDEX_COUNT_WARN
+                daemon_mod.INDEX_SIZE_WARN = 1024
+                daemon_mod.INDEX_COUNT_WARN = 1
+                try:
+                    assert store.index_path.stat().st_size > daemon_mod.INDEX_SIZE_WARN
+                    assert store.count > daemon_mod.INDEX_COUNT_WARN
+                    server = _make_server({"content": "no new memories"})
+                    server._maybe_reflect_memory(
+                        session, "Any feedback?", "No, everything looks good for now."
+                    )
+                    await asyncio.sleep(0.15)
+                finally:
+                    daemon_mod.INDEX_SIZE_WARN = original_size
+                    daemon_mod.INDEX_COUNT_WARN = original_count
+
+                prompt_text = server.llm.chat.call_args[0][0][0]["content"]
+                assert "past the 1-entry and 1KB soft caps" in prompt_text, (
+                    "both caps passed => both are named, plural"
+                )
 
         asyncio.run(_test())
 
