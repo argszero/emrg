@@ -88,6 +88,47 @@ def _fm_line_key(line: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _fm_line_owners(lines: list[str] | tuple[str, ...]) -> list[str | None]:
+    """Which key each frontmatter line belongs to, including its continuations.
+
+    A save replaces a key's line when the store changed that key, so it has to
+    know *all* the lines that line owns — otherwise the pieces it left behind
+    are the story: a block scalar's continuation lines turn a single-line
+    replacement into broken YAML, and a repeated key replayed verbatim after the
+    replacement is the one YAML keeps, so the write lands and then reads back as
+    the old value. Blank lines and column-0 comments own nothing.
+    """
+    owners: list[str | None] = []
+    current: str | None = None
+    for line in lines:
+        key = _fm_line_key(line)
+        if key is not None:
+            current = key
+            owners.append(key)
+        elif line[:1].isspace():
+            owners.append(current)  # an indented continuation of the key above
+        else:
+            current = None
+            owners.append(None)
+    return owners
+
+
+# The keys `MemoryFile` owns — the ones it renders, and so the only ones it may
+# replace or drop. A key outside this set belongs to the file, not to the model.
+_OWNED_FIELDS = frozenset(
+    {
+        "id",
+        "event_at",
+        "created_at",
+        "updated_at",
+        "source_session",
+        "type",
+        "scope",
+        "status",
+    }
+)
+
+
 # ── Constants ──────────────────────────────────────────────────────
 
 VALID_TYPES = {"user", "feedback", "project", "reference", "decision", "task"}
@@ -295,24 +336,50 @@ class MemoryFile:
         30 that still differ are 21 index/archive files that carry no
         frontmatter at all (``MemoryIndex`` writes those, not this class), 8
         whose body ends in a blank line, and 1 missing the required timestamps.
+
+        Replaying a line is only safe if the save knows every line that line
+        owns. A changed key is replaced *with* its continuations (otherwise a
+        block scalar's remaining lines re-attach to a single-line replacement
+        and the frontmatter stops parsing) and *at every occurrence* (otherwise
+        a repeated key is still there verbatim, and YAML keeps the last one —
+        so the store's write lands and then reads back as the old value).
+        Neither shape occurs in this machine's corpus (0 of 1654 frontmatter
+        files, measured 2026-09-14), but both were one write away from silent
+        data loss, and a writer that only works on the shapes already on disk
+        is a writer that fails on the shapes a person types next.
         """
         canonical = self._canonical_frontmatter()
+        lines = list(self._fm_lines or ())
+        owners = _fm_line_owners(lines)
+        # A key is replaced when the file's line for it no longer says what this
+        # model says: the value changed, or the field now renders to nothing (a
+        # cleared `source_session` has to go, not sit there contradicting it).
+        replaced: set[str] = set()
+        for key in set(owners):
+            if key is None or key not in _OWNED_FIELDS or key not in self._fm_parsed:
+                continue  # not ours, or new — a new field is appended below
+            if (
+                canonical.get(key) is not None
+                and self._fm_parsed[key] == getattr(self, key)
+            ):
+                continue  # untouched since it was read: replay it verbatim
+            replaced.add(key)
+
         out = ["---"]
         emitted: set[str] = set()
-        for line in self._fm_lines or ():
-            key = _fm_line_key(line)
-            if key is None or key in emitted:
-                # A comment, a nested/continuation line, or a repeated key:
-                # nothing here for us to own, so it stays as written.
+        for line, owner in zip(lines, owners, strict=True):
+            if owner is None or owner not in _OWNED_FIELDS:
+                out.append(line)  # a comment, a blank, or a key that is not ours
+                continue
+            if owner not in replaced:
+                emitted.add(owner)  # this field did not move: replay as written
                 out.append(line)
                 continue
-            emitted.add(key)
-            if key not in canonical:
-                out.append(line)  # a key this model has no field for: keep it
-            elif self._fm_parsed.get(key) == getattr(self, key):
-                out.append(line)  # untouched since it was read: keep it
-            else:
-                out.append(canonical[key])
+            if owner in emitted:
+                continue  # its canonical line already stands for the key
+            emitted.add(owner)
+            if canonical.get(owner) is not None:
+                out.append(canonical[owner])
         for key, line in canonical.items():
             if key not in emitted:
                 out.append(line)
