@@ -233,7 +233,7 @@ Posting the promotion is not the end, it's the beginning:
 
 #### Step 4 — Collect feedback (two-way value)
 
-Promotion is two-way. Community feedback gathered during promotion — **proactively write valuable items to rants.jsonl**, handled by the evolution task of that project (feature requests go to the backlog, bugs to the fix queue, negative feedback to the improvement plan). The promotion task itself does not implement these features — it only collects and hands them off.
+Promotion is two-way. Community feedback gathered during promotion — **proactively hand it off as a rant**, handled by the evolution task of that project (feature requests go to the backlog, bugs to the fix queue, negative feedback to the improvement plan). The promotion task itself does not implement these features — it only collects and hands them off.
 
 **What counts as valuable feedback (write to a rant)**:
 
@@ -246,41 +246,33 @@ Promotion is two-way. Community feedback gathered during promotion — **proacti
 | Use case | "I solved X with it" (non-trivial scenario) | use case / marketing material |
 | Clear intent | "this project solves my problem exactly" | potential user signal |
 
-**Do NOT write**: pure likes/pleasantries ("nice!"), unrelated topics, duplicate existing feedback, low-information replies.
+**Do NOT submit**: pure likes/pleasantries ("nice!"), unrelated topics, duplicate existing feedback, low-information replies.
 
-**Writing rules** (consistent with existing rant management):
+**Writing rules** — one tool call, and never a hand-written rewrite of the file:
 
-```python
-import json, os
-rants_file = os.path.expanduser("~/.emrg/rants.jsonl")
-rants = [json.loads(l) for l in open(rants_file) if l.strip()]
-new_entry = {
-    "timestamp": "YYYY-MM-DDTHH:MM:SS.ffffff",
-    "project": "{{ project.name }}",  # promoted project name → handled by that project's evolution task
-    "status": "pending",
-    "progress": None,
-    "message": "community feedback (<channel> <link>): <summary of the user's intent>",
-}
-# Dedupe: skip if a similar pending rant already exists
-if not any(r.get("project") == new_entry["project"] and r.get("status") == "pending"
-           and r.get("message", "")[:20] == new_entry["message"][:20] for r in rants):
-    rants.append(new_entry)
-rants.sort(key=lambda r: r.get("timestamp", ""))
-with open(rants_file, "w", encoding="utf-8") as f:
-    for r in rants:
-        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+```
+submit_rant(action="submit", project="{{ project.name }}",
+            message="community feedback (<channel> <link>): <summary of the user's intent>")
 ```
 
-- Field order: `timestamp → project → status → progress → completed → message` (message last)
-- Use `json.dumps(..., ensure_ascii=False)`; no Chinese escaping
-- Each message notes the source (channel + link) so the evolution task can trace back
+`submit_rant` is the only writer of `rants.jsonl` (rant 2026-08-18T16:42:52 — the
+unified tool exists because inline scripts drifted the format: array rows, lost
+fields, pruned history). It owns the file's shape: the timestamp, the field order,
+the sort and `ensure_ascii=False` are the tool's business and are not restated
+here, because a second copy of a rule is a copy that can disagree. So there is
+nothing for this prompt to write by hand — and no reason to open the file at all,
+not even to read it.
+
+- `project` = the promoted project's registered short name (as in `~/.emrg/projects.yml`); the rant is then handled by that project's evolution task. The tool warns when the name is not registered.
+- Deduplicate before submitting: `submit_rant(action="list", project="{{ project.name }}")` and skip feedback that is already queued.
+- Each message notes the source (channel + link) so the evolution task can trace back.
 
 **Also file a public GitHub issue on the promoted project** (rant 2026-08-22T08:14:31) — a rant is an internal queue (no issue number, not community-visible); a public issue is transparent, traceable, and lets the community participate. For **valuable feedback** (same table above — feature request / bug report / negative experience / new problem / inspiration):
 
 1. Open a public issue on the target repo: `gh issue create -R {{ owner }}/{{ repo }} --title "<English title>" --body "<feedback summary> (source: <channel> <link>)"` — English title/body (language policy), body includes the source link for traceability.
 2. On success → record the issue number + link in the state file (e.g. `- filed issues: <#N> (<summary>, <link>)`), and optionally reference that issue number in the rant entry to avoid the evolution task re-processing the same feedback.
 3. Reuse the existing value table for the bar; **do NOT file** for pure praise / unrelated / duplicate / low-information. Do not over-encourage the community: only nudge someone to file an issue themselves if **both** hold (per host 2026-08-22): (a) the discussion already explicitly referenced the promoted project, and (b) you judge them likely willing (engaged / interested / proactively asking). Otherwise **file it yourself** (the `gh issue create` path above) rather than nudging.
-4. If the target repo has issues disabled (some open-source projects), degrade to the rants.jsonl path only.
+4. If the target repo has issues disabled (some open-source projects), degrade to the rant handoff alone (the `submit_rant` call above).
 5. The promotion task does not implement these — it only collects (rant + issue) and hands off, consistent with the existing rant handoff semantics.
 
 ---
