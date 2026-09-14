@@ -165,29 +165,41 @@ import subprocess
 import sys
 from pathlib import Path
 
-# `100644 <blob> <stage>\t<path>` - the conflict block merge-tree writes first,
-# one line per side per conflicted path. Stage 1/2/3 are base/ours/theirs.
-_CONFLICT_LINE = re.compile(r"^[0-7]{6} [0-9a-f]+ [123]\t(.+)$")
+# `100644 <blob> <stage>\t<path>` - the conflict block merge-tree writes first, one
+# line per side per conflicted path (stage 1/2/3 are base/ours/theirs) - is matched
+# by `health._conflict_block_paths` below rather than by a second regex here: that
+# reading is one rule with one implementation, and this tool asks the owner of it.
 
-# The sibling tool's base resolution, loaded from its file rather than imported by
-# name: the scripts in this directory are not importable modules (hyphenated names,
-# no package), and this is the same loader the test suite already uses for them.
-# Taken from the sibling rather than copied so the *rule* has one implementation -
-# a base name's meaning must not differ between the gates that ask about it.
+# The sibling tools whose rules this one asks for, loaded from their files rather than
+# imported by name: the scripts in this directory are not importable modules
+# (hyphenated names, no package), and this is the same loader the test suite already
+# uses for them. Taken from the sibling rather than copied so each *rule* has one
+# implementation - a base name's meaning must not differ between the gates that ask
+# about it, and neither must a conflicted path's name.
+#
+# * `check-merge-sequence.py` owns base resolution (`_qualify_ref`, `_refresh_base`).
+# * `check-merge-tree-health.py` owns the conflicted-path *reading* - the shape match
+#   plus the decoding of git's path quoting (`_conflict_block_paths`), the change
+#   #1212 landed and #1215 delegated to.
+#
+# Both dependencies are one-way (neither sibling loads this file), so loading them
+# eagerly here cannot recurse.
 _SIBLING = Path(__file__).resolve().parent / "check-merge-sequence.py"
+_PATHS_SIBLING = Path(__file__).resolve().parent / "check-merge-tree-health.py"
 
 
-def _load_sibling():
-    spec = importlib.util.spec_from_file_location("check_merge_sequence", _SIBLING)
+def _load_sibling(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:  # pragma: no cover - file is in this repo
-        raise RuntimeError(f"could not load {_SIBLING}")
+        raise RuntimeError(f"could not load {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-seq = _load_sibling()
+seq = _load_sibling(_SIBLING, "check_merge_sequence")
+health = _load_sibling(_PATHS_SIBLING, "check_merge_tree_health")
 
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -304,6 +316,27 @@ def _conflict_paths(a: str, b: str) -> list[str] | None:
     An unevidenced answer in the other direction was already refused (`paths or
     None`), so the asymmetry was the whole defect: the *reassuring* answer was the
     half that could be invented.
+
+    **The paths are decoded, not passed through as git wrote them.** This function
+    used to match the stage block's shape itself and return the text after the tab,
+    which is git's *spelling* of the name rather than the name: with the default
+    `core.quotePath=true`, a path holding a non-ASCII byte, a quote, a backslash or a
+    control byte arrives C-quoted. Measured 2026-09-14 (`cyc20260914-104220`, git
+    2.50.1, scratch repos), a conflict in `中文.txt` was reported here as
+    `'"\\344\\270\\255\\346\\226\\207.txt"'` - and `(repo / that).exists()` was
+    measured `False`, while the sibling's decoded reading answers `中文.txt`
+    (`exists? → True`). Those names are not decoration: `forecast` prints them
+    ("CONFLICTS with the base on ...", "dirties ... on ... (n)") and attributes the
+    cascade through them, so a quoted spelling tells the caller to resolve a file
+    that does not exist.
+
+    The reading is the sibling's rather than a fifth copy of the rule
+    (`check-merge-tree-health.py::_conflict_block_paths`, which matches the shape and
+    decodes the quoting; #1212 landed it and #1215 delegated the sequence tool to it).
+    This function keeps its own two contract bits on top: the paths are deduplicated
+    here (the sibling returns one entry per stage line, three for a content conflict),
+    and an empty answer stays `None` - "not answered" - rather than becoming the
+    clean answer above.
     """
     proc = _run(["git", "merge-tree", "--write-tree", a, b])
     lines = proc.stdout.splitlines()
@@ -320,16 +353,9 @@ def _conflict_paths(a: str, b: str) -> list[str] | None:
     if proc.returncode != 1:
         return None
     paths: list[str] = []
-    for line in lines:
-        if not line.strip():
-            break  # end of the conflict block; the rest is the message
-        match = _CONFLICT_LINE.match(line)
-        if match:
-            path = match.group(1)
-            if path not in paths:
-                paths.append(path)
-        elif paths:
-            break
+    for path in health._conflict_block_paths(lines):
+        if path not in paths:
+            paths.append(path)
     return paths or None
 
 

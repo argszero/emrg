@@ -212,6 +212,67 @@ class TestTheMergeQuestionIsAnswered():
         )
         assert mod._conflict_paths("a", "b") == []
 
+    def test_the_path_reading_is_the_siblings_not_a_copy_here(
+        self, mod, monkeypatch
+    ) -> None:
+        """The delegation must be live, not a local regex kept beside a loaded sibling.
+
+        Measured 2026-09-14 (`cyc20260914-104220`): this file used to match the stage
+        block's shape itself, and a copy left in place answers whatever the sibling
+        would - so tests written against the *result* pass either way. Replacing the
+        sibling's reader in-process makes the difference visible: if the sentinel
+        comes back, this tool's `_conflict_paths` really is asking the sibling.
+        """
+        monkeypatch.setattr(
+            mod.health, "_conflict_block_paths", lambda lines: ["SENTINEL-FROM-SIBLING"]
+        )
+        out = (
+            _TREE + "\n"
+            "100644 f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0 1\tAgent.md\n"
+            "100644 e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0 2\tAgent.md\n"
+        )
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 1, out, ""),
+        )
+        assert mod._conflict_paths("a", "b") == ["SENTINEL-FROM-SIBLING"]
+
+    def test_the_dedupe_and_the_not_answered_answer_stay_this_tools(
+        self, mod, monkeypatch
+    ) -> None:
+        """What this file adds on top of the sibling's reading, pinned separately.
+
+        The sibling returns one entry per stage line - three for a content conflict -
+        so the dedupe is this tool's; and an empty answer must stay `None` ("not
+        answered") rather than collapse into the clean `[]` above it. Both are
+        contract bits the sibling does not own, so delegating the reading must not
+        quietly delegate them too.
+        """
+        repeated = (
+            _TREE + "\n"
+            "100644 f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0 1\tAgent.md\n"
+            "100644 e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0 2\tAgent.md\n"
+            "100644 d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0 3\tAgent.md\n"
+        )
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 1, repeated, ""),
+        )
+        assert mod._conflict_paths("a", "b") == ["Agent.md"]
+
+        blockless = _TREE + "\nCONFLICT (content): Merge conflict in Agent.md\n"
+        monkeypatch.setattr(
+            mod,
+            "_run",
+            lambda argv: subprocess.CompletedProcess(argv, 1, blockless, ""),
+        )
+        assert mod._conflict_paths("a", "b") is None, (
+            "a conflict whose paths the report does not name is 'not answered', "
+            "never the clean answer"
+        )
+
 
 class TestNoMutableRefNameReachesMergeTree:
     """The invariant whose absence produced a plausible, wrong live answer.
@@ -513,6 +574,46 @@ class TestAgainstRealGitHistory:
         mod = _load_module()
         assert mod._conflict_paths("main", "clean") == []
         assert mod._conflict_paths("main", "grow") == ["f.txt"]
+
+    def test_a_quoted_path_is_reported_as_the_real_name(self, tmp_path, monkeypatch):
+        """The arm that tells a decoding reading from a pass-through one.
+
+        Measured 2026-09-14 (`cyc20260914-104220`, git 2.50.1, scratch repo): with the
+        default `core.quotePath=true` a non-ASCII path arrives C-quoted in the stage
+        block - `"\\344\\270\\255\\346\\226\\207.txt"` for `中文.txt` - and the reading
+        this file used to have returned that spelling, which `(repo / that).exists()`
+        measured `False`. Because `forecast` prints the paths and attributes the
+        cascade through them, the caller was told to resolve a file that is not there.
+        Real git, because the quoting is git's behaviour rather than a fixture's.
+
+        The same arm is why the reading is the sibling's: the shape alone cannot
+        answer this one, only the shape plus the decoding.
+        """
+        name = "\u4e2d\u6587.txt"
+        repo = tmp_path / "r"
+        repo.mkdir()
+        self._git(repo, "init", "-q", "-b", "main")
+        self._git(repo, "config", "user.email", "t@example.com")
+        self._git(repo, "config", "user.name", "t")
+        (repo / name).write_text("base\n", encoding="utf-8")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "base")
+
+        self._git(repo, "checkout", "-q", "-b", "side")
+        (repo / name).write_text("side\n", encoding="utf-8")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "side rewrites it")
+
+        self._git(repo, "checkout", "-q", "main")
+        (repo / name).write_text("main\n", encoding="utf-8")
+        self._git(repo, "add", "-A")
+        self._git(repo, "commit", "-qm", "main rewrites it")
+
+        monkeypatch.chdir(repo)
+        mod = _load_module()
+        paths = mod._conflict_paths("main", "side")
+        assert paths == [name], paths
+        assert (repo / paths[0]).exists(), "the report named something unopenable"
 
     def test_the_shapes_git_really_prints(self, tmp_path) -> None:
         """Measure the output this tool reads its verdict from, on real git.
