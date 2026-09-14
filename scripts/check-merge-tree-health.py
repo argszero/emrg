@@ -84,7 +84,10 @@ Exit codes
 
 Conflicting PRs are reported as CONFLICT and are not a failure of this check:
 they cannot be merged as they stand, so there is no merged tree to judge. That
-question belongs to `check-merge-order.py`.
+question belongs to `check-merge-order.py`. The files such a refusal names are the
+real ones - read from the report's stage block and decoded out of git's path
+quoting (`_conflict_block_paths`) - so `conflicts on ...` names a file that can be
+opened, and not, as it used to, a name no resolver has.
 """
 
 from __future__ import annotations
@@ -327,6 +330,125 @@ def _is_object_name(line: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
 
 
+#: A conflicted path as the *stage block* writes it: `<mode> <blob> <stage>\t<path>`.
+#: The block is the report's first block - one line per side per conflicted path,
+#: stages 1/2/3 - and it ends at the first blank line, after which git writes prose
+#: ("Auto-merging <path>", "CONFLICT (content): Merge conflict in <path>"). The mode
+#: is `[0-7]{6}` so a symlink (120000) or a gitlink (160000) is named like any other
+#: path. See `_conflict_block_paths` for why the shape is matched instead of the tab.
+_CONFLICT_LINE = re.compile(r"^[0-7]{6} [0-9a-f]+ [123]\t(?P<path>.+)$")
+
+#: The escapes git's path quoting uses - `quote_c_style`'s set, as bytes.
+_C_ESCAPES = {
+    "a": 0x07,
+    "b": 0x08,
+    "f": 0x0C,
+    "n": 0x0A,
+    "r": 0x0D,
+    "t": 0x09,
+    "v": 0x0B,
+    "\\": 0x5C,
+    '"': 0x22,
+}
+
+
+def _unquote_path(path: str) -> str:
+    """The path git *means*, from the path git wrote.
+
+    `merge-tree` quotes a path that holds a quote, a backslash, a control byte, or
+    - with the default `core.quotePath=true` - a non-ASCII byte, C-style:
+    `f<TAB>tab.txt` arrives as `"f\\ttab.txt"`, and `中文.txt` as
+    `"\\344\\270\\255\\346\\226\\207.txt"` (measured 2026-09-14,
+    `cyc20260914-074822`, git 2.50.1, in a scratch repo). Passed through as
+    written, either names a file nobody has: the verdict below reads "conflicts
+    on " and names something no resolver can open - the quoted spelling for one
+    arm, and, worse, a name that does not exist at all for the other (see
+    `_conflict_block_paths`).
+
+    Decoding here also makes the path independent of the *reader's* locale: the
+    escapes are ASCII, so the real bytes are reassembled by this function rather
+    than by whatever encoding the subprocess reader happened to pin.
+
+    The same rule and the same spelling as `check-merge-plan-suite.py`, which
+    answers this question about a plan rather than about one merge (#1210).
+    """
+    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
+        # Unquoted: git wrote the path's bytes as they are (with
+        # `core.quotePath=false`, or a path that needed no quoting at all).
+        return path
+    body = path[1:-1]
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        char = body[i]
+        if char != "\\":
+            out.extend(char.encode("utf-8"))
+            i += 1
+            continue
+        i += 1
+        if i >= len(body):
+            # A lone trailing backslash: not a quoted path after all. Keep it.
+            out.extend(b"\\")
+            break
+        escape = body[i]
+        if escape in _C_ESCAPES:
+            out.append(_C_ESCAPES[escape])
+            i += 1
+        elif escape in "01234567":
+            # Octal, always three digits in git's output; a short tail is taken
+            # as it comes rather than invented into a byte.
+            digits = body[i : i + 3]
+            i += len(digits)
+            out.append(int(digits, 8) & 0xFF)
+        else:
+            out.extend(escape.encode("utf-8"))
+            i += 1
+    # `errors="replace"`: the bytes may be any encoding, and the reader that
+    # produced `path` was already pinned to UTF-8 (see `_run`). A name outside
+    # UTF-8 degrades the same way here as it would anywhere else in this tool.
+    return out.decode("utf-8", errors="replace")
+
+
+def _conflict_block_paths(lines: list[str]) -> list[str]:
+    """The conflicted paths a conflict report's stage block names.
+
+    **The stage block, not "every line with a tab in it".** The reading this
+    replaces took the text after the first tab from *any* line of the report, and
+    the report continues past the block with prose that embeds the conflicted
+    paths. Measured (2026-09-14, `cyc20260914-074822`, git 2.50.1, in a scratch
+    repo) a conflict in a file named `f<TAB>tab.txt` reports
+
+        100644 <blob> 1\t"f\\ttab.txt"        <- the stage block: git's spelling
+        ...
+        Auto-merging f<TAB>tab.txt            <- prose: a real tab, not a separator
+        CONFLICT (content): Merge conflict in f<TAB>tab.txt
+
+    and the old reading answered `conflicts on "f\\ttab.txt", tab.txt` for it:
+    one name nobody can open, and one file that collides with nothing and does not
+    exist, named in a refusal as if it did.
+
+    The rule is the *shape*: every line of the stage block is
+    `<mode> <blob> <stage>` followed by a tab and the path, and the prose that
+    follows the block is none of that. The blank line git writes after the block
+    is where the prose begins, but it is not what excludes it - stopping there as
+    well was measured to change no answer in any of these arms, i.e. it would be a
+    guard no test can hold - so the shape is the only rule, and it is the one the
+    tests in `tests/test_check_merge_tree_health.py` weaken to prove it is load
+    bearing.
+
+    The paths are returned as the real names (see `_unquote_path`), one per stage
+    line, in the order git wrote them: stages 1/2/3 of the same path appear once
+    per stage - which is what lets a rename conflict name all three sides - and
+    the caller dedupes before printing.
+    """
+    paths: list[str] = []
+    for line in lines[1:]:  # lines[0] is the merged tree's name
+        match = _CONFLICT_LINE.match(line)
+        if match:
+            paths.append(_unquote_path(match.group("path")))
+    return paths
+
+
 def _merge_tree_paths(a: str, b: str, cwd: str | None = None) -> list[str] | None:
     """Conflicted paths when `a` and `b` are merged; None if unmeasurable.
 
@@ -344,6 +466,10 @@ def _merge_tree_paths(a: str, b: str, cwd: str | None = None) -> list[str] | Non
     invent, because the next step then judges a tree that was never built. Both
     answers are read from the OID on the first line now, and an answer in neither
     shape is None, i.e. "the question was not answered".
+
+    The *names* in that answer come from the report's stage block and are decoded
+    out of git's path quoting (`_conflict_block_paths`), so the refusal's
+    "conflicts on ..." names a file a resolver can open.
     """
     proc = _run(["git", "merge-tree", "--write-tree", a, b], cwd=cwd)
     lines = proc.stdout.splitlines()
@@ -353,7 +479,7 @@ def _merge_tree_paths(a: str, b: str, cwd: str | None = None) -> list[str] | Non
         return [] if _is_object_name(named) else None
     if proc.returncode != 1 or not _is_object_name(named):
         return None
-    paths = [line.split("\t", 1)[1] for line in lines if "\t" in line]
+    paths = _conflict_block_paths(lines)
     # A conflict is described by its paths. An empty list here would be read as the
     # clean answer above - the direction this function must never invent - so a
     # conflict whose paths the report does not name is "not answered" instead.
