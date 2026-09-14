@@ -228,7 +228,7 @@ with open(rants_file, "w") as f:
 
 **Every cycle MUST end with a closing summary in your final message. This cannot be skipped** — there is no diary file and no state file any more: the session history is the record, and the closing summary is what the next round reads out of it.
 
-Reflection is strategic-layer cognition, and the closing summary is where it goes — written for the next round's reader, not for this one. Durable lessons (a research direction that did not pan out, an experimental condition that changed a result, a convention worth keeping) belong in **memory entries under `{{ evolution_cwd }}/.emrg/memory/`**, the durable layer whose index is part of this prompt. Memory hygiene: keep the index a pure index — one short line per entry, update in place, consolidate instead of appending.
+Reflection is strategic-layer cognition, and the closing summary is where it goes — written for the next round's reader, not for this one. Durable lessons (a research direction that did not pan out, an experimental condition that changed a result, a convention worth keeping) belong in **memory entries under `{{ evolution_cwd }}/.emrg/memory/`**, the durable layer, whose entries you open yourself with the `read` tool. Memory hygiene: keep the index a pure index — one short line per entry, update in place, consolidate instead of appending.
 
 Each round the closing summary must answer these 7 questions (cannot be omitted):
 

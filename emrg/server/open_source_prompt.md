@@ -519,7 +519,7 @@ End every cycle with a **closing summary in your final message**. It is the only
 4. **What is blocked, and on whom**
 5. **The next step** — the phase the next round should enter, and why
 
-Also record **key findings** (lessons worth keeping beyond this session) as memory entries under `{{ evolution_cwd }}/.emrg/memory/` — the durable layer, whose index is part of this prompt:
+Also record **key findings** (lessons worth keeping beyond this session) as memory entries under `{{ evolution_cwd }}/.emrg/memory/` — the durable layer, whose entries you open yourself with the `read` tool:
    - ⚡ **Memory hygiene** (rant 2026-08-23T08:04:26): keep MEMORY.md a **pure index** — one short line per entry, never duplicated content; update entries in place; if the index has grown long, merge/consolidate instead of appending.
 
 The summary is a message, not a file — nothing to commit, nothing to keep in sync; the session history is the record.

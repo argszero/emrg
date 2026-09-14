@@ -258,6 +258,64 @@ def test_prompt_memory_writes_land_where_the_sandbox_allows_them() -> None:
     )
 
 
+# The memory root the sweep re-based every phase hand-off onto: writable (the
+# guard above proves it) and readable via the `read` tool — but its own index is
+# NOT the one the daemon embeds.
+SWEEP_MEMORY_ROOT = "evolution_cwd }}/.emrg/memory"
+_INDEX_IN_PROMPT = re.compile(r"(part of|embedded in) this prompt", re.IGNORECASE)
+
+
+def test_no_template_calls_the_write_root_index_its_own_prompt_index() -> None:
+    """A root that is only *writable* must not be described as *loaded*.
+
+    Measured 2026-09-14 (cyc20260914-175549), on this branch before the fix: three
+    of the paragraphs re-based onto memory entries under
+    `{{ evolution_cwd }}/.emrg/memory/` also called that directory's index "part
+    of this prompt". It is not. `_collect_memory_data` embeds
+    `session.cwd/.emrg/memory/MEMORY.md` — the *task project's* index — and the
+    session index, and never `{{ evolution_cwd }}/.emrg/memory/MEMORY.md`;
+    measured by pointing `EVOLUTION_CWD` at a directory whose memory index carries
+    a marker and rendering the system prompt through the real builder: the marker
+    stays out while the project's appears. The two roots differ by construction on
+    this installation — `{{ evolution_cwd }}` is `~/.emrg/evolution` (988 files,
+    the durable record) while the embedded index belongs to the session's cwd,
+    `{{ evolution_cwd }}/emrg`.
+
+    The pairing is what is false, not the path: writing memory entries under that
+    root is correct (the sandbox trusts it, guarded above), and saying "the memory
+    index is embedded in this prompt" without naming a path is correct too. Naming
+    that path *and* claiming its index is in the prompt points the agent at a
+    place whose contents it will not find — the same defect family the sweep
+    exists to remove.
+    """
+    planted = (
+        "Record findings under `{{ evolution_cwd }}/.emrg/memory/`, "
+        "whose index is part of this prompt."
+    )
+    assert SWEEP_MEMORY_ROOT in planted and _INDEX_IN_PROMPT.search(planted), (
+        "the detector no longer detects the shape it was written for"
+    )
+
+    paragraphs_naming_the_root = 0
+    suspects: list[str] = []
+    for _task_type, filename in _builtin_templates():
+        text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+        for paragraph in text.split("\n\n"):
+            if SWEEP_MEMORY_ROOT in paragraph:
+                paragraphs_naming_the_root += 1
+                if _INDEX_IN_PROMPT.search(paragraph):
+                    suspects.append(f"{filename}: {paragraph.strip()[:140]}")
+
+    assert paragraphs_naming_the_root >= 3, (
+        f"only {paragraphs_naming_the_root} paragraph(s) name the memory root — "
+        f"the scan is not looking where it thinks it is"
+    )
+    assert not suspects, (
+        "these paragraphs name the memory root and also claim its index is in the "
+        "prompt, which the daemon never embeds:\n  " + "\n  ".join(suspects)
+    )
+
+
 # Templates still teaching the retired state-file / reflection-file mechanism.
 # Rant 2026-09-14T14:35:47 removes it wholesale ("the session itself is the
 # memory"); the sweep lands one template at a time. Each entry is removed from
