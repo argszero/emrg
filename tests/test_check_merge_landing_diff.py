@@ -29,6 +29,7 @@ from __future__ import annotations
 import importlib.util
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1035,3 +1036,129 @@ def test_the_refresh_is_effective_even_with_a_shadowing_stray(mod, tmp_path, mon
     # …and it is the same ref the header names, so the printed spelling and the measured
     # commit agree - the property the whole file exists for.
     assert mod._qualify_ref("origin/master") == "refs/remotes/origin/master"
+
+
+# --- the names are git's, not git's spelling of git's ---------------------------
+#
+# Both halves of the measurement need the path git *means*: the report prints it, and
+# `_path_reading` hands it back to git as a pathspec. Without `-z` git quotes a path
+# holding a quote, a backslash, a control byte, or any non-ASCII byte, and a quoted
+# path is a pathspec that matches nothing - so the inside-the-path arm answered "" for
+# both sides and reported *clean* (measured `cyc20260914-082347`).
+#
+# Pinned in both directions (#455): the non-ASCII arm and the control-byte arm are
+# shown to name the real file *and* to report the hazard, with git itself supplying
+# the evidence; the plain-name arm next door keeps passing unchanged for the control.
+
+
+def _named_same_file_repo(tmp_path: Path, name: str, tag: str) -> tuple[Path, str, str]:
+    """`_same_file_repo` with the shared file carrying `name`.
+
+    Same fixture as `_same_file_repo` - both sides change the file far enough apart
+    that the merge is clean, so the path is in both lists while its reading is not the
+    landing - with the name as the only difference. The name is what the tool used to
+    get wrong.
+    """
+    repo = tmp_path / tag
+    _init_repo(repo)
+    lines = [f"line {i}" for i in range(1, 31)]
+    _write(repo, name, "\n".join(lines) + "\n")
+    _commit(repo, "base")
+
+    _git(repo, "checkout", "-q", "-b", "feature")
+    pr_lines = list(lines)
+    pr_lines[0] = "CHANGED BY THE PR"
+    _write(repo, name, "\n".join(pr_lines) + "\n")
+    head = _commit(repo, "the PR changes line 1")
+
+    _git(repo, "checkout", "-q", "master")
+    master_lines = list(lines)
+    master_lines[-1] = "CHANGED BY MASTER LATER"
+    _write(repo, name, "\n".join(master_lines) + "\n")
+    base = _commit(repo, "master moves on inside the same file")
+    return repo, base, head
+
+
+def test_a_non_ascii_path_is_named_as_it_is(mod, tmp_path, monkeypatch) -> None:
+    """The report must print the file's name, not git's octal spelling of it.
+
+    Measured on this fixture with the file named 中文.txt: the default
+    `--name-status` spelling is `"\\344\\270\\255\\346\\226\\207.txt"`. That names
+    nothing a resolver can open, and as a pathspec it matches nothing - so the
+    inside-the-path arm compared "" with "" and this repo reported *clean* where the
+    same fixture named `src/app.py` as reading backwards inside.
+    """
+    name = "中文.txt"
+    repo, base, head = _named_same_file_repo(tmp_path, name, "cjk")
+    monkeypatch.chdir(repo)
+
+    _, landed, apparent, backwards, reversed_inside = mod.landing_reading(base, head)
+
+    assert landed == apparent == [("M", name)]
+    assert backwards == []  # the name-set rule is blind here: the path *is* landed
+    assert reversed_inside == [("M", name)]
+
+    # The evidence, from git rather than from the tool: the reading of that path does
+    # print the base's own later hunk as a deletion (so "reads backwards inside" is
+    # true of it), while the unseparated spelling really is quoted - which is why the
+    # old reading could never have matched it.
+    assert "CHANGED BY MASTER LATER" in _git(repo, "diff", base, head, "--", name)
+    quoted = _git(repo, "diff", "--name-status", "--no-renames", base, head)
+    assert quoted.split("\t", 1)[1].startswith('"')
+    assert "\\344" in quoted
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows cannot create a file whose name holds a control byte (CreateFile)",
+)
+def test_a_tab_in_a_path_is_named_as_it_is(mod, tmp_path, monkeypatch) -> None:
+    """The control-byte arm: a real tab arrives quoted as `"f\\ttab.txt"`.
+
+    Without `-z` the old reading split the line on *tabs*, so this name was the one
+    that produced a second, non-existent path in the sibling tools' reports; here it
+    made the path unopenable and the inside-the-path arm blind.
+    """
+    name = "f\ttab.txt"
+    repo, base, head = _named_same_file_repo(tmp_path, name, "tab")
+    monkeypatch.chdir(repo)
+
+    _, landed, apparent, _, reversed_inside = mod.landing_reading(base, head)
+
+    assert landed == apparent == [("M", name)]
+    assert reversed_inside == [("M", name)]
+    assert "CHANGED BY MASTER LATER" in _git(repo, "diff", base, head, "--", name)
+
+
+def test_the_report_names_a_non_ascii_path_as_it_is(mod, tmp_path, monkeypatch) -> None:
+    """What the reviewer is handed: the real name, in the hazard line."""
+    name = "中文.txt"
+    repo, base, head = _named_same_file_repo(tmp_path, name, "cjk-report")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    state, report = mod.check_pr(1, base)
+
+    assert state == "backwards"
+    assert "reads backwards inside: 1 of the 1 path(s)" in report
+    assert f"M\t{name}" in report
+    # The quoted spelling is not a name a resolver can use, so it must not be printed.
+    assert "\\344" not in report
+
+
+def test_a_payload_that_is_not_status_path_pairs_is_a_measurement_error(mod, monkeypatch) -> None:
+    """A shape this tool does not know is unmeasurable, never a shorter list.
+
+    `-z` writes `status\\0path\\0`; a reader that skipped an unpaired trailing field
+    would answer about a change it never read, so the pairing is asserted and the
+    failure is loud (the fake stands in for a payload git cannot be made to produce).
+    """
+    fake = subprocess.CompletedProcess(
+        args=["git", "diff"], returncode=0, stdout="M\0only-a-path\0M\0", stderr=""
+    )
+    monkeypatch.setattr(mod, "_run", lambda *args, **kwargs: fake)
+
+    with pytest.raises(mod.MeasurementError) as excinfo:
+        mod._changed_paths("a" * 40, "b" * 40)
+
+    assert "not status/path pairs" in str(excinfo.value)
