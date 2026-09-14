@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 from emrg.memory import (
     INDEX_TITLE_MAX_CHARS,
@@ -409,6 +410,100 @@ class TestMemoryFileRoundTripFidelity:
         assert out.startswith("---\n")
         assert "event_at:" in out
         assert "Text." in out
+
+
+def _frontmatter(text: str) -> dict:
+    """Parse a written file's frontmatter the way yaml sees it."""
+    lines = text.split("\n")
+    end = lines.index("---", 1)
+    return yaml.safe_load("\n".join(lines[1:end]))
+
+
+class TestChangedKeyOwnsItsLines:
+    """A replaced key takes its own lines with it — all of them.
+
+    Replaying the untouched lines verbatim is what makes a load → save faithful,
+    and it is also where the same rule breaks: a key's text is not always one
+    line, and not always in one place. Measured 2026-09-14 (cyc20260914-170405)
+    on the writer that introduced the replay: an owned key with a continuation
+    produced frontmatter that no longer parsed, and a repeated owned key was
+    written and then read back as its old value — the store's update silently
+    discarded. Both shapes are absent from this machine's corpus (0 of 1654
+    files), which is why they are pinned here rather than patched in a hurry.
+    """
+
+    def test_repeated_key_is_replaced_not_shadowed(self):
+        """YAML keeps the last occurrence: replacing only the first loses the write.
+
+        `update(status="superseded")` has to be readable back. It was not — the
+        file kept `status: active` further down, and the next load read that.
+        """
+        text = SPEC_SHAPED_MEMORY.replace("status: active", "status: active\nstatus: active")
+        mem = MemoryFile.from_text(text, _filename="task-a.md")
+        assert mem.status == "active"
+        mem.status = "superseded"
+        out = mem.to_markdown()
+        assert out.count("status:") == 1, "the shadowing duplicate must go with the key"
+        assert _frontmatter(out)["status"] == "superseded"
+        # The writer's own reader agrees with the file.
+        assert MemoryFile.from_text(out).status == "superseded"
+
+    def test_block_scalar_value_is_replaced_with_its_continuation(self):
+        """Orphaned indentation turns the frontmatter into broken YAML."""
+        text = SPEC_SHAPED_MEMORY.replace("status: active", "status: |\n  multi\n  line")
+        mem = MemoryFile.from_text(text, _filename="task-a.md")
+        mem.status = "superseded"
+        out = mem.to_markdown()
+        assert _frontmatter(out)["status"] == "superseded"
+        assert "  multi" not in out
+
+    def test_nested_map_value_is_replaced_with_its_block(self):
+        text = SPEC_SHAPED_MEMORY.replace("status: active", "status:\n  nested: y")
+        mem = MemoryFile.from_text(text, _filename="task-a.md")
+        mem.status = "superseded"
+        out = mem.to_markdown()
+        assert _frontmatter(out)["status"] == "superseded"
+        assert "nested: y" not in out
+
+    def test_a_cleared_field_loses_its_line(self):
+        """`source_session` set to None must not leave the file asserting it."""
+        text = SPEC_SHAPED_MEMORY.replace("type: task", 'source_session: "s_abc"\ntype: task')
+        mem = MemoryFile.from_text(text, _filename="task-a.md")
+        assert mem.source_session == "s_abc"
+        mem.source_session = None
+        out = mem.to_markdown()
+        assert "source_session" not in out
+        assert _frontmatter(out)["type"] == "task"
+
+    def test_unchanged_copies_still_replay_verbatim(self):
+        """The fidelity property is not traded away for the three fixes above."""
+        text = SPEC_SHAPED_MEMORY.replace("status: active", "status: active\nstatus: active")
+        mem = MemoryFile.from_text(text, _filename="task-a.md")
+        assert mem.to_markdown() == text
+
+        blocked = SPEC_SHAPED_MEMORY.replace("status: active", "status: |\n  multi\n  line")
+        assert MemoryFile.from_text(blocked, _filename="task-a.md").to_markdown() == blocked
+
+    def test_a_comment_next_to_a_replaced_key_survives(self):
+        """A column-0 comment belongs to no key, so it is never swept up."""
+        text = SPEC_SHAPED_MEMORY.replace("status: active", "# hand-written note\nstatus: active")
+        mem = MemoryFile.from_text(text, _filename="task-a.md")
+        mem.status = "superseded"
+        out = mem.to_markdown()
+        assert "# hand-written note" in out
+        assert _frontmatter(out)["status"] == "superseded"
+
+    def test_store_update_lands_on_a_file_with_a_repeated_key(self, temp_cwd):
+        """The same case through the store's own write path."""
+        store = SessionMemoryStore(temp_cwd)
+        path = store.directory / "task-a.md"
+        path.write_text(
+            SPEC_SHAPED_MEMORY.replace("status: active", "status: active\nstatus: active"),
+            encoding="utf-8",
+        )
+        assert store.update("a1b2c3d4", status="superseded") is not None
+        reloaded = MemoryFile.from_text(path.read_text(encoding="utf-8"), _filename="task-a.md")
+        assert reloaded.status == "superseded"
 # A hand-written index, as agents actually keep them: a document title, `>`
 # notes, a row with prose after the dates, a row listing several links, and a
 # heading that is not a `## <type>` section.
