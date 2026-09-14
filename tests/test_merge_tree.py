@@ -212,11 +212,49 @@ class TestAgainstRealGit:
         self._git(repo, "commit", "-qm", "main")
         return repo, "main", "side"
 
-    @pytest.mark.parametrize(
-        "name",
-        ["\u4e2d\u6587.txt", "f\ttab.txt", 'q"uote.txt', "back\\slash.txt", "plain.txt"],
-        ids=["non-ascii", "tab", "quote", "backslash", "plain"],
+    #: The names git quotes, and - where Windows cannot hold the name at all - why.
+    #: Skipped there rather than weakened or deleted: the property is "the decoded name
+    #: is openable", and on Windows the file cannot be created for the reading to be
+    #: asked about it (measured, test-windows run 34802892883 on PR #1217: `OSError
+    #: [Errno 22]` for the TAB and for the quote, `FileNotFoundError` for the backslash,
+    #: which is a *path separator* there and so is never part of a name). The decoding
+    #: rule keeps a real-git arm on Windows - the non-ASCII case, which NTFS accepts -
+    #: and a string-fixture arm on every platform
+    #: (`TestThePathsComeFromTheStageBlockDecoded`).
+    NAME_ARMS = (
+        ("non-ascii", "\u4e2d\u6587.txt", None),
+        (
+            "tab",
+            "f\ttab.txt",
+            "Windows rejects a filename holding a control byte "
+            "(CreateFile: OSError [Errno 22])",
+        ),
+        (
+            "quote",
+            'q"uote.txt',
+            'Windows rejects a filename holding a double quote (OSError [Errno 22])',
+        ),
+        (
+            "backslash",
+            "back\\slash.txt",
+            "on Windows a backslash separates path components, so it is never part of "
+            "a name (the path it would address does not exist)",
+        ),
+        ("plain", "plain.txt", None),
     )
+
+    NAMES = [
+        pytest.param(
+            name,
+            id=arm,
+            marks=[]
+            if why is None
+            else [pytest.mark.skipif(sys.platform == "win32", reason=why)],
+        )
+        for arm, name, why in NAME_ARMS
+    ]
+
+    @pytest.mark.parametrize("name", NAMES)
     def test_every_real_name_comes_back_openable(self, mod, tmp_path, name) -> None:
         """Every quoted spelling git writes must decode to a file that exists.
 
