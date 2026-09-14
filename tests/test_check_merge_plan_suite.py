@@ -26,6 +26,11 @@ Pinned in both directions (#455 - never infer from the failure case alone):
 * a plan whose final tree fails it is UNHEALTHY, and the failing test is named;
 * a step that conflicts means there is no final tree to judge (exit 3), which is
   not a health verdict;
+* the conflicted paths named in that exit-3 refusal are the real files: read from
+  the stage block (not from any line of the report that happens to contain a tab,
+  which is where the prose after the block injects a name that does not exist) and
+  decoded out of git's `core.quotePath` spelling, so "conflicts on ..." names a
+  file the caller can open;
 * a suite that cannot be run at all is a measurement error, never "healthy" - the
   asymmetry that matters, since an unanswerable question reported as health is how
   a broken tree reaches master;
@@ -133,6 +138,24 @@ def _commit(repo: Path, message: str) -> str:
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", message)
     return _git(repo, "rev-parse", "HEAD")
+
+
+def _two_branch_conflict_on(repo: Path, name: str) -> None:
+    """Branches `ours` and `theirs` of `repo` that both edit `name`, so merging conflicts.
+
+    Both branches touch one line of one file, which is the smallest real conflict; the
+    file's *name* is the variable under test, so it is the only thing the caller picks.
+    """
+    _init_repo(repo)
+    _write(repo, name, "a\nb\nc\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "checkout", "-q", "-b", "ours")
+    _write(repo, name, "a\nOURS\nc\n")
+    _git(repo, "commit", "-qam", "ours")
+    _git(repo, "checkout", "-q", "-b", "theirs", "master")
+    _write(repo, name, "a\nTHEIRS\nc\n")
+    _git(repo, "commit", "-qam", "theirs")
 
 
 @pytest.fixture
@@ -338,6 +361,198 @@ def test_a_clean_merge_without_a_tree_is_a_measurement_error_not_a_crash(
     _fake_run(monkeypatch, mod, "", "", 0)
     with pytest.raises(mod.MeasurementError):
         mod._merge_tree("a" * 40, "b" * 40)
+
+
+# The conflicted *paths* are the other half of "name the tree, not the code": exit 3
+# tells the caller to go resolve a conflict, and the names in that refusal are what
+# the caller resolves. Measured 2026-09-14 (`cyc20260914-062927`, git 2.50.1) in a
+# scratch repo, a conflict in `f<TAB>tab.txt` and one in `中文.txt` report:
+#
+#     100644 <blob> 1\t"f\\ttab.txt"                          <- stage block, quoted
+#     100644 <blob> 1\t"\\344\\270\\255\\346\\226\\207.txt"
+#     <blank line>
+#     Auto-merging f<TAB>tab.txt                              <- prose, a real tab
+#     CONFLICT (content): Merge conflict in f<TAB>tab.txt
+#
+# So "the text after the first tab on any line" reads `tab.txt` out of the prose - a
+# path that collides with nothing and does not exist - and passes the quoted
+# spelling through as the name. Both answers are wrong in the direction that costs
+# a resolution round, so both are pinned here, in the same file as the ordinary
+# conflict they must not break.
+
+# The stage block git writes for a path whose name contains a tab: the name is
+# quoted and its tab escaped, while the prose below it carries a real tab.
+_TAB_NAME_STDOUT = "\n".join(
+    [
+        "a99bc22e7c9f58ab0d501ebf64d1e9e0b440f21c",
+        '100644 df967b96a579e45a18b8251732d16804b2e56a55 1\t"f\\ttab.txt"',
+        '100644 45cf141ba67d59203f02a54f03162f3fcef57830 2\t"f\\ttab.txt"',
+        '100644 c376d892e8b105bd712d06ec5162b5f31ce949c3 3\t"f\\ttab.txt"',
+        "",
+        "Auto-merging f\ttab.txt",
+        "CONFLICT (content): Merge conflict in f\ttab.txt",
+    ]
+)
+
+# The same conflict for a non-ASCII name, as the default `core.quotePath=true`
+# spells it: the UTF-8 bytes escaped to octal.
+_QUOTED_NAME_STDOUT = "\n".join(
+    [
+        "a99bc22e7c9f58ab0d501ebf64d1e9e0b440f21c",
+        '100644 df967b96a579e45a18b8251732d16804b2e56a55 1\t"\\344\\270\\255\\346\\226\\207.txt"',
+        '100644 45cf141ba67d59203f02a54f03162f3fcef57830 2\t"\\344\\270\\255\\346\\226\\207.txt"',
+        '100644 c376d892e8b105bd712d06ec5162b5f31ce949c3 3\t"\\344\\270\\255\\346\\226\\207.txt"',
+        "",
+        "Auto-merging 中文.txt",
+        "CONFLICT (content): Merge conflict in 中文.txt",
+    ]
+)
+
+
+class TestTheConflictedPathsAreTheRealFiles:
+    """Every name in "conflicts on ..." must be a file that really collides."""
+
+    def test_the_prose_after_the_block_is_not_a_path(self, mod, monkeypatch) -> None:
+        """`tab.txt` came out of "Auto-merging f<TAB>tab.txt" - it is not a file.
+
+        The name containing the tab is the conflicted one; the prose that reports it
+        is tab-separated for the same reason, so a reader that treats the tab as the
+        path separator invents a second, non-existent path.
+        """
+        _fake_run(monkeypatch, mod, _TAB_NAME_STDOUT, "", 1)
+        _, paths = mod._merge_tree("a" * 40, "b" * 40)
+        assert set(paths) == {"f\ttab.txt"}
+        assert "tab.txt" not in paths
+
+    def test_a_quoted_name_is_decoded_to_the_file_it_names(
+        self, mod, monkeypatch
+    ) -> None:
+        """`"\\344\\270\\255...txt"` is `中文.txt`: the caller cannot open the escapes."""
+        _fake_run(monkeypatch, mod, _QUOTED_NAME_STDOUT, "", 1)
+        _, paths = mod._merge_tree("a" * 40, "b" * 40)
+        assert set(paths) == {"中文.txt"}
+        assert not any(path.startswith('"') for path in paths)
+
+    def test_an_ordinary_conflict_still_parses(self, mod, monkeypatch) -> None:
+        """The rule must not stop reading the common shape (pinned both ways)."""
+        _fake_run(monkeypatch, mod, REAL_CONFLICT_STDOUT, "", 1)
+        _, paths = mod._merge_tree("a" * 40, "b" * 40)
+        assert set(paths) == {"README.md"}
+
+    def test_a_clashing_path_is_named_once_per_stage_line(
+        self, mod, monkeypatch
+    ) -> None:
+        """A rename conflict names all three sides - the block is read as written."""
+        out = "\n".join(
+            [
+                "a99bc22e7c9f58ab0d501ebf64d1e9e0b440f21c",
+                "100644 df967b96a579e45a18b8251732d16804b2e56a55 1\tf.txt",
+                "100644 df967b96a579e45a18b8251732d16804b2e56a55 2\trenamed-ours.txt",
+                "100644 df967b96a579e45a18b8251732d16804b2e56a55 3\trenamed-theirs.txt",
+                "",
+                "CONFLICT (rename/rename): f.txt renamed to renamed-ours.txt in ours "
+                "and to renamed-theirs.txt in theirs.",
+            ]
+        )
+        _fake_run(monkeypatch, mod, out, "", 1)
+        _, paths = mod._merge_tree("a" * 40, "b" * 40)
+        assert set(paths) == {"f.txt", "renamed-ours.txt", "renamed-theirs.txt"}
+
+    def test_a_conflict_that_names_no_path_is_not_a_named_conflict(
+        self, mod, monkeypatch
+    ) -> None:
+        """A tree and no paths: "conflicts on " names nothing.
+
+        The report would read `step 1 (#12) conflicts on ` - a refusal that tells the
+        caller to resolve a conflict it cannot locate. Unanswered, like every other
+        refusal this family emits when the evidence is missing.
+        """
+        out = "a99bc22e7c9f58ab0d501ebf64d1e9e0b440f21c\n\nsome prose\n"
+        _fake_run(monkeypatch, mod, out, "", 1)
+        with pytest.raises(mod.MeasurementError):
+            mod._merge_tree("a" * 40, "b" * 40)
+
+    def test_a_non_ascii_name_comes_back_as_the_file_on_disk(
+        self, tmp_path, mod, monkeypatch
+    ) -> None:
+        """Measure the decode against a real report, not only a fixture.
+
+        A fixture is free to be a shape git never writes. Here git is asked for a
+        conflict on `中文.txt` and the path the tool returns is checked against the
+        file on disk. This arm runs on every platform: a non-ASCII filename is legal
+        everywhere (`test_the_shapes_git_really_prints` covers the tab-named file,
+        which Windows cannot create — see its reason).
+        """
+        repo = tmp_path / "cjk-conflict"
+        cjk_name = "中文.txt"
+        _two_branch_conflict_on(repo, cjk_name)
+        monkeypatch.chdir(repo)
+
+        raw = subprocess.run(
+            ["git", "merge-tree", "--write-tree", "ours", "theirs"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert raw.returncode == 1, raw.stdout + raw.stderr
+        escaped = "".join(f"\\{byte:03o}" for byte in cjk_name.encode("utf-8"))
+        # The stage block names the path; whether git spells its bytes escaped
+        # (`core.quotePath=true`, the default) or raw is git's choice of spelling, and
+        # the tool must return the real name either way.
+        assert f'"{escaped}"' in raw.stdout or cjk_name in raw.stdout, raw.stdout
+
+        tree, paths = mod._merge_tree("ours", "theirs")
+        assert tree is None
+        assert set(paths) == {cjk_name}
+        assert (repo / cjk_name).exists()
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason=(
+            "Windows rejects a filename holding a control byte: CreateFile fails with "
+            "OSError [Errno 22] before git is involved (measured, test-windows run "
+            "34787962250). The rule it pins is still covered on Windows by the fixture "
+            "tests above, which are strings and platform-independent."
+        ),
+    )
+    def test_the_shapes_git_really_prints(self, tmp_path, mod, monkeypatch) -> None:
+        """The real report for the one name that breaks the old reading.
+
+        A tab in the name makes the stage block quote it *and* makes the prose below
+        the block tab-separated, which is the whole defect: measured here on real
+        git, with the old reading run over the same bytes as a control arm.
+        """
+        repo = tmp_path / "tab-conflict"
+        tab_name = "f\ttab.txt"
+        _two_branch_conflict_on(repo, tab_name)
+        monkeypatch.chdir(repo)
+
+        raw = subprocess.run(
+            ["git", "merge-tree", "--write-tree", "ours", "theirs"],
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        assert raw.returncode == 1, raw.stdout + raw.stderr
+        assert '"f\\ttab.txt"' in raw.stdout, "the tab name must be quoted in the block"
+        assert "Auto-merging f\ttab.txt" in raw.stdout, "the prose carries a real tab"
+
+        tree, paths = mod._merge_tree("ours", "theirs")
+        assert tree is None
+        assert set(paths) == {tab_name}
+        for path in paths:
+            assert (repo / path).exists(), f"{path!r} is not a file on disk"
+
+        # The control arm: the reading this change replaces, run over the same real
+        # report, names a file that does not exist. Without this the test would only
+        # show that the new reading works, not what it is a fix for.
+        old_reading = [
+            line.split("\t", 1)[1] for line in raw.stdout.splitlines() if "\t" in line
+        ]
+        assert "tab.txt" in old_reading, old_reading
+        assert not (repo / "tab.txt").exists()
 
 
 def test_a_failing_merge_tree_makes_the_run_unanswerable_not_conflicted(
