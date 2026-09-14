@@ -1417,7 +1417,17 @@ class EmrgServer:
         return rendered
 
     def _collect_project_context(self, session: Session) -> list[dict[str, str]]:
-        """Read project context files, return structured data for template."""
+        """Read project context files, return structured data for template.
+
+        An over-long file is cut at the last complete line inside the cap, and the
+        notice names the file and says the tail is still on disk. Measured
+        2026-09-14: the old hard cut injected a half sentence — `MANIFESTO.md`'s
+        head ended *inside* a `**bold**` span — and the bare
+        `... [truncated N chars]` named neither the file nor a way to get the rest,
+        so a reader could not tell that the missing six sections were one `read`
+        away. `_cap_memory_index` below has always pointed at where the cut text
+        lives; this now does the same.
+        """
         candidates = ["CLAUDE.md", "AGENTS.md", "Agent.md", "MANIFESTO.md"]
         found: list[dict[str, str]] = []
 
@@ -1428,8 +1438,19 @@ class EmrgServer:
                     content = path.read_text(encoding="utf-8")
                     max_chars = PROJECT_CONTEXT_MAX_CHARS
                     if len(content) > max_chars:
-                        content = content[:max_chars] + (
-                            f"\n\n... [truncated {len(content) - max_chars} chars]"
+                        # Last complete line within the cap; a file with no newline
+                        # there (one huge line) falls back to the hard cut.
+                        cut = content.rfind("\n", 0, max_chars)
+                        if cut <= 0:
+                            cut = max_chars
+                        over = len(content) - cut
+                        # The count is the runtime measurement, not the cap: stating
+                        # the threshold again here buys nothing and drifts
+                        # (rant 2026-09-14T13:23:04).
+                        content = content[:cut] + (
+                            f"\n\n... [truncated {over} chars — {name} exceeds the "
+                            "project-context limit; the rest is on disk, readable "
+                            "via the read tool]"
                         )
                     found.append({"name": name, "content": content})
                 except (OSError, UnicodeDecodeError):

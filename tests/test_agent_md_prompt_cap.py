@@ -6,12 +6,18 @@ Rant 2026-09-14T07:20:11 ("Agent.md 内容不应该包含演化的历史。Agent
 Measured on master `e644cf6` (2026-09-14, this cycle):
 `EmrgServer._collect_project_context` reads each project-context file
 (`CLAUDE.md`, `AGENTS.md`, `Agent.md`, `MANIFESTO.md`) out of the session cwd and
-keeps at most `PROJECT_CONTEXT_MAX_CHARS` of it, appending a
-`... [truncated N chars]` notice — so an over-long file still parses, and what it
-loses is the **tail**. `Agent.md` had grown to 64466 chars: the model received the
-first 8000 (per-rule evidence, PR numbers, cycle ids) and lost the other 87%,
-conventions included. Nothing in the tree measured the file, so nothing could
-object to it growing there.
+keeps at most `PROJECT_CONTEXT_MAX_CHARS` of it, appending a truncation notice —
+so an over-long file still parses, and what it loses is the **tail**. `Agent.md`
+had grown to 64466 chars: the model received the first 8000 (per-rule evidence, PR
+numbers, cycle ids) and lost the other 87%, conventions included. Nothing in the
+tree measured the file, so nothing could object to it growing there.
+
+The same mechanism, measured 2026-09-14 on this repo's `MANIFESTO.md` (10434 chars):
+the cut fell **mid-line** — the injected head ended inside a `**bold**` span — and
+the notice named neither the file nor a way to reach the rest, so its last six
+sections (第十三条 through 第十七条) were dropped without a pointer. The cut now
+lands on the last complete line inside the cap and the notice names the file and
+the read tool; both properties are pinned below.
 
 The cap is imported from the daemon rather than restated: a second spelling could
 disagree with the code that does the cutting — the same defect the stored-count
@@ -59,6 +65,55 @@ def test_this_repos_agent_md_reaches_the_prompt_whole() -> None:
     )
 
 
+def test_one_char_over_the_cap_is_cut(tmp_path: Path) -> None:
+    """The negative half: one char more and the tail is gone.
+
+    Both halves are exercised against the same method, so the guard above is
+    known to discriminate rather than merely to be silent on today's tree.
+
+    A one-line file with no newline inside the cap keeps the hard cut: the
+    line-boundary rule needs a boundary to find.
+    """
+    server = _make_server()
+    body = "x" * (PROJECT_CONTEXT_MAX_CHARS + 1)
+    (tmp_path / "Agent.md").write_text(body, encoding="utf-8")
+    session = Session.create_with_id("agent-md-cap-over", tmp_path)
+
+    content = server._collect_project_context(session)[0]["content"]
+    assert content.startswith(body[:PROJECT_CONTEXT_MAX_CHARS])
+    assert len(content) > PROJECT_CONTEXT_MAX_CHARS  # the notice is added, not swallowed
+    assert "truncated 1 chars" in content
+    # The notice says which file lost text and how to read the rest. Without the
+    # path hint the truncation is a dead end: measured 2026-09-14 on MANIFESTO.md,
+    # whose last six sections were dropped by a notice naming neither
+    # (2026-09-14, defect family: a message that does not name what it dropped).
+    assert "Agent.md" in content, "the notice must name the file it cut"
+    assert "read tool" in content, "the notice must say the tail is still readable"
+
+
+def test_the_cut_lands_on_a_line_boundary(tmp_path: Path) -> None:
+    """An over-long file is cut at its last complete line inside the cap.
+
+    The old hard cut ended mid-sentence: on this repo's `MANIFESTO.md` the injected
+    text ended inside a `**bold**` span, so the prompt carried an unterminated
+    emphasis marker and a half sentence. The measurable rule: the injected head
+    contains no fragment of the line the cut fell in.
+    """
+    server = _make_server()
+    whole_line = project_line = "a" * 7000
+    next_line_marker = "SECOND-LINE-MARKER"
+    body = project_line + "\n" + (next_line_marker * 500)
+    assert len(body) > PROJECT_CONTEXT_MAX_CHARS
+    (tmp_path / "Agent.md").write_text(body, encoding="utf-8")
+    session = Session.create_with_id("agent-md-line-cut", tmp_path)
+
+    content = server._collect_project_context(session)[0]["content"]
+    head = content.split("\n\n... [truncated", 1)[0]
+    assert head == whole_line, f"head is not the complete first line: {head[-40:]!r}"
+    assert next_line_marker not in head, "a fragment of the cut line reached the prompt"
+    assert "truncated" in content
+
+
 def test_a_file_at_the_cap_is_not_cut(tmp_path: Path) -> None:
     """The positive half, driven through the real method: at the cap, nothing is dropped."""
     server = _make_server()
@@ -69,19 +124,3 @@ def test_a_file_at_the_cap_is_not_cut(tmp_path: Path) -> None:
     content = server._collect_project_context(session)[0]["content"]
     assert content == body
     assert "truncated" not in content
-
-
-def test_one_char_over_the_cap_is_cut(tmp_path: Path) -> None:
-    """The negative half: one char more and the tail is gone.
-
-    Both halves are exercised against the same method, so the guard above is
-    known to discriminate rather than merely to be silent on today's tree.
-    """
-    server = _make_server()
-    body = "x" * (PROJECT_CONTEXT_MAX_CHARS + 1)
-    (tmp_path / "Agent.md").write_text(body, encoding="utf-8")
-    session = Session.create_with_id("agent-md-cap-over", tmp_path)
-
-    content = server._collect_project_context(session)[0]["content"]
-    assert content == body[:PROJECT_CONTEXT_MAX_CHARS] + "\n\n... [truncated 1 chars]"
-    assert len(content) > PROJECT_CONTEXT_MAX_CHARS  # the notice is added, not swallowed
