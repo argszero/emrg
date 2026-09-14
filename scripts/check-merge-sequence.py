@@ -189,6 +189,7 @@ as "verified" now cannot be told the wrong thing.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import re
 import subprocess
@@ -196,6 +197,30 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+
+# The sibling tool that owns the conflicted-path reading, loaded from its file
+# rather than imported by name: the scripts in this directory are not importable
+# modules (hyphenated names, no package), and this is the loader the other tools
+# in this family already use for *this* file (`check-merge-plan-suite.py` etc.).
+# Taken from the sibling rather than copied so the *rule* has one implementation -
+# the same reason `GUARD` above is one constant: two spellings of one reading would
+# be one spelling too many, and a path a resolver cannot open is the defect class
+# this family keeps closing. The dependency runs one way - the tree-health tool does
+# not load this file - so loading it here cannot recurse.
+_SIBLING = Path(__file__).resolve().parent / "check-merge-tree-health.py"
+
+
+def _load_sibling():
+    spec = importlib.util.spec_from_file_location("check_merge_tree_health", _SIBLING)
+    if spec is None or spec.loader is None:  # pragma: no cover - file is in this repo
+        raise RuntimeError(f"could not load {_SIBLING}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+health = _load_sibling()
 
 # The guard is judged by its exit code, but its own report line names the
 # numbers, so it is captured and quoted rather than re-derived. Same constants
@@ -428,15 +453,38 @@ def _conflict_paths(a: str, b: str) -> list[str]:
     Reporting only. An empty list means git said nothing this parser recognises as
     a path, so no caller may read "no paths" as "no conflict" - `_merge_commit`
     is what decides whether a merge conflicts; this only describes one.
+
+    **Read from the stage block, not from the prose.** This function used to scan
+    the report's *message* lines for `Merge conflict in <path>` and fall back to the
+    whole line when that phrase was absent - and the phrase is absent for every
+    conflict that is not a content or add/add one. Measured (2026-09-14,
+    `cyc20260914-102037`, git 2.50.1, scratch repos), a modify/delete conflict prints
+
+        CONFLICT (modify/delete): gone.txt deleted in <sha> and modified in <sha>.
+        Version <sha> of gone.txt left in tree.
+
+    so the fallback returned **that entire sentence as the path**: the refusal then
+    named something a resolver cannot open, and `(repo / that).exists()` was measured
+    False - while the file's real name is in that sentence all along.
+
+    Four shapes were measured on real repositories - content, add/add, modify/delete
+    and a non-ASCII name - and the stage block named the real path in all four. What
+    separates the two readings is *which* arms each answers: the prose has a `Merge
+    conflict in` line only in the first two, and the block writes a non-ASCII path
+    C-quoted (`"\\344\\270\\255\\346\\226\\207.txt"`), so it is the block *plus*
+    decoding that answers every arm.
+
+    The reader is the sibling's rather than a third copy of the rule
+    (`check-merge-tree-health.py::_conflict_block_paths`, the change #1212 landed):
+    it matches the block's shape, decodes git's path quoting, and - like this
+    function - returns one entry per stage line, which the caller here dedupes.
+    Its own header records that the shape alone is the rule, a blank-line stop
+    having been measured to change no answer and therefore deleted rather than
+    tested. `check-merge-order.py` reads the same shape with its own regex; that
+    one predates this reader and is left alone here.
     """
     proc = _run(["git", "merge-tree", "--write-tree", a, b])
-    paths: list[str] = []
-    for line in (proc.stdout + proc.stderr).splitlines():
-        if not line.startswith("CONFLICT"):
-            continue
-        match = re.search(r"Merge conflict in (.+?)\s*$", line)
-        paths.append(match.group(1) if match else line.strip())
-    return sorted(set(paths))
+    return sorted(set(health._conflict_block_paths(proc.stdout.splitlines())))
 
 
 def _conflict_summary(base: str, excluded: list[int], heads: dict[int, str]) -> str:
