@@ -155,6 +155,12 @@ def _get_jinja_env() -> "jinja2.Environment":
 # ── Module-level constants ──
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
+# How much of each project-context file (Agent.md and its siblings — see
+# `_collect_project_context`) reaches the prompt. Named rather than inline so the
+# guard that keeps this repo's own `Agent.md` inside it reads the same number the
+# truncation uses: a second spelling could disagree with the code that cuts.
+PROJECT_CONTEXT_MAX_CHARS = 8000
+
 # Windows TIME_WAIT retry: SO_EXCLUSIVEADDRUSE (the only anti-hijack option on
 # Windows) blocks rebinding while accepted connections linger in TIME_WAIT.
 # serve() treats EADDRINUSE-with-no-listener as a TIME_WAIT remnant and retries
@@ -1420,7 +1426,7 @@ class EmrgServer:
             if path.exists():
                 try:
                     content = path.read_text(encoding="utf-8")
-                    max_chars = 8000
+                    max_chars = PROJECT_CONTEXT_MAX_CHARS
                     if len(content) > max_chars:
                         content = content[:max_chars] + (
                             f"\n\n... [truncated {len(content) - max_chars} chars]"
