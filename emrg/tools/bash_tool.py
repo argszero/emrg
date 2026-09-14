@@ -677,10 +677,40 @@ def _tokenize_command(cmd: str) -> list[str]:
     migration that fixed the over-blocks. `$( … )` was unaffected because its
     `git` is already a separate token, which is what made the hole invisible to
     the substitutions that were covered.
+
+    ⚠️ **Newline is a separator, and it had to be added in two places.** The
+    sets (`_COMMAND_SEPARATORS`, `_SHELL_SEPARATORS`) have always listed `"\n"`,
+    but `shlex` never emitted it: a newline was *whitespace*, so it vanished and
+    glued the two lines' tokens into one stream. `_runs_as_a_command` then
+    looked left past the second command and found the first command's operand —
+    not a separator — and answered "data, not an invocation". Measured on master
+    `addcb5ee` in the `read-only` tier: `git stash drop` blocked,
+    `git stash drop; echo done` blocked, and `echo done` + newline +
+    `git stash drop` **allowed**. That is the 2026-08-20 data-loss class this
+    tier exists to make structurally impossible, reachable by pressing Enter.
+    `git config user.name x`, `git clean -fd` and `git checkout .` behind any
+    read behaved the same.
+
+    ⚠️ The write-target extractor (`_extract_write_targets`, the other
+    tokenizer) is **not** affected, and I checked rather than assumed: it walks
+    tokens matching *command words* (`rm`, `mv`, `tee`) wherever they sit, so it
+    needs no separator and already found `rm -rf /tmp/a` at the end of a
+    newline-separated line (11 destructive shapes measured, 0 differing between
+    bare, `;`-chained and newline-chained). The hole is specific to the
+    position-sensitive walk in `_runs_as_a_command` — which is exactly the walk
+    that decides whether a `git` token is an invocation at all.
+
+    Fix: put `\n` in the punctuation set (so it becomes its own token) **and**
+    take it out of `lex.whitespace` (otherwise the whitespace branch still
+    splits on it and it is never emitted as a token). A newline *inside* quotes
+    is unaffected — quoting is resolved before either rule — so
+    ``echo "a<newline>b"`` stays one argument, as the shell makes it.
     """
     try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&`")
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&`\n")
         lex.whitespace_split = True
+        # `\n` is a separator token, not whitespace to be discarded — see above.
+        lex.whitespace = " \t\r"
         return list(lex)
     except ValueError:
         return cmd.split()
