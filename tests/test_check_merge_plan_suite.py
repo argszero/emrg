@@ -899,6 +899,13 @@ def test_the_purge_removes_the_trees_caches_and_not_the_harnesss(
     assert keeper.exists(), "the harness's own environment is not the tree under test"
     # Caches are reported, not the files inside them: the list is a count of caches.
     assert sorted(removed) == ["emrg/server/__pycache__", "stray.pyc"]
+    # …and spelled the same way on every platform. The assertion above is what the
+    # Windows job of #1214 answered `emrg\\server\\__pycache__` to: the *source* was
+    # wrong there (it returned the native spelling) while this test was right, so the
+    # arm that discriminates it is `test-windows` - locally the mutant that restores
+    # `str(...)` is equivalent, and saying so is cheaper than pretending otherwise.
+    # This line catches that mutant wherever the native separator is not `/`.
+    assert not any("\\" in name for name in removed)
 
 
 def test_a_cache_in_the_tree_cannot_answer_for_it(

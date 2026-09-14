@@ -470,6 +470,15 @@ def _purge_bytecode(root: Path) -> list[str]:
     Directories that belong to the harness (`.venv`, `node_modules`) are skipped:
     their caches cannot shadow the tree's own modules, and walking them costs more
     than the run they precede.
+
+    The names are spelled with `/` on every platform (`as_posix`), because the
+    native spelling is not a fact about the tree: measured by the Windows job of
+    #1214 (`cyc20260914-092057`), `str(path.relative_to(root))` answers
+    `emrg\\server\\__pycache__` there and `emrg/server/__pycache__` here, so the same
+    purge reported two different names - and a name that means "the same cache"
+    only on one platform is the same class of defect this file exists to remove.
+    The suite this feeds runs on Windows too (`test-windows`), which is the only
+    place the difference is visible at all.
     """
     removed: list[str] = []
     for path in sorted(root.rglob("*")):
@@ -480,10 +489,10 @@ def _purge_bytecode(root: Path) -> list[str]:
             # the directory is reported - two entries for one cache would make the
             # returned list a count of files rather than of caches.
             shutil.rmtree(path, ignore_errors=True)
-            removed.append(str(path.relative_to(root)))
+            removed.append(path.relative_to(root).as_posix())
         elif path.is_file() and path.suffix == ".pyc":
             path.unlink(missing_ok=True)
-            removed.append(str(path.relative_to(root)))
+            removed.append(path.relative_to(root).as_posix())
     return removed
 
 
