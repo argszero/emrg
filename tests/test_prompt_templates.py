@@ -269,9 +269,14 @@ PENDING_STATE_SWEEP = {
 }
 
 # The retired mechanism's fingerprints: the two file names, and the prose that
-# told the agent to read/write "the state file".
+# told the agent to read/write a state or reflection file. The prose arm matches
+# the bare noun phrase, not only "the state file": the first version demanded the
+# article, and paper_prompt.md came through the sweep still telling the agent to
+# read "state file" for its arXiv keywords (measured 2026-09-14,
+# cyc20260914-170405). A line that *denies* the file — "there is no state file,
+# the session is the state" — is the replacement text itself, so it stays legal.
 _RETIRED_MECHANISM = re.compile(
-    r"_state\.md|_reflections\.md|the state file|state-file",
+    r"_state\.md|_reflections\.md|(?<!no )state[-\s]file|(?<!no )reflections?[-\s]file",
     re.IGNORECASE,
 )
 
@@ -318,3 +323,29 @@ def test_retired_state_file_mechanism_is_gone_or_being_swept() -> None:
             f"the mechanism — drop it from the set in the same change that swept it, "
             f"so the set keeps meaning 'not yet done'"
         )
+
+
+def test_retired_mechanism_fingerprint_covers_the_bare_noun_phrase() -> None:
+    """What counts as a fingerprint: the sweep's vocabulary, not just its file names.
+
+    Measured 2026-09-14 (cyc20260914-170405): `paper_prompt.md` came out of the
+    sweep still instructing the agent to read a "state file" to derive its arXiv
+    keywords. The fingerprint then matched only "the state file", so the guard
+    called the template clean while an instruction pointing at a file nothing
+    reads was still in it. A guard whose blind spot is a plausible spelling of the
+    thing it forbids is a guard that reports success by not looking, which is
+    worse than no guard.
+
+    The four strings pin both halves of the pattern: the instruction forms that
+    must be flagged, and the sweep's own denial sentences, which must not be —
+    they are the text that replaced the mechanism.
+    """
+    assert _RETIRED_MECHANISM.search(
+        "read Agent.md / abstract / state file to determine direction terms"
+    ), "the bare 'state file' instruction is exactly what survived the first sweep"
+    assert _RETIRED_MECHANISM.search("the state file holds the current phase")
+    assert _RETIRED_MECHANISM.search("append this to the reflections file")
+    assert not _RETIRED_MECHANISM.search(
+        "This task keeps no state file — the session itself is the state."
+    ), "the replacement text denies the file; flagging it would forbid saying what replaced it"
+    assert not _RETIRED_MECHANISM.search("there is no reflections file any more")

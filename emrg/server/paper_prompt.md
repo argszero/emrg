@@ -139,7 +139,7 @@ Check paper-related files under the project directory `{{ source_dir }}`:
    ls {{ source_dir }}/literature/ 2>/dev/null || echo "[no literature/ directory — literature work has not started]"
    ```
 2. **Prefer the browser harness skill** to access arXiv (cs.LG, cs.CL, cs.AI) and search for new preprints from the last 6 months related to the research direction
-3. **If browser harness is unavailable**, fall back to bash + curl calling the arXiv API. Keywords MUST derive from the project's research direction (read Agent.md / abstract / state file to determine direction terms, e.g. mutual learning, co-teaching, self-play, knowledge distillation); using generic broad terms is forbidden:
+3. **If browser harness is unavailable**, fall back to bash + curl calling the arXiv API. Keywords MUST derive from the project's research direction (read Agent.md / abstract to determine direction terms, e.g. mutual learning, co-teaching, self-play, knowledge distillation); using generic broad terms is forbidden:
    ```bash
    # Example: search papers from the last 6 months related to the research direction (replace xxx with the direction term)
    curl -s "http://export.arxiv.org/api/query?search_query=cat:cs.CL+AND+all:xxx&sortBy=submittedDate&sortOrder=descending&max_results=10"
