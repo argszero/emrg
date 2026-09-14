@@ -26,6 +26,7 @@ to be called, so a test cannot pass by never querying.
 from __future__ import annotations
 
 import importlib.util
+import ast
 import json
 import sys
 from pathlib import Path
@@ -971,6 +972,51 @@ def test_min_votes_lowers_the_threshold(mod, monkeypatch, capsys):
                    _approve("cyc20260911-020000", "2026-09-11T02:00:00Z")])
     assert _run(mod, monkeypatch, fake, ["1", "--min-votes", "2"]) == 0
     assert "READY 2/2" in capsys.readouterr().out
+
+
+# --- the gate's number exists once -----------------------------------------
+
+
+def test_the_help_line_states_the_default_the_parser_actually_uses(mod, monkeypatch, capsys):
+    """`--help` must print the parser's default, never a copy written beside it.
+
+    Measured 2026-09-14: the option carried `default=3` *and* a hand-written help
+    string "(default 3)" - a stated number that is not the one that fires, since
+    raising the default leaves the help saying 3. The default now comes from
+    `DEFAULT_MIN_VOTES` and argparse renders it. This arm tunes the constant: the
+    parser reads it while `main()` builds the parser, so a rendered help that does
+    not follow is a second spelling. Asserting merely that "3" appears would have
+    passed against the hand-written text too, i.e. measured nothing.
+    """
+    monkeypatch.setattr(mod, "DEFAULT_MIN_VOTES", 7)
+    with pytest.raises(SystemExit) as exc:
+        mod.main(["--help"])
+    assert exc.value.code == 0
+    line = [ln for ln in capsys.readouterr().out.splitlines() if "votes required" in ln][0]
+    assert "default: 7" in line, line
+    assert "3" not in line, line
+
+
+def test_the_dataclass_default_is_the_constant_not_a_second_literal(mod):
+    """`Verdict.needed`'s default is baked when the class body runs, so the source is what to lock.
+
+    Patching the constant afterwards cannot move a class-level default, so the
+    honest checks are that the two defaults agree today and that the class reads
+    the *name*. `= 3` would be a second spelling that a tuned CLI default could not
+    move - the CLI would count to 7 while the dataclass still said 3.
+    """
+    assert mod.Verdict.__dataclass_fields__["needed"].default == mod.DEFAULT_MIN_VOTES
+
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    verdict = [
+        n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "Verdict"
+    ][0]
+    needed = [
+        n for n in verdict.body
+        if isinstance(n, ast.AnnAssign) and getattr(n.target, "id", "") == "needed"
+    ][0]
+    assert isinstance(needed.value, ast.Name), ast.dump(needed.value)
+    assert needed.value.id == "DEFAULT_MIN_VOTES", ast.dump(needed.value)
 
 
 def test_a_gh_failure_exits_2_with_the_reason(mod, monkeypatch, capsys):
