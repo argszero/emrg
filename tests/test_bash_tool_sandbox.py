@@ -989,6 +989,55 @@ def test_git_shape_decided_verbs_block_their_writing_forms():
         allowed, reason, _ = _check_sandbox(cmd, "read-only")
         assert allowed is False, f"{cmd!r} writes; must block ({reason!r})"
 
+def test_git_verdict_is_not_decided_by_the_next_command():
+    """A chained invocation is judged by its own tokens, not the next one's.
+
+    `rest` was the remainder of the whole token stream, so the verbs that decide
+    on a positional count read the *following* command's arguments:
+    `git config user.name && git config user.email` — the identity check
+    `emrg/server/evolution_prompt.md` tells every cycle to run — arrived as
+    `git config` with four positionals and was refused as a mutation, while the
+    same command standing alone was allowed. Measured on master `f5a62f47`:
+    11 of the 44 read shapes in the corpus were refused and all 11 were exactly
+    the chained twins of shapes that pass alone.
+
+    The blocked half is the point: bounding `rest` must not free a write. Every
+    writing form below is chained, so it fails if the fix made the guard read
+    only the first command of a chain.
+    """
+    for cmd in (
+        "git config user.name && git config user.email",
+        "git config user.name; git config user.email",
+        "git config user.name | head -1",
+        "git tag && echo done",
+        "git tag -l && echo done",
+        "git branch && echo done",
+        "git branch -a && git log --oneline -1",
+        "git remote -v && git status --porcelain",
+        "git remote -v; git branch",
+        "git submodule status && echo done",
+        "git worktree list && echo done",
+        "git stash list && git status",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} is all reads and must be allowed ({reason!r})"
+
+    for cmd in (
+        "git tag v9 && git tag",
+        "git tag -d v1 && echo done",
+        "git config user.name someone && git status",
+        "git branch -D old && echo done",
+        "git branch newbr && git branch",
+        "git remote set-url origin x && git remote -v",
+        "git submodule update --init && echo done",
+        "git worktree add ../wt && echo done",
+        "git stash list && git stash drop",
+        "git -C . stash list && git -C . stash drop",
+        "git -C . stash show -p && git -C . stash pop",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} writes; must block ({reason!r})"
+
 def test_git_verb_parsing_ignores_quoted_mentions():
     """A mutator inside a string literal is not a command (issue #1156 facet D).
 

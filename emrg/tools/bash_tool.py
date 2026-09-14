@@ -767,8 +767,17 @@ def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
     tokenising keeps a string literal whole; the *unquoted argument* is the same
     defect one level down, and position is what distinguishes it.
 
-    ``rest`` is the tokens after the verb, needed to decide flag/subcommand-
-    dependent verbs (`git branch -D` writes, `git branch -a` reads).
+    ``rest`` is the tokens after the verb **up to the next command separator**,
+    needed to decide flag/subcommand-dependent verbs (`git branch -D` writes,
+    `git branch -a` reads).
+
+    Bounded, because it once was not: an unbounded ``rest`` handed the *next*
+    command's tokens to a verdict that decides on the positional count, so
+    `git config user.name && git config user.email` — the identity check every
+    cycle is told to run (`emrg/server/evolution_prompt.md`) — was read as
+    `git config` with four positionals and refused as a mutation, while the same
+    command alone was allowed. The shape affects every positional-count-decided
+    verb (`config`, `tag`, `branch`, `remote`, `submodule`, `worktree`).
     """
     out: list[tuple[str, list[str]]] = []
     i = 0
@@ -789,7 +798,10 @@ def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
                 continue
             break
         if j < len(tokens):
-            out.append((tokens[j], tokens[j + 1:]))
+            end = j + 1
+            while end < len(tokens) and tokens[end] not in _COMMAND_SEPARATORS:
+                end += 1
+            out.append((tokens[j], tokens[j + 1:end]))
         i = j + 1
     return out
 
