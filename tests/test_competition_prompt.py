@@ -161,11 +161,15 @@ def test_goal_line_covers_both_prize_and_standing():
     assert "leaderboard standing / percentile" in text
 
 
-def test_preparation_and_reflection_are_mandatory():
+def test_preparation_and_closing_summary_are_mandatory():
     text = PROMPT.read_text(encoding="utf-8")
     assert "0. Preparation (MUST run first every round)" in text
     assert "Do not skip the preparation step (even when \"everything looks fine\")" in text
-    assert "MUST end with a reflection appended" in text
+    # The per-round reflection used to be appended to a `*_reflections.md` diary;
+    # the rant 2026-09-14T14:35:47 sweep moved it into the round's final message.
+    assert "closing summary in your final message" in text
+    assert "a round that ends without a summary strands the next one" in text
+    assert "Seven questions the closing summary must answer" in text
     # Rant scan must match the project field exactly, like the other templates.
     assert "exactly `{{ task.project }}`" in text
 
@@ -505,21 +509,25 @@ def test_machine_rejection_is_not_permanent():
     §4 is what turns a mechanical hit into a permanent exclusion, so the split
     is part of the fix, not cosmetic.
 
-    Asserted against the **template block** rather than the whole document: the
+    Asserted against the **§4 section block** rather than the whole document: the
     first version of this test checked only that the phrase occurred somewhere,
     and phase A (§, "does **not** go in that section") mentions it in prose — so
     renaming the actual section heading away survived the test unchanged. A
     presence check that can be satisfied by a mention of the thing is the same
     class of blindness this cycle is fixing, one level up.
+
+    §4 was a fenced ```markdown state-file template until rant 2026-09-14T14:35:47
+    removed the state file; the same two rejection entries now live as memory-entry
+    forms in prose, and the block is parsed by section.
     """
     text = PROMPT.read_text(encoding="utf-8")
-    block = text.split("```markdown", 1)[1].split("```", 1)[0]
-    assert "## Rejected (never re-evaluated)" in block, (
-        "the state-file template lost its permanent-rejection section"
+    block = text.split("### 4. Cross-round state lives", 1)[1].split("\n---", 1)[0]
+    assert "**Rejected (never re-evaluated)**" in block, (
+        "§4 lost its permanent-rejection entry form"
     )
-    assert "## Rejected — needs a human read" in block, (
-        "the state-file template has no re-checkable rejection section, so a "
-        "§3.2.1 negation override would be frozen as permanent"
+    assert "**Rejected — needs a human read" in block, (
+        "§4 has no re-checkable rejection entry form, so a §3.2.1 negation "
+        "override would be frozen as permanent"
     )
     # Phase A must route to the right one of the two.
     assert "does **not** go in that section" in text

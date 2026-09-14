@@ -39,6 +39,7 @@ import yaml
 from emrg.protocol import InstanceIdentity
 from emrg.server import scheduler as mod
 from emrg.server.scheduler import TaskHandler
+from emrg.tools import bash_tool
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPTS_DIR = REPO_ROOT / "emrg" / "server"
@@ -182,3 +183,139 @@ def test_no_prompt_names_a_placeholder_the_builder_does_not_provide(
                 f"provide ({exc}); with the daemon's Undefined it would silently "
                 f"render as an empty string"
             ) from exc
+
+
+# `{{ evolution_cwd }}` followed by the rest of the path it names.
+EVOLUTION_CWD_REF = re.compile(r"\{\{\s*evolution_cwd\s*\}\}([^\s`)\"'|,;]*)")
+
+# A path suffix that routes through a `memory/` directory.
+_MEMORY_SEGMENT = re.compile(r"(?:^|/)memory/")
+
+
+def _evolution_memory_refs(text: str) -> list[str]:
+    """Path suffixes of ``{{ evolution_cwd }}`` references that name a memory dir."""
+    return [
+        suffix
+        for suffix in EVOLUTION_CWD_REF.findall(text)
+        if _MEMORY_SEGMENT.search(suffix)
+    ]
+
+
+def test_prompt_memory_writes_land_where_the_sandbox_allows_them() -> None:
+    """A prompt's memory path must be one the ``workspace-write`` sandbox trusts.
+
+    Measured 2026-09-14 (rant 2026-09-14T14:35:47): `open_source_prompt.md` sent the
+    agent's identity file and its "key findings" to `{{ evolution_cwd }}/memory/`,
+    i.e. `~/.emrg/evolution/memory/`. That is out of the sandbox's boundary — every
+    such write is refused with "blocked write outside workspace", which the rant
+    reports an open-source task hitting 32 times in one day — and it is the wrong
+    root anyway: the evolution data root is `{{ evolution_cwd }}/.emrg/`, the only
+    part of `{{ evolution_cwd }}` `bash_tool._trusted_write_zones()` trusts and the
+    only memory the daemon loads. The directory exists, so a write that gets through
+    by a route the command-line scan cannot see (an `open()` inside a heredoc, as the
+    rant documents) lands in a folder no memory loader reads.
+
+    The expected location is taken from the sandbox's own trust list rather than
+    copied here, so if that list moves, this test reports the prompts may be stale
+    instead of agreeing with a second copy of the rule.
+
+    Named limit: only ``{{ evolution_cwd }}``-rooted *memory* paths are checked.
+    The state-file / reflection-file mechanism the same rant retires is covered by
+    ``test_retired_state_file_mechanism_is_gone_or_being_swept`` below, and the
+    paths that replaced it live in the memory root this test measures.
+    """
+    root = Path(mod.EVOLUTION_CWD)
+    zones = bash_tool._trusted_write_zones()
+    assert zones, "no trusted write zone — this check would pass vacuously"
+
+    # Self-test of the device: it must reject the exact shape the rant measured,
+    # and the machine must actually consider that shape outside the boundary.
+    planted = _evolution_memory_refs("write `{{ evolution_cwd }}/memory/identity.md`")
+    assert planted == ["/memory/identity.md"], planted
+    assert not any(
+        bash_tool._is_within(str(root / "memory/identity.md"), zone) for zone in zones
+    ), (
+        "`~/.emrg/evolution/memory/` is inside a trusted zone on this machine, so "
+        "this test cannot discriminate between the two roots here"
+    )
+
+    checked = 0
+    for task_type, filename in _builtin_templates():
+        text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+        for suffix in _evolution_memory_refs(text):
+            target = str(root / suffix.lstrip("/"))
+            assert any(
+                bash_tool._is_within(target, zone) for zone in zones
+            ), (
+                f"{task_type}/{filename}: tells the agent to write {target!r}, "
+                f"which the workspace-write sandbox blocks (trusted zones: {zones}); "
+                f"the evolution memory root is `{{{{ evolution_cwd }}}}/.emrg/memory/`"
+            )
+            checked += 1
+    assert checked >= 2, (
+        f"only {checked} memory path(s) found across the templates — the scan is "
+        f"not looking at what it thinks it is"
+    )
+
+
+# Templates still teaching the retired state-file / reflection-file mechanism.
+# Rant 2026-09-14T14:35:47 removes it wholesale ("the session itself is the
+# memory"); the sweep lands one template at a time. Each entry is removed from
+# this set in the SAME change that sweeps its template, so the set only shrinks
+# and reaching empty is what "no residue" means.
+PENDING_STATE_SWEEP = {
+    "promote_prompt.md",
+    "paper_prompt.md",
+    "journal_prompt.md",
+}
+
+# The retired mechanism's fingerprints: the two file names, and the prose that
+# told the agent to read/write "the state file".
+_RETIRED_MECHANISM = re.compile(
+    r"_state\.md|_reflections\.md|the state file|state-file",
+    re.IGNORECASE,
+)
+
+
+def test_retired_state_file_mechanism_is_gone_or_being_swept() -> None:
+    """A prompt outside `PENDING_STATE_SWEEP` must not teach the retired mechanism.
+
+    Measured 2026-09-14 (rant 2026-09-14T14:35:47): each task prompt carried a
+    per-project `*_state.md` file and an append-only `*_reflections.md` diary, and
+    every phase hand-off was a line written into one of them. The host retired both
+    — the daemon already replays the task's session history into every round, so the
+    session is the state and the memory index is the durable layer. Nothing reads
+    either file any more, which makes every surviving instruction a write into a
+    place no loader looks.
+
+    The check runs in both directions, because a set that only ever shrinks is one
+    someone can forget to shrink: a swept template must be clean, and a template
+    still listed as pending must actually still mention the mechanism (otherwise it
+    was swept without being removed from the set here).
+
+    Named limit: this is a *text* guard over the built-in templates only. It cannot
+    see a state file an agent invents at runtime, and it does not read the rendered
+    prompt — the templates are checked as written.
+    """
+    swept = [name for _, name in _builtin_templates() if name not in PENDING_STATE_SWEEP]
+    assert "open_source_prompt.md" in swept, (
+        "the swept set lost its pilot template — the check is not looking where it "
+        "thinks it is"
+    )
+
+    for name in swept:
+        text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
+        hits = sorted(set(_RETIRED_MECHANISM.findall(text)))
+        assert not hits, (
+            f"{name}: still teaches the retired state-file / reflection-file "
+            f"mechanism {hits} — the session is the state now, so this instruction "
+            f"sends the agent to a file nothing reads (rant 2026-09-14T14:35:47)"
+        )
+
+    for name in sorted(PENDING_STATE_SWEEP):
+        text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
+        assert _RETIRED_MECHANISM.search(text), (
+            f"{name} is still listed in PENDING_STATE_SWEEP but no longer mentions "
+            f"the mechanism — drop it from the set in the same change that swept it, "
+            f"so the set keeps meaning 'not yet done'"
+        )
