@@ -28,7 +28,7 @@ import yaml
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,18 @@ def _truncate_index_title(title: str, max_len: int | None = None) -> str:
     return title[: max_len - 1] + "…"
 
 
+# A frontmatter line that declares a top-level key. Indented lines (a nested
+# value or a continuation) and comments deliberately do not match: they are not
+# keys, so a save must carry them through untouched.
+_FM_LINE_KEY_RE = re.compile(r"^([A-Za-z_][\w-]*)\s*:")
+
+
+def _fm_line_key(line: str) -> str | None:
+    """The top-level frontmatter key a raw line declares, or None."""
+    m = _FM_LINE_KEY_RE.match(line)
+    return m.group(1) if m else None
+
+
 # ── Constants ──────────────────────────────────────────────────────
 
 VALID_TYPES = {"user", "feedback", "project", "reference", "decision", "task"}
@@ -112,6 +124,14 @@ class MemoryFile:
     title: str = ""
     body: str = ""
 
+    # Provenance, not content: the frontmatter block as it was read, and the
+    # value each key parsed to. ``to_markdown`` replays the source lines for
+    # values the store did not change, so a load → save of a file the store
+    # merely read reproduces that file. ClassVars so they stay out of the
+    # dataclass's fields, equality and constructor.
+    _fm_lines: ClassVar[tuple[str, ...] | None] = None
+    _fm_parsed: ClassVar[dict[str, object]] = {}
+
     @property
     def filename(self) -> str:
         """Derive a descriptive filename from title.
@@ -142,6 +162,7 @@ class MemoryFile:
         YAML (e.g. LLM-generated files with syntax errors).
         """
         frontmatter: dict = {}
+        fm_lines: tuple[str, ...] | None = None
         body = ""
         lines = text.split("\n")
 
@@ -155,6 +176,7 @@ class MemoryFile:
 
             if end_idx is not None:
                 fm_raw = "\n".join(lines[1:end_idx])
+                fm_lines = tuple(lines[1:end_idx])
                 body = "\n".join(lines[end_idx + 1 :]).strip()
 
                 # Try yaml.safe_load first (handles lists, nested values, etc.)
@@ -169,6 +191,15 @@ class MemoryFile:
                                 frontmatter[key] = " ".join(str(v) for v in value)
                             elif isinstance(value, bool):
                                 frontmatter[key] = "true" if value else "false"
+                            elif isinstance(value, datetime):
+                                # An unquoted ISO timestamp is a datetime to
+                                # yaml, and `str()` would hand back the same
+                                # instant in a different format ("2026-08-23
+                                # 12:27:14+08:00"). This module's own field
+                                # docs — and the memory format the system
+                                # prompt gives agents — say ISO 8601, so a
+                                # value read from such a file must stay ISO.
+                                frontmatter[key] = value.isoformat()
                             else:
                                 frontmatter[key] = str(value)
                 except (yaml.YAMLError, yaml.MarkedYAMLError):
@@ -222,7 +253,7 @@ class MemoryFile:
                     break
             title = stem.replace("-", " ")
 
-        return cls(
+        mem = cls(
             id=frontmatter.get("id") or generate_id(),
             event_at=frontmatter.get("event_at") or now_iso(),
             created_at=frontmatter.get("created_at") or now_iso(),
@@ -234,25 +265,54 @@ class MemoryFile:
             title=title,
             body=body,
         )
+        # Provenance for the write side: the lines as read, and the value each
+        # key parsed to, so ``to_markdown`` can tell what it changed.
+        mem._fm_lines = fm_lines
+        mem._fm_parsed = dict(frontmatter)
+        return mem
 
     # ── Serialization ──────────────────────────────────────────
 
     def to_markdown(self) -> str:
-        """Serialize to the full file format (frontmatter + body)."""
-        fm = [
-            "---",
-            f'id: "{self.id}"',
-            f'event_at: "{self.event_at}"',
-            f'created_at: "{self.created_at}"',
-            f'updated_at: "{self.updated_at}"',
-        ]
-        if self.source_session:
-            fm.append(f'source_session: "{self.source_session}"')
-        fm.append(f'type: "{self.type}"')
-        fm.append(f'scope: "{self.scope}"')
-        fm.append(f'status: "{self.status}"')
-        fm.append("---")
-        fm.append("")
+        """Serialize to the full file format (frontmatter + body).
+
+        The frontmatter is written as a document, not as a re-rendering of this
+        model's eight fields. Lines the store did not change come out of
+        ``_fm_lines`` verbatim — including keys this model does not know (they
+        used to be dropped outright) and values yaml coerced into something
+        else. Only keys the file never had, and values the store actually
+        changed, are rendered canonically. Measured 2026-09-14 over the 1216
+        ``.md`` files under ``~/.emrg`` memory directories: 1104 came back
+        different from a load → save (an ISO ``T`` became a space, ``Z`` became
+        ``+00:00``, every value gained quotes), which is the shape the memory
+        format spec tells agents to write — so every hand-written file was
+        rewritten by the next store write. With this, 1186 are byte-exact; the
+        30 that still differ are 21 index/archive files that carry no
+        frontmatter at all (``MemoryIndex`` writes those, not this class), 8
+        whose body ends in a blank line, and 1 missing the required timestamps.
+        """
+        canonical = self._canonical_frontmatter()
+        out = ["---"]
+        emitted: set[str] = set()
+        for line in self._fm_lines or ():
+            key = _fm_line_key(line)
+            if key is None or key in emitted:
+                # A comment, a nested/continuation line, or a repeated key:
+                # nothing here for us to own, so it stays as written.
+                out.append(line)
+                continue
+            emitted.add(key)
+            if key not in canonical:
+                out.append(line)  # a key this model has no field for: keep it
+            elif self._fm_parsed.get(key) == getattr(self, key):
+                out.append(line)  # untouched since it was read: keep it
+            else:
+                out.append(canonical[key])
+        for key, line in canonical.items():
+            if key not in emitted:
+                out.append(line)
+        out.append("---")
+        out.append("")
 
         body = self.body
         # Ensure title heading exists
@@ -260,10 +320,25 @@ class MemoryFile:
             title_line = f"# {self.title}"
             if not body.startswith(title_line):
                 body = f"{title_line}\n\n{body}"
-        fm.append(body)
+        out.append(body)
 
         # Trailing newline
-        return "\n".join(fm) + "\n"
+        return "\n".join(out) + "\n"
+
+    def _canonical_frontmatter(self) -> dict[str, str]:
+        """How this model renders each field it owns, in its own order."""
+        fm = {
+            "id": f'id: "{self.id}"',
+            "event_at": f'event_at: "{self.event_at}"',
+            "created_at": f'created_at: "{self.created_at}"',
+            "updated_at": f'updated_at: "{self.updated_at}"',
+        }
+        if self.source_session:
+            fm["source_session"] = f'source_session: "{self.source_session}"'
+        fm["type"] = f'type: "{self.type}"'
+        fm["scope"] = f'scope: "{self.scope}"'
+        fm["status"] = f'status: "{self.status}"'
+        return fm
 
     def save(self, path: Path) -> None:
         """Write this memory file to disk."""

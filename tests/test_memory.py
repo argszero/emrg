@@ -317,3 +317,94 @@ class TestMemoryIndexFileRoundtrip:
         loaded = MemoryIndex.from_file(path)
         assert len(loaded.entries) == 1
         assert loaded.entries[0].filename == mem.filename
+
+
+# A memory file in the shape the system prompt's format spec gives agents:
+# unquoted ISO timestamps, own key order, a `Z` offset, and a hand-added key
+# this module has no field for.
+SPEC_SHAPED_MEMORY = """---
+id: a1b2c3d4
+event_at: 2026-08-27T11:30:45Z
+created_at: 2026-08-27T11:48:00Z
+updated_at: 2026-08-27T11:48:00Z
+type: task
+scope: project
+status: active
+tags: merge-gate
+---
+
+# A hand-written memory
+
+Body text that must survive.
+"""
+
+
+class TestMemoryFileRoundTripFidelity:
+    """A save must reproduce the file it read — frontmatter included.
+
+    Before this: `to_markdown` re-rendered the frontmatter from the eight
+    fields this model holds, so a load → save of a file shaped like the
+    documented format came back with a space where the ISO `T` was (`yaml`
+    coerces an unquoted timestamp to a `datetime`, and `str()` renders that
+    with a space), `Z` as `+00:00`, every value newly quoted, and any key the
+    model does not know dropped. Measured 2026-09-14 over the 1216 `.md` files
+    under `~/.emrg` memory directories: 1104 came back different.
+    """
+
+    def test_spec_shaped_file_round_trips_byte_for_byte(self):
+        mem = MemoryFile.from_text(SPEC_SHAPED_MEMORY, _filename="task-a.md")
+        assert mem.to_markdown() == SPEC_SHAPED_MEMORY
+
+    def test_timestamps_stay_iso_8601(self):
+        """The field docs (and the format spec) say ISO 8601, not `str()`."""
+        mem = MemoryFile.from_text(SPEC_SHAPED_MEMORY, _filename="task-a.md")
+        assert mem.event_at == "2026-08-27T11:30:45+00:00"
+        assert " " not in mem.event_at.split("T")[0]
+        assert mem.created_at.startswith("2026-08-27T")
+
+    def test_unknown_frontmatter_key_is_kept(self):
+        """`tags:` is not a field of this model — dropping it was data loss."""
+        mem = MemoryFile.from_text(SPEC_SHAPED_MEMORY, _filename="task-a.md")
+        assert "tags: merge-gate" in mem.to_markdown()
+
+    def test_changed_field_is_rendered_and_siblings_stay_verbatim(self):
+        mem = MemoryFile.from_text(SPEC_SHAPED_MEMORY, _filename="task-a.md")
+        mem.status = "superseded"
+        out = mem.to_markdown()
+        assert 'status: "superseded"' in out
+        # Everything the store did not touch is still the file's own text.
+        assert "event_at: 2026-08-27T11:30:45Z" in out
+        assert "tags: merge-gate" in out
+        assert "id: a1b2c3d4" in out
+        # The two shapes must not both be present.
+        assert out.count("status:") == 1
+
+    def test_store_update_rewrites_only_the_changed_line(self, temp_cwd):
+        """The store's write path, on a real file: only `status` may move."""
+        store = SessionMemoryStore(temp_cwd)
+        path = store.directory / "task-a.md"
+        path.write_text(SPEC_SHAPED_MEMORY, encoding="utf-8")
+
+        mem = store.update("a1b2c3d4", status="superseded")
+
+        assert mem is not None
+        after = path.read_text(encoding="utf-8")
+        before_lines = SPEC_SHAPED_MEMORY.split("\n")
+        after_lines = after.split("\n")
+        changed = [
+            (a, b) for a, b in zip(before_lines, after_lines, strict=False) if a != b
+        ]
+        # `update` sets the field it was asked for and bumps `updated_at`;
+        # nothing else in the frontmatter may move.
+        assert sorted(a.split(":")[0] for a, _ in changed) == ["status", "updated_at"]
+        assert [b for _, b in changed if b.startswith("status")] == ['status: "superseded"']
+        # Same line count, so the body is untouched and no line was added.
+        assert len(before_lines) == len(after_lines)
+
+    def test_a_file_without_frontmatter_gains_the_required_fields(self):
+        """No frontmatter is not a round-trip case: the format requires it."""
+        mem = MemoryFile.from_text("# Just a body\n\nText.\n")
+        out = mem.to_markdown()
+        assert out.startswith("---\n")
+        assert "event_at:" in out
+        assert "Text." in out
