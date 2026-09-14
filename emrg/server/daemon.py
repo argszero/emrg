@@ -1447,7 +1447,7 @@ class EmrgServer:
         tokens per request). Cap what gets embedded; the full index and
         cycle-archive-*.md stay readable on disk via the read tool.
         """
-        # One knob, two readings. This used to spell `50 * 1024` itself with a
+        # One knob, two readings. This used to spell the cap itself with a
         # comment promising it matched `memory.INDEX_SIZE_WARN` — a promise nothing
         # checked, so tuning the threshold the store warns by (the point of a soft
         # guard) would leave the cap embedding an index the agent is already being
@@ -1461,10 +1461,13 @@ class EmrgServer:
             cut = limit
         head = text[:cut]
         over = len(text) - len(head)
+        # The notice names what was cut (`over` — a runtime measurement), not the
+        # size of the cap it was cut against: stating the threshold again here
+        # buys nothing and drifts (rant 2026-09-14T13:23:04). The number is the
+        # store's to say, and it says it when it warns.
         return head + (
             f"\n… [truncated {over} chars — MEMORY.md exceeds the "
-            f"{INDEX_SIZE_WARN // 1024}KB embed "
-            "cap; older cycle rows live in cycle-archive-*.md, readable via "
+            "embed cap; older cycle rows live in cycle-archive-*.md, readable via "
             "the read tool]"
         )
 
@@ -4533,13 +4536,20 @@ class EmrgServer:
                     "- **化整为零 (one → many)**: split an overgrown memory into "
                     "searchable entries by topic.\n"
                     "- Update existing entries in place when new info refines them; "
-                    "MEMORY.md stays a pure index (one short line per entry, "
-                    "title ≤512 chars).\n"
+                    "MEMORY.md stays a pure index (one short line per entry).\n"
                 )
+                # Rant 2026-09-14T13:23:04 — this line reports the index's actual
+                # entry count and byte size (runtime measurements, kept) and no
+                # longer names the threshold itself. It used to name an entry count
+                # that was never the one firing: the entry cap is
+                # `INDEX_COUNT_WARN`, and the store states that number for itself
+                # when it warns. A restated threshold tells the agent a wrong level
+                # and teaches it that the numbers in its own instructions cannot be
+                # trusted.
                 if store.count > INDEX_COUNT_WARN or index_size > INDEX_SIZE_WARN:
                     hygiene_note += (
                         f"\n⚠️ Index currently {store.count} entries / {index_size} "
-                        "bytes (past the ~50-entry soft cap) — prioritize "
+                        "bytes (past a soft cap) — prioritize "
                         "consolidation this round.\n"
                     )
 
@@ -4565,8 +4575,8 @@ class EmrgServer:
                     "- If nothing worth remembering happened, just reply 'no new memories' briefly\n"
                     "- Prefer session-scope for tentative/evolving knowledge; "
                     "project-scope for stable, cross-session facts\n"
-                    "- Keep MEMORY.md a pure index: one short line per entry "
-                    "(title ≤512 chars); update entries in place rather than appending\n"
+                    "- Keep MEMORY.md a pure index: one short line per entry; "
+                    "update entries in place rather than appending\n"
                     f"{hygiene_note}"
                     "\n"
                     "Memory format (YAML frontmatter + Markdown):\n"
