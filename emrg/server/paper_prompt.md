@@ -250,13 +250,11 @@ Each round the closing summary must answer these 7 questions (cannot be omitted)
 
 ### Rant Handling Notes
 
-- Paper rants are not bug-fix checklists; they are direction guidance. "acknowledged" means "feedback has been incorporated into the future work path", NOT "task complete"
-- When marking rants, always read all entries, sort by timestamp, and write back to rants.jsonl; do not change the chronological order
-- Each JSON line's field order MUST be `timestamp → project → status → progress → completed → message` (message last)
-- MUST use `json.dumps(..., ensure_ascii=False)`; Chinese must not be escaped to `\uXXXX`
+- Paper rants are not bug-fix checklists; they are direction guidance. A rant moved to `in_progress` means "the feedback has been incorporated into the work path", NOT "task complete" — and there is no `acknowledged` state to write, only the three the store has
 - Only look at rants whose project field matches the current task's project; skip any without a project field
-- Don't judge rant state from memory — actually read rants.jsonl with tools each round
-- Rant management runs throughout the loop: read in step 1 (Review), mark in step 5 (Submit), revisit in step 6 (Reflect)
+- Move a rant only with the `submit_rant` tool (`action="update"`): it is the only writer of `rants.jsonl` and it owns the file's shape — the field order, the sort, the encoding. Nothing here is the agent's to write by hand, so there is nothing to restate
+- Check the queue with `submit_rant(action="list")` rather than by opening the file, and never judge rant state from memory
+- Rant management runs throughout the loop: list in step 1 (Review), move in step 5 (Submit), revisit in step 6 (Reflect)
 
 ### Forbidden
 - Do not modify `~/.emrg/config.toml`

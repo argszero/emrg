@@ -1045,7 +1045,18 @@ def test_open_source_template_renders_with_context():
     assert "Unmatched-rant hint" in out, "未匹配疑似 rant 提示应渲染"
     assert "B.1b Rant-driven mode" in out, "rant 驱动模式应渲染"
     assert "ROLE LOCK" in out, "既有 ROLE LOCK 应保留"
-    assert "json.dumps(..., ensure_ascii=False)" in out, "rant 状态写入要求应渲染"
+    # Rant 2026-08-18T16:42:52: `submit_rant` is the only writer of rants.jsonl.
+    # This assertion used to require the opposite — that the rendered section state
+    # the field order / sort / `json.dumps(..., ensure_ascii=False)` rule — which
+    # made the *tests* pin the restated rule the templates were then swept of
+    # (cyc20260914-201054). A rendering test may assert that the section survives
+    # Jinja with this context; it may not assert that a rule the tool owns is
+    # restated here, because the whole point of the sweep is that it is not.
+    assert 'submit_rant(action="update"' in out, "rant 状态写入应改为交给 submit_rant"
+    assert "json.dumps(..., ensure_ascii=False)" not in out, (
+        "the field order / sort / encoding rule is `submit_rant`'s; the rendered "
+        "section must not restate it (see tests/test_rants_single_writer.py)"
+    )
 
 
 def test_open_source_template_allow_self_merge_conditional():
