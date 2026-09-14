@@ -1005,7 +1005,12 @@ def test_paper_template_renders_with_context():
         source_dir="/tmp/paper", session_id="s1", timestamp="20260806",
         task={}, project={}, evolution_count=0,
     )
-    assert "paper_state.md" in out, "状态文件指引应渲染"
+    # The per-round `paper_state.md` was retired (rant 2026-09-14T14:35:47): the
+    # session is the state now, so the template must render the continuity contract
+    # and the closing summary that replaces the file — and must not name the file.
+    assert "Cross-round continuity" in out, "跨轮续接指引应渲染"
+    assert "closing summary in your final message" in out, "收尾总结契约应渲染"
+    assert "paper_state.md" not in out, "已废置的状态文件指引不应再渲染"
     assert "latexmk" in out, "LaTeX 检查指引应渲染"
     assert "literature" in out, "文献去重指引应渲染"
 
