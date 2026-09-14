@@ -1447,7 +1447,12 @@ class EmrgServer:
         tokens per request). Cap what gets embedded; the full index and
         cycle-archive-*.md stay readable on disk via the read tool.
         """
-        limit = 50 * 1024  # match memory.INDEX_SIZE_WARN (50KB)
+        # One knob, two readings. This used to spell `50 * 1024` itself with a
+        # comment promising it matched `memory.INDEX_SIZE_WARN` — a promise nothing
+        # checked, so tuning the threshold the store warns by (the point of a soft
+        # guard) would leave the cap embedding an index the agent is already being
+        # warned about. The number is the store's; this reads it.
+        limit = INDEX_SIZE_WARN
         text = path.read_text(encoding="utf-8")
         if len(text) <= limit:
             return text
@@ -1457,7 +1462,8 @@ class EmrgServer:
         head = text[:cut]
         over = len(text) - len(head)
         return head + (
-            f"\n… [truncated {over} chars — MEMORY.md exceeds the 50KB embed "
+            f"\n… [truncated {over} chars — MEMORY.md exceeds the "
+            f"{INDEX_SIZE_WARN // 1024}KB embed "
             "cap; older cycle rows live in cycle-archive-*.md, readable via "
             "the read tool]"
         )

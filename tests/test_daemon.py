@@ -19,6 +19,7 @@ import pytest
 import yaml
 
 from emrg.config import LlmConfig
+from emrg.memory import INDEX_SIZE_WARN
 from emrg.protocol import InstanceIdentity
 from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
@@ -370,15 +371,15 @@ def test_context_section_manifesto(tmp_path):
 
 
 def test_cap_memory_index_small_file(tmp_path):
-    """Index under the 50KB cap is embedded as-is."""
+    """Index under the cap is embedded as-is."""
     server = _make_server()
     idx = tmp_path / "MEMORY.md"
-    idx.write_text("- [row](cycle-1.md) — title\n" * 50, encoding="utf-8")  # well under 50KB
+    idx.write_text("- [row](cycle-1.md) — title\n" * 50, encoding="utf-8")  # well under the cap
     assert server._cap_memory_index(idx) == idx.read_text(encoding="utf-8")
 
 
 def test_cap_memory_index_large_file(tmp_path):
-    """Index over 50KB is truncated at a line boundary with a notice.
+    """Index over the cap is truncated at a line boundary with a notice.
 
     Rant 2026-08-23T11:00:31: evolution agents append MEMORY.md rows
     directly (bypassing memory_store's write-time guards), so the embedded
@@ -387,14 +388,44 @@ def test_cap_memory_index_large_file(tmp_path):
     server = _make_server()
     idx = tmp_path / "MEMORY.md"
     line = "- [cyc00000000-000000](cycle-20260823-000000.md) — " + "x" * 100 + "\n"
-    idx.write_text(line * 600, encoding="utf-8")  # ~64KB > 50KB cap
+    idx.write_text(line * 600, encoding="utf-8")  # ~64KB > the cap
     capped = server._cap_memory_index(idx)
-    assert len(capped) <= 50 * 1024 + 200  # head + notice
+    assert len(capped) <= INDEX_SIZE_WARN + 200  # head + notice
     assert "truncated" in capped
     assert "cycle-archive" in capped
     # truncation lands on a line boundary (no half-cut index row)
     last_line = capped.rsplit("\n", 1)[1]
     assert last_line.startswith("… [truncated")
+
+
+def test_the_embed_cap_is_the_number_the_store_warns_by(tmp_path):
+    """The cap and `INDEX_SIZE_WARN` are one knob, not two numbers that agree.
+
+    `_cap_memory_index` used to spell `50 * 1024` itself, with a comment
+    promising it "matched memory.INDEX_SIZE_WARN" — a promise nothing ran, so
+    tuning the threshold the store warns by (the whole point of a soft guard)
+    would leave the cap embedding an index the agent is already being warned
+    about, and the test below this one pinned the *copy*, not the constant.
+
+    The boundary is measured against the constant in both directions: a file of
+    exactly `INDEX_SIZE_WARN` characters is embedded untouched, one character
+    more is not. A cap written as a different literal fails the first arm; a cap
+    that never truncates fails the second. Neither arm depends on the constant's
+    current value — they measure that the cap *is* that value.
+    """
+    server = _make_server()
+    at_cap = tmp_path / "MEMORY.md"
+    at_cap.write_text("x" * INDEX_SIZE_WARN, encoding="utf-8")
+    assert server._cap_memory_index(at_cap) == "x" * INDEX_SIZE_WARN
+
+    over_cap = tmp_path / "MEMORY.md"
+    over_cap.write_text("x" * (INDEX_SIZE_WARN + 1), encoding="utf-8")
+    capped = server._cap_memory_index(over_cap)
+    assert capped != "x" * (INDEX_SIZE_WARN + 1)
+    assert "truncated" in capped
+    # The notice states the cap from the same constant, so a tuned threshold
+    # cannot leave the agent reading a size that is no longer true.
+    assert f"{INDEX_SIZE_WARN // 1024}KB" in capped
 
 
 def test_collect_memory_data_caps_index(tmp_path):
@@ -409,7 +440,7 @@ def test_collect_memory_data_caps_index(tmp_path):
     assert data["has_memories"] is True
     assert data["project_memory_index_path"] == str(idx)
     assert "truncated" in data["project_memory_index"]
-    assert len(data["project_memory_index"]) <= 50 * 1024 + 200
+    assert len(data["project_memory_index"]) <= INDEX_SIZE_WARN + 200
 
 
 def test_collect_memory_data_no_index(tmp_path):
