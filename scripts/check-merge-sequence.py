@@ -189,13 +189,19 @@ as "verified" now cannot be told the wrong thing.
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
 import sys
 import tarfile
 import tempfile
 from pathlib import Path
+
+# The shared module's directory, so `import merge_tree` works however this file is
+# loaded: as `python3 scripts/check-merge-sequence.py` it is already `sys.path[0]`, but
+# the test suite loads these tools by file path (`spec_from_file_location`), where it
+# is not. `merge_tree.py` is a module of this repo, not a dependency.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import merge_tree  # noqa: E402  (needs the path above)
 
 # The guard is judged by its exit code, but its own report line names the
 # numbers, so it is captured and quoted rather than re-derived. Same constants
@@ -222,20 +228,22 @@ TREE_IN_REPORT = re.compile(r"^tree: (.+)$", re.M)
 COUNT_LINE_DOC = "Agent.md"
 RESOLVER = "uv run --no-sync python3 scripts/check-doc-count.py --resolve-conflict"
 
-# The date carried by every synthetic merge commit - the same constant and the
-# same reasoning as check-merge-plan-suite.py, so the two folds in this family
-# cannot drift apart. Pinned rather than read from the clock: a commit's sha
-# contains its committer date, so an unpinned fold is not a function of its
-# inputs, and a caller comparing two runs of the same plan would be comparing two
-# different shas for the same tree. A third copy lives in
-# check-merge-landing-diff.py, and the agreement of all three is enforced by
-# tests/test_synthetic_fold_date.py ("cannot drift" was a claim in comments with
-# nothing behind it until that guard existed).
-PLAN_COMMIT_DATE = "2000-01-01T00:00:00 +0000"
+# The date carried by every synthetic merge commit is `merge_tree.PLAN_COMMIT_DATE`,
+# one constant in one place: pinned rather than read from the clock, because a
+# commit's sha contains its committer date, so an unpinned fold is not a function of
+# its inputs and a caller comparing two runs of the same plan would be comparing two
+# shas for the same tree. This file, check-merge-plan-suite.py and
+# check-merge-landing-diff.py used to declare three copies, and
+# tests/test_synthetic_fold_date.py existed to enforce that they agreed ("cannot
+# drift" was a claim in comments with nothing behind it until that guard existed).
+# One constant needs no agreement guard.
+PLAN_COMMIT_DATE = merge_tree.PLAN_COMMIT_DATE
 
-
-class MeasurementError(Exception):
-    """The question could not be answered. Never a verdict."""
+# The question could not be answered. Never a verdict. The shared module's own class,
+# aliased rather than re-declared: a second class of the same name would let the
+# module's refusals travel past `except MeasurementError` here and reach the caller as
+# a traceback instead of as the measurement error it is.
+MeasurementError = merge_tree.MeasurementError
 
 
 def _run(
@@ -425,18 +433,22 @@ def _plan_from_open_prs(
 def _conflict_paths(a: str, b: str) -> list[str]:
     """The paths `git merge-tree` reports as conflicted between `a` and `b`.
 
-    Reporting only. An empty list means git said nothing this parser recognises as
-    a path, so no caller may read "no paths" as "no conflict" - `_merge_commit`
-    is what decides whether a merge conflicts; this only describes one.
+    Reporting only. An empty list means git, or the shared reading, named no path -
+    so no caller may read "no paths" as "no conflict": `_merge_commit` is what
+    decides whether a merge conflicts; this only describes one.
+
+    The reading is `merge_tree.fold`'s (the stage block, decoded out of git's path
+    quoting). This function used to scan the report's **prose** for
+    `Merge conflict in <path>` and fall back to the whole line, which was a second
+    reading with its own blind arm - measured 2026-09-14, a modify/delete conflict
+    does not use that wording, so the "path" it returned was the entire sentence
+    (arm G in `merge_tree.py`'s table) - and it reported a *quoted* spelling for a
+    non-ASCII name. Both are a refusal naming a file no resolver can open.
     """
-    proc = _run(["git", "merge-tree", "--write-tree", a, b])
-    paths: list[str] = []
-    for line in (proc.stdout + proc.stderr).splitlines():
-        if not line.startswith("CONFLICT"):
-            continue
-        match = re.search(r"Merge conflict in (.+?)\s*$", line)
-        paths.append(match.group(1) if match else line.strip())
-    return sorted(set(paths))
+    answer = merge_tree.fold(a, b, run=_run)
+    if answer.verdict != "conflict":
+        return []
+    return sorted(set(answer.paths))
 
 
 def _conflict_summary(base: str, excluded: list[int], heads: dict[int, str]) -> str:
@@ -592,114 +604,50 @@ def _fetch_head(number: int) -> str:
     return _rev_parse(ref)
 
 
-def _commit_env() -> dict[str, str]:
-    """Author/committer for the synthetic merge commits, independent of git config.
-
-    Measured defect (cyc20260913-200715): with no ambient identity and
-    `user.useConfigOnly = true` (a real setting, and the default in hardened
-    environments), `git commit-tree` refuses - "Author identity unknown ... no
-    email was given and auto-detection is disabled" - so this tool raised
-    `MeasurementError` and reported that the *guard question could not be
-    answered*, in an environment where it can be answered. Its sibling
-    `check-merge-plan-suite.py` answered the same environment correctly, because it
-    pins identity; the tool that folded a plan was the more robust of the two.
-
-    The date is pinned for the same reason as there: a commit's sha contains its
-    committer date, so an unpinned fold is not a function of its inputs. Here the
-    shas are only vehicles for the next step's merge (never printed, never compared
-    across runs), so the date half closes a latent trap rather than a measured
-    failure - the identity half is the measured one.
-    """
-    return {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "emrg-merge-sequence",
-        "GIT_AUTHOR_EMAIL": "merge-sequence@emrg.invalid",
-        "GIT_COMMITTER_NAME": "emrg-merge-sequence",
-        "GIT_COMMITTER_EMAIL": "merge-sequence@emrg.invalid",
-        "GIT_AUTHOR_DATE": PLAN_COMMIT_DATE,
-        "GIT_COMMITTER_DATE": PLAN_COMMIT_DATE,
-    }
-
-
-def _is_object_name(line: str) -> bool:
-    """Whether a line is a bare object name (the merged tree's).
-
-    Both the SHA-1 (40 hex) and SHA-256 (64 hex) object formats are accepted: the
-    question is the *shape* of the answer, which must not depend on the object
-    format of whichever clone happens to run this. The same rule and the same
-    spelling as `check-merge-plan-suite.py`, which measured it first.
-    """
-    return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
-
-
-def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
-    """What git said, from both streams - a failure must not report itself as empty."""
-    detail = (proc.stdout[-500:] + proc.stderr[-500:]).strip()
-    return detail or f"no output (exit {proc.returncode})"
-
-
+# Author/committer for the synthetic merge commits, independent of git config - the
+# whole family's, from `merge_tree.commit_env`.
+#
+# Measured defect (cyc20260913-200715): with no ambient identity and
+# `user.useConfigOnly = true` (a real setting, and the default in hardened
+# environments), `git commit-tree` refuses - "Author identity unknown ... no email
+# was given and auto-detection is disabled" - so this tool raised `MeasurementError`
+# and reported that the *guard question could not be answered*, in an environment
+# where it can be answered. Its sibling `check-merge-plan-suite.py` answered the same
+# environment correctly, because it pins identity; the tool that folded a plan was the
+# more robust of the two.
+#
+# The date is pinned for the same reason as there: a commit's sha contains its
+# committer date, so an unpinned fold is not a function of its inputs. Here the shas
+# are only vehicles for the next step's merge (never printed, never compared across
+# runs), so the date half closes a latent trap rather than a measured failure - the
+# identity half is the measured one.
+#
+# Three tools used to carry this function, differing only in the name and address they
+# stamped; the tool that reads a folded commit should not have to care whose name is
+# on it, and `tests/test_synthetic_fold_date.py` spent its whole length policing that
+# the three copies agreed.
+_commit_env = merge_tree.commit_env
 def _merge_commit(a: str, b: str) -> str | None:
     """Materialise the merge of commits `a` and `b` as a commit, or None if it conflicts.
 
     `merge-tree --write-tree` yields a tree sha, but a *tree* cannot be merged
-    again - the next step needs a commit to be one side of the merge. So the
-    tree is wrapped in a real merge commit via `commit-tree`, with both parents
-    recorded, which is exactly what a merge would have produced. Nothing is
-    written to the working tree, so a check can never leave the checkout dirty
-    (the uncommitted-repair trap recorded in `check-merge-tree-health.py`).
+    again - the next step needs a commit to be one side of the merge. So the tree
+    is wrapped in a real merge commit via `commit-tree`, with both parents recorded,
+    which is exactly what a merge would have produced. Nothing is written to the
+    working tree, so a check can never leave the checkout dirty (the
+    uncommitted-repair trap recorded in `check-merge-tree-health.py`).
 
-    A non-zero/one exit is a measurement failure, never a conflict: reporting
-    "conflict" for a git error would turn an unanswered question into a
-    reassuring one. The identity/date of that synthetic commit are pinned by
-    `_commit_env`, so the fold does not depend on the machine's git config.
-
-    **The exit code is not the signal; the output is.** Measured here
-    (`cyc20260914-050817`, this repo): a genuine conflict exits 1 and prints the
-    merged tree's OID on the first line of stdout - but so does a failure to
-    merge the two *inputs*: `git merge-tree --write-tree <commit> <an-object-
-    that-dereferences-to-a-blob>` exits **1 with empty stdout**. A bare
-    `if rc == 1: return None` read that as a conflict, so "I could not merge
-    these two inputs" was reported as a conflicting step, `_default_plan`
-    *excluded* the PR from the plan on that evidence, and the refusal that can
-    end there names conflicting paths that do not exist. An empty stdout is
-    never an answer, and a clean merge names its tree too, so both branches
-    require the OID. That also closes this branch's other direction: rc 0 with
-    empty stdout used to reach `splitlines()[0]` and raise `IndexError`, and an
-    unhandled exception leaves this tool as exit 1 - the code that means "a step
-    lands an unhealthy tree". A crash reported as a finding is a finding about a
-    tree nobody measured, which is the same defect one exit code over. The same
-    rule as `check-merge-plan-suite.py::_merge_tree`, which measured it first.
+    All of it is `merge_tree.merge_commit`'s now: the named-tree rule, both
+    directions of it, the synthetic commit's pinned identity and date, and the
+    default message. What this wrapper keeps is the tool's runner - the `_run` that
+    pins locale and decoding - so the pipeline can be driven by the fakes this
+    file's tests install (measured 2026-09-14, `cyc20260914-050817`: a genuine
+    conflict exits 1 and prints the merged tree's OID, but so does a failure to
+    merge the two *inputs*, which exits **1 with empty stdout** - and the second
+    was read as the first, so "I could not merge these two inputs" was reported as
+    a conflicting step and a PR was excluded on that evidence).
     """
-    proc = _run(["git", "merge-tree", "--write-tree", a, b])
-    lines = proc.stdout.splitlines()
-    named = lines[0].strip() if lines else ""
-    if proc.returncode not in (0, 1):
-        raise MeasurementError("merge-tree failed: " + _diagnosis(proc))
-    if not _is_object_name(named):
-        raise MeasurementError(
-            f"merge-tree exited {proc.returncode} without naming a merged tree, so "
-            "this is not a conflict but a failure to merge the inputs: "
-            + _diagnosis(proc)
-        )
-    if proc.returncode == 1:
-        return None
-    commit = _run(
-        [
-            "git",
-            "commit-tree",
-            named,
-            "-p",
-            a,
-            "-p",
-            b,
-            "-m",
-            f"merge {b[:8]} into {a[:8]}",
-        ],
-        env=_commit_env(),
-    )
-    if commit.returncode != 0:
-        raise MeasurementError(f"commit-tree failed: {commit.stderr.strip()}")
-    return commit.stdout.strip()
+    return merge_tree.merge_commit(a, b, run=_run)
 
 
 def _extract_tree(tree_sha: str, workdir: Path) -> None:

@@ -1200,26 +1200,63 @@ def test_a_candidate_that_conflicts_only_with_the_accumulated_tree_is_still_name
     assert rc_all == 3, out_all
     assert "plan: #1 -> #2" in out_all, out_all
     assert "#2: CONFLICT" in out_all, out_all
-def _queue_where_nothing_merges(mod, monkeypatch, conflict_line: str) -> None:
-    """Two open PRs, neither mergeable, conflicting in whatever `conflict_line` says.
+def _conflict_report(path: str, kind: str = "content") -> str:
+    """`git merge-tree --write-tree`'s report for one conflict, verbatim shape.
+
+    Measured 2026-09-14 (`cyc20260914-102037`, git 2.50.1, scratch repos): the merged
+    tree's OID on line 1, then the *stage block* - `<mode> <blob> <stage>\\t<path>`,
+    one line per side, so three for a content conflict and two for a modify/delete -
+    then a blank line, then the prose. The block's blob is a fixed 40 hex characters:
+    this file's reading looks at the path after the tab, so the object identity is
+    not what any test here turns on.
+
+    The two prose bodies differ, which is the point of the parameter: a content
+    conflict prints `Merge conflict in <path>`, naming the path so that a reader that
+    scans prose still answers, while a modify/delete conflict prints no `Merge
+    conflict in` line at all - measured output is
+
+        CONFLICT (modify/delete): gone.txt deleted in <sha> and modified in <sha>.
+        Version <sha> of gone.txt left in tree.
+
+    i.e. one long sentence *starting* with `CONFLICT`, which a prose-scanning reader
+    reports as the path. That is the arm that tells the two readings apart.
+    """
+    stages = {"content": (1, 2, 3), "modify/delete": (1, 2)}[kind]
+    block = "".join(f"100644 {'ab' * 20} {stage}\t{path}\n" for stage in stages)
+    if kind == "content":
+        prose = f"Auto-merging {path}\nCONFLICT (content): Merge conflict in {path}\n"
+    else:
+        prose = (
+            f"CONFLICT (modify/delete): {path} deleted in {'cd' * 20} and modified "
+            f"in {'ef' * 20}.  Version {'ef' * 20} of {path} left in tree.\n"
+        )
+    return "0" * 40 + "\n" + block + "\n" + prose
+
+
+def _queue_where_nothing_merges(mod, monkeypatch, path: str, kind: str = "content") -> None:
+    """Two open PRs, neither mergeable, both conflicting in `path`.
 
     The merge-tree output is faked at the `_run` layer rather than by replacing
     `_conflict_paths`, so the path parsing under test actually runs - a stub of the
     function being tested would pass whatever it was told to.
+
+    The report is the whole real shape (`_conflict_report`). It used to carry only
+    the `CONFLICT ...` prose line - a shape `git merge-tree --write-tree` never
+    prints *without* a stage block ahead of it - and it kept passing because the
+    reading under test was reading exactly that prose. Both halves are kept now, so
+    which one answers is what the tests below decide.
     """
     monkeypatch.setattr(mod, "_rev_parse", lambda ref: BASE)
     monkeypatch.setattr(mod, "_open_pr_numbers", lambda repo: [1, 2])
     monkeypatch.setattr(mod, "_fetch_head", lambda n: C1 if n == 1 else C2)
 
+    report = _conflict_report(path, kind)
+
     def fake_run(argv, cwd=None):
         if argv[:3] == ["git", "merge-tree", "--write-tree"]:
-            # Real shape, measured 2026-09-14: the merged tree's OID first, then the
-            # conflict block. The fixture used to carry only the CONFLICT line, a
-            # shape `git merge-tree --write-tree` never prints - and once
-            # `_merge_commit` stopped reading the exit code alone, that shape is a
-            # failure to merge both inputs rather than a conflict (which is exactly
-            # what the tool now says about it).
-            return _FakeProc("0" * 40 + "\n" + conflict_line, returncode=1)
+            # The OID on line 1, for the reason recorded in `_merge_commit`: rc 1
+            # without it is a failure to merge the inputs, not a conflict.
+            return _FakeProc(report, returncode=1)
         return _FakeProc(argv[-1].removesuffix("^{tree}"))
 
     monkeypatch.setattr(mod, "_run", fake_run)
@@ -1241,9 +1278,7 @@ def test_an_empty_plan_names_the_conflicting_paths_and_the_way_out(
     the sentence is printed for a base measured to state one, and the measurement
     itself is pinned separately below.
     """
-    _queue_where_nothing_merges(
-        mod, monkeypatch, "CONFLICT (content): Merge conflict in Agent.md\n"
-    )
+    _queue_where_nothing_merges(mod, monkeypatch, "Agent.md")
     monkeypatch.setattr(mod, "_base_states_a_count", lambda base: True)
     rc = mod.main([])
     err = capsys.readouterr().err
@@ -1267,9 +1302,7 @@ def test_a_base_that_states_no_count_gets_no_count_line_remedy(
     the reader `Agent.md` carries the count, on a tree whose own guard said no
     tracked file states it.
     """
-    _queue_where_nothing_merges(
-        mod, monkeypatch, "CONFLICT (content): Merge conflict in Agent.md\n"
-    )
+    _queue_where_nothing_merges(mod, monkeypatch, "Agent.md")
     monkeypatch.setattr(mod, "_base_states_a_count", lambda base: False)
     rc = mod.main([])
     err = capsys.readouterr().err
@@ -1289,9 +1322,7 @@ def test_an_unmeasurable_base_says_so_rather_than_guessing(mod, monkeypatch, cap
     did not manage to describe - the same defect as the one this clause was
     written for, one step further along. The paths *were* measured, so they stay.
     """
-    _queue_where_nothing_merges(
-        mod, monkeypatch, "CONFLICT (content): Merge conflict in Agent.md\n"
-    )
+    _queue_where_nothing_merges(mod, monkeypatch, "Agent.md")
     monkeypatch.setattr(mod, "_base_states_a_count", lambda base: None)
     rc = mod.main([])
     err = capsys.readouterr().err
@@ -1312,9 +1343,7 @@ def test_a_conflict_elsewhere_gets_no_count_line_advice(mod, monkeypatch, capsys
     a conflict in some unrelated file would name a command that cannot fix it -
     the same defect as a hint that cannot run, one tool further along.
     """
-    _queue_where_nothing_merges(
-        mod, monkeypatch, "CONFLICT (content): Merge conflict in emrg/tools/bash_tool.py\n"
-    )
+    _queue_where_nothing_merges(mod, monkeypatch, "emrg/tools/bash_tool.py")
     rc = mod.main([])
     err = capsys.readouterr().err
 
@@ -1611,3 +1640,155 @@ def test_a_conflict_that_names_its_tree_is_still_folded_from_that_line(mod, monk
     commit_tree = next(argv for argv in calls if argv[1] == "commit-tree")
     assert tree in commit_tree, commit_tree
     assert "CONFLICT" not in " ".join(commit_tree), commit_tree
+
+
+# --- which paths the report names -----------------------------------------
+#
+# The reading that names them used to scan the report's *prose* for
+# `Merge conflict in <path>` and fall back to the whole line. Measured
+# 2026-09-14 (`cyc20260914-102037`, git 2.50.1, scratch repos): that phrase is
+# absent for every conflict that is not content/add-add, and a modify/delete
+# conflict prints one sentence beginning with `CONFLICT`, so the refusal named
+# a sentence and `(repo / that).exists()` was measured False. The stage block
+# named the real path in all four measured arms, and the reader that reads it
+# (with git's path quoting decoded) is `scripts/merge_tree.py`'s - the one owner
+# every gate in this family now asks (`stage_block_paths` + `unquote_path`).
+
+
+def _two_sides(mod, root: Path, base, feature, master):
+    """A repo with `feature` and `master` diverging from one base commit.
+
+    `base`/`feature`/`master` each rewrite the working tree for their side; the two
+    commits produced are the inputs the reading is asked about. Real git, because the
+    report's *shape* is the property under test and a described shape is the thing
+    that drifted here.
+    """
+    root.mkdir()
+    _git(mod, root, "init", "-q", "-b", "master")
+    base(root)
+    _git(mod, root, "add", "-A")
+    _git(
+        mod, root, "-c", "user.email=f@example.com", "-c", "user.name=f",
+        "commit", "-q", "-m", "base",
+    )
+    _git(mod, root, "checkout", "-q", "-b", "feature")
+    feature(root)
+    _git(mod, root, "add", "-A")
+    _git(
+        mod, root, "-c", "user.email=f@example.com", "-c", "user.name=f",
+        "commit", "-q", "-m", "feature",
+    )
+    theirs = mod._run(["git", "rev-parse", "HEAD"], cwd=str(root)).stdout.strip()
+    _git(mod, root, "checkout", "-q", "master")
+    master(root)
+    _git(mod, root, "add", "-A")
+    _git(
+        mod, root, "-c", "user.email=f@example.com", "-c", "user.name=f",
+        "commit", "-q", "-m", "master",
+    )
+    ours = mod._run(["git", "rev-parse", "HEAD"], cwd=str(root)).stdout.strip()
+    return ours, theirs
+
+
+def test_a_modify_delete_conflict_names_the_file_not_the_sentence(
+    mod, tmp_path, monkeypatch
+):
+    """The arm that tells the two readings apart, on a real repository.
+
+    Measured here: the report's prose for this conflict is a sentence starting with
+    `CONFLICT`, and the prose-scanning reading returned it whole - so the refusal
+    that exists to name a path named no path. The stage block names `gone.txt`, one
+    line per side, and that is what the reading must answer.
+    """
+    repo = tmp_path / "modify-delete"
+
+    def base(root):
+        (root / "gone.txt").write_text("base\n", encoding="utf-8")
+
+    def feature(root):
+        (root / "gone.txt").write_text("feature\n", encoding="utf-8")
+
+    def master(root):
+        (root / "gone.txt").unlink()
+
+    ours, theirs = _two_sides(mod, repo, base, feature, master)
+    monkeypatch.chdir(repo)
+
+    assert mod._conflict_paths(ours, theirs) == ["gone.txt"]
+
+
+def test_a_clean_merge_names_no_paths(mod, tmp_path, monkeypatch):
+    """The other state on the same reader: nothing conflicted, so nothing is named.
+
+    A reader that matched too loosely - the tab rule the sibling replaced is the
+    measured example - names files that do not collide. This is the arm that says
+    the reading answers `[]` on a report that has no conflict in it at all.
+    """
+    repo = tmp_path / "clean"
+
+    def base(root):
+        (root / "f.txt").write_text("base\n", encoding="utf-8")
+
+    def feature(root):
+        (root / "feature.txt").write_text("feature\n", encoding="utf-8")
+
+    def master(root):
+        (root / "master.txt").write_text("master\n", encoding="utf-8")
+
+    ours, theirs = _two_sides(mod, repo, base, feature, master)
+    monkeypatch.chdir(repo)
+
+    proc = mod._run(["git", "merge-tree", "--write-tree", ours, theirs])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert mod._conflict_paths(ours, theirs) == []
+
+
+def test_a_non_ascii_path_comes_back_as_the_real_name(mod, tmp_path, monkeypatch):
+    """Why the reading is the owner's rather than a fourth copy of the rule here.
+
+    The stage block spells a non-ASCII path the way `core.quotePath` writes it -
+    `"\\344\\270\\255\\346\\226\\207.txt"` - and the *decoding* is what turns that back
+    into `中文.txt`. Measured here and in `tests/test_check_merge_tree_health.py`
+    (`cyc20260914-074822`), so a copy of the block regex without
+    `merge_tree.unquote_path` is a reading that names a path nobody can open. That
+    copy is the mutant this test exists to kill - and the copy itself is what
+    `tests/test_merge_tree_is_the_only_reading.py` refuses to let anyone write again.
+    """
+    name = "\u4e2d\u6587.txt"
+    repo = tmp_path / "non-ascii"
+
+    def base(root):
+        (root / name).write_text("base\n", encoding="utf-8")
+
+    def feature(root):
+        (root / name).write_text("feature\n", encoding="utf-8")
+
+    def master(root):
+        (root / name).write_text("master\n", encoding="utf-8")
+
+    ours, theirs = _two_sides(mod, repo, base, feature, master)
+    monkeypatch.chdir(repo)
+
+    assert mod._conflict_paths(ours, theirs) == [name]
+
+
+def test_the_refusal_names_a_modify_delete_path_and_not_the_sentence(
+    mod, monkeypatch, capsys
+):
+    """The user-visible end of the same defect: what the refusal tells the reader.
+
+    The summary counts the paths the reading returns, so the sentence reached the
+    refusal verbatim - advice about a path nobody can open. With the reading fixed
+    the same queue reports `Agent.md x2` and the sentence appears nowhere in the
+    output. This is the acceptance arm for the change: the reader can be right while
+    the sentence still rides out through the summary.
+    """
+    _queue_where_nothing_merges(mod, monkeypatch, "Agent.md", kind="modify/delete")
+    monkeypatch.setattr(mod, "_base_states_a_count", lambda base: True)
+    rc = mod.main([])
+    err = capsys.readouterr().err
+
+    assert rc == 2, err
+    assert "Conflicting paths over those 2 PR(s): Agent.md x2." in err, err
+    assert "CONFLICT (modify/delete)" not in err, "the prose sentence is not a path"
+    assert "--resolve-conflict" in err, err

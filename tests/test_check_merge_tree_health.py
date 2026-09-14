@@ -582,15 +582,10 @@ def test_only_the_stage_block_names_the_paths(mod, monkeypatch) -> None:
     assert set(mod._merge_tree_paths("a", "b") or []) == {"f\ttab.txt"}
 
 
-def test_the_escapes_are_gits_own(mod) -> None:
-    """The table is `quote_c_style`'s: the named escapes, the octal form git uses
-    for a byte it will not write raw, and a path that was never quoted."""
-    assert mod._unquote_path('"a\\tb\\nc\\\\d\\"e"') == 'a\tb\nc\\d"e'
-    assert mod._unquote_path('"\\344\\270\\255\\346\\226\\207.txt"') == "中文.txt"
-    assert mod._unquote_path('"\\000"') == "\x00"
-    assert mod._unquote_path("plain.txt") == "plain.txt"
-    # A trailing lone backslash is not an escape: it is kept as written.
-    assert mod._unquote_path('"x\\"') == "x\\"
+# `test_the_escapes_are_gits_own` lived here; the escapes are `merge_tree.py`'s now
+# (with the other readings of the merge report), and it moved to
+# `tests/test_merge_tree.py` with them - a rule with five implementations is five
+# rules, and this file's copy was one of them.
 
 
 # --- a mutable ref name must never reach merge-tree -----------------------------

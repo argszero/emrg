@@ -101,24 +101,31 @@ Exit codes
 from __future__ import annotations
 
 import argparse
-import os
-import re
 import subprocess
 import sys
+from pathlib import Path
 
-# Pinned, not read from the clock: a commit's sha contains its committer date, so
-# an unpinned synthetic commit is not a function of its inputs. The same constant
-# and the same reasoning as the two folds in this family, so they cannot drift.
-# That agreement is what `tests/test_synthetic_fold_date.py` enforces - it is the
-# one place that can see all the copies at once, and it checks that this constant
-# is applied to both date variables of the environment a synthetic commit is made
-# with (`tests/test_synthetic_fold_date.py::test_every_definer_applies_the_pin_to_both_dates`),
-# since a constant that is declared and not used pins nothing.
-PLAN_COMMIT_DATE = "2000-01-01T00:00:00 +0000"
+# The shared module's directory, so `import merge_tree` works however this file is
+# loaded: as `python3 scripts/check-merge-landing-diff.py` it is already `sys.path[0]`,
+# but the test suite loads these tools by file path (`spec_from_file_location`), where
+# it is not. `merge_tree.py` is a module of this repo, not a dependency.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import merge_tree  # noqa: E402  (needs the path above)
 
+# Pinned, not read from the clock: a commit's sha contains its committer date, so an
+# unpinned synthetic commit is not a function of its inputs. The constant is
+# `merge_tree.PLAN_COMMIT_DATE` - one place, one instant, for every synthetic fold in
+# this family. This file used to declare its own copy, and
+# `tests/test_synthetic_fold_date.py` existed to check the copies agreed: one constant
+# needs no agreement guard, only a guard against a second declaration
+# (`tests/test_merge_tree_is_the_only_reading.py`).
+PLAN_COMMIT_DATE = merge_tree.PLAN_COMMIT_DATE
 
-class MeasurementError(Exception):
-    """The question could not be answered. Never a verdict."""
+# The question could not be answered. Never a verdict. The shared module's own class,
+# aliased rather than re-declared: a second class of the same name would let the
+# module's refusals travel past `except MeasurementError` here and reach the caller as
+# a traceback instead of as the measurement error it is.
+MeasurementError = merge_tree.MeasurementError
 
 
 class Conflict(MeasurementError):
@@ -364,17 +371,6 @@ def _fetch_head(number: int) -> str:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
     return _rev_parse(ref)
-
-
-def _is_object_name(line: str) -> bool:
-    """Whether a line is a bare object name (the merged tree's).
-
-    Both object formats are accepted: the question is the *shape* of the answer,
-    which must not depend on the object format of whichever clone runs this.
-    """
-    return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
-
-
 def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
     """What git said, from both streams - a failure must not report itself as empty."""
     detail = (proc.stdout[-500:] + proc.stderr[-500:]).strip()
@@ -384,51 +380,34 @@ def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
 def _merge_tree(base: str, head: str) -> str | None:
     """The tree landing `head` on `base` produces, or None when it conflicts.
 
-    The exit code is not the signal, the output is (the same measurement
-    `check-merge-plan-suite.py` records): a genuine conflict exits 1 *and* names
-    the merged tree on the first line, while a failure to merge the two *inputs*
-    exits 1 with empty stdout - reading only the code would report "conflict" for
-    an unanswered question.
+    The same measurement every gate in this family asks: **the exit code is not the
+    signal, the named tree is** - a genuine conflict exits 1 *and* names the merged
+    tree on the first line, while a failure to merge the two *inputs* exits 1 with
+    empty stdout, and reading only the code would report "conflict" for an unanswered
+    question. `merge_tree.fold` is where that rule lives; what stays here is this
+    tool's refusal to proceed without a tree.
     """
-    proc = _run(["git", "merge-tree", "--write-tree", base, head])
-    lines = proc.stdout.splitlines()
-    first = lines[0].strip() if lines else ""
-    if not _is_object_name(first):
+    answer = merge_tree.fold(base, head, run=_run)
+    if not answer.answered:
         raise MeasurementError(
-            "merge-tree did not name a merged tree: " + _diagnosis(proc)
+            "merge-tree did not name a merged tree: " + answer.diagnosis
         )
-    return first if proc.returncode == 0 else None
+    return None if answer.verdict == "conflict" else answer.tree
 
 
-def _commit_env() -> dict[str, str]:
-    """Author/committer for the synthetic landing commit, independent of git config.
-
-    Measured in this family (`cyc20260913-200715`): with no ambient identity and
-    `user.useConfigOnly = true`, `git commit-tree` refuses and the tool reports a
-    *false* "could not measure" about a question the machine's git config has no
-    bearing on. The date is pinned for the reason in `PLAN_COMMIT_DATE`.
-    """
-    return {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "emrg-landing-diff",
-        "GIT_AUTHOR_EMAIL": "landing-diff@emrg.invalid",
-        "GIT_COMMITTER_NAME": "emrg-landing-diff",
-        "GIT_COMMITTER_EMAIL": "landing-diff@emrg.invalid",
-        "GIT_AUTHOR_DATE": PLAN_COMMIT_DATE,
-        "GIT_COMMITTER_DATE": PLAN_COMMIT_DATE,
-    }
+# Author/committer for the synthetic landing commit, independent of git config - the
+# whole family's, from `merge_tree.commit_env`. Measured in this family
+# (`cyc20260913-200715`): with no ambient identity and `user.useConfigOnly = true`,
+# `git commit-tree` refuses and the tool reports a *false* "could not measure" about a
+# question the machine's git config has no bearing on.
+_commit_env = merge_tree.commit_env
 
 
 def _commit_tree(tree: str, parents: list[str], message: str) -> str:
     """Create a commit for a merged tree, so both diffs are commit-to-commit."""
-    argv = ["git", "commit-tree", tree]
-    for parent in parents:
-        argv += ["-p", parent]
-    argv += ["-m", message]
-    proc = _run(argv, env=_commit_env())
-    if proc.returncode != 0:
-        raise MeasurementError(f"commit-tree failed: {proc.stderr.strip()}")
-    return proc.stdout.strip()
+    return merge_tree.commit_tree(
+        tree, parents, message, run=_run, env=_commit_env()
+    )
 
 
 def _changed_paths(a: str, b: str) -> list[tuple[str, str]]:
@@ -451,8 +430,8 @@ def _changed_paths(a: str, b: str) -> list[tuple[str, str]]:
     deletion. A false "clean" is the one answer this tool may not give.
 
     The siblings read merge-tree's *report*, where there is no `-z` spelling, so
-    they decode git's quoting instead (`check-merge-tree-health.py::_unquote_path`,
-    `check-merge-plan-suite.py`, #1212/#1210). Here the question can be put to git
+    they decode git's quoting instead (`merge_tree.unquote_path`, the one reading
+    every `check-merge-*.py` now asks for). Here the question can be put to git
     directly: `-z` separates the fields with NUL and quotes nothing, so the bytes
     arrive as they are and can be used as a pathspec unchanged.
     """
