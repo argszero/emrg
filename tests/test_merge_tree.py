@@ -60,6 +60,17 @@ _BLOCK = (
     "100644 " + "d" * 40 + " 3\tplain.txt\n"
 )
 
+#: Runners for the three verdicts plus the two unanswered shapes. Module-level, not
+#: class attributes: a lambda stored on a class is a function, so `run(argv)` would be
+#: handed `self` as the argv.
+_clean = lambda argv: _proc(argv, 0, _TREE + "\n")  # noqa: E731
+_conflict = lambda argv: _proc(  # noqa: E731
+    argv, 1, _TREE + "\n" + _BLOCK + "\nCONFLICT (content): Merge conflict in x\n"
+)
+_unknown_code = lambda argv: _proc(argv, 3, _TREE + "\n")  # noqa: E731
+_silent_zero = lambda argv: _proc(argv, 0, "")  # noqa: E731
+_silent_one = lambda argv: _proc(argv, 1, "")  # noqa: E731
+
 
 class TestTheVerdictIsTheNamedTree:
     """`rc` decides nothing; the OID on line 1 decides everything."""
@@ -295,6 +306,84 @@ class TestAgainstRealGit:
 
         assert mod.fold("main", "main", run=run).verdict == "clean"
         assert mod.fold("main", blob, run=run).verdict == "unmeasured"
+
+    def test_a_conflicting_merge_names_a_tree_full_of_markers(
+        self, mod, tmp_path
+    ) -> None:
+        """Why only a *clean* merge is a tree - measured, not argued.
+
+        `git merge-tree --write-tree` names a tree for a conflicting merge as well,
+        and the file inside it is the conflict with its markers. So "a tree was
+        named" is not "the merge happened": `merged_tree_sha` used to hand this tree
+        back to a caller asking for "the clean merge's tree", and
+        `check-merge-landing-diff.py` used to read it as the landing - a landing
+        whose content nobody can commit.
+        """
+        repo, a, b = self._conflict_on(tmp_path, "plain.txt")
+
+        def run(argv, cwd=None):
+            return subprocess.run(
+                argv,
+                cwd=cwd or str(repo),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+
+        answer = mod.fold(a, b, run=run)
+        assert answer.verdict == "conflict"
+        assert answer.tree is not None, "a conflict names a tree, which is the point"
+        content = self._git(repo, "cat-file", "blob", f"{answer.tree}:plain.txt").stdout
+        assert "<<<<<<<" in content, content
+
+        with pytest.raises(mod.MeasurementError):
+            mod.merged_tree_sha(a, b, run=run)
+
+
+class TestOnlyACleanMergeIsATree:
+    """The one mapping the owner keeps: verdict -> a tree, or `None`, or a raise.
+
+    Two callers used to write it themselves and had drifted: `merged_tree_sha` read
+    "a tree was named" as "here is the clean merge", and `check-merge-landing-diff.py`
+    its own version of the same. A conflicting merge names a tree (measured above),
+    so both were handing back a file full of `<<<<<<<`.
+    """
+
+    def test_a_clean_merge_is_its_tree_either_way(self, mod) -> None:
+        assert mod.merged_tree("a", "b", run=_clean) == _TREE
+        assert mod.merged_tree_sha("a", "b", run=_clean) == _TREE
+
+    def test_a_conflict_is_no_tree(self, mod) -> None:
+        """`None` is the conflict answer, and it is the *only* thing it means."""
+        assert mod.merged_tree("a", "b", run=_conflict) is None
+        with pytest.raises(mod.MeasurementError):
+            mod.merged_tree_sha("a", "b", run=_conflict)
+
+    def test_an_answer_nobody_understands_is_not_a_tree(self, mod) -> None:
+        """`rc 3` naming a tree: the module's rule, and `merged_tree_sha` used to miss it.
+
+        `merge_commit` refused this answer from the day it was written; the two
+        shortcuts beside it did not, and the mutant that returns the tree here
+        survives every other arm in this class.
+        """
+        with pytest.raises(mod.MeasurementError):
+            mod.merged_tree("a", "b", run=_unknown_code)
+        with pytest.raises(mod.MeasurementError):
+            mod.merged_tree_sha("a", "b", run=_unknown_code)
+
+    def test_an_unanswered_merge_is_not_a_tree(self, mod) -> None:
+        """Both shapes with no named tree: `--quiet`'s rc 0, and a failure's rc 1."""
+        for run in (_silent_zero, _silent_one):
+            with pytest.raises(mod.MeasurementError):
+                mod.merged_tree("a", "b", run=run)
+            with pytest.raises(mod.MeasurementError):
+                mod.merged_tree_sha("a", "b", run=run)
+
+    def test_the_shortcut_is_the_same_mapping_as_the_commit(self, mod) -> None:
+        """`merge_commit` builds on `merged_tree`, so they cannot diverge again."""
+        assert mod.merge_commit("a", "b", run=_conflict) is None
+        with pytest.raises(mod.MeasurementError):
+            mod.merge_commit("a", "b", run=_unknown_code)
 
 
 class TestTheSyntheticFold:

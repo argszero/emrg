@@ -62,6 +62,7 @@ RULES = (
     "unquote_path",
     "stage_block_paths",
     "fold",
+    "merged_tree",
     "merged_tree_sha",
     "commit_env",
     "commit_tree",

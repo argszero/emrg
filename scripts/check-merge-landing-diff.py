@@ -380,19 +380,18 @@ def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
 def _merge_tree(base: str, head: str) -> str | None:
     """The tree landing `head` on `base` produces, or None when it conflicts.
 
-    The same measurement every gate in this family asks: **the exit code is not the
+    The whole reading is `merge_tree.merged_tree`'s: **the exit code is not the
     signal, the named tree is** - a genuine conflict exits 1 *and* names the merged
     tree on the first line, while a failure to merge the two *inputs* exits 1 with
     empty stdout, and reading only the code would report "conflict" for an unanswered
-    question. `merge_tree.fold` is where that rule lives; what stays here is this
-    tool's refusal to proceed without a tree.
+    question. What this tool used to add to that - and no longer adds - was the
+    reading "a tree was named, so this is the landing" for an exit code the family
+    does not know: that tree is real, and for a conflicting merge its content is the
+    conflict with its markers, so a landing reported from it is a landing nobody can
+    make (measured 2026-09-14, `cyc20260914-114057`). What stays here is this tool's
+    runner.
     """
-    answer = merge_tree.fold(base, head, run=_run)
-    if not answer.answered:
-        raise MeasurementError(
-            "merge-tree did not name a merged tree: " + answer.diagnosis
-        )
-    return None if answer.verdict == "conflict" else answer.tree
+    return merge_tree.merged_tree(base, head, run=_run)
 
 
 # Author/committer for the synthetic landing commit, independent of git config - the

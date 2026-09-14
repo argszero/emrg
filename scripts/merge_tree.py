@@ -64,8 +64,15 @@ What this module deliberately does *not* decide
 -----------------------------------------------
 What an unmeasurable question *means* downstream: one gate refuses to name a
 conflict, another aborts the plan, a third says "reporting only". It reports the
-facts and lets each caller map them to its own verdict - `Fold.verdict` is the
-whole mapping, so the mapping itself is still written once.
+facts and lets each caller map them to its own verdict.
+
+One mapping it does own, because the callers had *drifted* on it: **which of the
+three answers is a tree**. `merged_tree` (and `merge_commit` on top of it) exists
+because two callers wrote that mapping as "a tree was named, so here it is" -
+`merged_tree_sha` for a conflicting merge, `check-merge-landing-diff.py` for an
+answer it did not understand - and a conflicting merge *does* name a tree, whose
+file is the conflict with its markers (measured 2026-09-14, `cyc20260914-114057`).
+Only `verdict == "clean"` is a tree; the rest is `None` or a raise.
 
 The runner (`run`) is the caller's: every gate pins its own locale/env/error
 discipline, and its tests replace it, so this module never owns a subprocess.
@@ -271,26 +278,73 @@ def fold(a: str, b: str, run: Callable[..., subprocess.CompletedProcess], cwd: s
     )
 
 
+def merged_tree(
+    a: str,
+    b: str,
+    run: Callable[..., subprocess.CompletedProcess],
+    cwd: str | None = None,
+) -> str | None:
+    """The tree a clean merge of `a` and `b` produces, or `None` when it conflicts.
+
+    **A conflicting merge names a tree too.** Measured 2026-09-14
+    (`cyc20260914-114057`, git 2.50.1, scratch repo): `git merge-tree --write-tree
+    master side` exits 1 and names `740ed768...`, and the blob it puts at the
+    conflicted path is the two sides' text with git's conflict markers between them.
+    (Not quoted here: `tests/test_conflict_markers.py` reads any line of a tracked
+    file that begins with a marker as a marker somebody committed -
+    `test_a_conflicting_merge_names_a_tree_full_of_markers` in
+    `tests/test_merge_tree.py` re-measures it on real git instead.)
+
+    So "git named a tree" is not "git merged". A caller that reads the tree out of a
+    conflicting answer measures a file full of markers - and a guard that never opens
+    that file reports the merge as healthy. Only `verdict == "clean"` is a tree;
+    a conflict is `None`; an answer this module does not understand raises (see
+    `Fold.verdict` for why an unknown code is not a merge).
+
+    Two callers had written this mapping themselves and drifted from it -
+    `merged_tree_sha` and `check-merge-landing-diff.py`, each of which handed back
+    the tree of an answer that was not a merge - which is why the mapping lives here
+    rather than in the callers that ask.
+    """
+    answer = fold(a, b, run=run, cwd=cwd)
+    if answer.verdict == "clean":
+        return answer.tree
+    if answer.verdict == "conflict":
+        return None
+    raise MeasurementError(
+        f"merge-tree exited {answer.code}"
+        + (
+            ""
+            if answer.answered
+            else " without naming a merged tree, so this is not a conflict but a "
+            "failure to merge the inputs"
+        )
+        + ": " + answer.diagnosis
+    )
+
+
 def merged_tree_sha(
     a: str,
     b: str,
     run: Callable[..., subprocess.CompletedProcess],
     cwd: str | None = None,
 ) -> str:
-    """The tree of the clean merge of `a` and `b`, or raise `MeasurementError`.
+    """The tree of the **clean** merge of `a` and `b`, or raise `MeasurementError`.
 
-    For a caller that has no answer to give without it. `MeasurementError` rather
-    than a falsy value: an unhandled exception used to leave these tools as exit
-    1, the code that *means* "the tree this step lands is unhealthy" - a crash
-    reported as a finding about a tree nobody measured.
+    For a caller that has no answer to give without it. Two answers are not a tree
+    here: a **conflict** names a tree whose content is the conflict with its markers
+    (measured - see `merged_tree`), which is not what this function's name promises
+    to the caller that measures it, and an unmeasured answer is not a merge at all.
+    `MeasurementError` rather than a falsy value: an unhandled exception used to
+    leave these tools as exit 1, the code that *means* "the tree this step lands is
+    unhealthy" - a crash reported as a finding about a tree nobody measured.
     """
-    answer = fold(a, b, run=run, cwd=cwd)
-    if not answer.answered:
+    tree = merged_tree(a, b, run=run, cwd=cwd)
+    if tree is None:
         raise MeasurementError(
-            "merge-tree did not produce a tree for a merge reported clean: "
-            + answer.diagnosis
+            "the merge conflicts, so there is no clean-merge tree to measure"
         )
-    return answer.tree  # type: ignore[return-value]
+    return tree
 
 
 def commit_env() -> dict[str, str]:
@@ -349,23 +403,16 @@ def merge_commit(
     tree - the uncommitted-repair trap these gates exist to avoid.
 
     An **unmeasured** merge raises too, even when it named a tree: a code this
-    module does not know is git saying something it has not taught us, and
-    wrapping that tree in a commit would turn "I do not understand this answer"
-    into "here is the merge" - the same trade in the reassuring direction that the
-    named-tree rule exists to refuse.
+    module does not know is git saying something it has not taught us, and wrapping
+    that tree in a commit would turn "I do not understand this answer" into "here is
+    the merge" - the same trade in the reassuring direction that the named-tree rule
+    exists to refuse. That rule is `merged_tree`'s, so it is written once.
     """
-    answer = fold(a, b, run=run, cwd=cwd)
-    if answer.verdict == "conflict":
+    tree = merged_tree(a, b, run=run, cwd=cwd)
+    if tree is None:
         return None
-    if answer.verdict != "clean":
-        raise MeasurementError(
-            f"merge-tree exited {answer.code}"
-            + ("" if answer.answered else " without naming a merged tree, so this is not "
-               "a conflict but a failure to merge the inputs")
-            + ": " + answer.diagnosis
-        )
     return commit_tree(
-        answer.tree,  # type: ignore[arg-type]
+        tree,
         [a, b],
         message if message is not None else f"merge {b[:8]} into {a[:8]}",
         run=run,

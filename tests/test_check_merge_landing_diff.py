@@ -347,6 +347,31 @@ def test_a_git_failure_is_a_measurement_error_not_health(mod, tmp_path, monkeypa
         mod.landing_reading(base, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
 
 
+def test_a_tree_from_an_answer_nobody_understands_is_not_a_landing(
+    mod, monkeypatch
+) -> None:
+    """A named tree is not a reading: only a *clean* merge has a landing.
+
+    Measured 2026-09-14 (`cyc20260914-114057`): `git merge-tree --write-tree` names
+    a tree for a **conflicting** merge as well, and its content is the conflict with
+    its markers - so a tool that reads "a tree was named" as "here is the landing"
+    reports on a tree nobody can produce. This tool did exactly that for an exit code
+    the family does not know; the mapping is `merge_tree.merged_tree`'s now, and the
+    conflict direction is pinned by `test_a_conflict_is_its_own_state_not_a_reading`.
+    """
+    tree = "9" * 40
+
+    class _Unknown:
+        returncode = 3
+        stdout = tree + "\n"
+        stderr = ""
+
+    monkeypatch.setattr(mod, "_run", lambda argv, cwd=None, env=None: _Unknown())
+
+    with pytest.raises(mod.MeasurementError):
+        mod._merge_tree("a", "b")
+
+
 # --- the family invariant: no mutable ref name reaches merge-tree ---------------
 
 
