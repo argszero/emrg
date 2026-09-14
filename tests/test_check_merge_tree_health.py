@@ -515,6 +515,16 @@ def _raw_report(repo: Path, a: str, b: str) -> str:
     return proc.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows rejects a filename holding a control byte: CreateFile fails with "
+        "OSError [Errno 22] before git is involved (measured, test-windows run "
+        "34787962250 on the sibling PR #1210). The rule it pins is still covered on "
+        "Windows by `test_only_the_stage_block_names_the_paths`, which feeds the same "
+        "measured report as a string."
+    ),
+)
 def test_a_tab_in_the_name_is_not_a_separator(mod, tmp_path, monkeypatch) -> None:
     """Measured 2026-09-14 (`cyc20260914-074822`), git 2.50.1: a conflict in a file
     named `f<TAB>tab.txt` reports the path C-quoted in the stage block and writes
@@ -539,7 +549,10 @@ def test_a_non_ascii_name_comes_back_as_the_file(mod, tmp_path, monkeypatch) -> 
     """The default `core.quotePath=true` spells `中文.txt` as an octal C string, so
     the name has to be decoded or the refusal points at a file nobody has."""
     repo, master, head = _conflict_on(tmp_path, "中文.txt")
-    assert '"\\344\\270\\255\\346\\226\\207.txt"' in _raw_report(repo, master, head)
+    # Whether git spells the bytes escaped (`core.quotePath=true`, the default) or
+    # raw is git's choice of spelling; the tool must return the real name either way.
+    raw = _raw_report(repo, master, head)
+    assert '"\\344\\270\\255\\346\\226\\207.txt"' in raw or "中文.txt" in raw, raw
     paths = mod._merge_tree_paths(master, head, cwd=str(repo))
     assert set(paths or []) == {"中文.txt"}, paths
 
