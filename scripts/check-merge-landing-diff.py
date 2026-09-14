@@ -74,6 +74,16 @@ cases there conflict outright, or are caught by the name-set rule already). It i
 arm that fires on a shape the two-list rule cannot see, not a repair of an observed
 false "clean".
 
+The path names here are the real ones
+-------------------------------------
+Both halves of the measurement need the *name git means*, so the path list is read
+with `-z` rather than from the default line-per-path spelling, which quotes a path
+holding a quote, a backslash, a control byte, or any non-ASCII byte. The quoted
+form is a pathspec matching nothing: measured (`cyc20260914-082347`) on this file's
+own fixture with the file named `中文.txt`, the tool answered *clean* where the
+same repo names `src/app.py` as reading backwards inside, and printed a name no
+resolver can open. See `_changed_paths`.
+
 Exit codes
 ----------
     0  nothing reads backwards: every path `diff(base, head)` lists is both a path the
@@ -422,18 +432,49 @@ def _commit_tree(tree: str, parents: list[str], message: str) -> str:
 
 
 def _changed_paths(a: str, b: str) -> list[tuple[str, str]]:
-    """`git diff --name-status a b`, as (status, path) pairs, in git's order."""
-    proc = _run(["git", "diff", "--name-status", "--no-renames", a, b])
+    """`git diff --name-status -z a b`, as (status, path) pairs, in git's order.
+
+    `-z` because the paths have to be **the real ones**, and both halves of this
+    tool need that: the report prints them, and `_path_reading` hands them back to
+    git as a pathspec.
+
+    Without `-z` git *quotes* a path that holds a quote, a backslash, a control
+    byte, or - with the default `core.quotePath=true` - any non-ASCII byte:
+    `中文.txt` arrives as the text `"\\344\\270\\255\\346\\226\\207.txt"` and
+    `f<TAB>tab.txt` as `"f\\ttab.txt"` (measured 2026-09-14, `cyc20260914-082347`,
+    git 2.50.1, in a scratch repo, both spellings). Such a quoted path is not only
+    unreadable in the report - it is a pathspec that matches **nothing**, so
+    `_path_reading` answered "" for both sides of a shared path and the
+    "reads backwards inside" arm went blind: measured on the fixture this file's
+    tests use, the same repo reported the hazard for `src/app.py` and reported
+    *clean* for `中文.txt`, whose reading does print the base's later hunk as a
+    deletion. A false "clean" is the one answer this tool may not give.
+
+    The siblings read merge-tree's *report*, where there is no `-z` spelling, so
+    they decode git's quoting instead (`check-merge-tree-health.py::_unquote_path`,
+    `check-merge-plan-suite.py`, #1212/#1210). Here the question can be put to git
+    directly: `-z` separates the fields with NUL and quotes nothing, so the bytes
+    arrive as they are and can be used as a pathspec unchanged.
+    """
+    proc = _run(["git", "diff", "--name-status", "--no-renames", "-z", a, b])
     if proc.returncode != 0:
         raise MeasurementError(
             f"could not diff {a[:8]}..{b[:8]}: {_diagnosis(proc)}"
         )
-    changed: list[tuple[str, str]] = []
-    for line in proc.stdout.splitlines():
-        fields = [field.strip() for field in line.split("\t")]
-        if len(fields) >= 2:
-            changed.append((fields[0], fields[-1]))
-    return changed
+    # `-z` writes NUL after every field, and the status is a field of its own, so
+    # the payload is `status\0path\0status\0path\0...` (and "no changes" is empty).
+    fields = proc.stdout.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 2:
+        # A shape this tool does not know is a measurement failure, never a short
+        # list: silently dropping the odd field would answer about a change that
+        # was not read.
+        raise MeasurementError(
+            f"diff {a[:8]}..{b[:8]} named {len(fields)} field(s), not status/path "
+            f"pairs: {proc.stdout!r}"
+        )
+    return [(fields[i], fields[i + 1]) for i in range(0, len(fields), 2)]
 
 
 def _behind_by(base: str, head: str) -> int:
