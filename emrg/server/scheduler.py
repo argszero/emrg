@@ -25,6 +25,11 @@ import yaml
 
 from emrg.config import config_dir
 from emrg.connect import connect_to_server
+from emrg.memory import (
+    INDEX_COUNT_WARN,
+    INDEX_SIZE_WARN,
+    INDEX_TITLE_MAX_CHARS,
+)
 from emrg.tools.bash_tool import SANDBOX_MODES
 from websockets.exceptions import ConnectionClosed
 from emrg.protocol import EvolutionLog, InstanceIdentity
@@ -1201,6 +1206,15 @@ class TaskHandler:
             "project": _load_project_config(self._project_name, str(self._source_dir)),
             "git_path": git_path,
             "gh_path": gh_path,
+            # The memory-hygiene numbers a prompt may state. They are the memory
+            # store's constants, offered to the templates so a prompt cannot drift
+            # from them: `open_source_prompt.md` used to say "~50 entries" while
+            # `INDEX_COUNT_WARN` is 100, and the phrase "≤512 chars" was a second
+            # spelling of `INDEX_TITLE_MAX_CHARS`. A derived number is not written
+            # where a guard can measure it.
+            "index_count_warn": INDEX_COUNT_WARN,
+            "index_size_warn_kb": INDEX_SIZE_WARN // 1024,
+            "index_title_max_chars": INDEX_TITLE_MAX_CHARS,
         }
 
         env = jinja2.Environment(undefined=jinja2.Undefined)

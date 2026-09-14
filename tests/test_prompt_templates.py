@@ -182,3 +182,48 @@ def test_no_prompt_names_a_placeholder_the_builder_does_not_provide(
                 f"provide ({exc}); with the daemon's Undefined it would silently "
                 f"render as an empty string"
             ) from exc
+
+
+def test_the_prompt_states_the_memory_limits_the_store_enforces(tmp_path, monkeypatch) -> None:
+    """A prompt's memory numbers are the store's constants, not a second spelling.
+
+    Measured 2026-09-14 (`cyc20260914-125119`): `open_source_prompt.md` told the agent
+    "title ≤512 chars ... if the index exceeds ~50 entries", while the store warns at
+    `INDEX_TITLE_MAX_CHARS = 512` and `INDEX_COUNT_WARN = 100`. The entry number was
+    simply wrong — and the same defect class as #1217/#1218/#1219: a stated number that
+    is not the one that fires. The prompt now renders both from the context, which is
+    built from the constants.
+
+    The discriminator is the one those PRs settled: if the text reads the constant,
+    tuning the constant has to move the text. A literal — the state this test was
+    written against — cannot follow, so the tuned arm is what makes it load bearing.
+    """
+    from emrg.memory import INDEX_COUNT_WARN, INDEX_TITLE_MAX_CHARS
+
+    def render() -> str:
+        handler = _make_handler(
+            tmp_path, monkeypatch, "open_source_prompt.md", {"project": "demoproj"}
+        )
+        return handler._build_evolution_prompt()
+
+    as_shipped = render()
+    assert f"≤{INDEX_TITLE_MAX_CHARS} chars" in as_shipped, (
+        "the prompt must state the title limit the store truncates at"
+    )
+    assert f"exceeds {INDEX_COUNT_WARN} entries" in as_shipped, (
+        "the prompt must state the entry count the store warns at"
+    )
+    assert "~50 entries" not in as_shipped, (
+        "the prompt still carries the number the store never used"
+    )
+
+    # Tuned: a re-spelled number stays put, a derived one follows.
+    monkeypatch.setattr(mod, "INDEX_TITLE_MAX_CHARS", 256)
+    monkeypatch.setattr(mod, "INDEX_COUNT_WARN", 42)
+    tuned = render()
+    assert "≤256 chars" in tuned and f"exceeds 42 entries" in tuned, (
+        "the prompt did not follow the tuned constants — its numbers are literals, "
+        "so they can drift from the store silently"
+    )
+    assert "≤512 chars" not in tuned and "exceeds 100 entries" not in tuned
+
