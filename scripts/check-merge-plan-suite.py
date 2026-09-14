@@ -100,6 +100,28 @@ Exit codes
 The plan and the tree that was measured are named in the output. "Which tree
 answered?" is the defect this family exists to remove.
 
+The tree answers, and its sources are the only copy that answers
+---------------------------------------------------------------
+A worktree run must be an answer about the tree under test, so the run is pinned in
+the two ways a second copy of that tree can creep in - both measured, not assumed:
+
+* *another tree on `sys.path`.* This machine's environment exports
+  `PYTHONPATH=/Users/argszero/.emrg/install/source:...`, i.e. a second, installed
+  copy of this package. Whichever copy `sys.path` resolves first is the one that
+  answers, and a suite green against the installed copy says nothing about the
+  tree that would land. The worktree is therefore **prepended** to `PYTHONPATH` for
+  the run, so the tree under test wins every name it defines.
+* *a bytecode cache inside the tree.* A `.pyc` is a second copy of a source, and
+  CPython prefers it whenever the header's `(int(mtime), size)` pair still matches
+  the source - a cache written by an earlier revision can therefore answer for the
+  revision under test. Measured (`cyc20260914-085416`): a *kept* worktree of
+  #1211's landing tree reported `PROJECT_CONTEXT_MAX_CHARS` as `7000` while its own
+  tracked `emrg/server/daemon.py` said `8000`; deleting that worktree's
+  `__pycache__` flipped the suite from failing to passing. Intermittent, silent, and
+  a verdict about a copy: the caches under the worktree are removed before the run,
+  and `PYTHONDONTWRITEBYTECODE=1` is set for it (and for anything it spawns) so the
+  measurement leaves none behind.
+
 What a worktree run is not
 --------------------------
 The suite runs in a worktree of the tree under test, so it runs the suite a *fresh
@@ -120,6 +142,7 @@ import argparse
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -429,6 +452,58 @@ def _no_suite_verdict(out: str) -> str:
     )
 
 
+# A populated environment belonging to the *harness* rather than to the tree under
+# test: purged of caches for speed, never a source of the answer. A fresh worktree
+# has none of these; a re-used one can.
+_NOT_THE_TREES_OWN = (".venv", "node_modules", ".git")
+
+
+def _purge_bytecode(root: Path) -> list[str]:
+    """Delete the bytecode caches under ``root``; return what was removed.
+
+    A `.pyc` is a second copy of a source and CPython prefers it whenever the
+    header's `(int(mtime), size)` pair still matches, so a cache left in a tree by
+    an earlier revision - or by a mutant, when the edit keeps the file's length and
+    lands in the same second - can answer for the revision under test. Measured
+    once that way in a kept worktree (`cyc20260914-085416`, see the header).
+
+    Directories that belong to the harness (`.venv`, `node_modules`) are skipped:
+    their caches cannot shadow the tree's own modules, and walking them costs more
+    than the run they precede.
+    """
+    removed: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if any(part in _NOT_THE_TREES_OWN for part in path.relative_to(root).parts):
+            continue
+        if path.is_dir() and path.name == "__pycache__":
+            # A stray `.pyc` *inside* a `__pycache__` is removed with it, so only
+            # the directory is reported - two entries for one cache would make the
+            # returned list a count of files rather than of caches.
+            shutil.rmtree(path, ignore_errors=True)
+            removed.append(str(path.relative_to(root)))
+        elif path.is_file() and path.suffix == ".pyc":
+            path.unlink(missing_ok=True)
+            removed.append(str(path.relative_to(root)))
+    return removed
+
+
+def _suite_env(worktree: Path) -> dict[str, str]:
+    """The environment the suite runs with: the tree under test, and no caches.
+
+    `PYTHONPATH` is *prepended* rather than replaced: the point is that the tree
+    wins every name it defines, not that the caller's environment is discarded -
+    this machine exports an installed copy of the package
+    (`/Users/argszero/.emrg/install/source`), and whichever copy `sys.path` reaches
+    first is the one whose answer the run reports.
+
+    `PYTHONDONTWRITEBYTECODE` is set for the run and inherited by everything it
+    spawns, so a measurement cannot leave a cache that a later run would read.
+    """
+    existing = os.environ.get("PYTHONPATH", "")
+    pinned = str(worktree) + (os.pathsep + existing if existing else "")
+    return {**os.environ, "PYTHONPATH": pinned, "PYTHONDONTWRITEBYTECODE": "1"}
+
+
 def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
     """Run the repository's suite in a worktree of the planned tree.
 
@@ -453,7 +528,10 @@ def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
             )
         if not (worktree / "tests").is_dir():
             raise MeasurementError("the planned tree has no tests/ directory")
-        proc = _run([sys.executable, *SUITE], cwd=str(worktree))
+        _purge_bytecode(worktree)
+        proc = _run(
+            [sys.executable, *SUITE], cwd=str(worktree), env=_suite_env(worktree)
+        )
         out = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode == 0:
             return True, _last_line(out, "suite passed"), tree_sha

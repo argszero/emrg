@@ -40,6 +40,7 @@ no network, no GitHub.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import time
@@ -831,3 +832,113 @@ def test_a_sha_base_is_taken_literally_and_never_fetched(
 
     assert mod.main(["1", "--base", "origin/master"]) == 2
     assert "could not measure" in capsys.readouterr().err
+
+
+# --- the tree answers, and its sources are the only copy that answers ----------
+#
+# Two second copies of a tree can answer in place of it, and both were measured on
+# this machine (`cyc20260914-085416`), not assumed:
+#
+# * another tree on `sys.path` - the environment exports
+#   `PYTHONPATH=/Users/argszero/.emrg/install/source:...`, an installed copy of this
+#   package, and whichever copy `sys.path` reaches first is the one whose answer the
+#   run reports;
+# * a bytecode cache inside the tree - a `.pyc` is a second copy of a source and
+#   CPython prefers it when the header's `(int(mtime), size)` pair still matches. A
+#   *kept* worktree of #1211's landing tree reported `PROJECT_CONTEXT_MAX_CHARS` as
+#   `7000` while its own tracked `emrg/server/daemon.py` said `8000`; deleting that
+#   worktree's `__pycache__` flipped the suite from failing to passing.
+
+
+def test_the_suite_env_puts_the_tree_first_and_writes_no_bytecode(
+    mod, monkeypatch, tmp_path: Path
+) -> None:
+    """Both halves of "the tree answers": it wins the name, the run leaves no copy."""
+    monkeypatch.setenv("PYTHONPATH", "/somewhere/else/install/source")
+    # This machine's own environment already exports 1 (the daemon's heredity); the
+    # pin has to be the run's, not the caller's, or a machine that exports nothing
+    # silently stops being covered.
+    monkeypatch.delenv("PYTHONDONTWRITEBYTECODE", raising=False)
+    env = mod._suite_env(tmp_path)
+    entries = env["PYTHONPATH"].split(os.pathsep)
+    assert entries[0] == str(tmp_path), "the tree under test must be reached first"
+    assert "/somewhere/else/install/source" in entries, (
+        "the caller's environment is prepended to, not discarded"
+    )
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1", (
+        "a run that writes bytecode leaves a cache the next run could read"
+    )
+
+    # Without an inherited PYTHONPATH there is nothing to append, and no empty entry
+    # is left behind pointing at the process's cwd.
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    assert mod._suite_env(tmp_path)["PYTHONPATH"] == str(tmp_path)
+
+
+def test_the_purge_removes_the_trees_caches_and_not_the_harnesss(
+    mod, tmp_path: Path
+) -> None:
+    """The purge's two directions: the tree's own caches go, a populated `.venv` stays."""
+    cache = tmp_path / "emrg" / "server" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "daemon.cpython-313.pyc").write_bytes(b"stale")
+    source = tmp_path / "emrg" / "server" / "daemon.py"
+    source.write_text("X = 1\n", encoding="utf-8")
+    stray = tmp_path / "stray.pyc"
+    stray.write_bytes(b"stale")
+
+    keeper = tmp_path / ".venv" / "lib" / "__pycache__"
+    keeper.mkdir(parents=True)
+    (keeper / "y.pyc").write_bytes(b"x")
+
+    removed = mod._purge_bytecode(tmp_path)
+
+    assert not cache.exists()
+    assert not stray.exists()
+    assert source.exists(), "sources are what is measured and are never touched"
+    assert keeper.exists(), "the harness's own environment is not the tree under test"
+    # Caches are reported, not the files inside them: the list is a count of caches.
+    assert sorted(removed) == ["emrg/server/__pycache__", "stray.pyc"]
+
+
+def test_a_cache_in_the_tree_cannot_answer_for_it(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """The discriminating arm: a cache in the tree is gone before the suite runs.
+
+    `git worktree add` produces a fresh tree, so the cache is planted at the one
+    moment it could exist - as the worktree is materialised. The suite is then asked
+    the question the cache would otherwise answer: does this tree still carry one?
+    Exit 0 is only reachable if the purge ran first, so a run that skips the purge
+    reports a red tree here - which is what a stale cache does to a real suite.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    real_run = mod._run
+    planted: list[Path] = []
+
+    def run_and_plant(argv, cwd=None, env=None):
+        proc = real_run(argv, cwd=cwd, env=env)
+        if list(argv[:3]) == ["git", "worktree", "add"]:
+            cache = Path(argv[-2]) / "emrg" / "__pycache__"
+            cache.mkdir(parents=True, exist_ok=True)
+            (cache / "daemon.cpython-313.pyc").write_bytes(b"stale")
+            planted.append(cache)
+        return proc
+
+    monkeypatch.setattr(mod, "_run", run_and_plant)
+    monkeypatch.setattr(
+        mod,
+        "SUITE",
+        [
+            "-c",
+            "import pathlib, sys;"
+            "sys.exit(1 if list(pathlib.Path('.').rglob('__pycache__')) else 0)",
+        ],
+    )
+
+    assert mod.main(["1", "--base", "master"]) == 0, capsys.readouterr().err
+    assert planted, "the cache was never planted, so this arm measures nothing"
