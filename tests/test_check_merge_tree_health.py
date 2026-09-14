@@ -29,6 +29,11 @@ Pinned in both directions (#455 - never infer from the failure case alone):
 * a clean merge whose merged tree passes the guard is HEALTHY;
 * a clean merge whose merged tree fails it is UNHEALTHY - the finding;
 * a genuine conflict is CONFLICT, not a failure: there is no merged tree to judge;
+* the files that refusal names are the real ones - read from the *stage block* of
+  the report (not from any line of it that happens to contain a tab, which is where
+  the prose after the block injects a name that does not exist) and decoded out of
+  git's `core.quotePath` spelling, so "conflicts on ..." names a file a resolver
+  can open;
 * a guard that cannot be run at all is a measurement error, never "healthy" - the
   asymmetry that matters, since an unanswerable question reported as health is how
   a broken tree reaches master.
@@ -477,6 +482,115 @@ def test_an_evidenced_conflict_still_names_its_paths(mod, monkeypatch) -> None:
     # One entry per stage line, as before: the caller dedupes for display, and
     # this change is about which answers count, not about the parse's shape.
     assert set(mod._merge_tree_paths("a", "b") or []) == {"Agent.md"}
+
+
+# --- the refusal names the real files -------------------------------------------
+
+
+def _conflict_on(tmp_path: Path, name: str) -> tuple[Path, str, str]:
+    """A repo whose two branches change the same file - called `name` - differently."""
+    repo = tmp_path / "paths"
+    _init_repo(repo)
+    _write(repo, name, "base\n")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-q", "-b", "branch")
+    _write(repo, name, "branch\n")
+    head = _commit(repo, "branch")
+    _git(repo, "checkout", "-q", "master")
+    _write(repo, name, "master\n")
+    master = _commit(repo, "master")
+    return repo, master, head
+
+
+def _raw_report(repo: Path, a: str, b: str) -> str:
+    """`git merge-tree`'s report, exit code ignored - a conflict exits 1 by design."""
+    proc = subprocess.run(
+        ["git", "merge-tree", "--write-tree", a, b],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert proc.returncode == 1, proc.returncode
+    return proc.stdout
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "Windows rejects a filename holding a control byte: CreateFile fails with "
+        "OSError [Errno 22] before git is involved (measured, test-windows run "
+        "34787962250 on the sibling PR #1210). The rule it pins is still covered on "
+        "Windows by `test_only_the_stage_block_names_the_paths`, which feeds the same "
+        "measured report as a string."
+    ),
+)
+def test_a_tab_in_the_name_is_not_a_separator(mod, tmp_path, monkeypatch) -> None:
+    """Measured 2026-09-14 (`cyc20260914-074822`), git 2.50.1: a conflict in a file
+    named `f<TAB>tab.txt` reports the path C-quoted in the stage block and writes
+    the real name into the prose after it, so "the text after the first tab on any
+    line" answered `"f\\ttab.txt", tab.txt` - one name no resolver can open and one
+    file that does not exist.
+
+    The whole refusal is asserted, not just the set: the report line is what the
+    person resolving the conflict acts on."""
+    repo, master, head = _conflict_on(tmp_path, "f\ttab.txt")
+    # Precondition: git really did quote this name, so this is the measured case.
+    assert '"f\\ttab.txt"' in _raw_report(repo, master, head)
+    paths = mod._merge_tree_paths(master, head, cwd=str(repo))
+    assert set(paths or []) == {"f\ttab.txt"}, paths
+
+    state, report = _drive(mod, repo, master, head, tmp_path, monkeypatch)
+    assert state == "conflict"
+    assert report == "conflicts on f\ttab.txt", report
+
+
+def test_a_non_ascii_name_comes_back_as_the_file(mod, tmp_path, monkeypatch) -> None:
+    """The default `core.quotePath=true` spells `中文.txt` as an octal C string, so
+    the name has to be decoded or the refusal points at a file nobody has."""
+    repo, master, head = _conflict_on(tmp_path, "中文.txt")
+    # Whether git spells the bytes escaped (`core.quotePath=true`, the default) or
+    # raw is git's choice of spelling; the tool must return the real name either way.
+    raw = _raw_report(repo, master, head)
+    assert '"\\344\\270\\255\\346\\226\\207.txt"' in raw or "中文.txt" in raw, raw
+    paths = mod._merge_tree_paths(master, head, cwd=str(repo))
+    assert set(paths or []) == {"中文.txt"}, paths
+
+    state, report = _drive(mod, repo, master, head, tmp_path, monkeypatch)
+    assert state == "conflict"
+    assert report == "conflicts on 中文.txt", report
+
+
+def test_only_the_stage_block_names_the_paths(mod, monkeypatch) -> None:
+    """The reading, over the measured report shape: the block's lines carry the
+    path after a *separator* tab, the prose carries the real name and tabs of its
+    own, and only the block is read."""
+    quoted = '"f\\ttab.txt"'
+    report = "\n".join(
+        [
+            "0" * 40,
+            f"100644 {'1' * 40} 1\t{quoted}",
+            f"100644 {'2' * 40} 2\t{quoted}",
+            f"100644 {'3' * 40} 3\t{quoted}",
+            "",
+            "Auto-merging f\ttab.txt",
+            "CONFLICT (content): Merge conflict in f\ttab.txt",
+            "",
+        ]
+    )
+    monkeypatch.setattr(mod, "_run", lambda *a, **k: _proc(1, report))
+    assert set(mod._merge_tree_paths("a", "b") or []) == {"f\ttab.txt"}
+
+
+def test_the_escapes_are_gits_own(mod) -> None:
+    """The table is `quote_c_style`'s: the named escapes, the octal form git uses
+    for a byte it will not write raw, and a path that was never quoted."""
+    assert mod._unquote_path('"a\\tb\\nc\\\\d\\"e"') == 'a\tb\nc\\d"e'
+    assert mod._unquote_path('"\\344\\270\\255\\346\\226\\207.txt"') == "中文.txt"
+    assert mod._unquote_path('"\\000"') == "\x00"
+    assert mod._unquote_path("plain.txt") == "plain.txt"
+    # A trailing lone backslash is not an escape: it is kept as written.
+    assert mod._unquote_path('"x\\"') == "x\\"
 
 
 # --- a mutable ref name must never reach merge-tree -----------------------------
