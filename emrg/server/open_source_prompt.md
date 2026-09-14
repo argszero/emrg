@@ -184,7 +184,7 @@ cd {{ source_dir }} && git log --oneline -20
 - State transitions: pending → in_progress → completed. **Never jump directly from pending to completed**
 - Host opens a new rant saying a fix is insufficient → revert the old rant to `in_progress`, note the reason in `progress`
 - Cleanup: keep all pending/in_progress rants; keep only the 10 most recent completed
-- When rewriting: sort by `timestamp` ascending; field order `timestamp → project → status → progress → completed → message` (message last); write with `json.dumps(..., ensure_ascii=False)`
+- Every move goes through `submit_rant` (`action="update"`), the only writer of `rants.jsonl`: the sort, the field order and the on-disk encoding are its business, not a rule to restate here
 
 **Language policy**: rant-driven outputs (PR title/body, review comments, issue replies) MUST be written in English; keep rant content verbatim when quoting it. Internal artifacts (memory entries, session notes) may stay in the author's language.
 
@@ -274,7 +274,7 @@ cd {{ source_dir }} && gh issue view <N> -R {{ owner }}/{{ repo }} --json state,
 When Phase Contribution is entered because an **unhandled rant** (project-matching, pending/in_progress) was found in the 0.5 scan:
 
 - The rant is the host's explicit development instruction — **priority over issues**
-- Before implementing: mark the rant `in_progress` in `~/.emrg/rants.jsonl` with a `progress` description (e.g. "implementing X (PR #N)")
+- Before implementing: move the rant with `submit_rant(action="update", timestamp="<the rant's timestamp>", status="in_progress", progress="implementing X (PR #N)")` — never by editing `rants.jsonl`
 - One rant may be split into multiple PRs (one acceptance item per PR, small iterations); reference the rant (timestamp + keywords) in the PR description
 - Flow continues with B.2–B.6 below (read conventions → fork/branch → implement → test → commit + PR)
 - After a PR is submitted: update the rant's `progress` (e.g. "PR #N submitted, awaiting review")
