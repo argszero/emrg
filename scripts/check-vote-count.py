@@ -124,8 +124,10 @@ Usage
 
 Exit codes
 ----------
-    0  every PR has >= --min-votes (default 3) valid votes **and** is
+    0  every PR has >= --min-votes valid votes **and** is
        `MERGEABLE`/`CLEAN` **and** has a CI run for its head commit
+       (`--min-votes` defaults to `DEFAULT_MIN_VOTES`; `--help` prints it, so this
+       spec states the name rather than a second copy of the number)
     1  at least one PR is SHORT (too few votes) or BLOCKED (cannot be merged:
        conflicting, a non-clean merge state, or no CI run for the head)
     2  the check could not be made (gh failed, unparseable response, mergeability
@@ -206,6 +208,14 @@ _NON_CLEAN_STATES = {
 # check-doc-count.py) so the doc line and the guard that checks it cannot drift
 # into agreeing on a string that no longer runs anything.
 INVOCATION = "uv run --no-sync python3 scripts/check-vote-count.py"
+
+# The merge gate: how many consecutive valid votes a PR needs. One spelling, read
+# by the CLI default, the `Verdict` default and the `--help` line — a number
+# written twice is a number that can disagree with itself, and this one decides
+# whether a PR may land. (Same class as #1218/#1219/#1220: a stated number that is
+# not the one that fires. Measured 2026-09-14: `--min-votes`'s help text spelled
+# "(default 3)" beside the `default=3` it was describing.)
+DEFAULT_MIN_VOTES = 3
 
 # `cyc20260911-091230` - the cycle id the vote comments carry.
 _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
@@ -646,7 +656,7 @@ class Verdict:
     # label column must say so rather than calling it "counts".
     counted: list[bool] = field(default_factory=list)
     valid_count: int = 0
-    needed: int = 3
+    needed: int = DEFAULT_MIN_VOTES
 
     @property
     def short(self) -> bool:
@@ -889,9 +899,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="check-vote-count.py",
         description="Count the LGTM votes that are still about a PR's current head.",
+        # The default is rendered by argparse from `default=` below, so the help
+        # line cannot go stale the way a hand-written "(default 3)" did.
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("prs", nargs="+", type=int, help="pull request number(s)")
-    parser.add_argument("--min-votes", type=int, default=3, help="votes required (default 3)")
+    parser.add_argument(
+        "--min-votes",
+        type=int,
+        default=DEFAULT_MIN_VOTES,
+        help="votes required",
+    )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
     args = parser.parse_args(argv)
 
