@@ -103,6 +103,11 @@ INDEX_TITLE_MAX_CHARS = 512  # max chars for one index title / line
 INDEX_COUNT_WARN = 100       # >N memory files → consolidation recommended
 INDEX_SIZE_WARN = 50 * 1024  # >50KB MEMORY.md → consolidation recommended
 
+# Order of the `## type` sections when the index has to be rendered from
+# entries alone (a rebuild, or entries the document never had). The parser
+# accepts any `## <valid type>` heading; this only decides where new rows file.
+INDEX_TYPE_ORDER = ("user", "feedback", "project", "reference", "decision", "task")
+
 # ── MemoryFile ─────────────────────────────────────────────────────
 
 
@@ -377,6 +382,11 @@ class _IndexEntry:
     created_at: str = ""
     event_at: str = ""
     updated_at: str = ""
+    # The index line this entry was parsed from, byte for byte. Kept so a
+    # hand-written index survives a load → save round trip: the renderer emits
+    # the source line verbatim unless the store itself rewrote the entry.
+    # Empty for entries the store created (they have no source line).
+    raw: str = ""
 
 
 class MemoryIndex:
@@ -391,10 +401,26 @@ class MemoryIndex:
 
         ## decision
         - [Use httpx](decision-use-httpx.md) [superseded] — rec: 2026-07-14, evt: 2026-07-03
+
+    Round-trip fidelity: MEMORY.md is a file agents hand-edit (they append rows
+    directly), so it holds more than this model represents — a document title,
+    ``>`` notes, per-row prose, a row listing several links. ``from_text``
+    therefore keeps the source document and the line each entry came from, and
+    ``to_markdown`` walks that document instead of re-rendering it from parsed
+    fields: lines it does not understand come out verbatim, an entry line comes
+    out verbatim unless the store rewrote that entry, and only genuinely new
+    entries are appended under their ``## type`` heading. Loading an untouched
+    index and saving it back returns the same text (normalised to one trailing
+    newline) — no row, note or heading is lost.
     """
 
     def __init__(self, entries: list[_IndexEntry] | None = None):
         self.entries: list[_IndexEntry] = entries or []
+        # Document skeleton: the index file's own lines in order, and the
+        # filename each entry line parsed to. A fresh index (nothing loaded)
+        # starts from just the title, so every entry counts as new.
+        self._lines: list[str] = ["# Memory Index", ""]
+        self._src: dict[int, str] = {}
 
     # ── Mutation ───────────────────────────────────────────────
 
@@ -432,46 +458,91 @@ class MemoryIndex:
     # ── Rendering ──────────────────────────────────────────────
 
     def to_markdown(self) -> str:
-        """Render the full index as markdown."""
-        lines = ["# Memory Index", ""]
+        """Render the index, preserving everything this model cannot hold.
 
-        # Group by type
-        by_type: dict[str, list[_IndexEntry]] = {}
-        for e in self.entries:
-            by_type.setdefault(e.type, []).append(e)
+        Walks the source document (``_lines``): non-entry lines are emitted as
+        written, and an entry line is emitted verbatim unless the store rewrote
+        that entry (``raw`` empty) or the line exceeds the index line cap.
+        Entries the document never had are appended under their ``## type``
+        heading. Re-rendering every line from parsed fields — what this used to
+        do — dropped a document title, ``>`` notes, per-row prose and any row
+        listing several links, i.e. any load → save destroyed the hand-written
+        index: measured on this repo's own indexes, 22389 chars came back as
+        2628 and 2388 chars as 349.
+        """
+        live = {e.filename: e for e in self.entries}
+        out: list[str] = []
+        placed: set[str] = set()
 
-        # Stable type ordering
-        type_order = ["user", "feedback", "project", "reference", "decision", "task"]
-        for t in type_order:
-            if t not in by_type:
+        for i, line in enumerate(self._lines):
+            filename = self._src.get(i)
+            if filename is None:
+                out.append(line)  # title, `>` notes, headings, prose — as written
                 continue
-            lines.append(f"## {t}")
-            for e in by_type[t]:
-                status_tag = f" [{e.status}]" if e.status != "active" else ""
-                rec = f"rec: {_short_date(e.created_at)}" if e.created_at else ""
-                evt = f"evt: {_short_date(e.event_at)}" if e.event_at else ""
-                date_part = ", ".join(p for p in [rec, evt] if p)
-                raw_line = f"- [{e.title}]({e.filename}){status_tag} — {date_part}"
-                if len(raw_line) > INDEX_TITLE_MAX_CHARS:
-                    # Rant 2026-08-23T08:04:26 — render-time fallback for legacy
-                    # dirty index data (write-time truncation wasn't in place).
-                    # Keep the filename so the detail file stays reachable.
-                    logger.warning(
-                        "memory index line exceeds %d chars (title=%d chars) — truncating",
-                        INDEX_TITLE_MAX_CHARS, len(e.title),
-                    )
-                    other = len(f"- []({e.filename}){status_tag} — {date_part}")
-                    budget = max(1, INDEX_TITLE_MAX_CHARS - other)
-                    line = (
-                        f"- [{_truncate_index_title(e.title, budget)}]"
-                        f"({e.filename}){status_tag} — {date_part}"
-                    )
-                else:
-                    line = raw_line
-                lines.append(line)
-            lines.append("")
+            entry = live.get(filename)
+            if entry is None:
+                continue  # the store removed this entry
+            if filename in placed and not entry.raw:
+                continue  # a rewritten entry renders once, however many rows it had
+            placed.add(filename)
+            if entry.raw and len(entry.raw) <= INDEX_TITLE_MAX_CHARS:
+                out.append(entry.raw)
+            else:
+                out.append(self._render_entry(entry))
 
-        return "\n".join(lines).strip() + "\n"
+        fresh = [e for e in self.entries if e.filename not in placed]
+        # Leftover types (not in INDEX_TYPE_ORDER) are filed last rather than
+        # dropped — an unknown type is a rendering question, not data loss.
+        leftovers = sorted({e.type for e in fresh} - set(INDEX_TYPE_ORDER))
+        for t in INDEX_TYPE_ORDER + tuple(leftovers):
+            group = [e for e in fresh if e.type == t]
+            if group:
+                self._append_under(out, t, [self._render_entry(e) for e in group])
+
+        return "\n".join(out).strip() + "\n"
+
+    @staticmethod
+    def _render_entry(e: _IndexEntry) -> str:
+        """One entry as a fresh index line (bounded by INDEX_TITLE_MAX_CHARS)."""
+        status_tag = f" [{e.status}]" if e.status != "active" else ""
+        rec = f"rec: {_short_date(e.created_at)}" if e.created_at else ""
+        evt = f"evt: {_short_date(e.event_at)}" if e.event_at else ""
+        date_part = ", ".join(p for p in [rec, evt] if p)
+        line = f"- [{e.title}]({e.filename}){status_tag} — {date_part}"
+        if len(line) <= INDEX_TITLE_MAX_CHARS:
+            return line
+        # Rant 2026-08-23T08:04:26 — render-time fallback for legacy dirty
+        # index data (write-time truncation wasn't in place). Keep the filename
+        # so the detail file stays reachable.
+        logger.warning(
+            "memory index line exceeds %d chars (title=%d chars) — truncating",
+            INDEX_TITLE_MAX_CHARS, len(e.title),
+        )
+        other = len(f"- []({e.filename}){status_tag} — {date_part}")
+        budget = max(1, INDEX_TITLE_MAX_CHARS - other)
+        return (
+            f"- [{_truncate_index_title(e.title, budget)}]"
+            f"({e.filename}){status_tag} — {date_part}"
+        )
+
+    @staticmethod
+    def _append_under(out: list[str], type_name: str, lines: list[str]) -> None:
+        """Insert rendered entry lines into ``out`` under `## type_name`."""
+        heading = f"## {type_name}"
+        if heading not in out:
+            if out and out[-1].strip():
+                out.append("")
+            out.extend([heading, *lines, ""])
+            return
+        start = out.index(heading)
+        end = len(out)
+        for j in range(start + 1, len(out)):
+            if out[j].startswith("## "):
+                end = j
+                break
+        while end > start + 1 and not out[end - 1].strip():
+            end -= 1  # keep the section's trailing blank line
+        out[end:end] = lines
 
     def save(self, path: Path) -> None:
         """Write the index to disk."""
@@ -496,11 +567,17 @@ class MemoryIndex:
 
     @classmethod
     def from_text(cls, text: str) -> MemoryIndex:
-        """Parse MEMORY.md content into entries."""
+        """Parse MEMORY.md content into entries, keeping the document itself."""
+        idx = cls()
+        lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()  # a trailing newline is not a line of its own
+        if lines:
+            idx._lines = lines
         entries: list[_IndexEntry] = []
         current_type = "reference"
 
-        for line in text.split("\n"):
+        for i, line in enumerate(lines):
             stripped = line.strip()
 
             # Detect type heading: ## user
@@ -538,10 +615,13 @@ class MemoryIndex:
                         created_at=created_at,
                         event_at=event_at,
                         updated_at=created_at,
+                        raw=line,
                     )
                 )
+                idx._src[i] = filename
 
-        return cls(entries)
+        idx.entries = entries
+        return idx
 
 
 def _normalize_date(d: str) -> str:

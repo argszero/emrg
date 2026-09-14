@@ -231,13 +231,13 @@ def test_check_mode_flags_a_long_row_and_a_duplicate(tmp_path, mod, capsys):
     _write_index(index, [padded])
 
     assert mod.main([str(index), "--cap", "50", "--check"]) == 0, (
-        "a row exactly at the 512-char cap is compliant"
+        "a row exactly at the cap is compliant"
     )
 
     over = padded + "z"
     _write_index(index, [over])
     assert mod.main([str(index), "--cap", "50", "--check"]) == 1
-    assert "over 512 chars" in capsys.readouterr().out
+    assert f"over {mod.ROW_MAX_CHARS} chars" in capsys.readouterr().out
 
     _write_index(index, [_row(NEW), _row(NEW)])
     assert mod.main([str(index), "--cap", "50", "--check"]) == 1

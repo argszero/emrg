@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from emrg.memory import (
+    INDEX_TITLE_MAX_CHARS,
     MemoryFile,
     MemoryIndex,
     ProjectMemoryStore,
@@ -174,7 +175,7 @@ class TestMemoryIndex:
         )
         idx.add_entry(mem)
         entry = idx.entries[0]
-        assert len(entry.title) <= 512
+        assert len(entry.title) <= INDEX_TITLE_MAX_CHARS
         assert entry.title.endswith("…")
         # Filename (reachable detail file) is preserved un-truncated
         assert entry.filename == mem.filename
@@ -193,7 +194,7 @@ class TestMemoryIndex:
         # Every rendered index line stays bounded…
         for line in md.splitlines():
             if line.startswith("- ["):
-                assert len(line) <= 512, f"line too long ({len(line)}): {line[:80]}…"
+                assert len(line) <= INDEX_TITLE_MAX_CHARS, f"line too long ({len(line)}): {line[:80]}…"
         # …and the detail filename stays reachable.
         assert "task-long.md" in md
 
@@ -408,3 +409,96 @@ class TestMemoryFileRoundTripFidelity:
         assert out.startswith("---\n")
         assert "event_at:" in out
         assert "Text." in out
+# A hand-written index, as agents actually keep them: a document title, `>`
+# notes, a row with prose after the dates, a row listing several links, and a
+# heading that is not a `## <type>` section.
+HAND_WRITTEN_INDEX = """# 项目记忆索引
+
+> 历史记录已于 2026-08-23 归档清理。
+> 本项目记忆从零开始重建。
+
+- [Steady state](evolution-state.md) — active · 最近更新 cyc20260914-131523：master `f15e1b88`。
+
+### Session Memory
+
+- [cycle-20260914-131523](cycle-20260914-131523.md) — 本周期：宿主令复述一律删除。
+- [cycle-20260914-125119](cycle-20260914-125119.md) / [cycle-20260914-122910](cycle-20260914-122910.md) — 更早周期。
+"""
+
+
+class TestMemoryIndexRoundTripFidelity:
+    """The index is hand-edited; a store write must not rewrite it.
+
+    Before this: `to_markdown` rendered only from parsed `_IndexEntry`s, so a
+    load → save dropped the document title, every `>` note and every row's
+    prose, and filed surviving rows under an invented `## reference` — the
+    evolution index (22389 chars, 50 rows) came back as 2628 chars.
+    """
+
+    def test_untouched_index_round_trips_byte_for_byte(self):
+        idx = MemoryIndex.from_text(HAND_WRITTEN_INDEX)
+        assert idx.to_markdown() == HAND_WRITTEN_INDEX
+
+    def test_round_trip_keeps_what_the_model_cannot_represent(self):
+        out = MemoryIndex.from_text(HAND_WRITTEN_INDEX).to_markdown()
+        for kept in [
+            "# 项目记忆索引",                      # document title
+            "> 历史记录已于",                       # `>` note
+            "### Session Memory",                  # unknown heading
+            "最近更新 cyc20260914-131523",           # per-row prose
+            "本周期：宿主令复述一律删除",              # per-row prose
+            "cycle-20260914-122910.md",            # 2nd link in a multi-link row
+        ]:
+            assert kept in out, f"lost on round trip: {kept}"
+
+    def test_loading_an_untouched_index_twice_is_stable(self):
+        once = MemoryIndex.from_text(HAND_WRITTEN_INDEX).to_markdown()
+        twice = MemoryIndex.from_text(once).to_markdown()
+        assert twice == once
+
+    def test_store_create_preserves_hand_written_rows(self, temp_cwd):
+        """The store's write path: create → load index → add_entry → save."""
+        store = SessionMemoryStore(temp_cwd)
+        store.index_path.write_text(HAND_WRITTEN_INDEX, encoding="utf-8")
+
+        mem = store.create("task", "A new memory", "body text")
+
+        after = store.index_path.read_text(encoding="utf-8")
+        assert mem.filename in after, "the new memory is not in the index"
+        assert "### Session Memory" in after
+        assert "> 历史记录已于" in after
+        assert "最近更新 cyc20260914-131523" in after
+        # The pre-existing hand-written rows are still there, verbatim.
+        assert "cycle-20260914-131523.md" in after
+        assert "cycle-20260914-125119.md" in after
+
+    def test_removed_entry_drops_only_its_own_row(self):
+        idx = MemoryIndex.from_text(HAND_WRITTEN_INDEX)
+        idx.remove_entry("cycle-20260914-131523.md")
+        out = idx.to_markdown()
+        assert "cycle-20260914-131523.md" not in out
+        assert "### Session Memory" in out
+        assert "cycle-20260914-125119.md" in out
+
+    def test_rewritten_entry_renders_once_from_its_fields(self):
+        """An entry the store rewrote loses its stale line — once, not twice."""
+        text = (
+            "# Memory Index\n\n"
+            "## task\n"
+            "- [Fix bug](task-fix-bug.md) — rec: 2026-07-14, evt: 2026-07-10\n"
+            "- [Other](task-other.md) — rec: 2026-07-14, evt: 2026-07-10\n"
+        )
+        idx = MemoryIndex.from_text(text)
+        idx.add_entry(
+            MemoryFile(
+                id="1111",
+                type="task",
+                title="Fix bug",
+                created_at="2026-07-20T00:00:00Z",
+            )
+        )
+        out = idx.to_markdown()
+        assert out.count("task-fix-bug.md") == 1
+        assert "2026-07-20" in out, "the rewritten row kept its stale dates"
+        # The untouched row is still its original line, verbatim.
+        assert "- [Other](task-other.md) — rec: 2026-07-14, evt: 2026-07-10" in out

@@ -110,7 +110,7 @@ class TestMemoryReflection:
     def test_hygiene_self_review_always_present_below_threshold(self):
         """Rant 2026-08-28T22:12:16 — the digest-style hygiene self-review must be
         in EVERY reflection prompt, even when the index is small (below threshold).
-        The old behavior gated it behind >100 entries / >50KB, so small indexes
+        The old behavior gated it behind the store's soft caps, so small indexes
         never got the consolidation instruction."""
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
