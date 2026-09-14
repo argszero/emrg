@@ -160,34 +160,45 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
 
-# `100644 <blob> <stage>\t<path>` - the conflict block merge-tree writes first,
-# one line per side per conflicted path. Stage 1/2/3 are base/ours/theirs.
-_CONFLICT_LINE = re.compile(r"^[0-7]{6} [0-9a-f]+ [123]\t(.+)$")
+# The shared module's directory, so `import merge_tree` works however this file is
+# loaded: as `python3 scripts/check-merge-order.py` it is already `sys.path[0]`, but
+# the test suite loads these tools by file path (`spec_from_file_location`), where it
+# is not. `merge_tree.py` is a module of this repo, not a dependency.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import merge_tree  # noqa: E402  (needs the path above)
 
-# The sibling tool's base resolution, loaded from its file rather than imported by
-# name: the scripts in this directory are not importable modules (hyphenated names,
-# no package), and this is the same loader the test suite already uses for them.
-# Taken from the sibling rather than copied so the *rule* has one implementation -
-# a base name's meaning must not differ between the gates that ask about it.
+# The sibling whose *base-resolution* rules this one asks for, loaded from its file
+# rather than imported by name: the scripts in this directory are not importable
+# modules (hyphenated names, no package), and this is the same loader the test suite
+# already uses for them. Taken from the sibling rather than copied so the rule has one
+# implementation - a base name's meaning must not differ between the gates that ask
+# about it.
+#
+# `check-merge-sequence.py` owns base resolution (`_qualify_ref`, `_refresh_base`).
+# The conflicted-path *reading* is not asked of a sibling any more: it lives in
+# `merge_tree.py`, with the measurement it belongs to (see that module's docstring for
+# the five copies this replaced).
+#
+# The dependency is one-way (that sibling does not load this file), so loading it
+# eagerly here cannot recurse.
 _SIBLING = Path(__file__).resolve().parent / "check-merge-sequence.py"
 
 
-def _load_sibling():
-    spec = importlib.util.spec_from_file_location("check_merge_sequence", _SIBLING)
+def _load_sibling(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:  # pragma: no cover - file is in this repo
-        raise RuntimeError(f"could not load {_SIBLING}")
+        raise RuntimeError(f"could not load {path}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
 
-seq = _load_sibling()
+seq = _load_sibling(_SIBLING, "check_merge_sequence")
 
 
 def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
@@ -267,23 +278,6 @@ def _fetch_head(repo: str, number: int) -> str:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise RuntimeError(f"could not fetch PR #{number}: {detail}")
     return ref
-
-
-def _is_object_name(line: str) -> bool:
-    """Whether a line is a bare object name (the merged tree's).
-
-    Both the SHA-1 (40 hex) and SHA-256 (64 hex) object formats are accepted: the
-    question is the *shape* of the answer, which must not depend on the object
-    format of whichever clone happens to run this. The same rule and the same
-    spelling as `check-merge-plan-suite.py`, `check-merge-landing-diff.py` and
-    `check-merge-tree-health.py`, each of which reads its merge verdict this way.
-    It is spelled here because the sibling this tool loads (`seq`) does not carry
-    it on master - the rule reaches `seq` in #1207 - and once that has landed this
-    copy should come from there, the way *base* resolution already does.
-    """
-    return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
-
-
 def _conflict_paths(a: str, b: str) -> list[str] | None:
     """Paths that conflict when `a` and `b` are merged; None if the merge is not answered.
 
@@ -304,32 +298,26 @@ def _conflict_paths(a: str, b: str) -> list[str] | None:
     An unevidenced answer in the other direction was already refused (`paths or
     None`), so the asymmetry was the whole defect: the *reassuring* answer was the
     half that could be invented.
+
+    Both facts - the named tree and the decoded stage-block paths - are
+    `merge_tree.fold`'s, measured once for every gate that needs them (that
+    module's docstring carries the arm table: prose reports a real name but only
+    for some conflict kinds, the block always names the paths but quotes them, and
+    `unquote_path` is what makes the block's answer a file one can open). What is
+    this function's own is the *mapping* to a caller's three answers: `"clean"` to
+    `[]`, anything unmeasured to `None`, a conflict to its paths or `None` (a
+    conflict whose paths the report does not name is not the clean answer), and
+    the paths deduplicated - the fold returns one entry per stage line.
     """
-    proc = _run(["git", "merge-tree", "--write-tree", a, b])
-    lines = proc.stdout.splitlines()
-    named = lines[0].strip() if lines else ""
-    if not _is_object_name(named):
-        # No merged tree was named, so there is nothing here to have an opinion
-        # about - whatever the exit code says.
-        return None
-    if proc.returncode == 0:
-        # `[]` is the clean answer, and the named tree is what makes it evidenced.
+    answer = merge_tree.fold(a, b, run=_run)
+    if answer.verdict == "clean":
         return []
-    # A conflict exits 1 with the block on stdout; anything else is a failure to
-    # measure rather than a conflict to report.
-    if proc.returncode != 1:
+    if answer.verdict != "conflict":
         return None
     paths: list[str] = []
-    for line in lines:
-        if not line.strip():
-            break  # end of the conflict block; the rest is the message
-        match = _CONFLICT_LINE.match(line)
-        if match:
-            path = match.group(1)
-            if path not in paths:
-                paths.append(path)
-        elif paths:
-            break
+    for path in answer.paths:
+        if path not in paths:
+            paths.append(path)
     return paths or None
 
 

@@ -86,14 +86,13 @@ Conflicting PRs are reported as CONFLICT and are not a failure of this check:
 they cannot be merged as they stand, so there is no merged tree to judge. That
 question belongs to `check-merge-order.py`. The files such a refusal names are the
 real ones - read from the report's stage block and decoded out of git's path
-quoting (`_conflict_block_paths`) - so `conflicts on ...` names a file that can be
-opened, and not, as it used to, a name no resolver has.
+quoting, both of which are `merge_tree.py`'s now - so `conflicts on ...` names a
+file that can be opened, and not, as it used to, a name no resolver has.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shutil
 import subprocess
@@ -101,6 +100,13 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+
+# The shared module's directory, so `import merge_tree` works however this file is
+# loaded: as `python3 scripts/check-merge-tree-health.py` it is already `sys.path[0]`,
+# but the test suite loads these tools by file path (`spec_from_file_location`), where
+# it is not. `merge_tree.py` is a module of this repo, not a dependency.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import merge_tree  # noqa: E402  (needs the path above)
 
 # The guard is judged by its exit code, but its own report line is what names the
 # numbers, so it is captured and quoted rather than re-derived. Same constants as
@@ -120,8 +126,9 @@ OK_IN_REPORT = re.compile(r"OK: no tracked file states the Python test count")
 FAILURE_LINE = re.compile(r"^FAIL: ", re.MULTILINE)
 
 
-class MeasurementError(Exception):
-    """The question could not be answered. Never a verdict."""
+# The question could not be answered. Never a verdict. An *alias*, not a subclass:
+# a gate that catches this name has to catch what the shared module raises too.
+MeasurementError = merge_tree.MeasurementError
 
 
 def _run(argv: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -317,192 +324,40 @@ def _fetch_head(number: int) -> str:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
     return ref
-
-
-def _is_object_name(line: str) -> bool:
-    """Whether a line is a bare object name (the merged tree's).
-
-    Both the SHA-1 (40 hex) and SHA-256 (64 hex) object formats are accepted: the
-    question is the *shape* of the answer, which must not depend on the object
-    format of whichever clone happens to run this. The same rule and the same
-    spelling as `check-merge-plan-suite.py` and `check-merge-sequence.py`.
-    """
-    return bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", line))
-
-
-#: A conflicted path as the *stage block* writes it: `<mode> <blob> <stage>\t<path>`.
-#: The block is the report's first block - one line per side per conflicted path,
-#: stages 1/2/3 - and it ends at the first blank line, after which git writes prose
-#: ("Auto-merging <path>", "CONFLICT (content): Merge conflict in <path>"). The mode
-#: is `[0-7]{6}` so a symlink (120000) or a gitlink (160000) is named like any other
-#: path. See `_conflict_block_paths` for why the shape is matched instead of the tab.
-_CONFLICT_LINE = re.compile(r"^[0-7]{6} [0-9a-f]+ [123]\t(?P<path>.+)$")
-
-#: The escapes git's path quoting uses - `quote_c_style`'s set, as bytes.
-_C_ESCAPES = {
-    "a": 0x07,
-    "b": 0x08,
-    "f": 0x0C,
-    "n": 0x0A,
-    "r": 0x0D,
-    "t": 0x09,
-    "v": 0x0B,
-    "\\": 0x5C,
-    '"': 0x22,
-}
-
-
-def _unquote_path(path: str) -> str:
-    """The path git *means*, from the path git wrote.
-
-    `merge-tree` quotes a path that holds a quote, a backslash, a control byte, or
-    - with the default `core.quotePath=true` - a non-ASCII byte, C-style:
-    `f<TAB>tab.txt` arrives as `"f\\ttab.txt"`, and `中文.txt` as
-    `"\\344\\270\\255\\346\\226\\207.txt"` (measured 2026-09-14,
-    `cyc20260914-074822`, git 2.50.1, in a scratch repo). Passed through as
-    written, either names a file nobody has: the verdict below reads "conflicts
-    on " and names something no resolver can open - the quoted spelling for one
-    arm, and, worse, a name that does not exist at all for the other (see
-    `_conflict_block_paths`).
-
-    Decoding here also makes the path independent of the *reader's* locale: the
-    escapes are ASCII, so the real bytes are reassembled by this function rather
-    than by whatever encoding the subprocess reader happened to pin.
-
-    The same rule and the same spelling as `check-merge-plan-suite.py`, which
-    answers this question about a plan rather than about one merge (#1210).
-    """
-    if len(path) < 2 or not (path.startswith('"') and path.endswith('"')):
-        # Unquoted: git wrote the path's bytes as they are (with
-        # `core.quotePath=false`, or a path that needed no quoting at all).
-        return path
-    body = path[1:-1]
-    out = bytearray()
-    i = 0
-    while i < len(body):
-        char = body[i]
-        if char != "\\":
-            out.extend(char.encode("utf-8"))
-            i += 1
-            continue
-        i += 1
-        if i >= len(body):
-            # A lone trailing backslash: not a quoted path after all. Keep it.
-            out.extend(b"\\")
-            break
-        escape = body[i]
-        if escape in _C_ESCAPES:
-            out.append(_C_ESCAPES[escape])
-            i += 1
-        elif escape in "01234567":
-            # Octal, always three digits in git's output; a short tail is taken
-            # as it comes rather than invented into a byte.
-            digits = body[i : i + 3]
-            i += len(digits)
-            out.append(int(digits, 8) & 0xFF)
-        else:
-            out.extend(escape.encode("utf-8"))
-            i += 1
-    # `errors="replace"`: the bytes may be any encoding, and the reader that
-    # produced `path` was already pinned to UTF-8 (see `_run`). A name outside
-    # UTF-8 degrades the same way here as it would anywhere else in this tool.
-    return out.decode("utf-8", errors="replace")
-
-
-def _conflict_block_paths(lines: list[str]) -> list[str]:
-    """The conflicted paths a conflict report's stage block names.
-
-    **The stage block, not "every line with a tab in it".** The reading this
-    replaces took the text after the first tab from *any* line of the report, and
-    the report continues past the block with prose that embeds the conflicted
-    paths. Measured (2026-09-14, `cyc20260914-074822`, git 2.50.1, in a scratch
-    repo) a conflict in a file named `f<TAB>tab.txt` reports
-
-        100644 <blob> 1\t"f\\ttab.txt"        <- the stage block: git's spelling
-        ...
-        Auto-merging f<TAB>tab.txt            <- prose: a real tab, not a separator
-        CONFLICT (content): Merge conflict in f<TAB>tab.txt
-
-    and the old reading answered `conflicts on "f\\ttab.txt", tab.txt` for it:
-    one name nobody can open, and one file that collides with nothing and does not
-    exist, named in a refusal as if it did.
-
-    The rule is the *shape*: every line of the stage block is
-    `<mode> <blob> <stage>` followed by a tab and the path, and the prose that
-    follows the block is none of that. The blank line git writes after the block
-    is where the prose begins, but it is not what excludes it - stopping there as
-    well was measured to change no answer in any of these arms, i.e. it would be a
-    guard no test can hold - so the shape is the only rule, and it is the one the
-    tests in `tests/test_check_merge_tree_health.py` weaken to prove it is load
-    bearing.
-
-    The paths are returned as the real names (see `_unquote_path`), one per stage
-    line, in the order git wrote them: stages 1/2/3 of the same path appear once
-    per stage - which is what lets a rename conflict name all three sides - and
-    the caller dedupes before printing.
-    """
-    paths: list[str] = []
-    for line in lines[1:]:  # lines[0] is the merged tree's name
-        match = _CONFLICT_LINE.match(line)
-        if match:
-            paths.append(_unquote_path(match.group("path")))
-    return paths
-
-
 def _merge_tree_paths(a: str, b: str, cwd: str | None = None) -> list[str] | None:
     """Conflicted paths when `a` and `b` are merged; None if unmeasurable.
 
     An empty list means the merge is clean, which is distinct from None (the
-    question was not answered). Anything other than rc 0/1 is treated as a
-    failure to measure, never as a conflict.
+    question was not answered).
 
-    **The exit code is not the signal; the output is.** Measured 2026-09-14
-    (`cyc20260914-050817`): `merge-tree` exits 1 for a genuine conflict *and* for
-    a failure to merge the two inputs - an unknown ref, or an object that
-    dereferences to a blob - and only the first prints the merged tree's OID.
-    `git merge-tree --write-tree <commit> <blob>` exits 1 with **empty stdout**,
-    which the `rc == 1` branch below used to turn into `[]`: the *clean-merge*
-    answer, over a merge nobody made. That is the one direction a gate must never
-    invent, because the next step then judges a tree that was never built. Both
-    answers are read from the OID on the first line now, and an answer in neither
-    shape is None, i.e. "the question was not answered".
-
-    The *names* in that answer come from the report's stage block and are decoded
-    out of git's path quoting (`_conflict_block_paths`), so the refusal's
-    "conflicts on ..." names a file a resolver can open.
+    The measurement is `merge_tree.fold`'s, and so is the reading of the paths -
+    **the exit code is not the signal; the named tree is**, and the paths come from
+    the report's stage block decoded, not as git spelled them. Measured here on
+    2026-09-14 (`cyc20260914-050817`): `git merge-tree --write-tree <commit>
+    <blob>` exits 1 with **empty stdout**, which the `rc == 1` branch this function
+    used to have turned into `[]` - the *clean-merge* answer, over a merge nobody
+    made. What stays here is the mapping to this tool's three answers: a conflict
+    whose paths the report does not name is `None` ("not answered"), never `[]`.
     """
-    proc = _run(["git", "merge-tree", "--write-tree", a, b], cwd=cwd)
-    lines = proc.stdout.splitlines()
-    named = lines[0].strip() if lines else ""
-    if proc.returncode == 0:
-        # A clean merge names its tree too, so `[]` has to be evidenced by it.
-        return [] if _is_object_name(named) else None
-    if proc.returncode != 1 or not _is_object_name(named):
+    answer = merge_tree.fold(a, b, run=_run, cwd=cwd)
+    if answer.verdict == "clean":
+        return []
+    if answer.verdict != "conflict":
         return None
-    paths = _conflict_block_paths(lines)
-    # A conflict is described by its paths. An empty list here would be read as the
-    # clean answer above - the direction this function must never invent - so a
-    # conflict whose paths the report does not name is "not answered" instead.
-    # That keeps one invariant: `[]` means an *evidenced* clean merge.
-    return paths or None
+    return list(answer.paths) or None
 
 
 def _merged_tree_sha(a: str, b: str, cwd: str | None = None) -> str:
-    """The tree sha of the clean merge of `a` and `b`."""
-    proc = _run(["git", "merge-tree", "--write-tree", a, b], cwd=cwd)
-    lines = proc.stdout.splitlines()
-    named = lines[0].strip() if lines else ""
-    if proc.returncode != 0 or not _is_object_name(named):
-        # The OID is what makes this a tree rather than an exit code. Reading it
-        # positionally (`splitlines()[0]`) raised `IndexError` on an empty stdout,
-        # and an unhandled exception leaves this tool as exit 1 - the code that
-        # means "a clean merge landed an unhealthy tree", i.e. a crash reported as
-        # a finding about a tree nobody measured.
-        raise MeasurementError(
-            "merge-tree did not produce a tree for a merge reported clean: "
-            + (proc.stdout[-500:] + proc.stderr[-500:]).strip()
-        )
-    return named
+    """The tree sha of the clean merge of `a` and `b`.
+
+    The rule is `merge_tree.merged_tree_sha`'s - the named OID, never the exit code,
+    and `MeasurementError` rather than a falsy value, because an unhandled exception
+    leaves this tool as exit 1 - the code that means "a clean merge landed an
+    unhealthy tree", i.e. a crash reported as a finding about a tree nobody measured.
+    What is this tool's is the repository the question is asked in (`cwd`), and the
+    runner that pins its decoding.
+    """
+    return merge_tree.merged_tree_sha(a, b, run=_run, cwd=cwd)
 
 
 def _git_cwd() -> str | None:
