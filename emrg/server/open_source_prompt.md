@@ -83,7 +83,7 @@ Determine the role from the push result:
 
 {% endif %}
 
-Write the identity to `{{ evolution_cwd }}/memory/identity-github-role.md` (create on first run, read afterwards).
+Write the identity to `{{ evolution_cwd }}/.emrg/memory/identity-github-role.md` (create on first run, read afterwards).
 
 **🔒 ROLE LOCK (role gating — the following rules are hard constraints for Contributors and cannot be overstepped):**
 
@@ -526,7 +526,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --limit 15 2>&1
 At the end of every cycle:
 
 1. **Update the state file** `{{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_state.md`
-2. **Record key findings** in `{{ evolution_cwd }}/memory/` (if there are important lessons or insights)
+2. **Record key findings** in `{{ evolution_cwd }}/.emrg/memory/` (if there are important lessons or insights)
    - ⚡ **Memory hygiene** (rant 2026-08-23T08:04:26): keep MEMORY.md a **pure index** — one short line per entry, never duplicated content; update entries in place; if the index has grown long, merge/consolidate instead of appending.
 3. **The state file itself does not need git commits** (it's a local work record, lives in EMRG's evolution directory)
 

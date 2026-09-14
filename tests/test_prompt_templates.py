@@ -39,6 +39,7 @@ import yaml
 from emrg.protocol import InstanceIdentity
 from emrg.server import scheduler as mod
 from emrg.server.scheduler import TaskHandler
+from emrg.tools import bash_tool
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPTS_DIR = REPO_ROOT / "emrg" / "server"
@@ -182,3 +183,76 @@ def test_no_prompt_names_a_placeholder_the_builder_does_not_provide(
                 f"provide ({exc}); with the daemon's Undefined it would silently "
                 f"render as an empty string"
             ) from exc
+
+
+# `{{ evolution_cwd }}` followed by the rest of the path it names.
+EVOLUTION_CWD_REF = re.compile(r"\{\{\s*evolution_cwd\s*\}\}([^\s`)\"'|,;]*)")
+
+# A path suffix that routes through a `memory/` directory.
+_MEMORY_SEGMENT = re.compile(r"(?:^|/)memory/")
+
+
+def _evolution_memory_refs(text: str) -> list[str]:
+    """Path suffixes of ``{{ evolution_cwd }}`` references that name a memory dir."""
+    return [
+        suffix
+        for suffix in EVOLUTION_CWD_REF.findall(text)
+        if _MEMORY_SEGMENT.search(suffix)
+    ]
+
+
+def test_prompt_memory_writes_land_where_the_sandbox_allows_them() -> None:
+    """A prompt's memory path must be one the ``workspace-write`` sandbox trusts.
+
+    Measured 2026-09-14 (rant 2026-09-14T14:35:47): `open_source_prompt.md` sent the
+    agent's identity file and its "key findings" to `{{ evolution_cwd }}/memory/`,
+    i.e. `~/.emrg/evolution/memory/`. That is out of the sandbox's boundary — every
+    such write is refused with "blocked write outside workspace", which the rant
+    reports an open-source task hitting 32 times in one day — and it is the wrong
+    root anyway: the evolution data root is `{{ evolution_cwd }}/.emrg/`, the only
+    part of `{{ evolution_cwd }}` `bash_tool._trusted_write_zones()` trusts and the
+    only memory the daemon loads. The directory exists, so a write that gets through
+    by a route the command-line scan cannot see (an `open()` inside a heredoc, as the
+    rant documents) lands in a folder no memory loader reads.
+
+    The expected location is taken from the sandbox's own trust list rather than
+    copied here, so if that list moves, this test reports the prompts may be stale
+    instead of agreeing with a second copy of the rule.
+
+    Named limit: only ``{{ evolution_cwd }}``-rooted *memory* paths are checked.
+    Other paths rooted at `{{ evolution_cwd }}` are the state-file / reflection-file
+    mechanism, which the same rant deletes wholesale; that removal carries its own
+    guard and this one deliberately does not pre-empt it.
+    """
+    root = Path(mod.EVOLUTION_CWD)
+    zones = bash_tool._trusted_write_zones()
+    assert zones, "no trusted write zone — this check would pass vacuously"
+
+    # Self-test of the device: it must reject the exact shape the rant measured,
+    # and the machine must actually consider that shape outside the boundary.
+    planted = _evolution_memory_refs("write `{{ evolution_cwd }}/memory/identity.md`")
+    assert planted == ["/memory/identity.md"], planted
+    assert not any(
+        bash_tool._is_within(str(root / "memory/identity.md"), zone) for zone in zones
+    ), (
+        "`~/.emrg/evolution/memory/` is inside a trusted zone on this machine, so "
+        "this test cannot discriminate between the two roots here"
+    )
+
+    checked = 0
+    for task_type, filename in _builtin_templates():
+        text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+        for suffix in _evolution_memory_refs(text):
+            target = str(root / suffix.lstrip("/"))
+            assert any(
+                bash_tool._is_within(target, zone) for zone in zones
+            ), (
+                f"{task_type}/{filename}: tells the agent to write {target!r}, "
+                f"which the workspace-write sandbox blocks (trusted zones: {zones}); "
+                f"the evolution memory root is `{{{{ evolution_cwd }}}}/.emrg/memory/`"
+            )
+            checked += 1
+    assert checked >= 2, (
+        f"only {checked} memory path(s) found across the templates — the scan is "
+        f"not looking at what it thinks it is"
+    )
