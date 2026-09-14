@@ -401,7 +401,7 @@ def test_cap_memory_index_large_file(tmp_path):
 def test_the_embed_cap_is_the_number_the_store_warns_by(tmp_path):
     """The cap and `INDEX_SIZE_WARN` are one knob, not two numbers that agree.
 
-    `_cap_memory_index` used to spell `50 * 1024` itself, with a comment
+    `_cap_memory_index` used to spell the cap itself, with a comment
     promising it "matched memory.INDEX_SIZE_WARN" — a promise nothing ran, so
     tuning the threshold the store warns by (the whole point of a soft guard)
     would leave the cap embedding an index the agent is already being warned
@@ -419,13 +419,15 @@ def test_the_embed_cap_is_the_number_the_store_warns_by(tmp_path):
     assert server._cap_memory_index(at_cap) == "x" * INDEX_SIZE_WARN
 
     over_cap = tmp_path / "MEMORY.md"
-    over_cap.write_text("x" * (INDEX_SIZE_WARN + 1), encoding="utf-8")
+    raw = "x" * (INDEX_SIZE_WARN + 1)
+    over_cap.write_text(raw, encoding="utf-8")
     capped = server._cap_memory_index(over_cap)
-    assert capped != "x" * (INDEX_SIZE_WARN + 1)
+    assert capped != raw
     assert "truncated" in capped
-    # The notice states the cap from the same constant, so a tuned threshold
-    # cannot leave the agent reading a size that is no longer true.
-    assert f"{INDEX_SIZE_WARN // 1024}KB" in capped
+    # The notice reports what was actually cut — a runtime measurement — and no
+    # longer restates the cap's own size (rant 2026-09-14T13:23:04). The cap is
+    # the store's number; the notice's job is to say what it did.
+    assert f"truncated {len(raw) - INDEX_SIZE_WARN} chars" in capped
 
 
 def test_collect_memory_data_caps_index(tmp_path):

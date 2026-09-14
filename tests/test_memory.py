@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from emrg.memory import (
+    INDEX_TITLE_MAX_CHARS,
     MemoryFile,
     MemoryIndex,
     ProjectMemoryStore,
@@ -174,7 +175,7 @@ class TestMemoryIndex:
         )
         idx.add_entry(mem)
         entry = idx.entries[0]
-        assert len(entry.title) <= 512
+        assert len(entry.title) <= INDEX_TITLE_MAX_CHARS
         assert entry.title.endswith("…")
         # Filename (reachable detail file) is preserved un-truncated
         assert entry.filename == mem.filename
@@ -193,7 +194,7 @@ class TestMemoryIndex:
         # Every rendered index line stays bounded…
         for line in md.splitlines():
             if line.startswith("- ["):
-                assert len(line) <= 512, f"line too long ({len(line)}): {line[:80]}…"
+                assert len(line) <= INDEX_TITLE_MAX_CHARS, f"line too long ({len(line)}): {line[:80]}…"
         # …and the detail filename stays reachable.
         assert "task-long.md" in md
 

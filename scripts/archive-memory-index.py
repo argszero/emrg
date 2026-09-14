@@ -53,7 +53,7 @@ Exit codes
 ----------
 ``0``  the index is within its cap (nothing to move), or the move was made and
        verified. ``1``  ``--check`` found a row-rule violation in an index it could
-       read (too many cycle rows, a row over the 512-char cap, a duplicate target).
+       read (too many cycle rows, a row over the per-row cap, a duplicate target).
        ``2``  the question could not be answered - no index at that path, an index
        that could not be read, an index holding lines that name a cycle but are not
        rows this tool can read (so which rows are cycle rows is unknowable), or a
@@ -77,6 +77,15 @@ from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 
+# The per-row cap below is the memory store's number, so read it from the store
+# rather than spelling a second copy that can drift from what the store actually
+# truncates at (rant 2026-09-14T13:23:04). The repo root goes on the path so this
+# tool measures the tree it stands in, however it is loaded: as
+# `python3 scripts/archive-memory-index.py` the root is not `sys.path[0]`, and the
+# test suite loads this file by path (`spec_from_file_location`).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from emrg.memory import INDEX_TITLE_MAX_CHARS  # noqa: E402  (needs the path above)
+
 #: One index row: a markdown link whose text is the title and whose target is a
 #: detail file. Only the target is load-bearing here, so the link text is free.
 ROW_RE = re.compile(r"^\s*-\s+\[[^\]]*\]\((?P<target>[^)\s]+)\)")
@@ -95,9 +104,10 @@ CYCLE_ID_IN_LINE = re.compile(r"\bcyc\d{8}-\d{6}\b")
 #: heading) is not a row and must not be mistaken for one.
 ROW_LIKE = re.compile(r"^\s*(?:[-*+]\s|\d+[.)]\s|\|)")
 
-#: The protocol's per-row cap, in **characters** (the index is embedded in the
-#: system prompt, so a byte count would under-report CJK rows).
-ROW_MAX_CHARS = 512
+#: The store's per-row cap for an index line, in **characters** (the index is
+#: embedded in the system prompt, so a byte count would under-report CJK rows).
+#: One owner: this is `emrg.memory`'s constant, not a number re-spelled here.
+ROW_MAX_CHARS = INDEX_TITLE_MAX_CHARS
 
 DEFAULT_CAP = 50
 
