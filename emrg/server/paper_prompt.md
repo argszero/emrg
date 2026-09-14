@@ -196,37 +196,26 @@ fi
 
 - Update `{{ source_dir }}/.emrg/sessions/{{ session_id }}/paper_state.md` (record the current phase, this round's completed operations, next-step plan)
 
-**Rant marking**: if this round's work path has covered a pending rant's feedback (e.g. the rant suggested lowering the learning rate and this round's experiments adopted it), mark that rant as acknowledged:
+**Rant marking**: if this round's work path has covered a pending rant's feedback (e.g. the rant suggested lowering the learning rate and this round's experiments adopted it), move that rant forward — **one tool call, never a hand-written rewrite of the file**:
 
-```python
-import json, os
-rants_file = os.path.expanduser("~/.emrg/rants.jsonl")
-rants = [json.loads(l) for l in open(rants_file) if l.strip()]
-for i, r in enumerate(rants):
-    if r.get("status") == "pending" and "<timestamp of the rant handled this round>":
-        r["status"] = "acknowledged"
-        r["completed"] = "<ISO timestamp>"
-        # Rebuild field order: timestamp → project → status → progress → completed → message
-        rants[i] = {
-            "timestamp": r.get("timestamp"),
-            "project": r.get("project"),
-            "status": r.get("status"),
-            "progress": r.get("progress"),
-            "completed": r.get("completed"),
-            "message": r.get("message"),
-        }
-rants.sort(key=lambda r: r.get("timestamp", ""))
-with open(rants_file, "w") as f:
-    for r in rants:
-        f.write(json.dumps(r, ensure_ascii=False) + "\n")
+```
+submit_rant(action="update", timestamp="<the rant's timestamp>",
+            status="in_progress", progress="adopted in round <date>: <what the round did>")
 ```
 
+`submit_rant` is the only writer of `rants.jsonl` (rant 2026-08-18T16:42:52 — the
+unified tool exists because inline scripts drifted the format: array rows, lost
+fields, pruned history). It owns the file's shape: the timestamp, the field order,
+the sort and `ensure_ascii=False` are the tool's business and are not restated
+here, because a second copy of a rule is a copy that can disagree. So there is
+nothing for this prompt to write by hand — and no reason to open the file at all,
+not even to read it.
+
 **Important rules**:
-- When marking rants, always read all entries, modify, sort by timestamp, then write back
-- Use `json.dumps(..., ensure_ascii=False)`; Chinese escaping is forbidden
-- Only mark a rant acknowledged when its suggestion has genuinely been incorporated into the work path — merely "reading" it doesn't count
-- If this round cannot cover it (e.g. the rant suggests Phase 4 writing changes but you're in Phase 2), don't mark it; leave it for later rounds
-- After marking, update the "unprocessed rants" list in paper_state.md and remove the processed timestamp
+- The status machine is `pending → in_progress → completed`, enforced by the tool; **there is no `acknowledged` state**. A round that has *begun* using the feedback sets `in_progress` with a `progress` note; `completed` is for a rant whose items are all done (only reachable after `in_progress`; the tool stamps the completion time)
+- Only move a rant when its suggestion has genuinely been incorporated into the work path — merely "reading" it doesn't count
+- If this round cannot cover it (e.g. the rant suggests Phase 4 writing changes but you're in Phase 2), don't touch it; leave it for later rounds
+- Check the queue with `submit_rant(action="list")` rather than by opening the file
 
 - `git add -A && git commit -m "paper: <short description>" && git push`
 - At least one commit per round, pushed immediately

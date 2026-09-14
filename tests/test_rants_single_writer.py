@@ -8,21 +8,32 @@ says so in its own docstring. The reason is recorded there: hand-written rewrite
 that file had already drifted into array rows, lost fields and pruned history
 (2026-08-18 incident).
 
-The task templates did not follow. Measured 2026-09-14 (cyc20260914-180702):
-`promote_prompt.md` carried a `rants_file = os.path.expanduser(...)` snippet that
-opened the file for writing, restated the field order, the sort and the
+The task templates did not follow. Measured 2026-09-14 (cyc20260914-180702 and
+cyc20260914-181706): `promote_prompt.md` carried a `rants_file = os.path.expanduser(...)`
+snippet that opened the file for writing, restated the field order, the sort and the
 `ensure_ascii=False` rule the tool already owns, and never named the tool at all —
 so a task collecting community feedback was pointed at the one write path the tool
-replaced. `paper_prompt.md` still does the same thing, and goes further: it tells
-the agent to write `status = "acknowledged"`, a value the state machine
-(`pending → in_progress → completed`) does not contain (`emrg/server/rants.py`).
-Both were deleted from `evolution_prompt.md`'s own copy of the rule, which is why
-the rule surviving here was invisible.
+replaced. `paper_prompt.md` did the same thing and went further: it told the agent to
+write `status = "acknowledged"`, a value the state machine
+(`pending → in_progress → completed`) does not contain (`emrg/server/rants.py`), so
+the file it produced could not be moved by the tool that owns it. Both were deleted
+from `evolution_prompt.md`'s own copy of the rule, which is why the rule surviving
+here was invisible.
+
+An earlier revision of this file left `paper_prompt.md` in a `PENDING_RANT_WRITER_SWEEP`
+set on the stated grounds that PR #1226 (the state-file sweep) owned the paper half.
+That was wrong, and measurably so: `git grep -n rants_file FETCH_HEAD` on #1226's own
+head (`e044922d`) finds the snippet untouched — #1226 sweeps the state/reflection
+mechanism, not the rant write path. A guard comment naming an owner that does not own
+the thing is the same defect class as the snippets it guards, so the two halves were
+fixed in the change that emptied the set. The set is gone rather than left empty:
+with no pending template it asserted nothing, and a scan with an exception list is a
+scan whose coverage can silently shrink.
 
 Named limit: this is a *text* guard over the built-in task templates, and it covers
-**writes** only. The evolution task's own `cat ~/.emrg/rants.jsonl` scan (in
-`evolution_prompt.md`, which normal evolution must not edit) is a read and is out of
-scope here; the write path is the one that corrupted the file.
+**writes** only. The `cat ~/.emrg/rants.jsonl` read recipes (in `evolution_prompt.md`,
+which normal evolution must not edit, and in the review steps of the other templates)
+are out of scope here; the write path is the one that corrupted the file.
 """
 
 from __future__ import annotations
@@ -35,15 +46,6 @@ from emrg.server.scheduler import TASK_TEMPLATES
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROMPTS_DIR = REPO_ROOT / "emrg" / "server"
 
-# Templates still teaching a hand-written `rants.jsonl` write. Each entry is
-# removed in the SAME change that routes its template through `submit_rant`, so
-# the set only shrinks: empty is what "one writer" means.
-#
-# `paper_prompt.md` is the remaining one and it is owned by PR #1226 (the
-# state-file sweep), which is why it is fixed by whoever lands the paper half
-# rather than here.
-PENDING_RANT_WRITER_SWEEP = {"paper_prompt.md"}
-
 # The write's fingerprint: the variable the hand-written snippets use to name the
 # file, or an `open(...rants.jsonl..., "w"/"a")` in any spelling. A template that
 # merely *mentions* rants.jsonl (reading it, or handing off to the tool) is legal
@@ -52,6 +54,27 @@ _RANT_FILE_WRITE = re.compile(
     r"rants_file|open\([^)\n]*rants\.jsonl[^)\n]*,\s*[\"'](?:w|a)[\"']",
     re.IGNORECASE,
 )
+
+# The status write's fingerprint, in the three spellings a Python snippet can use:
+# `"status": "x"`, `status = "x"`, and the subscript `r["status"] = "x"`. The last
+# one is the spelling the deleted `paper_prompt.md` snippet actually used, and the
+# first version of this guard did not match it (measured 2026-09-14, cyc20260914-181706:
+# reintroducing `r["status"] = "acknowledged"` left the guard green) — a guard whose
+# self-test covered the spellings that happened to be convenient.
+_RANT_STATUS_WRITE = re.compile(
+    r"(?:\[\s*[\"']status[\"']\s*\]|\bstatus[\"']?)\s*[:=]\s*[\"']([a-z_]+)[\"']"
+)
+
+
+def _template_names() -> list[str]:
+    """The corpus under guard, with the scan's own health asserted here once."""
+    names = sorted({name for _task_type, name in TASK_TEMPLATES.items()})
+    # Every named template must exist; a renamed file would otherwise be scanned
+    # as "" and pass by not being found.
+    assert len(names) >= 5, f"only {len(names)} templates found — scan broken"
+    for name in names:
+        assert (PROMPTS_DIR / name).is_file(), f"{name} is not a file in {PROMPTS_DIR}"
+    return names
 
 
 def test_the_detector_detects_the_shape_it_was_written_for() -> None:
@@ -70,17 +93,20 @@ def test_the_detector_detects_the_shape_it_was_written_for() -> None:
         assert not _RANT_FILE_WRITE.search(legal), legal
 
 
+def test_the_swept_corpus_covers_every_builtin_template() -> None:
+    """The two guards below scan the whole corpus; say so out loud.
+
+    Both the write check and the status check were once narrowed by a pending-set
+    exception, and the one template excluded from them was the one still wrong.
+    """
+    names = _template_names()
+    for pilot in ("promote_prompt.md", "paper_prompt.md"):
+        assert pilot in names, f"{pilot} left the corpus — the check moved off its target"
+
+
 def test_no_template_teaches_a_hand_written_rants_write() -> None:
     """Every built-in template that touches the file must go through the tool."""
-    templates = {name for _task_type, name in TASK_TEMPLATES.items()}
-    assert len(templates) >= 5, f"only {len(templates)} templates found — scan broken"
-    swept = sorted(templates - PENDING_RANT_WRITER_SWEEP)
-    assert "promote_prompt.md" in swept, (
-        "the swept set lost the pilot template — the check is not looking where it "
-        "thinks it is"
-    )
-
-    for name in swept:
+    for name in _template_names():
         text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
         hit = _RANT_FILE_WRITE.search(text)
         assert hit is None, (
@@ -89,14 +115,6 @@ def test_no_template_teaches_a_hand_written_rants_write() -> None:
             f"writer (rant 2026-08-18T16:42:52); it stamps the timestamp, fixes the "
             f"field order and the sort, and writes with ensure_ascii=False, so a "
             f"snippet here only re-states what the tool owns and can drift again"
-        )
-
-    for name in sorted(PENDING_RANT_WRITER_SWEEP):
-        text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
-        assert _RANT_FILE_WRITE.search(text), (
-            f"{name} is listed in PENDING_RANT_WRITER_SWEEP but no longer teaches a "
-            f"hand-written write — drop it from the set in the same change that "
-            f"routed it through submit_rant, so the set keeps meaning 'not yet done'"
         )
 
 
@@ -110,12 +128,37 @@ def test_no_template_writes_an_off_schema_rant_status() -> None:
     exists to prevent.
     """
     statuses = {"pending", "in_progress", "completed"}
-    for _task_type, name in TASK_TEMPLATES.items():
-        if name in PENDING_RANT_WRITER_SWEEP:
-            continue
+    for name in _template_names():
         text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
-        for m in re.finditer(r"status[\"']?\s*[:=]\s*[\"']([a-z_]+)[\"']", text):
+        for m in _RANT_STATUS_WRITE.finditer(text):
             assert m.group(1) in statuses, (
-                f"{name}: writes rant status {m.group(1)!r}, which the store does "
-                f"not accept ({sorted(statuses)})"
+                f"{name}: writes rant status {m.group(1)!r} at offset {m.start()}, "
+                f"which the store does not accept ({sorted(statuses)})"
             )
+
+
+def test_the_status_detector_covers_every_spelling_a_snippet_can_use() -> None:
+    """The three ways a snippet names the field, and one legal way to mention it.
+
+    The miss this test exists for was real: `paper_prompt.md` wrote
+    `r["status"] = "acknowledged"`, the detector only understood `status = "x"` and
+    `"status": "x"`, and the template was excluded from the scan by a pending-set —
+    so the guard was green over the one line it was written for.
+    """
+    for planted in (
+        '"status": "acknowledged"',
+        "status = 'acknowledged'",
+        'r["status"] = "acknowledged"',
+        "r['status']='acknowledged'",
+    ):
+        m = _RANT_STATUS_WRITE.search(planted)
+        assert m and m.group(1) == "acknowledged", planted
+    for legal in (
+        "`completed` is set only when status=completed",
+        "- `status: active` (cycle in progress)",
+        "the status machine is `pending → in_progress → completed`",
+        'submit_rant(action="update", status="completed")',
+    ):
+        m = _RANT_STATUS_WRITE.search(legal)
+        assert m is None or m.group(1) in {"pending", "in_progress", "completed"}, legal
+
