@@ -1038,6 +1038,54 @@ def test_git_verdict_is_not_decided_by_the_next_command():
         allowed, reason, _ = _check_sandbox(cmd, "read-only")
         assert allowed is False, f"{cmd!r} writes; must block ({reason!r})"
 
+def test_newline_chains_two_commands_for_the_guard():
+    """A newline separates commands exactly as `;` does.
+
+    `_COMMAND_SEPARATORS` / `_SHELL_SEPARATORS` have always listed `"\\n"`, but
+    the tokenizer never produced it: `shlex` treats a newline as whitespace, so
+    it was discarded and the two lines' tokens fused into one stream.
+    `_runs_as_a_command` then looked left from the second command's `git`, found
+    the *first* command's operand (a word, not a separator), and concluded the
+    token was data rather than an invocation — the guard never saw the mutator.
+
+    Measured on master `addcb5ee`, `read-only` tier:
+
+        git stash drop                    -> blocked
+        git stash drop; echo done         -> blocked
+        echo done <newline> git stash drop -> ALLOWED
+
+    That is the 2026-08-20 data-loss class this tier exists to make
+    structurally impossible, reachable by pressing Enter instead of typing `;`.
+    The write is real: `git stash drop` discards a stash.
+
+    Both halves are asserted, because a fix that separates the lines must not
+    start refusing a newline that is *inside* a quoted argument — the shell
+    makes `echo "a<newline>b"` one word, and so must this.
+    """
+    for cmd in (
+        "echo done\ngit stash drop",
+        "git status\ngit config user.name someone",
+        "git log --oneline -1\ngit checkout .",
+        "git status\ngit clean -fd",
+        "git status\ngit reset --hard",
+        "git status\ngit branch -D old",
+        "git status\ngit tag -d v1",
+        "git stash list\ngit stash pop",
+        "true\ngit -C . stash drop",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} writes on its own line; must block ({reason!r})"
+
+    # A newline inside quotes is data, not a separator. If the fix had been
+    # "split on every newline", these would be torn in two and the mutator
+    # mentioned inside the string would be read as a command.
+    for cmd in (
+        'echo "git stash drop\ngit clean -fd"',
+        "echo 'git checkout .\ngit reset --hard'",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} only names mutators; must allow ({reason!r})"
+
 def test_git_verb_parsing_ignores_quoted_mentions():
     """A mutator inside a string literal is not a command (issue #1156 facet D).
 
