@@ -522,6 +522,39 @@ def _restore_windows_backslashes(tokens: list[str]) -> list[str]:
         return tokens
     return [t.replace(_WINDOWS_BACKSLASH, "\\") for t in tokens]
 
+def _shell_lexer(cmd: str, punctuation) -> "shlex.shlex":
+    """A ``shlex`` that reads the line the way the *shell* reads it — comments off.
+
+    ``shlex`` treats ``#`` as a comment **wherever it appears** and drops the rest
+    of the line. A shell does not: ``#`` starts a comment only where a **word**
+    starts, and inside a word it is an ordinary character. So the shell reads
+    ``echo a#&& cd <dir> && git checkout .`` as *three* commands — ``echo a#``,
+    ``cd <dir>``, ``git checkout .`` — while the lexer handed the guard the single
+    word ``echo a``. Measured on master `e9bd6d8ab003293e`, in a scratch repo
+    holding one uncommitted edit: the guard answered ALLOW at ``read-only`` and the
+    hidden tail really ran, discarding the edit (issue #1264). The same shape
+    reached the path rule — ``echo a#&& rm -rf <outside>/v.txt`` was ALLOWED at
+    ``workspace-write``, and ``echo a#&& echo x > <outside>/out.txt`` created a file
+    outside the workspace — and the wrapper rule too, via
+    ``echo a#&& $SHELL -c 'git checkout .'``.
+
+    This is upstream of every rule, because it decides what the rules get to read.
+    The invariant is one-directional, and that direction is the whole point: the
+    guard must never read **less** of the line than the shell executes, because
+    reading less hides a mutator and work is lost. Reading *more* than the shell
+    runs cannot hide one — the over-read text is a comment the shell ignores — so
+    the worst case is a refusal of a command that would have done nothing, which is
+    the fail-closed side this guard already picks for input it cannot parse.
+
+    The cost is stated rather than hidden: a comment whose *text* contains a chain
+    (``ls # ; git checkout .``) is now refused, because telling that comment from
+    code means re-deriving the shell's word-start rule — a second parser, which is
+    exactly where a hole would come from.
+    """
+    lex = shlex.shlex(cmd, posix=True, punctuation_chars=punctuation)
+    lex.commenters = ""
+    return lex
+
 
 def _split_command_tokens(cmd: str) -> list[str]:
     """Split a shell command into tokens, preserving operators like ``&&``.
@@ -537,7 +570,7 @@ def _split_command_tokens(cmd: str) -> list[str]:
     """
     cmd = _protect_windows_backslashes(_strip_line_continuations(cmd))
     try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex = _shell_lexer(cmd, True)
         lex.whitespace_split = True
         return _restore_windows_backslashes(list(lex))
     except ValueError:
@@ -1013,7 +1046,7 @@ def _tokenize_command(cmd: str) -> list[str]:
     """
     cmd = _protect_windows_backslashes(_strip_line_continuations(cmd))
     try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars=_PUNCTUATION_CHARS)
+        lex = _shell_lexer(cmd, _PUNCTUATION_CHARS)
         lex.whitespace_split = True
         # `\n` is a separator token, not whitespace to be discarded — see above.
         lex.whitespace = " \t\r"
