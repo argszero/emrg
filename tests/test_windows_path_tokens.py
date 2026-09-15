@@ -176,6 +176,14 @@ def test_the_write_roots_are_pinned_for_this_file():
     assert bt._trusted_write_zones() == set()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="only where os.path is posix: there the drive-rooted spelling is a "
+    "relative name, so realpath resolves the target under the cwd and a write "
+    "root containing the tree swallows it. On Windows that spelling is "
+    "genuinely absolute (ntpath), no root can swallow it, and the verdict stays "
+    "BLOCK — the mechanism this test drives does not exist there",
+)
 def test_a_root_containing_the_tree_would_swallow_the_corpus(monkeypatch):
     """The mechanism the pin defends against, driven with the root made explicit.
 
