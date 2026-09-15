@@ -28,10 +28,12 @@ Exit codes
 0  every file a previous patch carried is still carried by the next one
 1  a file disappeared from the patch (named, with its hunk count)
 2  the question could not be answered - no patches given, a patch is unreadable,
-   a single patch without --list (there is nothing to compare it against), or a
-   patch that parsed to zero files. The last one matters: a parser that matched
-   nothing would report "nothing wrong" for every input, so it must never be
-   reported as a pass.
+   a single patch without --list (there is nothing to compare it against), a
+   patch that parsed to zero files, or a section whose file cannot be named. The
+   last two matter for the same reason: a file the parser cannot see is a file
+   that is missing from *both* patches, so it would make "nothing disappeared"
+   a statement about the parser. An unnameable section is therefore never
+   skipped - it makes the whole comparison unmeasurable.
 
 The tool reads the patch files it is given, not the working tree; its first
 output line names every patch it opened, so a reader can tell what was measured.
@@ -41,15 +43,26 @@ from __future__ import annotations
 
 import argparse
 import re
-import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 DIFF_HEADER = "diff --git "
 HUNK_MARKER = "@@ "
+PLUS_NAME = "+++ "
+MINUS_NAME = "--- "
+RENAME_TO = "rename to "
 NEW_FILE_MODE = "new file mode "
 DELETED_FILE_MODE = "deleted file mode "
+NULL_PATH = "/dev/null"
+
+# The escapes git's C-style quoting uses, besides octal byte escapes. Measured
+# on a real repository: a path is quoted exactly when it holds one of these, a
+# non-ASCII byte, or a control character - a space alone does NOT quote it.
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+    '"': '"', "\\": "\\",
+}
 
 DESCRIPTION = (
     "Compare the file lists of two or more patches and fail if a file carried by "
@@ -71,50 +84,191 @@ class Entry:
         return f"{kind} {self.path}" + (f" ({self.hunks} hunks)" if self.hunks else "")
 
 
-def _path_from_diff_header(line: str) -> str | None:
-    """The post-image path of a `diff --git` header, or None if unparseable.
+class UnparseableSection(Exception):
+    """A `diff --git` section whose file cannot be named.
 
-    ``shlex`` rather than a regex: git quotes a path containing whitespace, so
-    splitting on spaces silently truncates exactly the paths a regex is most
-    likely to mis-handle.
+    Raised rather than skipped: an unnamed file is absent from the parsed set of
+    every patch, so it would agree with itself and turn "nothing disappeared"
+    into a verdict about this parser (see the exit codes).
     """
-    rest = line[len(DIFF_HEADER):]
+
+
+def _closing_quote(text: str) -> int | None:
+    """Index of the quote closing the C-quoted name `text` starts with."""
+    i = 1
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == '"':
+            return i
+        i += 1
+    return None
+
+
+def _unquote(token: str) -> str:
+    """git's C-style quoting undone: ``"b/w\\303\\255th.txt"`` -> ``b/wíth.txt``.
+
+    git spells a non-ASCII byte as octal, so the escapes decode to bytes and the
+    bytes to UTF-8. Anything that does not round-trip comes back untouched
+    rather than guessed at.
+    """
+    if not token.startswith('"'):
+        return token
+    end = _closing_quote(token)
+    if end is None:
+        return token
+    body = token[1:end]
+    out = bytearray()
+    i = 0
     try:
-        parts = shlex.split(rest)
-    except ValueError:
-        parts = rest.split()
-    if len(parts) < 2:
-        return None
-    target = parts[1]
-    return target[2:] if target.startswith("b/") else target
+        while i < len(body):
+            char = body[i]
+            if char != "\\":
+                out += char.encode("utf-8")
+                i += 1
+                continue
+            i += 1
+            if i >= len(body):
+                return token
+            escape = body[i]
+            if escape in "01234567":
+                j = i
+                while j < len(body) and j - i < 3 and body[j] in "01234567":
+                    j += 1
+                out.append(int(body[i:j], 8))
+                i = j
+            elif escape in _C_ESCAPES:
+                out += _C_ESCAPES[escape].encode("utf-8")
+                i += 1
+            else:
+                return token
+        return out.decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return token
+
+
+def _section_token(rest: str) -> str | None:
+    """The one path on a `---`/`+++`/`rename to` line, or None if malformed.
+
+    git terminates an *unquoted* name containing a space with a tab - measured:
+    ``+++ b/a b.txt<TAB>`` - and quotes a name it cannot print plainly, so the
+    first tab after an unquoted name is always git's terminator and never part of
+    the name.
+    """
+    rest = rest.rstrip("\r\n")
+    if rest.startswith('"'):
+        end = _closing_quote(rest)
+        return None if end is None else _unquote(rest[: end + 1])
+    return rest.split("\t", 1)[0] or None
+
+
+def _strip_side(path: str, side: str) -> str:
+    """`b/<path>` -> `<path>`; git writes its side prefix on every one of these lines."""
+    return path[len(side):] if path.startswith(side) else path
+
+
+def _head(section: list[str]) -> list[str]:
+    """A section's lines up to its first hunk - where git writes the names."""
+    for i, line in enumerate(section):
+        if line.startswith(HUNK_MARKER):
+            return section[:i]
+    return section
+
+
+def _path_from_diff_header(line: str) -> str | None:
+    """The post-image path in a `diff --git` header, or None when it is ambiguous.
+
+    git writes `a/<path> b/<path>`, quoting a whole token only when that token
+    needs C-escaping. It does *not* quote a path merely for containing a space
+    (measured: ``diff --git a/a b.txt b/a b.txt``), so an unquoted header cannot
+    be split on whitespace. The split is instead chosen by plausibility: the two
+    sides agreeing is the reading of every section that is not a rename, which
+    resolves the ambiguous-looking case uniquely. A header with more than one
+    plausible reading and no agreeing one is reported as unknown rather than
+    guessed - a wrong name is invisible in both patches, which is the failure
+    this tool exists to prevent.
+    """
+    rest = line[len(DIFF_HEADER):].rstrip("\r\n")
+    if rest.startswith('"'):
+        end = _closing_quote(rest)
+        if end is None:
+            return None
+        remainder = rest[end + 1:].strip()
+        token = _section_token(remainder) if remainder else None
+        return None if token is None else _strip_side(token, "b/")
+
+    candidates: list[tuple[str, str]] = []
+    for match in re.finditer(" b/", rest):
+        left, right = rest[: match.start()], rest[match.start() + 1:]
+        if left.startswith("a/") and right.startswith("b/"):
+            candidates.append((left[2:], right[2:]))
+    for left, right in candidates:
+        if left == right:
+            return right
+    if len(candidates) == 1:
+        return candidates[0][1]
+    return None
+
+
+def _path_from_section(section: list[str]) -> str | None:
+    """The one file a section touches, or None if it cannot be named.
+
+    Each source is a line git writes the name on alone, in the order that makes
+    the post-image path the answer for every shape measured: `+++ b/<path>` (an
+    edit or an addition), `--- a/<path>` (a deletion), `rename to <path>` (a
+    rename). The header is the fallback for the two shapes that carry no name
+    line of their own - a mode-only change and a binary section.
+    """
+    head = _head(section)
+    for line in head:
+        if line.startswith(PLUS_NAME):
+            token = _section_token(line[len(PLUS_NAME):])
+            if token and token != NULL_PATH:
+                return _strip_side(token, "b/")
+    for line in head:
+        if line.startswith(MINUS_NAME):
+            token = _section_token(line[len(MINUS_NAME):])
+            if token and token != NULL_PATH:
+                return _strip_side(token, "a/")
+    for line in head:
+        if line.startswith(RENAME_TO):
+            token = _section_token(line[len(RENAME_TO):])
+            if token:
+                return _strip_side(token, "b/")
+    return _path_from_diff_header(section[0])
+
+
+def _split_sections(text: str) -> list[list[str]]:
+    """The patch cut at every `diff --git` header; text before the first is ignored."""
+    sections: list[list[str]] = []
+    for line in text.splitlines():
+        if line.startswith(DIFF_HEADER):
+            sections.append([line])
+        elif sections:
+            sections[-1].append(line)
+    return sections
 
 
 def parse_patch(text: str) -> dict[str, Entry]:
-    """{path: Entry} for every file the patch touches, in the order git wrote them."""
+    """{path: Entry} for every file the patch touches, in the order git wrote them.
+
+    Raises UnparseableSection when a section's file cannot be named - see the
+    exit codes: an unreadable section must make the comparison unmeasurable
+    instead of quietly shrinking both file sets.
+    """
     entries: dict[str, Entry] = {}
-    current: str | None = None
-    hunks = 0
-    is_new = is_deleted = False
-
-    def flush() -> None:
-        if current is not None:
-            entries[current] = Entry(current, hunks, is_new, is_deleted)
-
-    for line in text.splitlines():
-        if line.startswith(DIFF_HEADER):
-            flush()
-            current = _path_from_diff_header(line)
-            hunks, is_new, is_deleted = 0, False, False
-            continue
-        if current is None:
-            continue
-        if line.startswith(HUNK_MARKER):
-            hunks += 1
-        elif line.startswith(NEW_FILE_MODE):
-            is_new = True
-        elif line.startswith(DELETED_FILE_MODE):
-            is_deleted = True
-    flush()
+    for section in _split_sections(text):
+        path = _path_from_section(section)
+        if path is None:
+            raise UnparseableSection(section[0])
+        head = _head(section)
+        entries[path] = Entry(
+            path,
+            sum(1 for line in section if line.startswith(HUNK_MARKER)),
+            any(line.startswith(NEW_FILE_MODE) for line in head),
+            any(line.startswith(DELETED_FILE_MODE) for line in head),
+        )
     return entries
 
 
@@ -134,7 +288,12 @@ def _load(path: str) -> tuple[dict[str, Entry], str] | None:
     except OSError as exc:  # unreadable file (permissions, a directory, ...)
         print(f"unmeasurable: cannot read {path}: {exc}")
         return None
-    return parse_patch(text), text
+    try:
+        entries = parse_patch(text)
+    except UnparseableSection as exc:
+        print(f"unmeasurable: cannot name the file of this section: {exc}")
+        return None
+    return entries, text
 
 
 def main(argv: list[str] | None = None) -> int:
