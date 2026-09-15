@@ -87,6 +87,19 @@ A stale verdict has two remedies and their prices are not interchangeable:
   this remedy did until then - reads as "do not vote here", and a stale PR whose
   only route to the threshold is the landing-tree vote would then never reach it.
 
+  Being a review is necessary and not sufficient. The counter reads the *voting
+  cycle* out of the body, so a review whose body carries no cycle id is excluded
+  from the run: measured 2026-09-16 (`cyc20260916-020149`) the remedy above was
+  followed exactly - `gh pr review 1255 --comment --body-file review1255.md`,
+  rc 0, no output - and the count did not move (`VOID (no cycle id) - no cycle id
+  in the vote body`) on both `#1255` and `#1258`, two votes spent invisibly in one
+  run. Neither signal at the call site says so: `gh` prints nothing on success,
+  and the voiding is only visible to a reader who re-runs the counter afterwards.
+  So the remedy names `scripts/cast-vote.py`, which refuses to post a body the
+  counter cannot attribute (none, or more than one, cycle id) and then reads the
+  count back rather than assuming the POST worked - the loss was silent on both
+  sides, so the fix had to be a check on both sides.
+
 Measured 2026-09-14 (`cyc20260914-010711`, master `abe6f8b`), the whole queue
 stale: `#1197` 2 valid votes, `#1198` 1, `#1199` and `#1200` none. The blanket
 advice this tool printed until then - "re-merge master into each stale branch" -
@@ -422,12 +435,16 @@ def _remedy(pr: int, kind: str, valid_votes: int | None, unread: str) -> str:
             f"#{pr}: {valid_votes} valid vote(s) at risk - a refresh moves the head, and the "
             f"vote counter voids all {valid_votes}. Measure the tree this merge would land "
             "instead (`git fetch origin master`, then `scripts/check-merge-plan-suite.py "
-            f"{pr}`) and cast the vote on it (`gh pr review {pr} --comment --body-file "
-            "<path>`), stating the landing tree the review is about: the head does not move, "
-            "so the votes already cast stay valid and this one is counted - reviews are the "
-            "channel the counter reads, a plain comment carries the reading but no vote. "
-            "Refresh only if that tree fails - those votes were about a tree that can no "
-            "longer be merged"
+            f"{pr}`) and cast the vote on it (`scripts/cast-vote.py {pr} --body-file <path>`), "
+            "stating the landing tree the review is about: the head does not move, so the "
+            "votes already cast stay valid and this one is counted - reviews are the channel "
+            "the counter reads, a plain comment carries the reading but no vote. The body "
+            "must carry this cycle's id (`cycYYYYMMDD-HHMMSS`): the counter reads the voting "
+            "cycle out of the body and excludes a review without one, and `gh pr review` "
+            "prints nothing on success, so such a vote is spent in silence - which is why the "
+            "casting is done by `scripts/cast-vote.py`, that refuses a body the counter cannot "
+            "attribute and then reads the count back. Refresh only if that tree fails - those "
+            "votes were about a tree that can no longer be merged"
         )
     if kind == _KIND_NO_RUN:
         return (

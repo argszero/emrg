@@ -17,6 +17,7 @@ from emrg.tools.bash_tool import (
     SANDBOX_MODES,
     _check_sandbox,
     _extract_write_targets,
+    _flag_part,
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
     check_workspace_write,
@@ -182,6 +183,94 @@ def test_check_read_only_blocks_git_mv():
     allowed, reason, _ = _check_sandbox("git mv a b", "read-only")
     assert allowed is False
     assert "read-only sandbox" in reason
+
+
+def test_flag_part_is_the_flag_and_not_the_spelling():
+    """The helper the git flag tables are asked about, pinned case by case.
+
+    A flag table holds a *flag*; a shell token may carry its value. Asking the
+    table about the token decides by spelling, which is how three spellings of
+    one write got two verdicts (issue #1238's family, measured 2026-09-16).
+    """
+    assert _flag_part("--set-upstream-to=origin/main") == "--set-upstream-to"
+    assert _flag_part("-uorigin/main") == "-u"
+    assert _flag_part("--sort=-committerdate") == "--sort"
+    assert _flag_part("-vv") == "-v"
+    # Things that are not flags keep every character: a lone `-` is a filename,
+    # `--` is the argument terminator, and a path or pattern is not a flag.
+    assert _flag_part("-") == "-"
+    assert _flag_part("--") == "--"
+    assert _flag_part("origin/main") == "origin/main"
+    assert _flag_part("v1.2.3") == "v1.2.3"
+
+
+def test_check_read_only_blocks_attached_value_git_write_flags():
+    """A write flag whose value is attached is the same write.
+
+    Measured 2026-09-16 against master: each of these was ALLOWED under
+    read-only and, executed in a real repository with a real upstream, really
+    did write — the branch's upstream in `.git/config` went from `origin/main`
+    to `origin/old`. Their two-token twins (`--set-upstream-to origin/main`,
+    `-u origin/main`) were already blocked, so the guard was deciding by
+    spelling. This test pins the flag comparison itself.
+    """
+    for cmd in (
+        "git branch --set-upstream-to=origin/main",
+        "git branch -uorigin/main",
+        # Spellings git itself refuses (rc=129) are blocked too. That is the
+        # harmless direction, and it is pinned so a later reader does not
+        # "fix" the truncation into an exemption.
+        "git branch -dold",
+        "git branch -Dold",
+        "git branch --delete=old",
+        "git tag -dv1",
+        "git tag --delete=v1",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} should be blocked (got {reason!r})"
+        assert "read-only sandbox" in reason
+        assert "git" in reason, cmd
+
+
+def test_check_read_only_blocks_unset_upstream():
+    """The flag that takes no argument at all, so no positional rule sees it.
+
+    Measured 2026-09-16 against master: `git branch --unset-upstream` was
+    ALLOWED under read-only and really did clear the branch's upstream. It is a
+    separate mechanism from the attached-value case above — no spelling is
+    involved, the flag was simply absent from the table — so it fails on its
+    own if only that entry is removed.
+    """
+    allowed, reason, _ = _check_sandbox("git branch --unset-upstream", "read-only")
+    assert allowed is False, f"got {reason!r}"
+    assert "read-only sandbox" in reason
+    assert "git" in reason
+
+
+def test_check_read_only_still_allows_git_branch_and_tag_reads():
+    """The other direction: widening the flag tests must not eat the reads.
+
+    `--set-upstream-to` is a write; `--sort` in the same attached-value shape is
+    a read. Both go through `_flag_part`, so both are pinned here — a fix that
+    blocks the listing forms would be a usability regression with no safety
+    gain, which is what the read-only tier's own docstring warns about.
+    """
+    for cmd in (
+        "git branch",
+        "git branch -a",
+        "git branch -vv",
+        "git branch --show-current",
+        "git branch --contains HEAD",
+        "git branch --sort=-committerdate",
+        "git branch --list 'feat/*'",
+        "git tag",
+        "git tag -l",
+        "git tag --list",
+        "git tag -n",
+        "git tag --points-at HEAD",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is True, f"{cmd!r} should be allowed (got {reason!r})"
 
 
 def test_check_read_only_allows_git_reads():
