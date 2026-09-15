@@ -452,6 +452,56 @@ def _check_containment_escape(cmd: str) -> str | None:
     return None
 
 
+# ── Windows path spellings (issue #1261) ────────────────────────────────────
+#
+# The guard tokenises with `shlex` in POSIX mode, where a backslash is an
+# *escape* character. A Windows shell (cmd.exe — the bash tool's subprocess
+# shell on that platform) treats the same character as a *path separator*, so
+# the two readings of one text disagree by exactly the characters a Windows path
+# is made of. Measured on master `cca0b8dc`, `echo x > C:\Users\x\out.txt`
+# reached the workspace-write boundary as the single token `C:Usersxout.txt` —
+# a *relative* name, therefore "inside the workspace", therefore allowed. Ten
+# such spellings measured (redirect incl. append, rm -rf, mv, cp, sed -i,
+# find -delete, chained), every one allowed at workspace-write while its
+# absolute POSIX twin was refused; `read-only` was unaffected, since that tier
+# refuses every target without asking where it resolves.
+#
+# The repair is a character substitution on the copy the guard tokenises, never
+# on the command that is executed: each backslash becomes a placeholder `shlex`
+# has no meaning for, so the separators survive the split, and the placeholder
+# is put back on the way out. Substitution rather than a "mangled form → raw
+# spelling" lookup on purpose — a lookup has a silent failure mode (a key that
+# does not match leaves the path mangled and every rule reading it inert),
+# while a character that was never removed cannot fail to be restored.
+#
+# Gated on the shell the command will actually run in. On POSIX a backslash is
+# an escape, so `C:\Users\x` genuinely names the relative file `C:Usersx` and
+# repairing it there would refuse an ordinary in-workspace write (`echo x >
+# my\ file` is the same class of spelling, as issue #1162's cases are).
+_WINDOWS_SHELL = os.name == "nt"
+
+# A character no shell command can contain, so the restore cannot corrupt one.
+_WINDOWS_BACKSLASH = "\x00"
+
+# Drive-rooted: `C:\…` / `C:/…`. UNC (`\\server\share`) needs no pattern — it
+# already reads as rooted through the `\` test in `_is_absolute_path`.
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _protect_windows_backslashes(cmd: str) -> str:
+    """Make backslashes survive the POSIX split — Windows shells only (#1261)."""
+    if not _WINDOWS_SHELL or "\\" not in cmd:
+        return cmd
+    return cmd.replace("\\", _WINDOWS_BACKSLASH)
+
+
+def _restore_windows_backslashes(tokens: list[str]) -> list[str]:
+    """Undo `_protect_windows_backslashes`, so the guard reads the real spelling."""
+    if not _WINDOWS_SHELL:
+        return tokens
+    return [t.replace(_WINDOWS_BACKSLASH, "\\") for t in tokens]
+
+
 def _split_command_tokens(cmd: str) -> list[str]:
     """Split a shell command into tokens, preserving operators like ``&&``.
 
@@ -464,13 +514,13 @@ def _split_command_tokens(cmd: str) -> list[str]:
     unterminated quote), because a guard that raises on odd input is worse
     than one that over-blocks it.
     """
-    cmd = _strip_line_continuations(cmd)
+    cmd = _protect_windows_backslashes(_strip_line_continuations(cmd))
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
-        return list(lex)
+        return _restore_windows_backslashes(list(lex))
     except ValueError:
-        return cmd.split()
+        return _restore_windows_backslashes(cmd.split())
 
 
 def _command_word(tok: str) -> str:
@@ -717,15 +767,40 @@ def _temp_write_roots() -> set[str]:
 def _is_absolute_path(p: str) -> bool:
     """True when ``p`` is absolute (or drive-less rooted, e.g. ``/etc/hosts``
     on Windows — ntpath.isabs returns False for those, but they still do not
-    resolve under the cwd, so the sandbox must treat them as absolute)."""
-    return os.path.isabs(p) or p.startswith("/") or p.startswith("\\")
+    resolve under the cwd, so the sandbox must treat them as absolute).
+
+    A drive-rooted spelling (`C:\\…`, `C:/…`) counts as absolute when the shell
+    that will run the command is a Windows shell. `ntpath.isabs` already answers
+    True for it there, so on that platform this arm is redundant — it is here so
+    the rule does not depend on which `os.path` the *guard* happens to be
+    running under, which is what makes issue #1261's branch verifiable off
+    Windows. On a POSIX shell the spelling is a relative name and is left alone.
+    """
+    return (
+        os.path.isabs(p)
+        or p.startswith("/")
+        or p.startswith("\\")
+        or bool(_WINDOWS_SHELL and _WINDOWS_DRIVE_RE.match(p))
+    )
 
 
 def _is_within(path: str, root: str) -> bool:
-    """True when ``path`` (absolute) is inside ``root`` (absolute) or equals it."""
+    """True when ``path`` (absolute) is inside ``root`` (absolute) or equals it.
+
+    Under a Windows shell the comparison canonicalises the separator before the
+    prefix test. That is a uniform substitution on both sides, so it cannot
+    change which of two real paths contains the other — but it does stop the
+    test from depending on which `os.path` (and therefore which ``os.sep``) the
+    *guard* is running under, which is what makes issue #1261's containment
+    verifiable off Windows. POSIX shells are untouched.
+    """
     try:
         rp = os.path.realpath(path)
         rr = os.path.realpath(root)
+        if _WINDOWS_SHELL:
+            rp = rp.replace("\\", "/")
+            rr = rr.replace("\\", "/").rstrip("/")
+            return rp == rr or rp.startswith(rr + "/")
         return rp == rr or rp.startswith(rr + os.sep)
     except OSError:
         return False
@@ -857,15 +932,15 @@ def _tokenize_command(cmd: str) -> list[str]:
     is unaffected — quoting is resolved before either rule — so
     ``echo "a<newline>b"`` stays one argument, as the shell makes it.
     """
-    cmd = _strip_line_continuations(cmd)
+    cmd = _protect_windows_backslashes(_strip_line_continuations(cmd))
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=_PUNCTUATION_CHARS)
         lex.whitespace_split = True
         # `\n` is a separator token, not whitespace to be discarded — see above.
         lex.whitespace = " \t\r"
-        return _unfuse_newlines(list(lex))
+        return _restore_windows_backslashes(_unfuse_newlines(list(lex)))
     except ValueError:
-        return cmd.split()
+        return _restore_windows_backslashes(cmd.split())
 
 
 # The punctuation set handed to `shlex` above. Adjacent characters in this set
