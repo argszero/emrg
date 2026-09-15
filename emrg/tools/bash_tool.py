@@ -351,12 +351,33 @@ _SHELL_EVALUATORS = frozenset({"eval"})
 # different absolute path on every one. A guard cannot enumerate how a shell
 # spells itself, so the safe direction is to stop reading a decision out of text
 # that has not been expanded yet (issue #1244).
-_UNRESOLVED_VAR_RE = re.compile(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
+#
+# A parameter expansion is a **lexeme class, not a list of names**. It has four
+# shapes, and only the two simplest were named here at first:
+#
+#   `$NAME`            `$SHELL`          the form everyone writes
+#   `${NAME}`          `${SHELL}`        the same, braced
+#   `${NAME<op>...}`   `${SHELL:?}`, `${SHELL:-sh}`, `${SHELL//x/y}`
+#   `$X` (special)     `$0`, `$@`, `$?`, `$$` — set by the shell itself
+#
+# plus any concatenation of these (`${A}${B}`). Measured on master `cca0b8dc`,
+# read-only tier, each driven end to end through `BashTool.execute` against a
+# scratch repo holding one uncommitted edit: `$0 -c 'git checkout .'`,
+# `${SHELL:?} -c 'git checkout .'`, `${SHELL:-sh} -c 'git checkout .'` and
+# `${SHELL//x/y} -c 'git checkout .'` all answered ALLOW and all **discarded the
+# edit**, while `$SHELL -c 'git checkout .'` blocked on the same mutator. `$0` is
+# the shell already running the line, so the word is a wrapper the guard cannot
+# place. The class defeated the *path* rule the same way: at workspace-write
+# `echo x > ${EMRG_PROBE_OUT:?}/escaped.txt` answered ALLOW and **created the file
+# outside the workspace**, while `$EMRG_PROBE_OUT/escaped.txt` blocked. Naming two
+# spellings of a class while its other spellings pass is the #461 defect; the
+# class is what has to be matched.
+_PARAM_EXPANSION = r"\$(?:\{[^}]*\}|[A-Za-z_0-9@*#?$!-][A-Za-z0-9_]*)"
+_UNRESOLVED_VAR_RE = re.compile(rf"(?:{_PARAM_EXPANSION})+")
 # A variable that supplies the *root* of a path (`$HOME/.emrg/config.toml`),
 # rather than a whole name on its own (`$DST`). The distinction is what keeps the
 # write-target rule below from refusing `cp $SRC $DST` — see it for why.
-_UNRESOLVED_ROOT_RE = re.compile(
-    r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)[\\/]")
+_UNRESOLVED_ROOT_RE = re.compile(rf"(?:{_PARAM_EXPANSION})+[\\/]")
 
 # ── Heredocs: a body is DATA unless a program eats it as a program ──────────
 # A heredoc body is text on some command's stdin. It is shell *code* only when
@@ -1635,7 +1656,17 @@ def _unresolved_wrapper_payloads(tokens: list[str]) -> list[str]:
     """
     out: list[str] = []
     for i, tok in enumerate(tokens):
-        if _UNRESOLVED_VAR_RE.fullmatch(_basename(tok)):
+        # The token as written *and* its basename. A `/` inside `${…}` is not a
+        # directory separator, so `_basename("${SHELL//x/y}")` is `y}` — the
+        # expansion would be cut in half and read as neither. Measured on master
+        # `cca0b8dc`: `${SHELL//x/y} -c 'git checkout .'` is a live wrapper (the
+        # shell expands it to the interpreter and runs the mutator), and the
+        # guard answered ALLOW because the basename was `y}`. The basename test
+        # stays: it is what recognises `/usr/bin/$SHELL`.
+        if (
+            _UNRESOLVED_VAR_RE.fullmatch(tok)
+            or _UNRESOLVED_VAR_RE.fullmatch(_basename(tok))
+        ):
             out.extend(tokens[i + 1:])
     return out
 
