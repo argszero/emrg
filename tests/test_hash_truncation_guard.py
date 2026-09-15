@@ -48,9 +48,16 @@ READ_ONLY = "read-only"
 WW = "workspace-write"
 WORKDIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Outside the workspace on every platform the suite runs on, and not one of the
-# temp roots the boundary allows (on macOS the temp root is under /var/folders).
-OUTSIDE = os.path.join(os.path.expanduser("~"), "emrg-hash-probe")
+# An absolute path outside the workspace, spelled with **forward slashes on both
+# platforms**. A `C:\…` spelling would make these verdicts depend on issue #1261
+# rather than on the comment rule this file is about: a backslash is shlex's escape
+# character in the guard's POSIX reading, so `C:\Users\x\f.txt` reaches the guard as
+# `C:Usersxf.txt` — a *relative* name, therefore "inside the workspace", therefore
+# allowed. `/emrg-hash-probe` is rooted and drive-less, which `_is_absolute_path`
+# accepts on POSIX and Windows alike (that mis-spelling is what the Windows CI leg
+# caught here: 4 failures, every one of them this path, including its own un-hidden
+# control — the control failing is what identified the spelling, not the fix).
+OUTSIDE = "/emrg-hash-probe"
 
 # The hidden tails: in every one the `#` sits *inside* the word `a#`, so the shell
 # runs what follows it and the truncated reading never saw it.
