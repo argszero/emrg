@@ -333,8 +333,36 @@ PENDING_STATE_SWEEP = {
 # read "state file" for its arXiv keywords (measured 2026-09-14,
 # cyc20260914-170405). A line that *denies* the file — "there is no state file,
 # the session is the state" — is the replacement text itself, so it stays legal.
+#
+# ⚠️ Three more spellings, measured 2026-09-15 (cyc20260915-100310). The pattern
+# above matched an underscore-prefixed file name, so it was blind to the name
+# *without* its project prefix — and `promote_prompt.md` writes it that way:
+# line 38 is `- Reflection log: \u2026/reflections.md`, which the old pattern did not
+# see. Same for the section heading `### 5. Reflection Log` and for "diary", the
+# third name the rant lists. Measured on master `e6eaaee4`: 5 of that template's
+# 30 mentions were invisible, and every swept template stayed at 0 in both
+# directions (so this is a widening, not a rewrite).
+#
+# The five sit in a template that is still *pending*, so the guard was right
+# about it for the wrong reason. The defect is what happens next: the same
+# spelling in a **swept** template is a silent pass, and a guard whose blind spot
+# is a plausible spelling of the thing it forbids reports success by not looking
+# — the failure this file's own docstring names.
 _RETIRED_MECHANISM = re.compile(
-    r"_state\.md|_reflections\.md|(?<!no )state[-\s]file|(?<!no )reflections?[-\s]file",
+    # The file names: the prefixed form (`promote_state.md`) and the bare one
+    # (`reflections.md`, `state.md`). The boundary is `(?<![-\w])`, not `(?<!no )`
+    # alone, so a name only counts when it *is* a name — with the loose lookbehind
+    # `read realestate.md` was flagged as the retired `state.md` (measured
+    # 2026-09-15, cyc20260915-124341).
+    r"_state\.md|(?<![-\w])state\.md"
+    r"|_reflections\.md|(?<![-\w])reflections?\.md"
+    # …the same thing written as prose, dash / space / underscore…
+    r"|(?<!no )state[-\s_]files?"
+    r"|(?<!no )reflections?[-\s_]files?"
+    # …its other section name, with or without a separator…
+    r"|(?<!no )reflection[-\s_]?logs?"
+    # …and the third name the rant lists, singular or plural.
+    r"|(?<!no )diar(?:y|ies)",
     re.IGNORECASE,
 )
 
@@ -407,3 +435,74 @@ def test_retired_mechanism_fingerprint_covers_the_bare_noun_phrase() -> None:
         "This task keeps no state file — the session itself is the state."
     ), "the replacement text denies the file; flagging it would forbid saying what replaced it"
     assert not _RETIRED_MECHANISM.search("there is no reflections file any more")
+
+    # The three spellings the underscore-prefixed pattern could not see. Each is
+    # taken verbatim from a template that still uses it (measured 2026-09-15), so
+    # these are not invented strings — `promote_prompt.md:38` is the first one.
+    assert _RETIRED_MECHANISM.search(
+        "- Reflection log: `{{ source_dir }}/reflections.md`"
+    ), "the un-prefixed file name plus its other section name was the whole blind spot"
+    assert _RETIRED_MECHANISM.search(
+        "**Every cycle MUST end with a reflection appended to `reflections.md`**"
+    )
+    assert _RETIRED_MECHANISM.search("### 5. Reflection Log (mandatory every round)")
+    assert _RETIRED_MECHANISM.search(
+        "| Replies ignored or negative | record in the reflection log (pitfall) |"
+    )
+    assert _RETIRED_MECHANISM.search("append this round to the diary")
+    assert _RETIRED_MECHANISM.search("read state.md to find the current phase")
+    # …and the same three in their denial form stay legal, exactly like the two above.
+    assert not _RETIRED_MECHANISM.search("there is no diary file and no state file")
+    assert not _RETIRED_MECHANISM.search(
+        "**Reflection is strategic-layer cognition, and the closing summary is where it goes**"
+    )
+
+
+def test_widened_fingerprint_is_measured_on_the_real_templates() -> None:
+    """The widening catches more *in the templates that exist*, not in the abstract.
+
+    A pattern change can satisfy a string assertion while catching nothing real,
+    so this counts the lines each pattern sees in every pending template and
+    pins the difference. Measured on master `e6eaaee4`:
+
+        promote_prompt.md   25 -> 30   (lines 38, 329, 331, 363, 376)
+        journal_prompt.md   15 -> 15
+        every swept template 0 ->  0
+
+    The strict increase is asserted for `promote_prompt.md` by name, because that
+    is where the blind spot actually cost something; the swept templates are
+    asserted to stay clean, because a widening that starts flagging the
+    replacement text would be a different bug wearing this one's clothes.
+    """
+    prefix_free = re.compile(
+        r"_state\.md|_reflections\.md|(?<!no )state[-\s]file|(?<!no )reflections?[-\s]file",
+        re.IGNORECASE,
+    )
+
+    def seen(name: str, pattern: re.Pattern[str]) -> set[int]:
+        text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
+        return {i for i, line in enumerate(text.splitlines(), 1) if pattern.search(line)}
+
+    grew = {}
+    for name in sorted(PENDING_STATE_SWEEP):
+        before, after = seen(name, prefix_free), seen(name, _RETIRED_MECHANISM)
+        assert after >= before, (
+            f"{name}: the widened pattern lost matches the old one had "
+            f"({sorted(before - after)}) — a pattern that catches fewer things is not wider"
+        )
+        grew[name] = len(after) - len(before)
+
+    assert grew.get("promote_prompt.md", 0) == 5, (
+        f"the widening no longer gains the 5 measured mentions in promote_prompt.md "
+        f"(gained {grew.get('promote_prompt.md')}); if the template was swept, drop it from "
+        f"PENDING_STATE_SWEEP rather than re-fitting this number"
+    )
+
+    for _, name in _builtin_templates():
+        if name in PENDING_STATE_SWEEP:
+            continue
+        hits = seen(name, _RETIRED_MECHANISM)
+        assert not hits, (
+            f"{name}: the widened pattern flags lines {sorted(hits)} in a swept template — "
+            f"that is either a real residue or a false positive in the replacement text"
+        )
