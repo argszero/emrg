@@ -261,6 +261,29 @@ _GIT_WRITE_FLAGS = frozenset({"-d", "-D", "--delete", "-f", "--force", "-m",
 # `git config` reads unless it writes: read flags, or no positional key.
 _GIT_CONFIG_READ_FLAGS = frozenset({"--get", "--get-all", "--get-regexp",
                                     "-l", "--list", "--get-urlmatch"})
+# The flags that write. Naming them explicitly is the difference between a
+# decision about the flag and an accident of the positional rule below: `--add
+# k v` blocks because it leaves two positionals, `--replace-all k v r` for the
+# same reason — but `--unset k` leaves one and read as a read, `--edit` leaves
+# none. Measured on master with git 2.50.1, six spellings wrote while read-only
+# said ALLOW: `--unset`, `--unset-all`, `--edit`, `-e`, `--remove-section`, and
+# the subcommand `edit`. The mirror image was also live: `git config get k` — a
+# pure read in git's subcommand spelling — was refused as a write.
+_GIT_CONFIG_WRITE_FLAGS = frozenset({"--unset", "--unset-all", "--add",
+                                     "--replace-all", "--rename-section",
+                                     "--remove-section", "--edit", "-e"})
+# git 2.46+ accepts the same operations as subcommands without the `--`. Both
+# spellings must land on the same verdict; the lists are kept apart on purpose,
+# because `set`/`unset`/`edit` in *command* position are writes while the same
+# words as a config *key* are not our business. Only the one-word subcommands
+# actually need this branch (`unset k` is still caught below by leaving two
+# positionals); `git config edit` leaked precisely because its flag form has no
+# argument to count, so the rule that saved the others was not a rule at all.
+_GIT_CONFIG_WRITE_SUBCOMMANDS = frozenset({"set", "unset", "unset-all", "add",
+                                           "replace-all", "rename-section",
+                                           "remove-section", "edit"})
+_GIT_CONFIG_READ_SUBCOMMANDS = frozenset({"get", "get-all", "get-regexp",
+                                          "get-urlmatch", "list"})
 # git global options that take a SEPARATE argument — the parser must skip both
 # the option and its value to find the verb (`git -C . checkout .`).
 _GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--exec-path", "--git-dir",
@@ -1148,12 +1171,21 @@ def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
         # (no positional argument at all) is the listing read.
         return None if not positional else verb
     if verb == "config":
+        if any(t in _GIT_CONFIG_WRITE_FLAGS for t in rest):
+            return verb
         if any(t in _GIT_CONFIG_READ_FLAGS for t in rest):
             return None
-        # `git config <key>` with no value is a read; `key=value` or `--set`
-        # writes. A lone positional key is ambiguous, so treat a single
-        # positional as a read and anything that looks like an assignment as
-        # a write.
+        # git 2.46+ spells the same operations as subcommands (`git config unset
+        # k`); the first positional decides which, and only a word that is one of
+        # them counts — a config key is not a subcommand.
+        subcommand = next(iter(positional), None)
+        if subcommand in _GIT_CONFIG_WRITE_SUBCOMMANDS:
+            return verb
+        if subcommand in _GIT_CONFIG_READ_SUBCOMMANDS:
+            return None
+        # `git config <key>` with no value is a read; `key=value` writes. A lone
+        # positional key is ambiguous, so treat a single positional as a read and
+        # anything that looks like an assignment as a write.
         if any("=" in t for t in positional):
             return verb
         return None if len(positional) <= 1 else verb
