@@ -248,12 +248,20 @@ _GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--exec-path", "--git-dir",
 _SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
 # Tokens that put what follows them in command position without being commands
 # themselves: grouping (`( … )`, `{ … }`) and shell negation (`! cmd`).
-_COMMAND_POSITION_OPERATORS = frozenset({"(", "{", "!", "`"})
+_COMMAND_POSITION_OPERATORS = frozenset({"(", "{", "!", "`", ">(", "<(", ")"})
+# Shell keywords after which the next word is a command, not an argument.
+_SHELL_KEYWORD_POSITION = frozenset({"if", "then", "elif", "else", "while", "until", "do"})
 # Prefix commands that *run* their argument as a command. `env git checkout .`
 # and `sudo git checkout .` genuinely invoke git, so a `git` token after one of
 # these is an invocation even though it is not first in the stream. This is the
 # case that stops the over-block fix from becoming an under-block.
 _COMMAND_WRAPPERS = frozenset({
+    # `eval` joins its arguments and executes the result; `-exec`/`-execdir` hand
+    # the next word to execve. Both put the command where the walk looks for a
+    # wrapper's argument. They are spells of the same prefix, and the flag shape
+    # is deliberate: the value-skip below is what keeps `find . -exec grep git
+    # {} \;` allowed, because `grep` is consumed as the flag's value.
+    "eval", "-exec", "-execdir",
     "env", "sudo", "doas", "xargs", "nohup", "time", "timeout", "nice",
     "setsid", "stdbuf", "command", "exec", "ionice", "chrt", "watch",
 })
@@ -358,6 +366,7 @@ def _split_command_tokens(cmd: str) -> list[str]:
     unterminated quote), because a guard that raises on odd input is worse
     than one that over-blocks it.
     """
+    cmd = _strip_line_continuations(cmd)
     try:
         lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
         lex.whitespace_split = True
@@ -706,14 +715,130 @@ def _tokenize_command(cmd: str) -> list[str]:
     is unaffected — quoting is resolved before either rule — so
     ``echo "a<newline>b"`` stays one argument, as the shell makes it.
     """
+    cmd = _strip_line_continuations(cmd)
     try:
-        lex = shlex.shlex(cmd, posix=True, punctuation_chars="();<>|&`\n")
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=_PUNCTUATION_CHARS)
         lex.whitespace_split = True
         # `\n` is a separator token, not whitespace to be discarded — see above.
         lex.whitespace = " \t\r"
-        return list(lex)
+        return _unfuse_newlines(list(lex))
     except ValueError:
         return cmd.split()
+
+
+# The punctuation set handed to `shlex` above. Adjacent characters in this set
+# are fused into ONE token, which is the whole reason `_unfuse_newlines` exists.
+_PUNCTUATION_CHARS = "();<>|&`\n"
+
+
+def _unfuse_newlines(tokens: list[str]) -> list[str]:
+    """Emit each newline as its own token when `punctuation_chars` fused it in.
+
+    Making `\n` punctuation was necessary but not sufficient (#1233): shlex
+    groups *adjacent* punctuation into a single token, so `echo a;` followed by
+    a newline arrives as ``";\n"``, a blank line as ``"\n\n"``, and `cmd &&`
+    followed by a newline as ``"&&\n"``. None of those is `in
+    _COMMAND_SEPARATORS`, so the position-sensitive walks answered "data, not an
+    invocation" — the hole #1233 closed for a bare newline, open again one
+    character later. Measured on master `e6eaaee4`, `read-only` tier: 40 shapes
+    ALLOWED that block when the same writer is written inline — 5 writers
+    (`git stash drop`, `git checkout .`, `git clean -fd`, `git config user.name
+    x`, `git reset --hard`) × 8 fused forms (a blank line, two blank lines,
+    ``";\n"``, ``"\n;"``, ``"&&\n"``, ``"\n&&"``, ``"|\n"``, ``"\n(\n"``).
+    Five of those 8 forms are shapes a shell really runs the writer in (measured
+    against both `/bin/sh` and `/bin/bash` with a side-effect probe); the other
+    three — ``"\n;"``, ``"\n&&"``, ``"\n(\n"`` — are parse errors in both, so
+    closing them is conservative rather than necessary, and 25 of the 40 are
+    shapes whose writer a shell executes.
+
+    Only tokens that are *entirely punctuation* are split, and that is exactly
+    what separates a fused run from a word: ``echo "a<newline>b"`` is one
+    argument to the shell, shlex hands it over as one token containing letters,
+    and it is left alone. The other punctuation runs are left alone too, which
+    matters — `_extract_write_targets` matches a redirect *operator* by spelling,
+    so splitting ``">>\n"`` into ``">"``, ``">"`` would name the second `>` as the
+    target instead of the file.
+    """
+    if not any("\n" in tok and tok != "\n" for tok in tokens):
+        return tokens
+    out: list[str] = []
+    for tok in tokens:
+        if tok != "\n" and "\n" in tok and all(c in _PUNCTUATION_CHARS for c in tok):
+            out.extend(p for p in re.split(r"(\n)", tok) if p)
+        else:
+            out.append(tok)
+    return out
+
+
+def _strip_line_continuations(cmd: str) -> str:
+    """Remove every backslash-newline the shell removes before it parses.
+
+    A backslash immediately followed by a newline is a **line continuation**: the
+    shell deletes both characters and joins the lines, so the two lines are ONE
+    command and nothing separates them. Left in place, `shlex` glues the newline
+    to the *next word*, so the command word stops being a token at all. Measured
+    on master `e6eaaee4`, `read-only` tier: `x=1 \\<newline>git checkout .`
+    tokenises to ``['x=1', '\\ngit', 'checkout', '.']`` — there is no ``git``
+    token — and the shell runs ``git checkout .`` in both ``/bin/sh`` and
+    ``/bin/bash``. Three spellings reach that way (bare, after an assignment,
+    after a separator) and all three are ALLOW on master.
+
+    Removing it is not a heuristic: it is exactly what the shell does, so it
+    cannot hide a command the shell would run. It also keeps the *mention* case
+    honest — ``echo done \\<newline>git checkout .`` joins into a single
+    ``echo`` whose ``git`` is an argument, and both the shell and the guard read
+    it that way.
+
+    Two things are easy to get wrong, and both are measured:
+
+    * **A CR is not a newline.** `\\<CR><LF>` is `\\` escaping the CR, then a
+      CRLF line break — *two commands*, the second one real (measured: the shell
+      runs the mutator after it). Only `\\<LF>` is a continuation, so the CR is
+      left to the escape-pair rule below and the LF stays a separator.
+    * **An escaped backslash ends the story.** ````echo a\\<newline>git checkout
+      .```` is not a continuation: the shell consumes the two backslashes as
+      literal pairs, so the newline is a **real separator** and the mutator runs.
+      Pairing a backslash with the newline without first asking whether it was
+      itself escaped deletes that separator and lets the leftover backslash
+      escape the first letter of the next word, so the command word stops being a
+      token at all — the same failure this function exists to prevent, one
+      character deeper. Escapes are therefore consumed as **pairs**.
+    * **A quoted apostrophe is data.** In ````echo "x'" ; a=1 \\<newline>git
+      checkout .```` the `'` sits inside double quotes, so it does not open a
+      single-quoted string and the continuation is real. Tracking `'` alone
+      missed it; `"` is tracked as a second state, and the strip runs inside
+      double quotes because the shell removes the continuation there too.
+    """
+    if "\\\n" not in cmd and "\\\r\n" not in cmd:
+        return cmd
+    out: list[str] = []
+    in_single = False
+    in_double = False
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "\\" and not in_single:
+            j = i + 1
+            if cmd[j:j + 1] == "\n":
+                i = j + 1
+                continue
+            # A backslash escapes the next character, so the two are consumed
+            # together: an escaped backslash is never itself paired with the
+            # newline that follows it (clause A).
+            out.append(ch)
+            if j < len(cmd):
+                out.append(cmd[j])
+                i = j + 1
+            else:
+                i = j
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def _runs_as_a_command(tokens: list[str], i: int) -> bool:
@@ -755,6 +880,8 @@ def _runs_as_a_command(tokens: list[str], i: int) -> bool:
     while j >= 0:
         tok = tokens[j]
         if tok in _SHELL_SEPARATORS or tok in _COMMAND_POSITION_OPERATORS:
+            return True
+        if tok in _SHELL_KEYWORD_POSITION:
             return True
         if _is_env_assignment(tok):
             j -= 1
