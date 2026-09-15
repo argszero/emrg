@@ -214,23 +214,39 @@ def _state_of(verdict: object, cycle: str) -> tuple[str, str]:
     return "void", f"this cycle's reviews on #{verdict.pr} are void ({last.why})"
 
 
-def existing_vote(pr: int, cycle: str, needed: int) -> tuple[str, str]:
+def existing_vote(pr: int, cycle: str, needed: int, mergeability_wait: float) -> tuple[str, str]:
     """This cycle's vote state on `pr`, read from the counter."""
-    return _state_of(votes_counter().check_pr(pr, needed), cycle)
+    return _state_of(
+        votes_counter().check_pr(pr, needed, mergeability_wait=mergeability_wait),
+        cycle,
+    )
 
 
-def confirm(pr: int, cycle: str, needed: int, attempts: int, delay: float) -> tuple[bool, str]:
+def confirm(
+    pr: int,
+    cycle: str,
+    needed: int,
+    attempts: int,
+    delay: float,
+    mergeability_wait: float = 0.0,
+) -> tuple[bool, str]:
     """Read the counter back until this cycle's review is visible, then judge it.
 
     A retry exists for one reason: GitHub registers a review a moment after the
     POST returns, so a single read can miss it and report "never appeared" for a
     review that did arrive. The retry is bounded, and a *definite* answer (counted,
     or void with a reason) returns immediately — only the absence retries.
+
+    `mergeability_wait` is passed through for the other transient: a read that
+    raises because GitHub has not computed mergeability yet is not a definite
+    answer either, so the counter re-asks within that budget before it refuses.
     """
     for attempt in range(max(1, attempts)):
         if attempt:
             time.sleep(max(0.0, delay))
-        verdict = votes_counter().check_pr(pr, needed)
+        verdict = votes_counter().check_pr(
+            pr, needed, mergeability_wait=mergeability_wait
+        )
         state, why = _state_of(verdict, cycle)
         if state == "counted":
             return True, f"{verdict.valid_count}/{verdict.needed} valid votes"
@@ -274,6 +290,14 @@ def main(argv: list[str] | None = None) -> int:
         help="seconds between those re-reads",
     )
     parser.add_argument(
+        "--mergeability-wait",
+        type=float,
+        default=60.0,
+        help="seconds the counter may keep re-asking while GitHub has not computed "
+        "mergeability yet (a fresh push reports UNKNOWN for up to a couple of "
+        "minutes; 0 asks once and refuses, which is how a vote is lost to timing)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="run every check, post nothing",
@@ -292,7 +316,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        state, note = existing_vote(args.pr, cycle, args.min_votes)
+        state, note = existing_vote(
+            args.pr, cycle, args.min_votes, args.mergeability_wait
+        )
     except Exception as exc:  # noqa: BLE001 - the counter fails loud; say why, post nothing
         print(f"refusing to post: the vote count could not be read ({exc})", file=sys.stderr)
         return 2
@@ -326,7 +352,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    counted, note = confirm(args.pr, cycle, args.min_votes, args.attempts, args.delay)
+    counted, note = confirm(
+        args.pr,
+        cycle,
+        args.min_votes,
+        args.attempts,
+        args.delay,
+        args.mergeability_wait,
+    )
     if counted:
         print(f"#{args.pr}: review posted as {cycle} and counted - {note}")
         return 0

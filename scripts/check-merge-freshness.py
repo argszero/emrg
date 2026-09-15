@@ -150,6 +150,13 @@ REPO = "argszero/emrg"
 # sides, so a change to the gate has one place to land.
 _VOTES_NEEDED = 3
 
+# How long this gate may keep re-asking the counter while GitHub has not computed
+# mergeability yet (see `_valid_votes`). A gate a reader is watching may wait; the
+# alternative is reporting the price of a refresh as "unavailable" at exactly the
+# moment the price decides the action. The counter's own refusal still wins when
+# the budget runs out.
+_MERGEABILITY_WAIT = 60.0
+
 # GitHub `compare` statuses, split by the one property that decides freshness:
 # is master's tip an ancestor of the head?
 #
@@ -401,9 +408,18 @@ def _valid_votes(pr: int) -> tuple[int | None, str]:
     read would trade a real answer for a missing one. It never degrades to `0`
     though - zero is the line that says "refresh freely", so reporting it without
     having read it would be the direction that spends votes.
+
+    The read waits (`_MERGEABILITY_WAIT`) for the one transient this gate hit in
+    practice (2026-09-16): right after a push or a merge GitHub reports
+    mergeability as `UNKNOWN`, and the counter refuses it - which is correct, but
+    it made the *price* of a stale branch unreadable exactly when the decision is
+    being taken. Advising a refresh without knowing how many votes it voids is the
+    one degradation this function exists to avoid.
     """
     try:
-        verdict = votes_counter().check_pr(pr, _VOTES_NEEDED)
+        verdict = votes_counter().check_pr(
+            pr, _VOTES_NEEDED, mergeability_wait=_MERGEABILITY_WAIT
+        )
         return int(verdict.valid_count), ""
     except Exception as exc:  # advisory by construction - see the docstring above
         return None, f"{type(exc).__name__}: {exc}".replace("\n", " ")[:200]
