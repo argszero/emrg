@@ -105,10 +105,16 @@ def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
 #                         pull / merge / rebase — community issue #979) and
 #                         shell redirects (> / >>) to any non-/dev/null target
 #                         are blocked
-#   workspace-write     — writes inside the workspace root (and the OS temp
-#                         area) are allowed; destructive writes to protected
-#                         daemon state files and to absolute paths outside
-#                         the workspace are blocked
+#   workspace-write     — writes are allowed only inside three roots: the
+#                         workspace root, the OS temp root
+#                         `tempfile.gettempdir()` ($TMPDIR on macOS —
+#                         /var/folders/<…>/T, NOT /tmp there; /tmp on Linux),
+#                         and the trusted data roots (`_trusted_write_zones`).
+#                         Destructive writes to protected daemon state files
+#                         and to every other absolute path are blocked.
+#                         Measured 2026-09-16: `$TMPDIR/x` ALLOW while `/tmp/x`,
+#                         `/private/tmp/x`, `/var/tmp/x`, `/dev/shm/x` BLOCK —
+#                         "the OS temp area" is gettempdir(), not a guess at it
 #   both checked tiers  — destination-based containment-escape guard
 #                         (issue #1102, borrowed from Claude Code v2.1.257):
 #                         cloud metadata-credential fetches (IMDS/ECS/GCP)
