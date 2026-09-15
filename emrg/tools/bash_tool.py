@@ -1456,6 +1456,86 @@ def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     return None
 
 
+def _cwd_left_workspace(
+    cmd: str, workspace: str, _depth: int = 0, _base: str | None = None
+) -> str | None:
+    """The directory a command moves the shell into, when it is outside the workspace.
+
+    The ``workspace-write`` boundary reads a *relative* write target as "inside
+    the workspace, because the cwd is the workspace root". That premise holds
+    only while the command writes from where it started: ``cd <dir>`` and
+    ``env -C <dir>`` move the shell first, so every later target is relative to
+    the new directory. Measured on master, `cd /elsewhere; echo x > out.txt`
+    truncated `/elsewhere/out.txt` while the guard read `out.txt` as
+    in-workspace and allowed it (issue #1244).
+
+    Returns the offending directory, or None when the command never leaves the
+    workspace — a destination inside a trusted write zone or the OS temp root
+    does not count, because the boundary already allows those as write roots.
+    The walk is conservative in one direction: *any* move outside counts, even
+    one a later ``cd`` returns from, because the token stream does not say which
+    segment a target belongs to without re-deriving the parse, and refusing is
+    the fail-closed side. A move the guard cannot resolve (`cd -`, whose target
+    is $OLDPWD) is reported by its own token and treated the same way: it cannot
+    be proven to stay inside.
+
+    The payload of a nested shell is read too (`sh -c 'cd /elsewhere; echo x >
+    f'`, `env -C /elsewhere …`), since it runs with the same effect; depth is
+    capped rather than trusted, because a guard must terminate on adversarial
+    input.
+    """
+    allowed = [workspace] + list(_trusted_write_zones()) + list(_temp_write_roots())
+    cwd = os.path.realpath(_base) if _base else os.path.realpath(workspace)
+
+    def leaves_workspace(path: str) -> bool:
+        return not any(src and (_is_within(path, src) or path == src) for src in allowed)
+
+    def resolve(tok: str) -> str:
+        expanded = os.path.expanduser(os.path.expandvars(tok))
+        if not _is_absolute_path(expanded):
+            expanded = os.path.join(cwd, expanded)
+        return os.path.realpath(expanded)
+
+    tokens = _split_command_tokens(_mask_data_heredoc_bodies(cmd))
+    for i, tok in enumerate(tokens):
+        word = _command_word(tok)
+        if word not in ("cd", "env") or not _runs_as_a_command(tokens, i):
+            continue
+        args = _args_after_command(tokens, i)
+        if word == "cd":
+            operand = next((a for a in args if not a.startswith("-") or a == "-"), None)
+            if operand is None:
+                # A bare `cd` goes $HOME — outside the workspace unless the
+                # workspace *is* $HOME, which the containment test below decides.
+                cwd = os.path.realpath(os.path.expanduser("~"))
+            elif operand == "-":
+                # $OLDPWD: the guard has no way to know where that is.
+                return "-"
+            else:
+                cwd = resolve(operand)
+            if leaves_workspace(cwd):
+                return cwd
+            continue
+        # `env -C <dir>` / `env --chdir=<dir>`: the child of `env` starts there.
+        for j, a in enumerate(args):
+            target = None
+            if a in ("-C", "--chdir"):
+                target = args[j + 1] if j + 1 < len(args) else None
+            elif a.startswith("--chdir="):
+                target = a.split("=", 1)[1]
+            if target is None:
+                continue
+            cwd = resolve(target)
+            if leaves_workspace(cwd):
+                return cwd
+    if _depth < 3:
+        for nested in _nested_command_texts(tokens):
+            hit = _cwd_left_workspace(nested, workspace, _depth + 1, cwd)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
     """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
 
@@ -1515,12 +1595,27 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
     protected = _protected_paths()
     emrg_home = os.path.realpath(os.path.expanduser("~/.emrg"))
     workdir_real = os.path.realpath(workdir) if workdir else None
+    # A relative target is in-workspace only while the command writes from
+    # where it started; a command that moves the shell out first (issue #1244)
+    # makes the relative reading name a file the guard cannot place.
+    moved_out = _cwd_left_workspace(cmd, workdir_real) if workdir_real else None
     for t in targets:
         if t == "/dev/null":
             continue
         expanded = os.path.expanduser(t)
         if not _is_absolute_path(expanded):
-            # Relative target: assumed in-workspace (cwd = the workspace root).
+            # Relative target: assumed in-workspace (cwd = the workspace root) —
+            # an assumption the command itself can invalidate by moving the
+            # shell first, so it is only made when the command left the cwd it
+            # started in. `cd <outside>; echo x > out.txt` truncated a file
+            # outside the workspace while this line read it as inside (issue
+            # #1244); the block names the directory that made it possible.
+            if moved_out is not None:
+                return False, (
+                    f"workspace-write sandbox: blocked write to relative target {t!r}: "
+                    f"the command runs it after changing directory to {moved_out!r}, "
+                    "which is not a directory this workspace can place it in (issue #1244)"
+                ), "partial"
             continue
         real = os.path.realpath(expanded)
         if real in protected:
