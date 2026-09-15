@@ -281,13 +281,166 @@ def _extract_clipboard_image(target_path: str) -> bool:
     return False
 
 
-async def interactive(init_auto_evolve: bool = False):
+class _StderrContainment:
+    """Handle for a contained ``sys.stderr``; ``restore()`` undoes it.
+
+    Always returned (also when there was nothing to do) so the caller never has
+    to test for ``None``.
+    """
+
+    def __init__(self, original=None, sink=None, repointed=None):
+        self._original = original
+        self._sink = sink
+        self._repointed = repointed or []
+
+    def restore(self) -> None:
+        if self._original is None:
+            return
+        for handler, stream in self._repointed:
+            handler.stream = stream
+        sys.stderr = self._original
+        self._original = None
+        try:
+            self._sink.flush(); self._sink.close()
+        except Exception:
+            pass
+        self._sink = None
+
+
+def _handlers_bound_to(stream):
+    """Handlers that would still write to ``stream`` — root's and named loggers'.
+
+    The repoint loop used to walk ``logging.getLogger().handlers`` only. A
+    ``StreamHandler`` attached to a *named* logger is the same defect one logger
+    over: it bound ``sys.stderr`` at construction and keeps writing to the
+    terminal after the swap, while this function's sibling docstring already
+    claimed "handlers that already captured the terminal are repointed".
+
+    ``logging.lastResort`` is deliberately not walked: it is a
+    ``_StderrHandler`` whose ``stream`` is a read-only property returning the
+    *current* ``sys.stderr``, so it follows the swap by itself — assigning to
+    it raises ``AttributeError`` from inside ``_contain_stderr_for_tui``.
+    """
+    found = []
+    for handler in logging.getLogger().handlers:
+        if (isinstance(handler, logging.StreamHandler)
+                and getattr(handler, "stream", None) is stream):
+            found.append(handler)
+    # A snapshot on purpose: ``loggerDict`` is live, and a thread that creates a
+    # logger while this runs makes the view raise "dictionary changed size
+    # during iteration" — out of ``run_client``, onto the terminal.
+    for logger in list(logging.Logger.manager.loggerDict.values()):
+        if not isinstance(logger, logging.Logger):      # placeholders are not loggers
+            continue
+        for handler in logger.handlers:
+            if (isinstance(handler, logging.StreamHandler)
+                    and getattr(handler, "stream", None) is stream):
+                found.append(handler)
+    return found
+
+
+def _contain_stderr_for_tui() -> _StderrContainment:
+    """Keep internal errors off the TUI's screen, into a file (rant 2026-09-14T21:50:54).
+
+    The host's screen had received ``logging.Handler.handleError``'s report
+    (verbatim paste: ``tests/test_client_stderr_containment.py``):
+
+        --- Logging error ---
+        ...
+          File ".../emrg/client/app.py", line 308, in interactive
+            await conn.send_command("ping")
+          ...
+          File ".../websockets/protocol.py", line 755, in send_frame
+            self.logger.debug("> %s", frame)
+
+    ``handleError`` writes to ``sys.stderr`` — and for a TUI, ``sys.stderr``
+    **is the screen**. It fires whenever any handler's ``emit`` raises (there a
+    ``RotatingFileHandler`` whose stream had gone bad), so the client's own log
+    records are not the only thing that can land there: an unhandled traceback,
+    asyncio's default exception handler, or any third-party
+    ``print(..., file=sys.stderr)`` all do too. The host's requirement is the
+    policy, not one cause:
+
+        「任何时候，tui都不应该显示内部错误。也就是内部异常只应该在日志里，
+          不应该出现在tui里」
+
+    This is the client's counterpart of the daemon's ``_redirect_std_streams``
+    (rant 2026-08-25T09:25:32): the daemon already dies *silently* into
+    ``~/.emrg/emrgd-crash.log``; the client died *visibly*, because nothing
+    had claimed its stderr.
+
+    Installed by ``run_client`` for the whole client session — *before*
+    ``asyncio.run``, so records emitted while the event loop is being created
+    are covered too, and deliberately **not** handed back when an exception
+    ends the session: that traceback is printed by ``run_client``'s caller,
+    after the session is over, and it is exactly what the host saw on screen.
+    The messages a user must read (no TTY, "Failed to connect to emrgd") are
+    printed to the stream ``run_client`` captured *before* installing this,
+    never to ``sys.stderr`` — see ``interactive``'s ``console`` argument.
+
+    Sink: ``<cwd>/.emrg/emrg-client-crash.log`` — next to the structured client
+    log and deliberately a separate file, for the same reason the daemon keeps
+    ``emrgd-crash.log`` apart from ``emrgd.log`` (this is unstructured,
+    multi-line, and written by code that is already failing).
+
+    Boundaries, stated rather than implied:
+
+    * Only when ``sys.stderr`` is a TTY. If the user wrote ``emrg 2>errors.txt``
+      they asked for stderr there, and that terminal cannot be corrupted.
+    * ``sys.stdout`` is deliberately untouched — it is the surface the TUI
+      renders through.
+    * Containment is object-level (``sys.stderr`` and handlers built from it).
+      Output written straight to file descriptor 2 — ``faulthandler``,
+      C-level aborts — still reaches the terminal; that needs an
+      ``os.dup2`` and is left for its own change.
+    """
+    try:
+        if not sys.stderr.isatty():
+            return _StderrContainment()
+    except (AttributeError, ValueError, OSError):
+        return _StderrContainment()
+
+    crash_log = Path.cwd() / ".emrg" / "emrg-client-crash.log"
+    try:
+        crash_log.parent.mkdir(parents=True, exist_ok=True)
+        sink = open(str(crash_log), "a", encoding="utf-8",
+                    errors="backslashreplace", buffering=1)
+    except OSError:
+        # Best effort, exactly as the daemon's version: a screen that still
+        # works beats a crash log that cannot be opened.
+        return _StderrContainment()
+
+    original = sys.stderr
+    # ``StreamHandler(stream=None)`` binds ``sys.stderr`` **at construction**,
+    # so a handler created before this call keeps writing to the terminal even
+    # after ``sys.stderr`` is swapped. Repoint the ones that still target it —
+    # root's *and* the ones on named loggers (``websockets.client`` is the one
+    # in the host's traceback).
+    # (``FileHandler`` is a ``StreamHandler`` subclass but its stream is a file,
+    # so the identity test cannot catch it.)
+    repointed = []
+    for handler in _handlers_bound_to(original):
+        repointed.append((handler, handler.stream))
+        handler.stream = sink
+    sys.stderr = sink
+    return _StderrContainment(original, sink, repointed)
+
+
+async def interactive(init_auto_evolve: bool = False, console=None):
+    """Run one TUI session; ``console`` receives the messages a user must read.
+
+    ``run_client`` passes the terminal stream as it was *before* it installed
+    the stderr containment (rant 2026-09-14T21:50:54), because by the time
+    this coroutine runs ``sys.stderr`` is already the crash-log sink. Called
+    directly (tests, embedding), ``sys.stderr`` is used as-is.
+    """
+    console = console if console is not None else sys.stderr
     if not sys.stdin.isatty():
-        print("This client requires a real terminal (TTY).", file=sys.stderr); return
+        print("This client requires a real terminal (TTY).", file=console); return
 
     try: conn = await daemon_manager.ensure_connected()
     except Exception as e:
-        print(f"Failed to connect to emrgd: {e}", file=sys.stderr); return
+        print(f"Failed to connect to emrgd: {e}", file=console); return
     logger.info("connected to emrgd")
 
     # Session setup
@@ -2244,4 +2397,22 @@ def _format_args(args: dict, tool_name: str = "") -> str:
     return arg_str
 
 
-def run_client(init_auto_evolve: bool = False): asyncio.run(interactive(init_auto_evolve=init_auto_evolve))
+def run_client(init_auto_evolve: bool = False):
+    """Start the TUI client; the terminal belongs to the TUI for the session.
+
+    Containment is installed *here*, before ``asyncio.run`` builds the event
+    loop, so nothing internal — a record emitted during loop creation, a
+    handler whose own ``emit`` fails, an unhandled traceback — can reach the
+    screen (rant 2026-09-14T21:50:54). The only escape hatch is ``console``,
+    the terminal stream captured before installation, which carries the
+    messages a user must actually read.
+    """
+    console = sys.stderr
+    containment = _contain_stderr_for_tui()
+    try:
+        asyncio.run(interactive(init_auto_evolve=init_auto_evolve, console=console))
+    except BaseException:
+        # Deliberately no restore(): the traceback of the exception that ended
+        # the session is printed by *our* caller, after this function returns.
+        raise
+    containment.restore()

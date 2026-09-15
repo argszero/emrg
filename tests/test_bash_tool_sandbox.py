@@ -1007,14 +1007,24 @@ def test_git_classification_is_fail_closed_over_every_subcommand():
     shape_decided = _GIT_SHAPE_DECIDED
     # Verbs git reports that are not declared reads and are not shape-decided
     # must block, whether or not anyone remembered them.
+    # `reflog` and `notes` left this set in issue #1240. They are now
+    # shape-decided: their reporting form is a read (`git reflog` is
+    # `git reflog show`, `git notes` is `git notes list`) while `expire` /
+    # `delete` / `drop` and `add` / `remove` / `append` / `prune` write. This
+    # set is defined as "not a declared read and not shape-decided", so once
+    # that is true of them, keeping them here would make the test assert
+    # something false about its own predicate. Their writing shapes are asserted
+    # by test_check_read_only_blocks_unlisted_plumbing_mutators (the reflog
+    # `expire` case) and by tests/test_git_read_verbs_shape.py (the rest).
     unlisted = {
         "checkout-index", "mktree", "mktag", "filter-branch", "replace",
-        "update-server-info", "pack-refs", "reflog", "symbolic-ref",
-        "update-ref", "read-tree", "sparse-checkout", "notes", "init",
+        "update-server-info", "pack-refs", "symbolic-ref",
+        "update-ref", "read-tree", "sparse-checkout", "init",
         "clone", "revert", "cherry-pick", "rebase", "switch", "restore",
         "unpack-objects", "index-pack", "pack-objects", "fast-import",
         "fast-export", "update-index", "write-tree", "commit-tree",
     }
+    assert {"reflog", "notes"} <= shape_decided, "shape-decided since #1240"
     for verb in sorted(unlisted):
         assert verb not in allowlist, f"{verb!r} must not be a declared read"
         allowed, reason, _ = _check_sandbox(f"git {verb}", "read-only")

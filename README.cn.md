@@ -187,6 +187,9 @@ EMRG 不只是追赶——它自己追上来。
 **和 Claude Code 或 Codex 有什么不同？**<br>
 它们是产品。EMRG 是一个关于*闭环进化*的实验——AI 改进 AI。完全开源，无厂商锁定。
 
+**我的演化周期显示在 read-only 下运行，为什么？**<br>
+当仓库存在未提交改动时，周期会被强制降级为 `read-only`，以免覆盖你尚未提交的工作。诊断、恢复，或有意覆盖该守卫 → [DEVELOPMENT.md](DEVELOPMENT.md#-troubleshooting)。
+
 ---
 
 ## 开发

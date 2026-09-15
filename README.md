@@ -189,6 +189,9 @@ No. Self-evolution only modifies its own repository (`~/.emrg/evolution/emrg`), 
 **How is this different from Claude Code or Codex?**<br>
 They're products. EMRG is an experiment in *closing the loop* — the AI improves the AI. Fully open source, no vendor lock-in.
 
+**My evolution cycle says it is running read-only. Why?**<br>
+A cycle whose repository has uncommitted changes is forced down to `read-only`, so it cannot overwrite work you have not committed. Diagnosing it, recovering, or overriding the guard deliberately → [DEVELOPMENT.md](DEVELOPMENT.md#-troubleshooting).
+
 ---
 
 ## Development
