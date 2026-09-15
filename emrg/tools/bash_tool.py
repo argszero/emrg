@@ -599,6 +599,20 @@ def _positional_args(tokens: list[str], i: int) -> list[str]:
     return out
 
 
+def _is_redirect_operator(tok: str) -> bool:
+    """True when ``tok`` is a redirect operator rather than a path.
+
+    The set the write-target walk has always recognised: the four shell
+    spellings plus the fd-prefixed form, which arrives as its own token
+    (`cmd 2> err.txt` tokenises the `2` separately, and `2>` too when the
+    tokenizer keeps them together). Named here so the walk can ask the
+    question twice — once to find a redirect, once to refuse to call the
+    *next* operator its target (a quoted `'>'` is an operator token by the
+    time quoting is gone).
+    """
+    return tok in (">", ">>", "&>", "&>>") or re.fullmatch(r"\d*>>?", tok) is not None
+
+
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     """Write targets of ``cmd``: the paths a command appears to write.
 
@@ -620,9 +634,19 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
         unlisted writers (``sed -i``, ``truncate``, ``tee``, ``cp`` without
         ``-r``) were not destructive at all — 7 of 7 measured writes allowed.
 
-    Quoting is what distinguishes the two: the token stream already knows
-    whether ``>`` was an operator or a character in an argument, so both
-    directions are fixed by the same change.
+    Quoting is *mostly* what distinguishes the two, and the walk now covers the
+    case where it does not. The token stream knows whether a `>` sat inside a
+    longer argument (`echo "a > b"` is one token), so both directions are fixed
+    by the same change. It does **not** know whether a `>` that stood alone as a
+    word was quoted: `'>'` and `>` dequote to the same token, so a quoted
+    operator used to consume the next token as its `target` and the *real*
+    redirect's target was never reported — measured on master, `echo '>' > /etc/x`
+    produced targets `['>']` and was allowed to write `/etc/x` at
+    workspace-write while `echo x > /etc/x` was blocked. Since an operator is
+    never a path, the walk skips operator tokens rather than believing the first
+    one it meets (issue #1268). The residual is the over-block side only: a
+    quoted operator followed by a bare word is still read as a redirect, which
+    needs the lexer to preserve quoting to fix.
 
     Still deliberately non-exhaustive in *which verbs* it covers (an
     interpreter can always write a file); the honest boundary stays
@@ -640,10 +664,22 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
         word = _command_word(tok)
         # Redirects: `>` `>>` `&>` `&>>` are their own tokens, and a numeric
         # fd prefix arrives as a separate token (`2` `>` `e`).
-        if tok in (">", ">>", "&>", "&>>") or re.fullmatch(r"\d*>>?", tok):
-            if i + 1 < len(tokens) and tokens[i + 1] not in _COMMAND_SEPARATORS:
-                targets.append(tokens[i + 1])
-                i += 2
+        if _is_redirect_operator(tok):
+            # An operator is never a write target. A *quoted* `>` reaches this
+            # walk as an operator token — the tokenizer dequotes, so `'>'` and
+            # `>` are the same string here — and taking the next token blindly
+            # made the quoted one consume the real redirect's target: measured
+            # on master, `echo '>' > /etc/x` yielded targets `['>']` and was
+            # ALLOWED at workspace-write (the file was really created outside)
+            # while `echo x > /etc/x` was blocked. Skipping operator tokens
+            # reports the target the shell will actually write, so the boundary
+            # no longer depends on whether a `>` was quoted.
+            j = i + 1
+            while j < len(tokens) and _is_redirect_operator(tokens[j]):
+                j += 1
+            if j < len(tokens) and tokens[j] not in _COMMAND_SEPARATORS:
+                targets.append(tokens[j])
+                i = j + 1
                 continue
         elif word == "rm" or word == "rmdir":
             # Any operand is removed — NOT only with a recursive flag.

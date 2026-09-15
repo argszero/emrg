@@ -17,6 +17,7 @@ from emrg.tools.bash_tool import (
     SANDBOX_MODES,
     _check_sandbox,
     _extract_write_targets,
+    _is_redirect_operator,
     _flag_part,
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
@@ -661,6 +662,59 @@ def test_real_redirects_are_still_write_targets():
     for cmd in ("echo x > /tmp/y", "echo x >> /tmp/y", "cmd 2> err.txt"):
         allowed, _, _ = _check_sandbox(cmd, "read-only")
         assert allowed is False, cmd
+
+
+def test_is_redirect_operator_covers_the_spellings_the_walk_recognises():
+    """The predicate the walk asks twice must match exactly what it matched before."""
+    for tok in (">", ">>", "&>", "&>>", "2>", "22>>"):
+        assert _is_redirect_operator(tok) is True, tok
+    for tok in ("out.txt", "/tmp/y", "2", "a>b", "<", "|", ";"):
+        assert _is_redirect_operator(tok) is False, tok
+
+
+def test_a_quoted_operator_cannot_hide_the_real_redirect_target():
+    """Issue #1268: a quoted `>` used to swallow the next token as its target.
+
+    `'>'` and `>` dequote to the same token, so the walk could not tell a quoted
+    operator from a real one. It took the following token blindly, which meant
+    `echo '>' > /etc/x` produced the target `['>']` — and the *real* redirect
+    vanished. Measured on master `065ee9d5` end to end through
+    `BashTool.execute()` at workspace-write: the call returned success and
+    `/Users/argszero/emrg-phantom-proof.txt` really existed afterwards, while
+    `echo x > <the same path>` was refused. The boundary was escaped by one
+    quoted character.
+
+    An operator is never a path, so the walk now skips operator tokens and names
+    the target the shell will actually write.
+    """
+    outside = "/etc/emrg-1268-probe.txt"
+    for cmd in (
+        f"echo '>' > {outside}",
+        f"echo '>' >> {outside}",
+        f"echo '>>' > {outside}",
+    ):
+        targets = _extract_write_targets(cmd)
+        assert outside in targets, f"{cmd!r} must name the real target, got {targets!r}"
+        assert ">" not in targets, f"{cmd!r} must not treat an operator as a path"
+        for tier in ("read-only", "workspace-write"):
+            allowed, reason, _ = _check_sandbox(cmd, tier)
+            assert allowed is False, f"{cmd!r} must be blocked at {tier} (got {reason!r})"
+
+
+def test_the_operator_skip_does_not_swallow_a_real_target():
+    """The positive control for the skip: no operator means no skipping.
+
+    If the walk skipped the token after every operator unconditionally, a real
+    redirect would lose its target — a hole in the other direction, and the
+    reason the fix walks only over *operators*.
+    """
+    assert _extract_write_targets("echo x > /tmp/y") == ["/tmp/y"]
+    assert _extract_write_targets("echo x >> /tmp/y") == ["/tmp/y"]
+    assert _extract_write_targets("cmd 2> err.txt") == ["err.txt"]
+    assert _extract_write_targets("echo '>' > /tmp/y") == ["/tmp/y"]
+    # A quoted operator followed by a bare word is still read as a redirect —
+    # the known over-block residual, which needs the lexer to keep quoting.
+    assert _extract_write_targets("grep -n '>' file.txt") == ["file.txt"]
 
 
 def test_non_recursive_and_unlisted_writers_are_destructive():
