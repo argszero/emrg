@@ -602,15 +602,36 @@ def _positional_args(tokens: list[str], i: int) -> list[str]:
 def _is_redirect_operator(tok: str) -> bool:
     """True when ``tok`` is a redirect operator rather than a path.
 
-    The set the write-target walk has always recognised: the four shell
-    spellings plus the fd-prefixed form, which arrives as its own token
-    (`cmd 2> err.txt` tokenises the `2` separately, and `2>` too when the
-    tokenizer keeps them together). Named here so the walk can ask the
-    question twice — once to find a redirect, once to refuse to call the
-    *next* operator its target (a quoted `'>'` is an operator token by the
-    time quoting is gone).
+    Named here so the walk can ask the question twice — once to find a redirect,
+    once to refuse to call the *next* operator its target (a quoted `'>'` is an
+    operator token by the time quoting is gone).
+
+    Judged by **shape** rather than by a list, because the list is what the first
+    version of this predicate was and it was two operators short of the ones a
+    shell accepts. Measured on master `b0bd6188` (`bash_tool.py`
+    `00b7e8884c95d9be`): `echo x >| /etc/f` and `echo x <> /etc/f` reported the
+    targets `[]` at **both** tiers — allowed by `read-only`, whose whole job is to
+    refuse a redirect to anything but `/dev/null`, as well as by
+    `workspace-write`. Both genuinely write: in a throwaway directory bash and sh
+    each created the file for `>|` (the clobber redirect) and bash created it for
+    `<>` (read-write), so an empty target list there is a hole rather than an
+    opinion. `>>|`, `>>&` and `&>>` created nothing, so they are covered only
+    incidentally.
+
+    The shape test is: the token contains a `>` and no character that could be
+    part of a path. That also covers the fd-prefixed spellings (`1>|`, `0<>`,
+    `2>&1`, `5>&-`) without enumerating them, and it deliberately keeps a bare
+    `<` *out* of the set: `<` reads, so naming its operand a write target would
+    turn `cat < /etc/passwd` into a refusal — an over-block in exchange for
+    nothing. Erring towards "operator" is the safe direction *because of* what
+    the walk does with the answer: an operator is never recorded as a target, so
+    recognising more of them only makes the walk look further for the real one.
     """
-    return tok in (">", ">>", "&>", "&>>") or re.fullmatch(r"\d*>>?", tok) is not None
+    return (
+        bool(tok)
+        and ">" in tok
+        and re.fullmatch(r"[<>|&0-9-]+", tok) is not None
+    )
 
 
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
@@ -619,7 +640,7 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     Returns path tokens the command appears to write to:
       - ``rm <path>...`` and ``rmdir <path>`` → the removed paths
       - ``mv <src> <dst>`` / ``cp <src> <dst>`` → the destination
-      - ``> / >> / 2> / &>`` redirects → the redirect target
+      - ``> / >> / 2> / &> / >| / <>`` redirects → the redirect target
 
     **Parsed, not scanned** (issue #1162). The previous version regex-scanned
     raw text, which failed in both directions:
@@ -662,8 +683,9 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     while i < len(tokens):
         tok = tokens[i]
         word = _command_word(tok)
-        # Redirects: `>` `>>` `&>` `&>>` are their own tokens, and a numeric
-        # fd prefix arrives as a separate token (`2` `>` `e`).
+        # Redirects: `>` `>>` `&>` `&>>` `>|` `<>` are their own tokens, and a
+        # numeric fd prefix arrives as a separate token (`2` `>` `e`). Which
+        # spellings count is `_is_redirect_operator`'s job — this walk only asks.
         if _is_redirect_operator(tok):
             # An operator is never a write target. A *quoted* `>` reaches this
             # walk as an operator token — the tokenizer dequotes, so `'>'` and
