@@ -3,10 +3,12 @@
 
 The class this exists for
 -------------------------
-Every evolution cycle curates two memory indexes (the evolution project's and
-the session's), and the protocol is mechanical: keep at most 50 cycle rows,
-append the rows that fall off to `cycle-archive-<YYYYMMDD>.md`, never delete a
-detail file, never reference the archive from the index. It has been done by
+An evolution cycle used to curate two memory indexes (the evolution project's
+and the session's); that per-cycle mandate was removed (rant 2026-09-14T20:14:56),
+so an index is now maintained on demand. When it is maintained, the protocol is
+mechanical: keep at most 50 cycle rows, append the rows that fall off to
+`cycle-archive-<YYYYMMDD>.md`, never delete a detail file, never reference the
+archive from the index. It has been done by
 hand-written scripts, and the hand-written scripts have failed twice:
 
 * an empty shell variable turned ``sed -i '' "${n}d"`` into the sed script ``d``,
