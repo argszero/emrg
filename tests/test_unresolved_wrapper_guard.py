@@ -29,7 +29,12 @@ import tempfile
 
 import pytest
 
-from emrg.tools.bash_tool import _check_sandbox
+from emrg.tools.bash_tool import (
+    _check_sandbox,
+    _is_absolute_path,
+    _is_within,
+    _temp_write_roots,
+)
 
 READ_ONLY = "read-only"
 WW = "workspace-write"
@@ -134,33 +139,65 @@ def test_a_wrapper_chain_of_writes_terminates() -> None:
 
 
 def test_an_unresolvable_variable_root_is_blocked() -> None:
-    """A root the environment cannot supply means the guard cannot decide it."""
+    """A root the environment cannot supply means the guard cannot decide it.
+
+    The premise is asserted rather than assumed: the variable must really be
+    absent from the guard's environment, or this test would be measuring a
+    different rule.
+    """
+    assert "EMRG_UNSET_PROBE_VAR" not in os.environ
     allowed, reason, _enforcement = _check_sandbox(
         "echo x > $EMRG_UNSET_PROBE_VAR/x.txt", WW, WORKDIR
     )
     assert allowed is False
     assert "workspace-write sandbox" in (reason or "")
-    # The same shape with a variable the environment *can* supply is decided on
-    # the resolved path instead — here, the daemon's own config, which the tier
-    # refuses as a protected file.
-    protected, _r2, _e2 = _check_sandbox("echo x > $HOME/.emrg/config.toml", WW, WORKDIR)
-    assert protected is False
 
 
-def test_an_env_resolvable_variable_is_decided_like_its_literal() -> None:
-    """Expansion is not a bypass: a variable and its value reach one verdict."""
-    home_literal = os.path.join(os.path.expanduser("~"), "emrg-unresolved-probe.txt")
-    via_var, _r1, _e1 = _check_sandbox(
-        "echo x > $HOME/emrg-unresolved-probe.txt", WW, WORKDIR
+def test_a_resolvable_variable_root_is_decided_after_expansion(monkeypatch, tmp_path) -> None:
+    """Expansion happens first, so the variable spelling is not a bypass.
+
+    The literal arm is built from the guard's *own* expansion of the same string
+    rather than from `~`, because the two are only interchangeable where the
+    environment happens to define both — an earlier version of this test compared
+    `$HOME/...` with `os.path.expanduser("~")/...` and failed on a Windows runner
+    that sets neither, which was a defect in the test, not in the guard.
+    """
+    value = str(tmp_path)
+    assert _is_absolute_path(value), "the premise of this comparison is an absolute path"
+    monkeypatch.setenv("EMRG_PROBE_ROOT", value)
+    raw = "echo x > $EMRG_PROBE_ROOT/out.txt"
+    literal = f"echo x > {os.path.expandvars('$EMRG_PROBE_ROOT/out.txt')}"
+    via_var, _r1, _e1 = _check_sandbox(raw, WW, WORKDIR)
+    via_literal, _r2, _e2 = _check_sandbox(literal, WW, WORKDIR)
+    assert via_var == via_literal
+
+
+def test_a_variable_can_reach_the_daemons_own_config(monkeypatch) -> None:
+    """The resolved path — not the spelling — is what the tier decides on."""
+    home = os.path.expanduser("~")
+    if not _is_absolute_path(home):
+        pytest.skip("this environment has no resolvable home directory")
+    monkeypatch.setenv("EMRG_PROBE_HOME", home)
+    allowed, reason, _enforcement = _check_sandbox(
+        "echo x > $EMRG_PROBE_HOME/.emrg/config.toml", WW, WORKDIR
     )
-    via_literal, _r2, _e2 = _check_sandbox(f"echo x > {home_literal}", WW, WORKDIR)
-    assert via_var == via_literal
+    assert allowed is False
+    assert "workspace-write sandbox" in (reason or "")
 
 
-@pytest.mark.skipif(not os.environ.get("TMPDIR"), reason="this environment sets no TMPDIR")
-def test_the_temp_root_is_still_reachable_through_its_variable() -> None:
-    """The temp area the tier promises stays reachable by its own spelling."""
-    temp_literal = os.path.join(tempfile.gettempdir(), "emrg-probe.txt")
-    via_var, _r1, _e1 = _check_sandbox("echo x > $TMPDIR/emrg-probe.txt", WW, WORKDIR)
-    via_literal, _r2, _e2 = _check_sandbox(f"echo x > {temp_literal}", WW, WORKDIR)
+def test_the_temp_root_is_still_reachable_through_its_variable(monkeypatch) -> None:
+    """The temp area the tier promises stays reachable by its own spelling.
+
+    Same construction as the test above — the literal arm is the guard's own
+    expansion — and the one positive claim is made only after checking that the
+    temp directory really is a permitted root on this host.
+    """
+    monkeypatch.setenv("EMRG_PROBE_TMP", tempfile.gettempdir())
+    raw = "echo x > $EMRG_PROBE_TMP/emrg-probe.txt"
+    literal = f"echo x > {os.path.expandvars('$EMRG_PROBE_TMP/emrg-probe.txt')}"
+    via_var, _r1, _e1 = _check_sandbox(raw, WW, WORKDIR)
+    via_literal, _r2, _e2 = _check_sandbox(literal, WW, WORKDIR)
     assert via_var == via_literal
+    real = os.path.realpath(tempfile.gettempdir())
+    if any(_is_within(real, root) or real == root for root in _temp_write_roots()):
+        assert via_var is True
