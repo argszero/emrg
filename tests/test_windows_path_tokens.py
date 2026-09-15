@@ -75,6 +75,33 @@ INSIDE_WINDOWS = [
 # built in `_posix_corpus` against a real workspace.
 
 
+@pytest.fixture(autouse=True)
+def _pinned_write_roots(monkeypatch):
+    """Pin the guard's write roots, so this file's verdict is about the tree.
+
+    The corpus spells its workspace as a Windows path (`C:\\Users\\x\\repo`), and
+    on a POSIX arm `os.path.realpath` resolves *both* sides under the cwd. A write
+    root that contains the cwd therefore swallows the target, and the guard then
+    allows the write by its own rule — correctly, because the resolved file really
+    is inside a root it permits.
+
+    That makes the file's verdict depend on where the tree was materialised, which
+    is not a property of the tree. Measured before this pin: the file passes in a
+    worktree inside the repository and reports **15 failed** for the identical
+    tree when it is materialised under `tempfile.gettempdir()`. That is not a
+    hypothetical — `scripts/check-merge-plan-suite.py` builds the tree a merge
+    would land under exactly that root, so every plan on this master read FAILED
+    while the product was correct.
+
+    Pinning removes the ambient variable rather than the claim: what these tests
+    measure is the Windows *spelling* — an absolute path outside the workspace —
+    and the temp/trusted-root policy has its own tests. Both roots are pinned, not
+    just the temp one, because the trusted zone is cwd-dependent the same way.
+    """
+    monkeypatch.setattr(bt, "_temp_write_roots", lambda: set(), raising=True)
+    monkeypatch.setattr(bt, "_trusted_write_zones", lambda: set(), raising=True)
+
+
 def _windows(monkeypatch, value):
     monkeypatch.setattr(bt, "_WINDOWS_SHELL", value, raising=True)
 
@@ -141,6 +168,32 @@ def test_windows_rule_is_idempotent_on_its_own_output(monkeypatch):
     once = bt._split_command_tokens(r"rm -rf C:\Users\x\important")
     twice = bt._split_command_tokens(" ".join(once))
     assert once == twice
+
+
+def test_the_write_roots_are_pinned_for_this_file():
+    """A silent removal of the pin must fail here, not pass everywhere else."""
+    assert bt._temp_write_roots() == set()
+    assert bt._trusted_write_zones() == set()
+
+
+def test_a_root_containing_the_tree_would_swallow_the_corpus(monkeypatch):
+    """The mechanism the pin defends against, driven with the root made explicit.
+
+    A write root containing the cwd turns the case into a permitted file, because
+    the Windows spelling resolves *under* the cwd on a POSIX arm. Stated as a
+    measurement rather than as a comment, so that a later change which makes the
+    resolution cwd-independent fails here instead of quietly retiring the pin.
+    """
+    cmd = OUTSIDE_WINDOWS[0]
+    _windows(monkeypatch, True)
+    assert _verdict(cmd, WINDOWS_WS) == "BLOCK", "the pinned reading"
+    monkeypatch.setattr(
+        bt, "_temp_write_roots", lambda: {os.path.realpath(os.getcwd())}
+    )
+    assert _verdict(cmd, WINDOWS_WS) == "ALLOW", (
+        "a write root containing the tree is what flips this verdict, so the pin "
+        "is what keeps the corpus about the tree rather than about the directory"
+    )
 
 
 # ── no POSIX regression, measured by equality rather than by a list ─────────
