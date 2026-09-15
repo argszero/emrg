@@ -1483,6 +1483,12 @@ def _cwd_left_workspace(
     f'`, `env -C /elsewhere …`), since it runs with the same effect; depth is
     capped rather than trusted, because a guard must terminate on adversarial
     input.
+
+    **Known limit**: a directory the token stream cannot preserve is invisible
+    here. A Windows spelling `C:\\Users\\x` reaches the guard as `C:Usersx` —
+    backslash is shlex's escape character — so it is not read as an absolute
+    path at all (issue #1261). Forward-slash spellings, relative moves and
+    `..` are unaffected.
     """
     allowed = [workspace] + list(_trusted_write_zones()) + list(_temp_write_roots())
     cwd = os.path.realpath(_base) if _base else os.path.realpath(workspace)

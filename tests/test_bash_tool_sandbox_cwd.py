@@ -11,6 +11,13 @@ The property under test is *parity*, not a list of blocked strings: however the
 guard judges the absolute path, it must judge the relative spelling of the same
 write the same way. A verdict list would pass on a guard that simply refused
 every command containing ``cd``; parity fails such a guard on the allow side.
+
+Every path is spelled with forward slashes on purpose. The guard reads targets
+and operands from a POSIX-style token stream, where a backslash is an escape
+character, so a Windows spelling `C:\\Users\\x` reaches it as `C:Usersx` — a
+name that is not absolute at all (issue #1261). Using forward slashes keeps
+this file a test of the cwd rule instead of a test of that separate defect;
+Windows resolves both spellings to the same path.
 """
 
 import os
@@ -27,12 +34,17 @@ from emrg.tools.bash_tool import (
     _trusted_write_zones,
 )
 
-# Synthetic paths: the check is textual, so the directories need not exist.
+# Synthetic paths: the checks are textual, so the directories need not exist.
 WORKDIR = os.path.join(os.path.expanduser("~"), "Documents", "emrg-cwd-ws")
 OUTSIDE = os.path.join(os.path.expanduser("~"), "Documents", "emrg-cwd-outside")
 TEMP = tempfile.gettempdir()
 WW = "workspace-write"
 RO = "read-only"
+
+
+def spelled(path: str) -> str:
+    """The path as a command line spells it (forward slashes)."""
+    return path.replace(os.sep, "/") if os.sep != "/" else path
 
 
 def _verdict(cmd: str, mode: str = WW, workdir: str | None = WORKDIR) -> bool:
@@ -50,6 +62,10 @@ def test_premise_workdir_is_judgeable():
     # block below would be measuring the fixture rather than the guard.
     roots = [_temp_write_roots(), _trusted_write_zones()]
     assert not any(_is_within(OUTSIDE, r) for group in roots for r in group)
+    # The spelling used in every command below must be one the guard reads as
+    # absolute — the premise the blocks rest on (issue #1261 is why this file
+    # does not use backslashes).
+    assert _is_absolute_path(spelled(OUTSIDE))
 
 
 @pytest.mark.parametrize(
@@ -65,8 +81,8 @@ def test_premise_workdir_is_judgeable():
 )
 def test_relative_after_cd_gets_the_absolute_verdict(directory):
     """The parity property: both spellings of one write get one verdict."""
-    relative = f"cd {directory}; echo x > out.txt"
-    absolute = f"echo x > {os.path.join(directory, 'out.txt')}"
+    relative = f"cd {spelled(directory)}; echo x > out.txt"
+    absolute = f"echo x > {spelled(os.path.join(directory, 'out.txt'))}"
     assert _verdict(relative) == _verdict(absolute), (
         f"relative-after-cd and absolute disagree for {directory!r}"
     )
@@ -74,43 +90,52 @@ def test_relative_after_cd_gets_the_absolute_verdict(directory):
 
 def test_leaving_the_workspace_blocks_a_relative_write():
     """The live fail-open: it wrote outside while the guard read "in-workspace"."""
-    assert _verdict(f"cd {OUTSIDE}; echo x > out.txt") is False
-    assert _verdict(f"cd {OUTSIDE} && echo x > out.txt") is False
-    assert _verdict(f"cd {os.path.dirname(WORKDIR)}; echo x > out.txt") is False
-    assert _verdict(f"cd {OUTSIDE}; rm -rf build") is False
+    assert _verdict(f"cd {spelled(OUTSIDE)}; echo x > out.txt") is False
+    assert _verdict(f"cd {spelled(OUTSIDE)} && echo x > out.txt") is False
+    assert _verdict(f"cd {spelled(os.path.dirname(WORKDIR))}; echo x > out.txt") is False
+    assert _verdict(f"cd {spelled(OUTSIDE)}; rm -rf build") is False
 
 
 def test_the_block_names_the_directory_that_moved_the_shell():
-    allowed, reason, _ = _check_sandbox(f"cd {OUTSIDE}; echo x > out.txt", WW, WORKDIR)
+    allowed, reason, _ = _check_sandbox(
+        f"cd {spelled(OUTSIDE)}; echo x > out.txt", WW, WORKDIR
+    )
     assert allowed is False
-    assert "out.txt" in reason and OUTSIDE in reason, reason
+    # The message must name both the target and the directory that moved the
+    # shell — a block that does not say where the write would land is not
+    # actionable. Compared by basename so the check does not depend on how the
+    # platform spells the path back.
+    assert "out.txt" in reason and os.path.basename(OUTSIDE) in reason, reason
 
 
 def test_env_chdir_is_a_move_too():
     """`env -C <dir>` starts its child there, exactly as `cd` would."""
-    assert _verdict(f"env -C {OUTSIDE} sh -c 'echo x > out.txt'") is False
-    assert _verdict(f"env --chdir={OUTSIDE} sh -c 'echo x > out.txt'") is False
-    assert _verdict(f"env -C {os.path.join(WORKDIR, 'sub')} sh -c 'echo x > out.txt'") is True
+    assert _verdict(f"env -C {spelled(OUTSIDE)} sh -c 'echo x > out.txt'") is False
+    assert _verdict(f"env --chdir={spelled(OUTSIDE)} sh -c 'echo x > out.txt'") is False
+    inside = spelled(os.path.join(WORKDIR, "sub"))
+    assert _verdict(f"env -C {inside} sh -c 'echo x > out.txt'") is True
 
 
 def test_a_nested_shell_is_read_the_same_way():
-    assert _verdict(f"sh -c 'cd {OUTSIDE}; echo x > out.txt'") is False
-    assert _verdict(f"sh -c 'cd {os.path.join(WORKDIR, 'sub')}; echo x > out.txt'") is True
+    assert _verdict(f"sh -c 'cd {spelled(OUTSIDE)}; echo x > out.txt'") is False
+    inside = spelled(os.path.join(WORKDIR, "sub"))
+    assert _verdict(f"sh -c 'cd {inside}; echo x > out.txt'") is True
 
 
 def test_the_detector_resolves_chained_moves():
     """`cd a; cd b` resolves b against a, not against the workspace root.
 
     The discriminating case is a first move that stays inside: only a walk that
-    carries the cwd forward lands on `Documents` — one that resolved every move
-    against the workspace root would report `~`. The reported directory is the
-    first one outside, which is the one that made the relative reading possible.
+    carries the cwd forward lands on the workspace's parent — one that resolved
+    every move against the workspace root would report the parent of that
+    parent. The reported directory is the first one outside, which is the one
+    that made the relative reading possible.
     """
-    assert _cwd_left_workspace(f"cd {WORKDIR}/sub; cd ..", WORKDIR) is None
-    assert _cwd_left_workspace(f"cd {WORKDIR}/sub; cd ../..", WORKDIR) == os.path.dirname(
-        WORKDIR
-    )
-    assert _cwd_left_workspace("cd ..; cd ..; ls", WORKDIR) == os.path.dirname(WORKDIR)
+    parent = os.path.realpath(os.path.dirname(WORKDIR))
+    sub = spelled(os.path.join(WORKDIR, "sub"))
+    assert _cwd_left_workspace(f"cd {sub}; cd ..", WORKDIR) is None
+    assert _cwd_left_workspace(f"cd {sub}; cd ../..", WORKDIR) == parent
+    assert _cwd_left_workspace("cd ..; cd ..; ls", WORKDIR) == parent
     # A bare `cd` goes $HOME; `cd -` names $OLDPWD, which nothing can resolve.
     assert _cwd_left_workspace("cd; ls", WORKDIR) == os.path.realpath(
         os.path.expanduser("~")
@@ -125,11 +150,11 @@ def test_the_detector_resolves_chained_moves():
         "rm -rf build",
         "cp -r src dst",
         "cd sub && echo x > out.txt",
-        f"cd {WORKDIR}/sub; echo x > out.txt",
-        f"cd {TEMP}; echo x > out.txt",
+        f"cd {spelled(WORKDIR)}/sub; echo x > out.txt",
+        f"cd {spelled(TEMP)}; echo x > out.txt",
         'echo "cd /elsewhere; echo x > out.txt" > out.txt',
         'grep -rn "cd /elsewhere" . > out.txt',
-        f"cd {OUTSIDE}",  # a move with no write in the same command
+        f"cd {spelled(OUTSIDE)}",  # a move with no write in the same command
         "env -C . echo hi > out.txt",
     ],
 )
@@ -141,12 +166,15 @@ def test_staying_inside_is_unchanged(cmd):
 def test_read_only_is_untouched_by_this_rule():
     """read-only blocks every non-/dev/null target already; the new rule adds
     nothing there and must not change those verdicts."""
-    for cmd in (f"cd {OUTSIDE}; echo x > out.txt", f"cd {WORKDIR}; echo x > out.txt"):
+    for cmd in (
+        f"cd {spelled(OUTSIDE)}; echo x > out.txt",
+        f"cd {spelled(WORKDIR)}; echo x > out.txt",
+    ):
         assert _verdict(cmd, RO) is False
-    assert _verdict(f"cd {OUTSIDE}; echo x > /dev/null", RO) is True
+    assert _verdict(f"cd {spelled(OUTSIDE)}; echo x > /dev/null", RO) is True
 
 
 def test_without_a_workspace_the_old_assumption_stands():
     """No boundary means no relative boundary to enforce (unchanged behaviour)."""
-    assert _verdict(f"cd {OUTSIDE}; echo x > out.txt", WW, None) is True
+    assert _verdict(f"cd {spelled(OUTSIDE)}; echo x > out.txt", WW, None) is True
     assert _check_sandbox("rm -rf build", WW, None)[0] is True
