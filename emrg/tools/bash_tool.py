@@ -745,6 +745,11 @@ def _unfuse_newlines(tokens: list[str]) -> list[str]:
     (`git stash drop`, `git checkout .`, `git clean -fd`, `git config user.name
     x`, `git reset --hard`) × 8 fused forms (a blank line, two blank lines,
     ``";\n"``, ``"\n;"``, ``"&&\n"``, ``"\n&&"``, ``"|\n"``, ``"\n(\n"``).
+    Five of those 8 forms are shapes a shell really runs the writer in (measured
+    against both `/bin/sh` and `/bin/bash` with a side-effect probe); the other
+    three — ``"\n;"``, ``"\n&&"``, ``"\n(\n"`` — are parse errors in both, so
+    closing them is conservative rather than necessary, and 25 of the 40 are
+    shapes whose writer a shell executes.
 
     Only tokens that are *entirely punctuation* are split, and that is exactly
     what separates a fused run from a word: ``echo "a<newline>b"`` is one

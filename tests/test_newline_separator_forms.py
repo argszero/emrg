@@ -10,7 +10,12 @@ mutator was never seen.
 
 Measured on master `e6eaaee4`, `read-only` tier, by calling `_check_sandbox`
 directly (the commands are never executed): **40 shapes ALLOWED** that block when
-the same writer is written inline — 5 writers × 8 fused forms.
+the same writer is written inline — 5 writers × 8 fused forms. Five of the 8
+forms are shapes a shell really runs the writer in (probe: the writer word
+replaced by `mkdir <fresh dir>`, asked of both `/bin/sh` and `/bin/bash`); the
+other three — ``"\n;"``, ``"\n&&"``, ``"\n(\n"`` — are parse errors in both, so
+25 of the 40 are shapes whose writer a shell executes and the rest are closed
+conservatively.
 
     git stash drop                        -> blocked
     echo done<newline>git stash drop      -> blocked   (what #1233 fixed)
