@@ -298,6 +298,53 @@ Two gaps get mistaken for a broken fix:
 
 Check `emrg -v` and when the daemon started before re-reading the source.
 
+### Why is a write blocked at `workspace-write`?
+
+`workspace-write` is the default tier, and it allows a write only when the
+target resolves inside one of three roots:
+
+- the injected **workspace root** (the project the task runs in),
+- the **OS temp root** `tempfile.gettempdir()`,
+- the **trusted data roots** — `~/.emrg/evolution/.emrg/`, the evolution
+  module's own records and scratch, trusted because its records live outside
+  the workspace it is given (issue #1093).
+
+Every other absolute path is refused, and the daemon's own state files are
+refused inside any root (`~/.emrg/config.toml` is *protected*; a write to
+`~/.emrg` itself is refused outright, because it can erase the daemon's data).
+
+Measured 2026-09-16 against `master`: inside the workspace **ALLOW**,
+`$TMPDIR/…` **ALLOW**, `/tmp/…` **BLOCK**, `/private/tmp/…` **BLOCK**,
+`/var/tmp/…` **BLOCK**, `/dev/shm/…` **BLOCK**.
+
+#### `$TMPDIR`, not `/tmp`
+
+The tier means `tempfile.gettempdir()` — `$TMPDIR`, which is
+`/var/folders/<…>/T` on macOS and `/tmp` on Linux. So `/tmp` is the temp root on
+Linux but **not** on macOS, and the refusal names the target without naming the
+rule:
+
+```
+⛔ [sandbox:workspace-write enforcement=partial] workspace-write sandbox:
+blocked write outside workspace '/tmp/emrg-e2e-probe.txt' — command not executed
+```
+
+Use `$TMPDIR` (`mktemp -d` is the portable way) rather than a hardcoded `/tmp`
+in anything a sandboxed task runs. Nothing promises `/tmp` is writable, so the
+block is over-cautious rather than wrong — a boundary is not widened without the
+host's decision.
+
+Two more properties are worth knowing before debugging a refusal, both measured
+the same day:
+
+- **per call, not per statement** — one blocked target refuses the whole call.
+  `echo a > inside.txt; echo b > /etc/x` creates neither file: the guard decides
+  before the shell starts, so the legal half never runs either.
+- **the same `/tmp` target is refused by both tiers, for opposite reasons** —
+  `read-only` refuses the *shape* wherever the target lives (a redirect to
+  anything but `/dev/null`), `workspace-write` refuses the *target* wherever it
+  is written from. A refusal reason is how you tell which one you hit.
+
 ---
 
 ## 📜 License
