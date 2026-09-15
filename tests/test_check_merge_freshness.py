@@ -319,7 +319,16 @@ def test_a_stale_branch_with_votes_is_told_what_a_refresh_would_cost(mod, monkey
     # landing-tree vote would then never reach 3/3. Measured 2026-09-14
     # (cyc20260914-040021): #1200's 2nd vote was a review on a stale head and
     # counted; #1199/#1201 each merged on a 3rd vote cast the same way.
-    assert "gh pr review" in err
+    #
+    # The channel is necessary and not sufficient: two votes cast this way were
+    # lost on 2026-09-16 (cyc20260916-020149) because `gh pr review --body-file`
+    # returned 0 with no output while the body carried no cycle id, which
+    # check-vote-count.py reads the voting cycle out of. Both halves are pinned
+    # here - the helper that enforces it, and the format the helper needs - because
+    # a remedy that names only the channel is the advice that lost them.
+    assert "cast-vote.py 1 --body-file" in err
+    assert "cycYYYYMMDD-HHMMSS" in err
+    assert "prints nothing on success" in err
     assert "not a review" not in err
     assert "carries the reading but no vote" in err
     assert "Re-merge master into each stale branch" not in err
