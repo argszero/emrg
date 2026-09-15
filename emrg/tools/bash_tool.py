@@ -208,26 +208,47 @@ _GIT_READ_VERBS = frozenset({
     "ls-tree", "ls-remote", "cat-file", "merge-base", "merge-tree",
     "for-each-ref", "for-each-repo", "show-branch", "show-index", "show-ref",
     "count-objects", "verify-commit", "verify-pack", "verify-tag", "patch-id",
-    "get-tar-commit-id", "fsck", "diagnose", "refs", "revisions", "var",
+    "get-tar-commit-id", "fsck", "refs", "revisions", "var",
     "version", "help", "repository-layout",
     # pure stdin/stdout text filters — read a stream, print a stream
     "check-attr", "check-ignore", "check-mailmap", "check-ref-format",
-    "fmt-merge-msg", "interpret-trailers", "mailinfo", "mailsplit", "mailmap",
+    "fmt-merge-msg", "mailmap",
     "stripspace", "column",
+    # Deliberately absent: `mailinfo <msg> <patch>` writes both named paths,
+    # `mailsplit -o <dir>` writes into dir. They were listed here as "text
+    # filters" and are writers; the allowlist is default-BLOCK, so leaving
+    # them out is the fix.
     # Remote-tracking / credential inspection: these write only under .git or
     # in the user's credential store, never the working tree — and issue #979 is
     # a dirty-tree guard. `fetch` is deliberately kept: the previous design
     # allowed it, it cannot destroy uncommitted work, and refusing it would be a
     # usability regression with no safety gain.
-    "fetch", "credential",
+    "fetch",
+    # `git cherry` reports the commits that are not upstream. Unlike the
+    # three verbs above it has no writing subcommand at all, so there is no
+    # shape to decide — it belongs on the read list rather than in the shape
+    # logic (issue #1240).
+    "cherry",
 })
 # Verbs whose *shape* decides — the verb alone says nothing about the effect.
 # Kept out of `_GIT_READ_VERBS` so each is judged by explicit logic, and each
 # defaults to BLOCK when its shape is not a proven read.
 _GIT_SHAPE_DECIDED = frozenset({"stash", "worktree", "submodule", "remote",
-                                "branch", "tag", "config", "hash-object"})
+                                "branch", "tag", "config", "hash-object",
+                                "interpret-trailers", "credential",
+                                # issue #1240: these three are reads in their
+                                # reporting shape and writes in another, so the
+                                # verb alone cannot decide them — they were
+                                # previously refused outright, which made the
+                                # reason string ("mutating command") false about
+                                # them and cost a downgraded cycle the one read
+                                # that explains a dirty tree (`git reflog`).
+                                "reflog", "notes", "bisect"})
 # Listing flags for `branch` / `tag`: with one of these the command prints and
 # writes nothing, even when a pattern argument follows (`git tag -l 'v*'`).
+# `--output <file>` / `--output=<file>`: the redirect the diff-family readers
+# spell as an option.
+_OUTPUT_FLAG_RE = re.compile(r"--output(?:-file)?(?:=|$)")
 _GIT_LIST_FLAGS = frozenset({"-l", "--list", "-a", "--all", "-r", "--remotes",
                              "-v", "-vv", "--verbose", "--contains", "--merged",
                              "--no-merged", "--points-at", "--format",
@@ -244,6 +265,20 @@ _GIT_CONFIG_READ_FLAGS = frozenset({"--get", "--get-all", "--get-regexp",
 # the option and its value to find the verb (`git -C . checkout .`).
 _GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--exec-path", "--git-dir",
                                     "--work-tree", "--namespace", "--super-prefix"})
+
+# git *subcommand-level* options that also take a SEPARATE value. They are not
+# global options, so the splitter above does not skip their values — and without
+# this set a value occupies the subcommand slot: `git notes --ref refs/notes/x
+# list` read `refs/notes/x` as the subcommand, and `git reflog -n 5` read `5` as
+# it, so both were refused as "mutating" (issue #1240, measured 2026-09-15).
+#
+# Only flags whose value is mandatory belong here. Adding one that takes no value
+# would let the *subcommand* be skipped, which is the fail-open direction; each
+# entry below is a real separator-form option of a verb in `_GIT_SHAPE_DECIDED`.
+_GIT_SUBCOMMAND_WITH_VALUE = frozenset({
+    "-n", "--max-count", "--skip", "--ref", "--date", "--pretty", "--format",
+    "--grep", "--author", "--committer", "--since", "--until",
+})
 # Shell operators that separate one command from the next in a chain.
 _SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
 # Tokens that put what follows them in command position without being commands
@@ -282,6 +317,29 @@ _SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
 # a real invocation and are already handled, because the invocation is still in
 # the token stream.
 _SHELL_EVALUATORS = frozenset({"eval"})
+
+# ── Heredocs: a body is DATA unless a program eats it as a program ──────────
+# A heredoc body is text on some command's stdin. It is shell *code* only when
+# the consumer is a shell (`sh <<EOF` runs the body); for `cat <<EOF` it is
+# data, and every `>`, `->`, `rm` or `git checkout .` inside it is a character.
+# The scanners below parse a command text with the tokenizer, so a body used to
+# be read as shell code by accident of *text* — see
+# `_mask_data_heredoc_bodies` for what that cost, measured.
+#
+# This is an allowlist on purpose, and the direction of the bias is the point:
+# a consumer that is not named here keeps today's behaviour (the body is
+# scanned), so an unenumerated interpreter — `ssh host <<EOF`, `sed <<EOF`,
+# `patch <<EOF` — stays guarded. Naming the *readers* rather than the programs
+# that execute is what makes the unenumerated case fail closed.
+#
+# The interpreters are named because the guard ALREADY allows their inline
+# spelling: `python3 -c "print(1 > 0)"` and `python3 -c 'import os;
+# os.system("rm -rf /tmp/y")'` are both allowed on master (measured), and the
+# same script in a heredoc must not be judged differently for its spelling.
+_DATA_READER_CONSUMERS = frozenset({
+    "cat", "grep", "egrep", "fgrep", "rg", "wc", "head", "tail", "diff",
+    "jq", "nl", "sort", "uniq", "python", "python3", "node",
+})
 
 # ── Containment-escape guard (issue #1102) ─────────────────────────────────
 # Borrowed from Claude Code v2.1.257 ("Containment Escape"): block cloud
@@ -430,7 +488,7 @@ def _positional_args(tokens: list[str], i: int) -> list[str]:
     return out
 
 
-def _extract_write_targets(cmd: str) -> list[str]:
+def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     """Write targets of ``cmd``: the paths a command appears to write.
 
     Returns path tokens the command appears to write to:
@@ -458,8 +516,12 @@ def _extract_write_targets(cmd: str) -> list[str]:
     Still deliberately non-exhaustive in *which verbs* it covers (an
     interpreter can always write a file); the honest boundary stays
     ``enforcement="partial"``.
+
+    Heredoc bodies that no shell executes are masked first: a body is text on
+    some command's stdin, and reading it as shell code named prose and the
+    delimiter word as write targets (`_mask_data_heredoc_bodies`).
     """
-    tokens = _split_command_tokens(cmd)
+    tokens = _split_command_tokens(_mask_data_heredoc_bodies(cmd))
     targets: list[str] = []
     i = 0
     while i < len(tokens):
@@ -478,6 +540,13 @@ def _extract_write_targets(cmd: str) -> list[str]:
             # whether the delete recurses does not decide whether the file
             # survives.
             targets.extend(_positional_args(tokens, i))
+        elif word == "git":
+            # `--output=<file>` is the diff-family readers' shared redirect:
+            # `git diff --output=<f>` truncates and writes <f> exactly as
+            # `> <f>` does. Scoped to a git invocation because the tokenizer
+            # dequotes — a token `--output=x` is textually identical whether
+            # git would read it as an option or it sits inside quotes.
+            targets.extend(_git_output_flag_targets(tokens, i))
         elif word == "mv":
             args = _positional_args(tokens, i)
             if len(args) >= 2:
@@ -508,7 +577,40 @@ def _extract_write_targets(cmd: str) -> list[str]:
             if "-delete" in args:
                 targets.extend(_positional_args(tokens, i))
         i += 1
+    # Reach the same places the git-mutator scan reaches: a destructive
+    # command the shell will run is judged wherever it is written (issue
+    # #1234). `_nested_command_texts` is the same over-approximating walk
+    # `_find_git_mutator` uses, capped at the same depth, so the two rules
+    # cannot drift apart again.
+    if _depth < 3:
+        for nested in _nested_command_texts(tokens):
+            for t in _extract_write_targets(nested, _depth + 1):
+                if t not in targets:
+                    targets.append(t)
     return targets
+
+
+def _git_output_flag_targets(tokens: list[str], i: int) -> list[str]:
+    """Write targets named by a git invocation's ``--output[=]<file>`` flag.
+
+    Scoped to ``git`` on purpose. The tokenizer dequotes, so a global test on
+    the token cannot distinguish the option from the same characters inside a
+    string literal (``echo "--output=x"`` tokenizes to the same
+    ``--output=x``), and a guard that refuses a command for *mentioning* the
+    flag is the spelling-vs-effect defect fixed in #1162. As a git option the
+    flag has a real position, so it is read only where git would read it.
+    """
+    out: list[str] = []
+    args = _args_after_command(tokens, i)
+    for j, tok in enumerate(args):
+        if not _OUTPUT_FLAG_RE.match(tok):
+            continue
+        attached = tok.split("=", 1)[1] if "=" in tok else ""
+        if attached:
+            out.append(attached)
+        elif j + 1 < len(args):
+            out.append(args[j + 1])          # `--output <file>`
+    return out
 
 
 def _protected_paths() -> list[str]:
@@ -989,13 +1091,37 @@ def _git_invocation_is_mutator(verb: str, rest: list[str]) -> str | None:
     return verb
 
 
+def _git_positionals(rest: list[str]) -> list[str]:
+    """The non-option arguments of a git subcommand, option *values* excluded.
+
+    The same walk as the invocation splitter's global-option skip, one level
+    down: an option that takes a separate value consumes the next token, so
+    `["--ref", "refs/notes/x", "list"]` yields `["list"]` instead of
+    `["refs/notes/x", "list"]`. A value is never a subcommand, and treating one
+    as a subcommand is how `git reflog -n 5` was refused as a mutator (#1240).
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(rest):
+        tok = rest[i]
+        if tok in _GIT_SUBCOMMAND_WITH_VALUE:
+            i += 2
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    return out
+
+
 def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
     """The verdict for a verb whose subcommand / flags decide its effect.
 
     Returns the verb when the invocation writes, or None when it is a proven
     read. Every branch treats "not recognisably a read" as a write.
     """
-    positional = [t for t in rest if not t.startswith("-")]
+    positional = _git_positionals(rest)
     sub = next(iter(positional), None)
     if verb == "stash":
         # `stash list` / `stash show` read; a bare `git stash` saves and cleans
@@ -1031,10 +1157,30 @@ def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
         if any("=" in t for t in positional):
             return verb
         return None if len(positional) <= 1 else verb
+    if verb == "interpret-trailers":
+        # Prints to stdout by default; `--in-place` rewrites its file operand
+        # in place — the same effect as `sed -i`, which read-only blocks.
+        return verb if "--in-place" in rest else None
+    if verb == "credential":
+        # `fill` / `get` read; `approve` / `reject` write the credential store.
+        return None if sub in ("fill", "get") else verb
     if verb == "hash-object":
         # `git hash-object <file>` computes and prints an object name — a read.
         # `-w` additionally writes the object into the database.
         return verb if "-w" in rest else None
+    if verb == "reflog":
+        # Bare `git reflog` is `reflog show` — it prints. `expire` / `delete` /
+        # `drop` rewrite the reflog, so they stay blocked, as does any
+        # subcommand git adds later (fail-closed).
+        return None if sub in (None, "show", "list", "exists") else verb
+    if verb == "notes":
+        # `list` / `show` print; `add` / `copy` / `append` / `edit` / `remove` /
+        # `prune` write the notes ref. Bare `git notes` prints the note list.
+        return None if sub in (None, "list", "show") else verb
+    if verb == "bisect":
+        # Only the pure reporters. `start` / `good` / `bad` / `skip` / `reset` /
+        # `run` write `.git/BISECT_*`, and `replay` can rewrite history.
+        return None if sub in ("log", "view", "visualize") else verb
     return verb
 
 
@@ -1127,6 +1273,128 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
     return out
 
 
+def _heredoc_delimiters_read_as_data(line: str) -> list[str]:
+    """Delimiters of the heredocs opened on ``line`` whose body is data.
+
+    ``line`` is one line of the command (the shell reads a heredoc's body from
+    the lines *after* the opener, which the caller walks). The consumer is the
+    command word of the simple command that owns the ``<<``: for
+    `cat <<EOF > out` that is `cat`.
+
+    Two things this refuses to call a heredoc, both deliberate:
+
+    * a ``<<`` that is not its own token — `grep -n "x <<EOF" f` keeps the
+      operator inside the argument token, measured, so a *mention* of ``<<``
+      in a string is not an opener (this is why the scan runs on tokens);
+    * a delimiter that is not an identifier — `python3 -c 'print(1 << 2)'`
+      must not open anything.
+
+    And one thing it refuses to call data: an owning command that pipes
+    anywhere. `cat <<EOF | $SHELL` feeds the very text we would stop reading
+    into whatever the pipe names, and a pipe target spelled as a variable
+    cannot be resolved statically, so a pipe forfeits the mask entirely.
+    """
+    toks = _split_command_tokens(line)
+    segments: list[list[int]] = [[]]      # token indices, so the pipe test
+    for idx, tok in enumerate(toks):      # can look past the segment
+        if tok in _COMMAND_SEPARATORS:
+            segments.append([])
+        else:
+            segments[-1].append(idx)
+    out: list[str] = []
+    for seg in segments:
+        for pos, idx in enumerate(seg):
+            if toks[idx] != "<<" or pos + 1 >= len(seg):
+                continue
+            delim = toks[seg[pos + 1]].lstrip("-")
+            if not (delim and delim.isidentifier()):
+                continue
+            words = [toks[j] for j in seg[:pos] if not _is_env_assignment(toks[j])]
+            if not words or _basename(words[0]) not in _DATA_READER_CONSUMERS:
+                continue
+            # A pipe anywhere after the opener forfeits the mask: `cat <<EOF |
+            # $SHELL` (and `${SHELL}`, and any unresolved target) would run the
+            # text this would stop scanning. The test looks at the whole line,
+            # not the owning segment — the pipe is a segment separator, so the
+            # segment itself never contains it (measured: the first version of
+            # this function allowed `| $SHELL` for exactly that reason).
+            if "|" in toks[idx:]:
+                continue
+            out.append(delim)
+    return out
+
+
+def _mask_data_heredoc_bodies(cmd: str) -> str:
+    """Blank the heredoc bodies that no shell will execute, keeping the lines.
+
+    Why this exists (measured against master ``e6eaa4e4`` in the ``read-only``
+    tier, 2026-09-15): the scanners parse a command text with the tokenizer, and
+    a heredoc body is part of that text — so a body was read as shell code by
+    accident of *spelling*. A pure read paid for it:
+
+      - `cat <<'EOF'` + a line `> quoted` + `EOF` → BLOCKED, "blocked
+        destructive write targeting 'quoted'" — the target is prose;
+      - `cat <<'EOF'` + `a -> b` + `EOF` → BLOCKED, targeting ``'b'``;
+      - `cat <<'EOF'` + `rm -rf /tmp/x` + `EOF` → targets ``['/tmp/x', 'EOF']``,
+        i.e. the *delimiter word* named as a write target — the exact thing
+        issue #1162's docstring calls "a guard whose message points at a token
+        that is not a path is a guard nobody can trust";
+      - `cat <<'EOF'` + `git checkout .` + `EOF` → BLOCKED as a git mutator, so
+        a document that merely *mentions* the command could not be written.
+
+    The same text in the spelling the guard already reads correctly — a quoted
+    argument (`python3 -c "print(1 > 0)"`) — is allowed, so this was not a
+    safety margin being spent; it was one text judged two ways for its spelling.
+
+    Masking (not deleting) keeps the line structure, which matters because the
+    mutator scan treats a newline as a separator: a blank line is whitespace and
+    invents no command.
+
+    Boundaries, stated rather than implied — a body is masked only when ALL of
+    these hold, and every one of them fails closed:
+
+    1. the owning command is a named data reader (`_DATA_READER_CONSUMERS`);
+    2. its output is not piped (`| $SHELL` cannot be resolved statically);
+    3. a terminator line exists (an unterminated opener is left alone);
+    4. no shell wrapper or evaluator token appears anywhere **outside** the
+       bodies — so `sh -c "$(cat <<EOF … )"`, `eval $X` and `cat <<EOF | sh`
+       keep being scanned exactly as before.
+
+    What this does *not* claim: a body fed to an interpreter is executable
+    code, and an interpreter can write files. That boundary is unchanged and
+    already documented — `python3 -c 'open("/tmp/x","w")'` is allowed today.
+    """
+    if "<<" not in cmd:
+        return cmd
+    lines = cmd.split("\n")
+    regions: list[tuple[int, int]] = []
+    i = 0
+    while i < len(lines):
+        dels = _heredoc_delimiters_read_as_data(lines[i])
+        start = i + 1
+        next_i = i + 1
+        for delim in dels:
+            end = next((j for j in range(start, len(lines))
+                        if lines[j].strip() == delim), None)
+            if end is None:
+                break
+            regions.append((start, end))
+            start = end + 1
+            next_i = end + 1
+        i = next_i
+    if not regions:
+        return cmd
+    body_lines = {k for a, b in regions for k in range(a, b)}
+    for k, line in enumerate(lines):
+        if k in body_lines:
+            continue
+        if any(_basename(t) in _SHELL_WRAPPERS or _basename(t) in _SHELL_EVALUATORS
+               for t in _split_command_tokens(line)):
+            return cmd
+    return "\n".join("" if k in body_lines else line
+                     for k, line in enumerate(lines))
+
+
 def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     """The first mutating git verb in ``cmd``, or None when there is none.
 
@@ -1138,8 +1406,12 @@ def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     a mutator that the shell will run is judged wherever it is written. Depth
     is capped rather than trusted: nesting is bounded by the shell itself, and
     a guard must terminate on adversarial input.
+
+    Heredoc bodies that no shell executes are masked first, for the same reason
+    as in `_extract_write_targets`: `cat <<EOF` + `git checkout .` + `EOF` is a
+    document that mentions the command, not an invocation of it.
     """
-    tokens = _tokenize_command(cmd)
+    tokens = _tokenize_command(_mask_data_heredoc_bodies(cmd))
     for verb, rest in _git_verbs(tokens):
         hit = _git_invocation_is_mutator(verb, rest)
         if hit:
