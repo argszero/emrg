@@ -340,6 +340,17 @@ _SHELL_WRAPPERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "ash"})
 # a real invocation and are already handled, because the invocation is still in
 # the token stream.
 _SHELL_EVALUATORS = frozenset({"eval"})
+# A program word that is a *variable reference* is one the guard cannot resolve:
+# `$SHELL` is `sh`, `bash` or `zsh` depending on the host, and `$HOME` is a
+# different absolute path on every one. A guard cannot enumerate how a shell
+# spells itself, so the safe direction is to stop reading a decision out of text
+# that has not been expanded yet (issue #1244).
+_UNRESOLVED_VAR_RE = re.compile(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
+# A variable that supplies the *root* of a path (`$HOME/.emrg/config.toml`),
+# rather than a whole name on its own (`$DST`). The distinction is what keeps the
+# write-target rule below from refusing `cp $SRC $DST` — see it for why.
+_UNRESOLVED_ROOT_RE = re.compile(
+    r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)[\\/]")
 
 # ── Heredocs: a body is DATA unless a program eats it as a program ──────────
 # A heredoc body is text on some command's stdin. It is shell *code* only when
@@ -1291,6 +1302,14 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
     (e.g. `bash script.sh`) recurses into a filename, which parses to no git
     invocation and stays allowed. Erring toward *blocking* is the safe
     direction for this guard; erring toward data loss is not.
+
+    An **un-resolvable** wrapper is treated the same way (issue #1244): a
+    program word that is a variable reference may well be the shell, and the
+    guard cannot tell — measured on master, `$SHELL -c 'git checkout .'`,
+    `${SHELL} -c …`, `"$SHELL" -c …`, `env FOO=1 $SHELL -c …` and
+    `sudo $SHELL -c …` all answered ALLOW at read-only and all discarded the
+    uncommitted edit. Its payload is therefore read as a possible command, which
+    only ever *adds* blocking — the walk stays monotone in the safe direction.
     """
     out: list[str] = []
     for i, tok in enumerate(tokens):
@@ -1302,6 +1321,7 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
         elif _basename(tok) in _SHELL_EVALUATORS:
             # `eval <text...>`: every remaining token is re-parsed as a command.
             out.extend(tokens[i + 1:])
+    out.extend(_unresolved_wrapper_payloads(tokens))
     return out
 
 
@@ -1569,7 +1589,7 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
     if escape:
         return False, escape, "partial"
 
-    targets = _extract_write_targets(cmd)
+    targets = _extract_write_targets(cmd) + _unresolved_wrapper_targets(cmd)
     if mode == "read-only":
         for t in targets:
             if t != "/dev/null":
@@ -1608,8 +1628,28 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
     for t in targets:
         if t == "/dev/null":
             continue
-        expanded = os.path.expanduser(t)
+        expanded = os.path.expanduser(os.path.expandvars(t))
         if not _is_absolute_path(expanded):
+            if _UNRESOLVED_ROOT_RE.search(expanded):
+                # `$HOME/…` and `$TMPDIR/…` were resolved above against the
+                # environment the tool hands its child, so a path that *still*
+                # carries a variable root is one nobody can resolve — and
+                # without this the shell would reach an absolute path the guard
+                # read as "relative, therefore inside the workspace" (measured on
+                # master: `echo x > $UNKNOWN/repo/out254.txt` is ALLOW there, and
+                # `echo x > $HOME/.emrg/config.toml` — the daemon's own config —
+                # was ALLOW for the same reason until expansion was added above).
+                # A target whose root cannot be resolved is not one the guard can
+                # prove stays in the workspace, so it fails closed instead of
+                # guessing. A bare `$VAR` operand is left as it was: there the
+                # variable is the whole name and the relative reading below
+                # covers it exactly as it covers any other unresolvable name —
+                # blocking it would refuse `cp $SRC $DST`, a defect report of its
+                # own.
+                return False, (
+                    f"workspace-write sandbox: blocked write to {t!r}, whose root is "
+                    "a shell variable the guard cannot resolve (issue #1244)"
+                ), "partial"
             # Relative target: assumed in-workspace (cwd = the workspace root) —
             # an assumption the command itself can invalidate by moving the
             # shell first, so it is only made when the command left the cwd it
@@ -1643,6 +1683,46 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
                 f"workspace-write sandbox: blocked write outside workspace {t!r}"
             ), "partial"
     return True, None, "partial"
+
+
+def _unresolved_wrapper_payloads(tokens: list[str]) -> list[str]:
+    """Payloads of tokens the guard cannot resolve to a program.
+
+    A token is a possible *wrapper* when its command word is a variable
+    reference (`$SHELL`, `${SHELL}`, `"$SHELL"` — the tokenizer dequotes — and
+    their assignment-prefixed spellings) rather than the name of a shell.
+    Nothing in the text says whether that variable holds a shell, so what
+    follows it is read as a command that may run: the same over-approximation a
+    named wrapper already gets, and one that can only add blocking, never
+    remove it (issue #1244).
+    """
+    out: list[str] = []
+    for i, tok in enumerate(tokens):
+        if _UNRESOLVED_VAR_RE.fullmatch(_basename(tok)):
+            out.extend(tokens[i + 1:])
+    return out
+
+
+def _unresolved_wrapper_targets(cmd: str, _depth: int = 0) -> list[str]:
+    """Write targets inside the payload of an un-resolvable wrapper.
+
+    `_extract_write_targets` reads one command text, and a redirect inside a
+    quoted payload is a character rather than an operator — so
+    `$SHELL -c 'echo x > f'` named no target at all while the shell truncated
+    `f` (measured on master). The payload of a wrapper the guard cannot resolve
+    is not provably data, so the target rule reads it as a command for the same
+    reason `_find_git_mutator` already does.
+
+    Depth is capped rather than trusted: a guard must terminate on adversarial
+    input.
+    """
+    if _depth >= 3:
+        return []
+    out: list[str] = []
+    for nested in _unresolved_wrapper_payloads(_tokenize_command(cmd)):
+        out.extend(_extract_write_targets(nested))
+        out.extend(_unresolved_wrapper_targets(nested, _depth + 1))
+    return out
 
 
 def _decode_output(data: bytes, os_name: str | None = None) -> str:
