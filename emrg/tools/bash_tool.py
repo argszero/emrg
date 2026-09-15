@@ -452,6 +452,55 @@ def _check_containment_escape(cmd: str) -> str | None:
     return None
 
 
+# ── Windows path spellings (issue #1261) ────────────────────────────────────
+#
+# The guard tokenises with `shlex` in POSIX mode, where a backslash is an
+# *escape* character. A Windows shell (cmd.exe — the bash tool's subprocess
+# shell on that platform) treats the same character as a *path separator*, so
+# the two readings of one text disagree by exactly the characters a Windows path
+# is made of. Measured on master `cca0b8dc`, `echo x > C:\Users\x\out.txt`
+# reached the workspace-write boundary as the single token `C:Usersxout.txt` —
+# a *relative* name, therefore "inside the workspace", therefore allowed. Ten
+# such spellings measured (redirect incl. append, rm -rf, mv, cp, sed -i,
+# find -delete, chained), every one allowed at workspace-write while its
+# absolute POSIX twin was refused; `read-only` was unaffected, since that tier
+# refuses every target without asking where it resolves.
+#
+# The repair is a character substitution on the copy the guard tokenises, never
+# on the command that is executed: each backslash becomes a placeholder `shlex`
+# has no meaning for, so the separators survive the split, and the placeholder
+# is put back on the way out. Substitution rather than a "mangled form → raw
+# spelling" lookup on purpose — a lookup has a silent failure mode (a key that
+# does not match leaves the path mangled and every rule reading it inert),
+# while a character that was never removed cannot fail to be restored.
+#
+# Gated on the shell the command will actually run in. On POSIX a backslash is
+# an escape, so `C:\Users\x` genuinely names the relative file `C:Usersx` and
+# repairing it there would refuse an ordinary in-workspace write (`echo x >
+# my\ file` is the same class of spelling, as issue #1162's cases are).
+_WINDOWS_SHELL = os.name == "nt"
+
+# A character no shell command can contain, so the restore cannot corrupt one.
+_WINDOWS_BACKSLASH = "\x00"
+
+# Drive-rooted: `C:\…` / `C:/…`. UNC (`\\server\share`) needs no pattern — it
+# already reads as rooted through the `\` test in `_is_absolute_path`.
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _protect_windows_backslashes(cmd: str) -> str:
+    """Make backslashes survive the POSIX split — Windows shells only (#1261)."""
+    if not _WINDOWS_SHELL or "\\" not in cmd:
+        return cmd
+    return cmd.replace("\\", _WINDOWS_BACKSLASH)
+
+
+def _restore_windows_backslashes(tokens: list[str]) -> list[str]:
+    """Undo `_protect_windows_backslashes`, so the guard reads the real spelling."""
+    if not _WINDOWS_SHELL:
+        return tokens
+    return [t.replace(_WINDOWS_BACKSLASH, "\\") for t in tokens]
+
 def _shell_lexer(cmd: str, punctuation) -> "shlex.shlex":
     """A ``shlex`` that reads the line the way the *shell* reads it — comments off.
 
@@ -498,13 +547,13 @@ def _split_command_tokens(cmd: str) -> list[str]:
     unterminated quote), because a guard that raises on odd input is worse
     than one that over-blocks it.
     """
-    cmd = _strip_line_continuations(cmd)
+    cmd = _protect_windows_backslashes(_strip_line_continuations(cmd))
     try:
         lex = _shell_lexer(cmd, True)
         lex.whitespace_split = True
-        return list(lex)
+        return _restore_windows_backslashes(list(lex))
     except ValueError:
-        return cmd.split()
+        return _restore_windows_backslashes(cmd.split())
 
 
 def _command_word(tok: str) -> str:
@@ -751,15 +800,40 @@ def _temp_write_roots() -> set[str]:
 def _is_absolute_path(p: str) -> bool:
     """True when ``p`` is absolute (or drive-less rooted, e.g. ``/etc/hosts``
     on Windows — ntpath.isabs returns False for those, but they still do not
-    resolve under the cwd, so the sandbox must treat them as absolute)."""
-    return os.path.isabs(p) or p.startswith("/") or p.startswith("\\")
+    resolve under the cwd, so the sandbox must treat them as absolute).
+
+    A drive-rooted spelling (`C:\\…`, `C:/…`) counts as absolute when the shell
+    that will run the command is a Windows shell. `ntpath.isabs` already answers
+    True for it there, so on that platform this arm is redundant — it is here so
+    the rule does not depend on which `os.path` the *guard* happens to be
+    running under, which is what makes issue #1261's branch verifiable off
+    Windows. On a POSIX shell the spelling is a relative name and is left alone.
+    """
+    return (
+        os.path.isabs(p)
+        or p.startswith("/")
+        or p.startswith("\\")
+        or bool(_WINDOWS_SHELL and _WINDOWS_DRIVE_RE.match(p))
+    )
 
 
 def _is_within(path: str, root: str) -> bool:
-    """True when ``path`` (absolute) is inside ``root`` (absolute) or equals it."""
+    """True when ``path`` (absolute) is inside ``root`` (absolute) or equals it.
+
+    Under a Windows shell the comparison canonicalises the separator before the
+    prefix test. That is a uniform substitution on both sides, so it cannot
+    change which of two real paths contains the other — but it does stop the
+    test from depending on which `os.path` (and therefore which ``os.sep``) the
+    *guard* is running under, which is what makes issue #1261's containment
+    verifiable off Windows. POSIX shells are untouched.
+    """
     try:
         rp = os.path.realpath(path)
         rr = os.path.realpath(root)
+        if _WINDOWS_SHELL:
+            rp = rp.replace("\\", "/")
+            rr = rr.replace("\\", "/").rstrip("/")
+            return rp == rr or rp.startswith(rr + "/")
         return rp == rr or rp.startswith(rr + os.sep)
     except OSError:
         return False
@@ -891,15 +965,15 @@ def _tokenize_command(cmd: str) -> list[str]:
     is unaffected — quoting is resolved before either rule — so
     ``echo "a<newline>b"`` stays one argument, as the shell makes it.
     """
-    cmd = _strip_line_continuations(cmd)
+    cmd = _protect_windows_backslashes(_strip_line_continuations(cmd))
     try:
         lex = _shell_lexer(cmd, _PUNCTUATION_CHARS)
         lex.whitespace_split = True
         # `\n` is a separator token, not whitespace to be discarded — see above.
         lex.whitespace = " \t\r"
-        return _unfuse_newlines(list(lex))
+        return _restore_windows_backslashes(_unfuse_newlines(list(lex)))
     except ValueError:
-        return cmd.split()
+        return _restore_windows_backslashes(cmd.split())
 
 
 # The punctuation set handed to `shlex` above. Adjacent characters in this set
@@ -1548,6 +1622,92 @@ def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     return None
 
 
+def _cwd_left_workspace(
+    cmd: str, workspace: str, _depth: int = 0, _base: str | None = None
+) -> str | None:
+    """The directory a command moves the shell into, when it is outside the workspace.
+
+    The ``workspace-write`` boundary reads a *relative* write target as "inside
+    the workspace, because the cwd is the workspace root". That premise holds
+    only while the command writes from where it started: ``cd <dir>`` and
+    ``env -C <dir>`` move the shell first, so every later target is relative to
+    the new directory. Measured on master, `cd /elsewhere; echo x > out.txt`
+    truncated `/elsewhere/out.txt` while the guard read `out.txt` as
+    in-workspace and allowed it (issue #1244).
+
+    Returns the offending directory, or None when the command never leaves the
+    workspace — a destination inside a trusted write zone or the OS temp root
+    does not count, because the boundary already allows those as write roots.
+    The walk is conservative in one direction: *any* move outside counts, even
+    one a later ``cd`` returns from, because the token stream does not say which
+    segment a target belongs to without re-deriving the parse, and refusing is
+    the fail-closed side. A move the guard cannot resolve (`cd -`, whose target
+    is $OLDPWD) is reported by its own token and treated the same way: it cannot
+    be proven to stay inside.
+
+    The payload of a nested shell is read too (`sh -c 'cd /elsewhere; echo x >
+    f'`, `env -C /elsewhere …`), since it runs with the same effect; depth is
+    capped rather than trusted, because a guard must terminate on adversarial
+    input.
+
+    **Known limit**: a directory the token stream cannot preserve is invisible
+    here. A Windows spelling `C:\\Users\\x` reaches the guard as `C:Usersx` —
+    backslash is shlex's escape character — so it is not read as an absolute
+    path at all (issue #1261). Forward-slash spellings, relative moves and
+    `..` are unaffected.
+    """
+    allowed = [workspace] + list(_trusted_write_zones()) + list(_temp_write_roots())
+    cwd = os.path.realpath(_base) if _base else os.path.realpath(workspace)
+
+    def leaves_workspace(path: str) -> bool:
+        return not any(src and (_is_within(path, src) or path == src) for src in allowed)
+
+    def resolve(tok: str) -> str:
+        expanded = os.path.expanduser(os.path.expandvars(tok))
+        if not _is_absolute_path(expanded):
+            expanded = os.path.join(cwd, expanded)
+        return os.path.realpath(expanded)
+
+    tokens = _split_command_tokens(_mask_data_heredoc_bodies(cmd))
+    for i, tok in enumerate(tokens):
+        word = _command_word(tok)
+        if word not in ("cd", "env") or not _runs_as_a_command(tokens, i):
+            continue
+        args = _args_after_command(tokens, i)
+        if word == "cd":
+            operand = next((a for a in args if not a.startswith("-") or a == "-"), None)
+            if operand is None:
+                # A bare `cd` goes $HOME — outside the workspace unless the
+                # workspace *is* $HOME, which the containment test below decides.
+                cwd = os.path.realpath(os.path.expanduser("~"))
+            elif operand == "-":
+                # $OLDPWD: the guard has no way to know where that is.
+                return "-"
+            else:
+                cwd = resolve(operand)
+            if leaves_workspace(cwd):
+                return cwd
+            continue
+        # `env -C <dir>` / `env --chdir=<dir>`: the child of `env` starts there.
+        for j, a in enumerate(args):
+            target = None
+            if a in ("-C", "--chdir"):
+                target = args[j + 1] if j + 1 < len(args) else None
+            elif a.startswith("--chdir="):
+                target = a.split("=", 1)[1]
+            if target is None:
+                continue
+            cwd = resolve(target)
+            if leaves_workspace(cwd):
+                return cwd
+    if _depth < 3:
+        for nested in _nested_command_texts(tokens):
+            hit = _cwd_left_workspace(nested, workspace, _depth + 1, cwd)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
     """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
 
@@ -1607,6 +1767,10 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
     protected = _protected_paths()
     emrg_home = os.path.realpath(os.path.expanduser("~/.emrg"))
     workdir_real = os.path.realpath(workdir) if workdir else None
+    # A relative target is in-workspace only while the command writes from
+    # where it started; a command that moves the shell out first (issue #1244)
+    # makes the relative reading name a file the guard cannot place.
+    moved_out = _cwd_left_workspace(cmd, workdir_real) if workdir_real else None
     for t in targets:
         if t == "/dev/null":
             continue
@@ -1624,15 +1788,26 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
                 # A target whose root cannot be resolved is not one the guard can
                 # prove stays in the workspace, so it fails closed instead of
                 # guessing. A bare `$VAR` operand is left as it was: there the
-                # variable is the whole name and the existing relative-name
-                # assumption covers it exactly as it covers any other
-                # unresolvable name — blocking it would refuse `cp $SRC $DST`,
-                # a defect report of its own.
+                # variable is the whole name and the relative reading below
+                # covers it exactly as it covers any other unresolvable name —
+                # blocking it would refuse `cp $SRC $DST`, a defect report of its
+                # own.
                 return False, (
                     f"workspace-write sandbox: blocked write to {t!r}, whose root is "
                     "a shell variable the guard cannot resolve (issue #1244)"
                 ), "partial"
-            # Relative target: assumed in-workspace (cwd = the workspace root).
+            # Relative target: assumed in-workspace (cwd = the workspace root) —
+            # an assumption the command itself can invalidate by moving the
+            # shell first, so it is only made when the command left the cwd it
+            # started in. `cd <outside>; echo x > out.txt` truncated a file
+            # outside the workspace while this line read it as inside (issue
+            # #1244); the block names the directory that made it possible.
+            if moved_out is not None:
+                return False, (
+                    f"workspace-write sandbox: blocked write to relative target {t!r}: "
+                    f"the command runs it after changing directory to {moved_out!r}, "
+                    "which is not a directory this workspace can place it in (issue #1244)"
+                ), "partial"
             continue
         real = os.path.realpath(expanded)
         if real in protected:
