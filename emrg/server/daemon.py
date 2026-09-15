@@ -1462,11 +1462,13 @@ class EmrgServer:
         """Cap a MEMORY.md embedded into the system prompt (defense in depth).
 
         Rant 2026-08-23T11:00:31: #941's write-time guards only fire on
-        memory_store API writes, but agents append MEMORY.md rows directly
-        (evolution_prompt §6) and bypass them — the index once reached
-        787KB/2931 lines = 77% of a 452,972-char prompt (~250K all-miss
-        tokens per request). Cap what gets embedded; the full index and
-        cycle-archive-*.md stay readable on disk via the read tool.
+        memory_store API writes, but MEMORY.md rows also get appended
+        directly, bypassing them — the per-cycle mandate that used to
+        drive that was removed (rant 2026-09-14T20:14:56), the bypass was
+        not. The index once reached 787KB/2931 lines = 77% of a
+        452,972-char prompt (~250K all-miss tokens per request). Cap what
+        gets embedded; the full index and cycle-archive-*.md stay readable
+        on disk via the read tool.
         """
         # One knob, two readings. This used to spell the cap itself with a
         # comment promising it matched `memory.INDEX_SIZE_WARN` — a promise nothing
