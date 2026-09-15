@@ -207,6 +207,28 @@ async def _send_shutdown() -> bool:
     return False
 
 
+# An auth rejection is the one connection failure that proves a daemon answered:
+# a bad or missing token, or a CLI and a daemon from different versions. Calling
+# it "not running" is a lie the host then acts on — they go hunting for a process
+# that is right there — and the v0.2.7-era "install ≠ running" gap is exactly how
+# a version mismatch presents.
+_AUTH_REFUSED = ("the daemon is running but rejected this CLI (auth failed) — "
+                 "check the token / daemon version")
+
+
+def _stop_failure_message(exc: BaseException) -> str:
+    """The line `emrg server stop` prints when its graceful path could not run.
+
+    Derived as a function over the exception so both branches can be asserted
+    without exercising the stop path itself (a test that runs `_stop_daemon`
+    would SIGTERM the daemon that is hosting the evolution — MANIFESTO 第四条
+    附则二).
+    """
+    if isinstance(exc, AuthError):
+        return f"daemon was NOT stopped: {_AUTH_REFUSED}."
+    return "daemon not running."
+
+
 def _stop_daemon() -> None:
     """Stop the running emrg daemon gracefully (shutdown msg, fallback to SIGTERM)."""
     # Try graceful shutdown via protocol
@@ -241,8 +263,9 @@ def _stop_daemon() -> None:
             print("daemon stopped.")
         else:
             print("daemon not running (no pid from ping).")
-    except (ConnectionClosed, OSError, asyncio.TimeoutError, json.JSONDecodeError, AuthError):
-        print("daemon not running.")
+    except (ConnectionClosed, OSError, asyncio.TimeoutError, json.JSONDecodeError,
+            AuthError) as exc:
+        print(_stop_failure_message(exc))
 
 
 # ── Stop everything (`emrg stop`) ──────────────────────────────
@@ -335,6 +358,12 @@ def _send_rant(message: str, project: str | None = None) -> None:
     async def _do() -> None:
         try:
             ws = await asyncio.wait_for(connect_to_server(), timeout=3)
+        except AuthError:
+            print(f"rant not sent: {_AUTH_REFUSED}.")
+            # Today this path ends in an unhandled AuthError, so the exit code is
+            # already 1 — keep it. (The sibling "not running" branch exits 0; that
+            # is pre-existing and a separate intent, not smuggled in here.)
+            raise SystemExit(1)
         except (ConnectionError, FileNotFoundError, OSError, asyncio.TimeoutError):
             print("daemon not running. Start it first with: emrg")
             return
