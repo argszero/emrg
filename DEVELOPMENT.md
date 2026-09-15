@@ -194,6 +194,112 @@ They're products. EMRG is an experiment in *closing the loop* — the AI improve
 
 ---
 
+## 🐛 Troubleshooting
+
+### Why is my evolution cycle running read-only?
+
+Every cycle gets one bash tier: `read-only`, `workspace-write` (the default), or
+`danger-full-access`. **If the task's source repository has any uncommitted
+change, the cycle is forced down to `read-only` whatever the configuration
+says** — the dirty-tree guard (community issue #979). The probe is literally
+"does `git status --porcelain` print anything?", so a single tracked
+modification or one untracked scratch file is enough to downgrade the cycle, and
+a cycle that leaves scratch files behind can lock the next one.
+
+Read-only blocks the destructive shapes the guard recognises: redirects to
+anything but `/dev/null`, `rm` / `rmdir`, `mv` / `cp` destinations, `truncate` /
+`tee` / `shred`, `sed -i`, `find -delete`, `git ... --output=<f>`, and every git
+subcommand that is not on the read allowlist (`add` / `commit` / `stash` /
+`checkout` / `switch` included). The recognised shapes are blocked **wherever the
+target lives**, inside the workspace or outside it — only `/dev/null` is exempt.
+It is a static scan, not an OS boundary (`enforcement="partial"`), so a command
+outside that shape list (`mkdir`, `touch`, an interpreter writing a file) still
+runs and a downgraded cycle can leave scratch files behind. The decision is per
+command string, not per statement: one blocked shape anywhere in the call refuses
+the whole call. Reads are unaffected, so the problem can still be diagnosed from
+inside a downgraded cycle.
+
+#### Diagnose before you repair
+
+"Modified" does not say *which* of four things disagrees, and only some
+disagreements are safe to discard. Compare the content ids:
+
+```bash
+cd ~/.emrg/evolution/emrg
+git hash-object <path>            # working tree
+git ls-files -s <path>            # index
+git rev-parse HEAD:<path>         # HEAD
+git fetch origin master
+git rev-parse FETCH_HEAD:<path>   # master
+```
+
+Then the decisive question — is the branch simply behind?
+
+```bash
+git merge-base --is-ancestor HEAD FETCH_HEAD \
+  && echo "HEAD is behind master: nothing unmerged is at risk"
+```
+
+That is the common case in a workspace whose change was merged upstream after
+the local checkout: the working tree holds master's content while the index
+still matches the older HEAD, and the "uncommitted work" is already published.
+Recover with:
+
+```bash
+git fetch origin master
+git checkout -f -B master FETCH_HEAD
+```
+
+A plain `git checkout master` will not do it — fetching does not move your local
+branch, so that checks out the commit you are already on, exits 0, and leaves
+the tree dirty.
+
+`-f` is the right tool for tracked modifications only. Measured on the other two
+geometries: **untracked-only** dirt survives it (exit 0, still dirty, so the next
+cycle downgrades again) — use `git stash -u`, recoverable with `git stash pop`,
+not `git clean -fd`, which destroys the content; and an untracked file whose path
+the target commit also adds gets its content **silently replaced**. Adding the
+path to `.gitignore` does not help, because that edit is itself an uncommitted
+change.
+
+Try it without `-f` first. Git refuses exactly where `-f` would discard something,
+and the refusal names the file — `Your local changes to the following files would
+be overwritten by checkout: <path>` for a tracked modification, and `The following
+untracked working tree files would be overwritten by checkout: <path>` for an
+untracked path the target commit adds. Add `-f` only once that refusal is gone, or
+once the content it names is somewhere else.
+
+#### The override
+
+An audited escape hatch exists: `EMRG_TASK_DIRTY_OVERRIDE` takes a
+comma-separated list of task names, or `*`, and the downgrade is skipped with a
+receipt in the daemon log.
+
+The daemon inherits its environment from the process that starts it, so set the
+variable on the command that starts the daemon:
+
+```bash
+EMRG_TASK_DIRTY_OVERRIDE=emrg-task emrg server restart
+```
+
+Make it an explicit decision — read `git status` and `git diff` first. The guard
+exists because a cycle's bash tool can otherwise overwrite work you have not
+committed, and the variable disables that protection for the named tasks.
+
+#### When a fix seems not to have taken effect
+
+Two gaps get mistaken for a broken fix:
+
+- **merge ≠ running** — a guard fixed on `master` protects nobody until a
+  release ships it.
+- **install ≠ running** — after the installer updates `~/.emrg/install/source`,
+  a daemon that is already running keeps executing the old code until it
+  restarts.
+
+Check `emrg -v` and when the daemon started before re-reading the source.
+
+---
+
 ## 📜 License
 
 MIT — see [LICENSE](LICENSE) for the full terms and [MANIFESTO.md](MANIFESTO.md) for the philosophy behind the code.
