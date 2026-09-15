@@ -235,8 +235,14 @@ _GIT_LIST_FLAGS = frozenset({"-l", "--list", "-a", "--all", "-r", "--remotes",
                              "--no-color", "--ignore-case"})
 # `git branch -a` / `git tag -l` / `git tag` are reads; a delete or force flag
 # makes them destructive (`git branch -D old`, `git tag -d v1`).
+#
+# `--unset-upstream` belongs here for the same reason as `--delete`: it writes
+# (it removes the branch's upstream from `.git/config`), and it takes no
+# argument, so no positional rule can catch it — measured 2026-09-16, it was
+# ALLOWED under read-only and really did clear the upstream.
 _GIT_WRITE_FLAGS = frozenset({"-d", "-D", "--delete", "-f", "--force", "-m",
-                              "-M", "--move", "--set-upstream-to", "-u"})
+                              "-M", "--move", "--set-upstream-to", "-u",
+                              "--unset-upstream"})
 # `git config` reads unless it writes: read flags, or no positional key.
 _GIT_CONFIG_READ_FLAGS = frozenset({"--get", "--get-all", "--get-regexp",
                                     "-l", "--list", "--get-urlmatch"})
@@ -862,6 +868,30 @@ def _git_invocation_is_mutator(verb: str, rest: list[str]) -> str | None:
     return verb
 
 
+def _flag_part(tok: str) -> str:
+    """The spelling a flag table should be asked about, for ``tok``.
+
+    A flag and its value may be written as one token or two, and the tables hold
+    the flag. Comparing whole tokens therefore decides by *spelling* while
+    claiming to decide by flag: measured 2026-09-16 against master, read-only
+    ALLOWED `git branch --set-upstream-to=origin/main` and `git branch
+    -uorigin/main` (both really did set the upstream) while the two-token forms
+    `--set-upstream-to origin/main` / `-u origin/main` were BLOCKED — the same
+    write, three spellings, two verdicts. `git branch -dold` is refused by git
+    itself (rc=129), so widening here can only over-block a shape git rejects.
+
+    Only a leading flag is rewritten: `-` alone is a filename, ``--`` alone is
+    the argument terminator, and a short option keeps its first letter (`-u`),
+    which is how git reads it too. Nothing else about the token is touched, so
+    a path or a pattern is still compared as written.
+    """
+    if not tok.startswith("-") or tok in ("-", "--"):
+        return tok
+    if tok.startswith("--"):
+        return tok.split("=", 1)[0]
+    return tok[:2]
+
+
 def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
     """The verdict for a verb whose subcommand / flags decide its effect.
 
@@ -869,6 +899,7 @@ def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
     read. Every branch treats "not recognisably a read" as a write.
     """
     positional = [t for t in rest if not t.startswith("-")]
+    flags = [_flag_part(t) for t in rest]
     sub = next(iter(positional), None)
     if verb == "stash":
         # `stash list` / `stash show` read; a bare `git stash` saves and cleans
@@ -886,10 +917,12 @@ def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
         return None if sub is None or sub in ("show", "get-url", "v") else verb
     if verb in ("branch", "tag"):
         # A listing flag makes this a read even with a pattern argument; a
-        # delete/force/move flag makes it a write.
-        if any(t in _GIT_WRITE_FLAGS for t in rest):
+        # delete/force/move flag makes it a write. Both tests ask `flags`, not
+        # `rest`, so an attached value (`--delete=old`, `-uorigin/main`) is the
+        # same flag as the two-token form.
+        if any(t in _GIT_WRITE_FLAGS for t in flags):
             return verb
-        if any(t in _GIT_LIST_FLAGS for t in rest):
+        if any(t in _GIT_LIST_FLAGS for t in flags):
             return None
         # `git branch <name>` / `git tag <name>` create; only the bare form
         # (no positional argument at all) is the listing read.
