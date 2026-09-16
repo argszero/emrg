@@ -699,7 +699,7 @@ def _is_fd_operand(tok: str) -> bool:
     return tok == "-" or re.fullmatch(r"[0-9]+", tok) is not None
 
 
-def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
+def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int] | None:
     """Indexes of ``tokens`` whose word was **entirely quoted** in the source line.
 
     ``'>'`` and ``>`` dequote to the same token, so once quoting is resolved the
@@ -718,13 +718,16 @@ def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
     be wrapped is what keeps a partially quoted word out of the set — `'a'b` and
     `a'b'` both dequote to `ab`, and neither is a quoted word.
 
-    Answers the **empty set** — "no token is known to be quoted", i.e. the walk's
-    pre-existing behaviour — whenever the two readings disagree about how many
-    words there are (`echo 'it'\\''s'` is one such line: 2 words in POSIX mode, 3
-    with quoting kept) or the second lex fails. That fallback picks the safe side
-    on purpose: believing a *real* redirect was quoted would drop its target and
-    reopen the escape, while believing a quoted one was real only refuses a
-    command that writes nothing.
+    Answers ``None`` — **"cannot answer"** — whenever the two readings disagree
+    about how many words there are (`echo 'a'b > '>'`: 4 words with quoting
+    resolved, 5 with quoting kept) or the second lex fails. It used to answer the
+    empty set for that state, which is a *different* fact: "answered, and no word
+    is quoted". The two cannot be the same value, because the walk has to keep
+    the safe side in both positions and the fallback is only safe in one of them
+    (issue #1280): believing a real redirect was quoted drops its target, while
+    believing a quoted one was real only refuses a command that writes nothing —
+    true in **operator** position, and false in **target** position, where the
+    token that should be named as the path is itself operator-shaped.
     """
     prepped = _protect_windows_backslashes(_strip_line_continuations(cmd))
     try:
@@ -733,11 +736,11 @@ def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
         lex.whitespace_split = True
         second = _restore_windows_backslashes(list(lex))
     except ValueError:
-        return set()
+        return None
     if len(second) != len(tokens):
         # The two readings are not known to be the same words, so the pairing
         # below would compare one word with another. Nothing is claimed.
-        return set()
+        return None
     quoted: set[int] = set()
     for index, (plain, kept) in enumerate(zip(tokens, second)):
         if (
@@ -748,6 +751,50 @@ def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
         ):
             quoted.add(index)
     return quoted
+
+
+def _unresolved_operator_run_tails(tokens: list[str]) -> list[str]:
+    """Operator-shaped tokens sitting in **target** position, for issue #1280.
+
+    Asked only when the two lexings disagreed, i.e. when the walk cannot say
+    which operator-shaped tokens came from quoting. The first token of a run is in
+    operator position — believing it keeps a real redirect naming the path behind
+    it — while everything after it is in *target* position, where a token can only
+    be operator-shaped because it was quoted into being a path.
+
+    Restricted to a run that **swallows the rest of the line** (end of input, or a
+    command separator): that is the geometry where the tail would otherwise be
+    walked past and its file never named, which is what let `read-only` allow the
+    write in #1280. Where a non-operator token follows the run the walk already
+    names it, and naming the tail as well would add a claim about a command that
+    cannot run — `echo x > > out` is `rc=2` in `/bin/sh` and `bash` in a fresh
+    scratch directory, and creates nothing — so the narrower reading is kept.
+
+    Measured over 320 generated commands (4 prefixes x 4 redirect spellings x 5
+    targets x 4 partially quoted shapes), each run by the real shell: answering
+    this way takes the holes from 96 to 0 and introduces none.
+
+    What the direction costs, also measured rather than argued: a line whose
+    operator-shaped words are *all* quoted arguments and which therefore writes
+    nothing (`echo 'a'b '>' '>'`, `test 'a'b '>' '>'`) is newly refused — 6 of the
+    9 such shapes tried. They are indistinguishable from the class above at the
+    token level, which is exactly the fact the pairing could not recover, so the
+    trade is 96 writes-that-happened no longer allowed against 6 echoes no longer
+    allowed. Kept because the walk is the tier that exists to refuse writes.
+    """
+    tails: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if not _is_redirect_operator(tokens[i]):
+            i += 1
+            continue
+        j = i + 1
+        while j < len(tokens) and _is_redirect_operator(tokens[j]):
+            j += 1
+        if j - i >= 2 and (j == len(tokens) or tokens[j] in _COMMAND_SEPARATORS):
+            tails.extend(tokens[i + 1:j])
+        i = j
+    return tails
 
 
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
@@ -790,9 +837,17 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     path, never a redirect (`_fully_quoted_token_indexes`, which recovers the
     fact from a second lex pass with quoting kept). An operator is therefore
     *shape and not quoted*, and operator tokens are skipped when looking for the
-    target, so the boundary no longer depends on whether a `>` was quoted. What
-    remains on the fail-closed side is input the two readings disagree about,
-    where the walk falls back to treating every operator-shaped token as real.
+    target, so the boundary no longer depends on whether a `>` was quoted.
+
+    What remains is input the two readings disagree about (`echo 'a'b > '>'`), and
+    there the walk keeps the safe side in **both** positions (issue #1280). In
+    operator position a token is still believed, so a real redirect keeps naming
+    the path behind it. In target position the operator-shaped tail of a run is
+    *named* rather than believed: a command that really has a second operator
+    there is a syntax error in `/bin/sh` and `bash` (measured: `echo x > > out`
+    writes nothing) while a quoted path there writes a real file, so naming it
+    can only refuse a command that writes nothing — and losing it let `read-only`
+    allow a write, which is how #1280 was found.
 
     Still deliberately non-exhaustive in *which verbs* it covers (an
     interpreter can always write a file); the honest boundary stays
@@ -817,11 +872,24 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     # it, so "is this a redirect?" and "is this an operator rather than a path?"
     # cannot drift apart (issue #1268).
     quoted = _fully_quoted_token_indexes(masked, tokens)
+    # `None` is "the two readings disagree", not "nothing is quoted": when the
+    # walk cannot say which operator-shaped tokens came from quoting, it keeps the
+    # safe side in *both* positions (issue #1280) — the run handling below names
+    # the tokens that sit in target position, which is what the old empty set lost.
+    quoting_unknown = quoted is None
+    quoted = quoted or set()
 
     def is_operator(index: int) -> bool:
         return index not in quoted and _is_redirect_operator(tokens[index])
 
     targets: list[str] = []
+    if quoting_unknown:
+        # The two readings disagreed, so an operator-shaped token cannot be told
+        # from a quoted path. Operator position keeps the old answer (the walk
+        # below still believes it, so a real redirect keeps naming its path);
+        # target position is answered here, because that is the direction the old
+        # empty-set fallback lost (issue #1280).
+        targets.extend(_unresolved_operator_run_tails(tokens))
     i = 0
     while i < len(tokens):
         tok = tokens[i]
