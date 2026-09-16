@@ -250,6 +250,30 @@ def test_the_host_owned_file_is_in_the_scanned_class(mod):
     assert HOST_OWNED in mod.INSTRUCTION_FILES
 
 
+def test_the_ci_readme_is_in_the_scanned_class(mod):
+    """The one file outside the templates a reader acts on (issue #1289).
+
+    It tells the host which Secrets the release pipeline needs, so a citation in it
+    is an instruction, not a note. Measured before it joined: two of its lines
+    named a rant and nothing else - unresolvable on any other host, which is the
+    defect the class exists to catch. This test is what keeps the membership from
+    being dropped silently by a later edit to `INSTRUCTION_FILES`.
+    """
+    assert ".github/workflows/README.md" in mod.INSTRUCTION_FILES
+
+
+def test_the_ci_readme_sites_are_resolved_in_the_real_tree(mod):
+    """The membership is only a claim until the file's own sites are scanned."""
+    sites, missing = mod.scan_tree(REPO_ROOT)
+    assert missing == []
+    readme = [s for s in sites if s.path == ".github/workflows/README.md"]
+    assert len(readme) == 2, [s.path for s in readme]
+    assert all(s.has_record for s in readme), "a README citation without a public record"
+    # `problems` refuses a verdict over a subset - handed one site it calls every
+    # debt entry stale - so ask it about the whole class and look for this file.
+    assert not [p for p in mod.problems(sites) if "workflows/README.md" in p]
+
+
 # --- the tree, and the exit-code contract --------------------------------------
 
 

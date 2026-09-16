@@ -24,6 +24,8 @@ from emrg.tools.bash_tool import (
     _is_redirect_operator,
     _split_command_tokens,
     _flag_part,
+    _git_positionals,
+    _GIT_CONFIG_VALUE_OPTS,
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
     check_workspace_write,
@@ -435,6 +437,70 @@ def test_a_git_config_read_names_no_target_and_stays_allowed():
         assert _extract_write_targets(cmd) == [], cmd
         allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
         assert allowed is True, f"{cmd!r} must stay allowed (got {reason!r})"
+
+
+def test_a_config_option_value_is_never_a_positional_key():
+    """`--file <p>` and its siblings take a separate value; the count read it as a key.
+
+    Issue #1273 row 3, and the three spellings the same walk decides: measured
+    with git 2.50.1 in a scratch repo, watching every file under it for a byte
+    change, each of these **reads** — `--file <p> user.name` rc=1, `--type int
+    user.name` rc=1, `--default fallback user.name` rc=0 — and none touched a
+    file. The walk left the option's value among the positionals, so the count
+    saw two of them and reported the write the spelling is one token away from;
+    at read-only it was refused outright, and at workspace-write the file the
+    option names was named as a target and refused as outside the workspace.
+
+    The value is not a positional *by definition*, which is why this needs no
+    heuristic: it is the same defect `_GIT_SUBCOMMAND_WITH_VALUE` was introduced
+    for one level up (`git reflog -n 5`, issue #1240).
+    """
+    for cmd in (
+        f"git config --file {GIT_OUTSIDE} user.name",
+        f"git config -f {GIT_OUTSIDE} user.name",
+        f"git config --file {GIT_OUTSIDE} --type int user.name",
+        "git config --type int user.name",
+        "git config --default fallback user.name",
+    ):
+        assert _extract_write_targets(cmd) == [], cmd
+        for mode in ("read-only", "workspace-write"):
+            allowed, reason, _ = _check_sandbox(cmd, mode, workdir="/workspace")
+            assert allowed is True, f"{cmd!r} reads, at {mode} (got {reason!r})"
+
+
+def test_the_value_skip_does_not_move_a_write_to_the_read_side():
+    """The direction that decides whether the fix is a fix: the writes still block.
+
+    A value is skipped, not the *key and the value*: the spelling that adds a
+    value still leaves two positionals, and it really writes (`--file <p> a.b c`
+    changed the file, rc=0). The `--type` / `--comment` forms are asserted at
+    read-only, which is where a config mutator is decided; `--comment note a.b c`
+    really did write `.git/config` when measured.
+    """
+    for cmd in (
+        f"git config --file {GIT_OUTSIDE} a.b c",
+        f"git config --file {GIT_OUTSIDE} a.b c d",
+        f"git config -f {GIT_OUTSIDE} a.b c",
+        "git config --type int a.b c",
+        "git config --comment note a.b c",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "read-only", workdir="/workspace")
+        assert allowed is False, f"{cmd!r} writes (got {reason!r})"
+    # and the file operand is still the target the refusal names
+    assert _extract_write_targets(f"git config --file {GIT_OUTSIDE} a.b c") == [GIT_OUTSIDE]
+
+
+def test_the_value_skip_is_scoped_to_the_config_verb():
+    """`--file` takes a value for `config`; the shared walk must not learn that.
+
+    Every other verb's positionals are still counted by the shared set, and
+    measured over a generated corpus of 960 spellings across 40 other verbs the
+    fix changed **no** verdict at either tier — this asserts the structural half
+    of that: the same token list walks differently with and without the config set.
+    """
+    assert _git_positionals(["--file", "/p", "list"]) == ["/p", "list"]
+    assert _git_positionals(["--file", "/p", "list"], _GIT_CONFIG_VALUE_OPTS) == ["list"]
+    assert _git_positionals(["-n", "5"]) == []
 
 
 def test_git_config_writes_that_stay_inside_the_workspace_stay_allowed():
