@@ -19,6 +19,20 @@ node_modules/
 # forms. Verified safe: `git ls-files | grep '\.emrg-'` is empty.
 .emrg
 .emrg-*
+# The test suite's own scratch directories: five `mkdtemp(dir=<this directory>)` sites in
+# `tests/test_bash_tool_sandbox.py` run a POSIX shell in a private directory and delete it in
+# a `finally` — and a `finally` does not run under SIGKILL. Measured 2026-09-17: a kill
+# inside the corpus test's loop left `tests/emrg-corpus-fapk6xox/`, `git status` listed it as
+# `??`, `git check-ignore` said it was not ignored, and the dirty-tree criterion answered
+# `loses=True` ("could not be read to compare") — so the next evolution cycle keeps the
+# read-only tier because a *test* was interrupted; with the residue removed the same
+# criterion answers `loses=False`. An untracked directory really cannot be compared to
+# `HEAD`, so the criterion is right and the names are the problem: these are scratch, never
+# deliverables. Scoped to `/tests/` on purpose — this is about those sites, not about any
+# `emrg-*` file a future contributor may want tracked at the root.
+# `tests/test_scratch_roots_are_gitignored.py` is the mechanic that keeps a new site from
+# reintroducing the exposure.
+/tests/emrg-*
 .claude
 .pytest_cache/
 /dist/
