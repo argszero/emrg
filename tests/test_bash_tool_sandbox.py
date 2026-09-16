@@ -8,6 +8,7 @@ feedback through execute().
 
 import asyncio
 import os
+import subprocess
 import tempfile
 
 import pytest
@@ -919,12 +920,16 @@ def test_fully_quoted_token_indexes_recovers_quoting_or_claims_nothing():
 
     The pairing is by index between the walk's POSIX reading and a second reading
     with quoting kept, so the two must agree on how many words there are. When
-    they disagree the helper answers *nothing* — the walk's pre-existing
-    behaviour, and the safe side: believing a real redirect was quoted would drop
-    its target and reopen the escape, while believing a quoted one was real only
-    refuses a command that writes nothing.
+    they disagree the helper answers **None** — "cannot answer" — which is not the
+    same fact as the empty set ("answered, and no word is quoted"), and the walk
+    acts on the difference: in *operator* position it still believes every
+    operator-shaped token (a real redirect keeps its target), while in *target*
+    position it names the operator-shaped tail of a run instead of believing it
+    (issue #1280, where the empty-set fallback dropped a target and `read-only`
+    allowed a write). Keeping the two states apart is what lets both directions
+    stay on the fail-closed side.
     """
-    def quoted(cmd: str) -> set[int]:
+    def quoted(cmd: str) -> set[int] | None:
         return _fully_quoted_token_indexes(cmd, _split_command_tokens(cmd))
 
     # The one reason this helper exists: a quoted operator standing alone.
@@ -937,13 +942,15 @@ def test_fully_quoted_token_indexes_recovers_quoting_or_claims_nothing():
     # A *partially* quoted word is not a quoted word: `'a'b` and `a'b'` both
     # dequote to `ab`, and neither may be claimed (the whole word must be
     # wrapped). Asserted because the obvious implementation — "does the token
-    # contain a quote character" — would wrongly claim both.
-    assert quoted("echo 'a'b") == set()
+    # contain a quote character" — would wrongly claim both. The first is also a
+    # word-count disagreement, so it must answer *cannot answer*, not "nothing
+    # is quoted": the shell reads the second half of `> '>'` behind it as a path.
+    assert quoted("echo 'a'b") is None
     assert quoted("echo a'b'") == set()
     # The readings disagree here (`["echo", "it's"]` with quoting resolved, three
-    # words with quoting kept), so nothing is claimed rather than pairing the
-    # wrong words.
-    assert quoted("echo 'it'\\''s'") == set()
+    # words with quoting kept) — and the second lex cannot parse it at all, which
+    # lands on the same answer.
+    assert quoted("echo 'it'\\''s'") is None
     # …and these two are the same disagreement with a *discriminating* answer:
     # a pairing that paired anyway would claim index 0 in both (`'a'` against
     # `'a'`, `'>'` against `'>'`), and a wrong pairing is what can decide a real
@@ -951,14 +958,16 @@ def test_fully_quoted_token_indexes_recovers_quoting_or_claims_nothing():
     # commands: dropping the guard changes 541 walk answers, 493 of them by
     # dropping a target, outside ones included — so the guard is the fail-closed
     # side, not decoration.
-    assert quoted("'a' 'a'b") == set()
-    assert quoted("'>' '>'x") == set()
+    assert quoted("'a' 'a'b") is None
+    assert quoted("'>' '>'x") is None
     # Input the lexer cannot parse takes `_split_command_tokens`' whitespace
     # fallback, where a token can still carry its quote characters. `'a'` there
     # is not a quoted word, it is a token whose *text* contains quotes, and
     # claiming it would be claiming an artefact of the fallback. (This is the
     # case the interior-equality clause exists for: no generated command with a
-    # redirect changes its walk answer when that clause is loosened.)
+    # redirect changes its walk answer when that clause is loosened.) The two
+    # readings happen to agree here, so it is an *answer*, not a refusal to give
+    # one — the distinction the empty set and None are kept apart for.
     assert quoted("'a' it's") == set()
 
 
@@ -1723,3 +1732,93 @@ def test_shell_wrapper_options_do_not_hide_the_payload():
     # A different wrapper binary takes the same options.
     for cmd in ("zsh --login -c 'git checkout .'", "sh -o errexit -c 'git stash'"):
         assert _check_sandbox(cmd, "read-only")[0] is False, cmd
+
+
+# Issue #1280. A **partially quoted word** anywhere on the line (`'a'b`, `x'>'`)
+# makes the two lexings disagree about the word count, so the walked line cannot
+# say which operator-shaped tokens came from quoting — and the walk used to fall
+# back to "no token is quoted" in *both* positions. In operator position that is
+# the safe side; in target position it dropped the target, because the token that
+# should be named as the path is itself operator-shaped.
+#
+# Every row below was run by `/bin/sh` and `/bin/bash` in its own fresh scratch
+# directory and the created files read back: each one really creates the file it
+# is refused for. On master `4dce1ffde8902bc1` each row named `[]` and was
+# ALLOWED at `read-only` — a write inside the workspace at the tier that exists to
+# refuse writes.
+PARTIALLY_QUOTED_WRITES = [
+    "echo '>'x > '>'",
+    "echo 'a'b > '>'",
+    "echo x'>' > '>'",
+    "test 1 'a'b > '>'",
+    "echo 'a'b 2> '>'",
+    "echo 'a'b > '>'",
+    "echo 'a'b >> '>>'",
+    "echo 'a'b &> '>'",
+    "echo 'a'b > '>' && echo done",
+    "grep -n x f.txt 'a'b > '>'",
+]
+
+
+@pytest.mark.parametrize("cmd", PARTIALLY_QUOTED_WRITES)
+def test_a_partially_quoted_word_does_not_hide_the_target_behind_it(cmd: str):
+    """Issue #1280: the fallback has to keep the safe side in *target* position too.
+
+    The line has two facts and the walk can only recover the first: the operator
+    sitting before the last word is a real redirect (so it keeps naming what
+    follows it), while the operator-shaped word it names can only have come from
+    quoting. Naming it is the fail-closed direction, and it is not a guess that
+    costs anything: measured in fresh scratch directories, a command that really
+    has a second operator there — `echo x > > out` — is `rc=2` in both `/bin/sh`
+    and `bash` and writes nothing, so the only commands this refuses are ones that
+    cannot run.
+    """
+    targets = _extract_write_targets(cmd)
+    assert ">" in targets or ">>" in targets, f"{cmd!r} must name the target, got {targets!r}"
+    allowed, reason, _ = _check_sandbox(cmd, "read-only")
+    assert allowed is False, f"{cmd!r} writes a file and must be refused ({reason!r})"
+
+
+def test_a_partially_quoted_word_names_the_path_and_not_the_operator_too():
+    """The *exact* answer, so "name everything in the run" is not quietly enough.
+
+    `echo 'a'b > '>'` has two operator-shaped tokens and only one of them is a
+    path. Naming the operator as well would be harmless at `read-only` (the
+    command is refused either way) but wrong about what the command writes, and
+    the looser reading would let `<`-like spellings and fd operands leak into the
+    target list. So the walk's answer is asserted whole, not just non-empty.
+    """
+    assert _extract_write_targets("echo 'a'b > '>'") == [">"]
+    assert _extract_write_targets("echo 'a'b >> '>>'") == [">>"]
+    assert _extract_write_targets("echo 'a'b > '>' && echo done") == [">"]
+
+
+def test_a_real_operator_run_is_a_syntax_error_and_costs_only_a_refusal():
+    """The measured ground the direction rests on, so the claim is not read as taste.
+
+    Both shells refuse a run of operator-shaped words outright (`rc=2`) and create
+    nothing, which is why believing the first token while naming the rest cannot
+    lose a write. The control on the other side — the same run *without* a
+    partially quoted word, where quoting is known — keeps the walk's old answer,
+    so the new rule is scoped to the case that had the hole.
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    for shell in ("/bin/sh", "/bin/bash"):
+        for cmd in ("echo x > > out", "echo x > >> out", "echo x > > "):
+            d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-oprun-")
+            try:
+                proc = subprocess.run([shell, "-c", cmd], cwd=d, capture_output=True)
+                assert proc.returncode != 0, f"{shell} ran {cmd!r} — re-measure the rule"
+                assert os.listdir(d) == [], f"{shell} created files for {cmd!r}"
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
+    # Quoting known: the run is reported as one operator followed by a target, the
+    # pre-existing answer, unchanged by this fix.
+    assert _extract_write_targets("echo x > > out") == ["out"]
+    # …and with nothing after the run and quoting known, nothing is named at all:
+    # the new rule must be scoped to the case that cannot be resolved, not applied
+    # to every run. `echo x > > ` is `rc=2` in both shells (asserted above).
+    assert _extract_write_targets("echo x > > ") == []
+    assert _check_sandbox("echo x > > ", "read-only")[0] is True

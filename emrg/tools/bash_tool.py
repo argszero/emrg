@@ -673,7 +673,7 @@ def _is_redirect_operator(tok: str) -> bool:
     )
 
 
-def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
+def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int] | None:
     """Indexes of ``tokens`` whose word was **entirely quoted** in the source line.
 
     ``'>'`` and ``>`` dequote to the same token, so once quoting is resolved the
@@ -692,13 +692,16 @@ def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
     be wrapped is what keeps a partially quoted word out of the set — `'a'b` and
     `a'b'` both dequote to `ab`, and neither is a quoted word.
 
-    Answers the **empty set** — "no token is known to be quoted", i.e. the walk's
-    pre-existing behaviour — whenever the two readings disagree about how many
-    words there are (`echo 'it'\\''s'` is one such line: 2 words in POSIX mode, 3
-    with quoting kept) or the second lex fails. That fallback picks the safe side
-    on purpose: believing a *real* redirect was quoted would drop its target and
-    reopen the escape, while believing a quoted one was real only refuses a
-    command that writes nothing.
+    Answers ``None`` — **"cannot answer"** — whenever the two readings disagree
+    about how many words there are (`echo 'a'b > '>'`: 4 words with quoting
+    resolved, 5 with quoting kept) or the second lex fails. It used to answer the
+    empty set for that state, which is a *different* fact: "answered, and no word
+    is quoted". The two cannot be the same value, because the walk has to keep
+    the safe side in both positions and the fallback is only safe in one of them
+    (issue #1280): believing a real redirect was quoted drops its target, while
+    believing a quoted one was real only refuses a command that writes nothing —
+    true in **operator** position, and false in **target** position, where the
+    token that should be named as the path is itself operator-shaped.
     """
     prepped = _protect_windows_backslashes(_strip_line_continuations(cmd))
     try:
@@ -707,11 +710,11 @@ def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
         lex.whitespace_split = True
         second = _restore_windows_backslashes(list(lex))
     except ValueError:
-        return set()
+        return None
     if len(second) != len(tokens):
         # The two readings are not known to be the same words, so the pairing
         # below would compare one word with another. Nothing is claimed.
-        return set()
+        return None
     quoted: set[int] = set()
     for index, (plain, kept) in enumerate(zip(tokens, second)):
         if (
@@ -764,9 +767,17 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     path, never a redirect (`_fully_quoted_token_indexes`, which recovers the
     fact from a second lex pass with quoting kept). An operator is therefore
     *shape and not quoted*, and operator tokens are skipped when looking for the
-    target, so the boundary no longer depends on whether a `>` was quoted. What
-    remains on the fail-closed side is input the two readings disagree about,
-    where the walk falls back to treating every operator-shaped token as real.
+    target, so the boundary no longer depends on whether a `>` was quoted.
+
+    What remains is input the two readings disagree about (`echo 'a'b > '>'`), and
+    there the walk keeps the safe side in **both** positions (issue #1280). In
+    operator position a token is still believed, so a real redirect keeps naming
+    the path behind it. In target position the operator-shaped tail of a run is
+    *named* rather than believed: a command that really has a second operator
+    there is a syntax error in `/bin/sh` and `bash` (measured: `echo x > > out`
+    writes nothing) while a quoted path there writes a real file, so naming it
+    can only refuse a command that writes nothing — and losing it let `read-only`
+    allow a write, which is how #1280 was found.
 
     Still deliberately non-exhaustive in *which verbs* it covers (an
     interpreter can always write a file); the honest boundary stays
@@ -784,6 +795,12 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     # it, so "is this a redirect?" and "is this an operator rather than a path?"
     # cannot drift apart (issue #1268).
     quoted = _fully_quoted_token_indexes(masked, tokens)
+    # `None` is "the two readings disagree", not "nothing is quoted": when the
+    # walk cannot say which operator-shaped tokens came from quoting, it keeps the
+    # safe side in *both* positions (issue #1280) — the run handling below names
+    # the tokens that sit in target position, which is what the old empty set lost.
+    quoting_unknown = quoted is None
+    quoted = quoted or set()
 
     def is_operator(index: int) -> bool:
         return index not in quoted and _is_redirect_operator(tokens[index])
@@ -812,6 +829,22 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             if j < len(tokens) and tokens[j] not in _COMMAND_SEPARATORS:
                 targets.append(tokens[j])
                 i = j + 1
+                continue
+            if quoting_unknown and j - i >= 2:
+                # A run of operator-shaped tokens that swallows the rest of the
+                # line: the first one is the operator, so everything after it is
+                # in *target* position. With quoting resolved only a quoted path
+                # can be operator-shaped there (`echo '>' > '>'` names the second
+                # `>`); with the two readings disagreeing the walk cannot tell a
+                # quoted path from a second operator, and *both* readings are
+                # fail-closed — measured in fresh scratch directories, `echo x > >
+                # out` is a syntax error in `/bin/sh` and `bash` that writes
+                # nothing, while `echo 'a'b > '>'` really creates `>`. Naming the
+                # tail is therefore the answer that cannot lose a write (issue
+                # #1280, where the empty-set fallback dropped exactly this target
+                # and let `read-only` allow a write inside the workspace).
+                targets.extend(tokens[i + 1:j])
+                i = j
                 continue
         elif word == "rm" or word == "rmdir":
             # Any operand is removed — NOT only with a recursive flag.
