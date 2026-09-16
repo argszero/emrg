@@ -66,11 +66,13 @@ Exit codes
        **unmeasurable** rather than as a wrong vote: the review is on GitHub and
        cannot be un-posted, so the reader re-reads before spending it
     2  nothing was posted, so nothing has to be rolled back. Grouped by the check
-       that refused, not one line per `return`: the body could not be read from
-       `--body-file`; the body has no cycle id (or more than one), or `--cycle`
-       disagrees with it; the vote count could not be read; this cycle already has
-       a counted vote or a veto here; or `gh` failed. Fail loud, and never report
-       a posted vote for a review that was never sent
+       that refused, not one line per `return`, and each cause carries a stable
+       slug a wrapper can branch on (`body-unreadable`: the body could not be read
+       from `--body-file`; `cycle-id`: the body has no cycle id, or more than one,
+       or `--cycle` disagrees with it; `count-unreadable`: the vote count could
+       not be read; `already-voted`: this cycle already has a counted vote or a
+       veto here; `gh-failed`: `gh` failed). Fail loud, and never report a posted
+       vote for a review that was never sent
 
 `gh` is required, and so is network access to GitHub: the question is about a
 remote review, and every local guess would be about a different thing than the
@@ -99,6 +101,21 @@ _VOTES_NEEDED = 3
 # that accepted a different shape than the counter reads would post bodies that
 # are void by construction, which is the defect it exists to prevent.
 _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
+
+# Every `return 2` declares which of these it is, as `# cause: <slug>` on the
+# return itself, and each slug is named in the exit-code table above. The three
+# copies are joined by `tests/test_cast_vote.py` in **both** directions rather
+# than trusted: issue #1309 was the table and the code drifting apart silently,
+# and a guard that only checks the list it already knows cannot notice a refusal
+# path that is *new*. A slug is stable, so a wrapper can branch on it; that is
+# also why the table names them.
+RC2_CAUSES = (
+    "body-unreadable",   # --body-file could not be read
+    "cycle-id",          # no cycle id, several of them, or --cycle disagrees
+    "count-unreadable",  # the sibling counter raised
+    "already-voted",     # this cycle already has a counted vote or a veto here
+    "gh-failed",         # `gh pr review` itself failed
+)
 
 _SIBLING = Path(__file__).resolve().parent / "check-vote-count.py"
 _sibling: object | None = None
@@ -337,12 +354,12 @@ def main(argv: list[str] | None = None) -> int:
         body = Path(args.body_file).read_text(encoding="utf-8")
     except OSError as exc:
         print(f"could not read {args.body_file}: {exc}", file=sys.stderr)
-        return 2
+        return 2  # cause: body-unreadable
 
     cycle, why = preflight(body, args.cycle)
     if cycle is None:
         print(f"refusing to post: {why}", file=sys.stderr)
-        return 2
+        return 2  # cause: cycle-id
 
     try:
         state, note = existing_vote(
@@ -350,10 +367,10 @@ def main(argv: list[str] | None = None) -> int:
         )
     except Exception as exc:  # noqa: BLE001 - the counter fails loud; say why, post nothing
         print(f"refusing to post: the vote count could not be read ({exc})", file=sys.stderr)
-        return 2
+        return 2  # cause: count-unreadable
     if state in {"counted", "veto"}:
         print(f"refusing to post: {note}", file=sys.stderr)
-        return 2
+        return 2  # cause: already-voted
     if state == "void":
         print(f"note: {note}", file=sys.stderr)
 
@@ -379,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{proc.stderr.strip()}",
             file=sys.stderr,
         )
-        return 2
+        return 2  # cause: gh-failed
 
     state, note = confirm(
         args.pr,

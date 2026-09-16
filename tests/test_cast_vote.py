@@ -549,29 +549,75 @@ def test_an_unreadable_vote_count_exits_2_and_posts_nothing(mod, monkeypatch, ca
 
 
 def test_the_exit_code_table_names_every_rc_2_cause_the_module_can_reach(mod):
-    """The table is a contract callers script against, so it is measured against the code.
+    """The table is a contract callers script against, so it is joined to the code.
 
     Issue #1309: the table enumerated four causes while the module returned `2` from five
     sites, and the two it omitted — an unreadable `--body-file`, and a vote count that could
-    not be read — were the ones a caller is most likely to hit. This read the causes out of
-    the source rather than trusting the prose:
+    not be read — were the ones a caller is most likely to hit.
+
+    The first cut of this test read the *count* of refusals out of the source and then
+    checked a hand-written tuple of five phrases against the table. That closes #1309 and
+    nothing after it: a sixth refusal, with a message family the table does not name, left
+    this test green while the table went stale again — the same defect, one release later.
+    Measured, not argued: a spoken sixth `return 2` sitting next to the five kept this test
+    passing, so the claim in the docstring ("a new refusal path cannot be added without the
+    table being updated") was false as implemented.
+
+    The join therefore runs in both directions between three copies, none of which is a
+    list the other two are trusted against:
 
     * every `return 2` must have a `print(..., file=sys.stderr)` ahead of it in the same
       block — a refusal that says nothing is unusable, and this asserts it mechanically;
-    * the message families those prints open with must each be named in the table, so a new
-      refusal path cannot be added without the table being updated.
+    * every `return 2` must declare `# cause: <slug>` on the return itself, so a refusal
+      cannot be added without stating which cause it is;
+    * every declared slug must be in `RC2_CAUSES`; every slug in `RC2_CAUSES` must be
+      reached by some `return 2` (a cause the code cannot produce is a promise the tool
+      does not keep); and every slug must be named in the table's rc 2 entry, which is
+      what a caller reads.
 
-    Families, not sites: two of the five returns answer several shapes of one refusal (a body
-    with no cycle id, two cycle ids, a `--cycle` that disagrees), which is why counting
-    `return 2` against the listed causes is the wrong instrument and matching the *messages*
-    is the right one.
+    Why a declared slug, and not a family derived from the message: several returns are one
+    family reached from one site (no cycle id, two cycle ids, and a `--cycle` that
+    disagrees are all the `cycle-id` cause), and two of the five carry a message that is
+    *entirely* a variable, so no reading of the messages alone can name the family.
     """
     import ast
+    import re
+
+    # A cause slug: lower case, at least one hyphen. The hyphen is what separates a slug
+    # from the other backticked tokens the entry carries (`gh`, `--body-file`, `--cycle`),
+    # so it is not decoration — it is the parse.
+    slug_in_table = re.compile(r"`([a-z]+(?:-[a-z]+)+)`")
+
+    def rc2_entry(text: str) -> str:
+        """The `2` entry of the exit-code table — its own lines, not the whole table.
+
+        Scoped deliberately: the rest of the docstring backticks hyphenated things that are
+        not causes (`check-vote-count.py`), and reading those as slugs would fail this test
+        for a reason that has nothing to do with the exit codes.
+        """
+        lines = text.splitlines()
+        start = next(
+            (i for i, line in enumerate(lines) if re.match(r"^\s+2\s\s", line)), None
+        )
+        assert start is not None, "the exit-code table must document the rc 2 code"
+        entry = [lines[start]]
+        for line in lines[start + 1:]:
+            if not line.strip() or re.match(r"^\s+\d\s\s", line):
+                break
+            entry.append(line)
+        return "\n".join(entry)
 
     source = SCRIPT.read_text(encoding="utf-8")
     tree = ast.parse(source)
-    table = (mod.__doc__ or "").split("Exit codes")[1]
-    assert table, "the exit-code table is the contract this test measures"
+    section = (mod.__doc__ or "").split("Exit codes")[1]
+    assert section, "the exit-code table is the contract this test measures"
+    table = rc2_entry(section)
+    causes = tuple(getattr(mod, "RC2_CAUSES", ()))
+    assert causes, "the module enumerates its rc 2 causes so the table can be joined to them"
+    assert all(slug_in_table.fullmatch(f"`{cause}`") for cause in causes), (
+        f"every cause slug must be readable by the table's own parse, so the two lists can "
+        f"be compared: {causes}"
+    )
 
     def blocks(node: ast.AST):
         """Every statement block under `node`, each yielded exactly once.
@@ -607,7 +653,13 @@ def test_the_exit_code_table_names_every_rc_2_cause_the_module_can_reach(mod):
             if isinstance(part, ast.Constant) and isinstance(part.value, str)
         )
 
-    refusals: list[tuple[int, str]] = []
+    def declared_cause(line: str) -> str | None:
+        """The `# cause: <slug>` a `return 2` carries, or None when it declares none."""
+        match = re.search(r"#\s*cause:\s*([a-z][a-z0-9-]*)", line)
+        return match.group(1) if match else None
+
+    lines = source.splitlines()
+    refusals: list[tuple[int, str, str | None]] = []
     for block in blocks(tree):
         for index, stmt in enumerate(block):
             if (
@@ -616,27 +668,42 @@ def test_the_exit_code_table_names_every_rc_2_cause_the_module_can_reach(mod):
                 and stmt.value.value == 2
             ):
                 message = stderr_message(block[index - 1]) if index else None
-                refusals.append((stmt.lineno, message or ""))
+                refusals.append(
+                    (stmt.lineno, message or "", declared_cause(lines[stmt.lineno - 1]))
+                )
 
-    assert len(refusals) >= 5, f"the module returns 2 from at least five sites, found {len(refusals)}"
-    silent = [line for line, message in refusals if not message]
+    silent = [line for line, message, _cause in refusals if not message]
     assert not silent, (
         "a `return 2` must be preceded by the print that says why — a refusal with no message "
         f"is unusable to the caller. Silent refusals at: {silent}"
     )
 
-    for fragment in (
-        "could not be read",           # the body file could not be read
-        "cycle id",                    # the preflight family (absent, several, disagrees)
-        "vote count could not be read",  # the counter raised
-        "already has",                 # this cycle already voted here
-        "gh",                          # the post failed
-    ):
-        assert fragment in table, (
-            f"the exit-code table must name the rc 2 cause {fragment!r} — it is reachable in "
-            "this module, and a caller scripting on the code reads the table as the contract "
-            "(issue #1309)"
-        )
+    undeclared = [line for line, _message, cause in refusals if cause is None]
+    assert not undeclared, (
+        "every `return 2` must declare `# cause: <slug>` on the return itself. Without that "
+        "declaration a new refusal path can be added while the table silently stays "
+        f"incomplete — issue #1309 again, one release later. Undeclared at: {undeclared}"
+    )
+
+    declared = {cause for _line, _message, cause in refusals}
+    assert declared <= set(causes), (
+        f"a refusal declares the cause {sorted(declared - set(causes))}, which `RC2_CAUSES` "
+        "does not enumerate — the enumeration is what the table is checked against, so an "
+        "unlisted slug would be named nowhere a caller can read"
+    )
+    assert declared == set(causes), (
+        f"`RC2_CAUSES` enumerates {sorted(set(causes) - declared)}, which no `return 2` "
+        "reaches: a cause the table offers and the code cannot produce is a promise the tool "
+        "does not keep"
+    )
+
+    listed = set(slug_in_table.findall(table))
+    assert listed == set(causes), (
+        "the rc 2 entry and `RC2_CAUSES` are two copies of one list, joined in both "
+        f"directions: the table names {sorted(listed)}, the module enumerates "
+        f"{sorted(causes)}. A caller scripting on the code reads the table as the contract "
+        "(issue #1309)"
+    )
 
 
 def test_the_body_is_sent_byte_for_byte(mod, monkeypatch, capsys, body_file):
