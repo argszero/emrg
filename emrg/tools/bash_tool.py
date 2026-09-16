@@ -887,12 +887,18 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     Believing an operator-shaped token in *operator* position is the same
     fail-closed direction, and it has the same price: when the quoting sits
     **inside** an operator-shaped word the pairing cannot recover it at all — the
-    second reading raises on `echo x 2'>>' log` (`No closing quotation`) and
-    differs in word count on `echo x \\> log` (`['echo','x','>','log']` against
+    second reading (`_fully_quoted_token_indexes`'s
+    `shlex.shlex(cmd, posix=False, punctuation_chars=True)` with
+    `whitespace_split = True`) raises on `echo x 2'>>' log` (`No closing quotation`)
+    and differs in word count on `echo x \\> log` (`['echo','x','>','log']` against
     `['echo','x','\\\\','>','log']`) — so both answer "cannot say", and the walk
     names the following word (`log`, `out.txt`) although the shell creates
     nothing: measured in fresh scratch directories, each exits 0 with an empty
-    directory, in `/bin/sh` and `/bin/bash` alike. Filed as issue #1273 rows 1-2
+    directory, in `/bin/sh` and `/bin/bash` alike. The helper is named because the
+    obvious reconstruction is **not** this reading: `shlex.split(cmd, posix=False)`
+    does not raise on either line (it returns `['echo', 'x', "2'>>'", 'log']`), so
+    a reader who tries it concludes the docstring is wrong about its own guard.
+    Filed as issue #1273 rows 1-2
     (row 3, the `git config` value walk, is fixed) and pinned by
     `tests/test_bash_tool_sandbox.py` as a residual with its ground truth rather
     than left to prose: the two rows are refused today, and the change that fixes
