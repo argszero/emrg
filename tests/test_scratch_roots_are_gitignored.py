@@ -198,20 +198,6 @@ def _temp_rooted_names(tree: ast.AST, seed: set[str]) -> set[str]:
             return temp
 
 
-def _parameters(tree: ast.AST) -> set[str]:
-    """Every function's parameter names, so a fixture-supplied root can be recognised."""
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            a = node.args
-            names.update(x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs))
-            if a.vararg:
-                names.add(a.vararg.arg)
-            if a.kwarg:
-                names.add(a.kwarg.arg)
-    return names
-
-
 def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, str]],
                                               list[tuple[Path, int, str]]]:
     """`(in-scope sites, unmeasurable sites)` for one parsed module.
@@ -425,6 +411,26 @@ def test_x(tmp_path):
     tmp_path = Path("/abs/somewhere/tests")
     d = tempfile.mkdtemp(dir=tmp_path, prefix="anything-")
 '''
+    shadowed_beside_a_nested_def = '''
+import tempfile
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+tmp_path = REPO_ROOT / "tests"
+def test_x():
+    def helper(tmp_path):
+        return tmp_path
+
+    helper("x")
+    d = tempfile.mkdtemp(dir=tmp_path / "sub", prefix="anything-")
+'''
+    fixture_in_a_nested_def = '''
+import tempfile
+def test_x():
+    def helper(tmp_path):
+        d = tempfile.mkdtemp(dir=tmp_path / "sub", prefix="anything-")
+
+    helper("x")
+'''
     unresolvable = '''
 import tempfile
 def test_x(some_dir):
@@ -476,6 +482,7 @@ def test_x(some_dir):
         ("a bare name that shadows a fixture", shadowed_name),
         ("a composite root built on a shadowing name", shadowed_name_composite),
         ("a fixture name rebound in its own scope", shadowed_in_its_own_scope),
+        ("a fixture-named parameter of a def *nested beside* the call", shadowed_beside_a_nested_def),
     ):
         in_scope, unmeasurable = classify(source)
         assert not in_scope and len(unmeasurable) == 1, (
@@ -486,6 +493,15 @@ def test_x(some_dir):
             f"`0e27465f`, and on the bare shape on its parent too): "
             f"in_scope={in_scope} unmeasurable={unmeasurable}"
         )
+
+    # ...and the counterpart, so narrowing the seed to the *enclosing* scopes cannot become a
+    # way to report a real fixture root: here the nested def IS the call's enclosing scope.
+    in_scope, unmeasurable = classify(fixture_in_a_nested_def)
+    assert not in_scope and not unmeasurable, (
+        "a `tmp_path` parameter of the function the call sits in is a temp location, however "
+        "deeply that function is nested — reading only module-level defs would report it, "
+        f"failing a tree for a temp root: in_scope={in_scope} unmeasurable={unmeasurable}"
+    )
 
     in_scope, unmeasurable = classify(unresolvable)
     assert not in_scope, "an unresolvable root is not evidence of a repo root"
