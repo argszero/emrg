@@ -52,9 +52,17 @@ this scan collapsed them:
   escaped while the guard reported green. Provenance is now a fixed point over the module's
   assignments, so a root is followed however many hops it takes.
 
-Two honest boundaries, stated rather than implied:
+Three honest boundaries, stated rather than implied:
 * a site with no literal `prefix=` cannot be measured statically (the name `mkdtemp` invents
   is random), so it is reported as an unmeasurable site with the remedy — never as a pass;
+* the check asks git about the name **under the site's own root**, which has to be resolved
+  from the `dir=` expression first (`_resolve_root`, deliberately narrow: `__file__`,
+  `Path(...)`, `.parent`, `.resolve()`, the `os.path` calls over those, `/ "<literal>"`, and a
+  name whose assignments are all the same such expression). A root in any other shape is
+  **reported**, never passed. Synthesising the candidate as `tests/<prefix>x` instead was the
+  fail-open this guard shipped with: it discards the root, so a site rooting one level below
+  `tests/` or at the repository root passed while the path the call really creates was not
+  ignored (measured 2026-09-17, head `cfb6f59c`, both arms `3 passed`);
 * the check asks git about a *synthesised* name (`<prefix>x`), not about a directory that
   exists, which is what makes it runnable on a clean tree (`git check-ignore` answers for
   paths that do not exist — verified: rc=1 for an unignored path, rc=0 for an ignored one).
@@ -264,6 +272,110 @@ def _unmeasurable_sites() -> list[tuple[Path, int, str]]:
     return found
 
 
+def _assigned_values(path: Path) -> dict[str, tuple[ast.AST, ...]]:
+    """Every value assigned to each name in one module, as the expressions it is written in.
+
+    A name is usable as a root only when **every** one of its assignments is the same
+    expression: a name that means two different directories in two functions has no single
+    answer, and picking one of them is how a guard comes to ask git about a directory that is
+    not the one the call will use.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    values: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        if node.value is None:
+            continue
+        for name in names:
+            values.setdefault(name, []).append(node.value)
+    return {name: tuple(found) for name, found in values.items()}
+
+
+#: `os.path` calls a `dir=` root is built from, and what each one answers about its argument.
+#: `abspath`/`realpath` are the identity here because every path this scan holds — the file it
+#: is reading, and its own `REPO_ROOT` — is already absolute and resolved the same way.
+_PATH_CALLS = {"dirname": "parent", "abspath": None, "realpath": None}
+
+#: Calls that ask a path for itself: `Path(__file__).resolve()`. Same reason as above.
+_IDENTITY_CALLS = frozenset({"resolve", "absolute"})
+
+
+def _resolve_root(
+    expr: ast.AST,
+    values: dict[str, tuple[ast.AST, ...]],
+    here: Path,
+    seen: frozenset[str] = frozenset(),
+) -> Path | None:
+    """The absolute directory `expr` names, or None when this scan cannot read it.
+
+    Deliberately narrow, and None is the default answer. Only the shapes a `dir=` root is
+    actually built from are evaluated — `__file__`, `Path(...)`, the zero-argument
+    `.resolve()`/`.absolute()`, `.parent`, `os.path.dirname`/`abspath`/`realpath` over those,
+    `<path> / "<literal>"`, and a name whose assignments are all the same such expression.
+    Anything else — a call this scan does not know, a name assigned two different ways, an
+    f-string — answers None, and the caller **reports** it rather than passing it: "could not
+    measure" must never be the same value as "clean", which is this module's whole doctrine.
+    """
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+        candidate = Path(expr.value)
+        return candidate if candidate.is_absolute() else None
+    if isinstance(expr, ast.Name):
+        if expr.id == "__file__":
+            return here
+        if expr.id in seen or expr.id not in values:
+            return None
+        answers = {
+            _resolve_root(value, values, here, seen | {expr.id}) for value in values[expr.id]
+        }
+        return answers.pop() if len(answers) == 1 else None
+    if isinstance(expr, ast.Attribute):
+        if expr.attr != "parent":
+            return None
+        base = _resolve_root(expr.value, values, here, seen)
+        return None if base is None else base.parent
+    if isinstance(expr, ast.Call):
+        func = expr.func
+        called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if not expr.args and not expr.keywords:
+            if called not in _IDENTITY_CALLS or not isinstance(func, ast.Attribute):
+                return None
+            return _resolve_root(func.value, values, here, seen)
+        if len(expr.args) != 1 or expr.keywords:
+            return None
+        base = _resolve_root(expr.args[0], values, here, seen)
+        if base is None:
+            return None
+        if called == "Path":
+            return base
+        if called not in _PATH_CALLS:
+            return None
+        step = _PATH_CALLS[called]
+        return base if step is None else Path(base).parent
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Div):
+        left = _resolve_root(expr.left, values, here, seen)
+        if left is None:
+            return None
+        right = expr.right
+        if isinstance(right, ast.Constant) and isinstance(right.value, str):
+            return left / right.value
+        return None
+    return None
+
+
+def _root_for(source: str, path: Path) -> Path | None:
+    """The directory a site's `dir=` expression names, read from `path`'s own `__file__`."""
+    try:
+        expr = ast.parse(source, mode="eval").body
+    except SyntaxError:  # pragma: no cover - the source came from a parsed module
+        return None
+    return _resolve_root(expr, _assigned_values(path), path)
+
+
 def _unignored(candidates: list[str]) -> list[str]:
     """The candidates git's ignore rules do not match, asked one at a time.
 
@@ -287,6 +399,10 @@ def test_every_scratch_root_a_test_creates_in_the_repo_is_gitignored():
     A scan that silently stopped finding sites would pass while measuring nothing, which is
     the failure mode a guard is supposed to have instead of its callers, so the count is
     asserted against the five sites the rule was written for rather than trusted.
+
+    The name it asks git about is built from the site's **own** root, and a root this scan
+    cannot resolve is reported rather than passed: asking about `tests/<prefix>x` for every
+    site made the answer depend on a root the site does not have.
     """
     sites = _sites()
     assert len(sites) >= 5, (
@@ -318,13 +434,43 @@ def test_every_scratch_root_a_test_creates_in_the_repo_is_gitignored():
         "or move its root out of the repository."
     )
 
-    candidates = [f"tests/{prefix}x" for _p, _n, prefix, _src in sites]
+    # The candidate is built from the site's **own** root. `f"tests/{prefix}x"` was the first
+    # cut of this line and it discards the root the scan just read (`_src`), so every site was
+    # asked about as if it rooted at `tests/`: a root one level below it, or the repository
+    # root itself, passed here while the path the call really creates was listed by
+    # `git status` as `?? tests/sub/…` / `?? emrg-probe-root-…`, not ignored — dirt by the
+    # criterion that costs the next cycle its tier. Measured 2026-09-17 on head `cfb6f59c` by
+    # cycle `cyc20260917-071653`, whose two arms (a `dir=` one level below `tests/`, and one at
+    # the repository root) each left this guard at `3 passed`.
+    candidates: list[str] = []
+    unresolvable: list[str] = []
+    for path, lineno, prefix, src in sites:
+        if not prefix:
+            continue  # reported by the assertion above; there is no name to ask about
+        root = _root_for(src, path)
+        if root is None:
+            unresolvable.append(f"{path.relative_to(REPO_ROOT)}:{lineno} (dir={src})")
+            continue
+        try:
+            relative = root.relative_to(REPO_ROOT)
+        except ValueError:
+            continue  # resolved outside the repository, so it cannot become tree dirt
+        candidates.append(str(relative / f"{prefix}x"))
+    assert not unresolvable, (
+        "these sites root a scratch directory at an expression this scan cannot resolve, so "
+        f"it cannot ask git whether the name they create is ignored: {unresolvable}. Write the "
+        "root as a path derived from `__file__` (`Path(__file__).resolve().parent`, "
+        "`os.path.dirname(os.path.abspath(__file__))`) and show the scan the directory it "
+        "names, or move the scratch root out of the repository — a root this scan cannot read "
+        "is not a root that cannot dirty the tree."
+    )
     bad = _unignored(candidates)
     assert not bad, (
         "these names a test can create inside the repository are not ignored by git, so an "
-        f"interrupted run leaves tree dirt that costs the next cycle its tier: {bad}. Add "
-        "the prefix to `.gitignore` (scoped to /tests/, with the measurement in the comment) "
-        "or move the scratch root out of the repository."
+        f"interrupted run leaves tree dirt that costs the next cycle its tier: {bad}. The "
+        "`/tests/emrg-*` rule is anchored at the top level of `tests/`, so a site rooted "
+        "elsewhere needs the rule widened to that root deliberately — or, usually better, the "
+        "scratch root moved to `tests/` or out of the repository."
     )
 
 
