@@ -1173,6 +1173,102 @@ test("#1283 子进程起来了 → 安静返回", async () => {
   assert.strictEqual(await client._awaitDaemonReady(child, client._logMark(logFile()), 1000), child);
 });
 
+// ── 第三种状态：spawn 本身失败（ENOENT）──────────────────────────────────────
+// 打包路径 `~/.emrg/install/bin/emrgd` 是 `_findDaemonExecutable()` 无条件拼出来的
+// （不检查存在），源码路径 `_findPython()` 在 .venv 缺失时退回裸 "python3"/"python"
+// （也不检查）⇒ 装坏 / 第一次启动就能到。它既不是"退出"也不是"还在跑"。
+
+test("#1283 从未启动：pid 同步可见，'error' 补上名字（ENOENT）", () => {
+  const client = new DaemonClient();
+  let onError = null;
+  const child = {
+    pid: undefined, // 本机 node 26.5.0 实测：spawn 不存在的路径时同步就是 undefined
+    exitCode: null,
+    signalCode: null,
+    once(ev, cb) { if (ev === "error") onError = cb; },
+  };
+  const state = client._watchSpawn(child);
+  assert.strictEqual(state.neverStarted, true, "不必等 'error'：pid 就是判据");
+  assert.strictEqual(state.err, null);
+  assert.strictEqual(client._neverStartedName(state), "");
+  onError(Object.assign(new Error("spawn /nonexistent/emrgd-missing ENOENT"), { code: "ENOENT" }));
+  assert.strictEqual(state.neverStarted, true);
+  assert.strictEqual(state.err.code, "ENOENT");
+  assert.strictEqual(client._neverStartedName(state), " (ENOENT)");
+});
+
+test("#1283 从未启动 → never started，绝不是 still running，也不烧窗口", async () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous\n");
+  const mark = client._logMark(logFile());
+  client.isRunning = async () => false;
+  const child = { pid: undefined, exitCode: null, signalCode: null, once() {} };
+  const state = client._watchSpawn(child);
+  const t0 = Date.now();
+  await assert.rejects(
+    client._awaitDaemonReady(child, mark, 5_000, state),
+    (err) => err.message.includes("never started")
+      && !err.message.includes("still running")
+      && !err.message.includes("failed to start within timeout")
+      && !err.message.includes("exited during startup"),
+  );
+  assert.ok(Date.now() - t0 < 1000, "5s 的窗口不该被烧完");
+});
+
+test("#1283 从未启动的详细文案：仍说本次没写，并点名 ENOENT", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
+  const mark = client._logMark(logFile());
+  const state = { err: { code: "ENOENT" }, neverStarted: true };
+  const detail = client._startupFailureDetail(mark, { pid: undefined }, state);
+  assert.ok(detail.includes("never started (ENOENT)"));
+  assert.ok(detail.includes("wrote nothing"));
+  assert.ok(!detail.includes("still running"));
+  assert.ok(!detail.includes("SIGTERM"));
+});
+
+test("#1283 startDaemon：spawn 打桩为 ENOENT → 立即失败并点名，不冒到 uncaughtException", async () => {
+  // 真 spawn 会拉起 daemon——一律打桩（MANIFESTO 第四条附则二）。替身是真正的
+  // EventEmitter：没有 'error' 监听者时 node --test 会因未处理的 'error' 抛错 ⇒
+  // 这条测试同时证明「监听器确实挂上了」。
+  const childProcess = require("child_process");
+  const { EventEmitter } = require("events");
+  const cacheKey = require.resolve("../daemon_client.js");
+  const originalModule = require.cache[cacheKey];
+  const origSpawn = childProcess.spawn;
+  const file = logFile();
+  fs.writeFileSync(file, "previous run: SystemExit: SIGTERM (15) received\n");
+  try {
+    delete require.cache[cacheKey];
+    childProcess.spawn = () => {
+      const child = new EventEmitter();
+      child.unref = () => {};
+      child.pid = undefined;
+      child.exitCode = null;
+      child.signalCode = null;
+      setImmediate(() => child.emit(
+        "error", Object.assign(new Error("spawn /nonexistent/emrgd-missing ENOENT"), { code: "ENOENT" }),
+      ));
+      return child;
+    };
+    const Reloaded = require("../daemon_client.js").DaemonClient;
+    const c = new Reloaded();
+    // 真实路径：探测是异步的 ⇒ 'error' 在第一次检查之前就已经送达，名字拿得到。
+    c.isRunning = async () => { await new Promise((r) => setTimeout(r, 5)); return false; };
+    const t0 = Date.now();
+    await assert.rejects(
+      c.startDaemon(),
+      (err) => err.message.includes("never started (ENOENT)")
+        && !err.message.includes("still running")
+        && !err.message.includes("failed to start within timeout"),
+    );
+    assert.ok(Date.now() - t0 < 1000, "ENOENT 不该烧满 5s 窗口");
+  } finally {
+    childProcess.spawn = origSpawn;
+    require.cache[cacheKey] = originalModule;
+  }
+});
+
 test("#1283 startDaemon：标记在 spawn 之前取，失败信息只含本次写入", async () => {
   // 真实 spawn 会拉起 daemon——一律打桩（MANIFESTO 第四条附则二）。打桩的替身
   // 在 spawn 返回后立刻写日志并立刻死掉，正是"标记必须早于子进程"的场景。

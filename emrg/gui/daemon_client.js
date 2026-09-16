@@ -42,6 +42,9 @@ const MAX_SPAWN_ATTEMPTS = 3;
 // RotatingFileHandler 维护，会被 rotate（旧文件改名、同名新文件重建），
 // 到那时裸 offset 索引的是另一个文件。
 const NO_LOG_MARK = Object.freeze({ size: 0, ino: null });
+// "没观察到任何 spawn 状态"——直接调用 `_awaitDaemonReady` / `_startupFailureDetail`
+// （测试与将来别的调用者）时的默认值，与"子进程有 pid"同义。
+const NO_SPAWN_STATE = Object.freeze({ err: null, neverStarted: false });
 
 // 会话 ID 允许多种形态：
 //  - 交互会话：s_<6位日期>_<4位时间>_<hex id>（generateSessionId 产物）
@@ -207,10 +210,37 @@ class DaemonClient {
     };
   }
 
+  // spawn 本身失败（ENOENT：打包路径 `~/.emrg/install/bin/emrgd` 不在、PATH 里没有
+  // python）是第三种状态——既不是"退出"也不是"还在跑"。它不在 exitCode/signalCode
+  // 里：Node 把 'error' **异步**发给子进程，而 pid 从 spawn 返回那一刻起就是
+  // undefined（本机 node 26.5.0 实测：spawn 一个不存在的路径 → 同步 pid=undefined /
+  // exitCode=null；'error'(ENOENT) 之后 exitCode 变成 -2；CI 用的 node 22 是否同样
+  // 变 -2 未测，所以判据不依赖它）。两件都记下来：
+  //   · pid === undefined —— 同步可见，不必等 'error'；
+  //   · 'error' 的 err —— 名字（ENOENT）只能从这里拿到。
+  // 没有监听者时 'error' 会一路冒到 main.js 的 uncaughtException 日志里，而等待
+  // 循环会把整个窗口烧完再谎称 "still running"——正是本诊断要说清的那个事实。
+  _watchSpawn(child) {
+    const state = { err: null, neverStarted: !child || child.pid === undefined };
+    if (child && typeof child.once === "function") {
+      child.once("error", (err) => {
+        state.err = err;
+        state.neverStarted = true;
+      });
+    }
+    return state;
+  }
+
+  // 「从未启动」要用哪个名字说（`ENOENT` 只有 'error' 才给得出）。
+  _neverStartedName(state) {
+    if (!state || !state.err) return "";
+    return ` (${state.err.code || state.err.message})`;
+  }
+
   // 一次没能起来的启动，究竟知道些什么（issue #1283）：两个事实，都不得用猜测代替
   // ——本次是否往 log 里写过东西，以及子进程是活着还是已经退出（退出码/信号）。
   // 本次没写时**如实说没写**，绝不把更早的输出当成本次的原因。
-  _startupFailureDetail(since, child) {
+  _startupFailureDetail(since, child, spawnState = NO_SPAWN_STATE) {
     const tail = this._readLogTail(15, since);
     if (tail) {
       return `\n  emrgd.log tail (written by this start attempt, ${EMRGD_LOG()}):\n${tail}`;
@@ -222,9 +252,11 @@ class DaemonClient {
       exists = false;
     }
     const { code, signal } = this._childExit(child);
-    const how = signal !== null
-      ? `already exited (signal=${signal})`
-      : code !== null ? `already exited (exit=${code})` : "still running";
+    const how = spawnState.neverStarted
+      ? `never started${this._neverStartedName(spawnState)}`
+      : signal !== null
+        ? `already exited (signal=${signal})`
+        : code !== null ? `already exited (exit=${code})` : "still running";
     return (
       `\n  this start attempt wrote nothing to emrgd.log` +
       `${exists ? "" : " (the file does not exist)"}; the child is ${how}.` +
@@ -234,22 +266,29 @@ class DaemonClient {
 
   // 等 daemon 起来；已经死掉的子进程立即失败（issue #1283 缺陷 ②），而不是把整个
   // 窗口烧完再报"没有退出码"。静默子进程留下的唯一事实就是退出码——spawn 把
-  // stdout/stderr 都丢弃了（stdio: "ignore"）。
-  async _awaitDaemonReady(child, mark, waitMs = SPAWN_WAIT_MS) {
+  // stdout/stderr 都丢弃了（stdio: "ignore"）。从未启动的子进程（ENOENT）同样立即
+  // 失败：它没有 pid，也永远不会写 log。
+  async _awaitDaemonReady(child, mark, waitMs = SPAWN_WAIT_MS, spawnState = NO_SPAWN_STATE) {
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       if (await this.isRunning(500)) return child;
+      if (spawnState.neverStarted) {
+        throw new Error(
+          `emrgd never started${this._neverStartedName(spawnState)}` +
+          this._startupFailureDetail(mark, child, spawnState)
+        );
+      }
       const { code, signal } = this._childExit(child);
       if (code !== null || signal !== null) {
         const how = signal !== null ? `signal=${signal}` : `exit=${code}`;
         throw new Error(
-          `emrgd exited during startup (${how})` + this._startupFailureDetail(mark, child)
+          `emrgd exited during startup (${how})` + this._startupFailureDetail(mark, child, spawnState)
         );
       }
       await new Promise((r) => setTimeout(r, 300));
     }
     throw new Error(
-      `emrgd failed to start within timeout` + this._startupFailureDetail(mark, child)
+      `emrgd failed to start within timeout` + this._startupFailureDetail(mark, child, spawnState)
     );
   }
 
@@ -289,7 +328,8 @@ class DaemonClient {
       child.unref();
       this._daemonChild = child;
       this.logger.info(`[gui] daemon spawned: pid=${child.pid} (packaged emrgd)`); // 18:47:37 B2
-      return await this._awaitDaemonReady(child, mark);
+      const spawnState = this._watchSpawn(child);
+      return await this._awaitDaemonReady(child, mark, SPAWN_WAIT_MS, spawnState);
     }
     // G125：spawn 设 cwd=project_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
     const python = this._findPython();
@@ -307,7 +347,8 @@ class DaemonClient {
     this._daemonChild = child; // 暴露 child（集成测试 after 清理用）
     this.logger.info(`[gui] daemon spawned: pid=${child.pid} (source mode)`); // 18:47:37 B2
     // 等最多 SPAWN_WAIT_MS 就绪
-    return await this._awaitDaemonReady(child, mark);
+    const spawnState = this._watchSpawn(child);
+    return await this._awaitDaemonReady(child, mark, SPAWN_WAIT_MS, spawnState);
   }
 
   // Rant 2026-08-21T15:26:42：daemon 存活判断用固定端口 TCP 探测——
