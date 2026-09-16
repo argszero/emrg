@@ -147,6 +147,107 @@ def test_an_untracked_file_is_unique_even_when_upstream_has_those_bytes(tmp_path
     assert "b.txt" in why
 
 
+def test_an_untracked_copy_of_head_is_recoverable(tmp_path):
+    """`git rm --cached f` on unchanged content: `D  f` *and* `?? f` for one path (#1277).
+
+    The `??` line used to name the path unique before anything was hashed, so a tree
+    that loses nothing stayed read-only and the git verbs that could converge it stayed
+    refused. The bytes are `HEAD`'s own, under that same name — which is the whole
+    distinction from `test_an_untracked_file_is_unique_even_when_upstream_has_those_bytes`
+    above: content published once at this path but absent from `HEAD` is the host's file.
+
+    This geometry also measures something about the reversal that the receipt's own
+    wording does not cover, pinned below rather than left as a surprise: the named
+    inverse *works* and *exits 1* on it. That is the undo/audit half, filed in #1284.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo, "unchanged")
+    _git(repo, "rm", "-q", "--cached", "f.txt")
+    assert _status(repo) == "D  f.txt\n?? f.txt\n", _status(repo)
+    # The precondition that makes releasing the tier lossless, asserted rather than
+    # assumed: the untracked bytes are byte-identical to `HEAD`'s blob for this path,
+    # so they are reachable from a commit — the measurement #1277 reports, and the one
+    # that separates this case from a file the host wrote.
+    digest = _git(repo, "hash-object", "--", "f.txt").stdout.strip()
+    assert digest == _git(repo, "rev-parse", "HEAD:f.txt").stdout.strip()
+    assert _git(repo, "log", "--all", "--oneline", f"--find-object={digest}").stdout.strip()
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is False, why
+
+    # And the action obeys that verdict, reversibly, with `HEAD` where it was.
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
+    assert status == "recovered", f"{status}: {detail}"
+    assert _status(repo) == ""
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head
+
+    # The inverse the receipt names, run as named. What this geometry does to it is
+    # *measured*, not assumed (the residual is a finding, filed with the undo/audit
+    # half in #1284, not something to wish away here): the state comes back byte for
+    # byte — deletion still staged, file still untracked — while git exits **1** and
+    # warns `f.txt already exists, no checkout`, having restored the untracked copy
+    # already by the time it tries again. The stash is consequently *kept*, so the
+    # one-shot spelling's evidence is not consumed either (measured: `pop --index`
+    # reports the same failure and keeps the entry here).
+    message = json.loads(
+        (Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip())
+         / "emrg-recovery-receipt.json").read_text(encoding="utf-8")
+    )["stash_message"]
+    applied = _git(repo, "stash", "apply", "--index", f"stash^{{/{message}}}")
+    assert "already exists, no checkout" in applied.stderr, applied.stderr
+    assert _status(repo) == "D  f.txt\n?? f.txt\n", _status(repo)
+    assert _git(repo, "stash", "list").stdout.strip() != "", \
+        "the reversal must not consume the stash it is named by"
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head
+
+
+def test_an_untracked_copy_of_head_with_other_bytes_is_unique(tmp_path):
+    """The control for the clause above: the measurement is of the bytes, not the gesture.
+
+    The same `git rm --cached` shape with edited content — the host's newer draft — exists
+    in no commit, so the tier must stay refused and the draft must survive the attempt.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo, "unchanged")
+    _git(repo, "rm", "-q", "--cached", "f.txt")
+    (repo / "f.txt").write_text("the host's newer draft", encoding="utf-8")
+    assert _status(repo) == "D  f.txt\n?? f.txt\n", _status(repo)
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True, why
+    assert "f.txt" in why
+
+    status, _detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
+    assert status == "refused", status
+    assert (repo / "f.txt").read_text(encoding="utf-8") == "the host's newer draft"
+
+
+def test_an_untracked_file_duplicating_another_path_is_unique(tmp_path):
+    """Path-exactness: a blob with these bytes at *another* path is not evidence about this file.
+
+    The tempting looser test — "some blob with these bytes is in a commit" — releases the
+    tier here, over a file the host wrote; only `HEAD:<this path>` counts. Pinned because
+    the temptation is concrete: the duplication is measurable with one `hash-object` and
+    the shortcut would have passed every other test in this file.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo)
+    (repo / "other.txt").write_text("v1", encoding="utf-8")
+    _git(repo, "add", "other.txt")
+    _git(repo, "commit", "-q", "-m", "other")
+    assert (
+        _git(repo, "rev-parse", "HEAD:other.txt").stdout.strip()
+        == _git(repo, "hash-object", "--", "other.txt").stdout.strip()
+    )
+    (repo / "fresh.txt").write_text("v1", encoding="utf-8")   # same bytes, a new path
+    assert _status(repo).strip() == "?? fresh.txt", _status(repo)
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True, why
+    assert "fresh.txt" in why
+
+
 def test_a_deletion_loses_nothing(tmp_path):
     """A deleted tracked file is restored by discarding, so it is not unique work."""
     _new_repo(tmp_path / "repo")
