@@ -35,7 +35,7 @@ gh auth status 2>&1 || {
   # usually contain a valid GitHub token that can be reused as GH_TOKEN
   # (never persisted to disk, never printed in plaintext).
   #
-  # ⚠️ Platform guard (rant 2026-08-07T10:17:27): on Windows, `git credential
+  # ⚠️ Platform guard (PR #545, rant 2026-08-07T10:17:27): on Windows, `git credential
   # fill` triggers Git Credential Manager GUI popups inside the non-interactive
   # daemon session — skip credential extraction on Windows entirely; the host
   # connects GitHub from the EMRG GUI settings page instead.
@@ -113,7 +113,7 @@ cd {{ source_dir }} && git fetch origin 2>&1
 cd {{ source_dir }} && git status --short --branch 2>&1
 ```
 
-> ⛔ **Never touch the host's uncommitted work** (rant 2026-08-20T11:58:27 — the task
+> ⛔ **Never touch the host's uncommitted work** (PR #881, rant 2026-08-20T11:58:27 — the task
 > used to `git stash` / silently reset dirty working trees, silently discarding the
 > host's live edits). The source directory is the HOST's working directory, not a
 > dedicated clone — a dirty working tree is NORMAL and must be respected:
@@ -386,11 +386,11 @@ Closes #<N>
 - [ ] New tests added"
 ```
 
-> ⚠️ **PR submission rules (rant 2026-08-20T21:53:36 — supersedes earlier PR-issue linking notes)**:
+> ⚠️ **PR submission rules (PR #902, rant 2026-08-20T21:53:36 — supersedes earlier PR-issue linking notes)**:
 > 1. **Base the PR on the DEFAULT branch.** Before opening a PR, check the target repo's default branch (`gh repo view --json defaultBranchRef`) and open the PR against it. GitHub only resolves closing keywords in the body/commit message into the linked-issue field when the PR base is the default branch; for any other base the linked field stays empty and bot checks like `needs:issue` never pass. If the repo explicitly requires a non-default base (e.g. per CONTRIBUTING), record in the closing summary that the check fails by design and is ignorable — do not keep retrying.
 > 2. **Act on PR feedback the same round.** After creating the PR, and in every later round, check bot/maintainer comments (`gh api repos/<owner>/<repo>/issues/<n>/comments`). A bot block comment is a hard signal: handle it that round — determine what the bot actually checks (linked-issue field vs body keywords), fix what is fixable, and record-and-ignore what cannot pass by design. Never self-confirm with "the body already says Closes" and shelve the block.
 > 3. **For default-branch PRs, verify the issue is actually linked, not just mentioned in the body.** This prompt is Jinja2-rendered — use plain placeholders `<owner>`/`<repo>`/`<n>` (NOT Jinja2 double-brace delimiters, which would be silently erased). Verify via GraphQL `closingIssuesReferences`: `gh api graphql -f query='{ repository(owner: "<owner>", name: "<repo>") { pullRequest(number: <n>) { closingIssuesReferences(first: 5) { nodes { number } } } } }'` — `gh pr view <N> --json linkedIssues` FAILS on gh ≤ 2.58 (unknown field). If empty, attempt association via the GraphQL `addLinkedIssues` mutation (`mutation { addLinkedIssues(input: {issueId: ..., linkedPullRequestId: ..., relationship: CLOSES}) }`) — REST `POST /pulls/<n>/issues` is 404 and `gh pr edit` does not manage linked issues. If association still fails, record it in the closing summary and ask in the PR thread instead of assuming it worked.
-> ⚠️ **Publishing spec (rant 2026-08-20T14:10:28 — comment double-encoding bug)**:
+> ⚠️ **Publishing spec (PR #883, rant 2026-08-20T14:10:28 — comment double-encoding bug)**:
 > 1. **Always pass RAW text as the body of any comment / discussion / issue / PR** — write the body to a file with a heredoc and submit via `--field body=@file` (or `$(cat file)` / inline text). **NEVER** use patterns like `python3 -c "import json; print(json.dumps(...))"` that JSON-serialize the body before submitting — GitHub renders the escaped literal as-is (中文→`\uXXXX`, newlines→literal `\n`, quotes wrapped), producing garbled text.
 > 2. **Always read back and verify the posted body**: after posting, fetch the comment and check that the first character is NOT `"` and the text contains no `\uXXXX` residuals. If garbled, fix immediately with `updateDiscussionComment` (or the equivalent edit mutation) using the decoded original.
 > 3. This applies to every "multi-line text → GitHub API" submission (comment / issue body / PR body / discussion reply) without exception.
@@ -425,7 +425,7 @@ For each open PR:
 | **Closed (unmerged)** | Understand why → record in memory file → remove from active PR list |
 | **No feedback for 7+ days** | May politely ask on the PR "any updates or feedback?" |
 
-#### C.1.5 Parallel Recon (healthy-PR rule, rant 2026-08-24T14:05:06)
+#### C.1.5 Parallel Recon (healthy-PR rule, PR #954, rant 2026-08-24T14:05:06)
 
 Tracking is **not maintenance-only**. When **all** open PRs are healthy and this round needs no maintenance, you may run Recon in parallel instead of finishing the cycle — a long-lived healthy PR (MERGEABLE + CI green) must not lock the task out of producing new contributions.
 
@@ -520,7 +520,7 @@ End every cycle with a **closing summary in your final message**. It is the only
 5. **The next step** — the phase the next round should enter, and why
 
 Also record **key findings** (lessons worth keeping beyond this session) as memory entries under `{{ evolution_cwd }}/.emrg/memory/` — the durable layer, whose entries you open yourself with the `read` tool:
-   - ⚡ **Memory hygiene** (rant 2026-08-23T08:04:26): keep MEMORY.md a **pure index** — one short line per entry, never duplicated content; update entries in place; if the index has grown long, merge/consolidate instead of appending.
+   - ⚡ **Memory hygiene** (PR #941, rant 2026-08-23T08:04:26): keep MEMORY.md a **pure index** — one short line per entry, never duplicated content; update entries in place; if the index has grown long, merge/consolidate instead of appending.
 
 The summary is a message, not a file — nothing to commit, nothing to keep in sync; the session history is the record.
 

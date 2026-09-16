@@ -57,8 +57,8 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 
 #### 0.3 Confirm promotion channel availability
 
-- **Browser-first channel probing (MUST, rant 2026-08-19T21:08:55)**: use `browser-harness` to operate the **real browser** for all channel detection and actions — the login state (cookies/sessions) exists **only in the real browser**. curl/API probes see a logged-out view and misjudge channel availability (e.g. curl returns 000 for Reddit while the browser is logged in and fully usable). When checking whether a channel works / is logged in / can post: **open it in the real browser via browser-harness first**; only fall back to curl for plain public-data reads (public JSON endpoints, docs) when the browser path is unavailable or the data is genuinely public.
-- **Direct CDP connection (MUST, rant 2026-08-25T17:57:15)**: all browser operations MUST connect **directly** to the local CDP endpoint `ws://127.0.0.1:57000/devtools/page/...` (HTTP `127.0.0.1:57000/json` returns 200 with the tab list) — following the r47/r48 `_post_*.py` CDP script pattern (websocket to `ws://127.0.0.1:57000/devtools/page/<tab-id>`). **FORBIDDEN**: calling browser-harness's `remote-debugging-setup` / opening `chrome://inspect` — that pops Chrome's "Allow remote debugging?" authorization dialog and blocks waiting for host clicks. The 57000 endpoint is always available on this host; if a direct connection fails, **retry the direct connection** (the tab list may have changed), never switch to the popup flow.
+- **Browser-first channel probing (MUST, PR #899, rant 2026-08-19T21:08:55)**: use `browser-harness` to operate the **real browser** for all channel detection and actions — the login state (cookies/sessions) exists **only in the real browser**. curl/API probes see a logged-out view and misjudge channel availability (e.g. curl returns 000 for Reddit while the browser is logged in and fully usable). When checking whether a channel works / is logged in / can post: **open it in the real browser via browser-harness first**; only fall back to curl for plain public-data reads (public JSON endpoints, docs) when the browser path is unavailable or the data is genuinely public.
+- **Direct CDP connection (MUST, PR #987, rant 2026-08-25T17:57:15)**: all browser operations MUST connect **directly** to the local CDP endpoint `ws://127.0.0.1:57000/devtools/page/...` (HTTP `127.0.0.1:57000/json` returns 200 with the tab list) — following the r47/r48 `_post_*.py` CDP script pattern (websocket to `ws://127.0.0.1:57000/devtools/page/<tab-id>`). **FORBIDDEN**: calling browser-harness's `remote-debugging-setup` / opening `chrome://inspect` — that pops Chrome's "Allow remote debugging?" authorization dialog and blocks waiting for host clicks. The 57000 endpoint is always available on this host; if a direct connection fails, **retry the direct connection** (the tab list may have changed), never switch to the popup flow.
 - Check the CLI: `which curl` (public-data reads only — never for login-state judgment)
 - Check whether the browser harness skill is available (`/skills` or `ls ~/.emrg/skills/`)
 - Channel unavailable → record it in the state file (blocked = channel unavailable); skip channel actions this round, but still write the reflection
@@ -161,7 +161,7 @@ long-form output on your own turf.
   give value first, project mention natural (this is a home turf, but still not a hard ad).
 - **Fact-checking**: any claim about project capabilities/versions/mechanisms MUST be
   verified via §0.4 first (latest commit/release); cite the latest commit/release.
-- **Cadence**: 1-3 days per post — at least 2 posts/week (rant 2026-08-25T10:01:20 — the old
+- **Cadence**: 1-3 days per post — at least 2 posts/week (PR #970, rant 2026-08-25T10:01:20 — the old
   ≤1 post/week was too slow: publish-ready drafts piled up while the project ships ~8
   releases/2 days, and a postmortem draft waited a full week, its window slipping to 08-27).
   Publish within 1-3 days whenever a draft is ready; a new release or major progress may add
@@ -255,7 +255,7 @@ submit_rant(action="submit", project="{{ project.name }}",
             message="community feedback (<channel> <link>): <summary of the user's intent>")
 ```
 
-`submit_rant` is the only writer of `rants.jsonl` (rant 2026-08-18T16:42:52 — the
+`submit_rant` is the only writer of `rants.jsonl` (PR #845, rant 2026-08-18T16:42:52 — the
 unified tool exists because inline scripts drifted the format: array rows, lost
 fields, pruned history). It owns the file's shape: the timestamp, the field order,
 the sort and `ensure_ascii=False` are the tool's business and are not restated
@@ -267,7 +267,7 @@ not even to read it.
 - Deduplicate before submitting: `submit_rant(action="list", project="{{ project.name }}")` and skip feedback that is already queued.
 - Each message notes the source (channel + link) so the evolution task can trace back.
 
-**Also file a public GitHub issue on the promoted project** (rant 2026-08-22T08:14:31) — a rant is an internal queue (no issue number, not community-visible); a public issue is transparent, traceable, and lets the community participate. For **valuable feedback** (same table above — feature request / bug report / negative experience / new problem / inspiration):
+**Also file a public GitHub issue on the promoted project** (PR #932, rant 2026-08-22T08:14:31) — a rant is an internal queue (no issue number, not community-visible); a public issue is transparent, traceable, and lets the community participate. For **valuable feedback** (same table above — feature request / bug report / negative experience / new problem / inspiration):
 
 1. Open a public issue on the target repo: `gh issue create -R {{ owner }}/{{ repo }} --title "<English title>" --body "<feedback summary> (source: <channel> <link>)"` — English title/body (language policy), body includes the source link for traceability.
 2. On success → record the issue number + link in the state file (e.g. `- filed issues: <#N> (<summary>, <link>)`), and optionally reference that issue number in the rant entry to avoid the evolution task re-processing the same feedback.
@@ -305,7 +305,7 @@ Rules: update every round; only update the relevant fields, don't delete other f
 
 #### 4.1 Housekeeping (MUST run every round — the state file is a working notebook, not an append-only log)
 
-Rants 2026-08-24T15:27:37 + 15:28:41 (host): the file grew to 67KB/103 lines/14 sections by pure appending — homework piled up from r34 to r44, closed threads stayed in the active list, the same thread appeared in 4 different sections, and `last completed` became a 3700-char wall of text. Keep it convergent:
+PR #957, Rants 2026-08-24T15:27:37 + 2026-08-24T15:28:41 (host): the file grew to 67KB/103 lines/14 sections by pure appending — homework piled up from r34 to r44, closed threads stayed in the active list, the same thread appeared in 4 different sections, and `last completed` became a 3700-char wall of text. Keep it convergent:
 
 1. **Active lists only hold live entries** (`promotion tracking`, `promotion opportunities`, `homework record`): threads that are ACTED / closed / dormant / superseded leave the active list the same round they close — move them to `archive` (with the round range), never leave them in place.
 2. **Homework depth cap**: `homework record` keeps at most the **last 3 rounds** (rN, rN-1, rN-2). Older rounds collapse into one `archive` line, e.g. `- [archived r34-r41] homework: full detail dropped, outcomes in promotion tracking`.
@@ -347,7 +347,7 @@ Each round must answer these 8 questions:
 
 ### 6. Effect Measurement & Method Review (PDCA Check & Act)
 
-**Check — actively measure effects (MUST every round)**. Promote must read its own effect numbers — never wait for the host to point them out (rant 2026-08-24T18:28:38). Quantifiable signals to watch:
+**Check — actively measure effects (MUST every round)**. Promote must read its own effect numbers — never wait for the host to point them out (PR #961, rant 2026-08-24T18:28:38). Quantifiable signals to watch:
 
 - **Repo growth**: star/fork counts and their deltas since the last recorded values
   ```bash

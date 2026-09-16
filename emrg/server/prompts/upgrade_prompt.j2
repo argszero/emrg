@@ -46,7 +46,7 @@ release installer" means for this version.
 - `{{ install_dir }}/version.txt` ← {{ target_tag }} (the version).
 - Before overwriting `version.txt`: if it already exists with a different
   content, copy its current content to `{{ install_dir }}/previous-version.txt`
-  (rant 2026-08-21T12:44:34 — the GUI upgrade banner shows "from X to Y").
+  (PR #912, rant 2026-08-21T12:44:34 — the GUI upgrade banner shows "from X to Y").
   If `version.txt` did not exist (first install), delete any stale
   `previous-version.txt`.
 - `{{ install_dir }}/bin/` launcher scripts (emrg/emrgd/emrg.cmd/emrgd.cmd
@@ -61,7 +61,7 @@ release installer" means for this version.
   "Fatal Python error: Failed to import encodings" — never use a relative
   path. On POSIX layouts skip this file (the `bin/python` wrapper already
   handles stdlib discovery).
-- GUI **must be synced too** (rant 2026-08-24T17:50: GUI packages had been
+- GUI **must be synced too** (PR #959, rant 2026-08-24T17:50: GUI packages had been
   stuck at 0.2.72 while the daemon moved on — the old "no node/npm, skip"
   reasoning was a false premise: node/npm exist on the host (asdf), they are
   just not on the daemon's PATH). Updating the GUI is a fixed part of the
@@ -129,7 +129,7 @@ release installer" means for this version.
   5. **Verify**:
      - re-extract the replaced asar's package.json and confirm its
        `version` == target tag (strip the leading 'v');
-     - **signature check (REQUIRED — rant 2026-08-25T09:18:19)**:
+     - **signature check (REQUIRED — PR #968, rant 2026-08-25T09:18:19)**:
        `codesign --verify --deep --strict "{{ install_dir }}/emrg-gui/EMRG.app"`
        and `codesign --verify --deep --strict ~/Applications/EMRG.app` must
        both pass (exit 0). ANY failure = upgrade failure → restore from the

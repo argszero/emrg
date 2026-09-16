@@ -181,7 +181,7 @@ def test_reference_count_threshold_and_in_text_coverage():
 def test_author_side_citation_integrity_requirements():
     text = PROMPT.read_text(encoding="utf-8")
     # Author Phase B item 12: verify EVERY reference before submitting.
-    assert "Citation authenticity verification (mandatory, rant 2026-09-10T11:28:43)" in text
+    assert "Citation authenticity verification (mandatory, PR #1116, rant 2026-09-10T11:28:43)" in text
     assert "fabricated citations are academic misconduct, not a formatting slip" in text
     assert "delete it or replace it with a real reference" in text
     assert "Never submit an unverifiable citation" in text
@@ -193,10 +193,10 @@ def test_author_side_citation_integrity_requirements():
 def test_citation_gate_wired_into_triage_and_common_rules():
     text = PROMPT.read_text(encoding="utf-8")
     # Triage (editor Phase A step 3) verifies the gate before moving to in-review.
-    assert "citation gate (rant 2026-09-10T11:28:43)" in text
+    assert "citation gate (PR #1116, rant 2026-09-10T11:28:43)" in text
     assert "author's authenticity report — the independent spot-check still happens at review" in text
     # Common Rules item 8 carries it too, so the bar is visible outside the phases.
-    assert "Citation integrity is part of the bar (rant 2026-09-10T11:28:43)" in text
+    assert "Citation integrity is part of the bar (PR #1116, rant 2026-09-10T11:28:43)" in text
 
 
 def test_citation_verification_row_in_both_review_templates():

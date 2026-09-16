@@ -1,15 +1,15 @@
-{# Vibe check prompt (rant 2026-08-19T07:10:40 + 2026-08-19T10:15:43).
+{# Vibe check prompt (PR #860, rant 2026-08-19T07:10:40 + PR #863, rant 2026-08-19T10:15:43).
    Rendered by daemon._task_vibe_check via _get_jinja_env() (FileSystemLoader,
    same live-reload mechanism as system.j2: editing this template takes effect
    without a daemon restart). Context: task_name, prompt, completion_summary.
-   Rant 2026-08-19T10:15:43 (host-finalized): the PRIMARY evidence is the
+   PR #863, Rant 2026-08-19T10:15:43 (host-finalized): the PRIMARY evidence is the
    task's own session history — the daemon loads it by the task's fixed
    session_id and passes it as the chat messages that follow this system
    message. prompt/completion_summary below are only auxiliary context.
-   Rant 2026-08-20T10:58:55 (host design-finalized): fields unified to
+   PR #880, Rant 2026-08-20T10:58:55 (host design-finalized): fields unified to
    work / recommend_slowdown / slowdown_reason — the agent no longer
    self-rates "meaningful"; slowdown is decided solely by recommend_slowdown.
-   Rant 2026-08-20T22:45:33 (host): work must describe USER-RELEVANT OUTPUTS
+   PR #904, Rant 2026-08-20T22:45:33 (host): work must describe USER-RELEVANT OUTPUTS
    and RESULTS only — tool calls/process details are NOT work-report content;
    keep it brief (1-3 sentences, ≤200 chars). The saved task-run JSONL no
    longer truncates work (daemon/scheduler removed the [:500] cap). #}
