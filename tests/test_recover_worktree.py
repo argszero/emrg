@@ -8,6 +8,7 @@ dirt that is NOT unique is converged **reversibly** — the scenario the measure
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -19,6 +20,7 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "recover-worktree.py"
 DOC = Path(__file__).resolve().parent.parent / "DEVELOPMENT.md"
+SCHEDULER = Path(__file__).resolve().parent.parent / "emrg" / "server" / "scheduler.py"
 
 #: The one owner of the undo spelling (issue #1284), imported rather than re-spelled:
 #: a test that copies the string it is checking cannot see the copy drift. Both
@@ -48,6 +50,29 @@ def _recovery_bullet() -> str:
     end = rest.find("\n- ")  # the bullet ends at the next top-level item
     assert end != -1, f"`{_RECIPE_BULLET}` is the last bullet in {DOC.name}"
     return " ".join(rest[:end].split())
+
+
+#: The document's *second* statement of the undo, in the `-f` discussion rather than
+#: in the recovery bullet: it tells a reader who has untracked-only dirt to reach for
+#: `git stash -u`, and how to come back (`git stash apply --index`). Named by its
+#: opening words, not a line number, and asserted to appear exactly once so a moved
+#: paragraph fails instead of silently measuring a different one.
+_RECIPE_CAVEAT = "`-f` is the right tool for tracked modifications only."
+
+
+def _recovery_caveat() -> str:
+    """That paragraph as one string, with its markdown line breaks collapsed."""
+    text = DOC.read_text(encoding="utf-8")
+    found = text.count(_RECIPE_CAVEAT)
+    assert found == 1, (
+        f"expected exactly one `{_RECIPE_CAVEAT}` paragraph in {DOC.name}, found "
+        f"{found} — the anchor moved, so this test would be measuring a different "
+        "paragraph"
+    )
+    rest = text.split(_RECIPE_CAVEAT, 1)[1]
+    end = rest.find("\n\n")  # the paragraph ends at the blank line
+    assert end != -1, f"`{_RECIPE_CAVEAT}` is the last paragraph in {DOC.name}"
+    return " ".join((_RECIPE_CAVEAT + rest[:end]).split())
 
 
 def _load():
@@ -1124,6 +1149,128 @@ def test_the_document_still_carries_the_measured_spelling():
         f"`stash@{{0}}` (the newest, which is this one only until the next is made); "
         f"got:\n{bullet}"
     )
+
+
+def _module_docstring(path: Path) -> str:
+    """The module docstring of `path`, or "" — located with `ast`, never by line number."""
+    return ast.get_docstring(ast.parse(path.read_text(encoding="utf-8"))) or ""
+
+
+def _named_docstring(path: Path, name: str, owner: str | None = None) -> str:
+    """The docstring of `name`, optionally as a method of class `owner`; "" if absent."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    candidates = ast.walk(tree) if owner is None else (
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == owner
+    )
+    for node in candidates:
+        for sub in (node.body if isinstance(node, ast.ClassDef) else [node]):
+            if (isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and sub.name == name):
+                return ast.get_docstring(sub) or ""
+    return ""
+
+
+#: Every reader-facing copy of the undo recipe, as (what a reader meets, how to get it).
+#: An explicit list rather than a scan of every mention (issue #1304): prose that
+#: *records the harm* — a plain `git stash pop` dropping staged content — has to spell the
+#: wrong spelling out, so a scanner over mentions is a false verdict on this repo's own
+#: notes, which is why #1296 dropped the one it tried. Naming the sites also means a site
+#: that is **renamed or moved** fails here loudly instead of leaving the class silently,
+#: which a scan cannot promise either. Extracted by `ast` rather than by line number, so
+#: an unrelated edit above the docstring cannot make this measure a different paragraph.
+_RECIPE_DOC_SITES = (
+    ("DEVELOPMENT.md's recovery bullet", DOC, lambda: _recovery_bullet()),
+    ("DEVELOPMENT.md's `-f` recovery caveat", DOC, lambda: _recovery_caveat()),
+    ("scripts/recover-worktree.py's module docstring", SCRIPT,
+     lambda: _module_docstring(SCRIPT)),
+    ("scheduler.recovery_recipe's docstring", SCHEDULER,
+     lambda: _named_docstring(SCHEDULER, "recovery_recipe")),
+    ("TaskHandler._recover_dirty_tree_sync's docstring", SCHEDULER,
+     lambda: _named_docstring(SCHEDULER, "_recover_dirty_tree_sync", owner="TaskHandler")),
+)
+
+
+def _assert_site_names_the_measured_spelling(label: str, text: str) -> None:
+    """The one criterion, applied to one site — so the self-test drives the real check."""
+    assert text.strip(), (
+        f"{label}: the site was found but is empty — the anchor moved, so this "
+        "assertion would be measuring nothing"
+    )
+    assert "stash" in text, (
+        f"{label}: this site has to be about the stash the recovery made; got:\n{text[:400]}"
+    )
+    assert "--index" in text, (
+        f"{label} must name `--index`, the part of the reversal that restores the staged "
+        "side. Without it the text sends a reader to the spelling that takes the newest "
+        "stash, brings a staged change back unstaged and consumes it — the failure "
+        f"#1284 exists to prevent (issue #1304); got:\n{text[:400]}"
+    )
+
+
+def test_every_reader_facing_copy_of_the_recipe_names_the_measured_spelling():
+    """Issue #1304: the recipe is stated in several documents, and only one was pinned.
+
+    #1296 corrected the spelling in the manual tool's own usage text and in the docstring
+    of the function that performs the move, and pinned the *document* (see
+    `test_the_document_still_carries_the_measured_spelling`), concluding the claim was
+    "pinned at both ends". Measured on the merged tree, the guard covered one of the
+    three reader-facing sites: re-wording either docstring back to "the action is
+    undoable with a bare `git stash pop`" left the suite green (`38 passed`, rc=0),
+    while the identical edit to the bullet reddens the test above — the positive
+    control that shows the instrument is not blind to prose. So the tool could print
+    the correct spelling while its own usage text, and the action's own docstring, sent
+    a reader to the harmful one.
+
+    The criterion is the same **presence** assertion, applied to every named site rather
+    than to one: each must name `--index`. Like the test above, it deliberately cannot
+    see a site that states *both* spellings, and cannot see a recipe moved to another
+    sentence — that weakness is the price of not re-introducing the scanner, which was a
+    false verdict on prose that records the harm (see
+    `test_the_tool_prints_the_receipts_own_recipe`).
+
+    Three things keep it from passing vacuously: each extraction is asserted non-empty
+    and to be about the stash, so a renamed function or a moved docstring fails here
+    instead of yielding `""` and passing; the site list itself is floored, because a
+    list that shrank to one entry would be a weaker claim, not a green one; and the
+    check is driven once against the harmed spelling in a `pytest.raises` arm, so the
+    assertion is shown to be able to fail.
+
+    The list is a *reader-facing* inventory, so it has to be an inventory: this PR
+    first named four sites, and review measured a fifth by the list's own criterion —
+    the `-f` paragraph in the same document tells a reader "use `git stash -u`,
+    recoverable with `git stash apply --index`", which names `--index` exactly as
+    `_assert_site_names_the_measured_spelling` requires, while dropping the ordinal.
+    Re-wording it back to a bare `git stash pop` left the suite green (`39 passed`,
+    rc=0) while the identical edit to the bullet reddened it, which is how the omission
+    was found rather than argued. It is in the list now, and the floor moved with it.
+    """
+    texts = [(label, get()) for label, _path, get in _RECIPE_DOC_SITES]
+    assert len(texts) >= 5, (
+        "the class is asserted over the sites named in `_RECIPE_DOC_SITES`; a shorter "
+        f"list is a weaker claim, not a passing one (got {len(texts)})"
+    )
+    for label, text in texts:
+        _assert_site_names_the_measured_spelling(label, text)
+
+    # The selector half, at class level rather than per site: the action's docstring
+    # deliberately delegates the ordinal to the receipt ("the spelling the receipt
+    # names"), so requiring it of every site would redden a correct tree. Requiring it
+    # of *none* would let the whole class drop the ordinal and still pass.
+    naming_the_ordinal = [label for label, text in texts if "stash@{N}" in text]
+    assert len(naming_the_ordinal) >= 2, (
+        "at least two reader-facing sites must still name the ordinal selector "
+        "`stash@{N}` — the newest entry is this one only until the next recovery — "
+        f"rather than a bare `stash@{{0}}`; named by: {naming_the_ordinal}"
+    )
+
+    # Self-test (the arm that keeps this from being an assertion that cannot fail):
+    # this is the spelling #1296 removed from two of these sites, and #1304 measured
+    # free to come back.
+    with pytest.raises(AssertionError):
+        _assert_site_names_the_measured_spelling(
+            "planted", "the action is undoable with a bare `git stash pop`."
+        )
 
 
 def test_a_receipt_from_an_earlier_recovery_is_not_printed(tmp_path):
