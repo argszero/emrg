@@ -2226,3 +2226,99 @@ def test_a_run_longer_than_two_names_the_operand_the_shell_really_writes(
     assert operand in targets, f"{cmd!r} must name the file it writes, got {targets!r}"
     assert targets == answer, f"{cmd!r} -> {targets!r}"
     assert _check_sandbox(cmd, "read-only")[0] is False, cmd
+
+
+# Issue #1273, rows 1-2 — the *price* of the operator-position fallback, pinned.
+#
+# Both rows are spellings that make the shell write **nothing**, and both are read
+# as operator-shaped words by the one lexing that sees them:
+#
+#   * `echo x 2'>>' log` — `2'>>'` is a single quoted word (`2>>`), so the shell
+#     echoes it and opens no file. The second lexing raises on this line
+#     (`No closing quotation`), so the pairing cannot say the word was quoted;
+#   * `echo x \> log` — `\>` is an escaped `>`, an ordinary argument. Here the two
+#     readings differ in word count (4 against 5: `['echo','x','\\','>','log']`),
+#     which is the other "cannot say" answer;
+#   * `echo x 2'>' out.txt` is the same shape as the first row (`2'>'` is the word
+#     `2>`), listed because the row count is what a fix gets measured against.
+#
+# "Cannot say" is answered by the fail-closed fallback, which believes the operator
+# — the safe direction in *operator* position (a real redirect behind a quoted word
+# keeps naming its path, #1269) and the only direction that can be safe, since the
+# pairing has nothing to pair. The cost is these refusals of commands that write
+# nothing. Row 3 of the issue (the `git config` value walk) is fixed by #1288; the
+# rows below are the remaining residual, and this pins it **with its ground truth**
+# so that neither half can drift silently: the shell half says these commands really
+# write nothing (so the over-block stays classified as a defect, not as a refusal
+# that happens to be right), and the walk half says what today's answer is, so the
+# change that fixes them makes a deliberate, visible edit here instead of an
+# unnoticed widening of what `read-only` refuses.
+UNRESOLVED_QUOTED_OPERATOR_OVER_BLOCKS = [
+    # (command, the target the walk names for it, the shells this spelling reaches)
+    ("echo x 2'>>' log", "log", ("/bin/sh", "/bin/bash")),
+    ("echo x 2'>' out.txt", "out.txt", ("/bin/sh", "/bin/bash")),
+    ("echo x \\> log", "log", ("/bin/sh", "/bin/bash")),
+]
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh and /bin/bash do not exist")
+@pytest.mark.parametrize("cmd,named,shells", UNRESOLVED_QUOTED_OPERATOR_OVER_BLOCKS)
+def test_an_unresolvable_quoted_operator_is_a_measured_over_block(
+    cmd: str, named: str, shells: tuple
+):
+    """Issue #1273 rows 1-2: a refusal whose command really writes nothing.
+
+    The shell is the oracle on one side — each line is run by the shells the row
+    names in its own fresh scratch directory, and the directory is read back — and
+    the walk's own answer is the other. Asserting both is what keeps the residual
+    honest in both directions: the walk may not be *praised* for this refusal (the
+    shell creates nothing), and it may not quietly stop naming the word either,
+    because that is the change that would have to come with the fix.
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    for shell in shells:
+        d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-overblock-")
+        try:
+            proc = subprocess.run([shell, "-c", cmd], cwd=d, capture_output=True)
+            created = sorted(os.listdir(d))
+            assert proc.returncode == 0, f"{shell} could not run {cmd!r} - re-measure"
+            assert created == [], f"{shell} created {created!r} for {cmd!r}"
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    assert _extract_write_targets(cmd) == [named], cmd
+    allowed, reason, _ = _check_sandbox(cmd, "read-only")
+    assert allowed is False, f"{cmd!r} is refused today ({reason!r})"
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh and /bin/bash do not exist")
+def test_the_over_block_is_scoped_to_the_unresolvable_spelling():
+    """The control: where the shell *does* write, the same walk is right on purpose.
+
+    Without this, "the walk refuses these two lines" would be indistinguishable from
+    a walk that refuses every redirect it cannot spell out — and the pin above would
+    be measuring a guard that had stopped working rather than one with a known price.
+    Each control line is run the same way and really creates the file it is refused
+    for, so a fix that relaxed the *resolvable* cases would fail here, not there.
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    for cmd, named in (
+        ("echo x 2>> log", "log"),      # the same word, unquoted: a real redirect
+        ("echo x > log", "log"),        # the operator standing alone
+        ("echo x 2> log", "log"),       # the fd-prefixed spelling, unquoted
+    ):
+        d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-overblock-control-")
+        try:
+            proc = subprocess.run(["/bin/sh", "-c", cmd], cwd=d, capture_output=True)
+            created = sorted(os.listdir(d))
+            assert proc.returncode == 0, f"/bin/sh could not run {cmd!r} - re-measure"
+            assert created == [named], f"/bin/sh created {created!r} for {cmd!r}"
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        assert _extract_write_targets(cmd) == [named], cmd
+        assert _check_sandbox(cmd, "read-only")[0] is False, cmd
