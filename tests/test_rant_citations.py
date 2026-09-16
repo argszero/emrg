@@ -274,6 +274,36 @@ def test_the_ci_readme_sites_are_resolved_in_the_real_tree(mod):
     assert not [p for p in mod.problems(sites) if "workflows/README.md" in p]
 
 
+def test_a_class_entry_listed_twice_is_reported(mod):
+    """A duplicated name double-counts its file and passes every citation rule.
+
+    Reproduced before pinning (review note on #1293, 2026-09-16): resolving
+    #1290 x #1293 by keeping both sides of the one conflicted hunk lists
+    `emrg/server/evolution_prompt.md` twice; the guard scans it twice, still returns
+    `rc=0`, and prints `58 site(s)` instead of 49. So the resolution that looks
+    mechanical is a whole-suite-green change to the number this guard exists to
+    report. Both directions: the shipped list has no duplicate, a duplicated one
+    names the file, and the inflation it prevents is measured rather than asserted.
+    """
+    assert mod.duplicated_files() == []
+    duplicated = tuple(list(mod.INSTRUCTION_FILES) + [HOST_OWNED])
+    assert mod.duplicated_files(duplicated) == [HOST_OWNED]
+
+    twice, _ = mod.scan_tree(REPO_ROOT, duplicated)
+    once, _ = mod.scan_tree(REPO_ROOT, tuple(mod.INSTRUCTION_FILES))
+    assert len(twice) > len(once), (
+        "scanning a file twice has to add its sites, or there is nothing to report"
+    )
+
+
+def test_a_duplicated_class_entry_fails_the_guard(mod, monkeypatch, capsys):
+    """`1`, not a pass with a bigger number: the count is a count of the class."""
+    monkeypatch.setattr(mod, "duplicated_files", lambda *a, **k: [HOST_OWNED])
+    assert mod.main([]) == 1
+    out = capsys.readouterr().out
+    assert HOST_OWNED in out and "twice" in out, out
+
+
 # --- the tree, and the exit-code contract --------------------------------------
 
 

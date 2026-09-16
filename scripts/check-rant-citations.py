@@ -111,6 +111,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: (issue #1289). Adding a *file* is the deliberate act the comment above asks for;
 #: the alternative - a glob over every `*.md` - would sweep in the code comments the
 #: docstring excludes, which is why this is a list and not a pattern.
+#:
+#: A name listed twice is a failure and not a harmless repetition: the guard scans it
+#: twice, so every site in it is counted twice and the count this file prints - and
+#: the docstring above quotes - inflates in silence. Measured 2026-09-16: resolving
+#: #1290 x #1293 by keeping both sides of the hunk listed
+#: `emrg/server/evolution_prompt.md` twice and the guard still returned `rc=0`, now
+#: printing `58 site(s)` instead of 49. `duplicated_files` is where that is checked.
 INSTRUCTION_FILES = (
     ".github/workflows/README.md",         # tells the host which Secrets to set
     "emrg/server/evolution_prompt.md",     # swept: the red line covers the running copy
@@ -285,8 +292,35 @@ def scan(text: str, path: str) -> list[Site]:
     return sites
 
 
-def scan_tree(root: Path, files: tuple[str, ...] = INSTRUCTION_FILES) -> tuple[list[Site], list[str]]:
-    """Sites in `root`, plus the names of files that could not be read."""
+def duplicated_files(files: tuple[str, ...] | None = None) -> list[str]:
+    """Class entries listed more than once, in the order they first repeat.
+
+    A duplicated name is a defect in the **class**, not in a citation: the file is
+    scanned twice, so it contributes its sites twice, and no other rule can see it -
+    every site still resolves, so a tree with a double-counted class is green. That
+    is why this is enforced here rather than left to the count being "known": the
+    number is printed, and nothing asserts it (issue #1293's review, 2026-09-16).
+    """
+    listed = INSTRUCTION_FILES if files is None else files
+    seen: set[str] = set()
+    repeated: list[str] = []
+    for name in listed:
+        if name in seen and name not in repeated:
+            repeated.append(name)
+        seen.add(name)
+    return repeated
+
+
+def scan_tree(root: Path, files: tuple[str, ...] | None = None) -> tuple[list[Site], list[str]]:
+    """Sites in `root`, plus the names of files that could not be read.
+
+    `files` defaults to `INSTRUCTION_FILES` by lookup at call time rather than by
+    binding at definition time: a test that sets the class list has to reach the
+    scan, and a default bound at `def` time silently ignores it (measured
+    2026-09-16: `mod.INSTRUCTION_FILES = ("not-here.md",)` left `main()` scanning
+    the real ten files).
+    """
+    files = INSTRUCTION_FILES if files is None else files
     sites: list[Site] = []
     missing: list[str] = []
     for rel in files:
@@ -345,6 +379,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--measure", action="store_true",
                         help="print the inventory instead of enforcing the rule")
     args = parser.parse_args(argv)
+
+    repeated = duplicated_files()
+    if repeated:
+        for name in repeated:
+            print(f"duplicate class entry {name}: INSTRUCTION_FILES lists it twice, so "
+                  f"its sites are counted twice and the count this guard prints - the "
+                  f"one the module docstring quotes - inflates by that file's sites "
+                  f"while every citation rule still passes")
+        print(f"FAIL: {len(repeated)} duplicated instruction-class entr(y/ies)")
+        return 1
 
     sites, missing = scan_tree(REPO_ROOT)
     if missing:
