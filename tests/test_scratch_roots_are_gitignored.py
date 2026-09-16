@@ -38,7 +38,13 @@ this scan collapsed them:
 
 * **provably outside the repository** — a root the syntax shows to be a temp location
   (`tmp_path` / `tmp_path_factory` fixtures, `tempfile.gettempdir()`, `TemporaryDirectory()`,
-  `os.environ` / `getenv`) cannot dirty the tree, so it is out of scope;
+  `os.environ` / `getenv`) cannot dirty the tree, so it is out of scope. That is decided over
+  the **whole** expression — every name it is built from has to be temp-rooted, and a name
+  bound from a temp call (`with tempfile.TemporaryDirectory() as td:`) is followed, to a
+  fixed point — rather than in the expression's bare-name position. The first version read
+  only `dir=tmp_path`, so `tmp_path / "sub"`, the way a scratch dir gets a subdirectory, was
+  reported as a root nobody could read: it failed a tree for doing what the failure message
+  below tells it to do (measured 2026-09-17 by an outside reviewer on #1303);
 * **unmeasurable** — anything else is reported with a remedy, never passed. This is the hole
   a two-hop root fell through: `REPO_ROOT = Path(__file__)…` then `TESTS_DIR = REPO_ROOT /
   "tests"`, the idiom *this* module uses for its own root, was invisible to a one-hop scan
@@ -98,6 +104,40 @@ def _file_derived_names(tree: ast.AST) -> set[str]:
             return derived
 
 
+def _temp_rooted_names(tree: ast.AST, parameters: set[str]) -> set[str]:
+    """Every name in `tree` a temp location is behind, to a fixed point.
+
+    `dir=td` does not show that `td` came from `with tempfile.TemporaryDirectory() as td:`,
+    and the docstring calls that family provably outside — so the *name* has to be followed,
+    however many hops it takes, for the same reason `_file_derived_names` is: one hop was
+    the evasion there. The `tmp_path` / `tmp_path_factory` fixtures are parameters rather
+    than assignments, so the fixed point is seeded from `parameters`.
+    """
+    bindings: list[tuple[str, ast.AST]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bindings.append((target.id, node.value))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                target = item.optional_vars
+                if isinstance(target, ast.Name):
+                    bindings.append((target.id, item.context_expr))
+    temp = {name for name in parameters if name in _TEMP_FIXTURES}
+    while True:
+        grown = False
+        for name, value in bindings:
+            if name in temp:
+                continue
+            mentioned = {n.id for n in ast.walk(value) if isinstance(n, ast.Name)}
+            if mentioned & temp or any(m in ast.unparse(value) for m in _TEMP_MARKERS):
+                temp.add(name)
+                grown = True
+        if not grown:
+            return temp
+
+
 def _parameters(tree: ast.AST) -> set[str]:
     """Every function's parameter names, so a fixture-supplied root can be recognised."""
     names: set[str] = set()
@@ -118,12 +158,16 @@ def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, 
 
     A `dir=` is **in scope** when its expression mentions `__file__`, or is a name the module
     assigns from something file-derived (to a fixed point). It is **provably outside** when
-    the syntax shows a temp location: a `tmp_path`/`tmp_path_factory` fixture name, or an
-    expression carrying a temp marker. Everything else — an unresolvable name, a path built
-    from something the scan cannot follow — is **unmeasurable**, reported rather than passed.
+    the syntax shows a temp location: a `tmp_path`/`tmp_path_factory` fixture name, a name
+    bound from a temp call, or an expression carrying a temp marker — read over the whole
+    expression, so `tmp_path / "sub"` is outside rather than unreadable. A root built only
+    partly from temp names is *not* outside: every name it mentions has to be temp-rooted.
+    Everything else — an unresolvable name, a path built from something the scan cannot
+    follow — is **unmeasurable**, reported rather than passed.
     """
     derived = _file_derived_names(tree)
     parameters = _parameters(tree)
+    temp_rooted = _temp_rooted_names(tree, parameters)
     in_scope: list[tuple[Path, int, str | None, str]] = []
     unmeasurable: list[tuple[Path, int, str]] = []
     for node in ast.walk(tree):
@@ -138,6 +182,7 @@ def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, 
             continue
         source = ast.unparse(kw["dir"])
         arg = kw["dir"]
+        names_in_arg = {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
         if "__file__" in source or (isinstance(arg, ast.Name) and arg.id in derived):
             prefix = kw.get("prefix")
             prefix = (prefix.value if isinstance(prefix, ast.Constant)
@@ -145,9 +190,7 @@ def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, 
             in_scope.append((path, node.lineno, prefix, source))
             continue
         harmless = any(marker in source for marker in _TEMP_MARKERS) or (
-            isinstance(arg, ast.Name)
-            and arg.id in parameters
-            and arg.id in _TEMP_FIXTURES
+            bool(names_in_arg) and names_in_arg <= temp_rooted
         )
         if not harmless:
             unmeasurable.append((path, node.lineno, source))
@@ -215,7 +258,8 @@ def test_every_scratch_root_a_test_creates_in_the_repo_is_gitignored():
         "of assignments is followed to a fixed point, so a two-hop `__file__` path is in "
         "scope; a root that is neither `__file__`-derived nor a temp location has to be "
         "written so the scan can see it (give it a name derived from `__file__`, or root it "
-        "at `tmp_path` and move it out of the repository)."
+        "at `tmp_path` — a subdirectory under it counts, so `tmp_path / \"sub\"` is read as "
+        "a temp location — and move it out of the repository)."
     )
 
     unmeasurable = [f"{p.relative_to(REPO_ROOT)}:{n}" for p, n, prefix, _src in sites
@@ -246,6 +290,13 @@ def test_the_scan_follows_a_root_to_any_depth_and_reports_what_it_cannot_read():
     is genuinely out of scope, and a root nothing can resolve — which must be reported
     rather than passed, because "could not measure" and "clean" must not be the same value.
     Synthetic sources rather than files: the classification is the thing under test.
+
+    The out-of-scope family is driven in the spellings the *docstring* names rather than
+    only in its bare form: an outside reviewer measured on 2026-09-17 that `tmp_path` was
+    recognised while `tmp_path / "sub"` and a `TemporaryDirectory()` alias were reported
+    unreadable, so the guard failed a tree for doing what its own remedy says. The
+    counterpart arm is `partly_temp`: a temp name *mixed with* an unknown one has to stay
+    unreadable, so widening the check cannot become a way for a repo path to hide.
     """
     one_hop = '''
 import os, tempfile
@@ -272,6 +323,22 @@ import tempfile
 def test_x(tmp_path):
     d = tempfile.mkdtemp(dir=tmp_path, prefix="anything-")
 '''
+    fixture_subdir = '''
+import tempfile
+def test_x(tmp_path):
+    d = tempfile.mkdtemp(dir=tmp_path / "sub", prefix="anything-")
+'''
+    tempdir_alias = '''
+import tempfile
+def test_x():
+    with tempfile.TemporaryDirectory() as td:
+        d = tempfile.mkdtemp(dir=td, prefix="anything-")
+'''
+    partly_temp = '''
+import tempfile
+def test_x(tmp_path, other_dir):
+    d = tempfile.mkdtemp(dir=tmp_path / other_dir, prefix="anything-")
+'''
     unresolvable = '''
 import tempfile
 def test_x(some_dir):
@@ -297,6 +364,26 @@ def test_x(some_dir):
     in_scope, unmeasurable = classify(fixture_root)
     assert not in_scope and not unmeasurable, (
         "a `tmp_path` root is a temp location: out of scope, and measurable enough to know so"
+    )
+
+    for label, source in (
+        ("a `tmp_path` root with a subdirectory", fixture_subdir),
+        ("a name bound from `TemporaryDirectory()`", tempdir_alias),
+    ):
+        in_scope, unmeasurable = classify(source)
+        assert not in_scope and not unmeasurable, (
+            f"{label} is a temp location as well, and the remedy below tells a "
+            "contributor to write exactly this — reporting it unreadable fails a tree "
+            "for obeying the failure message (measured 2026-09-17): "
+            f"in_scope={in_scope} unmeasurable={unmeasurable}"
+        )
+
+    in_scope, unmeasurable = classify(partly_temp)
+    assert not in_scope, "a root built partly from an unknown name is not evidence of a repo root"
+    assert len(unmeasurable) == 1, (
+        "one temp name in the expression does not make the whole root a temp location: "
+        "every name it is built from has to be temp-rooted, or the check could be widened "
+        f"until a repo path hides behind a fixture name (got {unmeasurable})"
     )
 
     in_scope, unmeasurable = classify(unresolvable)
