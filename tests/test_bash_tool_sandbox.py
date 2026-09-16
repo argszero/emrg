@@ -2322,3 +2322,134 @@ def test_the_over_block_is_scoped_to_the_unresolvable_spelling():
             shutil.rmtree(d, ignore_errors=True)
         assert _extract_write_targets(cmd) == [named], cmd
         assert _check_sandbox(cmd, "read-only")[0] is False, cmd
+
+
+# Issue #1273 rows 1-2, measured as a **class** rather than as three examples.
+#
+# The pin above is three spellings, and three spellings are a sample: the same
+# question — "is this operator-shaped word really an operator?" — is asked by every
+# line whose operator carries quoting or escaping, and there are many such lines
+# (the corpus below generates 135 of them). A sample cannot show whether the price
+# is bounded, which is the thing a reader of the residual needs to know, so the
+# generated corpus is what the classification is measured against:
+#
+#   * the shell is the oracle for *what the line does* — each row is run in a fresh
+#     scratch directory and the directory is read back, so "writes nothing" is
+#     observed rather than argued;
+#   * the walk is asked for its targets and its `read-only` verdict;
+#   * the corpus is built from POSIX spellings only (`&>` is bash's, and `/bin/sh`
+#     on the CI Linux leg is dash, which reads it as backgrounding — the existing
+#     tests handle that spelling per shell, this corpus does not need it);
+#   * one shell is enough here because quoting and escaping are POSIX: the rows
+#     below behave the same in `/bin/sh` and `/bin/bash`, which the per-row pin
+#     above asserts for its own spellings.
+#
+# Two properties are asserted, in the two directions:
+#
+#   1. **no unnamed write** — every file the shell really creates is named by the
+#      walk. This is the direction that may never be traded away: an unnamed write
+#      is invisible at `read-only` and, for a path outside the workspace, at
+#      `workspace-write` too. Measured over this corpus: 0 rows out of 135, and the
+#      assertion is demonstrably load-bearing — the two arms below make it fire.
+#   2. **the over-block class stays masked** — an over-blocked row must carry an
+#      operator-shaped word whose own spelling is quoted or escaped (or a partially
+#      quoted word, which is #1280's priced class). Measured today: every one of the
+#      corpus's over-block rows is masked, so this half cannot fire on the tree as
+#      it stands — it is a **tripwire** for the day the walk starts refusing a line
+#      a reader would call plain. The non-vacuity assertions below are what keep the
+#      green meaningful: the corpus must contain rows the shell really writes *and*
+#      masked over-blocks, so a corpus that quietly stopped exercising either
+#      outcome fails here instead of passing.
+_CORPUS_PREFIXES = ["echo x", "echo 'a'b", "test 1 'a'b x"]
+_CORPUS_OPERATORS = [
+    ">", ">>", "2>", "2>>", ">|", "<>",       # plain: the walk must agree
+    "'>'", "'>>'", '">"', "2'>'", "2'>>'", '2">"',   # the operator's own spelling quoted
+    "\\>", "\\>>", "2\\>",                     # …or escaped
+]
+_CORPUS_TARGETS = ["log", "out.txt", "'>'"]
+
+
+def _corpus_rows() -> list[tuple[str, list[str], bool, list[str]]]:
+    """(command, walk targets, allowed at read-only, files the shell created).
+
+    Also returns the rows' shape, because the property is about which rows are
+    over-blocked and not only how many: the caller separates plain from masked.
+    """
+    import itertools
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    rows = []
+    for prefix, operator, target in itertools.product(
+        _CORPUS_PREFIXES, _CORPUS_OPERATORS, _CORPUS_TARGETS
+    ):
+        cmd = f"{prefix} {operator} {target}"
+        d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-corpus-")
+        try:
+            proc = subprocess.run(["/bin/sh", "-c", cmd], cwd=d, capture_output=True)
+            created = sorted(os.listdir(d))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        allowed, _, _ = _check_sandbox(cmd, "read-only")
+        rows.append((cmd, _extract_write_targets(cmd), allowed, created))
+    return rows
+
+
+def _row_is_masked(cmd: str) -> bool:
+    """Does the line carry quoting or escaping anywhere it matters?
+
+    A row is *masked* when the token before the target is quoted/escaped or a
+    partially quoted word sits on the line — the two facts the walk cannot recover
+    from the token stream, and the only ones the corpus allows an over-block for.
+    """
+    parts = cmd.split()
+    operator_word = parts[-2]
+    return ("'" in operator_word or '"' in operator_word or "\\" in operator_word
+            or any(("'" in p or "\\" in p) for p in parts[:-2]))
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh does not exist")
+def test_the_generated_corpus_has_no_unnamed_write_and_no_plain_over_block():
+    """Issue #1273: the price of the fallback, measured over a generated corpus.
+
+    Asserting the class rather than the sample is what makes the residual
+    *bounded*: the walk may be wrong about lines whose operator spelling is masked
+    (measured: it refuses them although the shell writes nothing), and it may not
+    be wrong about anything else. Both directions are asserted, so neither a new
+    unnamed write nor a newly over-blocked plain line can land as a green suite.
+    """
+    rows = _corpus_rows()
+    assert len(rows) >= 100, f"the corpus collapsed to {len(rows)} rows - re-measure"
+
+    unnamed = [
+        (cmd, created) for cmd, targets, _allowed, created in rows
+        if any(f not in targets for f in created)
+    ]
+    assert not unnamed, (
+        "the walk must name every file the shell really creates; these writes are "
+        f"unnamed (an invisible write at read-only): {unnamed[:5]}"
+    )
+
+    plain_over_blocks = [
+        cmd for cmd, targets, allowed, created in rows
+        if created == [] and targets and not allowed and not _row_is_masked(cmd)
+    ]
+    assert not plain_over_blocks, (
+        "a plain line (no quoting, no escaping) must not be over-blocked - that is a "
+        f"new defect rather than this residual: {plain_over_blocks}"
+    )
+
+    # The instrument must be looking at both outcomes, or "no plain over-blocks" is
+    # satisfied by a corpus that contains none, and "no unnamed write" by one whose
+    # commands write nothing at all.
+    writes = [cmd for cmd, _t, _a, created in rows if created]
+    masked_over_blocks = [
+        cmd for cmd, targets, allowed, created in rows
+        if created == [] and targets and not allowed and _row_is_masked(cmd)
+    ]
+    assert masked_over_blocks, "the residual class vanished - re-measure the corpus"
+    assert len(writes) >= 20, (
+        f"only {len(writes)} corpus row(s) really write a file, so an unnamed write "
+        "could not be observed even if one existed - re-measure the corpus"
+    )
