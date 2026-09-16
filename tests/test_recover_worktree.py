@@ -582,6 +582,39 @@ def test_the_tool_writes_a_receipt_of_what_it_moved(tmp_path):
     assert "upstream" in receipt["reason"]
 
 
+def test_the_tool_says_when_the_receipt_could_not_be_written(tmp_path, capsys):
+    """Issue #1284: the tool's `receipt:` line is a claim about a *file*, so read the file.
+
+    `_receipt_path` computes where a receipt *would* be written, and the branch for a
+    receipt that could not be written was therefore unreachable: with the path
+    pre-created as a directory (`open(..., "w")` raises `OSError`) the tool printed
+    `receipt: <path>` for a file that does not exist. Same input, twice, so the line is
+    a discriminator rather than a constant.
+    """
+    work, _head = _with_upstream(tmp_path)
+    git_dir = Path(_git(work, "rev-parse", "--absolute-git-dir").stdout.strip())
+    target = git_dir / "emrg-recovery-receipt.json"
+    target.mkdir()
+
+    assert _load().recover(work, apply=True) == 0
+    out = capsys.readouterr().out
+    assert "recovered" in out, out
+    assert "receipt: could not be written" in out, out
+    assert str(target) not in out, "a path is not a receipt"
+    assert not target.is_file()
+    # The convergence itself still happened, and the stash is still the record.
+    assert _status(work).strip() == ""
+    assert _git(work, "stash", "list").stdout.strip() != ""
+
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    control, _head2 = _with_upstream(control_root)
+    assert _load().recover(control, apply=True) == 0
+    out = capsys.readouterr().out
+    assert "receipt: could not be written" not in out, out
+    assert f"receipt: {Path(_git(control, 'rev-parse', '--absolute-git-dir').stdout.strip()) / 'emrg-recovery-receipt.json'}" in out, out
+
+
 def test_the_action_asks_the_criterion_itself_and_cannot_be_told_the_answer(tmp_path):
     """Defence in depth: no caller's verdict can disarm the net (found in review, #1274).
 
