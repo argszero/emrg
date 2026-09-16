@@ -439,7 +439,16 @@ def test_the_settle_retry_re_reads_until_the_review_appears(mod, monkeypatch, ca
 
 
 def test_a_review_that_never_appears_is_reported_not_guessed(mod, monkeypatch, capsys, body_file):
-    """Bounded retries, then a loud "not readable as a vote" - never a silent 0."""
+    """Bounded retries, then a loud "unmeasurable" - never a silent 0, and never "spent".
+
+    The absence is a *different state* from a void vote, and only its wording separates
+    them: both exit 1, and `confirm`'s note is the same either way, so the printed verdict
+    is the only thing telling a reader "do not re-post, re-read" apart from "the vote was
+    spent for nothing". Measured 2026-09-17 by an outside reviewer: replacing this branch's
+    message with the void branch's left `tests/test_cast_vote.py` at 18 passed, i.e. the
+    separation had no assertion behind it. Both halves are asserted here — the word that
+    means unmeasurable, and the verdict it must not be confused with.
+    """
     counter = FakeCounter(verdict_with())
     gh = FakeGh()
     monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
@@ -454,6 +463,14 @@ def test_a_review_that_never_appears_is_reported_not_guessed(mod, monkeypatch, c
     assert rc == 1
     assert len(counter.calls) == 4, "1 pre-flight + 3 confirm attempts"
     assert "never appeared" in err
+    assert "unmeasurable" in err, (
+        "the absence has to be reported as unmeasurable, not as a verdict - the review is "
+        "on GitHub and cannot be un-posted"
+    )
+    assert "spent for nothing" not in err, (
+        "this is the `void` branch's verdict, and the `none` state is not a spent vote: "
+        "re-collapsing the two leaves a reader re-posting instead of re-reading"
+    )
 
 
 def test_dry_run_posts_nothing(mod, monkeypatch, capsys, body_file):
