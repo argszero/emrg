@@ -28,10 +28,23 @@ The rule
 --------
 For every `mkdtemp(dir=…)` call in `tests/` whose `dir=` expression is **derived from
 `__file__`** — i.e. a path *inside this repository*, since the module lives in `tests/` — the
-name that call can create must be matched by git's ignore rules. A root that is not
-`__file__`-derived (a `tmp_path` fixture, the default system temp) cannot dirty the tree and
-is out of scope; that distinction is read from the syntax rather than kept in a list, so a
-new site is found by *writing the call*, not by remembering to edit this file.
+name that call can create must be matched by git's ignore rules. That distinction is read
+from the syntax rather than kept in a list, so a new site is found by *writing the call*, not
+by remembering to edit this file.
+
+Every other `dir=` is classified deliberately, into one of two buckets — because "not
+`__file__`-derived" and "cannot be read" are not the same answer, and the first version of
+this scan collapsed them:
+
+* **provably outside the repository** — a root the syntax shows to be a temp location
+  (`tmp_path` / `tmp_path_factory` fixtures, `tempfile.gettempdir()`, `TemporaryDirectory()`,
+  `os.environ` / `getenv`) cannot dirty the tree, so it is out of scope;
+* **unmeasurable** — anything else is reported with a remedy, never passed. This is the hole
+  a two-hop root fell through: `REPO_ROOT = Path(__file__)…` then `TESTS_DIR = REPO_ROOT /
+  "tests"`, the idiom *this* module uses for its own root, was invisible to a one-hop scan
+  and was silently treated as a root that cannot dirty the tree — so a real in-repo site
+  escaped while the guard reported green. Provenance is now a fixed point over the module's
+  assignments, so a root is followed however many hops it takes.
 
 Two honest boundaries, stated rather than implied:
 * a site with no literal `prefix=` cannot be measured statically (the name `mkdtemp` invents
@@ -51,41 +64,114 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
 
 
-def _sites() -> list[tuple[Path, int, str | None, str]]:
-    """Every `mkdtemp(dir=…)` call in `tests/`, as (file, line, prefix, dir source).
+#: Fixture names whose root is a temp location by construction (pytest's `tmp_path` family).
+_TEMP_FIXTURES = frozenset({"tmp_path", "tmp_path_factory"})
 
-    `dir source` is the expression as written (`ast.unparse`), which is what decides whether
-    the site is in scope: `__file__` in it — directly or through a name assigned to such an
-    expression in the same module — means the root is a path inside the repository.
+#: Substrings that mark a `dir=` expression as a temp location rather than a repo path.
+_TEMP_MARKERS = ("gettempdir", "TemporaryDirectory", "mkdtemp", "environ", "getenv", "expanduser")
+
+
+def _file_derived_names(tree: ast.AST) -> set[str]:
+    """The names in `tree` that hold a path derived from `__file__`, to a fixed point.
+
+    One pass over the module's assignments was the first version, and one hop is evadable by
+    the idiom this very module uses for its own root: `REPO_ROOT = Path(__file__)…` is
+    file-derived, but `TESTS_DIR = REPO_ROOT / "tests"` mentions only `REPO_ROOT`, so a site
+    rooted at `TESTS_DIR` was invisible to the scan — and, worse than invisible, it fell into
+    the out-of-scope branch, i.e. a real in-repo root was reported as one that cannot dirty
+    the tree. Iterating to a fixed point follows a chain of any length (measured: the
+    two-hop shape evaded the one-hop scan, and the guard module's own style is two hops).
     """
-    sites: list[tuple[Path, int, str | None, str]] = []
-    for path in sorted(TESTS_DIR.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        file_derived: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and "__file__" in ast.dump(node.value):
-                file_derived.update(t.id for t in node.targets if isinstance(t, ast.Name))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
+    assignments = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
+    derived: set[str] = set()
+    while True:
+        grown = False
+        for node in assignments:
+            value_names = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
+            if not ("__file__" in value_names or (value_names & derived)):
                 continue
-            func = node.func
-            called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if called != "mkdtemp":
-                continue
-            kw = {k.arg: k.value for k in node.keywords if k.arg}
-            if "dir" not in kw:
-                continue
-            source = ast.unparse(kw["dir"])
-            is_file_derived = "__file__" in source or (
-                isinstance(kw["dir"], ast.Name) and kw["dir"].id in file_derived
-            )
-            if not is_file_derived:
-                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id not in derived:
+                    derived.add(target.id)
+                    grown = True
+        if not grown:
+            return derived
+
+
+def _parameters(tree: ast.AST) -> set[str]:
+    """Every function's parameter names, so a fixture-supplied root can be recognised."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = node.args
+            names.update(x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs))
+            if a.vararg:
+                names.add(a.vararg.arg)
+            if a.kwarg:
+                names.add(a.kwarg.arg)
+    return names
+
+
+def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, str]],
+                                              list[tuple[Path, int, str]]]:
+    """`(in-scope sites, unmeasurable sites)` for one parsed module.
+
+    A `dir=` is **in scope** when its expression mentions `__file__`, or is a name the module
+    assigns from something file-derived (to a fixed point). It is **provably outside** when
+    the syntax shows a temp location: a `tmp_path`/`tmp_path_factory` fixture name, or an
+    expression carrying a temp marker. Everything else — an unresolvable name, a path built
+    from something the scan cannot follow — is **unmeasurable**, reported rather than passed.
+    """
+    derived = _file_derived_names(tree)
+    parameters = _parameters(tree)
+    in_scope: list[tuple[Path, int, str | None, str]] = []
+    unmeasurable: list[tuple[Path, int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if called != "mkdtemp":
+            continue
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        if "dir" not in kw:
+            continue
+        source = ast.unparse(kw["dir"])
+        arg = kw["dir"]
+        if "__file__" in source or (isinstance(arg, ast.Name) and arg.id in derived):
             prefix = kw.get("prefix")
             prefix = (prefix.value if isinstance(prefix, ast.Constant)
                       and isinstance(prefix.value, str) else None)
-            sites.append((path, node.lineno, prefix, source))
+            in_scope.append((path, node.lineno, prefix, source))
+            continue
+        harmless = any(marker in source for marker in _TEMP_MARKERS) or (
+            isinstance(arg, ast.Name)
+            and arg.id in parameters
+            and arg.id in _TEMP_FIXTURES
+        )
+        if not harmless:
+            unmeasurable.append((path, node.lineno, source))
+    return in_scope, unmeasurable
+
+
+def _sites() -> list[tuple[Path, int, str | None, str]]:
+    """Every in-scope `mkdtemp(dir=…)` call in `tests/`, as (file, line, prefix, dir source)."""
+    sites: list[tuple[Path, int, str | None, str]] = []
+    for path in sorted(TESTS_DIR.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        in_scope, _ = _scan(tree, path)
+        sites.extend(in_scope)
     return sites
+
+
+def _unmeasurable_sites() -> list[tuple[Path, int, str]]:
+    """Every `mkdtemp(dir=…)` call in `tests/` whose root this scan cannot classify."""
+    found: list[tuple[Path, int, str]] = []
+    for path in sorted(TESTS_DIR.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        _, unmeasurable = _scan(tree, path)
+        found.extend(unmeasurable)
+    return found
 
 
 def _unignored(candidates: list[str]) -> list[str]:
@@ -119,6 +205,19 @@ def test_every_scratch_root_a_test_creates_in_the_repo_is_gitignored():
         "dead, and a guard that measures nothing passes for the wrong reason"
     )
 
+    unclassifiable = [
+        f"{p.relative_to(REPO_ROOT)}:{n} (dir={src})"
+        for p, n, src in _unmeasurable_sites()
+    ]
+    assert not unclassifiable, (
+        "this scan cannot tell whether these scratch roots are inside the repository, so it "
+        f"must not treat them as harmless: {unclassifiable}. A root reached through a chain "
+        "of assignments is followed to a fixed point, so a two-hop `__file__` path is in "
+        "scope; a root that is neither `__file__`-derived nor a temp location has to be "
+        "written so the scan can see it (give it a name derived from `__file__`, or root it "
+        "at `tmp_path` and move it out of the repository)."
+    )
+
     unmeasurable = [f"{p.relative_to(REPO_ROOT)}:{n}" for p, n, prefix, _src in sites
                     if not prefix]
     assert not unmeasurable, (
@@ -135,6 +234,80 @@ def test_every_scratch_root_a_test_creates_in_the_repo_is_gitignored():
         f"interrupted run leaves tree dirt that costs the next cycle its tier: {bad}. Add "
         "the prefix to `.gitignore` (scoped to /tests/, with the measurement in the comment) "
         "or move the scratch root out of the repository."
+    )
+
+
+def test_the_scan_follows_a_root_to_any_depth_and_reports_what_it_cannot_read():
+    """The classifier driven directly, once per bucket — the arms the guard exists for.
+
+    The scan's liveness was asserted by counting sites, but a count cannot show that the
+    *interesting* shapes are classified: the one-hop root it was written against, the
+    two-hop root that evaded it (the idiom this module itself uses), a fixture root that
+    is genuinely out of scope, and a root nothing can resolve — which must be reported
+    rather than passed, because "could not measure" and "clean" must not be the same value.
+    Synthetic sources rather than files: the classification is the thing under test.
+    """
+    one_hop = '''
+import os, tempfile
+root = os.path.dirname(os.path.abspath(__file__))
+d = tempfile.mkdtemp(dir=root, prefix="emrg-one-")
+'''
+    two_hop = '''
+import tempfile
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+TESTS_DIR = REPO_ROOT / "tests"
+d = tempfile.mkdtemp(dir=TESTS_DIR, prefix="emrg-two-")
+'''
+    three_hop = '''
+import tempfile
+from pathlib import Path
+HERE = Path(__file__).resolve()
+ROOT = HERE.parent.parent
+SUB = ROOT / "tests" / "nested"
+d = tempfile.mkdtemp(dir=SUB, prefix="emrg-three-")
+'''
+    fixture_root = '''
+import tempfile
+def test_x(tmp_path):
+    d = tempfile.mkdtemp(dir=tmp_path, prefix="anything-")
+'''
+    unresolvable = '''
+import tempfile
+def test_x(some_dir):
+    d = tempfile.mkdtemp(dir=some_dir, prefix="anything-")
+'''
+
+    def classify(source: str):
+        tree = ast.parse(source)
+        return _scan(tree, Path("synthetic.py"))
+
+    for label, source, prefix in (
+        ("one hop", one_hop, "emrg-one-"),
+        ("two hops (the evasion)", two_hop, "emrg-two-"),
+        ("three hops", three_hop, "emrg-three-"),
+    ):
+        in_scope, unmeasurable = classify(source)
+        assert [p for _f, _n, p, _s in in_scope] == [prefix], (
+            f"a root reached in {label} must be classified as in-repo, not dropped: "
+            f"in_scope={in_scope} unmeasurable={unmeasurable}"
+        )
+        assert not unmeasurable, f"{label} is measurable — it must not be reported unknown"
+
+    in_scope, unmeasurable = classify(fixture_root)
+    assert not in_scope and not unmeasurable, (
+        "a `tmp_path` root is a temp location: out of scope, and measurable enough to know so"
+    )
+
+    in_scope, unmeasurable = classify(unresolvable)
+    assert not in_scope, "an unresolvable root is not evidence of a repo root"
+    assert len(unmeasurable) == 1, (
+        f"an unresolvable root must be reported as unmeasurable, got {unmeasurable}"
+    )
+    _file, lineno, source = unmeasurable[0]
+    assert source == "some_dir", "the report names the expression it could not read"
+    assert "mkdtemp" in unresolvable.splitlines()[lineno - 1], (
+        "the reported line is the call itself, not a nearby one"
     )
 
 
