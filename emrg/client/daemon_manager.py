@@ -90,6 +90,9 @@ async def start_daemon() -> subprocess.Popen:
     _spawn_attempts += 1
     logger.info("starting emrgd daemon (attempt %d/%d)...", _spawn_attempts, _MAX_SPAWN_ATTEMPTS)
     cleanup_server()
+    # Mark the log before the child can write to it: a failure report may only
+    # quote what *this* attempt appended (issue #1276).
+    log_mark = _log_mark(_log_path())
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "emrg.server",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
@@ -97,27 +100,147 @@ async def start_daemon() -> subprocess.Popen:
         # Windows: daemon spawn must never pop a console window
         # (rant 2026-08-09T13:16:36 — cmd-window storm).
         **win32_no_window_kwargs())
-    for _ in range(15):
-        await asyncio.sleep(0.3)
-        if is_running():
-            logger.info("emrgd started (pid=%d)", proc.pid)
-            return proc
-    # R124: 超时后读取 emrgd.log 尾部打印真实失败原因（rant 2026-08-05T15:54:28 关联：
-    # config.toml 解析错误时 CLI 只显示 'failed to start within timeout'，吞掉真实报错）
-    tail = _read_log_tail(Path.home() / ".emrg" / "emrgd.log", lines=15)
-    detail = f"\n  emrgd.log 尾部:\n{tail}" if tail else ""
-    raise RuntimeError(f"emrgd failed to start within timeout{detail}")
+    await _await_daemon_ready(proc, _log_path(), log_mark)
+    logger.info("emrgd started (pid=%d)", proc.pid)
+    return proc
 
 
-def _read_log_tail(path: Path, lines: int = 15) -> str:
-    """Return the last `lines` of a log file (empty string on any error)."""
+def _log_path() -> Path:
+    """Where emrgd writes — resolved per call, not at import.
+
+    A module-level constant would freeze ``Path.home()`` at import time, which is
+    wrong in exactly the case this diagnostic is for: tests and the GUI's
+    isolated-HOME runs point HOME elsewhere after the module is loaded.
+    """
+    return Path.home() / ".emrg" / "emrgd.log"
+
+
+def _log_mark(path: Path) -> tuple[int, int | None]:
+    """The pre-spawn mark of the log: ``(byte size, inode)``, or ``(0, None)``.
+
+    **A size alone is not a mark, because emrgd's log is *replaced*, not appended
+    to.** ``emrg/server/__main__.py`` installs a ``RotatingFileHandler``
+    (``maxBytes``, ``backupCount``), so between this mark and the read an offset
+    can come to index a different file — measured on the handler's own
+    ``doRollover()``, in both size regimes:
+
+    * the pre-spawn log is near the cap, so the mark lands *past* the new file's
+      end: the read answers ``""`` and the host is told "this start attempt wrote
+      nothing to emrgd.log" while the new file holds this attempt's error text —
+      R124's symptom (a real cause swallowed) reintroduced by a diagnostic;
+    * the pre-spawn log is short, so the mark lands *inside* a line of the new
+      file: a fragment is presented as what this attempt wrote.
+
+    The identity discriminates both, and the size is not the discriminator: the
+    inode changed in *both* regimes, so a ``size_now < mark`` test catches the
+    first and misses the second. The size is still carried, for the one case the
+    inode cannot see: a log truncated in place keeps its inode and shrinks.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return 0, None
+    return st.st_size, st.st_ino
+
+
+def _read_log_tail(path: Path, lines: int = 15, since: tuple[int, int | None] = (0, None)) -> str:
+    """Return the last `lines` of what this attempt appended after the mark `since`.
+
+    `since` is a mark from `_log_mark` — ``(byte offset, inode)``, never a bare
+    offset — and that is the point of the diagnostic (issue #1276): the tail of
+    the whole file is *history*, and history printed as the reason a start failed
+    sent the host looking for a cause in a previous run's normal shutdown. Only
+    what this attempt wrote can explain this attempt; when it wrote nothing, the
+    caller must say so rather than show an older run.
+
+    A mark whose inode is no longer the file's, or whose offset is now past the
+    end, is read from the start instead: the file it marked is gone, so every byte
+    of the current one belongs to this attempt. ``(0, None)`` means "no mark" and
+    reads the whole file, which is what the whole-file tail caller wants.
+    """
+    offset, ino = since
     try:
         if not path.exists():
             return ""
-        data = path.read_text(encoding="utf-8", errors="replace")
+        current = path.stat()
+        if (ino is not None and current.st_ino != ino) or current.st_size < offset:
+            offset = 0
+        with open(path, "rb") as handle:
+            handle.seek(offset)
+            data = handle.read().decode("utf-8", errors="replace")
         return "\n".join(data.rstrip().splitlines()[-lines:])
     except OSError:
         return ""
+
+
+def _child_exit_code(proc) -> int | None:
+    """The child's exit status if it has already exited, else None (issue #1276).
+
+    Only an ``int`` counts. The first version asked ``is not None``, and the
+    existing suite caught why that is wrong: a subprocess-like stand-in (or any
+    object whose ``returncode`` is not the documented int-or-None) then reports
+    an exit that never happened, and the wait fails fast on a *live* child —
+    turning a diagnostic fix into a startup regression.
+    """
+    code = getattr(proc, "returncode", None)
+    return code if isinstance(code, int) else None
+
+
+def _startup_failure_detail(log_path: Path, since: tuple[int, int | None], proc) -> str:
+    """What is actually known about a start that did not come up (issue #1276).
+
+    Still the fix for rant 2026-08-05T15:54:28 (R124): a config.toml parse error
+    used to surface as a bare "failed to start within timeout" with the real
+    error swallowed. The tail is still read — from this attempt's bytes only.
+
+    Two facts, and neither may be replaced by a guess: whether the child is
+    still alive (and its exit code if not), and whether this attempt appended
+    anything to the log at all.
+    """
+    tail = _read_log_tail(log_path, lines=15, since=since)
+    code = _child_exit_code(proc)
+    if tail:
+        return f"\n  emrgd.log 尾部（本次启动新增）:\n{tail}"
+    alive = "still running" if code is None else f"already exited (exit={code})"
+    return (
+        f"\n  this start attempt wrote nothing to emrgd.log"
+        f"{'' if log_path.exists() else ' (the file does not exist)'};"
+        f" the child is {alive}. Any output earlier in the file is from a previous run."
+    )
+
+
+async def _await_daemon_ready(
+    proc,
+    log_path: Path,
+    since: tuple[int, int | None],
+    probe=None,
+    *,
+    attempts: int = 15,
+    delay: float = 0.3,
+) -> None:
+    """Wait for the daemon to accept connections; raise with what is known.
+
+    Fail fast on a child that has already exited (issue #1276 item 3): the loop
+    used to sleep out the whole window without ever asking, so a child dying at
+    import or config-parse stage cost 4.5s and reported no exit code at all.
+    The exit code is the one fact a silent child leaves behind, because the spawn
+    discards its stderr.
+    """
+    probe = probe or is_running
+    for _ in range(attempts):
+        await asyncio.sleep(delay)
+        if probe():
+            return
+        code = _child_exit_code(proc)
+        if code is not None:
+            raise RuntimeError(
+                f"emrgd exited during startup (exit={code})"
+                + _startup_failure_detail(log_path, since, proc)
+            )
+    raise RuntimeError(
+        f"emrgd failed to start within {attempts * delay:.1f}s"
+        + _startup_failure_detail(log_path, since, proc)
+    )
 
 
 async def check_and_restart_if_stale() -> None:

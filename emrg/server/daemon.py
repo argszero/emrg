@@ -4881,6 +4881,41 @@ def _sigterm_handler(signum, frame) -> None:
     raise SystemExit(f"SIGTERM ({signum}) received")
 
 
+def _serve_exit_log_record(reason: str, exc: BaseException) -> tuple[int, str, bool]:
+    """The log call for an exception that escaped ``serve()`` — (level, message, exc_info).
+
+    The classification was already computed two lines above this helper's only
+    caller, and the log line was not using it: every escaped exception logged
+    ``"daemon crashed"`` with a full traceback, including ``SIGTERM`` — which is
+    how the *normal* stop path is taken (the client's stale-daemon restart,
+    ``emrg server stop``, the installer's ``stop_all``). Host-visible cost
+    (issue #1276): the client, unable to start a daemon, printed the previous
+    run's ordinary shutdown as the crash that explained *this* failure.
+
+    Worse than mislabelled, that traceback names no cause: ``_sigterm_handler``
+    raises ``SystemExit`` from a signal handler, so the frames are whichever
+    suspended coroutine the interpreter happened to be in — the capture in
+    #1276 ends at the *definition line* of an unrelated function.
+
+    So: a stop is reported as a stop, with no traceback; the word "crashed" and
+    the traceback are kept for the branch that means it. ``DaemonExit`` still
+    carries the full ``traceback_text`` either way — it is the durable record,
+    and the fix is about which *log level and wording* a stop gets.
+    """
+    if reason == "sigterm":
+        return (
+            logging.INFO,
+            f"daemon stopped on SIGTERM (SystemExit: {exc}) — operator-initiated "
+            f"stop, not a crash; no traceback recorded here (see the exit record)",
+            False,
+        )
+    return (
+        logging.CRITICAL,
+        f"daemon crashed ({type(exc).__name__}: {exc})",
+        True,
+    )
+
+
 async def run_server(llm_config: LlmConfig) -> DaemonExit:
     """Run the EMRG server until interrupted; return exit metadata.
 
@@ -4926,7 +4961,8 @@ async def run_server(llm_config: LlmConfig) -> DaemonExit:
         traceback_text = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )
-        logger.critical(
-            "daemon crashed (%s: %s)", type(exc).__name__, exc, exc_info=True
-        )
+        # `reason` decides the wording *and* the level (issue #1276): a stop is
+        # not a crash, and only the crash branch logs a traceback.
+        level, message, with_traceback = _serve_exit_log_record(reason, exc)
+        logger.log(level, message, exc_info=with_traceback)
     return DaemonExit(reason, exit_code, traceback_text)
