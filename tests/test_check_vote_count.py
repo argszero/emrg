@@ -1205,3 +1205,103 @@ def test_a_lost_jq_projection_fails_loud_instead_of_voiding_every_vote(mod, monk
     err = capsys.readouterr().err
     assert "did not apply" in err
     assert "0/3" not in err
+
+
+# --- the transient UNKNOWN: re-ask the question, never guess the answer ------
+
+
+class _Clock:
+    """A fake `time` for the poll: sleeping advances the clock, nothing else.
+
+    The real thing would make these tests take a minute and would make the
+    *budget* untestable (a test cannot tell "bounded" from "hung" by waiting).
+    """
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+class FlakyMergeability(FakeGh):
+    """`UNKNOWN` for the first `unknown_reads` reads, then a real answer."""
+
+    def __init__(self, unknown_reads: int, **kwargs):
+        super().__init__(_three_votes(), **{**kwargs, "mergeable": "UNKNOWN", "merge_state": "UNKNOWN"})
+        self.unknown_reads = unknown_reads
+        self.view_reads = 0
+
+    def __call__(self, args: list[str]) -> object:
+        if args[:2] == ["pr", "view"]:
+            self.view_reads += 1
+            if self.view_reads > self.unknown_reads:
+                self.mergeable, self.merge_state = "MERGEABLE", "CLEAN"
+        return super().__call__(args)
+
+
+def test_an_uncomputed_mergeability_is_asked_again_not_guessed(mod, monkeypatch, capsys):
+    """The reading that motivated the wait: GitHub says `UNKNOWN`, one read later it answers.
+
+    Measured 2026-09-16: a head merged minutes earlier, and the counter refused
+    the count for as long as GitHub had not computed mergeability - so the caller
+    slept and re-ran by hand, twice in one cycle. Re-asking is not a softer
+    answer: the verdict below is the one GitHub actually computed.
+    """
+    fake = FlakyMergeability(unknown_reads=2)
+    clock = _Clock()
+    monkeypatch.setattr(mod, "time", clock)
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    rc = mod.main(["1", "--mergeability-wait", "60"])
+    out = capsys.readouterr().out
+    assert rc == 0, "the PR is MERGEABLE/CLEAN with three votes once GitHub answers"
+    assert "READY 3/3" in out
+    assert fake.view_reads == 3, "two unanswered reads, then the answer"
+    assert clock.slept == [mod._MERGEABILITY_POLL_SECONDS] * 2, clock.slept
+    assert clock.now < 60, "the budget is a ceiling, not a duration to spend"
+
+
+def test_the_wait_is_bounded_and_the_refusal_is_unchanged(mod, monkeypatch, capsys):
+    """A mergeability that never arrives is still exit 2, after a bounded poll.
+
+    The failure this pins is a "robust" retry that ends by guessing, or one that
+    sleeps forever: the tool's contract is an honest count, and an unreadable
+    mergeability is reported as unreadable - no number, whatever the caller asked
+    for. Asserts the poll stopped *at* the budget and not a fixed number of tries.
+    """
+    fake = FlakyMergeability(unknown_reads=10_000)
+    clock = _Clock()
+    monkeypatch.setattr(mod, "time", clock)
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    rc = mod.main(["1", "--mergeability-wait", "12"])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "not a computed mergeability" in err
+    assert "3/3" not in err, "an answer that was never computed is not shipped with a count"
+    assert clock.now == 12, "the poll must stop at the budget it was given"
+    assert fake.view_reads == 4, "reads at t=0,5,10, then one last read at the deadline"
+    assert sum(clock.slept) == 12, "two full gaps plus a short one to reach the deadline"
+
+
+def test_the_default_budget_asks_exactly_once(mod, monkeypatch, capsys):
+    """Un-opted-in callers keep today's behaviour: one read, then refuse.
+
+    Everything that scans a queue calls this without a budget, and a hidden
+    default would make a scan sleep for a minute per uncomputed PR.
+    """
+    fake = FlakyMergeability(unknown_reads=10_000)
+    clock = _Clock()
+    monkeypatch.setattr(mod, "time", clock)
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    rc = mod.main(["1"])
+    assert rc == 2
+    assert fake.view_reads == 1
+    assert clock.slept == []
