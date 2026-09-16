@@ -36,6 +36,22 @@ from emrg.server.git_utils import (
 
 logger = logging.getLogger("emrg.server.scheduler")
 
+
+def _receipt_note(receipt: str | None) -> str:
+    """The sentence a recovery owes when it could not write its receipt (issue #1284).
+
+    The receipt is the audit half of a safety rule's release, so a release that
+    cannot write one must not read as plain success - and "could not write one" is
+    exactly the failure ``_write_recovery_receipt`` anticipates and returns ``None``
+    for. Its return value used to be discarded at the only call site, which is how a
+    missing receipt stayed silent (measured: the path pre-created as a directory, so
+    ``open(..., "w")`` raises ``OSError`` -> detail said only "HEAD unmoved").
+    """
+    if receipt is not None:
+        return ""
+    return "; no receipt could be written (the stash is the durable record)"
+
+
 # ── Module-level constants (shared with daemon) ──────────────────
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
@@ -630,9 +646,16 @@ class TaskHandler:
                 return None
             if out.returncode == 0 and out.stdout.strip():
                 path = out.stdout.strip()
-                if os.path.isabs(path):
-                    return path
-                return os.path.normpath(os.path.join(source_dir, path))
+                if not os.path.isabs(path):
+                    path = os.path.join(source_dir, path)
+                # One spelling per path (#1292, Windows CI): git prints an absolute
+                # git dir with forward slashes (`C:/.../.git`), so returning its
+                # verbatim answer gave whoever appends a file name a mixed-separator
+                # path (`C:/.../.git\emrg-recovery-receipt.json`) - the same file
+                # spelled two ways depending on which branch here answered, and only
+                # one of them equal to `str(Path(state) / name)`. Normalising both
+                # branches makes the answer a property of the file, not of the branch.
+                return os.path.normpath(path)
         return None
 
     @staticmethod
@@ -642,17 +665,22 @@ class TaskHandler:
         Best-effort by design: by the time this runs the recovery has already
         happened and been verified, and the stash itself is the durable record of
         what moved - so a missing receipt is worth reporting, not worth undoing a
-        verified recovery over.
+        verified recovery over. ``None`` is that report: the caller turns it into a
+        sentence in the action's detail *and* it is logged here, because the caller
+        is not the only reader (issue #1284).
         """
         state = TaskHandler._git_state_dir(source_dir)
         if state is None:
+            logger.warning("no git state dir for %s: the recovery receipt cannot be written",
+                           source_dir)
             return None
         target = os.path.join(state, "emrg-recovery-receipt.json")
         try:
             with open(target, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
-        except OSError:
+        except OSError as exc:
+            logger.warning("could not write the recovery receipt at %s: %s", target, exc)
             return None
         return target
 
@@ -732,7 +760,7 @@ class TaskHandler:
             )
 
         head_after = git("rev-parse", "HEAD").stdout.strip()
-        TaskHandler._write_recovery_receipt(source_dir, {
+        receipt = TaskHandler._write_recovery_receipt(source_dir, {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "repo": source_dir,
             "reason": reason,
@@ -761,10 +789,12 @@ class TaskHandler:
                 f"the recovery moved HEAD ({head.stdout.strip()[:8]} -> {head_after[:8]}); "
                 f"the stash is intact, inspect it before continuing "
                 f"(`git stash list` -> {message})"
+                + _receipt_note(receipt)
             )
         return "recovered", (
             f"{len(before)} reconstructible change(s) stashed as {message}; "
             f"HEAD unmoved at {head_after[:8]}"
+            + _receipt_note(receipt)
         )
 
     async def _effective_sandbox(

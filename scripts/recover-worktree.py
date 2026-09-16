@@ -38,7 +38,9 @@ what "reconstructible" means, the deadlock would come back through the script):
 
 Every `--apply` writes a receipt into the **git state dir** (see
 `scheduler._git_state_dir` — a location that cannot dirty the tree it just cleaned),
-as the structural guard's contract requires of every release of a safety rule.
+as the structural guard's contract requires of every release of a safety rule. It is
+best-effort, so the stdout and the action's detail *say so* when one could not be
+written rather than naming a path for a file that does not exist (issue #1284).
 
 Exit codes
 ----------
@@ -146,7 +148,15 @@ def recover(repo: Path, apply: bool) -> int:
     print(f"recovered: {repo} converged to a clean tree; {detail}")
     print("reversible: `git stash list` -> the named stash (a bare `git stash pop`")
     print("takes the newest, which is this one only until the next stash is made)")
-    print(f"receipt: {receipt}" if receipt else "receipt: could not be written")
+    # The path is not the receipt (issue #1284): `_receipt_path` computes where one
+    # *would* be written, so the branch below used to be unreachable — it printed a
+    # path for a file that an `OSError` had kept from existing. Ask the file — and ask
+    # whether it is a *file*, because "something exists at this path" is also true of
+    # the directory that the write failed against (the forced failure in the test).
+    if receipt and os.path.isfile(receipt):
+        print(f"receipt: {receipt}")
+    else:
+        print("receipt: could not be written")
     return 0
 
 
