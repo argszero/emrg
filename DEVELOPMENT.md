@@ -281,9 +281,22 @@ same question the guard asks, and then:
   written, and no stash is made. That is the guard working; commit, stash or copy
   that content out deliberately and re-run.
 - **stashes it when it is reconstructible** (`git stash push --include-untracked`),
-  leaving the worktree clean and every byte one `git stash pop` away. It never
-  moves `HEAD`, so it cannot orphan a commit, and the stash makes the action
-  undoable — which is why an agent is allowed to take it.
+  leaving the worktree clean and every byte in the stash. It never moves `HEAD`, so
+  it cannot orphan a commit, and the stash is what makes the action undoable —
+  which is why an agent is allowed to take it. Undo it with the spelling the
+  receipt names, `git stash apply --index stash@{N}` with the `N` that `git stash
+  list` prints for the named message: `--index` is what restores the staged side, and
+  a *bare* `git stash pop` is **not** the inverse of this action. It takes the newest
+  stash (this one only until the next is made), it brings a staged change back
+  unstaged, and it consumes the stash — so the exact spelling is gone with it. The
+  selector is the list's ordinal because no `@{…}` form names a stash **by message**
+  (`gitrevisions(7)` allows ordinals, dates, upstream and push): `stash^{/<message>}`
+  searches commit ancestry and stops resolving as soon as a later stash exists
+  (`apply` rc=1), while `stash@{/<message>}` resolves to the newest entry whatever
+  message it is given and so applies the **wrong** stash successfully — measured, both
+  (issue #1284, re-measured by
+  `tests/test_recover_worktree.py::test_the_advertised_selector_survives_a_later_stash`
+  after `::test_the_advertised_reversal_is_the_measured_one`).
 - **writes a receipt** into the git state dir (`emrg-recovery-receipt.json`), as
   every release of a safety rule requires. Deliberately not beside the tree: a
   receipt at `<repo>/.emrg/…` re-dirties the tree it just cleaned in any repository
@@ -350,8 +363,8 @@ the tree dirty.
 
 `-f` is the right tool for tracked modifications only. Measured on the other two
 geometries: **untracked-only** dirt survives it (exit 0, still dirty, so the next
-cycle downgrades again) — use `git stash -u`, recoverable with `git stash pop`,
-not `git clean -fd`, which destroys the content; and an untracked file whose path
+cycle downgrades again) — use `git stash -u`, recoverable with `git stash apply
+--index`, not `git clean -fd`, which destroys the content; and an untracked file whose path
 the target commit also adds gets its content **silently replaced**. Adding the
 path to `.gitignore` does not help, because that edit is itself an uncommitted
 change.
