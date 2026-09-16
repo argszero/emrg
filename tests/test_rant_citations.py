@@ -257,7 +257,16 @@ def test_the_real_tree_has_no_unresolved_citation(mod):
     sites, missing = mod.scan_tree(REPO_ROOT)
     assert missing == [], f"unmeasurable: {missing}"
     assert mod.problems(sites) == []
-    assert any(s.exempt() for s in sites), "the frozen debt sites vanished"
+    # This assertion was the opposite until 2026-09-16: it required the real tree to
+    # carry *some* frozen-debt site (`any(s.exempt())`). The host's ruling on issue
+    # #1252 narrowed the red line to the running copy of the template, the repository
+    # copy was swept, and the debt list was emptied - so the claim that can now fail
+    # is the one worth asserting: nothing in this tree is exempt. An entry quietly
+    # added back would exempt its site and make this red, while `problems` alone
+    # would stay green (that is exactly what an entry is for).
+    exempt = [s.key for s in sites if s.exempt()]
+    assert exempt == [], f"a site is exempt from naming a record: {exempt}"
+    assert mod.DEBT == {}, "the debt list is empty; a new entry needs the host's call"
 
 
 def test_a_missing_file_is_unmeasurable_not_a_pass(mod, tmp_path, capsys):

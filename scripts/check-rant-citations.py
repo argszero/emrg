@@ -53,17 +53,26 @@ verified against GitHub when the sweep was made (a reviewer sampled 7 of the 26
 inserted pairs, each credited PR merged with the timestamp present in its own
 diff).
 
-The frozen debt
----------------
-`evolution_prompt.md` is the one template routine evolution must not edit (host
-rant 2026-08-17T14:22:21; asserted by
-`tests/test_rants_single_writer.py::_UNEDITABLE_TEMPLATES`), so its citations are
-the caller's to sweep, not this guard's. They are listed in `DEBT` with a reason
-and are the *only* permitted host-local-only sites. An entry that no longer
-occurs is itself a failure: a debt list that cannot shrink grows until it means
-"everything", which is the same as no rule. That is also why the list holds
-`(file, timestamp)` pairs rather than a count - a count can stay true while the
-citations behind it change.
+The frozen debt (empty as of 2026-09-16)
+---------------------------------------
+`DEBT` is the mechanism by which a site may stay host-local-only: it is a
+`(file, timestamp)` set, and an entry that no longer occurs is itself a failure,
+because a debt list that cannot shrink grows until it means "everything", which is
+the same as no rule.
+
+It is **empty**. The list existed for one file, `evolution_prompt.md`, on the reading
+that routine evolution must not edit it - and the host has since ruled the boundary of
+that red line (issue #1252): it forbids editing the copy that is **running**, i.e. the
+one resolved as `Path(scheduler.__file__).parent / "evolution_prompt.md"`, and not the
+repository copy. With the repository copy sweepable, its sites carry records like every
+other site and the debt is gone; the running copy is replaced on the normal release
+path, not by a cycle.
+
+The mechanism stays, and stays tested: the synthetic-entry tests in
+`tests/test_rant_citations.py` build a debt list, exercise the exemptions and assert the
+stale report, so an empty real list is not an untested code path. What the real tree now
+asserts is the opposite of what it asserted while the debt existed - that **no** site is
+exempt - which is the claim that would fail if an entry were quietly added back.
 
 Exit codes
 ----------
@@ -88,7 +97,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: so a new template has to be added here deliberately rather than swept in by a
 #: pattern that also catches its code comments.
 INSTRUCTION_FILES = (
-    "emrg/server/evolution_prompt.md",     # host-owned: its sites are DEBT
+    "emrg/server/evolution_prompt.md",     # swept: the red line covers the running copy
     "emrg/server/journal_prompt.md",
     "emrg/server/open_source_prompt.md",
     "emrg/server/promote_prompt.md",
@@ -99,32 +108,24 @@ INSTRUCTION_FILES = (
     "docs/gui-redesign.md",
 )
 
-#: The one file routine evolution must not edit, so its citations wait for the
-#: caller. Kept as a name here rather than imported from the test module: a guard
-#: that imported its own scope from a test would report a failure when the test
-#: moves, not when the tree changes.
+#: The template whose **running** copy is the one routine evolution must not edit (the
+#: host's reading of the red line, issue #1252). Kept as a name here because the debt
+#: list may only ever hold sites in this file, and because a name is not imported from
+#: the test module: a guard that imported its own scope from a test would report a
+#: failure when the test moves, not when the tree changes.
 HOST_OWNED = "emrg/server/evolution_prompt.md"
 
-#: `(file, timestamp)` -> why this site may stay host-local-only. Every entry is
-#: in the host-owned file for the same reason; the reason is spelled per entry so
-#: the list cannot quietly become "things nobody got to". The set is the measured
-#: one (`--measure`), not a hand-copied list: it is eight sites, and the two
-#: spellings that are not sites of their own (`+ 11:00:31` is date-less, so it has
-#: no id; `+ 2026-08-28T22:12:16` is a continuation) are covered by DATEDLESS
-#: and by their block rather than by an entry each.
-DEBT: dict[tuple[str, str], str] = {
-    (HOST_OWNED, ts): "host-owned template (host rant 2026-08-17T14:22:21)"
-    for ts in (
-        "2026-08-07T10:17:27",
-        "2026-08-10T08:59:57",
-        "2026-08-12T18:03:26",
-        "2026-08-17T12:09:57",
-        "2026-08-17T14:22:21",
-        "2026-08-18T16:42:52",
-        "2026-08-23T08:04:26",
-        "2026-09-14T20:14:56",
-    )
-}
+#: `(file, timestamp)` -> why this site may stay host-local-only. **Empty**, and the
+#: reason it is worth keeping rather than deleting: the set is what makes "this site
+#: is allowed to cite no public record" a decision with a name attached, and the
+#: stale check below is what stops it from growing silently. It held the eight
+#: timestamps of `HOST_OWNED` until 2026-09-16, when the host ruled that the red line
+#: covers the running copy rather than the repository copy (issue #1252) - so the
+#: repository copy was swept and the list emptied in the same change, which the
+#: docstring's "the two halves are one action" note already asked for. Every entry
+#: used to be in the host-owned file for the same reason; the reason was spelled per
+#: entry so the list could not quietly become "things nobody got to".
+DEBT: dict[tuple[str, str], str] = {}
 
 #: A citation: the word "rant"/"rants" followed within three non-digits by a
 #: timestamp. Three characters, not a line: `(rant 2026-…` and `(rants\n  2026-…`
@@ -362,9 +363,14 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
         print(f"FAIL: {len(found)} problem(s)")
         return 1
+    # The debt half of the sentence is conditional because it is now usually absent:
+    # "0 frozen debt entries in the host-owned template" names a list and asserts
+    # nothing, and a line that reports a number without a reader is how the count in
+    # this file's docstring went stale before (issue #1289).
+    debt = (f", {len(DEBT)} frozen debt entr(y/ies) in the host-owned template"
+            if DEBT else ", no frozen debt")
     print(f"OK: every citation site in the instruction class names a public record "
-          f"({len(sites)} site(s), {len(DEBT)} frozen debt entr(y/ies) in the "
-          f"host-owned template)")
+          f"({len(sites)} site(s){debt})")
     return 0
 
 
