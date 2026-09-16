@@ -18,6 +18,28 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "recover-worktree.py"
+DOC = Path(__file__).resolve().parent.parent / "DEVELOPMENT.md"
+
+#: The recovery bullet whose prose is the reader-facing undo recipe. Its opening
+#: words are the anchor, not a line number: the section is re-wrapped and
+#: re-numbered by edits that have nothing to do with the recipe, and the anchor is
+#: asserted to appear exactly once so a renamed bullet fails instead of silently
+#: measuring a different paragraph.
+_RECIPE_BULLET = "- **stashes it when it is reconstructible**"
+
+
+def _recovery_bullet() -> str:
+    """That bullet as one paragraph, with its markdown line breaks collapsed."""
+    text = DOC.read_text(encoding="utf-8")
+    found = text.count(_RECIPE_BULLET)
+    assert found == 1, (
+        f"expected exactly one `{_RECIPE_BULLET}` bullet in {DOC.name}, found {found}"
+        " — the anchor moved, so this test would be measuring a different paragraph"
+    )
+    rest = text.split(_RECIPE_BULLET, 1)[1]
+    end = rest.find("\n- ")  # the bullet ends at the next top-level item
+    assert end != -1, f"`{_RECIPE_BULLET}` is the last bullet in {DOC.name}"
+    return " ".join(rest[:end].split())
 
 
 def _load():
@@ -809,15 +831,17 @@ def test_the_tool_prints_the_receipts_own_recipe(tmp_path, capsys):
     drift, so the line is now the receipt's own string, and this asserts that instead
     of assuming it: re-word the daemon's recipe and stdout re-words with it.
 
-    What this does not cover is prose that quotes the recipe in a document — markdown
-    has no way to be made to agree mechanically, and the first attempt at a scanner
-    (a paragraph mentioning `stash pop` next to an "undoable"/"recoverable" word had to
-    name `--index`) refused `emrg/server/scheduler.py`'s own note *recording the harm*
-    a plain pop did, which is prose that has to spell the wrong spelling out. A guard
-    that fails on the measurement it exists to cite is a false verdict, so the
-    remaining prose is pinned the only honest way available:
-    `test_the_advertised_reversal_is_the_measured_one` measures the behaviour those
-    documents describe, and names them so a failure points at the text to re-read.
+    What the *tool* cannot cover is prose that quotes the recipe in a document, and
+    the first attempt at a scanner for it was a false verdict: it required a paragraph
+    mentioning `stash pop` next to an "undoable"/"recoverable" word to also name
+    `--index`, which refused `emrg/server/scheduler.py`'s own note *recording the harm*
+    a plain pop did — prose that has to spell the wrong spelling out. That class is
+    specific to an *absence* test, so the document is pinned by the other shape: a
+    *presence* assertion that the recovery bullet still names the measured spelling
+    (`test_the_document_still_carries_the_measured_spelling`). Together with
+    `test_the_advertised_reversal_is_the_measured_one`, which measures the behaviour
+    those documents describe and names them so a failure points at the text to re-read,
+    the claim is pinned at both ends: what git does, and what the reader is told.
     """
     work, _head = _with_upstream(tmp_path)
 
@@ -834,6 +858,36 @@ def test_the_tool_prints_the_receipts_own_recipe(tmp_path, capsys):
     assert f"reversible: {receipt['reversible_with']}" in out, (
         "the tool must print the receipt's own recipe, not a second copy of it that "
         f"can drift; stdout was:\n{out}"
+    )
+
+
+def test_the_document_still_carries_the_measured_spelling():
+    """The reader-facing recipe is prose, so it can be *re-worded* back to the harm.
+
+    `DEVELOPMENT.md`'s recovery bullet is where a reader meets the undo, and nothing
+    mechanical connected it to the measurement above: re-wording that bullet to "every
+    byte one `git stash pop` away" left the whole file green (measured by
+    `how2how2how2-arch` on this PR, 34 passed). A *presence* assertion has no
+    false-verdict class — it fires on the spelling going missing, not on the wrong
+    spelling appearing — so it can hold this one line without repeating the scanner
+    that had to be dropped (see `test_the_tool_prints_the_receipts_own_recipe`).
+
+    What it deliberately cannot see is a document that states both spellings, or a
+    recipe moved to another sentence: it pins presence, which is weaker than a
+    scanner. The bullet is located by its own opening words, and a bullet that has
+    been re-wrapped or re-numbered is still the same claim; a bullet that is *gone*
+    fails here rather than skipping, because an assertion that cannot find its subject
+    has measured nothing.
+    """
+    bullet = _recovery_bullet()
+    assert "git stash apply --index" in bullet, (
+        "the recovery section must name the reversal that restores the staged side "
+        f"and keeps the stash — the spelling the receipt hands a reader; got:\n{bullet}"
+    )
+    assert "stash^{/" in bullet, (
+        "the recipe has to select the stash by the message the receipt names, not by "
+        f"`stash@{{0}}` (the newest, which is this one only until the next is made); "
+        f"got:\n{bullet}"
     )
 
 
