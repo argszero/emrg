@@ -884,6 +884,20 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     can only refuse a command that writes nothing — and losing it let `read-only`
     allow a write, which is how #1280 was found.
 
+    Believing an operator-shaped token in *operator* position is the same
+    fail-closed direction, and it has the same price: when the quoting sits
+    **inside** an operator-shaped word the pairing cannot recover it at all — the
+    second reading raises on `echo x 2'>>' log` (`No closing quotation`) and
+    differs in word count on `echo x \\> log` (`['echo','x','>','log']` against
+    `['echo','x','\\\\','>','log']`) — so both answer "cannot say", and the walk
+    names the following word (`log`, `out.txt`) although the shell creates
+    nothing: measured in fresh scratch directories, each exits 0 with an empty
+    directory, in `/bin/sh` and `/bin/bash` alike. Filed as issue #1273 rows 1-2
+    (row 3, the `git config` value walk, is fixed) and pinned by
+    `tests/test_bash_tool_sandbox.py` as a residual with its ground truth rather
+    than left to prose: the two rows are refused today, and the change that fixes
+    them flips those assertions deliberately.
+
     Still deliberately non-exhaustive in *which verbs* it covers (an
     interpreter can always write a file); the honest boundary stays
     ``enforcement="partial"``.

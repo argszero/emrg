@@ -2226,3 +2226,230 @@ def test_a_run_longer_than_two_names_the_operand_the_shell_really_writes(
     assert operand in targets, f"{cmd!r} must name the file it writes, got {targets!r}"
     assert targets == answer, f"{cmd!r} -> {targets!r}"
     assert _check_sandbox(cmd, "read-only")[0] is False, cmd
+
+
+# Issue #1273, rows 1-2 — the *price* of the operator-position fallback, pinned.
+#
+# Both rows are spellings that make the shell write **nothing**, and both are read
+# as operator-shaped words by the one lexing that sees them:
+#
+#   * `echo x 2'>>' log` — `2'>>'` is a single quoted word (`2>>`), so the shell
+#     echoes it and opens no file. The second lexing raises on this line
+#     (`No closing quotation`), so the pairing cannot say the word was quoted;
+#   * `echo x \> log` — `\>` is an escaped `>`, an ordinary argument. Here the two
+#     readings differ in word count (4 against 5: `['echo','x','\\','>','log']`),
+#     which is the other "cannot say" answer;
+#   * `echo x 2'>' out.txt` is the same shape as the first row (`2'>'` is the word
+#     `2>`), listed because the row count is what a fix gets measured against.
+#
+# "Cannot say" is answered by the fail-closed fallback, which believes the operator
+# — the safe direction in *operator* position (a real redirect behind a quoted word
+# keeps naming its path, #1269) and the only direction that can be safe, since the
+# pairing has nothing to pair. The cost is these refusals of commands that write
+# nothing. Row 3 of the issue (the `git config` value walk) is fixed by #1288; the
+# rows below are the remaining residual, and this pins it **with its ground truth**
+# so that neither half can drift silently: the shell half says these commands really
+# write nothing (so the over-block stays classified as a defect, not as a refusal
+# that happens to be right), and the walk half says what today's answer is, so the
+# change that fixes them makes a deliberate, visible edit here instead of an
+# unnoticed widening of what `read-only` refuses.
+UNRESOLVED_QUOTED_OPERATOR_OVER_BLOCKS = [
+    # (command, the target the walk names for it, the shells this spelling reaches)
+    ("echo x 2'>>' log", "log", ("/bin/sh", "/bin/bash")),
+    ("echo x 2'>' out.txt", "out.txt", ("/bin/sh", "/bin/bash")),
+    ("echo x \\> log", "log", ("/bin/sh", "/bin/bash")),
+]
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh and /bin/bash do not exist")
+@pytest.mark.parametrize("cmd,named,shells", UNRESOLVED_QUOTED_OPERATOR_OVER_BLOCKS)
+def test_an_unresolvable_quoted_operator_is_a_measured_over_block(
+    cmd: str, named: str, shells: tuple
+):
+    """Issue #1273 rows 1-2: a refusal whose command really writes nothing.
+
+    The shell is the oracle on one side — each line is run by the shells the row
+    names in its own fresh scratch directory, and the directory is read back — and
+    the walk's own answer is the other. Asserting both is what keeps the residual
+    honest in both directions: the walk may not be *praised* for this refusal (the
+    shell creates nothing), and it may not quietly stop naming the word either,
+    because that is the change that would have to come with the fix.
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    for shell in shells:
+        d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-overblock-")
+        try:
+            proc = subprocess.run([shell, "-c", cmd], cwd=d, capture_output=True)
+            created = sorted(os.listdir(d))
+            assert proc.returncode == 0, f"{shell} could not run {cmd!r} - re-measure"
+            assert created == [], f"{shell} created {created!r} for {cmd!r}"
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    assert _extract_write_targets(cmd) == [named], cmd
+    allowed, reason, _ = _check_sandbox(cmd, "read-only")
+    assert allowed is False, f"{cmd!r} is refused today ({reason!r})"
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh and /bin/bash do not exist")
+def test_the_over_block_is_scoped_to_the_unresolvable_spelling():
+    """The control: where the shell *does* write, the same walk is right on purpose.
+
+    Without this, "the walk refuses these two lines" would be indistinguishable from
+    a walk that refuses every redirect it cannot spell out — and the pin above would
+    be measuring a guard that had stopped working rather than one with a known price.
+    Each control line is run the same way and really creates the file it is refused
+    for, so a fix that relaxed the *resolvable* cases would fail here, not there.
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    for cmd, named in (
+        ("echo x 2>> log", "log"),      # the same word, unquoted: a real redirect
+        ("echo x > log", "log"),        # the operator standing alone
+        ("echo x 2> log", "log"),       # the fd-prefixed spelling, unquoted
+    ):
+        d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-overblock-control-")
+        try:
+            proc = subprocess.run(["/bin/sh", "-c", cmd], cwd=d, capture_output=True)
+            created = sorted(os.listdir(d))
+            assert proc.returncode == 0, f"/bin/sh could not run {cmd!r} - re-measure"
+            assert created == [named], f"/bin/sh created {created!r} for {cmd!r}"
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        assert _extract_write_targets(cmd) == [named], cmd
+        assert _check_sandbox(cmd, "read-only")[0] is False, cmd
+
+
+# Issue #1273 rows 1-2, measured as a **class** rather than as three examples.
+#
+# The pin above is three spellings, and three spellings are a sample: the same
+# question — "is this operator-shaped word really an operator?" — is asked by every
+# line whose operator carries quoting or escaping, and there are many such lines
+# (the corpus below generates 135 of them). A sample cannot show whether the price
+# is bounded, which is the thing a reader of the residual needs to know, so the
+# generated corpus is what the classification is measured against:
+#
+#   * the shell is the oracle for *what the line does* — each row is run in a fresh
+#     scratch directory and the directory is read back, so "writes nothing" is
+#     observed rather than argued;
+#   * the walk is asked for its targets and its `read-only` verdict;
+#   * the corpus is built from POSIX spellings only (`&>` is bash's, and `/bin/sh`
+#     on the CI Linux leg is dash, which reads it as backgrounding — the existing
+#     tests handle that spelling per shell, this corpus does not need it);
+#   * one shell is enough here because quoting and escaping are POSIX: the rows
+#     below behave the same in `/bin/sh` and `/bin/bash`, which the per-row pin
+#     above asserts for its own spellings.
+#
+# Two properties are asserted, in the two directions:
+#
+#   1. **no unnamed write** — every file the shell really creates is named by the
+#      walk. This is the direction that may never be traded away: an unnamed write
+#      is invisible at `read-only` and, for a path outside the workspace, at
+#      `workspace-write` too. Measured over this corpus: 0 rows out of 135, and the
+#      assertion is demonstrably load-bearing — the two arms below make it fire.
+#   2. **the over-block class stays masked** — an over-blocked row must carry an
+#      operator-shaped word whose own spelling is quoted or escaped (or a partially
+#      quoted word, which is #1280's priced class). Measured today: every one of the
+#      corpus's over-block rows is masked, so this half cannot fire on the tree as
+#      it stands — it is a **tripwire** for the day the walk starts refusing a line
+#      a reader would call plain. The non-vacuity assertions below are what keep the
+#      green meaningful: the corpus must contain rows the shell really writes *and*
+#      masked over-blocks, so a corpus that quietly stopped exercising either
+#      outcome fails here instead of passing.
+_CORPUS_PREFIXES = ["echo x", "echo 'a'b", "test 1 'a'b x"]
+_CORPUS_OPERATORS = [
+    ">", ">>", "2>", "2>>", ">|", "<>",       # plain: the walk must agree
+    "'>'", "'>>'", '">"', "2'>'", "2'>>'", '2">"',   # the operator's own spelling quoted
+    "\\>", "\\>>", "2\\>",                     # …or escaped
+]
+_CORPUS_TARGETS = ["log", "out.txt", "'>'"]
+
+
+def _corpus_rows() -> list[tuple[str, list[str], bool, list[str]]]:
+    """(command, walk targets, allowed at read-only, files the shell created).
+
+    Also returns the rows' shape, because the property is about which rows are
+    over-blocked and not only how many: the caller separates plain from masked.
+    """
+    import itertools
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    rows = []
+    for prefix, operator, target in itertools.product(
+        _CORPUS_PREFIXES, _CORPUS_OPERATORS, _CORPUS_TARGETS
+    ):
+        cmd = f"{prefix} {operator} {target}"
+        d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-corpus-")
+        try:
+            proc = subprocess.run(["/bin/sh", "-c", cmd], cwd=d, capture_output=True)
+            created = sorted(os.listdir(d))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+        allowed, _, _ = _check_sandbox(cmd, "read-only")
+        rows.append((cmd, _extract_write_targets(cmd), allowed, created))
+    return rows
+
+
+def _row_is_masked(cmd: str) -> bool:
+    """Does the line carry quoting or escaping anywhere it matters?
+
+    A row is *masked* when the token before the target is quoted/escaped or a
+    partially quoted word sits on the line — the two facts the walk cannot recover
+    from the token stream, and the only ones the corpus allows an over-block for.
+    """
+    parts = cmd.split()
+    operator_word = parts[-2]
+    return ("'" in operator_word or '"' in operator_word or "\\" in operator_word
+            or any(("'" in p or "\\" in p) for p in parts[:-2]))
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh does not exist")
+def test_the_generated_corpus_has_no_unnamed_write_and_no_plain_over_block():
+    """Issue #1273: the price of the fallback, measured over a generated corpus.
+
+    Asserting the class rather than the sample is what makes the residual
+    *bounded*: the walk may be wrong about lines whose operator spelling is masked
+    (measured: it refuses them although the shell writes nothing), and it may not
+    be wrong about anything else. Both directions are asserted, so neither a new
+    unnamed write nor a newly over-blocked plain line can land as a green suite.
+    """
+    rows = _corpus_rows()
+    assert len(rows) >= 100, f"the corpus collapsed to {len(rows)} rows - re-measure"
+
+    unnamed = [
+        (cmd, created) for cmd, targets, _allowed, created in rows
+        if any(f not in targets for f in created)
+    ]
+    assert not unnamed, (
+        "the walk must name every file the shell really creates; these writes are "
+        f"unnamed (an invisible write at read-only): {unnamed[:5]}"
+    )
+
+    plain_over_blocks = [
+        cmd for cmd, targets, allowed, created in rows
+        if created == [] and targets and not allowed and not _row_is_masked(cmd)
+    ]
+    assert not plain_over_blocks, (
+        "a plain line (no quoting, no escaping) must not be over-blocked - that is a "
+        f"new defect rather than this residual: {plain_over_blocks}"
+    )
+
+    # The instrument must be looking at both outcomes, or "no plain over-blocks" is
+    # satisfied by a corpus that contains none, and "no unnamed write" by one whose
+    # commands write nothing at all.
+    writes = [cmd for cmd, _t, _a, created in rows if created]
+    masked_over_blocks = [
+        cmd for cmd, targets, allowed, created in rows
+        if created == [] and targets and not allowed and _row_is_masked(cmd)
+    ]
+    assert masked_over_blocks, "the residual class vanished - re-measure the corpus"
+    assert len(writes) >= 20, (
+        f"only {len(writes)} corpus row(s) really write a file, so an unnamed write "
+        "could not be observed even if one existed - re-measure the corpus"
+    )
