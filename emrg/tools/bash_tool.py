@@ -319,10 +319,16 @@ _GIT_CONFIG_READ_SUBCOMMANDS = frozenset({"get", "get-all", "get-regexp",
 # and the count then reads a write as a read — `git config --no-type a.b c` really
 # writes `.git/config` (rc=0) and 7 more of the 16 value-less options measured do
 # the same. `tests/test_bash_tool_sandbox.py::test_every_config_value_option_consumes_its_value`
-# runs `git config <member> <value> probe.key` in a scratch repository and watches
-# every byte: a member that does not consume its value leaves two positionals and
-# git writes. Adding a member is therefore a change that has to come past a real
-# measurement (and past the value table the probe needs), not past a comment.
+# asks git itself, with nothing after the option: a value-taking member is reported
+# as `error: option `file' requires a value` (`switch `f' …` for the short form),
+# while a value-less one runs on to `error: no action specified` and one git does
+# not know to `error: unknown option`. It then re-runs each member in the shape this
+# walk counts and compares every byte. The byte watch alone was not enough to make
+# that a measurement — a command git *refuses* changes no bytes either: with
+# `--local` added to this set and a dot-less probe value, the watch stayed green
+# while `git config --local user.name probe` was allowed at read-only. Adding a
+# member is therefore a change that has to come past git's own answer (and past the
+# value table the probe needs), not past a comment.
 _GIT_CONFIG_VALUE_OPTS = frozenset({"--file", "-f", "--blob", "--type",
                                     "--default", "--comment"})
 # git global options that take a SEPARATE argument — the parser must skip both

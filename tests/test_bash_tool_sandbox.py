@@ -503,6 +503,14 @@ def test_the_value_skip_is_scoped_to_the_config_verb():
     assert _git_positionals(["-n", "5"]) == []
 
 
+#: The value the probe hands `--blob`: a real object id, but one that only exists
+#: inside the scratch repository the probe runs in, so `changed_by` hashes it there
+#: (`place_blob`). A placeholder rather than an id hashed somewhere else, because an
+#: object from another repository makes the probe **refuse** to run (`unable to load
+#: config blob object`) — and a refused command changes no bytes, which is the very
+#: false pass this file exists to close.
+_BLOB_PLACEHOLDER = "<a real object id, hashed into the probe's own repository>"
+
 #: A value of the kind each member of `_GIT_CONFIG_VALUE_OPTS` takes, so the probe
 #: below can hand it one. This is a *table*, not a second copy of the set: the test
 #: asserts the two agree, so a member added without a probe value fails as an
@@ -511,7 +519,7 @@ def test_the_value_skip_is_scoped_to_the_config_verb():
 _GIT_CONFIG_PROBE_VALUE = {
     "--file": "probe.cfg",
     "-f": "probe.cfg",
-    "--blob": "<a real object id, filled in per scratch repository>",
+    "--blob": _BLOB_PLACEHOLDER,
     "--type": "bool",
     "--default": "fallback",
     "--comment": "note",
@@ -532,20 +540,41 @@ def test_every_config_value_option_consumes_its_value(tmp_path):
     refused, so the exposure was entirely in the membership — and the suite stayed
     at `136 passed` with two of them added.
 
-    The probe is the property itself: `git config <member> <value> probe.key` leaves
-    **one** positional when the value is consumed (a read, so nothing is written) and
-    **two** when it is not (git reads that as `key=value` and writes). Real git is
-    the oracle and every byte under the scratch repository is compared, so "it
-    read" is measured rather than inferred from the option's name.
+    **Arm 1 is the property itself, asked of git directly**: `git config <member>`
+    with nothing after it. An option that takes a separate value is reported as
+    `error: option `file' requires a value` (`switch `f' requires a value` for the
+    short form); a value-less one runs on and reports `error: no action specified`,
+    and one git does not know reports `error: unknown option`. Real git answers, no
+    probe value is involved, and the answer does not depend on the shape this walk
+    counts — which is exactly what the first revision of this test lacked. Its arm
+    was `git config <member> <value> probe.key` asserting only that no bytes
+    changed, and **a refused command changes no bytes either**: with `--local`
+    added to the set and `"--local": "true"` to the table, that arm was green (its
+    two assertions re-measured here — `git config --local true probe.key` exits 2
+    with `error: key does not contain a section: true`, writing nothing, and that
+    message does not contain the substring it looked for; the probe value has to
+    contain a dot for the arm to catch a value-less member, and `bool`, `fallback`
+    and `note` do not), while this arm reports `error: no action specified` for it
+    and fails.
 
-    What this cannot measure on its own: an option git refuses in the counted shape
-    opens no hole, so the no-write assertion passes for it. `--all` is that case —
-    it is real, but it belongs to the subcommand forms (`git config set --all k v`)
-    and not to the bare `git config --all k v` this walk counts, where git exits 129.
-    So the shape assertion is here separately: a member that does nothing in the
-    shape being counted protects nothing, an inert member is a mistake worth failing
-    on, and the message carries git's own usage line — which is where a reader can
-    see what the option really belongs to.
+    **Arm 2 then checks that the counted shape really is a read**: per member,
+    `git config <member> <value> probe.key` in its own scratch repository, with
+    every byte under it compared. On its own it does not mean "git accepted the
+    command" — arm 1 is what licenses reading "no bytes changed" as a read.
+    `--blob`'s object is hashed *into the repository the probe runs in* for that
+    reason: hashed elsewhere, the probe exits 1 with `unable to load config blob
+    object` and the arm passed as a refusal rather than as a read.
+
+    One member is refused by git in arm 2's shape and stays in the set anyway:
+    `--comment` exits 129 with `--comment is only applicable to add/set/replace
+    operations` for a bare read. It takes a value (arm 1 says so), and its
+    membership is verdict-neutral in the write direction — measured,
+    `git config --comment note probe.key v` writes `.git/config` and is refused
+    with the member (two positionals) and without it (three). Arm 1 is the standard
+    and `--comment` meets it; the earlier revision instead asserted that every
+    member is accepted *in the counted shape*, which `--comment` is not — a claim
+    narrower than the instrument (`"unknown option" not in stderr`) that was meant
+    to enforce it, and green for the member it was aimed at (issue #1291).
     """
     import subprocess as sp
 
@@ -554,6 +583,34 @@ def test_every_config_value_option_consumes_its_value(tmp_path):
         "kind it takes (and re-measure that it consumes one) before the set grows; "
         "test_every_config_value_option_consumes_its_value is that measurement"
     )
+
+    def scratch(name):
+        repo = tmp_path / name
+        repo.mkdir()
+        env = dict(os.environ)
+        # The machine's own config must not be able to make this pass or fail.
+        env.update(GIT_CONFIG_GLOBAL=str(repo / "global.cfg"),
+                   GIT_CONFIG_SYSTEM=str(repo / "system.cfg"),
+                   GIT_CONFIG_NOSYSTEM="1", HOME=str(repo))
+        sp.run(["git", "init", "-q"], cwd=repo, env=env, capture_output=True, check=True)
+        return repo, env
+
+    def slug(opt):
+        return opt.strip("-").replace("-", "_")
+
+    # --- Arm 1: git's own answer about arity, with no value and no positional ---
+    for opt in sorted(_GIT_CONFIG_VALUE_OPTS):
+        repo, env = scratch(f"arity-{slug(opt)}")
+        proc = sp.run(["git", "config", opt], cwd=repo, env=env, capture_output=True)
+        stderr = proc.stderr.decode(errors="replace")
+        assert "requires a value" in stderr and opt.lstrip("-") in stderr, (
+            f"`git config {opt}` with nothing after it did not report that this "
+            f"member requires a value (stderr {stderr.strip()!r}). A member that "
+            "takes none swallows a genuine positional and the count then reads a "
+            "write as a read; a member git does not know is inert, and inert "
+            "protects nothing. Re-measure the rule (issue #1291) and drop the "
+            "member rather than widening this assertion"
+        )
 
     def snapshot(root):
         # Keys are POSIX-joined on every platform. A Windows run hands back
@@ -565,22 +622,30 @@ def test_every_config_value_option_consumes_its_value(tmp_path):
         return {p.relative_to(root).as_posix(): p.read_bytes()
                 for p in sorted(root.rglob("*")) if p.is_file()}
 
-    def changed_by(name, argv):
-        """Run git in a fresh scratch repo; return the paths whose bytes changed."""
-        repo = tmp_path / name
-        repo.mkdir()
-        env = dict(os.environ)
-        # The machine's own config must not be able to make this pass or fail.
-        env.update(GIT_CONFIG_GLOBAL=str(repo / "global.cfg"),
-                   GIT_CONFIG_SYSTEM=str(repo / "system.cfg"),
-                   GIT_CONFIG_NOSYSTEM="1", HOME=str(repo))
-        sp.run(["git", "init", "-q"], cwd=repo, env=env, capture_output=True, check=True)
+    def changed_by(name, argv, resolve=None):
+        """Run git in a fresh scratch repo; return what changed and what really ran.
+
+        `resolve(repo, env, argv)` may fill in a value that only exists inside that
+        repository (`--blob`'s object id). The argv it returns is handed back to the
+        caller, because that — not the template — is the command that really ran.
+        """
+        repo, env = scratch(name)
+        if resolve is not None:
+            argv = resolve(repo, env, argv)
         before = snapshot(repo)
         proc = sp.run(["git", *argv], cwd=repo, env=env, capture_output=True)
         after = snapshot(repo)
         changed = sorted(k for k in set(before) | set(after)
                          if before.get(k) != after.get(k))
-        return [c for c in changed if not c.startswith("logs/")], proc, repo
+        return [c for c in changed if not c.startswith("logs/")], proc, argv
+
+    def place_blob(repo, env, argv):
+        """Hash `--blob`'s object into the repository the probe is about to run in."""
+        blob = sp.run(["git", "hash-object", "-w", "--stdin"], cwd=repo, env=env,
+                      input=b"[user]\n\tname = probe\n", capture_output=True)
+        oid = blob.stdout.decode().strip()
+        assert oid, "could not create the object `--blob` needs"
+        return [oid if a == _BLOB_PLACEHOLDER else a for a in argv]
 
     # The watch has to be able to see a write, or "nothing changed" proves nothing.
     control, _, _ = changed_by("control", ["config", "probe.key", "probe.value"])
@@ -590,33 +655,23 @@ def test_every_config_value_option_consumes_its_value(tmp_path):
     )
 
     for opt, value in sorted(_GIT_CONFIG_PROBE_VALUE.items()):
-        slug = opt.strip("-").replace("-", "_")
-        probe_value = value
-        if opt == "--blob":
-            _, _, repo = changed_by(f"blob-{slug}", ["config", "--list"])
-            blob = sp.run(["git", "hash-object", "-w", "--stdin"], cwd=repo,
-                          input=b"[user]\n\tname = probe\n", capture_output=True)
-            probe_value = blob.stdout.decode().strip()
-            assert probe_value, "could not create the object `--blob` needs"
-        argv = ["config", opt, probe_value, "probe.key"]
-        changed, proc, _ = changed_by(f"probe-{slug}", argv)
+        argv = ["config", opt, value, "probe.key"]
+        changed, _, argv = changed_by(f"probe-{slug(opt)}", argv,
+                                      place_blob if opt == "--blob" else None)
         assert changed == [], (
-            f"`git config {opt} <value> probe.key` wrote {changed!r} — {opt} does not "
-            "consume its value, so the walk miscounts every spelling that uses it "
-            "(issue #1291: re-measure the rule and drop the member)"
+            f"`git {' '.join(argv)}` wrote {changed!r} — {opt} does not consume its "
+            "value, so the walk miscounts every spelling that uses it (issue #1291: "
+            "re-measure the rule and drop the member). Note that arm 1 above is what "
+            "makes this arm mean 'a read': a command git *refuses* changes no bytes "
+            "either"
         )
-        stderr = proc.stderr.decode(errors="replace")
-        assert "unknown option" not in stderr, (
-            f"git does not accept {opt!r} in the shape this walk counts: "
-            f"{stderr.strip()}. It is inert there rather than unsafe, but an inert "
-            "member should not sit in the set unnoticed — re-measure the rule "
-            "(issue #1291)"
-        )
-        # …and the walk's own answer agrees with git: this spelling is a read, so it
-        # must be allowed at read-only. That is the half the fix bought (issue #1273
-        # row 3) and it is asserted here per member rather than per spelling alone.
-        allowed, reason, _ = _check_sandbox(
-            f"git config {opt} {probe_value} probe.key", "read-only", workdir=str(tmp_path))
+        # …and the walk settles this spelling as a read, so read-only must allow it.
+        # That is the half the fix bought (issue #1273 row 3), and it is asserted
+        # per member rather than per spelling alone. Allowing a spelling git itself
+        # refuses (`--comment`, measured in the docstring) is harmless: it writes
+        # nothing.
+        cmd = "git " + " ".join(argv)
+        allowed, reason, _ = _check_sandbox(cmd, "read-only", workdir=str(tmp_path))
         assert allowed is True, f"{opt}: reads, so read-only must allow it (got {reason!r})"
 
 
