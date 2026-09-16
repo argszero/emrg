@@ -556,7 +556,13 @@ def test_every_config_value_option_consumes_its_value(tmp_path):
     )
 
     def snapshot(root):
-        return {str(p.relative_to(root)): p.read_bytes()
+        # Keys are POSIX-joined on every platform. A Windows run hands back
+        # `.git\\config` for `str(p.relative_to(root))`, so the expected
+        # `[".git/config"]` below would fail on the separator alone, and the
+        # `logs/` filter in `changed_by` would stop matching — both while the
+        # byte watch itself answers exactly the same question (Windows CI,
+        # 2026-09-16).
+        return {p.relative_to(root).as_posix(): p.read_bytes()
                 for p in sorted(root.rglob("*")) if p.is_file()}
 
     def changed_by(name, argv):
