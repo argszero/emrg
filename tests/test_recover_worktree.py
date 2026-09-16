@@ -729,3 +729,139 @@ def test_main_parses_the_repo_and_apply_flags(tmp_path, capsys):
     assert _load().main(["--repo", str(work)]) == 0
     assert "recoverable" in capsys.readouterr().out
     assert _status(work).startswith(" M"), "without --apply nothing is written"
+
+
+def _staged_deletion_repo(tmp_path: Path, name: str) -> Path:
+    """A repository whose only dirt is a staged deletion (`D  f.txt`), now stashed.
+
+    The geometry issue #1284's table is about, and one the criterion releases:
+    `git rm` on content unchanged from `HEAD`, so every byte of the removed file is
+    already in `HEAD` and moving it aside cannot lose anything. Stashed with the
+    action's own spelling (`git stash push -u`), which is what the reversal is the
+    inverse *of*.
+    """
+    repo = tmp_path / name
+    _new_repo(repo)
+    _git(repo, "rm", "-q", "f.txt")
+    assert _status(repo) == "D  f.txt\n", _status(repo)
+    _git(repo, "stash", "push", "-u")
+    assert _status(repo) == "", _status(repo)
+    return repo
+
+
+def test_the_advertised_reversal_is_the_measured_one(tmp_path):
+    """Issue #1284 item 2: the undo half is a claim about a git command, so measure it.
+
+    The prose used to say the stashed work is "one `git stash pop` away". On this
+    geometry — a staged deletion, which the criterion answers *recoverable* — that
+    spelling is **not** the inverse, and the difference is invisible until someone
+    needs the undo: it returns the change unstaged and it consumes the stash, so the
+    exact spelling is no longer available to try again. Measured with git 2.50.1,
+    three fresh repositories stashed the same way, one reversal each:
+
+        git stash pop                     -> ` D f.txt`, stash dropped
+        git stash pop --index             -> `D  f.txt`, stash dropped
+        git stash apply --index stash@{0} -> `D  f.txt`, stash kept   <- advertised
+
+    So this is not a stylistic preference between spellings: only the advertised one
+    restores the state *and* leaves the evidence. The claim is a claim about `git`,
+    which means a future git can invalidate it — if this test ever fails, the prose
+    below is what has to be re-read and re-worded, not the test:
+    `DEVELOPMENT.md` (the recovery section), `scripts/recover-worktree.py`'s
+    docstring and its `reversible:` output, and `_recover_dirty_tree_sync`'s
+    docstring in `emrg/server/scheduler.py`.
+    """
+    bare = _staged_deletion_repo(tmp_path, "bare-pop")
+    _git(bare, "stash", "pop")
+    assert _status(bare).startswith(" D"), (
+        "the bare `git stash pop` was expected to bring the staged deletion back "
+        f"*unstaged* — that is what makes it not the inverse; got {_status(bare)!r}"
+    )
+    assert _git(bare, "stash", "list").stdout.strip() == "", (
+        "the bare `git stash pop` was expected to consume the stash"
+    )
+
+    one_shot = _staged_deletion_repo(tmp_path, "pop-index")
+    _git(one_shot, "stash", "pop", "--index")
+    assert _status(one_shot).startswith("D  "), _status(one_shot)
+    assert _git(one_shot, "stash", "list").stdout.strip() == ""
+
+    advertised = _staged_deletion_repo(tmp_path, "apply-index")
+    _git(advertised, "stash", "apply", "--index", "stash@{0}")
+    assert _status(advertised).startswith("D  "), (
+        "the advertised spelling `git stash apply --index` must restore the staged "
+        f"side, byte for byte; got {_status(advertised)!r}"
+    )
+    assert _git(advertised, "stash", "list").stdout.strip() != "", (
+        "the advertised spelling must KEEP the stash — it is the one a reader can "
+        "run again, and the one the receipt hands them"
+    )
+
+
+def test_the_tool_prints_the_receipts_own_recipe(tmp_path, capsys):
+    """Issue #1284 item 2, mechanised: the undo has one owner, and stdout shows it.
+
+    The receipt written beside the move already carried the measured spelling
+    (`git stash apply --index ... stash^{/<message>}`). The tool's own `reversible:`
+    line was a *paraphrase* of it, and the paraphrase was the bare `git stash pop` —
+    one recovery, two spellings, and the one a reader sees on stdout is the one that
+    costs them the staged side and the stash. A paraphrase is a second copy that can
+    drift, so the line is now the receipt's own string, and this asserts that instead
+    of assuming it: re-word the daemon's recipe and stdout re-words with it.
+
+    What this does not cover is prose that quotes the recipe in a document — markdown
+    has no way to be made to agree mechanically, and the first attempt at a scanner
+    (a paragraph mentioning `stash pop` next to an "undoable"/"recoverable" word had to
+    name `--index`) refused `emrg/server/scheduler.py`'s own note *recording the harm*
+    a plain pop did, which is prose that has to spell the wrong spelling out. A guard
+    that fails on the measurement it exists to cite is a false verdict, so the
+    remaining prose is pinned the only honest way available:
+    `test_the_advertised_reversal_is_the_measured_one` measures the behaviour those
+    documents describe, and names them so a failure points at the text to re-read.
+    """
+    work, _head = _with_upstream(tmp_path)
+
+    assert _load().recover(work, apply=True) == 0
+    out = capsys.readouterr().out
+    git_dir = Path(_git(work, "rev-parse", "--absolute-git-dir").stdout.strip())
+    receipt = json.loads(
+        (git_dir / "emrg-recovery-receipt.json").read_text(encoding="utf-8")
+    )
+
+    assert "--index" in receipt["reversible_with"], (
+        "precondition: the daemon's recipe is the spelling that restores the state"
+    )
+    assert f"reversible: {receipt['reversible_with']}" in out, (
+        "the tool must print the receipt's own recipe, not a second copy of it that "
+        f"can drift; stdout was:\n{out}"
+    )
+
+
+def test_a_receipt_from_an_earlier_recovery_is_not_printed(tmp_path):
+    """The recipe has to be *this* run's, so the receipt is matched to the detail.
+
+    A receipt left by an earlier recovery names a different stash, and printing it
+    would send a reader to `apply` someone else's stash — worse than the paraphrase
+    the one-owner change replaced. The detail the action just returned names the
+    stash it made, so that is the discriminator, and it is tested directly rather
+    than through a recovery whose receipt happens to be stale.
+    """
+    module = _load()
+    base = {"stash_message": "emrg-recovery-20260101T000000Z",
+            "reversible_with": "`git stash apply --index stash^{/old}`"}
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps(base), encoding="utf-8")
+
+    assert module._receipt_recipe(
+        str(path), "1 change(s) stashed as emrg-recovery-20260916T000000Z; HEAD unmoved"
+    ) is None, "a receipt naming a different stash is not this run's"
+    assert module._receipt_recipe(
+        str(path), "1 change(s) stashed as emrg-recovery-20260101T000000Z; HEAD unmoved"
+    ) == "`git stash apply --index stash^{/old}`"
+    assert module._receipt_recipe(str(tmp_path / "absent.json"), "anything") is None
+    broken = tmp_path / "broken.json"
+    broken.write_text("{ not json", encoding="utf-8")
+    assert module._receipt_recipe(str(broken), "anything") is None, (
+        "unreadable receipt -> None, so the caller falls back to the stated spelling "
+        "rather than crashing a recovery that already succeeded"
+    )

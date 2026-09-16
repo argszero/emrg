@@ -2726,8 +2726,12 @@ def test_reconstructible_dirt_is_recovered_by_the_daemon_itself(tmp_path):
     blocked the repair of the thing blocking it.
 
     Measured end-to-end through the real probe and the real recovery: the tree is
-    clean afterwards without anyone asking, HEAD never moved, the moved work is one
-    `git stash pop` away, and a receipt in the git dir records what happened.
+    clean afterwards without anyone asking, HEAD never moved, the moved work is in the
+    stash — restored with the receipt's own spelling, `git stash apply --index
+    stash^{/<message>}` (a bare `git stash pop` is not the inverse: it leaves a staged
+    change unstaged and consumes the stash; issue #1284, measured by
+    `tests/test_recover_worktree.py::test_the_advertised_reversal_is_the_measured_one`)
+    — and a receipt in the git dir records what happened.
     """
     repo = _repo_with_dirt(tmp_path, "deleted")
     assert _status(repo).startswith(" D"), "precondition: deletion-only dirt"

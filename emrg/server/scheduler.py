@@ -692,8 +692,11 @@ class TaskHandler:
         directive 2026-09-16: dirt must be recovered from, not merely detected and
         reported). Nothing here is a decision for a human: the criterion says every
         byte in the tree is already in ``HEAD`` or in the upstream tip, so moving it
-        aside cannot lose anything - and the move is a stash, which leaves every byte
-        one ``git stash pop`` away. No branch is reset and no commit is dropped:
+        aside cannot lose anything - and the move is a stash, which holds every byte
+        and is undone with ``git stash apply --index``, the spelling the receipt
+        names: a bare ``git stash pop`` is *not* the inverse, since it takes the
+        newest stash, brings a staged change back unstaged, and consumes the stash
+        (issue #1284). No branch is reset and no commit is dropped:
         ``HEAD`` is compared before and after, and a moved ``HEAD`` is reported.
 
         **The criterion is measured here, always, and no caller can supply an
@@ -778,8 +781,9 @@ class TaskHandler:
             "reversible_with": (
                 f"`git stash list` -> {message}, then "
                 f"`git stash apply --index stash^{{/{message}}}` (`--index` restores "
-                f"the staged side too, and a bare `git stash pop` takes the newest, "
-                f"which is this one only until the next stash is made)"
+                f"the staged side too; a bare `git stash pop` is not the inverse -- "
+                f"it takes the newest stash, which is this one only until the next "
+                f"is made, brings a staged change back unstaged and consumes it)"
             ),
         })
         if head_after != head.stdout.strip():

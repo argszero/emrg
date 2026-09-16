@@ -32,9 +32,11 @@ what "reconstructible" means, the deadlock would come back through the script):
   whoever wrote it, and an agent that discards it is doing the thing the guard
   exists to prevent;
 * the dirt is reconstructible -> `git stash push -u` it, which leaves the worktree
-  clean *and* keeps every byte in the stash, so the action is undoable with
-  `git stash pop`. **No branch is reset and no commit is dropped** — this never
-  moves `HEAD`.
+  clean *and* keeps every byte in the stash, so the action is undoable — with
+  `git stash apply --index stash^{/<stash message>}`, the spelling the receipt
+  names, and *not* with a bare `git stash pop` (it takes the newest stash, brings a
+  staged change back unstaged, and consumes the stash; issue #1284). **No branch is
+  reset and no commit is dropped** — this never moves `HEAD`.
 
 Every `--apply` writes a receipt into the **git state dir** (see
 `scheduler._git_state_dir` — a location that cannot dirty the tree it just cleaned),
@@ -58,6 +60,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -96,6 +99,33 @@ def _receipt_path(repo: Path) -> str | None:
     """Where the daemon's own recovery writes its receipt, or None."""
     state = TaskHandler._git_state_dir(str(repo))
     return None if state is None else os.path.join(state, "emrg-recovery-receipt.json")
+
+
+def _receipt_recipe(receipt: str | None, detail: str) -> str | None:
+    """This run's reversal recipe, read from the receipt it wrote; None if unusable.
+
+    The recipe is not restated here — it is the action's own string, so the manual
+    route and the daemon cannot drift apart about how to undo the move (issue #1284).
+
+    `detail` is what makes "this run's" checkable rather than assumed: the receipt's
+    own `stash_message` has to appear in the detail the action just returned. A
+    receipt left over from an earlier recovery names a *different* stash, and a reader
+    who follows it would apply the wrong one — worse than the paraphrase this replaced.
+    """
+    if not receipt or not os.path.isfile(receipt):
+        return None
+    try:
+        with open(receipt, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    message = data.get("stash_message")
+    recipe = data.get("reversible_with")
+    if not message or not isinstance(recipe, str) or message not in detail:
+        return None
+    return recipe
 
 
 def recover(repo: Path, apply: bool) -> int:
@@ -146,8 +176,19 @@ def recover(repo: Path, apply: bool) -> int:
 
     receipt = _receipt_path(repo)
     print(f"recovered: {repo} converged to a clean tree; {detail}")
-    print("reversible: `git stash list` -> the named stash (a bare `git stash pop`")
-    print("takes the newest, which is this one only until the next stash is made)")
+    # One owner for the spelling too (issue #1284): the receipt's `reversible_with` is
+    # the recipe, so it is *printed* rather than paraphrased. The two used to disagree
+    # — the receipt said `apply --index`, this line said a bare `git stash pop` — and
+    # the spelling a reader saw here is the one that costs them the staged side and the
+    # stash itself. `None` means the receipt is unreadable or belongs to an earlier
+    # recovery, and the fallback below then states the measured spelling by hand.
+    recipe = _receipt_recipe(receipt, detail)
+    if recipe:
+        print(f"reversible: {recipe}")
+    else:
+        print("reversible: `git stash list` -> the named stash, then")
+        print("  `git stash apply --index stash^{/<message>}` (the stash is kept;")
+        print("  a bare `git stash pop` takes the newest and consumes it)")
     # The path is not the receipt (issue #1284): `_receipt_path` computes where one
     # *would* be written, so the branch below used to be unreachable — it printed a
     # path for a file that an `OSError` had kept from existing. Ask the file — and ask
