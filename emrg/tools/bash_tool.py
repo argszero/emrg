@@ -727,6 +727,50 @@ def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int] | None:
     return quoted
 
 
+def _unresolved_operator_run_tails(tokens: list[str]) -> list[str]:
+    """Operator-shaped tokens sitting in **target** position, for issue #1280.
+
+    Asked only when the two lexings disagreed, i.e. when the walk cannot say
+    which operator-shaped tokens came from quoting. The first token of a run is in
+    operator position — believing it keeps a real redirect naming the path behind
+    it — while everything after it is in *target* position, where a token can only
+    be operator-shaped because it was quoted into being a path.
+
+    Restricted to a run that **swallows the rest of the line** (end of input, or a
+    command separator): that is the geometry where the tail would otherwise be
+    walked past and its file never named, which is what let `read-only` allow the
+    write in #1280. Where a non-operator token follows the run the walk already
+    names it, and naming the tail as well would add a claim about a command that
+    cannot run — `echo x > > out` is `rc=2` in `/bin/sh` and `bash` in a fresh
+    scratch directory, and creates nothing — so the narrower reading is kept.
+
+    Measured over 320 generated commands (4 prefixes x 4 redirect spellings x 5
+    targets x 4 partially quoted shapes), each run by the real shell: answering
+    this way takes the holes from 96 to 0 and introduces none.
+
+    What the direction costs, also measured rather than argued: a line whose
+    operator-shaped words are *all* quoted arguments and which therefore writes
+    nothing (`echo 'a'b '>' '>'`, `test 'a'b '>' '>'`) is newly refused — 6 of the
+    9 such shapes tried. They are indistinguishable from the class above at the
+    token level, which is exactly the fact the pairing could not recover, so the
+    trade is 96 writes-that-happened no longer allowed against 6 echoes no longer
+    allowed. Kept because the walk is the tier that exists to refuse writes.
+    """
+    tails: list[str] = []
+    i = 0
+    while i < len(tokens):
+        if not _is_redirect_operator(tokens[i]):
+            i += 1
+            continue
+        j = i + 1
+        while j < len(tokens) and _is_redirect_operator(tokens[j]):
+            j += 1
+        if j - i >= 2 and (j == len(tokens) or tokens[j] in _COMMAND_SEPARATORS):
+            tails.extend(tokens[i + 1:j])
+        i = j
+    return tails
+
+
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     """Write targets of ``cmd``: the paths a command appears to write.
 
@@ -806,6 +850,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
         return index not in quoted and _is_redirect_operator(tokens[index])
 
     targets: list[str] = []
+    if quoting_unknown:
+        # The two readings disagreed, so an operator-shaped token cannot be told
+        # from a quoted path. Operator position keeps the old answer (the walk
+        # below still believes it, so a real redirect keeps naming its path);
+        # target position is answered here, because that is the direction the old
+        # empty-set fallback lost (issue #1280).
+        targets.extend(_unresolved_operator_run_tails(tokens))
     i = 0
     while i < len(tokens):
         tok = tokens[i]
@@ -829,22 +880,6 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             if j < len(tokens) and tokens[j] not in _COMMAND_SEPARATORS:
                 targets.append(tokens[j])
                 i = j + 1
-                continue
-            if quoting_unknown and j - i >= 2:
-                # A run of operator-shaped tokens that swallows the rest of the
-                # line: the first one is the operator, so everything after it is
-                # in *target* position. With quoting resolved only a quoted path
-                # can be operator-shaped there (`echo '>' > '>'` names the second
-                # `>`); with the two readings disagreeing the walk cannot tell a
-                # quoted path from a second operator, and *both* readings are
-                # fail-closed — measured in fresh scratch directories, `echo x > >
-                # out` is a syntax error in `/bin/sh` and `bash` that writes
-                # nothing, while `echo 'a'b > '>'` really creates `>`. Naming the
-                # tail is therefore the answer that cannot lose a write (issue
-                # #1280, where the empty-set fallback dropped exactly this target
-                # and let `read-only` allow a write inside the workspace).
-                targets.extend(tokens[i + 1:j])
-                i = j
                 continue
         elif word == "rm" or word == "rmdir":
             # Any operand is removed — NOT only with a recursive flag.

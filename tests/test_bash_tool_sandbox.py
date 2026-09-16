@@ -1822,3 +1822,29 @@ def test_a_real_operator_run_is_a_syntax_error_and_costs_only_a_refusal():
     # to every run. `echo x > > ` is `rc=2` in both shells (asserted above).
     assert _extract_write_targets("echo x > > ") == []
     assert _check_sandbox("echo x > > ", "read-only")[0] is True
+    # The rule is also scoped by *position*: when a token follows the run, the walk
+    # already names that token, and naming the run's tail as well would claim a
+    # file the walk has no evidence for. Unresolved quoting, run followed by a
+    # word — the answer stays the narrow one.
+    assert _extract_write_targets("echo 'a'b > > out.txt") == ["out.txt"]
+
+
+def test_the_price_of_the_direction_is_pinned_rather_than_left_to_drift():
+    """What this rule refuses that writes nothing — the honest other half.
+
+    Two operator-shaped words and no real redirect, with a partially quoted word
+    on the line: at the token level this is *identical* to the class the fix is
+    for (`echo 'a'b > '>'`), which is the fact the pairing could not recover. So
+    the walk refuses a line that only echoes (`/bin/sh` in a fresh scratch
+    directory creates nothing for either). Asserted as behaviour, not as a
+    surprise: 96 writes-that-happened no longer allowed weigh against these few
+    echoes no longer allowed, and the direction is the one the walk exists for.
+    """
+    for cmd in ("echo 'a'b '>' '>'", "echo '>'x '>' '>'", "test 'a'b '>' '>'"):
+        targets = _extract_write_targets(cmd)
+        assert targets == [">"], f"{cmd!r} -> {targets!r}"
+        assert _check_sandbox(cmd, "read-only")[0] is False, cmd
+    # The boundary of the price: one operator-shaped word alone still names
+    # nothing, so an ordinary quoted `>` argument stays allowed.
+    assert _extract_write_targets("echo 'a'b '>'") == []
+    assert _check_sandbox("echo 'a'b '>'", "read-only")[0] is True
