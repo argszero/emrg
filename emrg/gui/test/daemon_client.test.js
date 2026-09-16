@@ -17,6 +17,8 @@
  * - 断连 pending 请求 reject（G89/G90）
  * - generateSessionId 格式 + 碰撞兜底（G28+G81）
  * - isRunning：TCP 探测（mock net.connect，G43/G90）
+ * - 启动失败诊断（issue #1283）：标记 {size,ino} / 本次启动的 log 差值 / 沉默子进程
+ *   如实说没写 / 退出码与信号 / 已死子进程立即失败（对齐 daemon_manager.py #1279）
  */
 
 const { test, beforeEach, afterEach } = require("node:test");
@@ -1014,4 +1016,285 @@ test("P2 ownStream: 断连 → 释放锁", async () => {
   assert.strictEqual(client.ownStream, true);
   client.close();
   assert.strictEqual(client.ownStream, false, "disconnect must release lock");
+});
+
+// ── 启动失败诊断（issue #1283 = daemon_manager.py #1279 的 GUI 半边）──────────
+// ⚠️ 本组不 spawn 真实进程、不探测端口、不触碰真实 daemon（MANIFESTO 第四条附则二）：
+// spawn 打桩，isRunning 打桩。测的是纯部件（标记/差值读取/失败描述）＋打桩驱动的等待循环。
+
+/** emrgd.log 的规范位置（HOME/USERPROFILE 已被 beforeEach 重定向到临时目录）。 */
+const logFile = () => path.join(os.homedir(), ".emrg", "emrgd.log");
+
+test("#1283 本次没写 → 尾部为空；本次写了 → 只给本次的字节", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "old run: SystemExit: SIGTERM (15) received\n");
+  const mark = client._logMark(logFile());
+  assert.strictEqual(client._readLogTail(15, mark, logFile()), "");
+  fs.appendFileSync(logFile(), "this attempt: config.toml is not valid TOML\n");
+  const got = client._readLogTail(15, mark, logFile());
+  assert.ok(got.includes("this attempt"));
+  assert.ok(!got.includes("old run"), "上一轮的历史不得出现在本次的尾部里");
+});
+
+test("#1283 行数只在本次新增的范围内数", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "old\n");
+  const mark = client._logMark(logFile());
+  const block = Array.from({ length: 20 }, (_, i) => `new${i}`).join("\n");
+  fs.appendFileSync(logFile(), `${block}\n`);
+  assert.deepStrictEqual(
+    client._readLogTail(3, mark, logFile()).split("\n"),
+    ["new17", "new18", "new19"],
+  );
+});
+
+test("#1283 日志不存在/不可读不是异常", () => {
+  const client = new DaemonClient();
+  const missing = path.join(os.homedir(), ".emrg", "nope.log");
+  assert.strictEqual(client._readLogTail(15, client._logMark(missing), missing), "");
+  assert.deepStrictEqual(client._logMark(missing), { size: 0, ino: null });
+});
+
+test("#1283 裸 offset 不是标记：响亮失败，而不是静默读错文件", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous\n");
+  assert.throws(() => client._readLogTail(15, fs.statSync(logFile()).size, logFile()), TypeError);
+});
+
+test("#1283 标记取自文件本身，是文件中的一个点（不是常量/字符串长度）", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous run\n");
+  const mark = client._logMark(logFile());
+  assert.strictEqual(mark.size, fs.statSync(logFile()).size);
+  assert.ok(mark.size > 0);
+  assert.strictEqual(mark.ino, fs.statSync(logFile()).ino);
+  fs.appendFileSync(logFile(), "this attempt\n");
+  assert.ok(client._logMark(logFile()).size > mark.size, "标记必须随文件前进");
+  assert.strictEqual(client._readLogTail(15, mark, logFile()).trim(), "this attempt");
+});
+
+test("#1283 原地截断（ino 不变、字节变少）→ 从 0 读起", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
+  const mark = client._logMark(logFile());
+  fs.writeFileSync(logFile(), "this attempt: config.toml is not valid TOML\n");
+  assert.strictEqual(fs.statSync(logFile()).ino, mark.ino, "原地截断：还是标记所指的那个文件");
+  assert.ok(fs.statSync(logFile()).size < mark.size, "regime：标记已越过文件末尾");
+  const got = client._readLogTail(15, mark, logFile());
+  assert.ok(got.includes("this attempt"));
+  assert.ok(!got.includes("SIGTERM"));
+});
+
+test("#1283 标记所指的文件已不在（rotate 的形状）→ 整个文件都属于本次", () => {
+  // 真实生产者是 RotatingFileHandler：旧文件改名、同名新文件重建，标记所指的
+  // 那个文件从该路径上消失。这里用另一个文件确定性地重现该形状（ino 必不同），
+  // 并选 size 判别不了的那一侧：新文件比标记大，标记落在新文件内部——
+  // 只看 size 会从中间读起，把本次的第一行切掉。
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous ".repeat(200));
+  const mark = client._logMark(logFile());
+  const after = path.join(os.homedir(), ".emrg", "emrgd.log.rebuilt");
+  fs.writeFileSync(after, `THIS-ATTEMPT\n${"y".repeat(4096)}`);
+  assert.notStrictEqual(fs.statSync(after).ino, mark.ino);
+  assert.ok(fs.statSync(after).size > mark.size, "regime：尺寸判别不了，只有身份能");
+  const got = client._readLogTail(15, mark, after);
+  assert.ok(got.startsWith("THIS-ATTEMPT"), "整文件都算本次的：第一行不得被切掉");
+  assert.ok(!got.includes("previous"));
+});
+
+test("#1283 沉默死掉的子进程：如实说没写，并给出退出码", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
+  const mark = client._logMark(logFile());
+  const detail = client._startupFailureDetail(mark, { exitCode: 7 });
+  assert.ok(detail.includes("wrote nothing"));
+  assert.ok(detail.includes("exit=7"));
+  assert.ok(!detail.includes("SIGTERM"), "上一轮的关闭不得当作本次的原因");
+  assert.ok(detail.includes("previous run"), "仍明说更早的输出来自上一轮");
+});
+
+test("#1283 被信号杀掉的子进程报 signal，不报 still running", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous\n");
+  const mark = client._logMark(logFile());
+  const detail = client._startupFailureDetail(mark, { exitCode: null, signalCode: "SIGKILL" });
+  assert.ok(detail.includes("signal=SIGKILL"), "Node 把信号放在 signalCode，不放进 exitCode");
+  assert.ok(!detail.includes("still running"));
+});
+
+test("#1283 本次写了东西 → 报本次的行", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous\n");
+  const mark = client._logMark(logFile());
+  fs.appendFileSync(logFile(), "this attempt: Traceback ...\nRuntimeError: bad config\n");
+  const detail = client._startupFailureDetail(mark, { exitCode: 1 });
+  assert.ok(detail.includes("written by this start attempt"));
+  assert.ok(detail.includes("RuntimeError: bad config"));
+  assert.ok(!detail.includes("previous"));
+});
+
+test("#1283 已死的子进程立即失败（不烧完整个窗口）", async () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous\n");
+  const mark = client._logMark(logFile());
+  client.isRunning = async () => false;
+  const t0 = Date.now();
+  await assert.rejects(
+    client._awaitDaemonReady({ exitCode: 143 }, mark, 5_000),
+    (err) => err.message.includes("exited during startup") && err.message.includes("exit=143"),
+  );
+  assert.ok(Date.now() - t0 < 1000, "5s 的窗口不该被烧完");
+});
+
+test("#1283 非 number 的 exitCode 不得读成“已退出”（只认文档化的 number|null）", async () => {
+  // 对照 daemon_manager.py 既有断言：非 int 的 returncode 不算退出——否则替身
+  // 对象会把一次活的等待变成"启动即死"，诊断修复反过来变成启动回归。
+  const client = new DaemonClient();
+  client.isRunning = async () => false;
+  await assert.rejects(
+    client._awaitDaemonReady({ exitCode: "7" }, client._logMark(logFile()), 1),
+    (err) => err.message.includes("failed to start within timeout"),
+  );
+});
+
+test("#1283 活着的子进程没起来 → 报窗口 + still running", async () => {
+  const client = new DaemonClient();
+  client.isRunning = async () => false;
+  await assert.rejects(
+    client._awaitDaemonReady({ exitCode: null }, client._logMark(logFile()), 1),
+    (err) => err.message.includes("failed to start within timeout") && err.message.includes("still running"),
+  );
+});
+
+test("#1283 子进程起来了 → 安静返回", async () => {
+  const client = new DaemonClient();
+  client.isRunning = async () => true;
+  const child = { pid: 4242 };
+  assert.strictEqual(await client._awaitDaemonReady(child, client._logMark(logFile()), 1000), child);
+});
+
+// ── 第三种状态：spawn 本身失败（ENOENT）──────────────────────────────────────
+// 打包路径 `~/.emrg/install/bin/emrgd` 是 `_findDaemonExecutable()` 无条件拼出来的
+// （不检查存在），源码路径 `_findPython()` 在 .venv 缺失时退回裸 "python3"/"python"
+// （也不检查）⇒ 装坏 / 第一次启动就能到。它既不是"退出"也不是"还在跑"。
+
+test("#1283 从未启动：pid 同步可见，'error' 补上名字（ENOENT）", () => {
+  const client = new DaemonClient();
+  let onError = null;
+  const child = {
+    pid: undefined, // 本机 node 26.5.0 实测：spawn 不存在的路径时同步就是 undefined
+    exitCode: null,
+    signalCode: null,
+    once(ev, cb) { if (ev === "error") onError = cb; },
+  };
+  const state = client._watchSpawn(child);
+  assert.strictEqual(state.neverStarted, true, "不必等 'error'：pid 就是判据");
+  assert.strictEqual(state.err, null);
+  assert.strictEqual(client._neverStartedName(state), "");
+  onError(Object.assign(new Error("spawn /nonexistent/emrgd-missing ENOENT"), { code: "ENOENT" }));
+  assert.strictEqual(state.neverStarted, true);
+  assert.strictEqual(state.err.code, "ENOENT");
+  assert.strictEqual(client._neverStartedName(state), " (ENOENT)");
+});
+
+test("#1283 从未启动 → never started，绝不是 still running，也不烧窗口", async () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous\n");
+  const mark = client._logMark(logFile());
+  client.isRunning = async () => false;
+  const child = { pid: undefined, exitCode: null, signalCode: null, once() {} };
+  const state = client._watchSpawn(child);
+  const t0 = Date.now();
+  await assert.rejects(
+    client._awaitDaemonReady(child, mark, 5_000, state),
+    (err) => err.message.includes("never started")
+      && !err.message.includes("still running")
+      && !err.message.includes("failed to start within timeout")
+      && !err.message.includes("exited during startup"),
+  );
+  assert.ok(Date.now() - t0 < 1000, "5s 的窗口不该被烧完");
+});
+
+test("#1283 从未启动的详细文案：仍说本次没写，并点名 ENOENT", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
+  const mark = client._logMark(logFile());
+  const state = { err: { code: "ENOENT" }, neverStarted: true };
+  const detail = client._startupFailureDetail(mark, { pid: undefined }, state);
+  assert.ok(detail.includes("never started (ENOENT)"));
+  assert.ok(detail.includes("wrote nothing"));
+  assert.ok(!detail.includes("still running"));
+  assert.ok(!detail.includes("SIGTERM"));
+});
+
+test("#1283 startDaemon：spawn 打桩为 ENOENT → 立即失败并点名，不冒到 uncaughtException", async () => {
+  // 真 spawn 会拉起 daemon——一律打桩（MANIFESTO 第四条附则二）。替身是真正的
+  // EventEmitter：没有 'error' 监听者时 node --test 会因未处理的 'error' 抛错 ⇒
+  // 这条测试同时证明「监听器确实挂上了」。
+  const childProcess = require("child_process");
+  const { EventEmitter } = require("events");
+  const cacheKey = require.resolve("../daemon_client.js");
+  const originalModule = require.cache[cacheKey];
+  const origSpawn = childProcess.spawn;
+  const file = logFile();
+  fs.writeFileSync(file, "previous run: SystemExit: SIGTERM (15) received\n");
+  try {
+    delete require.cache[cacheKey];
+    childProcess.spawn = () => {
+      const child = new EventEmitter();
+      child.unref = () => {};
+      child.pid = undefined;
+      child.exitCode = null;
+      child.signalCode = null;
+      setImmediate(() => child.emit(
+        "error", Object.assign(new Error("spawn /nonexistent/emrgd-missing ENOENT"), { code: "ENOENT" }),
+      ));
+      return child;
+    };
+    const Reloaded = require("../daemon_client.js").DaemonClient;
+    const c = new Reloaded();
+    // 真实路径：探测是异步的 ⇒ 'error' 在第一次检查之前就已经送达，名字拿得到。
+    c.isRunning = async () => { await new Promise((r) => setTimeout(r, 5)); return false; };
+    const t0 = Date.now();
+    await assert.rejects(
+      c.startDaemon(),
+      (err) => err.message.includes("never started (ENOENT)")
+        && !err.message.includes("still running")
+        && !err.message.includes("failed to start within timeout"),
+    );
+    assert.ok(Date.now() - t0 < 1000, "ENOENT 不该烧满 5s 窗口");
+  } finally {
+    childProcess.spawn = origSpawn;
+    require.cache[cacheKey] = originalModule;
+  }
+});
+
+test("#1283 startDaemon：标记在 spawn 之前取，失败信息只含本次写入", async () => {
+  // 真实 spawn 会拉起 daemon——一律打桩（MANIFESTO 第四条附则二）。打桩的替身
+  // 在 spawn 返回后立刻写日志并立刻死掉，正是"标记必须早于子进程"的场景。
+  const childProcess = require("child_process");
+  const cacheKey = require.resolve("../daemon_client.js");
+  const originalModule = require.cache[cacheKey];
+  const origSpawn = childProcess.spawn;
+  const file = logFile();
+  fs.writeFileSync(file, "previous run: SystemExit: SIGTERM (15) received\n");
+  try {
+    delete require.cache[cacheKey];
+    childProcess.spawn = () => {
+      fs.appendFileSync(file, "this attempt: ModuleNotFoundError: No module named 'emrg'\n");
+      return { unref() {}, pid: 999, exitCode: 3 };
+    };
+    const Reloaded = require("../daemon_client.js").DaemonClient;
+    const c = new Reloaded();
+    c.isRunning = async () => false;
+    await assert.rejects(
+      c.startDaemon(),
+      (err) => err.message.includes("exit=3")
+        && err.message.includes("ModuleNotFoundError")
+        && !err.message.includes("SIGTERM"),
+    );
+  } finally {
+    childProcess.spawn = origSpawn;
+    require.cache[cacheKey] = originalModule;
+  }
 });
