@@ -296,6 +296,25 @@ _GIT_CONFIG_WRITE_SUBCOMMANDS = frozenset({"set", "unset", "unset-all", "add",
                                            "remove-section", "edit"})
 _GIT_CONFIG_READ_SUBCOMMANDS = frozenset({"get", "get-all", "get-regexp",
                                           "get-urlmatch", "list"})
+# The `git config` options that take a SEPARATE value. `_GIT_SUBCOMMAND_WITH_VALUE`
+# is shared by every verb, so they are named here instead of there: a value left
+# in the positional list is not neutral, it is counted — and the count is what
+# decides the verb. Measured with git 2.50.1 (issue #1273, row 3), every one of
+# these leaves a single positional key, so each **reads**, and each was refused
+# as a write:
+#   git config --file <p> user.name            rc=1, no file touched
+#   git config -f <p> user.name                rc=1, no file touched
+#   git config --type int user.name            rc=1, no file touched
+#   git config --default fallback user.name    rc=0, no file touched
+# `--blob` and `--comment` are here for the same reason — that they take a value
+# — not because each was caught over-blocking: `--comment note user.name probe`
+# really wrote `.git/config` (rc=0), and the value was already the second
+# positional there, so that spelling blocks either way.
+# Adding a value still blocks: skipping the option's value leaves the key and the
+# value the caller wrote, which is two positionals. `git config --file <p> user.name
+# probe` really wrote `<p>` (rc=0, bytes changed) and is still refused.
+_GIT_CONFIG_VALUE_OPTS = frozenset({"--file", "-f", "--blob", "--type",
+                                    "--default", "--comment"})
 # git global options that take a SEPARATE argument — the parser must skip both
 # the option and its value to find the verb (`git -C . checkout .`).
 _GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--exec-path", "--git-dir",
@@ -1548,7 +1567,8 @@ def _flag_part(tok: str) -> str:
     return tok[:2]
 
 
-def _git_positionals(rest: list[str]) -> list[str]:
+def _git_positionals(rest: list[str],
+                     extra_value_opts: frozenset[str] = frozenset()) -> list[str]:
     """The non-option arguments of a git subcommand, option *values* excluded.
 
     The same walk as the invocation splitter's global-option skip, one level
@@ -1556,12 +1576,17 @@ def _git_positionals(rest: list[str]) -> list[str]:
     `["--ref", "refs/notes/x", "list"]` yields `["list"]` instead of
     `["refs/notes/x", "list"]`. A value is never a subcommand, and treating one
     as a subcommand is how `git reflog -n 5` was refused as a mutator (#1240).
+
+    `extra_value_opts` is for a verb whose own options are not in the shared set
+    — `git config --file <p>` is the measured case (#1273): the shared set holds
+    the options that decide a *subcommand*, while this one decides a *verdict*.
     """
+    value_opts = _GIT_SUBCOMMAND_WITH_VALUE | extra_value_opts
     out: list[str] = []
     i = 0
     while i < len(rest):
         tok = rest[i]
-        if tok in _GIT_SUBCOMMAND_WITH_VALUE:
+        if tok in value_opts:
             i += 2
             continue
         if tok.startswith("-"):
@@ -1620,6 +1645,13 @@ def _shape_decided_verdict(verb: str, rest: list[str]) -> str | None:
         # git 2.46+ spells the same operations as subcommands (`git config unset
         # k`); the first positional decides which, and only a word that is one of
         # them counts — a config key is not a subcommand.
+        #
+        # This verb's own value-taking options are walked out first (#1273): the
+        # shared set holds the options that decide a *subcommand*, so `--file
+        # <p>` left `<p>` among the positionals and the count then read a pure
+        # read (`git config --file <p> user.name`, measured: rc=1, nothing
+        # written) as the write it is one token away from.
+        positional = _git_positionals(rest, _GIT_CONFIG_VALUE_OPTS)
         subcommand = next(iter(positional), None)
         if subcommand in _GIT_CONFIG_WRITE_SUBCOMMANDS:
             return verb
