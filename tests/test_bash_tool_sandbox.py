@@ -19,6 +19,7 @@ from emrg.tools.bash_tool import (
     _check_sandbox,
     _extract_write_targets,
     _fully_quoted_token_indexes,
+    _is_fd_operand,
     _is_redirect_operator,
     _split_command_tokens,
     _flag_part,
@@ -971,6 +972,80 @@ def test_fully_quoted_token_indexes_recovers_quoting_or_claims_nothing():
     assert quoted("'a' it's") == set()
 
 
+# Issue #1275. A duplication operand is a file *descriptor*, not a path, so
+# these open nothing — measured with **both** shells in a fresh scratch
+# directory per row, because a verdict mismatch alone is not a bug and `/bin/sh`
+# does not always agree with bash. Each one used to report target `'1'`/`'2'`
+# (or `'-'`) and be refused at `read-only`, the tier a dirty-tree downgrade
+# forces a cycle into — an over-block of ordinary diagnostics where they are
+# most needed. `>>&` is deliberately absent: it is a bash **syntax error**
+# (`unexpected token`), so its line never runs and is not this class.
+FD_DUPLICATIONS = [
+    "grep -n x f.txt 2>&1",
+    "echo hi 2>&1",
+    "grep -n x f.txt 1>&2",
+    "grep -n x f.txt >&2",
+    "grep -n x f.txt 2>&-",
+    "grep -n x f.txt 2>& 1",
+]
+
+
+@pytest.mark.parametrize("cmd", FD_DUPLICATIONS)
+def test_an_fd_duplication_operand_is_not_a_write_target(cmd: str):
+    """`2>&1` merges stderr into stdout; it names a descriptor, not a file."""
+    targets = _extract_write_targets(cmd)
+    assert "1" not in targets and "2" not in targets and "-" not in targets, targets
+    allowed, reason, _ = _check_sandbox(cmd, "read-only")
+    assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
+
+
+def test_a_real_redirect_beside_a_duplication_still_names_its_target():
+    """The fix must not swallow the write on the same line.
+
+    `2>&1` is skipped, but the `> out.log` next to it is a real file: dropping
+    the descriptor must not drop the target, or a write would become invisible.
+    """
+    for cmd, expected in (
+        ("echo hi 2>&1 > out.log", ["out.log"]),
+        ("echo hi > out.log 2>&1", ["out.log"]),
+        ("echo hi 2>&1 > out.log 2>&1", ["out.log"]),
+    ):
+        assert _extract_write_targets(cmd) == expected, cmd
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} writes a file and must be refused ({reason!r})"
+
+
+def test_the_operator_spelling_decides_a_duplication_not_the_operand():
+    """`&>` is the *other* operator: its numeric operand really is a file name.
+
+    This is the discriminator the fix has to use, and the tempting shortcuts
+    both fail here — "the operand is numeric" would drop a real write to a file
+    called `1`, and "the operand is separated by a space" would drop `out.log`
+    in `>& out.log`, which bash and sh both create. `read-only` is the tier
+    asserted, because these targets are relative and a relative target inside
+    the workspace is exactly what `workspace-write` exists to allow.
+    """
+    written = {
+        "echo x > 1": ["1"],
+        "echo x &>1": ["1"],
+        "echo x >&1x": ["1x"],
+        "echo x >& out.log": ["out.log"],
+        "echo x >&'out.log'": ["out.log"],
+    }
+    for cmd, expected in written.items():
+        assert _extract_write_targets(cmd) == expected, cmd
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked at read-only ({reason!r})"
+
+
+def test_is_fd_operand_accepts_only_the_spellings_the_shell_reads_as_descriptors():
+    """Direct test of the predicate, including the case `str.isdigit` gets wrong."""
+    for tok in ("0", "1", "2", "10", "-"):
+        assert _is_fd_operand(tok) is True, tok
+    for tok in ("", "1x", "out.log", "./1", "-1", "1 ", ">", "²", "١", "١٢"):
+        assert _is_fd_operand(tok) is False, tok
+
+
 OUTSIDE_CLOBBER = "/etc/emrg-clobber-probe.txt"
 
 # The spellings a shell really writes with and the walk did not call operators.
@@ -1848,3 +1923,51 @@ def test_the_price_of_the_direction_is_pinned_rather_than_left_to_drift():
     # nothing, so an ordinary quoted `>` argument stays allowed.
     assert _extract_write_targets("echo 'a'b '>'") == []
     assert _check_sandbox("echo 'a'b '>'", "read-only")[0] is True
+
+
+LONG_RUN_OPERAND_CASES = [
+    # (command, the file both shells really create, the walk's whole answer)
+    ("echo 'a'b &> '>>' '>'", ">>", [">>", ">"]),
+    ("echo 'a'b > '>>' '>'", ">>", [">>", ">"]),
+    ("echo 'a'b 2> '>>' '>'", ">>", [">>", ">"]),
+    ("echo 'a'b > '>' '>>'", ">", [">", ">>"]),
+]
+
+
+@pytest.mark.parametrize("cmd,operand,answer", LONG_RUN_OPERAND_CASES)
+def test_a_run_longer_than_two_names_the_operand_the_shell_really_writes(
+    cmd: str, operand: str, answer: list
+):
+    """The run's operand, not just its last token — the answer a mutation survived on.
+
+    `_unresolved_operator_run_tails` names the whole tail of an unresolved run. With
+    two operator-shaped words the tail is one token, so `tails.extend(tokens[i+1:j])`
+    and `tails.extend(tokens[j-1:j])` are the same answer — and a **mutation that
+    changed the first into the second passed all 129 tests in this file**. Only a run
+    of three or more separates them, and at that length the two readings differ in a
+    way that matters: the shells give the *first* word after the operator the operand,
+    so naming only the last reports a target list that does not contain the file the
+    command writes (`…&> '>>' '>'` -> `['>']`, while both shells create `>>`).
+
+    Measured, each line run by `/bin/sh` and `/bin/bash` in its own fresh scratch
+    directory: every one exits 0 and creates exactly its operand. The tokens after it
+    are arguments of the same command (they are quoted words the walk could not
+    resolve) — naming them is the same fail-closed direction as the two-word case and
+    costs only refusals of lines that write nothing on their own.
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    for shell in ("/bin/sh", "/bin/bash"):
+        d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-longrun-")
+        try:
+            proc = subprocess.run([shell, "-c", cmd], cwd=d, capture_output=True)
+            created = sorted(os.listdir(d))
+            assert proc.returncode == 0, f"{shell} could not run {cmd!r} — re-measure"
+            assert created == [operand], f"{shell} created {created!r} for {cmd!r}"
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    targets = _extract_write_targets(cmd)
+    assert operand in targets, f"{cmd!r} must name the file it writes, got {targets!r}"
+    assert targets == answer, f"{cmd!r} -> {targets!r}"
+    assert _check_sandbox(cmd, "read-only")[0] is False, cmd
