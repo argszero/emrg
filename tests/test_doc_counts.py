@@ -1975,3 +1975,137 @@ def test_commented_out_tripwire_is_empty_on_the_real_tree() -> None:
         f"what the runner executes and no doc value satisfies both gates: {tripped}. "
         "Delete the dead definition (or restore it) - do not sync Agent.md to it."
     )
+
+
+# --- a per-file breakdown has exactly one owner -------------------------------
+#
+# The breakdown is the most drift-prone form of a derived number: not one value but
+# a *list* of them, every entry of which has to be re-measured whenever any suite
+# moves. So it is allowed in exactly one doc - the one a measurement reads back.
+#
+# Measured 2026-09-16 (`cyc20260916-233501`): `DEVELOPMENT.md` still advertised
+# `(89: 45 daemon_client + 20 conn-manager + 8 integration + 6 build-config + 7
+# gui-state + 3 preload-api)` while the runner reported 119 and `Agent.md` carried
+# the per-file truth - a stale copy three files and 30 tests out of date, in a doc
+# no guard read. It survived because both breakdown guards iterate a hardcoded
+# trio (`README.md`, `README.cn.md`, `Agent.md`), so the "any `(N: ...)` line it
+# finds in any doc" in their docstrings was never what the code did. The rule below
+# is repo-wide by construction rather than by enumeration, which is the part the
+# previous two could not hold.
+BREAKDOWN_OWNER = "Agent.md"
+
+# `npm test` and its breakdown on the same line, which is both of Agent.md's
+# canonical lines *and* the code-block form that escaped the two earlier guards
+# (`npm test             # run Node tests (89: 45 daemon_client + ...)`).
+BREAKDOWN_LINE = re.compile(r"npm test[^\n]*\(\s*\d+\s*:\s*")
+
+
+def _tracked_markdown() -> list[str]:
+    """Every tracked markdown doc, tree-relative - the rule's real scope."""
+    return subprocess.check_output(
+        ["git", "ls-files", "*.md"],
+        cwd=str(REPO_ROOT),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    ).split()
+
+
+def _breakdown_docs(files: dict[str, str] | None = None) -> list[tuple[str, int, str]]:
+    """(doc, line number, line) for every doc stating an `npm test` breakdown.
+
+    Scans every tracked markdown doc by default: "one owner" is a claim about the
+    repository, not about three filenames, so a doc added later must not be able to
+    carry a breakdown by being absent from a list. `files` overrides the scan, so
+    the rule can be driven against the shape it exists to catch *and* against the
+    owner's real lines - a rule only ever pointed at the real tree is not known to
+    discriminate, and here the negative half is the owner's own text.
+    """
+    if files is None:
+        files = {
+            name: (REPO_ROOT / name).read_text(encoding="utf-8", errors="replace")
+            for name in _tracked_markdown()
+        }
+    found: list[tuple[str, int, str]] = []
+    for name, text in sorted(files.items()):
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if BREAKDOWN_LINE.search(line):
+                found.append((name, lineno, line.strip()))
+    return found
+
+
+def test_the_per_file_breakdown_has_one_owner() -> None:
+    """On the real tree: a breakdown outside its measured owner is the defect.
+
+    `Agent.md` is the owner because `scripts/check-node-test-count.py` reads its
+    two lines back out of the runners and CI runs that guard. A breakdown anywhere
+    else is a copy of a derived list that nothing measures, which is how
+    `DEVELOPMENT.md` came to state 89 while the runner said 119.
+    """
+    found = _breakdown_docs()
+    assert found, "the rule found no breakdown at all, so it would pass vacuously"
+    wrong = [(doc, lineno, line) for doc, lineno, line in found if doc != BREAKDOWN_OWNER]
+    assert not wrong, (
+        f"a per-file test count may appear only in {BREAKDOWN_OWNER} (the doc the "
+        "Node-count guard measures back from the runners); these copies are "
+        "unmeasured and go stale: "
+        + "; ".join(f"{doc}:{lineno} {line[:120]}" for doc, lineno, line in wrong)
+        + ". Delete the breakdown and name the measuring guard instead - re-measure "
+        "with `uv run --no-sync python3 scripts/check-node-test-count.py`."
+    )
+
+
+def test_the_breakdown_owner_rule_fires_on_the_copy_that_drifted() -> None:
+    """The positive half, driven against the real pre-fix line, not a paraphrase.
+
+    This is the line as it stood in `DEVELOPMENT.md` (removed in the same change):
+    the code-block form, in a doc nothing checked, with three files of the
+    breakdown missing and `daemon_client` stale by 18 tests.
+    """
+    stale = (
+        "npm test             # run Node tests (89: 45 daemon_client + 20 "
+        "conn-manager + 8 integration + 6 build-config + 7 gui-state + 3 "
+        "preload-api; integration runs in CI, local: npm run test:integration)\n"
+    )
+    assert [doc for doc, _, _ in _breakdown_docs({"DEVELOPMENT.md": stale})] == [
+        "DEVELOPMENT.md"
+    ]
+
+
+def test_the_breakdown_owner_rule_is_silent_on_the_owner() -> None:
+    """The negative half, driven against the owner's own lines read from the file.
+
+    `Agent.md` states its breakdown twice (GUI and Renderer). If the rule could not
+    tell those from the copy above, it would have made the drift fix impossible to
+    land - and reading them from the real doc rather than restating them here means
+    editing `Agent.md` drives this test immediately.
+    """
+    owner = {BREAKDOWN_OWNER: (REPO_ROOT / BREAKDOWN_OWNER).read_text(encoding="utf-8")}
+    found = _breakdown_docs(owner)
+    assert len(found) >= 2, f"expected the owner's GUI and Renderer lines, found {found}"
+    assert [doc for doc, _, _ in found] == [BREAKDOWN_OWNER] * len(found)
+
+
+def test_the_breakdown_scan_is_repo_wide() -> None:
+    """The scope witness: the rule reads the tracked set, not a chosen shortlist.
+
+    The two guards this one replaces were both scoped by enumeration, which is
+    exactly why a third doc could carry a stale breakdown through every gate. A
+    shortlist reintroduced here would restore that blind spot, so the scope is
+    witnessed rather than assumed.
+    """
+    tracked = _tracked_markdown()
+    assert len(tracked) >= 8, f"expected the repo's markdown docs, found {tracked}"
+    for witness in ("Agent.md", "DEVELOPMENT.md", "README.md", "MANIFESTO.md"):
+        assert witness in tracked, f"{witness} is not in the rule's scope"
+    scanned = {
+        name
+        for name in tracked
+        if BREAKDOWN_LINE.search(
+            (REPO_ROOT / name).read_text(encoding="utf-8", errors="replace")
+        )
+    }
+    assert scanned == {doc for doc, _, _ in _breakdown_docs()}, (
+        "the default scan and a direct sweep of the tracked docs disagree about "
+        "which docs carry a breakdown"
+    )
