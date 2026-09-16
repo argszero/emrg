@@ -646,9 +646,16 @@ class TaskHandler:
                 return None
             if out.returncode == 0 and out.stdout.strip():
                 path = out.stdout.strip()
-                if os.path.isabs(path):
-                    return path
-                return os.path.normpath(os.path.join(source_dir, path))
+                if not os.path.isabs(path):
+                    path = os.path.join(source_dir, path)
+                # One spelling per path (#1292, Windows CI): git prints an absolute
+                # git dir with forward slashes (`C:/.../.git`), so returning its
+                # verbatim answer gave whoever appends a file name a mixed-separator
+                # path (`C:/.../.git\emrg-recovery-receipt.json`) - the same file
+                # spelled two ways depending on which branch here answered, and only
+                # one of them equal to `str(Path(state) / name)`. Normalising both
+                # branches makes the answer a property of the file, not of the branch.
+                return os.path.normpath(path)
         return None
 
     @staticmethod

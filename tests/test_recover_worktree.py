@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -613,6 +614,34 @@ def test_the_tool_says_when_the_receipt_could_not_be_written(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "receipt: could not be written" not in out, out
     assert f"receipt: {Path(_git(control, 'rev-parse', '--absolute-git-dir').stdout.strip()) / 'emrg-recovery-receipt.json'}" in out, out
+
+
+def test_the_git_state_dir_is_answered_normalised(monkeypatch):
+    """The invariant behind #1292's red Windows leg, pinned on every platform.
+
+    `git rev-parse --absolute-git-dir` prints a Windows git dir with **forward
+    slashes** (`C:/.../.git`). The branch that returned it verbatim made the receipt
+    path mixed-separator (`C:/.../.git\\emrg-recovery-receipt.json`) — a spelling that
+    `str(Path(state) / name)`, which is what the test above builds, does not produce,
+    so that test failed on windows-2025 while passing here. The platform semantics
+    cannot be replayed on POSIX (`os.path` is `posixpath`), so what is pinned is the
+    property the fix establishes: whatever git prints — here an absolute git dir
+    wearing a redundant separator, the same *shape* — the answer is normalised, and
+    appending a name to it agrees with `Path(state) / name` on that platform.
+
+    Without the normalisation this fails on every platform, which is the point: the
+    discriminating case used to live only in CI, and a local green said nothing.
+    """
+    class _Fake:
+        returncode = 0
+        stdout = f"{Path(__file__).resolve().parent}/.git/./"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Fake())
+    state = _load().TaskHandler._git_state_dir("/does/not/matter")
+    assert state == os.path.normpath(state), state
+    assert os.path.join(state, "emrg-recovery-receipt.json") == str(
+        Path(state) / "emrg-recovery-receipt.json"
+    ), state
 
 
 def test_the_action_asks_the_criterion_itself_and_cannot_be_told_the_answer(tmp_path):

@@ -288,7 +288,10 @@ same question the guard asks, and then:
   It is best-effort, so the report **says so** when one could not be written
   (the action's detail and its log line, and `scripts/recover-worktree.py`'s
   `receipt:` line) rather than naming a path for a file that does not exist
-  (issue #1284).
+  (issue #1284). The path is **normalised** before it is joined with the file name:
+  Windows git prints an absolute git dir with forward slashes (`C:/…/.git`), so a
+  verbatim answer made the reported path mixed-separator and unequal to
+  `str(Path(state) / name)` — green locally, red on the windows-2025 leg (#1292).
 
 Read-only blocks the destructive shapes the guard recognises: redirects to
 anything but `/dev/null`, `rm` / `rmdir`, `mv` / `cp` destinations, `truncate` /
