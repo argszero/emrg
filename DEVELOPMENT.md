@@ -153,6 +153,28 @@ uv run python -c "from emrg.client.app import run_client"   # import check
 uv run python -m emrg --help
 ```
 
+### A test that derives its expectation from what it *wrote* is a POSIX assumption
+
+`test-windows` runs the same suite on a shell where text-mode writes translate every
+line ending, so an expected value taken from the Python string that was written is
+wrong there while staying green locally. This has cost two CI reds in this repo, both
+times on a brand-new test that passed on macOS:
+
+- `assert log.stat().st_size == len("previous run\n")` — the file holds one more byte
+  per line on Windows, so the assertion is about the platform, not about the code.
+  Read the expectation back from the **artifact** instead (`mark == log.stat().st_size`),
+  or assert a property rather than a literal: the mark must be a point in the file, so
+  the size grows by exactly the appended line's length read through the same reader.
+- A `not in` check against **multi-line source text** is satisfied by the line endings
+  alone on a CRLF checkout, so the guard silently stops guarding while staying green —
+  normalise (`text.replace("\r\n", "\n")`) before any substring assertion that spans
+  lines. A silently passing guard is worse than a red one.
+
+Neither needs a Windows machine to reproduce: write a file containing `"line\r\n"` and
+drive the code path under test with it. Local green is a statement about the platform
+you are standing on; when a test's subject is bytes, sizes or whole-file text, ask what
+the other platform's write path does to it.
+
 ### Electron GUI
 
 ```bash
