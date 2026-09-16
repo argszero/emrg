@@ -673,6 +673,57 @@ def _is_redirect_operator(tok: str) -> bool:
     )
 
 
+def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
+    """Indexes of ``tokens`` whose word was **entirely quoted** in the source line.
+
+    ``'>'`` and ``>`` dequote to the same token, so once quoting is resolved the
+    walk cannot tell a quoted operator from a real one — and the shell reads a
+    quoted word as a *path*, never as a redirect. Without that fact the walk
+    believed the first operator-shaped token it met, which cost a real target in
+    one direction and invented one in the other: `echo '>' > /etc/x` reported
+    `['>']` and was allowed to write outside (the under-block #1269 closed) while
+    `grep -n '>' file.txt` was refused under `read-only` for "targeting
+    'file.txt'" (the over-block this closes — the other half of issue #1268).
+
+    Repaired by lexing the same line a second time with POSIX mode **off**, where
+    `shlex` keeps the quote characters in the token, and pairing the two readings
+    by index: a pair is fully quoted when the second reading is the first one
+    wrapped in matching quotes (`'>'` around `>`). Requiring the *whole* word to
+    be wrapped is what keeps a partially quoted word out of the set — `'a'b` and
+    `a'b'` both dequote to `ab`, and neither is a quoted word.
+
+    Answers the **empty set** — "no token is known to be quoted", i.e. the walk's
+    pre-existing behaviour — whenever the two readings disagree about how many
+    words there are (`echo 'it'\\''s'` is one such line: 2 words in POSIX mode, 3
+    with quoting kept) or the second lex fails. That fallback picks the safe side
+    on purpose: believing a *real* redirect was quoted would drop its target and
+    reopen the escape, while believing a quoted one was real only refuses a
+    command that writes nothing.
+    """
+    prepped = _protect_windows_backslashes(_strip_line_continuations(cmd))
+    try:
+        lex = shlex.shlex(prepped, posix=False, punctuation_chars=True)
+        lex.commenters = ""
+        lex.whitespace_split = True
+        second = _restore_windows_backslashes(list(lex))
+    except ValueError:
+        return set()
+    if len(second) != len(tokens):
+        # The two readings are not known to be the same words, so the pairing
+        # below would compare one word with another. Nothing is claimed.
+        return set()
+    quoted: set[int] = set()
+    for index, (plain, kept) in enumerate(zip(tokens, second)):
+        if (
+            len(kept) >= 2
+            and kept[0] in "'\""
+            and kept[-1] == kept[0]
+            and kept[1:-1] == plain
+        ):
+            quoted.add(index)
+    return quoted
+
+
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     """Write targets of ``cmd``: the paths a command appears to write.
 
@@ -694,19 +745,28 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
         unlisted writers (``sed -i``, ``truncate``, ``tee``, ``cp`` without
         ``-r``) were not destructive at all — 7 of 7 measured writes allowed.
 
-    Quoting is *mostly* what distinguishes the two, and the walk now covers the
-    case where it does not. The token stream knows whether a `>` sat inside a
-    longer argument (`echo "a > b"` is one token), so both directions are fixed
-    by the same change. It does **not** know whether a `>` that stood alone as a
-    word was quoted: `'>'` and `>` dequote to the same token, so a quoted
-    operator used to consume the next token as its `target` and the *real*
-    redirect's target was never reported — measured on master, `echo '>' > /etc/x`
-    produced targets `['>']` and was allowed to write `/etc/x` at
-    workspace-write while `echo x > /etc/x` was blocked. Since an operator is
-    never a path, the walk skips operator tokens rather than believing the first
-    one it meets (issue #1268). The residual is the over-block side only: a
-    quoted operator followed by a bare word is still read as a redirect, which
-    needs the lexer to preserve quoting to fix.
+    Quoting is what distinguishes the two, and the token stream alone is not
+    enough to recover it. It knows whether a `>` sat inside a longer argument
+    (`echo "a > b"` is one token), but not whether a `>` that stood alone as a
+    word was quoted — `'>'` and `>` dequote to the same token. That single gap
+    produced both failures of issue #1268, in opposite directions:
+
+      - **under-block**: a quoted operator consumed the next token as its
+        `target`, so the *real* redirect's target was never reported — measured
+        on master, `echo '>' > /etc/x` produced targets `['>']` and was allowed
+        to write `/etc/x` at workspace-write while `echo x > /etc/x` was
+        blocked;
+      - **over-block**: with no real redirect at all, the quoted operator was
+        still read as one, so `grep -n '>' file.txt` was refused under
+        `read-only` for "targeting 'file.txt'" although grep never writes it.
+
+    Both are now closed by asking the shell's own question — a quoted word is a
+    path, never a redirect (`_fully_quoted_token_indexes`, which recovers the
+    fact from a second lex pass with quoting kept). An operator is therefore
+    *shape and not quoted*, and operator tokens are skipped when looking for the
+    target, so the boundary no longer depends on whether a `>` was quoted. What
+    remains on the fail-closed side is input the two readings disagree about,
+    where the walk falls back to treating every operator-shaped token as real.
 
     Still deliberately non-exhaustive in *which verbs* it covers (an
     interpreter can always write a file); the honest boundary stays
@@ -716,7 +776,18 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     some command's stdin, and reading it as shell code named prose and the
     delimiter word as write targets (`_mask_data_heredoc_bodies`).
     """
-    tokens = _split_command_tokens(_mask_data_heredoc_bodies(cmd))
+    masked = _mask_data_heredoc_bodies(cmd)
+    tokens = _split_command_tokens(masked)
+    # A quoted operator is not an operator: `'>'` dequotes to `>`, so the token
+    # stream alone cannot say which one the shell will act on. `is_operator` is
+    # the one question — shape *and* not quoted — asked wherever the walk needs
+    # it, so "is this a redirect?" and "is this an operator rather than a path?"
+    # cannot drift apart (issue #1268).
+    quoted = _fully_quoted_token_indexes(masked, tokens)
+
+    def is_operator(index: int) -> bool:
+        return index not in quoted and _is_redirect_operator(tokens[index])
+
     targets: list[str] = []
     i = 0
     while i < len(tokens):
@@ -725,7 +796,7 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
         # Redirects: `>` `>>` `&>` `&>>` `>|` `<>` are their own tokens, and a
         # numeric fd prefix arrives as a separate token (`2` `>` `e`). Which
         # spellings count is `_is_redirect_operator`'s job — this walk only asks.
-        if _is_redirect_operator(tok):
+        if is_operator(i):
             # An operator is never a write target. A *quoted* `>` reaches this
             # walk as an operator token — the tokenizer dequotes, so `'>'` and
             # `>` are the same string here — and taking the next token blindly
@@ -736,7 +807,7 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # reports the target the shell will actually write, so the boundary
             # no longer depends on whether a `>` was quoted.
             j = i + 1
-            while j < len(tokens) and _is_redirect_operator(tokens[j]):
+            while j < len(tokens) and is_operator(j):
                 j += 1
             if j < len(tokens) and tokens[j] not in _COMMAND_SEPARATORS:
                 targets.append(tokens[j])
