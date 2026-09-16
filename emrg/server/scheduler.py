@@ -52,6 +52,67 @@ def _receipt_note(receipt: str | None) -> str:
     return "; no receipt could be written (the stash is the durable record)"
 
 
+#: The undo recipe, written **once** (issue #1284). `{message}` is the stash message
+#: the recovery made; the placeholder form is what a reader sees when the receipt
+#: could not be read, because then there is no *this run's* message to name.
+#:
+#: This is a template rather than two strings because the spelling is the whole
+#: content of the claim: the receipt's copy and the tool's hand-written fallback
+#: were two copies of it, and two copies of a spelling is how the wrong one gets
+#: printed (measured: the daemon's receipt said `apply --index` while the tool's
+#: `reversible:` line — a paraphrase — said a bare `git stash pop`, and the tool is
+#: where the reader looks). The prose *around* it can still drift; the spelling
+#: cannot, and `tests/test_recover_worktree.py` drives both printers to prove it.
+RECOVERY_RECIPE_TEMPLATE = (
+    "`git stash list` -> the entry whose message is {message}, then "
+    "`git stash apply --index stash@{{N}}` with the `N` that list prints "
+    "(`--index` restores the staged side too, and a bare `git stash pop` "
+    "takes the newest and consumes it)"
+)
+
+
+def recovery_recipe(stash_message: str) -> str:
+    """The one place the undo spelling is written (issue #1284).
+
+    Both printers go through here: the receipt the daemon writes carries
+    ``recovery_recipe(message)`` for its own stash, and the manual tool's fallback —
+    the branch reached when the receipt is missing, unreadable or older than the run
+    that just finished — prints it with ``"<message>"`` standing in for the message
+    the reader substitutes from ``git stash list``. `--index` is not decoration: a
+    stash carries the index side as well, and without it a stash whose change is
+    index-only is popped as "Already up to date." and **dropped**, leaving that blob
+    unreferenced (measured: plain `pop` left the index at HEAD's blob and 4
+    unreachable objects behind, while `pop --index` restored the staged content byte
+    for byte).
+
+    **Why the selector is the list's ordinal and not the message** (measured with
+    git 2.50.1, in the state this recipe's own warning names — a *later* stash in the
+    same repository, which is the next ordinary recovery, since `apply` keeps the
+    first stash forever; there the named stash is at `stash@{1}` and a later
+    `emrg-recovery-…` sits at `stash@{0}`):
+
+        stash^{/<message>}  -> `rev-parse` rc=128; `apply` rc=1, `error: … is not a
+                               valid reference`; the geometry is NOT restored
+        stash@{/<message>}  -> `rev-parse` rc=0 but resolves to `stash@{0}`, the LATER
+                               stash, whatever message is passed; `apply` rc=0 and
+                               restores the WRONG stash's content
+        stash@{N}           -> `rev-parse` rc=0, the named entry; `apply` rc=0, the
+                               named geometry restored, both stashes kept
+
+    `gitrevisions(7)` allows `@{<n>}`, `@{<date>}`, `@{upstream}`, `@{push}`,
+    `@{-<n>}` — there is **no** message form, which is why the middle row succeeds
+    while pointing at the wrong stash: it is not a selector, and a silent wrong-stash
+    apply is worse than the loud failure above it. `^{/<text>}` *is* documented, but
+    as "the commit whose message matches, searching ancestry", and an older stash
+    commit is not an ancestor of a newer one, so the older name stops resolving the
+    moment a later stash exists. The list the recipe's first half tells the reader to
+    read is the store that does name every stash, so the recipe takes the ordinal
+    from it. Pinned by
+    `tests/test_recover_worktree.py::test_the_advertised_selector_survives_a_later_stash`.
+    """
+    return RECOVERY_RECIPE_TEMPLATE.format(message=stash_message)
+
+
 # ── Module-level constants (shared with daemon) ──────────────────
 EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 
@@ -692,8 +753,11 @@ class TaskHandler:
         directive 2026-09-16: dirt must be recovered from, not merely detected and
         reported). Nothing here is a decision for a human: the criterion says every
         byte in the tree is already in ``HEAD`` or in the upstream tip, so moving it
-        aside cannot lose anything - and the move is a stash, which leaves every byte
-        one ``git stash pop`` away. No branch is reset and no commit is dropped:
+        aside cannot lose anything - and the move is a stash, which holds every byte
+        and is undone with ``git stash apply --index``, the spelling the receipt
+        names: a bare ``git stash pop`` is *not* the inverse, since it takes the
+        newest stash, brings a staged change back unstaged, and consumes the stash
+        (issue #1284). No branch is reset and no commit is dropped:
         ``HEAD`` is compared before and after, and a moved ``HEAD`` is reported.
 
         **The criterion is measured here, always, and no caller can supply an
@@ -770,17 +834,10 @@ class TaskHandler:
             "status_after": [],
             "stash_message": message,
             "action": "git stash push --include-untracked",
-            # `--index` is not decoration: a stash carries the index side as well, and
-            # without it a stash whose change is index-only is popped as "Already up
-            # to date." and **dropped**, leaving that blob unreferenced (measured:
-            # plain `pop` left the index at HEAD's blob and 4 unreachable objects
-            # behind, while `pop --index` restored the staged content byte for byte).
-            "reversible_with": (
-                f"`git stash list` -> {message}, then "
-                f"`git stash apply --index stash^{{/{message}}}` (`--index` restores "
-                f"the staged side too, and a bare `git stash pop` takes the newest, "
-                f"which is this one only until the next stash is made)"
-            ),
+            # The spelling has one owner (`recovery_recipe`) so that the receipt and
+            # the manual tool's fallback cannot disagree about the inverse — the two
+            # copies were the defect, not the wording (see the template).
+            "reversible_with": recovery_recipe(message),
         })
         if head_after != head.stdout.strip():
             # Not expected - a stash does not move HEAD - so this is asserted rather

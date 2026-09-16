@@ -18,6 +18,36 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "recover-worktree.py"
+DOC = Path(__file__).resolve().parent.parent / "DEVELOPMENT.md"
+
+#: The one owner of the undo spelling (issue #1284), imported rather than re-spelled:
+#: a test that copies the string it is checking cannot see the copy drift. Both
+#: printers in the tree — the daemon's receipt and the manual tool's fallback — are
+#: asserted against this function, so the only way to change the spelling is to
+#: change it in one place, and the only thing left to assert *about* it is which
+#: stash it names and that `--index` is in it.
+from emrg.server.scheduler import recovery_recipe  # noqa: E402  (repo root is on sys.path)
+
+#: The recovery bullet whose prose is the reader-facing undo recipe. Its opening
+#: words are the anchor, not a line number: the section is re-wrapped and
+#: re-numbered by edits that have nothing to do with the recipe, and the anchor is
+#: asserted to appear exactly once so a renamed bullet fails instead of silently
+#: measuring a different paragraph.
+_RECIPE_BULLET = "- **stashes it when it is reconstructible**"
+
+
+def _recovery_bullet() -> str:
+    """That bullet as one paragraph, with its markdown line breaks collapsed."""
+    text = DOC.read_text(encoding="utf-8")
+    found = text.count(_RECIPE_BULLET)
+    assert found == 1, (
+        f"expected exactly one `{_RECIPE_BULLET}` bullet in {DOC.name}, found {found}"
+        " — the anchor moved, so this test would be measuring a different paragraph"
+    )
+    rest = text.split(_RECIPE_BULLET, 1)[1]
+    end = rest.find("\n- ")  # the bullet ends at the next top-level item
+    assert end != -1, f"`{_RECIPE_BULLET}` is the last bullet in {DOC.name}"
+    return " ".join(rest[:end].split())
 
 
 def _load():
@@ -189,19 +219,27 @@ def test_an_untracked_copy_of_head_is_recoverable(tmp_path):
     assert _status(repo) == ""
     assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head
 
-    # The inverse the receipt names, run as named. What this geometry does to it is
-    # *measured*, not assumed (the residual is a finding, filed with the undo/audit
-    # half in #1284, not something to wish away here): the state comes back byte for
-    # byte — deletion still staged, file still untracked — while git exits **1** and
-    # warns `f.txt already exists, no checkout`, having restored the untracked copy
-    # already by the time it tries again. The stash is consequently *kept*, so the
-    # one-shot spelling's evidence is not consumed either (measured: `pop --index`
-    # reports the same failure and keeps the entry here).
-    message = json.loads(
+    # The inverse the receipt names, run as named: the receipt names the entry
+    # `git stash list` prints, and this repository has exactly one stash, so the list
+    # prints `stash@{0}`. What this geometry does to it is *measured*, not assumed
+    # (the residual is a finding, filed with the undo/audit half in #1284, not
+    # something to wish away here): the state comes back byte for byte — deletion
+    # still staged, file still untracked — while git exits **1** and warns `f.txt
+    # already exists, no checkout`, having restored the untracked copy already by the
+    # time it tries again. The stash is consequently *kept*, so the one-shot
+    # spelling's evidence is not consumed either (measured: `pop --index` reports the
+    # same failure and keeps the entry here).
+    receipt = json.loads(
         (Path(_git(repo, "rev-parse", "--absolute-git-dir").stdout.strip())
          / "emrg-recovery-receipt.json").read_text(encoding="utf-8")
-    )["stash_message"]
-    applied = _git(repo, "stash", "apply", "--index", f"stash^{{/{message}}}")
+    )
+    listing = _git(repo, "stash", "list").stdout
+    index = next(
+        ln.split(":")[0].split("{")[1].rstrip("}")
+        for ln in listing.splitlines()
+        if ln.endswith(receipt["stash_message"])
+    )
+    applied = _git(repo, "stash", "apply", "--index", f"stash@{{{index}}}")
     assert "already exists, no checkout" in applied.stderr, applied.stderr
     assert _status(repo) == "D  f.txt\n?? f.txt\n", _status(repo)
     assert _git(repo, "stash", "list").stdout.strip() != "", \
@@ -571,6 +609,13 @@ def test_the_tool_writes_a_receipt_of_what_it_moved(tmp_path):
     assert any(line.startswith(" M") for line in receipt["status_before"])
     assert receipt["status_after"] == []
     assert "stash" in receipt["action"]
+    # The spelled route is the one owner's, not a copy of it: this asserts identity
+    # with the shared recipe, so a receipt that drifted from the function (or a
+    # function that drifted from the receipt) fails here rather than in a reader's
+    # shell. The substrings below only say *what* the owner has to contain.
+    assert receipt["reversible_with"] == recovery_recipe(receipt["stash_message"]), (
+        "the receipt must carry the one owner's recipe for *this* stash"
+    )
     # The route must name *this* stash: a host may already have stashes, so a bare
     # `git stash pop` is only correct until the next one is made (measured on the
     # authoring workspace, which held an unrelated `stash@{0}` when this was written).
@@ -614,6 +659,98 @@ def test_the_tool_says_when_the_receipt_could_not_be_written(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "receipt: could not be written" not in out, out
     assert f"receipt: {Path(_git(control, 'rev-parse', '--absolute-git-dir').stdout.strip()) / 'emrg-recovery-receipt.json'}" in out, out
+
+
+def test_the_fallback_recipe_is_the_owners_recipe_not_a_paraphrase(tmp_path, capsys):
+    """Issue #1284, the branch a receipt-less recovery prints: one owner, not three.
+
+    The tool prints its `reversible:` line from the receipt when it has this run's
+    receipt, and it used to write the spelling **by hand** when it did not — the exact
+    branch a reader lands on when the receipt could not be read. Two copies of a
+    spelling is how the wrong one gets printed, and this pair did disagree once (the
+    receipt said `apply --index`, this line said a bare `git stash pop`), so the
+    fallback now calls the same function the receipt is built from. Measured gap this
+    closes: the branch was *reached* by the test above but its text was named in no
+    test at all — grepping the suite for the fallback's wording found nothing, so a
+    re-worded fallback was a silent edit.
+
+    The assertion is identity with the owner rather than a substring of it: a
+    paraphrase that still contained `--index` would pass a substring test, and the
+    paraphrase is the defect. The placeholder is asserted too, because the fallback's
+    one honest difference from the receipt is that this run's message is unknown here.
+    """
+    work, _head = _with_upstream(tmp_path)
+    git_dir = Path(_git(work, "rev-parse", "--absolute-git-dir").stdout.strip())
+    # Pre-create the receipt path as a *directory*: `open(..., "w")` raises `OSError`,
+    # so no receipt exists and `_receipt_recipe` answers None — the fallback branch.
+    (git_dir / "emrg-recovery-receipt.json").mkdir()
+
+    assert _load().recover(work, apply=True) == 0
+    out = capsys.readouterr().out
+    assert "receipt: could not be written" in out, (
+        f"precondition: this run must take the no-receipt branch; got:\n{out}"
+    )
+
+    line = next((ln for ln in out.splitlines() if ln.startswith("reversible: ")), None)
+    assert line is not None, f"the recovery must print its route; got:\n{out}"
+    assert line == f"reversible: {recovery_recipe('<message>')}", (
+        "the fallback must be the one owner's recipe with the message left as the "
+        "placeholder the reader substitutes from `git stash list` — a hand-written "
+        f"spelling here is the second copy that drifted once; got:\n{line}"
+    )
+    # And the other half of the same claim: the placeholder is a *placeholder*, not a
+    # concrete name invented for a stash this recovery cannot know.
+    assert "stash@{N}" in line, line
+
+
+def test_the_owners_recipe_names_the_measured_route():
+    """The owner's content is a claim too — identity alone cannot see it change.
+
+    The two printer tests assert that each printer equals `recovery_recipe(...)`, and
+    that is exactly one assertion short: **a mutation that changes the owner's own
+    text keeps every identity assertion green**, because both sides moved together.
+    Measured while writing this change: dropping `--index` from the owner left all 36
+    tests in this file passing. The identity assertions cannot close that — only an
+    assertion about the *content* can, and it has to be about the route rather than
+    about the whole string, because the recipe deliberately spells the wrong spelling
+    out in its warning ("a bare `git stash pop` takes the newest…") so a reader knows
+    why the route is the one it is.
+
+    So the route is extracted — the command in the first backtick pair after "then " —
+    and asserted to be the spelling `test_the_advertised_reversal_is_the_measured_one`
+    and `test_the_advertised_selector_survives_a_later_stash` measured with git:
+    `apply --index`, selecting the stash by the **ordinal `git stash list` prints** —
+    not by the message (no documented `@{…}` form names a stash by message, and the
+    ancestry form stops resolving as soon as a later stash exists) and not by
+    `stash@{0}` (the newest, which is this one only until the next is made).
+    """
+    recipe = recovery_recipe("emrg-recovery-20260917T000000Z")
+    assert "then " in recipe, f"the recipe must name the route after 'then': {recipe}"
+    assert "emrg-recovery-20260917T000000Z" in recipe, (
+        f"the recipe must carry the message it was given: {recipe}"
+    )
+    after = recipe.split("then ", 1)[1]
+    assert after.startswith("`"), f"the route must be a quoted command: {after}"
+    route = after.split("`")[1]
+
+    assert "--index" in route, (
+        "the advertised route must restore the staged side — a bare `apply` or `pop` "
+        f"brings a staged change back unstaged; route was: {route!r}"
+    )
+    assert route == "git stash apply --index stash@{N}", (
+        "the route must name the stash the way `git stash list` does and leave the "
+        "ordinal to that list — a message selector either fails (`^{/…}`) or silently "
+        f"applies the newest stash (`@{{/…}}`); route was: {route!r}"
+    )
+    # The ordinal is the reader's substitution, and the test above proves the recipe's
+    # own first half is where they get it: the list is named in the same recipe.
+    assert "`git stash list`" in recipe, (
+        f"the route's `N` has to come from somewhere, and the recipe must say where: {recipe}"
+    )
+    # The message is substituted, not left as a word: two runs must not print the same
+    # recipe, or the receipt would name no stash in particular.
+    other = recovery_recipe("emrg-recovery-19990101T000000Z")
+    assert recipe != other, "the recipe must carry the message it was given"
 
 
 def test_the_git_state_dir_is_answered_normalised(monkeypatch):
@@ -729,3 +866,291 @@ def test_main_parses_the_repo_and_apply_flags(tmp_path, capsys):
     assert _load().main(["--repo", str(work)]) == 0
     assert "recoverable" in capsys.readouterr().out
     assert _status(work).startswith(" M"), "without --apply nothing is written"
+
+
+def _staged_deletion_repo(tmp_path: Path, name: str, message: str | None = None) -> Path:
+    """A repository whose only dirt is a staged deletion (`D  f.txt`), now stashed.
+
+    The geometry issue #1284's table is about, and one the criterion releases:
+    `git rm` on content unchanged from `HEAD`, so every byte of the removed file is
+    already in `HEAD` and moving it aside cannot lose anything. Stashed with the
+    action's own spelling (`git stash push -u`), which is what the reversal is the
+    inverse *of*.
+
+    `message` is the action's own `emrg-recovery-<ts>` name when a test needs to
+    address the stash *by* it — the selector is a claim about names, so the tests
+    that measure it cannot use git's default `WIP on …` message.
+    """
+    repo = tmp_path / name
+    _new_repo(repo)
+    _git(repo, "rm", "-q", "f.txt")
+    assert _status(repo) == "D  f.txt\n", _status(repo)
+    _git(repo, "stash", "push", "-u", *(["-m", message] if message else []))
+    assert _status(repo) == "", _status(repo)
+    return repo
+
+
+def test_the_advertised_reversal_is_the_measured_one(tmp_path):
+    """Issue #1284 item 2: the undo half is a claim about a git command, so measure it.
+
+    The prose used to say the stashed work is "one `git stash pop` away". On this
+    geometry — a staged deletion, which the criterion answers *recoverable* — that
+    spelling is **not** the inverse, and the difference is invisible until someone
+    needs the undo: it returns the change unstaged and it consumes the stash, so the
+    exact spelling is no longer available to try again. Measured with git 2.50.1,
+    three fresh repositories stashed the same way, one reversal each:
+
+        git stash pop                     -> ` D f.txt`, stash dropped
+        git stash pop --index             -> `D  f.txt`, stash dropped
+        git stash apply --index stash@{0} -> `D  f.txt`, stash kept   <- advertised
+
+    So this is not a stylistic preference between spellings: only the advertised one
+    restores the state *and* leaves the evidence. The claim is a claim about `git`,
+    which means a future git can invalidate it — if this test ever fails, the prose
+    below is what has to be re-read and re-worded, not the test:
+    `DEVELOPMENT.md` (the recovery section), `scripts/recover-worktree.py`'s
+    docstring and its `reversible:` output, and `_recover_dirty_tree_sync`'s
+    docstring in `emrg/server/scheduler.py`.
+    """
+    bare = _staged_deletion_repo(tmp_path, "bare-pop")
+    _git(bare, "stash", "pop")
+    assert _status(bare).startswith(" D"), (
+        "the bare `git stash pop` was expected to bring the staged deletion back "
+        f"*unstaged* — that is what makes it not the inverse; got {_status(bare)!r}"
+    )
+    assert _git(bare, "stash", "list").stdout.strip() == "", (
+        "the bare `git stash pop` was expected to consume the stash"
+    )
+
+    one_shot = _staged_deletion_repo(tmp_path, "pop-index")
+    _git(one_shot, "stash", "pop", "--index")
+    assert _status(one_shot).startswith("D  "), _status(one_shot)
+    assert _git(one_shot, "stash", "list").stdout.strip() == ""
+
+    advertised = _staged_deletion_repo(tmp_path, "apply-index")
+    _git(advertised, "stash", "apply", "--index", "stash@{0}")
+    assert _status(advertised).startswith("D  "), (
+        "the advertised spelling `git stash apply --index` must restore the staged "
+        f"side, byte for byte; got {_status(advertised)!r}"
+    )
+    assert _git(advertised, "stash", "list").stdout.strip() != "", (
+        "the advertised spelling must KEEP the stash — it is the one a reader can "
+        "run again, and the one the receipt hands them"
+    )
+
+
+def test_the_advertised_selector_survives_a_later_stash(tmp_path):
+    """The selector is a claim about *names*, and the state it is used in has two stashes.
+
+    The recipe's own parenthetical gives the reason it names a stash at all: "a bare
+    `git stash pop` takes the newest, which is this one only until the next stash is
+    made". The state that sentence describes is not a corner case — it is what the
+    second ordinary recovery in a repository looks like, because `apply` keeps the
+    first stash forever. Measured with git 2.50.1 in that state (the named stash at
+    `stash@{1}`, a later `emrg-recovery-…` at `stash@{0}`):
+
+        stash^{/<message>}  -> rc=128 to resolve; `apply` rc=1, `error: … is not a
+                               valid reference`; geometry NOT restored
+        stash@{/<message>}  -> resolves to `stash@{0}` (the LATER stash) whatever
+                               message is passed; `apply` rc=0 restoring the WRONG one
+        stash@{N}           -> rc=0, the named entry; `apply` rc=0, `D  f.txt`
+                               restored, both stashes kept          <- advertised
+
+    The middle row is the trap this test exists for: `@{…}` is documented in
+    `gitrevisions(7)` for ordinals, dates, upstream and push — not for messages — so
+    it does not fail, it silently applies someone else's stash. `^{/<text>}` is
+    documented, but searches **commit ancestry**, and an older stash commit is not an
+    ancestor of a newer one, so the older name stops resolving the moment a later
+    stash exists. Both directions are pinned below, so a future git that changes
+    either reddens here instead of in a reader's shell.
+    """
+    named = "emrg-recovery-20260917T010000Z"
+    later = "emrg-recovery-LATER"
+
+    def _two_stash_repo(name: str) -> Path:
+        repo = _staged_deletion_repo(tmp_path, name, message=named)
+        # The next ordinary recovery in this repository: a second, later stash, so the
+        # named one is no longer `stash@{0}`.
+        (repo / "g.txt").write_text("base\n", encoding="utf-8")
+        _git(repo, "add", "g.txt")
+        _git(repo, "commit", "-q", "-m", "add g")
+        (repo / "g.txt").write_text("later recovery\n", encoding="utf-8")
+        _git(repo, "stash", "push", "-u", "-m", later)
+        assert _status(repo) == ""
+        listing = _git(repo, "stash", "list").stdout
+        assert listing.count("emrg-recovery-") == 2, (
+            f"precondition: the named stash and a later one must both exist; got {listing!r}"
+        )
+        lines = listing.splitlines()
+        assert any(ln.endswith(named) for ln in lines), (
+            f"precondition: the named stash must be in the list; got {listing!r}"
+        )
+        assert any(ln.endswith(later) for ln in lines), (
+            f"precondition: the later stash must be in the list; got {listing!r}"
+        )
+        assert not lines[0].endswith(named), (
+            f"precondition: the named stash must no longer be the newest; got {listing!r}"
+        )
+        return repo
+
+    # The route as the receipt hands it over, taken from the one owner rather than
+    # re-spelled here — the reader's copy and this one must be the same string. The
+    # ordinal the route names is read off the list, which is what the recipe's first
+    # half tells the reader to do.
+    repo = _two_stash_repo("later-stash")
+    index = next(
+        ln.split(":")[0].split("{")[1].rstrip("}")
+        for ln in _git(repo, "stash", "list").stdout.splitlines()
+        if ln.endswith(named)
+    )
+    route = recovery_recipe(named).split("then ", 1)[1].split("`")[1].replace("N", index)
+    argv = route.split()
+    assert argv[0] == "git", f"the advertised command must be a literal git command: {route!r}"
+    applied = _git(repo, *argv[1:])
+    assert "D  f.txt" in _status(repo), (
+        f"the advertised route must still find the named stash when a later one "
+        f"exists — it restored {_status(repo)!r}; git said: {applied.stderr.strip()!r}"
+    )
+    assert _git(repo, "stash", "list").stdout.count("emrg-recovery-") == 2, (
+        "and it must keep both stashes: the reader may have to run it again"
+    )
+
+    # The trap, pinned as measured: `@{/<message>}` resolves to the *newest* entry
+    # regardless of the message, so a reader who "repairs" the recipe into that form
+    # gets a successful apply of the wrong stash. This is asserted, not described,
+    # because a silent wrong-stash apply is the one failure a reader cannot notice.
+    trap = _two_stash_repo("later-stash-reflog-form")
+    resolved = _git(trap, "rev-parse", f"stash@{{/{named}}}")
+    assert resolved.returncode == 0, (
+        f"`@{{/<message>}}` was measured to resolve (to the newest, not the named) "
+        f"rather than fail; it now fails with {resolved.stderr.strip()!r}"
+    )
+    newest = _git(trap, "rev-parse", "stash@{0}").stdout.strip()
+    assert resolved.stdout.strip() == newest, (
+        "`@{/<message>}}` must be recorded as resolving to the newest stash — if it "
+        "now names the entry the message mentions, the recipe may use it again"
+    )
+    _git(trap, "stash", "apply", "--index", f"stash@{{/{named}}}")
+    assert "D  f.txt" not in _status(trap), (
+        "and applying it must NOT restore the named geometry — that is why the recipe "
+        f"does not use this form (status={_status(trap)!r})"
+    )
+
+    # The other direction: the ancestry form does not resolve once a later stash exists.
+    ancestry = _two_stash_repo("later-stash-ancestry")
+    failed = _git(ancestry, "stash", "apply", "--index", f"stash^{{/{named}}}")
+    assert failed.returncode != 0, (
+        "the `^{/<message>}` form was measured to stop resolving once a later stash "
+        f"exists; it now succeeds, so the docstring needs re-measuring: {failed.stdout.strip()!r}"
+    )
+    assert "D  f.txt" not in _status(ancestry), (
+        "the failed form must not have restored the geometry by accident"
+    )
+
+
+def test_the_tool_prints_the_receipts_own_recipe(tmp_path, capsys):
+    """Issue #1284 item 2, mechanised: the undo has one owner, and stdout shows it.
+
+    The receipt written beside the move already carried the measured spelling
+    (`git stash apply --index` with a message-selecting stash name). The tool's own `reversible:`
+    line was a *paraphrase* of it, and the paraphrase was the bare `git stash pop` —
+    one recovery, two spellings, and the one a reader sees on stdout is the one that
+    costs them the staged side and the stash. A paraphrase is a second copy that can
+    drift, so the line is now the receipt's own string, and this asserts that instead
+    of assuming it: re-word the daemon's recipe and stdout re-words with it.
+
+    That fix covered the branch where a receipt *exists*. The other branch — no
+    receipt, so no message to name — still wrote the spelling by hand, which is how a
+    third copy survived the change that was about copies. It now calls the same
+    function (`recovery_recipe`) with the message the reader substitutes, asserted by
+    `test_the_fallback_recipe_is_the_owners_recipe_not_a_paraphrase`, so both printers
+    are the owner and neither can drift from it.
+
+    What the *tool* cannot cover is prose that quotes the recipe in a document, and
+    the first attempt at a scanner for it was a false verdict: it required a paragraph
+    mentioning `stash pop` next to an "undoable"/"recoverable" word to also name
+    `--index`, which refused `emrg/server/scheduler.py`'s own note *recording the harm*
+    a plain pop did — prose that has to spell the wrong spelling out. That class is
+    specific to an *absence* test, so the document is pinned by the other shape: a
+    *presence* assertion that the recovery bullet still names the measured spelling
+    (`test_the_document_still_carries_the_measured_spelling`). Together with
+    `test_the_advertised_reversal_is_the_measured_one`, which measures the behaviour
+    those documents describe and names them so a failure points at the text to re-read,
+    the claim is pinned at both ends: what git does, and what the reader is told.
+    """
+    work, _head = _with_upstream(tmp_path)
+
+    assert _load().recover(work, apply=True) == 0
+    out = capsys.readouterr().out
+    git_dir = Path(_git(work, "rev-parse", "--absolute-git-dir").stdout.strip())
+    receipt = json.loads(
+        (git_dir / "emrg-recovery-receipt.json").read_text(encoding="utf-8")
+    )
+
+    assert "--index" in receipt["reversible_with"], (
+        "precondition: the daemon's recipe is the spelling that restores the state"
+    )
+    assert f"reversible: {receipt['reversible_with']}" in out, (
+        "the tool must print the receipt's own recipe, not a second copy of it that "
+        f"can drift; stdout was:\n{out}"
+    )
+
+
+def test_the_document_still_carries_the_measured_spelling():
+    """The reader-facing recipe is prose, so it can be *re-worded* back to the harm.
+
+    `DEVELOPMENT.md`'s recovery bullet is where a reader meets the undo, and nothing
+    mechanical connected it to the measurement above: re-wording that bullet to "every
+    byte one `git stash pop` away" left the whole file green (measured by
+    `how2how2how2-arch` on this PR, 34 passed). A *presence* assertion has no
+    false-verdict class — it fires on the spelling going missing, not on the wrong
+    spelling appearing — so it can hold this one line without repeating the scanner
+    that had to be dropped (see `test_the_tool_prints_the_receipts_own_recipe`).
+
+    What it deliberately cannot see is a document that states both spellings, or a
+    recipe moved to another sentence: it pins presence, which is weaker than a
+    scanner. The bullet is located by its own opening words, and a bullet that has
+    been re-wrapped or re-numbered is still the same claim; a bullet that is *gone*
+    fails here rather than skipping, because an assertion that cannot find its subject
+    has measured nothing.
+    """
+    bullet = _recovery_bullet()
+    assert "git stash apply --index" in bullet, (
+        "the recovery section must name the reversal that restores the staged side "
+        f"and keeps the stash — the spelling the receipt hands a reader; got:\n{bullet}"
+    )
+    assert "stash@{N}" in bullet, (
+        "the recipe has to select the stash by the message the receipt names, not by "
+        f"`stash@{{0}}` (the newest, which is this one only until the next is made); "
+        f"got:\n{bullet}"
+    )
+
+
+def test_a_receipt_from_an_earlier_recovery_is_not_printed(tmp_path):
+    """The recipe has to be *this* run's, so the receipt is matched to the detail.
+
+    A receipt left by an earlier recovery names a different stash, and printing it
+    would send a reader to `apply` someone else's stash — worse than the paraphrase
+    the one-owner change replaced. The detail the action just returned names the
+    stash it made, so that is the discriminator, and it is tested directly rather
+    than through a recovery whose receipt happens to be stale.
+    """
+    module = _load()
+    base = {"stash_message": "emrg-recovery-20260101T000000Z",
+            "reversible_with": "`git stash apply --index stash@{/old}`"}
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps(base), encoding="utf-8")
+
+    assert module._receipt_recipe(
+        str(path), "1 change(s) stashed as emrg-recovery-20260916T000000Z; HEAD unmoved"
+    ) is None, "a receipt naming a different stash is not this run's"
+    assert module._receipt_recipe(
+        str(path), "1 change(s) stashed as emrg-recovery-20260101T000000Z; HEAD unmoved"
+    ) == "`git stash apply --index stash@{/old}`"
+    assert module._receipt_recipe(str(tmp_path / "absent.json"), "anything") is None
+    broken = tmp_path / "broken.json"
+    broken.write_text("{ not json", encoding="utf-8")
+    assert module._receipt_recipe(str(broken), "anything") is None, (
+        "unreadable receipt -> None, so the caller falls back to the stated spelling "
+        "rather than crashing a recovery that already succeeded"
+    )
