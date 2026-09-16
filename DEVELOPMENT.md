@@ -160,9 +160,12 @@ citation of a host rant name the public record that landed it? A rant timestamp
 indexes `~/.emrg/rants.jsonl` **on the machine that wrote it**, so it is unresolvable
 for every other reader; a PR number stays resolvable. It exits `0` when the rule
 holds, `1` on a violation, and `2` when a file in the class cannot be read — `2` is
-not a pass. `evolution_prompt.md` is the template routine evolution must not edit, so
-its citations are listed as frozen debt rather than silently exempt; `--measure`
-prints the whole inventory.
+not a pass. The class includes `evolution_prompt.md`; the red line around that file
+covers the **running** copy — the one resolved from the loaded module, i.e.
+`<dir of scheduler.__file__>/evolution_prompt.md` — so the repository copy's citations
+are swept like every other file's and the frozen-debt list is empty (the mechanisms that
+hold a site out of the rule are exercised by synthetic tests rather than by a real
+entry). `--measure` prints the whole inventory.
 
 ### Electron GUI
 

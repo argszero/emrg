@@ -14,11 +14,13 @@ The class this applies to
 The **instruction class**: prose a reader is expected to *act on* - the built-in
 task-prompt templates, the evolution template, the upgrade/vibe-check prompts, the
 GUI redesign spec, and the CI README the host reads to set the release Secrets. Ten
-files, measured 2026-09-16: 49 citation sites over 34 distinct timestamps, counted
-as `len({t for s in sites for t in s.timestamps})` over `scan_tree` - the same two
-numbers for the class before the CI README joined it are 47 and 32, and each is a
-reading of this tree rather than an estimate (the figure printed here said 29 until
-issue #1289 measured it: neither `32` nor the 27 records-only timestamps). Code
+files, measured 2026-09-16: 49 citation sites over 35 distinct timestamps, counted
+as `len({t for s in sites for t in s.timestamps})` over `scan_tree` - the same tree
+reads 47 sites and 33 timestamps without the CI README (47/32 on `f07368ba`, the
+master commit it joined, before this template's own citations were rewritten into
+records), and each figure is a reading of the tree it names rather than an estimate.
+(The figure printed here said 29 until issue #1289 measured it: neither it nor the
+27 records-only timestamps.) Code
 comments are deliberately out of scope (the same
 spelling occurs in 1300+ lines there): a comment's citation is a historical note
 about why the line exists, and rewriting those burns the `git log -S` trail that
@@ -58,17 +60,26 @@ verified against GitHub when the sweep was made (a reviewer sampled 7 of the 26
 inserted pairs, each credited PR merged with the timestamp present in its own
 diff).
 
-The frozen debt
----------------
-`evolution_prompt.md` is the one template routine evolution must not edit (host
-rant 2026-08-17T14:22:21; asserted by
-`tests/test_rants_single_writer.py::_UNEDITABLE_TEMPLATES`), so its citations are
-the caller's to sweep, not this guard's. They are listed in `DEBT` with a reason
-and are the *only* permitted host-local-only sites. An entry that no longer
-occurs is itself a failure: a debt list that cannot shrink grows until it means
-"everything", which is the same as no rule. That is also why the list holds
-`(file, timestamp)` pairs rather than a count - a count can stay true while the
-citations behind it change.
+The frozen debt (empty as of 2026-09-16)
+---------------------------------------
+`DEBT` is the mechanism by which a site may stay host-local-only: it is a
+`(file, timestamp)` set, and an entry that no longer occurs is itself a failure,
+because a debt list that cannot shrink grows until it means "everything", which is
+the same as no rule.
+
+It is **empty**. The list existed for one file, `evolution_prompt.md`, on the reading
+that routine evolution must not edit it - and the host has since ruled the boundary of
+that red line (issue #1252): it forbids editing the copy that is **running**, i.e. the
+one resolved as `Path(scheduler.__file__).parent / "evolution_prompt.md"`, and not the
+repository copy. With the repository copy sweepable, its sites carry records like every
+other site and the debt is gone; the running copy is replaced on the normal release
+path, not by a cycle.
+
+The mechanism stays, and stays tested: the synthetic-entry tests in
+`tests/test_rant_citations.py` build a debt list, exercise the exemptions and assert the
+stale report, so an empty real list is not an untested code path. What the real tree now
+asserts is the opposite of what it asserted while the debt existed - that **no** site is
+exempt - which is the claim that would fail if an entry were quietly added back.
 
 Exit codes
 ----------
@@ -88,7 +99,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: The instruction class, as measured 2026-09-16: ten files, 49 sites, 34
+#: The instruction class, as measured 2026-09-16: ten files, 49 sites, 35
 #: timestamps (the guard's own `scan_tree` counts them; see the module docstring).
 #: Names, not a glob: the class is a decision (prose a reader acts on),
 #: so a new template has to be added here deliberately rather than swept in by a
@@ -100,9 +111,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 #: (issue #1289). Adding a *file* is the deliberate act the comment above asks for;
 #: the alternative - a glob over every `*.md` - would sweep in the code comments the
 #: docstring excludes, which is why this is a list and not a pattern.
+#:
+#: A name listed twice is a failure and not a harmless repetition: the guard scans it
+#: twice, so every site in it is counted twice and the count this file prints - and
+#: the docstring above quotes - inflates in silence. Measured 2026-09-16: resolving
+#: #1290 x #1293 by keeping both sides of the hunk listed
+#: `emrg/server/evolution_prompt.md` twice and the guard still returned `rc=0`, now
+#: printing `58 site(s)` instead of 49. `duplicated_files` is where that is checked.
 INSTRUCTION_FILES = (
     ".github/workflows/README.md",         # tells the host which Secrets to set
-    "emrg/server/evolution_prompt.md",     # host-owned: its sites are DEBT
+    "emrg/server/evolution_prompt.md",     # swept: the red line covers the running copy
     "emrg/server/journal_prompt.md",
     "emrg/server/open_source_prompt.md",
     "emrg/server/promote_prompt.md",
@@ -113,32 +131,24 @@ INSTRUCTION_FILES = (
     "docs/gui-redesign.md",
 )
 
-#: The one file routine evolution must not edit, so its citations wait for the
-#: caller. Kept as a name here rather than imported from the test module: a guard
-#: that imported its own scope from a test would report a failure when the test
-#: moves, not when the tree changes.
+#: The template whose **running** copy is the one routine evolution must not edit (the
+#: host's reading of the red line, issue #1252). Kept as a name here because the debt
+#: list may only ever hold sites in this file, and because a name is not imported from
+#: the test module: a guard that imported its own scope from a test would report a
+#: failure when the test moves, not when the tree changes.
 HOST_OWNED = "emrg/server/evolution_prompt.md"
 
-#: `(file, timestamp)` -> why this site may stay host-local-only. Every entry is
-#: in the host-owned file for the same reason; the reason is spelled per entry so
-#: the list cannot quietly become "things nobody got to". The set is the measured
-#: one (`--measure`), not a hand-copied list: it is eight sites, and the two
-#: spellings that are not sites of their own (`+ 11:00:31` is date-less, so it has
-#: no id; `+ 2026-08-28T22:12:16` is a continuation) are covered by DATEDLESS
-#: and by their block rather than by an entry each.
-DEBT: dict[tuple[str, str], str] = {
-    (HOST_OWNED, ts): "host-owned template (host rant 2026-08-17T14:22:21)"
-    for ts in (
-        "2026-08-07T10:17:27",
-        "2026-08-10T08:59:57",
-        "2026-08-12T18:03:26",
-        "2026-08-17T12:09:57",
-        "2026-08-17T14:22:21",
-        "2026-08-18T16:42:52",
-        "2026-08-23T08:04:26",
-        "2026-09-14T20:14:56",
-    )
-}
+#: `(file, timestamp)` -> why this site may stay host-local-only. **Empty**, and the
+#: reason it is worth keeping rather than deleting: the set is what makes "this site
+#: is allowed to cite no public record" a decision with a name attached, and the
+#: stale check below is what stops it from growing silently. It held the eight
+#: timestamps of `HOST_OWNED` until 2026-09-16, when the host ruled that the red line
+#: covers the running copy rather than the repository copy (issue #1252) - so the
+#: repository copy was swept and the list emptied in the same change, which the
+#: docstring's "the two halves are one action" note already asked for. Every entry
+#: used to be in the host-owned file for the same reason; the reason was spelled per
+#: entry so the list could not quietly become "things nobody got to".
+DEBT: dict[tuple[str, str], str] = {}
 
 #: A citation: the word "rant"/"rants" followed within three non-digits by a
 #: timestamp. Three characters, not a line: `(rant 2026-…` and `(rants\n  2026-…`
@@ -282,8 +292,35 @@ def scan(text: str, path: str) -> list[Site]:
     return sites
 
 
-def scan_tree(root: Path, files: tuple[str, ...] = INSTRUCTION_FILES) -> tuple[list[Site], list[str]]:
-    """Sites in `root`, plus the names of files that could not be read."""
+def duplicated_files(files: tuple[str, ...] | None = None) -> list[str]:
+    """Class entries listed more than once, in the order they first repeat.
+
+    A duplicated name is a defect in the **class**, not in a citation: the file is
+    scanned twice, so it contributes its sites twice, and no other rule can see it -
+    every site still resolves, so a tree with a double-counted class is green. That
+    is why this is enforced here rather than left to the count being "known": the
+    number is printed, and nothing asserts it (issue #1293's review, 2026-09-16).
+    """
+    listed = INSTRUCTION_FILES if files is None else files
+    seen: set[str] = set()
+    repeated: list[str] = []
+    for name in listed:
+        if name in seen and name not in repeated:
+            repeated.append(name)
+        seen.add(name)
+    return repeated
+
+
+def scan_tree(root: Path, files: tuple[str, ...] | None = None) -> tuple[list[Site], list[str]]:
+    """Sites in `root`, plus the names of files that could not be read.
+
+    `files` defaults to `INSTRUCTION_FILES` by lookup at call time rather than by
+    binding at definition time: a test that sets the class list has to reach the
+    scan, and a default bound at `def` time silently ignores it (measured
+    2026-09-16: `mod.INSTRUCTION_FILES = ("not-here.md",)` left `main()` scanning
+    the real ten files).
+    """
+    files = INSTRUCTION_FILES if files is None else files
     sites: list[Site] = []
     missing: list[str] = []
     for rel in files:
@@ -343,6 +380,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the inventory instead of enforcing the rule")
     args = parser.parse_args(argv)
 
+    repeated = duplicated_files()
+    if repeated:
+        for name in repeated:
+            print(f"duplicate class entry {name}: INSTRUCTION_FILES lists it twice, so "
+                  f"its sites are counted twice and the count this guard prints - the "
+                  f"one the module docstring quotes - inflates by that file's sites "
+                  f"while every citation rule still passes")
+        print(f"FAIL: {len(repeated)} duplicated instruction-class entr(y/ies)")
+        return 1
+
     sites, missing = scan_tree(REPO_ROOT)
     if missing:
         print(f"unmeasurable: {len(missing)} file(s) in the instruction class are "
@@ -376,9 +423,14 @@ def main(argv: list[str] | None = None) -> int:
             print(line)
         print(f"FAIL: {len(found)} problem(s)")
         return 1
+    # The debt half of the sentence is conditional because it is now usually absent:
+    # "0 frozen debt entries in the host-owned template" names a list and asserts
+    # nothing, and a line that reports a number without a reader is how the count in
+    # this file's docstring went stale before (issue #1289).
+    debt = (f", {len(DEBT)} frozen debt entr(y/ies) in the host-owned template"
+            if DEBT else ", no frozen debt")
     print(f"OK: every citation site in the instruction class names a public record "
-          f"({len(sites)} site(s), {len(DEBT)} frozen debt entr(y/ies) in the "
-          f"host-owned template)")
+          f"({len(sites)} site(s){debt})")
     return 0
 
 

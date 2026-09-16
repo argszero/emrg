@@ -49,7 +49,7 @@ gh auth status 2>&1 || {
   # usually contain a valid GitHub token that can be reused as GH_TOKEN
   # (never persisted to disk, never printed in plaintext).
   #
-  # ⚠️ Platform guard (rant 2026-08-07T10:17:27): on Windows, `git credential
+  # ⚠️ Platform guard (PR #545, rant 2026-08-07T10:17:27): on Windows, `git credential
   # fill` triggers Git Credential Manager GUI popups inside the non-interactive
   # daemon session, and the daemon's env already forces GIT_TERMINAL_PROMPT=0
   # / GCM_INTERACTIVE=never — so credential extraction must be SKIPPED on
@@ -242,7 +242,7 @@ The Contributor's role is **contributing code and knowledge**, not gatekeeping. 
 
 Read the last 3-5 cycle records and analyze:
 
-- **New format** (rant 2026-08-12T18:03:26): memory entries under `{{ evolution_cwd }}/.emrg/memory/` whose frontmatter has `type: task` + `scope: project` and an id starting with `cyc` (e.g. `cyc20260812-...`); they are indexed in `MEMORY.md`
+- **New format** (PR #708, rant 2026-08-12T18:03:26): memory entries under `{{ evolution_cwd }}/.emrg/memory/` whose frontmatter has `type: task` + `scope: project` and an id starting with `cyc` (e.g. `cyc20260812-...`); they are indexed in `MEMORY.md`
 - **Legacy format** (keep for compatibility): `evolution-cycle-*.md` files under `{{ evolution_cwd }}/.emrg/memory/` — old records remain readable during the transition; do not create new ones
 
 - **Repeated patterns**: making the same kind of trivial per-file changes? → batch them. Repeatedly fixing the same feature? → refactor
@@ -263,7 +263,7 @@ Every cycle must curate `~/.emrg/rants.jsonl`. Each rant has a three-state `stat
 **State transition rules**: pending → in_progress → completed. Never jump directly from pending to completed.
 Old entries without a `status` field are treated as pending.
 
-- **Marking complete**: a rant is complete when **all its PRs are merged and the evolution's own verification passes** (rant 2026-08-10T08:59:57 — "completed 不再等宿主验证"：等待宿主实测没有任何意义，宿主发现问题会新起 rant)。Acceptance items in the rant must be **self-verifiable by the evolution** (tests, CI, code review) — do NOT write "host must verify on their machine / 宿主实测" style acceptance items, they block convergence forever. Set status to `"completed"` and append `"completed": "<ISO timestamp>"`
+- **Marking complete**: a rant is complete when **all its PRs are merged and the evolution's own verification passes** (PR #605, rant 2026-08-10T08:59:57 — "completed 不再等宿主验证"：等待宿主实测没有任何意义，宿主发现问题会新起 rant)。Acceptance items in the rant must be **self-verifiable by the evolution** (tests, CI, code review) — do NOT write "host must verify on their machine / 宿主实测" style acceptance items, they block convergence forever. Set status to `"completed"` and append `"completed": "<ISO timestamp>"`
 - **Host feedback goes through new rants**: if the host finds a fix insufficient, they open a new rant (existing mechanism) — never keep a rant in_progress waiting for host sign-off
 - **Staged progress rule**: when splitting a large change into stages (multiple PRs), keep status **in_progress** until the FINAL PR merges (a single PR merge is NOT grounds for completed); record progress as `"Stage N done (PR #xxx), remaining: <remaining PRs>"`, and only mark completed when all PRs are merged
 - **Correction mechanism**: if a new rant reveals a completed rant's fix was insufficient, immediately revert it to in_progress, note the reason in progress, and keep working on the remaining items
@@ -271,11 +271,11 @@ Old entries without a `status` field are treated as pending.
 - **⚡ Sort constraint**: every rewrite must be ordered by `timestamp` ascending (oldest first, newest last). Do not group by category (handled/unhandled); do not change chronological order. Read all entries → modify (mark completed / delete old entries) → `sorted(..., key=lambda r: r.get("timestamp", ""))` → write
 - **⚡ Field order constraint**: each JSON line's field order MUST be `timestamp → project → status → progress → completed → message` (**message last**). Build the dict in this order and `json.dumps` preserves it. The message is long; putting it last makes manual review of status fields easier.
 - **Always write with `json.dumps(..., ensure_ascii=False)`**
-- **⚡ Unified rant tool** (rant 2026-08-18T16:42:52): all reads/writes of `~/.emrg/rants.jsonl` MUST go through the `submit_rant` tool's actions — `submit` (write new), `list` (view), `update` (mark status/progress/completed, state machine enforced), `cleanup` (keep-10 rule). **Never rewrite the file with hand-written bash/python** — the 2026-08-18 incident (format drift to array rows, field loss, history pruning) was caused by inline scripts. Curation flow: `list` → `update` → `cleanup`.
+- **⚡ Unified rant tool** (PR #845, rant 2026-08-18T16:42:52): all reads/writes of `~/.emrg/rants.jsonl` MUST go through the `submit_rant` tool's actions — `submit` (write new), `list` (view), `update` (mark status/progress/completed, state machine enforced), `cleanup` (keep-10 rule). **Never rewrite the file with hand-written bash/python** — the 2026-08-18 incident (format drift to array rows, field loss, history pruning) was caused by inline scripts. Curation flow: `list` → `update` → `cleanup`.
 
 When reading rants, follow these rules:
 - Any unhandled rants? Previously skipped? Large changes can be staged
-- Match the rant's `project` field against **either** this task's `config.project` (**`{{ task.project }}`**) or the owner/repo form (**`{{ owner }}/{{ repo }}`**) — equal to either counts as a match; **ignore rants without a `project` field entirely** (rant 2026-08-17T12:09:57: the two forms must both match — a rant written with one form must never silently fail to match the other)
+- Match the rant's `project` field against **either** this task's `config.project` (**`{{ task.project }}`**) or the owner/repo form (**`{{ owner }}/{{ repo }}`**) — equal to either counts as a match; **ignore rants without a `project` field entirely** (PR #816, rant 2026-08-17T12:09:57: the two forms must both match — a rant written with one form must never silently fail to match the other)
 
 > **Note**: first check whether a rant was already handled, to avoid duplicate work:
 > 1. Check `git log --oneline -20` for commits referencing the rant (search the rant's timestamp or message keywords) — **note: a commit referencing the rant timestamp is only evidence the rant was touched, NOT sufficient proof of completion**. You must further verify: does the rant have unmet acceptance items? Are there unmerged branches? An early PR merge in a multi-stage effort does not mean the rant is done.
@@ -376,15 +376,15 @@ gh pr create -R {{ owner }}/{{ repo }} --title "emrg: <short-description>" --bod
 
 ### 6. Record
 
-Create a **cycle memory entry** (rant 2026-08-12T18:03:26 — no more standalone `evolution-cycle-*.md` files; the record lives in the memory system):
+Create a **cycle memory entry** (PR #708, rant 2026-08-12T18:03:26 — no more standalone `evolution-cycle-*.md` files; the record lives in the memory system):
 
 - Write `{{ evolution_cwd }}/.emrg/memory/cycle-{{ timestamp }}.md` with YAML frontmatter:
   - `id`: `cyc{{ timestamp }}` (e.g. `cyc20260812-180325`)
   - `event_at` / `created_at` / `updated_at`: ISO timestamps
   - `type: task`, `scope: project`, `status: active` (cycle in progress) or `completed` (final)
 - Body: findings, changes, verification results, expected effects (same content as before, just a memory file)
-- The `MEMORY.md` index in that directory is **not** a per-cycle obligation — it is kept on demand, by the session, when there is something worth indexing (rant 2026-09-14T20:14:56). The durable record is the `cycle-<ts>.md` detail file above
-- ⚡ **Index hygiene protocol — whenever you write to one of these indexes** (rants 2026-08-23T08:04:26 + 11:00:31 — the daemon embeds MEMORY.md into the system prompt raw, and evolution's direct file writes bypass memory_store's guards; an unbounded index once reached 787KB/2931 lines = 77% of a 452,972-char prompt, ~250K all-miss tokens per request). These rules bind **the write**, not the cycle — apply to **every MEMORY.md you maintain** (evolution-level, source-project-level, session-level). Rules:
+- The `MEMORY.md` index in that directory is **not** a per-cycle obligation — it is kept on demand, by the session, when there is something worth indexing (PR #1249, rant 2026-09-14T20:14:56). The durable record is the `cycle-<ts>.md` detail file above
+- ⚡ **Index hygiene protocol — whenever you write to one of these indexes** (PR #941 + PR #944, rants 2026-08-23T08:04:26 + 2026-08-23T11:00:31 — the daemon embeds MEMORY.md into the system prompt raw, and evolution's direct file writes bypass memory_store's guards; an unbounded index once reached 787KB/2931 lines = 77% of a 452,972-char prompt, ~250K all-miss tokens per request). These rules bind **the write**, not the cycle — apply to **every MEMORY.md you maintain** (evolution-level, source-project-level, session-level). Rules:
   - **Title-only rows**: each index row is a **one-line summary** (id linked to the filename). **Never embed a cycle's summary/NTE text into the index row** — that text lives in the `cycle-<ts>.md` detail file only.
   - **Hard cap: keep at most the 50 most recent cycle rows** in each MEMORY.md. Before adding a row that would exceed 50: append the oldest cycle rows to `cycle-archive-YYYYMMDD.md` **in the same directory** (create-if-missing, append-only, never rewrite or dedupe), then remove those rows from MEMORY.md. **Detail files (`cycle-*.md`) are never deleted** — only index rows move.
   - **Archive files are excluded from the system prompt** (the daemon embeds only `MEMORY.md`): never reference `cycle-archive-*.md` in MEMORY.md rows, never re-add archived rows to the index, never paste archive content into MEMORY.md or the prompt. Archived rows stay readable via the `read` tool.
@@ -408,5 +408,5 @@ Create a **cycle memory entry** (rant 2026-08-12T18:03:26 — no more standalone
 - Do not modify `~/.emrg/config.toml`
 - Do not modify `max_tool_rounds`
 - Do not modify files under `{{ evolution_cwd }}` outside `{{ source_dir }}/`
-- **Do not modify this file (`evolution_prompt.md`) during normal evolution** — it is a **stable template** (host rant 2026-08-17T14:22:21). Routine evolution must not edit it, and must not append changelog/quick-reference history to it. The ONLY exception is when the evolution target itself is improving `evolution_prompt.md` (a prompt-specific rant like this one). "Was this feature already done?" is answered by the **memory system** (`.emrg/memory/` + MEMORY.md + `cycle-*.md` records) and `git log` — not by a static in-prompt history table.
+- **Do not modify this file (`evolution_prompt.md`) during normal evolution** — it is a **stable template** (PR #822, host rant 2026-08-17T14:22:21). Routine evolution must not edit it, and must not append changelog/quick-reference history to it. The ONLY exception is when the evolution target itself is improving `evolution_prompt.md` (a prompt-specific rant like this one). "Was this feature already done?" is answered by the **memory system** (`.emrg/memory/` + MEMORY.md + `cycle-*.md` records) and `git log` — not by a static in-prompt history table.
 - Must push
