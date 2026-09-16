@@ -394,7 +394,9 @@ class TaskHandler:
         already recoverable from a commit git holds, so discarding it loses nothing.
         Read-only operations only, so it runs under the tier it is deciding about.
 
-        The criterion, per ``git status --porcelain`` entry:
+        The criterion, per ``git status --porcelain -z`` entry — the ``-z`` form on
+        purpose, because the plain one **quotes** a path that needs it and every
+        comparison below is about a *path* (see the note at the call site):
 
         * ``??`` untracked is unique **unless its content is already in ``HEAD``
           under the same path** (issue #1277) — the ``git rm --cached f`` shape,
@@ -438,11 +440,41 @@ class TaskHandler:
                 encoding="utf-8", errors="replace",
             )
 
-        status = git("status", "--porcelain", "--untracked-files=normal")
+        # `-z` is not a formatting preference, it is what makes the paths in here the
+        # *paths*. The v1 short format **quotes** any path that needs it — a space, a
+        # quote, a backslash, or any byte > 0x7f under the default `core.quotePath=true`
+        # — so `"a b.txt"` and `"\346\226\207\346\241\243.txt"` arrived with literal
+        # quote characters in them, and every comparison below (`hash-object -- <path>`,
+        # `HEAD:<path>`, `<upstream>:<path>`, `ls-files -s -- <path>`) was asked about a
+        # name that cannot resolve. Measured before this line existed: the ` M` geometry
+        # whose bytes are the upstream tip's — the 33-cycle deadlock shape — answered
+        # *unique* for a path with a space or a non-ASCII name, i.e. the guard refused a
+        # tree it has no reason to refuse, on a host whose filenames are not all ASCII.
+        status = git("status", "--porcelain", "-z", "--untracked-files=normal")
         if status.returncode != 0:
             return True, "the working tree state could not be read"
         if not status.stdout.strip():
             return False, "the tree is clean"
+
+        # In `-z` mode a rename or copy spends a **second** NUL-separated field on the
+        # origin path, which carries no status prefix of its own (measured:
+        # `R  moved name.txt\0orig name.txt\0`). Left in the walk it would be read as an
+        # entry whose "status" is the first two characters of a filename — an unexamined
+        # entry, which is the fail-open direction. The condition is the index column
+        # alone, which is what git emits it for: measured that a worktree-side rename
+        # never appears as `R` (` D` + `??` instead), including with
+        # `status.renames=true` and `status.renames=copies` set.
+        fields = status.stdout.split("\0")
+        lines: list[str] = []
+        i = 0
+        while i < len(fields):
+            entry = fields[i]
+            i += 1
+            if not entry:
+                continue
+            lines.append(entry)
+            if entry[0] in ("R", "C"):
+                i += 1  # the origin path, which is not an entry of its own
 
         # The second place a blob can already live. A repo with no upstream keeps
         # only HEAD, which can only make *more* dirt count as unique (safe side).
@@ -454,10 +486,12 @@ class TaskHandler:
                 break
 
         unique: list[str] = []
-        for line in status.stdout.splitlines():
+        for line in lines:
             if not line.strip():
                 continue
-            code, path = line[:2], line[3:].strip()
+            # The path is taken verbatim, not stripped: with `-z` there is no newline
+            # to remove, and a name may legitimately begin or end with a space.
+            code, path = line[:2], line[3:]
             # Porcelain v1 is two columns: the index status and the worktree status.
             # Naming them is what makes "which side is this fact about?" askable —
             # several defects here came from reading the pair as one flag.
