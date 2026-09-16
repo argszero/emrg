@@ -755,6 +755,83 @@ def test_an_unattributable_veto_still_resets_the_run(mod, monkeypatch, capsys):
     assert "SHORT 0/3" in out, out
 
 
+def test_an_approval_naming_several_cycle_ids_counts_for_none_of_them(mod, monkeypatch, capsys):
+    """The reading this counter used to do, and why a wrong vote is worse than none.
+
+    Measured on the real history 2026-09-16 (`cyc20260917-014155`): a review body that
+    named the two approvals it was voiding alongside its own id was read with
+    `_CYCLE_RE.search`, i.e. as a vote **by the first id in the text** - a rejection
+    filed against a cycle that had never written one. The mirror image is the one that
+    threatens the gate: the same mistake credits a PR with a vote from a cycle that did
+    not cast it, so a PR could reach 3/3 on fewer distinct cycles than it reports.
+
+    The two bodies below differ by one clause, and both name their own cycle **first**
+    (which is what the old `search` read); only the one-id body may count. A rule that
+    simply dropped every body mentioning an id twice would pass the second assertion
+    and fail the first, so the pair is the test.
+    """
+    mine = "cyc20260911-040000"
+    two_ids = (
+        f"\u2705 LGTM - cycle `{mine}`; the approvals of cyc20260911-010000 and "
+        "cyc20260911-020000 are void at this head"
+    )
+    assert len(mod._CYCLE_RE.findall(two_ids)) == 3  # the shape under test, not a guess
+
+    base = [_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+            _approve("cyc20260911-020000", "2026-09-11T02:00:00Z")]
+
+    # the one-id body: the same claim without the two names in it counts, as before
+    one_id = f"\u2705 LGTM - cycle `{mine}`"
+    assert _run(mod, monkeypatch, FakeGh(base + [_review("2026-09-11T03:00:00Z", one_id)])) == 0
+
+    fake = FakeGh(base + [_review("2026-09-11T03:00:00Z", two_ids)])
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    verdict = mod.check_pr(1, mod.DEFAULT_MIN_VOTES)
+    ambiguous = verdict.votes[-1]
+    assert ambiguous.cycle is None, (
+        "a body naming three ids has no single author, so it must not be filed under "
+        f"the first one the text mentions ({ambiguous.cycle})"
+    )
+    assert ambiguous.ids == ("cyc20260911-040000", "cyc20260911-010000",
+                             "cyc20260911-020000")
+    assert not ambiguous.valid and verdict.valid_count == 2
+
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 2/3" in out, out
+    assert "3 cycle ids" in out, "the label must say how many ids the body named"
+    assert "which cycle wrote it cannot be measured" in out, out
+    # The discriminator against the old reading: `_CYCLE_RE.search` found the first id
+    # and printed exactly this line. The ids still appear in the *reason* (it has to
+    # name them), so the assertion is about the verdict column, not about the text.
+    assert "OK  cyc20260911-040000" not in out, out
+    assert "VOID (3 cycle ids)" in out, out
+
+
+def test_a_multi_id_veto_keeps_its_force_though_it_cannot_be_attributed(
+    mod, monkeypatch, capsys
+):
+    """The other direction of the same rule: unattributable is not the same as inert.
+
+    A veto's effect on the run does not depend on our ability to name its author (the
+    sibling rule for a body with *no* id says the same). Identifying several ids must
+    not become a way for an objection to be skipped, or a cycle could void three
+    approvals by quoting them in its rejection.
+    """
+    fake = FakeGh(_three_votes() + [
+        _review("2026-09-11T04:00:00Z",
+                "\u274c Needs fix - cycle `cyc20260911-050000`; the \u2705 of "
+                "cyc20260911-010000 predates the head"),
+    ])
+    rc = _run(mod, monkeypatch, fake)
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 0/3" in out, out
+    assert "NO  " in out, "an unattributable veto must not render in the approval column"
+
+
 # --- the run rule ----------------------------------------------------------
 
 

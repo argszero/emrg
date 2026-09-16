@@ -50,6 +50,13 @@ the tool would call a PR mergeable on reviews a ❌ had already answered.
 
 The cycle id is read from the body (`cyc20260911-091230`); a vote without one is
 reported as unattributable rather than counted, since distinctness cannot be shown.
+**Every** id in the body is read, and a body naming several is unattributable too:
+the counter used to take the first one, which filed a rejection under a cycle that
+had never written it (measured 2026-09-16, `cyc20260917-014155` — a body naming the
+two approvals it was voiding alongside its own id was recorded as a `NO` by
+`cyc20260917-005148`). Which cycle wrote such a body is not derivable from it, and a
+mis-attributed vote is worse than a missing one: it can credit distinctness a PR does
+not have. `cast-vote.py` refuses to post a body like that; this is the reading side.
 
 Votes are necessary, not sufficient: the mergeable clause
 ---------------------------------------------------------
@@ -654,6 +661,26 @@ class Vote:
     cycle: str | None
     valid: bool
     why: str
+    #: Every cycle id the body named, in order of appearance. Length 1 is the normal
+    #: case and is what `cycle` is set from; anything else is *why* `cycle` is None,
+    #: and the label column has to say which of the two it is - "no cycle id" and
+    #: "three cycle ids" are different facts about the body (see the reader loop).
+    ids: tuple[str, ...] = ()
+
+
+def _cycle_label(vote: Vote) -> str:
+    """The label column: this vote's cycle, or the reason there is not one.
+
+    Two different facts both leave `cycle` empty, and collapsing them into
+    "(no cycle id)" would misreport the second: a body that named several ids
+    *has* ids, it just has no single author. The label says how many, so a reader
+    can tell "wrote none" from "wrote all of these" without reading the note.
+    """
+    if vote.cycle:
+        return vote.cycle
+    if len(vote.ids) > 1:
+        return f"({len(vote.ids)} cycle ids)"
+    return "(no cycle id)"
 
 
 @dataclass
@@ -903,16 +930,32 @@ def check_pr(
         kind = _classify(body)
         if kind == "comment":
             continue
-        match = _CYCLE_RE.search(body)
-        cycle = match.group(0) if match else None
+        # Every id the body names, not the first one. One id is the handle a vote is
+        # counted under; several are not a *weaker* handle but an unusable one, and
+        # the difference is not academic: taking the first id in the text mis-recorded
+        # a rejection under a cycle that never wrote it (measured 2026-09-16,
+        # cyc20260917-014155 - a body that named the two approvals it was voiding
+        # alongside its own id was filed as `NO cyc20260917-005148`, a veto by a cycle
+        # whose review said ✅). Which cycle wrote a body that names several is not
+        # derivable from the body, so the honest verdict is "not measurable" and it
+        # counts for none of them. `cast-vote.py` refuses to *post* such a body; this
+        # is the reading-side guard for a review posted with `gh pr review` directly.
+        ids = _CYCLE_RE.findall(body)
+        cycle = ids[0] if len(ids) == 1 else None
         if at <= push_time:
             votes.append(
-                Vote(at, kind, cycle, False, f"submitted before the head push ({push_time})")
+                Vote(at, kind, cycle, False, f"submitted before the head push ({push_time})",
+                     tuple(ids))
             )
+        elif len(ids) > 1:
+            votes.append(Vote(at, kind, None, False,
+                f"the vote body names {len(ids)} cycle ids ({', '.join(ids)}) - which "
+                "cycle wrote it cannot be measured, so it counts for none of them; a "
+                "vote body must name exactly one", tuple(ids)))
         elif cycle is None:
             votes.append(Vote(at, kind, cycle, False, "no cycle id in the vote body"))
         else:
-            votes.append(Vote(at, kind, cycle, True, ""))
+            votes.append(Vote(at, kind, cycle, True, "", tuple(ids)))
 
     # Walk the votes in order, resetting the run on a veto, and counting each
     # cycle at most once inside the trailing run.
@@ -1060,7 +1103,7 @@ def main(argv: list[str] | None = None) -> int:
                     # itself (measured 2026-09-11 on #1133: four lines read
                     # "OK - VOID").
                     mark, note = "VOID", vote.why
-                print(f"    {vote.at} {mark} {vote.cycle or '(no cycle id)'} - {note}")
+                print(f"    {vote.at} {mark} {_cycle_label(vote)} - {note}")
 
     # Two ways to fail, with different cures, so they are reported separately rather
     # than as one "not ready": a SHORT PR needs more review; a BLOCKED one needs the
