@@ -68,7 +68,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from emrg.server.scheduler import TaskHandler  # noqa: E402  (needs the path above)
+from emrg.server.scheduler import TaskHandler, recovery_recipe  # noqa: E402  (needs the path above)
 
 
 def _git(repo: Path, *args: str, timeout: int = 30):
@@ -181,14 +181,14 @@ def recover(repo: Path, apply: bool) -> int:
     # — the receipt said `apply --index`, this line said a bare `git stash pop` — and
     # the spelling a reader saw here is the one that costs them the staged side and the
     # stash itself. `None` means the receipt is unreadable or belongs to an earlier
-    # recovery, and the fallback below then states the measured spelling by hand.
+    # recovery, and there is then no *this run's* message to name, so the fallback
+    # prints the same recipe with the placeholder the reader substitutes from
+    # `git stash list` — the same function, not a third copy of it.
     recipe = _receipt_recipe(receipt, detail)
     if recipe:
         print(f"reversible: {recipe}")
     else:
-        print("reversible: `git stash list` -> the named stash, then")
-        print("  `git stash apply --index stash^{/<message>}` (the stash is kept;")
-        print("  a bare `git stash pop` takes the newest and consumes it)")
+        print(f"reversible: {recovery_recipe('<message>')}")
     # The path is not the receipt (issue #1284): `_receipt_path` computes where one
     # *would* be written, so the branch below used to be unreachable — it printed a
     # path for a file that an `OSError` had kept from existing. Ask the file — and ask

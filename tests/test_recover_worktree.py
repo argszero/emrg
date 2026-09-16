@@ -20,6 +20,14 @@ import pytest
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "recover-worktree.py"
 DOC = Path(__file__).resolve().parent.parent / "DEVELOPMENT.md"
 
+#: The one owner of the undo spelling (issue #1284), imported rather than re-spelled:
+#: a test that copies the string it is checking cannot see the copy drift. Both
+#: printers in the tree — the daemon's receipt and the manual tool's fallback — are
+#: asserted against this function, so the only way to change the spelling is to
+#: change it in one place, and the only thing left to assert *about* it is which
+#: stash it names and that `--index` is in it.
+from emrg.server.scheduler import recovery_recipe  # noqa: E402  (repo root is on sys.path)
+
 #: The recovery bullet whose prose is the reader-facing undo recipe. Its opening
 #: words are the anchor, not a line number: the section is re-wrapped and
 #: re-numbered by edits that have nothing to do with the recipe, and the anchor is
@@ -593,6 +601,13 @@ def test_the_tool_writes_a_receipt_of_what_it_moved(tmp_path):
     assert any(line.startswith(" M") for line in receipt["status_before"])
     assert receipt["status_after"] == []
     assert "stash" in receipt["action"]
+    # The spelled route is the one owner's, not a copy of it: this asserts identity
+    # with the shared recipe, so a receipt that drifted from the function (or a
+    # function that drifted from the receipt) fails here rather than in a reader's
+    # shell. The substrings below only say *what* the owner has to contain.
+    assert receipt["reversible_with"] == recovery_recipe(receipt["stash_message"]), (
+        "the receipt must carry the one owner's recipe for *this* stash"
+    )
     # The route must name *this* stash: a host may already have stashes, so a bare
     # `git stash pop` is only correct until the next one is made (measured on the
     # authoring workspace, which held an unrelated `stash@{0}` when this was written).
@@ -636,6 +651,91 @@ def test_the_tool_says_when_the_receipt_could_not_be_written(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "receipt: could not be written" not in out, out
     assert f"receipt: {Path(_git(control, 'rev-parse', '--absolute-git-dir').stdout.strip()) / 'emrg-recovery-receipt.json'}" in out, out
+
+
+def test_the_fallback_recipe_is_the_owners_recipe_not_a_paraphrase(tmp_path, capsys):
+    """Issue #1284, the branch a receipt-less recovery prints: one owner, not three.
+
+    The tool prints its `reversible:` line from the receipt when it has this run's
+    receipt, and it used to write the spelling **by hand** when it did not — the exact
+    branch a reader lands on when the receipt could not be read. Two copies of a
+    spelling is how the wrong one gets printed, and this pair did disagree once (the
+    receipt said `apply --index`, this line said a bare `git stash pop`), so the
+    fallback now calls the same function the receipt is built from. Measured gap this
+    closes: the branch was *reached* by the test above but its text was named in no
+    test at all — grepping the suite for the fallback's wording found nothing, so a
+    re-worded fallback was a silent edit.
+
+    The assertion is identity with the owner rather than a substring of it: a
+    paraphrase that still contained `--index` would pass a substring test, and the
+    paraphrase is the defect. The placeholder is asserted too, because the fallback's
+    one honest difference from the receipt is that this run's message is unknown here.
+    """
+    work, _head = _with_upstream(tmp_path)
+    git_dir = Path(_git(work, "rev-parse", "--absolute-git-dir").stdout.strip())
+    # Pre-create the receipt path as a *directory*: `open(..., "w")` raises `OSError`,
+    # so no receipt exists and `_receipt_recipe` answers None — the fallback branch.
+    (git_dir / "emrg-recovery-receipt.json").mkdir()
+
+    assert _load().recover(work, apply=True) == 0
+    out = capsys.readouterr().out
+    assert "receipt: could not be written" in out, (
+        f"precondition: this run must take the no-receipt branch; got:\n{out}"
+    )
+
+    line = next((ln for ln in out.splitlines() if ln.startswith("reversible: ")), None)
+    assert line is not None, f"the recovery must print its route; got:\n{out}"
+    assert line == f"reversible: {recovery_recipe('<message>')}", (
+        "the fallback must be the one owner's recipe with the message left as the "
+        "placeholder the reader substitutes from `git stash list` — a hand-written "
+        f"spelling here is the second copy that drifted once; got:\n{line}"
+    )
+    # And the other half of the same claim: the placeholder is a *placeholder*, not a
+    # concrete name invented for a stash this recovery cannot know.
+    assert "stash^{/<message>}" in line, line
+
+
+def test_the_owners_recipe_names_the_measured_route():
+    """The owner's content is a claim too — identity alone cannot see it change.
+
+    The two printer tests assert that each printer equals `recovery_recipe(...)`, and
+    that is exactly one assertion short: **a mutation that changes the owner's own
+    text keeps every identity assertion green**, because both sides moved together.
+    Measured while writing this change: dropping `--index` from the owner left all 36
+    tests in this file passing. The identity assertions cannot close that — only an
+    assertion about the *content* can, and it has to be about the route rather than
+    about the whole string, because the recipe deliberately spells the wrong spelling
+    out in its warning ("a bare `git stash pop` takes the newest…") so a reader knows
+    why the route is the one it is.
+
+    So the route is extracted — the command in the first backtick pair after "then " —
+    and asserted to be the spelling `test_the_advertised_reversal_is_the_measured_one`
+    measured with git: `apply --index`, selecting the stash **by the message** the
+    receipt carries rather than by `stash@{0}` (the newest, which is this one only
+    until the next is made).
+    """
+    recipe = recovery_recipe("emrg-recovery-20260917T000000Z")
+    assert "then " in recipe, f"the recipe must name the route after 'then': {recipe}"
+    after = recipe.split("then ", 1)[1]
+    assert after.startswith("`"), f"the route must be a quoted command: {after}"
+    route = after.split("`")[1]
+
+    assert "--index" in route, (
+        "the advertised route must restore the staged side — a bare `apply` or `pop` "
+        f"brings a staged change back unstaged; route was: {route!r}"
+    )
+    assert route == (
+        "git stash apply --index stash^{/emrg-recovery-20260917T000000Z}"
+    ), (
+        "the route must name *this* stash by the message the receipt carries, not "
+        f"`stash@{{0}}` (the newest); route was: {route!r}"
+    )
+    # The message is substituted, not left as a word: two runs must not print the same
+    # route, or the receipt would send a reader to whatever stash happens to be newest.
+    other = recovery_recipe("emrg-recovery-19990101T000000Z")
+    assert route != other.split("then ", 1)[1].split("`")[1], (
+        "the recipe must carry the message it was given"
+    )
 
 
 def test_the_git_state_dir_is_answered_normalised(monkeypatch):
@@ -830,6 +930,13 @@ def test_the_tool_prints_the_receipts_own_recipe(tmp_path, capsys):
     costs them the staged side and the stash. A paraphrase is a second copy that can
     drift, so the line is now the receipt's own string, and this asserts that instead
     of assuming it: re-word the daemon's recipe and stdout re-words with it.
+
+    That fix covered the branch where a receipt *exists*. The other branch — no
+    receipt, so no message to name — still wrote the spelling by hand, which is how a
+    third copy survived the change that was about copies. It now calls the same
+    function (`recovery_recipe`) with the message the reader substitutes, asserted by
+    `test_the_fallback_recipe_is_the_owners_recipe_not_a_paraphrase`, so both printers
+    are the owner and neither can drift from it.
 
     What the *tool* cannot cover is prose that quotes the recipe in a document, and
     the first attempt at a scanner for it was a false verdict: it required a paragraph
