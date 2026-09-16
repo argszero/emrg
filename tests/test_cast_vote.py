@@ -110,15 +110,22 @@ class FakeCounter:
     The last verdict repeats, so a test can script "the first read sees nothing,
     the second sees the vote" without padding the list - and `calls` is asserted
     in every test, so a fake that is never called cannot pass for one that was.
+
+    Keyword arguments are recorded too (the real counter takes
+    `mergeability_wait`), for the same reason: the fake must be able to receive
+    everything the real one would, or a call site that stopped passing a budget
+    would pass by being invisible to this fake.
     """
 
     def __init__(self, *verdicts: Verdict):
         assert verdicts, "a FakeCounter needs at least one reading"
         self._verdicts = list(verdicts)
         self.calls: list[tuple[int, int]] = []
+        self.kwargs: list[dict] = []
 
-    def check_pr(self, pr: int, needed: int) -> Verdict:
+    def check_pr(self, pr: int, needed: int, **kwargs) -> Verdict:
         self.calls.append((pr, needed))
+        self.kwargs.append(dict(kwargs))
         if len(self._verdicts) > 1:
             return self._verdicts.pop(0)
         return self._verdicts[0]
@@ -457,3 +464,65 @@ def test_the_cycle_pattern_agrees_with_the_counter(mod, counter_mod):
     ]
     for sample in samples:
         assert bool(mod.cycles_in(sample)) == bool(counter_mod._CYCLE_RE.search(sample)), sample
+
+
+# ── the transient that used to abort a vote ────────────────────────────────
+
+
+def test_the_mergeability_budget_reaches_the_counter_at_both_reads(
+    mod, monkeypatch, capsys, body_file
+):
+    """Both reads hand the counter the same budget, and both are recorded.
+
+    The refusal this removes was measured (`cyc20260916-074105`): GitHub reports
+    mergeability as `UNKNOWN` for a minute or two after a push, the counter
+    refuses it - correctly, it will not guess - and this tool then posted nothing.
+    The voter's remedy was to sleep and re-run by hand, which is the work a
+    bounded re-ask exists to do. Two reads matter: the pre-flight count (which
+    decides whether to post at all) and the confirm read (which decides whether
+    the post worked). A budget passed to only one of them would leave the other
+    able to abort the same vote, and the fake records the keyword so a call site
+    that stopped passing it fails here.
+    """
+    path = body_file(f"✅ LGTM - cycle `{CYCLE}`")
+    counter = FakeCounter(
+        verdict_with(),
+        verdict_with([vote()], counted=[True], valid_count=1),
+    )
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        FakeGh(),
+        ["1255", "--body-file", path, "--mergeability-wait", "45"],
+    )
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert len(counter.calls) == 2, "one pre-flight read and one confirmation read"
+    assert counter.kwargs == [
+        {"mergeability_wait": 45.0},
+        {"mergeability_wait": 45.0},
+    ], counter.kwargs
+    assert "counted" in out
+
+
+def test_zero_is_a_supported_budget_and_asks_once(mod, monkeypatch, capsys, body_file):
+    """`0` must stay legal: it is "ask once", the counter's own default.
+
+    Pinned because the tempting way to make the waiting *feel* robust is a floor
+    (`max(30, wait)`), which would silently make the fast path unreachable and
+    hide a hung GitHub behind a minute of sleeping in every scripted use.
+    """
+    counter = FakeCounter(
+        verdict_with(),
+        verdict_with([vote()], counted=[True], valid_count=1),
+    )
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        FakeGh(),
+        ["1255", "--body-file", body_file(f"✅ LGTM - cycle `{CYCLE}`"), "--mergeability-wait", "0"],
+    )
+    assert rc == 0
+    assert counter.kwargs == [{"mergeability_wait": 0.0}, {"mergeability_wait": 0.0}]
