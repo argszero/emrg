@@ -102,11 +102,11 @@ def recover(repo: Path, apply: bool) -> int:
         print(f"could not measure: {repo} is not a git repository with a commit")
         return 2
 
-    status = _status_lines(repo)
-    if status is None:
+    entries = _status_lines(repo)
+    if entries is None:
         print(f"could not measure: `git status` failed in {repo}")
         return 2
-    if not status:
+    if not entries:
         print(f"clean: {repo} has no uncommitted changes; nothing to recover")
         return 0
 
@@ -121,19 +121,31 @@ def recover(repo: Path, apply: bool) -> int:
 
     if not apply:
         print(f"recoverable: {why}")
-        print(f"{len(status)} entr(y|ies) would be stashed (reversible); re-run with --apply")
+        print(f"{len(entries)} entr(y|ies) would be stashed (reversible); re-run with --apply")
         return 0
 
     # One owner for the action too: the daemon runs this exact function at the start
-    # of a cycle, so what a human runs here and what the guard does cannot drift.
-    ok, detail = TaskHandler._recover_dirty_tree_sync(str(repo), reason=why)
-    if not ok:
+    # of a cycle, so what a human runs here and what the guard does cannot drift. It
+    # accepts no verdict from a caller and re-measures the criterion itself, so a tree
+    # that changed between the diagnosis above and this line is judged on its current
+    # state rather than on the earlier answer.
+    status, detail = TaskHandler._recover_dirty_tree_sync(str(repo))
+    if status == "refused":
+        print(f"refused: {repo} holds work that exists nowhere else: {detail}")
+        print("nothing was changed. Commit, stash or copy that work out first;")
+        print("this tool will not discard it.")
+        return 1
+    if status == "error":
         print(f"could not measure: {detail}")
         return 2
+    if status == "clean":
+        print(f"clean: {repo} has no uncommitted changes; nothing to recover")
+        return 0
 
     receipt = _receipt_path(repo)
     print(f"recovered: {repo} converged to a clean tree; {detail}")
-    print("reversible: git stash pop")
+    print("reversible: `git stash list` -> the named stash (a bare `git stash pop`")
+    print("takes the newest, which is this one only until the next stash is made)")
     print(f"receipt: {receipt}" if receipt else "receipt: could not be written")
     return 0
 

@@ -401,8 +401,13 @@ class TaskHandler:
         * a **deletion** loses nothing (discarding restores the blob from ``HEAD``);
         * a **modification** is recoverable when its blob equals ``HEAD``'s or the
           upstream tip's for that path — the two places a blob can already live;
-        * a commit reachable only from this branch would be orphaned by a branch
-          reset ⇒ unique.
+        * a commit reachable only from this branch is unique: it is work that exists
+          in no other checkout, so it forces ``read-only``. The reason is *not* the
+          recovery - that is a stash, which is indifferent to commits (measured: a
+          recovery leaves ``HEAD`` at the same sha) - but the cycle's own write access,
+          which could reset the branch away. A reviewer measured the consequence and
+          it is the fail-closed direction: a tree that is merely *ahead* of upstream
+          keeps ``read-only`` even when every byte of its dirt is reconstructible.
 
         Fail-closed throughout: an unreadable status, an unreadable file, or no
         upstream ref to compare against all answer *unique*, i.e. exactly the
@@ -530,9 +535,7 @@ class TaskHandler:
         return target
 
     @staticmethod
-    def _recover_dirty_tree_sync(
-        source_dir: str, reason: str | None = None
-    ) -> tuple[bool, str]:
+    def _recover_dirty_tree_sync(source_dir: str) -> tuple[str, str]:
         """Converge a working tree whose dirt is reconstructible, reversibly (issue #1237).
 
         The exit the downgrade never had, performed by the daemon **itself** (host
@@ -541,17 +544,30 @@ class TaskHandler:
         byte in the tree is already in ``HEAD`` or in the upstream tip, so moving it
         aside cannot lose anything - and the move is a stash, which leaves every byte
         one ``git stash pop`` away. No branch is reset and no commit is dropped:
-        ``HEAD`` is asserted unmoved before and after.
+        ``HEAD`` is compared before and after, and a moved ``HEAD`` is reported.
 
-        Answers ``(True, detail)`` when the tree is now verified clean, and
-        ``(False, why)`` when it is not - refused (the tree holds work found nowhere
-        else), already clean, or unmeasurable. Callers must not read ``False`` as
-        "clean".
+        **The criterion is measured here, always, and no caller can supply an
+        answer.** An earlier revision accepted the caller's already-measured verdict
+        so a second ``git status`` could be avoided - and that turned the net into a
+        conditional one: an independent review (#1274) measured
+        ``_recover_dirty_tree_sync(repo, "reported by the caller")`` stashing a tree
+        holding an untracked file, i.e. *unique* work, with the receipt calling it a
+        recovery. The parameter is gone rather than documented, because a guarantee
+        that holds only while every caller passes the truth is not a guarantee. It
+        also closes a window the old shape left open: the verdict and the stash were
+        two separate ``git status`` runs, so a file that became unique in between was
+        described by the earlier answer while being moved by the later one.
 
-        ``reason`` is the caller's already-measured verdict from
-        ``_dirty_tree_would_lose_work_sync``; when omitted the criterion is re-checked
-        here, so the action can never run on unique work even if a caller forgets to
-        ask first. That re-check is why this is safe to expose as a command.
+        Answers ``(status, detail)``, and callers must **branch on the status** rather
+        than on truthiness - the four are not two:
+
+        ``"recovered"``  the tree was converged and verified clean; ``detail`` names
+                         the stash to reverse it;
+        ``"clean"``      there was nothing to recover, no stash was made;
+        ``"refused"``    the tree holds work that exists nowhere else: **nothing was
+                         touched**, and ``detail`` names it;
+        ``"error"``      the question could not be answered, or the convergence
+                         failed; ``detail`` says which.
         """
         import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
 
@@ -565,33 +581,32 @@ class TaskHandler:
         try:
             head = git("rev-parse", "--verify", "--quiet", "HEAD")
         except (OSError, _sp.SubprocessError) as exc:
-            return False, f"the recovery could not run: {exc}"
+            return "error", f"the recovery could not run: {exc}"
         if head.returncode != 0 or not head.stdout.strip():
-            return False, "the recovery could not run: not a git repository with a commit"
+            return "error", "the recovery could not run: not a git repository with a commit"
 
-        status = git("status", "--porcelain", "--untracked-files=normal")
-        if status.returncode != 0:
-            return False, "the recovery could not run: `git status` failed"
-        before = [line for line in status.stdout.splitlines() if line.strip()]
+        porcelain = git("status", "--porcelain", "--untracked-files=normal")
+        if porcelain.returncode != 0:
+            return "error", "the recovery could not run: `git status` failed"
+        before = [line for line in porcelain.stdout.splitlines() if line.strip()]
         if not before:
-            return False, "the tree was already clean; nothing to recover"
+            return "clean", "the tree was already clean; nothing to recover"
 
-        if reason is None:
-            loses, reason = TaskHandler._dirty_tree_would_lose_work_sync(source_dir)
-            if loses:
-                return False, f"refused: this tree holds work that exists nowhere else ({reason})"
+        loses, reason = TaskHandler._dirty_tree_would_lose_work_sync(source_dir)
+        if loses:
+            return "refused", f"this tree holds work that exists nowhere else ({reason})"
 
         message = "emrg-recovery-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         stash = git("stash", "push", "--include-untracked", "-m", message)
         if stash.returncode != 0:
             detail = (stash.stderr or stash.stdout).strip()
-            return False, f"the recovery could not run: `git stash push` failed: {detail}"
+            return "error", f"the recovery could not run: `git stash push` failed: {detail}"
 
         after = git("status", "--porcelain", "--untracked-files=normal")
         if after.returncode != 0 or after.stdout.strip():
-            return False, (
+            return "error", (
                 "the tree is still not clean after stashing; recover the stash with "
-                f"`git stash pop` (stash {message}) and investigate"
+                f"`git stash list` -> {message} and investigate"
             )
 
         head_after = git("rev-parse", "HEAD").stdout.strip()
@@ -605,11 +620,27 @@ class TaskHandler:
             "status_after": [],
             "stash_message": message,
             "action": "git stash push --include-untracked",
-            "reversible_with": f"git stash pop (or `git stash list` -> {message})",
+            # The named form is the primary one: a host may already have stashes, and
+            # a bare `git stash pop` is only correct while this stash is the newest
+            # (measured on the authoring workspace, which had an unrelated
+            # `stash@{0}` when this was written).
+            "reversible_with": (
+                f"`git stash list` -> {message}, then `git stash apply stash^{{/{message}}}`"
+                f" (a bare `git stash pop` takes the newest, which is this one"
+                f" only until the next stash is made)"
+            ),
         })
-        return True, (
+        if head_after != head.stdout.strip():
+            # Not expected - a stash does not move HEAD - so this is asserted rather
+            # than assumed, and the receipt above is the evidence either way.
+            return "error", (
+                f"the recovery moved HEAD ({head.stdout.strip()[:8]} -> {head_after[:8]}); "
+                f"the stash is intact, inspect it before continuing "
+                f"(`git stash list` -> {message})"
+            )
+        return "recovered", (
             f"{len(before)} reconstructible change(s) stashed as {message}; "
-            f"HEAD unmoved at {head_after[:8]}; recover with `git stash pop`"
+            f"HEAD unmoved at {head_after[:8]}"
         )
 
     async def _effective_sandbox(
@@ -637,10 +668,17 @@ class TaskHandler:
 
         * a dirty tree whose changes are all recoverable from ``HEAD`` or the upstream
           tip is **converged by the daemon itself**, reversibly (stash, ``HEAD``
-          unmoved, receipt in the git dir), and the configured tier is left intact;
+          compared, receipt in the git dir), and the configured tier is left intact;
         * a dirty tree holding anything found nowhere else is forced ``read-only`` as
           before, with the offending paths named - the daemon touches nothing, because
           discarding that is a decision for whoever wrote it.
+
+        The action re-measures the criterion and **its answer governs the tier**: a
+        refusal (unique work) or a failed convergence forces ``read-only`` regardless
+        of the verdict reached above, so the safety of the tree does not depend on how
+        this method's own parameters were filled in. ``loses_unique`` remains as a
+        test seam and an optimisation for the *log line*; it cannot unlock a tree
+        holding unique work, because the action would find it.
 
         A human may still override with the env var ``EMRG_TASK_DIRTY_OVERRIDE``
         (comma-separated task names, or ``*`` for all); every release of the guard is
@@ -668,14 +706,28 @@ class TaskHandler:
         else:
             why = "reported by the caller"
         if not loses_unique:
-            recovered, detail = await asyncio.to_thread(
-                self._recover_dirty_tree_sync, str(self._source_dir), why
+            status, detail = await asyncio.to_thread(
+                self._recover_dirty_tree_sync, str(self._source_dir)
             )
+            if status in ("refused", "error"):
+                # The action measures the criterion itself, so this is the freshest
+                # answer there is, and it governs: when it finds work that exists
+                # nowhere else - or cannot clear the tree - the cycle gets read-only
+                # even if the verdict above said otherwise. Without this, supplying a
+                # "no loss" verdict would buy a write-capable cycle on a tree holding
+                # unique work, which is the state the guard exists to prevent.
+                self._logger.warning(
+                    "TaskHandler[%s]: dirty working tree — self-recovery did not clear "
+                    "it (%s) — cycle forced read-only (structural guard, community "
+                    "issue #979 / #1237, audited receipt)",
+                    self.name, detail,
+                )
+                return "read-only"
             self._logger.warning(
                 "TaskHandler[%s]: dirty working tree holding no unique work (%s) — "
                 "self-recovery %s; cycle keeps %s (structural guard, community "
                 "issue #979 / #1237, audited receipt)",
-                self.name, why, detail if recovered else "did not complete", self._sandbox,
+                self.name, why, detail, self._sandbox,
             )
             return self._sandbox
         self._logger.warning(

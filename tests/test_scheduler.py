@@ -2750,7 +2750,8 @@ def test_reconstructible_dirt_is_recovered_by_the_daemon_itself(tmp_path):
     assert receipt["head_before"] == receipt["head_after"] == head
     assert receipt["status_before"] == [" D f.txt"], receipt["status_before"]
     assert receipt["status_after"] == []
-    assert "stash pop" in receipt["reversible_with"]
+    assert receipt["stash_message"] in receipt["reversible_with"], \
+        "the reversal route must name the stash that was made, not the newest one"
 
     # Reversibility is why the action is allowed at all: popping restores the exact
     # state the daemon moved aside -- here, the deletion itself, byte for byte.
@@ -2776,6 +2777,32 @@ def test_unique_dirt_still_forces_read_only(tmp_path):
     assert not (Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
                 / "emrg-recovery-receipt.json").exists(), \
         "no recovery ran, so there is no recovery to receipt"
+
+
+def test_a_stale_verdict_cannot_unlock_a_tree_holding_unique_work(tmp_path):
+    """Found in review of #1274: the action's own measurement governs the tier.
+
+    `loses_unique` is a test seam and an optimisation for the log line, so a caller
+    can fill it in -- and the earlier shape *believed* it: passing `loses_unique=False`
+    on a tree that does hold unique work bought the cycle `workspace-write` **and**
+    stashed the work, with the receipt calling it a recovery. The net held only while
+    every caller passed the truth, which is the same as not holding.
+
+    Now the action re-measures the criterion itself and its refusal governs, so a
+    wrong or stale verdict is contradicted instead of honoured.
+    """
+    repo = _repo_with_dirt(tmp_path, "untracked")
+
+    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
+                          identity=InstanceIdentity())
+    assert asyncio.run(
+        handler._effective_sandbox(dirty=True, loses_unique=False)
+    ) == "read-only", "a verdict supplied by the caller must not decide this"
+
+    assert (tmp_path / "repo-untracked" / "notes.md").read_text(encoding="utf-8") == "only here"
+    assert _git_out(repo, "stash", "list") == "", "a refused action moves nothing"
+    assert not (Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
+                / "emrg-recovery-receipt.json").exists()
 
 
 def test_dirty_tree_override_env_audited_receipt():

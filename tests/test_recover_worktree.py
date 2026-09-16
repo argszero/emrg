@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "recover-worktree.py"
 
 
@@ -238,33 +240,71 @@ def test_the_tool_writes_a_receipt_of_what_it_moved(tmp_path):
     assert any(line.startswith(" M") for line in receipt["status_before"])
     assert receipt["status_after"] == []
     assert "stash" in receipt["action"]
-    assert "stash pop" in receipt["reversible_with"]
+    # The route must name *this* stash: a host may already have stashes, so a bare
+    # `git stash pop` is only correct until the next one is made (measured on the
+    # authoring workspace, which held an unrelated `stash@{0}` when this was written).
+    assert receipt["stash_message"] in receipt["reversible_with"]
     assert "upstream" in receipt["reason"]
 
 
-def test_the_action_asks_the_criterion_itself_before_touching_anything(tmp_path):
-    """Defence in depth: the action refuses unique work without being told to.
+def test_the_action_asks_the_criterion_itself_and_cannot_be_told_the_answer(tmp_path):
+    """Defence in depth: no caller's verdict can disarm the net (found in review, #1274).
 
-    Called with no measured verdict (the way a future caller who has not read this
-    module would call it), it must ask the criterion itself. Otherwise the safety of
-    the guard would rest on every caller remembering to check first -- and the one
-    that forgets would discard a host's unsaved work while the receipt called it a
-    recovery.
+    An independent review measured the earlier shape — the action accepted the
+    caller's already-measured verdict as an optional argument — stashing a tree that
+    held an untracked file, i.e. work that exists nowhere else, with the receipt
+    calling it a recovery. A guarantee that holds only while every caller passes the
+    truth is not a guarantee, so the parameter is gone: a caller that has not measured
+    now gets a ``TypeError`` instead of a silently wrong answer.
     """
     repo = tmp_path / "repo"
     _new_repo(repo)
     (repo / "notes.md").write_text("only here", encoding="utf-8")
 
-    ok, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
-    assert ok is False and "refused" in detail, detail
+    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
+    assert status == "refused" and "notes.md" in detail, detail
     assert (repo / "notes.md").read_text(encoding="utf-8") == "only here"
     assert _git(repo, "stash", "list").stdout.strip() == "", "nothing may be moved aside"
 
+    # The reviewed exploit, verbatim: `_recover_dirty_tree_sync(repo, <verdict>)`.
+    # It must not be expressible rather than merely discouraged.
+    with pytest.raises(TypeError):
+        _load().TaskHandler._recover_dirty_tree_sync(str(repo), "reported by the caller")
+
     # The other direction, same entry point: reconstructible dirt does converge.
     work, head = _with_upstream(tmp_path)
-    ok, detail = _load().TaskHandler._recover_dirty_tree_sync(str(work))
-    assert ok is True and "stash pop" in detail, detail
+    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(work))
+    assert status == "recovered" and "stash" in detail, detail
     assert _status(work).strip() == ""
+    assert _git(work, "rev-parse", "HEAD").stdout.strip() == head, "HEAD must not move"
+
+
+def test_the_four_outcomes_are_not_two(tmp_path):
+    """`(bool, detail)` collapsed three different answers into `False`; #1274 split them.
+
+    A caller reading any non-recovered answer as "nothing happened" would report a
+    tree it just *refused* to touch as though the question had been settled, and one
+    reading `clean` as `recovered` would claim a convergence that never ran. So the
+    states are pinned apart, including the one that means "I could not answer".
+    """
+    seen = {}
+
+    clean = tmp_path / "clean"
+    _new_repo(clean)
+    seen["clean"], _ = _load().TaskHandler._recover_dirty_tree_sync(str(clean))
+    assert _git(clean, "stash", "list").stdout.strip() == "", "a no-op makes no stash"
+
+    unique = tmp_path / "unique"
+    _new_repo(unique)
+    (unique / "notes.md").write_text("only here", encoding="utf-8")
+    seen["refused"], _ = _load().TaskHandler._recover_dirty_tree_sync(str(unique))
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    seen["error"], detail = _load().TaskHandler._recover_dirty_tree_sync(str(plain))
+    assert "could not run" in detail, detail
+
+    assert sorted(seen.values()) == ["clean", "error", "refused"], seen
 
 
 def test_a_clean_tree_is_a_no_op(tmp_path, capsys):
