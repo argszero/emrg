@@ -151,7 +151,18 @@ uv run python -m emrg     # launch TUI
 ```bash
 uv run python -c "from emrg.client.app import run_client"   # import check
 uv run python -m emrg --help
+uv run --no-sync python3 scripts/check-rant-citations.py    # every citation names its public record
 ```
+
+`scripts/check-rant-citations.py` answers one question about the instruction prose
+(the built-in task templates, `prompts/*.j2`, `docs/gui-redesign.md`): does every
+citation of a host rant name the public record that landed it? A rant timestamp
+indexes `~/.emrg/rants.jsonl` **on the machine that wrote it**, so it is unresolvable
+for every other reader; a PR number stays resolvable. It exits `0` when the rule
+holds, `1` on a violation, and `2` when a file in the class cannot be read — `2` is
+not a pass. `evolution_prompt.md` is the template routine evolution must not edit, so
+its citations are listed as frozen debt rather than silently exempt; `--measure`
+prints the whole inventory.
 
 ### Electron GUI
 
