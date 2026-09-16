@@ -27,7 +27,11 @@ def _load():
 
 def _git(repo: Path, *args: str):
     return subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30,
+        # The guard's rule, and the reason for it: a text-mode subprocess without
+        # an explicit encoding decodes with the *host* locale codec, so it raises or
+        # mojibakes on cp936/cp1252 for data that is valid UTF-8 (issue #1132).
+        encoding="utf-8", errors="replace",
     )
 
 
@@ -58,6 +62,7 @@ def _with_upstream(tmp_path: Path):
     subprocess.run(
         ["git", "init", "-q", "--bare", "-b", "master", str(origin)],
         capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
     )
     work = tmp_path / "work"
     _new_repo(work, "v1")
@@ -120,6 +125,7 @@ def test_an_untracked_file_is_unique_even_when_upstream_has_those_bytes(tmp_path
     subprocess.run(
         ["git", "init", "-q", "--bare", "-b", "master", str(origin)],
         capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
     )
     repo = tmp_path / "repo"
     _new_repo(repo, "v1")
@@ -155,6 +161,7 @@ def test_a_commit_only_on_this_branch_is_unique(tmp_path):
     subprocess.run(
         ["git", "init", "-q", "--bare", "-b", "master", str(origin)],
         capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
     )
     repo = tmp_path / "repo"
     _new_repo(repo)
