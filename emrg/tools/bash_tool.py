@@ -654,8 +654,12 @@ def _is_redirect_operator(tok: str) -> bool:
     `workspace-write`. Both genuinely write: in a throwaway directory bash and sh
     each created the file for `>|` (the clobber redirect) and bash created it for
     `<>` (read-write), so an empty target list there is a hole rather than an
-    opinion. `>>|`, `>>&` and `&>>` created nothing, so they are covered only
-    incidentally.
+    opinion. `>>|`, `>>&` and `&>>` created nothing under the shell this walk's
+    own runtime uses (`create_subprocess_shell` -> `/bin/sh`; measured here as
+    rc=2 syntax errors that write no file), which is why they are covered only
+    incidentally — on bash 4+, where `&>>` and `>>&` are valid append-both
+    redirects that do write, recognising them as operators is the safe direction
+    rather than an unnecessary one.
 
     The shape test is: the token contains a `>` and no character that could be
     part of a path. That also covers the fd-prefixed spellings (`1>|`, `0<>`,
@@ -671,6 +675,28 @@ def _is_redirect_operator(tok: str) -> bool:
         and ">" in tok
         and re.fullmatch(r"[<>|&0-9-]+", tok) is not None
     )
+
+
+def _is_fd_operand(tok: str) -> bool:
+    """True when ``tok`` is a file *descriptor* rather than a path.
+
+    Only ever asked about the operand of the ``>&`` operator, where the shell
+    reads an all-digits or ``-`` operand as a descriptor to duplicate onto
+    (``2>&1``, ``2>&-``) instead of a file to open. The order of ``&`` and ``>``
+    is the whole discriminator, and it is the shell's, not a convention: ``&>1``
+    is the other operator and really does write a file called ``1``, while
+    ``>&1x`` and ``>& out.log`` name files (so spacing and "the operand is
+    numeric" are both insufficient signals).
+
+    Measured on master `39edaefa` (`bash_tool.py` `4dce1ffde8902bc1`), each
+    command run by bash **and** sh in a fresh scratch directory: six duplication
+    spellings (`2>&1`, `1>&2`, `>&2`, `2>&-`, `2>& 1`, and `2>&1` beside a later
+    real redirect) created no file in either shell, while every genuine-file
+    spelling in the same corpus (`> 1`, `&>1`, `>&1x`, `>& out.log`) really wrote
+    the file the walk names. `[0-9]+` rather than ``str.isdigit`` because the
+    latter is true of Unicode digits (`²`, `١`), which are not descriptors.
+    """
+    return tok == "-" or re.fullmatch(r"[0-9]+", tok) is not None
 
 
 def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int]:
@@ -772,6 +798,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     interpreter can always write a file); the honest boundary stays
     ``enforcement="partial"``.
 
+    An operator's operand is not always a path: the operand of `>&` is a file
+    *descriptor* when it is all digits or `-`, so `grep -n x f.txt 2>&1` opens
+    nothing and now names no target, instead of being refused for "targeting
+    '1'" in the very tier a dirty-tree downgrade uses (`_is_fd_operand`, issue
+    #1275). The operator's spelling is what decides it, never the operand alone:
+    `&>1` and `echo x > 1` both really write a file called `1` and still name it.
+
     Heredoc bodies that no shell executes are masked first: a body is text on
     some command's stdin, and reading it as shell code named prose and the
     delimiter word as write targets (`_mask_data_heredoc_bodies`).
@@ -810,7 +843,17 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             while j < len(tokens) and is_operator(j):
                 j += 1
             if j < len(tokens) and tokens[j] not in _COMMAND_SEPARATORS:
-                targets.append(tokens[j])
+                # …but the operand of `>&` is not always a path: when it is all
+                # digits or `-` the shell duplicates onto that descriptor and
+                # opens nothing (`2>&1`, `2>&-`). Recording it made ordinary
+                # read-only diagnostics — `grep -n x f.txt 2>&1` — refusals for
+                # "targeting '1'" in the one tier whose documented recovery flow
+                # is to run read commands from inside it (issue #1275). The
+                # operator's spelling decides this, never the operand alone:
+                # `&>1` writes a real file called `1` and `echo x > 1` writes it
+                # too, so both keep naming their target here.
+                if not (tokens[i] == ">&" and _is_fd_operand(tokens[j])):
+                    targets.append(tokens[j])
                 i = j + 1
                 continue
         elif word == "rm" or word == "rmdir":

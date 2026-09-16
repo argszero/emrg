@@ -18,6 +18,7 @@ from emrg.tools.bash_tool import (
     _check_sandbox,
     _extract_write_targets,
     _fully_quoted_token_indexes,
+    _is_fd_operand,
     _is_redirect_operator,
     _split_command_tokens,
     _flag_part,
@@ -960,6 +961,80 @@ def test_fully_quoted_token_indexes_recovers_quoting_or_claims_nothing():
     # case the interior-equality clause exists for: no generated command with a
     # redirect changes its walk answer when that clause is loosened.)
     assert quoted("'a' it's") == set()
+
+
+# Issue #1275. A duplication operand is a file *descriptor*, not a path, so
+# these open nothing — measured with **both** shells in a fresh scratch
+# directory per row, because a verdict mismatch alone is not a bug and `/bin/sh`
+# does not always agree with bash. Each one used to report target `'1'`/`'2'`
+# (or `'-'`) and be refused at `read-only`, the tier a dirty-tree downgrade
+# forces a cycle into — an over-block of ordinary diagnostics where they are
+# most needed. `>>&` is deliberately absent: it is a bash **syntax error**
+# (`unexpected token`), so its line never runs and is not this class.
+FD_DUPLICATIONS = [
+    "grep -n x f.txt 2>&1",
+    "echo hi 2>&1",
+    "grep -n x f.txt 1>&2",
+    "grep -n x f.txt >&2",
+    "grep -n x f.txt 2>&-",
+    "grep -n x f.txt 2>& 1",
+]
+
+
+@pytest.mark.parametrize("cmd", FD_DUPLICATIONS)
+def test_an_fd_duplication_operand_is_not_a_write_target(cmd: str):
+    """`2>&1` merges stderr into stdout; it names a descriptor, not a file."""
+    targets = _extract_write_targets(cmd)
+    assert "1" not in targets and "2" not in targets and "-" not in targets, targets
+    allowed, reason, _ = _check_sandbox(cmd, "read-only")
+    assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
+
+
+def test_a_real_redirect_beside_a_duplication_still_names_its_target():
+    """The fix must not swallow the write on the same line.
+
+    `2>&1` is skipped, but the `> out.log` next to it is a real file: dropping
+    the descriptor must not drop the target, or a write would become invisible.
+    """
+    for cmd, expected in (
+        ("echo hi 2>&1 > out.log", ["out.log"]),
+        ("echo hi > out.log 2>&1", ["out.log"]),
+        ("echo hi 2>&1 > out.log 2>&1", ["out.log"]),
+    ):
+        assert _extract_write_targets(cmd) == expected, cmd
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} writes a file and must be refused ({reason!r})"
+
+
+def test_the_operator_spelling_decides_a_duplication_not_the_operand():
+    """`&>` is the *other* operator: its numeric operand really is a file name.
+
+    This is the discriminator the fix has to use, and the tempting shortcuts
+    both fail here — "the operand is numeric" would drop a real write to a file
+    called `1`, and "the operand is separated by a space" would drop `out.log`
+    in `>& out.log`, which bash and sh both create. `read-only` is the tier
+    asserted, because these targets are relative and a relative target inside
+    the workspace is exactly what `workspace-write` exists to allow.
+    """
+    written = {
+        "echo x > 1": ["1"],
+        "echo x &>1": ["1"],
+        "echo x >&1x": ["1x"],
+        "echo x >& out.log": ["out.log"],
+        "echo x >&'out.log'": ["out.log"],
+    }
+    for cmd, expected in written.items():
+        assert _extract_write_targets(cmd) == expected, cmd
+        allowed, reason, _ = _check_sandbox(cmd, "read-only")
+        assert allowed is False, f"{cmd!r} must be blocked at read-only ({reason!r})"
+
+
+def test_is_fd_operand_accepts_only_the_spellings_the_shell_reads_as_descriptors():
+    """Direct test of the predicate, including the case `str.isdigit` gets wrong."""
+    for tok in ("0", "1", "2", "10", "-"):
+        assert _is_fd_operand(tok) is True, tok
+    for tok in ("", "1x", "out.log", "./1", "-1", "1 ", ">", "²", "١", "١٢"):
+        assert _is_fd_operand(tok) is False, tok
 
 
 OUTSIDE_CLOBBER = "/etc/emrg-clobber-probe.txt"
