@@ -17,6 +17,7 @@ from emrg.tools.bash_tool import (
     SANDBOX_MODES,
     _check_sandbox,
     _extract_write_targets,
+    _is_redirect_operator,
     _flag_part,
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
@@ -788,6 +789,125 @@ def test_real_redirects_are_still_write_targets():
     for cmd in ("echo x > /tmp/y", "echo x >> /tmp/y", "cmd 2> err.txt"):
         allowed, _, _ = _check_sandbox(cmd, "read-only")
         assert allowed is False, cmd
+
+
+def test_is_redirect_operator_covers_the_spellings_the_walk_recognises():
+    """The predicate must still accept everything it accepted before.
+
+    It is now judged by shape (a `>` and nothing path-like) rather than by a
+    list, because the list was missing `>|` and `<>` — see
+    `test_a_clobber_redirect_names_the_target_it_writes`. The negatives here are
+    the ones a looser rule would break: a bare `<` reads, and `|`, `;` and a
+    plain word are not redirects.
+    """
+    for tok in (">", ">>", "&>", "&>>", "2>", "22>>"):
+        assert _is_redirect_operator(tok) is True, tok
+    for tok in (">|", "1>|", "2>|", "<>", "0<>", ">&", "2>&1", "5>&-", "&>>"):
+        assert _is_redirect_operator(tok) is True, tok
+    for tok in ("out.txt", "/tmp/y", "2", "a>b", "<", "|", ";", "&&", "<<", ">>>foo"):
+        assert _is_redirect_operator(tok) is False, tok
+
+
+def test_a_quoted_operator_cannot_hide_the_real_redirect_target():
+    """Issue #1268: a quoted `>` used to swallow the next token as its target.
+
+    `'>'` and `>` dequote to the same token, so the walk could not tell a quoted
+    operator from a real one. It took the following token blindly, which meant
+    `echo '>' > /etc/x` produced the target `['>']` — and the *real* redirect
+    vanished. Measured on master `065ee9d5` end to end through
+    `BashTool.execute()` at workspace-write: the call returned success and
+    `/Users/argszero/emrg-phantom-proof.txt` really existed afterwards, while
+    `echo x > <the same path>` was refused. The boundary was escaped by one
+    quoted character.
+
+    An operator is never a path, so the walk now skips operator tokens and names
+    the target the shell will actually write.
+    """
+    outside = "/etc/emrg-1268-probe.txt"
+    for cmd in (
+        f"echo '>' > {outside}",
+        f"echo '>' >> {outside}",
+        f"echo '>>' > {outside}",
+    ):
+        targets = _extract_write_targets(cmd)
+        assert outside in targets, f"{cmd!r} must name the real target, got {targets!r}"
+        assert ">" not in targets, f"{cmd!r} must not treat an operator as a path"
+        for tier in ("read-only", "workspace-write"):
+            allowed, reason, _ = _check_sandbox(cmd, tier)
+            assert allowed is False, f"{cmd!r} must be blocked at {tier} (got {reason!r})"
+
+
+def test_the_operator_skip_does_not_swallow_a_real_target():
+    """The positive control for the skip: no operator means no skipping.
+
+    If the walk skipped the token after every operator unconditionally, a real
+    redirect would lose its target — a hole in the other direction, and the
+    reason the fix walks only over *operators*.
+    """
+    assert _extract_write_targets("echo x > /tmp/y") == ["/tmp/y"]
+    assert _extract_write_targets("echo x >> /tmp/y") == ["/tmp/y"]
+    assert _extract_write_targets("cmd 2> err.txt") == ["err.txt"]
+    assert _extract_write_targets("echo '>' > /tmp/y") == ["/tmp/y"]
+    # A quoted operator followed by a bare word is still read as a redirect —
+    # the known over-block residual, which needs the lexer to keep quoting.
+    assert _extract_write_targets("grep -n '>' file.txt") == ["file.txt"]
+
+
+OUTSIDE_CLOBBER = "/etc/emrg-clobber-probe.txt"
+
+# The spellings a shell really writes with and the walk did not call operators.
+# Measured on master `b0bd6188` in a throwaway directory: bash and sh each
+# created the file for `>|` and bash created it for `<>`; `>>|`, `>>&` and `&>>`
+# created nothing, so they are not claimed here.
+CLOBBER_WRITES = [
+    "echo x >| {o}",
+    "echo '>' >| {o}",
+    "echo x 1>| {o}",
+    "echo x <> {o}",
+    "echo '>' <> {o}",
+    "echo x 0<> {o}",
+]
+
+
+@pytest.mark.parametrize("cmd", [c.format(o=OUTSIDE_CLOBBER) for c in CLOBBER_WRITES])
+def test_a_clobber_redirect_names_the_target_it_writes(cmd: str):
+    """`>|` and `<>` are redirects, so their operand is the target — not nothing.
+
+    Before this shape test the walk reported `[]` for `echo x >| /etc/f` at both
+    tiers, and the file was really written: on master the guard's answer and the
+    shell's behaviour disagreed in the direction that loses work.
+    """
+    targets = _extract_write_targets(cmd)
+    assert OUTSIDE_CLOBBER in targets, f"{cmd!r} must name the target, got {targets!r}"
+    for tier in ("read-only", "workspace-write"):
+        allowed, reason, _ = _check_sandbox(cmd, tier)
+        assert allowed is False, f"{cmd!r} must be blocked at {tier} (got {reason!r})"
+
+
+@pytest.mark.parametrize("cmd", [c.format(o=OUTSIDE_CLOBBER) for c in CLOBBER_WRITES])
+def test_the_same_redirects_without_the_clobber_spelling_were_already_blocked(cmd: str):
+    """The control, derived rather than hand-listed: the `>` half alone blocked.
+
+    `echo x > /etc/f` was already refused before this change, so the flip above
+    is about the operator being recognised and not about a broader refusal.
+    """
+    plain = cmd.replace(">|", ">").replace("<>", ">").replace("0>", ">").replace("1>", ">")
+    targets = _extract_write_targets(plain)
+    assert OUTSIDE_CLOBBER in targets, f"{plain!r} must name the target, got {targets!r}"
+
+
+def test_a_read_redirect_is_not_a_write_target():
+    """`<` reads, so its operand must stay out of the target list.
+
+    This is the asymmetry the shape test keeps on purpose: calling `<` an
+    operator would make `cat < /etc/passwd` name `/etc/passwd` as a *write*
+    target, i.e. refuse a read — an over-block bought with a fix that does not
+    need it.
+    """
+    assert _is_redirect_operator("<") is False
+    assert _extract_write_targets("cat < /etc/passwd") == []
+    allowed, reason, _ = _check_sandbox("cat < /etc/passwd", "workspace-write")
+    assert allowed is True, reason
 
 
 def test_non_recursive_and_unlisted_writers_are_destructive():
