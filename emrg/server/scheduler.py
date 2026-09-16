@@ -396,8 +396,13 @@ class TaskHandler:
 
         The criterion, per ``git status --porcelain`` entry:
 
-        * ``??`` untracked, a staged addition, a conflict, or a rename — content
-          that exists only in the index or the worktree ⇒ unique;
+        * ``??`` untracked is unique **unless its content is already in ``HEAD``
+          under the same path** (issue #1277) — the ``git rm --cached f`` shape,
+          where ``f`` is unchanged so discarding it restores exactly what ``HEAD``
+          holds. Measured against ``HEAD`` only, and path-exact: a match in the
+          upstream tip alone, or a blob with the same bytes at another path, is not
+          evidence that this file is a re-checkout. The other shapes on this line —
+          a staged addition, a conflict, a rename — stay unique unconditionally;
         * a **deletion** loses nothing (discarding restores the blob from ``HEAD``);
         * a **modification** is recoverable when its blob equals ``HEAD``'s or the
           upstream tip's for that path — the two places a blob can already live;
@@ -457,8 +462,39 @@ class TaskHandler:
             # Naming them is what makes "which side is this fact about?" askable —
             # several defects here came from reading the pair as one flag.
             index_side, worktree_side = code[0], code[1]
-            if code == "??" or "U" in code or code in ("AA", "DD"):
+            if "U" in code or code in ("AA", "DD"):
                 unique.append(f"{path} exists only in this checkout")
+                continue
+            if code == "??":
+                # An untracked path is unique **unless `HEAD` already holds these
+                # very bytes under this very name** (issue #1277). The shape is
+                # ordinary: `git rm --cached f` — the standard "stop tracking this,
+                # keep the file" gesture — on unchanged content reports `D  f` *and*
+                # `?? f` for one path, and the `??` line used to short-circuit
+                # before anything was hashed, so a tree that loses nothing stayed
+                # read-only and disabled the git verbs that could clean it.
+                #
+                # The measurement is **path-exact and HEAD-only**, and both halves
+                # of that are decisions rather than conveniences:
+                #
+                # * HEAD-only, not "HEAD or the upstream tip" as the modification
+                #   branch does: an untracked path is one git is not tracking now,
+                #   so a match in the upstream tip alone says only that *a* copy was
+                #   published once — and for a path absent from HEAD that is a file
+                #   the host has, not a re-checkout of a commit. Pinned by
+                #   `test_an_untracked_file_is_unique_even_when_upstream_has_those_bytes`;
+                # * path-exact, not "a blob with these bytes exists in history":
+                #   a blob-level test releases the tier over an untracked file that
+                #   merely duplicates unrelated content, which is a host file, not
+                #   evidence about this one. Pinned by
+                #   `test_an_untracked_file_duplicating_another_path_is_unique`.
+                blob = git("hash-object", "--", path)
+                if blob.returncode != 0 or not blob.stdout.strip():
+                    unique.append(f"{path} could not be read to compare")
+                    continue
+                have = git("rev-parse", "--verify", "--quiet", f"HEAD:{path}")
+                if have.returncode != 0 or have.stdout.strip() != blob.stdout.strip():
+                    unique.append(f"{path} exists only in this checkout")
                 continue
             if "A" in code:
                 unique.append(f"{path} is staged but not committed")
