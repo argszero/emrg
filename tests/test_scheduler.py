@@ -2764,6 +2764,47 @@ def test_reconstructible_dirt_is_recovered_by_the_daemon_itself(tmp_path):
     assert _status(repo) == " D f.txt\n", "the stash must carry the exact dirt it moved"
 
 
+def test_a_receipt_that_cannot_be_written_is_reported_not_silent(tmp_path, caplog):
+    """Issue #1284: the audit half of a release must not read as plain success.
+
+    `_write_recovery_receipt` returns `str | None` for exactly the failure it
+    anticipates — and its value was **discarded at the only call site**, so with the
+    path pre-created as a directory (`open(..., "w")` raises `OSError`) the action
+    said "1 reconstructible change(s) stashed … HEAD unmoved" and nothing anywhere
+    said the receipt was missing. The recovery itself is unaffected — best-effort by
+    design, the stash is the durable record — so what is asserted is the *report*,
+    which was the only thing wrong.
+
+    Both arms, because the sentence has to be a discriminator and not a constant: the
+    same call without the forced failure must say nothing about a missing receipt and
+    must leave a file behind.
+    """
+    repo = _repo_with_dirt(tmp_path, "deleted")
+    git_dir = Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
+    (git_dir / "emrg-recovery-receipt.json").mkdir()  # the documented failure mode
+
+    with caplog.at_level(logging.WARNING, logger="emrg.server.scheduler"):
+        status, detail = TaskHandler._recover_dirty_tree_sync(repo)
+
+    assert status == "recovered", detail
+    assert "no receipt could be written" in detail, detail
+    assert not (git_dir / "emrg-recovery-receipt.json").is_file()
+    # The recovery is still a recovery: the tree converged and the work is in a stash.
+    assert _status(repo).strip() == ""
+    assert "emrg-recovery-" in _git_out(repo, "stash", "list")
+    # …and the log carries it too, for the reader who never sees the action's detail.
+    assert any("could not write the recovery receipt" in record.getMessage()
+               for record in caplog.records), [r.getMessage() for r in caplog.records]
+
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    control = _repo_with_dirt(control_root, "deleted")
+    status2, detail2 = TaskHandler._recover_dirty_tree_sync(control)
+    assert status2 == "recovered" and "no receipt could be written" not in detail2, detail2
+    assert (Path(_git_out(control, "rev-parse", "--absolute-git-dir"))
+            / "emrg-recovery-receipt.json").is_file()
+
+
 def test_unique_dirt_still_forces_read_only(tmp_path):
     """The protection, unchanged: an untracked file exists nowhere else."""
     repo = _repo_with_dirt(tmp_path, "untracked")
