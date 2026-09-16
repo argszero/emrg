@@ -2329,7 +2329,9 @@ def test_the_over_block_is_scoped_to_the_unresolvable_spelling():
 # The pin above is three spellings, and three spellings are a sample: the same
 # question — "is this operator-shaped word really an operator?" — is asked by every
 # line whose operator carries quoting or escaping, and there are many such lines
-# (the corpus below generates 135 of them). A sample cannot show whether the price
+# (the corpus below is 3 prefixes × 24 operators × 3 targets = 216 of them, and the
+# 24 are the *family* rather than a sample of it — see `_masked_operator_spellings`).
+# A sample cannot show whether the price
 # is bounded, which is the thing a reader of the residual needs to know, so the
 # generated corpus is what the classification is measured against:
 #
@@ -2349,7 +2351,7 @@ def test_the_over_block_is_scoped_to_the_unresolvable_spelling():
 #   1. **no unnamed write** — every file the shell really creates is named by the
 #      walk. This is the direction that may never be traded away: an unnamed write
 #      is invisible at `read-only` and, for a path outside the workspace, at
-#      `workspace-write` too. Measured over this corpus: 0 rows out of 135, and the
+#      `workspace-write` too. Measured over this corpus: 0 rows out of 216, and the
 #      assertion is demonstrably load-bearing — the two arms below make it fire.
 #   2. **the over-block class stays masked** — an over-blocked row must carry an
 #      operator-shaped word whose own spelling is quoted or escaped (or a partially
@@ -2361,10 +2363,41 @@ def test_the_over_block_is_scoped_to_the_unresolvable_spelling():
 #      masked over-blocks, so a corpus that quietly stopped exercising either
 #      outcome fails here instead of passing.
 _CORPUS_PREFIXES = ["echo x", "echo 'a'b", "test 1 'a'b x"]
+
+
+def _masked_operator_spellings() -> list[str]:
+    """Every spelling of `>`/`>>` whose operator **word** carries quoting/escaping.
+
+    Issue #1300: the list below used to be a *chosen sample* of this family, so the
+    corpus measured its list rather than the class — four spellings an external
+    sweep had measured as members (`2">>"`, `\\2\\>`, `\\2\\>\\>`, `\\>\\>`) were
+    simply absent, and the failure that leaves is a later fix teaching the pairing
+    about `'` but not `"`: the twin stays refused while every non-vacuity assertion
+    in the corpus stays satisfied.
+
+    The family is the three maskings (single-quoted, double-quoted, fully escaped)
+    of the operator, each with the word's prefix plain, a bare `2`, or itself
+    escaped — 18 spellings. It is generated rather than listed so that the corpus
+    runs the family by construction; `test_the_corpus_operator_list_covers_the_
+    masked_family` pins the family independently, because a generator that quietly
+    stopped emitting a member would shrink the list and the corpus together.
+
+    The boundary is honest: this is the family of `>`/`>>`, the two operator shapes
+    the residual's own evidence is about. Other operators (`>|`, `<>`) keep their
+    single spellings, and *partial* quoting (`'a'b`) is #1280's separately priced
+    class, not this one.
+    """
+    spellings: list[str] = []
+    for op in (">", ">>"):
+        for word in (f"'{op}'", f'"{op}"', "".join("\\" + c for c in op)):
+            for prefix in ("", "2", "\\2"):
+                spellings.append(prefix + word)
+    return spellings
+
+
 _CORPUS_OPERATORS = [
     ">", ">>", "2>", "2>>", ">|", "<>",       # plain: the walk must agree
-    "'>'", "'>>'", '">"', "2'>'", "2'>>'", '2">"',   # the operator's own spelling quoted
-    "\\>", "\\>>", "2\\>",                     # …or escaped
+    *_masked_operator_spellings(),            # …and every masked member of the family
 ]
 _CORPUS_TARGETS = ["log", "out.txt", "'>'"]
 
@@ -2406,6 +2439,30 @@ def _row_is_masked(cmd: str) -> bool:
     operator_word = parts[-2]
     return ("'" in operator_word or '"' in operator_word or "\\" in operator_word
             or any(("'" in p or "\\" in p) for p in parts[:-2]))
+
+
+def test_the_corpus_operator_list_covers_the_masked_family():
+    """Issue #1300: the operator list is the family, and the family is pinned here.
+
+    `_CORPUS_OPERATORS` is generated from `_masked_operator_spellings`, which makes
+    "the corpus runs the family" true by construction — and also lets a generator
+    that quietly stopped emitting one member shrink the list and the corpus
+    *together*, with nothing to notice it. So the family is spelled out here,
+    independently of the generator: its measured size, and both twins of every
+    operator, which is the trap #1300 was filed for — a later fix that teaches the
+    pairing about `'` but not `"` leaves the `"`-twin refused while the corpus's
+    non-vacuity assertions stay satisfied.
+    """
+    family = _masked_operator_spellings()
+    assert len(family) == 18, f"the family changed size: {sorted(set(family))}"
+    for op in (">", ">>"):
+        for word in (f"'{op}'", f'"{op}"', "".join("\\" + c for c in op)):
+            for prefix in ("", "2", "\\2"):
+                assert prefix + word in family, f"{prefix + word!r} left the family"
+    assert set(family) <= set(_CORPUS_OPERATORS), (
+        "the corpus does not run every member of the masked family: "
+        f"{sorted(set(family) - set(_CORPUS_OPERATORS))}"
+    )
 
 
 @pytest.mark.skipif(sys.platform == "win32",
