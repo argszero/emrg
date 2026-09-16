@@ -57,10 +57,21 @@ def test_a_missing_or_unreadable_log_is_not_an_exception(tmp_path):
 
 
 def test_the_mark_is_taken_before_the_child_can_write(tmp_path):
-    """A size taken after the spawn would already include this attempt's output."""
+    """A size taken after the spawn would already include this attempt's output.
+
+    The expected size is read back from the **file**, never from ``len(text)``:
+    a text-mode write turns ``\\n`` into ``\\r\\n`` on Windows, so a byte count
+    derived from the string is a POSIX assumption. Measured the hard way — the
+    Windows leg of CI rejected exactly that assertion.
+    """
     log = tmp_path / "emrgd.log"
     log.write_text("previous run\n", encoding="utf-8")
-    assert dm._log_size(log) == len("previous run\n")
+    mark = dm._log_size(log)
+    assert mark == log.stat().st_size > 0
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("this attempt\n")
+    assert dm._log_size(log) > mark, "the mark must be a point in the file, not a constant"
+    assert dm._read_log_tail(log, since=mark).strip() == "this attempt"
 
 
 def test_a_silent_child_is_reported_as_silent_not_as_an_older_run(tmp_path):
@@ -178,7 +189,12 @@ def test_a_real_crash_keeps_the_word_and_the_traceback():
 
 def test_the_classification_in_run_server_is_the_one_used():
     """The defect was a computed `reason` that the log line ignored: assert the
-    caller routes through the helper rather than re-deciding the wording."""
-    src = Path(srv.__file__).read_text(encoding="utf-8")
+    caller routes through the helper rather than re-deciding the wording.
+
+    Line endings are normalised first: on a CRLF checkout the `not in` half would
+    otherwise be satisfied by the newline alone and stop guarding anything, which
+    is the silent-pass failure mode rather than a red one.
+    """
+    src = Path(srv.__file__).read_text(encoding="utf-8").replace("\r\n", "\n")
     assert "level, message, with_traceback = _serve_exit_log_record(reason, exc)" in src
     assert 'logger.critical(\n            "daemon crashed' not in src
