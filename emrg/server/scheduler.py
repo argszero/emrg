@@ -19,7 +19,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import yaml
 
@@ -378,17 +378,273 @@ class TaskHandler:
             return False
         return bool(out.stdout.strip()) if out.returncode == 0 else False
 
-    async def _effective_sandbox(self, dirty: bool | None = None) -> str:
+    @staticmethod
+    def _dirty_tree_would_lose_work_sync(source_dir: str) -> tuple[bool, str]:
+        """Whether discarding the working tree could lose content found nowhere else.
+
+        The question the guard actually needs (host directive 2026-09-16, issue
+        #1237): *would anything be lost?* — not *is the tree dirty?*. Those differ,
+        and the difference cost 33 consecutive zero-commit cycles: a tree can be
+        "dirty" because two files carry bytes that upstream's own commit already
+        holds, and forcing such a cycle read-only protects nothing while disabling
+        the git verbs it would need to converge the tree itself.
+
+        Answers ``(True, why)`` when the dirt is **unique** — the caller must then
+        keep the cycle read-only — and ``(False, why)`` when every listed change is
+        already recoverable from a commit git holds, so discarding it loses nothing.
+        Read-only operations only, so it runs under the tier it is deciding about.
+
+        The criterion, per ``git status --porcelain`` entry:
+
+        * ``??`` untracked, a staged addition, a conflict, or a rename — content
+          that exists only in the index or the worktree ⇒ unique;
+        * a **deletion** loses nothing (discarding restores the blob from ``HEAD``);
+        * a **modification** is recoverable when its blob equals ``HEAD``'s or the
+          upstream tip's for that path — the two places a blob can already live;
+        * a commit reachable only from this branch would be orphaned by a branch
+          reset ⇒ unique.
+
+        Fail-closed throughout: an unreadable status, an unreadable file, or no
+        upstream ref to compare against all answer *unique*, i.e. exactly the
+        pre-existing read-only behaviour. Only a positive, complete measurement of
+        "recoverable" ever releases the tier.
+        """
+        import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
+
+        def git(*args: str):
+            return _sp.run(
+                ["git", "-C", source_dir, *args],
+                capture_output=True, text=True, timeout=10,
+                # Paths, not console output — same pinning as the sibling probe.
+                encoding="utf-8", errors="replace",
+            )
+
+        status = git("status", "--porcelain", "--untracked-files=normal")
+        if status.returncode != 0:
+            return True, "the working tree state could not be read"
+        if not status.stdout.strip():
+            return False, "the tree is clean"
+
+        # The second place a blob can already live. A repo with no upstream keeps
+        # only HEAD, which can only make *more* dirt count as unique (safe side).
+        upstream = None
+        for ref in ("origin/master", "FETCH_HEAD"):
+            probe = git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+            if probe.returncode == 0 and probe.stdout.strip():
+                upstream = probe.stdout.strip()
+                break
+
+        unique: list[str] = []
+        for line in status.stdout.splitlines():
+            if not line.strip():
+                continue
+            code, path = line[:2], line[3:].strip()
+            if code == "??" or "U" in code or code in ("AA", "DD"):
+                unique.append(f"{path} exists only in this checkout")
+                continue
+            if "A" in code:
+                unique.append(f"{path} is staged but not committed")
+                continue
+            if "R" in code or "C" in code:
+                unique.append(f"{path} was renamed")
+                continue
+            if "D" in code:
+                continue                    # a deletion loses nothing: HEAD holds it
+            blob = git("hash-object", "--", path)
+            if blob.returncode != 0 or not blob.stdout.strip():
+                unique.append(f"{path} could not be read to compare")
+                continue
+            digest = blob.stdout.strip()
+            for ref in filter(None, ("HEAD", upstream)):
+                have = git("rev-parse", "--verify", "--quiet", f"{ref}:{path}")
+                if have.returncode == 0 and have.stdout.strip() == digest:
+                    break
+            else:
+                unique.append(f"{path} differs from HEAD and from the upstream tip")
+
+        if upstream:
+            ahead = git("rev-list", "--count", f"{upstream}..HEAD")
+            if ahead.returncode == 0 and ahead.stdout.strip() not in ("", "0"):
+                unique.append(
+                    f"{ahead.stdout.strip()} commit(s) exist only on this branch"
+                )
+
+        if unique:
+            shown = "; ".join(unique[:3])
+            if len(unique) > 3:
+                shown += f"; and {len(unique) - 3} more"
+            return True, shown
+        return False, "every change is already in HEAD or in the upstream tip"
+
+    @staticmethod
+    def _git_state_dir(source_dir: str) -> str | None:
+        """The git dir, where a recovery receipt belongs (issue #1237).
+
+        Measured while writing this recovery: a receipt beside the tree
+        (``<repo>/.emrg/...``) re-dirtied the tree it had just cleaned in any
+        repository that does not ignore ``.emrg/``, re-arming the guard on the next
+        cycle - the action causing the condition it exists to clear. Nothing inside
+        the git dir is tracked or reported by ``git status``, and it is where git
+        keeps its own recovery records (``ORIG_HEAD``, ``stash``).
+
+        Returns None when it cannot be resolved: a receipt is not worth failing a
+        verified recovery over, but the caller reports that it is missing.
+        """
+        import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
+
+        for args in (("rev-parse", "--absolute-git-dir"), ("rev-parse", "--git-dir")):
+            try:
+                out = _sp.run(
+                    ["git", "-C", source_dir, *args],
+                    capture_output=True, text=True, timeout=10,
+                    encoding="utf-8", errors="replace",
+                )
+            except (OSError, _sp.SubprocessError):
+                return None
+            if out.returncode == 0 and out.stdout.strip():
+                path = out.stdout.strip()
+                if os.path.isabs(path):
+                    return path
+                return os.path.normpath(os.path.join(source_dir, path))
+        return None
+
+    @staticmethod
+    def _write_recovery_receipt(source_dir: str, payload: dict) -> str | None:
+        """Write the receipt of a recovery into the git dir; return its path or None.
+
+        Best-effort by design: by the time this runs the recovery has already
+        happened and been verified, and the stash itself is the durable record of
+        what moved - so a missing receipt is worth reporting, not worth undoing a
+        verified recovery over.
+        """
+        state = TaskHandler._git_state_dir(source_dir)
+        if state is None:
+            return None
+        target = os.path.join(state, "emrg-recovery-receipt.json")
+        try:
+            with open(target, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+        except OSError:
+            return None
+        return target
+
+    @staticmethod
+    def _recover_dirty_tree_sync(
+        source_dir: str, reason: str | None = None
+    ) -> tuple[bool, str]:
+        """Converge a working tree whose dirt is reconstructible, reversibly (issue #1237).
+
+        The exit the downgrade never had, performed by the daemon **itself** (host
+        directive 2026-09-16: dirt must be recovered from, not merely detected and
+        reported). Nothing here is a decision for a human: the criterion says every
+        byte in the tree is already in ``HEAD`` or in the upstream tip, so moving it
+        aside cannot lose anything - and the move is a stash, which leaves every byte
+        one ``git stash pop`` away. No branch is reset and no commit is dropped:
+        ``HEAD`` is asserted unmoved before and after.
+
+        Answers ``(True, detail)`` when the tree is now verified clean, and
+        ``(False, why)`` when it is not - refused (the tree holds work found nowhere
+        else), already clean, or unmeasurable. Callers must not read ``False`` as
+        "clean".
+
+        ``reason`` is the caller's already-measured verdict from
+        ``_dirty_tree_would_lose_work_sync``; when omitted the criterion is re-checked
+        here, so the action can never run on unique work even if a caller forgets to
+        ask first. That re-check is why this is safe to expose as a command.
+        """
+        import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
+
+        def git(*args: str):
+            return _sp.run(
+                ["git", "-C", source_dir, *args],
+                capture_output=True, text=True, timeout=30,
+                encoding="utf-8", errors="replace",
+            )
+
+        try:
+            head = git("rev-parse", "--verify", "--quiet", "HEAD")
+        except (OSError, _sp.SubprocessError) as exc:
+            return False, f"the recovery could not run: {exc}"
+        if head.returncode != 0 or not head.stdout.strip():
+            return False, "the recovery could not run: not a git repository with a commit"
+
+        status = git("status", "--porcelain", "--untracked-files=normal")
+        if status.returncode != 0:
+            return False, "the recovery could not run: `git status` failed"
+        before = [line for line in status.stdout.splitlines() if line.strip()]
+        if not before:
+            return False, "the tree was already clean; nothing to recover"
+
+        if reason is None:
+            loses, reason = TaskHandler._dirty_tree_would_lose_work_sync(source_dir)
+            if loses:
+                return False, f"refused: this tree holds work that exists nowhere else ({reason})"
+
+        message = "emrg-recovery-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stash = git("stash", "push", "--include-untracked", "-m", message)
+        if stash.returncode != 0:
+            detail = (stash.stderr or stash.stdout).strip()
+            return False, f"the recovery could not run: `git stash push` failed: {detail}"
+
+        after = git("status", "--porcelain", "--untracked-files=normal")
+        if after.returncode != 0 or after.stdout.strip():
+            return False, (
+                "the tree is still not clean after stashing; recover the stash with "
+                f"`git stash pop` (stash {message}) and investigate"
+            )
+
+        head_after = git("rev-parse", "HEAD").stdout.strip()
+        TaskHandler._write_recovery_receipt(source_dir, {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "repo": source_dir,
+            "reason": reason,
+            "head_before": head.stdout.strip(),
+            "head_after": head_after,
+            "status_before": before,
+            "status_after": [],
+            "stash_message": message,
+            "action": "git stash push --include-untracked",
+            "reversible_with": f"git stash pop (or `git stash list` -> {message})",
+        })
+        return True, (
+            f"{len(before)} reconstructible change(s) stashed as {message}; "
+            f"HEAD unmoved at {head_after[:8]}; recover with `git stash pop`"
+        )
+
+    async def _effective_sandbox(
+        self, dirty: bool | None = None, loses_unique: bool | None = None
+    ) -> str:
         """Per-cycle effective bash sandbox tier for the task message.
 
         Structural dirty-tree guard (community issue #979 — heinrichneb's
         "audited override" pattern: inconvenient by default, possible on
-        explicit human override, every exception is a receipt). When the
-        source dir has uncommitted changes the cycle runs read-only
-        regardless of configuration — the host's live edits are out of
-        reach structurally, not by prompt aspiration. A human may override
-        with the env var ``EMRG_TASK_DIRTY_OVERRIDE`` (comma-separated task
-        names, or ``*`` for all); every override is logged as a receipt.
+        explicit human override, every exception is a receipt), **keyed on loss
+        rather than on dirt** (host directive 2026-09-16, issue #1237).
+
+        The guard exists so a cycle cannot destroy work that lives only in the
+        host's working tree. "The tree is dirty" was a proxy for that, and a bad
+        one: it fired on states that hold no unique work at all — most expensively
+        on the 33-cycle stretch where two modified files were byte-identical to
+        upstream's own blobs — while making the cycle read-only *also* disabled
+        the git verbs it would have needed to converge the tree, so the state that
+        triggered the downgrade kept the cycle locked in it.
+
+        So the question is now asked directly, by ``_dirty_tree_would_lose_work_sync``,
+        and answered, by ``_recover_dirty_tree_sync`` (host directive 2026-09-16: dirt
+        must be recovered from, not merely detected and reported - a guard whose exit
+        is a command a human has to run is a guard that strands the tree):
+
+        * a dirty tree whose changes are all recoverable from ``HEAD`` or the upstream
+          tip is **converged by the daemon itself**, reversibly (stash, ``HEAD``
+          unmoved, receipt in the git dir), and the configured tier is left intact;
+        * a dirty tree holding anything found nowhere else is forced ``read-only`` as
+          before, with the offending paths named - the daemon touches nothing, because
+          discarding that is a decision for whoever wrote it.
+
+        A human may still override with the env var ``EMRG_TASK_DIRTY_OVERRIDE``
+        (comma-separated task names, or ``*`` for all); every release of the guard is
+        logged as a receipt.
         """
         if dirty is None:
             dirty = await asyncio.to_thread(
@@ -405,9 +661,30 @@ class TaskHandler:
                 self.name, self._sandbox,
             )
             return self._sandbox
+        if loses_unique is None:
+            loses_unique, why = await asyncio.to_thread(
+                self._dirty_tree_would_lose_work_sync, str(self._source_dir)
+            )
+        else:
+            why = "reported by the caller"
+        if not loses_unique:
+            recovered, detail = await asyncio.to_thread(
+                self._recover_dirty_tree_sync, str(self._source_dir), why
+            )
+            self._logger.warning(
+                "TaskHandler[%s]: dirty working tree holding no unique work (%s) — "
+                "self-recovery %s; cycle keeps %s (structural guard, community "
+                "issue #979 / #1237, audited receipt)",
+                self.name, why, detail if recovered else "did not complete", self._sandbox,
+            )
+            return self._sandbox
         self._logger.warning(
-            "TaskHandler[%s]: dirty working tree — cycle forced read-only "
-            "(structural guard, community issue #979)", self.name,
+            "TaskHandler[%s]: dirty working tree holding work that exists nowhere "
+            "else (%s) — cycle forced read-only (structural guard, community "
+            "issue #979); the daemon leaves that work untouched and names it here; "
+            "a human decides whether to commit, stash or discard it "
+            "(`scripts/recover-worktree.py --repo <dir>` reports the same verdict)",
+            self.name, why,
         )
         return "read-only"
 
