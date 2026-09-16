@@ -271,7 +271,8 @@ def test_a_missing_file_is_unmeasurable_not_a_pass(mod, tmp_path, capsys):
 def test_the_script_reports_ok_on_the_real_tree_in_a_subprocess():
     """The CI-visible contract: the canonical command exits 0 on this tree."""
     out = subprocess.run([sys.executable, str(SCRIPT)], cwd=REPO_ROOT,
-                         capture_output=True, text=True)
+                         capture_output=True, text=True,
+                         encoding="utf-8", errors="replace")
     assert out.returncode == 0, out.stdout + out.stderr
     assert out.stdout.startswith("tree: "), out.stdout
     assert "OK:" in out.stdout
