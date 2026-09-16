@@ -697,6 +697,11 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # dequotes — a token `--output=x` is textually identical whether
             # git would read it as an option or it sits inside quotes.
             targets.extend(_git_output_flag_targets(tokens, i))
+            # `git config` names the file it writes as an *operand*, not as a
+            # shell redirect, so no redirect in the command reaches it: the
+            # `--file <p>` / `-f <p>` operand and the global/system config behind
+            # `--global` / `--system`. See `_git_config_write_targets`.
+            targets.extend(_git_config_write_targets(tokens, i))
         elif word == "mv":
             args = _positional_args(tokens, i)
             if len(args) >= 2:
@@ -761,6 +766,64 @@ def _git_output_flag_targets(tokens: list[str], i: int) -> list[str]:
         elif j + 1 < len(args):
             out.append(args[j + 1])          # `--output <file>`
     return out
+
+
+def _git_config_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The file a *writing* ``git config`` invocation writes.
+
+    `git config` is the one git verb whose file operand is not the working tree,
+    and both of its shapes leave a workspace: ``--file <p>`` / ``-f <p>`` writes
+    exactly ``<p>``, while ``--global`` / ``--system`` writes the user's or the
+    system's config. Neither was visible to the walk, so workspace-write — whose
+    stated job is to refuse absolute targets outside the workspace root —
+    answered ALLOW with an empty target list. Measured on master `0ff41174aaceb978`
+    against git 2.50.1: all four `--file`/`-f` spellings, `--global`, `--system`,
+    a global option before the verb (`git -c x=1 config …`), an `env` wrapper and
+    a `sh -c` wrapper were all allowed, and git really created the named file in
+    each case. The *verb* was already a mutator at read-only, so read-only was
+    never the tier with the hole — the untested tier was the one every cycle
+    actually runs in.
+
+    Only a **writing** invocation names a target, and the verdict comes from
+    `_git_invocation_is_mutator` rather than from a second opinion about the
+    flags: `git config --global --get user.name` is the identity check every
+    cycle is told to run, and `git config --file <p> --get k` reads a file it
+    must not be refused for *reading*. Naming a target for either would trade
+    this hole for a new over-block and protect nothing.
+
+    `--global` / `--system` are named by the file git writes by default
+    (`~/.gitconfig`, `/etc/gitconfig`). git honours `GIT_CONFIG_GLOBAL`,
+    `XDG_CONFIG_HOME` and a build prefix, any of which moves that file — but
+    never inside a workspace, so the verdict this feeds (target outside the write
+    roots ⇒ refuse) is the same one under every spelling.
+    """
+    inv = _git_invocation_at(tokens, i)
+    if inv is None:
+        return []
+    _, verb, rest = inv
+    if verb != "config":
+        return []
+    if _git_invocation_is_mutator(verb, rest) is None:
+        return []                       # a read names no file it writes
+    for j, tok in enumerate(rest):
+        if tok in ("--file", "-f"):
+            # A flag is never a file *name*: `--file --global` is a malformed
+            # spelling, and naming `--global` as the path it writes would put a
+            # flag in the refusal — the same "an operator is never a target"
+            # discipline the redirect walk applies to `> (issue #1268).
+            if j + 1 < len(rest) and not rest[j + 1].startswith("-"):
+                return [rest[j + 1]]
+            return []
+        if tok.startswith("--file="):
+            value = tok.split("=", 1)[1]
+            return [value] if value else []
+        if tok.startswith("-f") and len(tok) > 2:
+            return [tok[2:]]
+    if "--global" in rest:
+        return ["~/.gitconfig"]
+    if "--system" in rest:
+        return ["/etc/gitconfig"]
+    return []                           # `--local` is the repo's own .git/config
 
 
 def _protected_paths() -> list[str]:
@@ -1220,24 +1283,47 @@ def _git_verbs(tokens: list[str]) -> list[tuple[str, list[str]]]:
         if _basename(tok) != "git" or not _runs_as_a_command(tokens, i):
             i += 1
             continue
-        j = i + 1
-        # Skip global options (and the separate value of options that take one).
-        while j < len(tokens):
-            nxt = tokens[j]
-            if nxt in _GIT_GLOBAL_WITH_VALUE:
-                j += 2
-                continue
-            if nxt.startswith("-"):
-                j += 1
-                continue
-            break
-        if j < len(tokens):
-            end = j + 1
-            while end < len(tokens) and tokens[end] not in _COMMAND_SEPARATORS:
-                end += 1
-            out.append((tokens[j], tokens[j + 1:end]))
+        inv = _git_invocation_at(tokens, i)
+        if inv is None:
+            i += 1
+            continue
+        j, verb, rest = inv
+        out.append((verb, rest))
         i = j + 1
     return out
+
+
+def _git_invocation_at(tokens: list[str], i: int) -> tuple[int, str, list[str]] | None:
+    """``(verb token index, verb, tokens after it)`` for the ``git`` at ``i``.
+
+    The global-option skip that finds a git subcommand lives here rather than
+    inline in `_git_verbs`, because a second caller needs the same answer: the
+    write-target walk has to know *which verb* a `git` token introduced before it
+    can read that verb's file operand (`_git_config_write_targets`). Two copies
+    of the walk would be two places to fix the day git adds another option that
+    takes a value — exactly the drift the shared helpers in this file exist to
+    prevent.
+
+    Returns ``None`` when the invocation has no verb to resolve: a bare trailing
+    ``git``, or one followed only by global options.
+    """
+    j = i + 1
+    # Skip global options (and the separate value of options that take one).
+    while j < len(tokens):
+        nxt = tokens[j]
+        if nxt in _GIT_GLOBAL_WITH_VALUE:
+            j += 2
+            continue
+        if nxt.startswith("-"):
+            j += 1
+            continue
+        break
+    if j >= len(tokens):
+        return None
+    end = j + 1
+    while end < len(tokens) and tokens[end] not in _COMMAND_SEPARATORS:
+        end += 1
+    return j, tokens[j], tokens[j + 1:end]
 
 
 def _git_invocation_is_mutator(verb: str, rest: list[str]) -> str | None:

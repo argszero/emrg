@@ -345,6 +345,133 @@ def test_check_workspace_write_blocks_outside_workspace():
     assert allowed is False
 
 
+# ── workspace-write: a `git config` write names the file it writes ─────────
+# Measured on master `0ff41174aaceb978` with git 2.50.1: every command in
+# `GIT_CONFIG_WRITES` was ALLOWED at workspace-write with an **empty** target
+# list, and git really created the named file each time. The contract asserted
+# below is the one `test_check_workspace_write_blocks_outside_workspace` already
+# states for a redirect — a `git config` operand reaches the same boundary with
+# no redirect anywhere in the command, which is why no redirect rule could see it.
+
+GIT_OUTSIDE = "/outside/emrg.ini"
+
+GIT_CONFIG_WRITES = (
+    f"git config --file {GIT_OUTSIDE} a.b c",
+    f"git config --file={GIT_OUTSIDE} a.b c",
+    f"git config -f {GIT_OUTSIDE} a.b c",
+    f"git config -f{GIT_OUTSIDE} a.b c",
+    "git config --global user.name probe",
+    "git config --system a.b c",
+    f"git -c x=1 config --file {GIT_OUTSIDE} a.b c",
+    f"git config --add --file {GIT_OUTSIDE} a.b c",
+    f"env git config --file {GIT_OUTSIDE} a.b c",
+    f"git config --file {GIT_OUTSIDE} a.b c && git status",
+    f"sh -c 'git config --file {GIT_OUTSIDE} a.b c'",
+)
+
+
+def test_workspace_write_blocks_a_git_config_write_that_leaves_the_workspace():
+    """`git config`'s file is an *operand*, so only naming it can block it.
+
+    `--file`/`-f` writes exactly the path it is given, and `--global`/`--system`
+    writes a config no workspace contains. The walk named a target for neither,
+    and workspace-write allows a command whose target list is empty — so the
+    boundary was reachable by a spelling the guard never read. The wrappers
+    (`env`, `sh -c`) and the chained form are here because a rule that fired only
+    on a bare `git config` would be a rule about *position*, which is the defect
+    #1156 already fixed one level down.
+    """
+    for cmd in GIT_CONFIG_WRITES:
+        allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+        assert allowed is False, f"{cmd!r} writes outside the workspace"
+
+
+def test_the_git_config_block_names_the_file_git_writes():
+    """Which path the refusal names, so it is a finding and not just a no.
+
+    `--global` / `--system` are named by the file git writes by default
+    (`~/.gitconfig`, `/etc/gitconfig`). `GIT_CONFIG_GLOBAL`, `XDG_CONFIG_HOME` and
+    a build prefix move that file — never into a workspace — so the verdict this
+    feeds is the same one under every spelling.
+    """
+    cases = {
+        f"git config --file {GIT_OUTSIDE} a.b c": [GIT_OUTSIDE],
+        f"git config --file={GIT_OUTSIDE} a.b c": [GIT_OUTSIDE],
+        f"git config -f {GIT_OUTSIDE} a.b c": [GIT_OUTSIDE],
+        f"git config -f{GIT_OUTSIDE} a.b c": [GIT_OUTSIDE],
+        "git config --global --add a.b c": ["~/.gitconfig"],
+        "git config --system a.b c": ["/etc/gitconfig"],
+        # A flag is never a file *name*: naming `--global` here would put a flag
+        # in the refusal — the same "an operator is never a target" discipline
+        # the redirect walk applies to a quoted `>` (issue #1268).
+        "git config --file --global a.b c": [],
+        "git config --file= a.b c": [],
+    }
+    for cmd, want in cases.items():
+        assert _extract_write_targets(cmd) == want, cmd
+
+
+def test_a_git_config_read_names_no_target_and_stays_allowed():
+    """The blocking direction must not swallow the reads.
+
+    `git config --global --get user.name` is the identity check every cycle is
+    told to run, and `git config --file <p> --get k` reads a file it must not be
+    refused for *reading*. Both are proven reads, so they name no write target —
+    a rule that blocked `--global` by itself would refuse them both.
+    """
+    for cmd in (
+        "git config --global --get user.name",
+        "git config --global --list",
+        f"git config --file {GIT_OUTSIDE} --get a.b",
+        "git config --get user.name",
+        "git config -l",
+    ):
+        assert _extract_write_targets(cmd) == [], cmd
+        allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+        assert allowed is True, f"{cmd!r} must stay allowed (got {reason!r})"
+
+
+def test_git_config_writes_that_stay_inside_the_workspace_stay_allowed():
+    """The positive control: an in-workspace `git config` write is ordinary work.
+
+    `git config user.name x` writes the repo's own `.git/config`, and `--file`
+    pointed inside the workspace or the temp root is the same operation spelled
+    with a path. Refusing either would break the identity check and every
+    `--file` use inside a repo — a boundary defended by refusing the write that
+    is inside it is not a boundary.
+    """
+    for cmd in (
+        "git config user.name probe",
+        "git config core.hooksPath .githooks",
+        "git config --file ./local.ini a.b c",
+        f"git config --file {tempfile.gettempdir()}/emrg.ini a.b c",
+        "git status",
+    ):
+        allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+        assert allowed is True, f"{cmd!r} must stay allowed (got {reason!r})"
+
+
+def test_only_a_config_invocation_names_a_git_config_file():
+    """`-f` is a *file* flag for `config` alone.
+
+    For `branch` / `tag` / `push` the same spelling is `--force`, which names no
+    file — reading it as one for every verb would point the block at a name that
+    is not a path, and refuse ordinary work with it. The last two are the
+    valueless spellings: they must not read the flag itself as the file name.
+    """
+    for cmd in (
+        "git tag -f v1",
+        "git branch -f other",
+        "git push -f origin master",
+        "git config --file",
+        "git config --global",
+    ):
+        assert _extract_write_targets(cmd) == [], cmd
+    for cmd in ("git tag -f v1", "git branch -f other", "git push -f origin master"):
+        allowed, _, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+        assert allowed is True, cmd
+
+
 # ── workspace-write trusted zone (issue #1093 self-regression) ─────────────
 # PR #1092 added check_workspace_write to write/edit (mirroring bash) and
 # blocked absolute targets outside the injected workspace. The evolution task
