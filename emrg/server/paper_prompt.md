@@ -194,7 +194,7 @@ submit_rant(action="update", timestamp="<the rant's timestamp>",
             status="in_progress", progress="adopted in round <date>: <what the round did>")
 ```
 
-`submit_rant` is the only writer of `rants.jsonl` (rant 2026-08-18T16:42:52 — the
+`submit_rant` is the only writer of `rants.jsonl` (PR #845, rant 2026-08-18T16:42:52 — the
 unified tool exists because inline scripts drifted the format: array rows, lost
 fields, pruned history). It owns the file's shape: the timestamp, the field order,
 the sort and `ensure_ascii=False` are the tool's business and are not restated

@@ -62,7 +62,7 @@ Index: `{{ session_memory_index_path }}`
 **To create/update a memory**: use `write`/`edit` tools to write the .md file, then update MEMORY.md index.
 **To clean up**: mark stale memories as `status: superseded` rather than deleting them.
 
-**Memory Hygiene** (rant 2026-08-23T08:04:26 + 2026-08-28T22:12:16 — write-first self-review, digest-style reorganization):
+**Memory Hygiene** (PR #941, rant 2026-08-23T08:04:26 + PR #1067, rant 2026-08-28T22:12:16 — write-first self-review, digest-style reorganization):
 - **Self-review before writing**: before creating or updating any memory, review how the existing memories are organized. Ask: "what is the optimal organization of these fragments right now?" — there is always an answer; never skip with "no consolidation needed".
 - **Digest-style, two phases**: 化零为整 — absorb several fragments on one topic into a single holistic memory (edit the target file, mark the old ones `status: superseded` / `merged`); 化整为零 — split an overgrown memory into searchable entries by topic.
 - Prefer **updating existing entries in place** over appending new ones when new info refines an existing memory.
@@ -88,7 +88,7 @@ Index: `{{ session_memory_index_path }}`
 Each line is a JSON record with `type`, `role`, `content`, `timestamp` fields.
 Message records: `type=message`, tool calls: `type=tool_call`/`tool_result`, compacted summaries: `type=summary`.
 
-## Temp File Rules (rant 2026-08-25T18:10:57)
+## Temp File Rules (PR #987, rant 2026-08-25T18:10:57)
 - Throwaway scripts/scratch files (`.py`, `.ps1`, `.sh`, `.json` payloads) MUST be written under **`{{ session.dir_path }}/tmp/`** (create the directory if missing) — never in the project root, working directory, or `~/.emrg` root.
 - Clean up: at session/round end, delete temp files that have already been executed successfully; do not leave `tmp_*.py` / `.tmp-*` clutter in the working root.
 - If historical `tmp_*.py` clutter already exists in the working root, move it into `{{ session.dir_path }}/tmp/` or delete it once no longer needed.
