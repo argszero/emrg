@@ -33,10 +33,15 @@ what "reconstructible" means, the deadlock would come back through the script):
   exists to prevent;
 * the dirt is reconstructible -> `git stash push -u` it, which leaves the worktree
   clean *and* keeps every byte in the stash, so the action is undoable — with
-  `git stash apply --index stash^{/<stash message>}`, the spelling the receipt
-  names, and *not* with a bare `git stash pop` (it takes the newest stash, brings a
-  staged change back unstaged, and consumes the stash; issue #1284). **No branch is
-  reset and no commit is dropped** — this never moves `HEAD`.
+  `git stash apply --index stash@{N}`, the spelling the receipt names, `N` being the
+  ordinal `git stash list` prints for the message the receipt carries; and *not*
+  with a bare `git stash pop` (it takes the newest stash, brings a staged change
+  back unstaged, and consumes the stash; issue #1284). The ordinal is the selector
+  because no `@{…}` form names a stash **by message**: `stash^{/<message>}` searches
+  commit ancestry (rc=1 once a later stash exists) and `stash@{/<message>}` resolves
+  to the newest entry whatever message it is given, i.e. it applies the wrong stash
+  successfully — both measured. **No branch is reset and no commit is dropped** —
+  this never moves `HEAD`.
 
 Every `--apply` writes a receipt into the **git state dir** (see
 `scheduler._git_state_dir` — a location that cannot dirty the tree it just cleaned),

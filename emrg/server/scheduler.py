@@ -64,10 +64,10 @@ def _receipt_note(receipt: str | None) -> str:
 #: where the reader looks). The prose *around* it can still drift; the spelling
 #: cannot, and `tests/test_recover_worktree.py` drives both printers to prove it.
 RECOVERY_RECIPE_TEMPLATE = (
-    "`git stash list` -> {message}, then "
-    "`git stash apply --index stash^{{/{message}}}` (`--index` restores "
-    "the staged side too, and a bare `git stash pop` takes the newest, "
-    "which is this one only until the next stash is made)"
+    "`git stash list` -> the entry whose message is {message}, then "
+    "`git stash apply --index stash@{{N}}` with the `N` that list prints "
+    "(`--index` restores the staged side too, and a bare `git stash pop` "
+    "takes the newest and consumes it)"
 )
 
 
@@ -84,6 +84,31 @@ def recovery_recipe(stash_message: str) -> str:
     unreferenced (measured: plain `pop` left the index at HEAD's blob and 4
     unreachable objects behind, while `pop --index` restored the staged content byte
     for byte).
+
+    **Why the selector is the list's ordinal and not the message** (measured with
+    git 2.50.1, in the state this recipe's own warning names — a *later* stash in the
+    same repository, which is the next ordinary recovery, since `apply` keeps the
+    first stash forever; there the named stash is at `stash@{1}` and a later
+    `emrg-recovery-…` sits at `stash@{0}`):
+
+        stash^{/<message>}  -> `rev-parse` rc=128; `apply` rc=1, `error: … is not a
+                               valid reference`; the geometry is NOT restored
+        stash@{/<message>}  -> `rev-parse` rc=0 but resolves to `stash@{0}`, the LATER
+                               stash, whatever message is passed; `apply` rc=0 and
+                               restores the WRONG stash's content
+        stash@{N}           -> `rev-parse` rc=0, the named entry; `apply` rc=0, the
+                               named geometry restored, both stashes kept
+
+    `gitrevisions(7)` allows `@{<n>}`, `@{<date>}`, `@{upstream}`, `@{push}`,
+    `@{-<n>}` — there is **no** message form, which is why the middle row succeeds
+    while pointing at the wrong stash: it is not a selector, and a silent wrong-stash
+    apply is worse than the loud failure above it. `^{/<text>}` *is* documented, but
+    as "the commit whose message matches, searching ancestry", and an older stash
+    commit is not an ancestor of a newer one, so the older name stops resolving the
+    moment a later stash exists. The list the recipe's first half tells the reader to
+    read is the store that does name every stash, so the recipe takes the ordinal
+    from it. Pinned by
+    `tests/test_recover_worktree.py::test_the_advertised_selector_survives_a_later_stash`.
     """
     return RECOVERY_RECIPE_TEMPLATE.format(message=stash_message)
 
