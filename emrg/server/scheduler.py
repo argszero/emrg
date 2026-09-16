@@ -401,6 +401,15 @@ class TaskHandler:
         * a **deletion** loses nothing (discarding restores the blob from ``HEAD``);
         * a **modification** is recoverable when its blob equals ``HEAD``'s or the
           upstream tip's for that path — the two places a blob can already live;
+        * a **staged** change is measured on the index side as well, because the
+          worktree cannot evidence it: in ``MM`` (staged, then the worktree copy
+          reverted to ``HEAD``) the worktree blob *is* ``HEAD``'s, and in ``MD``
+          (staged, then the worktree copy removed) there is no worktree blob at all.
+          Measured before this clause existed: both answered "recoverable" while
+          `git log --all --find-object` found the staged blob in **no commit**, so
+          the tier was released over content a plain `git stash pop` then dropped as
+          an unreferenced object. Content must now be in ``HEAD`` or the upstream tip
+          on *both* sides before the tier is released;
         * a commit reachable only from this branch is unique: it is work that exists
           in no other checkout, so it forces ``read-only``. The reason is *not* the
           recovery - that is a stash, which is indifferent to commits (measured: a
@@ -444,6 +453,10 @@ class TaskHandler:
             if not line.strip():
                 continue
             code, path = line[:2], line[3:].strip()
+            # Porcelain v1 is two columns: the index status and the worktree status.
+            # Naming them is what makes "which side is this fact about?" askable —
+            # several defects here came from reading the pair as one flag.
+            index_side, worktree_side = code[0], code[1]
             if code == "??" or "U" in code or code in ("AA", "DD"):
                 unique.append(f"{path} exists only in this checkout")
                 continue
@@ -453,8 +466,47 @@ class TaskHandler:
             if "R" in code or "C" in code:
                 unique.append(f"{path} was renamed")
                 continue
-            if "D" in code:
-                continue                    # a deletion loses nothing: HEAD holds it
+            if index_side not in (" ", "D"):
+                # The index is the third place content can live, and the *worktree
+                # cannot evidence it*: `MM` is a staged change whose worktree copy was
+                # reverted to HEAD (so `hash-object` returns HEAD's own blob and the
+                # comparison below passes), and `MD` is a staged change whose worktree
+                # copy was removed (so there is no worktree blob to read at all). Both
+                # were measured answering "recoverable" while `git log --all
+                # --find-object` found the staged blob in **no commit** — the tier was
+                # released over content that a plain `git stash pop` then dropped as an
+                # unreferenced object (measured: index back to HEAD's blob, 4
+                # unreachable objects). ' ' is HEAD's own blob and 'D' a staged
+                # deletion, so neither can hide content the index alone holds.
+                staged = git("ls-files", "-s", "--", path)
+                fields = staged.stdout.split()
+                if staged.returncode != 0 or len(fields) < 2:
+                    unique.append(f"{path} is staged but its index content could not be read")
+                    continue
+                index_digest = fields[1]
+                for ref in filter(None, ("HEAD", upstream)):
+                    have = git("rev-parse", "--verify", "--quiet", f"{ref}:{path}")
+                    if have.returncode == 0 and have.stdout.strip() == index_digest:
+                        break
+                else:
+                    unique.append(
+                        f"{path} is staged with content that is in neither HEAD nor "
+                        f"the upstream tip"
+                    )
+                    continue
+            if index_side == "D" or worktree_side == "D":
+                # No worktree copy of this path exists, so there is nothing to read and
+                # nothing to lose — `HEAD` holds the blob, and whatever the index side
+                # held has just been measured above.
+                #
+                # Both halves of this are load-bearing, and each was measured by
+                # removing it: ` D` needs the worktree half. `D ` (a staged deletion,
+                # so the index has no entry *and* no file is on disk) needs the index
+                # half — without it the walk asks `hash-object` about a path with no
+                # file, reads the failure as "could not be read to compare", and
+                # refuses a tree that loses nothing. This is what a blanket
+                # `"D" in code` got right by accident and everything else wrong.
+                continue
             blob = git("hash-object", "--", path)
             if blob.returncode != 0 or not blob.stdout.strip():
                 unique.append(f"{path} could not be read to compare")
@@ -620,14 +672,16 @@ class TaskHandler:
             "status_after": [],
             "stash_message": message,
             "action": "git stash push --include-untracked",
-            # The named form is the primary one: a host may already have stashes, and
-            # a bare `git stash pop` is only correct while this stash is the newest
-            # (measured on the authoring workspace, which had an unrelated
-            # `stash@{0}` when this was written).
+            # `--index` is not decoration: a stash carries the index side as well, and
+            # without it a stash whose change is index-only is popped as "Already up
+            # to date." and **dropped**, leaving that blob unreferenced (measured:
+            # plain `pop` left the index at HEAD's blob and 4 unreachable objects
+            # behind, while `pop --index` restored the staged content byte for byte).
             "reversible_with": (
-                f"`git stash list` -> {message}, then `git stash apply stash^{{/{message}}}`"
-                f" (a bare `git stash pop` takes the newest, which is this one"
-                f" only until the next stash is made)"
+                f"`git stash list` -> {message}, then "
+                f"`git stash apply --index stash^{{/{message}}}` (`--index` restores "
+                f"the staged side too, and a bare `git stash pop` takes the newest, "
+                f"which is this one only until the next stash is made)"
             ),
         })
         if head_after != head.stdout.strip():

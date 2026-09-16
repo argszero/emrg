@@ -2752,6 +2752,8 @@ def test_reconstructible_dirt_is_recovered_by_the_daemon_itself(tmp_path):
     assert receipt["status_after"] == []
     assert receipt["stash_message"] in receipt["reversible_with"], \
         "the reversal route must name the stash that was made, not the newest one"
+    assert "--index" in receipt["reversible_with"], \
+        "a stash carries the index side; the inverse must restore it"
 
     # Reversibility is why the action is allowed at all: popping restores the exact
     # state the daemon moved aside -- here, the deletion itself, byte for byte.

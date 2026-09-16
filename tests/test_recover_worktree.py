@@ -157,6 +157,108 @@ def test_a_deletion_loses_nothing(tmp_path):
     assert loses is False, why
 
 
+def test_a_staged_deletion_loses_nothing(tmp_path):
+    """The same verdict on the *index* side of a deletion (`D `, not ` D`).
+
+    Pinned because the clause that skips deletions was narrowed from `"D" in code`
+    to the two sides that actually lose nothing. `D ` is the case that a careless
+    narrowing drops: the worktree copy is gone as well, so a check that looked for a
+    worktree blob would answer "could not be read to compare" and refuse a tree that
+    loses nothing. Both spellings are deletions; both must stay recoverable.
+    """
+    _new_repo(tmp_path / "repo")
+    repo = tmp_path / "repo"
+    _git(repo, "rm", "-q", "--cached", "f.txt")
+    (repo / "f.txt").unlink()
+    assert _status(repo) == "D  f.txt\n", _status(repo)
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is False, why
+
+
+def test_staged_content_the_worktree_cannot_evidence_is_unique(tmp_path):
+    """`MM`: staged, then the worktree copy reverted to HEAD (review of #1274).
+
+    The worktree blob *is* HEAD's, so a measurement that reads only the worktree
+    answers "recoverable" — while the staged blob is in no commit at all, and a plain
+    `git stash pop` then drops it as an unreferenced object (measured: the index went
+    back to HEAD's blob and the unique bytes became unreachable). The criterion must
+    measure the index side too.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo)
+    (repo / "f.txt").write_text("STAGED-ONLY-UNIQUE", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    (repo / "f.txt").write_text("v1", encoding="utf-8")   # back to HEAD's own bytes
+    assert _status(repo) == "MM f.txt\n", _status(repo)
+
+    staged = _git(repo, "rev-parse", ":f.txt").stdout.strip()
+    reachable = _git(repo, "log", "--all", "--oneline", f"--find-object={staged}")
+    assert reachable.stdout.strip() == "", "precondition: the staged blob is in no commit"
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True, why
+    assert "staged" in why, why
+
+    # And the action obeys that verdict: nothing may be moved aside.
+    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
+    assert status == "refused", f"{status}: {detail}"
+    assert _git(repo, "stash", "list").stdout.strip() == ""
+    assert _git(repo, "rev-parse", ":f.txt").stdout.strip() == staged, \
+        "the staged blob must still be in the index"
+
+
+def test_staged_content_with_no_worktree_copy_is_unique(tmp_path):
+    """`MD`: staged, then the worktree copy removed — the same hole, other spelling.
+
+    The worktree cannot evidence the index here for a different reason (there is no
+    worktree blob at all), which is why the deletion clause had to be narrowed rather
+    than left to skip anything containing a `D`.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo)
+    (repo / "f.txt").write_text("STAGED-ONLY-UNIQUE", encoding="utf-8")
+    _git(repo, "add", "f.txt")
+    (repo / "f.txt").unlink()
+    assert _status(repo) == "MD f.txt\n", _status(repo)
+
+    staged = _git(repo, "rev-parse", ":f.txt").stdout.strip()
+    assert _git(repo, "log", "--all", "--oneline",
+                f"--find-object={staged}").stdout.strip() == ""
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True, why
+    assert "staged" in why, why
+
+
+def test_staged_content_upstream_already_holds_is_recoverable(tmp_path):
+    """The other direction: the index clause must not refuse published content.
+
+    Both states carry an index blob that equals the **upstream tip's** blob for that
+    path, so discarding loses nothing (the bytes are in a commit anyone can reach).
+    A clause that refused every staged change would trade the #1274 hole for the
+    over-block class #1273 tracks — the two are not interchangeable.
+    """
+    for kind in ("mm", "md"):
+        work, _head = _with_upstream(tmp_path / kind)
+        published = _git(work, "rev-parse", "origin/master:f.txt").stdout.strip()
+        # Stage upstream's own blob for that path (HEAD still holds v1's).
+        staged = _git(work, "update-index", "--cacheinfo", f"100644,{published},f.txt")
+        assert staged.returncode == 0, staged.stderr
+        if kind == "md":
+            (work / "f.txt").unlink()
+        else:
+            # Back to HEAD's bytes, so the worktree cannot evidence the index either —
+            # the same `MM` geometry as the unique case above, differing only in
+            # whether a commit already holds the staged blob.
+            (work / "f.txt").write_text(
+                _git(work, "show", "HEAD:f.txt").stdout, encoding="utf-8"
+            )
+        assert _status(work) == f"{'MM' if kind == 'mm' else 'MD'} f.txt\n", _status(work)
+
+        loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(work))
+        assert loses is False, f"{kind}: {why}"
+
+
 def test_a_commit_only_on_this_branch_is_unique(tmp_path):
     """A branch reset would orphan it: dirty *and* ahead is never reconstructible."""
     origin = tmp_path / "origin.git"
@@ -244,6 +346,11 @@ def test_the_tool_writes_a_receipt_of_what_it_moved(tmp_path):
     # `git stash pop` is only correct until the next one is made (measured on the
     # authoring workspace, which held an unrelated `stash@{0}` when this was written).
     assert receipt["stash_message"] in receipt["reversible_with"]
+    # A stash carries the index side as well, and a plain pop does not restore it:
+    # measured on an index-only change, `stash pop` printed "Already up to date.",
+    # dropped the stash and left the index at HEAD's blob (#1274 review). The
+    # documented inverse must therefore be the `--index` spelling.
+    assert "--index" in receipt["reversible_with"]
     assert "upstream" in receipt["reason"]
 
 
