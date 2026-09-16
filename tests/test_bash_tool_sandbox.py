@@ -9,6 +9,7 @@ feedback through execute().
 import asyncio
 import os
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -1868,6 +1869,8 @@ def test_a_partially_quoted_word_names_the_path_and_not_the_operator_too():
     assert _extract_write_targets("echo 'a'b > '>' && echo done") == [">"]
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh and /bin/bash do not exist")
 def test_a_real_operator_run_is_a_syntax_error_and_costs_only_a_refusal():
     """The measured ground the direction rests on, so the claim is not read as taste.
 
@@ -1926,17 +1929,25 @@ def test_the_price_of_the_direction_is_pinned_rather_than_left_to_drift():
 
 
 LONG_RUN_OPERAND_CASES = [
-    # (command, the file both shells really create, the walk's whole answer)
-    ("echo 'a'b &> '>>' '>'", ">>", [">>", ">"]),
-    ("echo 'a'b > '>>' '>'", ">>", [">>", ">"]),
-    ("echo 'a'b 2> '>>' '>'", ">>", [">>", ">"]),
-    ("echo 'a'b > '>' '>>'", ">", [">", ">>"]),
+    # (command, the shells that read this spelling, the file they create, the
+    #  walk's whole answer)
+    # `&>` is the walk's spelling for "both streams", which the *bash* family
+    # reads as a redirect — macOS `/bin/sh` is bash in POSIX mode, so it reads it
+    # too. dash does not: it backgrounds `echo` and then fails on a command named
+    # `>` (`rc=127`, `>: not found`; measured on the CI Linux leg), so that row is
+    # asserted against bash alone, which both CI legs carry.
+    ("echo 'a'b &> '>>' '>'", ("/bin/bash",), ">>", [">>", ">"]),
+    ("echo 'a'b > '>>' '>'", ("/bin/sh", "/bin/bash"), ">>", [">>", ">"]),
+    ("echo 'a'b 2> '>>' '>'", ("/bin/sh", "/bin/bash"), ">>", [">>", ">"]),
+    ("echo 'a'b > '>' '>>'", ("/bin/sh", "/bin/bash"), ">", [">", ">>"]),
 ]
 
 
-@pytest.mark.parametrize("cmd,operand,answer", LONG_RUN_OPERAND_CASES)
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh and /bin/bash do not exist")
+@pytest.mark.parametrize("cmd,shells,operand,answer", LONG_RUN_OPERAND_CASES)
 def test_a_run_longer_than_two_names_the_operand_the_shell_really_writes(
-    cmd: str, operand: str, answer: list
+    cmd: str, shells: tuple, operand: str, answer: list
 ):
     """The run's operand, not just its last token — the answer a mutation survived on.
 
@@ -1949,16 +1960,22 @@ def test_a_run_longer_than_two_names_the_operand_the_shell_really_writes(
     so naming only the last reports a target list that does not contain the file the
     command writes (`…&> '>>' '>'` -> `['>']`, while both shells create `>>`).
 
-    Measured, each line run by `/bin/sh` and `/bin/bash` in its own fresh scratch
+    Measured, each line run by the shells its own row names in a fresh scratch
     directory: every one exits 0 and creates exactly its operand. The tokens after it
     are arguments of the same command (they are quoted words the walk could not
     resolve) — naming them is the same fail-closed direction as the two-word case and
     costs only refusals of lines that write nothing on their own.
+
+    The shell list is per row, not one list for all of them: `&>` is bash's spelling
+    (`/bin/sh` on Linux is dash, which reads `&` as backgrounding and then rejects the
+    word `>` with `rc=127`), so asserting it against dash would pin a spelling dash
+    does not have. The walk still recognises `&>` because the platform this guard grew
+    up on reads it as a redirect.
     """
     import shutil
 
     scratch_root = os.path.dirname(os.path.abspath(__file__))
-    for shell in ("/bin/sh", "/bin/bash"):
+    for shell in shells:
         d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-longrun-")
         try:
             proc = subprocess.run([shell, "-c", cmd], cwd=d, capture_output=True)
