@@ -503,6 +503,117 @@ def test_the_value_skip_is_scoped_to_the_config_verb():
     assert _git_positionals(["-n", "5"]) == []
 
 
+#: A value of the kind each member of `_GIT_CONFIG_VALUE_OPTS` takes, so the probe
+#: below can hand it one. This is a *table*, not a second copy of the set: the test
+#: asserts the two agree, so a member added without a probe value fails as an
+#: unmeasured claim rather than passing quietly — which is the point, because the
+#: set's safety rests entirely on the property the probe measures.
+_GIT_CONFIG_PROBE_VALUE = {
+    "--file": "probe.cfg",
+    "-f": "probe.cfg",
+    "--blob": "<a real object id, filled in per scratch repository>",
+    "--type": "bool",
+    "--default": "fallback",
+    "--comment": "note",
+}
+
+
+def test_every_config_value_option_consumes_its_value(tmp_path):
+    """The set's safety rests on one property, so measure it rather than assert it.
+
+    Issue #1291. `_GIT_CONFIG_VALUE_OPTS` decides a **verdict**, not a subcommand:
+    the walk skips an option *and its value*, and the count of what remains decides
+    read vs write. Every member must therefore really take a separate value — and
+    nothing in the tree measured that. Adding a value-less option swallows a genuine
+    positional, and the count then reads a write as a read: measured with git
+    2.50.1, `git config --no-type a.b c` writes `.git/config` (rc=0), and so do
+    `--show-scope`, `--local`, `--worktree`, `--includes`, `--no-includes`,
+    `--show-names` and `--null`. On the shipped set every one of those spellings is
+    refused, so the exposure was entirely in the membership — and the suite stayed
+    at `136 passed` with two of them added.
+
+    The probe is the property itself: `git config <member> <value> probe.key` leaves
+    **one** positional when the value is consumed (a read, so nothing is written) and
+    **two** when it is not (git reads that as `key=value` and writes). Real git is
+    the oracle and every byte under the scratch repository is compared, so "it
+    read" is measured rather than inferred from the option's name.
+
+    What this cannot measure on its own: an option git refuses in the counted shape
+    opens no hole, so the no-write assertion passes for it. `--all` is that case —
+    it is real, but it belongs to the subcommand forms (`git config set --all k v`)
+    and not to the bare `git config --all k v` this walk counts, where git exits 129.
+    So the shape assertion is here separately: a member that does nothing in the
+    shape being counted protects nothing, an inert member is a mistake worth failing
+    on, and the message carries git's own usage line — which is where a reader can
+    see what the option really belongs to.
+    """
+    import subprocess as sp
+
+    assert set(_GIT_CONFIG_PROBE_VALUE) == set(_GIT_CONFIG_VALUE_OPTS), (
+        "a member of _GIT_CONFIG_VALUE_OPTS has no probe value — add a value of the "
+        "kind it takes (and re-measure that it consumes one) before the set grows; "
+        "test_every_config_value_option_consumes_its_value is that measurement"
+    )
+
+    def snapshot(root):
+        return {str(p.relative_to(root)): p.read_bytes()
+                for p in sorted(root.rglob("*")) if p.is_file()}
+
+    def changed_by(name, argv):
+        """Run git in a fresh scratch repo; return the paths whose bytes changed."""
+        repo = tmp_path / name
+        repo.mkdir()
+        env = dict(os.environ)
+        # The machine's own config must not be able to make this pass or fail.
+        env.update(GIT_CONFIG_GLOBAL=str(repo / "global.cfg"),
+                   GIT_CONFIG_SYSTEM=str(repo / "system.cfg"),
+                   GIT_CONFIG_NOSYSTEM="1", HOME=str(repo))
+        sp.run(["git", "init", "-q"], cwd=repo, env=env, capture_output=True, check=True)
+        before = snapshot(repo)
+        proc = sp.run(["git", *argv], cwd=repo, env=env, capture_output=True)
+        after = snapshot(repo)
+        changed = sorted(k for k in set(before) | set(after)
+                         if before.get(k) != after.get(k))
+        return [c for c in changed if not c.startswith("logs/")], proc, repo
+
+    # The watch has to be able to see a write, or "nothing changed" proves nothing.
+    control, _, _ = changed_by("control", ["config", "probe.key", "probe.value"])
+    assert control == [".git/config"], (
+        "the byte watch did not see a plain `git config k v` write — re-measure the "
+        f"rule before trusting any 'read' it reports (got {control!r})"
+    )
+
+    for opt, value in sorted(_GIT_CONFIG_PROBE_VALUE.items()):
+        slug = opt.strip("-").replace("-", "_")
+        probe_value = value
+        if opt == "--blob":
+            _, _, repo = changed_by(f"blob-{slug}", ["config", "--list"])
+            blob = sp.run(["git", "hash-object", "-w", "--stdin"], cwd=repo,
+                          input=b"[user]\n\tname = probe\n", capture_output=True)
+            probe_value = blob.stdout.decode().strip()
+            assert probe_value, "could not create the object `--blob` needs"
+        argv = ["config", opt, probe_value, "probe.key"]
+        changed, proc, _ = changed_by(f"probe-{slug}", argv)
+        assert changed == [], (
+            f"`git config {opt} <value> probe.key` wrote {changed!r} — {opt} does not "
+            "consume its value, so the walk miscounts every spelling that uses it "
+            "(issue #1291: re-measure the rule and drop the member)"
+        )
+        stderr = proc.stderr.decode(errors="replace")
+        assert "unknown option" not in stderr, (
+            f"git does not accept {opt!r} in the shape this walk counts: "
+            f"{stderr.strip()}. It is inert there rather than unsafe, but an inert "
+            "member should not sit in the set unnoticed — re-measure the rule "
+            "(issue #1291)"
+        )
+        # …and the walk's own answer agrees with git: this spelling is a read, so it
+        # must be allowed at read-only. That is the half the fix bought (issue #1273
+        # row 3) and it is asserted here per member rather than per spelling alone.
+        allowed, reason, _ = _check_sandbox(
+            f"git config {opt} {probe_value} probe.key", "read-only", workdir=str(tmp_path))
+        assert allowed is True, f"{opt}: reads, so read-only must allow it (got {reason!r})"
+
+
 def test_git_config_writes_that_stay_inside_the_workspace_stay_allowed():
     """The positive control: an in-workspace `git config` write is ordinary work.
 

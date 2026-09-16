@@ -313,6 +313,16 @@ _GIT_CONFIG_READ_SUBCOMMANDS = frozenset({"get", "get-all", "get-regexp",
 # Adding a value still blocks: skipping the option's value leaves the key and the
 # value the caller wrote, which is two positionals. `git config --file <p> user.name
 # probe` really wrote `<p>` (rc=0, bytes changed) and is still refused.
+#
+# Membership is the whole of this set's safety, so it is **measured** rather than
+# asserted here (issue #1291): a value-less member swallows a genuine positional
+# and the count then reads a write as a read — `git config --no-type a.b c` really
+# writes `.git/config` (rc=0) and 7 more of the 16 value-less options measured do
+# the same. `tests/test_bash_tool_sandbox.py::test_every_config_value_option_consumes_its_value`
+# runs `git config <member> <value> probe.key` in a scratch repository and watches
+# every byte: a member that does not consume its value leaves two positionals and
+# git writes. Adding a member is therefore a change that has to come past a real
+# measurement (and past the value table the probe needs), not past a comment.
 _GIT_CONFIG_VALUE_OPTS = frozenset({"--file", "-f", "--blob", "--type",
                                     "--default", "--comment"})
 # git global options that take a SEPARATE argument — the parser must skip both
