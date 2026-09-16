@@ -41,6 +41,18 @@ A second spelling is reported too: a time with no date (`+ 11:00:31`). It is
 unresolvable even on the host that wrote it, since nothing links it to a day, and
 the block it sits in already supplies the date - so the fix is to spell it out.
 
+What this guard cannot measure
+------------------------------
+It checks that a record is **spelled**, not that it **resolves**: replacing a
+real record with `PR #999999` leaves `rc=0` (measured on this tree). That is the
+deliberate edge of the rule rather than a gap -
+resolvability needs the network, and a guard that could not measure would have to
+answer ``2`` on every offline run. Whether the named PR is *the* record that
+landed the citation is therefore the sweep's claim, not this guard's; it was
+verified against GitHub when the sweep was made (a reviewer sampled 7 of the 26
+inserted pairs, each credited PR merged with the timestamp present in its own
+diff).
+
 The frozen debt
 ---------------
 `evolution_prompt.md` is the one template routine evolution must not edit (host
