@@ -52,6 +52,29 @@ def _recovery_bullet() -> str:
     return " ".join(rest[:end].split())
 
 
+#: The document's *second* statement of the undo, in the `-f` discussion rather than
+#: in the recovery bullet: it tells a reader who has untracked-only dirt to reach for
+#: `git stash -u`, and how to come back (`git stash apply --index`). Named by its
+#: opening words, not a line number, and asserted to appear exactly once so a moved
+#: paragraph fails instead of silently measuring a different one.
+_RECIPE_CAVEAT = "`-f` is the right tool for tracked modifications only."
+
+
+def _recovery_caveat() -> str:
+    """That paragraph as one string, with its markdown line breaks collapsed."""
+    text = DOC.read_text(encoding="utf-8")
+    found = text.count(_RECIPE_CAVEAT)
+    assert found == 1, (
+        f"expected exactly one `{_RECIPE_CAVEAT}` paragraph in {DOC.name}, found "
+        f"{found} — the anchor moved, so this test would be measuring a different "
+        "paragraph"
+    )
+    rest = text.split(_RECIPE_CAVEAT, 1)[1]
+    end = rest.find("\n\n")  # the paragraph ends at the blank line
+    assert end != -1, f"`{_RECIPE_CAVEAT}` is the last paragraph in {DOC.name}"
+    return " ".join((_RECIPE_CAVEAT + rest[:end]).split())
+
+
 def _load():
     spec = importlib.util.spec_from_file_location("recover_worktree", SCRIPT)
     module = importlib.util.module_from_spec(spec)
@@ -1158,6 +1181,7 @@ def _named_docstring(path: Path, name: str, owner: str | None = None) -> str:
 #: an unrelated edit above the docstring cannot make this measure a different paragraph.
 _RECIPE_DOC_SITES = (
     ("DEVELOPMENT.md's recovery bullet", DOC, lambda: _recovery_bullet()),
+    ("DEVELOPMENT.md's `-f` recovery caveat", DOC, lambda: _recovery_caveat()),
     ("scripts/recover-worktree.py's module docstring", SCRIPT,
      lambda: _module_docstring(SCRIPT)),
     ("scheduler.recovery_recipe's docstring", SCHEDULER,
@@ -1211,9 +1235,18 @@ def test_every_reader_facing_copy_of_the_recipe_names_the_measured_spelling():
     list that shrank to one entry would be a weaker claim, not a green one; and the
     check is driven once against the harmed spelling in a `pytest.raises` arm, so the
     assertion is shown to be able to fail.
+
+    The list is a *reader-facing* inventory, so it has to be an inventory: this PR
+    first named four sites, and review measured a fifth by the list's own criterion —
+    the `-f` paragraph in the same document tells a reader "use `git stash -u`,
+    recoverable with `git stash apply --index`", which names `--index` exactly as
+    `_assert_site_names_the_measured_spelling` requires, while dropping the ordinal.
+    Re-wording it back to a bare `git stash pop` left the suite green (`39 passed`,
+    rc=0) while the identical edit to the bullet reddened it, which is how the omission
+    was found rather than argued. It is in the list now, and the floor moved with it.
     """
     texts = [(label, get()) for label, _path, get in _RECIPE_DOC_SITES]
-    assert len(texts) >= 4, (
+    assert len(texts) >= 5, (
         "the class is asserted over the sites named in `_RECIPE_DOC_SITES`; a shorter "
         f"list is a weaker claim, not a passing one (got {len(texts)})"
     )
