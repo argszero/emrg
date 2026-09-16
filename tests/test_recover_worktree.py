@@ -41,19 +41,25 @@ def _status(repo: Path) -> str:
     return _git(repo, "status", "--porcelain").stdout
 
 
-def _new_repo(path: Path, content: str = "v1") -> None:
+def _new_repo(path: Path, content: str = "v1", name: str = "f.txt") -> None:
     """A one-commit repository. `-b master` because the criterion's upstream ref is
-    the default branch, and a test whose branch name drifts would measure nothing."""
+    the default branch, and a test whose branch name drifts would measure nothing.
+
+    ``name`` exists because the criterion's defects are about *paths*: `git status`
+    quotes some names and not others, so a geometry has to be buildable at the name
+    that triggers the quoting (`add -A` rather than a literal name keeps that possible
+    for a name beginning with a space or a dash).
+    """
     path.mkdir(parents=True, exist_ok=True)
     _git(path, "init", "-q", "-b", "master")
     _git(path, "config", "user.email", "t@t.t")
     _git(path, "config", "user.name", "t")
-    (path / "f.txt").write_text(content, encoding="utf-8")
-    _git(path, "add", "f.txt")
+    (path / name).write_text(content, encoding="utf-8")
+    _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "base")
 
 
-def _with_upstream(tmp_path: Path):
+def _with_upstream(tmp_path: Path, name: str = "f.txt"):
     """The deadlock's exact shape: HEAD behind, worktree carrying upstream's bytes.
 
     Measures `(repo, head_sha)`: the tree is dirty (one modified tracked file) and
@@ -67,15 +73,15 @@ def _with_upstream(tmp_path: Path):
         encoding="utf-8", errors="replace",
     )
     work = tmp_path / "work"
-    _new_repo(work, "v1")
+    _new_repo(work, "v1", name)
     _git(work, "remote", "add", "origin", str(origin))
     _git(work, "push", "-q", "-u", "origin", "master")
     head = _git(work, "rev-parse", "HEAD").stdout.strip()
-    (work / "f.txt").write_text("v2", encoding="utf-8")
+    (work / name).write_text("v2", encoding="utf-8")
     _git(work, "commit", "-q", "-am", "v2")
     _git(work, "push", "-q", "origin", "master")
     _git(work, "reset", "-q", "--hard", head)      # HEAD back to v1 …
-    (work / "f.txt").write_text("v2", encoding="utf-8")  # … worktree at upstream's v2
+    (work / name).write_text("v2", encoding="utf-8")  # … worktree at upstream's v2
     assert _status(work).startswith(" M"), _status(work)
     return work, head
 
@@ -145,6 +151,127 @@ def test_an_untracked_file_is_unique_even_when_upstream_has_those_bytes(tmp_path
     loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
     assert loses is True, "untracked content is never reconstructible"
     assert "b.txt" in why
+
+
+# ── the path, not git's rendering of it ──────────────────────────────────────
+
+
+@pytest.mark.parametrize("name", ["a b.txt", "文档.txt", " leading.txt"])
+def test_a_modification_at_a_quoted_path_is_recoverable(tmp_path, name):
+    """`git status --porcelain` *quotes* these names, and the quotes are not the path.
+
+    The criterion took its path from that rendering, so every comparison it makes
+    (`hash-object -- <path>`, `HEAD:<path>`, `<upstream>:<path>`) was asked about a
+    name containing literal quote characters, could not resolve, and the walk answered
+    *unique*. Measured on the merged tree before this test: the ` M` geometry whose
+    bytes are the upstream tip's — the 33-cycle deadlock shape — was **refused** for
+    `a b.txt` and for `文档.txt`, i.e. the guard re-imposed the deadlock on any host
+    whose filenames are not all ASCII.
+
+    The three names cover the three ways to need quoting: a space, a byte > 0x7f
+    (octal-escaped under the default `core.quotePath=true`), and a *leading* space,
+    which additionally pins that the path is taken verbatim rather than stripped.
+    """
+    work, head = _with_upstream(tmp_path, name)
+    assert '"' in _status(work), f"precondition: git quotes this name: {_status(work)!r}"
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(work))
+    assert loses is False, f"{name!r}: {why}"
+
+    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(work))
+    assert status == "recovered", f"{status}: {detail}"
+    assert _status(work) == ""
+    assert _git(work, "rev-parse", "HEAD").stdout.strip() == head, "HEAD must not move"
+    # Converging means the tree is at HEAD again, so the file *is* v1 now: the v2 bytes
+    # live in the upstream tip's commit (that is why releasing this tree loses nothing)
+    # and in the stash. Both spellings are asserted rather than assumed.
+    assert (work / name).read_text(encoding="utf-8") == "v1"
+    _git(work, "stash", "pop")
+    assert (work / name).read_text(encoding="utf-8") == "v2"
+
+
+def test_a_modification_at_a_quoted_path_holding_unique_work_is_unique(tmp_path):
+    """The other direction: reading the real path must not become a way to release work.
+
+    With the path finally resolvable, the content comparison *can* answer, and for
+    content that is in no commit it must still refuse — the clause this test guards is
+    the same one the fix touches.
+    """
+    name = "a b.txt"
+    repo = tmp_path / "repo"
+    _new_repo(repo, "v1", name)
+    (repo / name).write_text("the host's unreleased work", encoding="utf-8")
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True, why
+    assert name in why
+
+    status, _detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
+    assert status == "refused", status
+    assert (repo / name).read_text(encoding="utf-8") == "the host's unreleased work"
+
+
+def test_an_untracked_file_at_a_quoted_path_names_its_own_path(tmp_path):
+    """The reported reason has to name the path, not the rendering.
+
+    On the pre-fix tree this reason was `"host notes.md" exists only in this checkout`
+    — the message a human reads when the guard refuses their cycle named a filename
+    with quotes in it, which is not a file they can go and look at.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo)
+    (repo / "host notes.md").write_text("only here", encoding="utf-8")
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True, why
+    # Exact, not a substring: on the pre-fix tree the reason was
+    # `"host notes.md" exists only in this checkout` — a filename with quotes in it,
+    # which is not a file the host can go and look at.
+    assert why == "host notes.md exists only in this checkout", why
+
+
+def test_a_rename_is_unique_and_its_origin_is_not_walked(tmp_path):
+    """`R` spends **two** NUL fields in `-z` mode; only the first is an entry.
+
+    Walking the origin field as an entry reads its first two characters as a status,
+    which lands it in the staged clause and reports a filename nobody has — measured by
+    mutation: without the consumption this reason becomes `ig name.txt is staged with
+    content that is in neither HEAD nor the upstream tip`. The assertion on the origin
+    path's absence is therefore the discriminator, not the verdict (which is *unique*
+    either way).
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo, "v1", "orig name.txt")
+    _git(repo, "mv", "orig name.txt", "moved name.txt")
+    assert _status(repo).startswith("R"), _status(repo)
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True
+    # Exact, and that is what carries the evidence: on the pre-fix tree this reason is
+    # the v1 rendering (`"orig name.txt" -> "moved name.txt" was renamed`), and with the
+    # origin field walked as an entry it gains a **second** clause naming `ig name.txt`
+    # (the first two characters eaten as a status). One equality pins both.
+    assert why == "moved name.txt was renamed", why
+
+
+def test_every_entry_is_walked_when_one_of_them_is_quoted(tmp_path):
+    """Both entries must be measured, which is what a NUL-field parse can get wrong.
+
+    A parse that consumes one field too many per entry drops the second one — and a
+    dropped entry is not a *refusal*, it is content the walk never looked at, so the
+    verdict here would flip from unique to recoverable. (This is the failure the
+    origin-field rule above is narrow against; the geometry keeps one entry that is
+    already upstream's and one that is unique, so the unique one has to govern.)
+    """
+    root = tmp_path / "both"
+    work, _head = _with_upstream(root, "plain.txt")
+    (work / "host notes.md").write_text("only here", encoding="utf-8")
+    assert _status(work).count("\n") == 2, _status(work)
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(work))
+    assert loses is True, why
+    assert "host notes.md" in why, why
+    assert _load().TaskHandler._recover_dirty_tree_sync(str(work))[0] == "refused"
 
 
 def test_a_deletion_loses_nothing(tmp_path):
