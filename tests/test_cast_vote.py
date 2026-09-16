@@ -288,8 +288,9 @@ def test_a_posted_review_the_counter_does_not_count_exits_1(mod, monkeypatch, ca
     """The one state the caller cannot detect alone: rc 0 from gh, no vote.
 
     Exit 1 rather than 0, because "posted" is what every signal at the call site
-    says, and the counter's reason is printed: a veto, a repeat vote and a
-    pre-push review are three different situations with three different remedies.
+    says, and the counter's reason is printed: a repeat vote and a pre-push review
+    are different situations with different remedies. A *veto* is not one of them —
+    a counted veto is registered, so it exits 0.
     """
     void = vote(counted=False, why="submitted before the head push (2026-09-15T18:13:26Z)")
     counter = FakeCounter(verdict_with(), verdict_with([void], counted=[False], valid_count=1))
@@ -300,6 +301,51 @@ def test_a_posted_review_the_counter_does_not_count_exits_1(mod, monkeypatch, ca
     assert len(gh.calls) == 1, "it was posted - that is exactly the problem"
     assert "POSTED and NOT counted" in err
     assert "submitted before the head push" in err
+
+
+def test_a_counted_veto_is_reported_as_registered_not_as_spent(
+    mod, monkeypatch, capsys, body_file
+):
+    """A veto counts as a verdict that resets the run, not as a vote for the PR.
+
+    The counter reads a counted veto as `NO ... counts - resets the run`, so
+    `_state_of` answers `"veto"` with `counted=True`. `confirm` used to
+    short-circuit only on `"counted"` and `"void"`, so a veto that had registered
+    fell through the retry loop and came out as a review that never appeared —
+    exit 1 with "the vote was spent for nothing" for a vote that was on the record
+    (measured 2026-09-17, `cyc20260917-043948`, on #1303 and #1305).
+
+    The read count is asserted too: a definite answer must return on the first
+    confirm read, not after the attempts are exhausted.
+    """
+    counter = FakeCounter(
+        verdict_with(),
+        verdict_with([vote(kind="veto", counted=True)], counted=[True], valid_count=0),
+    )
+    gh = FakeGh()
+    monkeypatch.setattr(mod.time, "sleep", lambda _s: None)
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        [
+            "1255",
+            "--body-file",
+            body_file(f"{CYCLE} — ❌ needs fix"),
+            "--attempts",
+            "3",
+            "--delay",
+            "0",
+        ],
+    )
+    out, err = capsys.readouterr()
+    assert rc == 0, "the veto is on the record - nothing was lost"
+    assert "VETO" in out
+    assert "resets the run" in out
+    assert "spent for nothing" not in err
+    assert len(counter.calls) == 2, "1 pre-flight + 1 confirm read, then it returns"
+    assert len(gh.calls) == 1, "the review was posted exactly once"
 
 
 def test_a_failed_post_exits_2_and_never_reads_the_counter(mod, monkeypatch, capsys, body_file):

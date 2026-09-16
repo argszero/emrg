@@ -54,9 +54,15 @@ the tool refuses rather than posting a vote under a cycle it was not told to use
 
 Exit codes
 ----------
-    0  the review is posted and `check-vote-count.py` counts it
+    0  the review is posted and `check-vote-count.py` counts it. A **veto** counts
+       here too: the counter reads a counted veto as `NO ... counts - resets the
+       run`, i.e. as a verdict that resets the run rather than as a vote for the
+       PR, and it is neither a lost vote nor a reason to re-post
     1  the review is posted and does NOT count — the vote was spent for nothing;
-       the counter's own reason is printed, because the remedy depends on it
+       the counter's own reason is printed, because the remedy depends on it. The
+       counter never showing the review at all is reported separately, as
+       **unmeasurable** rather than as a wrong vote: the review is on GitHub and
+       cannot be un-posted, so the reader re-reads before spending it
     2  nothing was posted: the body has no cycle id (or more than one), `--cycle`
        disagrees with it, this cycle already has a counted vote here, or `gh`
        failed — fail loud, and never report a posted vote for a review that was
@@ -229,13 +235,27 @@ def confirm(
     attempts: int,
     delay: float,
     mergeability_wait: float = 0.0,
-) -> tuple[bool, str]:
+) -> tuple[str, str]:
     """Read the counter back until this cycle's review is visible, then judge it.
+
+    Returns the state the counter reported — `"counted"`, `"veto"`, `"void"` or
+    `"none"` — with a note, because three of those are definite answers with three
+    different remedies and the fourth is the absence.
 
     A retry exists for one reason: GitHub registers a review a moment after the
     POST returns, so a single read can miss it and report "never appeared" for a
     review that did arrive. The retry is bounded, and a *definite* answer (counted,
-    or void with a reason) returns immediately — only the absence retries.
+    a counted **veto**, or void with a reason) returns immediately — only the
+    absence retries.
+
+    A veto belongs in that list and was missing from it. The counter reads a
+    counted veto as `NO ... counts - resets the run`, i.e. `counted=True`, so
+    `_state_of` answers `"veto"` — but this function short-circuited only on
+    `"counted"` and `"void"`, so a veto that *had* registered fell through the
+    retry loop and was reported as a review that never appeared, with the advice
+    to spend the vote (measured 2026-09-17, `cyc20260917-043948`, on #1303 and
+    #1305: this tool said "not counted", the counter said `counts - resets the
+    run` when re-read minutes later).
 
     `mergeability_wait` is passed through for the other transient: a read that
     raises because GitHub has not computed mergeability yet is not a definite
@@ -249,10 +269,15 @@ def confirm(
         )
         state, why = _state_of(verdict, cycle)
         if state == "counted":
-            return True, f"{verdict.valid_count}/{verdict.needed} valid votes"
+            return "counted", f"{verdict.valid_count}/{verdict.needed} valid votes"
+        if state == "veto":
+            return "veto", (
+                f"the veto is on the record at head {verdict.head_sha[:8]} and the "
+                "counter reads it as `counts - resets the run`"
+            )
         if state == "void":
-            return False, why
-    return False, (
+            return "void", why
+    return "none", (
         f"the review never appeared in the counter's reading of #{pr} after "
         f"{max(1, attempts)} attempt(s) - posted, but not readable as a vote"
     )
@@ -352,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    counted, note = confirm(
+    state, note = confirm(
         args.pr,
         cycle,
         args.min_votes,
@@ -360,14 +385,33 @@ def main(argv: list[str] | None = None) -> int:
         args.delay,
         args.mergeability_wait,
     )
-    if counted:
+    if state == "counted":
         print(f"#{args.pr}: review posted as {cycle} and counted - {note}")
         return 0
+    if state == "veto":
+        print(
+            f"#{args.pr}: review posted as {cycle} and counted as a VETO - {note}\n"
+            "A veto is not a lost vote: it is on the record and it resets the run, so "
+            f"#{args.pr} now needs three consecutive LGTMs from other cycles. "
+            "Re-posting contributes nothing - re-read it with "
+            f"scripts/check-vote-count.py {args.pr}."
+        )
+        return 0
+    if state == "void":
+        print(
+            f"#{args.pr}: review POSTED and NOT counted - {note}\n"
+            "The vote was spent for nothing. Nothing is rolled back by re-posting: a "
+            "second review from this cycle contributes nothing either, so fix the body "
+            "and let a later cycle vote.",
+            file=sys.stderr,
+        )
+        return 1
     print(
-        f"#{args.pr}: review POSTED and NOT counted - {note}\n"
-        "The vote was spent for nothing. Nothing is rolled back by re-posting: a "
-        "second review from this cycle contributes nothing either, so fix the body "
-        "and let a later cycle vote.",
+        f"#{args.pr}: review posted, and the counter never showed it - {note}\n"
+        "That is unmeasurable, not a verdict: the review is on GitHub and cannot be "
+        "un-posted, and it can register after this tool's bounded retries. Do not "
+        "spend it and do not re-post - re-read the counter first "
+        f"(scripts/check-vote-count.py {args.pr}) and act on what it says.",
         file=sys.stderr,
     )
     return 1
