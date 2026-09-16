@@ -104,14 +104,74 @@ def _file_derived_names(tree: ast.AST) -> set[str]:
             return derived
 
 
-def _temp_rooted_names(tree: ast.AST, parameters: set[str]) -> set[str]:
+def _parameters(node: ast.AST) -> set[str]:
+    """One function's parameter names, so a fixture-supplied root can be recognised."""
+    a = node.args
+    names = {x.arg for x in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
+    if a.vararg:
+        names.add(a.vararg.arg)
+    if a.kwarg:
+        names.add(a.kwarg.arg)
+    return names
+
+
+def _bound_names(node: ast.AST) -> set[str]:
+    """Names a *binding* in `node` shadows — assignment, `with … as`, `for … in`."""
+    names: set[str] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Assign):
+            names.update(t.id for t in sub.targets if isinstance(t, ast.Name))
+        elif isinstance(sub, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
+            if isinstance(sub.target, ast.Name):
+                names.add(sub.target.id)
+        elif isinstance(sub, (ast.With, ast.AsyncWith)):
+            for item in sub.items:
+                if isinstance(item.optional_vars, ast.Name):
+                    names.add(item.optional_vars.id)
+    return names
+
+
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    """`{child: parent}` for the whole module, so a call can find its enclosing defs."""
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    return parents
+
+
+def _fixture_seed(call: ast.AST, parents: dict[ast.AST, ast.AST]) -> set[str]:
+    """The fixture names that can reach `call` — its *own* enclosing scopes' parameters.
+
+    Seeded from every function's parameters module-wide instead, a local variable that
+    merely *shares a name* with a fixture reads as a temp location: measured 2026-09-17 on
+    head `0e27465f`, `tmp_path = Path("/abs/…")` in one function plus `def test_x(tmp_path)`
+    elsewhere made `dir=tmp_path / "sub"` answer **outside** — a root the syntax does not
+    show to be a temp directory, passed instead of reported, which is the value this guard's
+    doctrine forbids. On the parent head the same shape was reported, so the fix's own arm
+    is what widened it. A binding in the *same* scope shadows the parameter, so bound names
+    are subtracted rather than trusted.
+    """
+    seed: set[str] = set()
+    node: ast.AST = call
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            seed |= {p for p in _parameters(node) if p in _TEMP_FIXTURES}
+            seed -= _bound_names(node)
+    return seed
+
+
+def _temp_rooted_names(tree: ast.AST, seed: set[str]) -> set[str]:
     """Every name in `tree` a temp location is behind, to a fixed point.
 
     `dir=td` does not show that `td` came from `with tempfile.TemporaryDirectory() as td:`,
     and the docstring calls that family provably outside — so the *name* has to be followed,
     however many hops it takes, for the same reason `_file_derived_names` is: one hop was
     the evasion there. The `tmp_path` / `tmp_path_factory` fixtures are parameters rather
-    than assignments, so the fixed point is seeded from `parameters`.
+    than assignments, so the fixed point is seeded from `seed` — which is computed per call
+    by `_fixture_seed`, never from the whole module's parameter list, or a name that merely
+    looks like a fixture would be enough to pass an unreadable root.
     """
     bindings: list[tuple[str, ast.AST]] = []
     for node in ast.walk(tree):
@@ -124,7 +184,7 @@ def _temp_rooted_names(tree: ast.AST, parameters: set[str]) -> set[str]:
                 target = item.optional_vars
                 if isinstance(target, ast.Name):
                     bindings.append((target.id, item.context_expr))
-    temp = {name for name in parameters if name in _TEMP_FIXTURES}
+    temp = set(seed)
     while True:
         grown = False
         for name, value in bindings:
@@ -158,16 +218,16 @@ def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, 
 
     A `dir=` is **in scope** when its expression mentions `__file__`, or is a name the module
     assigns from something file-derived (to a fixed point). It is **provably outside** when
-    the syntax shows a temp location: a `tmp_path`/`tmp_path_factory` fixture name, a name
-    bound from a temp call, or an expression carrying a temp marker — read over the whole
-    expression, so `tmp_path / "sub"` is outside rather than unreadable. A root built only
-    partly from temp names is *not* outside: every name it mentions has to be temp-rooted.
-    Everything else — an unresolvable name, a path built from something the scan cannot
-    follow — is **unmeasurable**, reported rather than passed.
+    the syntax shows a temp location: a `tmp_path`/`tmp_path_factory` fixture name *that
+    reaches this call* (its own enclosing scopes' parameters, minus names a binding shadows),
+    a name bound from a temp call, or an expression carrying a temp marker — read over the
+    whole expression, so `tmp_path / "sub"` is outside rather than unreadable. A root built
+    only partly from temp names is *not* outside: every name it mentions has to be
+    temp-rooted. Everything else — an unresolvable name, a path built from something the scan
+    cannot follow — is **unmeasurable**, reported rather than passed.
     """
     derived = _file_derived_names(tree)
-    parameters = _parameters(tree)
-    temp_rooted = _temp_rooted_names(tree, parameters)
+    parents = _parents(tree)
     in_scope: list[tuple[Path, int, str | None, str]] = []
     unmeasurable: list[tuple[Path, int, str]] = []
     for node in ast.walk(tree):
@@ -189,6 +249,7 @@ def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, 
                       and isinstance(prefix.value, str) else None)
             in_scope.append((path, node.lineno, prefix, source))
             continue
+        temp_rooted = _temp_rooted_names(tree, _fixture_seed(node, parents))
         harmless = any(marker in source for marker in _TEMP_MARKERS) or (
             bool(names_in_arg) and names_in_arg <= temp_rooted
         )
@@ -339,6 +400,31 @@ import tempfile
 def test_x(tmp_path, other_dir):
     d = tempfile.mkdtemp(dir=tmp_path / other_dir, prefix="anything-")
 '''
+    shadowed_name = '''
+import tempfile
+from pathlib import Path
+def test_uses_the_fixture(tmp_path):
+    pass
+def test_other():
+    tmp_path = Path("/abs/other-project/tests")
+    d = tempfile.mkdtemp(dir=tmp_path, prefix="anything-")
+'''
+    shadowed_name_composite = '''
+import tempfile
+from pathlib import Path
+def test_uses_the_fixture(tmp_path):
+    pass
+def test_other():
+    tmp_path = Path("/abs/other-project/tests")
+    d = tempfile.mkdtemp(dir=tmp_path / "sub", prefix="anything-")
+'''
+    shadowed_in_its_own_scope = '''
+import tempfile
+from pathlib import Path
+def test_x(tmp_path):
+    tmp_path = Path("/abs/somewhere/tests")
+    d = tempfile.mkdtemp(dir=tmp_path, prefix="anything-")
+'''
     unresolvable = '''
 import tempfile
 def test_x(some_dir):
@@ -385,6 +471,21 @@ def test_x(some_dir):
         "every name it is built from has to be temp-rooted, or the check could be widened "
         f"until a repo path hides behind a fixture name (got {unmeasurable})"
     )
+
+    for label, source in (
+        ("a bare name that shadows a fixture", shadowed_name),
+        ("a composite root built on a shadowing name", shadowed_name_composite),
+        ("a fixture name rebound in its own scope", shadowed_in_its_own_scope),
+    ):
+        in_scope, unmeasurable = classify(source)
+        assert not in_scope and len(unmeasurable) == 1, (
+            f"{label} is not a temp location the syntax shows: the fixture name is a "
+            "parameter of a *different* function, and a binding in this scope shadows it. "
+            "Seeding from every function's parameters module-wide made this answer 'outside' "
+            "— an unreadable root passed rather than reported (measured 2026-09-17 on head "
+            f"`0e27465f`, and on the bare shape on its parent too): "
+            f"in_scope={in_scope} unmeasurable={unmeasurable}"
+        )
 
     in_scope, unmeasurable = classify(unresolvable)
     assert not in_scope, "an unresolvable root is not evidence of a repo root"
