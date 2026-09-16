@@ -3,7 +3,7 @@
 > 本文件记录 `build-release.yml`（一键安装包流水线）所需的全部 GitHub Secrets。
 > 配置位置：GitHub 仓库 → Settings → Secrets and variables → Actions。
 
-## 必需 Secrets（macOS 代码签名 + 公证，rant 2026-08-06T10:06:55）
+## 必需 Secrets（macOS 代码签名 + 公证，PR #441, rant 2026-08-06T10:06:55）
 
 | Secret | 用途 | 说明 |
 |---|---|---|
@@ -17,7 +17,7 @@
 | `MACOS_NOTARY_APP_PASSWORD` | App 专用密码 | Apple ID → 登录与安全 → App 专用密码 |
 | `MACOS_NOTARY_TEAM_ID` | Team ID | 开发者账号 Team ID |
 
-**两种方案**（rant 2026-08-06T15:26 起支持）：
+**两种方案**（PR #474, rant 2026-08-06T15:26 起支持）：
 - **单 p12 方案**（默认）：只配 `MACOS_SIGNING_*`，p12 内含双证书（Application + Installer），`security export -t identities` 导出
 - **双 p12 方案**（宿主已采用）：`MACOS_SIGNING_*` 含 Application，另配 `MACOS_INSTALLER_*` 含 Installer——CI Import step 分别导入两个 p12，Sign pkg 优先用 `MACOS_INSTALLER_IDENTITY`
 

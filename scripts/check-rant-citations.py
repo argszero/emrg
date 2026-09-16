@@ -12,9 +12,14 @@ Usage
 The class this applies to
 -------------------------
 The **instruction class**: prose a reader is expected to *act on* - the built-in
-task-prompt templates, the evolution template, the upgrade/vibe-check prompts and
-the GUI redesign spec. Nine files, measured 2026-09-16: 47 citation sites over 29
-distinct timestamps. Code comments are deliberately out of scope (the same
+task-prompt templates, the evolution template, the upgrade/vibe-check prompts, the
+GUI redesign spec, and the CI README the host reads to set the release Secrets. Ten
+files, measured 2026-09-16: 49 citation sites over 34 distinct timestamps, counted
+as `len({t for s in sites for t in s.timestamps})` over `scan_tree` - the same two
+numbers for the class before the CI README joined it are 47 and 32, and each is a
+reading of this tree rather than an estimate (the figure printed here said 29 until
+issue #1289 measured it: neither `32` nor the 27 records-only timestamps). Code
+comments are deliberately out of scope (the same
 spelling occurs in 1300+ lines there): a comment's citation is a historical note
 about why the line exists, and rewriting those burns the `git log -S` trail that
 makes the note checkable.
@@ -83,11 +88,20 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-#: The instruction class, as measured 2026-09-16: nine files, 47 sites, 29
-#: timestamps. Names, not a glob: the class is a decision (prose a reader acts on),
+#: The instruction class, as measured 2026-09-16: ten files, 49 sites, 34
+#: timestamps (the guard's own `scan_tree` counts them; see the module docstring).
+#: Names, not a glob: the class is a decision (prose a reader acts on),
 #: so a new template has to be added here deliberately rather than swept in by a
 #: pattern that also catches its code comments.
+#:
+#: `.github/workflows/README.md` is here because it is the one file outside the
+#: templates that a reader acts on: it tells the host which Secrets to set for the
+#: release pipeline, and two of its lines cited a rant with nothing else to go on
+#: (issue #1289). Adding a *file* is the deliberate act the comment above asks for;
+#: the alternative - a glob over every `*.md` - would sweep in the code comments the
+#: docstring excludes, which is why this is a list and not a pattern.
 INSTRUCTION_FILES = (
+    ".github/workflows/README.md",         # tells the host which Secrets to set
     "emrg/server/evolution_prompt.md",     # host-owned: its sites are DEBT
     "emrg/server/journal_prompt.md",
     "emrg/server/open_source_prompt.md",
