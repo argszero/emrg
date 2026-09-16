@@ -57,16 +57,20 @@ Exit codes
     0  the review is posted and `check-vote-count.py` counts it. A **veto** counts
        here too: the counter reads a counted veto as `NO ... counts - resets the
        run`, i.e. as a verdict that resets the run rather than as a vote for the
-       PR, and it is neither a lost vote nor a reason to re-post
+       PR, and it is neither a lost vote nor a reason to re-post. `0` does **not**
+       by itself mean a review went out: `--dry-run` runs every check, posts
+       nothing, and exits `0`
     1  the review is posted and does NOT count — the vote was spent for nothing;
        the counter's own reason is printed, because the remedy depends on it. The
        counter never showing the review at all is reported separately, as
        **unmeasurable** rather than as a wrong vote: the review is on GitHub and
        cannot be un-posted, so the reader re-reads before spending it
-    2  nothing was posted: the body has no cycle id (or more than one), `--cycle`
-       disagrees with it, this cycle already has a counted vote here, or `gh`
-       failed — fail loud, and never report a posted vote for a review that was
-       never sent
+    2  nothing was posted, so nothing has to be rolled back. Grouped by the check
+       that refused, not one line per `return`: the body could not be read from
+       `--body-file`; the body has no cycle id (or more than one), or `--cycle`
+       disagrees with it; the vote count could not be read; this cycle already has
+       a counted vote or a veto here; or `gh` failed. Fail loud, and never report
+       a posted vote for a review that was never sent
 
 `gh` is required, and so is network access to GitHub: the question is about a
 remote review, and every local guess would be about a different thing than the

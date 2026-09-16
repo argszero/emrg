@@ -491,6 +491,154 @@ def test_dry_run_posts_nothing(mod, monkeypatch, capsys, body_file):
     assert "dry run" in out and "counted" not in out
 
 
+def test_an_unreadable_body_file_exits_2_and_posts_nothing(mod, monkeypatch, capsys, tmp_path):
+    """The first `rc 2` the table did not name (issue #1309): the body cannot be read.
+
+    A mistyped or deleted `--body-file` is the most ordinary way to run this tool wrong, and
+    the exit code is the only thing a wrapper sees. It must be the documented `2` — nothing
+    was posted — and not `1`, which means a vote *was* spent.
+    """
+    missing = tmp_path / "no-such-body.md"
+    counter = FakeCounter(verdict_with())
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", str(missing)])
+    err = capsys.readouterr().err
+    assert rc == 2, "an unreadable body posts nothing, so it is the 'nothing was posted' code"
+    assert not missing.exists()
+    assert gh.calls == [], "no review may be attempted without a body"
+    assert counter.calls == [], "and the count is not even asked"
+    assert "could not read" in err, (
+        "the refusal has to say what it could not read, or the caller cannot tell this "
+        "apart from the other rc 2 refusals"
+    )
+
+
+def test_an_unreadable_vote_count_exits_2_and_posts_nothing(mod, monkeypatch, capsys, body_file):
+    """The second `rc 2` the table did not name (issue #1309): the counter raised.
+
+    `check-vote-count.py` fails loud on an unmeasurable reading, and this tool runs *before*
+    posting, so a counter that cannot be read must stop the vote rather than spend it. The
+    distinction matters: `1` would tell a wrapper the vote went out and did not count.
+    """
+
+    class RaisingCounter:
+        def __init__(self):
+            self.calls = 0
+
+        def check_pr(self, *_args, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("the counter could not reach GitHub")
+
+    counter = RaisingCounter()
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — LGTM")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert counter.calls == 1
+    assert gh.calls == [], "the vote is not spent on a count the tool could not read"
+    assert "vote count could not be read" in err
+    assert "the counter could not reach GitHub" in err, (
+        "the counter's own reason is carried through: the remedy depends on it"
+    )
+
+
+def test_the_exit_code_table_names_every_rc_2_cause_the_module_can_reach(mod):
+    """The table is a contract callers script against, so it is measured against the code.
+
+    Issue #1309: the table enumerated four causes while the module returned `2` from five
+    sites, and the two it omitted — an unreadable `--body-file`, and a vote count that could
+    not be read — were the ones a caller is most likely to hit. This read the causes out of
+    the source rather than trusting the prose:
+
+    * every `return 2` must have a `print(..., file=sys.stderr)` ahead of it in the same
+      block — a refusal that says nothing is unusable, and this asserts it mechanically;
+    * the message families those prints open with must each be named in the table, so a new
+      refusal path cannot be added without the table being updated.
+
+    Families, not sites: two of the five returns answer several shapes of one refusal (a body
+    with no cycle id, two cycle ids, a `--cycle` that disagrees), which is why counting
+    `return 2` against the listed causes is the wrong instrument and matching the *messages*
+    is the right one.
+    """
+    import ast
+
+    source = SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    table = (mod.__doc__ or "").split("Exit codes")[1]
+    assert table, "the exit-code table is the contract this test measures"
+
+    def blocks(node: ast.AST):
+        """Every statement block under `node`, each yielded exactly once.
+
+        Driven by the fields rather than by a hand-written list of attributes: `body` is
+        also how a `Lambda`/`IfExp` spells its *expression*, and an `except` handler is
+        reachable both from `handlers` and as a child — hand-written traversal yielded
+        those blocks twice, which is how the first version of this test reported the same
+        refusal as both silent and spoken.
+        """
+        for _field, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                yield value
+        for child in ast.iter_child_nodes(node):
+            yield from blocks(child)
+
+    def stderr_message(stmt: ast.stmt) -> str | None:
+        """The refusal text of a `print(..., file=sys.stderr)`, else None."""
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+            return None
+        call = stmt.value
+        if getattr(call.func, "id", "") != "print":
+            return None
+        if not any(
+            kw.arg == "file" and ast.unparse(kw.value) == "sys.stderr"
+            for kw in call.keywords
+        ):
+            return None
+        literal = call.args[0] if call.args else None
+        parts = getattr(literal, "values", [literal])
+        return "".join(
+            part.value for part in parts
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+
+    refusals: list[tuple[int, str]] = []
+    for block in blocks(tree):
+        for index, stmt in enumerate(block):
+            if (
+                isinstance(stmt, ast.Return)
+                and isinstance(stmt.value, ast.Constant)
+                and stmt.value.value == 2
+            ):
+                message = stderr_message(block[index - 1]) if index else None
+                refusals.append((stmt.lineno, message or ""))
+
+    assert len(refusals) >= 5, f"the module returns 2 from at least five sites, found {len(refusals)}"
+    silent = [line for line, message in refusals if not message]
+    assert not silent, (
+        "a `return 2` must be preceded by the print that says why — a refusal with no message "
+        f"is unusable to the caller. Silent refusals at: {silent}"
+    )
+
+    for fragment in (
+        "could not be read",           # the body file could not be read
+        "cycle id",                    # the preflight family (absent, several, disagrees)
+        "vote count could not be read",  # the counter raised
+        "already has",                 # this cycle already voted here
+        "gh",                          # the post failed
+    ):
+        assert fragment in table, (
+            f"the exit-code table must name the rc 2 cause {fragment!r} — it is reachable in "
+            "this module, and a caller scripting on the code reads the table as the contract "
+            "(issue #1309)"
+        )
+
+
 def test_the_body_is_sent_byte_for_byte(mod, monkeypatch, capsys, body_file):
     """The body is the caller's reading; the tool does not rewrite the vote."""
     body = f"{CYCLE} — ✅ LGTM\n\n| a | b |\n|---|---|\n| x | y |\n"
