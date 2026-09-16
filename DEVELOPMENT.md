@@ -199,12 +199,59 @@ They're products. EMRG is an experiment in *closing the loop* — the AI improve
 ### Why is my evolution cycle running read-only?
 
 Every cycle gets one bash tier: `read-only`, `workspace-write` (the default), or
-`danger-full-access`. **If the task's source repository has any uncommitted
-change, the cycle is forced down to `read-only` whatever the configuration
-says** — the dirty-tree guard (community issue #979). The probe is literally
-"does `git status --porcelain` print anything?", so a single tracked
-modification or one untracked scratch file is enough to downgrade the cycle, and
-a cycle that leaves scratch files behind can lock the next one.
+`danger-full-access`. The tier is decided per cycle and is keyed on **whether
+discarding the working tree would lose anything**, not on whether the tree is
+dirty (issue #1237). When the task's source repository has uncommitted changes:
+
+- **nothing exists only there** — every change is already recoverable from a commit
+  git holds (`HEAD`, or the upstream tip) — so the daemon converges the tree
+  itself and the cycle keeps its configured tier;
+- **something exists only there** — an untracked file, a staged addition, a
+  conflict, a modification outrunning both, or a commit only on this branch — so
+  the cycle is forced down to `read-only` whatever the configuration says
+  (community issue #979), and the paths that caused it are named in the log.
+
+Why the distinction matters more than it looks: `read-only` refuses the very git
+verbs that could clean the tree, so the state that triggered the downgrade also
+disabled its only exit. Measured cost of one instance of that loop: **33
+consecutive zero-commit cycles**, whose verified output had to be parked outside
+the repository. And the dirt in it was not work at all — of what git reported, the
+modified files were byte-identical to upstream's own blobs, i.e. the second bullet
+above had been applied where the first was true.
+
+#### Recovering a tree
+
+**A cycle recovers itself.** At the start of every cycle the daemon asks the
+question above, and when the answer is "nothing exists only here" it converges the
+tree itself, before the cycle's first tool call — reversibly (stash, `HEAD`
+unmoved, receipt in the git state dir). The exit from a downgrade is therefore the
+daemon's own action, not a command a human has to be present to run: a guard whose
+only exit is manual strands the tree, which is the shape of the measured 33-cycle
+loss above. Nothing is asked of the host.
+
+The same action is available from a shell, for a tree no cycle is about to touch:
+
+```bash
+uv run --no-sync python3 scripts/recover-worktree.py --repo <task-source-dir>
+uv run --no-sync python3 scripts/recover-worktree.py --repo <task-source-dir> --apply
+```
+
+The script owns no policy — it calls the daemon's implementation of both the
+criterion and the action, so a diagnosis you run by hand and the tier decision the
+daemon makes cannot drift apart. Without `--apply` it only reports. It asks the
+same question the guard asks, and then:
+
+- **refuses, naming the paths, when the work exists nowhere else.** Nothing is
+  written, and no stash is made. That is the guard working; commit, stash or copy
+  that content out deliberately and re-run.
+- **stashes it when it is reconstructible** (`git stash push --include-untracked`),
+  leaving the worktree clean and every byte one `git stash pop` away. It never
+  moves `HEAD`, so it cannot orphan a commit, and the stash makes the action
+  undoable — which is why an agent is allowed to take it.
+- **writes a receipt** into the git state dir (`emrg-recovery-receipt.json`), as
+  every release of a safety rule requires. Deliberately not beside the tree: a
+  receipt at `<repo>/.emrg/…` re-dirties the tree it just cleaned in any repository
+  that does not ignore `.emrg/`, which would re-arm the guard on the next cycle.
 
 Read-only blocks the destructive shapes the guard recognises: redirects to
 anything but `/dev/null`, `rm` / `rmdir`, `mv` / `cp` destinations, `truncate` /
@@ -216,8 +263,9 @@ It is a static scan, not an OS boundary (`enforcement="partial"`), so a command
 outside that shape list (`mkdir`, `touch`, an interpreter writing a file) still
 runs and a downgraded cycle can leave scratch files behind. The decision is per
 command string, not per statement: one blocked shape anywhere in the call refuses
-the whole call. Reads are unaffected, so the problem can still be diagnosed from
-inside a downgraded cycle.
+the whole call. Reads are unaffected — including the read-only git verbs the
+recovery tool's diagnosis uses — so the problem can still be diagnosed from inside
+a downgraded cycle; only the repair needs a writable tier.
 
 #### Diagnose before you repair
 
@@ -243,7 +291,10 @@ git merge-base --is-ancestor HEAD FETCH_HEAD \
 That is the common case in a workspace whose change was merged upstream after
 the local checkout: the working tree holds master's content while the index
 still matches the older HEAD, and the "uncommitted work" is already published.
-Recover with:
+`scripts/recover-worktree.py --apply` clears the dirty state reversibly without
+moving `HEAD`; the sequence below is for when you also want to move the branch
+onto upstream, which is a decision the tool deliberately leaves to you. Recover
+with:
 
 ```bash
 git fetch origin master
