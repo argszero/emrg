@@ -121,6 +121,13 @@ Usage
     uv run --no-sync python3 scripts/check-vote-count.py <PR> [<PR> ...]
     uv run --no-sync python3 scripts/check-vote-count.py <PR> --json
     uv run --no-sync python3 scripts/check-vote-count.py <PR> --min-votes 2
+    uv run --no-sync python3 scripts/check-vote-count.py <PR> --mergeability-wait 60
+
+`--mergeability-wait` is for the transient `UNKNOWN`: GitHub computes
+mergeability lazily, so a head pushed a moment ago reports "not answered yet",
+and this tool refuses rather than guess. With a budget it re-asks the same
+question until GitHub answers or the budget runs out - the refusal is unchanged
+when the budget is exhausted, and the default (`0`) asks exactly once.
 
 Exit codes
 ----------
@@ -150,6 +157,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 
 REPO = "argszero/emrg"
@@ -164,6 +172,13 @@ REPO = "argszero/emrg"
 _MERGEABLE = "MERGEABLE"
 _CONFLICTING = "CONFLICTING"
 _UNKNOWN_MERGEABILITY = "UNKNOWN"
+
+# How long one poll of a not-yet-computed mergeability waits before asking again.
+# Only the *gap* is fixed here; how long to keep asking is the caller's decision
+# (`--mergeability-wait`, or `check_pr(..., mergeability_wait=…)`), because the
+# right budget differs between a gate a reader is watching and a script that
+# scans a queue.
+_MERGEABILITY_POLL_SECONDS = 5.0
 
 # The merge gate is spelled **`MERGEABLE`/`CLEAN`** - two fields - and an earlier
 # version of this tool read only the first, on the theory that `mergeStateStatus` is
@@ -776,7 +791,8 @@ def _merge_state(view: dict) -> tuple[str, str]:
     return mergeable, state
 
 
-def check_pr(number: int, needed: int) -> Verdict:
+def _pr_view(number: int) -> dict:
+    """One `gh pr view` payload for `number`, as GitHub answers it right now."""
     view = _gh_json(
         [
             "pr",
@@ -789,6 +805,46 @@ def check_pr(number: int, needed: int) -> Verdict:
         ]
     )
     assert isinstance(view, dict)
+    return view
+
+
+def _view_with_computed_mergeability(number: int, wait: float) -> dict:
+    """Ask again until GitHub has computed mergeability, or until `wait` runs out.
+
+    Why this exists: `UNKNOWN` is not an answer, it is "not answered yet", and
+    GitHub answers it lazily - a head pushed or merged moments ago reports it for
+    up to a couple of minutes. Treating that as the final word makes the *caller*
+    poll by hand: measured 2026-09-16, three separate cycles hit the refusal
+    (`cast-vote.py` twice on one vote, `check-merge-freshness.py` on the count it
+    needs to price a stale branch) and each of them slept and re-ran the tool.
+
+    The retry re-asks the question, it does not soften the answer: `wait` seconds
+    of polling and then the same fail-loud refusal as before, so a mergeability
+    this tool could not read is still never reported as a verdict. Default `0.0`
+    asks exactly once, which is the behaviour everything that does not opt in
+    keeps.
+    """
+    if wait <= 0:
+        return _pr_view(number)
+    started = time.monotonic()
+    while True:
+        view = _pr_view(number)
+        mergeable = str(view.get("mergeable") or "")
+        if mergeable in {_MERGEABLE, _CONFLICTING}:
+            return view
+        remaining = wait - (time.monotonic() - started)
+        if remaining <= 0:
+            return view
+        time.sleep(min(_MERGEABILITY_POLL_SECONDS, remaining))
+
+
+def check_pr(
+    number: int,
+    needed: int,
+    *,
+    mergeability_wait: float = 0.0,
+) -> Verdict:
+    view = _view_with_computed_mergeability(number, mergeability_wait)
     head = str(view["headRefOid"])
 
     mergeable, merge_state = _merge_state(view)
@@ -911,10 +967,20 @@ def main(argv: list[str] | None = None) -> int:
         help="votes required",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of prose")
+    parser.add_argument(
+        "--mergeability-wait",
+        type=float,
+        default=0.0,
+        help="seconds to keep re-asking while GitHub has not computed mergeability "
+        "(0 = ask once and refuse, the behaviour every non-opted-in caller keeps)",
+    )
     args = parser.parse_args(argv)
 
     try:
-        verdicts = [check_pr(n, args.min_votes) for n in args.prs]
+        verdicts = [
+            check_pr(n, args.min_votes, mergeability_wait=args.mergeability_wait)
+            for n in args.prs
+        ]
     except (RuntimeError, KeyError, ValueError, AssertionError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

@@ -459,23 +459,27 @@ def test_the_count_comes_from_the_sibling_that_owns_it(mod, monkeypatch):
     recommendation. `needed` is asserted too: the gate is three, and a sibling
     called with a made-up threshold would answer the wrong question.
     """
-    seen: list[tuple[int, int]] = []
+    seen: list[tuple[int, int, dict]] = []
 
     class _Verdict:
         valid_count = 2
 
-    def fake_check_pr(pr: int, needed: int):
-        seen.append((pr, needed))
+    def fake_check_pr(pr: int, needed: int, **kwargs):
+        seen.append((pr, needed, dict(kwargs)))
         return _Verdict()
 
     monkeypatch.setattr(mod.votes_counter(), "check_pr", fake_check_pr)
     assert mod._valid_votes(41) == (2, "")
-    assert seen == [(41, 3)]
+    assert seen == [(41, 3, {"mergeability_wait": mod._MERGEABILITY_WAIT})], seen
+    assert mod._MERGEABILITY_WAIT > 0, (
+        "a zero budget is ask-once: the price of a refresh would be reported "
+        "unavailable for a transient GitHub state right when it decides the action"
+    )
 
 
 def test_a_broken_count_read_degrades_to_unavailable(mod, monkeypatch):
     """The seam's own failure path: the freshness answer survives a missing price."""
-    def boom(pr: int, needed: int):
+    def boom(pr: int, needed: int, **kwargs):
         raise RuntimeError("gh failed (rc=1): gh api repos/...")
 
     monkeypatch.setattr(mod.votes_counter(), "check_pr", boom)
@@ -495,7 +499,7 @@ def test_a_broken_count_read_reaches_main_as_unavailable_not_zero(mod, monkeypat
     """
     fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
 
-    def boom(pr: int, needed: int):
+    def boom(pr: int, needed: int, **kwargs):
         raise RuntimeError("gh failed (rc=1): gh api repos/argszero/emrg/commits/...")
 
     monkeypatch.setattr(mod.votes_counter(), "check_pr", boom)
