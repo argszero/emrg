@@ -17,7 +17,9 @@ from emrg.tools.bash_tool import (
     SANDBOX_MODES,
     _check_sandbox,
     _extract_write_targets,
+    _fully_quoted_token_indexes,
     _is_redirect_operator,
+    _split_command_tokens,
     _flag_part,
     _GIT_READ_VERBS,
     _GIT_SHAPE_DECIDED,
@@ -848,9 +850,116 @@ def test_the_operator_skip_does_not_swallow_a_real_target():
     assert _extract_write_targets("echo x >> /tmp/y") == ["/tmp/y"]
     assert _extract_write_targets("cmd 2> err.txt") == ["err.txt"]
     assert _extract_write_targets("echo '>' > /tmp/y") == ["/tmp/y"]
-    # A quoted operator followed by a bare word is still read as a redirect —
-    # the known over-block residual, which needs the lexer to keep quoting.
-    assert _extract_write_targets("grep -n '>' file.txt") == ["file.txt"]
+    # A quoted operator with no redirect at all is not one either — the
+    # over-block half of #1268, closed once the walk recovers quoting from the
+    # raw line (see the tests below). Before that this read `["file.txt"]`.
+    assert _extract_write_targets("grep -n '>' file.txt") == []
+    # …and because a quoted operator *is* a path, the skip must stop at it when
+    # it is the redirect's operand, rather than walking past it looking for
+    # another operator to skip. The file this names is the literal `>`.
+    assert _extract_write_targets("echo x > '>'") == [">"]
+
+
+# The over-block half of #1268. On master `6e0a19c3` every one of these reported
+# a write target and was refused under `read-only` — "targeting 'file.txt'" for
+# the first — although the shell writes nothing at all: quoting is what makes a
+# word a path, and a quoted operator is never a redirect. The corpus is the
+# shapes a real session meets (grepping for a redirect character, grepping a
+# quoted character, testing a comparison operand), not shapes chosen to pass.
+QUOTED_OPERATOR_READS = [
+    "grep -n '>' file.txt",
+    'grep -n ">" file.txt',
+    "grep -rn '>' src/",
+    "test 1 '>' 2",
+    "echo '>'",
+    "printf '>'",
+    "echo '<' foo",
+    "ls | grep '>'",
+]
+
+
+@pytest.mark.parametrize("cmd", QUOTED_OPERATOR_READS)
+def test_a_quoted_operator_with_no_redirect_is_not_a_write_target(cmd: str):
+    """Issue #1268, the half #1269 left open: a quoted word is a path, not a redirect.
+
+    `'>'` and `>` dequote to the same token, so the walk cannot answer this from
+    the token stream — the fact is recovered from the raw line
+    (`_fully_quoted_token_indexes`). Without it the quoted `>` was read as an
+    operator and the *next word* became its target, which refused ordinary reads
+    at the tier whose job is to refuse writes: `grep -n '>' file.txt`.
+    """
+    assert _extract_write_targets(cmd) == [], cmd
+    allowed, reason, _ = _check_sandbox(cmd, "read-only")
+    assert allowed is True, f"{cmd!r} must be allowed (got {reason!r})"
+
+
+def test_the_quoting_repair_does_not_reopen_the_quoted_operator_escape():
+    """The other direction, pinned by the same change: #1269's escape stays shut.
+
+    The repair could have gone too far in exactly one way — deciding a *real*
+    redirect was quoted — so every shape that has a real redirect behind a quoted
+    operator is asserted to still name the outside target and still be refused.
+    """
+    outside = "/etc/emrg-1268b-probe.txt"
+    for cmd in (
+        f"echo '>' > {outside}",
+        f"echo '>' >> {outside}",
+        f"echo '>' >| {outside}",
+        f"echo '>' <> {outside}",
+    ):
+        targets = _extract_write_targets(cmd)
+        assert outside in targets, f"{cmd!r} must name the real target, got {targets!r}"
+        for tier in ("read-only", "workspace-write"):
+            allowed, reason, _ = _check_sandbox(cmd, tier)
+            assert allowed is False, f"{cmd!r} must be blocked at {tier} (got {reason!r})"
+
+
+def test_fully_quoted_token_indexes_recovers_quoting_or_claims_nothing():
+    """The repair itself, including the case where it refuses to guess.
+
+    The pairing is by index between the walk's POSIX reading and a second reading
+    with quoting kept, so the two must agree on how many words there are. When
+    they disagree the helper answers *nothing* — the walk's pre-existing
+    behaviour, and the safe side: believing a real redirect was quoted would drop
+    its target and reopen the escape, while believing a quoted one was real only
+    refuses a command that writes nothing.
+    """
+    def quoted(cmd: str) -> set[int]:
+        return _fully_quoted_token_indexes(cmd, _split_command_tokens(cmd))
+
+    # The one reason this helper exists: a quoted operator standing alone.
+    assert quoted("echo '>' foo") == {1}
+    assert quoted("echo '>' > /etc/x") == {1}
+    assert quoted("echo x > /etc/x") == set()
+    # A `>` inside a longer quoted word, where the token stream alone sufficed.
+    assert quoted("echo 'a > b'") == {1}
+    assert quoted('echo "a b"') == {1}
+    # A *partially* quoted word is not a quoted word: `'a'b` and `a'b'` both
+    # dequote to `ab`, and neither may be claimed (the whole word must be
+    # wrapped). Asserted because the obvious implementation — "does the token
+    # contain a quote character" — would wrongly claim both.
+    assert quoted("echo 'a'b") == set()
+    assert quoted("echo a'b'") == set()
+    # The readings disagree here (`["echo", "it's"]` with quoting resolved, three
+    # words with quoting kept), so nothing is claimed rather than pairing the
+    # wrong words.
+    assert quoted("echo 'it'\\''s'") == set()
+    # …and these two are the same disagreement with a *discriminating* answer:
+    # a pairing that paired anyway would claim index 0 in both (`'a'` against
+    # `'a'`, `'>'` against `'>'`), and a wrong pairing is what can decide a real
+    # operator was quoted and drop its target. Measured over 30,783 generated
+    # commands: dropping the guard changes 541 walk answers, 493 of them by
+    # dropping a target, outside ones included — so the guard is the fail-closed
+    # side, not decoration.
+    assert quoted("'a' 'a'b") == set()
+    assert quoted("'>' '>'x") == set()
+    # Input the lexer cannot parse takes `_split_command_tokens`' whitespace
+    # fallback, where a token can still carry its quote characters. `'a'` there
+    # is not a quoted word, it is a token whose *text* contains quotes, and
+    # claiming it would be claiming an artefact of the fallback. (This is the
+    # case the interior-equality clause exists for: no generated command with a
+    # redirect changes its walk answer when that clause is loosened.)
+    assert quoted("'a' it's") == set()
 
 
 OUTSIDE_CLOBBER = "/etc/emrg-clobber-probe.txt"
