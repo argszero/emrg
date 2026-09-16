@@ -92,7 +92,7 @@ async def start_daemon() -> subprocess.Popen:
     cleanup_server()
     # Mark the log before the child can write to it: a failure report may only
     # quote what *this* attempt appended (issue #1276).
-    log_mark = _log_size(_log_path())
+    log_mark = _log_mark(_log_path())
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "emrg.server",
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
@@ -115,28 +115,58 @@ def _log_path() -> Path:
     return Path.home() / ".emrg" / "emrgd.log"
 
 
-def _log_size(path: Path) -> int:
-    """Byte size of the log, or 0 when it cannot be read — the pre-spawn mark."""
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
+def _log_mark(path: Path) -> tuple[int, int | None]:
+    """The pre-spawn mark of the log: ``(byte size, inode)``, or ``(0, None)``.
 
+    **A size alone is not a mark, because emrgd's log is *replaced*, not appended
+    to.** ``emrg/server/__main__.py`` installs a ``RotatingFileHandler``
+    (``maxBytes``, ``backupCount``), so between this mark and the read an offset
+    can come to index a different file — measured on the handler's own
+    ``doRollover()``, in both size regimes:
 
-def _read_log_tail(path: Path, lines: int = 15, since: int = 0) -> str:
-    """Return the last `lines` of what was appended after byte offset `since`.
+    * the pre-spawn log is near the cap, so the mark lands *past* the new file's
+      end: the read answers ``""`` and the host is told "this start attempt wrote
+      nothing to emrgd.log" while the new file holds this attempt's error text —
+      R124's symptom (a real cause swallowed) reintroduced by a diagnostic;
+    * the pre-spawn log is short, so the mark lands *inside* a line of the new
+      file: a fragment is presented as what this attempt wrote.
 
-    `since` is the point of the diagnostic (issue #1276): the tail of the whole
-    file is *history*, and history printed as the reason a start failed sent the
-    host looking for a cause in a previous run's normal shutdown. Only what this
-    attempt wrote can explain this attempt; when it wrote nothing, the caller
-    must say so rather than show an older run.
+    The identity discriminates both, and the size is not the discriminator: the
+    inode changed in *both* regimes, so a ``size_now < mark`` test catches the
+    first and misses the second. The size is still carried, for the one case the
+    inode cannot see: a log truncated in place keeps its inode and shrinks.
     """
+    try:
+        st = path.stat()
+    except OSError:
+        return 0, None
+    return st.st_size, st.st_ino
+
+
+def _read_log_tail(path: Path, lines: int = 15, since: tuple[int, int | None] = (0, None)) -> str:
+    """Return the last `lines` of what this attempt appended after the mark `since`.
+
+    `since` is a mark from `_log_mark` — ``(byte offset, inode)``, never a bare
+    offset — and that is the point of the diagnostic (issue #1276): the tail of
+    the whole file is *history*, and history printed as the reason a start failed
+    sent the host looking for a cause in a previous run's normal shutdown. Only
+    what this attempt wrote can explain this attempt; when it wrote nothing, the
+    caller must say so rather than show an older run.
+
+    A mark whose inode is no longer the file's, or whose offset is now past the
+    end, is read from the start instead: the file it marked is gone, so every byte
+    of the current one belongs to this attempt. ``(0, None)`` means "no mark" and
+    reads the whole file, which is what the whole-file tail caller wants.
+    """
+    offset, ino = since
     try:
         if not path.exists():
             return ""
+        current = path.stat()
+        if (ino is not None and current.st_ino != ino) or current.st_size < offset:
+            offset = 0
         with open(path, "rb") as handle:
-            handle.seek(max(0, since))
+            handle.seek(offset)
             data = handle.read().decode("utf-8", errors="replace")
         return "\n".join(data.rstrip().splitlines()[-lines:])
     except OSError:
@@ -156,7 +186,7 @@ def _child_exit_code(proc) -> int | None:
     return code if isinstance(code, int) else None
 
 
-def _startup_failure_detail(log_path: Path, since: int, proc) -> str:
+def _startup_failure_detail(log_path: Path, since: tuple[int, int | None], proc) -> str:
     """What is actually known about a start that did not come up (issue #1276).
 
     Still the fix for rant 2026-08-05T15:54:28 (R124): a config.toml parse error
@@ -182,7 +212,7 @@ def _startup_failure_detail(log_path: Path, since: int, proc) -> str:
 async def _await_daemon_ready(
     proc,
     log_path: Path,
-    since: int,
+    since: tuple[int, int | None],
     probe=None,
     *,
     attempts: int = 15,
