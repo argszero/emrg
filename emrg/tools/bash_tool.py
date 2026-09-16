@@ -654,8 +654,12 @@ def _is_redirect_operator(tok: str) -> bool:
     `workspace-write`. Both genuinely write: in a throwaway directory bash and sh
     each created the file for `>|` (the clobber redirect) and bash created it for
     `<>` (read-write), so an empty target list there is a hole rather than an
-    opinion. `>>|`, `>>&` and `&>>` created nothing, so they are covered only
-    incidentally.
+    opinion. `>>|`, `>>&` and `&>>` created nothing under the shell this walk's
+    own runtime uses (`create_subprocess_shell` -> `/bin/sh`; measured here as
+    rc=2 syntax errors that write no file), which is why they are covered only
+    incidentally — on bash 4+, where `&>>` and `>>&` are valid append-both
+    redirects that do write, recognising them as operators is the safe direction
+    rather than an unnecessary one.
 
     The shape test is: the token contains a `>` and no character that could be
     part of a path. That also covers the fd-prefixed spellings (`1>|`, `0<>`,
