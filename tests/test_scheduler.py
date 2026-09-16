@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -2653,20 +2654,157 @@ def test_is_dirty_tree_linked_worktree():
 
 
 def test_dirty_tree_forces_read_only_structural_guard():
-    """Community issue #979: a dirty source tree forces the cycle's effective
-    sandbox to read-only regardless of configuration — topology over rules."""
+    """Community issue #979 + #1237: a dirty tree holding work that exists nowhere
+    else forces the cycle's effective sandbox to read-only regardless of
+    configuration — topology over rules. `loses_unique` is injected here so the
+    test states the *reason* rather than depending on what the tree under test
+    happens to contain; the end-to-end probes are the two tests below."""
     handler = TaskHandler(
         name="emrg-task", config={"project": "emrg"}, interval=60,
         identity=InstanceIdentity(),
     )
     assert handler._sandbox == "workspace-write"  # configured default
-    assert asyncio.run(handler._effective_sandbox(dirty=True)) == "read-only"
+    assert asyncio.run(
+        handler._effective_sandbox(dirty=True, loses_unique=True)
+    ) == "read-only"
     # configured read-only stays read-only (no weakening)
     handler2 = TaskHandler(
         name="ro-task", config={}, interval=60, identity=InstanceIdentity(),
         sandbox="read-only",
     )
-    assert asyncio.run(handler2._effective_sandbox(dirty=True)) == "read-only"
+    assert asyncio.run(
+        handler2._effective_sandbox(dirty=True, loses_unique=True)
+    ) == "read-only"
+
+
+def _status(repo: str) -> str:
+    """`git status --porcelain` in `repo`, as text."""
+    return subprocess.run(["git", "-C", repo, "status", "--porcelain"],
+                          capture_output=True, text=True, timeout=30,
+                          encoding="utf-8", errors="replace").stdout
+
+
+def _git_out(repo: str, *args: str) -> str:
+    """Stdout of `git <args>` in `repo`, stripped."""
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
+                          timeout=30, encoding="utf-8", errors="replace").stdout.strip()
+
+
+def _repo_with_dirt(tmp_path, kind: str) -> str:
+    """A one-commit repo made dirty in a named way. Returns its path.
+
+    `deleted` — a tracked file removed from the worktree: `git status` reports
+    ` D`, and discarding restores it, so **nothing exists only here**.
+    `untracked` — a file git has never seen: its bytes exist in exactly one place.
+    """
+    repo = tmp_path / f"repo-{kind}"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "master", str(repo)],
+                   capture_output=True, timeout=30)
+    for key, value in (("user.email", "t@t.t"), ("user.name", "t")):
+        subprocess.run(["git", "-C", str(repo), "config", key, value],
+                       capture_output=True, timeout=30)
+    (repo / "f.txt").write_text("v1", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "f.txt"],
+                   capture_output=True, timeout=30)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "base"],
+                   capture_output=True, timeout=30)
+    if kind == "deleted":
+        (repo / "f.txt").unlink()
+    else:
+        (repo / "notes.md").write_text("only here", encoding="utf-8")
+    return str(repo)
+
+
+def test_reconstructible_dirt_is_recovered_by_the_daemon_itself(tmp_path):
+    """Host directive 2026-09-16 (issue #1237): dirt must be *recovered from*.
+
+    The downgrade is keyed on loss, and its exit is the daemon's own action -- not a
+    command a human has to be present to run. A guard whose exit needs a human
+    strands the tree, which is the shape of the loss that cost 33 consecutive
+    zero-commit cycles: the tier that blocked the cycle was also the tier that
+    blocked the repair of the thing blocking it.
+
+    Measured end-to-end through the real probe and the real recovery: the tree is
+    clean afterwards without anyone asking, HEAD never moved, the moved work is one
+    `git stash pop` away, and a receipt in the git dir records what happened.
+    """
+    repo = _repo_with_dirt(tmp_path, "deleted")
+    assert _status(repo).startswith(" D"), "precondition: deletion-only dirt"
+    head = _git_out(repo, "rev-parse", "HEAD")
+
+    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
+                          identity=InstanceIdentity())
+    assert asyncio.run(handler._effective_sandbox()) == "workspace-write", \
+        "dirt holding no unique work must not cost the cycle its tier"
+
+    assert _status(repo).strip() == "", \
+        "the daemon must converge a reconstructible tree itself, not ask a human to"
+    assert _git_out(repo, "rev-parse", "HEAD") == head, "the recovery must not move HEAD"
+    assert "emrg-recovery-" in _git_out(repo, "stash", "list"), \
+        "the action must be reversible: the work lives in a stash"
+
+    git_dir = Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
+    receipt = json.loads((git_dir / "emrg-recovery-receipt.json").read_text(encoding="utf-8"))
+    assert receipt["repo"] == repo
+    assert receipt["head_before"] == receipt["head_after"] == head
+    assert receipt["status_before"] == [" D f.txt"], receipt["status_before"]
+    assert receipt["status_after"] == []
+    assert receipt["stash_message"] in receipt["reversible_with"], \
+        "the reversal route must name the stash that was made, not the newest one"
+    assert "--index" in receipt["reversible_with"], \
+        "a stash carries the index side; the inverse must restore it"
+
+    # Reversibility is why the action is allowed at all: popping restores the exact
+    # state the daemon moved aside -- here, the deletion itself, byte for byte.
+    pop = subprocess.run(["git", "-C", repo, "stash", "pop"],
+                         capture_output=True, text=True, timeout=30,
+                         encoding="utf-8", errors="replace")
+    assert pop.returncode == 0, pop.stderr
+    assert _status(repo) == " D f.txt\n", "the stash must carry the exact dirt it moved"
+
+
+def test_unique_dirt_still_forces_read_only(tmp_path):
+    """The protection, unchanged: an untracked file exists nowhere else."""
+    repo = _repo_with_dirt(tmp_path, "untracked")
+
+    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
+                          identity=InstanceIdentity())
+    assert asyncio.run(handler._effective_sandbox()) == "read-only"
+    # The work the guard protects is still there after the decision -- and the
+    # daemon's self-recovery must not have run at all: a stash here would be the
+    # guard moving a host's unsaved work out from under it.
+    assert (tmp_path / "repo-untracked" / "notes.md").read_text(encoding="utf-8") == "only here"
+    assert _git_out(repo, "stash", "list") == "", "unique work must not be stashed"
+    assert not (Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
+                / "emrg-recovery-receipt.json").exists(), \
+        "no recovery ran, so there is no recovery to receipt"
+
+
+def test_a_stale_verdict_cannot_unlock_a_tree_holding_unique_work(tmp_path):
+    """Found in review of #1274: the action's own measurement governs the tier.
+
+    `loses_unique` is a test seam and an optimisation for the log line, so a caller
+    can fill it in -- and the earlier shape *believed* it: passing `loses_unique=False`
+    on a tree that does hold unique work bought the cycle `workspace-write` **and**
+    stashed the work, with the receipt calling it a recovery. The net held only while
+    every caller passed the truth, which is the same as not holding.
+
+    Now the action re-measures the criterion itself and its refusal governs, so a
+    wrong or stale verdict is contradicted instead of honoured.
+    """
+    repo = _repo_with_dirt(tmp_path, "untracked")
+
+    handler = TaskHandler(name="emrg-task", config={"path": repo}, interval=60,
+                          identity=InstanceIdentity())
+    assert asyncio.run(
+        handler._effective_sandbox(dirty=True, loses_unique=False)
+    ) == "read-only", "a verdict supplied by the caller must not decide this"
+
+    assert (tmp_path / "repo-untracked" / "notes.md").read_text(encoding="utf-8") == "only here"
+    assert _git_out(repo, "stash", "list") == "", "a refused action moves nothing"
+    assert not (Path(_git_out(repo, "rev-parse", "--absolute-git-dir"))
+                / "emrg-recovery-receipt.json").exists()
 
 
 def test_dirty_tree_override_env_audited_receipt():
@@ -2681,13 +2819,19 @@ def test_dirty_tree_override_env_audited_receipt():
     try:
         # task named in the override → configured tier restored
         os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "other-task,emrg-task"
-        assert asyncio.run(handler._effective_sandbox(dirty=True)) == "workspace-write"
+        assert asyncio.run(
+            handler._effective_sandbox(dirty=True, loses_unique=True)
+        ) == "workspace-write"
         # wildcard → configured tier restored
         os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "*"
-        assert asyncio.run(handler._effective_sandbox(dirty=True)) == "workspace-write"
+        assert asyncio.run(
+            handler._effective_sandbox(dirty=True, loses_unique=True)
+        ) == "workspace-write"
         # override for a different task → guard still applies
         os.environ["EMRG_TASK_DIRTY_OVERRIDE"] = "other-task"
-        assert asyncio.run(handler._effective_sandbox(dirty=True)) == "read-only"
+        assert asyncio.run(
+            handler._effective_sandbox(dirty=True, loses_unique=True)
+        ) == "read-only"
     finally:
         if old is None:
             os.environ.pop("EMRG_TASK_DIRTY_OVERRIDE", None)
@@ -2702,4 +2846,6 @@ def test_clean_tree_keeps_configured_sandbox():
         name="emrg-task", config={"project": "emrg"}, interval=60,
         identity=InstanceIdentity(),
     )
-    assert asyncio.run(handler._effective_sandbox(dirty=False)) == "workspace-write"
+    assert asyncio.run(
+        handler._effective_sandbox(dirty=False, loses_unique=True)
+    ) == "workspace-write", "a clean tree is never asked about loss"
