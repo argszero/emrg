@@ -173,7 +173,7 @@ entry). `--measure` prints the whole inventory.
 cd emrg/gui
 npm ci               # install deps (production: --omit=dev)
 npm start            # launch GUI (auto-starts daemon)
-npm test             # run Node tests (89: 45 daemon_client + 20 conn-manager + 8 integration + 6 build-config + 7 gui-state + 3 preload-api; integration runs in CI, local: npm run test:integration)
+npm test             # run Node tests (the counts are measured live, not stored — see scripts/check-node-test-count.py; integration runs in CI, local: npm run test:integration)
 ```
 
 ### Packaging (installer builds)
