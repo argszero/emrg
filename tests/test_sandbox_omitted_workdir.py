@@ -24,8 +24,6 @@ a probe, reaches the guard.
 """
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from emrg.tools.bash_tool import _check_sandbox
@@ -74,16 +72,23 @@ class TestTheFailOpenIsClosed:
     def test_the_refusal_is_the_move_check_and_not_a_coincidence(
         self, workspace, monkeypatch
     ):
-        """Why it is refused, not merely that it is: the reason names the
-        directory the command moved to, which is the check the omitted reading
-        used to skip — a generic block would be some other rule firing."""
+        """Why it is refused, not merely that it is: the reason is the move
+        check's own message and it names the directory the command moved to —
+        a generic block would be some other rule firing.
+
+        The directory is compared by a **component**, not by a spelling. Two
+        spellings of the same directory reach a message like this one (`realpath`
+        rewrites `/opt/x` to `C:\\opt\\x` on Windows, and the message carries
+        `!r`, which doubles the backslashes again), so any `in` test against a
+        whole path measures the host's path algebra — measured red on
+        windows-2025 twice, once per spelling attempt. `elsewhere` is identical
+        in every spelling, and it can only come from the move: the blocked target
+        is `f`."""
         monkeypatch.chdir(workspace)
         reason = _reason(f"cd {_OUTSIDE} && cat > f", None)
-        # The directory as the guard resolved it, not as the command spelled it:
-        # on Windows the guard reports `realpath("/opt/...")` as `C:\opt\...`, so
-        # a substring test against the literal spelling measures the host's path
-        # algebra instead of the rule under test (measured red on windows-2025).
-        assert reason is not None and os.path.realpath(_OUTSIDE) in reason
+        assert reason is not None
+        assert "relative target" in reason and "changing directory" in reason, reason
+        assert "elsewhere" in reason, reason
 
     def test_a_variable_move_out_is_also_refused_without_a_workdir(
         self, workspace, monkeypatch
