@@ -153,6 +153,18 @@ checkout - `tests/test_check_node_test_count.py` skips itself with "no node_modu
 `1771 passed, 1 skipped` after nine new tests - the two extra numbers are this skip
 and those tests, not a difference in the trees. Compare worktree runs with worktree
 runs, and never read a skip/pass delta between the two harnesses as a regression.
+
+What the run leaves behind
+--------------------------
+Nothing. A PR head has to be fetched into a ref before it can be folded, so each
+planned PR parks one under `refs/emrg-plan-suite/` - and a ref is state: it keeps
+the commit reachable, so `git gc` can never prune it. Those refs are therefore
+removed when the run ends, on every path (`_drop_fetched_refs`), the same way a
+worktree is: measured 2026-09-17 (`cyc20260917-142057`), leaving them in place had
+grown the family to 88 refs pinning 283 commits unreachable from master, plus 29
+more from three earlier tools with the same habit. A run that ends with a verdict
+nobody can act on is a bad run; a run that ends having quietly moved the object
+database is a worse one, because nothing about the verdict tells you it happened.
 """
 
 from __future__ import annotations
@@ -175,6 +187,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import merge_tree  # noqa: E402  (needs the path above)
 
 TIP_REF = "refs/emrg-plan-suite/tip"
+# Where a fetched PR head is parked while the plan is built. Temp by intent: the
+# plan needs the *commit* `_fetch_head` resolves, never the ref, so the ref is
+# removed when the run ends (`_drop_fetched_refs`). Nothing else may depend on it.
+PLAN_REF_PREFIX = "refs/emrg-plan-suite/pr"
 SUITE = ["-m", "pytest", "tests/", "-q", "--no-header"]
 
 # The sibling tool that owns the base rule, loaded from its file rather than
@@ -304,19 +320,60 @@ def _open_pr_numbers(repo: str) -> list[int]:
 
 
 def _fetch_head(number: int) -> str:
-    """Fetch a PR's real head into a temp ref and return the ref name.
+    """Fetch a PR's real head into a temp ref and return the commit it resolves to.
 
     The refspec is forced (`+`): PR heads here are routinely re-pushed to a commit
     that is not a descendant of the previous one (every conflict resolution does),
     and a rejected fetch would leave the *stale* ref in place, so the plan would
     silently be built from a tree that is no longer the PR.
+
+    The ref is a temp ref, and the caller must dispose of it: the plan needs the
+    commit, not the name, so `_drop_fetched_refs` removes it when the run is over.
     """
-    ref = f"refs/emrg-plan-suite/pr{number}"
+    ref = f"{PLAN_REF_PREFIX}{number}"
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
     return _rev_parse(ref)
+
+
+def _fetch_heads(numbers: list[int], fetched: list[int]) -> list[tuple[int, str]]:
+    """Fetch every planned PR's head, recording which temp refs now need removing.
+
+    `fetched` is appended to in fetch order rather than being derived from
+    `numbers`: a run that dies on PR 3 of 5 has created two refs, and those two are
+    exactly the ones that need clearing.
+    """
+    heads: list[tuple[int, str]] = []
+    for number in numbers:
+        heads.append((number, _fetch_head(number)))
+        fetched.append(number)
+    return heads
+
+
+def _drop_fetched_refs(fetched: list[int]) -> None:
+    """Delete the per-PR temp refs this run fetched - on every return path.
+
+    Measured 2026-09-17 (`cyc20260917-142057`): `_fetch_head` left its ref behind, so
+    `refs/emrg-plan-suite/` had grown to **88** refs - one per planned PR per run -
+    pinning **283 commits / 1405 objects** unreachable from master, which therefore
+    can never be pruned by `git gc`. Three older families (`refs/cdrain/`,
+    `refs/drain/`, `refs/tmp/`; 29 refs between them) are still sitting in this
+    clone from tools that no longer exist in the tree, which is what "nothing ever
+    cleans this" looks like. A ref nobody reads is state, and a guard's state leak
+    is the same defect class as a guard's wrong tree: the artifact outlives the
+    reason it was made.
+
+    The ref is keyed by PR number, so two runs planning the same PR share one ref.
+    Removing it is safe for the other run: it has already resolved the commit it
+    needs (that is what `_fetch_head` returns), and the ref is temp for it too - the
+    worst case is that it deletes an already-absent ref, which is why deleting is
+    best-effort rather than a `MeasurementError`. A failure to delete says nothing
+    about the measurement, so it is never allowed to become one.
+    """
+    for number in fetched:
+        _run(["git", "update-ref", "-d", f"{PLAN_REF_PREFIX}{number}"])
 
 
 def _merge_tree(ours: str, theirs: str) -> tuple[str | None, list[str]]:
@@ -509,10 +566,27 @@ def _suite_env(worktree: Path) -> dict[str, str]:
 
     `PYTHONDONTWRITEBYTECODE` is set for the run and inherited by everything it
     spawns, so a measurement cannot leave a cache that a later run would read.
+
+    One variable is *removed* rather than passed through, because it changes what
+    the suite says about a tree rather than what the suite can see:
+    `EMRG_TASK_DIRTY_OVERRIDE`. It is the evolution cycle's own escape hatch - a
+    cycle whose tree is dirty exports it to keep working, and `scheduler.py` reads
+    it from the environment - while `tests/test_scheduler.py` has four tests that
+    assert the *unoverridden* verdict for a dirty tree, reaching the real project
+    rather than the worktree. Measured 2026-09-17 (`cyc20260917-142057`): with a
+    dirty caller tree and the override exported, those four fail and the run reports
+    `suite FAILED` for a plan whose tree is green; with the override unset they pass,
+    dirty tree and all. That is a verdict about the caller's working tree, which is
+    the one thing this harness must never report. Dropping it cannot cost the run its
+    own answer: a fresh worktree is clean, so the exception the override grants is
+    not in play there - and a measurement must not inherit the caller's reason for
+    making an exception.
     """
     existing = os.environ.get("PYTHONPATH", "")
     pinned = str(worktree) + (os.pathsep + existing if existing else "")
-    return {**os.environ, "PYTHONPATH": pinned, "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {**os.environ, "PYTHONPATH": pinned, "PYTHONDONTWRITEBYTECODE": "1"}
+    env.pop("EMRG_TASK_DIRTY_OVERRIDE", None)
+    return env
 
 
 def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
@@ -654,6 +728,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    fetched: list[int] = []
     try:
         # The base, in the two dimensions it can be wrong by: *when* it was read
         # and *which* ref the name denotes. Both are owned by the sibling, so both
@@ -663,53 +738,61 @@ def main(argv: list[str] | None = None) -> int:
         base_ref = seq._qualify_ref(args.base)
         base = _rev_parse(base_ref)
         numbers = args.prs or _open_pr_numbers(args.repo)
-        heads = [(number, _fetch_head(number)) for number in numbers]
+        heads = _fetch_heads(numbers, fetched)
     except MeasurementError as exc:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
 
-    # The ref measured, not the spelling typed: they differ whenever a short name
-    # is ambiguous, and a header that reports `origin/master` for a commit that is
-    # not master is how the wrong-tree defect stays invisible.
-    print(f"base {base[:8]} ({base_ref}), {len(numbers)} PR(s) planned")
-
+    # Everything below runs with temp refs in the object database, so it is all
+    # wrapped: a plan that conflicts (rc 3), a step that cannot be built, or an
+    # unanswerable suite (rc 2) fetched its heads just the same, and a cleanup that
+    # only ran on the path that reached the suite would leak on exactly the runs
+    # that fail - the ones a reader is most likely to repeat.
     try:
-        tip = build_plan_tip(base, heads)
-    except PlanConflict as exc:
-        print(f"no final tree: {exc}", file=sys.stderr)
+        # The ref measured, not the spelling typed: they differ whenever a short name
+        # is ambiguous, and a header that reports `origin/master` for a commit that is
+        # not master is how the wrong-tree defect stays invisible.
+        print(f"base {base[:8]} ({base_ref}), {len(numbers)} PR(s) planned")
+
+        try:
+            tip = build_plan_tip(base, heads)
+        except PlanConflict as exc:
+            print(f"no final tree: {exc}", file=sys.stderr)
+            print(
+                "\nA step of the plan conflicts, so the plan has no final tree to judge. "
+                "That is not a health verdict - resolve the conflict (and re-push) or "
+                "reorder with check-merge-sequence.py.",
+                file=sys.stderr,
+            )
+            return 3
+        except MeasurementError as exc:
+            print(f"could not measure: {exc}", file=sys.stderr)
+            return 2
+
+        print("plan: " + " -> ".join(f"#{number}" for number, _ in heads))
+        if args.steps:
+            return _judge_every_step(base, heads)
+        try:
+            with tempfile.TemporaryDirectory(prefix="emrg-plan-suite-") as tmp:
+                passed, summary, tree_sha = _suite_verdict(tip, Path(tmp))
+        except MeasurementError as exc:
+            print(f"could not measure: {exc}", file=sys.stderr)
+            return 2
+
+        print(f"final tree {tree_sha[:12]} ({tree_sha})")
+        if passed:
+            print(f"suite OK: {summary}")
+            return 0
+        print(f"suite FAILED: {summary}")
         print(
-            "\nA step of the plan conflicts, so the plan has no final tree to judge. "
-            "That is not a health verdict - resolve the conflict (and re-push) or "
-            "reorder with check-merge-sequence.py.",
+            "\nThe plan's steps are individually clean and the per-PR signals are green, "
+            "but the tree they produce together fails the suite. Fix it on the merged "
+            "tree and re-push the PR that owns the failure (a push voids its votes).",
             file=sys.stderr,
         )
-        return 3
-    except MeasurementError as exc:
-        print(f"could not measure: {exc}", file=sys.stderr)
-        return 2
-
-    print("plan: " + " -> ".join(f"#{number}" for number, _ in heads))
-    if args.steps:
-        return _judge_every_step(base, heads)
-    try:
-        with tempfile.TemporaryDirectory(prefix="emrg-plan-suite-") as tmp:
-            passed, summary, tree_sha = _suite_verdict(tip, Path(tmp))
-    except MeasurementError as exc:
-        print(f"could not measure: {exc}", file=sys.stderr)
-        return 2
-
-    print(f"final tree {tree_sha[:12]} ({tree_sha})")
-    if passed:
-        print(f"suite OK: {summary}")
-        return 0
-    print(f"suite FAILED: {summary}")
-    print(
-        "\nThe plan's steps are individually clean and the per-PR signals are green, "
-        "but the tree they produce together fails the suite. Fix it on the merged "
-        "tree and re-push the PR that owns the failure (a push voids its votes).",
-        file=sys.stderr,
-    )
-    return 1
+        return 1
+    finally:
+        _drop_fetched_refs(fetched)
 
 
 if __name__ == "__main__":
