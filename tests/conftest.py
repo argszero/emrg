@@ -22,6 +22,7 @@ immediately instead of the pollution being discovered later (precedent:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -255,6 +256,15 @@ class _NoSignalOs:
 
     `is_probe` is injected so a test can drive both decisions on either platform
     without ever delegating to a real `os.kill`.
+
+    `killpg` is refused alongside `kill`. `__getattr__` would otherwise delegate it
+    to the real `os` — measured on the revision before this one,
+    `guard.killpg(4242, 15)` reached the stand-in `os` — which made "signal the
+    daemon's process group" the one signal route out of this wrapper. Nothing in
+    the restart path signals a group today, so this is scope rather than a live
+    hole; it is here because the act the red line forbids does not get narrower
+    when the target is a group, and because the blast radius is *larger*: the
+    daemon shares its group with whatever else the host started.
     """
 
     def __init__(self, real, is_probe=_kill_is_a_liveness_probe):
@@ -275,15 +285,71 @@ class _NoSignalOs:
             f"(`@patch('emrg.client.daemon_manager.os.kill')`)."
         )
 
+    def killpg(self, pgid, sig):
+        raise AssertionError(
+            f"{_RED_LINE}: emrg.client.daemon_manager tried to signal the process "
+            f"group {pgid} with signal {sig!r}. A test must never stop or restart "
+            f"the live daemon — it is EMRG's life core. Isolate the restart path "
+            f"you are testing instead, as tests/test_daemon_manager.py's restart "
+            f"tests do (`@patch('emrg.client.daemon_manager.os.kill')`)."
+        )
+
+
+_EMRG_PROGRAMS = ("emrg", "emrgd")
+_SHELLS = ("sh", "bash", "dash", "zsh", "ksh")
+_SIGNALLERS = ("pkill", "killall", "kill")
+_STOP_VERBS = ("stop", "restart")
+
+
+def _emrg_entry_index(tokens) -> int:
+    """Where in this argv the emrg program itself would be run, or -1.
+
+    The program is not necessarily `tokens[0]`: a wrapper hands it over (`env emrg
+    …`, `nohup emrg …`, `timeout 5 emrg …`, `uv run emrg …` — `uv run` is how this
+    repo runs its own tools), and an interpreter names it with `-m emrg` /
+    `-m emrg.server`. Reading only `tokens[0]` missed every one of those: measured
+    on the revision before this one, `uv run emrg server stop`, `env emrg stop`,
+    `nohup emrg stop`, `timeout 5 emrg server restart` and `nice -n 5 pkill -f
+    emrg.server` all passed a guard whose own docstring claims it refuses "the emrg
+    entry points … carrying a `stop`/`restart` verb".
+
+    An interpreter's `-c` string is *not* read here: that would mean parsing Python,
+    and a test hiding the act inside a language string is evading the guard rather
+    than reaching the daemon by an ordinary route.
+    """
+    for i, token in enumerate(tokens):
+        if Path(token).name in _EMRG_PROGRAMS:
+            return i
+        if token == "-m" and tokens[i + 1 : i + 2] in (["emrg"], ["emrg.server"]):
+            return i + 1
+    return -1
+
 
 def _spawns_a_daemon_stop_or_restart(args) -> bool:
     """Would this `Popen` argv stop or restart the emrg daemon?
 
-    Deliberately narrow, because the suite spawns git, node, pytest and the emrg
-    CLI itself for read-only verbs: it refuses the emrg entry points (the
-    installed `emrg`/`emrgd` script, or an interpreter on `-m emrg`) carrying a
-    `stop`/`restart` verb, and a process-signalling command that names emrg.
-    Everything else passes through untouched.
+    Keyed on the **act**, not on the mention: the emrg program carrying a
+    `stop`/`restart` verb, or a process-signalling command whose text names emrg.
+    The verb must come *after* the program, so a verb passed as data (`git commit
+    -m stop`) or a name in a pattern (`git log --grep emrg`) stays allowed — the
+    suite spawns git, node, pytest and the read-only `emrg` verbs, and a guard that
+    refused those would break them and teach the next reader to distrust it.
+
+    Two spellings the first revision read as somebody else's argv, both of them
+    this repo's own idiom, and both closed by looking past `tokens[0]`:
+
+    * a **shell** runs the string it was handed, so `sh -c "emrg server stop"` is
+      the same act as `emrg server stop` — the line inside is classified;
+    * a **wrapper** hands the program over — `env emrg stop`, `nohup emrg stop`,
+      `timeout 5 emrg server restart`, `uv run emrg server stop`, `nice -n 5 pkill
+      -f emrg.server`.
+
+    The bias is deliberate: a false refusal is loud, immediate and cheap (the test
+    fails where it stands, with a message naming the red line), while a false
+    allowance is the incident — a SIGTERM to the live daemon, which cost a cycle
+    read-only on 2026-09-17 and is unrecoverable mid-run. Where the two spellings
+    of the act are distinguishable only by shell parsing this cannot do, the guard
+    refuses rather than guesses.
     """
     if isinstance(args, bytes):
         args = args.decode("utf-8", "replace")
@@ -296,17 +362,31 @@ def _spawns_a_daemon_stop_or_restart(args) -> bool:
             return False  # not an argv at all — let Popen raise its own error
     if not tokens:
         return False
-    head = Path(tokens[0]).name
-    runs_emrg = head in ("emrg", "emrgd")
-    if "-m" in tokens:
-        i = tokens.index("-m")
-        if tokens[i + 1 : i + 2] == ["emrg"]:
-            runs_emrg = True
-    if runs_emrg:
-        return any(token in ("stop", "restart") for token in tokens[1:])
-    if head in ("pkill", "killall", "kill"):
-        return "emrg" in " ".join(tokens).lower()
-    return False
+
+    if Path(tokens[0]).name in _SHELLS:
+        # `sh -c <line>` / `bash -lc <line>`: what runs is the line, so decide on
+        # what the line would run — one *simple command* at a time, because a line
+        # is a pipeline of them and only one of them may be the act. Splitting on
+        # the separators is what keeps `sh -c "emrg --help | grep stop"` allowed
+        # (the verb is a pattern there) while `sh -c "emrg server stop && echo ok"`
+        # is refused. The split drops quotes, which is why the verb test strips
+        # them.
+        return any(
+            _spawns_a_daemon_stop_or_restart(segment.split())
+            for segment in re.split(r"[;&|]+", " ".join(tokens[1:]))
+        )
+
+    for i, token in enumerate(tokens):
+        if (
+            Path(token).name in _SIGNALLERS
+            and "emrg" in " ".join(tokens[i + 1 :]).lower()
+        ):
+            return True
+
+    entry = _emrg_entry_index(tokens)
+    if entry < 0:
+        return False
+    return any(token.strip("\"'") in _STOP_VERBS for token in tokens[entry + 1 :])
 
 
 @pytest.fixture
@@ -369,18 +449,32 @@ def _guard_no_live_daemon_is_signalled(monkeypatch):
 
     real_popen = subprocess.Popen
 
-    def _guarded_popen(args, *rest, **kwargs):
-        if _spawns_a_daemon_stop_or_restart(args):
-            raise AssertionError(
-                f"{_RED_LINE}: a test tried to spawn {args!r}, which stops or "
-                f"restarts the emrg daemon. A child process can kill the live "
-                f"daemon just as a direct call can; test the CLI's behaviour by "
-                f"calling it in-process with its stop path isolated."
-            )
-        return real_popen(args, *rest, **kwargs)
+    class _GuardedPopen(real_popen):
+        """`Popen` with the refusal in front of it — and still a *type*.
 
-    _guarded_popen.__name__ = "Popen"
-    monkeypatch.setattr(subprocess, "Popen", _guarded_popen)
+        A plain function patched over `subprocess.Popen` answers
+        `isinstance(x, subprocess.Popen)` with `TypeError: isinstance() arg 2 must
+        be a type, a tuple of types, or a union`. The patch is autouse for the whole
+        suite, so a plain function would make that question unanswerable everywhere
+        — and the error it raises names `isinstance`, not the red line, so the next
+        reader debugs the wrong thing. No test asks it today (grepped the tree);
+        subclassing removes the class of failure instead of pinning it, since
+        `isinstance`, `issubclass` and the inherited `__init__` all stay honest
+        while the refusal is identical.
+        """
+
+        def __init__(self, args, *rest, **kwargs):
+            if _spawns_a_daemon_stop_or_restart(args):
+                raise AssertionError(
+                    f"{_RED_LINE}: a test tried to spawn {args!r}, which stops or "
+                    f"restarts the emrg daemon. A child process can kill the live "
+                    f"daemon just as a direct call can; test the CLI's behaviour by "
+                    f"calling it in-process with its stop path isolated."
+                )
+            super().__init__(args, *rest, **kwargs)
+
+    _GuardedPopen.__name__ = "Popen"
+    monkeypatch.setattr(subprocess, "Popen", _GuardedPopen)
 
 
 @pytest.fixture(autouse=True)

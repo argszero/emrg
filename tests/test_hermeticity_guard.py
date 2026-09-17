@@ -143,12 +143,32 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
     host), i.e. a test whose safety depends on the code it is testing. With stubs,
     a regression still fails the test — the spawn raises nothing — and the host is
     untouched.
+
+    The wrapper and shell rows are here because the first revision of this guard
+    read only `tokens[0]` and let all of them through (measured): a shell runs the
+    line it is handed, and `env`/`nohup`/`timeout`/`nice` hand the program over, so
+    the *same* act arrives as somebody else's argv. Every program in those rows is
+    a stub as well, the wrapper included — so the "a regression must still be
+    harmless" property holds for them too.
     """
     import subprocess
 
     stubs = tmp_path / "bin"
     stubs.mkdir()
-    for name in ("emrg", "emrgd", "pkill", "killall", "kill", "python"):
+    for name in (
+        "emrg",
+        "emrgd",
+        "pkill",
+        "killall",
+        "kill",
+        "python",
+        "sh",
+        "bash",
+        "env",
+        "nohup",
+        "timeout",
+        "nice",
+    ):
         script = stubs / name
         script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         script.chmod(0o755)
@@ -161,6 +181,15 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
         [str(stubs / "pkill"), "-f", "emrg.server"],
         [str(stubs / "killall"), "emrgd"],
         f"{stubs / 'pkill'} -f 'python -m emrg'",
+        # a shell runs the line it is handed: the same act, one level in
+        [str(stubs / "sh"), "-c", f"{stubs / 'emrg'} server stop"],
+        [str(stubs / "sh"), "-c", f"{stubs / 'emrg'} server stop && echo done"],
+        [str(stubs / "bash"), "-lc", f"{stubs / 'python'} -m emrg server restart"],
+        # a wrapper hands the program over: the emrg program is not tokens[0]
+        [str(stubs / "env"), str(stubs / "emrg"), "stop"],
+        [str(stubs / "nohup"), str(stubs / "emrg"), "server", "restart"],
+        [str(stubs / "timeout"), "5", str(stubs / "emrg"), "server", "stop"],
+        [str(stubs / "nice"), "-n", "5", str(stubs / "pkill"), "-f", "emrg.server"],
     ):
         with pytest.raises(AssertionError, match="red-line violation"):
             subprocess.Popen(argv)
@@ -199,17 +228,86 @@ def test_guard_allows_read_only_spawns(daemon_spawn_refusal):
         [sys.executable, "-m", "emrg", "rant", "hello"],
         ["emrg", "--version"],
         ["emrg", "update"],
+        # the same wrappers and shells carrying a read-only verb: the refusal keys
+        # on the verb, so closing the wrapper spellings must not close these
+        ["sh", "-c", "emrg server status"],
+        ["bash", "-lc", "python3 -m emrg --help"],
+        # a read-only emrg command whose *pipeline* carries the verb as data
+        ["sh", "-c", "emrg --help | grep stop"],
+        ["env", "emrg", "--version"],
+        ["timeout", "5", "emrg", "server", "status"],
         # emrg mentioned without being the program being run
         ["git", "log", "--grep", "emrg"],
+        ["nice", "-n", "5", "git", "log", "--grep", "emrg"],
         # the verb present as *data* rather than as the verb being asked for
         ["git", "commit", "-m", "stop"],
         # everything else the suite spawns
         ["git", "status"],
         ["node", "--version"],
+        ["uv", "run", "python", "-m", "pytest", "tests/", "-v"],
         [sys.executable, "-c", "print('ok')"],
     ]
     for argv in allowed:
         assert not daemon_spawn_refusal(argv), argv
+
+
+def test_guard_refuses_signalling_the_daemon_group():
+    """Positive: `killpg` is refused too — the same act, wider blast radius.
+
+    `__getattr__` delegates every attribute of the `os` substitute to the real
+    module, so before this arm `killpg` was the one signal route *out* of the
+    guard: measured, `guard.killpg(4242, 15)` reached the stand-in `os` and
+    returned normally. Nothing in the restart path signals a group today, which is
+    why this is a scope arm rather than a live hole — but a group signal is the
+    same act with a wider target, and the wrapper's own docstring would otherwise
+    be the only place saying so.
+
+    The group `4242` is never signalled: the refusal precedes the delegation, and
+    the assertion is on the refusal. This is also the arm that keeps the `os`
+    substitute from being "refuse `kill`": the passthrough test below pins what
+    must still delegate.
+    """
+    import signal
+
+    import emrg.client.daemon_manager as daemon_manager
+
+    assert type(daemon_manager.os).__name__ == "_NoSignalOs"
+    with pytest.raises(AssertionError, match="red-line violation"):
+        daemon_manager.os.killpg(4242, signal.SIGTERM)
+
+
+def test_the_guarded_popen_is_still_a_type():
+    """The suite-wide `Popen` patch must not make `isinstance` unanswerable.
+
+    `isinstance(proc, subprocess.Popen)` is the question a reader asks about a
+    child, and the revision before this one installed the refusal as a plain
+    function over the attribute — which answers that question with `TypeError:
+    isinstance() arg 2 must be a type, a tuple of types, or a union` (measured). No
+    test asks it today, so nothing was red; the failure it would produce names
+    `isinstance`, not the red line, and would send the next reader to the wrong
+    place. A subclass refuses identically and keeps the question answerable, and
+    the name is kept because that is what the attribute is called.
+
+    The child spawned here is read-only — the guard allows it, which is the other
+    half of this test: a guard that refused every spawn would fail on its own
+    setup line rather than on an assertion.
+    """
+    import subprocess
+    import sys
+
+    assert isinstance(subprocess.Popen, type)
+    assert subprocess.Popen.__name__ == "Popen"
+
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "print('guarded')"],
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    # The line that raised `TypeError` before this arm exists.
+    assert isinstance(proc, subprocess.Popen)
+    assert proc.communicate()[0].strip() == "guarded"
 
 
 def test_kill_zero_is_a_probe_on_posix_and_a_ctrl_c_on_windows(daemon_kill_is_a_probe):
