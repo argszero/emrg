@@ -101,6 +101,8 @@ vision = true
 - `base_url`, `api_key`, `max_tokens`, `temperature`, `max_tool_rounds`, `context_window`, `auto_compact_threshold`, `models`, `vision`, `stream_options`, `context_refresh_interval_ms` are assigned for the next request; a stream already in flight is never rewritten.
 - A half-written or wrongly-typed file is **rejected whole**: the previous good configuration stays in force, one warning is logged, and the file is re-read on your next save.
 
+**A `config.toml` edit never restarts the daemon.** The client used to compare this file's mtime against the running server's start time and SIGTERM→SIGKILL it when the file looked newer — which killed the running scheduler handlers (a live evolution cycle among them) and dropped every connected client, to apply an edit the daemon now applies itself. That branch is gone; a **source** change is the only thing that still restarts the daemon. One residual is worth knowing: `[update]` is read once at daemon start, so a change to that section takes effect on the next start (`emrg server restart`, or a source-driven one) rather than within the 2 s tick — the live-reload path covers `[llm]`.
+
 Verify from the daemon log (`~/.emrg/emrgd.log`): every accepted edit logs one line naming the keys that moved —
 
 ```

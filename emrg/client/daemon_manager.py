@@ -52,19 +52,6 @@ def _get_server_source_mtime() -> float:
     return max_mtime
 
 
-def _get_config_mtime() -> float:
-    """Get the mtime of ~/.emrg/config.toml — used to detect config changes.
-
-    Returns 0.0 if config doesn't exist (it's optional).
-    """
-    from emrg.config import config_path as _config_path
-    cfg = _config_path()
-    try:
-        return os.stat(cfg).st_mtime
-    except OSError:
-        return 0.0
-
-
 def is_running() -> bool:
     """Synchronous liveness probe — is the daemon accepting connections?"""
     return is_server_running_sync()
@@ -387,6 +374,17 @@ async def _await_daemon_ready(
 async def check_and_restart_if_stale() -> None:
     """Ping the server. If source has changed since server started, restart it.
 
+    **Source is the only restart reason.** A `config.toml` edit used to be one
+    too, and it was the expensive half: the only way the client could apply the
+    file was to SIGTERM→SIGKILL the daemon, which killed the running scheduler
+    handlers (including a live evolution cycle) and dropped every connected
+    client. The daemon now watches the file itself and applies a revision in
+    place (`emrg/server/config_reload.py`, 2 s tick), so no restart can add
+    anything — requirement 5 of rant 2026-09-17T16:52:57: *a config edit never
+    kills the daemon again*. A config edit that the running daemon cannot apply
+    (an older daemon, or a `[update]` key the reloader does not cover) is a
+    version problem, and a source change is what moves the version.
+
     ⚠️ 内部保持裸 ws 操作（connect_to_server → ws.send/ws.recv/ws.close），
     不用 DaemonConnection——此时连接还没建立。ping 是【发-读配对】语义：
     必须读到带 started_at/pid 的 pong 才能判断是否重启。
@@ -398,7 +396,6 @@ async def check_and_restart_if_stale() -> None:
         return
 
     source_mtime = _get_server_source_mtime()
-    config_mtime = _get_config_mtime()
 
     try:
         ws = await connect_to_server()
@@ -425,8 +422,6 @@ async def check_and_restart_if_stale() -> None:
             restart_reason = ""
             if source_mtime > server_start:
                 restart_reason = f"source changed (src={source_mtime:.0f} > server={server_start:.0f})"
-            elif config_mtime > server_start:
-                restart_reason = f"config.toml changed (cfg={config_mtime:.0f} > server={server_start:.0f})"
 
             if restart_reason:
                 logger.info(
