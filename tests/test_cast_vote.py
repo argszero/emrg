@@ -529,6 +529,35 @@ def test_the_cycle_pattern_agrees_with_the_counter(mod, counter_mod):
         assert bool(mod.cycles_in(sample)) == bool(counter_mod._CYCLE_RE.search(sample)), sample
 
 
+def test_the_two_scripts_read_the_same_id_list_not_just_the_same_presence(mod, counter_mod):
+    """The guard above was presence-only, and that is exactly what hid #1310.
+
+    Measured 2026-09-17 (PR #1310): `cast-vote.py` deduped the ids it found while
+    the counter counted occurrences, so a body repeating one id passed preflight
+    here and was voided there (`VOID (2 cycle ids) - ... (X, X)`). Every sample
+    above has at most one id, so presence agreed while the readings did not.
+
+    Asserted on the *lists*, through the counter's own named reading
+    (`distinct_cycle_ids`) rather than a regex re-typed here: the requirement is
+    that the two scripts answer "which cycles does this body name?" identically,
+    including for a body that repeats an id - the shape a review of the vote
+    tooling itself has, since it quotes the counter's output.
+    """
+    assert mod._CYCLE_RE.pattern == counter_mod._CYCLE_RE.pattern
+    samples = [
+        CYCLE,
+        f"vote from {CYCLE}",
+        "no id at all",
+        f"quoted twice: {CYCLE} ... {CYCLE}",
+        f"three times: {CYCLE}, {CYCLE}, {CYCLE}",
+        f"{CYCLE} voided the approval of {OTHER_CYCLE}",
+        f"{OTHER_CYCLE} then {CYCLE} then {OTHER_CYCLE}",
+        "cyc20260916-02014",
+    ]
+    for sample in samples:
+        assert mod.cycles_in(sample) == counter_mod.distinct_cycle_ids(sample), sample
+
+
 # ── the transient that used to abort a vote ────────────────────────────────
 
 

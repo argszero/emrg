@@ -242,6 +242,27 @@ DEFAULT_MIN_VOTES = 3
 # `cyc20260911-091230` - the cycle id the vote comments carry.
 _CYCLE_RE = re.compile(r"cyc\d{8}-\d{6}")
 
+
+def distinct_cycle_ids(body: str) -> list[str]:
+    """Every *distinct* cycle id in `body`, in order of first appearance.
+
+    The one reading of "which cycle(s) does this body name", and distinct rather
+    than per occurrence: the question a vote body answers is *which cycle wrote
+    it*, and a body repeating one id still names exactly one candidate. The
+    difference is not academic (measured 2026-09-17, PR #1310): this reader
+    counted occurrences while `cast-vote.py`'s preflight
+    (`cycles_in()`) deduped, so a body quoting a transcript that contained its
+    own id was **accepted** by the poster and **voided** by the counter -
+    `VOID (2 cycle ids) - the vote body names 2 cycle ids
+    (cyc20260917-075555, cyc20260917-075555)`, i.e. one id, twice.
+
+    Named and exported so the two scripts can be *asserted* to agree on this
+    axis, not just on the pattern (`_CYCLE_RE`) they share - the presence-only
+    check they had kept passing while the readings diverged.
+    """
+    return list(dict.fromkeys(_CYCLE_RE.findall(body)))
+
+
 # A **leading** veto wins over everything on the line: "❌ needs fix" is a request
 # for changes no matter what follows it. A leading ✅ is the mirror image, and it
 # keeps the whole line: every real approving body that also mentions ❌ mentions it
@@ -661,10 +682,12 @@ class Vote:
     cycle: str | None
     valid: bool
     why: str
-    #: Every cycle id the body named, in order of appearance. Length 1 is the normal
-    #: case and is what `cycle` is set from; anything else is *why* `cycle` is None,
-    #: and the label column has to say which of the two it is - "no cycle id" and
-    #: "three cycle ids" are different facts about the body (see the reader loop).
+    #: Every *distinct* cycle id the body named, in order of first appearance. Length 1
+    #: is the normal case and is what `cycle` is set from; anything else is *why* `cycle`
+    #: is None, and the label column has to say which of the two it is - "no cycle id"
+    #: and "three cycle ids" are different facts about the body (see the reader loop).
+    #: Distinct because the question is which cycle wrote the body: a body repeating one
+    #: id has one candidate author, so it is not ambiguous (see the reader loop).
     ids: tuple[str, ...] = ()
 
 
@@ -930,17 +953,30 @@ def check_pr(
         kind = _classify(body)
         if kind == "comment":
             continue
-        # Every id the body names, not the first one. One id is the handle a vote is
-        # counted under; several are not a *weaker* handle but an unusable one, and
-        # the difference is not academic: taking the first id in the text mis-recorded
-        # a rejection under a cycle that never wrote it (measured 2026-09-16,
-        # cyc20260917-014155 - a body that named the two approvals it was voiding
-        # alongside its own id was filed as `NO cyc20260917-005148`, a veto by a cycle
-        # whose review said ✅). Which cycle wrote a body that names several is not
+        # Every *distinct* id the body names, not the first one. One id is the handle a
+        # vote is counted under; several are not a *weaker* handle but an unusable one,
+        # and the difference is not academic: taking the first id in the text
+        # mis-recorded a rejection under a cycle that never wrote it (measured
+        # 2026-09-16, cyc20260917-014155 - a body that named the two approvals it was
+        # voiding alongside its own id was filed as `NO cyc20260917-005148`, a veto by a
+        # cycle whose review said ✅). Which cycle wrote a body that names several is not
         # derivable from the body, so the honest verdict is "not measurable" and it
-        # counts for none of them. `cast-vote.py` refuses to *post* such a body; this
-        # is the reading-side guard for a review posted with `gh pr review` directly.
-        ids = _CYCLE_RE.findall(body)
+        # counts for none of them. `cast-vote.py` refuses to *post* such a body; this is
+        # the reading-side guard for a review posted with `gh pr review` directly.
+        #
+        # Distinct, not occurrences: the ambiguity above is about *which* cycle wrote the
+        # body, and a body that repeats one id has exactly one candidate author, so there
+        # is nothing to be ambiguous about. Counting occurrences voided such a vote while
+        # the poster accepted the very same body (`cast-vote.py`'s `cycles_in()` is already
+        # distinct, and its refusal says "more than one cycle id"), so a body that quotes a
+        # transcript containing its own id - which is what a review of the vote tooling
+        # looks like - was posted by the one instrument and discarded by the other.
+        # Measured 2026-09-17 on PR #1310: the counter's own output read
+        # `VOID (2 cycle ids) - the vote body names 2 cycle ids
+        # (cyc20260917-075555, cyc20260917-075555)`, i.e. one id, twice.
+        # The reading itself lives in `distinct_cycle_ids`, next to the pattern, so
+        # `tests/test_cast_vote.py` can assert the two scripts agree on it.
+        ids = distinct_cycle_ids(body)
         cycle = ids[0] if len(ids) == 1 else None
         if at <= push_time:
             votes.append(
