@@ -150,6 +150,17 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
     the *same* act arrives as somebody else's argv. Every program in those rows is
     a stub as well, the wrapper included — so the "a regression must still be
     harmless" property holds for them too.
+
+    The last block is the veto of cycle `cyc20260918-043412`, which measured seven
+    spellings that glued shell punctuation to the program or the verb and got
+    through the token-literal reading: `(emrg`, `$(which emrg)`, `` `emrg ``, a
+    quoted `'emrg'`, `env -S "…"`, and `(stop)` as an argv element with no shell
+    involved. `$(which emrg) server stop` is the one that must never come back — it
+    is how a test asks for the installed script's path, and it reaches the **live**
+    daemon. Those rows carry a `PATH` pinned to the stubs, because the substitution
+    is resolved by the shell *if* the guard ever lets it through: with the stub
+    `which` on `PATH` printing nothing, a regression expands to an empty command
+    instead of the host's real `emrg`.
     """
     import subprocess
 
@@ -168,6 +179,7 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
         "nohup",
         "timeout",
         "nice",
+        "which",
     ):
         script = stubs / name
         script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -193,6 +205,51 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
     ):
         with pytest.raises(AssertionError, match="red-line violation"):
             subprocess.Popen(argv)
+
+    # shell punctuation glued to the program or the verb (veto cyc20260918-043412).
+    # `emrg` is a stub here *and* on `PATH`, so the shell cannot reach the host's
+    # real CLI even if the refusal this block asserts were removed.
+    pinned = {"PATH": str(stubs)}
+    for argv in (
+        [str(stubs / "sh"), "-c", "(emrg server restart)"],
+        [str(stubs / "sh"), "-c", "$(which emrg) server stop"],
+        [str(stubs / "sh"), "-c", "`emrg server stop`"],
+        [str(stubs / "sh"), "-c", "'emrg' server stop"],
+        [str(stubs / "sh"), "-c", 'env -S "emrg server stop"'],
+        [str(stubs / "sh"), "-c", "emrg server (stop)"],
+        [str(stubs / "sh"), "-c", "(pkill -f emrg.server)"],
+        # a newline separates two commands exactly as `;` does
+        [str(stubs / "sh"), "-c", "emrg --help\nemrg server stop"],
+        # no shell at all: the verb itself is glued to punctuation
+        [str(stubs / "emrg"), "server", "(stop)"],
+    ):
+        with pytest.raises(AssertionError, match="red-line violation"):
+            subprocess.Popen(argv, env=pinned)
+
+
+def test_an_emrg_named_path_costs_a_false_refusal(tmp_path, daemon_spawn_refusal):
+    """The mirror direction: an `emrg` basename in *any* position can make a verb decisive.
+
+    Measured by this PR's veto (`cyc20260918-043412`) with this repo's own path:
+    the program scan accepts any token whose basename is `emrg`/`emrgd`, so
+    `git -C <this repo> log --grep restart` is refused — a false refusal for an
+    argv that runs nothing but git.
+
+    Pinned rather than repaired, and the reason is the guard's own bias: the repair
+    is to require *command position*, and the hole that opens is an `emrg` program
+    handed over by anything not on the wrapper list (`xargs -I{} emrg {} stop`).
+    A false refusal fails at its own assertion with the red line in the message; a
+    false allowance SIGTERMs the live daemon mid-suite. So the asymmetry is kept,
+    and what this pins is its exact scope: the *verb* is what decides, so the same
+    path with a read-only verb stays allowed.
+    """
+    emrg_named = tmp_path / "emrg"
+    emrg_named.mkdir()
+
+    assert not daemon_spawn_refusal(["git", "-C", str(emrg_named), "log"])
+    assert daemon_spawn_refusal(
+        ["git", "-C", str(emrg_named), "log", "--grep", "restart"]
+    ), "the known cost narrowed: re-check the docstring in conftest before relaxing it"
 
 
 def test_guard_allows_read_only_spawns(daemon_spawn_refusal):

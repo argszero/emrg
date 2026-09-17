@@ -300,6 +300,34 @@ _SHELLS = ("sh", "bash", "dash", "zsh", "ksh")
 _SIGNALLERS = ("pkill", "killall", "kill")
 _STOP_VERBS = ("stop", "restart")
 
+#: Punctuation a shell may leave glued to a token: `(emrg`, `emrg)`, `'emrg'`,
+#: `` `emrg` ``, `$(which` — see `_normalise_token`.
+_SHELL_PUNCTUATION = "(){}[]$`'\"<>"
+
+
+def _normalise_token(token: str) -> str:
+    """The token as the *program* would receive it — glued shell punctuation stripped.
+
+    A shell line arrives here already split on whitespace by `Popen`, and shell
+    punctuation is not whitespace, so it stays glued to its neighbour:
+    `sh -c "(emrg server restart)"` tokenises to `["(emrg", "server",
+    "restart)"]` and `sh -c "$(which emrg) server stop"` to `["$(which",
+    "emrg)", "server", "stop"]`. Read literally, neither carries an `emrg`
+    basename or a bare `stop`/`restart` verb, so the first revision of this guard
+    allowed **all** of them (measured, this PR's veto, cycle `cyc20260918-043412`): seven spellings of the
+    one act the red line forbids, including the substitution form a test reaches
+    for when it wants the installed script's path — and that form reaches the
+    *live* daemon.
+
+    None of them needs a shell parser. The punctuation is a fixed set, it is
+    stripped from both ends, and what is left is what the program is handed; where
+    a spelling is still ambiguous after this, the caller keeps its bias toward
+    refusing (`_spawns_a_daemon_stop_or_restart`). Stripping is deliberately blind
+    to *purpose*: `$(which emrg)` is not evaluated here, because evaluating it
+    would mean running a command to answer a question about an argv.
+    """
+    return token.strip(_SHELL_PUNCTUATION)
+
 
 def _emrg_entry_index(tokens) -> int:
     """Where in this argv the emrg program itself would be run, or -1.
@@ -316,9 +344,25 @@ def _emrg_entry_index(tokens) -> int:
     An interpreter's `-c` string is *not* read here: that would mean parsing Python,
     and a test hiding the act inside a language string is evading the guard rather
     than reaching the daemon by an ordinary route.
+
+    Matching goes through `_normalise_token`, so a program the shell glued to its
+    own punctuation (`$(which emrg)`, `(emrg`, `'emrg'`) is the same program here.
+
+    The scan accepts **any** position whose basename is `emrg`/`emrgd`, not only
+    command position, and that is a deliberate asymmetry rather than an oversight:
+    the wider rule costs a false refusal whenever an `emrg`-named path is used as
+    data (`git -C <this repo> log --grep restart` is refused — measured by this
+    PR's veto, with this repo's own path), while narrowing it to `tokens[0]` plus
+    the wrappers would allow an `emrg` program handed over by anything not on that
+    list (`xargs -I{} emrg {} stop`). Of the two, only the second is the incident:
+    a false refusal fails a test at its own assertion, naming the red line, and a
+    false allowance SIGTERMs the live daemon mid-suite (#1337 item 2, one cycle
+    lost to read-only). The verb test that follows is what keeps the common
+    data-verb shapes allowed — `git commit -m stop`, `git log --grep emrg` — and
+    they are pinned in `tests/test_hermeticity_guard.py`.
     """
     for i, token in enumerate(tokens):
-        if Path(token).name in _EMRG_PROGRAMS:
+        if Path(_normalise_token(token)).name in _EMRG_PROGRAMS:
             return i
         if token == "-m" and tokens[i + 1 : i + 2] in (["emrg"], ["emrg.server"]):
             return i + 1
@@ -350,6 +394,32 @@ def _spawns_a_daemon_stop_or_restart(args) -> bool:
     read-only on 2026-09-17 and is unrecoverable mid-run. Where the two spellings
     of the act are distinguishable only by shell parsing this cannot do, the guard
     refuses rather than guesses.
+
+    **Every token match goes through `_normalise_token`** (this PR's veto, cycle
+    `cyc20260918-043412`), which closed seven measured spellings that the
+    token-literal reading allowed — all of them the same act, and one of them
+    (`$(which emrg) server stop`) the form a test reaches for when it wants the
+    installed script's path, i.e. a route to the *live* daemon:
+
+    * `sh -c "(emrg server restart)"` — the program glued to a grouping paren;
+    * `sh -c "$(which emrg) server stop"` — a command substitution's result;
+    * ``sh -c "`emrg server stop`"`` — the older substitution spelling;
+    * `sh -c "'emrg' server stop"` — a quoted program name;
+    * `sh -c 'env -S "emrg server stop"'` — `env -S` handing over one string;
+    * `[..., "emrg", "server", "(stop)"]` — the *verb* glued to punctuation, no
+      shell involved at all.
+
+    The rules they all sit on top of are unchanged, and the shapes that must stay
+    allowed are pinned beside these in `tests/test_hermeticity_guard.py`: the verb
+    must come *after* the program, so `git commit -m stop` and `emrg --help | grep
+    stop` remain allowed. One qualification the veto measured, kept rather than
+    papered over: the program scan accepts any position whose basename is
+    `emrg`/`emrgd`, so an `emrg`-named path used as *data* makes the verb decisive
+    — `git -C <this repo> log --grep restart` is refused. That direction is loud
+    and cheap and its repair is a narrowing whose own hole (an `emrg` program
+    handed over by a wrapper not on any list) is the incident; see
+    `_emrg_entry_index`, and `test_an_emrg_named_path_costs_a_false_refusal` for
+    the shape pinned as a known cost.
     """
     if isinstance(args, bytes):
         args = args.decode("utf-8", "replace")
@@ -363,22 +433,24 @@ def _spawns_a_daemon_stop_or_restart(args) -> bool:
     if not tokens:
         return False
 
-    if Path(tokens[0]).name in _SHELLS:
+    if Path(_normalise_token(tokens[0])).name in _SHELLS:
         # `sh -c <line>` / `bash -lc <line>`: what runs is the line, so decide on
         # what the line would run — one *simple command* at a time, because a line
         # is a pipeline of them and only one of them may be the act. Splitting on
         # the separators is what keeps `sh -c "emrg --help | grep stop"` allowed
         # (the verb is a pattern there) while `sh -c "emrg server stop && echo ok"`
-        # is refused. The split drops quotes, which is why the verb test strips
-        # them.
+        # is refused. A newline separates two commands exactly as `;` does, so it
+        # is a separator too. The split drops quotes and leaves the punctuation at
+        # the segment edges, which is why both the token match below and the verb
+        # test go through `_normalise_token`.
         return any(
             _spawns_a_daemon_stop_or_restart(segment.split())
-            for segment in re.split(r"[;&|]+", " ".join(tokens[1:]))
+            for segment in re.split(r"[;&|\n]+", " ".join(tokens[1:]))
         )
 
     for i, token in enumerate(tokens):
         if (
-            Path(token).name in _SIGNALLERS
+            Path(_normalise_token(token)).name in _SIGNALLERS
             and "emrg" in " ".join(tokens[i + 1 :]).lower()
         ):
             return True
@@ -386,7 +458,7 @@ def _spawns_a_daemon_stop_or_restart(args) -> bool:
     entry = _emrg_entry_index(tokens)
     if entry < 0:
         return False
-    return any(token.strip("\"'") in _STOP_VERBS for token in tokens[entry + 1 :])
+    return any(_normalise_token(token) in _STOP_VERBS for token in tokens[entry + 1 :])
 
 
 @pytest.fixture
