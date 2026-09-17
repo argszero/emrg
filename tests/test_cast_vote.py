@@ -491,6 +491,221 @@ def test_dry_run_posts_nothing(mod, monkeypatch, capsys, body_file):
     assert "dry run" in out and "counted" not in out
 
 
+def test_an_unreadable_body_file_exits_2_and_posts_nothing(mod, monkeypatch, capsys, tmp_path):
+    """The first `rc 2` the table did not name (issue #1309): the body cannot be read.
+
+    A mistyped or deleted `--body-file` is the most ordinary way to run this tool wrong, and
+    the exit code is the only thing a wrapper sees. It must be the documented `2` — nothing
+    was posted — and not `1`, which means a vote *was* spent.
+    """
+    missing = tmp_path / "no-such-body.md"
+    counter = FakeCounter(verdict_with())
+    gh = FakeGh()
+    rc = _run(mod, monkeypatch, counter, gh, ["1255", "--body-file", str(missing)])
+    err = capsys.readouterr().err
+    assert rc == 2, "an unreadable body posts nothing, so it is the 'nothing was posted' code"
+    assert not missing.exists()
+    assert gh.calls == [], "no review may be attempted without a body"
+    assert counter.calls == [], "and the count is not even asked"
+    assert "could not read" in err, (
+        "the refusal has to say what it could not read, or the caller cannot tell this "
+        "apart from the other rc 2 refusals"
+    )
+
+
+def test_an_unreadable_vote_count_exits_2_and_posts_nothing(mod, monkeypatch, capsys, body_file):
+    """The second `rc 2` the table did not name (issue #1309): the counter raised.
+
+    `check-vote-count.py` fails loud on an unmeasurable reading, and this tool runs *before*
+    posting, so a counter that cannot be read must stop the vote rather than spend it. The
+    distinction matters: `1` would tell a wrapper the vote went out and did not count.
+    """
+
+    class RaisingCounter:
+        def __init__(self):
+            self.calls = 0
+
+        def check_pr(self, *_args, **_kwargs):
+            self.calls += 1
+            raise RuntimeError("the counter could not reach GitHub")
+
+    counter = RaisingCounter()
+    gh = FakeGh()
+    rc = _run(
+        mod,
+        monkeypatch,
+        counter,
+        gh,
+        ["1255", "--body-file", body_file(f"{CYCLE} — LGTM")],
+    )
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert counter.calls == 1
+    assert gh.calls == [], "the vote is not spent on a count the tool could not read"
+    assert "vote count could not be read" in err
+    assert "the counter could not reach GitHub" in err, (
+        "the counter's own reason is carried through: the remedy depends on it"
+    )
+
+
+def test_the_exit_code_table_names_every_rc_2_cause_the_module_can_reach(mod):
+    """The table is a contract callers script against, so it is joined to the code.
+
+    Issue #1309: the table enumerated four causes while the module returned `2` from five
+    sites, and the two it omitted — an unreadable `--body-file`, and a vote count that could
+    not be read — were the ones a caller is most likely to hit.
+
+    The first cut of this test read the *count* of refusals out of the source and then
+    checked a hand-written tuple of five phrases against the table. That closes #1309 and
+    nothing after it: a sixth refusal, with a message family the table does not name, left
+    this test green while the table went stale again — the same defect, one release later.
+    Measured, not argued: a spoken sixth `return 2` sitting next to the five kept this test
+    passing, so the claim in the docstring ("a new refusal path cannot be added without the
+    table being updated") was false as implemented.
+
+    The join therefore runs in both directions between three copies, none of which is a
+    list the other two are trusted against:
+
+    * every `return 2` must have a `print(..., file=sys.stderr)` ahead of it in the same
+      block — a refusal that says nothing is unusable, and this asserts it mechanically;
+    * every `return 2` must declare `# cause: <slug>` on the return itself, so a refusal
+      cannot be added without stating which cause it is;
+    * every declared slug must be in `RC2_CAUSES`; every slug in `RC2_CAUSES` must be
+      reached by some `return 2` (a cause the code cannot produce is a promise the tool
+      does not keep); and every slug must be named in the table's rc 2 entry, which is
+      what a caller reads.
+
+    Why a declared slug, and not a family derived from the message: several returns are one
+    family reached from one site (no cycle id, two cycle ids, and a `--cycle` that
+    disagrees are all the `cycle-id` cause), and two of the five carry a message that is
+    *entirely* a variable, so no reading of the messages alone can name the family.
+    """
+    import ast
+    import re
+
+    # A cause slug: lower case, at least one hyphen. The hyphen is what separates a slug
+    # from the other backticked tokens the entry carries (`gh`, `--body-file`, `--cycle`),
+    # so it is not decoration — it is the parse.
+    slug_in_table = re.compile(r"`([a-z]+(?:-[a-z]+)+)`")
+
+    def rc2_entry(text: str) -> str:
+        """The `2` entry of the exit-code table — its own lines, not the whole table.
+
+        Scoped deliberately: the rest of the docstring backticks hyphenated things that are
+        not causes (`check-vote-count.py`), and reading those as slugs would fail this test
+        for a reason that has nothing to do with the exit codes.
+        """
+        lines = text.splitlines()
+        start = next(
+            (i for i, line in enumerate(lines) if re.match(r"^\s+2\s\s", line)), None
+        )
+        assert start is not None, "the exit-code table must document the rc 2 code"
+        entry = [lines[start]]
+        for line in lines[start + 1:]:
+            if not line.strip() or re.match(r"^\s+\d\s\s", line):
+                break
+            entry.append(line)
+        return "\n".join(entry)
+
+    source = SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    section = (mod.__doc__ or "").split("Exit codes")[1]
+    assert section, "the exit-code table is the contract this test measures"
+    table = rc2_entry(section)
+    causes = tuple(getattr(mod, "RC2_CAUSES", ()))
+    assert causes, "the module enumerates its rc 2 causes so the table can be joined to them"
+    assert all(slug_in_table.fullmatch(f"`{cause}`") for cause in causes), (
+        f"every cause slug must be readable by the table's own parse, so the two lists can "
+        f"be compared: {causes}"
+    )
+
+    def blocks(node: ast.AST):
+        """Every statement block under `node`, each yielded exactly once.
+
+        Driven by the fields rather than by a hand-written list of attributes: `body` is
+        also how a `Lambda`/`IfExp` spells its *expression*, and an `except` handler is
+        reachable both from `handlers` and as a child — hand-written traversal yielded
+        those blocks twice, which is how the first version of this test reported the same
+        refusal as both silent and spoken.
+        """
+        for _field, value in ast.iter_fields(node):
+            if isinstance(value, list) and value and isinstance(value[0], ast.stmt):
+                yield value
+        for child in ast.iter_child_nodes(node):
+            yield from blocks(child)
+
+    def stderr_message(stmt: ast.stmt) -> str | None:
+        """The refusal text of a `print(..., file=sys.stderr)`, else None."""
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+            return None
+        call = stmt.value
+        if getattr(call.func, "id", "") != "print":
+            return None
+        if not any(
+            kw.arg == "file" and ast.unparse(kw.value) == "sys.stderr"
+            for kw in call.keywords
+        ):
+            return None
+        literal = call.args[0] if call.args else None
+        parts = getattr(literal, "values", [literal])
+        return "".join(
+            part.value for part in parts
+            if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        )
+
+    def declared_cause(line: str) -> str | None:
+        """The `# cause: <slug>` a `return 2` carries, or None when it declares none."""
+        match = re.search(r"#\s*cause:\s*([a-z][a-z0-9-]*)", line)
+        return match.group(1) if match else None
+
+    lines = source.splitlines()
+    refusals: list[tuple[int, str, str | None]] = []
+    for block in blocks(tree):
+        for index, stmt in enumerate(block):
+            if (
+                isinstance(stmt, ast.Return)
+                and isinstance(stmt.value, ast.Constant)
+                and stmt.value.value == 2
+            ):
+                message = stderr_message(block[index - 1]) if index else None
+                refusals.append(
+                    (stmt.lineno, message or "", declared_cause(lines[stmt.lineno - 1]))
+                )
+
+    silent = [line for line, message, _cause in refusals if not message]
+    assert not silent, (
+        "a `return 2` must be preceded by the print that says why — a refusal with no message "
+        f"is unusable to the caller. Silent refusals at: {silent}"
+    )
+
+    undeclared = [line for line, _message, cause in refusals if cause is None]
+    assert not undeclared, (
+        "every `return 2` must declare `# cause: <slug>` on the return itself. Without that "
+        "declaration a new refusal path can be added while the table silently stays "
+        f"incomplete — issue #1309 again, one release later. Undeclared at: {undeclared}"
+    )
+
+    declared = {cause for _line, _message, cause in refusals}
+    assert declared <= set(causes), (
+        f"a refusal declares the cause {sorted(declared - set(causes))}, which `RC2_CAUSES` "
+        "does not enumerate — the enumeration is what the table is checked against, so an "
+        "unlisted slug would be named nowhere a caller can read"
+    )
+    assert declared == set(causes), (
+        f"`RC2_CAUSES` enumerates {sorted(set(causes) - declared)}, which no `return 2` "
+        "reaches: a cause the table offers and the code cannot produce is a promise the tool "
+        "does not keep"
+    )
+
+    listed = set(slug_in_table.findall(table))
+    assert listed == set(causes), (
+        "the rc 2 entry and `RC2_CAUSES` are two copies of one list, joined in both "
+        f"directions: the table names {sorted(listed)}, the module enumerates "
+        f"{sorted(causes)}. A caller scripting on the code reads the table as the contract "
+        "(issue #1309)"
+    )
+
+
 def test_the_body_is_sent_byte_for_byte(mod, monkeypatch, capsys, body_file):
     """The body is the caller's reading; the tool does not rewrite the vote."""
     body = f"{CYCLE} — ✅ LGTM\n\n| a | b |\n|---|---|\n| x | y |\n"
