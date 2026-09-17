@@ -50,6 +50,7 @@ from emrg.server.llm import (
     CONTEXT_TOO_LONG,
     LlmClient,
     classify_llm_error,
+    is_overlong_error,
     with_content_risk_hint,
 )
 from emrg.server.git_utils import (
@@ -3943,8 +3944,7 @@ class EmrgServer:
                 }], tools=None)
                 return msg.get("content", "")
             except RuntimeError as e:
-                err = str(e)
-                if ("context length" in err or "length limit" in err) and depth < max_depth:
+                if is_overlong_error(e) and depth < max_depth:
                     record = self._truncate_record(
                         records[0],
                         self.llm.config.context_window // 2,
@@ -3960,8 +3960,7 @@ class EmrgServer:
             }], tools=None)
             return msg.get("content", "")
         except RuntimeError as e:
-            err = str(e)
-            if ("context length" in err or "length limit" in err) and depth < max_depth:
+            if is_overlong_error(e) and depth < max_depth:
                 mid = len(records) // 2
                 if mid == 0:
                     mid = 1

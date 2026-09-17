@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +21,7 @@ from emrg.server.llm import (
     OTHER_ERROR,
     LlmClient,
     classify_llm_error,
+    is_overlong_error,
     space_out_messages,
     space_out_text,
 )
@@ -738,6 +740,79 @@ def test_classify_unrelated_error_is_other():
     """A non-400/413 failure is neither: it must not be chunked."""
     assert classify_llm_error(_llm_error(500, "internal server error")) == OTHER_ERROR
     assert classify_llm_error(RuntimeError("connection reset")) == OTHER_ERROR
+
+
+# ── is_overlong_error: one word list, asked in one place (issue #1336) ──
+#
+# The chunker's two branches used to test
+# `"context length" in err or "length limit" in err` themselves, so a spelling
+# added to the classifier never reached them: the same 413 body overflow was a
+# length problem at the compact gate and an opaque failure two frames deeper.
+# These tests pin the delegation and mechanise the rule it replaces.
+
+_OVERLONG_SPELLINGS = (
+    "context length",
+    "context window",
+    "prompt is too long",
+    "too long",
+    "length limit",
+    "length exceeded",
+)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _respelled_overlong_sites(root: Path) -> list[tuple[str, str]]:
+    """`(file, spelling)` for every `<spelling>` member-test outside llm.py.
+
+    A local instrument rather than a grep so it can be pointed at a tree this
+    test builds — see the spoofed-tree control below.
+    """
+    found: list[tuple[str, str]] = []
+    for path in sorted(root.rglob("*.py")):
+        if path.name == "llm.py":
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for spelling in _OVERLONG_SPELLINGS:
+            for quote in ('"', "'"):
+                if f"{quote}{spelling}{quote} in" in text:
+                    found.append((path.name, spelling))
+    return found
+
+
+def test_is_overlong_error_is_the_classifier_not_a_second_answer():
+    """The predicate agrees with the classifier on all three classes, including
+    the one that must never be split: a refusal is not a length problem."""
+    assert is_overlong_error(
+        _llm_error(413, "Failed to buffer the request body: length limit exceeded")
+    )
+    assert is_overlong_error(_llm_error(400, "the prompt is too long for this model"))
+    assert is_overlong_error(_llm_error(400, "bad request"))  # the bare-400 fallback
+    assert not is_overlong_error(
+        _llm_error(
+            400,
+            '{"error":{"message":"Content Exists Risk","type":"invalid_request_error"}}',
+        )
+    )
+    assert not is_overlong_error(_llm_error(500, "internal server error"))
+
+
+def test_no_module_respells_the_overlong_markers():
+    """The rule is mechanised: the marker list lives in `llm.py` and nowhere
+    else, so a spelling cannot be added to one copy and missed by the other."""
+    assert _respelled_overlong_sites(REPO_ROOT / "emrg") == []
+
+
+def test_the_respelling_scan_is_not_blind(tmp_path):
+    """Positive control: the scan finds a respelling when one exists, and still
+    exempts `llm.py` (the authority, whose own list is the thing being kept
+    single). Without this, a zero-hit reading would be indistinguishable from a
+    broken instrument."""
+    (tmp_path / "llm.py").write_text('if "context length" in err:\n    pass\n', encoding="utf-8")
+    (tmp_path / "somewhere_else.py").write_text(
+        'if "length limit" in err:\n    raise\n', encoding="utf-8"
+    )
+    assert _respelled_overlong_sites(tmp_path) == [("somewhere_else.py", "length limit")]
 
 
 # ── space_out_messages ───────────────────────────────────────────

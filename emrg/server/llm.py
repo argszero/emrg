@@ -147,6 +147,26 @@ def classify_llm_error(exc: BaseException) -> str:
     return OTHER_ERROR
 
 
+def is_overlong_error(exc: BaseException) -> bool:
+    """Whether a failure is "the request did not fit" — asked of
+    :func:`classify_llm_error`, never respelled at the call site.
+
+    Every place that decides "the request was too long, so shrink and retry"
+    used to own its own word list: the classifier, the 413 buffer overflow, and
+    the chunker's two branches, which tested
+    ``"context length" in err or "length limit" in err``. A spelling added to
+    one list did not reach the other, so the same 413 body overflow was a
+    length problem at one gate and an opaque failure two frames deeper (issue
+    #1336; the deepseek-harness session that grew to 7.06 MB with ~179 cycles
+    of no output is what the drift cost).
+
+    This is a *predicate*, not a policy: it answers only the length question,
+    so a content refusal returns False here and is never split — the priority
+    inside :func:`classify_llm_error` is what makes that true.
+    """
+    return classify_llm_error(exc) == CONTEXT_TOO_LONG
+
+
 def space_out_text(text: str) -> str:
     """Insert one space between every two characters.
 
