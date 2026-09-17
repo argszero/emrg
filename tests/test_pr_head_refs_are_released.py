@@ -25,6 +25,17 @@ Both directions are asserted, because "releases more" is also what a broken gate
 does: the ref really exists before the drop (otherwise "it is gone" is evidence of
 nothing), a drop of something absent is not an error, and a *failed fetch* leaves
 nothing dropped — there is no ref to drop and the caller must still get its error.
+
+The structural half is keyed on the **ref**, not on a function's name (issue #1330,
+2026-09-17). The property is "nothing parks `refs/<gate>/…` without releasing it",
+and `_fetch_head` is only what four of the five gates happen to call their parking
+site: `check-merge-plan-suite.py` parks `refs/emrg-plan-suite/tip` inside
+`_suite_verdict`. A name-keyed guard cannot see that shape at all — measured on the
+tree that introduced this file, adding a second, unreleased `_park_head_for_forecast`
+to `scripts/check-merge-order.py` left the guard green (11 passed) while the run
+counted one more resident ref (105 → 106). So the walker below finds *every* site
+that writes into the gate's own namespace and asks each one whether it releases;
+the walker's two directions are themselves fixture-tested.
 """
 
 from __future__ import annotations
@@ -47,6 +58,18 @@ GATES = (
     ("check_merge_sequence", "check-merge-sequence", "refs/emrg-merge-seq", False),
     ("check_merge_tree_health", "check-merge-tree-health", "refs/emrg-tree-health", False),
     ("check_merge_landing_diff", "check-merge-landing-diff", "refs/emrg-landing-diff", False),
+)
+
+# Every gate that writes a ref of its own, for the structural half — by namespace,
+# not by function name, so the fifth one (whose parking site is `_suite_verdict`)
+# is in scope too. Its cleanup landed with #1325, so the exclusion this list used to
+# carry (a live PR owning those lines) no longer applies.
+PARKING_GATES = (
+    ("check-merge-order.py", "refs/emrg-forecast"),
+    ("check-merge-sequence.py", "refs/emrg-merge-seq"),
+    ("check-merge-tree-health.py", "refs/emrg-tree-health"),
+    ("check-merge-landing-diff.py", "refs/emrg-landing-diff"),
+    ("check-merge-plan-suite.py", "refs/emrg-plan-suite"),
 )
 
 
@@ -187,30 +210,211 @@ def test_a_failed_fetch_drops_nothing_and_still_raises(
     assert [c for c in calls if c[:2] == ["git", "rev-parse"]] == []
 
 
-def test_every_gate_that_parks_a_ref_releases_it() -> None:
-    """Structural half: a future edit cannot silently drop the release again.
+def _module_strings(tree: ast.Module) -> dict[str, str]:
+    """`NAME = "literal"` at module level, so a ref that lives in a constant resolves."""
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not (isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                out[target.id] = node.value.value
+    return out
 
-    `check-merge-plan-suite.py` is deliberately **not** in this list: open PR #1325
-    owns that function's cleanup, and touching the same lines here would guarantee a
-    conflict with it. It is expected to adopt `merge_tree.drop_ref` once #1325 lands.
+
+def _static_text(node: ast.AST, constants: dict[str, str]) -> str | None:
+    """The static text of a string expression, or None when it is not static.
+
+    An f-string contributes its literal parts (`f"refs/x/pr{n}"` → `"refs/x/pr"`);
+    a name contributes its bound literal, if any. Anything else is not static — and
+    "not static" must not be read as "does not park", which is why the sites this
+    walker *cannot* resolve are reported rather than dropped (`_bound_refs` keeps
+    only what it resolved, so an unresolvable refspec yields no site, and the
+    per-gate "at least one site" assertion below is what keeps that honest).
     """
-    for _name, script, namespace, _needs_repo in GATES:
-        source = (SCRIPTS / f"{script}.py").read_text(encoding="utf-8")
-        assert f'"{namespace}/pr{{number}}"' in source or f"{namespace}/pr" in source, (
-            f"{script}: the namespace this test asserts on must be the one it uses"
-        )
-        tree = ast.parse(source)
-        fetch_heads = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.FunctionDef) and node.name == "_fetch_head"
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts = [
+            value.value
+            for value in node.values
+            if isinstance(value, ast.Constant) and isinstance(value.value, str)
         ]
-        assert len(fetch_heads) == 1, f"{script}: expected exactly one _fetch_head"
-        called = {
-            ast.unparse(node.func)
-            for node in ast.walk(fetch_heads[0])
-            if isinstance(node, ast.Call)
-        }
-        assert "merge_tree.drop_ref" in called, (
-            f"{script}: _fetch_head parks {namespace}/pr<N> and must release it"
-        )
+        return "".join(parts) or None
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
+    return None
+
+
+def _bound_refs(fn: ast.AST, constants: dict[str, str]) -> dict[str, str]:
+    """`ref = <string expression>` bindings inside one function body."""
+    out: dict[str, str] = {}
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Assign):
+            continue
+        text = _static_text(node.value, constants)
+        if text is None:
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                out[target.id] = text
+    return out
+
+
+def _git_argv(call: ast.Call) -> list[str] | None:
+    """The literal words at the head of a call's argv, if that argv starts with `git`.
+
+    Only the literal words: `["git", "fetch", "--quiet", "origin", f"+pull/…:{ref}"]`
+    yields the first four, and the refspec — the part that says *where* — is left to
+    `_names_the_namespace`, which reads the whole argument rather than the words.
+    """
+    for arg in call.args:
+        if not isinstance(arg, (ast.List, ast.Tuple)):
+            continue
+        words = [
+            elt.value
+            for elt in arg.elts
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+        ]
+        if words and words[0] == "git":
+            return words
+    return None
+
+
+def _names_the_namespace(node: ast.AST, bound: dict[str, str], constants: dict[str, str],
+                         namespace: str) -> bool:
+    """Does this argument *name* the gate's own ref — literally, or by a bound name?
+
+    Scoped to the call's arguments on purpose. These files discuss their namespace
+    in docstrings, so a function-wide (let alone module-wide) text search is not a
+    parking signal; the argv is.
+    """
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            if sub.value.startswith(namespace):
+                return True
+        if isinstance(sub, ast.Name):
+            if bound.get(sub.id, "").startswith(namespace):
+                return True
+            if constants.get(sub.id, "").startswith(namespace):
+                return True
+    return False
+
+
+def _parking_sites(source: str, namespace: str) -> list[tuple[str, int, bool]]:
+    """[(function, line, releases)] — every function that writes into `namespace`.
+
+    A *park* is a git invocation that puts a ref there: `fetch` (the forced-refspec
+    form), or `update-ref <ref>` (which `-d` makes a release, not a park). A
+    *release* is either the family's `merge_tree.drop_ref(ref, …)` or the gate's own
+    `git update-ref -d <ref>` — both are how the five gates let one go — and it has
+    to sit in the same function, since the whole point is that an early return, a
+    raise or a kill cannot skip it.
+    """
+    tree = ast.parse(source)
+    constants = _module_strings(tree)
+    sites: list[tuple[str, int, bool]] = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        bound = _bound_refs(fn, constants)
+
+        def parks(call: ast.Call) -> bool:
+            return any(
+                _names_the_namespace(arg, bound, constants, namespace) for arg in call.args
+            )
+
+        parked_at: list[int] = []
+        released = False
+        for call in ast.walk(fn):
+            if not isinstance(call, ast.Call):
+                continue
+            argv = _git_argv(call)
+            writes = argv is not None and argv[1:2] == ["fetch"]
+            writes = writes or (argv is not None and argv[1:3] == ["update-ref"]
+                                and "-d" not in argv[2:])
+            if writes and parks(call):
+                parked_at.append(call.lineno)
+            if isinstance(call.func, ast.Attribute) and \
+                    ast.unparse(call.func) == "merge_tree.drop_ref" and parks(call):
+                released = True
+            if argv is not None and argv[1:3] == ["update-ref", "-d"] and parks(call):
+                released = True
+        if parked_at:
+            sites.append((fn.name, min(parked_at), released))
+    return sorted(sites, key=lambda row: row[1])
+
+
+@pytest.mark.parametrize("script, namespace", PARKING_GATES)
+def test_a_gate_that_parks_a_ref_releases_it(script: str, namespace: str) -> None:
+    """Structural half: a future edit cannot silently drop the release again."""
+    source = (SCRIPTS / script).read_text(encoding="utf-8")
+    assert f'"{namespace}/pr{{number}}"' in source or f"{namespace}/" in source, (
+        f"{script}: the namespace this test asserts on must be the one it uses"
+    )
+
+    sites = _parking_sites(source, namespace)
+    # An instrument that finds nothing would pass every leak test ever written.
+    assert sites, f"{script}: no parking site found — the walker is blind, not the gate clean"
+
+    leaks = [f"{name}() line {line}" for name, line, released in sites if not released]
+    assert not leaks, (
+        f"{script}: parks {namespace}/… and never releases it: {leaks}"
+    )
+
+
+# ── the walker's own two directions ────────────────────────────────────────
+
+INJECTED = '''
+def _park_head_for_forecast(number):
+    ref = f"refs/emrg-forecast/pr{number}"
+    proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
+    return _rev_parse(ref)
+'''
+
+INJECTED_WITH_RELEASE = INJECTED.replace(
+    "    return _rev_parse(ref)",
+    "    sha = _rev_parse(ref)\n    merge_tree.drop_ref(ref, run=_run)\n    return sha",
+)
+
+
+def test_the_walker_sees_a_parking_site_that_is_not_named_fetch_head() -> None:
+    """The positive control: #1330's exact shape, and it must be caught."""
+    assert _parking_sites(INJECTED, "refs/emrg-forecast") == [
+        ("_park_head_for_forecast", 4, False)
+    ]
+
+
+def test_the_walker_credits_a_release_and_only_for_that_ref() -> None:
+    """The other direction: a site that does release must not be reported as a leak."""
+    assert _parking_sites(INJECTED_WITH_RELEASE, "refs/emrg-forecast") == [
+        ("_park_head_for_forecast", 4, True)
+    ]
+    # …and a release of *some other* ref is not a release of this one.
+    elsewhere = INJECTED_WITH_RELEASE.replace(
+        "drop_ref(ref, run=_run)", "drop_ref(refs_emrg_merge_seq, run=_run)"
+    )
+    assert _parking_sites(elsewhere, "refs/emrg-forecast") == [
+        ("_park_head_for_forecast", 4, False)
+    ]
+
+
+def test_the_walker_reads_a_ref_that_lives_in_a_module_constant() -> None:
+    """`check-merge-plan-suite.py` parks `TIP_REF`, a module-level constant."""
+    source = (
+        'TIP_REF = "refs/emrg-plan-suite/tip"\n'
+        "\n"
+        "\n"
+        "def _suite_verdict(tip):\n"
+        '    updated = _run(["git", "update-ref", TIP_REF, tip])\n'
+        "    try:\n"
+        "        pass\n"
+        "    finally:\n"
+        '        _run(["git", "update-ref", "-d", TIP_REF])\n'
+    )
+    assert _parking_sites(source, "refs/emrg-plan-suite") == [("_suite_verdict", 5, True)]
+    # …and the same site with the `-d` taken away: it parks and never releases.
+    leaking = source.replace('["git", "update-ref", "-d", TIP_REF]', '["git", "update-ref", TIP_REF]')
+    assert _parking_sites(leaking, "refs/emrg-plan-suite") == [("_suite_verdict", 5, False)]
