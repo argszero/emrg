@@ -183,6 +183,133 @@ def _guard_stop_log_is_not_host_state(monkeypatch, _stop_log_scratch):
     monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(_stop_log_scratch))
 
 
+# ── the daemon is EMRG's life core: no suite run may signal it ────────────────
+#
+# Issue #1337, item 2. `_guard_stop_all_hermeticity` above covers
+# `emrg._stop_all`'s five stop functions — the *in-process* route. Two other
+# routes reach a live daemon without passing through them, and neither was
+# covered by anything:
+#
+#   * the client-side restart, `emrg.client.daemon_manager.
+#     check_and_restart_if_stale()` — it SIGTERMs the pid the pong frame named
+#     whenever the source looks newer than the daemon's start time;
+#   * a child process — `python -m emrg server stop`, `emrg server restart`,
+#     `pkill -f emrg.server`.
+#
+# The shape this exists for is measured, not hypothetical: on 2026-09-17 a
+# full-suite run SIGTERMed the live daemon mid-run (`~/.emrg/emrgd-exit.log`:
+# `reason sigterm exit_code 143`). It respawned, the scheduler re-sent the cycle
+# task while the tree still held uncommitted work, and the dirty-tree guard
+# pinned that cycle to read-only — the cost of one unguarded route.
+#
+# Both halves refuse *before* anything is signalled or spawned, and that is what
+# makes the positive controls in tests/test_hermeticity_guard.py safe to write:
+# they call these paths and never cause the event they forbid.
+
+_RED_LINE = "⛔ red-line violation (host 2026-08-18T22:58, issue #1337)"
+
+
+class _NoSignalOs:
+    """`os` as `emrg/client/daemon_manager.py` sees it: identical, minus signals.
+
+    Scoped to that module's own namespace rather than patching `os.kill` itself,
+    because `daemon_manager` is the only place in the client that signals a
+    process and the only process it signals is the daemon. A global patch would
+    also intercept `Popen.kill()` on a child a test spawned deliberately — a
+    different act, and one the suite needs.
+
+    `sig == 0` is delegated on purpose: `kill(pid, 0)` is the liveness probe this
+    module uses to wait for the old daemon to die (rant 2026-08-18T12:49:09 ②)
+    and a probe signals nothing. Refusing it would replace a benign check with an
+    error; refusing the term/kill signals is the whole point.
+    """
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def kill(self, pid, sig):
+        if sig == 0:
+            return self._real.kill(pid, sig)
+        raise AssertionError(
+            f"{_RED_LINE}: emrg.client.daemon_manager tried to signal pid {pid} "
+            f"with signal {sig!r}. A test must never stop or restart the live "
+            f"daemon — it is EMRG's life core. Isolate the restart path you are "
+            f"testing instead, as tests/test_daemon_manager.py's restart tests do "
+            f"(`@patch('emrg.client.daemon_manager.os.kill')`)."
+        )
+
+
+def _spawns_a_daemon_stop_or_restart(args) -> bool:
+    """Would this `Popen` argv stop or restart the emrg daemon?
+
+    Deliberately narrow, because the suite spawns git, node, pytest and the emrg
+    CLI itself for read-only verbs: it refuses the emrg entry points (the
+    installed `emrg`/`emrgd` script, or an interpreter on `-m emrg`) carrying a
+    `stop`/`restart` verb, and a process-signalling command that names emrg.
+    Everything else passes through untouched.
+    """
+    if isinstance(args, bytes):
+        args = args.decode("utf-8", "replace")
+    if isinstance(args, str):
+        tokens = args.split()
+    else:
+        try:
+            tokens = [str(a) for a in args]
+        except TypeError:
+            return False  # not an argv at all — let Popen raise its own error
+    if not tokens:
+        return False
+    head = Path(tokens[0]).name
+    runs_emrg = head in ("emrg", "emrgd")
+    if "-m" in tokens:
+        i = tokens.index("-m")
+        if tokens[i + 1 : i + 2] == ["emrg"]:
+            runs_emrg = True
+    if runs_emrg:
+        return any(token in ("stop", "restart") for token in tokens[1:])
+    if head in ("pkill", "killall", "kill"):
+        return "emrg" in " ".join(tokens).lower()
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _guard_no_live_daemon_is_signalled(monkeypatch):
+    """⛔ No suite run may stop or restart a live daemon, by any route.
+
+    The in-process route is covered by `_guard_stop_all_hermeticity`; this covers
+    the other two — the client-side restart's `os.kill`, and a child process
+    spawned from a test (issue #1337, item 2).
+
+    Tests that really do exercise the restart path keep working: their own
+    `@patch('emrg.client.daemon_manager.os.kill')` layers over this fixture and
+    replaces the refusal with their mock, which is the visible, deliberate act
+    the red line asks for.
+    """
+    import subprocess
+
+    import emrg.client.daemon_manager as daemon_manager
+
+    monkeypatch.setattr(daemon_manager, "os", _NoSignalOs(daemon_manager.os))
+
+    real_popen = subprocess.Popen
+
+    def _guarded_popen(args, *rest, **kwargs):
+        if _spawns_a_daemon_stop_or_restart(args):
+            raise AssertionError(
+                f"{_RED_LINE}: a test tried to spawn {args!r}, which stops or "
+                f"restarts the emrg daemon. A child process can kill the live "
+                f"daemon just as a direct call can; test the CLI's behaviour by "
+                f"calling it in-process with its stop path isolated."
+            )
+        return real_popen(args, *rest, **kwargs)
+
+    _guarded_popen.__name__ = "Popen"
+    monkeypatch.setattr(subprocess, "Popen", _guarded_popen)
+
+
 @pytest.fixture(autouse=True)
 def _guard_upgrade_hermeticity(monkeypatch, tmp_path):
     """⛔ Red line (host 2026-08-21T10:35:57): tests must NEVER trigger the
