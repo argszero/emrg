@@ -370,9 +370,15 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
     # The note names the path, the tree, and the two traps every fresh worktree has -
     # no `.venv` (so `uv run pytest` there reports that no suite ran) and no
     # `node_modules` (so one unrelated GUI spawn-args test reds). Both were reported
-    # as defects before, which is why the tool says them out loud.
+    # as defects before, which is why the tool says them out loud - and it prints the
+    # remedy for each, because a warning without one costs the next reader the same
+    # discovery. Shape-matched, not path-matched: the note prints git's spelling of the
+    # main checkout, which is a forward-slash path on Windows too.
     assert "kept " in kept.stdout and kept_dir.name in kept.stdout
     assert ".venv" in kept.stdout and "node_modules" in kept.stdout
+    assert f"PYTHONPATH={kept_dir}" in kept.stdout
+    assert "-m pytest tests/ -q" in kept.stdout
+    assert "emrg/gui/node_modules" in kept.stdout
 
     # The removal line it prints is the one that works.
     _git(repo, "worktree", "remove", "--force", str(kept_dir))
@@ -418,6 +424,22 @@ def test_the_worktree_listing_is_matched_across_separators() -> None:
     # the old assertion was false there for a worktree that was really listed. Pinned as
     # a fact so the next reader cannot "simplify" the matcher back into the defect.
     assert str(kept) not in windows_listing
+
+
+def test_the_note_names_a_main_checkout_that_exists(mod) -> None:
+    """The remedy lines are commands only if the path in them is real.
+
+    `_main_worktree` reads the first `worktree` line of `git worktree list --porcelain`,
+    which is the main worktree on every invocation (measured: the same first line from
+    the main tree and from a linked one). Asserted against this repository - the tests
+    run in it - so the pinned fact is "the lookup answers with a checkout that has this
+    project in it", not a spelling.
+    """
+    found = mod._main_worktree()
+    assert found is not None, "git could not name the main worktree"
+    main = Path(found)
+    assert main.is_dir()
+    assert (main / "pyproject.toml").is_file(), f"{main} is not the main checkout"
 
 
 def test_keep_refuses_the_two_ways_it_could_mislead(

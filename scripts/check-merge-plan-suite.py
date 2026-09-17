@@ -167,12 +167,15 @@ answers for, and how to remove it. The run itself is unchanged, so a kept worktr
 answers for the same tree the default run would have deleted.
 
 That line also names the two things true of every fresh worktree, because both have
-already been reported as defects (one measured this cycle in a hand-built landing-tree
-worktree): it has **no `.venv`**, so `uv run pytest` there reports that no suite ran, and
-it has **no `node_modules`**, so the GUI Node suite fails one unrelated spawn-args test
-(`python=python3 (expected .venv/bin/python)`). Neither is a verdict on the tree - point
-`PYTHONPATH` at the worktree, use the main checkout's interpreter, and compare worktree
-runs with worktree runs.
+already been reported as defects (one measured in a hand-built landing-tree worktree,
+and both re-measured on a real landing tree the next cycle): it has **no `.venv`**, so
+`uv run pytest` there reports that no suite ran, and it has **no `node_modules`**, so the
+GUI Node suite fails one unrelated spawn-args test (`python=python3 (expected
+.venv/bin/python)`) - on that real tree, `daemon_client` was 68 passed / 1 failed without
+the links and 69 / 0 with them. Neither is a verdict on the tree, so the note prints the
+two commands that fix it (the main checkout's interpreter with `PYTHONPATH` pointed at
+the worktree; the main checkout's `node_modules` and `.venv` linked in), and says to
+compare worktree runs with worktree runs.
 """
 
 from __future__ import annotations
@@ -609,15 +612,36 @@ def _kept_note(path: Path, tree_sha: str | None = None) -> None:
     where = f"kept {path}"
     if tree_sha:
         where += f" (tree {tree_sha[:12]})"
+    main = _main_worktree() or "<main checkout>"
     print(f"\n{where} - run your own checks there, then remove it:")
     print(f"  git worktree remove --force {path}")
     print(
         "  It has no .venv and no node_modules, like any fresh worktree: `uv run pytest`\n"
         "  there reports that no suite ran, and the GUI Node suite fails one unrelated\n"
-        "  spawn-args test (python=python3, expected .venv/bin/python). Use the main\n"
-        "  checkout's interpreter with PYTHONPATH pointing at the worktree, and compare\n"
-        "  worktree runs with worktree runs."
+        "  spawn-args test (python=python3, expected .venv/bin/python). Measured on a real\n"
+        "  landing tree (2026-09-17): `daemon_client` is 68 passed / 1 failed without the\n"
+        "  links below and 69 / 0 with them. Both remedies, against this tree:"
     )
+    print(f"    python: PYTHONPATH={path} {main}/.venv/bin/python -m pytest tests/ -q")
+    print(f"    node:   ln -sfn {main}/node_modules {path}/emrg/gui/node_modules")
+    print(f"            ln -sfn {main}/.venv {path}/.venv")
+    print("  Then compare worktree runs with worktree runs, never with main-checkout runs.")
+
+
+def _main_worktree() -> str | None:
+    """The main worktree's path, so the remedies above are commands and not placeholders.
+
+    `git worktree list --porcelain` lists the main worktree on its first `worktree`
+    line and the linked ones after it. Only a hint in a printed note: if git cannot
+    answer, the note says `<main checkout>` rather than guessing a path.
+    """
+    listed = _run(["git", "worktree", "list", "--porcelain"])
+    if listed.returncode != 0:
+        return None
+    for line in listed.stdout.splitlines():
+        if line.startswith("worktree "):
+            return line[len("worktree ") :].strip()
+    return None
 
 
 def _judge_every_step(base: str, heads: list[tuple[int, str]]) -> int:
