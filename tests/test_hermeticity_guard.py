@@ -145,21 +145,26 @@ def test_guard_allows_read_only_spawns():
     import subprocess
     import sys
 
+    # Byte capture, never ``text=True``: a text-mode capture decodes in the parent,
+    # and the parent's codec need not be the child's. Measured on the windows-2025
+    # leg: `--help` prints an em dash, a non-interactive Python encodes stdout with
+    # the *locale* codec rather than the console's (cp1252 => 0x97), and a
+    # `text=True, encoding="utf-8"` capture killed pytest's own reader thread
+    # decoding it — the suite reported no failures and still exited 1. The repo
+    # already captures this CLI as bytes for this reason
+    # (tests/test_cli_output_encoding.py, which records the same 0x97).
     helped = subprocess.run(
         [sys.executable, "-m", "emrg", "--help"],
         capture_output=True,
-        text=True,
-        encoding="utf-8",
     )
     assert helped.returncode == 0, helped.stderr
     # The property, not argparse's exact prog wording: the CLI ran and printed its
     # usage. Spelling the program name would test a derivation that is not ours.
-    assert "usage:" in helped.stdout
+    # `usage:` is ASCII, so a byte comparison is codec-independent.
+    assert b"usage:" in helped.stdout
 
     benign = subprocess.run(
         [sys.executable, "-c", "print('ok')"],
         capture_output=True,
-        text=True,
-        encoding="utf-8",
     )
-    assert benign.stdout.strip() == "ok"
+    assert benign.stdout.strip() == b"ok"
