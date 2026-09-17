@@ -1055,6 +1055,10 @@ class TestTeeDualWrite:
     def test_open_stop_log_creates_logs_dir(self, monkeypatch, tmp_path):
         """~/.emrg/logs is created and the file matches the timestamp pattern
         (stop_all-YYYYMMDD-HHMMSS.log)."""
+        # This test pins the DEFAULT resolution, so it must clear the
+        # session-wide EMRG_STOP_LOG_DIR pin first (conftest::
+        # _guard_stop_log_is_not_host_state).
+        monkeypatch.delenv("EMRG_STOP_LOG_DIR", raising=False)
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
         f = _stop_all._open_stop_log()
         assert f is not None
@@ -1074,6 +1078,9 @@ class TestTeeDualWrite:
     def test_stop_all_prints_tee_path(self, monkeypatch, tmp_path, capsys):
         """stop_all() with a tee open prints the fixed-path line; stdout output
         still flows (POSIX regression: emrg stop output unchanged)."""
+        # Default-resolution test — clear the session-wide pin (conftest::
+        # _guard_stop_log_is_not_host_state), see the class docstring.
+        monkeypatch.delenv("EMRG_STOP_LOG_DIR", raising=False)
         monkeypatch.setattr(_stop_all, "is_win", lambda: False)
         monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
         monkeypatch.setattr(_stop_all, "stop_gui", lambda: None)
@@ -1086,6 +1093,57 @@ class TestTeeDualWrite:
         assert "log also written to" in out
         assert str(tmp_path / ".emrg" / "logs") in out
         assert "exit code 0 (clean)" in out
+
+
+class TestStopLogDirIsNotHostState:
+    """Issue #1337: ``~/.emrg/logs`` is *host state*, so a suite run must not
+    create a file there. The stopper resolves the directory through
+    ``EMRG_STOP_LOG_DIR`` (``_stop_log_dir()``) and conftest reinforces it with
+    an autouse pin; these tests pin the resolver, and the guard test below
+    fails if that pin ever stops being in force."""
+
+    def test_the_env_override_wins(self, monkeypatch, tmp_path):
+        pin = str(tmp_path / "pinned")
+        monkeypatch.setenv("EMRG_STOP_LOG_DIR", pin)
+        assert _stop_all._stop_log_dir() == pin
+
+    def test_the_default_is_the_host_logs_dir(self, monkeypatch, tmp_path):
+        """The shipped default is unchanged: ``~/.emrg/logs``. A pure string
+        predicate — the fake home is only ever an input to ``expanduser``."""
+        monkeypatch.delenv("EMRG_STOP_LOG_DIR", raising=False)
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(tmp_path))
+        assert _stop_all._stop_log_dir() == str(tmp_path / ".emrg" / "logs")
+
+    def test_the_suite_pins_the_stop_log_out_of_the_host_home(self):
+        """The autouse guard must be in force for every test, this one included
+        (mutation: make ``_stop_log_dir`` ignore ``EMRG_STOP_LOG_DIR`` → red)."""
+        out = _stop_all._stop_log_dir()
+        resolved = Path(out).resolve()
+        home = Path.home().resolve()
+        assert home not in resolved.parents, f"stop log dir is host state: {out}"
+        assert resolved != (home / ".emrg" / "logs").resolve(), out
+
+    def test_stop_all_writes_its_log_into_the_pinned_dir(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """End to end, with the five killers isolated as the red line requires:
+        the run leaves its log in the pinned directory and nothing at all in
+        the home it would otherwise have used."""
+        pin = tmp_path / "pinned"
+        fake_home = tmp_path / "home"
+        monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(pin))
+        monkeypatch.setattr(_stop_all, "is_win", lambda: False)
+        monkeypatch.setattr(_stop_all, "stop_gui", lambda: None)
+        monkeypatch.setattr(_stop_all, "stop_tui", lambda: None)
+        monkeypatch.setattr(_stop_all, "stop_daemon", lambda: None)
+        monkeypatch.setattr(_stop_all, "_stop_scan_pids", lambda own: [])
+        monkeypatch.setattr(_stop_all, "verify", lambda *a, **kw: [])
+        monkeypatch.setattr(_stop_all.os.path, "expanduser", lambda _: str(fake_home))
+        assert _stop_all.stop_all() == 0
+        capsys.readouterr()
+        written = sorted(p.name for p in pin.glob("stop_all-*.log"))
+        assert len(written) == 1, written
+        assert not (fake_home / ".emrg" / "logs").exists()
 
 
 class TestStopAllHermeticityGuard:
