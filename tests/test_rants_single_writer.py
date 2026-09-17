@@ -41,10 +41,14 @@ the set is pinned to exactly one name, that name must still be in the corpus, an
 exemption must still be **needed** (if the template is ever cleaned the test fails and
 says to remove the exclusion).
 
-Named limit: this is a *text* guard over the built-in task templates, and it covers
-**writes** only. The `cat ~/.emrg/rants.jsonl` read recipes (in `evolution_prompt.md`,
-which normal evolution must not edit, and in the review steps of the other templates)
-are out of scope here; the write path is the one that corrupted the file.
+Named limit: this is a *text* guard over the built-in task templates, and the
+`cat ~/.emrg/rants.jsonl` read recipes (in `evolution_prompt.md`, which normal
+evolution must not edit, and in the review steps of the other templates) are
+**legal** here: they name the file without a mutating verb, and a read is not what
+corrupted it. The read half does cover the one shape that is decidable — a template
+that forbids opening the file, *even to read it*, while handing the reader a recipe
+that opens it (measured 2026-09-17 on `paper_prompt.md`; see
+`test_no_template_forbids_opening_the_rant_file_while_handing_out_a_read_recipe`).
 
 A second, narrower limit found while widening it this cycle (cyc20260914-201054): the
 instruction scan reads **line by line**, so a sentence that names the file and its
@@ -131,7 +135,26 @@ _RANT_RULE_RESTATED = re.compile(
     re.IGNORECASE,
 )
 
-# The one template the two scans above do not read, with the reason it cannot be
+# The direct-read fingerprint: a line that hands the agent the *file*, rather than the
+# tool. Two forms exist in the corpus — the shell recipe (`cat ~/.emrg/rants.jsonl`, in
+# three templates), and the prose that names the path as where the feedback is read
+# from (`paper_prompt.md:107` until 2026-09-17, quoted in the self-test below).
+_RANT_DIRECT_READ = re.compile(
+    r"cat\s+[^\s`'\"]*rants\.jsonl"
+    r"|\bread(?:ing|s)?\b[^\n]{0,40}\bfrom\s+`[^`\n]*rants\.jsonl",
+    re.IGNORECASE,
+)
+
+# The read-denial claim, as the tool's single-access rule grew into it in
+# `paper_prompt.md` and `promote_prompt.md`: "there is nothing to write by hand — and
+# no reason to open the file at all, not even to read it". The absolute half ("not even
+# to read it") is what a template may not say while telling the phase to read the file.
+_RANT_READ_DENIAL = re.compile(
+    r"no\s+reason\s+to\s+open\s+the\s+file\s+at\s+all|not\s+even\s+to\s+read\s+it",
+    re.IGNORECASE,
+)
+
+# The one template the scans above do not read, with the reason it cannot be
 # fixed the way the others were. It is a *real* owner, unlike the pending-set entry
 # this guard started with (which named #1226, a PR that never touched the snippet):
 # `evolution_prompt.md` is the stable evolution template, and routine evolution is
@@ -294,7 +317,12 @@ def test_the_instruction_detector_separates_the_write_from_its_delegation() -> N
     for legal in (
         # A read recipe: names the file, no mutating verb.
         'cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip]"',
-        "Every cycle you MUST first read user feedback from `~/.emrg/rants.jsonl`.",
+        # The repaired read mandate (master:paper_prompt.md:107): names the file and
+        # hands the *read* to the tool, which is why the write detector must keep
+        # treating it as legal — and why the read contradiction needs its own scan.
+        "Every cycle you MUST first review user feedback, and the queue is read "
+        'through the tool — `submit_rant(action="list")` — not by opening '
+        "`~/.emrg/rants.jsonl`",
         # The repairs written this cycle: names the file and a verb, hands off.
         "- Every move goes through `submit_rant` (`action=\"update\"`), the only "
         "writer of `rants.jsonl`: the sort, the field order and the on-disk "
@@ -347,6 +375,86 @@ def test_no_template_restates_a_rule_the_tool_owns() -> None:
                 f"timestamp, fixes the field order and the sort and writes with "
                 f"ensure_ascii=False; a second copy is a copy that drifts"
             )
+
+
+def test_the_read_detector_separates_the_read_recipe_from_the_read_denial() -> None:
+    """Both halves of the read shape, on the lines the corpus really has.
+
+    The contradiction is a *pair*, so each detector is pinned to the lines it must
+    see: the denial sentence as `paper_prompt.md` and `promote_prompt.md` carry it
+    (two lines of one sentence), and the read forms — the shell recipe, and the prose
+    mandate `paper_prompt.md:107` carried until this change, quoted verbatim from
+    master so the shape the guard was written for stays measured rather than
+    remembered. The negatives are the repair and the lines that were already legal.
+    """
+    for planted in (
+        # master:emrg/server/paper_prompt.md:202-203 — one sentence, two lines
+        "nothing for this prompt to write by hand — and no reason to open the file at all,\n"
+        "not even to read it.",
+        "and no reason to open the file at all",
+        "not even to read it",
+    ):
+        assert _RANT_READ_DENIAL.search(planted), planted
+    for planted in (
+        # master:emrg/server/paper_prompt.md:107 — the prose half of the contradiction
+        "Every cycle you MUST first read user feedback from `~/.emrg/rants.jsonl`.",
+        # the shell recipes in the journal / open_source / evolution templates
+        'cat ~/.emrg/rants.jsonl 2>/dev/null || echo "[no rants.jsonl — skip rant scan]"',
+        "cat ~/.emrg/rants.jsonl",
+    ):
+        assert _RANT_DIRECT_READ.search(planted), planted
+    for legal in (
+        # The repair: the mandate names the tool, and the file only as the store.
+        "Every cycle you MUST first review user feedback, and the queue is read "
+        'through the tool — `submit_rant(action="list")` — not by opening '
+        "`~/.emrg/rants.jsonl`",
+        '- Check the queue with `submit_rant(action="list")` rather than by opening '
+        "the file",
+        "all reads/writes of `~/.emrg/rants.jsonl` MUST go through the `submit_rant` "
+        "tool's actions",
+    ):
+        assert not _RANT_DIRECT_READ.search(legal), legal
+
+
+def test_no_template_forbids_opening_the_rant_file_while_handing_out_a_read_recipe() -> None:
+    """The read half of the same rule, in the one shape that is decidable.
+
+    Measured 2026-09-17: `paper_prompt.md` sent the phase to read user feedback *from*
+    `~/.emrg/rants.jsonl` (:107) and, 95 lines later, said there is no reason to open
+    the file at all, "not even to read it" (:202-203) — while the same file twice sends
+    the reader to the tool (:209, :255). A phase cannot both open the file and be told
+    there is nothing to open it for; rant 2026-08-18T16:42:52 made `submit_rant` the
+    single access point, and its `list` action is the queue view, so the mandate was
+    the stale half and was repaired rather than the denial being deleted.
+
+    Only the *contradiction* is scanned, not reads: the `cat` recipe three templates
+    use is legal on its own — they never claim the file is not to be opened — and that
+    limit is named in this module's docstring instead of being left to be inferred.
+
+    The second half keeps the scan honest: if no template makes the denial claim any
+    more, this test asserts nothing about the corpus, and it says so rather than
+    staying green over nothing. Its limit is the write detector's limit, named rather
+    than implied: the denial is a phrase vocabulary and not a grammar, so a template
+    that forbids reading the file in some other spelling is invisible here — the shape
+    the repair chose keeps the vocabulary wide (both halves of the sentence, which is
+    how a reworded third spelling was still caught when this guard was mutation-tested).
+    """
+    claimers = []
+    for name in _scanned_templates():
+        text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
+        if not _RANT_READ_DENIAL.search(text):
+            continue
+        claimers.append(name)
+        hit = _RANT_DIRECT_READ.search(text)
+        assert hit is None, (
+            f"{name}: forbids opening `rants.jsonl` even to read it, and hands out a "
+            f"read recipe for the same file ({hit.group(0)!r} at offset {hit.start()}) "
+            f"— the read path is `submit_rant(action=\"list\")` (rant 2026-08-18T16:42:52)"
+        )
+    assert claimers, (
+        "no scanned template claims the file is not to be opened, so the scan above is "
+        "vacuous — delete it rather than leaving a green guard over nothing"
+    )
 
 
 def test_the_excluded_template_is_excluded_because_it_cannot_be_edited() -> None:

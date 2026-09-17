@@ -2236,11 +2236,19 @@ def test_a_run_longer_than_two_names_the_operand_the_shell_really_writes(
 #   * `echo x 2'>>' log` — `2'>>'` is a single quoted word (`2>>`), so the shell
 #     echoes it and opens no file. The second lexing raises on this line
 #     (`No closing quotation`), so the pairing cannot say the word was quoted;
-#   * `echo x \> log` — `\>` is an escaped `>`, an ordinary argument. Here the two
-#     readings differ in word count (4 against 5: `['echo','x','\\','>','log']`),
-#     which is the other "cannot say" answer;
-#   * `echo x 2'>' out.txt` is the same shape as the first row (`2'>'` is the word
-#     `2>`), listed because the row count is what a fix gets measured against.
+#   * `echo x 2'>' out.txt` is the same shape (`2'>'` is the word `2>`), listed
+#     because the row count is what a fix gets measured against.
+#
+# **The third row used to be here and is gone on purpose.** `echo x \> log` was
+# priced as the escaped member of this class — `\>` is an ordinary argument, and
+# the two readings differ in word count, so the pairing could not say so. Issue
+# #1307's fix answers it from a different reading (the escapes masked, the same
+# POSIX lexer), so the walk now names nothing for that line and `read-only` allows
+# it; `test_the_escaped_operator_in_target_position_is_named_and_refused` asserts
+# the new answer against the same shell ground truth. Deleting the row rather than
+# relaxing the assertion is the point of pinning a residual at all: the over-block
+# is gone because the fact it could not recover is now recovered, and that is
+# visible in the diff.
 #
 # "Cannot say" is answered by the fail-closed fallback, which believes the operator
 # — the safe direction in *operator* position (a real redirect behind a quoted word
@@ -2257,7 +2265,6 @@ UNRESOLVED_QUOTED_OPERATOR_OVER_BLOCKS = [
     # (command, the target the walk names for it, the shells this spelling reaches)
     ("echo x 2'>>' log", "log", ("/bin/sh", "/bin/bash")),
     ("echo x 2'>' out.txt", "out.txt", ("/bin/sh", "/bin/bash")),
-    ("echo x \\> log", "log", ("/bin/sh", "/bin/bash")),
 ]
 
 
@@ -2324,13 +2331,158 @@ def test_the_over_block_is_scoped_to_the_unresolvable_spelling():
         assert _check_sandbox(cmd, "read-only")[0] is False, cmd
 
 
+# Issue #1307 — the same missing fact as #1273, in the direction the corpus's own
+# "no unnamed write" assertion exists to catch.
+#
+# An operator-shaped word that reached its shape through a **backslash** and sits in
+# *target* position was read as an operator, so the walk named the following word —
+# a file that is not the one written — or, when the escaped `|` dequoted onto a
+# command separator, named nothing at all. The second case is the one that may never
+# be traded away: an unnamed write is invisible at `read-only`, and four spellings
+# were ALLOWED there although the shell created a file (measured on master
+# `cc352419`, the sweep the issue was filed with).
+#
+# The two shapes at all four prefixes, each row run by `/bin/sh` in its own fresh
+# scratch directory with the directory listed afterwards: the shell creates exactly
+# the escaped character's file, so both halves are assertable — the ground truth and
+# the walk's answer — and the third assertion is the one that matters, since a guard
+# that names the right file and then permits it would pass the first two.
+_ESCAPED_TARGET_ROWS = [
+    # (command, the file the shell really redirects into)
+    ("echo x >\\> log", ">"),
+    ("echo x 2>\\> log", ">"),
+    ("echo x 1>\\> log", ">"),
+    ("echo x x>\\> log", ">"),
+    ("echo x >\\| log", "|"),
+    ("echo x 2>\\| log", "|"),
+    ("echo x 1>\\| log", "|"),
+    ("echo x x>\\| log", "|"),
+]
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh does not exist")
+@pytest.mark.parametrize("cmd,created", _ESCAPED_TARGET_ROWS)
+def test_the_escaped_operator_in_target_position_is_named_and_refused(
+    cmd: str, created: str
+):
+    """Issue #1307: an escaped word in target position is the file, not the operator.
+
+    `\\>` is the file `>`, `\\|` is the file `|` — the shell's own rule, and the one
+    the walk had no counterpart for while `is_operator` already excluded the *quoted*
+    half of the same fact (#1268/#1280). Each row is measured in both directions
+    here: the directory listing says which file the shell opened, the walk must name
+    that file and nothing else, and `read-only` must refuse the line. The last
+    assertion is why the row exists at all — before the fix these four `>\\|` rows
+    produced an empty target list and were ALLOWED.
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-escaped-")
+    try:
+        proc = subprocess.run(["/bin/sh", "-c", cmd], cwd=d, capture_output=True)
+        files = sorted(os.listdir(d))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert proc.returncode == 0, f"/bin/sh could not run {cmd!r} - re-measure"
+    assert files == [created], f"/bin/sh created {files!r} for {cmd!r} - re-measure"
+    assert _extract_write_targets(cmd) == [created], cmd
+    allowed, reason, _ = _check_sandbox(cmd, "read-only")
+    assert allowed is False, f"{cmd!r} was ALLOWED at read-only ({reason!r})"
+
+
+# The other half of the same fact, and the half the fix *removes*: where the escaped
+# word is an ordinary argument, the shell opens nothing, and the walk used to believe
+# the operator shape anyway — five of these rows stop being refused.
+_ESCAPED_ARGUMENT_ROWS = [
+    "echo x \\> log",           # the operand of no operator at all
+    "echo x <\\> log",          # `<\>` is a *read*, and the file behind it need not exist
+    "echo x \\>\\> log",        # both characters escaped: one argument
+    "echo x \\>\\| log",
+    "echo x \\|a log",          # the escape sits inside a word, not before one
+]
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh does not exist")
+@pytest.mark.parametrize("cmd", _ESCAPED_ARGUMENT_ROWS)
+def test_a_line_whose_escaped_word_is_an_argument_names_no_target(cmd: str):
+    """Issue #1307 from the over-block side: the shell writes nothing, and now so does the walk.
+
+    Every row is run in a fresh scratch directory and the directory must stay empty
+    — that is the classification, not an inference: the refusal these lines used to
+    get was a defect, and the fix is allowed to remove it. `echo x <\\> log` is worth
+    naming: the shell exits 1 there (`<` needs the file to exist), so the row is
+    pinned as "opens no file" rather than "succeeds".
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-escaped-arg-")
+    try:
+        subprocess.run(["/bin/sh", "-c", cmd], cwd=d, capture_output=True)
+        files = sorted(os.listdir(d))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert files == [], f"/bin/sh created {files!r} for {cmd!r} - re-measure"
+    assert _extract_write_targets(cmd) == [], cmd
+    assert _check_sandbox(cmd, "read-only")[0] is True, cmd
+
+
+# …and the shape where the escaped word follows a real operator. The run-tail helper
+# is the walk's *other* reader of operator-shaped tokens in target position (#1280),
+# and it read the escaped word as part of the operator run: measured, it named the
+# same file twice (`['>', '>']`) where the shell opens it once, and it refused lines
+# such as `echo x \> '>'` that open nothing at all. Both halves are pinned here,
+# because a duplicate target is the kind of drift a "does it name the file" assertion
+# cannot see.
+_ESCAPED_RUN_TAIL_ROWS = [
+    # (command, the single file the shell redirects into)
+    ("echo x > \\>", ">"),
+    ("echo x 2> \\>", ">"),
+    ("echo x >> \\>", ">"),
+    ("echo x >| \\>", ">"),
+]
+
+
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="POSIX shell ground truth: /bin/sh does not exist")
+@pytest.mark.parametrize("cmd,created", _ESCAPED_RUN_TAIL_ROWS)
+def test_an_escaped_word_after_a_real_operator_is_named_once(cmd: str, created: str):
+    """Issue #1307 in the run-tail helper: one file, named once, and refused.
+
+    The shell half is the same measurement as the acceptance pin: the escaped word
+    *is* the redirect target, so it is created, and the walk must name it exactly
+    once — `['>', '>']` is the answer the helper gives when it does not know the word
+    was escaped, and a list with the same file twice is a claim about a command that
+    does not exist. `test_a_line_whose_escaped_word_is_an_argument_names_no_target`
+    covers the same helper from the other side (`echo x \\> '>'`, which writes
+    nothing and must therefore name nothing).
+    """
+    import shutil
+
+    scratch_root = os.path.dirname(os.path.abspath(__file__))
+    d = tempfile.mkdtemp(dir=scratch_root, prefix="emrg-escaped-tail-")
+    try:
+        proc = subprocess.run(["/bin/sh", "-c", cmd], cwd=d, capture_output=True)
+        files = sorted(os.listdir(d))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert proc.returncode == 0, f"/bin/sh could not run {cmd!r} - re-measure"
+    assert files == [created], f"/bin/sh created {files!r} for {cmd!r} - re-measure"
+    assert _extract_write_targets(cmd) == [created], cmd
+    assert _check_sandbox(cmd, "read-only")[0] is False, cmd
+
+
 # Issue #1273 rows 1-2, measured as a **class** rather than as three examples.
 #
 # The pin above is three spellings, and three spellings are a sample: the same
 # question — "is this operator-shaped word really an operator?" — is asked by every
 # line whose operator carries quoting or escaping, and there are many such lines
-# (the corpus below is 3 prefixes × 24 operators × 3 targets = 216 of them, and the
-# 24 are the *family* rather than a sample of it — see `_masked_operator_spellings`).
+# (the corpus below runs every prefix against every operator spelling and target,
+# and the operator spellings are the *family* rather than a sample — see
+# `_masked_operator_spellings`, plus issue #1307's escaped targets).
 # A sample cannot show whether the price
 # is bounded, which is the thing a reader of the residual needs to know, so the
 # generated corpus is what the classification is measured against:
@@ -2351,8 +2503,10 @@ def test_the_over_block_is_scoped_to_the_unresolvable_spelling():
 #   1. **no unnamed write** — every file the shell really creates is named by the
 #      walk. This is the direction that may never be traded away: an unnamed write
 #      is invisible at `read-only` and, for a path outside the workspace, at
-#      `workspace-write` too. Measured over this corpus: 0 rows out of 216, and the
-#      assertion is demonstrably load-bearing — the two arms below make it fire.
+#      `workspace-write` too. Measured over this corpus: no unnamed write, and the
+#      assertion is demonstrably load-bearing — the two arms below make it fire, and
+#      it is the assertion issue #1307's escaped target spellings failed before the
+#      fix (they were the rows that named nothing and were allowed at `read-only`).
 #   2. **the over-block class stays masked** — an over-blocked row must carry an
 #      operator-shaped word whose own spelling is quoted or escaped (or a partially
 #      quoted word, which is #1280's priced class). Measured today: every one of the
@@ -2395,9 +2549,22 @@ def _masked_operator_spellings() -> list[str]:
     return spellings
 
 
+_ESCAPED_TARGET_SPELLINGS = [">\\>", ">\\|"]
+"""Issue #1307: escaped words in **target** position, run through the corpus too.
+
+The pin below lists the issue's own eight rows; these two spellings put the same
+fact into the generated corpus, so the *class* assertion ("no unnamed write" over
+every prefix and target, not over the row list) is the one that fails if the escape
+fact is ever lost — and it fails on rows the issue never enumerated (three prefixes
+x three targets each). `>\\|` is the spelling that was allowed at `read-only`; the
+`>\\>` spelling named the following word instead of the file the shell opened.
+"""
+
+
 _CORPUS_OPERATORS = [
     ">", ">>", "2>", "2>>", ">|", "<>",       # plain: the walk must agree
     *_masked_operator_spellings(),            # …and every masked member of the family
+    *_ESCAPED_TARGET_SPELLINGS,               # …and the escaped targets of issue #1307
 ]
 _CORPUS_TARGETS = ["log", "out.txt", "'>'"]
 
