@@ -420,6 +420,23 @@ _UNRESOLVED_VAR_RE = re.compile(rf"(?:{_PARAM_EXPANSION})+")
 # write-target rule below from refusing `cp $SRC $DST` — see it for why.
 _UNRESOLVED_ROOT_RE = re.compile(rf"(?:{_PARAM_EXPANSION})+[\\/]")
 
+# The variable a *write target* is rooted in (`$T/f`, `${T}/f`), read as the
+# plain name so the value the command gave it can be looked up. The expansion
+# operators of `_PARAM_EXPANSION` are deliberately not matched here: the value
+# of `${T:?}` is decided by the shell's `:?` and not by any assignment, so there
+# is nothing to look up and the token keeps its refusal (issue #1316). The `/`
+# is a lookahead rather than part of the match — it is what makes the variable a
+# *root* and not a whole operand, and it has to stay in the text the resolved
+# value is spliced into (a match that ate it turned `$T/f` into `./innerf`).
+_LEADING_VAR_ROOT_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(?=/)")
+
+# What a command-local assignment may hold to be usable as a resolution: a
+# literal path fragment and nothing else. `T=$(mktemp -d)`, ``T=`uname` ``,
+# `T="$A/$B"` and `T="a b"` are values only the shell can build, and
+# `T=../outside` is a literal that would move a relative write target out of the
+# workspace — so the class is refused rather than resolved (issue #1316).
+_ASSIGNED_LITERAL_VALUE_RE = re.compile(r"^[A-Za-z0-9._/+-]+$")
+
 # ── Heredocs: a body is DATA unless a program eats it as a program ──────────
 # A heredoc body is text on some command's stdin. It is shell *code* only when
 # the consumer is a shell (`sh <<EOF` runs the body); for `cat <<EOF` it is
@@ -2350,6 +2367,245 @@ def _cwd_left_workspace(
     return None
 
 
+# The shell's own statement separators. A newline is one of them, and it is the
+# one the ordinary tokenizer cannot report: it is whitespace to `shlex`, so
+# `T=<dir>` and the write that follows it on the next line arrive as one
+# word-list instead of two statements (issue #1316).
+_STATEMENT_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
+# `shlex`'s default punctuation set (`();<>|&`) plus the newline: asking for it
+# as punctuation is what makes it a token rather than whitespace.
+_STATEMENT_PUNCTUATION = "();<>|&\n"
+# Everything `shlex` strips as whitespace except the newline, which the line
+# above hands to the parser as punctuation instead. `\r` has to stay listed, or
+# a CRLF command would glue the carriage return to the token before it.
+_STATEMENT_WHITESPACE = " \t\r\v\f"
+
+
+def _split_command_statements(cmd: str) -> list[list[str]]:
+    """``cmd``'s statements as token lists, newlines kept as separators.
+
+    The same lexer as `_split_command_tokens` in every respect but one: a newline
+    is asked for as punctuation instead of being left as whitespace, so it arrives
+    as its own token rather than disappearing. That is the whole difference
+    between reading ``T=<dir>`` and ``cat > "$T/f"`` on two lines as one
+    word-list and reading them as the two statements a shell runs — and it is why
+    issue #1316's newline row could not be answered from the ordinary token
+    stream. Only the statement boundary needs this; every other rule keeps the
+    tokenizer it already had.
+    """
+    cmd = _protect_windows_backslashes(_strip_line_continuations(cmd))
+    try:
+        lex = _shell_lexer(cmd, _STATEMENT_PUNCTUATION)
+        lex.whitespace = _STATEMENT_WHITESPACE
+        lex.whitespace_split = True
+        return _restore_windows_backslashes(list(lex))
+    except ValueError:
+        return _restore_windows_backslashes(cmd.split())
+
+
+def _heredoc_openers(line: str) -> list[tuple[str, bool]] | None:
+    """``(delimiter, strips_tabs)`` for every heredoc opened on ``line``.
+
+    ``None`` is "there is a ``<<`` here whose delimiter cannot be read", which is
+    answered by refusing rather than by guessing. The scan is token-based for the
+    reason `_heredoc_delimiters_read_as_data` records: a ``<<`` that is not its
+    own token is a mention inside an argument (`grep -n "x <<EOF" f`), and one
+    whose next token is not an identifier opens nothing (`python3 -c 'print(1 << 2)'`).
+    """
+    toks = _split_command_tokens(line)
+    out: list[tuple[str, bool]] = []
+    for idx, tok in enumerate(toks):
+        if tok not in ("<<", "<<-"):
+            continue
+        nxt = toks[idx + 1] if idx + 1 < len(toks) else ""
+        delim = nxt.lstrip("-")
+        if not (delim and delim.isidentifier()):
+            return None
+        out.append((delim, tok == "<<-"))
+    return out
+
+
+def _no_heredoc_body_is_left_as_text(cmd: str, masked: str) -> bool:
+    """Whether masking blanked *every* heredoc body in ``cmd``.
+
+    `_mask_data_heredoc_bodies` blanks the bodies it can prove are data and
+    leaves the rest, so a command can come back **half**-masked — one body blank,
+    another still text. The rule below reads the remaining lines as statements,
+    and a body left as text is exactly the input it must not read as one:
+    measured on the tree that introduced it, a `cat <<EOF` body and a
+    `myprog <<EOF` body in the same command answered ALLOW and resolved a write
+    from a line of somebody's data, while `/bin/sh` put the write at `/f`.
+
+    Asking the question directly — does any opener still sit above text that was
+    not blanked? — is cheaper than linking each body to its consumer, and every
+    answer it cannot give is "no": an unterminated opener, a delimiter it cannot
+    read, and a body whose first line the terminator search reaches too early
+    all end in the refusal this rule is called from.
+    """
+    before = cmd.split("\n")
+    after = masked.split("\n")
+    for k, line in enumerate(before):
+        openers = _heredoc_openers(line)
+        if openers is None:
+            return False
+        for name, strips_tabs in openers:
+            end = next(
+                (j for j in range(k + 1, len(before))
+                 if before[j] == name
+                 or (strips_tabs and before[j].strip("\t") == name)),
+                None,
+            )
+            if end is None:
+                return False
+            if any(after[j].strip() for j in range(k + 1, end)):
+                return False
+    return True
+
+
+def _leading_assignment_names(statement: list[str]) -> list[str]:
+    """The names a statement assigns *before its command word* (``FOO=1 cmd``).
+
+    The leading run is what a shell applies to the command it is about to run,
+    and it stops at the first word that is not an assignment: in ``echo T=x`` the
+    token ``T=x`` is an argument, not an assignment, and counting it as one would
+    make an unrelated name look assigned twice.
+    """
+    names: list[str] = []
+    for tok in statement:
+        if not _is_env_assignment(tok):
+            break
+        names.append(tok.partition("=")[0])
+    return names
+
+
+def _commandless_assignment_pairs(statement: list[str]) -> list[tuple[str, str]]:
+    """The ``NAME=value`` pairs a statement gives *the shell that runs it*.
+
+    Only a statement made of assignments and nothing else does that: with no
+    command word to attach them to, they are performed in the current shell and
+    stay visible to later statements. ``T=tmp cmd > "$T/f"`` is the other shape —
+    there the assignment is ``cmd``'s own environment, and the shell has already
+    decided the redirect target without it (measured with ``/bin/sh`` in issue
+    #1316: ``$T`` expands empty, so the file lands at ``/f``). Returning nothing
+    for it is what keeps that spelling refused.
+    """
+    pairs: list[tuple[str, str]] = []
+    for tok in statement:
+        if not _is_env_assignment(tok):
+            return []
+        name, _, value = tok.partition("=")
+        pairs.append((name, value))
+    return pairs
+
+
+def _assigned_value_is_decidable(value: str) -> bool:
+    """Whether an assigned value can be resolved without guessing.
+
+    A literal fragment only (`_ASSIGNED_LITERAL_VALUE_RE`), with no ``..``
+    segment: the relative branch of the target rule assumes "relative therefore
+    inside the workspace", so `T=../outside && cat > "$T/f"` is exactly the write
+    that assumption cannot survive, and it stays refused (issue #1316).
+    """
+    if not _ASSIGNED_LITERAL_VALUE_RE.match(value):
+        return False
+    return ".." not in value.split("/")
+
+
+def _resolve_target_from_command_assignment(cmd: str, target: str) -> str | None:
+    """``target`` with its variable roots filled in from ``cmd``'s own assignments.
+
+    Why this exists (issue #1316): the refusal this feeds reasons from the
+    *environment* — `os.path.expandvars` against the variables the tool hands its
+    child — and concludes that a target still carrying a variable root is one
+    nobody can resolve. The environment is not the only resolution scope. A shell
+    resolves `$T` at a write site from the values its own statements assigned
+    earlier, so `T=.emrg/tmp && cat > "$T/f"` writes inside the workspace while
+    the guard refused it. That shape is the ordinary way a scratch path is used,
+    which makes the refusal a false block rather than a safety margin.
+
+    The two spellings differ by one character and the shell treats them
+    differently, and only one of them may open:
+
+      - `T=.emrg/tmp && cat > "$T/f"` — a preceding statement's assignment is
+        visible at the write site, so the target resolves;
+      - `T=.emrg/tmp cat > "$T/f"` — the inline prefix is *not* visible to the
+        redirect, so the shell writes `/f` and this keeps the refusal.
+
+    Returns ``None`` whenever the answer is not provable, which is every case
+    below; every one of them fails closed, so a command this cannot place keeps
+    the refusal it has today rather than gaining an allowance:
+
+      - the target is not a whole token of a statement at the top level (a
+        redirect inside a nested `sh -c '<text>'` payload, or inside a heredoc
+        body, is written by another shell — and an unexported variable expands to
+        nothing there, so resolving it here would be the fail-open of issue
+        #1316's `sh -c` row);
+      - the command contains a heredoc whose body was *not* blanked, because then
+        its lines cannot be told from statements — and an assignment written in a
+        body is input, not a value any later `$T` sees;
+      - a pipeline / background / subshell boundary anywhere in the command: each
+        of those runs in a shell of its own, so an assignment on one side is not
+        the value the other side sees;
+      - the write site comes before the assignment, or the name is assigned more
+        than once in the command (the value at the site is then not the one a
+        single reading can name);
+      - the assigned value is not a decidable literal.
+    """
+    if not _UNRESOLVED_ROOT_RE.search(target):
+        return None
+    masked = _mask_data_heredoc_bodies(cmd)
+    if not _no_heredoc_body_is_left_as_text(cmd, masked):
+        # A body left as text: its lines cannot be told from statements, and an
+        # assignment written in one is input no later `$T` ever sees.
+        return None
+    tokens = _split_command_statements(masked)
+    if any(tok in ("|", "&", "(", ")") for tok in tokens):
+        return None
+    statements: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok in _STATEMENT_SEPARATORS:
+            statements.append([])
+        else:
+            statements[-1].append(tok)
+    # The write site is the statement carrying the target as a token of its own.
+    site = next((k for k, st in enumerate(statements) if target in st), None)
+    if site is None:
+        return None
+    # Assigned twice anywhere in the command ⇒ the value at the site is not the
+    # one assignment a single reading can name. Counted over the whole command
+    # rather than the prefix on purpose: a second assignment *after* the write
+    # site also makes this undecidable without reading execution order, and an
+    # undecidable command is refused.
+    counts: dict[str, int] = {}
+    for st in statements:
+        for name in _leading_assignment_names(st):
+            counts[name] = counts.get(name, 0) + 1
+    values: dict[str, str] = {}
+    for st in statements[:site]:
+        for name, value in _commandless_assignment_pairs(st):
+            values[name] = value
+    resolved = target
+    while True:
+        m = _LEADING_VAR_ROOT_RE.match(resolved)
+        if not m:
+            break
+        name = m.group(1)
+        value = values.get(name)
+        if (value is None or counts.get(name) != 1
+                or not _assigned_value_is_decidable(value)):
+            return None
+        resolved = value + resolved[m.end():]
+    if resolved == target or _UNRESOLVED_ROOT_RE.search(resolved):
+        # Nothing was filled in (the root is spelled in a way no assignment can
+        # be matched to — an expansion operator, or a variable that is not the
+        # leading word), or the fill-in stopped at a root it cannot reach (a
+        # second variable later in the same path, `"$A/$B/c"`). Either way the
+        # target arrives as placed as it was, so it keeps the refusal: half a
+        # resolved path is not a path this guard can prove anything about.
+        return None
+    return resolved
+
+
 def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[bool, str | None, str]:
     """Static sandbox check for a bash command (rant 2026-08-20T15:46:50).
 
@@ -2417,6 +2673,18 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
         if t == "/dev/null":
             continue
         expanded = os.path.expanduser(os.path.expandvars(t))
+        if not _is_absolute_path(expanded) and _UNRESOLVED_ROOT_RE.search(expanded):
+            # The environment is not the only resolution scope (issue #1316): a
+            # variable the *command itself* assigned in an earlier statement is
+            # one the shell resolves at the write site, so the refusal below asks
+            # the command before it answers "nobody can resolve this". A resolved
+            # value then travels the ordinary path — absolute values reach the
+            # `_is_within` / protected-file checks, relative ones still face the
+            # `moved_out` check, and a spelling the command cannot place keeps the
+            # refusal it has today.
+            from_command = _resolve_target_from_command_assignment(cmd, t)
+            if from_command is not None:
+                expanded = os.path.expanduser(os.path.expandvars(from_command))
         if not _is_absolute_path(expanded):
             if _UNRESOLVED_ROOT_RE.search(expanded):
                 # `$HOME/…` and `$TMPDIR/…` were resolved above against the
@@ -2436,7 +2704,8 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
                 # own.
                 return False, (
                     f"workspace-write sandbox: blocked write to {t!r}, whose root is "
-                    "a shell variable the guard cannot resolve (issue #1244)"
+                    "a shell variable neither the environment nor the command's own "
+                    "assignments can resolve (issue #1244)"
                 ), "partial"
             # Relative target: assumed in-workspace (cwd = the workspace root) —
             # an assumption the command itself can invalidate by moving the
