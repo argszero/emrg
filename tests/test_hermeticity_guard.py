@@ -297,6 +297,17 @@ def test_the_guarded_popen_is_still_a_type():
 
     assert isinstance(subprocess.Popen, type)
     assert subprocess.Popen.__name__ == "Popen"
+    # Identity, the same way `test_guard_refuses_signalling_the_daemon` asserts
+    # `type(daemon_manager.os).__name__ == "_NoSignalOs"`: the installed object must
+    # be the guard's own subclass, not the real class left in place. A bare `type`
+    # check would pass on an unpatched `subprocess.Popen`; under the previous
+    # function patch this line raises `AttributeError` (a function has no `__mro__`)
+    # — i.e. the arm discriminates in the direction the property is about.
+    installed = subprocess.Popen
+    assert installed is not installed.__mro__[1], (
+        "the installed subprocess.Popen is the real class, not the guard's subclass"
+    )
+    assert installed.__mro__[1].__name__ == "Popen"
 
     proc = subprocess.Popen(
         [sys.executable, "-c", "print('guarded')"],
