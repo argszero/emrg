@@ -271,7 +271,7 @@ a log, a rendered page, a label. This section is the method that discharges such
 claim; Phases A–D each name the step where it applies. It lives in this prompt, and
 not only in a session-local audit, because a rule that governs every actor but can be
 opened by none of them dies with the instance that wrote it (failure mode: *a rule
-stated only in a carrier no other actor can see*).
+stated only in a carrier no other actor can see*) (PR #1333; rant 2026-09-17T16:49:58).
 
 **The six actions — every decision, comment and record follows them.**
 

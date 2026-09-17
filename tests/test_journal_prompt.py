@@ -207,7 +207,7 @@ def test_citation_verification_row_in_both_review_templates():
     assert text.count("total references <T> (≥100 required), uncited entries <u>") == 2
 
 
-# --- Verification discipline (rant 2026-09-17T16:49:58) ---------------------
+# --- Verification discipline (PR #1333; rant 2026-09-17T16:49:58) -------------
 #
 # The host's complaint: the editor's prompt was a skeleton (phase choice, 13-bar
 # review quality, state machine, recording) with **no method** — not one line on
