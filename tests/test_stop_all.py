@@ -36,6 +36,17 @@ from emrg._stop_all import (
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# ⚠️ A test may execute a real `os.kill(pid, 0)` **only on POSIX**. On Windows
+# `signal.CTRL_C_EVENT` is 0, so that call is not a probe but a delivered Ctrl+C to
+# the console process group — on a runner, the runner's own group, pytest
+# included. `platform=` picks the branch under test; it cannot change what
+# `os.kill` does on the host (measured on PR #1350's first CI round, see
+# `TestPidAliveIsPlatformCorrect`).
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a real os.kill(pid, 0) is CTRL_C_EVENT on Windows — it would Ctrl+C the runner",
+)
+
 
 class TestPureStdlib:
     def test_no_nonstdlib_imports(self):
@@ -179,6 +190,47 @@ class _FakeKernel32:
         return 1
 
 
+def _tests_that_reach_a_real_probe(src: str) -> set:
+    """Names of ``test_*`` functions that call ``pid_alive`` with no ``kill=``.
+
+    With `kill` left at its default the call reaches the host's real `os.kill`,
+    which on Windows is the Ctrl+C this whole class exists to prevent — so every
+    such test must be POSIX-only. Mechanised rather than remembered (a rule that
+    can be mechanised is mechanised, Agent.md): the alternative is what PR #1350's
+    first CI round measured — a real probe PASSED on windows-2025 and the next
+    test died inside `subprocess.py`, because a comment saying "don't do this on
+    Windows" is not a guard.
+
+    Paired with the control below, so an empty result is distinguishable from a
+    blind scan.
+    """
+    tree = ast.parse(textwrap.dedent(src))
+    found: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            fn = inner.func
+            called = (fn.attr if isinstance(fn, ast.Attribute)
+                      else fn.id if isinstance(fn, ast.Name) else None)
+            if called == "pid_alive":
+                if not any(kw.arg == "kill" for kw in inner.keywords):
+                    found.add(node.name)
+    return found
+
+
+def _posix_only(fn) -> bool:
+    """Is this test function skipped on Windows by `_POSIX_ONLY`?"""
+    return any(
+        mark.name == "skipif" and "CTRL_C_EVENT" in (mark.kwargs.get("reason") or "")
+        for mark in getattr(fn, "pytestmark", [])
+    )
+
+
 class TestPidAliveIsPlatformCorrect:
     """`pid_alive` — liveness, one answer per platform (issue #1349).
 
@@ -192,11 +244,24 @@ class TestPidAliveIsPlatformCorrect:
     Both branches are pinned here on any runner: the platform is a parameter and
     the Windows mechanism is injected, so the *unsafe* branch (`win32`) is the one
     this file can actually exercise.
+
+    ⚠️ **What `platform=` does not do.** It chooses the branch under test; it does
+    not change what `os.kill` does on the machine running the test. So a test that
+    pins `platform="linux"` *and* leaves `kill` at its default still executes a
+    real `os.kill(pid, 0)` — harmless on POSIX, and on Windows exactly the Ctrl+C
+    this class exists to prevent. Measured on this class's first CI round (PR
+    #1350): `test_a_live_pid_on_posix` **PASSED** on the windows-2025 runner, and
+    the next test died with `KeyboardInterrupt` inside `subprocess.py:1606` — the
+    console event landing a moment after the call that sent it, i.e. the
+    log-ordering signature of PR #1348. Hence `_POSIX_ONLY` below: real-call
+    coverage belongs to POSIX runners, and every other platform injects `kill`.
     """
 
+    @_POSIX_ONLY
     def test_a_live_pid_on_posix(self):
         assert _stop_all.pid_alive(os.getpid(), platform="linux") is True
 
+    @_POSIX_ONLY
     def test_a_dead_pid_on_posix(self):
         """Both states of the real call — the failure side alone proves nothing."""
         proc = subprocess.Popen([sys.executable, "-c", ""])
@@ -293,6 +358,38 @@ class TestPidAliveIsPlatformCorrect:
         assert _bare_kill_zero_calls("import os\nos.kill(pid, 0)\n") == [2]
         assert _bare_kill_zero_calls("# os.kill(pid, 0) is not a Windows probe\n") == []
         assert _bare_kill_zero_calls("import os\nos.kill(pid, signal.SIGTERM)\n") == []
+
+    def test_every_test_that_reaches_a_real_probe_is_posix_only(self):
+        """The rule PR #1350's first CI round paid for, mechanised.
+
+        `platform=` chooses the branch under test; it does not change what
+        `os.kill` does on the host. So a test that leaves `kill` at its default
+        reaches a real `os.kill(pid, 0)` — harmless on POSIX, and on Windows a
+        Ctrl+C to the runner's own console group. On that round
+        `test_a_live_pid_on_posix` PASSED on windows-2025 and the *next* test died
+        with `KeyboardInterrupt` inside `subprocess.py:1606`. Every such test must
+        therefore carry `_POSIX_ONLY`.
+        """
+        src = Path(__file__).read_text(encoding="utf-8")
+        real = _tests_that_reach_a_real_probe(src)
+        assert real == {"test_a_live_pid_on_posix", "test_a_dead_pid_on_posix"}
+        for name in sorted(real):
+            fn = getattr(TestPidAliveIsPlatformCorrect, name)
+            assert _posix_only(fn), f"{name} reaches a real os.kill — it must be _POSIX_ONLY"
+
+    def test_the_real_probe_scan_tells_injected_from_default(self):
+        """Its control: the scan must key on `kill=` being absent, not on a name.
+
+        Without this, a scan that returns nothing (or everything) would satisfy
+        the assertion above as easily as a correct one.
+        """
+        default = "def test_a():\n    pid_alive(1, platform='linux')\n"
+        injected = ("def test_b():\n"
+                    "    pid_alive(1, kill=lambda pid, sig: None)\n"
+                    "def test_c():\n"
+                    "    os.kill(1, 0)\n")
+        assert _tests_that_reach_a_real_probe(default) == {"test_a"}
+        assert _tests_that_reach_a_real_probe(injected) == set()
 
 
 class TestDaemonScanPids:
