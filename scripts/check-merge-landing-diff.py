@@ -557,8 +557,8 @@ def check_pr(number: int, base: str) -> tuple[str, str]:
     behind = _behind_by(base, head)
 
     lines = [
-        f"  #{number} landing tree {tree[:12]} - merging it changes {len(landed)} "
-        f"path(s) on the base:"
+        f"  #{number} landing tree {tree[:12]} ({tree}) - merging it changes "
+        f"{len(landed)} path(s) on the base:"
     ]
     lines += [f"    {status}\t{path}" for status, path in landed]
     if not landed:

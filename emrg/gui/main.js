@@ -991,7 +991,11 @@ vision = false
         });
       }
       writeConfig(toml);
-      // 保存后 daemon mtime 检测自动重启（G11）
+      // 保存后不需要重启：运行中的 daemon 自己监视该文件，并在原地应用新版本
+      // （emrg/server/config_reload.py，2s 轮询读字节+sha256；变更键会写进
+      //  ~/.emrg/emrgd.log 的 "config.toml reloaded: changed=…" 一行）。
+      // 旧机制已删除：客户端曾比对 config mtime 并 SIGTERM/SIGKILL 整个 daemon
+      // ——一次配置编辑不该杀掉正在跑的调度器（含演化周期）与所有已连客户端。
       if (wasRunning) {
         // G119：不主动重连（等 ws close 自然触发）
       } else {

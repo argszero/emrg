@@ -12,12 +12,16 @@ in test_installer_stop.py + the real installer runs on Windows hosts.
 from __future__ import annotations
 
 import ast
+import inspect
 import os
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
 
+from emrg import __main__ as cli
 from emrg import _stop_all
 from emrg._stop_all import (
     _caller_context,
@@ -31,6 +35,17 @@ from emrg._stop_all import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# ⚠️ A test may execute a real `os.kill(pid, 0)` **only on POSIX**. On Windows
+# `signal.CTRL_C_EVENT` is 0, so that call is not a probe but a delivered Ctrl+C to
+# the console process group — on a runner, the runner's own group, pytest
+# included. `platform=` picks the branch under test; it cannot change what
+# `os.kill` does on the host (measured on PR #1350's first CI round, see
+# `TestPidAliveIsPlatformCorrect`).
+_POSIX_ONLY = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="a real os.kill(pid, 0) is CTRL_C_EVENT on Windows — it would Ctrl+C the runner",
+)
 
 
 class TestPureStdlib:
@@ -124,6 +139,257 @@ class TestPortIsOpen:
 
         monkeypatch.setattr(_stop_all.socket, "create_connection", _boom)
         assert _port_is_open(56031) is False
+
+
+def _bare_kill_zero_calls(src: str) -> list:
+    """Line numbers of real ``os.kill(pid, 0)`` **calls** in ``src``.
+
+    Parsed, not grepped: a comment that names the unsafe call (which the fix
+    adds, to say why it is unsafe) must not read as the unsafe call itself —
+    measured on the first draft of this file, where the fix's own comment turned
+    a grep-style assertion red.
+
+    Paired with the controls below, so a scan that matches nothing is
+    distinguishable from one that cannot match.
+    """
+    tree = ast.parse(textwrap.dedent(src))
+    found: list = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (isinstance(fn, ast.Attribute) and fn.attr == "kill"
+                and isinstance(fn.value, ast.Name) and fn.value.id == "os"):
+            continue
+        if (len(node.args) == 2 and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == 0):
+            found.append(node.lineno)
+    return found
+
+
+class _FakeKernel32:
+    """The two kernel32 calls `_win_pid_alive` makes, recorded (issue #1349)."""
+
+    def __init__(self, handle: int = 0x1234, wait: int = 0x00000102) -> None:
+        self._handle = handle
+        self._wait = wait
+        self.opened: list = []
+        self.waited: list = []
+        self.closed: list = []
+
+    def OpenProcess(self, access, inherit, pid):  # noqa: N802 — the real name
+        self.opened.append((access, inherit, pid))
+        return self._handle
+
+    def WaitForSingleObject(self, handle, ms):  # noqa: N802 — the real name
+        self.waited.append((handle, ms))
+        return self._wait
+
+    def CloseHandle(self, handle):  # noqa: N802 — the real name
+        self.closed.append(handle)
+        return 1
+
+
+def _tests_that_reach_a_real_probe(src: str) -> set:
+    """Names of ``test_*`` functions that call ``pid_alive`` with no ``kill=``.
+
+    With `kill` left at its default the call reaches the host's real `os.kill`,
+    which on Windows is the Ctrl+C this whole class exists to prevent — so every
+    such test must be POSIX-only. Mechanised rather than remembered (a rule that
+    can be mechanised is mechanised, Agent.md): the alternative is what PR #1350's
+    first CI round measured — a real probe PASSED on windows-2025 and the next
+    test died inside `subprocess.py`, because a comment saying "don't do this on
+    Windows" is not a guard.
+
+    Paired with the control below, so an empty result is distinguishable from a
+    blind scan.
+    """
+    tree = ast.parse(textwrap.dedent(src))
+    found: set = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not node.name.startswith("test_"):
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Call):
+                continue
+            fn = inner.func
+            called = (fn.attr if isinstance(fn, ast.Attribute)
+                      else fn.id if isinstance(fn, ast.Name) else None)
+            if called == "pid_alive":
+                if not any(kw.arg == "kill" for kw in inner.keywords):
+                    found.add(node.name)
+    return found
+
+
+def _posix_only(fn) -> bool:
+    """Is this test function skipped on Windows by `_POSIX_ONLY`?"""
+    return any(
+        mark.name == "skipif" and "CTRL_C_EVENT" in (mark.kwargs.get("reason") or "")
+        for mark in getattr(fn, "pytestmark", [])
+    )
+
+
+class TestPidAliveIsPlatformCorrect:
+    """`pid_alive` — liveness, one answer per platform (issue #1349).
+
+    The defect: `os.kill(pid, 0)` answers this question only on POSIX. On Windows
+    `signal.CTRL_C_EVENT` is **0**, and CPython's `os_kill_impl` routes that value
+    to `GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)` *before* the
+    `TerminateProcess` fallback — so there it is **a Ctrl+C to the pid's console
+    process group**, every process on that console included. `emrg stop`'s wait
+    loop ran on the host's own console.
+
+    Both branches are pinned here on any runner: the platform is a parameter and
+    the Windows mechanism is injected, so the *unsafe* branch (`win32`) is the one
+    this file can actually exercise.
+
+    ⚠️ **What `platform=` does not do.** It chooses the branch under test; it does
+    not change what `os.kill` does on the machine running the test. So a test that
+    pins `platform="linux"` *and* leaves `kill` at its default still executes a
+    real `os.kill(pid, 0)` — harmless on POSIX, and on Windows exactly the Ctrl+C
+    this class exists to prevent. Measured on this class's first CI round (PR
+    #1350): `test_a_live_pid_on_posix` **PASSED** on the windows-2025 runner, and
+    the next test died with `KeyboardInterrupt` inside `subprocess.py:1606` — the
+    console event landing a moment after the call that sent it, i.e. the
+    log-ordering signature of PR #1348. Hence `_POSIX_ONLY` below: real-call
+    coverage belongs to POSIX runners, and every other platform injects `kill`.
+    """
+
+    @_POSIX_ONLY
+    def test_a_live_pid_on_posix(self):
+        assert _stop_all.pid_alive(os.getpid(), platform="linux") is True
+
+    @_POSIX_ONLY
+    def test_a_dead_pid_on_posix(self):
+        """Both states of the real call — the failure side alone proves nothing."""
+        proc = subprocess.Popen([sys.executable, "-c", ""])
+        proc.wait()
+        assert _stop_all.pid_alive(proc.pid, platform="darwin") is False
+
+    def test_posix_asks_with_signal_zero(self):
+        calls: list = []
+        assert _stop_all.pid_alive(
+            1234, platform="linux", kill=lambda pid, sig: calls.append((pid, sig)),
+        ) is True
+        assert calls == [(1234, 0)]
+
+    def test_posix_reads_oserror_as_a_dead_pid(self):
+        def _gone(pid, sig):
+            raise ProcessLookupError(3, "No such process")
+
+        assert _stop_all.pid_alive(1234, platform="linux", kill=_gone) is False
+
+    @pytest.mark.parametrize("alive", [True, False])
+    def test_windows_never_enters_os_kill(self, alive: bool):
+        """The negative control: on win32 the probe must not delegate at all.
+
+        `kill` fails the test if it is reached — deliberately, because reaching
+        it is the bug: signal 0 is `CTRL_C_EVENT` there, i.e. a delivered signal.
+        """
+        def _would_signal(pid, sig):
+            raise AssertionError(
+                f"os.kill({pid}, {sig}) on Windows is CTRL_C_EVENT — a Ctrl+C to "
+                "that console process group",
+            )
+
+        probed: list = []
+
+        def _win_probe(pid: int) -> bool:
+            probed.append(pid)
+            return alive
+
+        assert _stop_all.pid_alive(
+            4321, platform="win32", kill=_would_signal, win_probe=_win_probe,
+        ) is alive
+        assert probed == [4321]
+
+    def test_win32_defaults_to_the_windows_probe(self, monkeypatch):
+        """Nothing injected, platform win32 → `_win_pid_alive`, not `os.kill`.
+
+        This is the wiring the fix depends on: if the default ever fell through to
+        the POSIX branch, the injected-probe tests above would still pass while
+        the product kept sending Ctrl+C.
+        """
+        calls: list = []
+        monkeypatch.setattr(
+            _stop_all, "_win_pid_alive", lambda pid: calls.append(pid) or True,
+        )
+        assert _stop_all.pid_alive(
+            4321, platform="win32", kill=lambda pid, sig: pytest.fail("os.kill reached"),
+        ) is True
+        assert calls == [4321]
+
+    def test_windows_reads_a_timeout_as_alive(self):
+        fake = _FakeKernel32(wait=_stop_all._WAIT_TIMEOUT)
+        assert _stop_all._win_pid_alive(77, kernel32=fake) is True
+        assert fake.opened == [(_stop_all._SYNCHRONIZE, 0, 77)]
+        assert fake.waited == [(0x1234, 0)]
+        assert fake.closed == [0x1234]
+
+    def test_windows_reads_a_signalled_object_as_exited(self):
+        fake = _FakeKernel32(wait=_stop_all._WAIT_OBJECT_0)
+        assert _stop_all._win_pid_alive(77, kernel32=fake) is False
+        assert fake.closed == [0x1234], "the handle must be closed on both answers"
+
+    def test_windows_never_waits_on_a_handle_it_could_not_open(self):
+        """No such pid (or ERROR_ACCESS_DENIED) — and no handle to leak."""
+        fake = _FakeKernel32(handle=0)
+        assert _stop_all._win_pid_alive(77, kernel32=fake) is False
+        assert fake.waited == [] and fake.closed == []
+
+    def test_a_nonpositive_pid_is_dead_without_asking_windows(self):
+        fake = _FakeKernel32()
+        assert _stop_all._win_pid_alive(0, kernel32=fake) is False
+        assert fake.opened == []
+
+    def test_the_cli_stop_path_uses_the_shared_probe(self):
+        """Wiring, read from source — never by calling it: `_stop_daemon` SIGTERMs
+        the live daemon (MANIFESTO 第四条附则二). A probe nothing calls is a
+        silent no-op, and the bare call is the regression this pins against."""
+        src = inspect.getsource(cli._stop_daemon)
+        assert "pid_alive(pid)" in src
+        assert _bare_kill_zero_calls(src) == []
+
+    def test_the_signal_scan_sees_a_call_and_ignores_a_comment(self):
+        """The scan's own both-ways control: it must find the call in the source
+        that has one, and must not fire on the words in a comment."""
+        assert _bare_kill_zero_calls("import os\nos.kill(pid, 0)\n") == [2]
+        assert _bare_kill_zero_calls("# os.kill(pid, 0) is not a Windows probe\n") == []
+        assert _bare_kill_zero_calls("import os\nos.kill(pid, signal.SIGTERM)\n") == []
+
+    def test_every_test_that_reaches_a_real_probe_is_posix_only(self):
+        """The rule PR #1350's first CI round paid for, mechanised.
+
+        `platform=` chooses the branch under test; it does not change what
+        `os.kill` does on the host. So a test that leaves `kill` at its default
+        reaches a real `os.kill(pid, 0)` — harmless on POSIX, and on Windows a
+        Ctrl+C to the runner's own console group. On that round
+        `test_a_live_pid_on_posix` PASSED on windows-2025 and the *next* test died
+        with `KeyboardInterrupt` inside `subprocess.py:1606`. Every such test must
+        therefore carry `_POSIX_ONLY`.
+        """
+        src = Path(__file__).read_text(encoding="utf-8")
+        real = _tests_that_reach_a_real_probe(src)
+        assert real == {"test_a_live_pid_on_posix", "test_a_dead_pid_on_posix"}
+        for name in sorted(real):
+            fn = getattr(TestPidAliveIsPlatformCorrect, name)
+            assert _posix_only(fn), f"{name} reaches a real os.kill — it must be _POSIX_ONLY"
+
+    def test_the_real_probe_scan_tells_injected_from_default(self):
+        """Its control: the scan must key on `kill=` being absent, not on a name.
+
+        Without this, a scan that returns nothing (or everything) would satisfy
+        the assertion above as easily as a correct one.
+        """
+        default = "def test_a():\n    pid_alive(1, platform='linux')\n"
+        injected = ("def test_b():\n"
+                    "    pid_alive(1, kill=lambda pid, sig: None)\n"
+                    "def test_c():\n"
+                    "    os.kill(1, 0)\n")
+        assert _tests_that_reach_a_real_probe(default) == {"test_a"}
+        assert _tests_that_reach_a_real_probe(injected) == set()
 
 
 class TestDaemonScanPids:

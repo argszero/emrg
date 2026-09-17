@@ -52,19 +52,6 @@ def _get_server_source_mtime() -> float:
     return max_mtime
 
 
-def _get_config_mtime() -> float:
-    """Get the mtime of ~/.emrg/config.toml — used to detect config changes.
-
-    Returns 0.0 if config doesn't exist (it's optional).
-    """
-    from emrg.config import config_path as _config_path
-    cfg = _config_path()
-    try:
-        return os.stat(cfg).st_mtime
-    except OSError:
-        return 0.0
-
-
 def is_running() -> bool:
     """Synchronous liveness probe — is the daemon accepting connections?"""
     return is_server_running_sync()
@@ -384,8 +371,54 @@ async def _await_daemon_ready(
     )
 
 
+def _old_daemon_alive(pid: int, *, platform: str = "", kill=None,
+                      win_probe=None) -> bool:
+    """Is the daemon we just signalled gone? — asked once, not respelled.
+
+    The platform decision belongs to :func:`emrg._stop_all.pid_alive`, which is
+    what `emrg server stop` already asks; this used to be a second copy of it
+    here (issue #1349). A bare ``os.kill(pid, 0)`` is **not** a liveness probe on
+    Windows: ``signal.CTRL_C_EVENT`` is 0, so CPython routes it to
+    ``GenerateConsoleCtrlEvent`` and the call becomes a Ctrl+C delivered to that
+    pid's console process group — every process sharing it, this CLI's shell
+    included. Windows SIGTERM is an immediate hard kill, so a *port* probe is
+    what answers there, and :func:`is_running` is this caller's Windows probe.
+
+    ``platform`` / ``kill`` / ``win_probe`` are forwarded to `pid_alive` so both
+    answers can be pinned on every runner: the Windows branch is the unsafe one,
+    and a probe whose Windows behaviour is only observable on Windows is a defect
+    discovered on Windows.
+
+    One reading changes, and it is worth naming rather than discovering: the copy
+    here read ``EPERM`` as *alive* (the process exists, we may not signal it) and
+    `pid_alive` reads any ``OSError`` as *gone*. The pid this is asked about is
+    the daemon this client just SIGTERMed — its own child, same user — so an
+    ``EPERM`` cannot arise for it, and one answer for the class is the point of
+    asking here instead of spelling the question twice.
+    """
+    from emrg._stop_all import pid_alive
+
+    return pid_alive(
+        pid,
+        platform=platform,
+        kill=kill,
+        win_probe=is_running if win_probe is None else win_probe,
+    )
+
+
 async def check_and_restart_if_stale() -> None:
     """Ping the server. If source has changed since server started, restart it.
+
+    **Source is the only restart reason.** A `config.toml` edit used to be one
+    too, and it was the expensive half: the only way the client could apply the
+    file was to SIGTERM→SIGKILL the daemon, which killed the running scheduler
+    handlers (including a live evolution cycle) and dropped every connected
+    client. The daemon now watches the file itself and applies a revision in
+    place (`emrg/server/config_reload.py`, 2 s tick), so no restart can add
+    anything — requirement 5 of rant 2026-09-17T16:52:57: *a config edit never
+    kills the daemon again*. A config edit that the running daemon cannot apply
+    (an older daemon, or a `[update]` key the reloader does not cover) is a
+    version problem, and a source change is what moves the version.
 
     ⚠️ 内部保持裸 ws 操作（connect_to_server → ws.send/ws.recv/ws.close），
     不用 DaemonConnection——此时连接还没建立。ping 是【发-读配对】语义：
@@ -398,7 +431,6 @@ async def check_and_restart_if_stale() -> None:
         return
 
     source_mtime = _get_server_source_mtime()
-    config_mtime = _get_config_mtime()
 
     try:
         ws = await connect_to_server()
@@ -425,8 +457,6 @@ async def check_and_restart_if_stale() -> None:
             restart_reason = ""
             if source_mtime > server_start:
                 restart_reason = f"source changed (src={source_mtime:.0f} > server={server_start:.0f})"
-            elif config_mtime > server_start:
-                restart_reason = f"config.toml changed (cfg={config_mtime:.0f} > server={server_start:.0f})"
 
             if restart_reason:
                 logger.info(
@@ -447,23 +477,7 @@ async def check_and_restart_if_stale() -> None:
                     pass
 
                 def _old_pid_alive() -> bool:
-                    if sys.platform == "win32":
-                        # os.kill(pid, 0) is NOT a liveness probe on Windows:
-                        # signal.CTRL_C_EVENT is 0, and CPython's os_kill_impl
-                        # routes it to GenerateConsoleCtrlEvent(CTRL_C_EVENT,
-                        # pid) — a Ctrl+C to that process group, hitting every
-                        # process on the console, not just the one named. (Only
-                        # values outside CTRL_C/CTRL_BREAK go to TerminateProcess.)
-                        # Windows SIGTERM is an immediate hard kill, so the port
-                        # probe suffices.
-                        return is_running()
-                    try:
-                        os.kill(server_pid, 0)
-                        return True
-                    except ProcessLookupError:
-                        return False
-                    except OSError:
-                        return True  # EPERM → process exists
+                    return _old_daemon_alive(server_pid)
 
                 for _ in range(50):  # up to 10s for graceful shutdown
                     await asyncio.sleep(0.2)

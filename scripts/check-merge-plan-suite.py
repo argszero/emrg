@@ -315,6 +315,23 @@ def _rev_parse(ref: str) -> str:
     return proc.stdout.strip()
 
 
+def _tree_id(tree_sha: str) -> str:
+    """A tree's identity as this tool reports it: abbreviated to scan, complete to verify.
+
+    The abbreviation alone cannot be *reused*. A reader who wants to check that a
+    printed sha really names a tree has to ask git, and `git rev-parse <40-hex>`
+    echoes any 40-hex string handed to it - a control of `deadbeef` came back
+    unchanged, rc 0 - so the check is `git cat-file -t`, which needs all 40
+    characters. Measured (cyc20260918-000146): the `--steps` lines printed 12, the
+    cycle that needed step 2's tree could not verify the reading it already had in
+    hand, and paid another whole plan run (~116s) to recover the sha it had already
+    been shown. One shape in one place, because the defect is one line drifting from
+    the others: the short form stays readable, the full one is what a later reader
+    compares against, and a tree identity is the thing a verdict here is bound to.
+    """
+    return f"{tree_sha[:12]} ({tree_sha})"
+
+
 def _open_pr_numbers(repo: str) -> list[int]:
     """The open PR numbers, ascending - the default subject of the check."""
     proc = _run(
@@ -685,7 +702,7 @@ def _kept_note(path: Path, tree_sha: str | None = None) -> None:
         return
     where = f"kept {path}"
     if tree_sha:
-        where += f" (tree {tree_sha[:12]})"
+        where += f" (tree {_tree_id(tree_sha)})"
     main = _main_worktree() or "<main checkout>"
     print(f"\n{where} - run your own checks there, then remove it:")
     print(f"  git worktree remove --force {path}")
@@ -768,7 +785,10 @@ def _judge_every_step(base: str, heads: list[tuple[int, str]]) -> int:
             print(f"could not measure step {step} (#{number}): {exc}", file=sys.stderr)
             return 2
         state = "OK" if passed else "FAILED"
-        print(f"step {step} (#{number}) tree {tree_sha[:12]} suite {state}: {summary}")
+        print(
+            f"step {step} (#{number}) tree {_tree_id(tree_sha)} "
+            f"suite {state}: {summary}"
+        )
         if not passed:
             red.append((step, number, summary))
 
@@ -898,7 +918,7 @@ def main(argv: list[str] | None = None) -> int:
                 _kept_note(keep)
             return 2
 
-        print(f"final tree {tree_sha[:12]} ({tree_sha})")
+        print(f"final tree {_tree_id(tree_sha)}")
         if keep is not None:
             _kept_note(keep, tree_sha)
         if passed:

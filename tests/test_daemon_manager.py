@@ -8,8 +8,10 @@ emrg.client.daemon_manager.asyncio.create_subprocess_exec。
 
 import asyncio
 import json
+import os
 import signal
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -126,12 +128,11 @@ class TestCheckAndRestartIfStale:
             asyncio.run(daemon_manager.check_and_restart_if_stale())
         # no exceptions = pass
 
-    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.is_running", return_value=True)
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_mtime_unchanged_no_restart(self, mock_connect, mock_running,
-                                        mock_src, mock_cfg, tmp_path):
+                                        mock_src, tmp_path):
         token_file = tmp_path / "emrgd.token"
         token_file.write_text("token\n")
         mock_connect.return_value = FakeWS([_ping_pong_frame()])
@@ -142,7 +143,62 @@ class TestCheckAndRestartIfStale:
         # No restart: the frame's started_at (2026) > mtimes (0), so no SIGTERM.
         # We only assert connect was used (ping roundtrip happened).
 
-    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
+    @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_a_newer_config_does_not_restart_the_daemon(
+            self, mock_connect, mock_kill, mock_cleanup, mock_running,
+            mock_src, tmp_path, monkeypatch):
+        """Requirement 5 of rant 2026-09-17T16:52:57 — a config edit never kills
+        the daemon.
+
+        This is the state the removed branch was written for: a `config.toml`
+        **newer than the server**, and source **not** newer. The client used to
+        answer it with SIGTERM→SIGKILL, which took the running scheduler handlers
+        (a live evolution cycle among them) and every connected client with it.
+        The daemon watches the file itself now and applies a revision in place,
+        so the restart bought nothing.
+
+        The host state is a directory this test creates, and `HOME` /
+        `USERPROFILE` are pinned to it — so the file the old code would have
+        read is the file this test writes, and re-adding the branch (the arm this
+        test exists to kill) is caught rather than silently reading the
+        developer's real config. Pinning `HOME` for one test, never for the
+        suite: a temp-root home is itself an allowed write zone (PR #1318).
+        """
+        home = tmp_path / "home"
+        (home / ".emrg").mkdir(parents=True)
+        cfg = home / ".emrg" / "config.toml"
+        cfg.write_text('[llm]\nmodel = "test-model"\n')
+        future = 1e12
+        os.utime(cfg, (future, future))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+
+        # The premise, asserted rather than assumed: this file IS newer than the
+        # server the ping reports, so it is the case the old branch restarted on.
+        # (If the frame's started_at ever moves past `future`, this fails instead
+        # of quietly testing nothing.)
+        server_start = datetime.fromisoformat(
+            json.loads(_ping_pong_frame())["started_at"]).timestamp()
+        assert cfg.stat().st_mtime > server_start, (cfg.stat().st_mtime, server_start)
+
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
+        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(token_file)):
+            asyncio.run(daemon_manager.check_and_restart_if_stale())
+
+        assert mock_kill.call_args_list == [], (
+            "a config.toml newer than the server must not signal it — the daemon "
+            "applies the revision itself (emrg/server/config_reload.py)")
+        assert not mock_cleanup.called, (
+            "no restart means the port file must not be cleaned up")
+
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
     @patch("emrg.client.daemon_manager.is_running", return_value=True)
     @patch("emrg.client.daemon_manager.cleanup_server")
@@ -150,7 +206,7 @@ class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_source_newer_triggers_restart(self, mock_connect, mock_kill,
                                            mock_cleanup, mock_running,
-                                           mock_src, mock_cfg, tmp_path):
+                                           mock_src, tmp_path):
         token_file = tmp_path / "emrgd.token"
         token_file.write_text("token\n")
         # started_at in the past → source mtime (1e12) > server_start
@@ -172,7 +228,6 @@ class TestCheckAndRestartIfStale:
         # rant 12:49:09 ②：port file cleanup happens only AFTER old pid confirmed dead
         assert mock_cleanup.called
 
-    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
     @patch("emrg.client.daemon_manager.is_running", return_value=True)
     @patch("emrg.client.daemon_manager.cleanup_server")
@@ -180,7 +235,7 @@ class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_restart_waits_until_old_pid_dead_before_cleanup(
             self, mock_connect, mock_kill, mock_cleanup, mock_running,
-            mock_src, mock_cfg, tmp_path):
+            mock_src, tmp_path):
         """rant 12:49:09 ② — old daemon takes ~0.4s to die: cleanup_server()
         must NOT run while the old pid is still alive (multi-instance guard)."""
         token_file = tmp_path / "emrgd.token"
@@ -205,7 +260,6 @@ class TestCheckAndRestartIfStale:
         assert probe_calls["n"] >= 3, f"should probe liveness ≥3 times, got {probe_calls['n']}"
         assert mock_cleanup.called
 
-    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
     @patch("emrg.client.daemon_manager.is_running", return_value=True)
     @patch("emrg.client.daemon_manager.cleanup_server")
@@ -213,7 +267,7 @@ class TestCheckAndRestartIfStale:
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_restart_force_kills_stuck_old_pid(
             self, mock_connect, mock_kill, mock_cleanup, mock_running,
-            mock_src, mock_cfg, tmp_path):
+            mock_src, tmp_path):
         """rant 12:49:09 ② — old daemon never dies on SIGTERM → SIGKILL fallback,
         and cleanup still happens after the kill."""
         token_file = tmp_path / "emrgd.token"
@@ -229,10 +283,9 @@ class TestCheckAndRestartIfStale:
             "stuck old pid must be SIGKILLed after the SIGTERM grace window")
         assert mock_cleanup.called
 
-    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
-    def test_server_unreachable_silent(self, mock_connect, mock_src, mock_cfg, tmp_path):
+    def test_server_unreachable_silent(self, mock_connect, mock_src, tmp_path):
         token_file = tmp_path / "emrgd.token"
         token_file.write_text("token\n")
         mock_connect.side_effect = ConnectionRefusedError("no daemon")
@@ -241,10 +294,9 @@ class TestCheckAndRestartIfStale:
                    return_value=str(token_file)):
             asyncio.run(daemon_manager.check_and_restart_if_stale())  # no raise
 
-    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
-    def test_server_auth_error_propagates(self, mock_connect, mock_src, mock_cfg, tmp_path):
+    def test_server_auth_error_propagates(self, mock_connect, mock_src, tmp_path):
         """G129: AuthError (token mismatch) must NOT be swallowed — it's a
         config/install problem the user must see, not a transient disconnect."""
         token_file = tmp_path / "emrgd.token"
@@ -256,10 +308,9 @@ class TestCheckAndRestartIfStale:
             with pytest.raises(daemon_manager.AuthError):
                 asyncio.run(daemon_manager.check_and_restart_if_stale())
 
-    @patch("emrg.client.daemon_manager._get_config_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
-    def test_server_programming_error_propagates(self, mock_connect, mock_src, mock_cfg, tmp_path):
+    def test_server_programming_error_propagates(self, mock_connect, mock_src, tmp_path):
         """G129: genuine bugs must surface, not vanish into a bare except Exception."""
         token_file = tmp_path / "emrgd.token"
         token_file.write_text("token\n")
@@ -269,6 +320,76 @@ class TestCheckAndRestartIfStale:
                    return_value=str(token_file)):
             with pytest.raises(AttributeError):
                 asyncio.run(daemon_manager.check_and_restart_if_stale())
+
+
+# ── the old daemon's liveness probe (issue #1349) ────────────
+
+class TestTheOldDaemonProbe:
+    """`_old_daemon_alive` — the probe the restart path waits on.
+
+    Both answers are pinned on every runner: the Windows one must never enter
+    `os.kill` (signal 0 is `CTRL_C_EVENT` there — a Ctrl+C delivered to that
+    console process group, this CLI's shell included), and the POSIX one is a
+    signal-0 question. This file is skipped on Windows, so pinning the *Windows*
+    decision here is the whole point: it is observable on the runners that do
+    run these tests, which is where a defect like this has to be caught.
+    """
+
+    def test_posix_asks_with_signal_zero(self):
+        calls: list = []
+        assert daemon_manager._old_daemon_alive(
+            4321, platform="linux",
+            kill=lambda pid, sig: calls.append((pid, sig)),
+        ) is True
+        assert calls == [(4321, 0)]
+
+    def test_posix_reads_a_gone_pid_as_gone(self):
+        """Both states of the POSIX answer — the live side alone proves nothing."""
+        def _gone(pid, sig):
+            raise ProcessLookupError(3, "No such process")
+
+        assert daemon_manager._old_daemon_alive(
+            4321, platform="linux", kill=_gone) is False
+
+    def test_windows_never_enters_os_kill(self):
+        """The negative control: reaching `os.kill` on Windows IS the bug."""
+        def _would_signal(pid, sig):
+            raise AssertionError(
+                f"os.kill({pid}, {sig}) on Windows is CTRL_C_EVENT — a Ctrl+C to "
+                "that console process group")
+
+        seen: list = []
+        assert daemon_manager._old_daemon_alive(
+            4321, platform="win32", kill=_would_signal,
+            win_probe=lambda pid: seen.append(pid) or True,
+        ) is True
+        assert seen == [4321]
+
+    def test_windows_default_answer_is_the_port_probe(self):
+        """With no probe injected, Windows is answered by `is_running()`."""
+        with patch("emrg.client.daemon_manager.is_running",
+                   return_value=False) as mock_running:
+            assert daemon_manager._old_daemon_alive(
+                4321, platform="win32") is False
+        assert mock_running.called
+
+    def test_the_platform_decision_is_not_respelled_here(self):
+        """One spelling of the rule — the deletion is what is being pinned.
+
+        The scan is checked in the direction that makes it an instrument: the
+        positive half asserts text this file must still contain, so a scan that
+        cannot read what it claims to read fails instead of passing. The negative
+        half pins the *mechanism* — a platform verdict read here, or a signal-0
+        probe — rather than the word `win32`, which this file legitimately carries
+        in `win32_no_window_kwargs` (a spawn flag, not a liveness decision). The
+        file does still *signal*, with SIGTERM, which is not a probe.
+        """
+        src = Path(daemon_manager.__file__).read_text()
+        assert "_old_daemon_alive" in src, "the scan cannot see the file it reads"
+        assert "os.kill(server_pid, signal.SIGTERM)" in src, (
+            "the scan cannot see the file it reads")
+        assert "os.kill(server_pid, 0)" not in src
+        assert "sys.platform" not in src
 
 
 # ── ensure_connected ─────────────────────────────────────────
