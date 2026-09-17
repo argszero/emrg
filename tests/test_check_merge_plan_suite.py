@@ -446,6 +446,20 @@ def test_the_printed_python_remedy_measures_the_kept_tree(
     development machine, which has a global `.venv/` ignore (this repo ignores `.venv/`
     too) - so the difference was scaffolding, not the line under test. Hence the explicit
     `exists()` assertion as well: if the scaffold is what breaks, it has to say so itself.
+
+    The scaffold is an *exec wrapper*, not a symlink to this suite's interpreter. Measured
+    on the `ubuntu-latest` leg (run for head `631944fd`): with `<repo>/.venv/bin/python` a
+    symlink to `sys.executable`, the line ran and answered `No module named pytest`.
+    CPython locates a venv through the directory of the path it was invoked *as*
+    (measured here both ways: `<repo>/.venv/bin/python -c "import sys; print(sys.prefix)"`
+    through a symlink prints the base interpreter's prefix, because the invoked directory
+    carries no `pyvenv.cfg`, while an `exec` of that same target prints the venv's) - and
+    on the runner the base interpreter has no pytest. The arm stayed green on the
+    development machine only because *this host's* uv base python happens to have pytest
+    in its own site-packages (`.../uv/python/cpython-3.13.3-.../site-packages/pytest/`),
+    which is an accident of the host and not a property of the line. Executing the same
+    interpreter by its own path reproduces the environment it was launched with, venv or
+    not, so the arm measures the remedy and not the runner's interpreter layout.
     """
     repo, origin = queue
     _branch_with(repo, "guard", {"tests/test_no_token_under_data_or_src.py": GUARD_TEST})
@@ -461,10 +475,25 @@ def test_the_printed_python_remedy_measures_the_kept_tree(
         if line.strip().startswith("python: ")
     )
 
+    # A wrapper, not a symlink: see the docstring (head `631944fd`, `ubuntu-latest`, where
+    # the symlink ran as the base interpreter and reported `No module named pytest`).
     interpreter = repo / ".venv" / "bin" / "python"
     interpreter.parent.mkdir(parents=True, exist_ok=True)
-    interpreter.symlink_to(sys.executable)
-    assert interpreter.exists(), "the scaffolding interpreter must be runnable"
+    interpreter.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+    )
+    interpreter.chmod(0o755)
+    can_run = subprocess.run(
+        [str(interpreter), "-m", "pytest", "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert can_run.returncode == 0, (
+        "the scaffolding interpreter cannot run pytest, so this arm measures nothing: "
+        + (can_run.stdout or "")
+        + (can_run.stderr or "")
+    )
 
     _write(kept_dir, "tests/test_kept_tree_only_marker.py", KEPT_MARKER_TEST)
 
