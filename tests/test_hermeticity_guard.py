@@ -203,7 +203,6 @@ def test_a_test_that_isolates_the_kill_still_runs(monkeypatch, tmp_path):
     token_file = tmp_path / "emrgd.token"
     token_file.write_text("token\n")
     monkeypatch.setattr(dm_mod, "_get_server_source_mtime", lambda: 1e12)
-    monkeypatch.setattr(dm_mod, "is_running", lambda: True)
     monkeypatch.setattr(dm_mod, "cleanup_server", lambda: None)
     monkeypatch.setattr(dm_mod, "get_server_path", lambda: str(token_file))
 
@@ -213,14 +212,32 @@ def test_a_test_that_isolates_the_kill_still_runs(monkeypatch, tmp_path):
     monkeypatch.setattr(dm_mod, "connect_to_server", _connect)
 
     calls = []
+    signalled = []
 
     def _fake_kill(pid, sig):
         calls.append((pid, sig))
         if sig == 0:
-            raise ProcessLookupError(pid)  # old daemon already gone
+            raise ProcessLookupError(pid)  # POSIX liveness probe: it is gone
+        signalled.append(sig)              # Windows: the probe is the port file
 
+    # The wait loop asks a **platform-dependent** question: POSIX asks the pid
+    # (`os.kill(pid, 0)`), Windows asks the port file (`is_running()`, because
+    # signal 0 is CTRL_C_EVENT there — issue #1349). The fake has to answer
+    # whichever one this platform asks, or the loop is left to exhaust and the
+    # test quietly drives the 10-second fallback instead of the path it means to
+    # (measured: on Windows that fallback reached `os.kill(pid, signal.SIGKILL)`,
+    # an attribute Windows does not have).
+    monkeypatch.setattr(dm_mod, "is_running", lambda: not signalled)
     monkeypatch.setattr(dm_mod.os, "kill", _fake_kill)
 
     asyncio.run(dm_mod.check_and_restart_if_stale())
 
     assert (9999, signal.SIGTERM) in calls
+    # And it is *this* path: one SIGTERM and no fallback (the probe's own
+    # `os.kill(pid, 0)` is recorded too, so the count is not the invariant —
+    # "exactly one signal was sent" is). Without this, the drifting version above
+    # still passed on the platform it was written on and CI's other leg paid.
+    assert [sig for _pid, sig in calls if sig != 0] == [signal.SIGTERM], (
+        "the liveness loop did not settle after its SIGTERM — the test drove the "
+        f"force-kill fallback instead of the restart path: {calls}"
+    )
