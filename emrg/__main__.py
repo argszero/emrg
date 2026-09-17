@@ -253,12 +253,18 @@ def _stop_daemon() -> None:
         if pid:
             print(f"stopping daemon (pid={pid}) via SIGTERM ...")
             os.kill(pid, signal.SIGTERM)
+            # Wait on the pid, not on the port file: the wait is what keeps a
+            # restart from spawning a second daemon (rant 2026-08-18T12:49:09).
+            # ⚠️ The probe is `emrg._stop_all.pid_alive`, never a bare
+            # `os.kill(pid, 0)`: signal.CTRL_C_EVENT is 0, so on Windows that
+            # call is a Ctrl+C to the pid's console process group — every
+            # process sharing the console, this shell included (issue #1349).
+            from emrg._stop_all import pid_alive
+
             for _ in range(20):
-                try:
-                    os.kill(pid, 0)
-                    time.sleep(0.15)
-                except OSError:
+                if not pid_alive(pid):
                     break
+                time.sleep(0.15)
             cleanup_server()
             print("daemon stopped.")
         else:
