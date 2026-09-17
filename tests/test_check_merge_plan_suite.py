@@ -50,7 +50,7 @@ import re
 import subprocess
 import time
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -290,6 +290,45 @@ def test_the_suite_runs_in_a_real_worktree_not_an_extracted_archive(
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def _worktree_listing(repo: Path) -> str:
+    """`git worktree list --porcelain` - one `worktree <path>` line per worktree.
+
+    Porcelain rather than the decorative form, because the decorative line separates
+    its fields with spaces and a path may contain one (a pytest temp directory under
+    `C:/Users/<name with a space>/...` is an ordinary case).
+    """
+    return _git(repo, "worktree", "list", "--porcelain")
+
+
+def _worktree_listing_names(listing: str, path: Path) -> bool:
+    """Does this listing name `path` as one of its worktrees?
+
+    Compared as forward-slash spellings, because the two sides disagree about the
+    separator on Windows: git prints `C:/Users/.../kept` while `str(Path.resolve())`
+    is `C:\\Users\\...\\kept`. Measured on the `windows-2025` leg (2026-09-17) - the
+    first version asserted `str(path.resolve()) in listing` and failed with the kept
+    worktree plainly present in the listing, and in the same test its negative twin
+    (`not in`) *passed* for the same wrong reason, so that arm was vacuous there.
+
+    The same two-entry-point class as `tests/test_conflict_markers.py` (git's own
+    spelling, and `str(Path)`); the fix is the same shape: normalise, never compare
+    raw spellings. Pinned in both directions by
+    `test_the_worktree_listing_is_matched_across_separators`, which replays the
+    Windows shape with `PureWindowsPath` so the instrument is discriminating on POSIX.
+    """
+
+    def normalise(text: str) -> str:
+        return text.replace("\\", "/")
+
+    wanted = normalise(path.as_posix())
+    named = (
+        line[len("worktree ") :]
+        for line in listing.splitlines()
+        if line.startswith("worktree ")
+    )
+    return any(normalise(name) == wanted for name in named)
+
+
 def test_a_kept_worktree_is_the_tree_the_run_measured(
     queue: tuple[Path, Path], tmp_path: Path
 ) -> None:
@@ -326,7 +365,7 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
     assert _git(kept_dir, "write-tree") == match.group(1)
     assert (kept_dir / "tests" / "test_no_token_under_data_or_src.py").is_file()
     assert (kept_dir / "data" / "payload.txt").is_file()
-    assert str(kept_dir.resolve()) in _git(repo, "worktree", "list")
+    assert _worktree_listing_names(_worktree_listing(repo), kept_dir)
 
     # The note names the path, the tree, and the two traps every fresh worktree has -
     # no `.venv` (so `uv run pytest` there reports that no suite ran) and no
@@ -338,7 +377,47 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
     # The removal line it prints is the one that works.
     _git(repo, "worktree", "remove", "--force", str(kept_dir))
     assert not kept_dir.exists()
-    assert str(kept_dir.resolve()) not in _git(repo, "worktree", "list")
+    assert not _worktree_listing_names(_worktree_listing(repo), kept_dir)
+
+
+def test_the_worktree_listing_is_matched_across_separators() -> None:
+    """The kept-tree assertions must not depend on the platform's separator.
+
+    `git worktree list` prints forward slashes on every platform (measured on the
+    `windows-2025` runner: `C:/Users/runneradmin/.../kept 1541ddc (detached HEAD)`),
+    while `str(Path.resolve())` prints backslashes on Windows. The Windows leg caught
+    the naive `str(path) in listing`, and - the part that made it a real defect rather
+    than a portability nit - the *negative* assertion in the same test passed there for
+    the same wrong reason, so the arm proved nothing on that platform.
+
+    Driving the matcher with a Windows-shaped listing and a `PureWindowsPath` is what
+    makes the instrument discriminating **here**, on POSIX, where no real `git` run can
+    produce the failing shape.
+    """
+    windows_listing = (
+        "worktree C:/Users/a b/Temp/pytest-0/repo\n"
+        "HEAD 6b53c0d0000000000000000000000000000000000\n"
+        "branch refs/heads/master\n"
+        "\n"
+        "worktree C:/Users/a b/Temp/pytest-0/kept\n"
+        "HEAD 1541ddc0000000000000000000000000000000000\n"
+        "detached\n"
+        "\n"
+    )
+    kept = PureWindowsPath("C:/Users/a b/Temp/pytest-0/kept")
+    absent = PureWindowsPath("C:/Users/a b/Temp/pytest-0/other")
+
+    assert _worktree_listing_names(windows_listing, kept)
+    assert not _worktree_listing_names(windows_listing, absent)
+
+    # The path contains a space, which is why the matcher reads whole `worktree <path>`
+    # lines instead of splitting the decorative listing on whitespace.
+    assert " " in kept.as_posix() and "worktree " in windows_listing
+
+    # And the spelling this replaced: on Windows `str(...)` is the backslashed form, so
+    # the old assertion was false there for a worktree that was really listed. Pinned as
+    # a fact so the next reader cannot "simplify" the matcher back into the defect.
+    assert str(kept) not in windows_listing
 
 
 def test_keep_refuses_the_two_ways_it_could_mislead(
@@ -364,6 +443,11 @@ def test_keep_refuses_the_two_ways_it_could_mislead(
     proc = _run_tool(repo, "1", "--keep", str(stale))
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "already exists" in proc.stderr
+    # Both sides are `str(Path.resolve())` on the platform under test - the tool prints
+    # the `--keep` argument it resolved, this line resolves the same directory - so this
+    # one agreement does not cross separators and needs no normalising (unlike the
+    # worktree listing above, where one side is git's own spelling). It passed on the
+    # `windows-2025` leg, which is the evidence for that claim.
     assert proc.stderr.count(str(stale.resolve()))
 
 
