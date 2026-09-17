@@ -71,7 +71,13 @@ _TYPES: dict[str, tuple[type, ...]] = {
     "context_window": (int,),
     "auto_compact_threshold": (int, float),
     "models": (list,),
+    # `vision` is derived at load time from `vision_default` + the matching
+    # `[[llm.models]]` entry (`resolve_model_vision`, rant 2026-09-17T16:53:02),
+    # so it is always a real bool and the file's `[llm] vision` key lands on
+    # `vision_default` — the field that must be type-checked to catch a
+    # `vision = "yes"`.
     "vision": (bool,),
+    "vision_default": (bool,),
     "stream_options": (dict, type(None)),
     "context_refresh_interval_ms": (int,),
 }

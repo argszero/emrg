@@ -443,6 +443,32 @@ _DATA_READER_CONSUMERS = frozenset({
     "jq", "nl", "sort", "uniq", "python", "python3", "node",
 })
 
+# A second, narrower readership: a tool that eats stdin as a *message* for one
+# of its subcommands (issue #1320). `git` cannot go in the set above — that set
+# is a property of the *tool*, and git runs a program for other subcommands — so
+# the reader is pinned on two further axes: the subcommand, and an operand that
+# names stdin (`-F -`, `--file -`, `--file=-`, `-F-`; all four measured against
+# git 2.50.1 to put the body into the tag message). Nothing else may be on the
+# line, because a global option before the subcommand and an env prefix can both
+# decide what the subcommand *does*:
+#
+#   measured, git 2.50.1, inside a scratch repo — `git -c core.editor=sh commit
+#   -F - -e 'BODY'`, with `BODY` one `echo EDITOR_RAN` line, printed
+#   EDITOR_RAN and committed: the body ran as a script. So did the same override
+#   spelled through the environment (`GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=
+#   core.editor GIT_CONFIG_VALUE_0=sh commit -F - -e`), which is why an env
+#   prefix forfeits the mask too. The shape issue #1320 names instead,
+#   `git -c alias.commit='!sh' commit -F -`, did *not* run it — git refuses to
+#   let an alias shadow a builtin, so `commit` stayed the builtin and read the
+#   body as a message. The refusal below is therefore load-bearing against the
+#   editor route, not against the alias; it costs a rare false positive
+#   (`git -C <dir> commit -F -`), which is the direction this guard errs in.
+_STDIN_MESSAGE_READERS = {
+    "git": frozenset({"commit", "tag"}),
+}
+_STDIN_OPERAND_SEPARATE = frozenset({"-F", "--file"})
+_STDIN_OPERAND_ATTACHED = frozenset({"-F-", "--file=-"})
+
 # ── Containment-escape guard (issue #1102) ─────────────────────────────────
 # Borrowed from Claude Code v2.1.257 ("Containment Escape"): block cloud
 # metadata-credential fetches and egress-tunnel markers. The write-target
@@ -2030,6 +2056,56 @@ def _nested_command_texts(tokens: list[str]) -> list[str]:
     return out
 
 
+def _operand_names_stdin(args: list[str]) -> bool:
+    """Whether ``args`` name stdin as a message reader's input file.
+
+    Two spellings, both measured on git 2.50.1: the value as its own token
+    (`-F -`, `--file -`) and attached (`-F-`, `--file=-`). `-F=-` is not one of
+    them — git opens the file ``=-`` and fails — so it is not counted, and a
+    `-F`/`--file` whose value is anything else is a real filename.
+    """
+    for i, arg in enumerate(args):
+        if arg in _STDIN_OPERAND_ATTACHED:
+            return True
+        if arg in _STDIN_OPERAND_SEPARATE and i + 1 < len(args) and args[i + 1] == "-":
+            return True
+    return False
+
+
+def _owns_stdin_as_data(prefix: list[str]) -> bool:
+    """Whether this simple command reads the heredoc on its stdin as data.
+
+    ``prefix`` is the raw token span before the ``<<`` opener, env assignments
+    included: the shell strips those before running the command, so they are not
+    part of the command word — but an env prefix is also how `GIT_CONFIG_COUNT`
+    / `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` reaches a tool, and the guard
+    reads text, so it cannot tell those assignments from a harmless `FOO=1`. An
+    env prefix therefore forfeits the mask, which is the fail-closed direction.
+
+    Beyond that: a named data reader owns its stdin whatever the arguments, and
+    a message reader owns it only in the invocation that says so — the tool, its
+    subcommand, and a stdin operand, with the subcommand read at argv[0] after
+    the tool so that no global option can stand between them.
+    """
+    words = [tok for tok in prefix if not _is_env_assignment(tok)]
+    if not words:
+        return False
+    if _basename(words[0]) in _DATA_READER_CONSUMERS:
+        return True
+    subs = _STDIN_MESSAGE_READERS.get(_basename(words[0]))
+    if subs is None:
+        return False
+    if len(words) != len(prefix):
+        return False                      # env prefix: `GIT_CONFIG_*` lives there
+    if len(words) < 2 or words[1] not in subs:
+        # The subcommand must be argv[0] after the tool. A global option there is
+        # how `-c <name>=<value>` and `--config-env=` arrive, and a config value
+        # can make the subcommand run a program (`core.editor`); refusing the
+        # *position* instead of enumerating the options is the structural test.
+        return False
+    return _operand_names_stdin(words[2:])
+
+
 def _heredoc_delimiters_read_as_data(line: str) -> list[str]:
     """Delimiters of the heredocs opened on ``line`` whose body is data.
 
@@ -2050,6 +2126,11 @@ def _heredoc_delimiters_read_as_data(line: str) -> list[str]:
     anywhere. `cat <<EOF | $SHELL` feeds the very text we would stop reading
     into whatever the pipe names, and a pipe target spelled as a variable
     cannot be resolved statically, so a pipe forfeits the mask entirely.
+
+    The consumer is judged per *invocation*, not per tool (issue #1320):
+    `_owns_stdin_as_data` accepts a named data reader, or the narrower case of a
+    message reader — `git commit` / `git tag` — whose invocation is nothing but
+    the tool, that subcommand and an operand naming stdin.
     """
     toks = _split_command_tokens(line)
     segments: list[list[int]] = [[]]      # token indices, so the pipe test
@@ -2066,8 +2147,8 @@ def _heredoc_delimiters_read_as_data(line: str) -> list[str]:
             delim = toks[seg[pos + 1]].lstrip("-")
             if not (delim and delim.isidentifier()):
                 continue
-            words = [toks[j] for j in seg[:pos] if not _is_env_assignment(toks[j])]
-            if not words or _basename(words[0]) not in _DATA_READER_CONSUMERS:
+            prefix = [toks[j] for j in seg[:pos]]
+            if not prefix or not _owns_stdin_as_data(prefix):
                 continue
             # A pipe anywhere after the opener forfeits the mask: `cat <<EOF |
             # $SHELL` (and `${SHELL}`, and any unresolved target) would run the
@@ -2110,7 +2191,9 @@ def _mask_data_heredoc_bodies(cmd: str) -> str:
     Boundaries, stated rather than implied — a body is masked only when ALL of
     these hold, and every one of them fails closed:
 
-    1. the owning command is a named data reader (`_DATA_READER_CONSUMERS`);
+    1. the owning invocation reads its stdin as data — a named data reader
+       (`_DATA_READER_CONSUMERS`), or the message-reader invocation of issue
+       #1320 (`_owns_stdin_as_data`);
     2. its output is not piped (`| $SHELL` cannot be resolved statically);
     3. a terminator line exists (an unterminated opener is left alone);
     4. no shell wrapper or evaluator token appears anywhere **outside** the

@@ -70,6 +70,139 @@ def _parse_json_body(content: bytes) -> dict:
     return json.loads(content)
 
 
+# ── Request-error classification ─────────────────────────────
+#
+# A failed request is not one thing. The two compact paths act on the answer
+# — a request the provider says is *too long* is retried through the chunked
+# compactor, anything else must not be — and a blanket `"400" in str(e)` test
+# made every refusal look like a length problem. That single mistake is the
+# root cause of two rants: a content-filter refusal (400 "Content Exists
+# Risk") was "compacted" with the same poisoned text forever
+# (rant 2026-09-17T17:55:42), and a body-buffer overflow (413 "length limit
+# exceeded") was *not* recognised as too long, so a session could only grow
+# (rant 2026-09-17T18:19:45).
+#
+# So: classify first, act second. The refusal class is checked BEFORE the
+# length class, because a content refusal also arrives as a 400 and would
+# otherwise be swallowed by the "any 400 means too long" fallback.
+CONTENT_RISK_ERROR = "Content Exists Risk"
+
+#: Appended to the raised error when the provider refuses the text itself —
+#: the message reaches the client as `LLM error: ...`, so the hint belongs
+#: here and not in a log line the host never reads.
+CONTENT_RISK_HINT = (
+    " — the provider's content filter refused this request's text "
+    f"({CONTENT_RISK_ERROR}); it was re-sent once with the text spaced out. "
+    "If this persists the session context contains a fragment the provider "
+    "refuses: inspect/clean the session history or start a new session."
+)
+
+#: HTTP statuses that mean "the request body did not fit".
+_OVERLONG_STATUSES = ("400", "413")
+
+#: Bodies that mean "the request body did not fit". Providers word this
+#: differently per gateway: a model context overflow, a proxy body limit
+#: (413 "Failed to buffer the request body: length limit exceeded"), or a
+#: plain "too long".
+_OVERLONG_MARKERS = (
+    "context length",       # "This model's maximum context length is N tokens"
+    "context window",
+    "context_length",
+    "maximum context",
+    "prompt is too long",
+    "reduce the length",
+    "too long",
+    "length limit",         # 413: "Failed to buffer the request body: length limit exceeded"
+    "length exceeded",      # same 413 wording, order-independent
+)
+
+CONTENT_RISK = "content_risk"
+CONTEXT_TOO_LONG = "context_too_long"
+OTHER_ERROR = "other"
+
+
+def classify_llm_error(exc: BaseException) -> str:
+    """Say what kind of failure an LLM request hit: ``content_risk`` |
+    ``context_too_long`` | ``other``.
+
+    Reads the message, which for this client always carries the response
+    status and (redacted) body — see ``chat``/``chat_stream``.
+
+    The discriminating signals, in priority order:
+      1. the provider refused the text itself (content filter) — the body
+         says ``error.message == "Content Exists Risk"``;
+      2. the request did not fit — an overlong marker in the body, or a bare
+         400/413 with nothing more specific to go on (the pre-existing
+         fallback, now reachable only for non-refusals);
+      3. anything else.
+    """
+    text = str(exc)
+    lowered = text.lower()
+    if CONTENT_RISK_ERROR.lower() in lowered:
+        return CONTENT_RISK
+    if any(marker in lowered for marker in _OVERLONG_MARKERS):
+        return CONTEXT_TOO_LONG
+    if any(status in text for status in _OVERLONG_STATUSES):
+        return CONTEXT_TOO_LONG
+    return OTHER_ERROR
+
+
+def space_out_text(text: str) -> str:
+    """Insert one space between every two characters.
+
+    The transform the host verified by hand (rant 2026-09-17T17:55:42): it
+    breaks the exact byte sequence a content filter matches on while leaving
+    the text readable to a model. Costs 2x tokens and invalidates the prompt
+    cache, so it is only ever applied to a request that already failed.
+    """
+    return " ".join(text)
+
+
+def space_out_messages(messages: list[dict]) -> list[dict]:
+    """A copy of ``messages`` with every message's text payload spaced out.
+
+    Scope is deliberate:
+      * ``content`` on every role (system / user / assistant / tool) — a
+        tool_result body is message content like any other, and the poisoned
+        fragment can sit in any of them;
+      * multimodal ``content`` parts: only their ``text`` field;
+      * identifiers (``id``, ``tool_call_id``) and ``tool_calls`` are copied
+        untouched — an assistant message and its tool result must stay
+        paired, and ``function.arguments`` is JSON, which spacing between
+        every two characters would stop parsing.
+
+    The caller's messages are never mutated.
+    """
+    out: list[dict] = []
+    for message in messages:
+        new = dict(message)
+        content = new.get("content")
+        if isinstance(content, str):
+            new["content"] = space_out_text(content)
+        elif isinstance(content, list):
+            new["content"] = [
+                {**part, "text": space_out_text(part["text"])}
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+                else part
+                for part in content
+            ]
+        out.append(new)
+    return out
+
+
+def with_content_risk_hint(message: str) -> str:
+    """Append the host-facing hint when ``message`` is a content refusal.
+
+    Idempotent: an error that already went through here (it is raised, caught
+    and re-reported) is not annotated twice.
+    """
+    if classify_llm_error(RuntimeError(message)) != CONTENT_RISK:
+        return message
+    if CONTENT_RISK_HINT in message:
+        return message
+    return message + CONTENT_RISK_HINT
+
+
 class LlmClient:
     """Async LLM client with tool calling and multi-turn streaming support."""
 
@@ -136,6 +269,11 @@ class LlmClient:
         self.last_response_headers = {}
 
         last_error = None
+        # One-shot: after a content-filter refusal the request is re-sent with
+        # the text spaced out (see space_out_messages). A second refusal is
+        # reported honestly — never retried again, never handed to the
+        # chunked compactor (rant 2026-09-17T17:55:42).
+        content_risk_retried = False
         for attempt in range(MAX_RETRIES + 1):
             # First attempt is the normal path — log nothing (rant
             # 2026-08-17T14:27:39: 1/4 on every request is noise); retries
@@ -176,6 +314,25 @@ class LlmClient:
                 return choice.get("message", {})
 
             text = resp.text[:500]
+            # ── The provider refused the text itself ──────────────
+            # Checked before the transient/length branches: a content refusal
+            # arrives as a 400 and must never be read as "too long" (that
+            # misreading is the self-lock of rant 2026-09-17T17:55:42).
+            refusal = f"LLM request failed: {resp.status_code} - {_redact_text(text)}"
+            if classify_llm_error(RuntimeError(refusal)) == CONTENT_RISK:
+                if not content_risk_retried:
+                    content_risk_retried = True
+                    logger.warning(
+                        "LLM content-filter refusal %d — re-sending once with the "
+                        "text spaced out: %s", resp.status_code, _redact_text(text[:200]),
+                    )
+                    payload["messages"] = space_out_messages(payload["messages"])
+                    self.last_payload = dict(payload)
+                    continue
+                logger.error(
+                    "LLM content-filter refusal again after the spaced retry "
+                    "(status=%d): %s", resp.status_code, _redact_text(text[:500]),
+                )
             if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
                 delay = RETRY_BASE_DELAY * (2 ** attempt)
                 logger.warning(
@@ -195,7 +352,9 @@ class LlmClient:
             text_redacted = _redact_text(text)
             logger.error("LLM error: %s headers=%s body=%s", resp.status_code, hdr, text_redacted[:2000])
             raise RuntimeError(
-                f"LLM request failed: {resp.status_code} headers={hdr} body={text_redacted[:2000]}"
+                with_content_risk_hint(
+                    f"LLM request failed: {resp.status_code} headers={hdr} body={text_redacted[:2000]}"
+                )
             )
 
         raise last_error  # type: ignore[misc]
@@ -248,6 +407,7 @@ class LlmClient:
         tc_by_index: dict[int, dict] = {}
 
         last_error = None
+        content_risk_retried = False
         for attempt in range(MAX_RETRIES + 1):
             # First attempt silent (rant 2026-08-17T14:27:39) — the retrying
             # warning already logs the retry; this adds the attempt counter.
@@ -267,6 +427,30 @@ class LlmClient:
                 async with client.stream("POST", url, headers=headers, json=payload) as resp:
                     if resp.status_code != 200:
                         text = await resp.aread()
+                        # Content-filter refusal: same one-shot spaced retry as
+                        # chat() (rant 2026-09-17T17:55:42). This branch runs
+                        # before any delta is yielded, so retrying here cannot
+                        # duplicate streamed content.
+                        refusal = (
+                            f"LLM stream request failed: {resp.status_code} - "
+                            f"{_redact_text(text[:500])}"
+                        )
+                        if classify_llm_error(RuntimeError(refusal)) == CONTENT_RISK:
+                            if not content_risk_retried:
+                                content_risk_retried = True
+                                logger.warning(
+                                    "LLM stream content-filter refusal %d — re-sending once "
+                                    "with the text spaced out: %s",
+                                    resp.status_code, _redact_text(text[:200]),
+                                )
+                                payload["messages"] = space_out_messages(payload["messages"])
+                                self.last_payload = dict(payload)
+                                continue
+                            logger.error(
+                                "LLM stream content-filter refusal again after the spaced "
+                                "retry (status=%d): %s",
+                                resp.status_code, _redact_text(text[:500]),
+                            )
                         if resp.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
                             delay = RETRY_BASE_DELAY * (2 ** attempt)
                             logger.warning(
@@ -283,8 +467,10 @@ class LlmClient:
                         logger.error("LLM stream error: %s %s", resp.status_code, _redact_text(text[:500]))
                         hdr = _redact_headers(dict(resp.headers))
                         raise RuntimeError(
-                            f"LLM stream request failed: {resp.status_code} "
-                            f"headers={hdr} body={_redact_text(text[:1000])}"
+                            with_content_risk_hint(
+                                f"LLM stream request failed: {resp.status_code} "
+                                f"headers={hdr} body={_redact_text(text[:1000])}"
+                            )
                         )
 
                     # Capture response metadata for llm.jsonl logging

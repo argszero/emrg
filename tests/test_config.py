@@ -151,3 +151,78 @@ model = "gpt-4"
     monkeypatch.setattr("emrg.config.config_path", lambda: config_file)
     cfg = load_config()
     assert cfg.llm.models == []
+
+
+# ── vision resolution (rant 2026-09-17T16:53:02) ───────────────────────────
+
+
+def test_load_config_vision_prefers_the_matching_entry(tmp_path, monkeypatch):
+    """The entry's own `vision` is not dead config: startup resolves it.
+
+    Before this, startup read only the top-level `[llm] vision`, so a model whose
+    `[[llm.models]]` entry declared `vision = true` still started as blind.
+    """
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""[llm]
+api_key = "sk-test-123"
+model = "deepseek-v4-flash"
+vision = false
+
+[[llm.models]]
+name = "flash"
+model = "deepseek-v4-flash"
+vision = true
+""")
+    monkeypatch.setattr("emrg.config.config_path", lambda: config_file)
+    cfg = load_config()
+    assert cfg.llm.vision is True, "the entry's flag must win over the top-level key"
+    assert cfg.llm.vision_default is False, "the fallback stays the top-level value"
+
+
+def test_load_config_vision_falls_back_to_the_top_level_key(tmp_path, monkeypatch):
+    """An entry without `vision` falls back to the top-level key — an answer,
+    not a silence — and the default is kept separately for runtime switches."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""[llm]
+api_key = "sk-test-123"
+model = "deepseek-chat"
+vision = true
+
+[[llm.models]]
+name = "deepseek-chat"
+context_window = 131072
+""")
+    monkeypatch.setattr("emrg.config.config_path", lambda: config_file)
+    cfg = load_config()
+    assert cfg.llm.vision is True
+    assert cfg.llm.vision_default is True
+
+
+def test_load_config_vision_no_matching_entry_is_the_top_level_default(
+    tmp_path, monkeypatch
+):
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("""[llm]
+api_key = "sk-test-123"
+model = "gpt-4o"
+vision = true
+
+[[llm.models]]
+name = "other"
+model = "deepseek-chat"
+vision = false
+""")
+    monkeypatch.setattr("emrg.config.config_path", lambda: config_file)
+    cfg = load_config()
+    assert cfg.llm.vision is True, "no matching entry → the top-level default decides"
+
+
+def test_resolve_model_vision_source_names_the_decider():
+    from emrg.config import resolve_model_vision
+
+    models = [{"name": "a", "vision": True}, {"name": "b"}]
+    assert resolve_model_vision(models, "a", False) == (True, "entry")
+    assert resolve_model_vision(models, "b", True) == (True, "top-level-default")
+    assert resolve_model_vision(models, "missing", True) == (True, "top-level-default")
+    assert resolve_model_vision([], "a", False) == (False, "top-level-default")
+    assert resolve_model_vision(None, "a", False) == (False, "top-level-default")

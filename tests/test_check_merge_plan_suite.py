@@ -202,13 +202,16 @@ def _publish(repo: Path, origin: Path, number: int, branch: str) -> str:
     return sha
 
 
-def _run_tool(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run_tool(
+    repo: Path, *args: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args, "--base", "master"],
         cwd=str(repo),
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=None if env is None else {**os.environ, **env},
     )
 
 
@@ -288,6 +291,132 @@ def test_the_suite_runs_in_a_real_worktree_not_an_extracted_archive(
 
     proc = _run_tool(repo, "1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def _plan_refs(repo: Path) -> list[str]:
+    """The temp refs the harness parks fetched PR heads in, if any are left."""
+    listed = _git(repo, "for-each-ref", "--format=%(refname)", "refs/emrg-plan-suite/")
+    return [line for line in listed.splitlines() if line.strip()]
+
+
+def test_a_successful_run_leaves_no_fetched_pr_ref_behind(
+    queue: tuple[Path, Path],
+) -> None:
+    """The temp ref a fetched PR needs must not outlive the run.
+
+    Measured 2026-09-17 (`cyc20260917-142057`): `_fetch_head` left one ref per
+    planned PR behind, so `refs/emrg-plan-suite/` had reached 88 refs pinning 283
+    commits unreachable from master - unreachable, so `git gc` could never prune
+    them, and every re-pushed PR head added another. A ref nobody reads is state,
+    and this run's verdict is the only thing it was ever for.
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"a.md": "a\n"})
+    _branch_with(repo, "two", {"b.md": "b\n"})
+    _publish(repo, origin, 1, "one")
+    _publish(repo, origin, 2, "two")
+
+    assert _plan_refs(repo) == [], "the fixture started with refs the run did not make"
+
+    proc = _run_tool(repo, "1", "2")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _plan_refs(repo) == []
+    # …and the cleanup did not cost the run its answer.
+    assert re.search(r"final tree [0-9a-f]{12} \([0-9a-f]{40}\)", proc.stdout)
+
+
+def test_the_run_does_not_hand_the_suite_the_callers_dirty_tree_override(
+    queue: tuple[Path, Path],
+) -> None:
+    """The run's verdict must not depend on the caller's working tree.
+
+    `EMRG_TASK_DIRTY_OVERRIDE` is the evolution cycle's own escape hatch: a cycle
+    whose tree is dirty exports it to keep working, and `scheduler.py` reads it from
+    the environment. The suite observes it through the *real* project, not through
+    the worktree, so four `tests/test_scheduler.py` dirty-tree tests assert the
+    unoverridden verdict and fail when the variable is present. Measured 2026-09-17
+    (`cyc20260917-142057`): a plan run from a dirty caller tree with the override
+    exported reported `suite FAILED` for a tree that is green, while the same run
+    with the override unset reported it green.
+
+    The fixture's own test is the instrument: it fails if the variable reaches it,
+    so this asserts the behaviour rather than the shape of an environment dict.
+    """
+    repo, origin = queue
+    _branch_with(
+        repo,
+        "reports-env",
+        {
+            "tests/test_zz_env_seen_by_the_suite.py": (
+                "import os\n"
+                "\n"
+                "OVERRIDE = 'EMRG_TASK_DIRTY_OVERRIDE'\n"
+                "\n"
+                "\n"
+                "def test_the_suite_was_not_handed_the_override():\n"
+                "    seen = os.environ.get(OVERRIDE)\n"
+                "    assert seen is None, OVERRIDE + ' reached the suite: ' + repr(seen)\n"
+            )
+        },
+    )
+    _publish(repo, origin, 1, "reports-env")
+
+    proc = _run_tool(repo, "1", env={"EMRG_TASK_DIRTY_OVERRIDE": "emrg-task"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "suite OK" in proc.stdout
+
+
+def test_a_plan_that_conflicts_leaves_no_fetched_pr_ref_behind_either(
+    queue: tuple[Path, Path],
+) -> None:
+    """The cleanup covers the paths that never reach a suite.
+
+    A plan that conflicts (rc 3) fetched its heads exactly as a successful run did,
+    and a cleanup wired into the success path - or into `_suite_verdict`'s finally -
+    leaks on precisely the runs a reader is most likely to repeat while resolving
+    the conflict. Both directions are pinned by these two tests: drop the `finally`
+    and both fail; move it to the success path and only this one does.
+    """
+    repo, origin = queue
+    _branch_with(repo, "left", {"README.md": "left\n"})
+    _branch_with(repo, "right", {"README.md": "right\n"})
+    _publish(repo, origin, 1, "left")
+    _publish(repo, origin, 2, "right")
+
+    proc = _run_tool(repo, "1", "2")
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert _plan_refs(repo) == []
+    # The conflict is still reported by name, so the cleanup ran after the verdict
+    # was reached rather than instead of reaching it.
+    assert "step 2 (#2)" in proc.stderr
+
+
+def test_a_fetch_that_fails_partway_still_leaves_no_ref_behind(
+    queue: tuple[Path, Path],
+) -> None:
+    """The refs already parked before the failing fetch are the ones a leak keeps.
+
+    A run that fetches PR 1 and then dies on PR 2 exits 2 without ever reaching a
+    suite, a plan or a conflict - so a cleanup wired to any of those paths misses
+    exactly the run that created a ref and asked for nothing else. Measured
+    2026-09-17 by @how2how2how2-arch on the previous revision of this fix, where the
+    fetch sat in a `try` whose `except` returned before the cleanup's `finally`:
+    `check-merge-plan-suite.py 1323 999999` reported rc 2 and left
+    `refs/emrg-plan-suite/pr1323` behind. `_fetch_heads`' own docstring names this
+    case ("a run that dies on PR 3 of 5 has created two refs"), so the promise is
+    what this test holds the code to.
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"a.md": "a\n"})
+    _publish(repo, origin, 1, "one")
+
+    assert _plan_refs(repo) == [], "the fixture started with refs the run did not make"
+
+    # #999999 does not exist, so the fetch raises after #1's ref is already there.
+    proc = _run_tool(repo, "1", "999999")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "could not measure" in proc.stderr
+    assert _plan_refs(repo) == [], "the ref fetched before the failure outlived the run"
 
 
 def _fake_run(monkeypatch, mod, stdout: str, stderr: str, rc: int) -> None:

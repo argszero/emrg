@@ -36,7 +36,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from emrg._win import win32_no_window_kwargs
-from emrg.config import LlmConfig, config_dir
+from emrg.config import LlmConfig, config_dir, resolve_model_vision
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.config_reload import (
@@ -45,7 +45,13 @@ from emrg.server.config_reload import (
     ReloadOutcome,
     describe,
 )
-from emrg.server.llm import LlmClient
+from emrg.server.llm import (
+    CONTENT_RISK,
+    CONTEXT_TOO_LONG,
+    LlmClient,
+    classify_llm_error,
+    with_content_risk_hint,
+)
 from emrg.server.git_utils import (
     _detect_git_remote,
     no_prompt_env,
@@ -2634,17 +2640,9 @@ class EmrgServer:
                     })
                     try:
                         records = session._read_history()
-                        try:
-                            summary = await self._do_compact(session, records)
-                        except RuntimeError as e:
-                            err_msg = str(e).lower()
-                            if "context" in err_msg or "too long" in err_msg or "400" in str(e):
-                                logger.warning(
-                                    "auto-compact: normal failed, trying chunked: %s", e
-                                )
-                                summary = await self._chunked_compact(records)
-                            else:
-                                raise
+                        summary = await self._compact_with_fallback(
+                            session, records, source="auto-compact",
+                        )
                         count = session.compact(summary, keep_recent=5)
                         logger.info("auto-compact done: %d messages compacted", count)
                         # Surface shrank below the anchor baseline — drop the
@@ -3798,26 +3796,28 @@ class EmrgServer:
             })
             return
 
-        # Try normal compact first; fall back to chunked on context error
+        # Try normal compact first; fall back to chunked only for a request the
+        # provider rejected as too long (see _compact_with_fallback).
         try:
-            summary = await self._do_compact(session, records)
+            summary = await self._compact_with_fallback(
+                session, records, source="compact",
+            )
         except RuntimeError as e:
-            err_msg = str(e).lower()
-            if "context" in err_msg or "too long" in err_msg or "400" in str(e):
-                logger.warning("normal compact failed, trying chunked: %s", e)
-                try:
-                    summary = await self._chunked_compact(records)
-                except Exception as e2:
-                    logger.exception("chunked compact also failed")
-                    await self._broadcast(session.session_id, {
-                        "type": "compact_result",
-                        "session_id": session.session_id,
-                        "messages_compacted": 0,
-                        "error": f"Compact failed (both normal and chunked): {e2}",
-                    })
-                    return
+            if classify_llm_error(e) == CONTENT_RISK:
+                # Rant 2026-09-17T17:55:42: a content-filter refusal is not a
+                # length problem — chunking cannot help, and the host must be
+                # told what is blocking the session instead of seeing a
+                # compact that silently fails.
+                logger.error("compact refused by the provider's content filter: %s", e)
             else:
-                raise
+                logger.exception("chunked compact also failed")
+            await self._broadcast(session.session_id, {
+                "type": "compact_result",
+                "session_id": session.session_id,
+                "messages_compacted": 0,
+                "error": with_content_risk_hint(f"Compact failed: {e}"),
+            })
+            return
 
         # Apply compact
         count = session.compact(summary, keep_recent=5)
@@ -3878,6 +3878,35 @@ class EmrgServer:
             "response_headers": self.llm.last_response_headers,
         })
         return summary
+
+    async def _compact_with_fallback(
+        self, session: Session, records: list[dict], *, source: str
+    ) -> str:
+        """Summarize history, falling back to the chunked compactor only when
+        the provider says the request was too long.
+
+        One rule, obeyed by both compact paths (auto and manual). A refusal
+        that is *not* about length is re-raised instead of being chunked:
+        the chunker re-sends the very same text, so "retrying" it is what made
+        a session permanently unusable — every request, `hi` included, came
+        back 400 while compact retried forever (rants 2026-09-17T17:55:42 and
+        2026-09-17T18:19:45). A 413 body-buffer overflow is the opposite
+        mistake and *is* a length problem (see `classify_llm_error`).
+
+        Chunked failures propagate as-is; the caller decides how to report.
+        """
+        try:
+            return await self._do_compact(session, records)
+        except RuntimeError as e:
+            kind = classify_llm_error(e)
+            if kind != CONTEXT_TOO_LONG:
+                logger.error(
+                    "%s: compact refused (%s) — not retrying through the chunker: %s",
+                    source, kind, e,
+                )
+                raise
+            logger.warning("%s: normal compact too long, trying chunked: %s", source, e)
+            return await self._chunked_compact(records)
 
     async def _chunked_compact(
         self, records: list[dict], keep_recent: int = 5
@@ -4194,19 +4223,28 @@ class EmrgServer:
         """
         old_model = self.llm.config.model
         old_ctx = self.llm.config.context_window
+        old_vision = self.llm.config.vision
 
         # Find the matching [[llm.models]] entry (if any) to resolve
         # context_window and optional model name override.
         new_ctx: int | None = None
-        new_vision: bool | None = None
         api_model: str = model_name  # default: use display name as API model
         for m in (self.llm.config.models or []):
             if m.get("name") == model_name:
                 new_ctx = m.get("context_window")
                 api_model = m.get("model", model_name)
-                if "vision" in m:
-                    new_vision = m["vision"]
                 break
+
+        # vision comes from one place, with a stated priority (rant
+        # 2026-09-17T16:53:02): the entry's own key wins, otherwise the
+        # top-level `[llm] vision]` default applies — including when the entry
+        # has no key or does not exist. What it must never do is keep the
+        # previous model's value, which is what a missing key used to mean: a
+        # non-vision model would be handed an image, and a vision model would be
+        # degraded to text, both without a word in the log.
+        new_vision, vision_source = resolve_model_vision(
+            self.llm.config.models, model_name, self.llm.config.vision_default
+        )
 
         self.llm.config.model = api_model
         if api_model != old_model:
@@ -4217,18 +4255,24 @@ class EmrgServer:
             self._invalidate_usage_anchors_on_switch()
         if new_ctx is not None:
             self.llm.config.context_window = new_ctx
-        if new_vision is not None:
-            self.llm.config.vision = new_vision
+        self.llm.config.vision = new_vision
 
         logger.info(
-            "model switched: %s → %s (api=%s, context_window: %d → %d)",
+            "model switched: %s → %s (api=%s, context_window: %d → %d, "
+            "vision: %s → %s, source: %s)",
             old_model, model_name, api_model, old_ctx, self.llm.config.context_window,
+            old_vision, self.llm.config.vision, vision_source,
         )
 
         return {
             "type": "model_set",
             "model": model_name,
             "context_window": self.llm.config.context_window,
+            # The effective value, not the declaration (rant 2026-09-17T16:53:02):
+            # a client that reads config.toml's static value reads something else
+            # than what the daemon will do with an image.
+            "vision": self.llm.config.vision,
+            "vision_source": vision_source,
             "previous": old_model,
         }
 

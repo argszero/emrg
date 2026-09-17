@@ -205,3 +205,77 @@ def test_citation_verification_row_in_both_review_templates():
     text = PROMPT.read_text(encoding="utf-8")
     assert text.count("**Citation verification** (independent spot-check)") == 2
     assert text.count("total references <T> (≥100 required), uncited entries <u>") == 2
+
+
+# --- Verification discipline (PR #1333; rant 2026-09-17T16:49:58) -------------
+#
+# The host's complaint: the editor's prompt was a skeleton (phase choice, 13-bar
+# review quality, state machine, recording) with **no method** — not one line on
+# what makes an assertion "verified". On the journal that produced the evidence
+# (silicon-science-cs, R195→R360, 165 rounds) the method existed only as a
+# session-local, git-ignored audit file, which is the shape the journal had
+# already recorded as a failure mode: a rule that governs every actor, stated
+# only in a carrier no other actor can see. These tests pin the durable carrier
+# so a later edit cannot quietly drop the method back into a skeleton.
+
+_SIX_ACTIONS = (
+    "Read a count from the tool that produces it",
+    "A copy must be as wide as the artifact it copies",
+    "A claim is a receipt",
+    "Every requirement needs a collector",
+    "A verdict binds a version, a window and a control",
+    "A state change the reader cannot see needs a named reader",
+)
+
+
+def test_verification_discipline_section_defines_the_six_actions():
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "#### Verification discipline — how a claim is discharged" in text
+    for action in _SIX_ACTIONS:
+        assert action in text, f"the section lost action: {action!r}"
+    # The diagnostic table is the half a reader applies to their own claim; the
+    # six actions are the half they follow. Both are pinned, and by row name
+    # rather than by row count, because a count survives a table that lost the
+    # mode it was written for.
+    assert "| Failure mode | Check question |" in text
+    for mode in ("| A second source of truth |", "| The reading of an absence |",
+                 "| An invisible rule |"):
+        assert mode in text, f"the failure-mode table lost: {mode!r}"
+    assert "**Read an artifact in the form it is consumed.**" in text
+
+
+def test_every_editor_phase_references_the_discipline():
+    """A section nobody is sent to is a section nobody applies.
+
+    Checked per phase rather than by counting occurrences: the count would be
+    satisfied by five mentions in one paragraph, which is exactly the shape
+    ("a requirement in the guidance layer, no collector at the step that acts")
+    the section itself is about.
+    """
+    text = PROMPT.read_text(encoding="utf-8")
+    chunks = text.split("\n#### ")
+    for heading in ("Phase A: Triage", "Phase B: Decision",
+                    "Phase C: Follow-up", "Phase D: Ops"):
+        chunk = next((c for c in chunks if c.startswith(heading)), None)
+        assert chunk is not None, f"editor {heading} is gone"
+        assert "§Verification discipline" in chunk, (
+            f"{heading} does not send the reader to the discipline section"
+        )
+
+
+def test_state_machine_defines_the_correction_label():
+    """`correction` runs in the journal while the prompt never named it."""
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "| `correction` |" in text
+    # Reopened, not closed: the clock is not the pre-publication one, which is
+    # the part a reader would otherwise assume by analogy.
+    assert "**`correction` reopens, it does not close**" in text
+    assert "no 14-day revision deadline" in text
+
+
+def test_reference_presentation_is_a_third_citation_axis():
+    """Count and authenticity do not see a bibliography that renders as a wall."""
+    text = PROMPT.read_text(encoding="utf-8")
+    assert "Check how the references are *presented*" in text
+    # Both review templates collect it, or the requirement has no slot to land in.
+    assert text.count("- **Reference presentation** (read in the rendered form)") == 2
