@@ -428,6 +428,40 @@ def test_an_uncaptured_channel_is_named_when_a_log_tail_is_reported(tmp_path):
     assert "wrote nothing to its own stderr" not in detail
 
 
+def test_the_unreadable_channel_names_the_file_it_could_not_read(tmp_path):
+    """The third state's own line, which had no test behind it.
+
+    ``elif child_err is None:`` is the only place in `_startup_failure_detail` that
+    prints the failing *path*, and deleting that branch alone left this file
+    **green** — measured on head `29722b94` by the reviewing cycle, reproduced here:
+    the cells that reach this state are asserted through the English summary, which
+    is built from ``stderr_path is None`` and the reader's value rather than from
+    ``child_section``, so the branch could go without a symptom. It is not
+    decoration: with a tail to show, the section *is* the whole report of that
+    channel, and the file's name is the actionable half.
+
+    The path is a **directory** on purpose — a path that exists and still cannot be
+    read, which is the state the reader answers ``None`` for and the one the
+    absent-file case above does not distinguish from a spelling.
+    """
+    log = tmp_path / "emrgd.log"
+    log.write_text("previous\n", encoding="utf-8")
+    mark = dm._log_mark(log)
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("this attempt: RuntimeError: bad config\n")
+    unreadable = tmp_path / "emrgd-start.err"
+    unreadable.mkdir()
+
+    class Dead:
+        returncode = 1
+
+    detail = dm._startup_failure_detail(log, mark, Dead(), unreadable)
+    assert str(unreadable) in detail, "the file that could not be read is named"
+    assert "读取失败" in detail, "and the state is named, not borrowed from silence"
+    assert "RuntimeError: bad config" in detail, "the tail is still shown beside it"
+    assert "wrote nothing to its own stderr" not in detail
+
+
 def test_a_captured_child_that_wrote_nothing_is_still_named_silent(tmp_path):
     """The other half of the same distinction: the claim survives where it is true.
 
@@ -472,6 +506,11 @@ def test_a_channel_that_cannot_be_read_is_not_called_silent(tmp_path):
         "nothing was read from that channel, so its silence cannot be claimed"
     )
     assert "could not be read" in detail
+    assert str(absent) in detail, (
+        "the path is the actionable half of this state, and both clients have to carry it: "
+        "the GUI prefixes its child section in *both* of its returns, and this one - the "
+        "return with no tail to show - kept only the sentence"
+    )
     assert "exit=9" in detail
 
     # The third state must not be bought by giving up the second: the same path,

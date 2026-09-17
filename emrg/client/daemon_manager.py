@@ -331,8 +331,14 @@ def _startup_failure_detail(
         if child_err is None
         else "the child wrote nothing to its own stderr"
     )
+    # Every return carries the section, and both clients carry it in *both* of
+    # theirs (`daemon_client.js` prefixes its `childSection` at the tail return and
+    # here). Dropping it from this one left the path out of the state where the host
+    # has nothing else to go on: with no tail to show, the readable fact was the
+    # summary sentence and the file's *name* — the actionable half — was gone.
     return (
-        f"\n  this start attempt wrote nothing to emrgd.log"
+        child_section
+        + f"\n  this start attempt wrote nothing to emrgd.log"
         f"{'' if log_path.exists() else ' (the file does not exist)'},"
         f" and {stderr_fact};"
         f" the child is {alive}. Any output earlier in the file is from a previous run."
