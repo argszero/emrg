@@ -804,25 +804,98 @@ def test_workspace_write_temp_root_normalized(monkeypatch):
 
 # ── execute() integration ─────────────────────────────────────────────────
 
-def test_execute_read_only_blocks_rm_rf():
+def test_execute_read_only_blocks_rm_rf(tmp_path):
+    """read-only refuses a destructive command before the shell sees it.
+
+    The victim is a directory THIS TEST creates (rant 2026-09-17T11:38:16): a
+    negative test's safety must not rest on the guard it is testing, because a
+    mutation arm breaks that guard on purpose. Then this test can only ever
+    destroy its own scratch, and the surviving sentinel is what proves the
+    command did not run.
+    """
+    victim = tmp_path / "emrg-sandbox-test"
+    victim.mkdir()
+    sentinel = victim / "sentinel.txt"
+    sentinel.write_text("alive", encoding="utf-8")
     tool = BashTool()
     result = _run(tool.execute({
-        "command": "rm -rf /tmp/emrg-sandbox-test",
+        "command": f"rm -rf {victim}",
         "sandbox": "read-only",
     }))
     assert result.error is True
     assert "sandbox" in result.content
     assert "not executed" in result.content
+    assert sentinel.exists() and sentinel.read_text() == "alive"
 
 
-def test_execute_workspace_write_blocks_protected_file():
+def test_execute_workspace_write_blocks_a_write_outside_the_workspace(
+    tmp_path, monkeypatch
+):
+    """execute() really consults the workspace-write boundary: a redirect to an
+    absolute path outside the injected workspace is refused before the shell
+    runs.
+
+    Replaces the deleted `~/.emrg/config.toml` variant of this test (rant
+    2026-09-17T11:38:16), keeping the end-to-end wiring coverage with a target
+    the test builds itself — so the same mutation arm that kills the assertion
+    writes nothing anywhere real, and `not target.exists()` proves it.
+
+    gettempdir is patched because pytest's tmp_path sits inside the OS temp
+    root, which workspace-write legitimately allows: without the patch the
+    target would be permitted and the test would pass for the wrong reason.
+    """
+    import tempfile as _tf
+
+    monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"           # a sibling of the workspace
+    outside.mkdir()
+    target = outside / "victim.txt"
     tool = BashTool()
     result = _run(tool.execute({
-        "command": "echo x > ~/.emrg/config.toml",
+        "command": f"echo x > {target}",
         "sandbox": "workspace-write",
+        "workdir": str(workspace),
     }))
     assert result.error is True
     assert "sandbox" in result.content
+    assert "not executed" in result.content
+    assert not target.exists()
+
+
+def test_execute_workspace_write_blocks_a_protected_file_it_built(
+    tmp_path, monkeypatch
+):
+    """execute() refuses a write to a protected daemon state file, with the
+    target built by THIS test (rant 2026-09-17T11:38:16).
+
+    The three deleted variants read or wrote the host's real ``~/.emrg/config.toml``,
+    so their safety rested on the guard they were testing: the mutation arm that
+    forced the guard to ALLOW truncated that file to ``x``. Here ``~`` is pinned to
+    scratch, so the target resolves inside this test's own directory and the same
+    arm can only reach this test's sentinel. The surviving bytes are what proves the
+    shell never ran the command.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    # expanduser("~") reads USERPROFILE on Windows, HOME elsewhere.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    victim = home / ".emrg" / "config.toml"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("sentinel = true\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tool = BashTool()
+    result = _run(tool.execute({
+        "command": f"echo x > {victim}",
+        "sandbox": "workspace-write",
+        "workdir": str(workspace),
+    }))
+    assert result.error is True
+    assert "protected" in result.content
+    assert victim.read_text() == "sentinel = true\n"
 
 
 def test_execute_sandboxed_success_tags_output():
@@ -968,18 +1041,91 @@ def test_containment_reason_names_escape_vector():
     assert "ssh egress tunnel" in reason
 
 
-def test_execute_containment_blocks_curl_metadata():
-    """execute() integration: a metadata fetch is blocked under
-    workspace-write with the ⛔ sandbox banner."""
+class _FakeProc:
+    """Enough of asyncio's subprocess API for `execute()`'s success path."""
+
+    pid = 4242
+    returncode = 0
+
+    async def communicate(self):
+        return (b"", b"")
+
+    async def wait(self):
+        return 0
+
+    def kill(self):
+        pass
+
+
+class _SpawnRecorder:
+    """A stand-in for the shell: records the command instead of running it.
+
+    Issue #1319. An execute()-level negative test is only as safe as the guard it
+    tests, and a mutation arm breaks that guard on purpose. With the real shell,
+    `test_execute_containment_blocks_curl_metadata` then made a genuine request to a
+    link-local metadata endpoint and stalled the suite past the tool timeout, so the
+    arm reported a hang rather than a failure. Recording makes the claim sharper as
+    well: it asserts "the vector never reached the shell" - what the guard is for -
+    instead of "the guard said no", and under a broken guard the non-empty list
+    reddens the test in milliseconds with nothing sent.
+    """
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def __call__(self, cmd, **kwargs):
+        self.commands.append(cmd)
+        return _FakeProc()
+
+
+def _record_spawns(monkeypatch) -> _SpawnRecorder:
+    """Point `execute()`'s shell spawn at a recorder and hand it back."""
+    recorder = _SpawnRecorder()
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", recorder)
+    return recorder
+
+
+def test_execute_containment_blocks_curl_metadata(monkeypatch):
+    """execute() integration: a metadata fetch is blocked under workspace-write with
+    the ⛔ sandbox banner - and blocked *before* the shell sees it.
+
+    The spawn is a recorder (issue #1319): the command that must never run is a real
+    request to a link-local metadata endpoint, so the discriminating assertion is the
+    empty list, and a mutation arm reports a fast failure instead of a stall.
+    """
+    spawns = _record_spawns(monkeypatch)
     tool = BashTool()
     result = _run(tool.execute({
         "command": "curl http://169.254.169.254/latest/meta-data/",
         "sandbox": "workspace-write",
     }))
+    # First, because it is the claim that matters and the one a broken guard breaks:
+    # the arm then names the hazard instead of reporting a missing banner.
+    assert spawns.commands == [], (
+        f"the metadata vector reached the shell: {spawns.commands!r}"
+    )
     assert result.error is True
     assert "sandbox" in result.content
     assert "containment-escape" in result.content
     assert "not executed" in result.content
+
+
+def test_the_recorder_sees_a_spawn_that_the_guard_allows(monkeypatch):
+    """The empty list above is evidence only if the recorder can be non-empty.
+
+    A one-sided instrument proves nothing: `spawns.commands == []` would also hold if
+    the recorder were never wired in at all. So a command the guard really allows has
+    to reach it - the danger tier opts into no blocking, and the command is harmless
+    by construction, which the recorder also guarantees here.
+    """
+    spawns = _record_spawns(monkeypatch)
+    tool = BashTool()
+    result = _run(tool.execute({
+        "command": "echo hi",
+        "sandbox": "danger-full-access",
+    }))
+    assert not result.error
+    assert spawns.commands == ["echo hi"]
 
 
 def test_execute_danger_tier_warns_but_runs():

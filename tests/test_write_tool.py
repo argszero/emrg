@@ -219,22 +219,6 @@ def test_write_workspace_write_allows_os_temp(temp_dir):
     assert not target.exists()
 
 
-def test_write_workspace_write_blocks_protected_config(temp_dir):
-    """Daemon state files (~/.emrg/config.toml) are always blocked from a
-    workspace-write session."""
-    tool = WriteTool()
-    workspace = temp_dir / "ws"
-    workspace.mkdir()
-    result = _run(tool.execute({
-        "file_path": "~/.emrg/config.toml",
-        "content": "tamper",
-        "sandbox": "workspace-write",
-        "workspace": str(workspace),
-    }))
-    assert result.error
-    assert "protected daemon file" in result.content
-
-
 def test_write_workspace_write_allows_evolution_memory(tmp_path, monkeypatch):
     """Issue #1093 self-regression: the evolution module writes its cycle records
     to ~/.emrg/evolution/.emrg/memory/, which is OUTSIDE the repo checkout
@@ -258,3 +242,37 @@ def test_write_workspace_write_allows_evolution_memory(tmp_path, monkeypatch):
     assert not result.error
     assert target.exists()
     assert target.read_text() == "cycle record"
+
+
+def test_write_workspace_write_blocks_a_protected_daemon_file(tmp_path, monkeypatch):
+    """The protected-file branch reaches THIS tool's error path — not only the
+    predicate (rant 2026-09-17T11:38:16).
+
+    The deleted variant of this test targeted the host's real ``~/.emrg/config.toml``,
+    so its safety rested on the guard it was testing: the mutation arm that breaks
+    that guard overwrote the host's file. Here ``~`` is pinned to scratch, so the
+    target is built by the test and the same arm can only reach this test's own
+    sentinel. Note the boundary does NOT block it — the OS temp root is a trusted
+    write zone, measured 2026-09-17 — so a red run here means the PROTECTED branch
+    let the write through.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    # expanduser("~") reads USERPROFILE on Windows, HOME elsewhere.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    target = home / ".emrg" / "config.toml"
+    target.parent.mkdir(parents=True)
+    target.write_text("sentinel = true\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tool = WriteTool()
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "content": "tamper",
+        "sandbox": "workspace-write",
+        "workspace": str(workspace),
+    }))
+    assert result.error
+    assert "protected daemon file" in result.content
+    assert target.read_text() == "sentinel = true\n"

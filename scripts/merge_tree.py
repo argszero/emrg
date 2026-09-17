@@ -389,6 +389,40 @@ def commit_tree(
     return proc.stdout.strip()
 
 
+def drop_ref(
+    ref: str,
+    run: Callable[..., subprocess.CompletedProcess],
+) -> subprocess.CompletedProcess:
+    """Delete a ref a gate parked for a PR head, once its commit has been read.
+
+    The family's gates fetch a PR head into a fixed `refs/<tool>/pr<N>` — forced,
+    because a re-pushed head is not a descendant of the previous one and an
+    unforced refspec is rejected, which would leave the *stale* ref answering for
+    the new head. What none of them did was remove it again: measured on the main
+    tree 2026-09-17, the four gates that run every cycle had left **105 / 83 / 40 /
+    25** refs resident (`emrg-forecast`, `emrg-merge-seq`, `emrg-tree-health`,
+    `emrg-landing-diff`), one per PR per run, each pinning that head's commits and
+    trees for the life of the clone.
+
+    Dropping the ref as soon as the caller holds the *commit*, rather than in a
+    `finally` at the end of `main()`, is what makes the removal unconditional: an
+    early `return`, a raise or a killed process cannot skip it. That distinction is
+    the defect PR #1325 fixes one tool over, where only the paths that reached the
+    verdict ran the cleanup they had.
+
+    The commit stays usable after the drop, which is why this is safe: deleting
+    objects is `gc`'s job and `gc.pruneExpire` defaults to two weeks, so a head
+    fetched seconds ago is still in the object store when `merge-tree` asks for it —
+    and it is asked by *SHA*, never by the name (a name is mutable in a way a SHA is
+    not; that is why every caller rev-parses before it measures).
+
+    Returns the process rather than judging it, and never raises: the ref is a
+    by-product of a measurement, so a tool that cannot delete it still has to report
+    the measurement. The next run's forced fetch overwrites the same name anyway.
+    """
+    return run(["git", "update-ref", "-d", ref])
+
+
 def merge_commit(
     a: str,
     b: str,
