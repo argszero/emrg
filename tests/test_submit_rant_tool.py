@@ -399,6 +399,77 @@ def test_the_list_action_returns_the_whole_message_not_a_summary(tmp_path, monke
     assert not short_header.endswith("…"), f"a message that fits needs no marker: {short_header!r}"
 
 
+def test_the_list_header_is_bounded_and_the_full_progress_follows_it(tmp_path, monkeypatch):
+    """The row is a scan view, so it is bounded — and nothing is cut on the way out.
+
+    Measured 2026-09-17 on the live queue: the one rant in flight carried a 1651-character
+    `progress` printed **in full** inside its header line, so the row a caller scans down was
+    1743 characters — the scan view was itself the bulk of the output, and the field it was
+    supposed to frame was a tenth of it. Bounded here, with the whole value following in a
+    `progress:` block, on the same rule the message already follows: an excerpt in the scan
+    view *and* the full text, never one without the other.
+
+    Both arms of the marker are asserted for `progress` as well as for the message. The
+    failure this guards is not only "the text was cut" — the block proves it was not — but
+    "the cut was not visible": a row silently showing a third of a field is indistinguishable
+    from a row showing the field, which is what made the original truncation survive as long
+    as it did.
+    """
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    progress = (
+        "Stage 1 landed; the guard half is still open\n\n"
+        "  a detail line inside the progress\n\n"
+        "and a closing line that a header excerpt removes."
+        + " progress-tail-" + "p" * 300
+    )
+    message = ("a short message, then enough filler that the marker below sits past the "
+               "excerpt's " + "f" * 80 + " message-tail-" + "m" * 300)
+    _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-09-17T09:00:00+08:00", "project": "emrg",
+         "status": "in_progress", "progress": progress, "completed": None,
+         "message": message},
+        {"timestamp": "2026-09-17T09:01:00+08:00", "project": "emrg",
+         "status": "pending", "progress": "PR #1 submitted", "completed": None,
+         "message": "short rant"},
+    ])
+    out = __import__("asyncio").run(SubmitRantTool().execute({"action": "list"})).content
+    lines = out.splitlines()
+
+    header = next(l for l in lines if l.startswith("2026-09-17T09:00:00"))
+    # (a) the row is an excerpt of both fields, not either field: neither tail is in it, and
+    #     a row that carried one of them whole would be unbounded by construction.
+    assert "progress-tail-" not in header, f"the header carries the whole progress: {len(header)} chars"
+    assert "message-tail-" not in header, f"the header carries the whole message: {len(header)} chars"
+    assert len(header) < 400, (
+        f"the header is a scan view, so it is bounded; this one is {len(header)} characters"
+    )
+    # (b) both arms of the marker, on the progress field as well as on the message.
+    assert "progress=Stage 1 landed; the guard half is still open" in header
+    assert "progress=Stage 1 landed; the guard half is still open\n" not in header + "\n"
+    assert "… | completed=None" in header, f"a cut progress must say so: {header!r}"
+    short_header = next(l for l in lines if l.startswith("2026-09-17T09:01:00"))
+    assert "progress=PR #1 submitted |" in short_header, short_header
+    assert "…" not in short_header.split(" | ")[3], f"a progress that fits needs no marker: {short_header!r}"
+
+    # (c) the full progress arrives, in its own block, line for line — read back off the
+    #     output rather than searched for, because the block is indented and the value is
+    #     therefore never one literal run of characters in the output.
+    start = lines.index(header)
+    assert lines[start + 1].startswith("    "), "the message block follows the header"
+    label = next(i for i in range(start + 1, len(lines)) if lines[i] == "    progress:")
+    progress_block: list[str] = []
+    for line in lines[label + 1:]:
+        if line and not line.startswith("      "):  # the block's own indent; a header ends it
+            break
+        progress_block.append(line[6:] if line else "")
+    assert "\n".join(progress_block) == progress, (
+        "the whole progress has to arrive, line for line; the row above shows an excerpt of it"
+    )
+    assert "progress-tail-" + "p" * 300 in out, "the tail of the progress is what a header cut removes"
+    # (d) the message is not the casualty of the space the progress block takes.
+    assert "message-tail-" + "m" * 300 in out, "the message still arrives whole"
+
+
 def test_tool_list_action(tmp_path, monkeypatch):
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     tool = SubmitRantTool()

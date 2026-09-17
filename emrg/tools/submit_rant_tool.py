@@ -35,10 +35,30 @@ def _indented(message: str, indent: str = "    ") -> str:
     The line breaks are kept rather than flattened: a rant body is written as prose with
     its own structure (the host's own words in quotes, then the demand), and a summary of
     it is what this tool used to return — 100 characters of 3504 on the rant measured
-    2026-09-17. Empty lines are indented too, which keeps the block visibly contiguous
-    instead of letting it run into the next rant's header.
+    2026-09-17. An **empty line stays empty** (no indent, so no trailing whitespace): it
+    cannot run into the next rant's header, which starts at column 0 with a timestamp, and
+    a reader who treats a blank line as the end of a paragraph inside a block is reading it
+    the way the rant was written.
     """
     return "\n".join(indent + line if line else indent.rstrip() for line in message.splitlines())
+
+
+#: How much of a one-line field the **header** may carry, in characters. The header is the
+#: scan view — the row a caller looks down to find a timestamp — so it is bounded, and the
+#: full text follows as a block below it. Measured 2026-09-17: with `progress` printed in
+#: full the header of the one rant in flight was **1743** characters, i.e. the scan view was
+#: the longest line in the output and the thing it was supposed to be a view of.
+_HEADER_EXCERPT = 100
+
+
+def _excerpt(text: str, limit: int = _HEADER_EXCERPT) -> str:
+    """`text`, cut to `limit` characters and **marked** with `…` when anything was removed.
+
+    The marker is the half that carries the information: a caller that cannot see the marker
+    cannot tell an excerpt from the whole field, which is the silent half of the defect this
+    action was fixed for. Both arms are asserted where this is used.
+    """
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 class SubmitRantTool(ToolExecutor):
@@ -63,9 +83,11 @@ class SubmitRantTool(ToolExecutor):
                 "clarify the target and polish the text, show the user the "
                 "result, and only then call. "
                 "**action=list**: list rants (optional status/project filters; "
-                "returns timestamp/project/status/progress/completed, then the "
-                "rant's message in full — the read path the task templates "
-                "point at, so it has to carry the text they point it at for). "
+                "each row carries timestamp/project/status/a progress excerpt/"
+                "completed and a message excerpt — the scan view — and the full "
+                "message and progress follow as indented blocks under it. It is "
+                "the read path the task templates point at, so it has to carry "
+                "the text they point it at for). "
                 "**action=update**: update a rant by its timestamp (status "
                 "follows the pending→in_progress→completed state machine, no "
                 "skipping; completed timestamp auto-written). "
@@ -277,20 +299,31 @@ class SubmitRantTool(ToolExecutor):
         # the pending/in-progress ones; messages 3504 / 4031 / 3594 … chars): the whole
         # queue goes 15300 → 42725 characters, and `status="in_progress"` alone is 5544.
         # The filters are the way to narrow it; the header line is still the scan view.
+        #
+        # `progress` is bounded in the header too, and for the same reason it is *not*
+        # dropped there: it is a one-line field of the row (the prompt curates with it), but
+        # printed whole it **was** the row — 1651 of that 1743-character header on the rant
+        # in flight. So the row keeps an excerpt, and the whole value follows in a `progress:`
+        # block after the message, exactly as the message does. Nothing is cut: an excerpt in
+        # the scan view plus the full text in a block, never one without the other.
         lines = []
         for r in rants:
             message = (r.get("message") or "").strip()
-            flat = " ".join(message.split())
-            summary = flat[:100] + ("…" if len(flat) > 100 else "")
+            progress = (r.get("progress") or "").strip()
+            summary = _excerpt(" ".join(message.split()))
+            progress_row = _excerpt(" ".join(progress.split()))
             lines.append(
                 f"{r.get('timestamp')} | {r.get('project')} | "
-                f"status={r.get('status')} | progress={r.get('progress')} | "
+                f"status={r.get('status')} | progress={progress_row} | "
                 f"completed={r.get('completed')} | {summary}"
             )
             lines.append(
                 _indented(message) if message
                 else "    (this rant has no message)"
             )
+            if progress:
+                lines.append("    progress:")
+                lines.append(_indented(progress, "      "))
         return ToolResult(
             name="submit_rant",
             content=f"{len(rants)} rant(s):\n" + "\n".join(lines),
