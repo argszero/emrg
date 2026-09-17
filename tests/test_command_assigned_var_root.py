@@ -48,10 +48,30 @@ Every case is driven through ``_check_sandbox`` — the guard's own entry point,
 the tier where the question is asked. Nothing here is executed, and no case names
 a file that will be written: a test whose safety depended on the guard working
 would stop being a test the moment the guard broke.
+
+**Every case must be answered the same way on every host, and the first version of
+this file was not.** Green locally, it failed both CI legs, each for its own
+reason — the two host spellings a verdict can accidentally be made of:
+
+  - ``/tmp`` was the moved-out case's destination. It is outside the workspace on
+    macOS, where the case was written, and on Linux it *is*
+    ``tempfile.gettempdir()`` — an allowed write root — so the case never reached
+    the moved-out check and measured the temp-area allowance instead. Replaced by
+    ``OUTSIDE``, derived, with its membership in no allowed root asserted as a
+    premise (``test_the_outside_directory_is_taken_as_moved_out``); the same
+    condition replays locally under ``TMPDIR=/tmp``.
+  - the absolute row interpolated ``WORKSPACE`` as the host spells it, so on
+    Windows it carried a drive letter and a backslash: ``:`` is outside the value
+    charset, and a backslash is shlex's escape character (issue #1261), which is
+    why a whole row can be decidable on one platform and refused on another.
+    Every path this file composes now goes through ``spelled``, and the absolute
+    case asserts itself where the charset admits its spelling — skipping, with a
+    measured reason, where it does not.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -59,9 +79,14 @@ import pytest
 from emrg.tools.bash_tool import (
     _assigned_value_is_decidable,
     _check_sandbox,
+    _cwd_left_workspace,
+    _is_absolute_path,
+    _is_within,
     _resolve_target_from_command_assignment,
     _split_command_statements,
     _split_command_tokens,
+    _temp_write_roots,
+    _trusted_write_zones,
 )
 
 WW = "workspace-write"
@@ -72,14 +97,44 @@ WORKSPACE = str(Path(__file__).resolve().parent.parent)
 # A scratch path inside the workspace. It need not exist: no case writes, and the
 # membership rule is a name comparison.
 SCRATCH = ".emrg/sessions/emrg-evolution-emrg-task/tmp"
+# A directory outside the workspace that is also outside every *allowed write
+# root* (the temp area and the trusted data roots) — the premise the moved-out
+# case rests on, asserted in `test_the_outside_directory_is_taken_as_moved_out`.
+#
+# `/tmp` is not that directory, and reading it as one is how this file shipped a
+# platform-dependent verdict (issue #1316's PR): it is outside the workspace on
+# macOS, where the case was written and measured, but on Linux it *is*
+# `tempfile.gettempdir()` — an allowed write root — so `cd /tmp && …` never
+# reached the moved-out check at all and the case measured the temp-area
+# allowance instead. Green locally, red on the ubuntu leg of CI.
+OUTSIDE = os.path.join(
+    os.path.expanduser("~"), "Documents", "emrg-var-root-outside")
+
+
+def spelled(path: str) -> str:
+    """The path as a command line spells it (forward slashes).
+
+    The guard reads commands from a POSIX-style token stream, where a backslash
+    is an escape character, so a Windows spelling `C:\\Users\\x` reaches it as
+    `C:Usersx` — a name that is not absolute at all (issue #1261). Every path this
+    file interpolates into a command goes through here, or the case stops being a
+    test of the rule and becomes a test of that separate defect: the absolute row
+    of the resolvable matrix was written with the raw workspace path and failed on
+    the windows leg for exactly that reason.
+    """
+    return path.replace(os.sep, "/") if os.sep != "/" else path
 
 MAY_RESOLVE = [
     f"T={SCRATCH} && cat > \"$T/c.md\"",
-    f"T={WORKSPACE}/{SCRATCH} && cat > \"$T/c.md\"",
     f"T={SCRATCH}\necho x > \"$T/c.md\"",
     f"T={SCRATCH}; echo x > \"$T/c.md\"",
     f"T={SCRATCH} && cat > \"${{T}}/c.md\"",
 ]
+# An *absolute* resolvable value is asserted separately
+# (`test_an_absolute_value_resolves_where_the_charset_admits_the_spelling`): the
+# only absolute spelling the value charset admits is a POSIX one, so a row here
+# would have made the matrix platform-dependent in the other direction — it is
+# the row that failed on the windows leg.
 
 # (command, why the shell does not put the write where the path spells it)
 MUST_STAY_REFUSED = [
@@ -103,7 +158,7 @@ MUST_STAY_REFUSED = [
      "a literal absolute outside the workspace"),
     ('T=.emrg/tmp && sh -c \'cat > "$T/f"\'',
      "unexported: the nested shell expands it to nothing"),
-    ('cd /tmp && T=.emrg/tmp && cat > "$T/f"',
+    (f'cd {spelled(OUTSIDE)} && T={SCRATCH} && cat > "$T/f"',
      "the moved-out check must still run"),
     ('cat > "$T/f"; T=.emrg/tmp',
      "the assignment comes after the write site"),
@@ -151,6 +206,55 @@ def test_every_other_shape_keeps_its_refusal(cmd: str, why: str) -> None:
 def test_the_rules_own_boundaries_are_unchanged(cmd: str, why: str) -> None:
     allowed, reason, _enforcement = _check_sandbox(cmd, WW, WORKSPACE)
     assert allowed, (cmd, why, reason)
+
+
+def test_the_outside_directory_is_taken_as_moved_out() -> None:
+    """The premise of the moved-out row, asserted instead of assumed.
+
+    That row claims "a `cd` out of the workspace keeps the refusal", and it can
+    only claim it from a destination no allowed write root covers: a destination
+    inside one is allowed *by the boundary's own rule*, so the refusal never
+    happens and the row measures nothing. That is not hypothetical — it is what
+    `/tmp` did on Linux, where it is `tempfile.gettempdir()`. Asserting the
+    structural facts here means a host whose layout makes this destination
+    writable fails loudly in a test that names the reason, rather than in a
+    parametrized row whose failure looks like a guard regression.
+    """
+    assert _is_absolute_path(spelled(OUTSIDE))
+    assert not _is_within(OUTSIDE, WORKSPACE)
+    roots = [r for group in (_temp_write_roots(), _trusted_write_zones()) for r in group]
+    assert not any(_is_within(OUTSIDE, r) or os.path.realpath(r) == os.path.realpath(OUTSIDE)
+                   for r in roots), f"{OUTSIDE!r} is inside an allowed write root: {roots}"
+    cmd = f"cd {spelled(OUTSIDE)} && T={SCRATCH} && cat > \"$T/f\""
+    assert _cwd_left_workspace(cmd, WORKSPACE) is not None, cmd
+
+
+def test_an_absolute_value_resolves_where_the_charset_admits_the_spelling() -> None:
+    """The absolute half of the matrix, on the platform whose spelling is decidable.
+
+    The value charset (`_ASSIGNED_LITERAL_VALUE_RE`) is POSIX-shaped: it has no
+    `:` in it, so `T=D:/a/ws && …` is a value the rule will not use however
+    absolute it plainly is, and a backslash spelling never reaches the guard as
+    one word at all (issue #1261). On Windows, #1316's false block therefore
+    survives for absolute values — a limitation of this rule, not of this test,
+    and recorded as an issue rather than papered over.
+
+    The skip is tied to its cause, not to the platform: it disappears by itself
+    if the charset ever admits a drive letter, and the case then asserts the
+    Windows verdict too. `test_why_the_absolute_case_is_posix_only` holds the
+    cause on every platform, so the skip cannot outlive it silently.
+    """
+    cmd = f'T={spelled(WORKSPACE)}/{SCRATCH} && cat > "$T/c.md"'
+    if not _assigned_value_is_decidable(f"{spelled(WORKSPACE)}/{SCRATCH}"):
+        pytest.skip(f"the value charset does not admit this spelling: {cmd}")
+    allowed, reason, _enforcement = _check_sandbox(cmd, WW, WORKSPACE)
+    assert allowed, (cmd, reason)
+
+
+def test_why_the_absolute_case_is_posix_only() -> None:
+    """The skip's cause, as a predicate that measures the same on every host."""
+    assert _assigned_value_is_decidable("/tmp/emrg-ws") is True
+    assert _assigned_value_is_decidable("D:/emrg-ws") is False
 
 
 def test_the_inline_prefix_and_the_earlier_statement_differ() -> None:
