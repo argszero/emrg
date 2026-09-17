@@ -743,6 +743,68 @@ def test_compact_fallback_passes_through_a_success():
     assert calls == []
 
 
+# ── _adaptive_chunk_summarize: the split decision is the classifier's ──
+#
+# The chunker used to carry its own two-spelling list, so a marker the
+# classifier knew about was invisible two frames deeper (issue #1336). It now
+# asks `is_overlong_error`; these pin both directions, because "splits on a
+# length error" without "does not split on a refusal" would re-open the loop
+# that made a poisoned session unusable (rant 2026-09-17T17:55:42).
+
+
+def _two_records() -> list[dict]:
+    return [
+        {"type": "message", "role": "user", "content": "a"},
+        {"type": "message", "role": "assistant", "content": "b"},
+    ]
+
+
+def _chunker_server(first_error: str):
+    """A server whose chunker's **first** summarise call fails with
+    `first_error` and whose later calls succeed, recording every prompt."""
+    server = _make_server()
+    prompts: list[str] = []
+
+    async def _chat(messages, tools=None):
+        prompts.append(messages[0]["content"])
+        if len(prompts) == 1:
+            raise RuntimeError(first_error)
+        return {"content": "part"}
+
+    server.llm.chat = _chat
+    return server, prompts
+
+
+def test_the_chunker_splits_on_a_wording_only_the_classifier_knew():
+    """`prompt is too long` is in the classifier's marker list and was **not**
+    in the chunker's inline list — this is the drift the change removes: the
+    same failure used to be chunkable at one gate and fatal one frame deeper.
+    """
+    server, prompts = _chunker_server(
+        "LLM request failed: 400 headers={} body=the prompt is too long for this model"
+    )
+    out = asyncio.run(server._adaptive_chunk_summarize(_two_records(), 0))
+    # The split happened: 1 refused call + the two halves (one record each)
+    # + the merge = 4. Measured, not computed from the code's intent.
+    assert len(prompts) == 4, prompts
+    assert out  # a merged summary came back rather than an exception
+
+
+def test_the_chunker_never_splits_a_content_refusal():
+    """Negative control, and the one that matters: a refusal must propagate
+    even when its text also carries a length marker — otherwise the chunker
+    re-sends the very text the filter rejected, into every depth of the
+    recursion (the loop that locked a session out)."""
+    server, prompts = _chunker_server(
+        'LLM request failed: 400 headers={} body={"error":{"message":'
+        '"Content Exists Risk: the prompt is too long","type":"invalid_request_error"}}'
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(server._adaptive_chunk_summarize(_two_records(), 0))
+    assert len(prompts) == 1, "the chunker re-sent a refused request"
+    assert classify_llm_error(excinfo.value) == CONTENT_RISK
+
+
 class _FakeWs:
     """Minimal subscriber: records what the daemon sends it."""
 
