@@ -272,6 +272,39 @@ def test_a_list_argv_is_not_shell_dropped(token_normaliser):
     assert token_normaliser("sto\\p", shell_parsed=True) == "stop"
 
 
+def test_a_windows_spelled_argv_is_judged_as_windows_would_judge_it(daemon_spawn_refusal):
+    """The windows-2025 failure of run 35287972569, pinned on any host.
+
+    The revision before this one confined the drop rule to shell-parsed tokens and
+    stopped there, so a shell-parsed token was still read **one way only**. A string
+    argv goes to a shell (`shell=True`), and a token in it may be a Windows path
+    whose separators `cmd.exe` does not delete: the drop turned `C:\\ws\\bin\\pkill`
+    into `C:wsbinpkill`, the basename stopped being `pkill`, the signaller check
+    missed, and the corpus above really spawned the stub it names (`OSError:
+    [WinError 193] %1 is not a valid Win32 application`; 1 failed / 2939 passed on
+    that leg).
+
+    The root cause is wider than the drop rule: `Path(...).name` is the *host's*
+    basename, so the same argv was judged differently depending on which machine
+    read it. The guard now asks both path flavours (`PurePosixPath` /
+    `PureWindowsPath`) of every reading, which makes this test classify the Windows
+    spelling exactly as the Windows leg does, wherever it runs.
+    """
+    win_bin = "C:\\ws\\bin"
+
+    # a string argv is shell-parsed (`shell=True`) and its program is a Windows path
+    assert daemon_spawn_refusal(f"{win_bin}\\pkill -f 'python -m emrg'") is True
+    # the same act one level in, and a wrapper handing the program over
+    assert daemon_spawn_refusal([f"{win_bin}\\sh", "-c", f"{win_bin}\\emrg server stop"]) is True
+    assert daemon_spawn_refusal([f"{win_bin}\\env", f"{win_bin}\\emrg", "stop"]) is True
+    assert daemon_spawn_refusal([f"{win_bin}\\emrg", "server", "restart"]) is True
+
+    # the mirror direction: a Windows path that is not the program stays allowed, so
+    # "read both flavours" is not simply "refuse anything with a backslash"
+    assert daemon_spawn_refusal([f"{win_bin}\\emrg-notes.txt", "server", "stop"]) is False
+    assert daemon_spawn_refusal(f"{win_bin}\\pytest -q tests/") is False
+
+
 def test_an_emrg_named_path_costs_a_false_refusal(tmp_path, daemon_spawn_refusal):
     """The mirror direction: an `emrg` basename in *any* position can make a verb decisive.
 

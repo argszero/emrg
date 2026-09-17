@@ -23,7 +23,7 @@ immediately instead of the pollution being discovered later (precedent:
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -400,6 +400,49 @@ def _normalise_token(token: str, *, shell_parsed: bool = False) -> str:
     return stripped
 
 
+def _token_readings(token: str, *, shell_parsed: bool = False) -> tuple[str, ...]:
+    """Every spelling of this token a shell/platform might really hand over.
+
+    `_normalise_token` answers "what does the *shell* make of this token"; that is
+    the right answer only where a shell is, and only on a platform whose shell
+    does the deleting. The windows-2025 leg of run 35287972569 is the report for
+    treating it as universal: a string argv (`shell=True`) naming a Windows path —
+    `C:\\ws\\bin\\pkill -f 'python -m emrg'` — is *shell-parsed*, and the drop rule
+    then deleted the path separators inside `tokens[0]`, whose basename stopped
+    being `pkill`. The signaller check missed, the guard allowed, and the corpus
+    spawned its stub (`OSError: [WinError 193]`). `cmd.exe` does not delete a
+    backslash; `sh` does. Neither reading is wrong — the mistake was picking one.
+
+    So a token is judged under **every** reading, and the guard refuses if any of
+    them is the act (the bias below). A list argv has exactly one reading, because
+    nothing drops anything before exec/CreateProcess.
+    """
+    literal = _normalise_token(token, shell_parsed=False)
+    if not shell_parsed:
+        return (literal,)
+    dropped = _normalise_token(token, shell_parsed=True)
+    return (literal,) if dropped == literal else (literal, dropped)
+
+
+def _basenames(token: str, *, shell_parsed: bool = False) -> tuple[str, ...]:
+    """The program names this token could be, under either path flavour.
+
+    `Path(...).name` is the *host's* basename, which is what made the verdict
+    depend on which machine evaluated it: `C:\\ws\\bin\\emrg` has the basename
+    `emrg` to `ntpath` and the whole string to `posixpath`. The guard's question is
+    about the shape of an argv, so both flavours are asked and a match on either
+    refuses. On POSIX this widens nothing that a test writes (a backslash in a
+    *list* argv token is a filename character there); on Windows it is the flavour
+    that was already in force, now visible to a control that runs on any host.
+    """
+    names: list[str] = []
+    for reading in _token_readings(token, shell_parsed=shell_parsed):
+        for name in (PurePosixPath(reading).name, PureWindowsPath(reading).name):
+            if name not in names:
+                names.append(name)
+    return tuple(names)
+
+
 def _emrg_entry_index(tokens, *, shell_parsed: bool = False) -> int:
     """Where in this argv the emrg program itself would be run, or -1.
 
@@ -433,7 +476,7 @@ def _emrg_entry_index(tokens, *, shell_parsed: bool = False) -> int:
     they are pinned in `tests/test_hermeticity_guard.py`.
     """
     for i, token in enumerate(tokens):
-        if Path(_normalise_token(token, shell_parsed=shell_parsed)).name in _EMRG_PROGRAMS:
+        if any(name in _EMRG_PROGRAMS for name in _basenames(token, shell_parsed=shell_parsed)):
             return i
         if token == "-m" and tokens[i + 1 : i + 2] in (["emrg"], ["emrg.server"]):
             return i + 1
@@ -502,6 +545,18 @@ def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False) -> boo
     (`OSError: [WinError 193] %1 is not a valid Win32 application`, and "the known
     cost narrowed" on the `git -C … log --grep restart` row).
     `test_a_list_argv_is_not_shell_dropped` pins the rule on any host.
+
+    **No single reading is treated as *the* reading** (`_token_readings`,
+    `_basenames`): the confirmation that no shell is involved is not the same as
+    knowing which shell *is*, so a shell-parsed token is judged both as the shell
+    would hand it over and as exec/CreateProcess would receive it, and a token is
+    compared under both path flavours. That is the second windows-2025 report
+    (run 35287972569): with the drop applied to the only reading, a *string* argv
+    naming a Windows path had its separators deleted inside `tokens[0]`, so
+    `C:\\ws\\bin\\pkill -f 'python -m emrg'` stopped being a signaller and the stub
+    it named was really executed. The guard refuses if *any* reading is the act,
+    which is the bias this function already documents — with two readings there is
+    no longer a guess to bias against.
     """
     if isinstance(args, bytes):
         args = args.decode("utf-8", "replace")
@@ -519,7 +574,7 @@ def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False) -> boo
     if not tokens:
         return False
 
-    if Path(_normalise_token(tokens[0], shell_parsed=shell_parsed)).name in _SHELLS:
+    if any(name in _SHELLS for name in _basenames(tokens[0], shell_parsed=shell_parsed)):
         # `sh -c <line>` / `bash -lc <line>`: what runs is the line, so decide on
         # what the line would run — one *simple command* at a time, because a line
         # is a pipeline of them and only one of them may be the act. Splitting on
@@ -537,7 +592,7 @@ def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False) -> boo
 
     for i, token in enumerate(tokens):
         if (
-            Path(_normalise_token(token, shell_parsed=shell_parsed)).name in _SIGNALLERS
+            any(name in _SIGNALLERS for name in _basenames(token, shell_parsed=shell_parsed))
             and "emrg" in " ".join(tokens[i + 1 :]).lower()
         ):
             return True
@@ -546,8 +601,9 @@ def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False) -> boo
     if entry < 0:
         return False
     return any(
-        _normalise_token(token, shell_parsed=shell_parsed) in _STOP_VERBS
+        reading in _STOP_VERBS
         for token in tokens[entry + 1 :]
+        for reading in _token_readings(token, shell_parsed=shell_parsed)
     )
 
 
