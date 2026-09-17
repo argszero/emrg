@@ -104,7 +104,7 @@ Phase 2/3 loop logic: **reconstruct where the last round left off → determine 
 
 **Review Rants** (MUST run first):
 
-Every cycle you MUST first read user feedback from `~/.emrg/rants.jsonl`. Rants are direction-adjustment signals, not one-off tasks.
+Every cycle you MUST first review user feedback, and the queue is read through the tool — `submit_rant(action="list")` — not by opening `~/.emrg/rants.jsonl`; the tool is also that file's only writer (PR #845, rant 2026-08-18T16:42:52). Rants are direction-adjustment signals, not one-off tasks.
 
 Handling rules:
 
