@@ -2547,6 +2547,15 @@ class EmrgServer:
         # tool set for it.
         force_ask = False
         round_num = 1
+        # Issue #1336 (item 2), rant 2026-09-17T18:19:45: a round the provider
+        # rejected for *body length* — a proxy 413 the local estimate never
+        # predicted — used to surface as `LLM error: ...` and end the turn, so a
+        # session whose body had grown past a gateway limit could only grow (the
+        # deepseek-harness task: ~179 cycles with no output, request body 7.06
+        # MB). One budget for the whole turn: shrink the session and re-send the
+        # SAME round once. Bounded deliberately — a retry that also fails has to
+        # report, not loop.
+        overlong_retries_left = 1
         while True:
             if round_num > self._max_tool_rounds:
                 # P1 (rant 21:55:37): round budget exhausted but messages
@@ -2730,6 +2739,38 @@ class EmrgServer:
                 return
             except Exception as e:
                 logger.exception("LLM stream error in round %d", round_num)
+                # Request-level shrink-and-retry (issue #1336, item 2). Two
+                # conditions, both factual rather than cautious:
+                #   * nothing was streamed yet — re-sending a round whose partial
+                #     text already reached the client would show that text twice,
+                #     and a half-executed tool call is worse than a retry;
+                #   * the budget is per turn, so the retry cannot loop.
+                if (
+                    overlong_retries_left > 0
+                    and not content_parts
+                    and not tc_by_index
+                    and is_overlong_error(e)
+                ):
+                    overlong_retries_left -= 1
+                    shrunk = await self._shrink_for_overlong_retry(
+                        session, system_prompt, source="overlong-retry",
+                    )
+                    if shrunk is not None:
+                        messages, compacted = shrunk
+                        logger.warning(
+                            "round %d: the provider rejected the request as overlong "
+                            "(%s) — compacted %d message(s), re-sending the round once",
+                            round_num, type(e).__name__, compacted,
+                        )
+                        await self._broadcast(session.session_id, {
+                            "type": "compact_result",
+                            "session_id": session.session_id,
+                            "messages_compacted": compacted,
+                            "summary": "Context was too long for the provider "
+                                       "(request rejected) — compacted and retrying.",
+                            "auto": True,
+                        })
+                        continue
                 await self._broadcast(session.session_id, {
                     "error": f"LLM error: {e}. Check config at ~/.emrg/config.toml",
                 })
@@ -3909,6 +3950,56 @@ class EmrgServer:
                 raise
             logger.warning("%s: normal compact too long, trying chunked: %s", source, e)
             return await self._chunked_compact(records)
+
+    async def _shrink_for_overlong_retry(
+        self, session: Session, system_prompt: str, *, source: str
+    ) -> tuple[list[dict], int] | None:
+        """Compact a session the provider rejected for body length, and rebuild
+        the round's message list from the result.
+
+        The remedy for "the request did not fit" is the one the auto-compact gate
+        already applies: summarize through :meth:`_compact_with_fallback` — the
+        only path that knows how to degrade to the chunker — then re-send the
+        round from the compacted history. Issue #1336 (item 2): before this, the
+        tool loop had no such remedy at all, so a turn rejected at request level
+        was simply over, however published the session's bytes were.
+
+        Returns ``(messages, compacted_count)``, or ``None`` when the session
+        could not be shrunk — the caller then reports the provider's own error
+        rather than swallowing it, which is the honest outcome of a failed
+        remedy.
+
+        The rebuilt list is ``system + history``, taken from the session rather
+        than from the round's local list because the loop persists every
+        assistant message and tool result as it goes: the history *is* the
+        conversation, already compacted, and this keeps the byte-stable system
+        prefix first (prompt-cache). The current turn's images are the one thing
+        the rebuild does not carry in multimodal form — the record keeps the
+        reference, so a re-send is text-only. A stranding 413 costs the whole
+        turn; that is the trade taken here.
+        """
+        try:
+            summary = await self._compact_with_fallback(
+                session, session._read_history(), source=source,
+            )
+            compacted = session.compact(summary, keep_recent=5)
+        except Exception:
+            logger.exception("%s: the session could not be shrunk", source)
+            return None
+        # The surface just shrank below the usage anchor's baseline: drop the
+        # stale anchor (the next round re-anchors from a fresh estimate) and
+        # remember the drop was intentional, so the next round is not warned
+        # about a "missing" anchor it will legitimately not have. Same
+        # bookkeeping the auto-compact gate does (rants 2026-08-23T13:28:50,
+        # 2026-08-24T02:06:34).
+        self._usage_anchors.pop(session.session_id, None)
+        self._usage_anchor_dropped_by_compact.add(session.session_id)
+        messages: list[dict] = [
+            {"role": "system", "content": system_prompt},
+            *session.get_messages_for_llm(),
+        ]
+        self._inject_context_message(session, messages)
+        return messages, compacted
 
     async def _chunked_compact(
         self, records: list[dict], keep_recent: int = 5
