@@ -336,6 +336,69 @@ def test_cleanup_rants_keeps_pending_plus_10_completed(tmp_path):
     assert timestamps == sorted(timestamps)
 
 
+def test_the_list_action_returns_the_whole_message_not_a_summary(tmp_path, monkeypatch):
+    """The message IS the rant, so a 100-character excerpt is not a reading of it.
+
+    Measured 2026-09-17: the only rant in flight had a **3504**-character message and
+    `action=list` showed its first 100 — 97% dropped by the very path the task templates
+    route every read through (`paper_prompt.md` says to check the queue with
+    `submit_rant(action="list")` and that there is no reason to open the file at all,
+    "not even to read it"; `promote_prompt.md` deduplicates against the same call). A read
+    path that cannot deliver the text is not a read path — and the failure is silent: the
+    caller sees a plausible sentence and never learns the rest existed.
+
+    Asserted on the *tail* of the message and on an interior line, because those are what
+    a truncation at the front removes: a substring taken from the beginning passes under
+    `[:100]` and would have made this test green over the defect it exists for.
+
+    The fixture is synthetic and deliberately shaped like the real one (multi-paragraph
+    body, long tail) — it quotes no host and names no real rant.
+    """
+    monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
+    message = (
+        "line one of the rant, the part a summary keeps\n\n"
+        "  an indented detail line\n\n"
+        "a third paragraph, which a 100-character cut removes entirely along with"
+        " the rest of the message."
+        + " tail-marker-" + "z" * 300
+    )
+    _write_rant_lines(tmp_path, [
+        {"timestamp": "2026-09-17T09:00:00+08:00", "project": "emrg",
+         "status": "pending", "progress": None, "completed": None,
+         "message": message},
+        {"timestamp": "2026-09-17T09:01:00+08:00", "project": "emrg",
+         "status": "pending", "progress": None, "completed": None,
+         "message": "short rant"},
+    ])
+    tool = SubmitRantTool()
+    out = __import__("asyncio").run(tool.execute({"action": "list"})).content
+
+    # Read the message back off the output instead of searching for the raw string: the
+    # block is indented under its header line, so the message is present line by line and
+    # never as one literal run of characters. Comparing the whole block is also what makes
+    # the assertion about *all* of the text — a `in out` check on the head of the message
+    # passes under the truncation this test exists for.
+    lines = out.splitlines()
+    start = next(i for i, l in enumerate(lines) if l.startswith("2026-09-17T09:00:00"))
+    block: list[str] = []
+    for line in lines[start + 1:]:
+        if line.startswith("2026-09-17T09:01:00"):  # the next header ends this rant's block
+            break
+        block.append(line[4:] if line.startswith("    ") else line)
+    assert "\n".join(block) == message, (
+        "the whole message has to arrive, line for line; a caller that gets a "
+        "100-character excerpt cannot decide the rant's relevance"
+    )
+    assert "tail-marker-" + "z" * 300 in out, "the tail of a long message is the part truncation eats"
+    assert "short rant" in out
+    # The header line is the scan view: it says it is an excerpt rather than pretending
+    # to be the text. Both arms, so the marker cannot be unconditional.
+    header = next(line for line in lines if line.startswith("2026-09-17T09:00:00"))
+    assert header.endswith("…"), f"a truncated header must say so: {header[-60:]!r}"
+    short_header = next(line for line in lines if line.startswith("2026-09-17T09:01:00"))
+    assert not short_header.endswith("…"), f"a message that fits needs no marker: {short_header!r}"
+
+
 def test_tool_list_action(tmp_path, monkeypatch):
     monkeypatch.setattr("emrg.config.config_dir", lambda: tmp_path)
     tool = SubmitRantTool()

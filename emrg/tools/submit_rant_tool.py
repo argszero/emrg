@@ -29,6 +29,18 @@ from emrg.tools.base import ToolExecutor
 _ACTIONS = ("submit", "list", "update", "cleanup")
 
 
+def _indented(message: str, indent: str = "    ") -> str:
+    """`message` with every line indented, so it reads as belonging to its header line.
+
+    The line breaks are kept rather than flattened: a rant body is written as prose with
+    its own structure (the host's own words in quotes, then the demand), and a summary of
+    it is what this tool used to return — 100 characters of 3504 on the rant measured
+    2026-09-17. Empty lines are indented too, which keeps the block visibly contiguous
+    instead of letting it run into the next rant's header.
+    """
+    return "\n".join(indent + line if line else indent.rstrip() for line in message.splitlines())
+
+
 class SubmitRantTool(ToolExecutor):
     """Submit a user-confirmed rant / list / update / cleanup rants.jsonl.
 
@@ -51,8 +63,9 @@ class SubmitRantTool(ToolExecutor):
                 "clarify the target and polish the text, show the user the "
                 "result, and only then call. "
                 "**action=list**: list rants (optional status/project filters; "
-                "returns timestamp/project/status/progress/completed + message "
-                "summary). "
+                "returns timestamp/project/status/progress/completed, then the "
+                "rant's message in full — the read path the task templates "
+                "point at, so it has to carry the text they point it at for). "
                 "**action=update**: update a rant by its timestamp (status "
                 "follows the pending→in_progress→completed state machine, no "
                 "skipping; completed timestamp auto-written). "
@@ -250,13 +263,33 @@ class SubmitRantTool(ToolExecutor):
                     + (f" (project={project})" if project else "")
                 ),
             )
+        # The message is the rant: `[…][:100]` used to be all of it that this action
+        # showed, and that was measured to be 100 of 3504 characters on the one rant in
+        # flight when it was looked at (2026-09-17) — 97% of the feedback dropped by the
+        # very path the task templates now route every read through (`paper_prompt.md`
+        # says to check the queue with `submit_rant(action="list")` and that there is no
+        # reason to open the file at all, "not even to read it"). A read path that cannot
+        # deliver the text is not a read path; the header line stays for scanning, and the
+        # message follows it whole — a cap here would be the same defect with a larger
+        # number in it, since nothing else can hand the caller the rest.
+        #
+        # Measured cost on the same queue (11 rants, cleanup caps it at 10 completed plus
+        # the pending/in-progress ones; messages 3504 / 4031 / 3594 … chars): the whole
+        # queue goes 15300 → 42725 characters, and `status="in_progress"` alone is 5544.
+        # The filters are the way to narrow it; the header line is still the scan view.
         lines = []
         for r in rants:
-            summary = (r.get("message") or "").replace("\n", " ").strip()[:100]
+            message = (r.get("message") or "").strip()
+            flat = " ".join(message.split())
+            summary = flat[:100] + ("…" if len(flat) > 100 else "")
             lines.append(
                 f"{r.get('timestamp')} | {r.get('project')} | "
                 f"status={r.get('status')} | progress={r.get('progress')} | "
                 f"completed={r.get('completed')} | {summary}"
+            )
+            lines.append(
+                _indented(message) if message
+                else "    (this rant has no message)"
             )
         return ToolResult(
             name="submit_rant",
