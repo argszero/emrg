@@ -418,15 +418,33 @@ class ProjectSelector(Widget):
         return lines
 
 
+TASK_SELECTOR_TITLES: dict[str, str] = {
+    # Rant 2026-09-17T18:36:08: the same list serves two commands, and the title
+    # is the only thing that tells the host which one they are in the middle of —
+    # Enter means "trigger this task" in one and "open this task's session" in
+    # the other. Derived from `intent` rather than passed alongside it, so the
+    # two can never disagree.
+    "trigger": "Select a task to trigger (↑↓/j/k to move, Enter to confirm, Esc to cancel):",
+    "session": "Select a task to open its session (↑↓/j/k to move, Enter to confirm, Esc to cancel):",
+}
+
+
 class TaskSelector(Widget):
     """Interactive task picker — arrow-key navigation with highlight.
 
     Renders a list of scheduled tasks from the server with the selected one
-    in reverse video. Used by /trigger when invoked without arguments.
+    in reverse video. Used by /trigger and /task-session when invoked without
+    arguments; `intent` decides which command the Enter key carries out.
     """
 
-    def __init__(self, tasks: list[dict] | None = None):
+    def __init__(self, tasks: list[dict] | None = None, intent: str = "trigger"):
+        if intent not in TASK_SELECTOR_TITLES:
+            raise ValueError(
+                f"unknown task selector intent {intent!r} — "
+                f"expected one of {', '.join(sorted(TASK_SELECTOR_TITLES))}"
+            )
         self.tasks: list[dict] = tasks or []
+        self.intent: str = intent
         self.selected_index: int = 0
         self._dirty: bool = True
 
@@ -454,11 +472,19 @@ class TaskSelector(Widget):
             return self.tasks[self.selected_index].get("name", "")
         return None
 
+    @property
+    def selected_task(self) -> dict | None:
+        """The whole selected row — /task-session needs `project_path` and
+        `session_id`, which `selected_task_name` does not carry."""
+        if 0 <= self.selected_index < len(self.tasks):
+            return self.tasks[self.selected_index]
+        return None
+
     def render(self, ctx):
         lines: list[Line] = []
         pstyle = Style.parse("bold cyan")
         lines.append(Line(
-            spans=[Span("○ ", style="dim"), Span("Select a task to trigger (↑↓/j/k to move, Enter to confirm, Esc to cancel):", style="bold")],
+            spans=[Span("○ ", style="dim"), Span(TASK_SELECTOR_TITLES[self.intent], style="bold")],
             style=ctx.style,
         ))
         for i, t in enumerate(self.tasks):
@@ -572,6 +598,7 @@ _COMMAND_HELP: dict[str, str] = {
     "/rant":     "Send feedback to the evolution system [/rant | /rant @<project> <msg>]",
     "/model":    "Switch LLM model [/model | /model <name>]",
     "/trigger":  "List or manually trigger scheduled tasks [/trigger | /trigger <name>]",
+    "/task-session": "Open a scheduled task's session (no args = interactive picker)",
     "/skills":   "List loaded skills (user + project)",
     "/version":  "Show EMRG version and instance info",
     "/image":    "Insert clipboard image into input field",

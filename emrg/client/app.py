@@ -106,6 +106,48 @@ def _auto_title_from_prompt(text: str, max_len: int = 30) -> str | None:
     return first[: max_len - 1] + "…"
 
 
+def _task_session_target(task: dict | None) -> tuple[str, str] | None:
+    """The ``(cwd, session_id)`` that opening a task's session needs.
+
+    ``list_tasks`` rows already carry both (`handler.status()` → `project_path`,
+    `session_id`), so /task-session needs no server change (rant
+    2026-09-17T18:36:08). Returns ``None`` when they cannot be used — a task
+    that has never run, or a row without them — and the caller then reports that
+    instead of asking the daemon to resume a session that is not there, which
+    would create the ghost session the resume docstring warns about.
+
+    Module-level and pure so it is unit-testable without a terminal: the branch
+    it feeds is otherwise only reachable by driving the TUI. Missing, empty and
+    non-string fields all count as unusable — `os.getcwd`-style falsiness is not
+    an answer to "where is this project".
+    """
+    if not isinstance(task, dict):
+        return None
+    cwd = task.get("project_path")
+    sid = task.get("session_id")
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    if not isinstance(sid, str) or not sid.strip():
+        return None
+    return cwd, sid
+
+
+def _task_open_switch(pending: tuple[str, str] | None, resumed_sid: str) -> str | None:
+    """The cwd to move into once a resume answers a /task-session open, or ``None``.
+
+    ``None`` means "stay where you are", and it covers two cases that a plain
+    truthiness test would confuse: no open was pending at all, and the daemon's
+    answer is about a *different* session than the one the open asked for. The
+    second is not hypothetical — an open whose verdict never arrived (the
+    connection dropped) leaves its target behind, and a later `/resume <id>`
+    succeeding must not then drag the host into a project they never picked,
+    which is the defect a cwd is the wrong place to discover.
+    """
+    if pending is None or pending[1] != resumed_sid:
+        return None
+    return pending[0]
+
+
 # ── Clipboard image support (platform-adaptive) ─────────────
 
 # Reading a clipboard *file path* must not go through the console locale codec.
@@ -532,6 +574,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     task_sel = SelectorState()
     _rant_project: str | None = None  # Set after project selection, used on next Enter
     _skills_confirm: tuple | None = None  # (skill_name, install_cmd) — next Enter answers the prompt
+    # /task-session (rant 2026-09-17T18:36:08). `_task_list_intent` is set by the
+    # command that asked for the list, so the picker can be built with the right
+    # intent; `_task_open_pending` holds the (cwd, session_id) a confirmed pick
+    # asked the daemon to resume, and is applied only when the daemon says the
+    # session exists — a task that has never run must not move the client's cwd.
+    _task_list_intent: str = "trigger"
+    _task_open_pending: tuple[str, str] | None = None
 
     # Command autocomplete state (shows dropdown when user types /)
     _autocomplete_active = False
@@ -553,6 +602,9 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         nonlocal current_model
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start
+        # /task-session: the daemon's verdict on a task's session decides whether
+        # the client moves into that task's project at all (rant 2026-09-17T18:36:08).
+        nonlocal cwd, project_name, _task_list_intent, _task_open_pending
 
         async def _reconnect():
             """Attempt reconnection — blocks until successful."""
@@ -1029,7 +1081,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     term.render()
                     continue
 
-                # Tasks list response (for /trigger interactive mode)
+                # Tasks list response (for /trigger + /task-session interactive mode)
                 if data.get("type") == "tasks_list":
                     nonlocal task_sel
                     tasks = data.get("tasks", [])
@@ -1042,11 +1094,15 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         # stacking a new one (rant 2026-08-21T16:47:44).
                         if task_sel.widget is not None:
                             chat.remove(task_sel.widget)
-                        task_sel.widget = TaskSelector(tasks)
+                        task_sel.widget = TaskSelector(tasks, intent=_task_list_intent)
                         task_sel.active = True
                         task_sel.pending = False
                         chat.add(task_sel.widget)
-                        status.update(center="select a task to trigger (↑↓/j/k, Enter, Esc)")
+                        status.update(center=(
+                            "select a task to open its session (↑↓/j/k, Enter, Esc)"
+                            if _task_list_intent == "session"
+                            else "select a task to trigger (↑↓/j/k, Enter, Esc)"
+                        ))
                     else:
                         chat.add("system", "No scheduled tasks found.")
                     term.render()
@@ -1141,6 +1197,10 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if data.get("type") == "resume_result":
                     err = data.get("error", "")
                     if err:
+                        # A failed /task-session open must leave the host exactly
+                        # where they were: no cwd move, no ghost session
+                        # (rant 2026-09-17T18:36:08).
+                        _task_open_pending = None
                         chat.add("system", f"Resume failed: {err}")
                         term.render()
                         continue
@@ -1150,6 +1210,15 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
                     # Switch session
                     session_id = new_sid
+
+                    # /task-session: the session exists, so the client now moves
+                    # into that task's project — before the history replay below,
+                    # which reads it from `cwd`.
+                    switch_to = _task_open_switch(_task_open_pending, new_sid)
+                    _task_open_pending = None
+                    if switch_to is not None:
+                        cwd = switch_to
+                        project_name = Path(cwd).name
 
                     # Clear and replay history from disk
                     chat.rows.clear()
@@ -1385,8 +1454,9 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, conn, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
-        nonlocal current_model
+        nonlocal current_model, project_name
         nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
+        nonlocal _task_list_intent, _task_open_pending
         nonlocal history_index, history_saved_input
         nonlocal _autocomplete_active, _autocomplete_widget
         nonlocal _request_start, _last_center, _elapsed_task, _pending_images
@@ -1611,10 +1681,32 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 return True
             if data in (b"\r", b"\n"):  # Enter — confirm
                 task_name = task_sel.widget.selected_task_name
+                task_intent = task_sel.widget.intent
+                task_row = task_sel.widget.selected_task
                 task_sel.active = False
                 chat.remove(task_sel.widget)
                 task_sel.widget = None
-                if task_name:
+                if task_intent == "session":
+                    # /task-session (rant 2026-09-17T18:36:08): open the task's
+                    # session instead of triggering it. The cwd the daemon is
+                    # asked with is the TASK's project — the client's own cwd
+                    # only moves once the daemon confirms the session exists, so
+                    # a never-run task leaves the host where they were.
+                    target = _task_session_target(task_row)
+                    if target is None:
+                        chat.add("system", (
+                            f"Task '{task_name}' has no session yet "
+                            "(it has never run) — nothing to open."
+                            if task_name else "No task selected."
+                        ))
+                        status.update(center=server_id or "emrg")
+                    else:
+                        _task_open_pending = target
+                        await conn.send_command("resume_session",
+                                                session_id=target[1], cwd=target[0])
+                        chat.add("system", f"Opening session of task: {task_name}")
+                        status.update(center=f"opening {task_name}'s session...")
+                elif task_name:
                     await conn.send_command("trigger_task", name=task_name,
                                             session_id=session_id, cwd=cwd)
                     chat.add("system", f"Triggering task: {task_name}")
@@ -2067,6 +2159,7 @@ Commands
   /model [name]        Switch LLM model (no args = interactive picker)
   /trigger             List scheduled tasks (type name to trigger)
   /trigger <name>      Manually trigger a scheduled task now
+  /task-session        Open a scheduled task's session (↑↓/j/k picker, Enter opens)
   quit / exit         Exit EMRG
 
 Streaming
@@ -2158,6 +2251,23 @@ Streaming
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
                     return True
 
+                # Handle /task-session command (rant 2026-09-17T18:36:08): the
+                # same picker as /trigger, but Enter opens the task's session
+                # rather than triggering it. Only the no-argument form exists —
+                # a name argument would be a second way to say what the picker
+                # already shows, so it is refused rather than half-supported.
+                if text.lower().startswith("/task-session"):
+                    parts = text.split(None, 1)
+                    if len(parts) > 1 and parts[1].strip():
+                        chat.add("system", "Usage: /task-session (no arguments — pick from the list)")
+                        status.update(center=server_id or "emrg")
+                    else:
+                        _task_list_intent = "session"
+                        await conn.send_command("list_tasks")
+                        status.update(center="loading tasks...")
+                    inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
+                    return True
+
                 # Handle /trigger command
                 if text.lower().startswith("/trigger"):
                     parts = text.split(None, 1)
@@ -2168,6 +2278,7 @@ Streaming
                         status.update(center=f"triggering task '{task_name}'...")
                     else:
                         # /trigger without args → list tasks
+                        _task_list_intent = "trigger"
                         await conn.send_command("list_tasks")
                         status.update(center="loading tasks...")
                     inp.text = ""; inp.cursor = 0; inp.dirty = True; term.render()
