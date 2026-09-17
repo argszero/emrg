@@ -391,6 +391,34 @@ def test_a_plan_that_conflicts_leaves_no_fetched_pr_ref_behind_either(
     assert "step 2 (#2)" in proc.stderr
 
 
+def test_a_fetch_that_fails_partway_still_leaves_no_ref_behind(
+    queue: tuple[Path, Path],
+) -> None:
+    """The refs already parked before the failing fetch are the ones a leak keeps.
+
+    A run that fetches PR 1 and then dies on PR 2 exits 2 without ever reaching a
+    suite, a plan or a conflict - so a cleanup wired to any of those paths misses
+    exactly the run that created a ref and asked for nothing else. Measured
+    2026-09-17 by @how2how2how2-arch on the previous revision of this fix, where the
+    fetch sat in a `try` whose `except` returned before the cleanup's `finally`:
+    `check-merge-plan-suite.py 1323 999999` reported rc 2 and left
+    `refs/emrg-plan-suite/pr1323` behind. `_fetch_heads`' own docstring names this
+    case ("a run that dies on PR 3 of 5 has created two refs"), so the promise is
+    what this test holds the code to.
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"a.md": "a\n"})
+    _publish(repo, origin, 1, "one")
+
+    assert _plan_refs(repo) == [], "the fixture started with refs the run did not make"
+
+    # #999999 does not exist, so the fetch raises after #1's ref is already there.
+    proc = _run_tool(repo, "1", "999999")
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "could not measure" in proc.stderr
+    assert _plan_refs(repo) == [], "the ref fetched before the failure outlived the run"
+
+
 def _fake_run(monkeypatch, mod, stdout: str, stderr: str, rc: int) -> None:
     monkeypatch.setattr(
         mod,

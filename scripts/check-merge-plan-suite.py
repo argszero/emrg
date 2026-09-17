@@ -729,6 +729,19 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     fetched: list[int] = []
+    # Everything from the first fetch on runs with temp refs in the object database,
+    # so it is all wrapped: a plan that conflicts (rc 3), a step that cannot be built,
+    # or an unanswerable suite (rc 2) fetched its heads just the same, and a cleanup
+    # that only ran on the path that reached the suite would leak on exactly the runs
+    # that fail - the ones a reader is most likely to repeat.
+    #
+    # The fetch itself belongs *inside* this try, not before it. It is the first thing
+    # that parks a ref, so a run that fetches PR 1 and then dies on PR 2 has already
+    # created PR 1's ref - the case `_fetch_heads`' own docstring names ("those two are
+    # exactly the ones that need clearing"). Measured 2026-09-17 by @how2how2how2-arch
+    # on the previous revision of this fix: `check-merge-plan-suite.py 1323 999999`
+    # reported rc 2 and left `refs/emrg-plan-suite/pr1323` behind, because the fetch sat
+    # in a `try` whose `except` returned before the cleanup's `finally` was entered.
     try:
         # The base, in the two dimensions it can be wrong by: *when* it was read
         # and *which* ref the name denotes. Both are owned by the sibling, so both
@@ -739,16 +752,7 @@ def main(argv: list[str] | None = None) -> int:
         base = _rev_parse(base_ref)
         numbers = args.prs or _open_pr_numbers(args.repo)
         heads = _fetch_heads(numbers, fetched)
-    except MeasurementError as exc:
-        print(f"could not measure: {exc}", file=sys.stderr)
-        return 2
 
-    # Everything below runs with temp refs in the object database, so it is all
-    # wrapped: a plan that conflicts (rc 3), a step that cannot be built, or an
-    # unanswerable suite (rc 2) fetched its heads just the same, and a cleanup that
-    # only ran on the path that reached the suite would leak on exactly the runs
-    # that fail - the ones a reader is most likely to repeat.
-    try:
         # The ref measured, not the spelling typed: they differ whenever a short name
         # is ambiguous, and a header that reports `origin/master` for a commit that is
         # not master is how the wrong-tree defect stays invisible.
@@ -791,6 +795,14 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except MeasurementError as exc:
+        # Reached by everything that can fail before the suite does - the base, the
+        # open-PR listing, and any fetch (the head fetched first is the ref the
+        # `finally` below exists for). The inner `except` clauses keep their own
+        # messages and run first; this is the same discipline one level out: an
+        # unanswerable question is rc 2, never a verdict.
+        print(f"could not measure: {exc}", file=sys.stderr)
+        return 2
     finally:
         _drop_fetched_refs(fetched)
 
