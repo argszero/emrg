@@ -24,6 +24,14 @@ const WebSocket = require("ws");
 // emrgd.token 已是唯一规范位置，回退冗余）。
 const TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
 const EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
+// Issue #1276 item 4：子进程**自己的 stderr** 落到这里。emrgd 的日志 handler 是
+// 子进程内部才装的（`emrg/server/__main__.py:_configure_logging`），所以"还没走到
+// 那一步就死了"的失败（import 失败、补丁语法错、缺模块）在 emrgd.log 里一个字都
+// 没有——此前 stderr 直接丢弃，宿主此时被告知"什么都没有"，正是该 issue 的第二个
+// 症状。落**文件**而不是终端：stderr 被丢弃的理由是 daemon 不得写进客户端界面，
+// 落文件保留这个性质，同时给失败一个可读的地方。不会重复写：emrgd 只在
+// `sys.stderr.isatty()` 时加 StreamHandler，stderr 指向文件与 DEVNULL 一样不是 tty。
+const EMRGD_START_ERR = () => path.join(os.homedir(), ".emrg", "emrgd-start.err");
 // Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52): the
 // daemon always listens on this constant — keep in sync with emrg/connect.py
 // EMRGD_PORT and emrg/_stop_all.py _EMRGD_PORT. The token file no longer
@@ -196,6 +204,36 @@ class DaemonClient {
     }
   }
 
+  // 本次启动的子进程 stderr 文件，**截断**打开（issue #1276 item 4）。拿不到 fd 就
+  // 返回 null，调用方退回 "ignore"——诊断永远不得让启动本身失败。截断而不追加：
+  // 报给宿主的内容必须全是本次写的，append 会把上一轮的 traceback 重新放到"本次
+  // 失败的原因"的位置上，正是 #1283 修掉的那个形状。
+  _openStartStderr(file = EMRGD_START_ERR()) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      return fs.openSync(file, "w");
+    } catch {
+      return null;
+    }
+  }
+
+  // 本次启动子进程自己写的 stderr 末 `lines` 行。返回三种答案而不是两种：
+  //   null = **读不到**（文件不存在/不可读/不是文件）；"" = 读到了且是空的；文本 = 读到了这些话。
+  // 把第一种并进第二种，就是"对一条自己没能打开的通道宣布沉默"——实测过：命名了却读不到的
+  // 文件，与读到且为空的文件，产出的文本逐字节相同，且都说 "the child wrote nothing to its own
+  // stderr"。诊断不抛异常：读失败是一个**值**，由调用方如实报出。
+  // 40 行而不是日志尾巴的 15：traceback 的**结尾**（异常那一行与它的 cause）才是
+  // 原因，而一个 Python traceback 比 15 行长。
+  _readStartStderr(lines = 40, file = EMRGD_START_ERR()) {
+    let text;
+    try {
+      text = fs.readFileSync(file, "utf8").replace(/\s+$/, "");
+    } catch {
+      return null;
+    }
+    return text ? text.split(/\r?\n/).slice(-lines).join("\n") : "";
+  }
+
   // 子进程是否已经退出、以何种方式（issue #1283 缺陷 ②）。Node 把"退出码"与
   // "被信号杀"分成两个字段（exitCode / signalCode）；Python 的 returncode 把信号
   // 表示为负数，所以那边只看 returncode 就够，这里两个都要看——否则被 SIGKILL 的
@@ -237,13 +275,29 @@ class DaemonClient {
     return ` (${state.err.code || state.err.message})`;
   }
 
-  // 一次没能起来的启动，究竟知道些什么（issue #1283）：两个事实，都不得用猜测代替
-  // ——本次是否往 log 里写过东西，以及子进程是活着还是已经退出（退出码/信号）。
-  // 本次没写时**如实说没写**，绝不把更早的输出当成本次的原因。
-  _startupFailureDetail(since, child, spawnState = NO_SPAWN_STATE) {
+  // 一次没能起来的启动，究竟知道些什么（issue #1283 + #1276 item 4）：三个事实，
+  // 都不得用猜测代替——本次是否往 log 里写过东西、子进程是活着还是已经退出（退出
+  // 码/信号）、以及子进程**自己**的 stderr 说了什么。第三条是另外两条看不见的：在
+  // 装上日志 handler 之前就死掉的子进程只写 stderr，没有这一节时宿主被show一个空的
+  // emrgd.log 并被告诉"什么都没有"。没写就**如实说没写**，绝不把更早的输出当成本次
+  // 的原因。顺序即论证：子进程的遗言在前，它已经能记录的日志尾巴在后。
+  _startupFailureDetail(since, child, spawnState = NO_SPAWN_STATE, stderrFile = null) {
+    // `stderrFile === null` 表示本次**没有读到**这一路 stderr（开文件失败，spawn 退回
+    // "ignore"）。"子进程什么都没写"、"这一路压根没读"、"这一路读不到" 是三件不同的事实，
+    // 文本必须分开：给了路径且读到了才读得出沉默；没给路径，或给了却读不到，都不得替它
+    // 宣布沉默（也不得引用更早一轮留在那个文件里的字节当成本次原因）。
+    const captured = stderrFile !== null;
+    const childErr = captured ? this._readStartStderr(40, stderrFile) : null; // null = 读不到
+    const childSection = typeof childErr === "string" && childErr
+      ? `\n  emrgd own stderr (written by this start attempt, ${stderrFile}):\n${childErr}`
+      : captured
+        ? (childErr === null
+          ? `\n  emrgd own stderr: could not be read (nothing was read from it this attempt, ${stderrFile})`
+          : "")
+        : "\n  emrgd own stderr: not captured (nothing was read from it this attempt)";
     const tail = this._readLogTail(15, since);
     if (tail) {
-      return `\n  emrgd.log tail (written by this start attempt, ${EMRGD_LOG()}):\n${tail}`;
+      return childSection + `\n  emrgd.log tail (written by this start attempt, ${EMRGD_LOG()}):\n${tail}`;
     }
     let exists = true;
     try {
@@ -257,38 +311,50 @@ class DaemonClient {
       : signal !== null
         ? `already exited (signal=${signal})`
         : code !== null ? `already exited (exit=${code})` : "still running";
+    // 沉默是对一条**读到且为空**的通道的测量：读不到的那一路只支持"没读到它"这个事实。
+    const silent = typeof childErr === "string" && childErr
+      ? ""
+      : captured
+        ? (childErr === null
+          ? ", and the child's own stderr could not be read"
+          : ", and the child wrote nothing to its own stderr")
+        : ", and the child's own stderr was not captured";
     return (
+      childSection +
       `\n  this start attempt wrote nothing to emrgd.log` +
-      `${exists ? "" : " (the file does not exist)"}; the child is ${how}.` +
+      `${exists ? "" : " (the file does not exist)"}${silent}; the child is ${how}.` +
       ` Any output earlier in the file is from a previous run.`
     );
   }
 
   // 等 daemon 起来；已经死掉的子进程立即失败（issue #1283 缺陷 ②），而不是把整个
-  // 窗口烧完再报"没有退出码"。静默子进程留下的唯一事实就是退出码——spawn 把
-  // stdout/stderr 都丢弃了（stdio: "ignore"）。从未启动的子进程（ENOENT）同样立即
-  // 失败：它没有 pid，也永远不会写 log。
-  async _awaitDaemonReady(child, mark, waitMs = SPAWN_WAIT_MS, spawnState = NO_SPAWN_STATE) {
+  // 窗口烧完再报"没有退出码"。stdout 一律丢弃，stderr 落到本次启动的诊断文件
+  // （issue #1276 item 4）——但那只在文件真开出来时才成立：`stderrFile` 为 null 的
+  // 这一路没有读过任何东西，报告只说"未捕获"，不会替它宣布沉默。从未启动的子进程
+  // （ENOENT）同样立即失败：它没有 pid，也永远不会写 log。
+  async _awaitDaemonReady(child, mark, waitMs = SPAWN_WAIT_MS, spawnState = NO_SPAWN_STATE, stderrFile = null) {
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       if (await this.isRunning(500)) return child;
       if (spawnState.neverStarted) {
         throw new Error(
           `emrgd never started${this._neverStartedName(spawnState)}` +
-          this._startupFailureDetail(mark, child, spawnState)
+          this._startupFailureDetail(mark, child, spawnState, stderrFile)
         );
       }
       const { code, signal } = this._childExit(child);
       if (code !== null || signal !== null) {
         const how = signal !== null ? `signal=${signal}` : `exit=${code}`;
         throw new Error(
-          `emrgd exited during startup (${how})` + this._startupFailureDetail(mark, child, spawnState)
+          `emrgd exited during startup (${how})` +
+          this._startupFailureDetail(mark, child, spawnState, stderrFile)
         );
       }
       await new Promise((r) => setTimeout(r, 300));
     }
     throw new Error(
-      `emrgd failed to start within timeout` + this._startupFailureDetail(mark, child, spawnState)
+      `emrgd failed to start within timeout` +
+      this._startupFailureDetail(mark, child, spawnState, stderrFile)
     );
   }
 
@@ -312,9 +378,12 @@ class DaemonClient {
     // exec python -m emrg.server）；源码模式保持 python -m emrg.server。
     if (this._isPackaged) {
       const emrgdPath = this._findDaemonExecutable();
+      // 本次启动的 stderr（issue #1276 item 4）：装日志 handler 之前就死掉的子进程
+      // 只有这一个出口。取不到 fd 时退回 "ignore"，与旧行为一致。
+      const errFd = this._openStartStderr();
       const opts = {
         cwd: os.homedir(),
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", errFd === null ? "ignore" : errFd],
         detached: true,
       };
       // R36/R66：Windows .cmd 需 shell:true（非 PE），windowsHide 防黑窗闪烁；
@@ -325,30 +394,43 @@ class DaemonClient {
       }
       this.logger.info(`[gui] spawning packaged daemon: ${emrgdPath} cwd=${os.homedir()}`);
       const child = spawn(emrgdPath, [], opts);
+      if (errFd !== null) { try { fs.closeSync(errFd); } catch { /* 子进程已持有副本 */ } }
       child.unref();
       this._daemonChild = child;
       this.logger.info(`[gui] daemon spawned: pid=${child.pid} (packaged emrgd)`); // 18:47:37 B2
       const spawnState = this._watchSpawn(child);
-      return await this._awaitDaemonReady(child, mark, SPAWN_WAIT_MS, spawnState);
+      // 只有真开出了诊断文件才算"读过这一路"：拿不到 fd 时子进程的 stderr 退回
+      // "ignore"，报告必须说"未捕获"，而不是替这一路宣布沉默。
+      return await this._awaitDaemonReady(
+        child, mark, SPAWN_WAIT_MS, spawnState,
+        errFd === null ? null : EMRGD_START_ERR()
+      );
     }
     // G125：spawn 设 cwd=project_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
     const python = this._findPython();
     const args = ["-m", "emrg.server"];
     this.logger.info(`[gui] spawning daemon: ${python} ${args.join(" ")} cwd=${os.homedir()}`);
+    const errFdSource = this._openStartStderr();
     const child = spawn(python, args, {
       cwd: os.homedir(),
-      stdio: "ignore", // G68：对照 DEVNULL
+      // G68：对照 DEVNULL——stdout 丢弃，stderr 落到本次启动的诊断文件（issue #1276
+      // item 4）。见 EMRGD_START_ERR 的注释：装日志 handler 之前的失败只有这一个出口。
+      stdio: ["ignore", "ignore", errFdSource === null ? "ignore" : errFdSource],
       detached: true, // 对照 start_new_session=True
       // windowsHide: python.exe 是 console 子系统——GUI spawn 时不隐藏会
       // 弹一个命令行黑窗（打包模式 emrgd.cmd 已改走 pythonw.exe，这里补源码模式）。
       ...(process.platform === "win32" ? { windowsHide: true } : {}),
     });
+    if (errFdSource !== null) { try { fs.closeSync(errFdSource); } catch { /* 子进程已持有副本 */ } }
     child.unref(); // GUI 退出不带走 daemon
     this._daemonChild = child; // 暴露 child（集成测试 after 清理用）
     this.logger.info(`[gui] daemon spawned: pid=${child.pid} (source mode)`); // 18:47:37 B2
     // 等最多 SPAWN_WAIT_MS 就绪
     const spawnState = this._watchSpawn(child);
-    return await this._awaitDaemonReady(child, mark, SPAWN_WAIT_MS, spawnState);
+    return await this._awaitDaemonReady(
+      child, mark, SPAWN_WAIT_MS, spawnState,
+      errFdSource === null ? null : EMRGD_START_ERR()
+    );
   }
 
   // Rant 2026-08-21T15:26:42：daemon 存活判断用固定端口 TCP 探测——
@@ -903,4 +985,4 @@ function generateSessionId(seed) {
   return sid;
 }
 
-module.exports = { DaemonClient, generateSessionId, TOKEN_FILE, SESSION_ID_RE, MAX_PAYLOAD, EMRGD_PORT };
+module.exports = { DaemonClient, generateSessionId, TOKEN_FILE, SESSION_ID_RE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR };
