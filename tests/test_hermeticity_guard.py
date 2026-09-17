@@ -151,26 +151,30 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
             subprocess.Popen(argv)
 
 
-def test_guard_allows_read_only_spawns(daemon_spawn_refusal, tmp_path):
+def test_guard_allows_read_only_spawns(daemon_spawn_refusal):
     """Negative: the refusal keys on the verb, not on "it mentions emrg".
 
     The suite spawns git, node, pytest and the `emrg` CLI itself for read-only
     verbs, and a guard that refused every emrg invocation would break those tests
-    and teach the next reader to distrust it. So the property is pinned three
-    ways: the argv shapes the guard reads, one allowed shape pushed through the
-    installed wrapper to prove it reaches `Popen`, and one benign child that
-    actually runs.
+    and teach the next reader to distrust it. Those shapes have to stay allowed,
+    and this test pins that on the argv predicate — which is the guard's own
+    question, and the one thing only this file can ask. Read together with
+    `test_guard_refuses_spawning_the_stop_or_restart_cli` above, which drives the
+    installed `Popen` wrapper and sees it raise, the refusal is pinned in both
+    directions: a guard that refused everything fails here, and a guard that
+    refused nothing fails there.
 
-    The CLI is *classified* here rather than executed. An earlier revision of this
-    test ran `python -m emrg --help` and the windows-2025 leg reddened on it —
-    first a `UnicodeDecodeError` from decoding the child in the parent, then, once
-    that was fixed, a `KeyboardInterrupt` reported in the parent while it was
-    blocked in a `Condition.wait`. Neither is reachable on macOS, and neither is
-    this file's subject: `tests/test_cli_output_encoding.py` already runs exactly
-    this command on this platform and pins its output in both codecs. What this
-    guard owns is which argv it refuses, so that is what is asserted.
+    Nothing is spawned here, deliberately. Two earlier revisions of this test did
+    spawn, and the windows-2025 leg reddened on the later one twice: first a
+    `UnicodeDecodeError` raised in the parent while decoding the child, then —
+    once the child's bytes were captured instead of decoded — a
+    `KeyboardInterrupt` reported in the parent while its main thread was blocked
+    in a `Condition.wait`. The second is the reason this test spawns nothing at
+    all: the spawn is not this guard's subject, `tests/test_cli_output_encoding.py`
+    already runs this CLI on every platform and pins its output in both codecs,
+    and the suite's other spawns already pin that an allowed argv reaches `Popen`.
+    What this guard owns is which argv it refuses.
     """
-    import subprocess
     import sys
 
     allowed = [
@@ -191,25 +195,3 @@ def test_guard_allows_read_only_spawns(daemon_spawn_refusal, tmp_path):
     ]
     for argv in allowed:
         assert not daemon_spawn_refusal(argv), argv
-
-    # An allowed shape reaches `Popen`: the guard refuses *before* spawning, so the
-    # failure of a refused argv is an `AssertionError` and the failure of an allowed
-    # one is the program's own. The basename here is `emrg` — the thing the guard
-    # looks for — and the path does not exist, so this discriminates without running
-    # a CLI, needing one installed, or depending on one's behaviour.
-    ghost = str(tmp_path / "emrg")
-    try:
-        subprocess.Popen([ghost, "--help"])
-    except AssertionError as exc:  # the guard refused an allowed shape
-        pytest.fail(f"the guard refused a read-only shape: {exc}")
-    except OSError:
-        pass  # reached Popen; there is simply no program at that path
-    else:
-        pytest.fail("Popen found a program at a path that does not exist")
-
-    # ... and the wrapper passes a real child through untouched. Byte capture, never
-    # `text=True`: a text-mode capture decodes in the parent, and the parent's codec
-    # need not be the child's (tests/test_cli_output_encoding.py records the same).
-    benign = subprocess.run([sys.executable, "-c", "print('ok')"], capture_output=True)
-    assert benign.returncode == 0, benign.stderr
-    assert benign.stdout.strip() == b"ok"
