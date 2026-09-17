@@ -23,6 +23,7 @@ from emrg.memory import INDEX_SIZE_WARN
 from emrg.protocol import InstanceIdentity
 from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
+from emrg.server.llm import CONTENT_RISK, classify_llm_error
 from emrg.server.scheduler import TaskHandler, TaskScheduler
 from emrg.session import Session
 
@@ -640,6 +641,145 @@ def test_manual_compact_drop_marks_anchor(caplog):
         server._warn_missing_usage_anchor(_SidSession(sid), messages, 50)
     assert "usage anchor missing" not in caplog.text
     assert sid not in server._usage_anchor_dropped_by_compact  # consumed
+
+
+# ── _compact_with_fallback: which failures may reach the chunker ──
+#
+# One rule for both compact paths (auto and manual): only a request the
+# provider rejected as too long is re-sent through the chunker. A body-buffer
+# overflow must get there (rant 2026-09-17T18:19:45); a content-filter refusal
+# must not (rant 2026-09-17T17:55:42) — the chunker re-sends the same text, so
+# "retrying" a refusal locked sessions up: every request 400, `hi` included.
+
+
+def _compact_records() -> list[dict]:
+    return [{"type": "message", "role": "user", "content": "x"}]
+
+
+def _spy_chunker(server, calls: list) -> None:
+    async def _chunked_compact(records):
+        calls.append("chunked")
+        return "chunked summary"
+    server._chunked_compact = _chunked_compact
+
+
+def test_compact_fallback_chunks_a_413_body_overflow():
+    """The 413 wording is a length problem — before this, the gate did not
+    recognise it, so compact never degraded to chunking and the context only
+    grew (rant 2026-09-17T18:19:45)."""
+    server = _make_server()
+    calls: list = []
+
+    async def _do_compact(session, records):
+        raise RuntimeError(
+            "LLM request failed: 413 headers={} body=Failed to buffer the "
+            "request body: length limit exceeded"
+        )
+
+    server._do_compact = _do_compact
+    _spy_chunker(server, calls)
+    out = asyncio.run(
+        server._compact_with_fallback(None, _compact_records(), source="test")
+    )
+    assert out == "chunked summary"
+    assert calls == ["chunked"]
+
+
+def test_compact_fallback_never_chunks_a_content_refusal():
+    """A content-filter refusal is raised, and the chunker is never entered —
+    the exact loop that made the session unusable."""
+    server = _make_server()
+    calls: list = []
+
+    async def _do_compact(session, records):
+        raise RuntimeError(
+            'LLM request failed: 400 headers={} body={"error":{"message":'
+            '"Content Exists Risk","type":"invalid_request_error"}}'
+        )
+
+    server._do_compact = _do_compact
+    _spy_chunker(server, calls)
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(
+            server._compact_with_fallback(None, _compact_records(), source="test")
+        )
+    assert calls == []  # the whole point
+    assert classify_llm_error(excinfo.value) == CONTENT_RISK
+
+
+def test_compact_fallback_never_chunks_an_unrelated_failure():
+    """Positive control for the gate: a failure that is not about length at
+    all (a 500) is also raised, not chunked — proving the branch discriminates
+    on the error class rather than on 'compact failed'."""
+    server = _make_server()
+    calls: list = []
+
+    async def _do_compact(session, records):
+        raise RuntimeError("LLM request failed: 500 headers={} body=internal")
+
+    server._do_compact = _do_compact
+    _spy_chunker(server, calls)
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            server._compact_with_fallback(None, _compact_records(), source="test")
+        )
+    assert calls == []
+
+
+def test_compact_fallback_passes_through_a_success():
+    """A successful compact is never followed by a chunked attempt."""
+    server = _make_server()
+    calls: list = []
+
+    async def _do_compact(session, records):
+        return "summary"
+
+    server._do_compact = _do_compact
+    _spy_chunker(server, calls)
+    out = asyncio.run(
+        server._compact_with_fallback(None, _compact_records(), source="test")
+    )
+    assert out == "summary"
+    assert calls == []
+
+
+class _FakeWs:
+    """Minimal subscriber: records what the daemon sends it."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, data) -> None:
+        self.sent.append(json.loads(data))
+
+
+def test_manual_compact_tells_the_client_about_a_refusal(tmp_path):
+    """Rant 2026-09-17T17:55:42 requirement 6: a compact the provider refuses
+    must be reported to the host — not swallowed — and must not be retried
+    through the chunker."""
+    server = _make_server()
+    session = Session.create_with_id("compact-refusal", tmp_path)
+    for _ in range(6):
+        session.append_message({"type": "message", "role": "user", "content": "x"})
+    ws = _FakeWs()
+    server._session_subscribers[session.session_id] = {ws: str(tmp_path)}
+    calls: list = []
+
+    async def _do_compact(session, records):
+        raise RuntimeError(
+            'LLM request failed: 400 headers={} body={"error":{"message":'
+            '"Content Exists Risk","type":"invalid_request_error"}}'
+        )
+
+    server._do_compact = _do_compact
+    _spy_chunker(server, calls)
+    asyncio.run(server._handle_compact(session, ws))
+
+    assert calls == []
+    errors = [m for m in ws.sent if m.get("error")]
+    assert errors, f"no error broadcast to the client: {ws.sent}"
+    assert "Content Exists Risk" in errors[0]["error"]
+    assert "start a new session" in errors[0]["error"]
 
 
 # ── model/provider switch invalidates anchors (Dev.to comment 3dh3g) ──
