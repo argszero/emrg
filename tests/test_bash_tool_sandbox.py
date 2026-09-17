@@ -864,6 +864,40 @@ def test_execute_workspace_write_blocks_a_write_outside_the_workspace(
     assert not target.exists()
 
 
+def test_execute_workspace_write_blocks_a_protected_file_it_built(
+    tmp_path, monkeypatch
+):
+    """execute() refuses a write to a protected daemon state file, with the
+    target built by THIS test (rant 2026-09-17T11:38:16).
+
+    The three deleted variants read or wrote the host's real ``~/.emrg/config.toml``,
+    so their safety rested on the guard they were testing: the mutation arm that
+    forced the guard to ALLOW truncated that file to ``x``. Here ``~`` is pinned to
+    scratch, so the target resolves inside this test's own directory and the same
+    arm can only reach this test's sentinel. The surviving bytes are what proves the
+    shell never ran the command.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    # expanduser("~") reads USERPROFILE on Windows, HOME elsewhere.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    victim = home / ".emrg" / "config.toml"
+    victim.parent.mkdir(parents=True)
+    victim.write_text("sentinel = true\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tool = BashTool()
+    result = _run(tool.execute({
+        "command": f"echo x > {victim}",
+        "sandbox": "workspace-write",
+        "workdir": str(workspace),
+    }))
+    assert result.error is True
+    assert "protected" in result.content
+    assert victim.read_text() == "sentinel = true\n"
+
+
 def test_execute_sandboxed_success_tags_output():
     tool = BashTool()
     result = _run(tool.execute({
