@@ -322,6 +322,76 @@ class TestCheckAndRestartIfStale:
                 asyncio.run(daemon_manager.check_and_restart_if_stale())
 
 
+# ── the old daemon's liveness probe (issue #1349) ────────────
+
+class TestTheOldDaemonProbe:
+    """`_old_daemon_alive` — the probe the restart path waits on.
+
+    Both answers are pinned on every runner: the Windows one must never enter
+    `os.kill` (signal 0 is `CTRL_C_EVENT` there — a Ctrl+C delivered to that
+    console process group, this CLI's shell included), and the POSIX one is a
+    signal-0 question. This file is skipped on Windows, so pinning the *Windows*
+    decision here is the whole point: it is observable on the runners that do
+    run these tests, which is where a defect like this has to be caught.
+    """
+
+    def test_posix_asks_with_signal_zero(self):
+        calls: list = []
+        assert daemon_manager._old_daemon_alive(
+            4321, platform="linux",
+            kill=lambda pid, sig: calls.append((pid, sig)),
+        ) is True
+        assert calls == [(4321, 0)]
+
+    def test_posix_reads_a_gone_pid_as_gone(self):
+        """Both states of the POSIX answer — the live side alone proves nothing."""
+        def _gone(pid, sig):
+            raise ProcessLookupError(3, "No such process")
+
+        assert daemon_manager._old_daemon_alive(
+            4321, platform="linux", kill=_gone) is False
+
+    def test_windows_never_enters_os_kill(self):
+        """The negative control: reaching `os.kill` on Windows IS the bug."""
+        def _would_signal(pid, sig):
+            raise AssertionError(
+                f"os.kill({pid}, {sig}) on Windows is CTRL_C_EVENT — a Ctrl+C to "
+                "that console process group")
+
+        seen: list = []
+        assert daemon_manager._old_daemon_alive(
+            4321, platform="win32", kill=_would_signal,
+            win_probe=lambda pid: seen.append(pid) or True,
+        ) is True
+        assert seen == [4321]
+
+    def test_windows_default_answer_is_the_port_probe(self):
+        """With no probe injected, Windows is answered by `is_running()`."""
+        with patch("emrg.client.daemon_manager.is_running",
+                   return_value=False) as mock_running:
+            assert daemon_manager._old_daemon_alive(
+                4321, platform="win32") is False
+        assert mock_running.called
+
+    def test_the_platform_decision_is_not_respelled_here(self):
+        """One spelling of the rule — the deletion is what is being pinned.
+
+        The scan is checked in the direction that makes it an instrument: the
+        positive half asserts text this file must still contain, so a scan that
+        cannot read what it claims to read fails instead of passing. The negative
+        half pins the *mechanism* — a platform verdict read here, or a signal-0
+        probe — rather than the word `win32`, which this file legitimately carries
+        in `win32_no_window_kwargs` (a spawn flag, not a liveness decision). The
+        file does still *signal*, with SIGTERM, which is not a probe.
+        """
+        src = Path(daemon_manager.__file__).read_text()
+        assert "_old_daemon_alive" in src, "the scan cannot see the file it reads"
+        assert "os.kill(server_pid, signal.SIGTERM)" in src, (
+            "the scan cannot see the file it reads")
+        assert "os.kill(server_pid, 0)" not in src
+        assert "sys.platform" not in src
+
+
 # ── ensure_connected ─────────────────────────────────────────
 
 class TestEnsureConnected:
