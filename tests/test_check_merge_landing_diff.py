@@ -162,6 +162,35 @@ def test_the_report_names_the_landing_change_and_the_backwards_paths(
     assert "M\tsrc/shared.txt" in backwards
 
 
+def test_the_landing_tree_is_published_complete(mod, tmp_path, monkeypatch) -> None:
+    """The tree a vote is cast on is named in full, not by a prefix nobody can check.
+
+    The report's first line is where a reviewer reads *which tree* the change was
+    computed on, and that tree is what a landing-tree vote is bound to. Abbreviated to
+    12 characters the reading cannot be reused: `git rev-parse <40-hex>` echoes any
+    40-hex string it is handed - a control of `deadbeef` came back unchanged, rc 0 - so
+    asking git whether a published sha names an object means `git cat-file -t`, which
+    needs all 40 characters. Measured (cyc20260918-000146): a cycle holding a
+    12-character step tree sha re-ran a whole plan (~116s) rather than trust it.
+    """
+    repo, base, head = _behind_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(mod, "_fetch_head", lambda number: head)
+
+    tree, _, _, _, _ = mod.landing_reading(base, head)
+    state, report = mod.check_pr(1, base)
+
+    assert state == "backwards"
+    match = re.search(r"#1 landing tree ([0-9a-f]{12}) \(([0-9a-f]{40})\)", report)
+    assert match, report
+    short, full = match.group(1), match.group(2)
+    assert full.startswith(short)
+    # The published identity is the tree the reading was computed on - not the head's -
+    # and git agrees it names a tree, which the prefix alone could not establish.
+    assert full == tree
+    assert _git(repo, "cat-file", "-t", full).strip() == "tree"
+
+
 def test_a_head_containing_the_base_tip_reads_cleanly(mod, tmp_path, monkeypatch) -> None:
     """The control: with nothing to be behind, there is nothing to distrust."""
     repo, base, head = _fresh_repo(tmp_path)
