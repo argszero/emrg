@@ -347,7 +347,9 @@ class TestPidAliveIsPlatformCorrect:
     def test_the_cli_stop_path_uses_the_shared_probe(self):
         """Wiring, read from source — never by calling it: `_stop_daemon` SIGTERMs
         the live daemon (MANIFESTO 第四条附则二). A probe nothing calls is a
-        silent no-op, and the bare call is the regression this pins against."""
+        silent no-op, and the bare call is the regression this pins against.
+        Calling it is not merely discouraged: conftest::
+        _guard_live_daemon_signals makes the SIGTERM raise (issue #1337)."""
         src = inspect.getsource(cli._stop_daemon)
         assert "pid_alive(pid)" in src
         assert _bare_kill_zero_calls(src) == []

@@ -22,6 +22,7 @@ immediately instead of the pollution being discovered later (precedent:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -149,6 +150,77 @@ def _guard_stop_all_hermeticity(monkeypatch, request):
     for name in _STOP_FUNCS:
         if name not in allowed:
             monkeypatch.setattr(stop_mod, name, _no_real_stop(name))
+
+
+class _SignalTripwire:
+    """An ``os`` stand-in whose ``kill`` refuses a real signal.
+
+    Everything else delegates to the real ``os`` module, so the module holding
+    it keeps working normally. Signal 0 is *not* a kill — it delivers nothing
+    and only asks whether the pid exists — so it passes through (on Windows 0
+    is ``signal.CTRL_C_EVENT`` instead: a console event, which is exactly why
+    no production path probes with it there — ``emrg._stop_all.pid_alive``,
+    issue #1349).
+
+    It replaces a module's ``os`` *name*, not ``os.kill`` itself: a global
+    patch would also disarm ``subprocess.Popen.terminate()``, breaking every
+    test that reaps a process it owns.
+    """
+
+    def __init__(self, holder: str) -> None:
+        self._holder = holder
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def kill(self, pid, sig, *args, **kwargs):
+        if sig == 0:
+            return os.kill(pid, sig, *args, **kwargs)
+        raise AssertionError(
+            f"a test sent signal {sig!r} to pid {pid} through {self._holder} — "
+            f"⛔ red-line violation (MANIFESTO 第四条附则二 / host 2026-08-18T22:58): "
+            f"the daemon is EMRG's life core. Isolate the kill in the test that "
+            f"needs it, the way tests/test_daemon_manager.py's restart tests do: "
+            f'monkeypatch.setattr({self._holder}.os, "kill", lambda pid, sig: None)'
+        )
+
+
+@pytest.fixture(autouse=True)
+def _guard_live_daemon_signals(monkeypatch):
+    """⛔ No test may signal a pid through either client-side route that kills
+    the live daemon (issue #1337 part 2, measured 2026-09-17).
+
+    The red line -- tests must never stop/restart the daemon (host
+    2026-08-18T22:58) -- was enforced in-process only for ``emrg._stop_all``'s
+    five ``stop_*()`` functions (``_guard_stop_all_hermeticity`` above). Two
+    client-side kill routes were outside its reach, and both were held by
+    *prose* alone: ``daemon_manager.check_and_restart_if_stale()`` SIGTERMs a
+    live daemon whose source/config looks newer (``emrg/client/daemon_manager.py``
+    ``os.kill(server_pid, signal.SIGTERM)``), and the ``emrg stop`` CLI's
+    SIGTERM fallback (``emrg/__main__.py::_stop_daemon``). Two test files
+    document that they must never be executed ("Neither test runs the stop
+    path ... exercising it would kill the daemon hosting the evolution") — and
+    nothing made that true; a new test could call either one and end the
+    daemon mid-suite. Issue #1337 records the consequence of exactly that: a
+    suite run SIGTERMed a live daemon, the scheduler restarted this cycle
+    against a still-dirty tree, and the dirty-tree guard pinned it read-only,
+    losing the cycle's work.
+
+    Now the two routes raise instead of killing. Tests that legitimately drive
+    the restart logic patch the module's ``os.kill`` themselves *after* this
+    fixture, which overrides it as usual (that is the escape hatch, and it is
+    what tests/test_daemon_manager.py already does).
+
+    Not covered, and not coverable from inside the process: a child process
+    that runs the stopper (``python -m emrg stop``). Measured on 2026-09-18: no
+    test spawns one, and the child's stop log is already pinned away from host
+    state by ``_guard_stop_log_is_not_host_state`` below.
+    """
+    import emrg.__main__ as cli_mod
+    import emrg.client.daemon_manager as dm_mod
+
+    for module, name in ((dm_mod, "emrg.client.daemon_manager"), (cli_mod, "emrg")):
+        monkeypatch.setattr(module, "os", _SignalTripwire(name))
 
 
 @pytest.fixture(scope="session")

@@ -9,7 +9,9 @@ while it kept running. `emrg rant` had the mirror-image version of the same
 mistake: `AuthError` was caught by no clause at all and escaped as a traceback.
 
 **Neither test runs the stop path.** `_stop_daemon` SIGTERMs a pid; exercising
-it would kill the daemon hosting the evolution (MANIFESTO 第四条附则二). What is
+it would kill the daemon hosting the evolution (MANIFESTO 第四条附则二). That is
+now enforced rather than intended — conftest::_guard_live_daemon_signals makes
+the SIGTERM raise (issue #1337). What is
 asserted is the pure message function, plus the wiring read from source, plus
 `_send_rant` driven with `connect_to_server` replaced in-process — so no socket
 is opened and no rant can reach `rants.jsonl`.
