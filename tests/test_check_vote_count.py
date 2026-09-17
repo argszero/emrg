@@ -810,6 +810,82 @@ def test_an_approval_naming_several_cycle_ids_counts_for_none_of_them(mod, monke
     assert "VOID (3 cycle ids)" in out, out
 
 
+def test_an_approval_that_repeats_one_cycle_id_counts_once(mod, monkeypatch, capsys):
+    """The reader must count *candidates*, not occurrences - one id twice is one author.
+
+    Measured 2026-09-17 on PR #1310. A vote body that quoted the counter's own
+    output - `VOID (2 cycle ids) - the vote body names 2 cycle ids (X, X)`, the
+    same id twice - was **accepted** by `cast-vote.py` (its preflight `cycles_in()`
+    is already distinct) and **voided** here, where the ids were read with
+    `_CYCLE_RE.findall`. One instrument posted what the other discarded, and the
+    only visible symptom was the count not moving.
+
+    What the reader owes the gate is "how many cycles could have written this",
+    and for a body repeating one id that is 1. Both directions are asserted: the
+    pair below differs by one clause, so a "dedupe" that also excused a body
+    naming two *different* cycles would pass the first half and fail the second.
+    """
+    mine = "cyc20260911-040000"
+    quoted = (
+        f"\u2705 LGTM - cycle `{mine}`; the counter printed `VOID (2 cycle ids) - "
+        f"the vote body names 2 cycle ids ({mine}, {mine})`"
+    )
+    assert mod._CYCLE_RE.findall(quoted) == [mine, mine, mine], (
+        "the shape under test: the same id repeated, which is what the old "
+        "occurrence-counting reader read as an ambiguous body"
+    )
+
+    base = [_approve("cyc20260911-010000", "2026-09-11T01:00:00Z"),
+            _approve("cyc20260911-020000", "2026-09-11T02:00:00Z")]
+
+    # (a) one id, three times: one candidate author, so it is a vote - and the
+    # third distinct cycle, so the PR is READY rather than SHORT.
+    fake = FakeGh(base + [_review("2026-09-11T03:00:00Z", quoted)])
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    verdict = mod.check_pr(1, mod.DEFAULT_MIN_VOTES)
+    counted = verdict.votes[-1]
+    assert counted.cycle == mine, (
+        "a body repeating one id has exactly one candidate author, so it must be "
+        f"filed under it; got {counted.cycle!r} - one id, twice, is not an "
+        "ambiguous body"
+    )
+    assert counted.valid and counted.ids == (mine,)
+    assert verdict.valid_count == 3
+
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "READY 3/3" in out, out
+    assert "cyc20260911-040000 - counts" in out, (
+        "the label names the cycle and counts it, rather than reporting an id count"
+    )
+    assert "cycle ids)" not in out, out
+
+    # (b) the same body plus one *other* cycle: two candidates, so the original
+    # rule still holds and the vote counts for neither.
+    two_ids = (
+        f"\u2705 LGTM - cycle `{mine}`; the approvals of cyc20260911-010000 are "
+        f"void at this head ({mine}, cyc20260911-010000)"
+    )
+    fake = FakeGh(base + [_review("2026-09-11T03:00:00Z", two_ids)])
+    monkeypatch.setattr(mod, "_gh_json", fake)
+    monkeypatch.setattr(mod, "_gh_json_paginated", fake.paginated)
+    verdict = mod.check_pr(1, mod.DEFAULT_MIN_VOTES)
+    ambiguous = verdict.votes[-1]
+    assert ambiguous.cycle is None and not ambiguous.valid
+    assert ambiguous.ids == (mine, "cyc20260911-010000"), (
+        "deduping is about repeated ids, not about dropping ids"
+    )
+    assert verdict.valid_count == 2
+
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 1, out
+    assert "SHORT 2/3" in out, out
+    assert "VOID (2 cycle ids)" in out, out
+
+
 def test_a_multi_id_veto_keeps_its_force_though_it_cannot_be_attributed(
     mod, monkeypatch, capsys
 ):
