@@ -24,6 +24,14 @@ const WebSocket = require("ws");
 // emrgd.token 已是唯一规范位置，回退冗余）。
 const TOKEN_FILE = () => path.join(os.homedir(), ".emrg", "emrgd.token");
 const EMRGD_LOG = () => path.join(os.homedir(), ".emrg", "emrgd.log");
+// Issue #1276 item 4：子进程**自己的 stderr** 落到这里。emrgd 的日志 handler 是
+// 子进程内部才装的（`emrg/server/__main__.py:_configure_logging`），所以"还没走到
+// 那一步就死了"的失败（import 失败、补丁语法错、缺模块）在 emrgd.log 里一个字都
+// 没有——此前 stderr 直接丢弃，宿主此时被告知"什么都没有"，正是该 issue 的第二个
+// 症状。落**文件**而不是终端：stderr 被丢弃的理由是 daemon 不得写进客户端界面，
+// 落文件保留这个性质，同时给失败一个可读的地方。不会重复写：emrgd 只在
+// `sys.stderr.isatty()` 时加 StreamHandler，stderr 指向文件与 DEVNULL 一样不是 tty。
+const EMRGD_START_ERR = () => path.join(os.homedir(), ".emrg", "emrgd-start.err");
 // Fixed daemon port (rant 2026-08-19T08:05:21 + 2026-08-20T14:32:52): the
 // daemon always listens on this constant — keep in sync with emrg/connect.py
 // EMRGD_PORT and emrg/_stop_all.py _EMRGD_PORT. The token file no longer
@@ -196,6 +204,31 @@ class DaemonClient {
     }
   }
 
+  // 本次启动的子进程 stderr 文件，**截断**打开（issue #1276 item 4）。拿不到 fd 就
+  // 返回 null，调用方退回 "ignore"——诊断永远不得让启动本身失败。截断而不追加：
+  // 报给宿主的内容必须全是本次写的，append 会把上一轮的 traceback 重新放到"本次
+  // 失败的原因"的位置上，正是 #1283 修掉的那个形状。
+  _openStartStderr(file = EMRGD_START_ERR()) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      return fs.openSync(file, "w");
+    } catch {
+      return null;
+    }
+  }
+
+  // 本次启动子进程自己写的 stderr 末 `lines` 行；读不到答案就是 ""（诊断不抛异常）。
+  // 40 行而不是日志尾巴的 15：traceback 的**结尾**（异常那一行与它的 cause）才是
+  // 原因，而一个 Python traceback 比 15 行长。
+  _readStartStderr(lines = 40, file = EMRGD_START_ERR()) {
+    try {
+      const text = fs.readFileSync(file, "utf8").replace(/\s+$/, "");
+      return text ? text.split(/\r?\n/).slice(-lines).join("\n") : "";
+    } catch {
+      return "";
+    }
+  }
+
   // 子进程是否已经退出、以何种方式（issue #1283 缺陷 ②）。Node 把"退出码"与
   // "被信号杀"分成两个字段（exitCode / signalCode）；Python 的 returncode 把信号
   // 表示为负数，所以那边只看 returncode 就够，这里两个都要看——否则被 SIGKILL 的
@@ -237,13 +270,20 @@ class DaemonClient {
     return ` (${state.err.code || state.err.message})`;
   }
 
-  // 一次没能起来的启动，究竟知道些什么（issue #1283）：两个事实，都不得用猜测代替
-  // ——本次是否往 log 里写过东西，以及子进程是活着还是已经退出（退出码/信号）。
-  // 本次没写时**如实说没写**，绝不把更早的输出当成本次的原因。
-  _startupFailureDetail(since, child, spawnState = NO_SPAWN_STATE) {
+  // 一次没能起来的启动，究竟知道些什么（issue #1283 + #1276 item 4）：三个事实，
+  // 都不得用猜测代替——本次是否往 log 里写过东西、子进程是活着还是已经退出（退出
+  // 码/信号）、以及子进程**自己**的 stderr 说了什么。第三条是另外两条看不见的：在
+  // 装上日志 handler 之前就死掉的子进程只写 stderr，没有这一节时宿主被show一个空的
+  // emrgd.log 并被告诉"什么都没有"。没写就**如实说没写**，绝不把更早的输出当成本次
+  // 的原因。顺序即论证：子进程的遗言在前，它已经能记录的日志尾巴在后。
+  _startupFailureDetail(since, child, spawnState = NO_SPAWN_STATE, stderrFile = EMRGD_START_ERR()) {
+    const childErr = this._readStartStderr(40, stderrFile);
+    const childSection = childErr
+      ? `\n  emrgd own stderr (written by this start attempt, ${stderrFile}):\n${childErr}`
+      : "";
     const tail = this._readLogTail(15, since);
     if (tail) {
-      return `\n  emrgd.log tail (written by this start attempt, ${EMRGD_LOG()}):\n${tail}`;
+      return childSection + `\n  emrgd.log tail (written by this start attempt, ${EMRGD_LOG()}):\n${tail}`;
     }
     let exists = true;
     try {
@@ -257,9 +297,13 @@ class DaemonClient {
       : signal !== null
         ? `already exited (signal=${signal})`
         : code !== null ? `already exited (exit=${code})` : "still running";
+    const silent = childErr
+      ? ""
+      : ", and the child wrote nothing to its own stderr";
     return (
+      childSection +
       `\n  this start attempt wrote nothing to emrgd.log` +
-      `${exists ? "" : " (the file does not exist)"}; the child is ${how}.` +
+      `${exists ? "" : " (the file does not exist)"}${silent}; the child is ${how}.` +
       ` Any output earlier in the file is from a previous run.`
     );
   }
@@ -312,9 +356,12 @@ class DaemonClient {
     // exec python -m emrg.server）；源码模式保持 python -m emrg.server。
     if (this._isPackaged) {
       const emrgdPath = this._findDaemonExecutable();
+      // 本次启动的 stderr（issue #1276 item 4）：装日志 handler 之前就死掉的子进程
+      // 只有这一个出口。取不到 fd 时退回 "ignore"，与旧行为一致。
+      const errFd = this._openStartStderr();
       const opts = {
         cwd: os.homedir(),
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", errFd === null ? "ignore" : errFd],
         detached: true,
       };
       // R36/R66：Windows .cmd 需 shell:true（非 PE），windowsHide 防黑窗闪烁；
@@ -325,6 +372,7 @@ class DaemonClient {
       }
       this.logger.info(`[gui] spawning packaged daemon: ${emrgdPath} cwd=${os.homedir()}`);
       const child = spawn(emrgdPath, [], opts);
+      if (errFd !== null) { try { fs.closeSync(errFd); } catch { /* 子进程已持有副本 */ } }
       child.unref();
       this._daemonChild = child;
       this.logger.info(`[gui] daemon spawned: pid=${child.pid} (packaged emrgd)`); // 18:47:37 B2
@@ -335,14 +383,18 @@ class DaemonClient {
     const python = this._findPython();
     const args = ["-m", "emrg.server"];
     this.logger.info(`[gui] spawning daemon: ${python} ${args.join(" ")} cwd=${os.homedir()}`);
+    const errFdSource = this._openStartStderr();
     const child = spawn(python, args, {
       cwd: os.homedir(),
-      stdio: "ignore", // G68：对照 DEVNULL
+      // G68：对照 DEVNULL——stdout 丢弃，stderr 落到本次启动的诊断文件（issue #1276
+      // item 4）。见 EMRGD_START_ERR 的注释：装日志 handler 之前的失败只有这一个出口。
+      stdio: ["ignore", "ignore", errFdSource === null ? "ignore" : errFdSource],
       detached: true, // 对照 start_new_session=True
       // windowsHide: python.exe 是 console 子系统——GUI spawn 时不隐藏会
       // 弹一个命令行黑窗（打包模式 emrgd.cmd 已改走 pythonw.exe，这里补源码模式）。
       ...(process.platform === "win32" ? { windowsHide: true } : {}),
     });
+    if (errFdSource !== null) { try { fs.closeSync(errFdSource); } catch { /* 子进程已持有副本 */ } }
     child.unref(); // GUI 退出不带走 daemon
     this._daemonChild = child; // 暴露 child（集成测试 after 清理用）
     this.logger.info(`[gui] daemon spawned: pid=${child.pid} (source mode)`); // 18:47:37 B2
@@ -903,4 +955,4 @@ function generateSessionId(seed) {
   return sid;
 }
 
-module.exports = { DaemonClient, generateSessionId, TOKEN_FILE, SESSION_ID_RE, MAX_PAYLOAD, EMRGD_PORT };
+module.exports = { DaemonClient, generateSessionId, TOKEN_FILE, SESSION_ID_RE, MAX_PAYLOAD, EMRGD_PORT, EMRGD_START_ERR };

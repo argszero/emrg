@@ -93,14 +93,36 @@ async def start_daemon() -> subprocess.Popen:
     # Mark the log before the child can write to it: a failure report may only
     # quote what *this* attempt appended (issue #1276).
     log_mark = _log_mark(_log_path())
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "emrg.server",
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
-        start_new_session=True, close_fds=True,
-        # Windows: daemon spawn must never pop a console window
-        # (rant 2026-08-09T13:16:36 — cmd-window storm).
-        **win32_no_window_kwargs())
-    await _await_daemon_ready(proc, _log_path(), log_mark)
+    # The child's own stderr used to go to DEVNULL, and `_configure_logging()`
+    # installs emrgd's handler *inside* the child — so a start that died before
+    # that call (an import error, a syntax error in a patch, a missing module)
+    # left no evidence anywhere: emrgd.log was empty and the host was told
+    # nothing at all. That is the second symptom of issue #1276, and it is the
+    # one case where the diagnostic has no other channel to read from.
+    #
+    # A file, not the terminal: the reason stderr was discarded is that the
+    # daemon must not write into the client's TUI (server logs are files), and
+    # redirecting it into a file keeps that property while giving the failure a
+    # place to be read from. Nothing is duplicated into it: emrgd adds its
+    # StreamHandler only when `sys.stderr.isatty()`, which is false for a file
+    # exactly as it was for DEVNULL (`emrg/server/__main__.py`).
+    stderr_path = _start_stderr_path()
+    stderr_handle = _truncate_start_stderr(stderr_path)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "emrg.server",
+            stdout=subprocess.DEVNULL,
+            stderr=stderr_handle if stderr_handle is not None else subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True, close_fds=True,
+            # Windows: daemon spawn must never pop a console window
+            # (rant 2026-08-09T13:16:36 — cmd-window storm).
+            **win32_no_window_kwargs())
+    finally:
+        # The child holds its own descriptor; the parent's copy would leak.
+        if stderr_handle is not None:
+            stderr_handle.close()
+    await _await_daemon_ready(proc, _log_path(), log_mark, stderr_path=stderr_path)
     logger.info("emrgd started (pid=%d)", proc.pid)
     return proc
 
@@ -113,6 +135,53 @@ def _log_path() -> Path:
     isolated-HOME runs point HOME elsewhere after the module is loaded.
     """
     return Path.home() / ".emrg" / "emrgd.log"
+
+
+def _start_stderr_path() -> Path:
+    """Where a spawned daemon's **own stderr** goes (issue #1276, item 4).
+
+    Resolved per call for the same reason `_log_path` is. Separate from
+    `emrgd.log` on purpose: that file is the daemon's *logging* output, written by
+    a handler the child installs partway through its startup, so the failures this
+    file exists for are exactly the ones that happen before it and therefore never
+    reach `emrgd.log`.
+    """
+    return Path.home() / ".emrg" / "emrgd-start.err"
+
+
+def _truncate_start_stderr(path: Path):
+    """Open ``path`` for the child's stderr, **truncated**, or None if it cannot be opened.
+
+    Truncated rather than appended so that everything a failure report quotes from
+    it is this attempt's bytes: the defect the log-delta reader exists for is
+    history presented as the cause of *this* failure (issue #1276), and a file that
+    is only ever appended to would reintroduce it one level down. ``None`` means
+    the caller falls back to ``DEVNULL`` — a diagnostic must never be able to make
+    a start fail.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return open(path, "wb")
+    except OSError:
+        return None
+
+
+def _read_start_stderr(path: Path | None, lines: int = 40) -> str:
+    """The last ``lines`` of the child's own stderr for this attempt, or ``""``.
+
+    ``lines`` is larger than the log tail's 15 because the useful part of a
+    traceback is the *end* of it — the exception line and its cause — and a
+    Python traceback is longer than fifteen lines. An unreadable or absent file
+    answers ``""``: "could not be read" and "nothing was written" are both
+    reported as text by the caller, never as an exception out of a diagnostic.
+    """
+    if path is None:
+        return ""
+    try:
+        data = path.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(data.rstrip().splitlines()[-lines:])
 
 
 def _log_mark(path: Path) -> tuple[int, int | None]:
@@ -186,25 +255,44 @@ def _child_exit_code(proc) -> int | None:
     return code if isinstance(code, int) else None
 
 
-def _startup_failure_detail(log_path: Path, since: tuple[int, int | None], proc) -> str:
+def _startup_failure_detail(
+    log_path: Path,
+    since: tuple[int, int | None],
+    proc,
+    stderr_path: Path | None = None,
+) -> str:
     """What is actually known about a start that did not come up (issue #1276).
 
     Still the fix for rant 2026-08-05T15:54:28 (R124): a config.toml parse error
     used to surface as a bare "failed to start within timeout" with the real
     error swallowed. The tail is still read — from this attempt's bytes only.
 
-    Two facts, and neither may be replaced by a guess: whether the child is
-    still alive (and its exit code if not), and whether this attempt appended
-    anything to the log at all.
+    Three facts, and none may be replaced by a guess: whether the child is still
+    alive (and its exit code if not), whether this attempt appended anything to
+    the log, and — the one the other two cannot see — what the child itself wrote
+    to its own stderr before it died. A child that fails at import stage writes
+    *only* to stderr, so before this section existed the host was shown an empty
+    log and told nothing at all (issue #1276, second symptom).
     """
     tail = _read_log_tail(log_path, lines=15, since=since)
+    child_err = _read_start_stderr(stderr_path)
+    child_section = (
+        f"\n  emrgd 自身 stderr（本次启动新增）:\n{child_err}" if child_err else ""
+    )
     code = _child_exit_code(proc)
     if tail:
-        return f"\n  emrgd.log 尾部（本次启动新增）:\n{tail}"
+        return child_section + f"\n  emrgd.log 尾部（本次启动新增）:\n{tail}"
+    if child_section:
+        return child_section + (
+            f"\n  this start attempt wrote nothing to emrgd.log"
+            f"{'' if log_path.exists() else ' (the file does not exist)'};"
+            f" the child is {'still running' if code is None else f'already exited (exit={code})'}."
+        )
     alive = "still running" if code is None else f"already exited (exit={code})"
     return (
         f"\n  this start attempt wrote nothing to emrgd.log"
-        f"{'' if log_path.exists() else ' (the file does not exist)'};"
+        f"{'' if log_path.exists() else ' (the file does not exist)'},"
+        f" and the child wrote nothing to its own stderr;"
         f" the child is {alive}. Any output earlier in the file is from a previous run."
     )
 
@@ -217,14 +305,17 @@ async def _await_daemon_ready(
     *,
     attempts: int = 15,
     delay: float = 0.3,
+    stderr_path: Path | None = None,
 ) -> None:
     """Wait for the daemon to accept connections; raise with what is known.
 
     Fail fast on a child that has already exited (issue #1276 item 3): the loop
     used to sleep out the whole window without ever asking, so a child dying at
     import or config-parse stage cost 4.5s and reported no exit code at all.
-    The exit code is the one fact a silent child leaves behind, because the spawn
-    discards its stderr.
+    The exit code is one fact a silent child leaves behind; the other is
+    ``stderr_path``'s content, where the child's own output was captured instead
+    of discarded (issue #1276 item 4) — a child that dies at import writes
+    *only* there, so without it the failure report had nothing to quote.
     """
     probe = probe or is_running
     for _ in range(attempts):
@@ -235,11 +326,11 @@ async def _await_daemon_ready(
         if code is not None:
             raise RuntimeError(
                 f"emrgd exited during startup (exit={code})"
-                + _startup_failure_detail(log_path, since, proc)
+                + _startup_failure_detail(log_path, since, proc, stderr_path)
             )
     raise RuntimeError(
         f"emrgd failed to start within {attempts * delay:.1f}s"
-        + _startup_failure_detail(log_path, since, proc)
+        + _startup_failure_detail(log_path, since, proc, stderr_path)
     )
 
 

@@ -279,3 +279,156 @@ def test_the_classification_in_run_server_is_the_one_used():
     src = Path(srv.__file__).read_text(encoding="utf-8").replace("\r\n", "\n")
     assert "level, message, with_traceback = _serve_exit_log_record(reason, exc)" in src
     assert 'logger.critical(\n            "daemon crashed' not in src
+
+
+# ── the child's own stderr: the channel a start that dies before logging has ─
+
+
+def test_the_captured_stderr_is_truncated_so_it_is_only_this_attempt(tmp_path):
+    """The same rule as the log mark, one level down: history is not this attempt.
+
+    ``emrgd-start.err`` is truncated at spawn, so everything a failure report can
+    quote from it was written by *this* attempt. Appending instead would put an
+    earlier run's traceback back in front of the host — the defect the log-delta
+    reader exists for (issue #1276), reintroduced through the new file.
+    """
+    err = tmp_path / "emrgd-start.err"
+    err.write_bytes(b"previous attempt: ImportError: no such patch\n")
+    handle = dm._truncate_start_stderr(err)
+    assert handle is not None
+    try:
+        assert err.read_bytes() == b"", "the earlier attempt's bytes must be gone"
+        handle.write(b"this attempt: ImportError: real cause\n")
+    finally:
+        handle.close()
+    assert dm._read_start_stderr(err).strip() == "this attempt: ImportError: real cause"
+
+
+def test_the_child_itself_writes_into_the_captured_stderr(tmp_path):
+    """The plumbing, driven by a **stand-in** child: nothing here is the daemon.
+
+    MANIFESTO 第四条附则二 forbids any test that stops or restarts `emrgd`, and
+    this one can only ever spawn `python -c "exit(3)"` — a process that is not the
+    server, does not read a port file and cannot terminate a daemon. What it
+    proves is the mechanism the real spawn now relies on: a handle from
+    `_truncate_start_stderr` passed as a child's stderr really does land in that
+    file, which is the only channel a child that dies before installing its
+    logging handler leaves behind.
+    """
+    import subprocess
+
+    err = tmp_path / "emrgd-start.err"
+    handle = dm._truncate_start_stderr(err)
+    assert handle is not None
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.stderr.write('Traceback ...\\nImportError: boom\\n'); sys.exit(3)"],
+            stderr=handle,
+        )
+    finally:
+        handle.close()
+    assert proc.returncode == 3
+    got = dm._read_start_stderr(err)
+    assert "Traceback ..." in got and "ImportError: boom" in got
+
+
+def test_a_child_that_died_before_logging_has_its_own_stderr_reported(tmp_path):
+    """issue #1276's second symptom: the report was *nothing at all*.
+
+    A child that fails at import stage writes only to stderr, so before this
+    section existed the host was shown an empty emrgd.log and told nothing — the
+    first-run symptom was a mislabelled cause, the second was no cause at all.
+    """
+    log = tmp_path / "emrgd.log"
+    log.write_text("previous run: SystemExit: SIGTERM (15) received\n", encoding="utf-8")
+    mark = dm._log_mark(log)
+    err = tmp_path / "emrgd-start.err"
+    err.write_bytes(b"Traceback (most recent call last):\nImportError: boom\n")
+
+    class Dead:
+        returncode = 1
+
+    detail = dm._startup_failure_detail(log, mark, Dead(), err)
+    assert "ImportError: boom" in detail, "the child's own cause is the one fact this adds"
+    assert "SIGTERM" not in detail, "the older run's shutdown still must not be shown"
+    assert "wrote nothing to emrgd.log" in detail, "the log half is still reported"
+
+
+def test_the_child_stderr_is_reported_before_the_log_tail(tmp_path):
+    """Both channels can be non-empty, and the order is the argument.
+
+    The child's own stderr is what it said *while dying*; the log tail is what its
+    logging was already able to record. The more direct fact comes first, so a
+    reader who stops after the first section has read the cause.
+    """
+    log = tmp_path / "emrgd.log"
+    log.write_text("previous\n", encoding="utf-8")
+    mark = dm._log_mark(log)
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("this attempt: config.toml is not valid TOML\n")
+    err = tmp_path / "emrgd-start.err"
+    err.write_bytes(b"child: ImportError: no module named 'x'\n")
+
+    class Dead:
+        returncode = 1
+
+    detail = dm._startup_failure_detail(log, mark, Dead(), err)
+    assert "ImportError" in detail and "config.toml" in detail
+    assert detail.index("ImportError") < detail.index("config.toml"), (
+        "the child's own last words come first"
+    )
+
+
+def test_a_silent_child_is_named_silent_in_both_channels(tmp_path):
+    """Nothing anywhere is a fact, and the report says which two channels were read.
+
+    Silence in one channel used to be published as a bare "wrote nothing" that
+    read as the whole story; naming both is what makes "we learned nothing" a
+    measurement rather than an omission (`_dummy` cannot appear: the reader is
+    given no path here at all, which is the parameter's default).
+    """
+    log = tmp_path / "emrgd.log"
+    log.write_text("previous\n", encoding="utf-8")
+
+    class Dead:
+        returncode = 9
+
+    detail = dm._startup_failure_detail(log, dm._log_mark(log), Dead())
+    assert "wrote nothing to emrgd.log" in detail
+    assert "wrote nothing to its own stderr" in detail
+    assert "exit=9" in detail
+
+
+def test_the_stderr_line_cap_keeps_the_end_of_a_traceback(tmp_path):
+    """A traceback's cause is its *end*, and 15 lines is not enough for that.
+
+    The log tail's cap is 15 because a log line is self-contained; a traceback is
+    not — its useful half is the exception line at the bottom. Measured here with
+    a body longer than either cap.
+    """
+    err = tmp_path / "emrgd-start.err"
+    err.write_bytes(
+        ("Traceback (most recent call last):\n"
+         + "".join(f'  File "f{i}.py", line {i}, in <module>\n' for i in range(60))
+         + "ImportError: the cause\n").encode()
+    )
+    got = dm._read_start_stderr(err)
+    assert "ImportError: the cause" in got, "the last line is the one that names the cause"
+    assert len(got.splitlines()) == 40, "the cap is 40 lines, and it is applied"
+    assert dm._read_start_stderr(tmp_path / "nope.err") == "", "unreadable is not an exception"
+    assert dm._read_start_stderr(None) == "", "no path is not an exception either"
+
+
+def test_start_daemon_captures_the_child_stderr_instead_of_discarding_it():
+    """The wiring itself, asserted on the source: the diagnostic above is dead code
+    unless the spawn passes the handle through.
+
+    A text assertion rather than a call, because calling `start_daemon()` spawns —
+    and, worse, calls `cleanup_server()` first, which is a stop path. Line endings
+    are normalised so a CRLF checkout cannot satisfy the assertion with a newline.
+    """
+    src = Path(dm.__file__).read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert "stderr=stderr_handle if stderr_handle is not None else subprocess.DEVNULL" in src
+    assert "stderr_path = _start_stderr_path()" in src
+    assert "await _await_daemon_ready(proc, _log_path(), log_mark, stderr_path=stderr_path)" in src
