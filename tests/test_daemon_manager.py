@@ -366,12 +366,28 @@ class TestTheOldDaemonProbe:
         assert seen == [4321]
 
     def test_windows_default_answer_is_the_port_probe(self):
-        """With no probe injected, Windows is answered by `is_running()`."""
-        with patch("emrg.client.daemon_manager.is_running",
-                   return_value=False) as mock_running:
+        """With no probe injected, Windows is answered by `is_running()`.
+
+        The stand-in is a **zero-argument** callable on purpose. `is_running` takes
+        no pid — it asks the port file — while `pid_alive`'s `win_probe` contract is
+        ``probe(pid)``. A `MagicMock` (what this test used to patch in) accepts
+        either call, so it stayed green while the production path raised `TypeError:
+        is_running() takes 0 positional arguments but 1 was given` on every Windows
+        restart — measured on the windows-2025 leg of run 35283518915, where a test
+        that reproduced the shape failed. A stand-in that can be called the wrong
+        way is not a control: this one is called the wrong way the moment the
+        adapter stops being the supplier.
+        """
+        calls: list = []
+
+        def _port_is_up() -> bool:
+            calls.append(None)
+            return False
+
+        with patch("emrg.client.daemon_manager.is_running", new=_port_is_up):
             assert daemon_manager._old_daemon_alive(
                 4321, platform="win32") is False
-        assert mock_running.called
+        assert calls == [None]
 
     def test_the_platform_decision_is_not_respelled_here(self):
         """One spelling of the rule — the deletion is what is being pinned.

@@ -371,6 +371,29 @@ async def _await_daemon_ready(
     )
 
 
+def _port_probe(_pid: int) -> bool:
+    """`is_running()` wearing `pid_alive`'s ``win_probe`` contract — ``probe(pid)``.
+
+    The two probes this module supplies to `pid_alive` do not have the same
+    signature, and that is not a detail: `_win_pid_alive` answers *about a pid*
+    (it opens the process handle), while :func:`is_running` answers about the
+    **port file** and takes no argument at all. Passing the latter straight
+    through was a `TypeError` on every Windows restart: `is_running() takes 0
+    positional arguments but 1 was given`, raised from inside `pid_alive` on the
+    first iteration of the wait loop — i.e. on the path that exists to keep one
+    daemon from becoming two. Nothing on POSIX reaches it (`platform` is `win*`
+    there), which is exactly why it survived local runs, and it was measured on
+    Windows by the windows-2025 leg of run 35283518915.
+
+    The argument is accepted and dropped rather than the call being made without
+    one, because the *contract* is `pid_alive`'s to define and it is the one
+    asking; the port probe is what this caller has to answer with (a Windows
+    SIGTERM is a hard kill, so the pid is gone and the port file is the thing
+    that lingers).
+    """
+    return is_running()
+
+
 def _old_daemon_alive(pid: int, *, platform: str = "", kill=None,
                       win_probe=None) -> bool:
     """Is the daemon we just signalled gone? — asked once, not respelled.
@@ -382,7 +405,9 @@ def _old_daemon_alive(pid: int, *, platform: str = "", kill=None,
     ``GenerateConsoleCtrlEvent`` and the call becomes a Ctrl+C delivered to that
     pid's console process group — every process sharing it, this CLI's shell
     included. Windows SIGTERM is an immediate hard kill, so a *port* probe is
-    what answers there, and :func:`is_running` is this caller's Windows probe.
+    what answers there, and :func:`_port_probe` is this caller's Windows probe —
+    a port probe, because ``is_running`` answers for the port rather than for a
+    pid and cannot be handed over as it stands.
 
     ``platform`` / ``kill`` / ``win_probe`` are forwarded to `pid_alive` so both
     answers can be pinned on every runner: the Windows branch is the unsafe one,
@@ -391,7 +416,8 @@ def _old_daemon_alive(pid: int, *, platform: str = "", kill=None,
 
     Both halves of the answer are sourced from **this** module when the caller
     injected neither, and that symmetry is load-bearing rather than tidy: the
-    Windows half already had to come from here (``is_running`` is ours), and the
+    Windows half already had to come from here (``_port_probe`` over our
+    ``is_running``), and the
     POSIX half has to as well, or the restart route's signalling is split across
     two modules. It briefly was: `pid_alive` defaults its ``kill`` to its *own*
     module's ``os.kill``, so the probe left the tripwire
@@ -419,7 +445,7 @@ def _old_daemon_alive(pid: int, *, platform: str = "", kill=None,
         pid,
         platform=platform,
         kill=os.kill if kill is None else kill,
-        win_probe=is_running if win_probe is None else win_probe,
+        win_probe=_port_probe if win_probe is None else win_probe,
     )
 
 
