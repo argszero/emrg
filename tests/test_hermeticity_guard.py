@@ -222,6 +222,21 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
         [str(stubs / "sh"), "-c", "emrg --help\nemrg server stop"],
         # no shell at all: the verb itself is glued to punctuation
         [str(stubs / "emrg"), "server", "(stop)"],
+        # characters a shell DROPS rather than a token edge: an escape and quote
+        # concatenation. Both were measured to reach the live daemon — a stub
+        # `emrg` on PATH ran, with argv `server stop`, for each — and both were
+        # allowed by the edge-strip rule, because `str.strip` never saw them
+        # (cycle cyc20260918-071815, reviewing this PR's own veto fix).
+        [str(stubs / "sh"), "-c", "\\emrg server stop"],
+        [str(stubs / "sh"), "-c", "'e''mrg' server stop"],
+        [str(stubs / "sh"), "-c", "e\\mrg server stop"],
+        [str(stubs / "sh"), "-c", "emrg sto\\p"],
+        [str(stubs / "sh"), "-c", "e''mrg server stop"],
+        # the accepted over-refusal: the shell reads this as ONE command name with
+        # spaces (`emrg server stop: command not found`, measured), but the split
+        # here is whitespace-only by design, so it arrives as the act's own token
+        # stream and is refused. Cheap and loud; no test writes it.
+        [str(stubs / "sh"), "-c", "emrg\\ server\\ stop"],
     ):
         with pytest.raises(AssertionError, match="red-line violation"):
             subprocess.Popen(argv, env=pinned)

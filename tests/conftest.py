@@ -309,9 +309,15 @@ _SHELLS = ("sh", "bash", "dash", "zsh", "ksh")
 _SIGNALLERS = ("pkill", "killall", "kill")
 _STOP_VERBS = ("stop", "restart")
 
-#: Punctuation a shell may leave glued to a token: `(emrg`, `emrg)`, `'emrg'`,
-#: `` `emrg` ``, `$(which` — see `_normalise_token`.
+#: Punctuation a shell may leave glued to a token's **ends**: `(emrg`, `emrg)`,
+#: `'emrg'`, `` `emrg` ``, `$(which` — see `_normalise_token`.
 _SHELL_PUNCTUATION = "(){}[]$`'\"<>"
+
+#: Characters a shell **drops wherever they appear** rather than at an edge. A
+#: backslash escapes the character after it, and quotes join adjacent pieces into
+#: one word; both are gone by the time the program is handed its argv, so they are
+#: removed from anywhere in the token — see `_normalise_token`.
+_SHELL_DROPPED = "\\'\""
 
 
 def _normalise_token(token: str) -> str:
@@ -334,8 +340,45 @@ def _normalise_token(token: str) -> str:
     refusing (`_spawns_a_daemon_stop_or_restart`). Stripping is deliberately blind
     to *purpose*: `$(which emrg)` is not evaluated here, because evaluating it
     would mean running a command to answer a question about an argv.
+
+    Two spellings survived the first pass of that rule and are closed here, both
+    measured with a stub `emrg` on `PATH` (the stub ran, with argv
+    ``server stop``, in both cases — i.e. they reach the **live** daemon, not a
+    lookalike):
+
+    * a **leading backslash** — `sh -c "\\emrg server stop"`: the shell removes
+      the escape and runs `emrg`. The old set had no backslash, so the token was
+      `"\\emrg"`, whose basename is not `emrg`;
+    * **quote concatenation** — `sh -c "'e''mrg' server stop"`: adjacent quoted
+      and unquoted pieces are one word to the shell, so the program is `emrg`.
+      `str.strip` only reaches the *ends* of a token and left `e''mrg`.
+
+    That is why this is a *removal* rule and not a wider strip: the shell drops
+    those characters wherever they are, so `e\\mrg` and `sto\\p` are the program
+    `emrg` and the verb `stop` too, and an edge-only rule would close the two
+    measured spellings while leaving their siblings open. The set stays small on
+    purpose — these are the characters whose shell meaning *is* "delete me"; a
+    substitution (`$(…)`, `` `…` ``) is only closed at an edge, and a token that
+    expands to something else is the same evasion class as a `-c` string.
+
+    And one row that looks like the third of the family and is **refused**, on
+    purpose, at a measured cost: `sh -c "emrg\\ server\\ stop"`. The shell reads
+    the escapes as joining three words into one command name, `emrg server stop`,
+    which cannot exist — it answers `emrg server stop: command not found`
+    (measured), so refusing it is over-broad. It is refused anyway because the
+    split here is whitespace-only **by design** (a shell-parsing split is the thing
+    this function exists to avoid), so the token stream after it is exactly
+    `["emrg", "server", "stop"]` — the act's own spelling — and the two are not
+    distinguishable without modelling `\\ ` as a joiner. Accepted rather than
+    repaired: no test writes an escaped space before a verb, and the alternative
+    (deciding "the verb is only a verb when nothing was escaped before it")
+    reopens the hole this rule closes. `tests/test_hermeticity_guard.py` pins the
+    row so both halves of that trade are visible.
     """
-    return token.strip(_SHELL_PUNCTUATION)
+    stripped = token.strip(_SHELL_PUNCTUATION)
+    for dropped in _SHELL_DROPPED:
+        stripped = stripped.replace(dropped, "")
+    return stripped
 
 
 def _emrg_entry_index(tokens) -> int:
