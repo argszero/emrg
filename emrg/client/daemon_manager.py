@@ -389,6 +389,23 @@ def _old_daemon_alive(pid: int, *, platform: str = "", kill=None,
     and a probe whose Windows behaviour is only observable on Windows is a defect
     discovered on Windows.
 
+    Both halves of the answer are sourced from **this** module when the caller
+    injected neither, and that symmetry is load-bearing rather than tidy: the
+    Windows half already had to come from here (``is_running`` is ours), and the
+    POSIX half has to as well, or the restart route's signalling is split across
+    two modules. It briefly was: `pid_alive` defaults its ``kill`` to its *own*
+    module's ``os.kill``, so the probe left the tripwire
+    ``conftest::_guard_no_live_daemon_is_signalled`` installs on this module — the
+    substitute ``os`` the guard scopes here (and the escape hatch it documents:
+    "tests that drive the restart logic patch the module's ``os.kill``") silently
+    stopped covering the probe, because the patch lands on the substitute while
+    the probe asked the real module. Two tests in ``tests/test_daemon_manager.py``
+    fake that answer to pin the wait loop, and they then read a real
+    ``os.kill(<stale pid>, 0)``: ``ESRCH``, i.e. *gone*, on the first iteration —
+    no wait, and no SIGKILL fallback. Naming our ``os`` here makes the faked
+    answer and the guarded answer the same object again, in production and in
+    tests.
+
     One reading changes, and it is worth naming rather than discovering: the copy
     here read ``EPERM`` as *alive* (the process exists, we may not signal it) and
     `pid_alive` reads any ``OSError`` as *gone*. The pid this is asked about is
@@ -401,7 +418,7 @@ def _old_daemon_alive(pid: int, *, platform: str = "", kill=None,
     return pid_alive(
         pid,
         platform=platform,
-        kill=kill,
+        kill=os.kill if kill is None else kill,
         win_probe=is_running if win_probe is None else win_probe,
     )
 
