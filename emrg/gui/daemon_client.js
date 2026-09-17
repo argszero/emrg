@@ -276,11 +276,18 @@ class DaemonClient {
   // 装上日志 handler 之前就死掉的子进程只写 stderr，没有这一节时宿主被show一个空的
   // emrgd.log 并被告诉"什么都没有"。没写就**如实说没写**，绝不把更早的输出当成本次
   // 的原因。顺序即论证：子进程的遗言在前，它已经能记录的日志尾巴在后。
-  _startupFailureDetail(since, child, spawnState = NO_SPAWN_STATE, stderrFile = EMRGD_START_ERR()) {
-    const childErr = this._readStartStderr(40, stderrFile);
+  _startupFailureDetail(since, child, spawnState = NO_SPAWN_STATE, stderrFile = null) {
+    // `stderrFile === null` 表示本次**没有读到**这一路 stderr（开文件失败，spawn 退回
+    // "ignore"）。"子进程什么都没写" 与 "这一路压根没读" 是两件不同的事实，文本必须
+    // 分开：给了路径才读得出沉默，没给路径就不得替它宣布沉默（也不得引用更早一轮
+    // 留在那个文件里的字节当成本次原因）。
+    const captured = stderrFile !== null;
+    const childErr = captured ? this._readStartStderr(40, stderrFile) : "";
     const childSection = childErr
       ? `\n  emrgd own stderr (written by this start attempt, ${stderrFile}):\n${childErr}`
-      : "";
+      : captured
+        ? ""
+        : "\n  emrgd own stderr: not captured (nothing was read from it this attempt)";
     const tail = this._readLogTail(15, since);
     if (tail) {
       return childSection + `\n  emrgd.log tail (written by this start attempt, ${EMRGD_LOG()}):\n${tail}`;
@@ -299,7 +306,9 @@ class DaemonClient {
         : code !== null ? `already exited (exit=${code})` : "still running";
     const silent = childErr
       ? ""
-      : ", and the child wrote nothing to its own stderr";
+      : captured
+        ? ", and the child wrote nothing to its own stderr"
+        : ", and the child's own stderr was not captured";
     return (
       childSection +
       `\n  this start attempt wrote nothing to emrgd.log` +
@@ -309,30 +318,33 @@ class DaemonClient {
   }
 
   // 等 daemon 起来；已经死掉的子进程立即失败（issue #1283 缺陷 ②），而不是把整个
-  // 窗口烧完再报"没有退出码"。静默子进程留下的唯一事实就是退出码——spawn 把
-  // stdout/stderr 都丢弃了（stdio: "ignore"）。从未启动的子进程（ENOENT）同样立即
-  // 失败：它没有 pid，也永远不会写 log。
-  async _awaitDaemonReady(child, mark, waitMs = SPAWN_WAIT_MS, spawnState = NO_SPAWN_STATE) {
+  // 窗口烧完再报"没有退出码"。stdout 一律丢弃，stderr 落到本次启动的诊断文件
+  // （issue #1276 item 4）——但那只在文件真开出来时才成立：`stderrFile` 为 null 的
+  // 这一路没有读过任何东西，报告只说"未捕获"，不会替它宣布沉默。从未启动的子进程
+  // （ENOENT）同样立即失败：它没有 pid，也永远不会写 log。
+  async _awaitDaemonReady(child, mark, waitMs = SPAWN_WAIT_MS, spawnState = NO_SPAWN_STATE, stderrFile = null) {
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline) {
       if (await this.isRunning(500)) return child;
       if (spawnState.neverStarted) {
         throw new Error(
           `emrgd never started${this._neverStartedName(spawnState)}` +
-          this._startupFailureDetail(mark, child, spawnState)
+          this._startupFailureDetail(mark, child, spawnState, stderrFile)
         );
       }
       const { code, signal } = this._childExit(child);
       if (code !== null || signal !== null) {
         const how = signal !== null ? `signal=${signal}` : `exit=${code}`;
         throw new Error(
-          `emrgd exited during startup (${how})` + this._startupFailureDetail(mark, child, spawnState)
+          `emrgd exited during startup (${how})` +
+          this._startupFailureDetail(mark, child, spawnState, stderrFile)
         );
       }
       await new Promise((r) => setTimeout(r, 300));
     }
     throw new Error(
-      `emrgd failed to start within timeout` + this._startupFailureDetail(mark, child, spawnState)
+      `emrgd failed to start within timeout` +
+      this._startupFailureDetail(mark, child, spawnState, stderrFile)
     );
   }
 
@@ -377,7 +389,12 @@ class DaemonClient {
       this._daemonChild = child;
       this.logger.info(`[gui] daemon spawned: pid=${child.pid} (packaged emrgd)`); // 18:47:37 B2
       const spawnState = this._watchSpawn(child);
-      return await this._awaitDaemonReady(child, mark, SPAWN_WAIT_MS, spawnState);
+      // 只有真开出了诊断文件才算"读过这一路"：拿不到 fd 时子进程的 stderr 退回
+      // "ignore"，报告必须说"未捕获"，而不是替这一路宣布沉默。
+      return await this._awaitDaemonReady(
+        child, mark, SPAWN_WAIT_MS, spawnState,
+        errFd === null ? null : EMRGD_START_ERR()
+      );
     }
     // G125：spawn 设 cwd=project_dir（daemon load_skills 用 Path.cwd() 加载项目级 skills）
     const python = this._findPython();
@@ -400,7 +417,10 @@ class DaemonClient {
     this.logger.info(`[gui] daemon spawned: pid=${child.pid} (source mode)`); // 18:47:37 B2
     // 等最多 SPAWN_WAIT_MS 就绪
     const spawnState = this._watchSpawn(child);
-    return await this._awaitDaemonReady(child, mark, SPAWN_WAIT_MS, spawnState);
+    return await this._awaitDaemonReady(
+      child, mark, SPAWN_WAIT_MS, spawnState,
+      errFdSource === null ? null : EMRGD_START_ERR()
+    );
   }
 
   // Rant 2026-08-21T15:26:42：daemon 存活判断用固定端口 TCP 探测——

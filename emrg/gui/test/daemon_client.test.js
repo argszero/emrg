@@ -1198,7 +1198,7 @@ test("#1276 在装日志 handler 之前死掉的子进程：由它自己的 stde
   fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
   const mark = client._logMark(logFile());
   fs.writeFileSync(EMRGD_START_ERR(), "Traceback (most recent call last):\nImportError: boom\n");
-  const detail = client._startupFailureDetail(mark, { exitCode: 1 });
+  const detail = client._startupFailureDetail(mark, { exitCode: 1 }, undefined, EMRGD_START_ERR());
   assert.ok(detail.includes("ImportError: boom"), "子进程自己的原因就是这一节新增的事实");
   assert.ok(!detail.includes("SIGTERM"), "上一轮的关闭仍不得当作本次的原因");
   assert.ok(detail.includes("wrote nothing to emrgd.log"), "log 那一半照样如实说");
@@ -1210,20 +1210,37 @@ test("#1276 子进程的遗言排在日志尾巴之前（顺序即论证）", ()
   const mark = client._logMark(logFile());
   fs.appendFileSync(logFile(), "this attempt: config.toml is not valid TOML\n");
   fs.writeFileSync(EMRGD_START_ERR(), "child: ImportError: no module named 'x'\n");
-  const detail = client._startupFailureDetail(mark, { exitCode: 1 });
+  const detail = client._startupFailureDetail(mark, { exitCode: 1 }, undefined, EMRGD_START_ERR());
   assert.ok(detail.includes("ImportError") && detail.includes("config.toml"));
   assert.ok(detail.indexOf("ImportError") < detail.indexOf("config.toml"));
 });
 
-test("#1276 两处都沉默时明说两处都沉默（沉默是事实，不是省略）", () => {
+test("#1276 未捕获的那一路说「未捕获」，不说「子进程没写」（沉默是测量，不是推断）", () => {
   const client = new DaemonClient();
   fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
   const mark = client._logMark(logFile());
+  // 不给 stderrFile：spawn 开不出诊断文件时交出来的就是这个形状（子进程 stderr
+  // 走 "ignore"）。这一路压根没读，所以不得替它宣布沉默。
   const detail = client._startupFailureDetail(mark, { exitCode: 9 });
   assert.ok(detail.includes("wrote nothing to emrgd.log"));
-  assert.ok(detail.includes("wrote nothing to its own stderr"));
+  assert.ok(detail.includes("not captured"), "没读过的那一路要如实说没读");
+  assert.ok(!detail.includes("wrote nothing to its own stderr"),
+    "这一路没有可读的文件，它的沉默无从得知");
   assert.ok(detail.includes("exit=9"));
   assert.ok(detail.includes("previous run"), "仍明说更早的输出来自上一轮");
+});
+
+test("#1276 捕获了却真的没写：这一句沉默才成立", () => {
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
+  const mark = client._logMark(logFile());
+  const fd = client._openStartStderr(); // 本次截断打开，随后读回空
+  assert.notStrictEqual(fd, null);
+  fs.closeSync(fd);
+  const detail = client._startupFailureDetail(mark, { exitCode: 9 }, undefined, EMRGD_START_ERR());
+  assert.ok(detail.includes("wrote nothing to its own stderr"), "读过且为空，这句是测量出来的");
+  assert.ok(!detail.includes("not captured"));
+  assert.ok(detail.includes("exit=9"));
 });
 
 test("#1276 stderr 的行上限保住 traceback 的结尾，读不到不抛异常", () => {
@@ -1238,12 +1255,17 @@ test("#1276 stderr 的行上限保住 traceback 的结尾，读不到不抛异�
 
 test("#1276 spawn 把 stderr 接到诊断文件，而不是丢弃", () => {
   // 接线本身：诊断在上面，但 spawn 不把 fd 传下去就是死代码。断言源码而不是调用
-  // ——调用会 spawn 真实 daemon（并先走 cleanup_server 的停止路径）。
+  // ——调用会 spawn 真实 daemon（并先走 cleanup_server 的停止路径）。四个片段各是
+  // 一条"这一路变死"的路：从哪个路径开 fd、子进程的 stderr 就是它、以及**报告拿到的
+  // 是这一个 fd 的结果**（`errFd === null ? null : EMRGD_START_ERR()`——开不出来就
+  // 交 null，报告才会说"未捕获"而不是"子进程没写"）。
   const src = fs.readFileSync(require.resolve("../daemon_client.js"), "utf8").replace(/\r\n/g, "\n");
   assert.ok(src.includes('stdio: ["ignore", "ignore", errFd === null ? "ignore" : errFd]'));
   assert.ok(src.includes('stdio: ["ignore", "ignore", errFdSource === null ? "ignore" : errFdSource]'));
   assert.ok(src.includes("const errFd = this._openStartStderr();"));
   assert.ok(src.includes("const errFdSource = this._openStartStderr();"));
+  assert.ok(src.includes("errFd === null ? null : EMRGD_START_ERR()"));
+  assert.ok(src.includes("errFdSource === null ? null : EMRGD_START_ERR()"));
 });
 
 // ── 第三种状态：spawn 本身失败（ENOENT）──────────────────────────────────────

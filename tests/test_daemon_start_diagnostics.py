@@ -380,13 +380,15 @@ def test_the_child_stderr_is_reported_before_the_log_tail(tmp_path):
     )
 
 
-def test_a_silent_child_is_named_silent_in_both_channels(tmp_path):
-    """Nothing anywhere is a fact, and the report says which two channels were read.
+def test_an_uncaptured_child_is_named_uncaptured_not_silent(tmp_path):
+    """A channel nobody read is not a silent channel.
 
-    Silence in one channel used to be published as a bare "wrote nothing" that
-    read as the whole story; naming both is what makes "we learned nothing" a
-    measurement rather than an omission (`_dummy` cannot appear: the reader is
-    given no path here at all, which is the parameter's default).
+    Silence is a *measurement*, so it needs a channel to have been read. The
+    reader is given no path here — the parameter's default, and what the spawn
+    hands over when it could not open the file, so the child's stderr went to
+    DEVNULL — and the earlier shape answered "the child wrote nothing to its own
+    stderr" anyway: a claim about a channel the report never opened. The log half
+    is still named as silent, because that channel *was* read.
     """
     log = tmp_path / "emrgd.log"
     log.write_text("previous\n", encoding="utf-8")
@@ -396,8 +398,95 @@ def test_a_silent_child_is_named_silent_in_both_channels(tmp_path):
 
     detail = dm._startup_failure_detail(log, dm._log_mark(log), Dead())
     assert "wrote nothing to emrgd.log" in detail
-    assert "wrote nothing to its own stderr" in detail
+    assert "was not captured" in detail, "the channel that was not read is named as such"
+    assert "wrote nothing to its own stderr" not in detail, (
+        "nothing was read from that channel, so its silence cannot be claimed"
+    )
     assert "exit=9" in detail
+
+
+def test_an_uncaptured_channel_is_named_when_a_log_tail_is_reported(tmp_path):
+    """The same fact, in the branch that prints the tail: an absent section is read.
+
+    With a log tail to show, the report has no sentence left to say "the child
+    wrote nothing to its own stderr" — so the *absence* of that section is what a
+    host would read as silence. The unread channel is named in the tail branch
+    instead, which is why the note is not dead code.
+    """
+    log = tmp_path / "emrgd.log"
+    log.write_text("previous\n", encoding="utf-8")
+    mark = dm._log_mark(log)
+    with open(log, "a", encoding="utf-8") as fh:
+        fh.write("this attempt: RuntimeError: bad config\n")
+
+    class Dead:
+        returncode = 1
+
+    detail = dm._startup_failure_detail(log, mark, Dead(), None)
+    assert "RuntimeError: bad config" in detail, "the tail is still what this attempt wrote"
+    assert "未捕获" in detail, "the unread channel is named next to the tail"
+    assert "wrote nothing to its own stderr" not in detail
+
+
+def test_a_captured_child_that_wrote_nothing_is_still_named_silent(tmp_path):
+    """The other half of the same distinction: the claim survives where it is true.
+
+    The file exists, this attempt truncated it, and it came back empty — that is a
+    measurement of the channel, and the report makes the claim it supports.
+    """
+    log = tmp_path / "emrgd.log"
+    log.write_text("previous\n", encoding="utf-8")
+    err = tmp_path / "emrgd-start.err"
+    handle = dm._truncate_start_stderr(err)
+    assert handle is not None
+    handle.close()
+
+    class Dead:
+        returncode = 9
+
+    detail = dm._startup_failure_detail(log, dm._log_mark(log), Dead(), err)
+    assert "wrote nothing to its own stderr" in detail
+    assert "未捕获" not in detail
+    assert "exit=9" in detail
+
+
+def test_the_uncaptured_channel_cannot_quote_an_earlier_attempt(tmp_path):
+    """Both faces of one bug, at the call site's own reduction.
+
+    ``emrgd-start.err`` readable but not writable (mode 444, or one left behind by
+    an earlier ``sudo emrg …``) is the shape where the spawn falls back to DEVNULL
+    while the *reader* would still succeed: the report quoted an older attempt's
+    bytes as this failure's cause, and the sentence that replaced the quote then
+    published the silence claim about the channel it had never opened. What the
+    call site hands over is ``stderr_path if stderr_handle is not None else None``,
+    and that reduction is applied here to a file that really is unwritable.
+    """
+    log = tmp_path / "emrgd.log"
+    log.write_text("previous\n", encoding="utf-8")
+    err = tmp_path / "emrgd-start.err"
+    err.write_bytes(b"ImportError: STALE-FROM-AN-EARLIER-ATTEMPT\n")
+    err.chmod(0o444)
+    try:
+        handle = dm._truncate_start_stderr(err)
+    finally:
+        err.chmod(0o644)
+    if handle is not None:
+        handle.close()
+        pytest.skip("this filesystem lets the owner write a 444 file — unmeasurable here")
+
+    class Dead:
+        returncode = 1
+
+    detail = dm._startup_failure_detail(
+        log, dm._log_mark(log), Dead(), err if handle is not None else None
+    )
+    assert "STALE-FROM-AN-EARLIER-ATTEMPT" not in detail, (
+        "an earlier attempt's bytes are not this attempt's cause"
+    )
+    assert "wrote nothing to its own stderr" not in detail, (
+        "the child's stderr went to DEVNULL: its silence is unknown, not measured"
+    )
+    assert "was not captured" in detail
 
 
 def test_the_stderr_line_cap_keeps_the_end_of_a_traceback(tmp_path):
@@ -427,8 +516,17 @@ def test_start_daemon_captures_the_child_stderr_instead_of_discarding_it():
     A text assertion rather than a call, because calling `start_daemon()` spawns —
     and, worse, calls `cleanup_server()` first, which is a stop path. Line endings
     are normalised so a CRLF checkout cannot satisfy the assertion with a newline.
+
+    Four fragments, each a different way for the channel to go dead: the handle is
+    opened from the path the diagnostic reads, the child's stderr is that handle,
+    and what the report is handed is that handle's *outcome* — `… if … is not None
+    else None`, the reduction that keeps an uncaptured channel from being quoted
+    and from being called silent. Dosing the open line leaves the other three
+    present with the feature dead: measured on the mutant, 1 failed (the reviewer
+    of this head found the same gap).
     """
     src = Path(dm.__file__).read_text(encoding="utf-8").replace("\r\n", "\n")
     assert "stderr=stderr_handle if stderr_handle is not None else subprocess.DEVNULL" in src
     assert "stderr_path = _start_stderr_path()" in src
-    assert "await _await_daemon_ready(proc, _log_path(), log_mark, stderr_path=stderr_path)" in src
+    assert "stderr_handle = _truncate_start_stderr(stderr_path)" in src
+    assert "stderr_path=stderr_path if stderr_handle is not None else None" in src

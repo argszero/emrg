@@ -122,7 +122,14 @@ async def start_daemon() -> subprocess.Popen:
         # The child holds its own descriptor; the parent's copy would leak.
         if stderr_handle is not None:
             stderr_handle.close()
-    await _await_daemon_ready(proc, _log_path(), log_mark, stderr_path=stderr_path)
+    # The channel is handed on only when it was really opened: `None` says the
+    # child's stderr went to DEVNULL, which the report must not turn into
+    # "the child wrote nothing to its own stderr" (`_startup_failure_detail`,
+    # which reads this parameter as "captured here, or not captured at all").
+    await _await_daemon_ready(
+        proc, _log_path(), log_mark,
+        stderr_path=stderr_path if stderr_handle is not None else None,
+    )
     logger.info("emrgd started (pid=%d)", proc.pid)
     return proc
 
@@ -273,26 +280,45 @@ def _startup_failure_detail(
     to its own stderr before it died. A child that fails at import stage writes
     *only* to stderr, so before this section existed the host was shown an empty
     log and told nothing at all (issue #1276, second symptom).
+
+    ``stderr_path`` is where the child's stderr was captured, and ``None`` means
+    it was **not captured**: the caller could not open the file and the child's
+    stderr went to DEVNULL instead. "The child wrote nothing" and "nothing was
+    read from that channel" are two different facts, so the text below keeps them
+    distinct — the earlier shape passed the path on unconditionally and could
+    quote an *older* attempt's bytes as this failure's cause, and the paragraph
+    that replaced the quote still claimed silence about a channel nobody had
+    opened.
     """
     tail = _read_log_tail(log_path, lines=15, since=since)
     child_err = _read_start_stderr(stderr_path)
-    child_section = (
-        f"\n  emrgd 自身 stderr（本次启动新增）:\n{child_err}" if child_err else ""
-    )
+    if stderr_path is None:
+        child_section = "\n  emrgd 自身 stderr: 未捕获（本次启动没有读到这一路）"
+    elif child_err:
+        child_section = f"\n  emrgd 自身 stderr（本次启动新增）:\n{child_err}"
+    else:
+        child_section = ""
     code = _child_exit_code(proc)
     if tail:
         return child_section + f"\n  emrgd.log 尾部（本次启动新增）:\n{tail}"
-    if child_section:
+    if child_err:
         return child_section + (
             f"\n  this start attempt wrote nothing to emrgd.log"
             f"{'' if log_path.exists() else ' (the file does not exist)'};"
             f" the child is {'still running' if code is None else f'already exited (exit={code})'}."
         )
     alive = "still running" if code is None else f"already exited (exit={code})"
+    # The silence claim is a measurement of a channel, so it needs one to have
+    # been read: it is made only when a path was given and came back empty.
+    stderr_fact = (
+        "the child's own stderr was not captured"
+        if stderr_path is None
+        else "the child wrote nothing to its own stderr"
+    )
     return (
         f"\n  this start attempt wrote nothing to emrgd.log"
         f"{'' if log_path.exists() else ' (the file does not exist)'},"
-        f" and the child wrote nothing to its own stderr;"
+        f" and {stderr_fact};"
         f" the child is {alive}. Any output earlier in the file is from a previous run."
     )
 
@@ -316,6 +342,8 @@ async def _await_daemon_ready(
     ``stderr_path``'s content, where the child's own output was captured instead
     of discarded (issue #1276 item 4) — a child that dies at import writes
     *only* there, so without it the failure report had nothing to quote.
+    ``None`` is not a path: it says the capture did not happen, and the report
+    says so instead of claiming the channel was silent.
     """
     probe = probe or is_running
     for _ in range(attempts):
