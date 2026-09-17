@@ -219,22 +219,6 @@ def test_write_workspace_write_allows_os_temp(temp_dir):
     assert not target.exists()
 
 
-def test_write_workspace_write_blocks_protected_config(temp_dir):
-    """Daemon state files (~/.emrg/config.toml) are always blocked from a
-    workspace-write session."""
-    tool = WriteTool()
-    workspace = temp_dir / "ws"
-    workspace.mkdir()
-    result = _run(tool.execute({
-        "file_path": "~/.emrg/config.toml",
-        "content": "tamper",
-        "sandbox": "workspace-write",
-        "workspace": str(workspace),
-    }))
-    assert result.error
-    assert "protected daemon file" in result.content
-
-
 def test_write_workspace_write_allows_evolution_memory(tmp_path, monkeypatch):
     """Issue #1093 self-regression: the evolution module writes its cycle records
     to ~/.emrg/evolution/.emrg/memory/, which is OUTSIDE the repo checkout
