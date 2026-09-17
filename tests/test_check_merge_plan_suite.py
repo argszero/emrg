@@ -1245,6 +1245,48 @@ def test_steps_is_healthy_when_every_step_is(queue: tuple[Path, Path]) -> None:
     assert "every step healthy (2 suite run(s))" in proc.stdout
 
 
+def test_every_step_publishes_a_tree_sha_a_later_reader_can_verify(
+    queue: tuple[Path, Path], mod, monkeypatch
+) -> None:
+    """A step's tree identity is printed complete, because a prefix cannot be checked.
+
+    The `--steps` line is the only reading a cycle gets of an intermediate tree, and
+    that tree is what its verdict is about. Abbreviated to 12 characters the reading
+    cannot be reused: `git rev-parse <40-hex>` echoes any 40-hex string it is handed -
+    a control of `deadbeef` came back unchanged, rc 0 - so the way to ask git whether a
+    published sha names an object is `git cat-file -t`, which needs all 40 characters.
+    Measured (cyc20260918-000146): a cycle holding step 2's `4e0d146538fc` from an
+    earlier run could not verify it, and re-ran the whole plan (~116s) to recover the
+    sha it had already been shown. The fold's date is pinned for exactly this reason -
+    so a step tree sha is comparable between runs, "which is the point of printing one".
+    """
+    repo, origin = queue
+    _branch_with(repo, "one", {"notes.md": "one\n"})
+    _branch_with(repo, "two", {"other.md": "two\n"})
+    _publish(repo, origin, 1, "one")
+    _publish(repo, origin, 2, "two")
+
+    proc = _run_tool(repo, "1", "2", "--steps")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    # The parenthesis is the assertion: a 12-character prefix alone fails to match.
+    printed = re.findall(
+        r"step (\d+) \(#(\d+)\) tree ([0-9a-f]{12}) \(([0-9a-f]{40})\)", proc.stdout
+    )
+    assert [step for step, _, _, _ in printed] == ["1", "2"], proc.stdout
+
+    monkeypatch.chdir(repo)
+    base = _git(repo, "rev-parse", "master")
+    heads = [(n, mod._fetch_head(n)) for n in (1, 2)]
+    steps = mod.build_plan_steps(base, heads)
+    for (_, _, short, full), (_, _, commit) in zip(printed, steps):
+        assert full.startswith(short)
+        # The published identity is the step's own tree ...
+        assert _git(repo, "rev-parse", f"{commit}^{{tree}}").strip() == full
+        # ... and a tree git will name, which the prefix alone could not establish.
+        assert _git(repo, "cat-file", "-t", full).strip() == "tree"
+
+
 def test_steps_still_refuses_to_call_a_conflict_unhealthy(
     queue: tuple[Path, Path],
 ) -> None:
