@@ -384,6 +384,41 @@ async def _await_daemon_ready(
     )
 
 
+def _old_daemon_alive(pid: int, *, platform: str = "", kill=None,
+                      win_probe=None) -> bool:
+    """Is the daemon we just signalled gone? — asked once, not respelled.
+
+    The platform decision belongs to :func:`emrg._stop_all.pid_alive`, which is
+    what `emrg server stop` already asks; this used to be a second copy of it
+    here (issue #1349). A bare ``os.kill(pid, 0)`` is **not** a liveness probe on
+    Windows: ``signal.CTRL_C_EVENT`` is 0, so CPython routes it to
+    ``GenerateConsoleCtrlEvent`` and the call becomes a Ctrl+C delivered to that
+    pid's console process group — every process sharing it, this CLI's shell
+    included. Windows SIGTERM is an immediate hard kill, so a *port* probe is
+    what answers there, and :func:`is_running` is this caller's Windows probe.
+
+    ``platform`` / ``kill`` / ``win_probe`` are forwarded to `pid_alive` so both
+    answers can be pinned on every runner: the Windows branch is the unsafe one,
+    and a probe whose Windows behaviour is only observable on Windows is a defect
+    discovered on Windows.
+
+    One reading changes, and it is worth naming rather than discovering: the copy
+    here read ``EPERM`` as *alive* (the process exists, we may not signal it) and
+    `pid_alive` reads any ``OSError`` as *gone*. The pid this is asked about is
+    the daemon this client just SIGTERMed — its own child, same user — so an
+    ``EPERM`` cannot arise for it, and one answer for the class is the point of
+    asking here instead of spelling the question twice.
+    """
+    from emrg._stop_all import pid_alive
+
+    return pid_alive(
+        pid,
+        platform=platform,
+        kill=kill,
+        win_probe=is_running if win_probe is None else win_probe,
+    )
+
+
 async def check_and_restart_if_stale() -> None:
     """Ping the server. If source has changed since server started, restart it.
 
@@ -447,18 +482,7 @@ async def check_and_restart_if_stale() -> None:
                     pass
 
                 def _old_pid_alive() -> bool:
-                    if sys.platform == "win32":
-                        # os.kill(pid, 0) would TerminateProcess on Windows —
-                        # never use it as a liveness probe. Windows SIGTERM is
-                        # an immediate hard kill, so the port probe suffices.
-                        return is_running()
-                    try:
-                        os.kill(server_pid, 0)
-                        return True
-                    except ProcessLookupError:
-                        return False
-                    except OSError:
-                        return True  # EPERM → process exists
+                    return _old_daemon_alive(server_pid)
 
                 for _ in range(50):  # up to 10s for graceful shutdown
                     await asyncio.sleep(0.2)
