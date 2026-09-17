@@ -2657,8 +2657,28 @@ def test_the_dirty_tree_verdicts_survive_an_exported_override():
     the fixture — the run below is what keeps the insulation from being deleted
     silently. Its failure mode without the fixture is the measured one from
     issue #1326: `4 failed` for a caller's convenience variable.
+
+    The export is this guard's whole power, so it is pinned rather than assumed.
+    Dropping it — `env = dict(os.environ)` — leaves the child reporting
+    `4 passed` whatever the module does, and then the guard passes in *both*
+    states, insulation present or deleted (measured 2026-09-17 on the merged
+    tree: `1 passed` either way). A guard that cannot fail reads like a guard
+    that passes, which is the one failure this file exists to prevent in the
+    module under it, so the probe below observes the variable from the child
+    side — a child process, not a second look at the same dict.
     """
     env = dict(os.environ, EMRG_TASK_DIRTY_OVERRIDE="emrg-task")
+    probe = subprocess.run(
+        [sys.executable, "-c",
+         "import os, sys; "
+         "sys.exit(0 if os.environ.get('EMRG_TASK_DIRTY_OVERRIDE') == 'emrg-task' else 1)"],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+    )
+    assert probe.returncode == 0, (
+        "the child run below must be handed EMRG_TASK_DIRTY_OVERRIDE, or it "
+        "cannot fail and this guard's verdict means nothing"
+    )
     out = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", *OVERRIDE_SENSITIVE_TESTS],
         cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
