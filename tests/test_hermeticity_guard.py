@@ -252,6 +252,45 @@ def test_an_emrg_named_path_costs_a_false_refusal(tmp_path, daemon_spawn_refusal
     ), "the known cost narrowed: re-check the docstring in conftest before relaxing it"
 
 
+def test_guard_refuses_the_cli_stop_fallback_signal():
+    """Positive: `emrg.__main__`'s own SIGTERM route is guarded too.
+
+    `emrg/__main__.py::_stop_daemon` signals the pid it read from a `ping` frame
+    and does **not** pass through `emrg._stop_all`'s five stop functions, so
+    `_guard_stop_all_hermeticity` never saw it: a test calling that function
+    in-process would SIGTERM the daemon this evolution is running on, and the two
+    files that describe the stop path said so only in prose (issue #1337, item 2's
+    three named routes — in-process, subprocess, client-side restart — are only
+    covered when this one is).
+
+    The refusal comes before any signal, so pid 4242 is never signalled, and the
+    shim's identity is asserted first so the refusal is the *installed* guard's
+    rather than one a test body arranged.
+    """
+    import signal
+
+    import emrg.__main__ as cli_mod
+
+    assert type(cli_mod.os).__name__ == "_NoSignalOs"
+    with pytest.raises(AssertionError, match="red-line violation"):
+        cli_mod.os.kill(4242, signal.SIGTERM)
+    # and it names the module it fired in — two shims, one rule, so the message is
+    # the only thing that says which route was reached
+    with pytest.raises(AssertionError, match=r"emrg\.__main__ tried to signal"):
+        cli_mod.os.kill(4242, signal.SIGTERM)
+
+
+def test_the_cli_shim_still_answers_everything_else():
+    """Negative: only `kill`/`killpg` are replaced — the CLI runs on the rest of `os`."""
+    import os
+
+    import emrg.__main__ as cli_mod
+
+    assert cli_mod.os.getpid() == os.getpid()
+    assert cli_mod.os.sep == os.sep
+    assert cli_mod.os.environ is os.environ
+
+
 def test_guard_allows_read_only_spawns(daemon_spawn_refusal):
     """Negative: the refusal keys on the verb, not on "it mentions emrg".
 

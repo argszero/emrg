@@ -529,8 +529,14 @@ async def check_and_restart_if_stale() -> None:
                 else:
                     # SIGTERM didn't work — force kill
                     logger.warning("old daemon (pid=%d) didn't die, sending SIGKILL", server_pid)
+                    # Windows has no `signal.SIGKILL` (measured — the AttributeError
+                    # escaped the whole restart path, because nothing here catches
+                    # it: `ensure_connected()` died instead of respawning the
+                    # daemon). Its `os.kill` ignores the number and terminates the
+                    # process, which is what this fallback is for, so ask for
+                    # whatever force the platform has.
                     try:
-                        os.kill(server_pid, signal.SIGKILL)
+                        os.kill(server_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
                     except (ProcessLookupError, OSError):
                         pass
                     for _ in range(10):  # up to 2s for SIGKILL to land

@@ -265,11 +265,20 @@ class _NoSignalOs:
     hole; it is here because the act the red line forbids does not get narrower
     when the target is a group, and because the blast radius is *larger*: the
     daemon shares its group with whatever else the host started.
+
+    ``holder`` is the module the shim is installed on. It is named in the refusal
+    because two modules carry a kill that reaches the daemon and the message is
+    the only thing that says which one fired — `emrg.client.daemon_manager`'s
+    restart path and `emrg.__main__`'s own `emrg server stop` fallback. One class
+    for both keeps one rule: a second wrapper would be a second place to forget
+    something, and the two routes are the same act.
     """
 
-    def __init__(self, real, is_probe=_kill_is_a_liveness_probe):
+    def __init__(self, real, is_probe=_kill_is_a_liveness_probe,
+                 holder="emrg.client.daemon_manager"):
         self._real = real
         self._is_probe = is_probe
+        self._holder = holder
 
     def __getattr__(self, name):
         return getattr(self._real, name)
@@ -278,7 +287,7 @@ class _NoSignalOs:
         if self._is_probe(sig):
             return self._real.kill(pid, sig)
         raise AssertionError(
-            f"{_RED_LINE}: emrg.client.daemon_manager tried to signal pid {pid} "
+            f"{_RED_LINE}: {self._holder} tried to signal pid {pid} "
             f"with signal {sig!r}. A test must never stop or restart the live "
             f"daemon — it is EMRG's life core. Isolate the restart path you are "
             f"testing instead, as tests/test_daemon_manager.py's restart tests do "
@@ -287,7 +296,7 @@ class _NoSignalOs:
 
     def killpg(self, pgid, sig):
         raise AssertionError(
-            f"{_RED_LINE}: emrg.client.daemon_manager tried to signal the process "
+            f"{_RED_LINE}: {self._holder} tried to signal the process "
             f"group {pgid} with signal {sig!r}. A test must never stop or restart "
             f"the live daemon — it is EMRG's life core. Isolate the restart path "
             f"you are testing instead, as tests/test_daemon_manager.py's restart "
@@ -505,8 +514,18 @@ def _guard_no_live_daemon_is_signalled(monkeypatch):
     """⛔ No suite run may stop or restart a live daemon, by any route.
 
     The in-process route is covered by `_guard_stop_all_hermeticity`; this covers
-    the other two — the client-side restart's `os.kill`, and a child process
-    spawned from a test (issue #1337, item 2).
+    the other three — the client-side restart's `os.kill`, the `emrg server stop`
+    CLI's own SIGTERM fallback, and a child process spawned from a test (issue
+    #1337, item 2).
+
+    **Two modules, not one.** `emrg/__main__.py::_stop_daemon` SIGTERMs the pid it
+    read from a `ping` frame, and it does *not* go through `emrg._stop_all`'s five
+    stop functions — so `_guard_stop_all_hermeticity` above never sees it, and a
+    test calling it in-process would signal the daemon the evolution is running
+    on. Measured shape, not a hypothesis: both files that describe the stop path
+    (`tests/test_cli_failure_reporting.py`, `tests/test_stop_all.py`) say in prose
+    that they must never run it, and prose is not a guard. One shim class covers
+    both so there is one rule to read and one place to change.
 
     Tests that really do exercise the restart path keep working: their own
     `@patch('emrg.client.daemon_manager.os.kill')` layers over this fixture and
@@ -515,9 +534,14 @@ def _guard_no_live_daemon_is_signalled(monkeypatch):
     """
     import subprocess
 
+    import emrg.__main__ as cli_mod
     import emrg.client.daemon_manager as daemon_manager
 
-    monkeypatch.setattr(daemon_manager, "os", _NoSignalOs(daemon_manager.os))
+    for module, holder in (
+        (daemon_manager, "emrg.client.daemon_manager"),
+        (cli_mod, "emrg.__main__"),
+    ):
+        monkeypatch.setattr(module, "os", _NoSignalOs(module.os, holder=holder))
 
     real_popen = subprocess.Popen
 
