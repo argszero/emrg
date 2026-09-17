@@ -2681,6 +2681,9 @@ def test_shutdown_all_logs_reason_and_cleanup_steps(tmp_path, caplog):
     assert "cancelled skills-ttl loop" in text
     assert "cancelled upgrade-tick loop" in text
     assert "cancelled port-keepalive loop" in text
+    # Every background loop is torn down by name; the config hot-reload loop
+    # (rant 2026-09-17T16:52:57) is a sibling of the three above.
+    assert "cancelled config-reload loop" in text
     assert "stopped scheduler" in text
     assert "closed llm client" in text
     assert "removed port file" in text

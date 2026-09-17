@@ -80,9 +80,15 @@ def config_path() -> Path:
 
 
 
-def load_config() -> EmrgConfig:
-    """Load EMRG configuration from ~/.emrg/config.toml."""
-    cfg_path = config_path()
+def load_config(path: Optional[Path] = None) -> EmrgConfig:
+    """Load EMRG configuration from ~/.emrg/config.toml.
+
+    `path` is the file to read; it defaults to `config_path()` so every
+    existing caller is unchanged. It exists so the daemon's hot-reload path
+    (rant 2026-09-17T16:52:57) and its tests can point the loader at a file
+    they own — a test must never read the host's real config.
+    """
+    cfg_path = config_path() if path is None else Path(path)
     if not cfg_path.exists():
         raise FileNotFoundError(
             f"config not found at {cfg_path} — create it with [llm] section"

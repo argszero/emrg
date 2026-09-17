@@ -93,7 +93,21 @@ context_window = 128000
 vision = true
 ```
 
-**Update checking** (`[update]` section): `check = true|false` (default true) enables periodic GitHub release checks; `ttl_hours = 24` controls how often. EMRG only **checks and prompts** — it never auto-downloads or auto-installs.
+**Live reload — no restart needed.** The daemon watches `~/.emrg/config.toml` (a `stat` every couple of seconds; the file is read only when it changed) and applies an edit **in place** to the running process. Every key in `[llm]` moves for subsequent requests:
+
+- `model` travels the same path `/model` uses — the usage anchors are invalidated and `context_window` re-resolved from the matching `[[llm.models]]` entry — and every connected client is told (`model_set`).
+- `base_url`, `api_key`, `max_tokens`, `temperature`, `max_tool_rounds`, `context_window`, `auto_compact_threshold`, `models`, `vision`, `stream_options`, `context_refresh_interval_ms` are assigned for the next request; a stream already in flight is never rewritten.
+- A half-written or wrongly-typed file is **rejected whole**: the previous good configuration stays in force, one warning is logged, and the file is re-read on your next save.
+
+Verify from the daemon log (`~/.emrg/emrgd.log`): every accepted edit logs one line naming the keys that moved —
+
+```
+config.toml reloaded: changed=max_tokens,temperature
+config.toml reloaded: model→gpt-4o (via the /model path)
+config.toml change rejected (previous config kept): TOMLDecodeError: ...
+```
+
+**Update checking** (`[update]` section): `enabled = true|false` (default true) enables the periodic GitHub release check, and `delay_minutes` (default 1440) is how long after a release is published it becomes eligible (set `1` for immediate). The check runs every 5 minutes — that interval is **not** configurable. The program only *triggers*: it never downloads an installer package, it starts an agent session (`emrg-upgrade`) that installs the equivalent of the release from the local evolution repo.
 
 ---
 
