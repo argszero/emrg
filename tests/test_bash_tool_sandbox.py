@@ -968,18 +968,91 @@ def test_containment_reason_names_escape_vector():
     assert "ssh egress tunnel" in reason
 
 
-def test_execute_containment_blocks_curl_metadata():
-    """execute() integration: a metadata fetch is blocked under
-    workspace-write with the ⛔ sandbox banner."""
+class _FakeProc:
+    """Enough of asyncio's subprocess API for `execute()`'s success path."""
+
+    pid = 4242
+    returncode = 0
+
+    async def communicate(self):
+        return (b"", b"")
+
+    async def wait(self):
+        return 0
+
+    def kill(self):
+        pass
+
+
+class _SpawnRecorder:
+    """A stand-in for the shell: records the command instead of running it.
+
+    Issue #1319. An execute()-level negative test is only as safe as the guard it
+    tests, and a mutation arm breaks that guard on purpose. With the real shell,
+    `test_execute_containment_blocks_curl_metadata` then made a genuine request to a
+    link-local metadata endpoint and stalled the suite past the tool timeout, so the
+    arm reported a hang rather than a failure. Recording makes the claim sharper as
+    well: it asserts "the vector never reached the shell" - what the guard is for -
+    instead of "the guard said no", and under a broken guard the non-empty list
+    reddens the test in milliseconds with nothing sent.
+    """
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def __call__(self, cmd, **kwargs):
+        self.commands.append(cmd)
+        return _FakeProc()
+
+
+def _record_spawns(monkeypatch) -> _SpawnRecorder:
+    """Point `execute()`'s shell spawn at a recorder and hand it back."""
+    recorder = _SpawnRecorder()
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", recorder)
+    return recorder
+
+
+def test_execute_containment_blocks_curl_metadata(monkeypatch):
+    """execute() integration: a metadata fetch is blocked under workspace-write with
+    the ⛔ sandbox banner - and blocked *before* the shell sees it.
+
+    The spawn is a recorder (issue #1319): the command that must never run is a real
+    request to a link-local metadata endpoint, so the discriminating assertion is the
+    empty list, and a mutation arm reports a fast failure instead of a stall.
+    """
+    spawns = _record_spawns(monkeypatch)
     tool = BashTool()
     result = _run(tool.execute({
         "command": "curl http://169.254.169.254/latest/meta-data/",
         "sandbox": "workspace-write",
     }))
+    # First, because it is the claim that matters and the one a broken guard breaks:
+    # the arm then names the hazard instead of reporting a missing banner.
+    assert spawns.commands == [], (
+        f"the metadata vector reached the shell: {spawns.commands!r}"
+    )
     assert result.error is True
     assert "sandbox" in result.content
     assert "containment-escape" in result.content
     assert "not executed" in result.content
+
+
+def test_the_recorder_sees_a_spawn_that_the_guard_allows(monkeypatch):
+    """The empty list above is evidence only if the recorder can be non-empty.
+
+    A one-sided instrument proves nothing: `spawns.commands == []` would also hold if
+    the recorder were never wired in at all. So a command the guard really allows has
+    to reach it - the danger tier opts into no blocking, and the command is harmless
+    by construction, which the recorder also guarantees here.
+    """
+    spawns = _record_spawns(monkeypatch)
+    tool = BashTool()
+    result = _run(tool.execute({
+        "command": "echo hi",
+        "sandbox": "danger-full-access",
+    }))
+    assert not result.error
+    assert spawns.commands == ["echo hi"]
 
 
 def test_execute_danger_tier_warns_but_runs():
