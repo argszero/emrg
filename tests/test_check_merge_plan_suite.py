@@ -437,12 +437,17 @@ def test_the_printed_python_remedy_measures_the_kept_tree(
 
     The fixture's `repo` is the main checkout here, so it gets the `.venv/bin/python` the
     note names: every other arm of this file asserts the note's *text*, and this is the one
-    that runs it.
+    that runs it. Created *after* the harness run, deliberately - the fixtures commit with
+    `git add -A`, and whether a `.venv` directory is committed depends on the machine's
+    gitignore configuration. Measured on the `ubuntu-latest` leg (run for head `0d28ff9e`):
+    with the symlink in place first, `_branch_with`'s `git add -A` committed it on the
+    branch, the fixture's `git checkout master` then removed it, and the printed line failed
+    with `/bin/sh: .../repo/.venv/bin/python: not found`. The same arm passed on the
+    development machine, which has a global `.venv/` ignore (this repo ignores `.venv/`
+    too) - so the difference was scaffolding, not the line under test. Hence the explicit
+    `exists()` assertion as well: if the scaffold is what breaks, it has to say so itself.
     """
     repo, origin = queue
-    interpreter = repo / ".venv" / "bin" / "python"
-    interpreter.parent.mkdir(parents=True, exist_ok=True)
-    interpreter.symlink_to(sys.executable)
     _branch_with(repo, "guard", {"tests/test_no_token_under_data_or_src.py": GUARD_TEST})
     _publish(repo, origin, 1, "guard")
 
@@ -455,6 +460,11 @@ def test_the_printed_python_remedy_measures_the_kept_tree(
         for line in kept.stdout.splitlines()
         if line.strip().startswith("python: ")
     )
+
+    interpreter = repo / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.symlink_to(sys.executable)
+    assert interpreter.exists(), "the scaffolding interpreter must be runnable"
 
     _write(kept_dir, "tests/test_kept_tree_only_marker.py", KEPT_MARKER_TEST)
 
