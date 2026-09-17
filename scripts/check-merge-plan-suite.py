@@ -154,6 +154,29 @@ checkout - `tests/test_check_node_test_count.py` skips itself with "no node_modu
 and those tests, not a difference in the trees. Compare worktree runs with worktree
 runs, and never read a skip/pass delta between the two harnesses as a regression.
 
+Keeping the measured tree for further checks (`--keep DIR`)
+----------------------------------------------------------
+Reviewing a PR properly means running *your own* probe on the tree this tool measured,
+and that tree disappears when the run ends. Rebuilding the merge by hand is how a
+verdict about a different tree gets published: the checkout has to be re-derived
+(`git merge --no-commit` on a fetched `refs/pull/<N>/head`) and its `git write-tree`
+compared with the sha printed here, or the arms describe something else. `--keep DIR`
+materialises the worktree at `DIR`, still purges its bytecode caches, still pins the run
+to that tree, and leaves it in place - the line it prints names the path, the tree it
+answers for, and how to remove it. The run itself is unchanged, so a kept worktree
+answers for the same tree the default run would have deleted.
+
+That line also names the two things true of every fresh worktree, because both have
+already been reported as defects (one measured in a hand-built landing-tree worktree,
+and both re-measured on a real landing tree the next cycle): it has **no `.venv`**, so
+`uv run pytest` there reports that no suite ran, and it has **no `node_modules`**, so the
+GUI Node suite fails one unrelated spawn-args test (`python=python3 (expected
+.venv/bin/python)`) - on that real tree, `daemon_client` was 68 passed / 1 failed without
+the links and 69 / 0 with them. Neither is a verdict on the tree, so the note prints the
+two commands that fix it (the main checkout's interpreter with `PYTHONPATH` pointed at
+the worktree; the main checkout's `node_modules` and `.venv` linked in), and says to
+compare worktree runs with worktree runs.
+
 What the run leaves behind
 --------------------------
 Nothing. A PR head has to be fetched into a ref before it can be folded, so each
@@ -589,12 +612,19 @@ def _suite_env(worktree: Path) -> dict[str, str]:
     return env
 
 
-def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
+def _suite_verdict(
+    tip: str, scratch: Path, keep: Path | None = None
+) -> tuple[bool, str, str]:
     """Run the repository's suite in a worktree of the planned tree.
 
     Returns (passed, suite summary, tree sha). The tree sha is returned and
     reported because the family's recurring defect is a verdict about a tree the
     caller was not looking at.
+
+    `keep` materialises the worktree there and leaves it in place for the caller, who
+    then owns its removal; nothing else about the run changes (same caches purged, same
+    interpreter and `PYTHONPATH` pinned to the tree), so a kept worktree answers for the
+    same tree the default run would have deleted.
     """
     tree_proc = _run(["git", "rev-parse", f"{tip}^{{tree}}"])
     if tree_proc.returncode != 0:
@@ -604,7 +634,7 @@ def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
     updated = _run(["git", "update-ref", TIP_REF, tip])
     if updated.returncode != 0:
         raise MeasurementError(f"could not mark the plan tip: {updated.stderr.strip()}")
-    worktree = scratch / "tree"
+    worktree = keep if keep is not None else scratch / "tree"
     try:
         added = _run(["git", "worktree", "add", "--detach", str(worktree), TIP_REF])
         if added.returncode != 0:
@@ -639,8 +669,65 @@ def _suite_verdict(tip: str, scratch: Path) -> tuple[bool, str, str]:
             f"the suite could not be run (rc={proc.returncode}):\n" + out[-1000:].strip()
         )
     finally:
-        _run(["git", "worktree", "remove", "--force", str(worktree)])
+        if keep is None:
+            _run(["git", "worktree", "remove", "--force", str(worktree)])
         _run(["git", "update-ref", "-d", TIP_REF])
+
+
+def _kept_note(path: Path, tree_sha: str | None = None) -> None:
+    """What a kept worktree is good for, and the two traps it inherits.
+
+    Printed only when the directory really is there, so the note cannot describe a
+    worktree that failed to materialise. Both traps are *environment*, not the tree:
+    naming them here is what keeps the next reader from reporting them as defects.
+    """
+    if not path.is_dir():
+        return
+    where = f"kept {path}"
+    if tree_sha:
+        where += f" (tree {tree_sha[:12]})"
+    main = _main_worktree() or "<main checkout>"
+    print(f"\n{where} - run your own checks there, then remove it:")
+    print(f"  git worktree remove --force {path}")
+    print(
+        "  It has no .venv and no node_modules, like any fresh worktree: `uv run pytest`\n"
+        "  there reports that no suite ran, and the GUI Node suite fails one unrelated\n"
+        "  spawn-args test (python=python3, expected .venv/bin/python). Measured on a real\n"
+        "  landing tree (2026-09-17): `daemon_client` is 68 passed / 1 failed without the\n"
+        "  links below and 69 / 0 with them. Both remedies, against this tree:"
+    )
+    # `cd` before the interpreter, not only `PYTHONPATH`: the harness's own `_suite_verdict`
+    # passes `cwd=str(worktree)` *and* `_suite_env`'s pinned `PYTHONPATH` for the same
+    # stated reason, and a remedy that keeps only the weaker pin measures the wrong tree.
+    # For `-m pytest`, `sys.path[0]` is the process CWD and the positional `tests/`
+    # resolves against it too, so run from the main checkout - where this note is printed
+    # and therefore where it will be copied - the `PYTHONPATH` below pins nothing and the
+    # reader gets a plausible green about the main tree (measured 2026-09-17,
+    # `cyc20260917-142057`: 2797 collected from the main checkout against 2801 from the
+    # kept tree, the marker test collecting only in the latter).
+    print(
+        f"    python: cd {path} && PYTHONPATH={path} "
+        f"{main}/.venv/bin/python -m pytest tests/ -q"
+    )
+    print(f"    node:   ln -sfn {main}/node_modules {path}/emrg/gui/node_modules")
+    print(f"            ln -sfn {main}/.venv {path}/.venv")
+    print("  Then compare worktree runs with worktree runs, never with main-checkout runs.")
+
+
+def _main_worktree() -> str | None:
+    """The main worktree's path, so the remedies above are commands and not placeholders.
+
+    `git worktree list --porcelain` lists the main worktree on its first `worktree`
+    line and the linked ones after it. Only a hint in a printed note: if git cannot
+    answer, the note says `<main checkout>` rather than guessing a path.
+    """
+    listed = _run(["git", "worktree", "list", "--porcelain"])
+    if listed.returncode != 0:
+        return None
+    for line in listed.stdout.splitlines():
+        if line.startswith("worktree "):
+            return line[len("worktree ") :].strip()
+    return None
 
 
 def _judge_every_step(base: str, heads: list[tuple[int, str]]) -> int:
@@ -726,7 +813,33 @@ def main(argv: list[str] | None = None) -> int:
             "(one suite run per step; issue #1161's open half)"
         ),
     )
+    parser.add_argument(
+        "--keep",
+        metavar="DIR",
+        default=None,
+        help=(
+            "materialise the planned tree at DIR and leave it there for your own "
+            "checks instead of removing it (same run, same tree; the caller removes it)"
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.keep is not None and args.steps:
+        print(
+            "could not measure: --keep names the one tree to leave behind, while "
+            "--steps measures a different tree per step - they cannot be combined",
+            file=sys.stderr,
+        )
+        return 2
+    keep = Path(args.keep).expanduser().resolve() if args.keep else None
+    if keep is not None and keep.exists():
+        print(
+            f"could not measure: --keep {keep} already exists - a stale worktree there "
+            "would be confusing, and `git worktree add` refuses the path anyway. Remove "
+            "it first (`git worktree remove --force`), or name an empty path.",
+            file=sys.stderr,
+        )
+        return 2
 
     fetched: list[int] = []
     # Everything from the first fetch on runs with temp refs in the object database,
@@ -778,12 +891,16 @@ def main(argv: list[str] | None = None) -> int:
             return _judge_every_step(base, heads)
         try:
             with tempfile.TemporaryDirectory(prefix="emrg-plan-suite-") as tmp:
-                passed, summary, tree_sha = _suite_verdict(tip, Path(tmp))
+                passed, summary, tree_sha = _suite_verdict(tip, Path(tmp), keep)
         except MeasurementError as exc:
             print(f"could not measure: {exc}", file=sys.stderr)
+            if keep is not None:
+                _kept_note(keep)
             return 2
 
         print(f"final tree {tree_sha[:12]} ({tree_sha})")
+        if keep is not None:
+            _kept_note(keep, tree_sha)
         if passed:
             print(f"suite OK: {summary}")
             return 0

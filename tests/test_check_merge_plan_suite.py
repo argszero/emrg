@@ -50,7 +50,7 @@ import re
 import subprocess
 import time
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -94,6 +94,21 @@ def test_the_tree_has_git_metadata():
         encoding="utf-8",
     )
     assert proc.returncode == 0, "the tree was extracted rather than checked out"
+'''
+
+
+KEPT_MARKER_SENTINEL = "KEPT-TREE-ONLY-MARKER-6b53c0d"
+
+# Placed in a *kept* tree only, so a collection can be attributed rather than assumed.
+# Deliberately failing: `-q` reports a failing test by name and a passing one as a dot,
+# and the name is the evidence - the whole defect is a command that looks pinned to one
+# tree while answering about another, where the count difference alone is easy to explain
+# away.
+KEPT_MARKER_TEST = f'''"""Exists only in the kept tree, so what collected it can be named."""
+
+
+def test_the_kept_tree_only_marker():
+    assert False, "{KEPT_MARKER_SENTINEL}"
 '''
 
 
@@ -291,6 +306,306 @@ def test_the_suite_runs_in_a_real_worktree_not_an_extracted_archive(
 
     proc = _run_tool(repo, "1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def _worktree_listing(repo: Path) -> str:
+    """`git worktree list --porcelain` - one `worktree <path>` line per worktree.
+
+    Porcelain rather than the decorative form, because the decorative line separates
+    its fields with spaces and a path may contain one (a pytest temp directory under
+    `C:/Users/<name with a space>/...` is an ordinary case).
+    """
+    return _git(repo, "worktree", "list", "--porcelain")
+
+
+def _worktree_listing_names(listing: str, path: Path) -> bool:
+    """Does this listing name `path` as one of its worktrees?
+
+    Compared as forward-slash spellings, because the two sides disagree about the
+    separator on Windows: git prints `C:/Users/.../kept` while `str(Path.resolve())`
+    is `C:\\Users\\...\\kept`. Measured on the `windows-2025` leg (2026-09-17) - the
+    first version asserted `str(path.resolve()) in listing` and failed with the kept
+    worktree plainly present in the listing, and in the same test its negative twin
+    (`not in`) *passed* for the same wrong reason, so that arm was vacuous there.
+
+    The same two-entry-point class as `tests/test_conflict_markers.py` (git's own
+    spelling, and `str(Path)`); the fix is the same shape: normalise, never compare
+    raw spellings. Pinned in both directions by
+    `test_the_worktree_listing_is_matched_across_separators`, which replays the
+    Windows shape with `PureWindowsPath` so the instrument is discriminating on POSIX.
+    """
+
+    def normalise(text: str) -> str:
+        return text.replace("\\", "/")
+
+    wanted = normalise(path.as_posix())
+    named = (
+        line[len("worktree ") :]
+        for line in listing.splitlines()
+        if line.startswith("worktree ")
+    )
+    return any(normalise(name) == wanted for name in named)
+
+
+def test_a_kept_worktree_is_the_tree_the_run_measured(
+    queue: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """`--keep DIR` leaves behind the tree this run answered *for*, not a rebuild of it.
+
+    Reviewing a PR means running your own probe on the tree whose sha was published;
+    rebuilding that tree by hand is how a verdict about a different tree gets written
+    (measured this cycle: two hand-built landing-tree worktrees, each needing its
+    `git write-tree` checked against the printed sha before the arms meant anything).
+    So the kept worktree must hash to the printed sha, must contain both PRs, and the
+    run that keeps it must reach the same verdict as the run that deletes it - keeping
+    is a side effect of the measurement, never a second measurement.
+    """
+    repo, origin = queue
+    _branch_with(repo, "guard", {"tests/test_no_token_under_data_or_src.py": GUARD_TEST})
+    _branch_with(repo, "violator", {"data/payload.txt": f"contains {TOKEN}\n"})
+    _publish(repo, origin, 1, "guard")
+    _publish(repo, origin, 2, "violator")
+
+    plain = _run_tool(repo, "1", "2")
+    kept_dir = tmp_path / "kept"
+    kept = _run_tool(repo, "1", "2", "--keep", str(kept_dir))
+
+    # Same verdict and same tree with and without --keep.
+    assert plain.returncode == 1, plain.stdout + plain.stderr
+    assert kept.returncode == 1, kept.stdout + kept.stderr
+    assert "test_no_token_under_data_or_src" in kept.stdout
+    match = re.search(r"final tree [0-9a-f]{12} \(([0-9a-f]{40})\)", kept.stdout)
+    assert match, kept.stdout
+    assert match.group(1) in plain.stdout
+
+    # The directory left behind *is* that tree, checked out, with both PRs in it.
+    assert kept_dir.is_dir()
+    assert _git(kept_dir, "write-tree") == match.group(1)
+    assert (kept_dir / "tests" / "test_no_token_under_data_or_src.py").is_file()
+    assert (kept_dir / "data" / "payload.txt").is_file()
+    assert _worktree_listing_names(_worktree_listing(repo), kept_dir)
+
+    # The note names the path, the tree, and the two traps every fresh worktree has -
+    # no `.venv` (so `uv run pytest` there reports that no suite ran) and no
+    # `node_modules` (so one unrelated GUI spawn-args test reds). Both were reported
+    # as defects before, which is why the tool says them out loud - and it prints the
+    # remedy for each, because a warning without one costs the next reader the same
+    # discovery. Shape-matched, not path-matched: the note prints git's spelling of the
+    # main checkout, which is a forward-slash path on Windows too.
+    assert "kept " in kept.stdout and kept_dir.name in kept.stdout
+    assert ".venv" in kept.stdout and "node_modules" in kept.stdout
+    assert f"PYTHONPATH={kept_dir}" in kept.stdout
+    assert "-m pytest tests/ -q" in kept.stdout
+    assert "emrg/gui/node_modules" in kept.stdout
+
+    # The removal line it prints is the one that works.
+    _git(repo, "worktree", "remove", "--force", str(kept_dir))
+    assert not kept_dir.exists()
+    assert not _worktree_listing_names(_worktree_listing(repo), kept_dir)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "the note's remedies are POSIX-shaped (`<main>/.venv/bin/python`, `ln -sfn`), so the "
+        "line it prints cannot be executed on the windows leg; the shape assertions in "
+        "test_a_kept_worktree_is_the_tree_the_run_measured still run there"
+    ),
+)
+def test_the_printed_python_remedy_measures_the_kept_tree(
+    queue: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The remedy the note prints has to answer about the tree the note is about.
+
+    The line is printed in the main checkout and carries `PYTHONPATH=<kept>`, which looks
+    pinned and is not: for `-m pytest`, `sys.path[0]` is the process CWD and the
+    positional `tests/` resolves against it, so copied verbatim from where it is printed
+    the line measures the *main* checkout - the injury this tool exists to prevent, printed
+    by the tool. Measured 2026-09-17 (`cyc20260917-142057`) in both directions: as printed,
+    `2797 deselected` of the main suite, the kept tree's marker test not collected, `import
+    emrg` from `<main>/emrg/__init__.py`; with `cd <kept> &&` in front, the marker
+    collected and `import emrg` from the kept tree. `_suite_verdict` pins both (its
+    `cwd=str(worktree)`, `_suite_env`'s `PYTHONPATH`), so the printed remedy keeping only
+    the weaker of the two is the whole defect.
+
+    Attribution, not spelling: a sentinel test file that exists *only* in the kept tree,
+    the printed line run verbatim from the checkout it is printed in (the harness's own
+    cwd, which `_main_worktree` also names), and the sentinel required to be named in the
+    output. The shape of the line is asserted too, because the failing behaviour is not a
+    wrong string but a missing `cd` - and a regression would otherwise be caught only by a
+    slow arm (the main suite) that happens to red.
+
+    The fixture's `repo` is the main checkout here, so it gets the `.venv/bin/python` the
+    note names: every other arm of this file asserts the note's *text*, and this is the one
+    that runs it. Created *after* the harness run, deliberately - the fixtures commit with
+    `git add -A`, and whether a `.venv` directory is committed depends on the machine's
+    gitignore configuration. Measured on the `ubuntu-latest` leg (run for head `0d28ff9e`):
+    with the symlink in place first, `_branch_with`'s `git add -A` committed it on the
+    branch, the fixture's `git checkout master` then removed it, and the printed line failed
+    with `/bin/sh: .../repo/.venv/bin/python: not found`. The same arm passed on the
+    development machine, which has a global `.venv/` ignore (this repo ignores `.venv/`
+    too) - so the difference was scaffolding, not the line under test. Hence the explicit
+    `exists()` assertion as well: if the scaffold is what breaks, it has to say so itself.
+
+    The scaffold is an *exec wrapper*, not a symlink to this suite's interpreter. Measured
+    on the `ubuntu-latest` leg (run for head `631944fd`): with `<repo>/.venv/bin/python` a
+    symlink to `sys.executable`, the line ran and answered `No module named pytest`.
+    CPython locates a venv through the directory of the path it was invoked *as*
+    (measured here both ways: `<repo>/.venv/bin/python -c "import sys; print(sys.prefix)"`
+    through a symlink prints the base interpreter's prefix, because the invoked directory
+    carries no `pyvenv.cfg`, while an `exec` of that same target prints the venv's) - and
+    on the runner the base interpreter has no pytest. The arm stayed green on the
+    development machine only because *this host's* uv base python happens to have pytest
+    in its own site-packages (`.../uv/python/cpython-3.13.3-.../site-packages/pytest/`),
+    which is an accident of the host and not a property of the line. Executing the same
+    interpreter by its own path reproduces the environment it was launched with, venv or
+    not, so the arm measures the remedy and not the runner's interpreter layout.
+    """
+    repo, origin = queue
+    _branch_with(repo, "guard", {"tests/test_no_token_under_data_or_src.py": GUARD_TEST})
+    _publish(repo, origin, 1, "guard")
+
+    kept_dir = tmp_path / "kept"
+    kept = _run_tool(repo, "1", "--keep", str(kept_dir))
+    assert kept.returncode == 0, kept.stdout + kept.stderr
+
+    remedy = next(
+        line.strip().removeprefix("python: ")
+        for line in kept.stdout.splitlines()
+        if line.strip().startswith("python: ")
+    )
+
+    # A wrapper, not a symlink: see the docstring (head `631944fd`, `ubuntu-latest`, where
+    # the symlink ran as the base interpreter and reported `No module named pytest`).
+    interpreter = repo / ".venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True, exist_ok=True)
+    interpreter.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8"
+    )
+    interpreter.chmod(0o755)
+    can_run = subprocess.run(
+        [str(interpreter), "-m", "pytest", "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert can_run.returncode == 0, (
+        "the scaffolding interpreter cannot run pytest, so this arm measures nothing: "
+        + (can_run.stdout or "")
+        + (can_run.stderr or "")
+    )
+
+    _write(kept_dir, "tests/test_kept_tree_only_marker.py", KEPT_MARKER_TEST)
+
+    proc = subprocess.run(
+        remedy,
+        shell=True,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    out = (proc.stdout or "") + (proc.stderr or "")
+    assert KEPT_MARKER_SENTINEL in out, out[-2000:]
+    # The count, because `-q` names failing tests only: the kept tree collects its own
+    # `tests/test_seed.py` *and* the PR's `test_no_token_under_data_or_src.py` *and* the
+    # marker, so 3 collected / 1 failed. The main checkout would collect `test_seed.py` and
+    # the marker (2 collected) - which is what a missing `cd` measures.
+    assert "1 failed, 2 passed" in out, out[-2000:]
+
+    # The shape is asserted *after* the run, deliberately: this is the secondary pin, and a
+    # test whose first assertion is the spelling would red on a missing `cd` without ever
+    # exercising the behaviour it exists to measure (measured on the mutation arm: with the
+    # `cd` deleted, the behavioural assertions above fail on their own - the sentinel is not
+    # collected and the count is the main checkout's).
+    assert remedy.startswith(f"cd {kept_dir} && PYTHONPATH={kept_dir} "), remedy
+
+
+def test_the_worktree_listing_is_matched_across_separators() -> None:
+    """The kept-tree assertions must not depend on the platform's separator.
+
+    `git worktree list` prints forward slashes on every platform (measured on the
+    `windows-2025` runner: `C:/Users/runneradmin/.../kept 1541ddc (detached HEAD)`),
+    while `str(Path.resolve())` prints backslashes on Windows. The Windows leg caught
+    the naive `str(path) in listing`, and - the part that made it a real defect rather
+    than a portability nit - the *negative* assertion in the same test passed there for
+    the same wrong reason, so the arm proved nothing on that platform.
+
+    Driving the matcher with a Windows-shaped listing and a `PureWindowsPath` is what
+    makes the instrument discriminating **here**, on POSIX, where no real `git` run can
+    produce the failing shape.
+    """
+    windows_listing = (
+        "worktree C:/Users/a b/Temp/pytest-0/repo\n"
+        "HEAD 6b53c0d0000000000000000000000000000000000\n"
+        "branch refs/heads/master\n"
+        "\n"
+        "worktree C:/Users/a b/Temp/pytest-0/kept\n"
+        "HEAD 1541ddc0000000000000000000000000000000000\n"
+        "detached\n"
+        "\n"
+    )
+    kept = PureWindowsPath("C:/Users/a b/Temp/pytest-0/kept")
+    absent = PureWindowsPath("C:/Users/a b/Temp/pytest-0/other")
+
+    assert _worktree_listing_names(windows_listing, kept)
+    assert not _worktree_listing_names(windows_listing, absent)
+
+    # The path contains a space, which is why the matcher reads whole `worktree <path>`
+    # lines instead of splitting the decorative listing on whitespace.
+    assert " " in kept.as_posix() and "worktree " in windows_listing
+
+    # And the spelling this replaced: on Windows `str(...)` is the backslashed form, so
+    # the old assertion was false there for a worktree that was really listed. Pinned as
+    # a fact so the next reader cannot "simplify" the matcher back into the defect.
+    assert str(kept) not in windows_listing
+
+
+def test_the_note_names_a_main_checkout_that_exists(mod) -> None:
+    """The remedy lines are commands only if the path in them is real.
+
+    `_main_worktree` reads the first `worktree` line of `git worktree list --porcelain`,
+    which is the main worktree on every invocation (measured: the same first line from
+    the main tree and from a linked one). Asserted against this repository - the tests
+    run in it - so the pinned fact is "the lookup answers with a checkout that has this
+    project in it", not a spelling.
+    """
+    found = mod._main_worktree()
+    assert found is not None, "git could not name the main worktree"
+    main = Path(found)
+    assert main.is_dir()
+    assert (main / "pyproject.toml").is_file(), f"{main} is not the main checkout"
+
+
+def test_keep_refuses_the_two_ways_it_could_mislead(
+    queue: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """A combined `--steps --keep` and a stale directory are refusals, not surprises.
+
+    `--steps` measures a different tree per step, so "the tree to keep" has no single
+    answer; and a directory that already exists is not the tree this run measured, so
+    leaving a kept worktree there would attach the caller's later checks to the wrong
+    tree - the defect class this family of tools exists to remove.
+    """
+    repo, _origin = queue
+
+    combined = tmp_path / "combined"
+    proc = _run_tool(repo, "1", "--steps", "--keep", str(combined))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "cannot be combined" in proc.stderr
+    assert not combined.exists()
+
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    proc = _run_tool(repo, "1", "--keep", str(stale))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "already exists" in proc.stderr
+    # Both sides are `str(Path.resolve())` on the platform under test - the tool prints
+    # the `--keep` argument it resolved, this line resolves the same directory - so this
+    # one agreement does not cross separators and needs no normalising (unlike the
+    # worktree listing above, where one side is git's own spelling). It passed on the
+    # `windows-2025` leg, which is the evidence for that claim.
+    assert proc.stderr.count(str(stale.resolve()))
 
 
 def _plan_refs(repo: Path) -> list[str]:
