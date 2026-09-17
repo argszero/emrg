@@ -1250,7 +1250,30 @@ test("#1276 stderr 的行上限保住 traceback 的结尾，读不到不抛异�
   const got = client._readStartStderr();
   assert.ok(got.includes("ImportError: the cause"), "最后一行才是说出原因的那一行");
   assert.strictEqual(got.split(/\r?\n/).length, 40, "上限 40 行，且确实生效");
-  assert.strictEqual(client._readStartStderr(40, path.join(tmpHome, ".emrg", "nope.err")), "");
+  // 这里原来断言 `=== ""`，正是被并成一体的那个答案：读失败与读到空文件无法区分，
+  // 报告于是对一条从没读过的通道宣布沉默。现在是第三种答案 null——仍然不抛异常。
+  assert.strictEqual(client._readStartStderr(40, path.join(tmpHome, ".emrg", "nope.err")), null);
+});
+
+test("#1276 读不到的那一路不叫沉默（第三种事实：命名了却读不到）", () => {
+  // 对照 emrg/client/daemon_manager.py 的 `_read_start_stderr`（issue #1276 item 4）。
+  // 上一版只有两种状态：给了路径就读，读回 `""` 就说"子进程没写"——而**打不开**的文件
+  // 也回 `""`，于是同一句（这一节存在的理由就是不许再说它）被印在了一条从没读过的通道上。
+  const client = new DaemonClient();
+  fs.writeFileSync(logFile(), "previous run: SystemExit: SIGTERM (15) received\n");
+  const mark = client._logMark(logFile());
+  const absent = path.join(tmpHome, ".emrg", "absence.err"); // 从不创建，故读失败
+  const detail = client._startupFailureDetail(mark, { exitCode: 9 }, undefined, absent);
+  assert.ok(!detail.includes("wrote nothing to its own stderr"),
+    "这一路没有被读过，它的沉默无从得知");
+  assert.ok(detail.includes("could not be read"));
+  assert.ok(detail.includes("exit=9"));
+
+  // 第三种不能靠牺牲第二种换来：同一个路径，真的打开并留空，沉默那句才成立。
+  fs.writeFileSync(absent, "");
+  const empty = client._startupFailureDetail(mark, { exitCode: 9 }, undefined, absent);
+  assert.ok(empty.includes("wrote nothing to its own stderr"));
+  assert.ok(!empty.includes("could not be read"));
 });
 
 test("#1276 spawn 把 stderr 接到诊断文件，而不是丢弃", () => {

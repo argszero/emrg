@@ -450,6 +450,61 @@ def test_a_captured_child_that_wrote_nothing_is_still_named_silent(tmp_path):
     assert "exit=9" in detail
 
 
+def test_a_channel_that_cannot_be_read_is_not_called_silent(tmp_path):
+    """The third state: the file was named, and reading it failed — that is not silence.
+
+    The distinction the previous shape drew had two states, not three: a path whose
+    read came back ``""`` was reported as "the child wrote nothing", and a reader
+    that could not open the file at all produced the *same* ``""`` — so the sentence
+    this section exists to stop making was printed about a channel nothing had been
+    read from. Measured on that head: a named-but-absent file and a read-and-empty
+    file answered **byte-identically**.
+    """
+    log = tmp_path / "emrgd.log"
+    log.write_text("previous\n", encoding="utf-8")
+
+    class Dead:
+        returncode = 9
+
+    absent = tmp_path / "emrgd-start.err"  # never created, so the read fails
+    detail = dm._startup_failure_detail(log, dm._log_mark(log), Dead(), absent)
+    assert "wrote nothing to its own stderr" not in detail, (
+        "nothing was read from that channel, so its silence cannot be claimed"
+    )
+    assert "could not be read" in detail
+    assert "exit=9" in detail
+
+    # The third state must not be bought by giving up the second: the same path,
+    # now opened and left empty, has really been read, and there the claim stands.
+    handle = dm._truncate_start_stderr(absent)
+    assert handle is not None
+    handle.close()
+    detail = dm._startup_failure_detail(log, dm._log_mark(log), Dead(), absent)
+    assert "wrote nothing to its own stderr" in detail
+    assert "could not be read" not in detail
+
+
+def test_the_stderr_reader_answers_three_ways(tmp_path):
+    """Where the collapse happened: the reader's own three answers.
+
+    ``except OSError: return ""`` made a failed read indistinguishable from an empty
+    file, so the caller could not keep the facts apart even in principle. Three
+    answers, and each one is a fact about a different thing.
+    """
+    assert dm._read_start_stderr(None) is None, "no path is not a path that read empty"
+
+    missing = tmp_path / "never-written.err"
+    assert dm._read_start_stderr(missing) is None, "a failed read is reported as one"
+
+    empty = tmp_path / "empty.err"
+    empty.write_bytes(b"")
+    assert dm._read_start_stderr(empty) == "", "read and empty is a measurement"
+
+    spoken = tmp_path / "spoken.err"
+    spoken.write_text("ImportError: boom\n", encoding="utf-8")
+    assert dm._read_start_stderr(spoken) == "ImportError: boom"
+
+
 def test_the_uncaptured_channel_cannot_quote_an_earlier_attempt(tmp_path):
     """Both faces of one bug, at the call site's own reduction.
 
@@ -505,8 +560,12 @@ def test_the_stderr_line_cap_keeps_the_end_of_a_traceback(tmp_path):
     got = dm._read_start_stderr(err)
     assert "ImportError: the cause" in got, "the last line is the one that names the cause"
     assert len(got.splitlines()) == 40, "the cap is 40 lines, and it is applied"
-    assert dm._read_start_stderr(tmp_path / "nope.err") == "", "unreadable is not an exception"
-    assert dm._read_start_stderr(None) == "", "no path is not an exception either"
+    # These two used to assert `== ""`, which is the conflation this test's sibling
+    # fixed: a failed read and an empty file were the same answer, so the report could
+    # not keep them apart and claimed silence for a channel it never read. `None` is
+    # the third answer now, and it is still not an exception.
+    assert dm._read_start_stderr(tmp_path / "nope.err") is None, "unreadable is not an exception"
+    assert dm._read_start_stderr(None) is None, "no path is not an exception either"
 
 
 def test_start_daemon_captures_the_child_stderr_instead_of_discarding_it():

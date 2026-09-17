@@ -173,21 +173,28 @@ def _truncate_start_stderr(path: Path):
         return None
 
 
-def _read_start_stderr(path: Path | None, lines: int = 40) -> str:
-    """The last ``lines`` of the child's own stderr for this attempt, or ``""``.
+def _read_start_stderr(path: Path | None, lines: int = 40) -> str | None:
+    """The last ``lines`` of the child's own stderr for this attempt, or the fact that it could not be read.
+
+    Three answers, not two: ``None`` means **the file could not be read** (absent,
+    unreadable, not a file), ``""`` means it was read and came back empty, and text
+    means it was read and said that. Collapsing the first into the second is how a
+    report ends up claiming silence about a channel it never managed to open —
+    measured on an earlier shape of this function: a named-but-unreadable file and a
+    read-and-empty file produced byte-identical text, and both said "the child wrote
+    nothing to its own stderr".
 
     ``lines`` is larger than the log tail's 15 because the useful part of a
-    traceback is the *end* of it — the exception line and its cause — and a
-    Python traceback is longer than fifteen lines. An unreadable or absent file
-    answers ``""``: "could not be read" and "nothing was written" are both
-    reported as text by the caller, never as an exception out of a diagnostic.
+    traceback is the *end* of it — the exception line and its cause — and a Python
+    traceback is longer than fifteen lines. Nothing here raises: a diagnostic is the
+    wrong place for an exception, so a failure to read is a value the caller reports.
     """
     if path is None:
-        return ""
+        return None
     try:
         data = path.read_bytes().decode("utf-8", errors="replace")
     except OSError:
-        return ""
+        return None
     return "\n".join(data.rstrip().splitlines()[-lines:])
 
 
@@ -283,17 +290,23 @@ def _startup_failure_detail(
 
     ``stderr_path`` is where the child's stderr was captured, and ``None`` means
     it was **not captured**: the caller could not open the file and the child's
-    stderr went to DEVNULL instead. "The child wrote nothing" and "nothing was
-    read from that channel" are two different facts, so the text below keeps them
-    distinct — the earlier shape passed the path on unconditionally and could
-    quote an *older* attempt's bytes as this failure's cause, and the paragraph
-    that replaced the quote still claimed silence about a channel nobody had
-    opened.
+    stderr went to DEVNULL instead. "The child wrote nothing", "nothing was read
+    from that channel" and "that channel could not be read at all" are three
+    different facts, so the text below keeps them distinct — the earlier shape
+    passed the path on unconditionally and could quote an *older* attempt's bytes
+    as this failure's cause, and the paragraph that replaced the quote still
+    claimed silence about a channel nobody had opened, or about one that named a
+    file which had since become unreadable.
     """
     tail = _read_log_tail(log_path, lines=15, since=since)
     child_err = _read_start_stderr(stderr_path)
     if stderr_path is None:
         child_section = "\n  emrgd 自身 stderr: 未捕获（本次启动没有读到这一路）"
+    elif child_err is None:
+        child_section = (
+            "\n  emrgd 自身 stderr: 读取失败（本次启动没有读到这一路，"
+            f"文件 {stderr_path}）"
+        )
     elif child_err:
         child_section = f"\n  emrgd 自身 stderr（本次启动新增）:\n{child_err}"
     else:
@@ -309,10 +322,13 @@ def _startup_failure_detail(
         )
     alive = "still running" if code is None else f"already exited (exit={code})"
     # The silence claim is a measurement of a channel, so it needs one to have
-    # been read: it is made only when a path was given and came back empty.
+    # been read *and* come back empty: a path that could not be read supports the
+    # fact that nothing was read from it, and nothing more.
     stderr_fact = (
         "the child's own stderr was not captured"
         if stderr_path is None
+        else "the child's own stderr could not be read"
+        if child_err is None
         else "the child wrote nothing to its own stderr"
     )
     return (

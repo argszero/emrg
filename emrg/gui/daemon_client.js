@@ -217,16 +217,21 @@ class DaemonClient {
     }
   }
 
-  // 本次启动子进程自己写的 stderr 末 `lines` 行；读不到答案就是 ""（诊断不抛异常）。
+  // 本次启动子进程自己写的 stderr 末 `lines` 行。返回三种答案而不是两种：
+  //   null = **读不到**（文件不存在/不可读/不是文件）；"" = 读到了且是空的；文本 = 读到了这些话。
+  // 把第一种并进第二种，就是"对一条自己没能打开的通道宣布沉默"——实测过：命名了却读不到的
+  // 文件，与读到且为空的文件，产出的文本逐字节相同，且都说 "the child wrote nothing to its own
+  // stderr"。诊断不抛异常：读失败是一个**值**，由调用方如实报出。
   // 40 行而不是日志尾巴的 15：traceback 的**结尾**（异常那一行与它的 cause）才是
   // 原因，而一个 Python traceback 比 15 行长。
   _readStartStderr(lines = 40, file = EMRGD_START_ERR()) {
+    let text;
     try {
-      const text = fs.readFileSync(file, "utf8").replace(/\s+$/, "");
-      return text ? text.split(/\r?\n/).slice(-lines).join("\n") : "";
+      text = fs.readFileSync(file, "utf8").replace(/\s+$/, "");
     } catch {
-      return "";
+      return null;
     }
+    return text ? text.split(/\r?\n/).slice(-lines).join("\n") : "";
   }
 
   // 子进程是否已经退出、以何种方式（issue #1283 缺陷 ②）。Node 把"退出码"与
@@ -278,15 +283,17 @@ class DaemonClient {
   // 的原因。顺序即论证：子进程的遗言在前，它已经能记录的日志尾巴在后。
   _startupFailureDetail(since, child, spawnState = NO_SPAWN_STATE, stderrFile = null) {
     // `stderrFile === null` 表示本次**没有读到**这一路 stderr（开文件失败，spawn 退回
-    // "ignore"）。"子进程什么都没写" 与 "这一路压根没读" 是两件不同的事实，文本必须
-    // 分开：给了路径才读得出沉默，没给路径就不得替它宣布沉默（也不得引用更早一轮
-    // 留在那个文件里的字节当成本次原因）。
+    // "ignore"）。"子进程什么都没写"、"这一路压根没读"、"这一路读不到" 是三件不同的事实，
+    // 文本必须分开：给了路径且读到了才读得出沉默；没给路径，或给了却读不到，都不得替它
+    // 宣布沉默（也不得引用更早一轮留在那个文件里的字节当成本次原因）。
     const captured = stderrFile !== null;
-    const childErr = captured ? this._readStartStderr(40, stderrFile) : "";
-    const childSection = childErr
+    const childErr = captured ? this._readStartStderr(40, stderrFile) : null; // null = 读不到
+    const childSection = typeof childErr === "string" && childErr
       ? `\n  emrgd own stderr (written by this start attempt, ${stderrFile}):\n${childErr}`
       : captured
-        ? ""
+        ? (childErr === null
+          ? `\n  emrgd own stderr: could not be read (nothing was read from it this attempt, ${stderrFile})`
+          : "")
         : "\n  emrgd own stderr: not captured (nothing was read from it this attempt)";
     const tail = this._readLogTail(15, since);
     if (tail) {
@@ -304,10 +311,13 @@ class DaemonClient {
       : signal !== null
         ? `already exited (signal=${signal})`
         : code !== null ? `already exited (exit=${code})` : "still running";
-    const silent = childErr
+    // 沉默是对一条**读到且为空**的通道的测量：读不到的那一路只支持"没读到它"这个事实。
+    const silent = typeof childErr === "string" && childErr
       ? ""
       : captured
-        ? ", and the child wrote nothing to its own stderr"
+        ? (childErr === null
+          ? ", and the child's own stderr could not be read"
+          : ", and the child wrote nothing to its own stderr")
         : ", and the child's own stderr was not captured";
     return (
       childSection +
