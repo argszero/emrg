@@ -290,6 +290,83 @@ def test_the_suite_runs_in_a_real_worktree_not_an_extracted_archive(
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
+def test_a_kept_worktree_is_the_tree_the_run_measured(
+    queue: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """`--keep DIR` leaves behind the tree this run answered *for*, not a rebuild of it.
+
+    Reviewing a PR means running your own probe on the tree whose sha was published;
+    rebuilding that tree by hand is how a verdict about a different tree gets written
+    (measured this cycle: two hand-built landing-tree worktrees, each needing its
+    `git write-tree` checked against the printed sha before the arms meant anything).
+    So the kept worktree must hash to the printed sha, must contain both PRs, and the
+    run that keeps it must reach the same verdict as the run that deletes it - keeping
+    is a side effect of the measurement, never a second measurement.
+    """
+    repo, origin = queue
+    _branch_with(repo, "guard", {"tests/test_no_token_under_data_or_src.py": GUARD_TEST})
+    _branch_with(repo, "violator", {"data/payload.txt": f"contains {TOKEN}\n"})
+    _publish(repo, origin, 1, "guard")
+    _publish(repo, origin, 2, "violator")
+
+    plain = _run_tool(repo, "1", "2")
+    kept_dir = tmp_path / "kept"
+    kept = _run_tool(repo, "1", "2", "--keep", str(kept_dir))
+
+    # Same verdict and same tree with and without --keep.
+    assert plain.returncode == 1, plain.stdout + plain.stderr
+    assert kept.returncode == 1, kept.stdout + kept.stderr
+    assert "test_no_token_under_data_or_src" in kept.stdout
+    match = re.search(r"final tree [0-9a-f]{12} \(([0-9a-f]{40})\)", kept.stdout)
+    assert match, kept.stdout
+    assert match.group(1) in plain.stdout
+
+    # The directory left behind *is* that tree, checked out, with both PRs in it.
+    assert kept_dir.is_dir()
+    assert _git(kept_dir, "write-tree") == match.group(1)
+    assert (kept_dir / "tests" / "test_no_token_under_data_or_src.py").is_file()
+    assert (kept_dir / "data" / "payload.txt").is_file()
+    assert str(kept_dir.resolve()) in _git(repo, "worktree", "list")
+
+    # The note names the path, the tree, and the two traps every fresh worktree has -
+    # no `.venv` (so `uv run pytest` there reports that no suite ran) and no
+    # `node_modules` (so one unrelated GUI spawn-args test reds). Both were reported
+    # as defects before, which is why the tool says them out loud.
+    assert "kept " in kept.stdout and kept_dir.name in kept.stdout
+    assert ".venv" in kept.stdout and "node_modules" in kept.stdout
+
+    # The removal line it prints is the one that works.
+    _git(repo, "worktree", "remove", "--force", str(kept_dir))
+    assert not kept_dir.exists()
+    assert str(kept_dir.resolve()) not in _git(repo, "worktree", "list")
+
+
+def test_keep_refuses_the_two_ways_it_could_mislead(
+    queue: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """A combined `--steps --keep` and a stale directory are refusals, not surprises.
+
+    `--steps` measures a different tree per step, so "the tree to keep" has no single
+    answer; and a directory that already exists is not the tree this run measured, so
+    leaving a kept worktree there would attach the caller's later checks to the wrong
+    tree - the defect class this family of tools exists to remove.
+    """
+    repo, _origin = queue
+
+    combined = tmp_path / "combined"
+    proc = _run_tool(repo, "1", "--steps", "--keep", str(combined))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "cannot be combined" in proc.stderr
+    assert not combined.exists()
+
+    stale = tmp_path / "stale"
+    stale.mkdir()
+    proc = _run_tool(repo, "1", "--keep", str(stale))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "already exists" in proc.stderr
+    assert proc.stderr.count(str(stale.resolve()))
+
+
 def _fake_run(monkeypatch, mod, stdout: str, stderr: str, rc: int) -> None:
     monkeypatch.setattr(
         mod,
