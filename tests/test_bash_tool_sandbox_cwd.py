@@ -174,7 +174,24 @@ def test_read_only_is_untouched_by_this_rule():
     assert _verdict(f"cd {spelled(OUTSIDE)}; echo x > /dev/null", RO) is True
 
 
-def test_without_a_workspace_the_old_assumption_stands():
-    """No boundary means no relative boundary to enforce (unchanged behaviour)."""
-    assert _verdict(f"cd {spelled(OUTSIDE)}; echo x > out.txt", WW, None) is True
+def test_without_a_workspace_the_moved_cwd_is_still_read():
+    """An omitted workdir skips the *workspace*, not the question (issue #1359).
+
+    This asserted ``is True`` for the first command until #1359 measured what
+    that meant: with no ``workdir`` the move-out question was never asked, so
+    the row above was refused with a workspace declared and allowed without one
+    — issue #1244's defect, keyed on the caller instead of on the command. The
+    question is now asked about the cwd the child actually inherits (see
+    ``execute()``: ``cwd=workdir``, and a None cwd means "inherit"), which is
+    the only directory this guard can place the relative target in.
+
+    The boundary itself does not move: with no declared workspace the workspace
+    is still not an allowed root, so a command that stays put keeps its verdict
+    (``rm -rf build`` below) — one hole closed, not a blanket refusal of every
+    command that omits an argument. #1359's acceptance was exactly this pair.
+    """
+    assert _verdict(f"cd {spelled(OUTSIDE)}; echo x > out.txt", WW, None) is False
+    assert _verdict(f"cd {spelled(OUTSIDE)}; echo x > out.txt", WW, WORKDIR) is False
+    # Controls: no move, so the relative target keeps the old assumption.
     assert _check_sandbox("rm -rf build", WW, None)[0] is True
+    assert _check_sandbox("echo x > out.txt", WW, None)[0] is True
