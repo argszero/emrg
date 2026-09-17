@@ -36,7 +36,7 @@ the answer is printed instead of written:
     ====================  ==========================  ==========
 
 The three rows marked *over-blocks* are deliberate and documented in
-``_resolve_target_from_command_assignment``: the value is decidable only by
+``_resolve_from_command_assignment``: the value is decidable only by
 reading execution order (`./other/f`) or by building it (`inner/f`), and the
 ``..`` value is exactly the write the relative branch's "relative therefore
 inside the workspace" assumption cannot survive. A guard may refuse a command it
@@ -82,7 +82,7 @@ from emrg.tools.bash_tool import (
     _cwd_left_workspace,
     _is_absolute_path,
     _is_within,
-    _resolve_target_from_command_assignment,
+    _resolve_from_command_assignment,
     _split_command_statements,
     _split_command_tokens,
     _temp_write_roots,
@@ -185,6 +185,8 @@ CONTROLS_ALLOWED = [
     ("cp $SRC $DST", "a bare `$VAR` operand is not a variable *root*"),
     ("echo $SHELL", "a read"),
     (f'T={SCRATCH} && cat > "$T~f"', "no `/` after the variable: not this rule"),
+    ('D=.emrg && cd "$D" && cat > f',
+     "an assigned move that stays in the workspace is placed, not refused"),
 ]
 
 
@@ -227,6 +229,62 @@ def test_the_outside_directory_is_taken_as_moved_out() -> None:
                    for r in roots), f"{OUTSIDE!r} is inside an allowed write root: {roots}"
     cmd = f"cd {spelled(OUTSIDE)} && T={SCRATCH} && cat > \"$T/f\""
     assert _cwd_left_workspace(cmd, WORKSPACE) is not None, cmd
+
+
+def test_a_move_spelled_by_an_assigned_variable_is_placed() -> None:
+    """The move walk reads the same resolution scope as the write-target rule.
+
+    One defect, two halves, and the second half was the dangerous one: the scope
+    was added for write targets, and the walk that decides whether a *relative*
+    target is still relative to the workspace kept expanding the environment
+    alone. It then joined the literal `$D` onto the cwd, which reads as
+    "`.`/`$D` — inside", so the move was invisible and the target behind it was
+    read as in-workspace. Measured on the head this file is part of: with
+    `D=<outside>` above it, `cd "$D" && T=<in-ws> && cat > "$T/f"` is BLOCK on
+    master (the target-side scope absent, so the unresolvable root refused it),
+    ALLOW with the target-side scope only, and BLOCK again once the walk reads
+    the assignment. The introduced allowance is what this case exists for: the
+    shell writes outside the workspace either way, and the guard said so before
+    the rule that was supposed to widen legitimate use arrived.
+
+    Both assertions are needed and they are different questions — that the move
+    is *placed* (the walk's answer) and that the write is *refused* (the tier's).
+    A walk that returned the directory while the loop below ignored it would
+    satisfy the second alone for the wrong reason.
+
+    The deciding value is an absolute spelling, which the value charset admits on
+    POSIX only (issue #1354), so this skips where the value cannot be decided —
+    with the cause held on every host by `test_why_the_absolute_case_is_posix_only`.
+    """
+    cmd = f'D={spelled(OUTSIDE)} && cd "$D" && T={SCRATCH} && cat > "$T/f"'
+    if not _assigned_value_is_decidable(spelled(OUTSIDE)):
+        pytest.skip(f"the value charset does not admit this spelling: {cmd}")
+    assert _cwd_left_workspace(cmd, WORKSPACE) is not None, cmd
+    allowed, reason, _enforcement = _check_sandbox(cmd, WW, WORKSPACE)
+    assert not allowed, (cmd, reason)
+    assert "sandbox" in (reason or ""), (cmd, reason)
+
+
+def test_the_move_and_the_target_are_resolved_by_one_rule() -> None:
+    """The two call sites answer from the same function, asserted as a pair.
+
+    The asymmetry this pins is invisible in either half alone: a resolver that
+    read assignments for write targets and a walk that read only the environment
+    are each defensible, and together they turned a refusal into an allowance.
+    Asserting the shared entry point's verdict on both kinds of token is what
+    makes the two halves one rule rather than two that happen to agree.
+    """
+    assert _resolve_from_command_assignment(
+        'D=/outside && cd "$D"', "$D") == "/outside"
+    assert _resolve_from_command_assignment(
+        'T=/outside && cat > "$T/f"', "$T/f") == "/outside/f"
+    # A move whose value is decided by the shell, not by an assignment, is not
+    # placed — and the walk then reads it as inside (the limit named in
+    # `_cwd_left_workspace`, not a promise of this rule).
+    assert _resolve_from_command_assignment(
+        'cd "$D" && D=/outside', "$D") is None
+    assert _resolve_from_command_assignment(
+        'D=../outside && cd "$D"', "$D") is None
 
 
 def test_an_absolute_value_resolves_where_the_charset_admits_the_spelling() -> None:
@@ -284,10 +342,10 @@ def test_the_resolved_path_is_the_one_the_shell_would_use() -> None:
     shell writes. Measured while writing this, and the reason this test asserts
     the string rather than the boolean.
     """
-    assert _resolve_target_from_command_assignment(
+    assert _resolve_from_command_assignment(
         'T=./inner && cat > "$T/f"', "$T/f") == "./inner/f"
     # The braced spelling is the same root, and must resolve to the same path.
-    assert _resolve_target_from_command_assignment(
+    assert _resolve_from_command_assignment(
         'T=./inner && cat > "${T}/f"', "${T}/f") == "./inner/f"
 
 
@@ -316,7 +374,7 @@ def test_a_nested_shell_gets_no_resolution_from_its_parent() -> None:
     textual substitution apart.
     """
     cmd = f'T={SCRATCH} && sh -c \'cat > "$T/f"\''
-    assert _resolve_target_from_command_assignment(cmd, "$T/f") is None
+    assert _resolve_from_command_assignment(cmd, "$T/f") is None
     allowed, reason, _enforcement = _check_sandbox(cmd, WW, WORKSPACE)
     assert allowed is False
     assert "shell variable" in (reason or ""), reason
@@ -341,7 +399,7 @@ def test_a_body_that_cannot_be_blanked_is_not_read_as_statements() -> None:
         'myprog <<EOF\nT=.emrg/tmp\nEOF\ncat > "$T/f"',
         "cat <<'EOF' > notes.txt\nbody\nEOF\nmyprog <<EOF\nT=.emrg/tmp\nEOF\ncat > \"$T/f\"",
     ):
-        assert _resolve_target_from_command_assignment(body, "$T/f") is None
+        assert _resolve_from_command_assignment(body, "$T/f") is None
         allowed, _reason, _enforcement = _check_sandbox(body, WW, WORKSPACE)
         assert allowed is False, body
 
@@ -380,7 +438,7 @@ def test_every_other_value_is_refused_rather_than_guessed(value: str) -> None:
     The **charset** half is held here only, and the reason is a measurement: the
     mutation arm that drops it (`if not _ASSIGNED_LITERAL_VALUE_RE.match(value)`
     → `if False`) is *survived* by the end-to-end corpus, because the shapes it
-    would let through are refused before or after it — `_resolve_target_…` bails
+    would let through are refused before or after it — `_resolve_from_command_assignment_…` bails
     out on a `(` or a backtick before the value is ever read, and the caller
     re-checks the substituted string for a variable root that is still there, so
     `$HOME` cannot slip past either. It is kept anyway, and this is where that

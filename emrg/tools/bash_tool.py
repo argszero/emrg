@@ -429,6 +429,13 @@ _UNRESOLVED_ROOT_RE = re.compile(rf"(?:{_PARAM_EXPANSION})+[\\/]")
 # *root* and not a whole operand, and it has to stay in the text the resolved
 # value is spliced into (a match that ate it turned `$T/f` into `./innerf`).
 _LEADING_VAR_ROOT_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?(?=/)")
+# The var-is-the-whole-token case (`cd "$D"`, `D=<dir> && cd "$D"`): there is no
+# separator after the variable, so the root pattern above — whose whole point is
+# the `/` lookahead — has nothing to match and the value would never be looked
+# up. The name charset is the same one, for the same reason: an expansion
+# operator (`${D:?}`) is decided by the shell rather than by an assignment, and
+# a special parameter (`$0`, `$@`) has no assignment to look up at all.
+_WHOLE_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 
 # What a command-local assignment may hold to be usable as a resolution: a
 # literal path fragment and nothing else. `T=$(mktemp -d)`, ``T=`uname` ``,
@@ -2309,11 +2316,28 @@ def _cwd_left_workspace(
     capped rather than trusted, because a guard must terminate on adversarial
     input.
 
-    **Known limit**: a directory the token stream cannot preserve is invisible
-    here. A Windows spelling `C:\\Users\\x` reaches the guard as `C:Usersx` —
-    backslash is shlex's escape character — so it is not read as an absolute
-    path at all (issue #1261). Forward-slash spellings, relative moves and
-    `..` are unaffected.
+    A destination the command spells with a variable is resolved against the
+    command's own assignments as well as the environment — the scope the
+    write-target rule reads (`_resolve_from_command_assignment`) — so
+    `D=<dir> && cd "$D"` is a move this walk can place. Reading that scope in one
+    place only is what let a correct refusal become an allowance: with the scope
+    added for targets and not here, `D=<outside> && cd "$D" && T=<in-ws> && cat >
+    "$T/f"` moved the shell out while the literal `$D` was joined onto the cwd and
+    read as inside.
+
+    **Known limit**: a destination *neither* scope can decide is joined onto the
+    cwd and therefore reads as inside, which hides a move that really happens —
+    `D=../outside && cd "$D" && cat > f` (the value charset admits no `..`) and
+    `for d in <dir>; do cd "$d" && cat > f; done` are both ALLOW on every host
+    (measured; issue #1357). The contract above argues for refusing them — a move
+    that cannot be proven to stay inside is the case `cd -` is already refused for
+    — but that is a behaviour change of its own, since it also refuses computed
+    destinations that are legitimately inside, so it is decided in that issue
+    rather than folded in here. A directory the token stream cannot preserve is
+    invisible here for the older reason: a Windows spelling `C:\\Users\\x`
+    reaches the guard as `C:Usersx` — backslash is shlex's escape character — so
+    it is not read as an absolute path at all (issue #1261). Forward-slash
+    spellings, relative moves and `..` are unaffected.
     """
     allowed = [workspace] + list(_trusted_write_zones()) + list(_temp_write_roots())
     cwd = os.path.realpath(_base) if _base else os.path.realpath(workspace)
@@ -2323,6 +2347,20 @@ def _cwd_left_workspace(
 
     def resolve(tok: str) -> str:
         expanded = os.path.expanduser(os.path.expandvars(tok))
+        if _UNRESOLVED_VAR_RE.search(expanded):
+            # The environment is not the only resolution scope (issue #1316's
+            # rule, read the other way round here): a variable the command
+            # itself assigned in an earlier statement is one the shell resolves
+            # at this move too, so `D=<dir> && cd "$D"` is a move this walk can
+            # place. Without it the literal `$D` is joined onto the cwd, which
+            # makes *any* such move read as "still inside the workspace" — the
+            # same scope the write-target rule had just been taught, so the
+            # asymmetry turned a correct refusal into an allowance: measured,
+            # `D=<outside> && cd "$D" && T=<in-ws> && cat > "$T/f"` is BLOCK
+            # before the target-side scope and was ALLOW with it.
+            from_command = _resolve_from_command_assignment(cmd, tok)
+            if from_command is not None:
+                expanded = os.path.expanduser(os.path.expandvars(from_command))
         if not _is_absolute_path(expanded):
             expanded = os.path.join(cwd, expanded)
         return os.path.realpath(expanded)
@@ -2511,17 +2549,32 @@ def _assigned_value_is_decidable(value: str) -> bool:
     return ".." not in value.split("/")
 
 
-def _resolve_target_from_command_assignment(cmd: str, target: str) -> str | None:
-    """``target`` with its variable roots filled in from ``cmd``'s own assignments.
+def _resolve_from_command_assignment(cmd: str, token: str) -> str | None:
+    """``token`` with the variables in it filled in from ``cmd``'s own assignments.
 
-    Why this exists (issue #1316): the refusal this feeds reasons from the
-    *environment* — `os.path.expandvars` against the variables the tool hands its
-    child — and concludes that a target still carrying a variable root is one
-    nobody can resolve. The environment is not the only resolution scope. A shell
-    resolves `$T` at a write site from the values its own statements assigned
-    earlier, so `T=.emrg/tmp && cat > "$T/f"` writes inside the workspace while
-    the guard refused it. That shape is the ordinary way a scratch path is used,
-    which makes the refusal a false block rather than a safety margin.
+    Two call sites read this one rule, and they read it for the same reason:
+
+      - the write-target rule, where the token is the file a redirect names
+        (`T=.emrg/tmp && cat > "$T/f"`);
+      - the moved-out walk, where the token is the directory a `cd` / `env -C`
+        moves the shell into (`D=<dir> && cd "$D" && …`).
+
+    Reading it in one place only is what let the two disagree: with the scope
+    added for targets and not for moves, `D=<outside> && cd "$D" && cat > f`
+    moved the shell out of the workspace while the walk, still expanding the
+    environment alone, joined the literal `$D` onto the cwd and called the move
+    "still inside" — the relative target behind it was then read as in-workspace
+    (measured: BLOCK on master, ALLOW with the target-side scope only).
+
+    Why the scope exists at all (issue #1316): the refusal this feeds reasons
+    from the *environment* — `os.path.expandvars` against the variables the tool
+    hands its child — and concludes that a token still carrying a variable root
+    is one nobody can resolve. The environment is not the only resolution scope.
+    A shell resolves `$T` at a write site from the values its own statements
+    assigned earlier, so `T=.emrg/tmp && cat > "$T/f"` writes inside the
+    workspace while the guard refused it. That shape is the ordinary way a
+    scratch path is used, which makes the refusal a false block rather than a
+    safety margin.
 
     The two spellings differ by one character and the shell treats them
     differently, and only one of them may open:
@@ -2531,11 +2584,15 @@ def _resolve_target_from_command_assignment(cmd: str, target: str) -> str | None
       - `T=.emrg/tmp cat > "$T/f"` — the inline prefix is *not* visible to the
         redirect, so the shell writes `/f` and this keeps the refusal.
 
+    The token may be a variable *root* (`$T/f`, whose value is spliced in) or the
+    whole variable (`cd "$D"`, whose value replaces it): both are looked up the
+    same way, because in both the shell reads the same assignment.
+
     Returns ``None`` whenever the answer is not provable, which is every case
     below; every one of them fails closed, so a command this cannot place keeps
     the refusal it has today rather than gaining an allowance:
 
-      - the target is not a whole token of a statement at the top level (a
+      - the token is not a whole token of a statement at the top level (a
         redirect inside a nested `sh -c '<text>'` payload, or inside a heredoc
         body, is written by another shell — and an unexported variable expands to
         nothing there, so resolving it here would be the fail-open of issue
@@ -2551,7 +2608,7 @@ def _resolve_target_from_command_assignment(cmd: str, target: str) -> str | None
         single reading can name);
       - the assigned value is not a decidable literal.
     """
-    if not _UNRESOLVED_ROOT_RE.search(target):
+    if not (_UNRESOLVED_ROOT_RE.search(token) or _WHOLE_VAR_RE.match(token)):
         return None
     masked = _mask_data_heredoc_bodies(cmd)
     if not _no_heredoc_body_is_left_as_text(cmd, masked):
@@ -2567,8 +2624,9 @@ def _resolve_target_from_command_assignment(cmd: str, target: str) -> str | None
             statements.append([])
         else:
             statements[-1].append(tok)
-    # The write site is the statement carrying the target as a token of its own.
-    site = next((k for k, st in enumerate(statements) if target in st), None)
+    # The site is the statement carrying the token as a word of its own — the
+    # redirect's target for the write rule, the `cd` operand for the move walk.
+    site = next((k for k, st in enumerate(statements) if token in st), None)
     if site is None:
         return None
     # Assigned twice anywhere in the command ⇒ the value at the site is not the
@@ -2584,18 +2642,27 @@ def _resolve_target_from_command_assignment(cmd: str, target: str) -> str | None
     for st in statements[:site]:
         for name, value in _commandless_assignment_pairs(st):
             values[name] = value
-    resolved = target
+    resolved = token
     while True:
         m = _LEADING_VAR_ROOT_RE.match(resolved)
-        if not m:
-            break
-        name = m.group(1)
+        if m is not None:
+            # A root: the value is spliced in front of the separator the
+            # lookahead stopped at, which stays in the text.
+            name, tail = m.group(1), resolved[m.end():]
+        else:
+            # The whole token is the variable (`cd "$D"`): there is no separator
+            # to stop at, so the value is the token entire. Read in the same
+            # loop because it is the same lookup.
+            m = _WHOLE_VAR_RE.match(resolved)
+            if m is None:
+                break
+            name, tail = m.group(1), ""
         value = values.get(name)
         if (value is None or counts.get(name) != 1
                 or not _assigned_value_is_decidable(value)):
             return None
-        resolved = value + resolved[m.end():]
-    if resolved == target or _UNRESOLVED_ROOT_RE.search(resolved):
+        resolved = value + tail
+    if resolved == token or _UNRESOLVED_ROOT_RE.search(resolved):
         # Nothing was filled in (the root is spelled in a way no assignment can
         # be matched to — an expansion operator, or a variable that is not the
         # leading word), or the fill-in stopped at a root it cannot reach (a
@@ -2682,7 +2749,7 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
             # `_is_within` / protected-file checks, relative ones still face the
             # `moved_out` check, and a spelling the command cannot place keeps the
             # refusal it has today.
-            from_command = _resolve_target_from_command_assignment(cmd, t)
+            from_command = _resolve_from_command_assignment(cmd, t)
             if from_command is not None:
                 expanded = os.path.expanduser(os.path.expandvars(from_command))
         if not _is_absolute_path(expanded):
