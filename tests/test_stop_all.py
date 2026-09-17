@@ -12,6 +12,7 @@ in test_installer_stop.py + the real installer runs on Windows hosts.
 from __future__ import annotations
 
 import ast
+import os
 import sys
 from pathlib import Path
 
@@ -1116,12 +1117,21 @@ class TestStopLogDirIsNotHostState:
 
     def test_the_suite_pins_the_stop_log_out_of_the_host_home(self):
         """The autouse guard must be in force for every test, this one included
-        (mutation: make ``_stop_log_dir`` ignore ``EMRG_STOP_LOG_DIR`` → red)."""
-        out = _stop_all._stop_log_dir()
-        resolved = Path(out).resolve()
-        home = Path.home().resolve()
-        assert home not in resolved.parents, f"stop log dir is host state: {out}"
-        assert resolved != (home / ".emrg" / "logs").resolve(), out
+        (mutation: make ``_stop_log_dir`` ignore ``EMRG_STOP_LOG_DIR`` → red).
+
+        The property is about *which directory answers*, not about where a
+        temporary directory happens to live: the resolved directory must be the
+        pinned scratch directory and must not be ``<home>/.emrg/logs``. An
+        earlier spelling asserted ``home not in resolved.parents`` and the
+        `windows-2025` leg killed it — pytest's temp base there is
+        ``C:/Users/runneradmin/AppData/Local/Temp/...``, i.e. *inside* the home
+        directory, so "a temp dir is not under home" is a POSIX assumption."""
+        pinned = os.environ.get("EMRG_STOP_LOG_DIR")
+        assert pinned, "the suite's stop-log pin is not in force (see conftest)"
+        resolved = Path(_stop_all._stop_log_dir()).resolve()
+        assert resolved == Path(pinned).resolve(), resolved
+        host_logs = (Path.home() / ".emrg" / "logs").resolve()
+        assert resolved != host_logs, f"stop log dir is host state: {resolved}"
 
     def test_stop_all_writes_its_log_into_the_pinned_dir(
         self, monkeypatch, tmp_path, capsys
