@@ -24,6 +24,8 @@ a probe, reaches the guard.
 """
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from emrg.tools.bash_tool import _check_sandbox
@@ -77,7 +79,11 @@ class TestTheFailOpenIsClosed:
         used to skip — a generic block would be some other rule firing."""
         monkeypatch.chdir(workspace)
         reason = _reason(f"cd {_OUTSIDE} && cat > f", None)
-        assert reason is not None and _OUTSIDE in reason
+        # The directory as the guard resolved it, not as the command spelled it:
+        # on Windows the guard reports `realpath("/opt/...")` as `C:\opt\...`, so
+        # a substring test against the literal spelling measures the host's path
+        # algebra instead of the rule under test (measured red on windows-2025).
+        assert reason is not None and os.path.realpath(_OUTSIDE) in reason
 
     def test_a_variable_move_out_is_also_refused_without_a_workdir(
         self, workspace, monkeypatch
