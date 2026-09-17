@@ -206,3 +206,37 @@ def test_edit_workspace_write_allows_inside_workspace(temp_file):
     }))
     assert not result.error
     assert "baz qux" in temp_file.read_text()
+
+
+def test_edit_workspace_write_blocks_a_protected_daemon_file(tmp_path, monkeypatch):
+    """The protected-file branch reaches THIS tool's error path — not only the
+    predicate (rant 2026-09-17T11:38:16).
+
+    The deleted variant targeted the host's real ``~/.emrg/config.toml``, so its
+    safety rested on the guard it was testing: the mutation arm that breaks that
+    guard rewrote the host's file. Here ``~`` is pinned to scratch, so the target
+    is built by the test and the same arm can only reach this test's own sentinel.
+    The boundary does not block it (the OS temp root is a trusted write zone,
+    measured 2026-09-17), so a red run means the PROTECTED branch let it through.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    # expanduser("~") reads USERPROFILE on Windows, HOME elsewhere.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    target = home / ".emrg" / "config.toml"
+    target.parent.mkdir(parents=True)
+    target.write_text("sentinel = true\n", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    tool = EditTool()
+    result = _run(tool.execute({
+        "file_path": str(target),
+        "old_string": "sentinel",
+        "new_string": "tamper",
+        "sandbox": "workspace-write",
+        "workspace": str(workspace),
+    }))
+    assert result.error
+    assert "protected daemon file" in result.content
+    assert target.read_text() == "sentinel = true\n"
