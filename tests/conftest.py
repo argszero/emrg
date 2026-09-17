@@ -275,6 +275,21 @@ def _spawns_a_daemon_stop_or_restart(args) -> bool:
     return False
 
 
+@pytest.fixture
+def daemon_spawn_refusal():
+    """The argv predicate the guard keys on, for a test that must classify a shape
+    without spawning it.
+
+    The shapes worth pinning as *allowed* include the live `emrg` CLI, and a test
+    that proves allowance by running it is asserting two things at once: that the
+    guard permitted the spawn, and that the CLI behaves on this platform. The
+    second is `tests/test_cli_output_encoding.py`'s job, and it already runs this
+    CLI here (`--help` under ascii and cp1252). Exposing the predicate lets this
+    file pin the first, over more shapes than one invocation could cover.
+    """
+    return _spawns_a_daemon_stop_or_restart
+
+
 @pytest.fixture(autouse=True)
 def _guard_no_live_daemon_is_signalled(monkeypatch):
     """⛔ No suite run may stop or restart a live daemon, by any route.
