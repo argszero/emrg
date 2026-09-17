@@ -95,14 +95,29 @@ def test_guard_refuses_signalling_the_daemon():
             daemon_manager.os.kill(4242, sig)
 
 
-def test_guard_still_allows_a_liveness_probe():
-    """Negative: `kill(pid, 0)` is a probe, not a signal — it must reach `os`.
+def test_guard_still_allows_a_liveness_probe(daemon_kill_is_a_probe):
+    """Negative: a genuine probe is not a signal — `kill(pid, 0)` must reach `os`.
 
     This is the arm that keeps the guard from being "refuse every os.kill":
     `daemon_manager` uses the probe to wait for the old daemon to die
     (rant 2026-08-18T12:49:09 ②), so refusing it would turn a benign check into
     an error.
+
+    POSIX only, and that is a property of the *value* rather than a shortcut. On
+    Windows `0` is `signal.CTRL_C_EVENT`, so the call this test exists to allow is
+    the call the guard must refuse there — and it is not a call this file may make
+    to find that out. Measured on the windows-2025 leg of run 35252423114: this
+    test passed at 17:33:41.5 and the *next* test that spawned a child died at
+    17:33:44.4 with `KeyboardInterrupt` at `threading.py:359` (`waiter.acquire()`
+    inside `Condition.wait`, i.e. `Thread.start()` waiting on `_started`) — the
+    Ctrl+C this line sent to its own console group, noticed at the next blocking
+    call. So the Windows half is pinned where it can be, without sending it:
+    `test_kill_zero_is_a_probe_on_posix_and_a_ctrl_c_on_windows` for the decision
+    and `test_the_refusal_asks_that_decision_instead_of_assuming_it` for the wiring.
     """
+    if not daemon_kill_is_a_probe(0):
+        pytest.skip("kill(pid, 0) is CTRL_C_EVENT here — see the two tests named above")
+
     import os as real_os
 
     import emrg.client.daemon_manager as daemon_manager
@@ -195,3 +210,64 @@ def test_guard_allows_read_only_spawns(daemon_spawn_refusal):
     ]
     for argv in allowed:
         assert not daemon_spawn_refusal(argv), argv
+
+
+def test_kill_zero_is_a_probe_on_posix_and_a_ctrl_c_on_windows(daemon_kill_is_a_probe):
+    """`kill(pid, 0)` means "does this pid exist" on POSIX and "interrupt" on Windows.
+
+    The guard delegates `kill(pid, 0)` so the restart path's liveness wait keeps
+    working, and the whole justification for that delegation is the POSIX reading.
+    It is not the Windows one: `signal.CTRL_C_EVENT` is **0**, and CPython's
+    `os_kill_impl` sends `CTRL_C_EVENT` through `GenerateConsoleCtrlEvent(pid,
+    sig)` — a Ctrl+C to that process group. A guard that delegated that value on
+    Windows would permit exactly the act it exists to refuse, and would do it by
+    signalling the console the test process is sitting on.
+
+    Pinned as a table rather than by calling `os.kill`: the Windows row cannot be
+    exercised on this runner without sending the signal it describes.
+    """
+    assert daemon_kill_is_a_probe(0, "linux")
+    assert daemon_kill_is_a_probe(0, "darwin")
+    assert not daemon_kill_is_a_probe(0, "win32")
+    # Cygwin's `os.kill` is the POSIX one and Cygwin Python has no
+    # `signal.CTRL_C_EVENT`, so the boundary is the `win*` platform string and
+    # not "anything that runs on Windows".
+    assert daemon_kill_is_a_probe(0, "cygwin")
+    # every real signal is a signal — zero is the only value in question
+    assert not daemon_kill_is_a_probe(15, "linux")
+    assert not daemon_kill_is_a_probe(9, "win32")
+
+
+def test_the_refusal_asks_that_decision_instead_of_assuming_it(daemon_kill_refusal):
+    """The wrapper routes `kill` through the probe decision, both ways.
+
+    Driven over a stand-in `os`, so the delegated branch appends to a list
+    instead of reaching a real `os.kill`: the Windows row's assertion is that
+    nothing is delivered, which a test cannot make by delivering it.
+    """
+    delivered: list = []
+
+    class _RecordingOs:
+        def kill(self, pid, sig):
+            delivered.append((pid, sig))
+
+    delegating = daemon_kill_refusal(_RecordingOs(), is_probe=lambda sig: True)
+    assert delegating.kill(4711, 0) is None
+    assert delivered == [(4711, 0)]
+
+    refusing = daemon_kill_refusal(_RecordingOs(), is_probe=lambda sig: False)
+    with pytest.raises(AssertionError, match="red-line violation"):
+        refusing.kill(4711, 0)
+    assert delivered == [(4711, 0)], "the refused call reached an os.kill anyway"
+
+
+def test_other_os_attributes_pass_through_unchanged():
+    """The guard replaces `kill` and nothing else — `daemon_manager` uses more of `os`."""
+    import os
+
+    import emrg.client.daemon_manager as daemon_manager
+
+    installed = daemon_manager.os  # the wrapper the autouse guard installed
+    assert installed.getpid() == os.getpid()
+    assert installed.path is os.path
+    assert installed.sep == os.sep

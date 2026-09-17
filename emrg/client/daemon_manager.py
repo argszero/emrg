@@ -448,9 +448,14 @@ async def check_and_restart_if_stale() -> None:
 
                 def _old_pid_alive() -> bool:
                     if sys.platform == "win32":
-                        # os.kill(pid, 0) would TerminateProcess on Windows —
-                        # never use it as a liveness probe. Windows SIGTERM is
-                        # an immediate hard kill, so the port probe suffices.
+                        # os.kill(pid, 0) is NOT a liveness probe on Windows:
+                        # signal.CTRL_C_EVENT is 0, and CPython's os_kill_impl
+                        # routes it to GenerateConsoleCtrlEvent(CTRL_C_EVENT,
+                        # pid) — a Ctrl+C to that process group, hitting every
+                        # process on the console, not just the one named. (Only
+                        # values outside CTRL_C/CTRL_BREAK go to TerminateProcess.)
+                        # Windows SIGTERM is an immediate hard kill, so the port
+                        # probe suffices.
                         return is_running()
                     try:
                         os.kill(server_pid, 0)

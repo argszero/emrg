@@ -209,6 +209,34 @@ def _guard_stop_log_is_not_host_state(monkeypatch, _stop_log_scratch):
 _RED_LINE = "⛔ red-line violation (host 2026-08-18T22:58, issue #1337)"
 
 
+def _kill_is_a_liveness_probe(sig, platform: str = "") -> bool:
+    """Is `os.kill(pid, sig)` on this platform a pure existence check?
+
+    POSIX `kill(pid, 0)` is: it delivers nothing and reports ESRCH / EPERM.
+    **Windows has no such call.** `signal.CTRL_C_EVENT` is **0**, and CPython's
+    `os_kill_impl` routes `CTRL_C_EVENT` / `CTRL_BREAK_EVENT` to
+    `GenerateConsoleCtrlEvent(pid, sig)` before it ever reaches
+    `TerminateProcess` — so there `kill(pid, 0)` is a **Ctrl+C to that process
+    group**, delivered to every process sharing the console, pytest included.
+
+    This is why the guard below cannot delegate `sig == 0` unconditionally: on
+    Windows that single value *is* a signal, and signalling the daemon is the one
+    act the red line forbids. `emrg/client/daemon_manager.py`'s restart path
+    skips its probe on win32 for the same reason, so refusing it there costs the
+    suite nothing.
+
+    The platform is a parameter rather than a `sys.platform` read so the decision
+    can be pinned on any runner — a guard whose behaviour on Windows is only
+    testable on Windows is a guard whose Windows behaviour is only discovered on
+    Windows.
+    """
+    if not platform:
+        import sys
+
+        platform = sys.platform
+    return sig == 0 and not platform.startswith("win")
+
+
 class _NoSignalOs:
     """`os` as `emrg/client/daemon_manager.py` sees it: identical, minus signals.
 
@@ -218,20 +246,26 @@ class _NoSignalOs:
     also intercept `Popen.kill()` on a child a test spawned deliberately — a
     different act, and one the suite needs.
 
-    `sig == 0` is delegated on purpose: `kill(pid, 0)` is the liveness probe this
-    module uses to wait for the old daemon to die (rant 2026-08-18T12:49:09 ②)
-    and a probe signals nothing. Refusing it would replace a benign check with an
-    error; refusing the term/kill signals is the whole point.
+    `kill(pid, 0)` is delegated only where it is genuinely a probe — see
+    `_kill_is_a_liveness_probe`: on POSIX it is the liveness check this module
+    uses to wait for the old daemon to die (rant 2026-08-18T12:49:09 ②) and
+    refusing it would replace a benign check with an error; on Windows the same
+    value is `signal.CTRL_C_EVENT`, i.e. a delivered signal, so it is refused
+    like any other.
+
+    `is_probe` is injected so a test can drive both decisions on either platform
+    without ever delegating to a real `os.kill`.
     """
 
-    def __init__(self, real):
+    def __init__(self, real, is_probe=_kill_is_a_liveness_probe):
         self._real = real
+        self._is_probe = is_probe
 
     def __getattr__(self, name):
         return getattr(self._real, name)
 
     def kill(self, pid, sig):
-        if sig == 0:
+        if self._is_probe(sig):
             return self._real.kill(pid, sig)
         raise AssertionError(
             f"{_RED_LINE}: emrg.client.daemon_manager tried to signal pid {pid} "
@@ -288,6 +322,30 @@ def daemon_spawn_refusal():
     file pin the first, over more shapes than one invocation could cover.
     """
     return _spawns_a_daemon_stop_or_restart
+
+
+@pytest.fixture
+def daemon_kill_is_a_probe():
+    """The guard's "is this call a probe?" decision, for the platform table.
+
+    Exposed for the reason `daemon_spawn_refusal` is: Windows is the platform
+    where the decision flips, and a test that could only observe it by running on
+    Windows would leave the flip unmeasured on every other runner.
+    """
+    return _kill_is_a_liveness_probe
+
+
+@pytest.fixture
+def daemon_kill_refusal():
+    """The guard's `os` substitute, constructible with a supplied decision.
+
+    A test that wants to see the refusal for a Windows-shaped `kill(pid, 0)`
+    cannot do it by calling the installed guard: on POSIX that reaches a real
+    `os.kill`, and on Windows the whole point is that it must not reach one.
+    Building the guard over a stand-in `os` lets both branches be pinned while
+    nothing is signalled on any platform.
+    """
+    return _NoSignalOs
 
 
 @pytest.fixture(autouse=True)
