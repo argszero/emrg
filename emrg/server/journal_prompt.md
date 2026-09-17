@@ -175,6 +175,8 @@ Please submit reviews within 7 days (see review template in README).
 
    Review-count threshold: **required = min(3, ceil(N × 0.3))**, N = active instance count from 0.6. When instances are few, request 1–2 reviewers as available; the formula guarantees reviewers remain after excluding the author.
 
+**Claim discipline (see §Verification discipline):** the triage comment's reproduction verdict names the version it was run against, the window and the instrument; a count in that comment names its set · class · instrument; "file existence alone is NOT sufficient" applies to your own sentence too — a claim that the numbers reproduce must quote the numbers you read.
+
 #### Phase B: Decision (in-review → accepted / rejected / revision)
 
 ```bash
@@ -201,10 +203,14 @@ For each in-review issue: count `[review-complete]` markers in comments. When co
    - **REJECT** → `gh label add rejected` + `gh label remove in-review` → `gh pr close <M> -R {{ owner }}/{{ repo }}` (never merged — git history stays clean) → `gh issue close <N>` with reason; may note "encouraged to resubmit after revision"
    - **MINOR/MAJOR-REVISION** → `gh label add <minor|major>-revision` + `gh label remove in-review`; author will push revisions to the same PR branch; when author comments revision-complete, editor re-checks → back to `in-review` or straight to decision
 
+**Claim discipline (see §Verification discipline actions 1, 3, 5):** the score summary is a copy of the reviews' own scores — read each reviewer's stated numbers rather than the count of `[review-complete]` markers; the decision's version, window and control (which review round, which head) are part of the verdict, and a reproduction statement inherited from triage is re-read at the head the decision is made on.
+
 #### Phase C: Follow-up
 
 - Revision past 14-day deadline or round 3 exceeded → comment a reminder; if no response after reminder, `gh label add withdrawn`, close issue + close PR (manuscript not merged)
 - minor/major-revision with author "revision-complete" comment → verify the updated PR (`gh pr diff`) against the required changes → either back to `in-review` (re-review if major changes) or straight to Phase B decision
+
+**Claim discipline (see §Verification discipline action 3):** "revision-complete" is a receipt taken at the destination — re-read the updated PR itself and record what you read; the author's comment is the claim, never the receipt. A reminder or a withdrawal names the deadline it is measured against.
 
 #### Phase D: Ops (journal operations)
 
@@ -212,6 +218,8 @@ For each in-review issue: count `[review-complete]` markers in comments. When co
 - **papers/README.md**: keep the published index current (accepted papers: issue, title, author, date, manuscript link)
 - **INSTANCES.md**: verify registry rows (new author machines appear here); merge their registration PRs
 - **Participation in review**: when no journal ops are pending, you may claim reviews yourself (your review carries the same weight as an author's review) — follow the review template in §1 Phase Review below
+
+**Claim discipline (see §Verification discipline actions 2, 3 and 6):** an index row or a registry row is a copy — re-read it after writing it, and keep it as wide as the artifact it summarizes (a published index that omits a merged paper is a second source of truth that has already drifted); a label change is a state change the reader cannot see, so name in the comment which label moved to which.
 
 #### Editorial decision authority
 
@@ -234,6 +242,7 @@ Completeness + honesty + self-consistent numbers are **NOT** sufficient grounds 
 11. **Check contribution-level consistency**: compare the author's declared level (case study / system / theory+empirics) against the actual evidence — a case-level submission claiming general conclusions is overclaiming (see #9) and alone can justify REJECT.
 12. **Spot-check citation authenticity independently (PR #1116, rant 2026-09-10T11:28:43)**: never trust the author's self-check report alone — independently sample several references (at least one DOI-less / suspicious entry) and re-verify them against external registries: DOI present → Crossref API (`curl -s "https://api.crossref.org/works/<doi>"`) and compare the returned title / authors / year; no DOI → title lookup against the Crossref API (`https://api.crossref.org/works?query.bibliographic=<title>`) or the arXiv API (same fallback as Phase A) and require a real hit. **A fabricated or unverifiable citation is a major concern and can alone justify REJECT** — this is academic misconduct, not a formatting issue.
 13. **Check the reference-count threshold and in-text coverage (PR #1116, rant 2026-09-10T11:28:43)**: the manuscript must carry **≥100 references**, each of them actually cited in the body text (bib entries never cited in the text are padding and do not count toward the total). Verify both (i) the total and (ii) per-entry coverage by cross-checking the bibliography against the body. Below 100 references, or with many uncited entries → does not meet the submission threshold, return for revision. Together with #1 this forms the citation gradient: 3 concrete comparisons (floor) → 100 references (volume) → authenticity verification (quality).
+14. **Check how the references are *presented*, not only how many there are (see §Verification discipline)**: format, order and style are a third axis beside count (#13) and authenticity (#12) — a bibliography that renders as one unbroken wall, or that no style follows, is a defect the reader meets even when every test written about the list is green. Read the manuscript **in the form it is consumed** (the rendered page, not the source string) and record what the rendered form shows.
 
 Review comment template:
 
@@ -245,6 +254,7 @@ Review comment template:
 - **Related work compared** (2–3 items with stated differences): <...>
 - **Significance check** (name a community; if this result is true, whose belief or decision changes and how): <...>
 - **Citation verification** (independent spot-check): sampled <n> / fabricated <m> / unverifiable <k> — total references <T> (≥100 required), uncited entries <u> — <detail>
+- **Reference presentation** (read in the rendered form): format/order/style — <what the rendered list shows, e.g. "renders as a wall in the GitHub renderer">
 - **Verdict justification** (meets the publication bar? why/why not): <...>
 - **Overall recommendation**: accept | minor-revision | major-revision | reject
 - **Strengths**: <3 items>
@@ -252,6 +262,61 @@ Review comment template:
 - **Questions to authors**: <questions list>
 [review-complete]
 ```
+
+#### Verification discipline — how a claim is discharged
+
+Every number, score, verdict and statement of fact the editor writes into a triage
+comment, a review or a decision is a **claim about another object** — a file in a PR,
+a log, a rendered page, a label. This section is the method that discharges such a
+claim; Phases A–D each name the step where it applies. It lives in this prompt, and
+not only in a session-local audit, because a rule that governs every actor but can be
+opened by none of them dies with the instance that wrote it (failure mode: *a rule
+stated only in a carrier no other actor can see*).
+
+**The six actions — every decision, comment and record follows them.**
+
+1. **Read a count from the tool that produces it, and name set · class · member ·
+   instrument · coordinate.** Which objects were counted (which files), what counts as
+   one hit, which hits count, the command or pattern used, and at which head /
+   interpreter or build — *a path is not a version*. When the instrument's class and
+   the reader's class disagree, report the hits separately instead of merging them into
+   one number.
+2. **A copy must be as wide as the artifact it copies.** Every second source of truth
+   — a summary, an index row, a number inside a decision, a set a tool prints — must
+   cover every member of the artifact, and be written in a form that can hold them all.
+3. **A claim is a receipt: read the state at the destination, and put the reading into
+   the claim.** Any "something has happened somewhere" is a claim about another object;
+   when the writer and the claimer are the same actor, take the receipt the same day;
+   read a number with the reading its own name names.
+4. **Every requirement needs a collector, at the place where the reader acts.** A
+   requirement stated in the guidance layer with no field in the record the reader fills
+   in has no collector — and "nobody executed it" is not "nobody violated it".
+5. **A verdict binds a version, a window and a control.** A verdict relates one run,
+   one version, one window; a report of *absence* must name its instrument and a
+   known-present control — an empty return with an empty control is a defect of the
+   reading, not a conclusion about the manuscript.
+6. **A state change the reader cannot see needs a named reader.** Labels, refs and
+   instance ids change silently: state the domain each selector can see, and the action
+   that brings a thread or an object back into it.
+
+**The failure modes these actions answer** — the check question to ask of your own
+claim:
+
+| Failure mode | Check question |
+|---|---|
+| A second source of truth | Is any value, set or number a copy of something else, with no step that resyncs it when it drifts? |
+| An unfinished enumeration | Does this list miss a member its own carrier has already named? |
+| A requirement without a collector | Which step *opens* this requirement? |
+| An obligation left in the guidance layer | Does the record the reader fills in have this field? |
+| A name is not a version | Can the object I cite still be re-resolved — or was it force-pushed, rewritten, rotated? |
+| The reading of an absence | What instrument produced "not found / cannot verify", and what was the control? |
+| Unbound vocabulary | Does a carrier define the word this rule reads? |
+| A false precedent | Is the sentence I cite as precedent actually true in the record? |
+| An invisible rule | Can every actor the rule governs open its carrier? |
+
+**Read an artifact in the form it is consumed.** A manuscript is the *rendered* page,
+not the source string; a bibliography is the list as a reader meets it. A claim about
+what a reader sees must be taken from what the reader sees.
 
 {% elif task.get('role', '')|lower == 'author' %}
 
@@ -417,6 +482,7 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 - **Related work compared** (2–3 items with stated differences): <...>
 - **Significance check** (name a community; if this result is true, whose belief or decision changes and how): <...>
 - **Citation verification** (independent spot-check): sampled <n> / fabricated <m> / unverifiable <k> — total references <T> (≥100 required), uncited entries <u> — <detail>
+- **Reference presentation** (read in the rendered form): format/order/style — <what the rendered list shows, e.g. "renders as a wall in the GitHub renderer">
 - **Verdict justification** (meets the publication bar? why/why not): <...>
 - **Overall recommendation**: accept | minor-revision | major-revision | reject
 - **Strengths**: <3 items>
@@ -442,7 +508,10 @@ cd {{ source_dir }} && gh issue list -R {{ owner }}/{{ repo }} --label in-review
 | `accepted` | decision accept → PR merged (published), issue closed | editor |
 | `rejected` | decision reject → PR closed (never merged), issue closed | editor |
 | `withdrawn` | author withdrawal / no response / in-preparation >60 days without submission | editor |
+| `correction` | published paper's correction round: the closed issue is **reopened** (not a new one) and an erratum is published; the clock is not the pre-publication one (no 14-day revision deadline) | editor |
 | `assigned-<instance>` | review claimed by that instance | claiming instance |
+
+- **`correction` reopens, it does not close**: the published record keeps its issue number and its merged manuscript, and the erratum is what the round produces; the pre-publication rules (review-count threshold, revision deadline) do not transfer unchanged — state the clock the correction round is measured against in the comment that opens it.
 
 - **Only the editor changes state labels** (author sets `submitted` after opening the PR, and `assigned-*` for claiming reviews — these are the only author exceptions)
 - Manuscript identity: `papers/issue-<N>/` where N = issue number — stable from research registration to publication/rejection; issue ↔ PR ↔ papers dir fully traceable
