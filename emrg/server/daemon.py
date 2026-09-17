@@ -36,7 +36,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from emrg._win import win32_no_window_kwargs
-from emrg.config import LlmConfig, config_dir
+from emrg.config import LlmConfig, config_dir, resolve_model_vision
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.llm import LlmClient
@@ -4112,19 +4112,28 @@ class EmrgServer:
         """
         old_model = self.llm.config.model
         old_ctx = self.llm.config.context_window
+        old_vision = self.llm.config.vision
 
         # Find the matching [[llm.models]] entry (if any) to resolve
         # context_window and optional model name override.
         new_ctx: int | None = None
-        new_vision: bool | None = None
         api_model: str = model_name  # default: use display name as API model
         for m in (self.llm.config.models or []):
             if m.get("name") == model_name:
                 new_ctx = m.get("context_window")
                 api_model = m.get("model", model_name)
-                if "vision" in m:
-                    new_vision = m["vision"]
                 break
+
+        # vision comes from one place, with a stated priority (rant
+        # 2026-09-17T16:53:02): the entry's own key wins, otherwise the
+        # top-level `[llm] vision]` default applies — including when the entry
+        # has no key or does not exist. What it must never do is keep the
+        # previous model's value, which is what a missing key used to mean: a
+        # non-vision model would be handed an image, and a vision model would be
+        # degraded to text, both without a word in the log.
+        new_vision, vision_source = resolve_model_vision(
+            self.llm.config.models, model_name, self.llm.config.vision_default
+        )
 
         self.llm.config.model = api_model
         if api_model != old_model:
@@ -4135,18 +4144,24 @@ class EmrgServer:
             self._invalidate_usage_anchors_on_switch()
         if new_ctx is not None:
             self.llm.config.context_window = new_ctx
-        if new_vision is not None:
-            self.llm.config.vision = new_vision
+        self.llm.config.vision = new_vision
 
         logger.info(
-            "model switched: %s → %s (api=%s, context_window: %d → %d)",
+            "model switched: %s → %s (api=%s, context_window: %d → %d, "
+            "vision: %s → %s, source: %s)",
             old_model, model_name, api_model, old_ctx, self.llm.config.context_window,
+            old_vision, self.llm.config.vision, vision_source,
         )
 
         await self._send(ws, {
             "type": "model_set",
             "model": model_name,
             "context_window": self.llm.config.context_window,
+            # The effective value, not the declaration (rant 2026-09-17T16:53:02):
+            # a client that reads config.toml's static value reads something else
+            # than what the daemon will do with an image.
+            "vision": self.llm.config.vision,
+            "vision_source": vision_source,
             "previous": old_model,
         })
         # Phase 2 broadcast: model is global daemon state — all connected
@@ -4156,6 +4171,8 @@ class EmrgServer:
             "type": "model_set",
             "model": model_name,
             "context_window": self.llm.config.context_window,
+            "vision": self.llm.config.vision,
+            "vision_source": vision_source,
             "previous": old_model,
         }, exclude=ws)
 
