@@ -39,6 +39,12 @@ from emrg._win import win32_no_window_kwargs
 from emrg.config import LlmConfig, config_dir, resolve_model_vision
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
+from emrg.server.config_reload import (
+    POLL_INTERVAL_SECONDS,
+    ConfigReloader,
+    ReloadOutcome,
+    describe,
+)
 from emrg.server.llm import (
     CONTENT_RISK,
     CONTEXT_TOO_LONG,
@@ -245,6 +251,15 @@ class EmrgServer:
         self.start_time = datetime.now()
         self.evolutions: list[EvolutionLog] = []
         self.llm = LlmClient(llm_config)
+        # Hot-reload state + policy (rant 2026-09-17T16:52:57). Constructed
+        # here so `_reload_config_once()` has its decision object even in a
+        # server that never entered `_run()` (tests drive single revisions);
+        # its baseline fingerprint is the file the daemon was started from.
+        self._config_reloader = ConfigReloader(llm_config)
+        # Pre-declared so a server that never entered `_run()` (a unit test
+        # driving one revision) is torn down by the same code path as a live
+        # one — `_shutdown_all` walks this attribute like its siblings.
+        self._config_reload_task: Optional[asyncio.Task] = None
         self._running = False
         self._stop_reason: str = "unknown"  # shutdown_msg|cancel|sigint|bind_exit|crash (rant 2026-08-19T14:02:37)
         self._scheduler: Optional[TaskScheduler] = None
@@ -438,6 +453,14 @@ class EmrgServer:
         # provides the session-runner callback.
         self._upgrade_tick_task = asyncio.create_task(self._upgrade_tick_loop())
 
+        # Config hot reload (rant 2026-09-17T16:52:57): `config.toml` used to
+        # be read exactly once, so an edit only took effect if the client
+        # SIGKILLed the daemon — killing in-flight scheduled handlers and
+        # dropping every connection. The loop stats the file every couple of
+        # seconds and applies a new revision in place; `model` rides the same
+        # path `/model` uses.
+        self._config_reload_task = asyncio.create_task(self._config_reload_loop())
+
         # Issue #1086/#1114: planted-fire staleness alarm (low-frequency, 6h).
         # Watches the per-exchange marker AND the completed-round file; logs
         # planted-fire-stale when no round completed within
@@ -496,6 +519,7 @@ class EmrgServer:
             (self._skills_ttl_task, "skills-ttl loop"),
             (self._upgrade_tick_task, "upgrade-tick loop"),
             (self._port_keepalive_task, "port-keepalive loop"),
+            (self._config_reload_task, "config-reload loop"),
         ):
             try:
                 if task is not None:
@@ -597,6 +621,48 @@ class EmrgServer:
             logger.info("sessions index rebuilt: %d sessions indexed", count)
         except Exception:
             logger.debug("sessions index rebuild failed", exc_info=True)
+
+    async def _config_reload_loop(self) -> None:
+        """Apply `~/.emrg/config.toml` edits without restarting (rant 2026-09-17T16:52:57).
+
+        One tick reads the file and hashes it (see `config_reload.POLL_INTERVAL_SECONDS`
+        and `config_reload.fingerprint` for why a stat is not enough); it is parsed
+        only when the hash moved. A revision
+        that cannot be parsed — or whose fields are wrongly typed — is
+        rejected whole and the previous good configuration stays in force; the
+        next write is a new fingerprint and is retried. Never raises: a bad
+        config must not be able to stop the daemon.
+        """
+        while self._running:
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
+            try:
+                await self._reload_config_once()
+            except Exception:
+                logger.warning("config reload tick failed", exc_info=True)
+
+    async def _reload_config_once(self) -> Optional["ReloadOutcome"]:
+        """One reload decision + its application. Returns None when unchanged.
+
+        Split from the loop so a test can drive exactly one revision without
+        sleeping, and so the loop body stays a timer.
+        """
+        outcome = self._config_reloader.poll()
+        if outcome is None:
+            return None
+        if outcome.error is not None:
+            logger.warning("config.toml change %s", describe(outcome))
+            return outcome
+        if outcome.model is not None:
+            # The file asks for a different model: run the /model path, then
+            # tell every client (the model is global daemon state).
+            frame = self._apply_model_switch(outcome.model)
+            await self._broadcast_all(frame)
+        if "max_tool_rounds" in outcome.applied:
+            # The daemon snapshots this at construction (__init__) — the value
+            # always comes from the host's file, never from a default we invent.
+            self._max_tool_rounds = self.llm.config.max_tool_rounds
+        logger.info("config.toml reloaded: %s", describe(outcome))
+        return outcome
 
     async def _skills_ttl_loop(self) -> None:
         """Background deterministic skill update check (startup + every 24h).
@@ -4139,6 +4205,23 @@ class EmrgServer:
         The model_name must be either the default model or in [[llm.models]].
         If not found in [[llm.models]], the context_window is kept as-is.
         """
+        frame = self._apply_model_switch(model_name)
+        await self._send(ws, frame)
+        # Phase 2 broadcast: model is global daemon state — all connected
+        # clients must see the same model (protocol-contract §2.6.3).
+        # The requester already got model_set above; exclude it from _broadcast_all.
+        await self._broadcast_all(frame, exclude=ws)
+
+    def _apply_model_switch(self, model_name: str) -> dict:
+        """The state change behind `/model`, as one reusable step.
+
+        Split out for the config hot-reload path (rant 2026-09-17T16:52:57):
+        an edited `[llm] model` must travel *this* path rather than a bare
+        `self.llm.config.model = …`, or the change skips the usage-anchor
+        invalidation (Dev.to 3dh3g) and the `context_window` / `vision`
+        resolution that a switch is supposed to carry. Returns the `model_set`
+        frame payload; the caller decides who is told.
+        """
         old_model = self.llm.config.model
         old_ctx = self.llm.config.context_window
         old_vision = self.llm.config.vision
@@ -4182,7 +4265,7 @@ class EmrgServer:
             old_vision, self.llm.config.vision, vision_source,
         )
 
-        await self._send(ws, {
+        return {
             "type": "model_set",
             "model": model_name,
             "context_window": self.llm.config.context_window,
@@ -4192,18 +4275,7 @@ class EmrgServer:
             "vision": self.llm.config.vision,
             "vision_source": vision_source,
             "previous": old_model,
-        })
-        # Phase 2 broadcast: model is global daemon state — all connected
-        # clients must see the same model (protocol-contract §2.6.3).
-        # The requester already got model_set above; exclude it from _broadcast_all.
-        await self._broadcast_all({
-            "type": "model_set",
-            "model": model_name,
-            "context_window": self.llm.config.context_window,
-            "vision": self.llm.config.vision,
-            "vision_source": vision_source,
-            "previous": old_model,
-        }, exclude=ws)
+        }
 
     async def _handle_resume_session(
         self, session_id: str, cwd: Path, ws
