@@ -30,6 +30,17 @@ class _Recorder:
         return self._answer
 
 
+#: Signals that exist on **both** legs. `SIGKILL` does not exist on Windows, and
+#: naming it in a decorator is a *collection* error there — measured on this
+#: file's first CI round (run 35287611871): `AttributeError: module 'signal' has
+#: no attribute 'SIGKILL'`, `collected 3064 items / 1 error`, the whole windows
+#: leg dead before a single test ran. Built from what the platform has, so the
+#: list can only grow where the name is real.
+_REAL_SIGNALS = [signal.SIGTERM, signal.SIGINT]
+if hasattr(signal, "SIGKILL"):
+    _REAL_SIGNALS.append(signal.SIGKILL)
+
+
 class TestTheDecision:
     """`refuses_a_real_probe` — both states, on any runner."""
 
@@ -53,10 +64,25 @@ class TestTheDecision:
         """
         assert refuses_a_real_probe(1234, 0) is sys.platform.startswith("win")
 
-    @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGKILL, signal.SIGINT])
+    @pytest.mark.parametrize("sig", _REAL_SIGNALS)
     def test_a_real_signal_is_never_refused_not_even_on_windows(self, sig):
         """The guard is about the probe; stopping a process is the caller's job."""
         assert refuses_a_real_probe(1234, sig, "win32") is False
+
+    def test_ctrl_c_event_is_the_zero_signal_where_it_exists(self):
+        """The fact the whole guard rests on, pinned where the name is real.
+
+        On Windows `signal.CTRL_C_EVENT` is 0 — which is why `sig == 0` is the
+        refused pair there and why this row cannot exist on POSIX, where the name
+        does not. The value is asserted rather than assumed: if CPython ever moved
+        it, the refusal would need moving with it, and a bare `0` in `pid_alive`
+        would stop being the probe it is.
+        """
+        if not hasattr(signal, "CTRL_C_EVENT"):
+            pytest.skip("CTRL_C_EVENT is Windows-only — asserted on the windows leg")
+        assert signal.CTRL_C_EVENT == 0
+        assert refuses_a_real_probe(1234, signal.CTRL_C_EVENT, "win32") is True
+        assert refuses_a_real_probe(1234, signal.CTRL_C_EVENT, "linux") is False
 
 
 class TestTheWrapper:
@@ -81,8 +107,8 @@ class TestTheWrapper:
 
     def test_a_real_signal_passes_through_even_on_windows(self):
         real = _Recorder(answer=None)
-        assert RefusingProbe(real, platform="win32")(1234, signal.SIGKILL) is None
-        assert real.calls == [(1234, signal.SIGKILL)]
+        assert RefusingProbe(real, platform="win32")(1234, signal.SIGTERM) is None
+        assert real.calls == [(1234, signal.SIGTERM)]
 
     def test_the_return_value_is_the_real_one(self):
         """Transparency: whatever the real call answers is what the caller sees."""
