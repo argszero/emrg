@@ -120,13 +120,16 @@ def test_both_kill_routes_carry_the_tripwire():
 
 def test_the_client_restart_route_cannot_signal_a_live_daemon(monkeypatch, tmp_path):
     """daemon_manager.check_and_restart_if_stale(): source looks newer than the
-    running daemon → the real code reaches os.kill(pid, SIGTERM). Refused."""
+    running daemon → the real code reaches os.kill(pid, SIGTERM). Refused.
+
+    Source mtime is the whole trigger: the config.toml branch was removed by
+    #1355 ("a config.toml edit never restarts the daemon again"), so a
+    config-mtime patch here would name an attribute that no longer exists."""
     import emrg.client.daemon_manager as dm_mod
 
     token_file = tmp_path / "emrgd.token"
     token_file.write_text("token\n")
     monkeypatch.setattr(dm_mod, "_get_server_source_mtime", lambda: 1e12)
-    monkeypatch.setattr(dm_mod, "_get_config_mtime", lambda: 0.0)
     monkeypatch.setattr(dm_mod, "is_running", lambda: True)
     monkeypatch.setattr(dm_mod, "cleanup_server", lambda: None)
     monkeypatch.setattr(dm_mod, "get_server_path", lambda: str(token_file))
@@ -189,13 +192,17 @@ def test_the_liveness_probe_still_reaches_the_real_os():
 def test_a_test_that_isolates_the_kill_still_runs(monkeypatch, tmp_path):
     """Negative control, the other direction: the documented escape hatch — a
     test that patches the module's own os.kill — still drives the full restart
-    path (this is the shape tests/test_daemon_manager.py uses)."""
+    path (this is the shape tests/test_daemon_manager.py uses).
+
+    Also the merge pin: this file was written against a tree that still had
+    the config-mtime branch, and CI tests the PR *merged with master*, where
+    #1355 removed `_get_config_mtime`. Nothing here names an attribute that
+    master does not have."""
     import emrg.client.daemon_manager as dm_mod
 
     token_file = tmp_path / "emrgd.token"
     token_file.write_text("token\n")
     monkeypatch.setattr(dm_mod, "_get_server_source_mtime", lambda: 1e12)
-    monkeypatch.setattr(dm_mod, "_get_config_mtime", lambda: 0.0)
     monkeypatch.setattr(dm_mod, "is_running", lambda: True)
     monkeypatch.setattr(dm_mod, "cleanup_server", lambda: None)
     monkeypatch.setattr(dm_mod, "get_server_path", lambda: str(token_file))
