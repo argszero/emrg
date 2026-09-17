@@ -7,9 +7,11 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from emrg.protocol import InstanceIdentity
@@ -2613,6 +2615,57 @@ def test_sandbox_resolution_unified_default_rule():
 
 
 # ── structural dirty-tree guard (community issue #979) ────────────────────
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# The four verdicts that hold only while `EMRG_TASK_DIRTY_OVERRIDE` is *absent*
+# (issue #1326); the subprocess test below runs them with it exported.
+OVERRIDE_SENSITIVE_TESTS = (
+    "tests/test_scheduler.py::test_dirty_tree_forces_read_only_structural_guard",
+    "tests/test_scheduler.py::test_reconstructible_dirt_is_recovered_by_the_daemon_itself",
+    "tests/test_scheduler.py::test_unique_dirt_still_forces_read_only",
+    "tests/test_scheduler.py::test_a_stale_verdict_cannot_unlock_a_tree_holding_unique_work",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_dirty_override(monkeypatch):
+    """The caller's shell must not decide a dirty-tree verdict (issue #1326).
+
+    `_effective_sandbox` reads `EMRG_TASK_DIRTY_OVERRIDE` from the process
+    environment and hands back the *configured* tier when the task is named, so
+    an exported variable replaces the read-only verdict the four tests below
+    assert. That variable is precisely how an evolution cycle keeps working on a
+    dirty tree, which is why the standard verification command reported
+    `4 failed` on a tree where the same four pass with it unset (measured
+    2026-09-17 on a dirty main tree): the variable decided, not the dirt.
+
+    A test's premise is its own: this module builds the trees it measures, so
+    the ambient variable is removed here rather than inherited. The one test
+    that *means* to exercise the override
+    (`test_dirty_tree_override_env_audited_receipt`) sets it itself, which is
+    why this is an autouse clear rather than four separate requests.
+    """
+    monkeypatch.delenv("EMRG_TASK_DIRTY_OVERRIDE", raising=False)
+
+
+def test_the_dirty_tree_verdicts_survive_an_exported_override():
+    """The CI-visible half: the four verdicts hold in a subprocess that exports
+    `EMRG_TASK_DIRTY_OVERRIDE`, so the fixture above is the reason they hold.
+
+    In CI the variable is never exported, so the four tests pass with or without
+    the fixture — the run below is what keeps the insulation from being deleted
+    silently. Its failure mode without the fixture is the measured one from
+    issue #1326: `4 failed` for a caller's convenience variable.
+    """
+    env = dict(os.environ, EMRG_TASK_DIRTY_OVERRIDE="emrg-task")
+    out = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", *OVERRIDE_SENSITIVE_TESTS],
+        cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", env=env,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "4 passed" in out.stdout, out.stdout + out.stderr
 
 
 def test_is_dirty_tree_detects_uncommitted_changes():
