@@ -1,0 +1,506 @@
+"""Tests for scripts/review-queue.py - what may a cycle do about each open PR?
+
+Background (cycle cyc20260917-221117, issue #1340)
+--------------------------------------------------
+Issue #1340 is a question the host asked about a cycle: seven open PRs, no votes
+cast. The cycle had not been lazy — it was following a rule it had derived by hand
+and got wrong ("a stale PR cannot be voted on"), and re-deriving the rules showed
+nothing had prevented the votes. The rules were already mechanical and already
+split between two tools, so the fix is to assemble them once.
+
+The reading is a *decision*, and the decision is only useful if it is right in both
+directions. So what is pinned here is every branch's order, and each pair of states
+that look alike in the count while calling for **opposite** actions:
+
+* `0/3` from a ❌ at this head -> a fix push, **not** a vote. The counter resets the
+  run on a veto, so this row and "never reviewed" read as the same number; treating
+  them alike is how a cycle votes into an answered objection.
+* a head that no longer contains master -> measure the landing tree and vote on
+  *that*, **not** "unreviewable" and not a refresh. The refresh is the remedy that
+  costs every vote the branch has, and the landing-tree reading is the one whose
+  absence stalled cycle `cyc20260917-190356`.
+* a red run, no run, and a run still going -> three actions, none of them a vote.
+  Collapsing them into "not fresh" is the shortcut that produces one wrong remedy
+  for three states.
+* `--cycle` already voted here -> stop. One counted vote per cycle per PR, so the
+  next vote at that head has to come from another cycle.
+
+Nothing here touches the network or `gh`: both siblings' entry points are replaced,
+and each replacement is asserted to receive the arguments the real one would, so a
+test cannot pass by never asking. The three answers this tool must never invent are
+pinned too — an unreadable count is `?` (not `0/3`), an unreadable queue is exit 2
+(not "nothing to review"), and an unreadable row is exit 2 (not a green light).
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / "scripts" / "review-queue.py"
+
+HEAD = "a" * 40
+MASTER = "c" * 40
+PUSH_TIME = "2026-09-17T10:00:00Z"
+CYCLE = "cyc20260917-221117"
+
+
+def _load_module():
+    spec = importlib.util.spec_from_file_location("review_queue", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    # Register before exec: the module declares a dataclass, and dataclasses
+    # resolves annotations through sys.modules[cls.__module__] at class-creation
+    # time. A module that is not registered there raises AttributeError from inside
+    # dataclasses itself - an error that names neither this test nor the cause.
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def mod():
+    return _load_module()
+
+
+# --- the two halves, as the siblings answer them ---------------------------
+
+class FakeVotes:
+    """`check-vote-count.py`, answering `check_pr` from a routing list.
+
+    Built around the real `Verdict`/`Vote` dataclasses with the real field values,
+    so a field this tool reads under the wrong name fails here rather than in the
+    live queue. `DEFAULT_MIN_VOTES` is carried because the tool reads the gate's
+    threshold from the counter rather than keeping a second copy of the number.
+    """
+
+    DEFAULT_MIN_VOTES = 3
+
+    def __init__(self, reviews: list[dict] | None = None, mergeable: str = "MERGEABLE",
+                 state: str = "CLEAN", head: str = HEAD, valid: int | None = None):
+        self.reviews = reviews if reviews is not None else []
+        self.mergeable = mergeable
+        self.state = state
+        self.head = head
+        self.forced_valid = valid
+        self.calls: list[tuple[int, int, float]] = []
+        #: The real sibling module, attached by `_install` so the fakes can build
+        #: its dataclasses instead of a lookalike that would agree with a misreading.
+        self.real = None
+
+    def check_pr(self, number, needed, *, mergeability_wait=0.0):
+        self.calls.append((number, needed, mergeability_wait))
+        counter = self.real
+        votes = [
+            counter.Vote(
+                at=review["at"],
+                kind=review["kind"],
+                cycle=review.get("cycle"),
+                valid=review.get("valid", True),
+                why=review.get("why", ""),
+                ids=(review["cycle"],) if review.get("cycle") else (),
+            )
+            for review in self.reviews
+        ]
+        # The counter's own rule, replayed here: a veto resets the run, and a valid
+        # approval counts once per cycle. Written out rather than imported because
+        # the point of this fake is to be a second, independent answer this tool is
+        # measured against - if it delegated to the counter, both could be wrong
+        # together.
+        run = 0
+        seen: set[str] = set()
+        for vote in votes:
+            if vote.kind == "veto":
+                run = 0
+                seen.clear()
+            elif vote.valid and vote.cycle and vote.cycle not in seen:
+                seen.add(vote.cycle)
+                run += 1
+        return counter.Verdict(
+            pr=number,
+            title=f"pr {number}",
+            head_sha=self.head,
+            push_time=PUSH_TIME,
+            push_time_exact=True,
+            mergeable=self.mergeable,
+            merge_state=self.state,
+            votes=votes,
+            counted=[],
+            valid_count=run if self.forced_valid is None else self.forced_valid,
+            needed=needed,
+        )
+
+
+class FakeFresh:
+    """`check-merge-freshness.py`, for both the fresh case and the four stale kinds."""
+
+    def __init__(self, stale: bool = False, kind: str = "", behind: int = 0,
+                 reason: str = ""):
+        self.stale = stale
+        self.kind = kind
+        self.behind = behind
+        self.reason = reason or f"some reason for {kind or 'fresh'}"
+        self.calls: list[int] = []
+        self.real = None
+
+    def check_pr(self, number):
+        self.calls.append(number)
+        verdict = self.real
+        return verdict.Verdict(
+            pr=number,
+            title=f"pr {number}",
+            head_sha=HEAD,
+            merge_base=MASTER,
+            ahead_by=1,
+            behind_by=self.behind,
+            run_created_at=None,
+            run_conclusion=None,
+            stale=self.stale,
+            reason=self.reason,
+            stale_kind=self.kind,
+        )
+
+
+def _install(mod, monkeypatch, votes, fresh):
+    """Point the tool's two sibling seams at the fakes.
+
+    `real` is kept on each fake so it can build the sibling's own dataclasses: the
+    point is to exercise this tool against the other tools' *declared* shapes, and a
+    self-authored lookalike would agree with a misreading.
+    """
+    votes.real = mod.vote_counter()
+    fresh.real = mod.freshness()
+    monkeypatch.setattr(mod, "vote_counter", lambda: votes)
+    monkeypatch.setattr(mod, "freshness", lambda: fresh)
+
+
+def _review(at="2026-09-17T10:05:00Z", kind="approve", cycle=CYCLE, valid=True, why=""):
+    return {"at": at, "kind": kind, "cycle": cycle, "valid": valid, "why": why}
+
+
+def _read(mod, monkeypatch, votes, fresh, *, number=1, cycle=None, prs=()):
+    _install(mod, monkeypatch, votes, fresh)
+    argv = [str(pr) for pr in prs] if prs else [str(number)]
+    if cycle:
+        argv += ["--cycle", cycle]
+    return mod.main(argv)
+
+
+# --- the vote branch: the ordinary case first ------------------------------
+
+
+def test_three_votes_on_a_fresh_head_is_a_merge(mod, monkeypatch, capsys):
+    """The positive control: every branch below is measured against this one."""
+    votes = FakeVotes(reviews=[_review(cycle=f"cyc20260917-1{n}") for n in range(3)])
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "3/3 votes" in out
+    assert "merge" in out
+    assert "gh pr merge 1 -R argszero/emrg --squash" in out
+    # Both halves were asked, in the order the row needs them.
+    assert votes.calls == [(1, 3, 30.0)]
+    assert fresh.calls == [1]
+
+
+def test_no_votes_on_a_fresh_head_is_a_vote(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "0/3 votes" in out
+    assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
+
+
+def test_the_vote_command_carries_the_cycle_that_will_attribute_it(mod, monkeypatch, capsys):
+    """A vote body with no cycle id is uncountable, so the printed command must ask
+    for one rather than let the reader post a review the counter drops."""
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert "--cycle cyc20260917-221117" in out
+
+
+# --- the states that look like 0/3 and are not ----------------------------
+
+
+def test_a_veto_at_this_head_is_a_fix_push_not_a_vote(mod, monkeypatch, capsys):
+    """The counter resets the run on a veto, so a vetoed PR reads `0/3` - exactly
+    like a never-reviewed one. Voting on it would answer an objection."""
+    votes = FakeVotes(
+        reviews=[
+            _review(cycle="cyc1", kind="approve"),
+            _review(at="2026-09-17T10:06:00Z", cycle="cyc2", kind="veto"),
+        ],
+    )
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "fix-push" in out
+    assert "veto" in out
+    assert "cast-vote.py" not in out, "a vote must not be suggested while a veto stands"
+
+
+def test_a_veto_from_before_the_head_push_does_not_block_a_vote(mod, monkeypatch, capsys):
+    """It is already excluded from the count, so treating it as standing would stall
+    a PR that has no live objection."""
+    votes = FakeVotes(
+        reviews=[
+            _review(at="2026-09-17T09:00:00Z", cycle="cyc1", kind="veto", valid=False),
+        ],
+    )
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "vote" in out
+    assert "fix-push" not in out
+
+
+def test_a_head_behind_master_is_voted_on_its_landing_tree(mod, monkeypatch, capsys):
+    """The measured failure this tool exists for: the rule "a stale PR cannot be
+    voted on" is false, and the landing-tree measurement preserves the votes."""
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=3,
+                      reason="head does not contain master")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "measure-then-vote" in out
+    assert "check-merge-plan-suite.py 1" in out
+    assert "cast-vote.py 1 --cycle cyc20260917-221117" in out
+    # The refresh is the expensive remedy and must not be the advice here.
+    assert "git merge FETCH_HEAD" not in out
+
+
+def test_enough_votes_on_a_stale_head_measures_before_merging(mod, monkeypatch, capsys):
+    """Merging a stale head merges a tree no CI judged, so the vote count alone is
+    not the green light."""
+    votes = FakeVotes(reviews=[_review(cycle=f"cyc20260917-1{n}") for n in range(3)])
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=2)
+    rc = _read(mod, monkeypatch, votes, fresh)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "measure-then-merge" in out
+    assert "gh pr merge" not in out
+
+
+# --- the three CI states, which are not one state -------------------------
+
+
+def test_a_red_run_is_not_votable_and_names_the_run(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh(stale=True, kind="failing",
+                      reason="CI concluded 'failure' on head aaaa")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ci-red" in out
+    assert "gh pr checks 1" in out
+    assert "cast-vote.py" not in out
+
+
+def test_a_head_with_no_run_is_retriggered_not_refreshed(mod, monkeypatch, capsys):
+    """A re-trigger fires a run on the same head and keeps the votes; a refresh
+    would spend them for a question the re-trigger answers."""
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(stale=True, kind="no_run",
+                      reason="there is NO Test run for head aaaa")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "retrigger-ci" in out
+    assert "cast-vote.py" not in out
+    assert "git merge FETCH_HEAD" not in out
+
+
+def test_a_run_still_going_waits(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh(stale=True, kind="running",
+                      reason="CI is still in_progress on head aaaa")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "wait" in out
+    assert "cast-vote.py" not in out
+
+
+# --- branch states, and the one a committer resolves directly --------------
+
+
+def test_a_conflict_names_the_merge_and_the_classifier(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[], mergeable="CONFLICTING", state="DIRTY")
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "resolve-conflict" in out
+    assert "git merge FETCH_HEAD" in out
+    assert "classify-conflict.py --all" in out
+
+
+def test_a_conflict_is_not_reported_as_an_ordinary_blocker(mod, monkeypatch, capsys):
+    """A non-conflicting state is the branch's to remove, so the row must not hand
+    the reader a merge cascade for a draft."""
+    votes = FakeVotes(reviews=[], mergeable="MERGEABLE", state="DRAFT")
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "unblock" in out
+    assert "resolve-conflict" not in out
+
+
+# --- the per-cycle rule ----------------------------------------------------
+
+
+def test_a_vote_this_cycle_already_cast_stops_the_next_one(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[_review(cycle=CYCLE)])
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "already-voted" in out
+    assert "cast-vote.py" not in out
+
+
+def test_the_same_vote_without_this_cycle_id_is_just_a_count(mod, monkeypatch, capsys):
+    """Without `--cycle` the tool answers the first question only - and says so by
+    not claiming the vote budget is spent."""
+    votes = FakeVotes(reviews=[_review(cycle=CYCLE)])
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "already-voted" not in out
+    assert "cast-vote.py 1" in out
+
+
+# --- what it must never invent ---------------------------------------------
+
+
+def test_an_unreadable_count_is_a_question_mark_not_zero(mod, monkeypatch, capsys):
+    class Boom:
+        # A faithful stand-in for the counter: the tool reads the gate's threshold
+        # from it, so a stand-in without it would fail for the wrong reason.
+        DEFAULT_MIN_VOTES = 3
+        calls: list = []
+
+        def check_pr(self, number, needed, *, mergeability_wait=0.0):
+            raise RuntimeError("gh failed: mergeable UNKNOWN")
+
+    fresh = FakeFresh()
+    votes = Boom()
+    monkeypatch.setattr(mod, "vote_counter", lambda: votes)
+    monkeypatch.setattr(mod, "freshness", lambda: fresh)
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 2, "an unread count is a failure to measure, not a clean run"
+    assert "? votes" in out
+    assert "0/3" not in out, "0/3 is the line that says 'vote freely'"
+    assert "read-first" in out
+    assert "UNKNOWN" in out
+    assert fresh.calls == [], "an unread count means no later decision is worth making"
+
+
+def test_an_unreadable_queue_is_not_an_empty_one(mod, monkeypatch, capsys):
+    def boom(repo=mod.REPO):
+        raise RuntimeError("gh failed (rc=1): gh pr list")
+
+    monkeypatch.setattr(mod, "open_prs", boom)
+    rc = mod.main([])
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "could not list open PRs" in err
+    assert "nothing to review" not in err
+
+
+def test_an_empty_queue_is_an_empty_one(mod, monkeypatch, capsys):
+    """The other side of the same distinction: `[]` read successfully is a state."""
+    monkeypatch.setattr(mod, "open_prs", lambda repo=mod.REPO: [])
+    rc = mod.main([])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "nothing to review" in out
+
+
+# --- the queue the tool is asked about -------------------------------------
+
+
+def test_named_prs_are_asked_about_instead_of_the_whole_queue(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    monkeypatch.setattr(
+        mod, "open_prs", lambda repo=mod.REPO: pytest.fail("the queue must not be listed")
+    )
+    rc = mod.main(["7", "9"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert [call[0] for call in votes.calls] == [7, 9]
+    assert fresh.calls == [7, 9]
+    assert "#7" in out and "#9" in out
+
+
+def test_the_default_threshold_comes_from_the_counter(mod, monkeypatch, capsys):
+    """Never a second copy of the number: moving the gate must move this."""
+    votes = FakeVotes(reviews=[_review(cycle=f"cyc20260917-1{n}") for n in range(2)])
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    votes.DEFAULT_MIN_VOTES = 2
+    rc = mod.main(["1"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert votes.calls == [(1, 2, 30.0)]
+    assert "2/2 votes" in out
+    assert "merge" in out
+
+
+def test_json_carries_the_reading_and_the_action(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=1)
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1", "--cycle", CYCLE, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert len(payload) == 1
+    row = dict(payload[0])
+    why = row.pop("why")
+    assert row == {
+        "pr": 1,
+        "head": HEAD,
+        "title": "pr 1",
+        "votes": 1,
+        "needed": 3,
+        "mergeable": "MERGEABLE",
+        "merge_state": "CLEAN",
+        "block_reason": "",
+        "veto_at_head": False,
+        "voted_by_this_cycle": False,
+        "stale": True,
+        "stale_kind": "ancestry",
+        "behind_by": 1,
+        "unread": "",
+        "action": "measure-then-vote",
+        "command": "uv run --no-sync python3 scripts/check-merge-plan-suite.py 1",
+    }
+    # The reason is the sibling's sentence, carried through rather than rephrased.
+    assert "some reason for ancestry" in why
+
+
+def test_the_summary_counts_every_row_once(mod, monkeypatch, capsys):
+    votes = FakeVotes(reviews=[])
+    fresh = FakeFresh()
+    _install(mod, monkeypatch, votes, fresh)
+    rc = mod.main(["1", "2", "3"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "3 PR(s): vote 3" in out

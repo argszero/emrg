@@ -1,0 +1,586 @@
+#!/usr/bin/env python3
+"""What may a cycle do about each open PR? One row per PR, one next action.
+
+Issue #1340 (2026-09-17). Every part of this reading was already mechanical, and
+none of it was assembled: a cycle's Step 1 had to hold four rules at once, each
+living in a different tool, docstring, or nowhere —
+
+1. **counted** votes are the votes that postdate the head push (a push voids them);
+2. a head that no longer contains master is **not** unvotable: the remedy is a vote
+   on the *landing tree* (`check-merge-plan-suite.py <PR>`), and that does **not**
+   move the head, so the votes already standing survive;
+3. a head whose CI run is red, still running, or absent has three *different*
+   remedies, none of which is "cast a vote and move on";
+4. a standing ❌ at the current head makes a vote wrong rather than useless — that
+   PR needs a **fix push**, not more review.
+
+Measured cost of the misreading (cycle `cyc20260917-190356`): seven open PRs
+received no votes in a cycle where nothing prevented them. Once the rules were
+re-derived by hand, five votes were cast in one cycle and none of them needed a git
+write. At the observed cadence — one cycle every ~20 minutes, ~8 open PRs, 3 votes
+each — "one vote per cycle" is ~24 cycles where "a vote on every PR it can" is 2–3.
+
+Where each fact comes from, and why not from a lookalike
+--------------------------------------------------------
+The two halves of this reading are **owned by two tools** and neither is
+re-implemented here:
+
+* `check-vote-count.py` owns "how many votes are still about this head?" — the
+  count, the per-cycle rule, and the mergeability clause;
+* `check-merge-freshness.py` owns "is the green CI about the tree that would land?"
+  — the ancestry, and the four ways a verdict can fail to be current.
+
+So the number printed here is the counter's number and the staleness here is the
+freshness tool's *kind*, not a local re-derivation of either. That matters more than
+it looks: `behind_by > 0` is a plausible stand-in for "stale", and it is not the same
+question — the freshness tool asks whether master's tip is an *ancestor* of the head
+(a graph property), and it names four distinct states where a count comparison would
+have produced one word. A second implementation of the vote rule would be a second
+answer to "may we merge this", which is the number every decision below turns on.
+
+Two things the output never does
+--------------------------------
+* **A count it could not read is not a zero.** `0/3 votes` is the line that says
+  "vote freely"; printing it without having read it spends votes in the direction
+  that cannot be undone. An unreadable count is reported as `?` with the reason, and
+  the action becomes "read it first".
+* **Silence is not an answer.** A failed `gh pr list` and an empty queue are
+  different facts, so a failed listing exits 2 and says so, where `no open PRs in
+  argszero/emrg - nothing to review` is printed only for a queue actually read.
+
+Cost: two `gh pr view` calls and roughly six more API calls per PR, because each
+sibling is asked for its own half — measured at ~12 seconds per PR, so a queue of
+eight is ~1.5 minutes. When only one PR matters, name it — positionally — to ask
+about it alone.
+
+`--mergeability-wait` is the one flag with a non-zero default, and the reason is
+the shape of the failure rather than a preference: GitHub computes mergeability
+lazily and reports `UNKNOWN` until it has, so the *newest* PR in the queue — the
+one that was pushed seconds ago, which is exactly the state this tool exists to
+classify — answers "not computed yet". Reported as `read-first` that is a false
+`?` on the row a cycle most wants answered. The budget is spent re-asking the same
+question and nothing else: after it runs out the counter's own refusal stands
+unchanged, and the row still reads `?` with the reason. A small budget rather than
+the freshness gate's 60s because this loop pays it per unread PR, while that gate
+pays it once for a merge it is about to make.
+
+Usage
+-----
+    uv run --no-sync python3 scripts/review-queue.py                    # the whole queue
+    uv run --no-sync python3 scripts/review-queue.py 1342 1343          # just these
+    uv run --no-sync python3 scripts/review-queue.py --cycle cyc20260917-221117
+    uv run --no-sync python3 scripts/review-queue.py --json
+
+`--cycle` is what turns "may this PR be voted on" into "may *this cycle* still vote
+here" — the counter counts per cycle, so a cycle that has already voted at a head
+must get its next vote from another cycle. Without it the tool reports the first
+question only, and says so.
+
+Exit codes
+----------
+    0  every PR was read and classified (the classification itself may say "someone
+       has to push a fix"; that is an answer, not a failure)
+    2  the queue could not be listed, or a PR in it could not be read - the family's
+       contract, and the reason for it here: on the unreadable row the honest
+       output is `?`, and a caller that took the whole run for a green light would
+       act on a count nobody has. Fail loud rather than a silently short queue.
+
+`gh` and network access to GitHub are required; there is no offline mode.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+REPO = "argszero/emrg"
+
+#: How the family's tools are invoked (`Agent.md`, "Test Commands"). Printed
+#: commands carry the runner the docstrings and the docs prescribe — a bare
+#: `scripts/x.py` is not executable on this host, so printing one would hand the
+#: reader a command that fails.
+RUNNER = "uv run --no-sync python3"
+
+SCRIPTS_DIR = Path(__file__).resolve().parent
+
+
+def _sibling(name: str, module_name: str):
+    """Load a sibling script by file, the way the rest of this family does.
+
+    The scripts in this directory are not importable modules (hyphenated names, no
+    package), so the file is loaded by path and registered under a plain name.
+    """
+    spec = importlib.util.spec_from_file_location(module_name, SCRIPTS_DIR / name)
+    if spec is None or spec.loader is None:  # pragma: no cover - the file is in this repo
+        raise RuntimeError(f"could not load {name}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec: these modules declare dataclasses, and dataclasses
+    # resolves annotations through sys.modules[cls.__module__] at class-creation
+    # time. A module that is not registered there raises AttributeError from inside
+    # dataclasses itself - an error that names neither the caller nor the cause.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_counted: object | None = None
+_freshness: object | None = None
+
+
+def vote_counter():
+    """The sibling that owns "is this vote still about this head?"."""
+    global _counted
+    if _counted is None:
+        _counted = _sibling("check-vote-count.py", "review_queue_vote_count")
+    return _counted
+
+
+def freshness():
+    """The sibling that owns "is the green CI about the tree that would land?"."""
+    global _freshness
+    if _freshness is None:
+        _freshness = _sibling("check-merge-freshness.py", "review_queue_freshness")
+    return _freshness
+
+
+def votes_needed() -> int:
+    """The gate's threshold, read from the tool that enforces it.
+
+    Not written here: a second copy of the number is a second answer to "how many
+    votes does this PR still need", and the one that is read from a constant drifts
+    silently when the constant moves.
+    """
+    return int(vote_counter().DEFAULT_MIN_VOTES)
+
+
+def _gh_json(args: list[str]) -> object:
+    """Run `gh` and parse JSON, failing loud rather than guessing.
+
+    `args` excludes the program name, which is prepended here so no call site can
+    omit it — a call site that passed bare gh arguments once ran the POSIX `pr`
+    utility instead, whose error names neither gh nor the mistake.
+    """
+    proc = subprocess.run(
+        ["gh", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"gh failed (rc={proc.returncode}): gh {' '.join(args)}: {proc.stderr.strip()}"
+        )
+    return json.loads(proc.stdout)
+
+
+def open_prs(repo: str = REPO) -> list[int]:
+    """Every open PR number, in the order GitHub lists them (newest first).
+
+    Raises rather than returning `[]` when the listing fails: an empty queue and an
+    unreadable one are different facts, and the empty one reads as "nothing to
+    review", which is the answer a cycle would act on.
+    """
+    raw = _gh_json(
+        [
+            "pr",
+            "list",
+            "-R",
+            repo,
+            "--limit",
+            "100",
+            "--state",
+            "open",
+            "--json",
+            "number",
+        ]
+    )
+    assert isinstance(raw, list)
+    return [int(item["number"]) for item in raw]
+
+
+# ── the reading ──────────────────────────────────────────────────────────────
+
+@dataclass
+class Reading:
+    """One PR's evidence, from the tools that own each half.
+
+    The optional fields are the ones a reader must not be able to mistake for a
+    value: `votes=None` is "not read", never 0; `behind_by=None` is "ancestry not
+    read", never "contains master"; `stale_kind=""` with `stale_read=False` is "not
+    known", never "fresh". `unread` carries why, and is never empty when something
+    could not be read.
+    """
+
+    pr: int
+    head: str
+    title: str = ""
+    votes: int | None = None
+    needed: int = 3
+    mergeable: str = ""
+    merge_state: str = ""
+    block_reason: str = ""
+    veto_at_head: bool = False
+    voted_here: bool = False
+    stale_read: bool = False
+    stale: bool = False
+    stale_kind: str = ""
+    stale_reason: str = ""
+    behind_by: int | None = None
+    unread: str = ""
+
+    @property
+    def conflict(self) -> bool:
+        """Git cannot merge the text — the one blocker a reader can act on directly."""
+        return self.mergeable == "CONFLICTING"
+
+    @property
+    def blocked(self) -> bool:
+        return bool(self.block_reason)
+
+
+@dataclass
+class Action:
+    """What to do about one PR, and the command that does it."""
+
+    kind: str
+    why: str
+    command: str = ""
+    extra: list[str] = field(default_factory=list)
+
+
+def _note(*parts: str) -> str:
+    """Join the reasons several reads failed, on one line, bounded.
+
+    One line because the row is one line per fact; bounded because an exception
+    string can carry a whole `gh` stderr and the queue has to stay readable. The
+    first 200 characters name the failure, and the full text is one call away.
+    """
+    return "; ".join(part for part in parts if part)[:400].replace("\n", " ")
+
+
+def read_pr(pr: int, repo: str = REPO, cycle: str | None = None,
+            needed: int = 3, mergeability_wait: float = 0.0) -> Reading:
+    """Assemble one PR's row from the counter and the freshness tool.
+
+    Each half degrades on its own — an unreadable ancestry does not discard a
+    readable count — but neither degrades *to a value*. What could not be read is
+    left `None` / `False` and named in `unread`, so a caller can tell "the counter
+    says zero" from "the counter did not answer".
+
+    The vote half is first because everything else is a decision about its number,
+    and because a failure there means no row is worth printing. `mergeability_wait`
+    is passed through to the counter, which is the tool that owns the refusal: this
+    one neither softens it nor invents a verdict if the budget runs out.
+    """
+    out = Reading(pr=pr, head="", needed=needed)
+
+    try:
+        verdict = vote_counter().check_pr(pr, needed, mergeability_wait=mergeability_wait)
+    except Exception as exc:  # noqa: BLE001 - the point is to report, not to crash
+        out.unread = _note(f"vote count unreadable: {type(exc).__name__}: {exc}")
+        return out
+
+    out.head = str(verdict.head_sha)
+    out.title = str(verdict.title)
+    out.votes = int(verdict.valid_count)
+    out.mergeable = str(verdict.mergeable)
+    out.merge_state = str(verdict.merge_state)
+    # Only a veto *at this head* makes a vote wrong: an invalid one (submitted
+    # before the head push, or carrying no cycle id) is already excluded from the
+    # count, so treating it as a standing objection would stall a PR that has none.
+    out.veto_at_head = any(
+        vote.kind == "veto" and vote.valid for vote in verdict.votes
+    )
+    if cycle:
+        out.voted_here = any(vote.cycle == cycle for vote in verdict.votes)
+    if verdict.blocked:
+        out.block_reason = str(verdict.block_reason)
+
+    try:
+        fresh = freshness().check_pr(pr)
+    except Exception as exc:  # noqa: BLE001
+        out.unread = _note(f"ancestry unreadable: {type(exc).__name__}: {exc}")
+        return out
+
+    out.stale_read = True
+    out.stale = bool(fresh.stale)
+    out.stale_kind = str(fresh.stale_kind)
+    out.stale_reason = str(fresh.reason)
+    out.behind_by = int(fresh.behind_by)
+    return out
+
+
+# ── the decision ─────────────────────────────────────────────────────────────
+
+def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO) -> Action:
+    """The next action for one PR, in priority order.
+
+    The order is the whole value of the tool: each PR gets the one thing a cycle
+    should do next, and the branches are ordered so that the *first* applicable one
+    is also the one that makes the rest moot. Each step is a rule from the
+    docstring:
+
+    * an unreadable count is first, because every later branch is a decision about a
+      number this one does not have;
+    * a standing veto is "fix push", not "vote" — and it is checked before the
+      count, because a veto has already reset the run: a `0/3` caused by a ❌ looks
+      exactly like a `0/3` that was never reviewed, and only one of them is a PR a
+      cycle may vote on;
+    * a text conflict is next: more review does not fix it, and resolving it
+      replaces the head and voids whatever votes exist;
+    * then the three CI states the freshness tool distinguishes — red, absent,
+      unfinished. None of them is votable, and their remedies differ, which is why
+      they are not collapsed into "not fresh";
+    * then a merge state that withholds the merge (draft, blocked, behind) — again
+      not a review problem, and not curable by a vote;
+    * then the count decides: enough votes is "merge", otherwise "vote" — and a head
+      that no longer contains master gets the landing-tree form of that vote, the
+      reading whose absence stalled a cycle.
+    """
+    pr = reading.pr
+    if reading.votes is None:
+        # The command carries the counter's own wait flag because this branch is
+        # where a not-yet-computed mergeability lands: the same question, asked with
+        # a budget, is the way it gets answered.
+        return Action(
+            kind="read-first",
+            why=reading.unread or "the vote count could not be read",
+            command=f"{RUNNER} scripts/check-vote-count.py {pr} --mergeability-wait 60",
+        )
+    if reading.veto_at_head:
+        return Action(
+            kind="fix-push",
+            why="a veto stands at this head: it needs a fix push, not another review, "
+                 "and no vote counted here can outlive the answer it already has",
+            command=f"{RUNNER} scripts/check-vote-count.py {pr}",
+        )
+    if reading.conflict:
+        return Action(
+            kind="resolve-conflict",
+            why=reading.block_reason + " - resolving it moves the head, so every vote "
+                 "standing here is spent on the fix (a fork PR is pushed to the fork, "
+                 "never to origin)",
+            command=f"gh pr checkout {pr} -R {repo} && git fetch origin master "
+                    "&& git merge FETCH_HEAD",
+            extra=[f"{RUNNER} scripts/classify-conflict.py --all"],
+        )
+    if reading.stale_read and reading.stale_kind == "failing":
+        return Action(
+            kind="ci-red",
+            why=reading.stale_reason
+            + " - not votable: a vote at this head would be a vote about a tree whose "
+              "CI ran red, and a re-run only helps if the failure was a flake",
+            command=f"gh pr checks {pr} -R {repo}",
+        )
+    if reading.stale_read and reading.stale_kind == "no_run":
+        return Action(
+            kind="retrigger-ci",
+            why=reading.stale_reason
+            + " - re-triggering fires a run on the same head, which keeps the votes a "
+              "refresh would spend",
+            command=f"{RUNNER} scripts/re-trigger-ci.sh <branch-of-{pr}>",
+        )
+    if reading.stale_read and reading.stale_kind == "running":
+        return Action(
+            kind="wait",
+            why=reading.stale_reason + " - neither a refresh nor a re-trigger answers a "
+                                       "run that has not concluded",
+            command=f"gh pr checks {pr} -R {repo}",
+        )
+    if reading.blocked:
+        return Action(
+            kind="unblock",
+            why=reading.block_reason
+            + " - a state of the branch, not of the review: no vote cast here changes "
+              "it, and the branch has to remove it",
+            command=f"gh pr view {pr} -R {repo} --json mergeable,mergeStateStatus",
+        )
+    if reading.votes >= reading.needed:
+        if reading.stale:
+            return Action(
+                kind="measure-then-merge",
+                why=f"{reading.votes}/{reading.needed} votes, but "
+                    + reading.stale_reason
+                    + " - measure the landing tree before merging; the head does not "
+                      "move, so the votes that carried it here stay valid",
+                command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
+                extra=[f"{RUNNER} scripts/check-merge-tree-health.py"],
+            )
+        return Action(
+            kind="merge",
+            why=f"{reading.votes}/{reading.needed} valid votes, none predating the head "
+                "push, and the head's green run is about the tree that would land",
+            command=f"gh pr merge {pr} -R {repo} --squash",
+        )
+    if reading.voted_here:
+        return Action(
+            kind="already-voted",
+            why=f"this cycle already has a vote at this head ({reading.votes}"
+                f"/{reading.needed}) - counting is per cycle, so the next vote here has "
+                "to come from another cycle",
+            command=f"{RUNNER} scripts/check-vote-count.py {pr}",
+        )
+    vote_cmd = (
+        f"{RUNNER} scripts/cast-vote.py {pr}"
+        f"{f' --cycle {cycle}' if cycle else ''} --body-file <body>"
+    )
+    if reading.stale:
+        return Action(
+            kind="measure-then-vote",
+            why=f"{reading.votes}/{reading.needed} votes, and " + reading.stale_reason
+                + " - measure the tree this merge would land and vote on that reading; "
+                  "the head does not move, so the standing votes survive",
+            command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
+            extra=[vote_cmd],
+        )
+    return Action(
+        kind="vote",
+        why=f"{reading.votes}/{reading.needed} votes, a fresh head, no unanswered veto",
+        command=vote_cmd,
+    )
+
+
+def rows(readings: list[Reading], cycle: str | None, repo: str) -> list[tuple[Reading, Action]]:
+    """(reading, action) per PR, in the order the PRs were given."""
+    return [(reading, next_action(reading, cycle, repo)) for reading in readings]
+
+
+def render(reading: Reading, action: Action) -> str:
+    """One PR's block: what is true, then what to do, then the exact command."""
+    head = reading.head[:8] if reading.head else "????????"
+    votes = f"{reading.votes}/{reading.needed}" if reading.votes is not None else "?"
+    marks = []
+    if reading.stale_read and reading.stale:
+        marks.append(f"stale:{reading.stale_kind}")
+    if reading.veto_at_head:
+        marks.append("veto")
+    if reading.voted_here:
+        marks.append("voted-here")
+    suffix = f"  [{', '.join(marks)}]" if marks else ""
+    lines = [f"#{reading.pr} {votes} votes  head {head}  {action.kind}{suffix}"]
+    lines.append(f"    {action.why}")
+    if action.command:
+        lines.append(f"    $ {action.command}")
+    for extra in action.extra:
+        lines.append(f"    $ {extra}")
+    return "\n".join(lines)
+
+
+def _as_json(readings: list[tuple[Reading, Action]]) -> str:
+    return json.dumps(
+        [
+            {
+                "pr": reading.pr,
+                "head": reading.head,
+                "title": reading.title,
+                "votes": reading.votes,
+                "needed": reading.needed,
+                "mergeable": reading.mergeable,
+                "merge_state": reading.merge_state,
+                "block_reason": reading.block_reason,
+                "veto_at_head": reading.veto_at_head,
+                "voted_by_this_cycle": reading.voted_here,
+                "stale": reading.stale if reading.stale_read else None,
+                "stale_kind": reading.stale_kind,
+                "behind_by": reading.behind_by,
+                "unread": reading.unread,
+                "action": action.kind,
+                "why": action.why,
+                "command": action.command,
+            }
+            for reading, action in readings
+        ],
+        indent=2,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="review-queue.py",
+        description="For every open PR: its counted votes, and the next action for a cycle.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "prs",
+        nargs="*",
+        type=int,
+        help="only these PRs; default is every open PR",
+    )
+    parser.add_argument("--repo", default=REPO, help="GitHub owner/repo")
+    parser.add_argument(
+        "--cycle",
+        default=None,
+        help="this cycle's id (cycYYYYMMDD-HHMMSS); given, the queue also answers "
+             "whether this cycle may still vote at each head",
+    )
+    parser.add_argument(
+        "--min-votes",
+        type=int,
+        default=None,
+        help="votes the gate requires (default: the counter's own DEFAULT_MIN_VOTES)",
+    )
+    parser.add_argument(
+        "--mergeability-wait",
+        type=float,
+        default=30.0,
+        help="seconds to keep re-asking GitHub for a lazily-computed mergeability "
+             "before the counter refuses (only spent when it answers UNKNOWN)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="emit the readings as JSON instead of prose"
+    )
+    args = parser.parse_args(argv)
+
+    needed = args.min_votes if args.min_votes is not None else votes_needed()
+
+    try:
+        queue = args.prs if args.prs else open_prs(args.repo)
+    except Exception as exc:  # noqa: BLE001
+        # Not an empty queue: `gh` failing means the question was not answered, and
+        # the empty answer is the one a cycle would act on.
+        print(f"error: could not list open PRs in {args.repo}: {exc}", file=sys.stderr)
+        return 2
+
+    readings = rows(
+        [
+            read_pr(pr, args.repo, args.cycle, needed, args.mergeability_wait)
+            for pr in queue
+        ],
+        args.cycle,
+        args.repo,
+    )
+
+    unread = [reading.pr for reading, _ in readings if reading.votes is None]
+
+    if args.json:
+        print(_as_json(readings))
+    elif not queue:
+        print(f"no open PRs in {args.repo} - nothing to review")
+    else:
+        for reading, action in readings:
+            print(render(reading, action))
+            print()
+        tally: dict[str, int] = {}
+        for _reading, action in readings:
+            tally[action.kind] = tally.get(action.kind, 0) + 1
+        summary = ", ".join(f"{kind} {count}" for kind, count in sorted(tally.items()))
+        print(f"{len(readings)} PR(s): {summary}")
+        if unread:
+            print(
+                f"unmeasurable: {', '.join(f'#{pr}' for pr in unread)} - "
+                "read them before acting"
+            )
+
+    # The same verdict however the reading is rendered: a row nobody could read is
+    # not a row that is fine.
+    return 2 if unread else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
