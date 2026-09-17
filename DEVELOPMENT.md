@@ -93,7 +93,9 @@ context_window = 128000
 vision = true
 ```
 
-**Live reload — no restart needed.** The daemon watches `~/.emrg/config.toml` (a `stat` every couple of seconds; the file is read only when it changed) and applies an edit **in place** to the running process. Every key in `[llm]` moves for subsequent requests:
+**Live reload — no restart needed.** The daemon watches `~/.emrg/config.toml`: every couple of seconds it **reads the file and hashes it**, parses it only when the hash moved, and applies the edit **in place** to the running process. Every key in `[llm]` moves for subsequent requests:
+
+- The tick reads the bytes rather than comparing `(mtime, size)`. That pair was the first design and the `windows-2025` leg falsified it: two writes milliseconds apart share a timestamp there, so an edit that also keeps the file's size leaves the comparison identical and the edit is **silently never applied** — the very complaint this feature removes. The cost is one small read plus a sha256 per tick, paid on every platform (coarse timestamps are a property of the mount, not of the OS) — worth knowing if `~/.emrg` lives on a network filesystem.
 
 - `model` travels the same path `/model` uses — the usage anchors are invalidated and `context_window` re-resolved from the matching `[[llm.models]]` entry — and every connected client is told (`model_set`).
 - `base_url`, `api_key`, `max_tokens`, `temperature`, `max_tool_rounds`, `context_window`, `auto_compact_threshold`, `models`, `vision`, `stream_options`, `context_refresh_interval_ms` are assigned for the next request; a stream already in flight is never rewritten.
