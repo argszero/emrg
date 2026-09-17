@@ -210,13 +210,18 @@ def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, 
                                               list[tuple[Path, int, str]]]:
     """`(in-scope sites, unmeasurable sites)` for one parsed module.
 
-    A `dir=` is **in scope** when its expression mentions `__file__`, or is a name the module
-    assigns from something file-derived (to a fixed point). It is **provably outside** when
-    the syntax shows a temp location: a `tmp_path`/`tmp_path_factory` fixture name *that
-    reaches this call* (its own enclosing scopes' parameters, minus names a binding shadows),
-    a name bound from a temp call, or an expression carrying a temp marker — read over the
-    whole expression, so `tmp_path / "sub"` is outside rather than unreadable. A root built
-    only partly from temp names is *not* outside: every name it mentions has to be
+    A `dir=` is **in scope** when its expression mentions `__file__`, or mentions a name the
+    module assigns from something file-derived (to a fixed point) — read over the **whole**
+    expression, because the other reading failed a legitimate site: `dir=TESTS` (a bare
+    `__file__`-derived name) was in scope while `dir=REPO_ROOT / "tests"`, the *same*
+    directory spelled as an expression, was reported as a root nobody could read — with a
+    remedy ("give it a name derived from `__file__`") that its author had already followed.
+    It is **provably outside** when the syntax shows a temp location: a
+    `tmp_path`/`tmp_path_factory` fixture name *that reaches this call* (its own enclosing
+    scopes' parameters, minus names a
+    binding shadows), a name bound from a temp call, or an expression carrying a temp marker —
+    read over the whole expression, so `tmp_path / "sub"` is outside rather than unreadable. A
+    root built only partly from temp names is *not* outside: every name it mentions has to be
     temp-rooted. Everything else — an unresolvable name, a path built from something the scan
     cannot follow — is **unmeasurable**, reported rather than passed.
     """
@@ -237,7 +242,7 @@ def _scan(tree: ast.AST, path: Path) -> tuple[list[tuple[Path, int, str | None, 
         source = ast.unparse(kw["dir"])
         arg = kw["dir"]
         names_in_arg = {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
-        if "__file__" in source or (isinstance(arg, ast.Name) and arg.id in derived):
+        if "__file__" in source or (names_in_arg & derived):
             prefix = kw.get("prefix")
             prefix = (prefix.value if isinstance(prefix, ast.Constant)
                       and isinstance(prefix.value, str) else None)
@@ -569,6 +574,22 @@ def test_x():
     helper("x")
     d = tempfile.mkdtemp(dir=tmp_path / "sub", prefix="anything-")
 '''
+    #: The twin of the arm above, with the one clause that decides the bucket changed: the
+    #: binding is *not* file-derived, so nothing in the syntax says this root is in the
+    #: repository — and the fixture name must not be read from a different function.
+    shadowed_beside_a_nested_def_absolute = '''
+import tempfile
+from pathlib import Path
+def test_uses_the_fixture(tmp_path):
+    pass
+def test_x():
+    def helper(tmp_path):
+        return tmp_path
+
+    helper("x")
+    tmp_path = Path("/abs/other-project/tests")
+    d = tempfile.mkdtemp(dir=tmp_path / "sub", prefix="anything-")
+'''
     fixture_in_a_nested_def = '''
 import tempfile
 def test_x():
@@ -581,6 +602,29 @@ def test_x():
 import tempfile
 def test_x(some_dir):
     d = tempfile.mkdtemp(dir=some_dir, prefix="anything-")
+'''
+    #: One directory, three spellings. The first two name `tests/`; the third names a
+    #: subdirectory of it, where `/tests/emrg-*` is anchored at the top level and therefore
+    #: does *not* cover the name — the arm exists so the guard reports that one for the right
+    #: reason (unignored) rather than for the wrong one (unreadable root).
+    composite_bare = '''
+import tempfile
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+TESTS_DIR = REPO_ROOT / "tests"
+d = tempfile.mkdtemp(dir=TESTS_DIR, prefix="emrg-composite-")
+'''
+    composite_spelled_out = '''
+import tempfile
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+d = tempfile.mkdtemp(dir=REPO_ROOT / "tests", prefix="emrg-composite-")
+'''
+    composite_subdir = '''
+import tempfile
+from pathlib import Path
+REPO_ROOT = Path(__file__).resolve().parent.parent
+d = tempfile.mkdtemp(dir=REPO_ROOT / "tests" / "sub", prefix="emrg-composite-")
 '''
 
     def classify(source: str):
@@ -628,7 +672,8 @@ def test_x(some_dir):
         ("a bare name that shadows a fixture", shadowed_name),
         ("a composite root built on a shadowing name", shadowed_name_composite),
         ("a fixture name rebound in its own scope", shadowed_in_its_own_scope),
-        ("a fixture-named parameter of a def *nested beside* the call", shadowed_beside_a_nested_def),
+        ("a fixture-named parameter of a def *nested beside* the call",
+         shadowed_beside_a_nested_def_absolute),
     ):
         in_scope, unmeasurable = classify(source)
         assert not in_scope and len(unmeasurable) == 1, (
@@ -647,6 +692,38 @@ def test_x(some_dir):
         "a `tmp_path` parameter of the function the call sits in is a temp location, however "
         "deeply that function is nested — reading only module-level defs would report it, "
         f"failing a tree for a temp root: in_scope={in_scope} unmeasurable={unmeasurable}"
+    )
+
+    # A `__file__`-derived root with anything appended is still in the repository, and the
+    # bucket may not depend on how the author spelled it. Bare name vs the same directory as
+    # an expression, same call otherwise: both in scope, both judged by the candidate they
+    # create. Read the bare-name position only, the second was reported "cannot tell whether
+    # these scratch roots are inside the repository" — with the remedy "give it a name derived
+    # from `__file__`", which its author had already done (measured 2026-09-17 on head
+    # `d5773029` by cycle `cyc20260917-081808`, with the pair driven against the real guard).
+    for label, source, expected in (
+        ("the bare name", composite_bare, "tests/emrg-composite-x"),
+        ("the same directory as an expression", composite_spelled_out, "tests/emrg-composite-x"),
+        ("a subdirectory of a derived root", composite_subdir, "tests/sub/emrg-composite-x"),
+    ):
+        in_scope, unmeasurable = classify(source)
+        assert len(in_scope) == 1 and not unmeasurable, (
+            f"{label} is inside the repository — `__file__`-derived, and the scan follows a "
+            "chain of assignments to a fixed point — so it must be in scope and judged by the "
+            f"name it creates, not reported as a root nobody can read: in_scope={in_scope} "
+            f"unmeasurable={unmeasurable}"
+        )
+        _file, _line, prefix, dir_source = in_scope[0]
+        assert prefix == "emrg-composite-", (
+            "the in-scope record still carries the site's own prefix", prefix
+        )
+        assert expected.endswith(prefix + "x"), (label, expected, prefix)
+
+    in_scope, unmeasurable = classify(shadowed_beside_a_nested_def)
+    assert len(in_scope) == 1 and not unmeasurable, (
+        "this arm's binding is `REPO_ROOT / \"tests\"`, which the scan reads as a repository "
+        "path (that is why it is not a temp location), so the root is in scope and judged by "
+        f"the candidate `tests/sub/anything-x`: in_scope={in_scope} unmeasurable={unmeasurable}"
     )
 
     in_scope, unmeasurable = classify(unresolvable)
