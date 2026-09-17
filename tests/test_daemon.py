@@ -20,7 +20,7 @@ import yaml
 
 from emrg.config import LlmConfig
 from emrg.memory import INDEX_SIZE_WARN
-from emrg.protocol import InstanceIdentity
+from emrg.protocol import InstanceIdentity, TaskRequest
 from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.llm import CONTENT_RISK, classify_llm_error
@@ -803,6 +803,107 @@ def test_the_chunker_never_splits_a_content_refusal():
         asyncio.run(server._adaptive_chunk_summarize(_two_records(), 0))
     assert len(prompts) == 1, "the chunker re-sent a refused request"
     assert classify_llm_error(excinfo.value) == CONTENT_RISK
+
+
+# ── the tool loop: a round the provider rejected for BODY LENGTH ────────────
+#
+# Issue #1336, item 2 (rant 2026-09-17T18:19:45). The compact gates shrink; the
+# *request-level* path had nothing, so a round a proxy rejected for length ended
+# the turn — the deepseek-harness shape (~179 cycles with no output, a 7.06 MB
+# request body). The remedy is one compaction plus one re-send of the same round,
+# and it is bounded on purpose: a retry that also fails must report.
+
+_OVERLONG_413 = (
+    "LLM request failed: 413 headers={} "
+    "body=Failed to buffer the request body: length limit exceeded"
+)
+_SERVER_500 = "LLM request failed: 500 headers={} body=internal server error"
+
+
+def _drive_tool_loop(tmp_path, monkeypatch, errors: list[str]):
+    """Run one tool loop whose stream raises `errors[n]` on its n-th call.
+
+    Returns `(calls, frames)`: the message lists the loop sent, and everything it
+    broadcast. Both planted-fire markers are pointed at `tmp_path` — the loop
+    stamps host state at round finalization, and a suite run must not write
+    `~/.emrg/logs` (issue #1337).
+    """
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_MARKER_PATH",
+                        tmp_path / "planted-fire-heartbeat")
+    monkeypatch.setattr(daemon_mod, "_PLANTED_FIRE_ROUND_COMPLETE_PATH",
+                        tmp_path / "planted-fire-round-complete")
+    server = _make_server()
+    session = Session.create_with_id("overlong-retry-test", tmp_path)
+    # History worth shrinking, so "did it compact?" is a measurement rather than
+    # a belief about the code path.
+    for i in range(12):
+        session.append_message({"type": "message", "role": "user", "content": f"old turn {i}"})
+
+    calls: list[list[dict]] = []
+    frames: list[dict] = []
+
+    async def fake_stream(messages, tools=None):
+        calls.append(list(messages))
+        if len(calls) <= len(errors):
+            raise RuntimeError(errors[len(calls) - 1])
+        yield {"content": "ok", "tool_calls": None, "finish_reason": "stop",
+               "usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    async def fake_chat(messages, tools=None):
+        return {"content": "a compacted summary of the earlier turns"}
+
+    async def fake_broadcast(session_id, payload):
+        frames.append(payload)
+
+    server.llm.chat_stream = fake_stream
+    server.llm.chat = fake_chat
+    server._broadcast = fake_broadcast
+    req = TaskRequest(id="req-overlong", session_id=session.session_id, prompt="hello")
+    asyncio.run(server._run_tool_loop(req, None, session))
+    return calls, frames
+
+
+def test_a_request_rejected_for_body_length_is_compacted_and_retried(tmp_path, monkeypatch):
+    """The 413 the classifier knows (`length limit exceeded`) must cost one
+    compaction and one re-send — not the whole turn."""
+    calls, frames = _drive_tool_loop(tmp_path, monkeypatch, [_OVERLONG_413])
+
+    assert len(calls) == 2, "the round was not re-sent"
+    assert len(calls[1]) < len(calls[0]), (
+        f"the retry sent {len(calls[1])} messages, the rejected attempt {len(calls[0])} "
+        "— nothing was shrunk"
+    )
+    # The retry still ends as a normal turn: the answer reaches the client and
+    # no error frame is sent.
+    assert any(f.get("content") == "ok" and f.get("done") for f in frames)
+    assert not [f for f in frames if "error" in f], frames
+    assert any(f.get("type") == "compact_result" for f in frames), (
+        "the client was never told the context was compacted"
+    )
+
+
+def test_a_round_that_keeps_too_long_is_retried_once_then_reported(tmp_path, monkeypatch):
+    """The budget: a session that still does not fit must report the provider's
+    error instead of shrinking forever."""
+    calls, frames = _drive_tool_loop(
+        tmp_path, monkeypatch, [_OVERLONG_413, _OVERLONG_413, _OVERLONG_413],
+    )
+
+    assert len(calls) == 2, "the retry is not bounded to one attempt"
+    assert [f for f in frames if "error" in f], (
+        "a still-overlong round ended the turn without reporting anything"
+    )
+    assert not [f for f in frames if f.get("content") == "ok"]
+
+
+def test_a_non_length_failure_is_not_shrunk(tmp_path, monkeypatch):
+    """The other direction, which is what keeps this from being "retry anything":
+    a 500 is not a length problem, so no compaction may be attempted for it."""
+    calls, frames = _drive_tool_loop(tmp_path, monkeypatch, [_SERVER_500])
+
+    assert len(calls) == 1
+    assert not [f for f in frames if f.get("type") == "compact_result"]
+    assert [f for f in frames if "error" in f]
 
 
 class _FakeWs:
