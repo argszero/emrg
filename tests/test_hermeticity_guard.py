@@ -10,6 +10,7 @@ BOTH states (#455 lesson):
 """
 from __future__ import annotations
 
+import ntpath
 from pathlib import Path
 
 import pytest
@@ -240,6 +241,35 @@ def test_guard_refuses_spawning_the_stop_or_restart_cli(tmp_path):
     ):
         with pytest.raises(AssertionError, match="red-line violation"):
             subprocess.Popen(argv, env=pinned)
+
+
+def test_a_list_argv_is_not_shell_dropped(token_normaliser):
+    """The windows-2025 failure of run 35286596898, pinned on any host.
+
+    `str(tmp_path / "emrg")` is backslash-separated on Windows, and a drop rule
+    that deletes backslashes *anywhere* in a token moved the basename off `emrg` —
+    so the refusal stopped firing and the corpus above really spawned its stub
+    (`OSError: [WinError 193] %1 is not a valid Win32 application`), while the
+    known-cost row below stopped being refused. `Path(...).name` on Windows is
+    `ntpath.basename`, so the guard's own comparison can be evaluated the way
+    Windows would, here, on any host.
+
+    Both directions are pinned: the drop is confined to tokens a shell re-parses,
+    and inside one it still closes the escapes and quotes it was added for.
+    """
+    win_spelled = "C:\\ws\\bin\\emrg"
+
+    # a list argv reaches exec/CreateProcess literally — nothing drops anything
+    assert token_normaliser(win_spelled) == win_spelled
+    assert ntpath.basename(token_normaliser(win_spelled)) == "emrg", (
+        "the Windows spelling must keep its basename on `emrg` — the refusal keys "
+        "on it, and this is the comparison that silently changed on the Windows leg"
+    )
+
+    # where a shell DOES run it, the drop is what closes the measured holes
+    assert token_normaliser("\\emrg", shell_parsed=True) == "emrg"
+    assert token_normaliser("e''mrg", shell_parsed=True) == "emrg"
+    assert token_normaliser("sto\\p", shell_parsed=True) == "stop"
 
 
 def test_an_emrg_named_path_costs_a_false_refusal(tmp_path, daemon_spawn_refusal):

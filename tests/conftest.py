@@ -313,14 +313,16 @@ _STOP_VERBS = ("stop", "restart")
 #: `'emrg'`, `` `emrg` ``, `$(which` — see `_normalise_token`.
 _SHELL_PUNCTUATION = "(){}[]$`'\"<>"
 
-#: Characters a shell **drops wherever they appear** rather than at an edge. A
+#: Characters a **shell drops wherever they appear** rather than at an edge: a
 #: backslash escapes the character after it, and quotes join adjacent pieces into
-#: one word; both are gone by the time the program is handed its argv, so they are
-#: removed from anywhere in the token — see `_normalise_token`.
+#: one word. Applied only where a shell re-parses the token — a `sh -c` payload, or
+#: an argv handed to `Popen` as a *string* (which `shell=True` sends to a shell) —
+#: never to a list argv, which reaches exec/CreateProcess literally. That is the
+#: `shell_parsed` argument of `_normalise_token` / `_spawns_a_daemon_stop_or_restart`.
 _SHELL_DROPPED = "\\'\""
 
 
-def _normalise_token(token: str) -> str:
+def _normalise_token(token: str, *, shell_parsed: bool = False) -> str:
     """The token as the *program* would receive it — glued shell punctuation stripped.
 
     A shell line arrives here already split on whitespace by `Popen`, and shell
@@ -374,14 +376,31 @@ def _normalise_token(token: str) -> str:
     (deciding "the verb is only a verb when nothing was escaped before it")
     reopens the hole this rule closes. `tests/test_hermeticity_guard.py` pins the
     row so both halves of that trade are visible.
+
+    **Those two are shell transformations, so they apply only where a shell
+    re-parses the token** (`shell_parsed`): inside a `sh -c` payload, or in an
+    argv handed over as a *string* (which `shell=True` sends to a shell). A list
+    argv is handed to exec/CreateProcess as it stands — nothing drops anything —
+    and on Windows the backslash in that token is a **path separator**, so
+    dropping it moved the basename off `emrg` and the guard stopped refusing the
+    act outright. Measured on the windows-2025 leg of run 35286596898, the first
+    CI round of this rule: `test-windows` failed both ways at once — the
+    known-cost row `git -C <…>\\emrg log --grep restart` no longer refused, and
+    the refusal corpus really spawned its stub (`OSError: [WinError 193] %1 is
+    not a valid Win32 application`), because the refusal that keeps those stubs
+    from being executed is the very thing that had stopped firing. So the flag is
+    the fix, not a caution: a rule about what a *shell* deletes cannot be applied
+    to an argv no shell touches, on either platform.
     """
     stripped = token.strip(_SHELL_PUNCTUATION)
+    if not shell_parsed:
+        return stripped
     for dropped in _SHELL_DROPPED:
         stripped = stripped.replace(dropped, "")
     return stripped
 
 
-def _emrg_entry_index(tokens) -> int:
+def _emrg_entry_index(tokens, *, shell_parsed: bool = False) -> int:
     """Where in this argv the emrg program itself would be run, or -1.
 
     The program is not necessarily `tokens[0]`: a wrapper hands it over (`env emrg
@@ -414,14 +433,14 @@ def _emrg_entry_index(tokens) -> int:
     they are pinned in `tests/test_hermeticity_guard.py`.
     """
     for i, token in enumerate(tokens):
-        if Path(_normalise_token(token)).name in _EMRG_PROGRAMS:
+        if Path(_normalise_token(token, shell_parsed=shell_parsed)).name in _EMRG_PROGRAMS:
             return i
         if token == "-m" and tokens[i + 1 : i + 2] in (["emrg"], ["emrg.server"]):
             return i + 1
     return -1
 
 
-def _spawns_a_daemon_stop_or_restart(args) -> bool:
+def _spawns_a_daemon_stop_or_restart(args, *, shell_parsed: bool = False) -> bool:
     """Would this `Popen` argv stop or restart the emrg daemon?
 
     Keyed on the **act**, not on the mention: the emrg program carrying a
@@ -472,11 +491,26 @@ def _spawns_a_daemon_stop_or_restart(args) -> bool:
     handed over by a wrapper not on any list) is the incident; see
     `_emrg_entry_index`, and `test_an_emrg_named_path_costs_a_false_refusal` for
     the shape pinned as a known cost.
+
+    **Shell semantics are applied where a shell is** (`shell_parsed`): the `sh -c`
+    recursion and the string-argv branch, never a list argv. Getting that wrong is
+    not a subtlety — it failed the windows-2025 leg of run 35286596898 outright,
+    in both directions at once, because a Windows `str(tmp_path / "emrg")` is
+    backslash-separated and the drop rule deleted those backslashes: the basename
+    stopped being `emrg`, the refusal stopped firing, and the corpus below then
+    really spawned its stub. Two of its rows are the report
+    (`OSError: [WinError 193] %1 is not a valid Win32 application`, and "the known
+    cost narrowed" on the `git -C … log --grep restart` row).
+    `test_a_list_argv_is_not_shell_dropped` pins the rule on any host.
     """
     if isinstance(args, bytes):
         args = args.decode("utf-8", "replace")
     if isinstance(args, str):
         tokens = args.split()
+        # A string argv goes to a shell (`shell=True`), which drops escapes and
+        # joins quotes. A list argv does not — it is passed through literally —
+        # so only the string form and the `sh -c` recursion below are shell-parsed.
+        shell_parsed = True
     else:
         try:
             tokens = [str(a) for a in args]
@@ -485,7 +519,7 @@ def _spawns_a_daemon_stop_or_restart(args) -> bool:
     if not tokens:
         return False
 
-    if Path(_normalise_token(tokens[0])).name in _SHELLS:
+    if Path(_normalise_token(tokens[0], shell_parsed=shell_parsed)).name in _SHELLS:
         # `sh -c <line>` / `bash -lc <line>`: what runs is the line, so decide on
         # what the line would run — one *simple command* at a time, because a line
         # is a pipeline of them and only one of them may be the act. Splitting on
@@ -494,23 +528,27 @@ def _spawns_a_daemon_stop_or_restart(args) -> bool:
         # is refused. A newline separates two commands exactly as `;` does, so it
         # is a separator too. The split drops quotes and leaves the punctuation at
         # the segment edges, which is why both the token match below and the verb
-        # test go through `_normalise_token`.
+        # test go through `_normalise_token` — with `shell_parsed=True`, because a
+        # shell is what will run every segment of this line.
         return any(
-            _spawns_a_daemon_stop_or_restart(segment.split())
+            _spawns_a_daemon_stop_or_restart(segment.split(), shell_parsed=True)
             for segment in re.split(r"[;&|\n]+", " ".join(tokens[1:]))
         )
 
     for i, token in enumerate(tokens):
         if (
-            Path(_normalise_token(token)).name in _SIGNALLERS
+            Path(_normalise_token(token, shell_parsed=shell_parsed)).name in _SIGNALLERS
             and "emrg" in " ".join(tokens[i + 1 :]).lower()
         ):
             return True
 
-    entry = _emrg_entry_index(tokens)
+    entry = _emrg_entry_index(tokens, shell_parsed=shell_parsed)
     if entry < 0:
         return False
-    return any(_normalise_token(token) in _STOP_VERBS for token in tokens[entry + 1 :])
+    return any(
+        _normalise_token(token, shell_parsed=shell_parsed) in _STOP_VERBS
+        for token in tokens[entry + 1 :]
+    )
 
 
 @pytest.fixture
@@ -526,6 +564,20 @@ def daemon_spawn_refusal():
     file pin the first, over more shapes than one invocation could cover.
     """
     return _spawns_a_daemon_stop_or_restart
+
+
+@pytest.fixture
+def token_normaliser():
+    """`_normalise_token`, so a token's reading can be pinned without an argv.
+
+    The predicate above answers "would this argv be refused"; the `shell_parsed`
+    rule underneath it is about a single token, and the Windows failure that made
+    the rule explicit (run 35286596898) is visible at that level on any host —
+    `Path(...).name` on Windows is `ntpath.basename`, so a test can evaluate the
+    guard's own comparison the way Windows would. Exposed for the same reason the
+    predicate is: no spawn, no signal, just the classification.
+    """
+    return _normalise_token
 
 
 @pytest.fixture
