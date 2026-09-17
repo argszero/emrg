@@ -32,6 +32,13 @@ class LlmConfig:
     # vision: whether the model supports OpenAI vision API (image_url content type).
     # Default false — DeepSeek and most models don't support it.
     vision: bool = False
+    # vision_default: the top-level `[llm] vision` — what a model's vision falls
+    # back to when its `[[llm.models]]` entry has no `vision` key, or has no entry
+    # at all (rant 2026-09-17T16:53:02). Kept separately from `vision` because
+    # `vision` is the *effective* value and moves on every `/model` switch: a
+    # fallback read from it would inherit the previous model's answer instead of
+    # the configured default, which is the defect this field exists to prevent.
+    vision_default: bool = False
     # stream_options: None means don't send stream_options at all (for APIs like Kimi).
     # Default is {"include_usage": False} for OpenAI/DeepSeek compatibility.
     stream_options: Optional[dict] = field(default_factory=lambda: {"include_usage": False})
@@ -41,6 +48,41 @@ class LlmConfig:
     # re-injection within the window — the system prompt prefix stays
     # byte-stable for prompt caching (rant 2026-08-23T13:54:14).
     context_refresh_interval_ms: int = 0
+
+
+def resolve_model_vision(
+    models: Optional[list[dict]], key: str, default: bool
+) -> tuple[bool, str]:
+    """Resolve a model's vision flag in one place, with a stated priority.
+
+    Rant 2026-09-17T16:53:02: the flag had two sources and neither held. Startup
+    read only the top-level ``[llm] vision`` and never opened the matching
+    ``[[llm.models]]`` entry; ``/model`` read only the entry and, on a missing
+    key, kept the **previous model's** value rather than falling back to a
+    default. So a model that cannot see images could be sent one, and a model
+    that can see them could be degraded to text, both silently.
+
+    The resolution is therefore one function, called by both paths:
+
+    * an entry matches by its display ``name`` (what ``/model`` receives) or by
+      its ``model`` (what ``[llm] model`` holds in config.toml);
+    * the entry's own ``vision`` wins when the key is present — source
+      ``"entry"``;
+    * otherwise the top-level ``[llm] vision`` applies — source
+      ``"top-level-default"`` — including when no entry matches at all.
+
+    A missing key is an answer, not a silence: the second element names which of
+    the two decided, so a caller can log it and the host can read the effective
+    value instead of inferring it from a failed attempt to send an image.
+    """
+    for m in models or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("name") == key or m.get("model") == key:
+            if "vision" in m:
+                return bool(m["vision"]), "entry"
+            break
+    return bool(default), "top-level-default"
 
 
 @dataclass
@@ -109,7 +151,15 @@ def load_config() -> EmrgConfig:
         context_window=llm_data.get("context_window", 131072),
         auto_compact_threshold=llm_data.get("auto_compact_threshold", 0.0),
         models=llm_data.get("models", []),
-        vision=llm_data.get("vision", False),
+        vision_default=llm_data.get("vision", False),
+        # The startup path goes through the same resolution `/model` uses
+        # (rant 2026-09-17T16:53:02): an entry's own `vision` wins over the
+        # top-level key, so a declared-per-model flag is no longer dead config.
+        vision=resolve_model_vision(
+            llm_data.get("models", []),
+            llm_data.get("model", "gpt-4o-mini"),
+            llm_data.get("vision", False),
+        )[0],
         stream_options=stream_opts,
         context_refresh_interval_ms=llm_data.get("context_refresh_interval_ms", 0),
     )

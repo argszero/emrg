@@ -3008,3 +3008,84 @@ def test_asyncio_exception_handler_routes_to_logger(caplog):
     assert any(
         "ValueError" in (r.exc_text or "") for r in caplog.records
     ) or "ValueError" in caplog.text
+
+
+# ── /model switch resolves vision, it does not inherit it ─────────────────
+# Rant 2026-09-17T16:53:02. These drive `_handle_set_model` with a fake writer;
+# nothing here starts, stops or restarts a daemon.
+
+
+def _vision_server(models, current_vision, vision_default=False):
+    server = _make_server()
+    server.llm.config.models = models
+    server.llm.config.vision = current_vision
+    server.llm.config.vision_default = vision_default
+    return server
+
+
+def test_set_model_entry_vision_key_wins_and_is_logged(caplog):
+    """An entry that declares `vision` decides it, and the log says so."""
+    server = _vision_server(
+        [{"name": "blind", "model": "deepseek-chat", "vision": False}],
+        current_vision=True, vision_default=True,
+    )
+    writer = _FakeWriter()
+    with caplog.at_level("INFO", logger="emrg.server.daemon"):
+        asyncio.run(server._handle_set_model("blind", writer))
+
+    assert server.llm.config.vision is False, "the entry's own flag decides"
+    assert "vision: True → False" in caplog.text
+    assert "source: entry" in caplog.text
+
+
+def test_set_model_missing_vision_key_falls_back_to_the_default(caplog):
+    """The defect: a missing key used to keep the PREVIOUS model's value.
+
+    Switching from a vision model to an entry that says nothing about vision
+    must land on the configured default, not on `True` inherited from the model
+    being left — which is how an image reaches a model that cannot read it.
+    """
+    server = _vision_server(
+        [{"name": "silent", "model": "moonshot-v1"}],
+        current_vision=True, vision_default=False,
+    )
+    writer = _FakeWriter()
+    with caplog.at_level("INFO", logger="emrg.server.daemon"):
+        asyncio.run(server._handle_set_model("silent", writer))
+
+    assert server.llm.config.vision is False, (
+        "a missing key must resolve to the top-level default, never to the "
+        "previous model's value"
+    )
+    assert "vision: True → False" in caplog.text
+    assert "source: top-level-default" in caplog.text
+
+
+def test_set_model_unknown_model_falls_back_to_the_default(caplog):
+    """No entry at all (the old behaviour: keep everything) → the default."""
+    server = _vision_server(
+        [{"name": "known", "model": "x", "vision": True}],
+        current_vision=False, vision_default=True,
+    )
+    writer = _FakeWriter()
+    with caplog.at_level("INFO", logger="emrg.server.daemon"):
+        asyncio.run(server._handle_set_model("never-heard-of-it", writer))
+
+    assert server.llm.config.vision is True
+    assert "source: top-level-default" in caplog.text
+
+
+def test_set_model_frame_carries_the_effective_vision():
+    """A client must be able to read the value the daemon will act on."""
+    server = _vision_server(
+        [{"name": "blind", "model": "deepseek-chat", "vision": False}],
+        current_vision=True, vision_default=True,
+    )
+    writer = _FakeWriter()
+    asyncio.run(server._handle_set_model("blind", writer))
+
+    frames = [json.loads(f) for f in writer._frames]
+    model_set = [f for f in frames if f.get("type") == "model_set"]
+    assert model_set, "the requester gets a model_set frame"
+    assert model_set[0]["vision"] is False, "the effective value, not the declaration"
+    assert model_set[0]["vision_source"] == "entry"
