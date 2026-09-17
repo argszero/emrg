@@ -177,12 +177,81 @@ def scan_pids(ps_output: str, own_pid: int) -> list[int]:
     return pids
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, PermissionError):
+# ── Liveness ────────────────────────────────────────────────────
+
+# WaitForSingleObject's two answers we act on (winbase.h). A process object is
+# signalled exactly when the process has exited, so WAIT_TIMEOUT = still alive.
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_TIMEOUT = 0x00000102
+_SYNCHRONIZE = 0x00100000
+
+
+def _win_pid_alive(pid: int, kernel32=None) -> bool:
+    """Is ``pid`` alive on Windows — without ever entering ``os.kill``.
+
+    ``OpenProcess(SYNCHRONIZE, ...)`` + ``WaitForSingleObject(h, 0)`` is the
+    platform's own existence check: ``SYNCHRONIZE`` is the only access right it
+    needs, and it asks nothing of the process.
+
+    ``kernel32`` is injectable so the decision is testable on any runner — the
+    same reasoning as :func:`_win_exclusive_open`'s ``try_open`` (issue #1349:
+    the Windows branch is the *unsafe* one, so it is the one that must be
+    pinnable locally).
+    """
+    if pid <= 0:
         return False
+    if kernel32 is None:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        # 64-bit handle truncation fix (same lesson as _win_exclusive_open,
+        # rant 2026-08-18T09:40:40): ctypes defaults a foreign function's restype
+        # to c_int, which truncates a 64-bit HANDLE and can alias a valid handle
+        # with a failure value.
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+
+    handle = kernel32.OpenProcess(_SYNCHRONIZE, 0, pid)
+    if not handle:
+        # No such pid — or one this user may not open (ERROR_ACCESS_DENIED).
+        # "not ours ⇒ gone" keeps this module's existing answer, and it is what
+        # its callers act on: every pid they probe is one their own scan matched.
+        return False
+    try:
+        return kernel32.WaitForSingleObject(handle, 0) == _WAIT_TIMEOUT
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def pid_alive(pid: int, *, platform: str = "", kill=None, win_probe=None) -> bool:
+    """Is ``pid`` still alive?  The one platform-correct liveness probe (#1349).
+
+    POSIX ``os.kill(pid, 0)`` *is* this question: it delivers nothing and reports
+    ``ESRCH`` / ``EPERM``.
+
+    **Windows has no such call.**  ``signal.CTRL_C_EVENT`` is **0**, and CPython's
+    ``os_kill_impl`` routes ``CTRL_C_EVENT`` to
+    ``GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)`` *before* the
+    ``TerminateProcess`` fallback — so there ``os.kill(pid, 0)`` is **a Ctrl+C to
+    that pid's console process group**: every process sharing the console,
+    ``emrg stop``'s own shell included.  Windows therefore answers through
+    :func:`_win_pid_alive`, which signals nothing at all.
+
+    ``platform`` / ``kill`` / ``win_probe`` are parameters rather than reads of
+    ``sys.platform`` / ``os.kill`` so both decisions can be pinned on every
+    runner: the Windows branch is the unsafe one, and a probe whose Windows
+    behaviour is only observable on Windows is a defect discovered on Windows.
+    """
+    if (platform or sys.platform).startswith("win"):
+        probe = _win_pid_alive if win_probe is None else win_probe
+        return bool(probe(pid))
+    try:
+        (kill or os.kill)(pid, 0)
+        return True
     except OSError:
         return False
 
@@ -204,7 +273,7 @@ def _kill_pid_posix(pid: int, grace: float = 3.0) -> None:
         return
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
-        if not _pid_alive(pid):
+        if not pid_alive(pid):
             return
         time.sleep(0.15)
     try:
@@ -890,7 +959,7 @@ def _escalate_kill_windows(pid: int) -> str:
             capture_output=True, text=True, timeout=10, **_no_window(),
         )
         log.append(f"taskkill /F /T rc={getattr(r, 'returncode', '?')}")
-        if getattr(r, "returncode", 1) == 0 and not _pid_alive(pid):
+        if getattr(r, "returncode", 1) == 0 and not pid_alive(pid):
             return "; ".join(log) + " => killed"
     except (OSError, subprocess.SubprocessError, TimeoutError) as e:
         log.append(f"taskkill err={type(e).__name__}")
@@ -919,7 +988,7 @@ def _escalate_kill_windows(pid: int) -> str:
             log.append(f"parent {apid} ({aname}) rc={getattr(r, 'returncode', '?')}")
     except (OSError, subprocess.SubprocessError, TimeoutError) as e:
         log.append(f"parent-tree err={type(e).__name__}")
-    if not _pid_alive(pid):
+    if not pid_alive(pid):
         return "; ".join(log) + " => killed"
     # Final fallback: Stop-Process -Force (CIM/WMIC-class stop).
     try:
@@ -929,7 +998,7 @@ def _escalate_kill_windows(pid: int) -> str:
             capture_output=True, text=True, timeout=10, **_no_window(),
         )
         log.append(f"Stop-Process rc={getattr(r, 'returncode', '?')}")
-        if not _pid_alive(pid):
+        if not pid_alive(pid):
             return "; ".join(log) + " => killed"
     except (OSError, subprocess.SubprocessError, TimeoutError) as e:
         log.append(f"Stop-Process err={type(e).__name__}")
