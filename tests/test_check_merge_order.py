@@ -741,8 +741,11 @@ class TestARePushedHeadIsFetchedNotRejected:
         Here the origin exposes a real `refs/pull/1/head`, so `_fetch_head` runs
         unchanged. The head is then moved to a commit that does **not** descend from
         the first one (a sibling of it, as a rebase or a rewritten PR head produces):
-        the unforced refspec is rejected and leaves the stale ref behind, while the
-        tool must land on the true head.
+        the unforced refspec is rejected, while the tool must land on the true head.
+
+        It also pins the release half on real git: each call returns the *commit* and
+        leaves no ref behind, which is what keeps the second call from being answered
+        out of a stale parked ref.
         """
         origin = tmp_path / "origin"
         work = tmp_path / "work"
@@ -791,22 +794,30 @@ class TestARePushedHeadIsFetchedNotRejected:
 
         monkeypatch.chdir(work)
         mod = _load_module()
+        ref = "refs/emrg-forecast/pr1"
 
-        # Run 1: the helper fetches the PR head and returns the ref name it used.
-        ref = mod._fetch_head("ignored", 1)
-        assert git(work, "rev-parse", ref).stdout.strip() == first_sha
+        # Run 1: the helper fetches the PR head, returns that commit, and releases
+        # the ref it parked (measured before the release landed: the ref stayed, one
+        # per PR per run, pinning the head's objects for the life of the clone).
+        head = mod._fetch_head("ignored", 1)
+        assert head == first_sha, "the caller must get the commit, not the ref name"
+        assert git(work, "rev-parse", "--verify", ref).returncode != 0, (
+            "the parked ref must not survive the call that made it"
+        )
 
-        # The PR head is re-pushed to the sibling commit.
+        # The PR head is re-pushed to the sibling commit. The object is still here:
+        # a released ref does not delete anything, which is why holding the SHA is
+        # enough for `merge-tree` (and why this call must not be answered from cache).
         git(origin, "update-ref", "refs/pull/1/head", second_sha)
 
         # Run 2: the helper must land on the NEW head rather than leaving the stale
         # one - an unforced refspec fails here with rc 1 and keeps `first_sha`.
-        ref2 = mod._fetch_head("ignored", 1)
-        assert ref2 == ref
-        assert git(work, "rev-parse", ref).stdout.strip() == second_sha, (
+        head2 = mod._fetch_head("ignored", 1)
+        assert head2 == second_sha, (
             "a re-pushed head must be fetched, not silently rejected - a stale ref "
             "would make the tool answer about the previous head"
         )
+        assert git(work, "rev-parse", "--verify", ref).returncode != 0
 
 
 class TestTheBaseIsResolvedByItsFullName:

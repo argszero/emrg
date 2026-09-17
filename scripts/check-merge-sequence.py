@@ -589,19 +589,25 @@ def _open_pr_numbers(repo: str) -> list[int]:
 
 
 def _fetch_head(number: int) -> str:
-    """Fetch a PR's real head into a temp ref and return the ref name.
+    """Fetch a PR's real head into a temp ref and return its commit SHA.
 
     The refspec is forced (`+`): a PR head is routinely re-pushed to a commit
     that is not a descendant of the previous one (every conflict resolution in
     this repo does), and a rejected fetch would leave the *stale* ref in place,
     so the check would silently answer about a tree that is no longer the PR.
+
+    The parked ref is dropped before this returns (`merge_tree.drop_ref`): the
+    caller wants the commit, the name is mutable and would pin the head's objects
+    for good - measured 2026-09-17, this gate had 83 such refs resident.
     """
     ref = f"refs/emrg-merge-seq/pr{number}"
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
-    return _rev_parse(ref)
+    sha = _rev_parse(ref)
+    merge_tree.drop_ref(ref, run=_run)
+    return sha
 
 
 # Author/committer for the synthetic merge commits, independent of git config - the

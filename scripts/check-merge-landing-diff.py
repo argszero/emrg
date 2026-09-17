@@ -364,13 +364,19 @@ def _fetch_head(number: int) -> str:
     that is not a descendant of the previous one (every conflict resolution does),
     and a rejected fetch would leave the *stale* ref in place, so the reading would
     be about a head that is no longer the PR.
+
+    The parked ref is dropped before this returns (`merge_tree.drop_ref`): the
+    caller wants the SHA, and a ref left behind pins that head's objects for the
+    life of the clone (measured 2026-09-17: this gate had 25 of them resident).
     """
     ref = f"refs/emrg-landing-diff/pr{number}"
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
-    return _rev_parse(ref)
+    sha = _rev_parse(ref)
+    merge_tree.drop_ref(ref, run=_run)
+    return sha
 def _diagnosis(proc: subprocess.CompletedProcess[str]) -> str:
     """What git said, from both streams - a failure must not report itself as empty."""
     detail = (proc.stdout[-500:] + proc.stderr[-500:]).strip()

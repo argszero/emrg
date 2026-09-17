@@ -311,19 +311,26 @@ def _open_pr_numbers(repo: str) -> list[int]:
 
 
 def _fetch_head(number: int) -> str:
-    """Fetch a PR's real head into a temp ref and return the ref name.
+    """Fetch a PR's real head into a temp ref and return its commit SHA.
 
     The refspec is forced (`+`): a PR head is routinely re-pushed to a commit
     that is not a descendant of the previous one (every conflict resolution in
     this repo does), and a rejected fetch leaves the *stale* ref in place, so the
     check would silently answer about a tree that is no longer the PR.
+
+    The parked ref is dropped before this returns (`merge_tree.drop_ref`): the
+    caller wants the commit - it rev-parses what comes back either way - and a ref
+    left behind pins the head's objects for the life of the clone (measured
+    2026-09-17: this gate had 40 of them resident).
     """
     ref = f"refs/emrg-tree-health/pr{number}"
     proc = _run(["git", "fetch", "--quiet", "origin", f"+pull/{number}/head:{ref}"])
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise MeasurementError(f"could not fetch PR #{number}: {detail}")
-    return ref
+    sha = _rev_parse(ref)
+    merge_tree.drop_ref(ref, run=_run)
+    return sha
 def _merge_tree_paths(a: str, b: str, cwd: str | None = None) -> list[str] | None:
     """Conflicted paths when `a` and `b` are merged; None if unmeasurable.
 

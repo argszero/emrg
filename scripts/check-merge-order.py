@@ -249,11 +249,12 @@ def _open_pr_numbers(repo: str) -> list[int]:
 
 
 def _fetch_head(repo: str, number: int) -> str:
-    """Fetch a PR's real head into a temp ref and return the ref name.
+    """Fetch a PR's real head into a temp ref and return its commit SHA.
 
     By ref, not by local branch name: a local branch called `pr<N>` may point at a
     stale commit, and the whole value of this tool is that it measures the trees
-    that would actually merge.
+    that would actually merge. The ref is dropped again before this returns —
+    `merge_tree.drop_ref` owns the why.
 
     The refspec is **forced** (`+`), and must be. A PR head is routinely re-pushed
     to a commit that is not a descendant of the previous one - every conflict
@@ -277,7 +278,13 @@ def _fetch_head(repo: str, number: int) -> str:
         # how this surfaced as an undiagnosable "unknown error" with empty stderr.
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown error"
         raise RuntimeError(f"could not fetch PR #{number}: {detail}")
-    return ref
+    # The commit, and the ref dropped again as soon as it is read: the name is
+    # mutable in a way a SHA is not, so nothing downstream wants it back, and a ref
+    # left behind pins that head's objects forever (measured 2026-09-17: this gate
+    # alone had 105 of them resident). The sha is what `merge-tree` is asked with.
+    sha = _rev_parse(ref)
+    merge_tree.drop_ref(ref, run=_run)
+    return sha
 def _conflict_paths(a: str, b: str) -> list[str] | None:
     """Paths that conflict when `a` and `b` are merged; None if the merge is not answered.
 
