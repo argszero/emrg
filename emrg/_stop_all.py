@@ -1577,14 +1577,31 @@ class _Tee:
         return self.orig.fileno()
 
 
+def _stop_log_dir() -> str:
+    """Directory the dual-write stop log lands in: ``~/.emrg/logs`` by default,
+    ``$EMRG_STOP_LOG_DIR`` when set.
+
+    The override exists because that path is *host state* and had no seam
+    (issue #1337, measured 2026-09-17): every in-process ``stop_all()`` a test
+    ran created a real file there — 1877 ``stop_all-*.log`` had accumulated.
+    It is an environment variable rather than an argument so it also reaches a
+    child process that runs the stopper (``python -m emrg stop``). Pure
+    stdlib, no I/O — the caller decides whether to create the directory."""
+    override = os.environ.get("EMRG_STOP_LOG_DIR")
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".emrg", "logs")
+
+
 def _open_stop_log() -> object | None:
     """Open the fixed-path dual-write log (rant 2026-08-18T11:20:54):
-    ``~/.emrg/logs/stop_all-YYYYMMDD-HHMMSS.log`` (local time; the timestamp
-    name makes concurrent stop_all runs naturally isolated). Returns the file
-    object or None on any failure — best-effort, never breaks the stop flow.
-    The handle closes naturally at process exit (no finally dependency)."""
+    ``<stop log dir>/stop_all-YYYYMMDD-HHMMSS.log`` (local time; the timestamp
+    name makes concurrent stop_all runs naturally isolated; the directory is
+    ``_stop_log_dir()``). Returns the file object or None on any failure —
+    best-effort, never breaks the stop flow. The handle closes naturally at
+    process exit (no finally dependency)."""
     try:
-        d = os.path.join(os.path.expanduser("~"), ".emrg", "logs")
+        d = _stop_log_dir()
         os.makedirs(d, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         return open(os.path.join(d, f"stop_all-{ts}.log"), "a", encoding="utf-8")

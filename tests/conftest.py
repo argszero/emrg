@@ -151,6 +151,38 @@ def _guard_stop_all_hermeticity(monkeypatch, request):
             monkeypatch.setattr(stop_mod, name, _no_real_stop(name))
 
 
+@pytest.fixture(scope="session")
+def _stop_log_scratch(tmp_path_factory):
+    """One scratch directory for the whole session — the whole suite shares it,
+    so this does not create a temp dir per test."""
+    return tmp_path_factory.mktemp("stop-logs")
+
+
+@pytest.fixture(autouse=True)
+def _guard_stop_log_is_not_host_state(monkeypatch, _stop_log_scratch):
+    """⛔ A suite run must not write into the host's ``~/.emrg/logs`` (issue
+    #1337, measured 2026-09-17 on this workspace).
+
+    The stop log is host state. ``tests/test_stop_all.py``'s
+    ``test_stop_all_retries_lock_kill`` and
+    ``test_stop_all_process_residual_still_aborts`` call ``stop_all()``
+    in-process — legitimate, all five killers isolated — and ``stop_all()``
+    opens its forensic log on the way through, so each run created a real
+    ``stop_all-YYYYMMDD-HHMMSS.log`` in the host's logs directory: **1877**
+    were counted, one per run, each carrying the Windows-shaped fixture fake
+    (``C:/locked.pyd``, ``daemon (pid 1234)``) on a macOS host.
+
+    Containing it here rather than in each test: the stopper resolves the
+    directory through ``EMRG_STOP_LOG_DIR`` (``emrg/_stop_all.py::
+    _stop_log_dir``), so one pin covers every route — in-process calls from any
+    test file, and a child process that inherits the environment (``python -m
+    emrg stop``). Tests that assert the *default* resolution clear the variable
+    themselves (``monkeypatch.delenv``), which patches after this fixture and
+    overrides it as usual.
+    """
+    monkeypatch.setenv("EMRG_STOP_LOG_DIR", str(_stop_log_scratch))
+
+
 @pytest.fixture(autouse=True)
 def _guard_upgrade_hermeticity(monkeypatch, tmp_path):
     """⛔ Red line (host 2026-08-21T10:35:57): tests must NEVER trigger the
