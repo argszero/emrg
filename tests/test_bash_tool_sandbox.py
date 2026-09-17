@@ -804,25 +804,64 @@ def test_workspace_write_temp_root_normalized(monkeypatch):
 
 # ── execute() integration ─────────────────────────────────────────────────
 
-def test_execute_read_only_blocks_rm_rf():
+def test_execute_read_only_blocks_rm_rf(tmp_path):
+    """read-only refuses a destructive command before the shell sees it.
+
+    The victim is a directory THIS TEST creates (rant 2026-09-17T11:38:16): a
+    negative test's safety must not rest on the guard it is testing, because a
+    mutation arm breaks that guard on purpose. Then this test can only ever
+    destroy its own scratch, and the surviving sentinel is what proves the
+    command did not run.
+    """
+    victim = tmp_path / "emrg-sandbox-test"
+    victim.mkdir()
+    sentinel = victim / "sentinel.txt"
+    sentinel.write_text("alive", encoding="utf-8")
     tool = BashTool()
     result = _run(tool.execute({
-        "command": "rm -rf /tmp/emrg-sandbox-test",
+        "command": f"rm -rf {victim}",
         "sandbox": "read-only",
     }))
     assert result.error is True
     assert "sandbox" in result.content
     assert "not executed" in result.content
+    assert sentinel.exists() and sentinel.read_text() == "alive"
 
 
-def test_execute_workspace_write_blocks_protected_file():
+def test_execute_workspace_write_blocks_a_write_outside_the_workspace(
+    tmp_path, monkeypatch
+):
+    """execute() really consults the workspace-write boundary: a redirect to an
+    absolute path outside the injected workspace is refused before the shell
+    runs.
+
+    Replaces the deleted `~/.emrg/config.toml` variant of this test (rant
+    2026-09-17T11:38:16), keeping the end-to-end wiring coverage with a target
+    the test builds itself — so the same mutation arm that kills the assertion
+    writes nothing anywhere real, and `not target.exists()` proves it.
+
+    gettempdir is patched because pytest's tmp_path sits inside the OS temp
+    root, which workspace-write legitimately allows: without the patch the
+    target would be permitted and the test would pass for the wrong reason.
+    """
+    import tempfile as _tf
+
+    monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"           # a sibling of the workspace
+    outside.mkdir()
+    target = outside / "victim.txt"
     tool = BashTool()
     result = _run(tool.execute({
-        "command": "echo x > ~/.emrg/config.toml",
+        "command": f"echo x > {target}",
         "sandbox": "workspace-write",
+        "workdir": str(workspace),
     }))
     assert result.error is True
     assert "sandbox" in result.content
+    assert "not executed" in result.content
+    assert not target.exists()
 
 
 def test_execute_sandboxed_success_tags_output():

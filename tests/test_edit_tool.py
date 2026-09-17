@@ -206,17 +206,3 @@ def test_edit_workspace_write_allows_inside_workspace(temp_file):
     }))
     assert not result.error
     assert "baz qux" in temp_file.read_text()
-
-
-def test_edit_workspace_write_blocks_protected_config(temp_file):
-    """Daemon state files are always blocked from a workspace-write session."""
-    tool = EditTool()
-    result = _run(tool.execute({
-        "file_path": "~/.emrg/config.toml",
-        "old_string": "foo",
-        "new_string": "bar",
-        "sandbox": "workspace-write",
-        "workspace": str(temp_file.parent),
-    }))
-    assert result.error
-    assert "protected daemon file" in result.content
