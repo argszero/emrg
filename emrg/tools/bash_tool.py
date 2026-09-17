@@ -788,7 +788,119 @@ def _fully_quoted_token_indexes(cmd: str, tokens: list[str]) -> set[int] | None:
     return quoted
 
 
-def _unresolved_operator_run_tails(tokens: list[str]) -> list[str]:
+_ESCAPED_OPERATOR_CHARS = "><|&;"
+"""Characters a backslash can turn from an operator into an ordinary character.
+
+The shell's own rule, not a convention: an escaped character is a *character*, so
+`\\>` is the file `>` and `\\|` is the file `|`, while `\\` is a backslash and the
+`>` behind it is an operator again. Only the control characters are listed —
+masking the rest of the punctuation set would claim a fact the walk never asks
+for, and masking a quote would destroy the quoting the lexer is about to read.
+"""
+
+_ESCAPE_PLACEHOLDERS = {
+    ch: chr(0xE000 + i) for i, ch in enumerate(_ESCAPED_OPERATOR_CHARS)
+}
+"""One private-use code point per escaped character (#1307).
+
+Private use because a placeholder must not be punctuation (that is the whole
+point: `\\>` has to survive the lexer as part of a word) and must not be a
+character a command line can plausibly contain. The Windows path already leans on
+the same idea for a different reason (`_protect_windows_backslashes`), and the
+recovery below returns "cannot say" rather than guessing when the line already
+carries a placeholder.
+"""
+
+
+def _restore_escape_placeholders(token: str) -> str:
+    """Undo the masking, so the reading can be compared with the plain one."""
+    for ch, placeholder in _ESCAPE_PLACEHOLDERS.items():
+        token = token.replace(placeholder, ch)
+    return token
+
+
+def _escaped_word_indexes(cmd: str, tokens: list[str]) -> set[int] | None:
+    """Indexes of ``tokens`` whose word reached its shape through a **backslash**.
+
+    An escaped operator-shaped word is a *path*: `\\>` is the file `>`, `\\|` is the
+    file `|`, and neither is an operator or a command separator. `is_operator`
+    excluded the *quoted* case (issues #1268/#1280) but had no counterpart for the
+    escaped one, so an escaped word sitting in **target** position was read as an
+    operator and the walk lost the real target — measured on master `cc352419`
+    over 88 spellings (4 operators x every masking x 4 prefixes), each run as
+    `/bin/sh -c` in a fresh scratch directory and the directory listed afterwards:
+    8 rows name the wrong file or nothing at all, and 4 of them are ALLOWED at
+    `read-only` although the shell created a file (`echo x >\\| log` and its three
+    prefixes create `|` and were allowed; `echo x >\\> log` names `log` while the
+    shell wrote `>`) — issue #1307.
+
+    Recovered with the **same lexer the walk already uses**, on a line with every
+    escaped control character replaced by a private-use placeholder: the escape
+    has to survive as part of its word (`>\\|` has to read as the operator `>` and
+    the word `|`, not as `>` and a separator), and the placeholder is what keeps
+    it there. The masked line is then compared *word for word* with the reading
+    the walk was handed, and only when the two are the same words is "this word
+    carried an escape" a fact about that index. That comparison is the whole
+    safety property, and it is what makes quoting a non-issue rather than a second
+    parser: the masked reading goes through the same POSIX lexer, so quotes are
+    resolved in it exactly as in the plain one. Where the two disagree — measured,
+    an escape *inside* quotes (`echo x '\\>' log`, where the shell keeps the
+    backslash the mask takes away) and an escaped backslash beside its operator
+    (`echo x \\\\> log`, where the mask swallows the operator) — the answer is
+    "cannot say" rather than a guess, and the walk keeps the answer it had.
+
+    Measured over a 588-row family (4 prefixes x 21 operator spellings x 7 targets,
+    every row run as `/bin/sh -c` in a fresh scratch directory and the directory
+    listed afterwards): 392 rows really write a file, the walk names every one of
+    them, and `read-only` refuses every one of them — 0 unnamed writes and 0
+    invisible writes, against 8 and 4 before the fix. Over the same family the
+    over-blocks fall from 86 to 18, and 4 of the 18 are new: a line whose
+    operator-shaped word is a *quoted argument* (`echo x '>' \\|`) is read as a
+    redirect to the escaped word behind it, because the quoting is unresolvable
+    there (#1280's "cannot say") while the escape is not. All 4 write nothing —
+    measured — so they are the over-block direction the walk already prices.
+
+    What it does not claim, also measured: 28 of the 588 rows answer "cannot say",
+    and every one of them carries an escape *inside quotes* (`echo x '\\>' log`),
+    where masking the escape changes the word and the comparison rejects it. Those
+    rows keep today's answer, which is a refusal for naming the following word —
+    the over-block direction, nothing lost.
+
+    Not consulted outside the redirect walk, and that boundary is stated too:
+    `rm a\\;b` already names `a;b` in the plain reading, while a line whose
+    *command* boundary carries the escape (`echo x \\; rm -rf <dir>`) is still
+    read as a chain — again the over-block direction, refusing a line that
+    removes nothing.
+    """
+    prepped = _protect_windows_backslashes(_strip_line_continuations(cmd))
+    if any(placeholder in prepped for placeholder in _ESCAPE_PLACEHOLDERS.values()):
+        return None                      # the line carries the marker: nothing claimed
+    masked = prepped
+    for ch, placeholder in _ESCAPE_PLACEHOLDERS.items():
+        masked = masked.replace("\\" + ch, placeholder)
+    if masked == prepped:
+        return set()                     # answered: no control character is escaped
+    try:
+        lex = _shell_lexer(masked, True)
+        lex.whitespace_split = True
+        masked_tokens = list(lex)
+    except ValueError:
+        return None
+    restored = [_restore_escape_placeholders(t) for t in masked_tokens]
+    if restored != tokens:
+        # The two readings are not known to be the same words, so "this word
+        # carried an escape" is not a fact about any token in ``tokens``.
+        return None
+    placeholders = tuple(_ESCAPE_PLACEHOLDERS.values())
+    return {
+        index for index, tok in enumerate(masked_tokens)
+        if any(placeholder in tok for placeholder in placeholders)
+    }
+
+
+def _unresolved_operator_run_tails(tokens: list[str],
+                                   escaped: "set[int] | frozenset[int]" = frozenset(),
+                                   ) -> list[str]:
     """Operator-shaped tokens sitting in **target** position, for issue #1280.
 
     Asked only when the two lexings disagreed, i.e. when the walk cannot say
@@ -816,17 +928,26 @@ def _unresolved_operator_run_tails(tokens: list[str]) -> list[str]:
     token level, which is exactly the fact the pairing could not recover, so the
     trade is 96 writes-that-happened no longer allowed against 6 echoes no longer
     allowed. Kept because the walk is the tier that exists to refuse writes.
+
+    ``escaped`` is the fact this helper could not recover on its own (issue #1307):
+    a word that reached operator shape through a backslash is a path, so it neither
+    joins a run nor counts as the separator that ends one. Leaving it out is not
+    merely untidy — measured over the 588-row family below, the same walk refuses
+    54 lines that write nothing when this helper is handed no escape fact, and 18
+    when it is, so 36 of those refusals are this helper reading an escaped word as
+    an operator-run tail.
     """
     tails: list[str] = []
     i = 0
     while i < len(tokens):
-        if not _is_redirect_operator(tokens[i]):
+        if i in escaped or not _is_redirect_operator(tokens[i]):
             i += 1
             continue
         j = i + 1
-        while j < len(tokens) and _is_redirect_operator(tokens[j]):
+        while j < len(tokens) and j not in escaped and _is_redirect_operator(tokens[j]):
             j += 1
-        if j - i >= 2 and (j == len(tokens) or tokens[j] in _COMMAND_SEPARATORS):
+        if j - i >= 2 and (j == len(tokens)
+                           or (j not in escaped and tokens[j] in _COMMAND_SEPARATORS)):
             tails.extend(tokens[i + 1:j])
         i = j
     return tails
@@ -933,9 +1054,26 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     # the tokens that sit in target position, which is what the old empty set lost.
     quoting_unknown = quoted is None
     quoted = quoted or set()
+    # An *escaped* operator-shaped word is a path for the same reason a quoted one
+    # is, and it is the half `quoted` cannot see: `>\|` keeps the escape out of the
+    # token stream (the plain reading dequotes it to `|`) so the walk read the
+    # word as a separator, named no target at all, and `read-only` allowed a write
+    # the shell really made (issue #1307, found by a sweep of 88 spellings). Both
+    # consultations below are one-directional — an escaped word is never an
+    # operator and never a separator — and the recovery answers "cannot say" rather
+    # than guessing when the two readings are not known to be the same words.
+    escaped = _escaped_word_indexes(masked, tokens)
+    # `None` is "cannot say", which is answered by leaving the walk's two questions
+    # alone — the escape is a fact about *this* line or it is not claimed at all.
+    escaped = escaped or set()
 
     def is_operator(index: int) -> bool:
-        return index not in quoted and _is_redirect_operator(tokens[index])
+        return (index not in quoted and index not in escaped
+                and _is_redirect_operator(tokens[index]))
+
+    def is_separator(index: int) -> bool:
+        """The shell's word-boundary question, asked with the escape in hand."""
+        return index not in escaped and tokens[index] in _COMMAND_SEPARATORS
 
     targets: list[str] = []
     if quoting_unknown:
@@ -944,7 +1082,7 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
         # below still believes it, so a real redirect keeps naming its path);
         # target position is answered here, because that is the direction the old
         # empty-set fallback lost (issue #1280).
-        targets.extend(_unresolved_operator_run_tails(tokens))
+        targets.extend(_unresolved_operator_run_tails(tokens, escaped))
     i = 0
     while i < len(tokens):
         tok = tokens[i]
@@ -965,7 +1103,7 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             j = i + 1
             while j < len(tokens) and is_operator(j):
                 j += 1
-            if j < len(tokens) and tokens[j] not in _COMMAND_SEPARATORS:
+            if j < len(tokens) and not is_separator(j):
                 # …but the operand of `>&` is not always a path: when it is all
                 # digits or `-` the shell duplicates onto that descriptor and
                 # opens nothing (`2>&1`, `2>&-`). Recording it made ordinary
