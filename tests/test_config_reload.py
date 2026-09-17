@@ -3,7 +3,7 @@
 The host's complaint: editing `~/.emrg/config.toml` had no effect on the running
 daemon; the only path was a client SIGKILLing it, which drops every connection
 and rebuilds every scheduled handler. These tests pin the replacement — a
-daemon-side stat + in-place apply, with `model` riding the `/model` path.
+daemon-side fingerprint + in-place apply, with `model` riding the `/model` path.
 
 Two rules these tests obey, both from the project's own safety lines:
 
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
 from pathlib import Path
 
 import pytest
@@ -186,6 +187,39 @@ def test_a_model_change_is_reported_not_assigned(tmp_path):
     assert outcome.model == "model-b"
     assert outcome.applied == []
     assert live.model == "model-a", "the reloader must not assign the model itself"
+
+
+def test_a_same_size_edit_inside_the_timestamp_granule_is_still_a_revision(tmp_path):
+    """The change detector must not depend on the filesystem's timestamp resolution.
+
+    Measured on the `windows-2025` leg (2026-09-17, run for head `ef38270e`):
+    `test_a_model_change_is_reported_not_assigned` failed there with
+    `assert None is not None` - two writes milliseconds apart share a timestamp, and
+    `model-a` → `model-b` keeps the size, so `(st_mtime_ns, st_size)` was *identical*
+    and the edit was never applied. That is the rant's own complaint - "I edited it and
+    nothing happened" - surviving on one platform, silently, with no log line.
+
+    The Windows shape is replayed here by restoring the first write's mtime with
+    `os.utime`, so the premise (equal `st_mtime_ns`, equal size, different bytes) holds
+    as a *file system fact* rather than a patched `stat`: a detector that consults
+    only `(mtime_ns, size)` reports "nothing changed" for this file on any platform.
+    """
+    cfg_path = tmp_path / "config.toml"
+    _write(cfg_path, BASE)
+    live = _live_from(cfg_path)
+    reloader = ConfigReloader(live, path=cfg_path)
+    before = cfg_path.stat()
+
+    _write(cfg_path, BASE.replace('model = "model-a"', 'model = "model-b"'))
+    os.utime(cfg_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    after = cfg_path.stat()
+    assert after.st_size == before.st_size, "the edit must keep the size for this shape"
+    assert after.st_mtime_ns == before.st_mtime_ns, "and the timestamp"
+
+    outcome = reloader.poll()
+    assert outcome is not None, "the same-size edit inside the tick was not detected"
+    assert outcome.model == "model-b"
 
 
 # ── the daemon's act half ────────────────────────────────────────────

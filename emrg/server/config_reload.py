@@ -39,6 +39,7 @@ changes again — the host's next write is a new fingerprint.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,9 +49,9 @@ from emrg.config import EmrgConfig, LlmConfig, config_path, load_config
 
 logger = logging.getLogger("emrg.server")
 
-#: How often the daemon stats the file. A stat is the whole cost of an idle
-#: tick (`os.stat`, no read, no parse) — the file is read only when the
-#: fingerprint moves.
+#: How often the daemon looks at the file. The look is a read of a small TOML
+#: file and a sha256 of it (`fingerprint`) — see that function for why a stat is
+#: not enough to answer "did this change?".
 POLL_INTERVAL_SECONDS = 2.0
 
 #: Fields applied onto the live config, taken from the dataclass rather than
@@ -89,17 +90,26 @@ def reloadable_fields() -> tuple[str, ...]:
     return tuple(n for n in names if n not in EXCLUDED_FIELDS)
 
 
-def fingerprint(path: Path) -> Optional[tuple[int, int]]:
-    """`(mtime_ns, size)` for `path`, or None when it cannot be stat'ed.
+def fingerprint(path: Path) -> Optional[str]:
+    """A content hash of `path`, or None when it cannot be read.
 
-    Chosen over a content hash because it is read-free: the tick that finds no
-    change must not read or parse the file at all.
+    Not `(st_mtime_ns, st_size)`. That pair was the first design - "read-free, a stat
+    is the whole cost of an idle tick" - and the `windows-2025` leg falsified it
+    (measured 2026-09-17): two writes milliseconds apart share a timestamp there, so
+    an edit that also keeps the file's size leaves the stat **identical** and the
+    revision is silently never applied, which is the exact complaint this module
+    exists to remove ("I edited it and nothing happened"). Equality is the ambiguous
+    case - the tick that finds no change is the tick that cannot rule one out - so
+    there is no sound stat fast path; the bytes have to be read. The cost is one
+    small TOML read plus a sha256 per `POLL_INTERVAL_SECONDS` tick, and it is paid
+    on every platform rather than behind a Windows branch, because a filesystem with
+    coarse timestamps is a property of the mount, not of the OS.
     """
     try:
-        st = path.stat()
+        data = path.read_bytes()
     except OSError:
         return None
-    return (st.st_mtime_ns, st.st_size)
+    return hashlib.sha256(data).hexdigest()
 
 
 @dataclass

@@ -625,8 +625,9 @@ class EmrgServer:
     async def _config_reload_loop(self) -> None:
         """Apply `~/.emrg/config.toml` edits without restarting (rant 2026-09-17T16:52:57).
 
-        One tick is a `os.stat` (see `config_reload.POLL_INTERVAL_SECONDS`); the
-        file is read and parsed only when its fingerprint moved. A revision
+        One tick reads the file and hashes it (see `config_reload.POLL_INTERVAL_SECONDS`
+        and `config_reload.fingerprint` for why a stat is not enough); it is parsed
+        only when the hash moved. A revision
         that cannot be parsed — or whose fields are wrongly typed — is
         rejected whole and the previous good configuration stays in force; the
         next write is a new fingerprint and is retried. Never raises: a bad
