@@ -6,10 +6,23 @@ require network access or asyncio event loops.
 
 from __future__ import annotations
 
+import copy
+import json
+
 import pytest
 
 from emrg.config import LlmConfig
-from emrg.server.llm import LlmClient
+from emrg.server.llm import (
+    CONTENT_RISK,
+    CONTENT_RISK_ERROR,
+    CONTENT_RISK_HINT,
+    CONTEXT_TOO_LONG,
+    OTHER_ERROR,
+    LlmClient,
+    classify_llm_error,
+    space_out_messages,
+    space_out_text,
+)
 
 
 @pytest.fixture
@@ -661,3 +674,202 @@ def test_stream_usage_cache_hit_tokens_top_level_and_nested(monkeypatch, client)
     chunks3 = _collect_chunks(client)
     assert "cache_hit_tokens" not in chunks3[-1]["usage"]
     assert chunks3[-1]["usage"]["prompt_tokens"] == 10
+
+
+# ── classify_llm_error ───────────────────────────────────────────
+#
+# The rule the compact paths act on: only a request the provider called too
+# long may be re-sent through the chunker. Everything here exists because a
+# blanket `"400" in str(e)` fed both refusals and overflows into the same
+# branch (rants 2026-09-17T17:55:42 and 2026-09-17T18:19:45).
+
+
+def _llm_error(status: int, body: str) -> RuntimeError:
+    """An error shaped exactly like the ones chat()/chat_stream() raise."""
+    return RuntimeError(f"LLM request failed: {status} headers={{'x': 'y'}} body={body}")
+
+
+def test_classify_content_risk_beats_the_bare_400_fallback():
+    """A content-filter refusal is a 400 — and must still NOT be read as
+    'too long'. This is the precedence that ends the self-lock."""
+    err = _llm_error(
+        400,
+        '{"error":{"message":"Content Exists Risk","type":"invalid_request_error",'
+        '"code":"invalid_request_error"}}',
+    )
+    assert classify_llm_error(err) == CONTENT_RISK
+
+
+def test_classify_413_body_buffer_overflow_is_context_too_long():
+    """413 'Failed to buffer the request body: length limit exceeded' is a
+    length problem — the chunker must be reachable for it (an unrecognised
+    overflow leaves a session growing forever, rant 2026-09-17T18:19:45)."""
+    err = _llm_error(413, "Failed to buffer the request body: length limit exceeded")
+    assert classify_llm_error(err) == CONTEXT_TOO_LONG
+
+
+@pytest.mark.parametrize("body", [
+    "This model's maximum context length is 65536 tokens",
+    "context_length_exceeded",
+    "the prompt is too long for this model",
+    "Please reduce the length of the messages",
+    "maximum context window reached",
+])
+def test_classify_overlong_wording(body):
+    """Every provider spelling of 'too long' that the chunker cares about."""
+    assert classify_llm_error(_llm_error(400, body)) == CONTEXT_TOO_LONG
+
+
+def test_classify_opaque_400_still_means_overlong():
+    """A 400 with nothing to go on keeps the old fallback — the refusal class
+    is now checked first, so only genuine unknowns reach it."""
+    assert classify_llm_error(_llm_error(400, "bad request")) == CONTEXT_TOO_LONG
+
+
+def test_classify_overlong_wording_beyond_400_and_413():
+    """The wording itself is a signal, not just the status: gateways pass a
+    context overflow through as other statuses too."""
+    assert classify_llm_error(
+        _llm_error(422, "This model's maximum context length is 65536 tokens")
+    ) == CONTEXT_TOO_LONG
+
+
+def test_classify_unrelated_error_is_other():
+    """A non-400/413 failure is neither: it must not be chunked."""
+    assert classify_llm_error(_llm_error(500, "internal server error")) == OTHER_ERROR
+    assert classify_llm_error(RuntimeError("connection reset")) == OTHER_ERROR
+
+
+# ── space_out_messages ───────────────────────────────────────────
+
+
+def test_space_out_text_spaces_every_pair():
+    assert space_out_text("abc") == "a b c"
+    assert space_out_text("") == ""
+    assert space_out_text("a") == "a"
+
+
+def test_space_out_messages_transforms_every_role_content():
+    """The poisoned fragment can sit in any message — system / user /
+    assistant / tool (a tool_result body included)."""
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "tool", "tool_call_id": "c1", "content": "out"},
+    ]
+    out = space_out_messages(messages)
+    assert [m["content"] for m in out] == ["s y s", "h i", "o k", "o u t"]
+
+
+def test_space_out_messages_preserves_pairing_and_arguments():
+    """Identifiers and tool_calls are copied untouched: an assistant message
+    must stay paired with its tool result, and function.arguments is JSON —
+    spacing every two characters would stop it parsing."""
+    messages = [{
+        "role": "assistant",
+        "content": "calling",
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "bash", "arguments": '{"cmd": "ls -la"}'},
+        }],
+    }]
+    out = space_out_messages(messages)
+    assert out[0]["tool_calls"] == messages[0]["tool_calls"]
+    assert out[0]["tool_calls"][0]["id"] == "call_1"
+    assert json.loads(out[0]["tool_calls"][0]["function"]["arguments"]) == {"cmd": "ls -la"}
+
+
+def test_space_out_messages_leaves_the_caller_untouched():
+    """The transform is a copy — the caller's history must be unaffected."""
+    messages = [{"role": "user", "content": "hi"}]
+    space_out_messages(messages)
+    assert messages == [{"role": "user", "content": "hi"}]
+
+
+def test_space_out_messages_transforms_multimodal_text_only():
+    """Multimodal parts: the text field is spaced, the image reference is not
+    (rewriting a URL would break the attachment)."""
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "ab"},
+            {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+        ],
+    }]
+    out = space_out_messages(messages)
+    assert out[0]["content"][0]["text"] == "a b"
+    assert out[0]["content"][1] == messages[0]["content"][1]
+
+
+class _RecordingHttpClient:
+    """Records every payload it is asked to send.
+
+    Snapshots each payload (deep copy): a real client serialises the body at
+    send time, so a recorder that kept the object it was handed would show
+    later mutations instead of what was sent — which is exactly how the
+    spaced retry would look like it had rewritten the first request.
+    """
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.payloads = []
+
+    async def post(self, url, headers=None, json=None):
+        self.payloads.append(copy.deepcopy(json))
+        return self.responses.pop(0)
+
+
+_CONTENT_RISK_BODY = (
+    b'{"error":{"message":"Content Exists Risk","type":"invalid_request_error"}}'
+)
+
+
+def test_chat_retries_once_with_spaced_messages_on_content_risk(monkeypatch, client):
+    """A refusal is answered by re-sending once with the text spaced out —
+    the transform the host verified by hand."""
+    import asyncio
+    good = b'{"choices": [{"message": {"content": "recovered"}}]}'
+    fake = _RecordingHttpClient([
+        _FakeResponse(400, _CONTENT_RISK_BODY),
+        _FakeResponse(200, good),
+    ])
+    client._client = fake
+    msg = asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert msg == {"content": "recovered"}
+    assert len(fake.payloads) == 2
+    assert fake.payloads[0]["messages"] == [{"role": "user", "content": "hi"}]
+    assert fake.payloads[1]["messages"] == [{"role": "user", "content": "h i"}]
+    # The retried payload is what llm.jsonl records (it is what was sent).
+    assert client.last_payload["messages"] == [{"role": "user", "content": "h i"}]
+
+
+def test_chat_content_risk_twice_reports_honestly(monkeypatch, client):
+    """Exactly one retry: a second refusal is raised with the host-facing
+    hint, and the error still classifies as content_risk so no caller can
+    hand it to the chunked compactor."""
+    import asyncio
+    fake = _RecordingHttpClient([_FakeResponse(400, _CONTENT_RISK_BODY)] * 2)
+    client._client = fake
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert len(fake.payloads) == 2  # one retry, not a loop
+    assert classify_llm_error(excinfo.value) == CONTENT_RISK
+    assert CONTENT_RISK_ERROR in str(excinfo.value)
+    assert "start a new session" in str(excinfo.value)
+
+
+def test_chat_plain_400_is_not_spaced(monkeypatch, client):
+    """Positive control: a 400 that is NOT a content refusal keeps the old
+    path — one call, messages untouched (the trigger is the marker, not
+    'any 400')."""
+    import asyncio
+    fake = _RecordingHttpClient([_FakeResponse(400, b"bad request")])
+    client._client = fake
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert len(fake.payloads) == 1
+    assert fake.payloads[0]["messages"] == [{"role": "user", "content": "hi"}]
+    assert classify_llm_error(excinfo.value) == CONTEXT_TOO_LONG
+    assert CONTENT_RISK_HINT not in str(excinfo.value)
