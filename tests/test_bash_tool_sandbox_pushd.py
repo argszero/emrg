@@ -221,6 +221,16 @@ def test_the_conservative_refusals_are_pinned_with_their_ground_truth():
     assert _verdict(f"pushd -n {spelled(OUTSIDE)} && echo x > f.txt") is False
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "the ground truth needs a POSIX shell: the bash on the Windows runner is Git Bash, "
+        "which reads `pushd C:\\...` as an error (measured, exit 1 on run 35336751754), so it "
+        "cannot witness the semantics this arm is about. The corpus above is asserted on BOTH "
+        "platforms - that is where the Windows leg's value is - and this arm is the instrument "
+        "for a POSIX-shell claim, so it is gated to the platform that has one."
+    ),
+)
 def test_the_two_new_spellings_really_move_the_shell(tmp_path):
     """Ground truth for the two escapes, in a directory this test builds.
 
