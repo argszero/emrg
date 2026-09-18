@@ -21,6 +21,8 @@ Windows resolves both spellings to the same path.
 """
 
 import os
+import shutil
+import subprocess
 import tempfile
 
 import pytest
@@ -453,4 +455,144 @@ def test_a_pushd_form_with_no_placeable_destination_keeps_the_start_directory():
     assert _cwd_at_write_site(
         "popd && echo x > ../back.txt", WORKDIR, "../back.txt"
     ) == os.path.realpath(WORKDIR)
+
+
+# ---------------------------------------------------------------------------
+# The prefix spelling of the move (issue #1385)
+#
+# `_cwd_left_workspace` reads a command through `_runs_as_a_command`, which
+# knows `_COMMAND_WRAPPERS` — so it has read `builtin cd sub` as a move since
+# #1379. `_move_statement`, the write-site walk's vocabulary, read the verb only
+# as the statement's literal first word, so the two walks disagreed about a *prefixed* move: the
+# cwd walk saw a move this one did not, the join base stayed the workspace root,
+# and a write that really lands beside a subdirectory was refused. Measured in
+# `/bin/sh` (`ws/sub` present, file placement read back off disk): `builtin cd
+# sub && echo x > ../f` and `command cd sub && echo x > ../f` both create
+# `ws/f` — inside — and both were BLOCK, naming `ws/../f`.
+#
+# The vocabulary is the *current-shell* prefixes only. `env`, `sudo`, `timeout`
+# and `xargs` hand the word to `execve`, and a `cd` program can exist (macOS
+# ships `/usr/bin/cd`): measured, `env cd sub && echo x > ../f` leaves the shell
+# in the workspace, runs that program in a child, and writes *outside* the
+# workspace. Reading `env` as transparent flips that row to ALLOW while the file
+# really lands outside — the mutation arm that fixed this list's size.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prefix", ["builtin ", "command ", "builtin command "])
+def test_a_move_behind_a_current_shell_prefix_moves_the_write_site(prefix):
+    """`builtin cd` / `command cd` are `cd`: the prefix consumes one word.
+
+    The rows are the issue's two, plus the doubled prefix — `builtin command cd`
+    is an invocation of the builtin `command`, so it moves for the same reason.
+    Each landing place is the one measured in the shell: `../back.txt` after a
+    move into `sub` is `<ws>/back.txt`.
+    """
+    sub = os.path.realpath(os.path.join(WORKDIR, "sub"))
+    move = f"{prefix}cd sub && echo x > ../back.txt"
+    assert _verdict(move) is True, prefix
+    assert _cwd_at_write_site(move, WORKDIR, "../back.txt") == sub, prefix
+    assert _verdict(f"{prefix}cd {spelled(sub)} && echo x > ../in2.txt") is True, prefix
+    # The allow side is not a blanket refusal of the prefix: a climb out from
+    # the write site is still measured from where the shell really is.
+    assert _verdict(f"{prefix}cd sub && echo x > ../../worse.txt") is False, prefix
+
+
+def test_a_prefix_that_hands_the_word_to_execve_keeps_the_start_directory():
+    """The neighbours this vocabulary must not swallow, each pinned.
+
+    Every row's move verb would have to be an *executable* for the prefix to run
+    it, and `cd` is a shell builtin — where a `cd` program exists (macOS), the
+    prefix runs it in a child and the shell that sets the redirect up stays
+    where it was. So the climb out of the workspace is the correct refusal, and
+    the helper must keep the start directory rather than name a directory the
+    shell never entered.
+    """
+    real_workdir = os.path.realpath(WORKDIR)
+    for prefix in ("env ", "sudo ", "timeout 5 ", "xargs ", "nohup ", "doas "):
+        move = f"{prefix}cd sub && echo x > ../back.txt"
+        assert _verdict(move) is False, prefix
+        assert _cwd_at_write_site(move, WORKDIR, "../back.txt") == real_workdir, prefix
+
+
+def test_the_prefix_rows_against_the_move_out_are_unchanged():
+    """The other half of issue #1385's table: the refusals that must survive.
+
+    A prefixed move *out* of the workspace is refused on both spellings — the
+    relative target through the cwd walk, the absolute one through the
+    containment test — so the new vocabulary cannot be read as "a prefix
+    disarms the boundary".
+    """
+    for prefix in ("builtin ", "command "):
+        assert _verdict(f"{prefix}cd {spelled(OUTSIDE)} && echo x > out.txt") is False
+        assert (
+            _verdict(
+                f"{prefix}cd {spelled(OUTSIDE)} && echo x > {spelled(os.path.join(OUTSIDE, 'out.txt'))}"
+            )
+            is False
+        )
+
+
+def test_the_shapes_the_prefix_rule_still_does_not_read_are_pinned():
+    """Two residuals of this reading, both false blocks, both deliberate.
+
+    * A **flag between the prefix and the verb** (`command -p cd sub`) is not
+      read: the rule consumes exactly the one word after the prefix, and
+      enumerating which flags a prefix takes is the #461 class of hole this
+      guard refuses to open. Measured in `/bin/sh`: the file lands inside, so
+      the refusal is friction — the caller's work-around is the unprefixed
+      spelling.
+    * An **`eval` payload** is not read: `eval 'cd sub'` reaches this walk as one
+      opaque token, and the unquoted spelling is refused a statement earlier by
+      `_cwd_left_workspace`, which parses every `eval` argument as its own
+      command. Reading the unquoted spelling here would fix one spelling of the
+      class and leave the other, which is exactly the enumeration trap.
+    """
+    assert _verdict("command -p cd sub && echo x > ../back.txt") is False
+    assert _verdict("eval cd sub && echo x > ../back.txt") is False
+    assert _verdict("eval 'cd sub' && echo x > ../back.txt") is False
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "the ground truth needs a POSIX shell with `builtin` (bash): a verdict "
+        "mismatch alone is not a bug, and this arm is the instrument that says "
+        "where the file really lands, so it is gated to the platform that has one."
+    ),
+)
+def test_the_prefix_verdicts_match_where_the_file_really_lands(tmp_path):
+    """Ground truth for both sides of the vocabulary, in a tree this test builds.
+
+    Two commands with the *same* relative target and different prefixes:
+    `builtin cd sub && echo x > ../f` moves the shell (the file lands inside,
+    `<work>/f`), and `env cd sub && echo x > ../f` does not (the file lands
+    beside the workspace, or — on a host with no `cd` program — `env` fails and
+    nothing is written; either way it is never inside). The temp directory is
+    the test's own, never a host working directory.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available for the ground-truth run")
+    work = tmp_path / "work"
+    (work / "sub").mkdir(parents=True)
+    subprocess.run(
+        [bash, "-c", "builtin cd sub && echo x > ../f_builtin.txt"],
+        cwd=work,
+        capture_output=True,
+        check=True,
+    )
+    assert (work / "f_builtin.txt").exists(), "the shell did not write inside"
+    subprocess.run(
+        [bash, "-c", "env cd sub && echo x > ../f_env.txt"],
+        cwd=work,
+        capture_output=True,
+        check=False,
+    )
+    assert not (work / "f_env.txt").exists(), (
+        "the shell moved behind `env`, so this arm cannot witness the difference"
+    )
+    # The two guard verdicts the arm exists to justify, asked of the same text.
+    assert _verdict("builtin cd sub && echo x > ../f_builtin.txt") is True
+    assert _verdict("env cd sub && echo x > ../f_env.txt") is False
 
