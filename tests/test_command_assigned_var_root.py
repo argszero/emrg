@@ -112,6 +112,40 @@ SCRATCH = ".emrg/sessions/emrg-evolution-emrg-task/tmp"
 OUTSIDE = os.path.join(
     os.path.expanduser("~"), "Documents", "emrg-var-root-outside")
 
+#: The host's real write roots, read before `_pinned_write_roots` replaces them.
+#: The membership premise below is about the *host's* layout, so it must not be
+#: answered by the pin that makes the rest of this file tree-independent.
+_REAL_WRITE_ROOTS = (*_temp_write_roots(), *_trusted_write_zones())
+
+
+@pytest.fixture(autouse=True)
+def _pinned_write_roots(monkeypatch):
+    """Pin the guard's write roots, so this file's verdict is about the tree.
+
+    The corpus spells its workspace as a Windows path (`C:\\Users\\x\\repo`) and
+    spells its targets the same way; on a POSIX arm `os.path.realpath` then
+    resolves *both* sides under the cwd. A write root that contains the cwd
+    therefore swallows the target, and the guard allows the write by its own rule
+    — correctly, because the resolved file really is inside a root it permits.
+
+    That makes the file's verdict depend on where the tree was materialised, which
+    is not a property of the tree. Measured before this pin: 59 passed and
+    **1 failed** (`test_a_drive_rooted_value_is_placed_on_a_windows_shell`) for the
+    identical tree materialised under `tempfile.gettempdir()`. That is not
+    hypothetical — `scripts/check-merge-plan-suite.py` builds the tree a merge
+    would land under exactly that root, so a plan could read FAILED while the
+    product was correct.
+
+    Pinning removes the ambient variable rather than the claim: what this file
+    measures is the assignment-resolution rule, and the temp/trusted-root policy
+    has its own tests. Both roots are pinned, not just the temp one, because the
+    trusted zone is HOME-dependent the same way. The one question that *is* about
+    the host's layout — whether `OUTSIDE` is covered by a real root — reads
+    `_REAL_WRITE_ROOTS` instead.
+    """
+    monkeypatch.setattr(_bash_tool, "_temp_write_roots", lambda: set(), raising=True)
+    monkeypatch.setattr(_bash_tool, "_trusted_write_zones", lambda: set(), raising=True)
+
 
 def spelled(path: str) -> str:
     """The path as a command line spells it (forward slashes).
@@ -228,7 +262,9 @@ def test_the_outside_directory_is_taken_as_moved_out() -> None:
     """
     assert _is_absolute_path(spelled(OUTSIDE))
     assert not _is_within(OUTSIDE, WORKSPACE)
-    roots = [r for group in (_temp_write_roots(), _trusted_write_zones()) for r in group]
+    # The *host's* roots, not the pinned ones: this premise is exactly the
+    # question `_pinned_write_roots` must not answer for it.
+    roots = list(_REAL_WRITE_ROOTS)
     assert not any(_is_within(OUTSIDE, r) or os.path.realpath(r) == os.path.realpath(OUTSIDE)
                    for r in roots), f"{OUTSIDE!r} is inside an allowed write root: {roots}"
     cmd = f"cd {spelled(OUTSIDE)} && T={SCRATCH} && cat > \"$T/f\""
