@@ -39,6 +39,7 @@ import tempfile
 
 import pytest
 
+from emrg.tools import bash_tool as bt
 from emrg.tools.bash_tool import _check_sandbox
 
 MODE = "workspace-write"
@@ -82,6 +83,39 @@ def _reason(cmd: str, workdir: str | None) -> str | None:
 
 def _allowed(cmd: str, workdir: str | None) -> bool:
     return _check_sandbox(cmd, MODE, workdir)[0]
+
+
+@pytest.fixture(autouse=True)
+def _pinned_write_roots(monkeypatch):
+    """Pin the guard's write roots, so this file's verdict is about the tree.
+
+    The rule pinned here (issue #1353) is a containment question — does the
+    resolved target stay under the directory the command runs in — but the
+    allowance it is measured against is the union of that directory with
+    `_trusted_write_zones()` and `_temp_write_roots()`. The second of those is the
+    OS temp area, so when the checkout itself is materialised *under*
+    `tempfile.gettempdir()` a climb out of `<scratch>/a/b/ws` lands inside a root
+    the guard trusts, and the guard allows the write by its own rule — correctly,
+    because the resolved file really is inside a zone it permits.
+
+    That makes the file's verdict depend on where the tree was materialised, which
+    is not a property of the tree. Measured before this pin: 23 passed in the
+    repository and **9 failed** (3 rows × 3 classes) for the identical tree
+    materialised under `tempfile.gettempdir()`. That is not hypothetical —
+    `scripts/check-merge-plan-suite.py` builds the tree a merge would land under
+    exactly that root, so every plan on this master read FAILED while the product
+    was correct.
+
+    The scratch living under `tests/` (rather than under `tmp_path`, see the
+    module docstring) is what keeps the *default* materialisation out of the temp
+    root; it does not help once the checkout is there. Pinning removes the ambient
+    variable rather than the claim: what this file measures is the resolved-target
+    containment rule, and the temp/trusted-root policy has its own tests. Both
+    roots are pinned, not just the temp one, because the trusted zone is
+    HOME-dependent the same way.
+    """
+    monkeypatch.setattr(bt, "_temp_write_roots", lambda: set(), raising=True)
+    monkeypatch.setattr(bt, "_trusted_write_zones", lambda: set(), raising=True)
 
 
 @pytest.fixture
@@ -204,3 +238,37 @@ class TestBothReadingsRefuseIt:
             assert _allowed(cmd, None) is True, _reason(cmd, None)
         finally:
             os.chdir(cwd)
+
+
+def test_the_write_roots_are_pinned_for_this_file():
+    """A silent removal of the pin must fail here, not pass everywhere else."""
+    assert bt._temp_write_roots() == set()
+    assert bt._trusted_write_zones() == set()
+
+
+def test_a_write_root_containing_the_tree_would_swallow_the_rows(monkeypatch):
+    """The mechanism the pin defends against, driven with the root made explicit.
+
+    Stated as a measurement rather than as a comment, so that a later change which
+    makes the containment verdict independent of the write roots fails here
+    instead of quietly retiring the pin.
+    """
+    ambient = tempfile.mkdtemp(dir=_TESTS_DIR, prefix="emrg-relative-escape-")
+    try:
+        ws = os.path.join(ambient, "a", "b", "ws")
+        os.makedirs(ws)
+        cmd, _created = _ESCAPE_ROWS[2]
+        assert _allowed(cmd, ws) is False, "the pinned reading"
+        # A root that contains the tree is what flips this verdict: the climb now
+        # resolves inside a zone the guard trusts, which is what a checkout under
+        # the OS temp root does to this file's rows for real.
+        monkeypatch.setattr(
+            bt, "_temp_write_roots", lambda: {os.path.realpath(_TESTS_DIR)}
+        )
+        assert _allowed(cmd, ws) is True, (
+            "a write root containing the tree is what flips this verdict, so the "
+            "pin is what keeps these rows about the rule rather than about the "
+            "directory the tree happens to sit in"
+        )
+    finally:
+        shutil.rmtree(ambient, ignore_errors=True)
