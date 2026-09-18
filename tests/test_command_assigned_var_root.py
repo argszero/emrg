@@ -61,12 +61,13 @@ reason — the two host spellings a verdict can accidentally be made of:
     premise (``test_the_outside_directory_is_taken_as_moved_out``); the same
     condition replays locally under ``TMPDIR=/tmp``.
   - the absolute row interpolated ``WORKSPACE`` as the host spells it, so on
-    Windows it carried a drive letter and a backslash: ``:`` is outside the value
-    charset, and a backslash is shlex's escape character (issue #1261), which is
-    why a whole row can be decidable on one platform and refused on another.
-    Every path this file composes now goes through ``spelled``, and the absolute
-    case asserts itself where the charset admits its spelling — skipping, with a
-    measured reason, where it does not.
+    Windows it carried a drive letter and a backslash: ``:`` was outside the value
+    charset, and a backslash is an escape character to the POSIX tokenizer (issue
+    #1261), which is why a whole row can be decidable on one platform and refused
+    on another. Every path this file composes now goes through ``spelled``, and
+    the value charset has since been widened to the drive position (issue #1354),
+    so the absolute case no longer picks its platform — it asserts the same
+    verdict everywhere, and it is the case that now holds the Windows half.
 """
 
 from __future__ import annotations
@@ -76,6 +77,7 @@ from pathlib import Path
 
 import pytest
 
+from emrg.tools import bash_tool as _bash_tool
 from emrg.tools.bash_tool import (
     _assigned_value_is_decidable,
     _check_sandbox,
@@ -132,9 +134,11 @@ MAY_RESOLVE = [
 ]
 # An *absolute* resolvable value is asserted separately
 # (`test_an_absolute_value_resolves_where_the_charset_admits_the_spelling`): the
-# only absolute spelling the value charset admits is a POSIX one, so a row here
-# would have made the matrix platform-dependent in the other direction — it is
-# the row that failed on the windows leg.
+# host's own spelling of one is not a word this matrix can write down — a row
+# interpolating `WORKSPACE` made the file platform-dependent, and it is the row
+# that failed on the windows leg. It is decidable on both hosts now (issue #1354,
+# the value charset admits a drive letter), which is what that separate case
+# asserts rather than a skip.
 
 # (command, why the shell does not put the write where the path spells it)
 MUST_STAY_REFUSED = [
@@ -252,9 +256,12 @@ def test_a_move_spelled_by_an_assigned_variable_is_placed() -> None:
     A walk that returned the directory while the loop below ignored it would
     satisfy the second alone for the wrong reason.
 
-    The deciding value is an absolute spelling, which the value charset admits on
-    POSIX only (issue #1354), so this skips where the value cannot be decided —
-    with the cause held on every host by `test_why_the_absolute_case_is_posix_only`.
+    The deciding value is an absolute spelling. That used to make this case
+    POSIX-only — the value charset had no `:` in it (issue #1354) — and it does not
+    any more: the class admits a drive letter, so both hosts decide the value and
+    the skip below is kept only for a workspace or home spelled outside that class.
+    The class itself is held on every host by
+    `test_the_value_charset_admits_a_drive_rooted_absolute_value`.
     """
     cmd = f'D={spelled(OUTSIDE)} && cd "$D" && T={SCRATCH} && cat > "$T/f"'
     if not _assigned_value_is_decidable(spelled(OUTSIDE)):
@@ -288,19 +295,22 @@ def test_the_move_and_the_target_are_resolved_by_one_rule() -> None:
 
 
 def test_an_absolute_value_resolves_where_the_charset_admits_the_spelling() -> None:
-    """The absolute half of the matrix, on the platform whose spelling is decidable.
+    """The absolute half of the matrix, asserted on the host's own spelling.
 
-    The value charset (`_ASSIGNED_LITERAL_VALUE_RE`) is POSIX-shaped: it has no
-    `:` in it, so `T=D:/a/ws && …` is a value the rule will not use however
-    absolute it plainly is, and a backslash spelling never reaches the guard as
-    one word at all (issue #1261). On Windows, #1316's false block therefore
-    survives for absolute values — a limitation of this rule, not of this test,
-    and recorded as an issue rather than papered over.
+    This case used to skip on Windows, and the skip was a measurement rather than
+    a convenience: the value charset was POSIX-shaped, so a drive-rooted value was
+    refused as undecidable, and a backslash spelling never reaches the guard as
+    one word at all (issue #1261). The charset now admits the drive position
+    (issue #1354), so the cause the skip was tied to is gone — the skip cannot
+    fire on either CI leg, and the Windows verdict is asserted instead of stood in
+    for.
 
-    The skip is tied to its cause, not to the platform: it disappears by itself
-    if the charset ever admits a drive letter, and the case then asserts the
-    Windows verdict too. `test_why_the_absolute_case_is_posix_only` holds the
-    cause on every platform, so the skip cannot outlive it silently.
+    The branch stays, because it is still the honest answer for a host whose own
+    workspace is spelled in a way this rule will not use (a path with a space in
+    it, which this file interpolates unquoted). It is no longer what carries the
+    platform: the class itself is held on every host by
+    `test_the_value_charset_admits_a_drive_rooted_absolute_value`, so a future
+    narrowing of that class fails there rather than silently skipping here.
     """
     cmd = f'T={spelled(WORKSPACE)}/{SCRATCH} && cat > "$T/c.md"'
     if not _assigned_value_is_decidable(f"{spelled(WORKSPACE)}/{SCRATCH}"):
@@ -309,10 +319,85 @@ def test_an_absolute_value_resolves_where_the_charset_admits_the_spelling() -> N
     assert allowed, (cmd, reason)
 
 
-def test_why_the_absolute_case_is_posix_only() -> None:
-    """The skip's cause, as a predicate that measures the same on every host."""
+def test_the_value_charset_admits_a_drive_rooted_absolute_value() -> None:
+    """The class the rule will place, as a predicate that measures the same on every host.
+
+    This is where the platform stops mattering. `D:/ws` was refused before issue
+    #1354 and is placed now, so the widening is held on a POSIX host too — without
+    it the change would be provable only on the leg that reported it, which is how
+    a one-platform fix gets to look green while being untested.
+
+    The four refusals around it are the boundary the widening must not move:
+
+      - `D:ws` — no separator after the colon. `ntpath.isabs` says False, so this
+        is not an absolute path on any host, and resolving it would be the guess
+        the charset exists to avoid;
+      - `D:\\ws` — the backslash spelling, refused on both readings but for two
+        reasons: on a POSIX shell shlex eats the backslash and the word that
+        reaches the guard is `D:ws` above (issue #1261), while under a Windows
+        shell the token arrives intact (`test_windows_path_tokens.py` holds that)
+        and the class refuses it for the separator. Measured under a forced
+        Windows shell: `_assigned_value_is_decidable("C:\\\\Users\\\\x")` is False
+        and the command is BLOCK. Widening the class to a *separator* is a
+        different change from widening it to a drive letter, and this one does
+        not claim to make it;
+      - `a:b` — a colon that is not in the drive position, i.e. a POSIX filename;
+      - `D:/ws/../x` — a `..` segment. The exclusion is asserted on the widened
+        class rather than assumed to survive it: "absolute" is what the class now
+        admits, and a `..` value is the one literal that can still leave the
+        workspace after the value is placed.
+
+    Measured, and the reason this test is not optional: taking the drive half back
+    off the disjunction fails **four** assertions, the four drive ones of this file
+    — the class assertion, the `D:/ws/.emrg/tmp` row of the value matrix, the
+    resolution assertion in
+    `test_the_resolved_path_is_the_one_the_shell_would_use`, and the forced-Windows
+    case below — and nothing anywhere else in the suite (4 failed / 3098 passed).
+    The corpus would not notice the fix reverting; these rows are the only thing
+    holding it.
+    """
     assert _assigned_value_is_decidable("/tmp/emrg-ws") is True
-    assert _assigned_value_is_decidable("D:/emrg-ws") is False
+    assert _assigned_value_is_decidable("D:/emrg-ws") is True
+    assert _assigned_value_is_decidable("D:ws") is False
+    assert _assigned_value_is_decidable("D:\\ws") is False
+    assert _assigned_value_is_decidable("a:b") is False
+    assert _assigned_value_is_decidable("D:/ws/../x") is False
+
+
+def test_a_drive_rooted_value_is_placed_on_a_windows_shell(monkeypatch) -> None:
+    """Issue #1354's verdict, measured on every host instead of only on Windows.
+
+    The end-to-end half of the widening is the one that cannot be reasoned about
+    locally: the value has to reach the resolver, resolve to a path, and then be
+    judged by the containment rule — three steps, and a host that only ever runs
+    the POSIX leg proves none of them. The platform state is a module constant
+    (`_WINDOWS_SHELL`), so it can be forced, and this is the case that forces it:
+
+      - the same command is **ALLOW** under a Windows shell, where before the
+        widening it was BLOCK with "whose root is a shell variable neither the
+        environment nor the command's own assignments can resolve";
+      - the identical shape rooted *outside* the workspace is still BLOCK, and
+        blocked with **"outside workspace"** — the reason is the assertion that
+        matters, because "unresolvable" would mean the value never resolved at
+        all and the allowance above was reached some other way. Resolution is not
+        a permission: the path is handed to the containment rule, and the rule
+        refuses it.
+
+    The workspace is spelled as a Windows path (a name, not a directory that
+    exists — `_check_sandbox` only `realpath`s it and opens nothing), and the
+    value keeps the forward slash, which is the spelling the guard can place:
+    the backslash one is refused by the same charset for the *separator*, not for
+    the drive (issue #1354's second half, measured, and not this change's).
+    """
+    monkeypatch.setattr(_bash_tool, "_WINDOWS_SHELL", True, raising=True)
+    windows_ws = r"C:\Users\x\repo"
+    inside = 'T=C:/Users/x/repo/.emrg/tmp && cat > "$T/c.md"'
+    outside = 'T=C:/Users/x/other && cat > "$T/c.md"'
+    allowed, _reason, _enforcement = _check_sandbox(inside, WW, windows_ws)
+    assert allowed, (inside, _reason)
+    blocked, reason, _enforcement = _check_sandbox(outside, WW, windows_ws)
+    assert blocked is False, (outside, reason)
+    assert "outside workspace" in (reason or ""), reason
 
 
 def test_the_inline_prefix_and_the_earlier_statement_differ() -> None:
@@ -347,6 +432,12 @@ def test_the_resolved_path_is_the_one_the_shell_would_use() -> None:
     # The braced spelling is the same root, and must resolve to the same path.
     assert _resolve_from_command_assignment(
         'T=./inner && cat > "${T}/f"', "${T}/f") == "./inner/f"
+    # A drive-rooted value is placed by the same rule, and issue #1354 is about
+    # exactly this word: a charset that admits the value and a resolver that still
+    # answers `None` would satisfy the predicate test while leaving the write
+    # refused, so the resolved string is asserted here and not only the class.
+    assert _resolve_from_command_assignment(
+        'T=D:/a/ws && cat > "$T/f"', "$T/f") == "D:/a/ws/f"
 
 
 def test_a_resolved_absolute_value_is_still_judged_by_the_tier() -> None:
@@ -406,11 +497,15 @@ def test_a_body_that_cannot_be_blanked_is_not_read_as_statements() -> None:
 
 # The values the rule is willing to use, split by the boundary the docstring
 # states rather than by what was easy to write down.
-DECIDABLE_VALUES = [".emrg/tmp", "./inner", "/tmp/x", "/etc", "inner/sub"]
+DECIDABLE_VALUES = [
+    ".emrg/tmp", "./inner", "/tmp/x", "/etc", "inner/sub",
+    "D:/ws/.emrg/tmp",      # the drive-rooted absolute spelling (issue #1354)
+]
 UNDECIDABLE_VALUES = [
     "",                     # an empty value puts an absolute target at `/f`
     "../outside",           # the relative branch's assumption cannot survive this
     "a/../b",               # the same, in the middle of the value
+    "D:/ws/../x",           # …and a drive root does not buy the `..` an exemption
     "$HOME",                # the value the *shell* would need to expand first
     "~/x",                  # …and the tilde spelling of the same
     "$(mktemp -d)",         # a value built by running something
@@ -418,6 +513,8 @@ UNDECIDABLE_VALUES = [
     "a b",                  # whitespace needs quoting to survive the tokenizer
     "*",                    # a glob is not a path fragment this rule can place
     "a\\b",                 # a backslash is a separator on Windows, poison on POSIX
+    "D:ws",                 # a drive letter with no separator: absolute nowhere
+    "a:b",                  # a `:` that is not in the drive position
 ]
 
 
@@ -436,9 +533,10 @@ def test_every_other_value_is_refused_rather_than_guessed(value: str) -> None:
     that assumption cannot survive.
 
     The **charset** half is held here only, and the reason is a measurement: the
-    mutation arm that drops it (`if not _ASSIGNED_LITERAL_VALUE_RE.match(value)`
-    → `if False`) is *survived* by the end-to-end corpus, because the shapes it
-    would let through are refused before or after it — `_resolve_from_command_assignment_…` bails
+    mutation arm that drops it (`if not (_ASSIGNED_LITERAL_VALUE_RE.match(value)
+    or _ASSIGNED_DRIVE_ROOTED_VALUE_RE.match(value))` → `if False`) is *survived*
+    by the end-to-end corpus, because the shapes it would let through are refused
+    before or after it — `_resolve_from_command_assignment` bails
     out on a `(` or a backtick before the value is ever read, and the caller
     re-checks the substituted string for a variable root that is still there, so
     `$HOME` cannot slip past either. It is kept anyway, and this is where that
@@ -446,6 +544,20 @@ def test_every_other_value_is_refused_rather_than_guessed(value: str) -> None:
     fragment and nothing else" — would be wider than what it can place, and a
     future cycle loosening it should have to change an assertion on purpose
     rather than by editing one line of the guard.
+
+    The two drive rows are the exception the arm cannot reach, which is why they
+    are here rather than in a case of their own: `D:ws` and `a:b` are words the
+    *widened* class is one character away from admitting, and the disjunction is
+    the line that stands between them and resolution. This test is the only thing
+    that fails if that line is ever claimed by the wrong branch (`a:b` resolving
+    as a drive, say) — the end-to-end corpus has no such command.
+
+    Measured, rather than argued: drop the `/` the drive form requires and the
+    whole suite fails **three** assertions, all three of them rows here
+    (`D:ws`, `a:b`, and the class case) — 3098 passed / 3 failed, nothing else in
+    the corpus notices. The same shape holds in the other direction: taking the
+    drive half off the disjunction above fails four assertions, again all of them
+    in this file (4 failed / 3098 passed).
     """
     assert not _assigned_value_is_decidable(value)
 
