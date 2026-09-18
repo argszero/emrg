@@ -14,6 +14,7 @@ import tempfile
 
 import pytest
 
+from emrg.tools import bash_tool
 from emrg.tools.bash_tool import (
     BashTool,
     SANDBOX_MODES,
@@ -2823,3 +2824,555 @@ def test_the_generated_corpus_has_no_unnamed_write_and_no_plain_over_block():
         f"only {len(writes)} corpus row(s) really write a file, so an unnamed write "
         "could not be observed even if one existed - re-measure the corpus"
     )
+
+
+# ── issue #1398: the everyday writers name what they write ────────────────
+#
+# Measured on master `6667fba7`, `emrg/tools/bash_tool.py` sha256[:16]
+# `53c6faef76cde822`, in one geometry whose target lay outside every allowed root:
+# `touch`, `mkdir`, `ln -s`, `install -m`, `dd of=`, `chmod 777` and `chown root`
+# were ALLOWED at **both** tiers with an *empty* target list, while
+# `cat > <outside>/f` and `rm -rf <outside>` were refused. The walk's verb list was
+# short by the plain everyday spellings, and an empty target list is allowed by
+# construction — the loop that judges targets never ran. Driven end to end through
+# the tool in the same geometry, `touch` and `mkdir` really created their file and
+# their directory, which is why an ALLOW here *is* the write (`_check_sandbox`'s
+# own contract: static scan only, no OS-level boundary).
+
+# Outside every allowed root (workspace, OS temp root, the evolution data dir) and
+# used only as an argument to the pure predicate — never executed and never opened.
+OUTSIDE_TARGET = "/outside/emrg"
+
+# Residuals of the same class, measured *after* the verb list above was written —
+# on its own branch, not on master. In the same geometry, `mkfifo <o>/f`,
+# `mknod <o>/n p`, `link x <o>/l` and `link <o>/a <o>/b` were still ALLOW at both
+# tiers with an empty target list, i.e. one verb list short of covering the class
+# the list exists for. `lk`/`link`/`mknod` are not exotic: `link` is `ln` without
+# options and `mknod` makes a fifo as readily as a device node.
+#
+# The `-t` spellings below are the other half of the same family, and their ground
+# truth cannot be measured on this host: BSD `cp`/`ln` have no `-t` at all (macOS).
+# Measured on GNU instead (`debian:bookworm-slim`, one directory outside every
+# allowed root, the delivered name read back off disk): `cp x -t<dir>`,
+# `mv x -t<dir>`, `install -m 644 x -t<dir>`, `install -Dt <dir> x`,
+# `cp -rt <dir> x` and `ln -s x -t<dir>` all exit 0 with the file in `<dir>` — while
+# only the bare `-t <dir>` token was read, so the other five named no target and
+# both tiers allowed them. The last two rows are the controls in the other
+# direction: `-T` is a flag and `-S` takes a *suffix*, so neither may be read as a
+# `-t` — a scan that mistook them would name the source and block the wrong file.
+#
+# (row, command, every path the walk must name for it)
+EVERYDAY_WRITES = (
+    ("touch", f"touch {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
+    ("touch -d", f"touch -d 2020-01-01 {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
+    ("touch -r", f"touch -r /etc/passwd {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
+    ("mkdir", f"mkdir {OUTSIDE_TARGET}/d", (f"{OUTSIDE_TARGET}/d",)),
+    ("mkdir -m", f"mkdir -m 755 {OUTSIDE_TARGET}/d", (f"{OUTSIDE_TARGET}/d",)),
+    ("mkfifo", f"mkfifo {OUTSIDE_TARGET}/f", (f"{OUTSIDE_TARGET}/f",)),
+    ("mkfifo -m", f"mkfifo -m 644 {OUTSIDE_TARGET}/f", (f"{OUTSIDE_TARGET}/f",)),
+    ("mkfifo two", f"mkfifo {OUTSIDE_TARGET}/f1 {OUTSIDE_TARGET}/f2",
+     (f"{OUTSIDE_TARGET}/f1", f"{OUTSIDE_TARGET}/f2")),
+    # Only the node is created: naming `p` would block a token that is not a path.
+    ("mknod", f"mknod {OUTSIDE_TARGET}/n p", (f"{OUTSIDE_TARGET}/n",)),
+    ("mknod -m", f"mknod -m 644 {OUTSIDE_TARGET}/n p", (f"{OUTSIDE_TARGET}/n",)),
+    ("mknod device", f"mknod {OUTSIDE_TARGET}/n b 1 3", (f"{OUTSIDE_TARGET}/n",)),
+    ("ln -s", f"ln -s x {OUTSIDE_TARGET}/l", (f"{OUTSIDE_TARGET}/l",)),
+    ("ln -t", f"ln -t {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("ln --target-directory=", f"ln --target-directory={OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("ln -t attached", f"ln -s x -t{OUTSIDE_TARGET}", (OUTSIDE_TARGET,)),
+    ("link", f"link x {OUTSIDE_TARGET}/l", (f"{OUTSIDE_TARGET}/l",)),
+    ("cp", f"cp x {OUTSIDE_TARGET}/dst", (f"{OUTSIDE_TARGET}/dst",)),
+    ("cp -s", f"cp -s x {OUTSIDE_TARGET}/l", (f"{OUTSIDE_TARGET}/l",)),
+    ("cp -t", f"cp -t {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("cp -t attached", f"cp x -t{OUTSIDE_TARGET}", (OUTSIDE_TARGET,)),
+    ("cp -rt spaced", f"cp -rt {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("cp -rt attached", f"cp -rt{OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("cp -T is a flag", f"cp -T x {OUTSIDE_TARGET}/dst", (f"{OUTSIDE_TARGET}/dst",)),
+    ("cp -St is a suffix", f"cp -St x {OUTSIDE_TARGET}/dst", (f"{OUTSIDE_TARGET}/dst",)),
+    ("mv", f"mv x {OUTSIDE_TARGET}/m", (f"{OUTSIDE_TARGET}/m",)),
+    ("mv -t", f"mv -t {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("mv -t attached", f"mv x -t{OUTSIDE_TARGET}", (OUTSIDE_TARGET,)),
+    ("install -m", f"install -m 644 x {OUTSIDE_TARGET}/i", (f"{OUTSIDE_TARGET}/i",)),
+    ("install -t attached", f"install -m 644 x -t{OUTSIDE_TARGET}", (OUTSIDE_TARGET,)),
+    ("install -Dt spaced", f"install -Dt {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("install -Dt attached", f"install -Dt{OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("install -d", f"install -d {OUTSIDE_TARGET}/d1", (f"{OUTSIDE_TARGET}/d1",)),
+    ("install -d two", f"install -d {OUTSIDE_TARGET}/d1 {OUTSIDE_TARGET}/d2",
+     (f"{OUTSIDE_TARGET}/d1", f"{OUTSIDE_TARGET}/d2")),
+    ("dd of= first", f"dd of={OUTSIDE_TARGET}/d if=/dev/zero", (f"{OUTSIDE_TARGET}/d",)),
+    ("dd of= last", f"dd if=/dev/zero of={OUTSIDE_TARGET}/d bs=1", (f"{OUTSIDE_TARGET}/d",)),
+    ("chmod octal", f"chmod 777 {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
+    ("chmod -R", f"chmod -R +x {OUTSIDE_TARGET}/d", (f"{OUTSIDE_TARGET}/d",)),
+    ("chown", f"chown root {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
+    ("chown -h", f"chown -h root {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
+    ("chgrp", f"chgrp staff {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
+    ("chmod --reference=", f"chmod --reference=/etc/passwd {OUTSIDE_TARGET}/t",
+     (f"{OUTSIDE_TARGET}/t",)),
+    ("sh -c", f"sh -c 'touch {OUTSIDE_TARGET}/t'", (f"{OUTSIDE_TARGET}/t",)),
+    ("bash -c", f"bash -c 'mkdir {OUTSIDE_TARGET}/d'", (f"{OUTSIDE_TARGET}/d",)),
+    ("env prefix", f"env touch {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
+)
+
+_WRITE_ROW_IDS = [row for row, _c, _n in EVERYDAY_WRITES]
+
+
+@pytest.mark.parametrize("row,cmd,named", EVERYDAY_WRITES, ids=_WRITE_ROW_IDS)
+def test_the_walk_names_the_file_an_everyday_writer_writes(row, cmd, named):
+    """The target list, so the block can name it and not just say no.
+
+    A verb that names no target is not refused by either tier, which is how this
+    class was reachable at all; a verb that names the *wrong* token (a mode, an
+    owner, the `dd` *read* side) blocks on a path the command never touches, which
+    is the neighbouring defect this family keeps finding.
+    """
+    assert tuple(_extract_write_targets(cmd)) == named
+
+
+@pytest.mark.parametrize("row,cmd,named", EVERYDAY_WRITES, ids=_WRITE_ROW_IDS)
+def test_both_tiers_refuse_an_everyday_writer_that_leaves_the_workspace(row, cmd, named):
+    """Both tiers, and the refusal names the file rather than the verb.
+
+    `read-only`'s promise is stronger than the tag suggests ("blocks every
+    destructive write"), and this is the tier a dirty-tree downgrade drops a task
+    into — a task that could `touch`, `mkdir`, `dd` or `chmod` anywhere the
+    process can reach was not read-only in any useful sense.
+    """
+    for tier in ("read-only", "workspace-write"):
+        allowed, reason, enforcement = _check_sandbox(cmd, tier, workdir="/workspace")
+        assert allowed is False, f"{tier} allowed {cmd!r}"
+        # The reason quotes the *first* named target, which is what a refusal can
+        # report: `install -d <a> <b>` has two destinations and one sentence.
+        assert named[0] in reason, f"{tier} block for {cmd!r} does not name {named[0]!r}"
+        assert enforcement == "partial", (
+            "the everyday writers are now read, but an interpreter still writes "
+            "anywhere it likes - the label must stay `partial` (issue #1398)"
+        )
+
+
+# Forms that write *nothing*, or write only inside: their verdict must not move.
+# The inside half of this list is the false-block direction of the same change.
+NOT_WRITES_OR_INSIDE = (
+    "dd if=/outside/emrg/f",                       # dd's read side, no destination
+    "dd if=/outside/emrg/f of=/dev/null",          # the one destination both tiers allow
+    "chmod",                                       # no operand at all
+    "chown root",                                  # owner but no file
+    f"touch -d 2020-01-01",                        # a stamp with no file
+    f"chmod --reference=/etc/passwd /workspace/t",  # the mode's own file is a read
+    f"touch -r /etc/passwd /workspace/f",
+    "touch f.txt",                                 # relative to the workspace
+    "mkdir -p a/b/c",
+    "ln -s x /workspace/l",
+    "ln -t /workspace a b",
+    "cp -t /workspace a b",
+    "install -m 644 x /workspace/i",
+    "install -d /workspace/d",
+    "dd if=/dev/zero of=/workspace/d",
+    "chmod 777 /workspace/t",
+    "chown root /workspace/t",
+    "chgrp staff /workspace/t",
+    "cp -s x /workspace/l",
+    "mv /workspace/a /workspace/b",
+    "mkfifo /workspace/f",
+    "mkfifo /workspace/f1 /workspace/f2",
+    "mknod /workspace/n p",
+    "mknod /workspace/n b 1 3",
+    "link x /workspace/l",
+    "cp x -t/workspace",
+    "ln -s x -t/workspace",
+    "mv x -t/workspace",
+    "install -m 644 x -t/workspace",
+    "cp -rt /workspace x",
+    "install -Dt /workspace x",
+    # The two controls: neither `-T` nor `-S` may be read as a `-t`. Getting this
+    # wrong names the *source* and refuses the workspace's own destination.
+    "cp -T x /workspace/dst",
+    "cp -St x /workspace/dst",
+)
+
+
+@pytest.mark.parametrize("cmd", NOT_WRITES_OR_INSIDE, ids=NOT_WRITES_OR_INSIDE)
+def test_the_forms_that_write_nothing_or_stay_inside_are_still_allowed(cmd):
+    """The false-block half, pinned: a guard that refuses its own workspace is
+    worse than the hole it closed (`read-only` is the tier whose documented
+    recovery flow is to keep running commands from inside it)."""
+    allowed, reason, _ = _check_sandbox(cmd, "workspace-write", workdir="/workspace")
+    assert allowed is True, f"{cmd!r} is a false block: {reason}"
+
+
+def test_read_only_answers_the_new_writers_the_way_it_answers_the_old_ones():
+    """Why an inside write is refused by `read-only` and allowed by
+    `workspace-write`, measured against the writers that were already there.
+
+    The asymmetry is not new and not the change's to make: `read-only` refuses a
+    write *anywhere* but `/dev/null` — `rm -rf build` and `sed -i s/a/b/ f.txt`
+    get exactly that answer on master — while `workspace-write` allows one inside
+    the workspace. Pinning the two families together is what makes this a
+    *measured parity* rather than a claim that the new verbs are special.
+    """
+    for cmd in ("rm -rf build", "sed -i s/a/b/ f.txt", "truncate -s 0 out.txt",
+                "touch f.txt", "mkdir -p a/b", "ln -s x l", "chmod 777 f.txt",
+                "chown root f.txt", "dd if=/dev/zero of=f.bin"):
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+        assert _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0] is True, cmd
+
+
+# ── the naming arms: the destination, never a mode, an owner or a source ──
+
+def test_a_metadata_block_names_the_file_and_not_the_mode_or_the_owner():
+    """Issue #1398 acceptance 1, as assertions rather than as prose.
+
+    `chown root <outside>/t` named *both* operands while this was being fixed, so
+    the refusal said "targeting 'root'" — a guard whose message points at a token
+    that is not a path is the defect `_positional_args`'s docstring already names.
+    `--reference` is the one spelling that turns the first operand back into a
+    file, and it is asserted in both of the ways a caller can write it, because a
+    flag asked about by name is a claim about *both* spellings.
+    """
+    t = f"{OUTSIDE_TARGET}/t"
+    assert _extract_write_targets(f"chown root {t}") == [t]
+    assert _extract_write_targets(f"chown root:staff {t}") == [t]
+    assert _extract_write_targets(f"chown 1000:1000 {t}") == [t]
+    assert _extract_write_targets(f"chgrp staff {t}") == [t]
+    assert _extract_write_targets(f"chmod 777 {t}") == [t]
+    assert _extract_write_targets(f"chmod u+x {t}") == [t]
+    assert _extract_write_targets(f"chmod --reference=/etc/passwd {t}") == [t]
+    assert _extract_write_targets(f"chmod --reference /etc/passwd {t}") == [t]
+
+    # `-t <dir>` moves the destination off the operand it displaces, so the
+    # operands left behind are sources and must not be named (`ln -t <outside> a b`
+    # named `b` while the branch read the last operand and the flag together).
+    assert _extract_write_targets(f"ln -t {OUTSIDE_TARGET} a b") == [OUTSIDE_TARGET]
+    assert _extract_write_targets(f"cp -t {OUTSIDE_TARGET} a b") == [OUTSIDE_TARGET]
+    assert _extract_write_targets(f"mv -t {OUTSIDE_TARGET} a b") == [OUTSIDE_TARGET]
+    assert _extract_write_targets(f"install -t {OUTSIDE_TARGET} a b") == [OUTSIDE_TARGET]
+    assert _extract_write_targets(f"install --target-directory={OUTSIDE_TARGET} a") == [
+        OUTSIDE_TARGET
+    ]
+
+    # `dd`'s `if=` is the read side; the walk may name it only as the file it is
+    # not writing to.
+    assert _extract_write_targets(f"dd if={OUTSIDE_TARGET}/f of={OUTSIDE_TARGET}/d") == [
+        f"{OUTSIDE_TARGET}/d"
+    ]
+    assert _extract_write_targets(f"dd if={OUTSIDE_TARGET}/f") == []
+
+    # `-s` is a *size* to `truncate`/`shred` and takes no value for `ln`/`cp`, and
+    # reading one table for both made `cp -s x <target>` — which really creates the
+    # link at `<target>` — name nothing at all (measured on master: ALLOW at both
+    # tiers).
+    assert _extract_write_targets(f"cp -s x {OUTSIDE_TARGET}/l") == [f"{OUTSIDE_TARGET}/l"]
+    assert _extract_write_targets(f"cp -S .bak x {OUTSIDE_TARGET}/c") == [
+        f"{OUTSIDE_TARGET}/c"
+    ]
+    assert _check_sandbox(f"cp -s x {OUTSIDE_TARGET}/l", "read-only")[0] is False
+
+
+def test_the_target_directory_is_read_in_every_spelling_getopt_accepts():
+    """The `-t` spellings that ride in the same token, measured against GNU.
+
+    Reading only the bare `-t` token is a fail-open that survives the spaced and
+    the `=`-joined long form: an unnamed destination is an ALLOW at both tiers
+    whatever it points at. The ground truth for the attached and clustered
+    spellings is GNU's (BSD `cp`/`mv`/`ln` have no `-t`), measured in
+    `debian:bookworm-slim` — every row below exits 0 there with the source in the
+    named directory, in the same geometry this file uses.
+
+    The last two assertions are the direction that must *not* move: a scan that
+    read `-T` or `-S` as `-t` would name the source, so a legitimate copy to a
+    path inside the workspace would be refused for being its own input.
+    """
+    for cmd in (
+        f"cp x -t{OUTSIDE_TARGET}",
+        f"mv x -t{OUTSIDE_TARGET}",
+        f"ln -s x -t{OUTSIDE_TARGET}",
+        f"install -m 644 x -t{OUTSIDE_TARGET}",
+        f"cp -rt {OUTSIDE_TARGET} x",
+        f"cp -rt{OUTSIDE_TARGET} x",
+        f"install -Dt {OUTSIDE_TARGET} x",
+        f"install -Dt{OUTSIDE_TARGET} x",
+    ):
+        assert _extract_write_targets(cmd) == [OUTSIDE_TARGET], cmd
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+        assert _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0] is False, cmd
+
+    # `-T` is a *flag* and `-S` takes a suffix, so the letter after them is a value
+    # or nothing — never a target directory. Both name their real destination.
+    assert _extract_write_targets(f"cp -T x {OUTSIDE_TARGET}/dst") == [
+        f"{OUTSIDE_TARGET}/dst"
+    ]
+    assert _extract_write_targets(f"cp -St x {OUTSIDE_TARGET}/dst") == [
+        f"{OUTSIDE_TARGET}/dst"
+    ]
+
+
+# ── one mutation arm per verb: a row that cannot be killed is not a claim ──
+
+# (row, the set the branch tests, the verb to drop, a command that row refuses)
+MUTATION_ARMS = (
+    ("touch", "_CREATING_VERBS", "touch", f"touch {OUTSIDE_TARGET}/t"),
+    ("mkdir", "_CREATING_VERBS", "mkdir", f"mkdir {OUTSIDE_TARGET}/d"),
+    ("ln", "_DESTINATION_LAST_VERBS", "ln", f"ln -s x {OUTSIDE_TARGET}/l"),
+    ("cp", "_DESTINATION_LAST_VERBS", "cp", f"cp x {OUTSIDE_TARGET}/dst"),
+    ("mv", "_DESTINATION_LAST_VERBS", "mv", f"mv x {OUTSIDE_TARGET}/m"),
+    ("install", "_DESTINATION_LAST_VERBS", "install",
+     f"install -m 644 x {OUTSIDE_TARGET}/i"),
+    ("chmod", "_METADATA_VERBS", "chmod", f"chmod 777 {OUTSIDE_TARGET}/t"),
+    ("chown", "_METADATA_VERBS", "chown", f"chown root {OUTSIDE_TARGET}/t"),
+    ("chgrp", "_METADATA_VERBS", "chgrp", f"chgrp staff {OUTSIDE_TARGET}/t"),
+    ("dd", "_dd_output_targets", "dd", f"dd if=/dev/zero of={OUTSIDE_TARGET}/d"),
+    ("mkfifo", "_CREATING_VERBS", "mkfifo", f"mkfifo {OUTSIDE_TARGET}/f"),
+    ("mknod", "_CREATING_VERBS", "mknod", f"mknod {OUTSIDE_TARGET}/n p"),
+    ("link", "_DESTINATION_LAST_VERBS", "link", f"link x {OUTSIDE_TARGET}/l"),
+)
+
+
+def test_each_row_is_killed_by_dropping_its_verb_from_the_walk():
+    """A mutation arm per verb, because a row nothing can kill is not a claim.
+
+    Each arm is applied to the module the walk really reads (the sets the branch
+    tests, and for `dd` the helper that reads `of=`), then reverted. The row must
+    be refused *before* the arm — otherwise the arm proves nothing — and allowed
+    after it, which is the `ALLOW` master gave.
+    """
+    for row, name, verb, cmd in MUTATION_ARMS:
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, row
+        saved = getattr(bash_tool, name, None)
+        if name == "_dd_output_targets":
+            bash_tool._dd_output_targets = lambda *_a, **_k: []
+        else:
+            setattr(bash_tool, name, saved - {verb})
+        try:
+            allowed = _check_sandbox(cmd, "read-only", workdir="/workspace")[0]
+        finally:
+            if saved is None:
+                del bash_tool._dd_output_targets
+            else:
+                setattr(bash_tool, name, saved)
+        assert allowed is True, (
+            f"the {row} row survives dropping {verb} from {name} - it does not "
+            "depend on the branch it claims to test"
+        )
+
+
+def test_the_attached_spellings_are_killed_by_disabling_the_short_option_reader():
+    """The `-t<dir>` / clustered rows, killed by the helper they rest on.
+
+    A set-difference arm cannot reach these: the short forms are not read from the
+    verb table (the reader already knows `-t` is the flag it is looking for — the
+    table is only what tells it where a *cluster's* value-taking letters are). So
+    the arm is the reader itself, replaced by one that answers `None`, and every
+    attached spelling must go back to naming nothing — the ALLOW measured before
+    the fix.
+    """
+    rows = (f"cp x -t{OUTSIDE_TARGET}", f"cp -rt {OUTSIDE_TARGET} x",
+            f"install -Dt{OUTSIDE_TARGET} x")
+    for cmd in rows:
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+    saved = bash_tool._short_target_directory
+    bash_tool._short_target_directory = lambda *_a, **_k: None
+    try:
+        for cmd in rows:
+            targets = _extract_write_targets(cmd)
+            # Without the reader the destination is gone from the walk: the attached
+            # forms name nothing at all, and the clustered one falls back to the
+            # last-operand rule, which names the *source* (`x`) instead.
+            assert OUTSIDE_TARGET not in targets, (cmd, targets)
+            assert (
+                _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0] is True
+            ), (
+                f"{cmd!r} is still refused without the short-option reader - the row "
+                "does not depend on the spelling it claims to test"
+            )
+    finally:
+        bash_tool._short_target_directory = saved
+
+
+# ── ground truth: the refused form writes nothing, its control really writes ──
+#
+# One verb per spelling family, driven end to end through `BashTool.execute` in a
+# tree THIS TEST creates (rant 2026-09-17T11:38:16: a negative test's safety must
+# not rest on the guard it is testing). Each row is a pair: the outside form must
+# be refused with nothing left behind, and the inside control must really write —
+# otherwise "the walk names the path" would be a statement about a helper with
+# nothing measuring whether the path was ever the real destination.
+#
+# `witness` says what to look at and where: a *file* the command would leave
+# behind (asserted absent after the refusal, present after the control), or the
+# *mode* of a file the test created (`chmod` leaves no new file, so the mode is its
+# only observable).
+GROUND_TRUTH_FAMILIES = (
+    # (row, refused form, the file it would leave, kind, allowed form, its witness)
+    ("touch", "touch {t}/refused.txt", "{t}/refused.txt", "file",
+     "touch {w}/allowed.txt", "{w}/allowed.txt"),
+    ("mkdir", "mkdir {t}/refused-dir", "{t}/refused-dir", "file",
+     "mkdir {w}/allowed-dir", "{w}/allowed-dir"),
+    ("ln -s", "ln -s x {t}/refused-link", "{t}/refused-link", "file",
+     "ln -s x {w}/allowed-link", "{w}/allowed-link"),
+    # `cp -t <dir> <src>` needs a source that is not already in `<dir>` (cp refuses
+    # a file onto itself), so the source lives one level down in the workspace.
+    ("cp -t", "cp -t {t} {w}/sub/source.txt", "{t}/source.txt", "file",
+     "cp -t {w} {w}/sub/source.txt", "{w}/source.txt"),
+    ("dd of=", "dd if=/dev/zero of={t}/refused.bin bs=1 count=1", "{t}/refused.bin",
+     "file", "dd if=/dev/zero of={w}/allowed.bin bs=1 count=1", "{w}/allowed.bin"),
+    ("chmod", "chmod 777 {t}/locked.txt", "{t}/locked.txt", "mode",
+     "chmod 777 {w}/locked.txt", "{w}/locked.txt"),
+    ("install -d", "install -d {t}/refused-dir", "{t}/refused-dir", "file",
+     "install -d {w}/allowed-dir", "{w}/allowed-dir"),
+    ("sh -c touch", "sh -c 'touch {t}/refused.txt'", "{t}/refused.txt", "file",
+     "sh -c 'touch {w}/allowed.txt'", "{w}/allowed.txt"),
+    ("mkfifo", "mkfifo {t}/refused.fifo", "{t}/refused.fifo", "file",
+     "mkfifo {w}/allowed.fifo", "{w}/allowed.fifo"),
+    ("mknod", "mknod {t}/refused.node p", "{t}/refused.node", "file",
+     "mknod {w}/allowed.node p", "{w}/allowed.node"),
+    ("link", "link {w}/sub/source.txt {t}/refused-link", "{t}/refused-link", "file",
+     "link {w}/sub/source.txt {w}/allowed-link", "{w}/allowed-link"),
+    # The `-t` spellings that ride in one token. Their *control* is GNU-only (BSD
+    # rejects the flag), which the row's own premise check handles; the refusal is
+    # measurable everywhere because the guard answers before the shell is reached.
+    # The option leads for a measured reason: BSD `cp` does not permute, so
+    # `cp <src> -t<dir>` there is not "an illegal option" at all — it copies the
+    # source to a file *named* `-t<dir>`, which would let the control look green
+    # while the flag was never understood. Option-first makes the platform reject
+    # the flag it does not have, which is the premise this check can see.
+    ("cp -t attached", "cp -t{t} {w}/sub/source.txt", "{t}/source.txt", "file",
+     "cp -t{w} {w}/sub/source.txt", "{w}/source.txt"),
+    ("cp -rt cluster", "cp -rt{t} {w}/sub/source.txt", "{t}/source.txt", "file",
+     "cp -rt{w} {w}/sub/source.txt", "{w}/source.txt"),
+)
+
+
+def _tool_refused_the_flag_itself(result) -> bool:
+    """True when the *shell* rejected the form rather than the guard the write.
+
+    `-t` is GNU coreutils: BSD `cp`/`mv`/`ln` (what macOS ships) answer `illegal
+    option -- t`, and cmd.exe has no such flag at all — so on those platforms the
+    control cannot write however the walk behaves, and the row's ground truth is
+    unmeasurable rather than green or red. The signal is the tool's own stderr, and
+    a *guard* refusal is excluded by its own words ("not executed"), which is what
+    keeps this from swallowing a real over-block. It is read from the output and not
+    from `result.error`, because a non-zero exit is not flagged as an error (measured:
+    `cp -t` exits 64 and reports `error=False`).
+    """
+    if "not executed" in result.content:
+        return False
+    lowered = result.content.lower()
+    return (
+        "illegal option" in lowered
+        or "invalid option" in lowered
+        or "usage:" in lowered
+    )
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX shell ground truth: the daemon's shell on Windows is cmd.exe, "
+           "where `touch`, `ln`, `dd` and `install` are not commands at all",
+)
+@pytest.mark.parametrize(
+    "row,refused,refused_witness,witness,allowed,allowed_witness",
+    GROUND_TRUTH_FAMILIES,
+    ids=[row for row, *_rest in GROUND_TRUTH_FAMILIES],
+)
+def test_the_refused_writer_writes_nothing_and_its_control_really_writes(
+    monkeypatch, tmp_path, row, refused, refused_witness, witness, allowed,
+    allowed_witness,
+):
+    """Issue #1398 acceptance 4, including the premise the pair rests on.
+
+    `tmp_path` sits inside the OS temp root, which workspace-write legitimately
+    allows — so `gettempdir` is patched to a name no directory here has, and the
+    outside tree is a sibling of the workspace rather than something under the temp
+    root. Without that patch the refusal would be about the *temp root* and would
+    pass for the wrong reason (the same trap the existing
+    `test_execute_workspace_write_blocks_a_write_outside_the_workspace` names).
+    """
+    import shutil as _shutil
+    import stat as _stat
+    import tempfile as _tf
+
+    if row == "install -d" and _shutil.which("install") is None:
+        pytest.skip("`install` is not on PATH here, so this ground truth is unmeasurable")
+    _verb = row.split()[0]
+    if _verb in ("mkfifo", "mknod", "link") and _shutil.which(_verb) is None:
+        pytest.skip(
+            f"`{_verb}` is not on PATH here, so this ground truth is unmeasurable"
+        )
+
+    monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
+    workspace = tmp_path / "ws"
+    (workspace / "sub").mkdir(parents=True)
+    outside = tmp_path / "outside"          # a sibling of the workspace
+    outside.mkdir()
+
+    # The premises the *test* builds: the copy source, and the file whose mode is
+    # the witness for the `chmod` row. None of this is produced by the guard.
+    (workspace / "sub" / "source.txt").write_text("x", encoding="utf-8")
+    (outside / "locked.txt").write_text("x", encoding="utf-8")
+    (workspace / "locked.txt").write_text("x", encoding="utf-8")
+    os.chmod(outside / "locked.txt", 0o644)
+    os.chmod(workspace / "locked.txt", 0o644)
+
+    def path(template: str):
+        return template.format(t=outside.as_posix(), w=workspace.as_posix())
+
+    tool = BashTool()
+
+    # The refusal comes first because it is the half every platform can measure: the
+    # guard answers before the shell ever sees the command, so even on a platform
+    # whose tool has no `-t` (BSD coreutils, macOS) the walk's half of the row is a
+    # real measurement — it is the *control* that needs the flag to exist.
+    result = _run(tool.execute({
+        "command": path(refused),
+        "sandbox": "workspace-write",
+        "workdir": str(workspace),
+    }))
+    assert result.error is True, f"{path(refused)!r} was not refused"
+    assert "not executed" in result.content
+    assert "enforcement=partial" in result.content, (
+        "the honest `partial` label must stay on the refusal itself, not only in "
+        "the docstring (issue #1398 acceptance 5)"
+    )
+    if witness == "file":
+        # `lexists`, not `exists`, in both directions: `ln -s x <target>` leaves a
+        # *dangling* symlink, which `exists` cannot see — so the refusal would look
+        # clean even if it had written, and the control would look empty although it
+        # had written.
+        assert not os.path.lexists(path(refused_witness)), (
+            f"{path(refused)!r} really wrote {path(refused_witness)!r} outside the "
+            "workspace"
+        )
+    else:
+        assert _stat.S_IMODE(os.stat(path(refused_witness)).st_mode) == 0o644, (
+            f"{path(refused)!r} changed the mode of a file outside the workspace"
+        )
+
+    # The control carries the row's *premise*: `-t` is GNU coreutils, and BSD
+    # `cp`/`mv`/`ln` answer `illegal option -- t`, so where the tool has no such flag
+    # the control cannot write however the walk behaves and the half is unmeasurable
+    # rather than green or red. The distinction is read from what the shell said,
+    # never from the platform name.
+    control = _run(tool.execute({
+        "command": path(allowed),
+        "sandbox": "workspace-write",
+        "workdir": str(workspace),
+    }))
+    if _tool_refused_the_flag_itself(control):
+        pytest.skip(
+            f"{path(allowed)!r} is not a form this platform's tool understands "
+            f"({control.content.strip().splitlines()[-1][:60]}), so the control half "
+            "of this row cannot be measured here"
+        )
+
+    assert control.error is not True, (
+        f"the control {path(allowed)!r} was refused: {control.content}"
+    )
+    if witness == "file":
+        assert os.path.lexists(path(allowed_witness)), (
+            f"the control {path(allowed)!r} really wrote nothing, so the refusal "
+            "above was not the difference: re-measure the row"
+        )
+    else:
+        assert _stat.S_IMODE(os.stat(path(allowed_witness)).st_mode) == 0o777, (
+            f"the control {path(allowed)!r} did not change the mode it names"
+        )
+
