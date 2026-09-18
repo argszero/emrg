@@ -478,13 +478,22 @@ class TaskHandler:
         * ``??`` untracked is unique **unless its content is already in ``HEAD``
           under the same path** (issue #1277) — the ``git rm --cached f`` shape,
           where ``f`` is unchanged so discarding it restores exactly what ``HEAD``
-          holds. Measured against ``HEAD`` only, and path-exact: a match in the
-          upstream tip alone, or a blob with the same bytes at another path, is not
+          holds. Measured against ``HEAD`` only, and path-exact: a match in another
+          ref alone, or a blob with the same bytes at another path, is not
           evidence that this file is a re-checkout. The other shapes on this line —
           a staged addition, a conflict, a rename — stay unique unconditionally;
         * a **deletion** loses nothing (discarding restores the blob from ``HEAD``);
-        * a **modification** is recoverable when its blob equals ``HEAD``'s or the
-          upstream tip's for that path — the two places a blob can already live;
+        * a **modification** is recoverable when its blob is **already published at
+          that path somewhere git can reach it** — ``HEAD``, the upstream tip, or the
+          tip of any other ref the repository holds (issue #1338). The criterion used
+          to ask only the first two, and the third is where a cycle's own dirt usually
+          lives: the diff it just pushed sits at ``refs/remotes/origin/<branch>`` (or a
+          ``refs/cdrain/prNNNN`` tip) while the criterion called it unique and pinned
+          the next cycle read-only. That claim was measured against the workspace
+          (2026-09-17): four staged files, their bytes byte-identical to the head of the
+          branch that had been pushed, and no remedy available — the recovery refuses
+          on the same criterion, the landing-tree route needs `git worktree add`, and
+          refreshing needs `git merge` + `git push`, all three refused at read-only;
         * a **staged** change is measured on the index side as well, because the
           worktree cannot evidence it: in ``MM`` (staged, then the worktree copy
           reverted to ``HEAD``) the worktree blob *is* ``HEAD``'s, and in ``MD``
@@ -492,26 +501,38 @@ class TaskHandler:
           Measured before this clause existed: both answered "recoverable" while
           `git log --all --find-object` found the staged blob in **no commit**, so
           the tier was released over content a plain `git stash pop` then dropped as
-          an unreferenced object. Content must now be in ``HEAD`` or the upstream tip
-          on *both* sides before the tier is released;
-        * a commit reachable only from this branch is unique: it is work that exists
-          in no other checkout, so it forces ``read-only``. The reason is *not* the
-          recovery - that is a stash, which is indifferent to commits (measured: a
-          recovery leaves ``HEAD`` at the same sha) - but the cycle's own write access,
-          which could reset the branch away. A reviewer measured the consequence and
-          it is the fail-closed direction: a tree that is merely *ahead* of upstream
-          keeps ``read-only`` even when every byte of its dirt is reconstructible.
+          an unreferenced object. Content must now be published on *both* sides before
+          the tier is released;
+        * a commit that exists in **no ref other than this checkout's own two
+          self-references** is unique: it is work kept nowhere else, so it forces
+          ``read-only``. The reason is *not* the recovery - that is a stash, which is
+          indifferent to commits (measured: a recovery leaves ``HEAD`` at the same
+          sha) - but the cycle's own write access, which could reset the branch away.
+          The clause asked ``upstream..HEAD`` until issue #1338, which counts a branch
+          already pushed to ``refs/remotes/origin/<branch>`` as ahead, so a cycle whose
+          every byte was published stayed read-only; that is the same deadlock the blob
+          clause above was widened for, arriving by a second route;
 
-        Fail-closed throughout: an unreadable status, an unreadable file, or no
-        upstream ref to compare against all answer *unique*, i.e. exactly the
+        Fail-closed throughout: an unreadable status, an unreadable file, a batch
+        read whose answers do not line up with its questions, an unreadable ``HEAD``,
+        or no ref to compare against at all answer *unique*, i.e. exactly the
         pre-existing read-only behaviour. Only a positive, complete measurement of
-        "recoverable" ever releases the tier.
+        "recoverable" ever releases the tier. The widened clause keeps that direction
+        by asking only for **tips**: a blob recorded at this path in an *older* commit
+        of some branch is still counted unique even though `git log --all
+        --find-object` would find it — the safe side, and the reason the release
+        message names the ref it matched rather than claiming the bytes are nowhere.
         """
         import subprocess as _sp  # noqa: PLC0415 — local import keeps the module invariant
 
-        def git(*args: str):
+        def git(*args: str, stdin: str | None = None):
             return _sp.run(
                 ["git", "-C", source_dir, *args],
+                # `None` is the inherited stdin every other call here has always had;
+                # only the one batched read below passes a spec list (`cat-file
+                # --batch-check` takes its questions on stdin, which is what makes one
+                # process per *path* possible instead of one per ref).
+                input=stdin,
                 capture_output=True, text=True, timeout=10,
                 # Paths, not console output — same pinning as the sibling probe.
                 encoding="utf-8", errors="replace",
@@ -556,11 +577,84 @@ class TaskHandler:
         # The second place a blob can already live. A repo with no upstream keeps
         # only HEAD, which can only make *more* dirt count as unique (safe side).
         upstream = None
+        upstream_name = ""
         for ref in ("origin/master", "FETCH_HEAD"):
             probe = git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
             if probe.returncode == 0 and probe.stdout.strip():
                 upstream = probe.stdout.strip()
+                upstream_name = ref
                 break
+
+        # The **third** place, and the one a cycle's own workflow fills (issue #1338):
+        # a remote-tracking branch, a tag, a `refs/cdrain/prNNNN` tip, a stash — any
+        # tip the repository already holds. The two places above are a subset of this
+        # list, so the clause only ever widens: dirt whose bytes are published is no
+        # longer called unique, and the tier it was pinning stays at what the task
+        # configured. Discovered rather than enumerated (`for-each-ref` needs no fetch
+        # and no network; measured 2383 refs / 0.015s in this workspace).
+        #
+        # Tips are *not* deduplicated, deliberately: two names for one tip are not
+        # interchangeable downstream, because the commit clause below has to tell "a
+        # remote-tracking ref also holds this" from "this is my own branch ref" — and
+        # those two refs are exactly the pair that shares a tip. HEAD is appended first
+        # so that when a blob matches several refs the message names the most specific
+        # owner it saw first.
+        candidates: list[tuple[str, str]] = [("HEAD", "HEAD")]
+        if upstream:
+            candidates.append((upstream, upstream_name))
+        named = git("for-each-ref", "--format=%(objectname) %(refname)")
+        if named.returncode == 0:
+            for line in named.stdout.splitlines():
+                tip, _, refname = line.partition(" ")
+                if tip and refname:
+                    candidates.append((tip, refname))
+
+        # `(digest -> the ref that publishes it)` per path, read once per path and
+        # memoised: a walk asks about each entry twice in the `MM` geometry (index
+        # side, then worktree side).
+        copies_cache: dict[str, dict[str, str] | None] = {}
+        # The refs that carried the bytes of the entries measured recoverable, in
+        # walk order — the release message's evidence, and the receipt's (`reason`
+        # reaches the recovery receipt verbatim).
+        published: list[str] = []
+
+        def copies_at(path: str) -> dict[str, str] | None:
+            """``{blob digest: the ref publishing these bytes at ``path``}``, or None.
+
+            One batched ``cat-file --batch-check`` for every candidate tip. The
+            process-per-ref form would spend ~2400 forks on a predicate that runs at
+            the tier it is deciding about; batched, this workspace measures 0.038s
+            for all 2383 refs, and the questions are the *same expressions* the
+            per-ref form asked (``<rev>:<path>``), so path-exactness (issue #1277) is
+            preserved by construction: the only thing ever asked about a tip is what
+            it holds at this very path.
+
+            ``None`` — "could not be answered" — is returned when there is no
+            candidate at all, when the batch exited non-zero, or when its answers do
+            not line up with its questions (a path carrying a newline splits one spec
+            into two lines). Callers read that as *unique*: fail-closed, never a pass.
+            """
+            if path in copies_cache:
+                return copies_cache[path]
+            answer: dict[str, str] | None = None
+            if candidates:
+                spec = "".join(f"{rev}:{path}\n" for rev, _ in candidates)
+                batch = git("cat-file", "--batch-check", stdin=spec)
+                lines = batch.stdout.splitlines()
+                if batch.returncode == 0 and len(lines) == len(candidates):
+                    found: dict[str, str] = {}
+                    for (_rev, name), line in zip(candidates, lines):
+                        # Only a `blob` answer is about content; a path that is a
+                        # directory answers `tree`, a missing one echoes the spec and
+                        # `missing`. The digest shape is checked too, so an echoed spec
+                        # can never be read as an answer.
+                        fields = line.split()
+                        if (len(fields) == 3 and fields[1] == "blob"
+                                and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", fields[0])):
+                            found.setdefault(fields[0], name)
+                    answer = found
+            copies_cache[path] = answer
+            return answer
 
         unique: list[str] = []
         for line in lines:
@@ -631,14 +725,16 @@ class TaskHandler:
                     unique.append(f"{path} is staged but its index content could not be read")
                     continue
                 index_digest = fields[1]
-                for ref in filter(None, ("HEAD", upstream)):
-                    have = git("rev-parse", "--verify", "--quiet", f"{ref}:{path}")
-                    if have.returncode == 0 and have.stdout.strip() == index_digest:
-                        break
+                # Published at this path on *some* ref tip — HEAD, the upstream tip, or
+                # any other the repository holds (issue #1338). The staged side is
+                # compared to the same set as the worktree side below: a blob git can
+                # already reach from a tip is content a discard cannot destroy.
+                found = copies_at(path)
+                if found is not None and index_digest in found:
+                    published.append(found[index_digest])
                 else:
                     unique.append(
-                        f"{path} is staged with content that is in neither HEAD nor "
-                        f"the upstream tip"
+                        f"{path} is staged with content that is in no ref at this path"
                     )
                     continue
             if index_side == "D" or worktree_side == "D":
@@ -659,18 +755,43 @@ class TaskHandler:
                 unique.append(f"{path} could not be read to compare")
                 continue
             digest = blob.stdout.strip()
-            for ref in filter(None, ("HEAD", upstream)):
-                have = git("rev-parse", "--verify", "--quiet", f"{ref}:{path}")
-                if have.returncode == 0 and have.stdout.strip() == digest:
-                    break
+            found = copies_at(path)
+            if found is not None and digest in found:
+                published.append(found[digest])
             else:
-                unique.append(f"{path} differs from HEAD and from the upstream tip")
+                unique.append(f"{path} differs from what every ref holds at this path")
 
-        if upstream:
-            ahead = git("rev-list", "--count", f"{upstream}..HEAD")
-            if ahead.returncode == 0 and ahead.stdout.strip() not in ("", "0"):
+        # A commit that exists in **no other ref** is work the cycle's own write access
+        # could reset away, so it keeps the cycle read-only. The set to differ against is
+        # therefore every ref tip except this checkout's own two self-references: `HEAD`,
+        # and the local branch ref HEAD is attached to. Those two are excluded **by name**
+        # and not by tip, which is why the candidate list above keeps duplicate tips: a
+        # branch already pushed has `refs/remotes/origin/<branch>` *at the same commit as
+        # HEAD*, and that one is elsewhere while `refs/heads/<branch>` is here. The clause
+        # used to ask the narrower `upstream..HEAD`, which counts the pushed branch as
+        # ahead — measured 2026-09-17, that is exactly how a cycle whose every byte was
+        # published stayed read-only: the same deadlock the blob clause above was widened
+        # for, arriving by a second route. A detached HEAD has no branch ref to exclude
+        # and needs none. A ref that is not a commit (an annotated tag is *peeled* by
+        # rev-list; a ref to a blob is ignored rather than rejected, measured) cannot
+        # make the answer smaller, so it stays on the safe side.
+        self_refs = {"HEAD"}
+        current = git("symbolic-ref", "--quiet", "HEAD")
+        if current.returncode == 0 and current.stdout.strip():
+            self_refs.add(current.stdout.strip())
+        elsewhere = list(dict.fromkeys(
+            rev for rev, name in candidates if name not in self_refs
+        ))
+        if elsewhere:
+            # The tips go in on **stdin**, not as arguments: a workspace holds thousands
+            # of refs (2383 here), and a command line that long is refused outright on
+            # Windows (32767 characters) — i.e. the argument form would break the
+            # predicate on a host whose tree is perfectly ordinary. Measured: 0.05s.
+            reach = git("rev-list", "--count", "HEAD", "--stdin",
+                        stdin="".join(f"^{rev}\n" for rev in elsewhere))
+            if reach.returncode == 0 and reach.stdout.strip() not in ("", "0"):
                 unique.append(
-                    f"{ahead.stdout.strip()} commit(s) exist only on this branch"
+                    f"{reach.stdout.strip()} commit(s) exist only in this checkout"
                 )
 
         if unique:
@@ -678,6 +799,13 @@ class TaskHandler:
             if len(unique) > 3:
                 shown += f"; and {len(unique) - 3} more"
             return True, shown
+        if published:
+            # Name what carried the bytes: the release message is the evidence a human
+            # reads, and "already published" is only believable with the ref in it.
+            return False, (
+                "every change is already published in "
+                + ", ".join(dict.fromkeys(published))
+            )
         return False, "every change is already in HEAD or in the upstream tip"
 
     @staticmethod
