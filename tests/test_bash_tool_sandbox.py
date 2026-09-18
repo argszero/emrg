@@ -2843,6 +2843,24 @@ def test_the_generated_corpus_has_no_unnamed_write_and_no_plain_over_block():
 # used only as an argument to the pure predicate — never executed and never opened.
 OUTSIDE_TARGET = "/outside/emrg"
 
+# Residuals of the same class, measured *after* the verb list above was written —
+# on its own branch, not on master. In the same geometry, `mkfifo <o>/f`,
+# `mknod <o>/n p`, `link x <o>/l` and `link <o>/a <o>/b` were still ALLOW at both
+# tiers with an empty target list, i.e. one verb list short of covering the class
+# the list exists for. `lk`/`link`/`mknod` are not exotic: `link` is `ln` without
+# options and `mknod` makes a fifo as readily as a device node.
+#
+# The `-t` spellings below are the other half of the same family, and their ground
+# truth cannot be measured on this host: BSD `cp`/`ln` have no `-t` at all (macOS).
+# Measured on GNU instead (`debian:bookworm-slim`, one directory outside every
+# allowed root, the delivered name read back off disk): `cp x -t<dir>`,
+# `mv x -t<dir>`, `install -m 644 x -t<dir>`, `install -Dt <dir> x`,
+# `cp -rt <dir> x` and `ln -s x -t<dir>` all exit 0 with the file in `<dir>` — while
+# only the bare `-t <dir>` token was read, so the other five named no target and
+# both tiers allowed them. The last two rows are the controls in the other
+# direction: `-T` is a flag and `-S` takes a *suffix*, so neither may be read as a
+# `-t` — a scan that mistook them would name the source and block the wrong file.
+#
 # (row, command, every path the walk must name for it)
 EVERYDAY_WRITES = (
     ("touch", f"touch {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
@@ -2850,15 +2868,34 @@ EVERYDAY_WRITES = (
     ("touch -r", f"touch -r /etc/passwd {OUTSIDE_TARGET}/t", (f"{OUTSIDE_TARGET}/t",)),
     ("mkdir", f"mkdir {OUTSIDE_TARGET}/d", (f"{OUTSIDE_TARGET}/d",)),
     ("mkdir -m", f"mkdir -m 755 {OUTSIDE_TARGET}/d", (f"{OUTSIDE_TARGET}/d",)),
+    ("mkfifo", f"mkfifo {OUTSIDE_TARGET}/f", (f"{OUTSIDE_TARGET}/f",)),
+    ("mkfifo -m", f"mkfifo -m 644 {OUTSIDE_TARGET}/f", (f"{OUTSIDE_TARGET}/f",)),
+    ("mkfifo two", f"mkfifo {OUTSIDE_TARGET}/f1 {OUTSIDE_TARGET}/f2",
+     (f"{OUTSIDE_TARGET}/f1", f"{OUTSIDE_TARGET}/f2")),
+    # Only the node is created: naming `p` would block a token that is not a path.
+    ("mknod", f"mknod {OUTSIDE_TARGET}/n p", (f"{OUTSIDE_TARGET}/n",)),
+    ("mknod -m", f"mknod -m 644 {OUTSIDE_TARGET}/n p", (f"{OUTSIDE_TARGET}/n",)),
+    ("mknod device", f"mknod {OUTSIDE_TARGET}/n b 1 3", (f"{OUTSIDE_TARGET}/n",)),
     ("ln -s", f"ln -s x {OUTSIDE_TARGET}/l", (f"{OUTSIDE_TARGET}/l",)),
     ("ln -t", f"ln -t {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
     ("ln --target-directory=", f"ln --target-directory={OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("ln -t attached", f"ln -s x -t{OUTSIDE_TARGET}", (OUTSIDE_TARGET,)),
+    ("link", f"link x {OUTSIDE_TARGET}/l", (f"{OUTSIDE_TARGET}/l",)),
     ("cp", f"cp x {OUTSIDE_TARGET}/dst", (f"{OUTSIDE_TARGET}/dst",)),
     ("cp -s", f"cp -s x {OUTSIDE_TARGET}/l", (f"{OUTSIDE_TARGET}/l",)),
     ("cp -t", f"cp -t {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("cp -t attached", f"cp x -t{OUTSIDE_TARGET}", (OUTSIDE_TARGET,)),
+    ("cp -rt spaced", f"cp -rt {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("cp -rt attached", f"cp -rt{OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("cp -T is a flag", f"cp -T x {OUTSIDE_TARGET}/dst", (f"{OUTSIDE_TARGET}/dst",)),
+    ("cp -St is a suffix", f"cp -St x {OUTSIDE_TARGET}/dst", (f"{OUTSIDE_TARGET}/dst",)),
     ("mv", f"mv x {OUTSIDE_TARGET}/m", (f"{OUTSIDE_TARGET}/m",)),
     ("mv -t", f"mv -t {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("mv -t attached", f"mv x -t{OUTSIDE_TARGET}", (OUTSIDE_TARGET,)),
     ("install -m", f"install -m 644 x {OUTSIDE_TARGET}/i", (f"{OUTSIDE_TARGET}/i",)),
+    ("install -t attached", f"install -m 644 x -t{OUTSIDE_TARGET}", (OUTSIDE_TARGET,)),
+    ("install -Dt spaced", f"install -Dt {OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
+    ("install -Dt attached", f"install -Dt{OUTSIDE_TARGET} x", (OUTSIDE_TARGET,)),
     ("install -d", f"install -d {OUTSIDE_TARGET}/d1", (f"{OUTSIDE_TARGET}/d1",)),
     ("install -d two", f"install -d {OUTSIDE_TARGET}/d1 {OUTSIDE_TARGET}/d2",
      (f"{OUTSIDE_TARGET}/d1", f"{OUTSIDE_TARGET}/d2")),
@@ -2935,6 +2972,21 @@ NOT_WRITES_OR_INSIDE = (
     "chgrp staff /workspace/t",
     "cp -s x /workspace/l",
     "mv /workspace/a /workspace/b",
+    "mkfifo /workspace/f",
+    "mkfifo /workspace/f1 /workspace/f2",
+    "mknod /workspace/n p",
+    "mknod /workspace/n b 1 3",
+    "link x /workspace/l",
+    "cp x -t/workspace",
+    "ln -s x -t/workspace",
+    "mv x -t/workspace",
+    "install -m 644 x -t/workspace",
+    "cp -rt /workspace x",
+    "install -Dt /workspace x",
+    # The two controls: neither `-T` nor `-S` may be read as a `-t`. Getting this
+    # wrong names the *source* and refuses the workspace's own destination.
+    "cp -T x /workspace/dst",
+    "cp -St x /workspace/dst",
 )
 
 
@@ -3015,6 +3067,44 @@ def test_a_metadata_block_names_the_file_and_not_the_mode_or_the_owner():
     assert _check_sandbox(f"cp -s x {OUTSIDE_TARGET}/l", "read-only")[0] is False
 
 
+def test_the_target_directory_is_read_in_every_spelling_getopt_accepts():
+    """The `-t` spellings that ride in the same token, measured against GNU.
+
+    Reading only the bare `-t` token is a fail-open that survives the spaced and
+    the `=`-joined long form: an unnamed destination is an ALLOW at both tiers
+    whatever it points at. The ground truth for the attached and clustered
+    spellings is GNU's (BSD `cp`/`mv`/`ln` have no `-t`), measured in
+    `debian:bookworm-slim` — every row below exits 0 there with the source in the
+    named directory, in the same geometry this file uses.
+
+    The last two assertions are the direction that must *not* move: a scan that
+    read `-T` or `-S` as `-t` would name the source, so a legitimate copy to a
+    path inside the workspace would be refused for being its own input.
+    """
+    for cmd in (
+        f"cp x -t{OUTSIDE_TARGET}",
+        f"mv x -t{OUTSIDE_TARGET}",
+        f"ln -s x -t{OUTSIDE_TARGET}",
+        f"install -m 644 x -t{OUTSIDE_TARGET}",
+        f"cp -rt {OUTSIDE_TARGET} x",
+        f"cp -rt{OUTSIDE_TARGET} x",
+        f"install -Dt {OUTSIDE_TARGET} x",
+        f"install -Dt{OUTSIDE_TARGET} x",
+    ):
+        assert _extract_write_targets(cmd) == [OUTSIDE_TARGET], cmd
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+        assert _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0] is False, cmd
+
+    # `-T` is a *flag* and `-S` takes a suffix, so the letter after them is a value
+    # or nothing — never a target directory. Both name their real destination.
+    assert _extract_write_targets(f"cp -T x {OUTSIDE_TARGET}/dst") == [
+        f"{OUTSIDE_TARGET}/dst"
+    ]
+    assert _extract_write_targets(f"cp -St x {OUTSIDE_TARGET}/dst") == [
+        f"{OUTSIDE_TARGET}/dst"
+    ]
+
+
 # ── one mutation arm per verb: a row that cannot be killed is not a claim ──
 
 # (row, the set the branch tests, the verb to drop, a command that row refuses)
@@ -3030,6 +3120,9 @@ MUTATION_ARMS = (
     ("chown", "_METADATA_VERBS", "chown", f"chown root {OUTSIDE_TARGET}/t"),
     ("chgrp", "_METADATA_VERBS", "chgrp", f"chgrp staff {OUTSIDE_TARGET}/t"),
     ("dd", "_dd_output_targets", "dd", f"dd if=/dev/zero of={OUTSIDE_TARGET}/d"),
+    ("mkfifo", "_CREATING_VERBS", "mkfifo", f"mkfifo {OUTSIDE_TARGET}/f"),
+    ("mknod", "_CREATING_VERBS", "mknod", f"mknod {OUTSIDE_TARGET}/n p"),
+    ("link", "_DESTINATION_LAST_VERBS", "link", f"link x {OUTSIDE_TARGET}/l"),
 )
 
 
@@ -3059,6 +3152,39 @@ def test_each_row_is_killed_by_dropping_its_verb_from_the_walk():
             f"the {row} row survives dropping {verb} from {name} - it does not "
             "depend on the branch it claims to test"
         )
+
+
+def test_the_attached_spellings_are_killed_by_disabling_the_short_option_reader():
+    """The `-t<dir>` / clustered rows, killed by the helper they rest on.
+
+    A set-difference arm cannot reach these: the short forms are not read from the
+    verb table (the reader already knows `-t` is the flag it is looking for — the
+    table is only what tells it where a *cluster's* value-taking letters are). So
+    the arm is the reader itself, replaced by one that answers `None`, and every
+    attached spelling must go back to naming nothing — the ALLOW measured before
+    the fix.
+    """
+    rows = (f"cp x -t{OUTSIDE_TARGET}", f"cp -rt {OUTSIDE_TARGET} x",
+            f"install -Dt{OUTSIDE_TARGET} x")
+    for cmd in rows:
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+    saved = bash_tool._short_target_directory
+    bash_tool._short_target_directory = lambda *_a, **_k: None
+    try:
+        for cmd in rows:
+            targets = _extract_write_targets(cmd)
+            # Without the reader the destination is gone from the walk: the attached
+            # forms name nothing at all, and the clustered one falls back to the
+            # last-operand rule, which names the *source* (`x`) instead.
+            assert OUTSIDE_TARGET not in targets, (cmd, targets)
+            assert (
+                _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0] is True
+            ), (
+                f"{cmd!r} is still refused without the short-option reader - the row "
+                "does not depend on the spelling it claims to test"
+            )
+    finally:
+        bash_tool._short_target_directory = saved
 
 
 # ── ground truth: the refused form writes nothing, its control really writes ──
@@ -3094,6 +3220,24 @@ GROUND_TRUTH_FAMILIES = (
      "install -d {w}/allowed-dir", "{w}/allowed-dir"),
     ("sh -c touch", "sh -c 'touch {t}/refused.txt'", "{t}/refused.txt", "file",
      "sh -c 'touch {w}/allowed.txt'", "{w}/allowed.txt"),
+    ("mkfifo", "mkfifo {t}/refused.fifo", "{t}/refused.fifo", "file",
+     "mkfifo {w}/allowed.fifo", "{w}/allowed.fifo"),
+    ("mknod", "mknod {t}/refused.node p", "{t}/refused.node", "file",
+     "mknod {w}/allowed.node p", "{w}/allowed.node"),
+    ("link", "link {w}/sub/source.txt {t}/refused-link", "{t}/refused-link", "file",
+     "link {w}/sub/source.txt {w}/allowed-link", "{w}/allowed-link"),
+    # The `-t` spellings that ride in one token. Their *control* is GNU-only (BSD
+    # rejects the flag), which the row's own premise check handles; the refusal is
+    # measurable everywhere because the guard answers before the shell is reached.
+    # The option leads for a measured reason: BSD `cp` does not permute, so
+    # `cp <src> -t<dir>` there is not "an illegal option" at all — it copies the
+    # source to a file *named* `-t<dir>`, which would let the control look green
+    # while the flag was never understood. Option-first makes the platform reject
+    # the flag it does not have, which is the premise this check can see.
+    ("cp -t attached", "cp -t{t} {w}/sub/source.txt", "{t}/source.txt", "file",
+     "cp -t{w} {w}/sub/source.txt", "{w}/source.txt"),
+    ("cp -rt cluster", "cp -rt{t} {w}/sub/source.txt", "{t}/source.txt", "file",
+     "cp -rt{w} {w}/sub/source.txt", "{w}/source.txt"),
 )
 
 
@@ -3148,6 +3292,11 @@ def test_the_refused_writer_writes_nothing_and_its_control_really_writes(
 
     if row == "install -d" and _shutil.which("install") is None:
         pytest.skip("`install` is not on PATH here, so this ground truth is unmeasurable")
+    _verb = row.split()[0]
+    if _verb in ("mkfifo", "mknod", "link") and _shutil.which(_verb) is None:
+        pytest.skip(
+            f"`{_verb}` is not on PATH here, so this ground truth is unmeasurable"
+        )
 
     monkeypatch.setattr(_tf, "gettempdir", lambda: "/fake-os-temp")
     workspace = tmp_path / "ws"

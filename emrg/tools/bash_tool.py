@@ -168,12 +168,24 @@ _INPLACE_WRITER_VERBS = frozenset({"truncate", "tee", "shred"})
 # drops an option's value (so a mode or a size is never named as a path) and the
 # last-operand rule is the one `mv`/`cp` already use. What each branch below
 # decides is *which* operand a verb writes.
-_CREATING_VERBS = frozenset({"touch", "mkdir"})
+_CREATING_VERBS = frozenset({"touch", "mkdir", "mkfifo", "mknod"})
+
+# Verbs that create their *first* operand only. `mknod <name> <type> [<major>
+# <minor>]` creates the node and then *reads* the rest of its operands (`p` / `b`
+# / `c` and the device numbers), so the every-operand reading above would name
+# tokens that are not paths — the rule `_positional_args`'s docstring sets out.
+# `mkfifo` is not here for the opposite reason: `mkfifo a b` really makes two.
+#
+# `mkfifo`, `mknod` and `link` were measured after issue #1398's fix landed on
+# its own branch: all three were still ALLOW/ALLOW with an *empty* target list in
+# the same geometry that fix used (every path outside every allowed root), i.e.
+# the same class the fix was for, one verb list short of covering it.
+_FIRST_OPERAND_CREATING_VERBS = frozenset({"mknod"})
 
 # Verbs whose destination is the last operand (`ln <src> <dst>`, `cp <src> <dst>`,
-# `mv <src> <dst>`) — read with each verb's own option table, plus `-t <dir>` /
-# `--target-directory`, which moves the destination off the operand it displaces
-# and turns that operand into a source.
+# `mv <src> <dst>`, `link <src> <dst>`) — read with each verb's own option table,
+# plus `-t <dir>` / `--target-directory`, which moves the destination off the
+# operand it displaces and turns that operand into a source.
 #
 # `cp`/`mv` are read here rather than with the shared `_OPTIONS_WITH_VALUE` table
 # they used to get: that table's `-s` is a *size* (for `truncate`/`shred`), and
@@ -181,7 +193,7 @@ _CREATING_VERBS = frozenset({"touch", "mkdir"})
 # — which really creates a symlink at `<target>` — named no target at all and
 # both tiers allowed it (measured while fixing issue #1398). The same table also
 # hid `-t <dir>` behind the last-operand rule, naming the *source* instead.
-_DESTINATION_LAST_VERBS = frozenset({"ln", "cp", "mv", "install"})
+_DESTINATION_LAST_VERBS = frozenset({"ln", "cp", "mv", "install", "link"})
 
 # `install <src> <dst>` is `cp` with a mode, so the rule above reads it; it is
 # listed separately here only because its `-d` form inverts that rule — every
@@ -229,6 +241,11 @@ _VERB_OPTIONS_WITH_VALUE = {
     # /etc/passwd <inside>/f` was a false block while it was unlisted.
     "touch": frozenset({"-d", "--date", "-t", "-r", "--reference"}),
     "mkdir": frozenset({"-m", "--mode"}),
+    "mkfifo": frozenset({"-m", "--mode"}),
+    "mknod": frozenset({"-m", "--mode"}),
+    # `link` is `ln` without options — the one verb here that takes no option
+    # with a value at all.
+    "link": _NO_OPTION_WITH_VALUE,
     # `-S`/`--suffix` is a suffix, and `-t`/`--target-directory` is the
     # destination directory (`_target_directory_values` reads the same flag, and
     # reading it in both places is deliberate: without the table entry the
@@ -1136,11 +1153,14 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
 
     Returns path tokens the command appears to write to:
       - ``rm <path>...`` and ``rmdir <path>`` → the removed paths
-      - ``mv`` / ``cp`` / ``ln`` / ``install`` → the destination (the last
-        operand, or ``-t <dir>`` / ``--target-directory``); under
-        ``install -d`` every operand
+      - ``mv`` / ``cp`` / ``ln`` / ``link`` / ``install`` → the destination (the
+        last operand, or ``-t <dir>`` / ``--target-directory`` in every spelling
+        getopt accepts); under ``install -d`` every operand
       - ``> / >> / 2> / &> / >| / <>`` redirects → the redirect target
-      - ``touch`` / ``mkdir`` → every operand (all of them are created)
+      - ``touch`` / ``mkdir`` / ``mkfifo`` → every operand (all of them are
+        created)
+      - ``mknod`` → the first operand (the node it creates; the type and the
+        device numbers are read, not written)
       - ``dd of=<path>`` → the ``of=`` value (``if=`` is a read)
       - ``chmod`` / ``chown`` / ``chgrp`` → the operands after the mode/owner
         (or all of them when no operand looks like one, as with
@@ -1329,7 +1349,7 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             targets.extend(_git_config_write_targets(tokens, i))
         elif word in _DESTINATION_LAST_VERBS:
             args = _positional_args(tokens, i, _VERB_OPTIONS_WITH_VALUE[word])
-            t_dir = _target_directory_values(tokens, i)
+            t_dir = _target_directory_values(tokens, i, word)
             if word in _DIRECTORY_INSTALL_VERBS and _is_directory_install(tokens, i):
                 # `install -d <dir>...` creates *every* operand; the last-operand
                 # rule would read it as one directory plus its neighbours.
@@ -1347,8 +1367,14 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                 targets.append(args[-1])
         elif word in _CREATING_VERBS:
             # Every operand is created or updated — `touch a b c` stamps three
-            # files, `mkdir -p a/b` creates one. Nothing here is a source.
-            targets.extend(_positional_args(tokens, i, _VERB_OPTIONS_WITH_VALUE[word]))
+            # files, `mkdir -p a/b` creates one, `mkfifo a b` makes two. Nothing
+            # here is a source.
+            args = _positional_args(tokens, i, _VERB_OPTIONS_WITH_VALUE[word])
+            if word in _FIRST_OPERAND_CREATING_VERBS:
+                # `mknod <name> <type> [<major> <minor>]` — only the name is
+                # created; the type and the numbers are read.
+                args = args[:1]
+            targets.extend(args)
         elif word == "dd":
             # `dd of=<path>` is dd's only destination and it sits in no operand
             # position, so no operand rule reaches it. `if=` is a read and is
@@ -1391,24 +1417,71 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     return targets
 
 
-def _target_directory_values(tokens: list[str], i: int) -> list[str]:
-    """The directory named by ``-t <dir>`` / ``--target-directory[=<dir>]``.
+def _short_target_directory(
+    tok: str, args: list[str], j: int, table: frozenset
+) -> str | None:
+    """The directory a *short-option* token carries as ``-t``'s value, or ``None``.
 
-    ``ln``, ``install``, ``cp`` and ``mv`` all take it, and it is a
+    getopt does not require an option's value to be a separate word, so ``-t``
+    has three spellings beyond the bare token: the value rides in the same token
+    (``-t<dir>``), or the ``t`` sits in a cluster behind a flag (``-rt <dir>``,
+    ``-Dt<dir>``). Reading only the bare ``-t`` token missed all of them, and an
+    unnamed destination is an ALLOW whatever the tier — measured on GNU
+    (``debian:bookworm-slim``) in one directory outside every allowed root, all
+    of ``cp x -t<dir>``, ``mv x -t<dir>``, ``install -m 644 x -t<dir>``,
+    ``install -Dt <dir> x``, ``cp -rt <dir> x`` and ``ln -s x -t<dir>`` deliver
+    the file into ``<dir>`` (rc=0, the name read back off disk), while the walk
+    named *no* target at all. BSD's ``cp``/``ln`` have no ``-t`` (the host is
+    macOS), which is why the ground truth is measured on GNU rather than here.
+
+    Scanning stops at the first letter that itself takes a value, because the
+    rest of that token is *its* value (``-mD`` is a mode of ``D``, not a ``-t``).
+    The letters come from the verb's own table — ``_VERB_OPTIONS_WITH_VALUE``,
+    already the per-verb fact this walk reads — so this introduces no new
+    enumeration of a command's flags (the #461 class the walk keeps refusing).
+    """
+    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+        return None
+    body = tok[1:]
+    for k, ch in enumerate(body):
+        letter = "-" + ch
+        if letter == "-t":
+            rest = body[k + 1:]
+            if rest:
+                return rest
+            return args[j + 1] if j + 1 < len(args) else None
+        if letter in table:
+            # An earlier option swallowed the rest of the token as its value.
+            return None
+    return None
+
+
+def _target_directory_values(tokens: list[str], i: int, verb: str) -> list[str]:
+    """The directory named by ``-t``/``--target-directory``, in every spelling.
+
+    ``ln``, ``link``, ``install``, ``cp`` and ``mv`` all take it, and it is a
     *destination*: the operand it displaces is a source, so a rule that reads
     only "the last operand" names the wrong one of the two. It is read here
     rather than added to ``_OPTIONS_WITH_VALUE`` because that table is consulted
     for every verb the walk reads, while ``-t``'s meaning is per-verb (issue
-    #1398).
+    #1398). The spaced and ``=``-joined long forms were covered first; the two
+    short forms ``-t<dir>`` and a cluster's trailing ``t`` are read by
+    ``_short_target_directory``, which takes ``verb``'s own table to know where a
+    cluster's value-taking letters are.
     """
     out: list[str] = []
     args = _args_after_command(tokens, i)
+    table = _VERB_OPTIONS_WITH_VALUE[verb]
     for j, tok in enumerate(args):
         if tok in ("-t", "--target-directory"):
             if j + 1 < len(args):
                 out.append(args[j + 1])
         elif tok.startswith("--target-directory="):
             out.append(tok.split("=", 1)[1])
+        else:
+            short = _short_target_directory(tok, args, j, table)
+            if short is not None:
+                out.append(short)
     return out
 
 
