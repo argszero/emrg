@@ -496,8 +496,26 @@ allowed, while `cd sub && echo x > ../../worse.txt` climbs out of `<ws>/sub` and
 is refused (issue #1370). Proving which directory that is costs the shapes that
 cannot prove it, and those keep the refusal they had: a `;` or `||` chain (the
 `cd` may have failed, and then the shell never moved), a `( … )` group or a
-pipeline (the `cd` may be in a shell of its own), and a target written *before*
-the move.
+pipeline (the `cd` may be in a shell of its own), a target written *before* the
+move, and — since issue #1357 — a destination only the shell could finish:
+
+```
+⛔ workspace-write sandbox: blocked write to relative target 'f': the command runs
+it after changing directory to '$D', which is not a directory this workspace can
+place it in (issue #1244)
+```
+
+A destination that still needs expanding is refused rather than joined onto the
+workspace, because the join would read it as **inside**: `D=../outside && cd "$D"
+&& cat > f`, a loop variable over a directory, and `cd "$(mktemp -d)"` were all
+allowed while the shell writes outside the workspace. The class is "anything left
+to expand after the environment and the command's own assignments have been
+applied" — an unknown `$NAME`, a `${NAME:?}`, a `$(…)` or its backquote spelling.
+**The price is real and stated**: a legitimate computed move (`cd "$(git rev-parse
+--show-toplevel)"`, a directory a `read` filled in) is refused the same way, and so
+is `cd "$(mktemp -d)"` even though `mktemp -d` lands in the allowed temp root —
+*where* it lands is exactly what the text does not say. If you hit this, spell the
+write target absolutely, or `cd` to a path the daemon can read from the text.
 
 #### `$TMPDIR`, not `/tmp`
 
