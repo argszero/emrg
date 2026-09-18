@@ -56,6 +56,20 @@ def spelled(path: str) -> str:
     return path.replace(os.sep, "/") if os.sep != "/" else path
 
 
+def names(path: str, text: str) -> bool:
+    """Whether a block's message names ``path`` — in plain or in repr form.
+
+    Both forms are needed, and the reason is a Windows-only measurement rather than a
+    guess: the refusal interpolates the directory with ``{…!r}``, so on Windows every
+    separator arrives **doubled** while the plain spelling has none, and the first run
+    of this file's row was red there and green on POSIX for exactly that reason. This
+    is the same shape as the ``spelled()`` helper above (one path, two spellings), so
+    it is folded into a helper instead of being spelled out at each row.
+    """
+    forms = {path, os.path.realpath(path), spelled(path), spelled(os.path.realpath(path))}
+    return any(f in text for f in forms | {repr(f) for f in forms})
+
+
 def _verdict(cmd: str, mode: str = WW, workdir: str | None = WORKDIR) -> bool:
     allowed, _reason, _enforcement = _check_sandbox(cmd, mode, workdir)
     return allowed
@@ -241,18 +255,12 @@ def test_the_literal_move_out_is_refused_for_its_own_reason():
 
     The two reasons are distinguishable, and they should stay that way: this one
     names the *directory*, the unplaceable one names the *text*.
-
-    The reason carries the directory the way the *host* spells it, and on Windows
-    that is the backslash form (`C:\\\\...`) while a command line may have written it
-    with forward slashes — the walk resolves both to the same directory. So the
-    assertion accepts either spelling rather than pinning one platform's; the row
-    that matters is that a directory is named at all.
     """
     allowed, reason, _enforcement = _check_sandbox(
         f"cd {spelled(OUTSIDE)} && echo x > f", WW, WORKDIR
     )
     assert allowed is False
-    assert any(s in (reason or "") for s in {spelled(OUTSIDE), os.path.realpath(OUTSIDE)}), reason
+    assert names(OUTSIDE, reason or ""), reason
     assert _cwd_left_workspace(f"cd {spelled(OUTSIDE)} && echo x > f", WORKDIR) == os.path.realpath(OUTSIDE)
 
 
