@@ -2326,6 +2326,51 @@ def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
 _STACK_ENTRY_RE = re.compile(r"^[+-]\d+$")
 
 
+def _move_destination_is_unresolved(expanded: str) -> bool:
+    """Whether a move's destination is text no scope can turn into a directory.
+
+    The two walks that place a move both end in a *join*: a destination that is
+    not absolute is joined onto the directory in effect, and ``os.path.join(cwd,
+    "$D")`` is a path **inside** the workspace. So an unresolved destination does
+    not read as "unknown" — it reads as "inside", which is the one direction this
+    guard must never drift in. Measured on master (issue #1357, all
+    ``workspace-write``, nothing executed): ``D=../outside && cd "$D" && cat > f``,
+    ``for d in <outside>; do cd "$d" && cat > f; done`` and ``cd "$(mktemp -d)" &&
+    cat > f`` were all ALLOW while the shell writes outside the workspace.
+
+    The class is the *lexeme* the shell would have to expand before the path
+    exists, not a list of names — the same lesson `_PARAM_EXPANSION` records for
+    program words. Both the environment and the command's own assignments have
+    already been applied by the caller, so the rule is simply *anything left to
+    expand*:
+
+    - ``$NAME`` / ``${NAME}`` / ``${NAME<op>}`` — a name neither scope knows;
+    - a **split** expansion: ``$(mktemp -d)`` reaches this walk as the token ``$``
+      followed by ``mktemp`` and ``-d)``, because the tokenizer makes ``(`` and
+      ``)`` punctuation. Checking only complete lexemes leaves that spelling open —
+      measured while writing this rule: with the complete-lexeme version,
+      ``cd $(mktemp -d) && cat > f`` was still ALLOW while its quoted spelling was
+      refused. Any surviving ``$`` or backtick answers "unresolved", which is the
+      conservative reading of unfinished text.
+    - ``$(…)`` and its backquote spelling — a command substitution, whose value
+      only running it would give.
+
+    The price is stated rather than hidden: a *legitimate* computed move
+    (``cd "$(git rev-parse --show-toplevel)"``, a directory a ``read`` filled in)
+    is refused the same way, because the token stream cannot tell it from the
+    escapes above without executing them; and a destination known to land in an
+    allowed write root (``cd "$(mktemp -d)"``, which lands in the OS temp area) is
+    refused with it, because *where* it lands is exactly what is unknowable here.
+    That is the trade this guard already
+    makes one branch over — a write target rooted in a variable neither scope can
+    resolve fails closed ("a target whose root cannot be resolved is not one the
+    guard can prove stays in the workspace") — and ``cd -`` is refused for exactly
+    this reason already. The work-around the caller keeps is the one every refusal
+    here has: spell the target absolutely.
+    """
+    return "$" in expanded or "`" in expanded
+
+
 def _cwd_left_workspace(
     cmd: str, workspace: str, _depth: int = 0, _base: str | None = None
 ) -> str | None:
@@ -2367,15 +2412,20 @@ def _cwd_left_workspace(
     "$T/f"` moved the shell out while the literal `$D` was joined onto the cwd and
     read as inside.
 
-    **Known limit**: a destination *neither* scope can decide is joined onto the
-    cwd and therefore reads as inside, which hides a move that really happens —
-    `D=../outside && cd "$D" && cat > f` (the value charset admits no `..`) and
-    `for d in <dir>; do cd "$d" && cat > f; done` are both ALLOW on every host
-    (measured; issue #1357). The contract above argues for refusing them — a move
-    that cannot be proven to stay inside is the case `cd -` is already refused for
-    — but that is a behaviour change of its own, since it also refuses computed
-    destinations that are legitimately inside, so it is decided in that issue
-    rather than folded in here. A directory the token stream cannot preserve is
+    A destination *neither* scope can decide is refused rather than joined onto
+    the cwd (issue #1357): the join is what makes it dangerous, since
+    ``os.path.join(cwd, "$D")`` is a path *inside* the workspace, so an unresolved
+    move did not read as "unknown" but as "inside" — measured on master,
+    `D=../outside && cd "$D" && cat > f`, `for d in <dir>; do cd "$d" && cat > f;
+    done` and `cd "$(mktemp -d)" && cat > f` were all ALLOW while the shell writes
+    outside the workspace. Refusing is the side this walk's own contract names (a
+    move that cannot be proven to stay inside is the case `cd -` is refused for),
+    and the price is stated rather than hidden: a *legitimate* computed move —
+    `cd "$(git rev-parse --show-toplevel)"`, a directory a `read` filled in — is
+    refused the same way, because the token stream cannot tell the two apart
+    without running them. `_move_destination_is_unresolved` carries the class and
+    the trade; the caller's work-around is to spell the write target absolutely.
+    A directory the token stream cannot preserve is
     invisible here for the older reason: a Windows spelling `C:\\Users\\x`
     reaches the guard as `C:Usersx` — backslash is shlex's escape character — so
     it is not read as an absolute path at all (issue #1261). Forward-slash
@@ -2399,7 +2449,7 @@ def _cwd_left_workspace(
     def leaves_workspace(path: str) -> bool:
         return not any(src and (_is_within(path, src) or path == src) for src in allowed)
 
-    def resolve(tok: str) -> str:
+    def resolve(tok: str) -> "str | None":
         expanded = os.path.expanduser(os.path.expandvars(tok))
         if _UNRESOLVED_VAR_RE.search(expanded):
             # The environment is not the only resolution scope (issue #1316's
@@ -2413,8 +2463,15 @@ def _cwd_left_workspace(
             # `D=<outside> && cd "$D" && T=<in-ws> && cat > "$T/f"` is BLOCK
             # before the target-side scope and was ALLOW with it.
             from_command = _resolve_from_command_assignment(cmd, tok)
-            if from_command is not None:
-                expanded = os.path.expanduser(os.path.expandvars(from_command))
+            if from_command is None:
+                # Neither scope decides it, so this walk cannot place the move:
+                # `None` rather than a path joined onto the cwd, which would read
+                # as "inside the workspace" (issue #1357). The caller reports the
+                # move it could not place.
+                return None
+            expanded = os.path.expanduser(os.path.expandvars(from_command))
+        if _move_destination_is_unresolved(expanded):
+            return None
         if not _is_absolute_path(expanded):
             expanded = os.path.join(cwd, expanded)
         return os.path.realpath(expanded)
@@ -2445,6 +2502,12 @@ def _cwd_left_workspace(
             ):
                 return word
             cwd = resolve(operand)
+            if cwd is None:
+                # A destination neither scope decides (issue #1357): the move is
+                # reported by the operand it could not place, the way `cd -` is
+                # reported by its token. Joining it onto the cwd would read the
+                # move as "inside the workspace" while the shell writes outside.
+                return operand
             if leaves_workspace(cwd):
                 return cwd
             continue
@@ -2459,6 +2522,8 @@ def _cwd_left_workspace(
                 return "-"
             else:
                 cwd = resolve(operand)
+                if cwd is None:
+                    return operand
             if leaves_workspace(cwd):
                 return cwd
             continue
@@ -2472,6 +2537,8 @@ def _cwd_left_workspace(
             if target is None:
                 continue
             cwd = resolve(target)
+            if cwd is None:
+                return target
             if leaves_workspace(cwd):
                 return cwd
     if _depth < 3:
@@ -2582,6 +2649,13 @@ def _resolve_move_operand(cmd: str, cwd: str, operand: str) -> str | None:
         if from_command is None:
             return None
         expanded = os.path.expanduser(os.path.expandvars(from_command))
+    if _move_destination_is_unresolved(expanded):
+        # The mirror of `_cwd_left_workspace`'s answer for the same text (issue
+        # #1357): `None` keeps the start directory, which is the join base this
+        # walk falls back to whenever it cannot prove where the shell writes
+        # from. Joining the literal `$(…)` onto the cwd instead would name a
+        # directory that exists nowhere on disk and read the write as inside it.
+        return None
     if not _is_absolute_path(expanded):
         expanded = os.path.join(cwd, expanded)
     return os.path.realpath(expanded)
