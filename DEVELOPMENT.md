@@ -230,6 +230,26 @@ drive the code path under test with it. Local green is a statement about the pla
 you are standing on; when a test's subject is bytes, sizes or whole-file text, ask what
 the other platform's write path does to it.
 
+### A test file the guards cannot see yet — green locally, red in CI
+
+Several guards here decide what to read by asking git for the **tracked** files
+(`git ls-files`): the encoding rule (`test_script_decode_is_locale_independent.py`), the
+CRLF rule, the conflict-marker rule, the doc-count rule, `scripts/check-doc-count.py`, and
+others of the same shape. That is deliberate — an index cannot go stale — and it has one
+consequence: **a new file that is not in the index is read by none of those rules.**
+
+Measured 2026-09-18 (cycle `cyc20260918-105223`, PR #1368): a new test file was written,
+the full suite ran green in its worktree, the branch was pushed — and CI failed four
+minutes later on the encoding rule, naming a `subprocess.run(..., text=True)` call *in
+that file*. The local run had answered about a tree the file was not part of.
+
+The remedy is one command: **`git add` a new file before trusting a local suite run.**
+Staging is enough — `git ls-files` lists staged files. `tests/test_the_index_derived_scans_reach_new_files.py`
+now fails while a first-party `.py` file under `emrg/`, `packaging/`, `scripts/` or
+`tests/` is untracked, so the local run cannot report a verdict over source those rules
+cannot read; a file staged and then edited (the `AM` state) is a different question and no
+guard answers it.
+
 ---
 
 ## ❓ Extended FAQ
