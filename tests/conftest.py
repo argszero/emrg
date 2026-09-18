@@ -73,6 +73,50 @@ def _redirect_sessions_index(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _redirect_the_config_path(monkeypatch, tmp_path):
+    """Point `config_path()` at this test's scratch tree, in every module that binds it.
+
+    The read half of what `_guard_real_config_files` enforces for writes. The
+    suite never intends to touch the host's `~/.emrg/config.toml`, and it was
+    reading it constantly: constructing a real `EmrgServer` resolves the default
+    path in `ConfigReloader.__init__` (it fingerprints the file as its baseline,
+    `fingerprint` reads bytes rather than statting). Measured with a spy on
+    `open`/`io.open` (2026-09-18): **202 reads of the host's real file per
+    full-suite run** — 201 attributed to that construction (`daemon.py:259` →
+    `config_reload.py:167` → the `fingerprint` read) and 1 to a poll that let the
+    reloader tick (`daemon.py:650`). Nothing failed, which is the point — a host
+    read that no assertion depends on is invisible until a later edit makes an
+    expectation depend on it, which is how `tests/test_ws_e2e.py`'s upgrade
+    isolation became dead code and how `tests/test_config_reload.py` inherited
+    14 host resolutions.
+
+    Counting `config_path()` calls is not the same instrument: `ConfigReloader`
+    resolves the path and then reads it, so a fixture that patched the reloader
+    would hide the read from that spy without ever stopping it. The default path
+    is only *used* when no explicit `path=` is passed — the upgrade loop's
+    `load_update_config()` is the other caller, and it is not reached by the
+    suite (that path's isolation is a separate red line).
+
+    Two modules are re-pointed, because neither name is the other's alias:
+    `emrg.config` (where `config_path` is defined, and where `load_config` /
+    `load_update_config` call it) and `emrg.server.config_reload`, which imported
+    the name by value — patching only the first leaves the reloader on the host.
+
+    The scratch path keeps the shape of the real one — `config.toml` under a
+    directory named `.emrg` — so the test whose subject *is* the default
+    resolution (`tests/test_config.py::test_config_path`) still asserts what it
+    means to. A test that wants a config file of its own patches `config_path`
+    after this fixture, as `tests/test_upgrade.py` already does.
+    """
+    import emrg.config as cfg_mod
+    import emrg.server.config_reload as cr_mod
+
+    cfg_path = tmp_path / ".emrg" / "config.toml"
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+    monkeypatch.setattr(cr_mod, "config_path", lambda: cfg_path)
+
+
+@pytest.fixture(autouse=True)
 def _ensure_git_on_path(monkeypatch):
     """Make bare ``git`` subprocess calls work on hosts without PATH git.
 

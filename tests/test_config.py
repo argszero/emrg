@@ -13,6 +13,8 @@ from emrg.config import (
     load_config,
     ensure_config,
 )
+from emrg import config as cfg_mod
+from emrg.server import config_reload as cr
 
 
 def test_config_dir():
@@ -26,6 +28,45 @@ def test_config_path():
     assert isinstance(p, Path)
     assert p.name == "config.toml"
     assert p.parent.name == ".emrg"
+
+
+def test_the_default_config_path_is_redirected_into_the_scratch_tree(tmp_path):
+    """`conftest` redirects the default path; this pins that it is in force.
+
+    Read through the *module attribute*, not through this file's own
+    `from emrg.config import config_path` — a by-value import is a separate name
+    that a fixture patching `emrg.config` cannot reach, which is the trap this
+    whole change is about (and the reason this test failed the first time it was
+    written: it called its own copy and got the host's path back).
+
+    `test_config_path` above asserts the *shape* of the default resolution, and
+    the redirection keeps the shape (`config.toml` under a `.emrg` directory), so
+    it cannot tell a redirected run from an unredirected one. Without this pin the
+    fixture could be deleted and the only symptom would be the suite quietly
+    reading the host's real `~/.emrg/config.toml` again — 202 reads per run,
+    measured with a spy on `open`/`io.open` (2026-09-18) and 0 after the
+    redirection. Attribution of the 202: `daemon.py:259` (the `ConfigReloader`
+    the server builds) 201, `daemon.py:650` (a poll that ticks) 1.
+    """
+    p = cfg_mod.config_path()
+    assert p.parent.name == ".emrg"
+    assert p.parent.parent == tmp_path, (
+        "the suite resolved the default config path outside the test's scratch "
+        "tree — the host's real ~/.emrg/config.toml is being read again"
+    )
+
+
+def test_the_reloader_resolves_the_config_path_inside_the_scratch_tree(tmp_path):
+    """The same redirection for the other module that **binds** the name.
+
+    `config_reload.py` does `from emrg.config import ... config_path ...`, so it
+    holds its own reference; a fixture that re-pointed only `emrg.config` would
+    leave `ConfigReloader.__init__` fingerprinting the host's file. Pinned
+    separately because the two are separate names, and the difference is exactly
+    the class of defect this suite has hit twice (`tests/test_ws_e2e.py`'s
+    module-level binding, `tests/test_config_reload.py`'s 14 host reads).
+    """
+    assert cr.config_path() == tmp_path / ".emrg" / "config.toml"
 
 
 def test_llm_config_defaults():
