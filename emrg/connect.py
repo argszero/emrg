@@ -105,9 +105,10 @@ def cleanup_server() -> None:
     """Remove the daemon auth token file on shutdown.
 
     ⚠️ Guards against deleting a HEALTHY daemon's token (rant 2026-08-27T14:48:50):
-    a mis-triggered spawn cleanup (start_daemon / _start_daemon_background run this
-    unconditionally) must never remove the token of a daemon that is actually
-    listening on the fixed port — the fixed port is the single-instance ground
+    a mis-triggered spawn cleanup (the background start path —
+    `client/daemon_manager.py:start_daemon`, which is also what `emrg server
+    restart` uses — runs this unconditionally) must never remove the token of a
+    daemon that is actually listening on the fixed port — the fixed port is the single-instance ground
     truth, and a transient TCP probe miss while a daemon is alive caused the token
     to be deleted and the doomed spawn (EADDRINUSE suicide) never rewrote it.
 

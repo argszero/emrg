@@ -64,7 +64,8 @@ class TestCleanupServer:
     def test_keeps_token_when_daemon_listening(self, monkeypatch, tmp_path):
         """rant 2026-08-27T14:48:50 — never delete a HEALTHY daemon's token.
 
-        A mis-triggered spawn cleanup (start_daemon / _start_daemon_background run
+        A mis-triggered spawn cleanup (the background start path
+        `daemon_manager.start_daemon`, which `emrg server restart` now shares, runs
         cleanup_server() unconditionally) must not remove the token of a daemon
         that is actually listening on the fixed port. The doomed spawn (EADDRINUSE
         suicide) would never rewrite it → token-missing window for new connections.

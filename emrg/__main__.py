@@ -65,7 +65,10 @@ def _build_parser() -> argparse.ArgumentParser:
     server_actions.add_parser(
         "restart",
         help="Restart the daemon",
-        description="Stop the running daemon and start a new one.",
+        description="Stop the running daemon and start a new one. The start is "
+        "verified against the daemon port before it is announced, and the exit "
+        "code is non-zero when the replacement never came up (by then the old "
+        "daemon is already stopped).",
     )
     # (no action = foreground run, handled in main())
 
@@ -169,21 +172,40 @@ def main() -> None:
 
 # ── Daemon lifecycle ────────────────────────────────────────────
 
-def _start_daemon_background() -> subprocess.Popen:
-    """Start the daemon as a background subprocess. Returns the Popen handle."""
-    cleanup_server()
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "emrg.server"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        stdin=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-        # Windows: background daemon spawn must not pop a console window
-        # (rant 2026-08-09T13:16:36 — cmd-window storm).
-        **win32_no_window_kwargs(),
-    )
-    return proc
+def _start_daemon_and_report() -> int:
+    """Start the daemon in the background, and say what actually happened.
+
+    Returns the CLI's exit code: 0 once a daemon is *measured* to be up, 1 when
+    the replacement never answered.
+
+    The CLI used to spawn here itself — `subprocess.Popen(…, stderr=DEVNULL)` and
+    no readiness probe — and `emrg server restart` printed `daemon started
+    (pid=N).` straight after it (issue #1321). So a child that died at import or
+    config-parse stage was announced as started, and the host discovered the
+    truth later, from somewhere else, with no cause attached.
+
+    Both halves of the answer already exist in `client/daemon_manager.py`, the
+    path the TUI and the GUI use: it redirects the child's own stderr to
+    `~/.emrg/emrgd-start.err` — the only channel a child that dies before
+    installing its logging handler leaves behind (issue #1276) — and it waits for
+    the port before calling a start done. This path does not re-implement them, it
+    *is* that path. One background start in the product instead of two that drift,
+    which is precisely how one got the diagnostic and the other did not; the
+    spawn-storm gate and the fail-fast exit-code check come along with it.
+
+    `start_daemon()` raises `RuntimeError` carrying the evidence (the child's exit
+    code, what this attempt appended to `emrgd.log`, the child's own stderr) when
+    the daemon never answers, and that evidence is what the caller must print.
+    """
+    from emrg.client import daemon_manager as dm
+
+    try:
+        proc = asyncio.run(dm.start_daemon())
+    except RuntimeError as exc:
+        print(_start_failure_message(exc))
+        return 1
+    print(f"daemon started (pid={proc.pid}).")
+    return 0
 
 
 async def _send_shutdown() -> bool:
@@ -227,6 +249,28 @@ def _stop_failure_message(exc: BaseException) -> str:
     if isinstance(exc, AuthError):
         return f"daemon was NOT stopped: {_AUTH_REFUSED}."
     return "daemon not running."
+
+
+def _start_failure_message(exc: BaseException) -> str:
+    """The line `emrg server restart` prints when its replacement never answered.
+
+    Derived as a function over the exception, the shape `_stop_failure_message`
+    already uses, so the branch is assertable without stopping or starting
+    `emrgd` — a test that ran the restart path would do both (MANIFESTO 第四条
+    附则二).
+
+    The exception's own text is carried through rather than summarised. It is
+    `daemon_manager._startup_failure_detail`: the child's exit code, the bytes
+    this attempt appended to `emrgd.log`, and the child's own stderr. Those three
+    facts are what name a cause, so a tidy one-line version would put the host
+    back exactly where the defect left them — told that something failed, and
+    nothing more.
+    """
+    return (
+        "daemon was NOT started: the old daemon is stopped and the replacement "
+        "never answered on the daemon port —\n"
+        f"{str(exc).strip()}"
+    )
 
 
 def _stop_daemon() -> None:
@@ -314,15 +358,19 @@ def _stop_all(skip_gui: bool = False) -> int:
 
 
 def _restart_daemon() -> None:
-    """Stop and restart the daemon."""
+    """Stop the daemon, start a replacement, and report the start it measured.
+
+    The exit code follows the outcome (issue #1321): a restart that leaves no
+    daemon listening exits non-zero instead of announcing a start that never
+    happened, so a script — or the host — can tell the two apart.
+    """
     print("restarting daemon ...")
     _stop_daemon()
 
     # Wait a beat for the old socket to be cleaned up
     time.sleep(0.3)
 
-    proc = _start_daemon_background()
-    print(f"daemon started (pid={proc.pid}).")
+    sys.exit(_start_daemon_and_report())
 
 
 # ── Foreground daemon ───────────────────────────────────────────
