@@ -370,3 +370,87 @@ def test_the_walk_names_the_directory_the_file_lands_in():
         is None
     )
 
+
+# ---------------------------------------------------------------------------
+# The shell's other move verb (issue #1381)
+#
+# `_cwd_left_workspace` follows `pushd <dir>` as it follows `cd <dir>` (issue
+# #1362); its mirror read only `cd`, so the same command got two answers
+# depending on which verb spelled the move. Measured in `/bin/sh`, `ws/sub`
+# present, declared workspace `ws`, with the file's placement read back off
+# disk: `cd <ws>/sub && echo x > ../gt-out.txt` is allowed and lands
+# `<ws>/gt-out.txt`; `pushd <ws>/sub && echo x > ../gt-out.txt` was refused as
+# resolving to `<ws>/../gt-out.txt` — a directory the file never appears in —
+# while the same file landed inside.
+#
+# The rows below are the pair that makes the change discriminating in both
+# directions, plus the forms that must keep the start directory: `pushd`'s
+# options all mean there is no placeable destination (`-n` pushes without
+# moving, `±N` indexes the stack), so reading the token after the flag would
+# name a directory the shell never entered.
+# ---------------------------------------------------------------------------
+
+
+def test_both_move_verbs_place_the_write_site():
+    """One command, one answer, whichever verb spells the move.
+
+    Each row's landing place is the one measured in the shell: `../back.txt`
+    after a move into `sub` is `<ws>/back.txt`, and after climbing twice it is
+    `<ws>/../worse.txt`. The absolute spellings are those same paths, so the
+    verdict cannot be a list of blocked or allowed strings — a guard that
+    answered by verb rather than by placement would fail one of the two.
+    """
+    sub = os.path.realpath(os.path.join(WORKDIR, "sub"))
+    for verb in ("cd", "pushd"):
+        # Inside: refused before this change, and the file really lands inside.
+        assert _verdict(f"{verb} sub && echo x > ../back.txt") is True, verb
+        assert (
+            _cwd_at_write_site(
+                f"{verb} sub && echo x > ../back.txt", WORKDIR, "../back.txt"
+            )
+            == sub
+        ), verb
+        assert _verdict(f"{verb} {spelled(sub)} && echo x > ../in2.txt") is True, verb
+        assert _verdict(f"echo x > {spelled(os.path.join(WORKDIR, 'in2.txt'))}") is True
+        # `--` ends option parsing for both verbs — measured, `pushd -- <dir>`
+        # moves in sh, bash and zsh — so it must not be read as the flag that
+        # names no destination.
+        assert _verdict(f"{verb} -- sub && echo x > ../back.txt") is True, verb
+        # Outside: the reading that must survive the change. Measured, the file
+        # lands in the workspace's parent.
+        assert _verdict(f"{verb} sub && echo x > ../../worse.txt") is False, verb
+        assert (
+            _verdict(f"echo x > {spelled(os.path.join(os.path.dirname(WORKDIR), 'worse.txt'))}")
+            is False
+        )
+
+
+def test_a_pushd_form_with_no_placeable_destination_keeps_the_start_directory():
+    """`pushd`'s flags and the stack forms answer "not proven", never a guess.
+
+    `-n` pushes the directory and does **not** move, so the shell is in the
+    start directory and `../back.txt` really does land outside the workspace
+    (measured) — the refusal on that row is the correct reading, not friction.
+    Reading the token after `-n` as the destination would join the write onto a
+    directory the shell never entered, which is the one direction this walk must
+    not move.
+    """
+    assert _cwd_at_write_site(
+        "pushd -n sub && echo x > ../back.txt", WORKDIR, "../back.txt"
+    ) is None
+    assert _verdict("pushd -n sub && echo x > ../back.txt") is False
+    assert (
+        _cwd_at_write_site("pushd +1 && echo x > ../back.txt", WORKDIR, "../back.txt")
+        is None
+    )
+    assert (
+        _cwd_at_write_site("pushd && echo x > ../back.txt", WORKDIR, "../back.txt")
+        is None
+    )
+    # `popd` is not read as a move at all: its destination is an entry the stack
+    # pushed earlier, and a non-move answers with the start directory — the same
+    # fail-closed base `None` gives the caller.
+    assert _cwd_at_write_site(
+        "popd && echo x > ../back.txt", WORKDIR, "../back.txt"
+    ) == os.path.realpath(WORKDIR)
+

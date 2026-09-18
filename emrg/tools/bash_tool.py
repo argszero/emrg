@@ -2482,22 +2482,47 @@ def _cwd_left_workspace(
     return None
 
 
-def _cd_statement(statement: list[str]) -> tuple[bool, str | None]:
-    """Whether a statement is a plain ``cd <dir>``, and the operand it names.
+def _move_statement(statement: list[str]) -> tuple[bool, str | None]:
+    """Whether a statement moves the shell's directory, and the operand it names.
+
+    Two verbs spell the same move — ``cd <dir>`` and ``pushd <dir>`` (issue
+    #1362) — and this is the vocabulary both walks read. ``pushd`` differs from
+    ``cd`` in its *flags*, not in what follows them: every ``cd`` option is a
+    preference modifier (``-P``, ``-L``, ``-e``) and the destination is the
+    operand after it, while ``pushd``'s options all mean there is no placeable
+    destination at all. ``pushd -n <dir>`` pushes the directory onto the stack
+    and does *not* move, and ``pushd ±N`` rotates the stack by index. So a flag
+    on ``pushd`` answers ``(True, None)`` — the shell is where it was, which is
+    the same reading ``None`` gives the caller — rather than being skipped for
+    the token after it, which is how ``pushd -n <dir>`` would name a directory
+    the shell never entered.
 
     ``(False, None)`` is not a move at all. ``(True, None)`` is a move this walk
-    cannot place, and the three spellings that reach it are the ones a shell
-    answers without a directory this guard can read: a bare ``cd`` (which goes
+    cannot place, and the spellings that reach it are the ones a shell answers
+    without a directory this guard can read: a bare ``cd`` (which goes
     ``$HOME``), ``cd -`` (``$OLDPWD``), and ``cd a b``, which the shell itself
     refuses ("too many arguments") — a move that did not happen leaves the shell
-    where it was, so none of the three may set a join base.
+    where it was, so none of them may set a join base — plus ``pushd``'s stack
+    forms above, whose destination is an entry an earlier ``pushd`` pushed.
     """
     i = 0
     while i < len(statement) and _is_env_assignment(statement[i]):
         i += 1
-    if i >= len(statement) or _command_word(statement[i]) != "cd":
+    if i >= len(statement):
         return False, None
-    operands = [a for a in statement[i + 1:] if not a.startswith("-") or a == "-"]
+    verb = _command_word(statement[i])
+    if verb not in ("cd", "pushd"):
+        return False, None
+    args = statement[i + 1:]
+    # `--` ends option parsing, so what follows it is an operand even when it
+    # looks like a flag (measured: `pushd -- <dir>` moves in sh, bash and zsh).
+    # Read before the flag rule below, which would otherwise answer "no
+    # placeable destination" for a move every shell makes.
+    if args[:1] == ["--"]:
+        args = args[1:]
+    elif verb == "pushd" and any(a.startswith(("-", "+")) for a in args):
+        return True, None
+    operands = [a for a in args if not a.startswith("-") or a == "-"]
     if len(operands) != 1 or operands[0] == "-":
         return True, None
     return True, operands[0]
@@ -2523,7 +2548,7 @@ def _resolve_move_operand(cmd: str, cwd: str, operand: str) -> str | None:
 
 
 def _cwd_at_write_site(cmd: str, workspace: str, token: str) -> str | None:
-    """The directory the shell writes ``token`` *from*, when a ``cd`` moved it.
+    """The directory the shell writes ``token`` *from*, when a move moved it.
 
     The mirror of `_cwd_left_workspace`: that one asks where a move takes the
     shell *out* of the workspace; this one where it takes it while staying
@@ -2536,6 +2561,25 @@ def _cwd_at_write_site(cmd: str, workspace: str, token: str) -> str | None:
     subdirectory and climbing back is the ordinary way to write *beside* a
     subdirectory rather than in it, so this is a refusal the caller can only
     work around by spelling the target absolutely.
+
+    Both verbs that spell that move are read — ``cd <dir>`` and ``pushd <dir>``
+    (`_move_statement`) — and the two must agree, because they name one question
+    about one command: the walk that asks whether a move *leaves* the workspace
+    follows the stack form too (issue #1362). Read the same way in only one of
+    them, the third spelling gave the same command two answers. Measured with
+    the shell, ``ws/sub`` inside the workspace and declared ``ws``:
+
+    * ``cd <ws>/sub && echo x > ../gt-out.txt`` — allowed, and ``<ws>/gt-out.txt``
+      really exists afterwards.
+    * ``pushd <ws>/sub && echo x > ../gt-out.txt`` — refused as resolving to
+      ``<ws>/../gt-out.txt``, while the same file lands *inside* (issue #1381).
+
+    Reading it here does not widen anything: the pushed directory is used as the
+    join base only when `_resolve_move_operand` places it *and* it is inside an
+    allowed root, so the base is the directory the shell is really in — the join
+    is the measured landing place, and the containment check below then refuses
+    exactly the targets that leave the workspace. A ``pushd`` this walk cannot
+    place keeps the start directory, which is the fail-closed reading.
 
     Returns the directory in effect at the statement that writes ``token``, or
     ``None`` when that cannot be proven — in which case the caller keeps the
@@ -2604,7 +2648,7 @@ def _cwd_at_write_site(cmd: str, workspace: str, token: str) -> str | None:
     # writes: a redirect attached to the `cd` itself (`cd sub > ../f`) is set up
     # before the `cd` runs, which is why the site's own statement is not read.
     for k, st in enumerate(statements[:site]):
-        is_move, operand = _cd_statement(st)
+        is_move, operand = _move_statement(st)
         if not is_move:
             continue
         if operand is None:
