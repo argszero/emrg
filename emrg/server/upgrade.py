@@ -19,6 +19,7 @@ Design (host-specified boundaries, verbatim intent):
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,10 @@ RELEASES_URL = "https://api.github.com/repos/argszero/emrg/releases?per_page=30"
 UPGRADE_WORK_DIR = Path.home() / ".emrg" / "upgrade-work" / "emrg"
 INSTALL_DIR = Path.home() / ".emrg" / "install"
 VERSION_FILE = INSTALL_DIR / "version.txt"
+# The version the install replaced last time (written by the upgrade prompt
+# before it overwrites version.txt — PR #912). It names the one backup that a
+# failed upgrade can still be restored from, so the retention below keeps it.
+PREVIOUS_VERSION_FILE = INSTALL_DIR / "previous-version.txt"
 BACKUP_DIR = Path.home() / ".emrg" / "upgrade-backup"
 GUI_SRC = Path(__file__).parent.parent / "gui"  # evolution repo's emrg/gui
 # Hard-coded 5-minute check interval (host: not configurable).
@@ -46,6 +51,21 @@ TICK_INTERVAL = 300
 CHECK_TIMEOUT_SECONDS = 10.0
 # Fixed upgrade session id — traceable, one session per upgrade.
 SESSION_ID = "emrg-upgrade"
+# How many pre-upgrade snapshots survive a prune, counted newest-first **by
+# version, never by mtime** (issue #1389). One snapshot is a full copy of the
+# install — 599 MB measured on the host that filed the issue — and the upgrade
+# prompt writes one per upgraded version, so the directory grew without bound:
+# 14 snapshots / 8.2 GB, of which exactly one was still restorable.
+#
+# One is enough because the count is not the only protection: the versions the
+# install can still name (`version.txt`, `previous-version.txt`) are kept
+# whatever their rank, and `previous-version.txt` *is* the rollback target — the
+# prompt only ever restores from `backup_dir/<current_version>` (step 4). So the
+# surviving snapshot is the one a failed upgrade can actually be rolled back to;
+# a larger bound would only keep generations that nothing can name. The host
+# reached the same rule by hand before this policy existed (the cleanup of
+# 2026-09-18 kept `previous-version.txt`'s snapshot and nothing else).
+BACKUP_KEEP = 1
 
 
 def parse_version(tag: str) -> tuple:
@@ -76,6 +96,139 @@ def is_newer(latest: tuple, current: tuple) -> bool:
     return bool(latest) and latest > current
 
 
+# ── Retention of the pre-upgrade snapshots (issue #1389) ───────────────────
+
+
+def _snapshot_version(name: str) -> tuple:
+    """The version a snapshot directory's name denotes, or () if it denotes none.
+
+    Stricter than `parse_version` on purpose. `parse_version` is a *comparison*
+    helper that deliberately stops at a suffix ("0.2.18-rc.2" → (0, 2, 18)), and
+    that is right for ordering prereleases. It is wrong for *recognition*, which
+    here decides a deletion: reading it that way, a directory named
+    `0.2.18-rc.2` would pass for the snapshot of `0.2.18` and could be removed
+    in that snapshot's place. The prompt writes `backup_dir/<current_version>`
+    and `version.txt` holds a plain version (a `v` prefix at most), so the whole
+    name must be the version — nothing else is this feature's to delete.
+    """
+    stripped = name.lstrip("v")
+    version = parse_version(stripped)
+    if not version or ".".join(str(piece) for piece in version) != stripped:
+        return ()
+    return version
+
+
+def backup_snapshot_versions(backup_dir: Path) -> list[tuple[tuple, str]]:
+    """The snapshot directories in `backup_dir`, ascending by parsed version.
+
+    A snapshot is a **directory whose name is a version**, because that is the
+    only shape this feature writes: the upgrade prompt backs the current install
+    up to `backup_dir/<current_version>/` (step 4 of
+    `prompts/upgrade_prompt.j2`). Everything else is left alone rather than
+    guessed at — a name this module cannot read as a version is not a file it
+    may delete, and neither is a symlink (which `rmtree` would follow) or a
+    plain file. A missing or unreadable directory is `[]`, not an error: a fresh
+    install has no backups at all, and that must stay a non-event.
+    """
+    try:
+        entries = list(backup_dir.iterdir())
+    except OSError:
+        return []
+    snapshots = [
+        (_snapshot_version(entry.name), entry.name)
+        for entry in entries
+        if not entry.is_symlink() and entry.is_dir() and _snapshot_version(entry.name)
+    ]
+    snapshots.sort()
+    return snapshots
+
+
+def backup_snapshots_to_prune(
+    backup_dir: Path, keep: int = BACKUP_KEEP, keep_versions: tuple = ()
+) -> list[str]:
+    """Which snapshot names a prune would remove — the decision, doing nothing.
+
+    Separated from the removal so the policy can be read and tested without a
+    filesystem side effect, which is the property the issue asks for: "the
+    policy must be executable and testable with a scratch `backup_dir`".
+
+    Two protections, and they answer different questions:
+
+    * the newest `keep` snapshots by **version** — the floor. At `BACKUP_KEEP=1`
+      this is the safety net for a snapshot directory whose version files are
+      missing or unreadable, where the protection below has nothing to name;
+    * every snapshot whose parsed version is named by `keep_versions` — the
+      versions `version.txt` and `previous-version.txt` record, i.e. what the
+      install can actually restore from. That is what keeps the snapshots that
+      matter alive even when they are not the newest (a downgrade, or a
+      hand-copied install), and it is why `keep=1` cannot drop the rollback
+      target.
+
+    Names, not paths, so the caller cannot be handed a path outside the
+    directory it scanned. Ascending, so a caller that logs the removals logs
+    them oldest-first.
+    """
+    snapshots = backup_snapshot_versions(backup_dir)
+    protected = {parse_version(name) for name in keep_versions if parse_version(name)}
+    survivors = {name for _ver, name in snapshots[len(snapshots) - keep :]} if keep > 0 else set()
+    survivors |= {name for ver, name in snapshots if ver in protected}
+    return [name for _ver, name in snapshots if name not in survivors]
+
+
+def _installed_versions() -> tuple:
+    """The versions the install can still name: what runs, and what it replaced.
+
+    Both files are read defensively — the policy must not depend on them being
+    there. `version.txt` and `previous-version.txt` hold the *tag* (the prompt
+    writes `{{ target_tag }}`), so the leading `v` is stripped before parsing;
+    `parse_version` would drop it anyway, but saying so keeps the two readers in
+    step with `_read_local_version`.
+    """
+    versions = []
+    for path in (VERSION_FILE, PREVIOUS_VERSION_FILE):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            versions.append(text.lstrip("v"))
+    return tuple(versions)
+
+
+def prune_upgrade_backups(backup_dir: Optional[Path] = None, keep: int = BACKUP_KEEP) -> list[str]:
+    """Remove the pre-upgrade snapshots the retention no longer keeps.
+
+    Returns the names it removed, oldest-first, so a caller (or a test) reads
+    back what happened rather than inferring it. Removal is one `shutil.rmtree`
+    per snapshot, each in its own try: a snapshot that cannot be removed is
+    logged and skipped, never allowed to abort the sweep or to hide the ones
+    that were.
+
+    `backup_dir` is resolved **at call time** from the module constant, which is
+    what makes the daemon's own call site patchable: a test that boots a server
+    must never point this at the host's real snapshots (see `tests/conftest.py`'s
+    upgrade guard), and a default argument would bind the real path at import.
+    """
+    target = Path(backup_dir) if backup_dir is not None else BACKUP_DIR
+    removed: list[str] = []
+    for name in backup_snapshots_to_prune(target, keep=keep, keep_versions=_installed_versions()):
+        try:
+            shutil.rmtree(target / name)
+        except OSError:
+            logger.warning(
+                "upgrade: could not remove the superseded backup %s", target / name,
+                exc_info=True,
+            )
+            continue
+        removed.append(name)
+    if removed:
+        logger.info(
+            "upgrade: removed %d superseded upgrade backup(s), kept the newest %d: %s",
+            len(removed), keep, ", ".join(removed),
+        )
+    return removed
+
+
 def _published_epoch(published_at: str) -> Optional[float]:
     """ISO published_at → epoch seconds; None on unparseable input."""
     try:
@@ -103,6 +256,14 @@ class UpgradeManager:
             return
         if self._inflight:
             return  # re-entry guard: skip while an upgrade session runs
+        # Retention of the pre-upgrade snapshots (issue #1389). Here, and after
+        # the re-entry guard, because this is the only process that outlives the
+        # upgrades that fill the directory — and never while a session may be
+        # writing the next snapshot. A failed sweep is not a failed tick.
+        try:
+            prune_upgrade_backups()
+        except Exception:
+            logger.warning("upgrade: backup retention failed", exc_info=True)
         target = await self._find_target_tag()
         if not target:
             return  # nothing eligible this round

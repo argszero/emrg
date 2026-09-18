@@ -811,8 +811,13 @@ def _guard_upgrade_hermeticity(monkeypatch, tmp_path):
 
     monkeypatch.setattr(up_mod, "httpx", _BlockedHttpx)
 
-    # 2. Version file — never the real ~/.emrg/install/version.txt.
+    # 2. Version files — never the real ~/.emrg/install/*.txt. Both are read by
+    #    the retention policy below, so both are redirected: a test's verdict
+    #    must not depend on which versions this host happens to have installed.
     monkeypatch.setattr(up_mod, "VERSION_FILE", tmp_path / "upgrade-version.txt")
+    monkeypatch.setattr(
+        up_mod, "PREVIOUS_VERSION_FILE", tmp_path / "upgrade-previous-version.txt"
+    )
 
     # 3. Upgrade session — creating/writing the real emrg-upgrade session is a
     #    loud failure; tests that exercise the runner stub the factory after.
@@ -831,6 +836,13 @@ def _guard_upgrade_hermeticity(monkeypatch, tmp_path):
     monkeypatch.setattr(
         daemon_mod.EmrgServer, "_get_or_create_session", _guarded_get_or_create
     )
+
+    # 4. Snapshot retention — the upgrade tick prunes ~/.emrg/upgrade-backup
+    #    (issue #1389), and that directory holds the host's only rollback
+    #    snapshot: a test that ticked for real would delete it. Redirected at
+    #    the module constant, which the prune resolves at call time, so a test
+    #    that wants the sweep exercises it against its own tmp directory.
+    monkeypatch.setattr(up_mod, "BACKUP_DIR", tmp_path / "upgrade-backup")
 
 
 @pytest.fixture(autouse=True)
