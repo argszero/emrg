@@ -1090,6 +1090,27 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     term.render()
                     continue
 
+                # A config.toml edit the daemon applied to itself (issue #1374).
+                # It moves no model, so no `/model` happened — but a value the
+                # status segment shows did, and the daemon broadcasts it rather
+                # than only logging it. Without this branch the segment keeps the
+                # previous frame's answer until a reconnect or a switch, which is
+                # exactly the host's original complaint: the only way to learn the
+                # effective image capability was to send an image and read the refusal.
+                if data.get("type") == "config_applied":
+                    if data.get("model"):
+                        current_model = data["model"]
+                    if isinstance(data.get("vision"), bool):
+                        current_vision = data["vision"]
+                    moved = ", ".join(data.get("applied", [])) or "config"
+                    vision_note = ""
+                    if current_vision is not None:
+                        vision_note = f" (images: {'yes' if current_vision else 'no'})"
+                    chat.add("system", f"config.toml reloaded: {moved}{vision_note}")
+                    status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id)
+                    term.render()
+                    continue
+
                 # Model set response
                 if data.get("type") == "model_set":
                     err = data.get("error", "")

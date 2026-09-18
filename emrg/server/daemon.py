@@ -180,6 +180,17 @@ EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 # truncation uses: a second spelling could disagree with the code that cuts.
 PROJECT_CONTEXT_MAX_CHARS = 8000
 
+# The reloadable fields whose value a connected client *displays*, so a revision
+# that moves one of them must be broadcast rather than only logged (issue #1374).
+# Measured before this existed: `vision = true` edited into `~/.emrg/config.toml`
+# moved the running daemon's value within the poll interval while every connected
+# client kept the answer from its last frame, because the only two things that
+# report the effective vision are a `pong` and a `model_set` — and a reload is
+# neither (the TUI's pings are event-driven: startup, reconnect, rewind). The
+# other reloadable fields are daemon-local: nothing outside the daemon reads them,
+# so broadcasting them would be noise, not information.
+BROADCAST_ON_RELOAD = frozenset({"vision", "context_window"})
+
 # Windows TIME_WAIT retry: SO_EXCLUSIVEADDRUSE (the only anti-hijack option on
 # Windows) blocks rebinding while accepted connections linger in TIME_WAIT.
 # serve() treats EADDRINUSE-with-no-listener as a TIME_WAIT remnant and retries
@@ -672,12 +683,47 @@ class EmrgServer:
             # tell every client (the model is global daemon state).
             frame = self._apply_model_switch(outcome.model)
             await self._broadcast_all(frame)
+        elif set(outcome.applied) & BROADCAST_ON_RELOAD:
+            # No model moved, but a value a client *shows* did (issue #1374):
+            # without this arm the revision reached the log line and nothing
+            # else, so the TUI kept the previous answer until a reconnect or a
+            # `/model`. Mutually exclusive with the arm above because a model
+            # revision already carries the resolved `vision` on its own frame.
+            await self._broadcast_all(self._config_applied_frame(outcome))
         if "max_tool_rounds" in outcome.applied:
             # The daemon snapshots this at construction (__init__) — the value
             # always comes from the host's file, never from a default we invent.
             self._max_tool_rounds = self.llm.config.max_tool_rounds
         logger.info("config.toml reloaded: %s", describe(outcome))
         return outcome
+
+    def _config_applied_frame(self, outcome: ReloadOutcome) -> dict:
+        """The effective values a revision moved, for the clients that show them.
+
+        Issue #1374: `vision` is reloadable, so an edited `[llm] vision` reaches the
+        running daemon and changes how it treats an image, while a connected client
+        keeps the last value it was told — it only ever learns one from the `pong`
+        or a `model_set`, and a reload is neither.
+
+        Deliberately **not** `_apply_model_switch`'s frame, and the difference is
+        the reason this is a separate type rather than a reused `model_set`:
+        `previous` and `vision_source` describe a *resolution* (a switch resolved
+        the `[[llm.models]]` entry and can name where the value came from), and a
+        reload resolves nothing — `load_config` already ran the priority rule and
+        the reloader copies its result in place, so the live value *is* the
+        effective one. A source field here would invent a third value for a key
+        whose two legal values both describe switches. Reusing `model_set` was also
+        unsafe on the client side: a GUI waiting on a `/model` request resolves that
+        pending promise from the frame type, so a broadcast it never asked for would
+        answer it.
+        """
+        return {
+            "type": "config_applied",
+            "model": self.llm.config.model,
+            "context_window": self.llm.config.context_window,
+            "vision": self.llm.config.vision,
+            "applied": list(outcome.applied),
+        }
 
     async def _skills_ttl_loop(self) -> None:
         """Background deterministic skill update check (startup + every 24h).

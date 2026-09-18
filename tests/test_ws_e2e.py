@@ -19,8 +19,9 @@ import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from emrg.config import LlmConfig
+from emrg.config import LlmConfig, load_config
 from emrg.connect import connect_to_server
+from emrg.server.config_reload import ConfigReloader
 from emrg.server.tool_types import ToolResult
 
 
@@ -1256,6 +1257,56 @@ class TestWSBroadcast:
                     finally:
                         await ws_a.close()
                         await ws_b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+
+    def test_a_config_reload_broadcasts_the_effective_vision(self):
+        """A `[llm] vision` edit reaches a client already connected (issue #1374).
+
+        The daemon half is driven by hand rather than waited out on the 2s poll, so
+        this test carries the one claim a unit test cannot make: the frame really
+        crosses the socket, to a client that never asked for anything. Which of the
+        two callers drove the revision (this test, or the daemon's own loop ticking
+        underneath it) is not asserted — the frame is the acceptance, and the loop
+        applying it first is the same feature working.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                server, _, cleanup = await _boot_server(cwd)
+                try:
+                    cfg_path = cwd / "config.toml"
+                    body = (
+                        '[llm]\nbase_url = "http://localhost:9999/v1"\n'
+                        'api_key = "test-key"\nmodel = "test-model"\n'
+                        "max_tokens = 100\ncontext_window = 4096\nvision = %s\n"
+                    )
+                    cfg_path.write_text(body % "false", encoding="utf-8")
+                    # The reloader's `live` object must be the one the daemon
+                    # answers with (`self.llm.config`), or the test would measure a
+                    # reload into a config nobody reads.
+                    live = load_config(cfg_path).llm
+                    assert live.vision is False
+                    server.llm.config = live
+                    server._config_reloader = ConfigReloader(live, path=cfg_path)
+
+                    ws_a = await connect_to_server()
+                    try:
+                        cfg_path.write_text(body % "true", encoding="utf-8")
+                        await server._reload_config_once()
+                        assert live.vision is True, "the reload did not move the live value"
+                        # A already connected, and asked for nothing: the frame has
+                        # to arrive on the daemon's own initiative.
+                        while True:
+                            resp = json.loads(await asyncio.wait_for(ws_a.recv(), timeout=5))
+                            if resp.get("type") == "config_applied":
+                                assert resp["vision"] is True
+                                assert resp["applied"] == ["vision", "vision_default"]
+                                break
+                    finally:
+                        await ws_a.close()
                 finally:
                     await cleanup()
         asyncio.run(_test())
