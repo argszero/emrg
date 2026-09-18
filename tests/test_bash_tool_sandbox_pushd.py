@@ -221,6 +221,43 @@ def test_the_conservative_refusals_are_pinned_with_their_ground_truth():
     assert _verdict(f"pushd -n {spelled(OUTSIDE)} && echo x > f.txt") is False
 
 
+def test_the_prefix_reaches_the_read_only_git_block_too():
+    """A second consumer the one-word addition reaches, pinned on purpose.
+
+    The change is in `_COMMAND_WRAPPERS`, which every consumer of
+    `_runs_as_a_command` reads, not only this walk. The one that matters is the
+    ``read-only`` git-mutator check: measured on master (`bash_tool.py` sha16
+    `46d3e0161f47d0c9`), `git push origin master` is BLOCK there while
+    ``builtin git push origin master`` came back **ALLOW** — the prefix left the
+    git verb outside command position, so a mutator reached the read-only tier
+    as an argument. `builtin git reset --hard HEAD` and `builtin git commit`
+    were allowed the same way.
+
+    Found by an external contributor's independent run
+    (how2how2how2-arch on #1379, "worth naming in the PR") and re-measured here
+    on both arms before pinning: on _this_ arm all three are BLOCK, and the
+    read verbs stay allowed. Pinned because the read-only half would otherwise
+    be an implicit consequence of a fixture in a workspace-write test — a later
+    change could drop it without any test noticing.
+
+    Classification only: nothing here is executed.
+    """
+    for mutator in (
+        "git push origin master",
+        "git reset --hard HEAD",
+        "git commit -m x",
+    ):
+        # The prefix must not widen the tier: the bare and prefixed spellings
+        # get the same verdict, exactly as `command`/`env` already did.
+        for prefix in ("", "builtin ", "command ", "env "):
+            cmd = f"{prefix}{mutator}"
+            assert _verdict(cmd, RO) is False, cmd
+    # Read verbs are not collateral damage: the block is about mutators, and the
+    # prefix must not turn a read into a refusal.
+    for read in ("builtin git status", "builtin git log --oneline -1", "builtin cat f.txt"):
+        assert _verdict(read, RO) is True, read
+
+
 @pytest.mark.skipif(
     os.name == "nt",
     reason=(
