@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -615,3 +616,103 @@ def test_no_function_has_an_unused_parameter() -> None:
         "unused parameter(s) - each declares a dependency the body does not have: "
         f"{offenders}"
     )
+
+
+# --- the refresh route has to be one a reader can publish -------------------
+#
+# The remedy above the row is only advice if the reader can carry it out. This
+# tool told a stale-with-no-votes PR to "re-merge master into the branch (or
+# rebase it)" - and the second half cannot be done: a rebase of a branch whose
+# head is already on the remote rewrites the commits the remote holds, so
+# `git push` is refused as non-fast-forward and the only way to publish one is a
+# force-push, which this project forbids ("NEVER force-push over an existing
+# remote branch", `emrg/server/evolution_prompt.md`). Measured 2026-09-19
+# (`cyc20260919-065231`) on `#1404`: the rebase was rejected exactly so, while
+# merging master in and pushing the same tree moved the head cleanly; every
+# refresh in this repo's history is that merge. A remedy that names an
+# unpublishable route costs a cycle a rejected push and an invitation to
+# force-push, which is the one action here that cannot be undone.
+
+#: The offer form, not the word: a rebase named as an alternative route. The
+#: three carriers all spelled it this way ("(or rebase)", "(or rebase it)",
+#: "(re-merge master in, or rebase)"), and a sentence that names a rebase to rule
+#: it out ("instead of a rebase that would not answer its question") is not an
+#: offer.
+_REBASE_OFFER = re.compile(r"\bor\s+rebase", re.IGNORECASE)
+
+
+def _rebase_offers(text: str) -> list[str]:
+    """The sentences of ``text`` that offer a rebase as a way to refresh.
+
+    Whitespace is flattened and the text split on sentence ends first, so a
+    sentence wrapped across source lines is still read as one sentence - the
+    carriers are prose, and their line breaks are formatting rather than meaning.
+
+    Named limit: an offer spelled without `or` ("you may rebase the branch
+    instead") reads as no offer here. The scan is written for the form this repo
+    has actually used; it is a pin on that form, not a proof that no rebase can be
+    proposed in English.
+    """
+    flat = " ".join(text.split())
+    return [s for s in re.split(r"(?<=\.)\s+", flat) if _REBASE_OFFER.search(s)]
+
+
+def test_the_rebase_offer_scan_is_not_blind() -> None:
+    """The instrument's control, fed the wording this change removed.
+
+    All three carriers' pre-fix spellings are here verbatim - a predicate that
+    cannot see the defect it was written for reports the healthy answer for every
+    input, which is a false certificate rather than a check. The second assertion
+    is the other direction: naming a rebase in order to rule it out must not read
+    as an offer.
+    """
+    assert _rebase_offers("Re-merge master into the branch (or rebase it) and let CI judge the real merged tree.") == [
+        "Re-merge master into the branch (or rebase it) and let CI judge the real merged tree."
+    ]
+    assert _rebase_offers("re-merge master into it (or rebase) so CI judges the real merged tree.") == [
+        "re-merge master into it (or rebase) so CI judges the real merged tree."
+    ]
+    assert _rebase_offers("refreshing a branch (re-merge master in, or rebase) moves its head.") == [
+        "refreshing a branch (re-merge master in, or rebase) moves its head."
+    ]
+    assert _rebase_offers(
+        "A stale verdict that is not ancestry-shaped is named with the remedy that does "
+        "fit it instead of a rebase that would not answer its question."
+    ) == []
+
+
+def test_no_carrier_offers_a_rebase_as_the_refresh_route(mod, monkeypatch, capsys) -> None:
+    """Both *printed* carriers, read off the real output rather than off the source.
+
+    The remedy line and the header above it are what an operator acts on, and they
+    are two carriers of one route, so both are read here - a `sed` on the source
+    would answer "is the offer in the file", one level short of "does a reader
+    receive it". The PR is the state whose remedy *is* the refresh (stale, nothing
+    to void), which is the only state that named the route at all.
+    """
+    fake = FakeGh(_view(), _compare("diverged", 2, 1, base="cb651a4"), [_run_()])
+    _votes(mod, monkeypatch, 0)
+    rc = _run(mod, monkeypatch, fake)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "nothing to void" in err, "the verdict under test is the one that names the route"
+    assert _rebase_offers(err) == [], (
+        "the refresh must be published by pushing a merge: a rebase of a pushed branch "
+        "cannot be pushed back without a force-push, which this project forbids"
+    )
+    assert "git push" in err, "the route named must carry the step that moves the head"
+
+
+def test_the_tools_own_document_does_not_offer_a_rebase(mod) -> None:
+    """The third carrier: the module docstring, which no run prints.
+
+    It is where the rule the two printed carriers follow is stated - the tool's own
+    document, and the text `--help` renders the description from - so a reader who
+    never hits a stale PR still learns the route from here. Pinned on the same
+    predicate, so the three cannot drift apart.
+    """
+    assert mod.__doc__, "the script has no module docstring to read"
+    assert _rebase_offers(mod.__doc__) == [], (
+        "the docstring's own statement of the refresh route must not offer a rebase"
+    )
+    assert "force-push" in mod.__doc__, "the docstring must name what publishing a rebase costs"
