@@ -992,7 +992,15 @@ def test_containment_allows_legitimate_commands():
     for cmd in (
         # normal network reads
         "curl -s https://api.github.com/repos/argszero/emrg",
-        "curl -s -o /tmp/out.json https://example.com/data",
+        # `curl -s -o /tmp/out.json <url>` used to sit here and is deliberately not
+        # back: `-o` names a *write*, and this list asserts both tiers, so the row
+        # was passing for a reason that had nothing to do with containment — the
+        # walk named no target for `curl -o`, and an empty target list is allowed
+        # by construction. With the destination read (issue #1398) read-only blocks
+        # it (its contract: every write except `/dev/null`), and workspace-write
+        # judges the path — `/tmp` is the temp root only on Linux, and this suite
+        # runs on macOS and Windows too. The `-o` shape is now covered where the
+        # reader lives: `tests/test_bash_tool_option_destinations.py`.
         "wget https://example.com/file.tar.gz",
         "ping 8.8.8.8",
         "git fetch origin master",
