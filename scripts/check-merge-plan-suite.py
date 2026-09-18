@@ -1080,9 +1080,10 @@ def _kept_note(path: Path, tree_sha: str | None = None) -> None:
         "  test/integration.test.js (Cannot find module 'ws'). Measured on a real landing\n"
         "  tree (2026-09-19, f96d6515c734): the GUI suite is 125 passed / 2 failed with\n"
         "  neither link, 126 / 1 with the python link alone, 126 / 0 / 8 skipped with both.\n"
-        "  The node link must point at the GUI's OWN node_modules: the repository root's is\n"
-        "  empty, so linking it is indistinguishable from linking nothing (126 / 1 either\n"
-        "  way). Both remedies, against this tree:"
+        "  The node link must point at the GUI's OWN node_modules: the repository root has\n"
+        "  none at all (there is no root package.json either), so `ln -sfn` from it leaves a\n"
+        "  dangling symlink - as indistinguishable from linking nothing as an empty directory\n"
+        "  would be (126 / 1 either way). Both remedies, against this tree:"
     )
     # `cd` before the interpreter, not only `PYTHONPATH`: the harness's own `_suite_verdict`
     # passes `cwd=str(worktree)` *and* `_suite_env`'s pinned `PYTHONPATH` for the same
