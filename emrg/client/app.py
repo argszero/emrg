@@ -66,10 +66,22 @@ def _csi_modifier_action(data: bytes) -> str | None:
     return None
 
 
-def _format_status_left(title: str, sid: str, model: str = "") -> str:
-    """Format left status: version + session title + short ID + model.
+def _format_status_left(
+    title: str, sid: str, model: str = "", vision: bool | None = None
+) -> str:
+    """Format left status: version + session title + short ID + model (+ images).
 
     Module-level so it is unit-testable (rant 2026-08-13T14:11:03).
+
+    ``vision`` is the **effective** image capability the daemon reported, not
+    ``config.toml``'s declaration (rant 2026-09-17T16:53:02): the host's complaint
+    was that the only way to learn whether images work was to send one and read
+    the refusal, while the answer had already been decided by a priority rule
+    (entry key → top-level default). Both directions are shown, because the
+    silent failure is symmetric — a vision model degraded to text and a
+    text-only model handed an image look the same from the outside. ``None``
+    (an older daemon that does not report it) prints nothing extra, keeping the
+    segment byte-identical to before.
     """
     import emrg
     ver = getattr(emrg, "__version__", "dev")
@@ -79,7 +91,10 @@ def _format_status_left(title: str, sid: str, model: str = "") -> str:
     else:
         parts.append(sid)
     if model:
-        parts.append(f"[{model}]")
+        if vision is None:
+            parts.append(f"[{model}]")
+        else:
+            parts.append(f"[{model} {'img' if vision else 'no-img'}]")
     return " ".join(parts)
 
 
@@ -504,13 +519,18 @@ async def interactive(init_auto_evolve: bool = False, console=None):
     term = Terminal(); stdin_fd = sys.stdin.fileno()
     stdin_queue: asyncio.Queue = asyncio.Queue()
 
-    def _status_left(title: str, sid: str, model: str = "") -> str:
+    def _status_left(
+        title: str, sid: str, model: str = "", vision: bool | None = None
+    ) -> str:
         """Format left status: version + session title + short ID + model."""
-        return _format_status_left(title, sid, model)
+        return _format_status_left(title, sid, model, vision)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
     current_model = ""  # model name tracked independently of server_id (rant 2026-08-11T20:02:43)
+    # Effective image capability, as the daemon reports it (rant 2026-09-17T16:53:02).
+    # None until a pong or model_set frame says — an older daemon never does.
+    current_vision: bool | None = None
 
-    status = StatusLine(left=_status_left(session_title, session_id, current_model), center="connecting...")
+    status = StatusLine(left=_status_left(session_title, session_id, current_model, current_vision), center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
     term.mount(status=status, composer=inp, chat=chat)
 
@@ -599,7 +619,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
-        nonlocal current_model
+        nonlocal current_model, current_vision
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start
         # /task-session: the daemon's verdict on a task's session decides whether
@@ -660,13 +680,20 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     model = data.get("model", "")
                     if model:
                         current_model = model
+                    # The effective image capability, decided daemon-side by the
+                    # priority rule (rant 2026-09-17T16:53:02). Reported on the
+                    # pong so a client that just connected is not blind until its
+                    # first `/model`; an older daemon simply omits the key and the
+                    # segment stays as it was.
+                    if isinstance(data.get("vision"), bool):
+                        current_vision = data["vision"]
                     server_id = f"{hid} @ {host}"
                     if not _welcomed:
                         _welcomed = True
                         import emrg
                         ver = getattr(emrg, "__version__", "dev")
                         chat.add("system", f"EMRG {ver}  |  {server_id}\nType /help for shortcuts, or just start chatting.")
-                    status.update(left=_status_left(session_title, session_id, current_model), center=server_id)
+                    status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id)
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     term.render(); continue
 
@@ -894,7 +921,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                             chat.rows.clear()
                             chat.dirty = True
                             chat.add("system", f"Created new session {new_sid} — continue chatting.")
-                            status.update(left=_status_left("", new_sid, current_model), center=server_id or "emrg")
+                            status.update(left=_status_left("", new_sid, current_model, current_vision), center=server_id or "emrg")
                             term.set_title(f"{new_sid} @ {project_name}")
                             msg_count = 0
                             _update_left_extra()
@@ -1072,12 +1099,26 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         model_name = data.get("model", "")
                         ctx_win = data.get("context_window", 0)
                         previous = data.get("previous", "")
+                        # The effective value and where it came from (rant
+                        # 2026-09-17T16:53:02): "source: entry" means the model
+                        # entry declared it, "top-level-default" means the
+                        # fallback applied because the entry said nothing — the
+                        # distinction the host could only infer by sending an image.
+                        if isinstance(data.get("vision"), bool):
+                            current_vision = data["vision"]
+                        vision_note = ""
+                        if current_vision is not None:
+                            src = data.get("vision_source", "")
+                            vision_note = (
+                                f", images: {'yes' if current_vision else 'no'}"
+                                + (f" ({src})" if src else "")
+                            )
                         chat.add("system",
                                  f"Model switched: {previous} → {model_name}"
-                                 f" (context: {ctx_win:,})")
+                                 f" (context: {ctx_win:,}{vision_note})")
                         # Track model independently and refresh the left section
                         current_model = model_name
-                        status.update(left=_status_left(session_title, session_id, current_model), center=server_id)
+                        status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id)
                     term.render()
                     continue
 
@@ -1271,7 +1312,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         f"Resumed session {session_id}{title_extra} "
                         f"({meta.get('message_count', record_count)} messages, "
                         f"created {str(meta.get('created_at', ''))[:16].replace('T', ' ')})")
-                    status.update(left=_status_left(session_title, session_id, current_model), center=server_id or "emrg")
+                    status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id or "emrg")
                     term.set_title(f"{session_title or session_id} @ {project_name}")
                     # Set message count from loaded session
                     msg_count = meta.get("message_count", record_count)
@@ -1288,7 +1329,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         new_title = data.get("title", "")
                         session_title = new_title
                         chat.add("system", f"Session renamed to: {new_title}")
-                        status.update(left=_status_left(session_title, session_id, current_model), center=server_id or "emrg")
+                        status.update(left=_status_left(session_title, session_id, current_model, current_vision), center=server_id or "emrg")
                         term.set_title(f"{session_title} @ {project_name}")
                     term.render()
                     continue

@@ -77,6 +77,9 @@ context_window = 131072
 auto_compact_threshold = 0.0
 # vision: whether the model supports the OpenAI vision API (image_url). Keep false for
 # non-vision models (e.g. DeepSeek) — pasted images degrade to text placeholders to avoid API errors.
+# This is the DEFAULT: a [[llm.models]] entry's own `vision` key wins over it, and an
+# entry without one (or no entry at all) falls back to this value — it never inherits
+# the previous model's answer.
 vision = false
 
 # Multi-model support — use /model to switch between models
@@ -98,6 +101,7 @@ vision = true
 - The tick reads the bytes rather than comparing `(mtime, size)`. That pair was the first design and the `windows-2025` leg falsified it: two writes milliseconds apart share a timestamp there, so an edit that also keeps the file's size leaves the comparison identical and the edit is **silently never applied** — the very complaint this feature removes. The cost is one small read plus a sha256 per tick, paid on every platform (coarse timestamps are a property of the mount, not of the OS) — worth knowing if `~/.emrg` lives on a network filesystem.
 
 - `model` travels the same path `/model` uses — the usage anchors are invalidated and `context_window` re-resolved from the matching `[[llm.models]]` entry — and every connected client is told (`model_set`).
+- **`vision` is resolved, and the resolved value is what is reported.** It comes from one place — the matching entry's own key, else the top-level `[llm] vision` — and both the `model_set` frame and the `ping`/`pong` status frame carry the value the daemon will act on, so a client shows the effective capability rather than this file's declaration (the TUI prints it beside the model name in the status bar: `[gpt-4o img]` / `[deepseek-chat no-img]`). The declaration and the effective value are different things the moment a switch happens, which is why the file alone cannot answer "can I paste an image?".
 - A `[[llm.models]]` entry is matched by its `name` **or** its `model`, so `/model <name>` and `/model <api-id>` name the same entry — one matcher (`config.find_model_entry`) answers every lookup a switch makes, so the entry's `context_window`, its API id and its `vision` can never come from three different rows. Before that was one function, the `context_window` lookup matched `name` only: switching by the API id matched nothing and silently kept the previous model's window.
 - `base_url`, `api_key`, `max_tokens`, `temperature`, `max_tool_rounds`, `context_window`, `auto_compact_threshold`, `models`, `vision`, `stream_options`, `context_refresh_interval_ms` are assigned for the next request; a stream already in flight is never rewritten.
 - A half-written or wrongly-typed file is **rejected whole**: the previous good configuration stays in force, one warning is logged, and the file is re-read on your next save.
