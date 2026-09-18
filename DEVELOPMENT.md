@@ -444,6 +444,24 @@ Measured 2026-09-16 against `master`: inside the workspace **ALLOW**,
 `$TMPDIR/…` **ALLOW**, `/tmp/…` **BLOCK**, `/private/tmp/…` **BLOCK**,
 `/var/tmp/…` **BLOCK**, `/dev/shm/…` **BLOCK**.
 
+#### A relative target is resolved, not assumed
+
+`echo x > out.txt` is allowed while the resolved target stays under the
+directory the command runs in — the workspace root, or the daemon's own cwd
+when the caller injected none. A target that climbs out with `..` is refused,
+including the spelling that arrives through a variable the command itself
+assigns (issue #1353):
+
+```
+⛔ workspace-write sandbox: blocked write to relative target '../escaped.txt':
+it resolves to '/…/escaped.txt', outside '/…/ws', the directory the command runs
+in (issue #1353)
+```
+
+A climb that returns to the workspace (`echo x > ../ws/out.txt`) is still
+allowed: the test is on the **resolved** target, not on the spelling, so it
+cannot turn `sub/../out.txt` into a refusal.
+
 #### `$TMPDIR`, not `/tmp`
 
 The tier means `tempfile.gettempdir()` — `$TMPDIR`, which is

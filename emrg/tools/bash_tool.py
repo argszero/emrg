@@ -2798,6 +2798,43 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
                     f"the command runs it after changing directory to {moved_out!r}, "
                     "which is not a directory this workspace can place it in (issue #1244)"
                 ), "partial"
+            # …and the target itself can invalidate it without moving anything,
+            # by climbing out with `..` (issue #1353). The assumption above is
+            # about *where* the write lands, so it is only sound while the
+            # resolved target is still under the directory the command runs in:
+            # `echo x > ../escaped.txt` was ALLOW here, exited 0, and created the
+            # file outside the workspace (measured end to end). The base is the
+            # directory the child actually starts in — the declared workspace,
+            # or this process's cwd when the caller declared none, which is what
+            # `execute()` hands the child as `cwd=None` (issue #1359).
+            #
+            # This only ever *adds* refusals: every relative target was allowed
+            # before, and the test's omitted/declared property (issue #1359) is
+            # preserved because both readings resolve against the directory the
+            # child runs in and both then require the result to stay under it.
+            base = workdir_real if workdir_real else cwd_real
+            real = os.path.realpath(os.path.join(base, expanded))
+            if real in protected:
+                return False, (
+                    f"workspace-write sandbox: blocked write to protected daemon file {t!r}"
+                ), "partial"
+            if real == emrg_home:
+                return False, (
+                    f"workspace-write sandbox: blocked destructive write to {t!r} "
+                    "(would erase the daemon's data directory)"
+                ), "partial"
+            relative_allowed = (
+                [base] + list(_trusted_write_zones()) + list(_temp_write_roots())
+            )
+            if not any(
+                src and (_is_within(real, src) or real == src)
+                for src in relative_allowed
+            ):
+                return False, (
+                    f"workspace-write sandbox: blocked write to relative target {t!r}: "
+                    f"it resolves to {real!r}, outside {base!r}, the directory the "
+                    "command runs in (issue #1353)"
+                ), "partial"
             continue
         real = os.path.realpath(expanded)
         if real in protected:
