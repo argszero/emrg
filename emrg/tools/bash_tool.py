@@ -432,6 +432,29 @@ _UNRESOLVED_VAR_RE = re.compile(rf"(?:{_PARAM_EXPANSION})+")
 # rather than a whole name on its own (`$DST`). The distinction is what keeps the
 # write-target rule below from refusing `cp $SRC $DST` — see it for why.
 _UNRESOLVED_ROOT_RE = re.compile(rf"(?:{_PARAM_EXPANSION})+[\\/]")
+# A brace list is several words to the shell and one word to this walk (issue
+# #1396). `{a,b}` is expanded *before* the command runs, so a destination or a
+# target carrying one names a path that is not in the token stream — the same
+# case `$` and the backquote already are, and the same failure shape: read
+# literally, the token is joined onto the cwd, so every spelling of the list
+# reads as being **inside** the workspace, the one direction this guard must
+# never drift in. Measured on master `67ba7f52` (predicate only, nothing
+# executed), one geometry whose outside directory is outside every allowed root:
+# `cd {../emrg-1396-outside,sub} && cat > f` and `cat > {../emrg-1396-outside,inside}/f`
+# were both ALLOW, while `/bin/sh` in the same tree wrote the file in the sibling
+# directory — this host's `cd` places the shell in the first of the expanded words.
+#
+# The expansion is a comma or a `..` *inside* a brace pair; a word carrying
+# braces with neither (`a{b}c`) is one literal word to the shell as well, so it
+# keeps the verdict the join gives it. The search is for the inner pair, which is
+# also what makes the nested spelling (`{a,{b,c}}`) not slip past: its inner pair
+# is a match even when the outer one is not readable as a list.
+#
+# The price is stated rather than hidden: a *legitimate* list whose every
+# spelling stays inside is refused too (`rm {dist,build}`, `cp a {b,c}`), because
+# which of the spellings the command uses is exactly what the text does not say.
+# The work-around is the one every refusal in this file names: spell them out.
+_BRACE_EXPANSION_RE = re.compile(r"\{[^{}]*(?:,|\.\.)[^{}]*\}")
 
 # The variable a *write target* is rooted in (`$T/f`, `${T}/f`), read as the
 # plain name so the value the command gave it can be looked up. The expansion
@@ -2354,13 +2377,21 @@ def _move_destination_is_unresolved(expanded: str) -> bool:
       conservative reading of unfinished text.
     - ``$(…)`` and its backquote spelling — a command substitution, whose value
       only running it would give.
+    - a **brace list** (``{a,b}``, ``{1..3}``, ``{a,b}{c,d}``) — several words to
+      the shell and one to this walk, expanded before the command runs (issue
+      #1396). Measured on master ``67ba7f52``: ``cd {../emrg-1396-outside,sub} &&
+      cat > f`` was ALLOW while the shell in the same tree wrote the file in the
+      sibling directory, and ``{a,b}`` carries no ``$`` for the class above to
+      catch.
 
     The price is stated rather than hidden: a *legitimate* computed move
     (``cd "$(git rev-parse --show-toplevel)"``, a directory a ``read`` filled in)
     is refused the same way, because the token stream cannot tell it from the
     escapes above without executing them; and a destination known to land in an
     allowed write root (``cd "$(mktemp -d)"``, which lands in the OS temp area) is
-    refused with it, because *where* it lands is exactly what is unknowable here.
+    refused with it, because *where* it lands is exactly what is unknowable here;
+    and so is a brace list whose every spelling stays inside (``cd {a,b}``),
+    because *which* spelling runs is unknowable in the same way.
     That is the trade this guard already
     makes one branch over — a write target rooted in a variable neither scope can
     resolve fails closed ("a target whose root cannot be resolved is not one the
@@ -2368,7 +2399,11 @@ def _move_destination_is_unresolved(expanded: str) -> bool:
     this reason already. The work-around the caller keeps is the one every refusal
     here has: spell the target absolutely.
     """
-    return "$" in expanded or "`" in expanded
+    return (
+        "$" in expanded
+        or "`" in expanded
+        or bool(_BRACE_EXPANSION_RE.search(expanded))
+    )
 
 
 def _cwd_left_workspace(
@@ -3139,6 +3174,29 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
         if t == "/dev/null":
             continue
         expanded = os.path.expanduser(os.path.expandvars(t))
+        if _BRACE_EXPANSION_RE.search(expanded):
+            # The same class as the move rule, refused on the same ground (issue
+            # #1396): a brace list is several operands and this walk cannot say
+            # which spelling the shell takes, so a target carrying one is not one
+            # the guard can prove stays in the workspace. Read literally it is a
+            # *relative* name, i.e. inside — measured on master `67ba7f52`,
+            # `rm -rf {../emrg-1396-outside/doomed,inside}` and
+            # `tee {../emrg-1396-outside/written,inside}` were both ALLOW, and both
+            # really reach the sibling directory when driven in `/bin/sh` (the
+            # verbs take several operands, so the expanded list is simply handed to
+            # them). A *redirect* is the one shape that does not escape — bash
+            # answers "ambiguous redirect" and writes nothing, measured with the
+            # other two — but it is refused with the rest, because for this walk
+            # the two spellings are the same text and the guard has no wish to
+            # depend on which verb it was handed to. The bare-operand exemption the
+            # variable rule keeps for `cp $SRC $DST` has no analogue here: a brace
+            # operand is several operands, so it is refused with them. The price is
+            # stated rather than hidden — `rm {dist,build}` is refused too, because
+            # every spelling being inside is exactly what the text does not say.
+            return False, (
+                f"workspace-write sandbox: blocked write to {t!r}, whose text is a "
+                "brace expansion the guard cannot place (issue #1396)"
+            ), "partial"
         if not _is_absolute_path(expanded) and _UNRESOLVED_ROOT_RE.search(expanded):
             # The environment is not the only resolution scope (issue #1316): a
             # variable the *command itself* assigned in an earlier statement is
