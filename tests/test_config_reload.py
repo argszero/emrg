@@ -64,7 +64,13 @@ def _server(tmp_path: Path, body: str = BASE) -> tuple[EmrgServer, Path]:
     _write(cfg_path, body)
     live = _live_from(cfg_path)
     server = EmrgServer(live)
-    server._config_reloader = ConfigReloader(live, path=cfg_path)
+    # The `[update]` half (issue #1356), isolated the same way: the object the
+    # daemon hands its UpgradeManager, loaded from this tmp file instead of the
+    # host's real config.toml. No test here calls `tick()`.
+    server._update_config = load_config(cfg_path).update
+    server._config_reloader = ConfigReloader(
+        live, path=cfg_path, live_update=server._update_config
+    )
     return server, cfg_path
 
 
@@ -320,6 +326,144 @@ def test_a_rejected_revision_never_raises_out_of_the_tick(tmp_path):
     outcome = asyncio.run(server._reload_config_once())
     assert outcome is not None and outcome.error is not None
     assert server.llm.config.max_tokens == 100
+
+
+# ── the `[update]` section (issue #1356) ─────────────────────────────
+
+
+def test_the_update_type_table_covers_every_reloadable_field():
+    """The same second-source-of-truth rule as `_TYPES`, one section over.
+
+    A field added to `UpdateConfig` and absent from `_UPDATE_TYPES` would be
+    applied with no check at all (`validate` skips it), and the section is the
+    one whose whole defect was being silently out of scope.
+    """
+    assert set(cr._UPDATE_TYPES) == set(cr.update_reloadable_fields())
+    assert cr.update_reloadable_fields() == ("enabled", "delay_minutes")
+
+
+def test_an_update_section_edit_is_applied_in_place(tmp_path):
+    """The measured defect: `load_update_config()` ran once, in the tick loop.
+
+    So `enabled = false` in the file did nothing to a running daemon — and after
+    the client's mtime-restart was removed (PR #1355) nothing at all covered it.
+    """
+    server, cfg_path = _server(tmp_path)
+    live_update = server._update_config
+    assert live_update.enabled is True and live_update.delay_minutes == 1440
+
+    _write(cfg_path, BASE + "\n[update]\nenabled = false\ndelay_minutes = 60\n")
+    outcome = asyncio.run(server._reload_config_once())
+    assert outcome is not None and outcome.error is None
+    assert outcome.update_applied == ["enabled", "delay_minutes"]
+    assert outcome.applied == [], "nothing under [llm] moved"
+    # In place, on the object itself — which is what makes the manager's next
+    # tick read the new values without being rebuilt.
+    assert live_update.enabled is False and live_update.delay_minutes == 60
+    assert describe(outcome) == "[update] changed=enabled,delay_minutes"
+    # A second poll with no further write is not a second revision.
+    assert asyncio.run(server._reload_config_once()) is None
+
+
+def test_a_wrongly_typed_update_field_rejects_the_whole_revision(tmp_path):
+    """Atomicity is per *revision*, not per section.
+
+    If the `[llm]` half were applied while `[update]` was rejected, the daemon
+    would run a configuration that is half the old file and half the new one —
+    which reads exactly like a successful reload, the failure mode `validate`
+    exists to prevent.
+    """
+    server, cfg_path = _server(tmp_path)
+    _write(
+        cfg_path,
+        BASE.replace("max_tokens = 100", "max_tokens = 4096")
+        + '\n[update]\ndelay_minutes = "soon"\n',
+    )
+    outcome = asyncio.run(server._reload_config_once())
+    assert outcome is not None and outcome.error is not None
+    assert outcome.error.startswith("[update] delay_minutes is str")
+    assert server.llm.config.max_tokens == 100, "the [llm] half leaked through"
+    assert server._update_config.delay_minutes == 1440
+    # The rejected revision is retried as soon as the file moves again.
+    _write(cfg_path, BASE.replace("max_tokens = 100", "max_tokens = 4096"))
+    again = asyncio.run(server._reload_config_once())
+    assert again is not None and again.applied == ["max_tokens"]
+
+
+def test_the_upgrade_tick_loop_hands_the_manager_the_shared_object(tmp_path, monkeypatch):
+    """The seam between the two halves, **driven** rather than asserted.
+
+    The manager captures its `UpdateConfig` at construction and reads it once per
+    5-minute tick, so the reload can only reach it if the loop hands it *this*
+    object. Asserting that `UpgradeManager` keeps the object it is given would
+    test the constructor and not the daemon — it passes even while the loop
+    builds the manager from its own `load_update_config()` copy, which is exactly
+    the state this change removes (measured: that arm left this test green).
+
+    The loop therefore runs against a **recording stub**, one tick deep. The real
+    manager is never constructed, `tick()` here is a local no-op, and no releases
+    API, `version.txt` or `emrg-upgrade` session is reachable from this test.
+    """
+    from emrg.server import upgrade as upgrade_mod
+
+    seen: dict[str, object] = {}
+
+    class RecordingManager:
+        def __init__(self, config, run_session_cb):
+            seen["config"] = config
+
+        async def tick(self) -> None:
+            seen["ticked"] = True
+
+    monkeypatch.setattr(upgrade_mod, "UpgradeManager", RecordingManager)
+    monkeypatch.setattr(upgrade_mod, "TICK_INTERVAL", 0)
+
+    server, cfg_path = _server(tmp_path)
+
+    async def drive() -> None:
+        task = asyncio.create_task(server._upgrade_tick_loop())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if seen.get("ticked"):
+                break
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(drive())
+    assert seen["ticked"], "the loop did not reach a tick"
+    assert seen["config"] is server._update_config
+
+    # And the object the loop is ticking on is the one a reload moves.
+    _write(cfg_path, BASE + "\n[update]\nenabled = false\n")
+    outcome = asyncio.run(server._reload_config_once())
+    assert outcome is not None and outcome.update_applied == ["enabled"]
+    assert seen["config"].enabled is False, "what tick() reads first"
+
+
+def test_a_reloader_without_the_update_object_does_not_own_that_section(tmp_path):
+    """A section is owned by the object it is given, and no object means no claim.
+
+    The alternative — validating `[update]` anyway — would let a mistyped value in
+    a section this reloader cannot apply reject the `[llm]` half as well, which is
+    over-reach in the other direction.
+    """
+    cfg_path = tmp_path / "config.toml"
+    _write(cfg_path, BASE + '\n[update]\ndelay_minutes = "soon"\n')
+    live = _live_from(cfg_path)
+    reloader = ConfigReloader(live, path=cfg_path)
+
+    _write(
+        cfg_path,
+        BASE.replace("max_tokens = 100", "max_tokens = 4096")
+        + '\n[update]\ndelay_minutes = "soon"\n',
+    )
+    outcome = reloader.poll()
+    assert outcome is not None and outcome.error is None
+    assert outcome.applied == ["max_tokens"] and outcome.update_applied == []
+    assert live.max_tokens == 4096
 
 
 def test_every_live_field_is_actually_reloadable(tmp_path):

@@ -14,7 +14,14 @@ logs the changed keys, and routes a `model` change through the same path
 `/model` uses (usage-anchor invalidation, `context_window` resolution,
 `model_set` broadcast).
 
-Three properties the design is built around, each of them a requirement in the
+**Both sections of the file are covered** — `[llm]` and `[update]` (issue #1356).
+Each is applied onto the live object its reader already holds: the `LlmConfig`
+the `LlmClient` reads per request, and the `UpdateConfig` the `UpgradeManager`
+reads once per tick. `update.enabled` / `update.delay_minutes` therefore take
+effect on a running daemon, which they did not while the section was read once at
+startup and the client's mtime-restart was the only thing that ever re-read it.
+
+Four properties the design is built around, each of them a requirement in the
 rant:
 
 * **In place, for the next request.** Every field is assigned onto the *live*
@@ -22,14 +29,17 @@ rant:
   change applies to subsequent requests and can never rewrite a stream that is
   already in flight.
 * **Atomic, and only when the whole revision is good.** The file is parsed and
-  every field type-checked *before* the first assignment: a half-written or
-  wrongly-typed file keeps the previous good configuration and leaves no
-  half-applied state (a partially applied revision would be worse than the
-  bug — it looks like it worked).
+  every field of every covered section type-checked *before* the first
+  assignment: a half-written or wrongly-typed file keeps the previous good
+  configuration and leaves no half-applied state (a partially applied revision
+  would be worse than the bug — it looks like it worked).
 * **`model` is not assigned here.** It travels the `/model` path, because a
   real API-model change must invalidate the usage anchors (Dev.to 3dh3g) and
   re-resolve `context_window`. This module only *reports* the model the file
   asks for.
+* **A section is owned by the object it is given.** The `[update]` half applies
+  only when an `UpdateConfig` was passed; the upgrade *interval* is not
+  configurable and is not a field, so it stays out of reach by construction.
 
 The retry rule: a revision that is rejected is recorded as *seen* (so a broken
 file does not spam the log on every tick) and is retried as soon as the file
@@ -45,7 +55,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from emrg.config import EmrgConfig, LlmConfig, config_path, load_config
+from emrg.config import EmrgConfig, LlmConfig, UpdateConfig, config_path, load_config
 
 logger = logging.getLogger("emrg.server")
 
@@ -83,11 +93,30 @@ _TYPES: dict[str, tuple[type, ...]] = {
     "context_refresh_interval_ms": (int,),
 }
 
+#: The `[update]` section (issue #1356), type-checked the same way. Derived from
+#: the dataclass like `reloadable_fields()` is, so a new field cannot be silently
+#: unreloadable — `DEVELOPMENT.md` promises the section is live, and a field
+#: missing from this table would be applied with no check at all.
+_UPDATE_TYPES: dict[str, tuple[type, ...]] = {
+    "enabled": (bool,),
+    "delay_minutes": (int,),
+}
+
 
 def reloadable_fields() -> tuple[str, ...]:
     """Every `LlmConfig` field this module applies, in declaration order."""
     names = tuple(f.name for f in dataclasses.fields(LlmConfig))
     return tuple(n for n in names if n not in EXCLUDED_FIELDS)
+
+
+def update_reloadable_fields() -> tuple[str, ...]:
+    """Every `UpdateConfig` field this module applies, in declaration order.
+
+    Not the upgrade *interval*: `upgrade.TICK_INTERVAL` is hard-coded at 5
+    minutes by host decision (rant 2026-08-20T12:33:59) and is not a field of
+    this dataclass, so it cannot be mistaken for one here.
+    """
+    return tuple(f.name for f in dataclasses.fields(UpdateConfig))
 
 
 def fingerprint(path: Path) -> Optional[str]:
@@ -117,26 +146,30 @@ class ReloadOutcome:
     """What one poll decided. `applied`/`model` and `error` are exclusive."""
 
     applied: list[str] = field(default_factory=list)
+    update_applied: list[str] = field(default_factory=list)
     model: Optional[str] = None
     error: Optional[str] = None
 
     @property
     def changed(self) -> bool:
-        return bool(self.applied) or self.model is not None
+        return bool(self.applied) or bool(self.update_applied) or self.model is not None
 
 
-def validate(cfg: LlmConfig) -> Optional[str]:
-    """Why `cfg` may not be applied, or None when every field is well typed.
+def _first_type_error(
+    obj: object, names: tuple[str, ...], table: dict[str, tuple[type, ...]], prefix: str = ""
+) -> Optional[str]:
+    """The first field in `names` whose value is not the type the file must give.
 
-    Run over the **whole** revision before any assignment: the alternative
-    (assign until something breaks) leaves a configuration that is half the old
-    file and half the new one, which reads exactly like a successful reload.
+    `bool` is checked strictly because it is a subclass of `int` — a
+    `max_tokens = true` would otherwise pass an `isinstance(v, int)` test and
+    become `1`. `prefix` names the section for a field that is not under
+    `[llm]`, so a rejected revision says where to look.
     """
-    for name in reloadable_fields():
-        expected = _TYPES.get(name)
+    for name in names:
+        expected = table.get(name)
         if expected is None:
             continue  # untyped field (e.g. a future addition) — nothing to check
-        value = getattr(cfg, name)
+        value = getattr(obj, name)
         strict_bool = expected == (bool,)
         if strict_bool:
             ok = isinstance(value, bool)
@@ -144,10 +177,26 @@ def validate(cfg: LlmConfig) -> Optional[str]:
             ok = isinstance(value, expected) and not isinstance(value, bool)
         if not ok:
             return (
-                f"{name} is {type(value).__name__}, expected "
+                f"{prefix}{name} is {type(value).__name__}, expected "
                 f"{'/'.join(t.__name__ for t in expected)}"
             )
     return None
+
+
+def validate(cfg: LlmConfig, update: Optional[UpdateConfig] = None) -> Optional[str]:
+    """Why this revision may not be applied, or None when every field is well typed.
+
+    Run over the **whole** revision — every section this reloader owns — before
+    any assignment: the alternative (assign until something breaks) leaves a
+    configuration that is half the old file and half the new one, which reads
+    exactly like a successful reload. The section boundary is the object
+    boundary: `update` is None for a reloader that was not given an
+    `UpdateConfig`, and that section is then neither checked nor applied.
+    """
+    reason = _first_type_error(cfg, reloadable_fields(), _TYPES)
+    if reason is not None or update is None:
+        return reason
+    return _first_type_error(update, update_reloadable_fields(), _UPDATE_TYPES, "[update] ")
 
 
 class ConfigReloader:
@@ -159,8 +208,19 @@ class ConfigReloader:
     body and this decision can be tested apart.
     """
 
-    def __init__(self, live: LlmConfig, path: Optional[Path] = None) -> None:
+    def __init__(
+        self,
+        live: LlmConfig,
+        path: Optional[Path] = None,
+        live_update: Optional[UpdateConfig] = None,
+    ) -> None:
         self.live = live
+        #: The `[update]` object the daemon's `UpgradeManager` holds (issue
+        #: #1356). Mutated **in place** for the same reason `live` is: the
+        #: manager captured this object at construction and reads it once per
+        #: 5-minute tick, so an assignment here is what the next tick sees.
+        #: None means this reloader was not given the section and does not own it.
+        self.live_update = live_update
         self.path = Path(path) if path is not None else config_path()
         # The daemon loaded this file at startup, so its current bytes are
         # already in force: the baseline is "seen", not "pending".
@@ -183,7 +243,7 @@ class ConfigReloader:
         except Exception as exc:  # TOMLDecodeError, OSError, UnicodeDecodeError…
             self.rejected_revisions += 1
             return ReloadOutcome(error=f"{exc.__class__.__name__}: {exc}")
-        reason = validate(cfg.llm)
+        reason = validate(cfg.llm, cfg.update if self.live_update is not None else None)
         if reason is not None:
             self.rejected_revisions += 1
             return ReloadOutcome(error=reason)
@@ -197,6 +257,16 @@ class ConfigReloader:
             if getattr(self.live, name) != new:
                 setattr(self.live, name, new)
                 outcome.applied.append(name)
+        if self.live_update is not None:
+            # In place, so the `UpgradeManager` that holds this object reads the
+            # new values on its next tick without being reconstructed — the same
+            # property the `[llm]` half has, and the reason a reload needs no
+            # restart of anything.
+            for name in update_reloadable_fields():
+                new = getattr(cfg.update, name)
+                if getattr(self.live_update, name) != new:
+                    setattr(self.live_update, name, new)
+                    outcome.update_applied.append(name)
         if cfg.llm.model != self.live.model:
             # Reported, never assigned: the daemon runs the /model path (anchor
             # invalidation + context_window resolution + broadcast) and only
@@ -217,6 +287,8 @@ def describe(outcome: ReloadOutcome) -> str:
     parts = []
     if outcome.applied:
         parts.append("changed=" + ",".join(outcome.applied))
+    if outcome.update_applied:
+        parts.append("[update] changed=" + ",".join(outcome.update_applied))
     if outcome.model is not None:
         parts.append(f"model→{outcome.model} (via the /model path)")
     return "; ".join(parts) if parts else "no effective field differs"

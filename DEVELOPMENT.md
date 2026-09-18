@@ -101,17 +101,19 @@ vision = true
 - `base_url`, `api_key`, `max_tokens`, `temperature`, `max_tool_rounds`, `context_window`, `auto_compact_threshold`, `models`, `vision`, `stream_options`, `context_refresh_interval_ms` are assigned for the next request; a stream already in flight is never rewritten.
 - A half-written or wrongly-typed file is **rejected whole**: the previous good configuration stays in force, one warning is logged, and the file is re-read on your next save.
 
-**A `config.toml` edit never restarts the daemon.** The client used to compare this file's mtime against the running server's start time and SIGTERM→SIGKILL it when the file looked newer — which killed the running scheduler handlers (a live evolution cycle among them) and dropped every connected client, to apply an edit the daemon now applies itself. That branch is gone; a **source** change is the only thing that still restarts the daemon. One residual is worth knowing: `[update]` is read once at daemon start, so a change to that section takes effect on the next start (`emrg server restart`, or a source-driven one) rather than within the 2 s tick — the live-reload path covers `[llm]`.
+**A `config.toml` edit never restarts the daemon.** The client used to compare this file's mtime against the running server's start time and SIGTERM→SIGKILL it when the file looked newer — which killed the running scheduler handlers (a live evolution cycle among them) and dropped every connected client, to apply an edit the daemon now applies itself. That branch is gone; a **source** change is the only thing that still restarts the daemon. Both sections are live: `[llm]` as described above, and `[update]` (`enabled`, `delay_minutes`) — the daemon's upgrade manager holds the same object the reloader writes to, so a change lands on its next 5-minute check. The upgrade *interval* stays hard-coded and is not a field of that section.
 
 Verify from the daemon log (`~/.emrg/emrgd.log`): every accepted edit logs one line naming the keys that moved —
 
 ```
 config.toml reloaded: changed=max_tokens,temperature
+config.toml reloaded: [update] changed=enabled
 config.toml reloaded: model→gpt-4o (via the /model path)
 config.toml change rejected (previous config kept): TOMLDecodeError: ...
+config.toml change rejected (previous config kept): [update] delay_minutes is str, expected int
 ```
 
-**Update checking** (`[update]` section): `enabled = true|false` (default true) enables the periodic GitHub release check, and `delay_minutes` (default 1440) is how long after a release is published it becomes eligible (set `1` for immediate). The check runs every 5 minutes — that interval is **not** configurable. The program only *triggers*: it never downloads an installer package, it starts an agent session (`emrg-upgrade`) that installs the equivalent of the release from the local evolution repo.
+**Update checking** (`[update]` section): `enabled = true|false` (default true) enables the periodic GitHub release check, and `delay_minutes` (default 1440) is how long after a release is published it becomes eligible (set `1` for immediate). Both keys are **hot-reloaded** like `[llm]`: edit the file and the next check (within a couple of seconds) uses the new values — no daemon restart. The check itself runs every 5 minutes — that interval is **not** configurable. The program only *triggers*: it never downloads an installer package, it starts an agent session (`emrg-upgrade`) that installs the equivalent of the release from the local evolution repo.
 
 ---
 
