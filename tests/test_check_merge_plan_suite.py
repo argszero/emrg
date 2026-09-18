@@ -1773,6 +1773,14 @@ def test_the_rows_are_read_from_the_report_and_not_invented(mod) -> None:
     assert mod._unfound_ids(
         out, ["tests/test_g.py::test_h", "tests/test_a.py::test_b"]
     ) == {"tests/test_g.py::test_h"}
+    # On Windows the argument is named with the platform's separator while the node id
+    # keeps `/`. Measured while writing this: an early revision matched the POSIX
+    # spelling and nothing else, which on that platform would have read every row the
+    # base does not contain as "the base could not be measured" (rc 2).
+    assert mod._unfound_ids(
+        "ERROR: not found: C:\\Temp\\emrg-plan-suite-a\\base\\tests\\test_g.py::test_h\n",
+        ["tests/test_g.py::test_h"],
+    ) == {"tests/test_g.py::test_h"}
 
 
 def test_the_two_paragraphs_split_the_rows_and_no_row_is_in_both(mod) -> None:

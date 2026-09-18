@@ -593,9 +593,20 @@ def _unfound_ids(out: str, rows: list[str]) -> set[str]:
     run `no tests`, rc 4 - so a missing argument has to be removed from the invocation
     rather than read as a result. The answer is not in doubt, though: a row a tree does
     not contain cannot fail there.
+
+    Separators are normalised on both sides, which is not cosmetic: pytest names the
+    argument by its *path* (the platform's separator) while a node id always uses `/`.
+    Measured while writing this, on the same string with the two spellings -
+    `/tmp/base/tests/test_a.py::test_b` matched, `C:\\Temp\\base\\tests\\test_a.py::test_b`
+    matched **nothing**. Blind there, every row the base does not contain would have
+    been read as "the base could not be measured" (rc 2) instead of as the answer.
     """
-    named = {match.group(1) for match in NOT_FOUND.finditer(out)}
-    return {row for row in rows if any(n == row or n.endswith("/" + row) for n in named)}
+    named = {match.group(1).replace("\\", "/") for match in NOT_FOUND.finditer(out)}
+    return {
+        row
+        for row in rows
+        if any(n == row or n.endswith("/" + row.replace("\\", "/")) for n in named)
+    }
 
 
 # A populated environment belonging to the *harness* rather than to the tree under
