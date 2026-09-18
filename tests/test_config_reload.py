@@ -356,6 +356,118 @@ def test_a_rejected_revision_never_raises_out_of_the_tick(tmp_path):
     assert server.llm.config.max_tokens == 100
 
 
+# ── a revision the clients display has to reach them (issue #1374) ────
+
+
+def _recorder(server) -> list[dict]:
+    """Replace the daemon's broadcast with a recording sink, and return the log.
+
+    The sink is the seam the claim is about — "a frame carrying the effective value
+    is sent to the connected clients" — so recording there is measuring the daemon
+    rather than asserting that a function exists. `test_ws_e2e`'s
+    `test_a_config_reload_broadcasts_the_effective_vision` covers the other half
+    (that the frame really crosses a socket).
+    """
+    sent: list[dict] = []
+
+    async def record(data, exclude=None):
+        sent.append(data)
+
+    server._broadcast_all = record
+    return sent
+
+
+def test_a_vision_revision_reaches_the_clients_that_display_it(tmp_path):
+    """The measured defect: the value moved in the daemon, and only the log knew.
+
+    Before this arm, `vision = true` edited into the file left every connected
+    client showing the previous answer until a reconnect or a `/model`, because the
+    only frames that carry the effective vision are a `pong` and a `model_set`.
+    """
+    server, cfg_path = _server(tmp_path)
+    assert server.llm.config.vision is False
+    sent = _recorder(server)
+
+    _write(cfg_path, BASE + "vision = true\n")
+    outcome = asyncio.run(server._reload_config_once())
+
+    assert outcome is not None and "vision" in outcome.applied, (
+        "the reload itself must still apply — this arm reports it, it does not replace it"
+    )
+    assert server.llm.config.vision is True
+    assert len(sent) == 1, f"expected exactly one frame, got {sent}"
+    frame = sent[0]
+    assert frame["type"] == "config_applied"
+    assert frame["vision"] is True, "the frame carries the live value, not the file's key"
+    assert frame["context_window"] == 1000
+    assert frame["applied"] == outcome.applied
+    # A reload resolves nothing, so it must not name a resolution: `vision_source`'s
+    # two legal values both describe a `/model` switch (rant 2026-09-17T16:53:02),
+    # and a third spelling invented here would be a value no resolution can produce.
+    assert "vision_source" not in frame
+
+
+def test_the_other_direction_moves_the_clients_too(tmp_path):
+    """`true → false` is the half a one-directional test misses.
+
+    It is the dangerous direction: a client that keeps showing `images: yes` while
+    the daemon has stopped accepting images is the failure the badge exists to
+    prevent, so the frame must move here as well.
+    """
+    server, cfg_path = _server(tmp_path, BASE + "vision = true\n")
+    assert server.llm.config.vision is True
+    sent = _recorder(server)
+
+    _write(cfg_path, BASE + "vision = false\n")
+    outcome = asyncio.run(server._reload_config_once())
+
+    assert outcome is not None and "vision" in outcome.applied
+    assert server.llm.config.vision is False
+    assert [f["vision"] for f in sent] == [False]
+
+
+def test_a_revision_no_client_displays_is_not_broadcast(tmp_path):
+    """The control that makes the two tests above discriminating.
+
+    Without it, "broadcast on every applied revision" passes both — and puts a
+    frame on the wire for every keystroke the host makes in a file that has nothing
+    to do with what a client shows. `max_tokens` is daemon-local: nothing outside
+    the daemon reads it.
+    """
+    server, cfg_path = _server(tmp_path)
+    sent = _recorder(server)
+
+    _write(cfg_path, BASE.replace("max_tokens = 100", "max_tokens = 1234"))
+    outcome = asyncio.run(server._reload_config_once())
+
+    assert outcome is not None and outcome.applied == ["max_tokens"]
+    assert server.llm.config.max_tokens == 1234
+    assert sent == [], "a value no client displays must not produce a frame"
+
+
+def test_a_revision_that_moves_the_model_and_the_vision_is_reported_once(tmp_path):
+    """One revision, one frame — the two arms are exclusive, not cumulative.
+
+    A model revision already travels `_apply_model_switch`, whose frame carries the
+    resolved `vision`. If the new arm were a second `if` rather than an `elif`, this
+    revision would send two frames saying the same thing and the client would print
+    two lines for one edit.
+    """
+    server, cfg_path = _server(tmp_path)
+    sent = _recorder(server)
+
+    _write(
+        cfg_path,
+        BASE.replace('model = "model-a"', 'model = "model-b"') + "vision = true\n",
+    )
+    outcome = asyncio.run(server._reload_config_once())
+
+    assert outcome is not None and outcome.model == "model-b"
+    assert "vision" in outcome.applied, "the fixture must exercise both arms at once"
+    assert [f["type"] for f in sent] == ["model_set"]
+    assert sent[0]["vision"] is True, "the switch frame already reports the effective value"
+
+
 # ── the `[update]` section (issue #1356) ─────────────────────────────
 
 
