@@ -36,7 +36,13 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from emrg._win import win32_no_window_kwargs
-from emrg.config import LlmConfig, config_dir, load_update_config, resolve_model_vision
+from emrg.config import (
+    LlmConfig,
+    config_dir,
+    find_model_entry,
+    load_update_config,
+    resolve_model_vision,
+)
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.config_reload import (
@@ -4338,18 +4344,21 @@ class EmrgServer:
         old_vision = self.llm.config.vision
 
         # Find the matching [[llm.models]] entry (if any) to resolve
-        # context_window and optional model name override.
+        # context_window and optional model name override. Through
+        # `find_model_entry`, the same matcher the vision resolution below uses:
+        # while this loop matched `name` only, a switch that named the entry by
+        # its API id silently kept the previous model's context window — the
+        # inheritance the vision flag was just fixed for (rant 2026-09-17T16:53:02).
         new_ctx: int | None = None
         api_model: str = model_name  # default: use display name as API model
-        for m in (self.llm.config.models or []):
-            if m.get("name") == model_name:
-                new_ctx = m.get("context_window")
-                api_model = m.get("model", model_name)
-                break
+        entry = find_model_entry(self.llm.config.models, model_name)
+        if entry is not None:
+            new_ctx = entry.get("context_window")
+            api_model = entry.get("model", model_name)
 
         # vision comes from one place, with a stated priority (rant
         # 2026-09-17T16:53:02): the entry's own key wins, otherwise the
-        # top-level `[llm] vision]` default applies — including when the entry
+        # top-level `[llm] vision` default applies — including when the entry
         # has no key or does not exist. What it must never do is keep the
         # previous model's value, which is what a missing key used to mean: a
         # non-vision model would be handed an image, and a vision model would be

@@ -3381,6 +3381,36 @@ def test_set_model_unknown_model_falls_back_to_the_default(caplog):
     assert "source: top-level-default" in caplog.text
 
 
+def test_set_model_by_api_id_resolves_the_entrys_context_window():
+    """A switch key may name the entry by its API id, not only by its display name.
+
+    The defect this pins is the silent-inheritance shape one key over from the
+    vision flag's: the `context_window` lookup matched `name` only, while the
+    vision resolution matched name-or-model — so switching by the id that
+    `[llm] model` holds (the spelling the host copies out of config.toml) matched
+    no entry, kept the previous model's window, and said nothing. The window is
+    what auto-compaction and the usage projection are measured against, so an
+    inherited one is not cosmetic.
+
+    Both spellings are asserted in one test on purpose: "one rule" is the
+    property, and a fix that looked up the id *instead of* the name would pass
+    one half and fail the other.
+    """
+    models = [
+        {"name": "qwen-max", "model": "qwen3.8-max-preview", "context_window": 262144}
+    ]
+    for key in ("qwen3.8-max-preview", "qwen-max"):
+        server = _vision_server(models, current_vision=False, vision_default=False)
+        server.llm.config.context_window = 131072
+        writer = _FakeWriter()
+        asyncio.run(server._handle_set_model(key, writer))
+
+        assert server.llm.config.context_window == 262144, (
+            f"switching by {key!r} must resolve the entry's own window"
+        )
+        assert server.llm.config.model == "qwen3.8-max-preview", key
+
+
 def test_set_model_frame_carries_the_effective_vision():
     """A client must be able to read the value the daemon will act on."""
     server = _vision_server(
