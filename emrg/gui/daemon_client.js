@@ -39,7 +39,14 @@ const EMRGD_START_ERR = () => path.join(os.homedir(), ".emrg", "emrgd-start.err"
 const EMRGD_PORT = 56031;
 const MAX_PAYLOAD = 16 * 1024 * 1024; // G62/G105：16MB 双向一致（工具输出上限 200KB）
 const AUTH_TIMEOUT_MS = 10_000;
+// Issue #1276 item 5：启动等待窗口。GUI 自己的默认值保持 5.0s 不变（改默认值是一次
+// 行为变更，而"冷启动是否真需要更久"没有被测量过）；变的是它现在**可被宿主抬高**——
+// 与 emrg/client/daemon_manager.py 的 `EMRG_START_TIMEOUT` 同一个变量、同一套回落规则
+// （见 `_startWindowMs`）。此前 GUI 只有这个源码常量，而它被打包进 app.asar：最需要
+// 抬高窗口的宿主（不用终端的那些人）恰恰是唯一够不着它的人。
 const SPAWN_WAIT_MS = 5_000;
+const SPAWN_WAIT_POLL_MS = 300;
+const START_WINDOW_ENV = "EMRG_START_TIMEOUT";
 const PENDING_TIMEOUT_MS = 5_000;
 // Rant 2026-08-09T13:16:36 ⑤（防风暴总闸）：单个"连接生命周期"内最多 spawn
 // MAX_SPAWN_ATTEMPTS 次 daemon——之后不再拉起，只把真实错误（含 emrgd.log 尾部）
@@ -350,12 +357,40 @@ class DaemonClient {
           this._startupFailureDetail(mark, child, spawnState, stderrFile)
         );
       }
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, SPAWN_WAIT_POLL_MS));
     }
     throw new Error(
-      `emrgd failed to start within timeout` +
+      // 报**真的等过**的那个界，不是宿主敲的那个数：窗口按 0.3s 的轮询量化，与
+      // daemon_manager.py 的 `failed to start within {attempts * delay:.1f}s` 同一句法，
+      // 于是两条入口的失败文案能被同一句话描述。
+      `emrgd failed to start within ${(waitMs / 1000).toFixed(1)}s` +
       this._startupFailureDetail(mark, child, spawnState, stderrFile)
     );
+  }
+
+  /** 启动等待窗口（毫秒）：`EMRG_START_TIMEOUT`（秒）若已设置，否则 `SPAWN_WAIT_MS`。
+   *
+   * issue #1276 item 5 的 GUI 半边。这是 emrg/client/daemon_manager.py
+   * `_start_window_seconds()` 的对照实现，读**同一个**环境变量、用同一套回落规则
+   * ——宿主给 TUI 设过的值对 GUI 同样生效，而不是两条入口各有一个只有源码能改的窗口。
+   *
+   * 取值不合法时回落到默认并告警，**绝不抛**：与 `_truncate_start_stderr` 同一条规则
+   * ——一个诊断/调参用的变量不得成为启动失败的原因。`Number()` 的可用性在此处够用：
+   * 空串与非数字都是 NaN（空串在下面被单独当作"未设置"先返回），`Infinity`/`nan` 被
+   * `Number.isFinite` 挡下，非正数被 `<= 0` 挡下 —— 与 Python 侧拒绝的是同一批形态。
+   */
+  _startWindowMs(env = process.env) {
+    const raw = String(env[START_WINDOW_ENV] ?? "").trim();
+    if (!raw) return SPAWN_WAIT_MS;
+    const seconds = Number(raw);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      this.logger.warn(
+        `${START_WINDOW_ENV}='${raw}' is not a positive number of seconds — ` +
+        `using ${SPAWN_WAIT_MS / 1000}s`
+      );
+      return SPAWN_WAIT_MS;
+    }
+    return seconds * 1000;
   }
 
   async startDaemon() {
@@ -402,7 +437,7 @@ class DaemonClient {
       // 只有真开出了诊断文件才算"读过这一路"：拿不到 fd 时子进程的 stderr 退回
       // "ignore"，报告必须说"未捕获"，而不是替这一路宣布沉默。
       return await this._awaitDaemonReady(
-        child, mark, SPAWN_WAIT_MS, spawnState,
+        child, mark, this._startWindowMs(), spawnState,
         errFd === null ? null : EMRGD_START_ERR()
       );
     }
@@ -425,10 +460,10 @@ class DaemonClient {
     child.unref(); // GUI 退出不带走 daemon
     this._daemonChild = child; // 暴露 child（集成测试 after 清理用）
     this.logger.info(`[gui] daemon spawned: pid=${child.pid} (source mode)`); // 18:47:37 B2
-    // 等最多 SPAWN_WAIT_MS 就绪
+    // 等最多 _startWindowMs()（宿主可用 EMRG_START_TIMEOUT 抬高）就绪
     const spawnState = this._watchSpawn(child);
     return await this._awaitDaemonReady(
-      child, mark, SPAWN_WAIT_MS, spawnState,
+      child, mark, this._startWindowMs(), spawnState,
       errFdSource === null ? null : EMRGD_START_ERR()
     );
   }

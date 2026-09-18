@@ -490,10 +490,10 @@ test("rant 13:16:36 ⑤ spawn 节流：超 MAX_SPAWN_ATTEMPTS 后不再拉起 da
     this._spawnAttempts += 1;
     spawnCount += 1;
     await new Promise((r) => setTimeout(r, 5));
-    throw new Error("emrgd failed to start within timeout");
+    throw new Error("emrgd failed to start within 5.0s");
   };
   for (let i = 0; i < 3; i++) {
-    await assert.rejects(client.startDaemon(), /emrgd failed to start within timeout/);
+    await assert.rejects(client.startDaemon(), /emrgd failed to start within 5\.0s/);
   }
   assert.strictEqual(spawnCount, 3, "3 次尝试内每次都会真正 spawn");
   // 第 4 次：不再 spawn，直接抛节流错误
@@ -508,10 +508,10 @@ test("rant 13:16:36 ⑤ spawn 节流计数在成功连接后归零", async () =>
   client.startDaemon = async function () {
     this._spawnAttempts += 1; // 镜像真实 startDaemon 的计数
     await new Promise((r) => setTimeout(r, 10));
-    throw new Error("emrgd failed to start within timeout");
+    throw new Error("emrgd failed to start within 5.0s");
   };
   client.isRunning = async () => false;
-  await assert.rejects(client.startDaemon(), /emrgd failed to start within timeout/);
+  await assert.rejects(client.startDaemon(), /emrgd failed to start within 5\.0s/);
   assert.strictEqual(client._spawnAttempts, 1);
   // 恢复真实 startDaemon（token 文件已预写 → ensureConnected 直接 ws → auth_ok）
   delete client.startDaemon;
@@ -1153,7 +1153,7 @@ test("#1283 非 number 的 exitCode 不得读成“已退出”（只认文档�
   client.isRunning = async () => false;
   await assert.rejects(
     client._awaitDaemonReady({ exitCode: "7" }, client._logMark(logFile()), 1),
-    (err) => err.message.includes("failed to start within timeout"),
+    (err) => err.message.includes("failed to start within "),
   );
 });
 
@@ -1162,7 +1162,7 @@ test("#1283 活着的子进程没起来 → 报窗口 + still running", async ()
   client.isRunning = async () => false;
   await assert.rejects(
     client._awaitDaemonReady({ exitCode: null }, client._logMark(logFile()), 1),
-    (err) => err.message.includes("failed to start within timeout") && err.message.includes("still running"),
+    (err) => err.message.includes("failed to start within ") && err.message.includes("still running"),
   );
 });
 
@@ -1171,6 +1171,116 @@ test("#1283 子进程起来了 → 安静返回", async () => {
   client.isRunning = async () => true;
   const child = { pid: 4242 };
   assert.strictEqual(await client._awaitDaemonReady(child, client._logMark(logFile()), 1000), child);
+});
+
+// ── issue #1276 item 5：GUI 也认 EMRG_START_TIMEOUT ──────────────────────────
+// 对照 emrg/client/daemon_manager.py 的 `_start_window_seconds()`：同一个变量、同一套
+// 回落规则。GUI 是**非开发者宿主**的入口，而窗口此前只有 SPAWN_WAIT_MS 这一个源码
+// 常量，且被打包进 app.asar —— 最需要抬高它的宿主恰恰是唯一够不着它的人。
+// 这里不 spawn 任何 daemon：启动路径的测试一律把 spawn 打桩（MANIFESTO 第四条附则二）。
+
+test("#1276 GUI：窗口未设置时用 GUI 自己的默认值（5000ms）", () => {
+  const client = new DaemonClient();
+  assert.strictEqual(client._startWindowMs({}), 5_000);
+  assert.strictEqual(client._startWindowMs({ EMRG_START_TIMEOUT: "" }), 5_000, "空串 = 未设置");
+  assert.strictEqual(client._startWindowMs({ EMRG_START_TIMEOUT: "   " }), 5_000, "空白 = 未设置");
+});
+
+test("#1276 GUI：设置后按秒换算（整数、小数、前后空白）", () => {
+  const client = new DaemonClient();
+  assert.strictEqual(client._startWindowMs({ EMRG_START_TIMEOUT: "12" }), 12_000);
+  assert.strictEqual(client._startWindowMs({ EMRG_START_TIMEOUT: "4.5" }), 4_500);
+  assert.strictEqual(client._startWindowMs({ EMRG_START_TIMEOUT: " 5 " }), 5_000);
+});
+
+test("#1276 GUI：非正/非有限/非数字 → 回落默认并告警（调参不得成为启动失败的原因）", () => {
+  const warnings = [];
+  const client = new DaemonClient({
+    logger: { info: () => {}, warn: (m) => warnings.push(m) },
+  });
+  for (const bad of ["abc", "0", "-5", "nan", "Infinity", "5s"]) {
+    assert.strictEqual(
+      client._startWindowMs({ EMRG_START_TIMEOUT: bad }), 5_000, `${bad} → 默认`,
+    );
+  }
+  assert.strictEqual(warnings.length, 6, "每个坏值一次告警");
+  assert.ok(
+    warnings[0].includes("EMRG_START_TIMEOUT='abc'"),
+    `告警须点名变量与值，宿主才知道是哪个变量：${warnings[0]}`,
+  );
+});
+
+test("#1276 GUI：真实 spawn 路径把解析出的窗口交给等待（spawn 打桩，不拉起 daemon）", async () => {
+  const childProcess = require("child_process");
+  const { EventEmitter } = require("events");
+  const origSpawn = childProcess.spawn;
+  const origTimeout = process.env.EMRG_START_TIMEOUT;
+  try {
+    childProcess.spawn = () => {
+      const child = new EventEmitter();
+      child.unref = () => {};
+      child.pid = 4242;
+      child.exitCode = null;
+      child.signalCode = null;
+      return child;
+    };
+    const client = new DaemonClient();
+    let seen = null;
+    client._awaitDaemonReady = async (child, mark, waitMs) => { seen = waitMs; return child; };
+    process.env.EMRG_START_TIMEOUT = "12";
+    await client.startDaemon();
+    assert.strictEqual(seen, 12_000, "12 → 12000ms，且是启动那一刻读的");
+    delete process.env.EMRG_START_TIMEOUT;
+    await client.startDaemon();
+    assert.strictEqual(seen, 5_000, "未设置 → GUI 默认 5000ms");
+  } finally {
+    childProcess.spawn = origSpawn;
+    if (origTimeout === undefined) delete process.env.EMRG_START_TIMEOUT;
+    else process.env.EMRG_START_TIMEOUT = origTimeout;
+  }
+});
+
+test("#1276 GUI：打包模式的 spawn 路径同样吃这个窗口（spawn 打桩，不拉起 daemon）", async () => {
+  const childProcess = require("child_process");
+  const { EventEmitter } = require("events");
+  const origSpawn = childProcess.spawn;
+  const origTimeout = process.env.EMRG_START_TIMEOUT;
+  try {
+    childProcess.spawn = () => {
+      const child = new EventEmitter();
+      child.unref = () => {};
+      child.pid = 4242;
+      child.exitCode = null;
+      child.signalCode = null;
+      return child;
+    };
+    // 打包模式是**非开发者宿主**真正走的那条路（app.asar 里的 emrgd），所以它单独
+    // 钉一次：只改源码模式那一处的变异臂，在这条测试存在之前是查不出来的。
+    const client = new DaemonClient({ isPackaged: true });
+    let seen = null;
+    client._awaitDaemonReady = async (child, mark, waitMs) => { seen = waitMs; return child; };
+    process.env.EMRG_START_TIMEOUT = "12";
+    await client.startDaemon();
+    assert.strictEqual(seen, 12_000, "打包路径同样把解析出的窗口交给等待");
+  } finally {
+    childProcess.spawn = origSpawn;
+    if (origTimeout === undefined) delete process.env.EMRG_START_TIMEOUT;
+    else process.env.EMRG_START_TIMEOUT = origTimeout;
+  }
+});
+
+test("#1276 GUI：失败文案报真的等过的窗口，不是敲进去的数", async () => {
+  const client = new DaemonClient();
+  client.isRunning = async () => false;
+  const t0 = Date.now();
+  await assert.rejects(
+    client._awaitDaemonReady(
+      { exitCode: null }, client._logMark(logFile()),
+      client._startWindowMs({ EMRG_START_TIMEOUT: "0.3" }),
+    ),
+    (err) => err.message.includes("failed to start within 0.3s"),
+  );
+  assert.ok(Date.now() - t0 < 2000, "0.3s 的窗口不该被烧成别的数");
 });
 
 // ── 子进程自己的 stderr：装日志 handler 之前就死掉的失败只有这一个出口 ────────
@@ -1327,7 +1437,7 @@ test("#1283 从未启动 → never started，绝不是 still running，也不烧
     client._awaitDaemonReady(child, mark, 5_000, state),
     (err) => err.message.includes("never started")
       && !err.message.includes("still running")
-      && !err.message.includes("failed to start within timeout")
+      && !err.message.includes("failed to start within ")
       && !err.message.includes("exited during startup"),
   );
   assert.ok(Date.now() - t0 < 1000, "5s 的窗口不该被烧完");
@@ -1378,7 +1488,7 @@ test("#1283 startDaemon：spawn 打桩为 ENOENT → 立即失败并点名，不
       c.startDaemon(),
       (err) => err.message.includes("never started (ENOENT)")
         && !err.message.includes("still running")
-        && !err.message.includes("failed to start within timeout"),
+        && !err.message.includes("failed to start within "),
     );
     assert.ok(Date.now() - t0 < 1000, "ENOENT 不该烧满 5s 窗口");
   } finally {
