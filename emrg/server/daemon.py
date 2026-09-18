@@ -180,16 +180,25 @@ EVOLUTION_CWD = Path.home() / ".emrg" / "evolution"
 # truncation uses: a second spelling could disagree with the code that cuts.
 PROJECT_CONTEXT_MAX_CHARS = 8000
 
-# The reloadable fields whose value a connected client *displays*, so a revision
-# that moves one of them must be broadcast rather than only logged (issue #1374).
+# The reloadable fields a connected client *displays*, so a revision that moves one
+# of them must be broadcast rather than only logged (issue #1374).
 # Measured before this existed: `vision = true` edited into `~/.emrg/config.toml`
 # moved the running daemon's value within the poll interval while every connected
 # client kept the answer from its last frame, because the only two things that
 # report the effective vision are a `pong` and a `model_set` — and a reload is
-# neither (the TUI's pings are event-driven: startup, reconnect, rewind). The
-# other reloadable fields are daemon-local: nothing outside the daemon reads them,
-# so broadcasting them would be noise, not information.
-BROADCAST_ON_RELOAD = frozenset({"vision", "context_window"})
+# neither (the TUI's pings are event-driven: startup, reconnect, rewind).
+#
+# The set is exactly what that sentence says, and `context_window` was not (issue
+# #1384). It was here because a `/model` prints the window on a switch line, which is
+# a frame a client *asks* for; the reload frame's reader reads `type` / `model` /
+# `vision` / `applied`, the persistent segment is `_format_status_left(title, sid,
+# model, vision)`, and no GUI surface has a context gauge — so a window-only edit put
+# a frame on the wire whose payload nothing read. The other reloadable fields are
+# daemon-local in the same way, and every one of them is evidenced by the reload log
+# line below, which is their collector (rant 2026-09-17T16:52:57, requirement 3). A
+# client surface that starts showing one of them adds it here, and the tests beside
+# this frame pin membership in both directions.
+BROADCAST_ON_RELOAD = frozenset({"vision"})
 
 # Windows TIME_WAIT retry: SO_EXCLUSIVEADDRUSE (the only anti-hijack option on
 # Windows) blocks rebinding while accepted connections linger in TIME_WAIT.
@@ -705,6 +714,13 @@ class EmrgServer:
         keeps the last value it was told — it only ever learns one from the `pong`
         or a `model_set`, and a reload is neither.
 
+        It carries the fields its reader uses and no others (issue #1384): the client
+        branch reads `type` / `model` / `vision` / `applied`, so a key nothing reads
+        is payload a future reader would have to be trusted to keep in step. A client
+        that starts showing another reloadable field adds it here *and* to
+        `BROADCAST_ON_RELOAD`, because the trigger is the same question as the
+        payload: what does a client surface show?
+
         Deliberately **not** `_apply_model_switch`'s frame, and the difference is
         the reason this is a separate type rather than a reused `model_set`:
         `previous` and `vision_source` describe a *resolution* (a switch resolved
@@ -720,7 +736,6 @@ class EmrgServer:
         return {
             "type": "config_applied",
             "model": self.llm.config.model,
-            "context_window": self.llm.config.context_window,
             "vision": self.llm.config.vision,
             "applied": list(outcome.applied),
         }

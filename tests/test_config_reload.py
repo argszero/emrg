@@ -399,7 +399,13 @@ def test_a_vision_revision_reaches_the_clients_that_display_it(tmp_path):
     frame = sent[0]
     assert frame["type"] == "config_applied"
     assert frame["vision"] is True, "the frame carries the live value, not the file's key"
-    assert frame["context_window"] == 1000
+    # The frame carries the fields its reader uses and no others (issue #1384). This
+    # assertion changed direction — it read `== 1000` while `context_window` was in
+    # the set — because the rule changed, not because it was inconvenient: the
+    # client branch reads `type` / `model` / `vision` / `applied`, so a window in
+    # the payload is a key nothing reads, and `test_a_window_only_revision_is_silent`
+    # below pins the membership that follows from it.
+    assert "context_window" not in frame
     assert frame["applied"] == outcome.applied
     # A reload resolves nothing, so it must not name a resolution: `vision_source`'s
     # two legal values both describe a `/model` switch (rant 2026-09-17T16:53:02),
@@ -442,6 +448,32 @@ def test_a_revision_no_client_displays_is_not_broadcast(tmp_path):
 
     assert outcome is not None and outcome.applied == ["max_tokens"]
     assert server.llm.config.max_tokens == 1234
+    assert sent == [], "a value no client displays must not produce a frame"
+
+
+def test_a_window_only_revision_is_silent(tmp_path):
+    """The membership half of `BROADCAST_ON_RELOAD` (issue #1384).
+
+    The set is justified as "the reloadable fields a client *displays*", and
+    `context_window` was in it while nothing displayed it: the frame's reader reads
+    `type` / `model` / `vision` / `applied`, the persistent segment is
+    `_format_status_left(title, sid, model, vision)`, and no GUI surface has a
+    context gauge. So a window-only edit reached a frame whose payload nothing read,
+    while the host could see the key move in the log line — which is the collector
+    every daemon-local reloadable field has (rant 2026-09-17T16:52:57, requirement 3).
+
+    Paired with the two vision tests this pins the set from both sides: a field a
+    client shows broadcasts, a field it does not is silent. Widening the set again
+    reddens this test; narrowing it past `vision` reddens those.
+    """
+    server, cfg_path = _server(tmp_path)
+    sent = _recorder(server)
+
+    _write(cfg_path, BASE.replace("context_window = 1000", "context_window = 4242"))
+    outcome = asyncio.run(server._reload_config_once())
+
+    assert outcome is not None and outcome.applied == ["context_window"]
+    assert server.llm.config.context_window == 4242, "the value still lands — only the frame is absent"
     assert sent == [], "a value no client displays must not produce a frame"
 
 
