@@ -332,6 +332,19 @@ def _tree_id(tree_sha: str) -> str:
     return f"{tree_sha[:12]} ({tree_sha})"
 
 
+def _tree_of(commit: str, what: str) -> str:
+    """The tree a commit carries, named as the caller will have to describe it.
+
+    One implementation for both trees this tool measures (the plan's and the base's),
+    because the two are compared with each other: a difference in how they are resolved
+    would be read as a difference between the trees.
+    """
+    proc = _run(["git", "rev-parse", f"{commit}^{{tree}}"])
+    if proc.returncode != 0:
+        raise MeasurementError(f"could not read {what}: {proc.stderr}")
+    return proc.stdout.strip()
+
+
 def _open_pr_numbers(repo: str) -> list[int]:
     """The open PR numbers, ascending - the default subject of the check."""
     proc = _run(
@@ -551,6 +564,51 @@ def _no_suite_verdict(out: str) -> str:
     )
 
 
+# The two forms pytest's short summary uses to blame a row, and the reason the rows are
+# read out of the report rather than reconstructed: they are what the base comparison
+# re-runs, so a name this module invented would ask the base tree a different question
+# than the run answered. `FAILED <nodeid> - <message>` is a failing test, `ERROR <nodeid>
+# - <message>` a fixture or teardown that failed; `ERROR: not found: <path>` - a
+# collection error - matches neither, which the `" "` after the verb excludes. The id
+# runs up to the `" - "` separator, which is what keeps an id parametrized with a space
+# (`test_x[a b]`) whole.
+BLAMED_ROW = re.compile(r"^(?:FAILED|ERROR) (\S.*?)(?: - |$)", re.M)
+
+# What pytest prints for an argument its tree does not contain:
+#     ERROR: not found: /tmp/emrg-plan-suite-x/base/tests/test_a.py::test_b
+# The path is absolute, so a row is matched by its tail.
+NOT_FOUND = re.compile(r"not found: (\S+)")
+
+
+def _failing_rows(out: str) -> list[str]:
+    """Every node id the suite's own report blames, in the order it printed them."""
+    return [match.group(1).strip() for match in BLAMED_ROW.finditer(out)]
+
+
+def _unfound_ids(out: str, rows: list[str]) -> set[str]:
+    """Which of `rows` the tree does not contain, as the run itself reported it.
+
+    pytest aborts the whole invocation when one argument cannot be resolved - measured
+    on this machine: one existing and one missing id print *two* `not found` lines and
+    run `no tests`, rc 4 - so a missing argument has to be removed from the invocation
+    rather than read as a result. The answer is not in doubt, though: a row a tree does
+    not contain cannot fail there.
+
+    Separators are normalised on both sides, which is not cosmetic: pytest names the
+    argument by its *path* (the platform's separator) while a node id always uses `/`.
+    Measured while writing this, on the same string with the two spellings -
+    `/tmp/base/tests/test_a.py::test_b` matched, `C:\\Temp\\base\\tests\\test_a.py::test_b`
+    matched **nothing**. Blind there, every row the base does not contain would have
+    been read as "the base could not be measured" (rc 2) instead of as the answer.
+    """
+    named = {match.group(1).replace("\\", "/") for match in NOT_FOUND.finditer(out)}
+    return {
+        row
+        for row in rows
+        if any(n == row or n.endswith("/" + row.replace("\\", "/")) for n in named)
+    }
+
+
 # A populated environment belonging to the *harness* rather than to the tree under
 # test: purged of caches for speed, never a source of the answer. A fresh worktree
 # has none of these; a re-used one can.
@@ -631,22 +689,22 @@ def _suite_env(worktree: Path) -> dict[str, str]:
 
 def _suite_verdict(
     tip: str, scratch: Path, keep: Path | None = None
-) -> tuple[bool, str, str]:
+) -> tuple[bool, str, str, list[str]]:
     """Run the repository's suite in a worktree of the planned tree.
 
-    Returns (passed, suite summary, tree sha). The tree sha is returned and
+    Returns (passed, suite summary, tree sha, failing rows). The tree sha is returned and
     reported because the family's recurring defect is a verdict about a tree the
-    caller was not looking at.
+    caller was not looking at. The failing rows are the run's own, returned so the
+    caller can ask the base tree the *same* question rather than a reconstructed one
+    (issue #1378: a plan whose tree inherits a red base was reported as a combination
+    failure and pointed at a PR that owns nothing).
 
     `keep` materialises the worktree there and leaves it in place for the caller, who
     then owns its removal; nothing else about the run changes (same caches purged, same
     interpreter and `PYTHONPATH` pinned to the tree), so a kept worktree answers for the
     same tree the default run would have deleted.
     """
-    tree_proc = _run(["git", "rev-parse", f"{tip}^{{tree}}"])
-    if tree_proc.returncode != 0:
-        raise MeasurementError(f"could not read the planned tree: {tree_proc.stderr}")
-    tree_sha = tree_proc.stdout.strip()
+    tree_sha = _tree_of(tip, "the planned tree")
 
     updated = _run(["git", "update-ref", TIP_REF, tip])
     if updated.returncode != 0:
@@ -666,7 +724,7 @@ def _suite_verdict(
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode == 0:
-            return True, _last_line(out, "suite passed"), tree_sha
+            return True, _last_line(out, "suite passed"), tree_sha, []
         if proc.returncode == 1:
             failures = [
                 line.split(" ", 1)[1].strip()
@@ -678,7 +736,7 @@ def _suite_verdict(
             summary = (
                 "; ".join(failures[:5]) if failures else _last_line(out, "suite FAILED")
             )
-            return False, summary, tree_sha
+            return False, summary, tree_sha, _failing_rows(out)
         # 2 interrupted, 3 internal error, 4 usage error, 5 no tests collected. None
         # of these is "the suite passed" - and rc 1 reaches here only with a failure
         # report in hand, since a report is what the branch above asks for.
@@ -689,6 +747,117 @@ def _suite_verdict(
         if keep is None:
             _run(["git", "worktree", "remove", "--force", str(worktree)])
         _run(["git", "update-ref", "-d", TIP_REF])
+
+
+def _pytest_rows(worktree: Path, rows: list[str]) -> tuple[int, str]:
+    """Run only these rows in that tree, with the same interpreter and pinning.
+
+    Running the rows rather than the whole suite is what makes a second measurement
+    affordable - seconds against the ~140s a full run costs here - and it is also what
+    makes the two runs comparable: the base is asked exactly the question the plan's run
+    answered, not a wider one that merely contains it. Same `cwd` and `PYTHONPATH` pin
+    as the suite run (`_suite_env`), because a base tree measured through a different
+    path is a different tree's answer.
+    """
+    proc = _run(
+        [sys.executable, "-m", "pytest", *rows, "-q", "--no-header"],
+        cwd=str(worktree),
+        env=_suite_env(worktree),
+    )
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _still_red_on(tip: str, rows: list[str], scratch: Path) -> set[str]:
+    """Which of `rows` also fail on the tree at `tip`, measured the way the plan was.
+
+    The question a red plan leaves open is *whose* failure it is, and the plan's own run
+    cannot answer it: `_suite_verdict` measures one tree. Issue #1378 measured the cost
+    of that gap - plans `#1373` and `#1375` were reported as "the tree they produce
+    together fails the suite … re-push the PR that owns the failure (a push voids its
+    votes)" while the same five rows failed on the base tree too (the harness checks the
+    tree out under the OS temp root, itself an allowed write root, so the unpinned
+    write-root-dependent rows flip). Neither PR touches the files that fail: the remedy
+    pointed at a PR that owns nothing, and a cycle that believes it either re-pushes its
+    own untouched PR - voiding valid votes and re-running CI for a tree that is not the
+    one failing - or goes looking inside a diff for a failure that is not there.
+
+    Everything about the materialisation is the plan's: a detached worktree of the base
+    commit, bytecode purged, the interpreter and `PYTHONPATH` pinned to that tree. Rows
+    the base does not contain cannot fail there, and pytest runs nothing at all when one
+    argument is unresolvable (measured), so a `not found` report is that answer rather
+    than a failed measurement and the run is repeated without those rows. Anything else
+    the base run reports - an interpreter without pytest, rc 3 - is a measurement error:
+    an unanswerable question is rc 2, never a verdict about a PR.
+    """
+    worktree = scratch / "base"
+    added = _run(["git", "worktree", "add", "--detach", str(worktree), tip])
+    if added.returncode != 0:
+        raise MeasurementError(
+            "could not materialise the base tree: " + added.stderr.strip()
+        )
+    try:
+        _purge_bytecode(worktree)
+        rc, out = _pytest_rows(worktree, rows)
+        if rc == 4:
+            missing = _unfound_ids(out, rows)
+            if not missing:
+                raise MeasurementError(
+                    "the base tree could not be asked these rows (rc=4):\n"
+                    + out[-1000:].strip()
+                )
+            rows = [row for row in rows if row not in missing]
+            if not rows:
+                return set()
+            rc, out = _pytest_rows(worktree, rows)
+        if rc == 0:
+            return set()
+        blamed = set(_failing_rows(out)) & set(rows) if rc == 1 else set()
+        if blamed:
+            return blamed
+        raise MeasurementError(
+            f"the base tree could not be measured (rc={rc}):\n" + out[-1000:].strip()
+        )
+    finally:
+        _run(["git", "worktree", "remove", "--force", str(worktree)])
+
+
+def _ownership_lines(
+    base_tree: str, failing: list[str], inherited: set[str]
+) -> tuple[str, str]:
+    """Who owns the failing rows: the paragraphs that say so, or ``""`` for neither.
+
+    The plan's paragraph and the base's are built together so that they are halves of one
+    split - a row appears in at most one of them, and the union is `failing` - which is
+    the property that keeps the remedy honest. A row the base tree also fails must not
+    reach the sentence that tells the caller to re-push a PR, and a row only the plan's
+    tree fails must, restricted to those rows.
+
+    A pure function of the split, so the wording is asserted without a git run; mutating
+    it into "the base owns everything" is what the combination arm of the test pair
+    catches (`--steps` mode keeps the older wording: it measures a different tree per
+    step, so its owner is a step, not this split).
+    """
+    own = [row for row in failing if row not in inherited]
+    plan = ""
+    if own:
+        plan = (
+            "\nThe plan's steps are individually clean and the per-PR signals are green, "
+            "but the tree they produce together fails the suite. Fix it on the merged "
+            "tree and re-push the PR that owns the failure (a push voids its votes).\n"
+            "  rows this plan's tree owns: " + ", ".join(own)
+        )
+    base = ""
+    if inherited:
+        base = (
+            f"\n{len(inherited)} of the {len(failing)} failing row(s) fail on the base "
+            f"tree {_tree_id(base_tree)} too, measured the same way (same interpreter, "
+            "PYTHONPATH pinned to that tree, caches purged): "
+            + ", ".join(sorted(inherited))
+            + "\nNo PR in this plan owns those rows, so re-pushing one would void its "
+            "votes and re-run CI for a tree that is not the one failing: fix them on the "
+            "base instead."
+        )
+    return plan, base
 
 
 def _kept_note(path: Path, tree_sha: str | None = None) -> None:
@@ -780,7 +949,7 @@ def _judge_every_step(base: str, heads: list[tuple[int, str]]) -> int:
     for step, number, commit in steps:
         try:
             with tempfile.TemporaryDirectory(prefix="emrg-plan-step-") as tmp:
-                passed, summary, tree_sha = _suite_verdict(commit, Path(tmp))
+                passed, summary, tree_sha, _rows = _suite_verdict(commit, Path(tmp))
         except MeasurementError as exc:
             print(f"could not measure step {step} (#{number}): {exc}", file=sys.stderr)
             return 2
@@ -909,9 +1078,27 @@ def main(argv: list[str] | None = None) -> int:
         print("plan: " + " -> ".join(f"#{number}" for number, _ in heads))
         if args.steps:
             return _judge_every_step(base, heads)
+        # Both are filled only when the final tree is red, and both are read only on that
+        # path: a green run has no ownership question to answer.
+        base_tree = ""
+        inherited: set[str] = set()
         try:
             with tempfile.TemporaryDirectory(prefix="emrg-plan-suite-") as tmp:
-                passed, summary, tree_sha = _suite_verdict(tip, Path(tmp), keep)
+                passed, summary, tree_sha, failing = _suite_verdict(tip, Path(tmp), keep)
+                if not passed and failing:
+                    # The same question asked of the other tree, before the verdict is
+                    # attributed: see `_still_red_on` for why the plan's own run cannot
+                    # answer it. A base that cannot be measured is reported as such and
+                    # leaves as rc 2 - "the question could not be answered" - rather than
+                    # as a verdict that names the wrong owner.
+                    try:
+                        base_tree = _tree_of(base, "the base tree")
+                        inherited = _still_red_on(base, failing, Path(tmp))
+                    except MeasurementError as exc:
+                        print(f"could not measure the base: {exc}", file=sys.stderr)
+                        if keep is not None:
+                            _kept_note(keep)
+                        return 2
         except MeasurementError as exc:
             print(f"could not measure: {exc}", file=sys.stderr)
             if keep is not None:
@@ -925,12 +1112,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"suite OK: {summary}")
             return 0
         print(f"suite FAILED: {summary}")
-        print(
-            "\nThe plan's steps are individually clean and the per-PR signals are green, "
-            "but the tree they produce together fails the suite. Fix it on the merged "
-            "tree and re-push the PR that owns the failure (a push voids its votes).",
-            file=sys.stderr,
-        )
+        if not failing:
+            print(
+                "\nThe suite reported a red tree without naming an individual failing row, "
+                "so nothing here says whether this plan or the base owns it. Re-run the "
+                "suite verbosely (-v) to get the row, or compare the two trees by hand.",
+                file=sys.stderr,
+            )
+            return 1
+        plan_text, base_text = _ownership_lines(base_tree, failing, inherited)
+        if plan_text:
+            print(plan_text, file=sys.stderr)
+        if base_text:
+            print(base_text, file=sys.stderr)
         return 1
     except MeasurementError as exc:
         # Reached by everything that can fail before the suite does - the base, the
