@@ -283,6 +283,58 @@ class TestCheckAndRestartIfStale:
             "stuck old pid must be SIGKILLed after the SIGTERM grace window")
         assert mock_cleanup.called
 
+    @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=1e12)
+    @patch("emrg.client.daemon_manager.is_running", return_value=True)
+    @patch("emrg.client.daemon_manager.cleanup_server")
+    @patch("emrg.client.daemon_manager.os.kill")
+    @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
+    def test_the_force_kill_asks_for_a_signal_the_platform_has(
+            self, mock_connect, mock_kill, mock_cleanup, mock_running,
+            mock_src, tmp_path, monkeypatch):
+        """Windows has no `signal.SIGKILL`, and naming it killed the restart path.
+
+        The fallback used to call `os.kill(pid, signal.SIGKILL)` outright. On
+        Windows that attribute does not exist, so the `AttributeError` left
+        `check_and_restart_if_stale()` — nothing on the way out catches it —
+        and `ensure_connected()` died *instead of* respawning the daemon: the
+        wait loop had already spent its 10s, so the one outcome the force kill
+        exists to produce (a dead old daemon, then a fresh one) became a crash.
+
+        A platform that has no `SIGKILL` is simulated over the module's own
+        `signal` name, the same way the guard simulates one over its `os`. POSIX
+        cannot reach the row by running it, and a defect whose only observation
+        platform is Windows is a defect discovered on Windows — which is how this
+        one was (the windows-2025 leg of run 35283518915).
+
+        Both signals asserted are `SIGTERM` here, and that is the point rather
+        than a coincidence: with no force signal to escalate to, the fallback
+        must still *make* the call with the strongest force the platform has.
+        """
+        import signal as real_signal
+
+        token_file = tmp_path / "emrgd.token"
+        token_file.write_text("token\n")
+        mock_connect.return_value = FakeWS([_ping_pong_frame()])
+        mock_kill.side_effect = lambda pid, sig: None  # pid stays "alive" forever
+
+        class _NoSigkill:
+            """`signal` as Windows has it: `SIGTERM` exists, `SIGKILL` does not."""
+
+            SIGTERM = real_signal.SIGTERM
+
+        monkeypatch.setattr(daemon_manager, "signal", _NoSigkill)
+
+        with patch("emrg.client.daemon_manager.get_server_path",
+                   return_value=str(token_file)):
+            asyncio.run(daemon_manager.check_and_restart_if_stale())
+
+        forces = [sig for _pid, sig in (c.args for c in mock_kill.call_args_list)
+                  if sig != 0]
+        assert forces == [real_signal.SIGTERM, real_signal.SIGTERM], (
+            "the graceful signal, then the fallback — the fallback must ask for "
+            f"the force this platform has: {forces}")
+        assert mock_cleanup.called, "and the port file is still released after it"
+
     @patch("emrg.client.daemon_manager._get_server_source_mtime", return_value=0.0)
     @patch("emrg.client.daemon_manager.connect_to_server", new_callable=AsyncMock)
     def test_server_unreachable_silent(self, mock_connect, mock_src, tmp_path):
@@ -366,12 +418,28 @@ class TestTheOldDaemonProbe:
         assert seen == [4321]
 
     def test_windows_default_answer_is_the_port_probe(self):
-        """With no probe injected, Windows is answered by `is_running()`."""
-        with patch("emrg.client.daemon_manager.is_running",
-                   return_value=False) as mock_running:
+        """With no probe injected, Windows is answered by `is_running()`.
+
+        The stand-in is a **zero-argument** callable on purpose. `is_running` takes
+        no pid — it asks the port file — while `pid_alive`'s `win_probe` contract is
+        ``probe(pid)``. A `MagicMock` (what this test used to patch in) accepts
+        either call, so it stayed green while the production path raised `TypeError:
+        is_running() takes 0 positional arguments but 1 was given` on every Windows
+        restart — measured on the windows-2025 leg of run 35283518915, where a test
+        that reproduced the shape failed. A stand-in that can be called the wrong
+        way is not a control: this one is called the wrong way the moment the
+        adapter stops being the supplier.
+        """
+        calls: list = []
+
+        def _port_is_up() -> bool:
+            calls.append(None)
+            return False
+
+        with patch("emrg.client.daemon_manager.is_running", new=_port_is_up):
             assert daemon_manager._old_daemon_alive(
                 4321, platform="win32") is False
-        assert mock_running.called
+        assert calls == [None]
 
     def test_the_platform_decision_is_not_respelled_here(self):
         """One spelling of the rule — the deletion is what is being pinned.
