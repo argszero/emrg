@@ -36,7 +36,7 @@ from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
 from emrg._win import win32_no_window_kwargs
-from emrg.config import LlmConfig, config_dir, resolve_model_vision
+from emrg.config import LlmConfig, config_dir, load_update_config, resolve_model_vision
 from emrg.connect import EMRGD_PORT, cleanup_server, is_server_running_sync
 from emrg.server.atomic import atomic_write_bytes, atomic_write_yaml
 from emrg.server.config_reload import (
@@ -252,11 +252,19 @@ class EmrgServer:
         self.start_time = datetime.now()
         self.evolutions: list[EvolutionLog] = []
         self.llm = LlmClient(llm_config)
+        # The `[update]` object the UpgradeManager's tick loop runs on (issue
+        # #1356). Constructed **here**, not inside `_upgrade_tick_loop`, so the
+        # reloader below and the manager share one object: a reload assigns to
+        # it in place and the next tick reads the new values, with no
+        # reconstruction and no restart. `load_update_config()` reads only the
+        # `[update]` section and falls back to defaults, so a server built
+        # without the file (every unit test) is unaffected.
+        self._update_config = load_update_config()
         # Hot-reload state + policy (rant 2026-09-17T16:52:57). Constructed
         # here so `_reload_config_once()` has its decision object even in a
         # server that never entered `_run()` (tests drive single revisions);
         # its baseline fingerprint is the file the daemon was started from.
-        self._config_reloader = ConfigReloader(llm_config)
+        self._config_reloader = ConfigReloader(llm_config, live_update=self._update_config)
         # Pre-declared so a server that never entered `_run()` (a unit test
         # driving one revision) is torn down by the same code path as a live
         # one — `_shutdown_all` walks this attribute like its siblings.
@@ -700,11 +708,14 @@ class EmrgServer:
         many servers; each immediate tick would fire a real network request
         and destabilize timing).
         """
-        from emrg.config import load_update_config
         from emrg.server.upgrade import TICK_INTERVAL, UpgradeManager
 
+        # `self._update_config` is the object the config hot-reload path assigns
+        # to in place (issue #1356), so an `[update]` edit reaches the next tick
+        # without this loop being rebuilt. The manager holds the same object for
+        # the whole life of the daemon.
         self._upgrade_manager = UpgradeManager(
-            load_update_config(), self._run_upgrade_session
+            self._update_config, self._run_upgrade_session
         )
         while True:
             await asyncio.sleep(TICK_INTERVAL)

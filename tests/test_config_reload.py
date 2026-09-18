@@ -11,7 +11,8 @@ Two rules these tests obey, both from the project's own safety lines:
   case builds its own file under `tmp_path` and hands it to
   `ConfigReloader(..., path=tmp)`. `load_config`'s new optional `path` is what
   makes that possible; a test that resolved `config_path()` would be editing
-  the host's runtime state.
+  the host's runtime state. The *implicit* resolutions are pinned by the
+  autouse fixture below rather than by each test remembering to pass `path=`.
 * **They never start, stop or restart a daemon.** `EmrgServer` is constructed
   in-process (as `tests/test_daemon.py::_make_server` already does) and one
   revision is driven through `_reload_config_once()` by hand — no `_run()`, no
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from emrg import config as cfg_mod
 from emrg.config import LlmConfig, load_config
 from emrg.server import config_reload as cr
 from emrg.server.config_reload import ConfigReloader, describe
@@ -64,8 +66,40 @@ def _server(tmp_path: Path, body: str = BASE) -> tuple[EmrgServer, Path]:
     _write(cfg_path, body)
     live = _live_from(cfg_path)
     server = EmrgServer(live)
-    server._config_reloader = ConfigReloader(live, path=cfg_path)
+    # The `[update]` half (issue #1356), isolated the same way: the object the
+    # daemon hands its UpgradeManager, loaded from this tmp file instead of the
+    # host's real config.toml. No test here calls `tick()`.
+    server._update_config = load_config(cfg_path).update
+    server._config_reloader = ConfigReloader(
+        live, path=cfg_path, live_update=server._update_config
+    )
     return server, cfg_path
+
+
+@pytest.fixture(autouse=True)
+def _the_implicit_config_path_is_never_the_hosts(tmp_path, monkeypatch):
+    """`config_path()` must resolve inside `tmp_path` for every test in this file.
+
+    The module docstring has claimed this from the start, and one caller broke
+    it invisibly: `EmrgServer.__init__` calls `load_update_config()`, which
+    resolves `config_path()` — so merely *constructing* a server read the host's
+    real `~/.emrg/config.toml`, and the result was discarded a line later by
+    `_server`. Nothing was mis-asserted, which is why it survived: a read of host
+    state that no expectation depends on stays invisible until a later edit makes
+    an expectation depend on it (the same shape as the `tests/test_ws_e2e.py`
+    patch that stopped reaching the daemon, 2026-09-18).
+
+    Both modules are re-pointed because neither name is the other's alias:
+    `emrg.config.config_path` is what `load_update_config` calls (it is defined
+    in that module), while `config_reload.py` imported the name by value — a
+    fixture that patched only one would leave the other reading the host.
+
+    Pinned to the same file name the tests build themselves, so an implicit
+    resolution and an explicit `path=` argument agree on the file.
+    """
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+    monkeypatch.setattr(cr, "config_path", lambda: cfg_path)
 
 
 # ── the decision half ────────────────────────────────────────────────
@@ -320,6 +354,184 @@ def test_a_rejected_revision_never_raises_out_of_the_tick(tmp_path):
     outcome = asyncio.run(server._reload_config_once())
     assert outcome is not None and outcome.error is not None
     assert server.llm.config.max_tokens == 100
+
+
+# ── the `[update]` section (issue #1356) ─────────────────────────────
+
+
+def test_the_update_type_table_covers_every_reloadable_field():
+    """The same second-source-of-truth rule as `_TYPES`, one section over.
+
+    A field added to `UpdateConfig` and absent from `_UPDATE_TYPES` would be
+    applied with no check at all (`validate` skips it), and the section is the
+    one whose whole defect was being silently out of scope.
+    """
+    assert set(cr._UPDATE_TYPES) == set(cr.update_reloadable_fields())
+    assert cr.update_reloadable_fields() == ("enabled", "delay_minutes")
+
+
+def test_an_update_section_edit_is_applied_in_place(tmp_path):
+    """The measured defect: `load_update_config()` ran once, in the tick loop.
+
+    So `enabled = false` in the file did nothing to a running daemon — and after
+    the client's mtime-restart was removed (PR #1355) nothing at all covered it.
+    """
+    server, cfg_path = _server(tmp_path)
+    live_update = server._update_config
+    assert live_update.enabled is True and live_update.delay_minutes == 1440
+
+    _write(cfg_path, BASE + "\n[update]\nenabled = false\ndelay_minutes = 60\n")
+    outcome = asyncio.run(server._reload_config_once())
+    assert outcome is not None and outcome.error is None
+    assert outcome.update_applied == ["enabled", "delay_minutes"]
+    assert outcome.applied == [], "nothing under [llm] moved"
+    # In place, on the object itself — which is what makes the manager's next
+    # tick read the new values without being rebuilt.
+    assert live_update.enabled is False and live_update.delay_minutes == 60
+    assert describe(outcome) == "[update] changed=enabled,delay_minutes"
+    # A second poll with no further write is not a second revision.
+    assert asyncio.run(server._reload_config_once()) is None
+
+
+def test_a_wrongly_typed_update_field_rejects_the_whole_revision(tmp_path):
+    """Atomicity is per *revision*, not per section.
+
+    If the `[llm]` half were applied while `[update]` was rejected, the daemon
+    would run a configuration that is half the old file and half the new one —
+    which reads exactly like a successful reload, the failure mode `validate`
+    exists to prevent.
+    """
+    server, cfg_path = _server(tmp_path)
+    _write(
+        cfg_path,
+        BASE.replace("max_tokens = 100", "max_tokens = 4096")
+        + '\n[update]\ndelay_minutes = "soon"\n',
+    )
+    outcome = asyncio.run(server._reload_config_once())
+    assert outcome is not None and outcome.error is not None
+    assert outcome.error.startswith("[update] delay_minutes is str")
+    assert server.llm.config.max_tokens == 100, "the [llm] half leaked through"
+    assert server._update_config.delay_minutes == 1440
+    # The rejected revision is retried as soon as the file moves again.
+    _write(cfg_path, BASE.replace("max_tokens = 100", "max_tokens = 4096"))
+    again = asyncio.run(server._reload_config_once())
+    assert again is not None and again.applied == ["max_tokens"]
+
+
+def test_the_upgrade_tick_loop_hands_the_manager_the_shared_object(tmp_path, monkeypatch):
+    """The seam between the two halves, **driven** rather than asserted.
+
+    The manager captures its `UpdateConfig` at construction and reads it once per
+    5-minute tick, so the reload can only reach it if the loop hands it *this*
+    object. Asserting that `UpgradeManager` keeps the object it is given would
+    test the constructor and not the daemon — it passes even while the loop
+    builds the manager from its own `load_update_config()` copy, which is exactly
+    the state this change removes (measured: that arm left this test green).
+
+    The loop therefore runs against a **recording stub**, one tick deep. The real
+    manager is never constructed, `tick()` here is a local no-op, and no releases
+    API, `version.txt` or `emrg-upgrade` session is reachable from this test.
+    """
+    from emrg.server import upgrade as upgrade_mod
+
+    seen: dict[str, object] = {}
+
+    class RecordingManager:
+        def __init__(self, config, run_session_cb):
+            seen["config"] = config
+
+        async def tick(self) -> None:
+            seen["ticked"] = True
+
+    monkeypatch.setattr(upgrade_mod, "UpgradeManager", RecordingManager)
+    monkeypatch.setattr(upgrade_mod, "TICK_INTERVAL", 0)
+
+    server, cfg_path = _server(tmp_path)
+
+    async def drive() -> None:
+        task = asyncio.create_task(server._upgrade_tick_loop())
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if seen.get("ticked"):
+                break
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(drive())
+    assert seen["ticked"], "the loop did not reach a tick"
+    assert seen["config"] is server._update_config
+
+    # And the object the loop is ticking on is the one a reload moves.
+    _write(cfg_path, BASE + "\n[update]\nenabled = false\n")
+    outcome = asyncio.run(server._reload_config_once())
+    assert outcome is not None and outcome.update_applied == ["enabled"]
+    assert seen["config"].enabled is False, "what tick() reads first"
+
+
+def test_a_reloader_without_the_update_object_does_not_own_that_section(tmp_path):
+    """A section is owned by the object it is given, and no object means no claim.
+
+    The alternative — validating `[update]` anyway — would let a mistyped value in
+    a section this reloader cannot apply reject the `[llm]` half as well, which is
+    over-reach in the other direction.
+    """
+    cfg_path = tmp_path / "config.toml"
+    _write(cfg_path, BASE + '\n[update]\ndelay_minutes = "soon"\n')
+    live = _live_from(cfg_path)
+    reloader = ConfigReloader(live, path=cfg_path)
+
+    _write(
+        cfg_path,
+        BASE.replace("max_tokens = 100", "max_tokens = 4096")
+        + '\n[update]\ndelay_minutes = "soon"\n',
+    )
+    outcome = reloader.poll()
+    assert outcome is not None and outcome.error is None
+    assert outcome.applied == ["max_tokens"] and outcome.update_applied == []
+    assert live.max_tokens == 4096
+
+
+def test_the_daemons_own_reloader_owns_the_update_section(tmp_path):
+    """The wiring in `__init__`, driven through the daemon's **own** reloader.
+
+    Every other test here drives a `ConfigReloader` this file built — `_server()`
+    *replaces* the daemon's. So the construction that actually ships,
+    `ConfigReloader(llm_config, live_update=self._update_config)`, was never
+    exercised: dropping `live_update=` leaves this whole file green (measured
+    while reviewing this PR), i.e. the `[update]` section would be hot-reloadable
+    in appearance only — the silent state issue #1356 exists to end, reproduced
+    one level up. `_server()` cannot pin it, because replacing that object is the
+    thing it does; the daemon's own reloader is only reachable by letting the
+    fixture point the implicit `config_path()` at this file and constructing the
+    server with no replacement.
+
+    The other seam has its own driven test
+    (`test_the_upgrade_tick_loop_hands_the_manager_the_shared_object`): that the
+    manager *reads* this object, and that this object *is* the one the reloader
+    owns, are two claims — one test cannot cover both.
+    """
+    cfg_path = tmp_path / "config.toml"
+    _write(cfg_path, BASE + "\n[update]\nenabled = true\ndelay_minutes = 5\n")
+    server = EmrgServer(_live_from(cfg_path))
+
+    assert server._config_reloader.live_update is server._update_config, (
+        "the daemon must hand its own `[update]` object to the reloader it "
+        "builds — a reloader without it neither checks nor applies that section"
+    )
+    assert server._update_config.delay_minutes == 5, (
+        "the daemon's baseline must come from the file, not from defaults or "
+        "the host's config — the fixture resolves `config_path()` to this file"
+    )
+
+    _write(cfg_path, BASE + "\n[update]\nenabled = false\ndelay_minutes = 30\n")
+    outcome = asyncio.run(server._reload_config_once())
+    assert outcome is not None and outcome.error is None
+    assert outcome.update_applied == ["enabled", "delay_minutes"]
+    assert server._update_config.enabled is False
+    assert server._update_config.delay_minutes == 30
 
 
 def test_every_live_field_is_actually_reloadable(tmp_path):

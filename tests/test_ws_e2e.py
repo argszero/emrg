@@ -102,18 +102,36 @@ async def _boot_server(tmp: Path):
 
     # ⛔ Red line (host 2026-08-21T10:35:57): tests must never run the real
     # auto-upgrade chain. serve() unconditionally starts the 5-minute
-    # _upgrade_tick_loop, which builds UpgradeManager(load_update_config(), …)
-    # with enabled=True by default — over a long session the tick really
-    # requested the GitHub releases API and wrote real emrg-upgrade sessions
-    # (21h pytest incident, PID 72994). Force the manager disabled so the tick
-    # is a no-op; the conftest autouse guard additionally blocks the network.
-    import emrg.config as cfg_mod
+    # _upgrade_tick_loop, whose UpgradeManager is built from the `[update]`
+    # object the daemon takes in `__init__` — with enabled=True by default,
+    # over a long session the tick really requested the GitHub releases API
+    # and wrote real emrg-upgrade sessions (21h pytest incident, PID 72994).
+    # Force the manager disabled so the tick is a no-op; the conftest autouse
+    # guard additionally blocks the network.
+    #
+    # The patch names **the daemon module's own binding**, because that is the
+    # name the code under test resolves (`EmrgServer.__init__` calls
+    # `load_update_config()` out of `emrg.server.daemon`'s namespace) — the
+    # same reason the three `config_dir` patches above name their own module.
+    # Patching `emrg.config.load_update_config` stopped reaching it once that
+    # import moved from function-local (inside the tick loop) to module level:
+    # measured 2026-09-18, the patched name was called 0 times and the server
+    # took `enabled=True, delay_minutes=180` from the host's real
+    # ~/.emrg/config.toml. The assertion below keeps the seam observable — if
+    # the binding moves again, the isolation fails loudly here instead of
+    # silently reading host state while the test still passes.
     from emrg.config import UpdateConfig as _UpdateConfig
 
-    _orig_load_update_config = cfg_mod.load_update_config
-    cfg_mod.load_update_config = lambda: _UpdateConfig(enabled=False)
+    _orig_load_update_config = daemon_mod.load_update_config
+    daemon_mod.load_update_config = lambda: _UpdateConfig(enabled=False)
 
     server = daemon_mod.EmrgServer(_make_config())
+    assert server._update_config.enabled is False, (
+        "the [update] section was not isolated — the daemon built its "
+        "UpgradeManager config from a source other than the patched "
+        "emrg.server.daemon.load_update_config (the host's real config.toml). "
+        "Re-point the patch at the name the daemon resolves."
+    )
     server.llm = AsyncMock()
     server.llm.config = _make_config()  # real config so _run_tool_loop reads thresholds
     server.llm.last_payload = {}
@@ -143,7 +161,7 @@ async def _boot_server(tmp: Path):
         connect_mod.config_dir = _orig_connect_cfg
         daemon_mod.EMRGD_PORT = _orig_daemon_port
         connect_mod.EMRGD_PORT = _orig_connect_port
-        cfg_mod.load_update_config = _orig_load_update_config
+        daemon_mod.load_update_config = _orig_load_update_config
 
     return server, task, _cleanup
 
