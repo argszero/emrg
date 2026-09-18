@@ -11,7 +11,8 @@ Two rules these tests obey, both from the project's own safety lines:
   case builds its own file under `tmp_path` and hands it to
   `ConfigReloader(..., path=tmp)`. `load_config`'s new optional `path` is what
   makes that possible; a test that resolved `config_path()` would be editing
-  the host's runtime state.
+  the host's runtime state. The *implicit* resolutions are pinned by the
+  autouse fixture below rather than by each test remembering to pass `path=`.
 * **They never start, stop or restart a daemon.** `EmrgServer` is constructed
   in-process (as `tests/test_daemon.py::_make_server` already does) and one
   revision is driven through `_reload_config_once()` by hand — no `_run()`, no
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from emrg import config as cfg_mod
 from emrg.config import LlmConfig, load_config
 from emrg.server import config_reload as cr
 from emrg.server.config_reload import ConfigReloader, describe
@@ -72,6 +74,32 @@ def _server(tmp_path: Path, body: str = BASE) -> tuple[EmrgServer, Path]:
         live, path=cfg_path, live_update=server._update_config
     )
     return server, cfg_path
+
+
+@pytest.fixture(autouse=True)
+def _the_implicit_config_path_is_never_the_hosts(tmp_path, monkeypatch):
+    """`config_path()` must resolve inside `tmp_path` for every test in this file.
+
+    The module docstring has claimed this from the start, and one caller broke
+    it invisibly: `EmrgServer.__init__` calls `load_update_config()`, which
+    resolves `config_path()` — so merely *constructing* a server read the host's
+    real `~/.emrg/config.toml`, and the result was discarded a line later by
+    `_server`. Nothing was mis-asserted, which is why it survived: a read of host
+    state that no expectation depends on stays invisible until a later edit makes
+    an expectation depend on it (the same shape as the `tests/test_ws_e2e.py`
+    patch that stopped reaching the daemon, 2026-09-18).
+
+    Both modules are re-pointed because neither name is the other's alias:
+    `emrg.config.config_path` is what `load_update_config` calls (it is defined
+    in that module), while `config_reload.py` imported the name by value — a
+    fixture that patched only one would leave the other reading the host.
+
+    Pinned to the same file name the tests build themselves, so an implicit
+    resolution and an explicit `path=` argument agree on the file.
+    """
+    cfg_path = tmp_path / "config.toml"
+    monkeypatch.setattr(cfg_mod, "config_path", lambda: cfg_path)
+    monkeypatch.setattr(cr, "config_path", lambda: cfg_path)
 
 
 # ── the decision half ────────────────────────────────────────────────
@@ -464,6 +492,46 @@ def test_a_reloader_without_the_update_object_does_not_own_that_section(tmp_path
     assert outcome is not None and outcome.error is None
     assert outcome.applied == ["max_tokens"] and outcome.update_applied == []
     assert live.max_tokens == 4096
+
+
+def test_the_daemons_own_reloader_owns_the_update_section(tmp_path):
+    """The wiring in `__init__`, driven through the daemon's **own** reloader.
+
+    Every other test here drives a `ConfigReloader` this file built — `_server()`
+    *replaces* the daemon's. So the construction that actually ships,
+    `ConfigReloader(llm_config, live_update=self._update_config)`, was never
+    exercised: dropping `live_update=` leaves this whole file green (measured
+    while reviewing this PR), i.e. the `[update]` section would be hot-reloadable
+    in appearance only — the silent state issue #1356 exists to end, reproduced
+    one level up. `_server()` cannot pin it, because replacing that object is the
+    thing it does; the daemon's own reloader is only reachable by letting the
+    fixture point the implicit `config_path()` at this file and constructing the
+    server with no replacement.
+
+    The other seam has its own driven test
+    (`test_the_upgrade_tick_loop_hands_the_manager_the_shared_object`): that the
+    manager *reads* this object, and that this object *is* the one the reloader
+    owns, are two claims — one test cannot cover both.
+    """
+    cfg_path = tmp_path / "config.toml"
+    _write(cfg_path, BASE + "\n[update]\nenabled = true\ndelay_minutes = 5\n")
+    server = EmrgServer(_live_from(cfg_path))
+
+    assert server._config_reloader.live_update is server._update_config, (
+        "the daemon must hand its own `[update]` object to the reloader it "
+        "builds — a reloader without it neither checks nor applies that section"
+    )
+    assert server._update_config.delay_minutes == 5, (
+        "the daemon's baseline must come from the file, not from defaults or "
+        "the host's config — the fixture resolves `config_path()` to this file"
+    )
+
+    _write(cfg_path, BASE + "\n[update]\nenabled = false\ndelay_minutes = 30\n")
+    outcome = asyncio.run(server._reload_config_once())
+    assert outcome is not None and outcome.error is None
+    assert outcome.update_applied == ["enabled", "delay_minutes"]
+    assert server._update_config.enabled is False
+    assert server._update_config.delay_minutes == 30
 
 
 def test_every_live_field_is_actually_reloadable(tmp_path):
