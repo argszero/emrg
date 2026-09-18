@@ -119,7 +119,12 @@ class TestTheEscapeIsReal:
         root, ws = scratch
         cmd, created = row
         proc = subprocess.run(
-            ["/bin/sh", "-c", cmd], cwd=ws, capture_output=True, text=True
+            ["/bin/sh", "-c", cmd],
+            cwd=ws,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
         landed = os.path.join(root, created)
         assert proc.returncode == 0, f"/bin/sh could not run {cmd!r}: {proc.stderr}"
