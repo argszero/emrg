@@ -444,6 +444,24 @@ _WHOLE_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 # workspace — so the class is refused rather than resolved (issue #1316).
 _ASSIGNED_LITERAL_VALUE_RE = re.compile(r"^[A-Za-z0-9._/+-]+$")
 
+# The same class, spelled the way an *absolute* value is spelled on Windows: the
+# charset above cannot express one, because `:` is not in it, so `T=D:/ws && cat >
+# "$T/f"` was refused as undecidable however plainly absolute it is. That is the
+# false block of issue #1316 surviving on the one platform whose scratch root is
+# most likely to be absolute (issue #1354).
+#
+# `:` is admitted in the drive position only, and only with a forward slash after
+# it: a backslash is shlex's escape character, so `D:\ws` reaches this file as a
+# word that is not a path at all (`D:ws`) — a separate and older defect, issue
+# #1261, which this charset cannot fix and must not pretend to.
+#
+# Widening the class grants no permission. A value it now admits is *resolved*,
+# not trusted: the result is handed to the same `_is_within` / protected-file /
+# moved-out checks a POSIX absolute value already goes to, so the change turns
+# "unresolvable, so refused" into "placed, so judged". The `..` exclusion still
+# applies to both spellings (`_assigned_value_is_decidable`).
+_ASSIGNED_DRIVE_ROOTED_VALUE_RE = re.compile(r"^[A-Za-z]:/[A-Za-z0-9._/+-]*$")
+
 # ── Heredocs: a body is DATA unless a program eats it as a program ──────────
 # A heredoc body is text on some command's stdin. It is shell *code* only when
 # the consumer is a shell (`sh <<EOF` runs the body); for `cat <<EOF` it is
@@ -2539,12 +2557,14 @@ def _commandless_assignment_pairs(statement: list[str]) -> list[tuple[str, str]]
 def _assigned_value_is_decidable(value: str) -> bool:
     """Whether an assigned value can be resolved without guessing.
 
-    A literal fragment only (`_ASSIGNED_LITERAL_VALUE_RE`), with no ``..``
-    segment: the relative branch of the target rule assumes "relative therefore
-    inside the workspace", so `T=../outside && cat > "$T/f"` is exactly the write
-    that assumption cannot survive, and it stays refused (issue #1316).
+    A literal fragment only — `_ASSIGNED_LITERAL_VALUE_RE`, or a drive-rooted
+    absolute value (`_ASSIGNED_DRIVE_ROOTED_VALUE_RE`, issue #1354) — with no
+    ``..`` segment: the relative branch of the target rule assumes "relative
+    therefore inside the workspace", so `T=../outside && cat > "$T/f"` is exactly
+    the write that assumption cannot survive, and it stays refused (issue #1316).
     """
-    if not _ASSIGNED_LITERAL_VALUE_RE.match(value):
+    if not (_ASSIGNED_LITERAL_VALUE_RE.match(value)
+            or _ASSIGNED_DRIVE_ROOTED_VALUE_RE.match(value)):
         return False
     return ".." not in value.split("/")
 
