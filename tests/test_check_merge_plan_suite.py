@@ -318,6 +318,54 @@ def _worktree_listing(repo: Path) -> str:
     return _git(repo, "worktree", "list", "--porcelain")
 
 
+#: The GUI's dependencies live here, not in the repository root's `node_modules`.
+_GUI_NODE_MODULES = "emrg/gui/node_modules"
+
+
+def _node_remedy(note: str) -> tuple[str, str]:
+    """The `(source, destination)` of the node remedy the note prints."""
+    for line in note.splitlines():
+        parts = line.split()
+        if len(parts) == 5 and parts[0] == "node:" and parts[1:3] == ["ln", "-sfn"]:
+            return parts[3], parts[4]
+    raise AssertionError(f"the note prints no node remedy:\n{note}")
+
+
+def _node_remedy_links_the_guis_own_deps(note: str) -> bool:
+    """True when the node remedy links the *GUI's* `node_modules`, not the root's.
+
+    The source is the load-bearing half, and the destination cannot discriminate it:
+    the root form (`ln -sfn <main>/node_modules <kept>/emrg/gui/node_modules`) contains
+    the string `emrg/gui/node_modules` too, which is why the assertion that stood here
+    passed for a link that fixed nothing. Measured 2026-09-19 (`cyc20260919-060712`) on
+    landing tree `f96d6515c734`: the repository root's `node_modules` is empty (0
+    entries), so linking it is indistinguishable from linking nothing - the GUI suite
+    reports 126 passed / 1 failed (`test/integration.test.js`, `Cannot find module
+    'ws'`) either way, and 126 / 0 / 8 skipped once the GUI's own directory is linked.
+    """
+    source, destination = _node_remedy(note)
+    return source.endswith(_GUI_NODE_MODULES) and destination.endswith(_GUI_NODE_MODULES)
+
+
+def test_the_node_remedy_reader_rejects_the_root_form() -> None:
+    """The instrument's control: the wrong link source must read as wrong.
+
+    Without this, `_node_remedy_links_the_guis_own_deps` could return True for anything
+    (the shape the previous assertion effectively had) and the arm it now backs would
+    still pass. Three shapes, because the two halves fail independently: the right
+    source with the right destination, the root source, and a destination that is not
+    the GUI's directory at all.
+    """
+    def note(source: str, destination: str = "/kept/emrg/gui/node_modules") -> str:
+        return f"    node:   ln -sfn {source} {destination}\n"
+
+    assert _node_remedy_links_the_guis_own_deps(note("/main/emrg/gui/node_modules"))
+    assert not _node_remedy_links_the_guis_own_deps(note("/main/node_modules"))
+    assert not _node_remedy_links_the_guis_own_deps(
+        note("/main/emrg/gui/node_modules", "/kept/node_modules")
+    )
+
+
 def _worktree_listing_names(listing: str, path: Path) -> bool:
     """Does this listing name `path` as one of its worktrees?
 
@@ -387,7 +435,8 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
 
     # The note names the path, the tree, and the two traps every fresh worktree has -
     # no `.venv` (so `uv run pytest` there reports that no suite ran) and no
-    # `node_modules` (so one unrelated GUI spawn-args test reds). Both were reported
+    # `node_modules` (so the GUI suite reds the spawn-args test and
+    # `test/integration.test.js`, which cannot resolve `ws`). Both were reported
     # as defects before, which is why the tool says them out loud - and it prints the
     # remedy for each, because a warning without one costs the next reader the same
     # discovery. Shape-matched, not path-matched: the note prints git's spelling of the
@@ -396,7 +445,7 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
     assert ".venv" in kept.stdout and "node_modules" in kept.stdout
     assert f"PYTHONPATH={kept_dir}" in kept.stdout
     assert "-m pytest tests/ -q" in kept.stdout
-    assert "emrg/gui/node_modules" in kept.stdout
+    assert _node_remedy_links_the_guis_own_deps(kept.stdout), kept.stdout
 
     # The removal line it prints is the one that works.
     _git(repo, "worktree", "remove", "--force", str(kept_dir))
