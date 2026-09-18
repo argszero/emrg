@@ -27,6 +27,7 @@ import pytest
 
 from emrg.tools.bash_tool import (
     _check_sandbox,
+    _cwd_at_write_site,
     _cwd_left_workspace,
     _is_absolute_path,
     _is_within,
@@ -195,3 +196,177 @@ def test_without_a_workspace_the_moved_cwd_is_still_read():
     # Controls: no move, so the relative target keeps the old assumption.
     assert _check_sandbox("rm -rf build", WW, None)[0] is True
     assert _check_sandbox("echo x > out.txt", WW, None)[0] is True
+
+
+# ---------------------------------------------------------------------------
+# The other direction: a `cd` that stays *inside* moves the write site too
+# (issue #1370).
+#
+# Everything above is about a move that *leaves* — the `..` climb, the
+# `cd /elsewhere`, the nested shell. These rows are about the move that stays:
+# the boundary joins a relative target onto the directory the child starts in,
+# and that is the right reading only while the command writes from where it
+# started. `cd sub && echo x > ../back.txt` creates `<workspace>/back.txt` —
+# inside — while the join onto the start directory reads
+# `<workspace>/../back.txt`, refuses it, and names a directory the file never
+# appears in. `cd` into a subdirectory and climbing back is how a shell writes
+# *beside* a subdirectory rather than in it, so the refusal was friction the
+# caller could only avoid by spelling the target absolutely.
+#
+# Every row below was run for real in a scratch tree of the same shape
+# (`ws/sub`, `ws/sub/sub2`) in `/bin/sh`, with the file's location read back off
+# disk; the comment beside each says where it really lands. The verdicts are
+# compared against that measured location, never against a rule — and the rows
+# that must stay refused are there because each one is a way this reading can
+# name a directory the shell is not in (the docstring of `_cwd_at_write_site`
+# carries the same list).
+# ---------------------------------------------------------------------------
+
+
+def test_a_move_that_stays_inside_moves_the_write_site():
+    """The three false blocks of issue #1370, and a chained move.
+
+    Each really lands inside the workspace: `<ws>/back.txt`, `<ws>/sub/in.txt`,
+    `<ws>/in2.txt` and `<ws>/deep.txt` respectively (measured, not inferred).
+    """
+    sub = spelled(os.path.join(WORKDIR, "sub"))
+    assert _verdict("cd sub && echo x > ../back.txt") is True
+    assert _verdict("cd sub && echo x > ../sub/in.txt") is True
+    assert _verdict(f"cd {sub} && echo x > ../in2.txt") is True
+    assert _verdict("cd sub && cd sub2 && echo x > ../../deep.txt") is True
+
+
+def test_a_climb_that_leaves_is_still_refused():
+    """The direction this change must not lose, now that `..` is measured from
+    the write site: from *there*, a climb may still leave the workspace.
+
+    `cd sub && echo x > ../../worse.txt` really writes the workspace's parent
+    directory, and `cd sub && cd .. && echo x > ../outside.txt` really writes
+    outside it — both measured. The last row is #1353's original case, which no
+    move is involved in.
+    """
+    assert _verdict("cd sub && echo x > ../../worse.txt") is False
+    assert _verdict("cd sub && cd .. && echo x > ../outside.txt") is False
+    assert _verdict("echo x > ../escaped.txt") is False
+
+
+def test_inside_and_outside_spellings_agree():
+    """Parity for this family: the absolute spelling of one write gets the
+    verdict the relative spelling gets. A verdict list would pass on a guard
+    that simply allowed everything behind a `cd`; parity fails such a guard on
+    the block side.
+
+    The absolute paths are the *measured* landing places of the relative rows.
+    """
+    pairs = [
+        ("cd sub && echo x > ../back.txt", os.path.join(WORKDIR, "back.txt"), True),
+        (
+            "cd sub && cd sub2 && echo x > ../../deep.txt",
+            os.path.join(WORKDIR, "deep.txt"),
+            True,
+        ),
+        (
+            "cd sub && echo x > ../../worse.txt",
+            os.path.join(os.path.dirname(WORKDIR), "worse.txt"),
+            False,
+        ),
+    ]
+    for relative, absolute, expected in pairs:
+        assert _verdict(relative) is expected, relative
+        assert _verdict(f"echo x > {spelled(absolute)}") is expected, absolute
+
+
+@pytest.mark.parametrize(
+    "cmd, lands",
+    [
+        # The write is *before* the move, so the move is not its write site:
+        # measured, `<parent>/a.txt`.
+        ("echo x > ../a.txt && cd sub", "the workspace's parent"),
+        # `;` and `||` run the next statement whether or not the `cd` worked,
+        # and a `cd` that failed leaves the shell in the start directory:
+        # measured with `nosuchdir`, both land outside the workspace.
+        ("cd nosuchdir; echo x > ../escape.txt", "the workspace's parent"),
+        ("cd nosuchdir || echo x > ../escape2.txt", "the workspace's parent"),
+        # A grouping boundary can put the `cd` in a shell of its own: measured,
+        # `<parent>/back.txt` — the inner `cd ..` is the one that counts.
+        ("cd sub && (cd .. && echo x > ../back.txt)", "the workspace's parent"),
+        # The token is written by two statements, so the stream does not say
+        # which one names the write: measured, `<parent>/back.txt`.
+        (
+            "cd sub && echo ../back.txt && cd .. && echo x > ../back.txt",
+            "the workspace's parent",
+        ),
+        # A redirect attached to the `cd` itself is set up before the `cd` runs:
+        # measured, `<parent>/f.txt`.
+        ("cd sub > ../f.txt", "the workspace's parent"),
+    ],
+)
+def test_the_write_site_is_refused_when_it_cannot_be_proven(cmd, lands):
+    """Each row is a way the write site could be read as the wrong directory.
+
+    They are not hypothetical: removing the rule each one exercises allows a
+    command whose file really lands in ``lands`` (measured, one mutation arm per
+    row). A guard that allowed them would be trading issue #1370's friction for
+    an escape, which is exactly the direction a fail-closed boundary must not
+    move.
+    """
+    assert _verdict(cmd) is False, cmd
+
+
+def test_the_conditional_spellings_stay_refused_with_their_ground_truth():
+    """The two shapes that stay refused although the shell really wrote inside.
+
+    ``cd sub; echo x > ../back.txt`` lands inside only because ``sub`` existed;
+    the same line with a directory that does not is an escape (measured), and
+    the token stream cannot tell the two apart, so the reading keeps the refusal
+    rather than assuming the ``cd`` worked. The second row is the price of the
+    grouping bail-out, measured the same way. Both are pinned as residuals: the
+    change that lifts them has to lift them deliberately.
+    """
+    assert _verdict("cd sub; echo x > ../back.txt") is False
+    assert _verdict("cd sub && (echo x > ../back.txt)") is False
+
+
+def test_the_walk_names_the_directory_the_file_lands_in():
+    """The helper itself, apart from its caller.
+
+    ``None`` is "no directory this walk can prove" — the caller keeps the start
+    directory, which is the fail-closed reading — and it is what every uncertain
+    shape answers, not only the ones with a `cd` in them.
+    """
+    real_workdir = os.path.realpath(WORKDIR)
+    sub = os.path.realpath(os.path.join(WORKDIR, "sub"))
+    assert (
+        _cwd_at_write_site("cd sub && echo x > ../back.txt", WORKDIR, "../back.txt")
+        == sub
+    )
+    # A non-move answers with the start directory, so the caller's join is
+    # unchanged by this rule.
+    assert (
+        _cwd_at_write_site("echo x > ../back.txt", WORKDIR, "../back.txt")
+        == real_workdir
+    )
+    # `env -C` moves its *child*; the shell that sets the redirect up does not
+    # move, which is why the target really lands in the parent directory.
+    assert (
+        _cwd_at_write_site("env -C sub echo x > ../back.txt", WORKDIR, "../back.txt")
+        == real_workdir
+    )
+    assert _cwd_at_write_site("cd sub; echo x > ../back.txt", WORKDIR, "../back.txt") is None
+    assert _cwd_at_write_site("cd -; echo x > ../back.txt", WORKDIR, "../back.txt") is None
+    assert _cwd_at_write_site("cd; echo x > ../back.txt", WORKDIR, "../back.txt") is None
+    # A move the walk cannot place, and a target the token stream does not carry
+    # as a word of its own (a git `--output=` value is a fragment of a token,
+    # not a token) — "not proven" for both, which the caller reads as the start
+    # directory.
+    assert (
+        _cwd_at_write_site("cd $UNSET && echo x > ../back.txt", WORKDIR, "../back.txt")
+        is None
+    )
+    assert (
+        _cwd_at_write_site(
+            "cd sub && echo x > ../back.txt", WORKDIR, "--output=../back.txt"
+        )
+        is None
+    )
+
