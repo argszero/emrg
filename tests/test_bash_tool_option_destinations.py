@@ -219,6 +219,85 @@ def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
         assert _extract_write_targets(cmd.replace("-so", "-s -o")) == [f"{OUTSIDE}/f"]
 
 
+# ── the writers this table deliberately does not cover ─────────────────────
+#
+# The same fail-open this change closed for `curl`/`wget`/`sort`/`unzip`, left open
+# where the destination cannot be read without the verb's own flag grammar. Measured
+# this cycle on this branch, predicate only, nothing executed, with the target outside
+# every allowed root — the third and fourth columns are the *measured* verdicts, which
+# are not uniform: `git clone` reaches `read-only` through the git-mutator rule (issue
+# #979), and that block says nothing about its destination.
+UNCOVERED_WRITERS = (
+    # (row, command, allowed under read-only, allowed under workspace-write)
+    ("tar -cf", "tar -cf OUT/a.tgz x", True, True),
+    ("tar -xf -C spaced", "tar -xf a.tgz -C OUT", True, True),
+    ("tar -xf -C attached", "tar -xf a.tgz -COUT", True, True),
+    ("rsync", "rsync -a x/ OUT/dst/", True, True),
+    ("split", "split -l 100 x OUT/pre", True, True),
+    ("csplit", "csplit x /re/ -f OUT/pre", True, True),
+    ("curl -so cluster", "curl -soOUT/f https://example.invalid/x", True, True),
+    ("git clone", "git clone https://example.invalid/r.git OUT/clone", False, True),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd,read_only_allowed,workspace_write_allowed",
+    UNCOVERED_WRITERS, ids=[row for row, *_rest in UNCOVERED_WRITERS],
+)
+def test_the_uncovered_writers_are_pinned_as_a_measured_hole(
+    row, cmd, read_only_allowed, workspace_write_allowed,
+):
+    """A hole pinned as a hole, with the verdict it really gets.
+
+    Two things are asserted, and they are different claims: an **empty target list**
+    (which is why the tier below it allows — the loop that judges targets never runs),
+    and the tier verdicts themselves. Pinning only the second would let a `git clone`
+    row read as "the walk places the destination", when the block comes from the
+    git-mutator rule and the destination is still unnamed.
+
+    An empty list is also what makes these a *hole* rather than a design: when one of
+    these families is read, the row reds and must be moved into `OPTION_DESTINATIONS`
+    deliberately.
+    """
+    resolved = cmd.replace("OUT", OUTSIDE)
+    assert _extract_write_targets(resolved) == [], (
+        f"{row}: the walk now names a target for {resolved!r} - this row is no longer "
+        "a residual, move it into OPTION_DESTINATIONS"
+    )
+    for tier, expected in (("read-only", read_only_allowed),
+                           ("workspace-write", workspace_write_allowed)):
+        allowed, reason, _ = _check_sandbox(resolved, tier, workdir="/workspace")
+        assert allowed is expected, f"{row}: {tier} gave {allowed}, not {expected}"
+        if expected:
+            # `git clone` under workspace-write is the one row that is allowed while
+            # its destination is unnamed, which is the residual itself.
+            assert reason is None
+
+
+def test_the_only_read_only_block_in_that_family_is_the_git_mutator_rule():
+    """Why `git clone` is not evidence that the family is handled.
+
+    The row above says BLOCK under read-only; this says *where the block comes from*,
+    so a reader cannot mistake it for the walk naming the clone directory. It is the
+    mutator rule that catches it — the same rule that catches a bare `git clone` with
+    no directory at all.
+    """
+    allowed, reason, _ = _check_sandbox(
+        "git clone https://example.invalid/r.git " + OUTSIDE + "/clone",
+        "read-only", workdir="/workspace",
+    )
+    assert allowed is False
+    assert "git mutating" in reason, reason
+    # ...and the same rule blocks a clone that names no directory whatsoever, so the
+    # block is not a statement about the destination.
+    assert _check_sandbox("git clone https://example.invalid/r.git", "read-only")[0] is False
+    # Under workspace-write the destination is unnamed and the clone is allowed.
+    assert _check_sandbox(
+        "git clone https://example.invalid/r.git " + OUTSIDE + "/clone",
+        "workspace-write", workdir="/workspace",
+    )[0] is True
+
+
 # ── mutation arms: a row that cannot be flipped is not a claim ──────────────
 
 # (verb, a command whose refusal depends on that verb being in the table)

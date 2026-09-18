@@ -1067,9 +1067,13 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # is a *write* under `-c`/`-r`/`-u` and a *read* under `-x`/`-t`, and `-C` is where
 # files land when extracting but only a directory to collect from when creating —
 # so `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely
-# refused by a rule that named `-C`. Measured ground truth for the family it does
-# not cover (tar/rsync/split/csplit/git clone, all ALLOW at both tiers with an
-# empty target list) is recorded in the test that pins the residual.
+# refused by a rule that named `-C`. Measured ground truth for the families it does
+# not cover (`tar`, `rsync`, `split`, `csplit`, `git clone`, and the cluster spelling
+# `curl -so<dir>`) is pinned as a measured hole in
+# `tests/test_bash_tool_option_destinations.py` — with the verdict each one really
+# gets rather than a blanket "allowed": all of them reach `workspace-write` with an
+# empty target list, and `git clone` is refused under `read-only` by the git-mutator
+# rule (which is not this walk) rather than by any named destination.
 _OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
     "curl": frozenset({"-o", "--output"}),
     "wget": frozenset({"-O", "--output-document"}),
