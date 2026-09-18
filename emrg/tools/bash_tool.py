@@ -367,6 +367,19 @@ _COMMAND_WRAPPERS = frozenset({
     # is deliberate: the value-skip below is what keeps `find . -exec grep git
     # {} \;` allowed, because `grep` is consumed as the flag's value.
     "eval", "-exec", "-execdir",
+    # `builtin cd <dir>` is `cd <dir>` reached by its other spelling, and it was
+    # the one prefix that left the candidate out of command position: measured on
+    # master, `builtin cd <outside> && echo x > f.txt` created `<outside>/f.txt`
+    # while the guard read the relative target as in-workspace and allowed it,
+    # and the same held for `builtin cd -P <outside>`, `(builtin cd <outside> …)`
+    # and `sh -c 'builtin cd <outside>; …'` (issue #1362). `builtin` prefixes
+    # exactly one word, like `command`, so it belongs to the same list — and the
+    # gap was here rather than in the walk: every consumer of
+    # `_runs_as_a_command` read `builtin <cmd>` as an argument, not just this one.
+    # The cost is the same over-approximation the others carry: `echo builtin cd
+    # <dir>` reads `cd` as an invocation too (measured — a false block, in the
+    # loud direction, of the class `echo command cd <dir>` already had).
+    "builtin",
     "env", "sudo", "doas", "xargs", "nohup", "time", "timeout", "nice",
     "setsid", "stdbuf", "command", "exec", "ionice", "chrt", "watch",
 })
@@ -2306,6 +2319,13 @@ def _find_git_mutator(cmd: str, _depth: int = 0) -> str | None:
     return None
 
 
+# `pushd ±N` / `popd ±N`: an index into the shell's directory stack, not a
+# directory (`pushd +1` rotates the stack by one). A path literally named `+1`
+# is the only thing this reads wrongly, and it is read wrongly in the refusing
+# direction, which is the side this walk takes.
+_STACK_ENTRY_RE = re.compile(r"^[+-]\d+$")
+
+
 def _cwd_left_workspace(
     cmd: str, workspace: str, _depth: int = 0, _base: str | None = None
 ) -> str | None:
@@ -2313,11 +2333,14 @@ def _cwd_left_workspace(
 
     The ``workspace-write`` boundary reads a *relative* write target as "inside
     the workspace, because the cwd is the workspace root". That premise holds
-    only while the command writes from where it started: ``cd <dir>`` and
-    ``env -C <dir>`` move the shell first, so every later target is relative to
-    the new directory. Measured on master, `cd /elsewhere; echo x > out.txt`
-    truncated `/elsewhere/out.txt` while the guard read `out.txt` as
-    in-workspace and allowed it (issue #1244).
+    only while the command writes from where it started: ``cd <dir>``,
+    ``pushd <dir>`` and ``env -C <dir>`` move the shell first, so every later
+    target is relative to the new directory. Measured on master, `cd /elsewhere;
+    echo x > out.txt` truncated `/elsewhere/out.txt` while the guard read
+    `out.txt` as in-workspace and allowed it (issue #1244), and `pushd
+    /elsewhere && echo x > out.txt` did the same through the third spelling
+    (issue #1362) while `builtin cd /elsewhere && …` did it through a prefix the
+    command-position rule did not read (`_COMMAND_WRAPPERS`).
 
     Returns the offending directory, or None when the command never leaves the
     workspace — a destination inside a trusted write zone or the OS temp root
@@ -2326,8 +2349,9 @@ def _cwd_left_workspace(
     one a later ``cd`` returns from, because the token stream does not say which
     segment a target belongs to without re-deriving the parse, and refusing is
     the fail-closed side. A move the guard cannot resolve (`cd -`, whose target
-    is $OLDPWD) is reported by its own token and treated the same way: it cannot
-    be proven to stay inside.
+    is $OLDPWD, and the stack forms `popd`, bare `pushd`, `pushd ±N`, whose
+    targets are whatever an earlier ``pushd`` pushed) is reported by its own
+    token and treated the same way: it cannot be proven to stay inside.
 
     The payload of a nested shell is read too (`sh -c 'cd /elsewhere; echo x >
     f'`, `env -C /elsewhere …`), since it runs with the same effect; depth is
@@ -2356,6 +2380,18 @@ def _cwd_left_workspace(
     reaches the guard as `C:Usersx` — backslash is shlex's escape character — so
     it is not read as an absolute path at all (issue #1261). Forward-slash
     spellings, relative moves and `..` are unaffected.
+
+    The stack forms are refused rather than placed, and the price is the mirror
+    of the one above: every form whose destination is an earlier `pushd`'s is
+    answered by the verb, so a command that *returns* to the directory it started
+    in is refused as well — measured, `pushd <inside>/sub && popd && echo x > f`
+    creates `f` inside the workspace and is still refused, at the `popd`, and
+    `pushd <outside> && popd && echo x > f` is refused one statement earlier, at
+    the `pushd` itself, exactly as the `cd <outside>; cd <back>` spelling is.
+    Refusing is the side the contract names, and the work-around is one the
+    caller already has: spell the write target absolutely. `pushd -n <dir>`,
+    which pushes without moving, is read as a move for the same reason — flags
+    are skipped, not interpreted.
     """
     allowed = [workspace] + list(_trusted_write_zones()) + list(_temp_write_roots())
     cwd = os.path.realpath(_base) if _base else os.path.realpath(workspace)
@@ -2386,9 +2422,32 @@ def _cwd_left_workspace(
     tokens = _split_command_tokens(_mask_data_heredoc_bodies(cmd))
     for i, tok in enumerate(tokens):
         word = _command_word(tok)
-        if word not in ("cd", "env") or not _runs_as_a_command(tokens, i):
+        if word not in ("cd", "pushd", "popd", "env") or not _runs_as_a_command(
+            tokens, i
+        ):
             continue
         args = _args_after_command(tokens, i)
+        if word in ("pushd", "popd"):
+            # `pushd <dir>` moves the shell exactly as `cd <dir>` does — the same
+            # move, a third spelling — so it is placed the same way. Every other
+            # form names an entry of the shell's *directory stack* instead of a
+            # directory: `popd` returns to whatever an earlier `pushd` pushed,
+            # a bare `pushd` swaps the top two entries, and `pushd ±N` rotates
+            # the stack by index. The stack is a value this token stream does not
+            # carry, which is the case `cd -` is refused for one case down, and
+            # refusing is this walk's fail-closed side (issue #1362).
+            operand = next((a for a in args if not a.startswith("-") or a == "-"), None)
+            if (
+                word == "popd"
+                or operand is None
+                or operand == "-"
+                or _STACK_ENTRY_RE.match(operand)
+            ):
+                return word
+            cwd = resolve(operand)
+            if leaves_workspace(cwd):
+                return cwd
+            continue
         if word == "cd":
             operand = next((a for a in args if not a.startswith("-") or a == "-"), None)
             if operand is None:
