@@ -296,7 +296,11 @@ class EmrgServer:
         # one — `_shutdown_all` walks this attribute like its siblings.
         self._config_reload_task: Optional[asyncio.Task] = None
         self._running = False
-        self._stop_reason: str = "unknown"  # shutdown_msg|cancel|sigint|bind_exit|crash (rant 2026-08-19T14:02:37)
+        # `unknown` is the "nothing has classified this exit yet" initialiser, not
+        # a stop reason: every path that ends the serve loop names the stop before
+        # `_shutdown_all` logs it, so the teardown never reports `unknown`
+        # (issue #1276).
+        self._stop_reason: str = "unknown"  # normal|shutdown_msg|cancel|sigint|sigterm|bind_exit|crash (rant 2026-08-19T14:02:37)
         self._scheduler: Optional[TaskScheduler] = None
         # Rant 2026-08-21T14:38:27：进程实际运行版本——启动时读一次 install/version.txt
         # 记入内存（进程生命周期内不变）。GUI 用它对比磁盘实时 installed_version：
@@ -510,6 +514,26 @@ class EmrgServer:
         self._planted_fire_drill_task = asyncio.create_task(
             self._planted_fire_drill_loop())
 
+        await self._serve_until_stopped()
+
+    async def _serve_until_stopped(self) -> None:
+        """Drive ``serve_forever()``, name the stop, then tear down.
+
+        ``_shutdown_all`` logs ``_stop_reason``, so it has to be named *before*
+        the teardown runs. Two paths never named it: SIGTERM and SIGINT arrive as
+        ``SystemExit`` and ``KeyboardInterrupt``, and neither is an
+        ``Exception`` — so neither matched the handlers below, both fell through
+        to the ``finally`` with ``_stop_reason`` still at its ``"unknown"``
+        initialiser, and the teardown logged ``reason=unknown`` for a stop that
+        ``run_server`` named ``"sigterm"`` in the durable record beside it
+        (issue #1276).
+
+        Both sites now name it with ``_serve_stop_reason``, so they cannot drift
+        apart again. Split out of ``serve()`` because this decision touches no
+        socket, scheduler or background loop: a test can drive it with the
+        teardown mocked, rather than booting the daemon this project forbids
+        stopping.
+        """
         try:
             await self._server.serve_forever()
         except asyncio.CancelledError:
@@ -522,6 +546,18 @@ class EmrgServer:
             # after this handler runs — the exception is not re-raised).
             self._crash_traceback = traceback.format_exc()
             logger.error("daemon serve crashed — cleanup started", exc_info=True)
+        except BaseException as exc:
+            # A stop by signal. Record it before the `finally` logs it, then let
+            # it propagate so `run_server` still writes the exit record.
+            self._stop_reason = _serve_stop_reason(exc)
+            raise
+        else:
+            # `serve_forever()` returned on its own. A graceful stop names
+            # itself first — the shutdown message sets `shutdown_msg` and then
+            # closes the server, which is how this branch is reached — so only a
+            # return that named nothing at all is `normal`.
+            if self._stop_reason == "unknown":
+                self._stop_reason = "normal"
         finally:
             await self._shutdown_all()
 
@@ -5215,6 +5251,22 @@ def _serve_exit_log_record(reason: str, exc: BaseException) -> tuple[int, str, b
     )
 
 
+def _serve_stop_reason(exc: BaseException) -> str:
+    """Name the stop an exception escaping ``serve_forever()`` represents.
+
+    ``SystemExit`` is what ``_sigterm_handler`` raises and ``KeyboardInterrupt``
+    is SIGINT; neither is an ``Exception``, so ``serve()``'s own handlers cannot
+    name them. Both the teardown log and the durable exit record call this, so a
+    SIGTERM stop cannot be ``"unknown"`` in one and ``"sigterm"`` in the other
+    (issue #1276).
+    """
+    if isinstance(exc, SystemExit):
+        return "sigterm"
+    if isinstance(exc, KeyboardInterrupt):
+        return "sigint"
+    return "crash"
+
+
 async def run_server(llm_config: LlmConfig) -> DaemonExit:
     """Run the EMRG server until interrupted; return exit metadata.
 
@@ -5255,8 +5307,10 @@ async def run_server(llm_config: LlmConfig) -> DaemonExit:
     except BaseException as exc:
         # Safety net: anything that escapes serve() (a signal SystemExit, a
         # hard crash) is recorded with its traceback, never silently.
-        reason = "sigterm" if isinstance(exc, SystemExit) else "crash"
-        exit_code = 143 if isinstance(exc, SystemExit) else 1
+        reason = _serve_stop_reason(exc)
+        # 128 + signal number, the shell convention (SIGTERM 15 → 143, SIGINT
+        # 2 → 130, matching the handler above); a crash gets the generic 1.
+        exit_code = {"sigterm": 143, "sigint": 130}.get(reason, 1)
         traceback_text = "".join(
             traceback.format_exception(type(exc), exc, exc.__traceback__)
         )

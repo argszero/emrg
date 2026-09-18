@@ -2970,6 +2970,30 @@ class _ShutdownFakeServer:
         pass
 
 
+class _SigtermFakeServer:
+    """The websockets Server as SIGTERM leaves it: ``serve_forever`` raises.
+
+    ``_sigterm_handler`` raises ``SystemExit``, so this is the shape the daemon
+    really sees — not a mocked exception chosen for convenience.
+    """
+
+    async def serve_forever(self) -> None:
+        raise SystemExit("SIGTERM (15) received")
+
+    def close(self) -> None:
+        pass
+
+
+class _ReturningFakeServer:
+    """The websockets Server as a graceful close leaves it: returns at once."""
+
+    async def serve_forever(self) -> None:
+        return None
+
+    def close(self) -> None:
+        pass
+
+
 def test_shutdown_all_logs_reason_and_cleanup_steps(tmp_path, caplog):
     """_shutdown_all logs the stop reason + every cleanup step + final line."""
     import logging
@@ -3024,6 +3048,76 @@ def test_shutdown_all_reason_crash_and_sigint(tmp_path, caplog):
         assert f"daemon stopping (reason={reason}" in caplog.text
         assert f"daemon stopped (reason={reason}" in caplog.text
         caplog.clear()
+
+
+def test_serve_until_stopped_names_a_sigterm_before_the_teardown_logs_it(tmp_path, caplog):
+    """A SIGTERM stop is named in its own teardown, never left at "unknown".
+
+    Issue #1276: `_shutdown_all` logs `_stop_reason`, and the SIGTERM path never
+    set it — `SystemExit` is not an `Exception`, so it skipped both handlers in
+    `_serve_until_stopped` and the teardown logged `reason=unknown` while the
+    durable exit record beside it said `sigterm`.
+    """
+    import logging
+
+    server = _make_shutdown_server(tmp_path)
+    server._stop_reason = "unknown"  # the real initialiser, not a chosen value
+    server._server = _SigtermFakeServer()
+
+    caplog.set_level(logging.INFO, logger="emrg.server.daemon")
+    with pytest.raises(SystemExit):
+        asyncio.run(server._serve_until_stopped())
+
+    assert server._stop_reason == "sigterm"
+    assert "daemon stopping (reason=sigterm, handlers=0) — cleaning up" in caplog.text
+    assert "reason=unknown" not in caplog.text
+
+
+def test_serve_until_stopped_does_not_rename_a_graceful_stop(tmp_path):
+    """A return must not overwrite the reason a graceful stop already set.
+
+    The shutdown message sets `shutdown_msg` and *then* closes the server, so
+    `serve_forever()` returns — the very branch a bare return takes. Only a
+    return that named nothing at all may become "normal".
+    """
+    for initial, expected in (("shutdown_msg", "shutdown_msg"), ("unknown", "normal")):
+        server = _make_shutdown_server(tmp_path)
+        server._stop_reason = initial
+        server._server = _ReturningFakeServer()
+
+        asyncio.run(server._serve_until_stopped())
+
+        assert server._stop_reason == expected, f"initial={initial}"
+
+
+def test_one_classifier_names_the_stop_for_the_record_and_the_teardown(monkeypatch):
+    """`_serve_stop_reason` is the single name for a signal stop (issue #1276).
+
+    Nothing here boots a daemon: `serve` is replaced by the raise itself, so the
+    only production code that runs is the classification and the record.
+    """
+    import signal
+
+    async def _sigterm(self):
+        raise SystemExit("SIGTERM (15) received")
+
+    monkeypatch.setattr(EmrgServer, "serve", _sigterm)
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        info = asyncio.run(
+            daemon_mod.run_server(LlmConfig(base_url="http://localhost", api_key="test"))
+        )
+    finally:
+        # run_server installs a real SIGTERM handler on the process — put back
+        # whatever pytest had, so this test leaves no signal state behind.
+        signal.signal(signal.SIGTERM, previous)
+
+    assert info.reason == "sigterm"
+    assert info.exit_code == 143  # 128 + SIGTERM, the shell convention
+    # Both sites call this, which is what stops them drifting apart.
+    assert daemon_mod._serve_stop_reason(SystemExit("SIGTERM (15) received")) == "sigterm"
+    assert daemon_mod._serve_stop_reason(KeyboardInterrupt()) == "sigint"
+    assert daemon_mod._serve_stop_reason(RuntimeError("boom")) == "crash"
 
 
 def test_shutdown_message_logs_peer_and_source(tmp_path, caplog):
