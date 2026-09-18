@@ -283,13 +283,14 @@ Every cycle gets one bash tier: `read-only`, `workspace-write` (the default), or
 discarding the working tree would lose anything**, not on whether the tree is
 dirty (issue #1237). When the task's source repository has uncommitted changes:
 
-- **nothing exists only there** — every change is already recoverable from a commit
-  git holds (`HEAD`, or the upstream tip) — so the daemon converges the tree
-  itself and the cycle keeps its configured tier;
-- **something exists only there** — an untracked file, a staged addition, a
-  conflict, a modification outrunning both, or a commit only on this branch — so
-  the cycle is forced down to `read-only` whatever the configuration says
-  (community issue #979), and the paths that caused it are named in the log.
+- **nothing exists only there** — every change is already published at that path in a
+  ref git holds (`HEAD`, the upstream tip, or any other ref tip: a branch you already
+  pushed, a tag, a `refs/cdrain/prNNNN` tip) — so the daemon converges the tree itself
+  and the cycle keeps its configured tier;
+- **something exists only there** — an untracked file, a staged addition, a conflict,
+  a modification outrunning every ref tip, or a commit no other ref reaches — so the
+  cycle is forced down to `read-only` whatever the configuration says (community issue
+  #979), and the paths that caused it are named in the log.
 
 Why the distinction matters more than it looks: `read-only` refuses the very git
 verbs that could clean the tree, so the state that triggered the downgrade also

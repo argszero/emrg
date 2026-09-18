@@ -150,7 +150,11 @@ def test_dirt_carrying_upstreams_bytes_is_reconstructible(tmp_path):
     work, _ = _with_upstream(tmp_path)
     loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(work))
     assert loses is False, why
-    assert "upstream" in why
+    # The reason now **names the ref** that carries those bytes instead of a fixed
+    # phrase about "the upstream tip" (issue #1338): with every ref tip as a candidate,
+    # "already published" is only evidence if it says where, and here the publisher is
+    # the remote-tracking ref the push wrote.
+    assert "origin/master" in why, why
 
 
 def test_a_modification_found_nowhere_is_unique(tmp_path):
@@ -160,6 +164,97 @@ def test_a_modification_found_nowhere_is_unique(tmp_path):
     (repo / "f.txt").write_text("host's unreleased work", encoding="utf-8")
     loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
     assert loses is True
+    assert "f.txt" in why
+
+
+@pytest.mark.parametrize("ref", [
+    "refs/tags/published",
+    "refs/remotes/origin/fix/x",
+    "refs/cdrain/pr9999",
+])
+def test_a_modification_published_in_another_ref_is_recoverable(tmp_path, ref):
+    """The third place a blob can live, and the one a cycle's own workflow fills (#1338).
+
+    The criterion asked `HEAD` and the upstream tip, so a blob published at this path in
+    *any other* ref still read as unique: measured 2026-09-17, a cycle's own four staged
+    files were byte-identical to the head of a branch it had just pushed and the next
+    cycle was pinned read-only anyway — with no route out, because the recovery refuses
+    on the same criterion, the landing-tree route needs `git worktree add`, and refreshing
+    needs `git merge` + `git push`.
+
+    Parametrised over the three shapes that actually occur, because the discovery
+    (`for-each-ref`) is not tag-specific and a fix that only consulted tags would pass one
+    arm of this and pin the other two: a tag, a remote-tracking branch, and the
+    `refs/cdrain/prNNNN` tips this workspace's own tooling writes.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo, "v1")
+    (repo / "f.txt").write_text("v2", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "v2")
+    _git(repo, "update-ref", ref, "HEAD")
+    _git(repo, "reset", "-q", "--hard", "HEAD~1")          # HEAD back to v1 …
+    (repo / "f.txt").write_text("v2", encoding="utf-8")    # … worktree at the ref's bytes
+    assert _status(repo).startswith(" M"), _status(repo)
+
+    blob = _git(repo, "hash-object", "--", "f.txt").stdout.strip()
+    assert _git(repo, "rev-parse", "HEAD:f.txt").stdout.strip() != blob, (
+        "precondition: HEAD does not hold these bytes — the geometry the criterion "
+        "used to call unique"
+    )
+    assert _git(repo, "rev-parse", f"{ref}:f.txt").stdout.strip() == blob, (
+        "precondition: the bytes are published at this path in the ref under test"
+    )
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is False, why
+    assert ref in why, f"the evidence has to name the ref it matched: {why!r}"
+
+    # And the action obeys the verdict, reversibly: the tier is only released so the
+    # cycle can converge its own tree, so the convergence has to actually work here.
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    status, detail = _load().TaskHandler._recover_dirty_tree_sync(str(repo))
+    assert status == "recovered", f"{status}: {detail}"
+    assert _status(repo) == ""
+    assert _git(repo, "rev-parse", "HEAD").stdout.strip() == head
+    assert _git(repo, "rev-parse", f"{ref}:f.txt").stdout.strip() == blob, (
+        "the ref that carried the bytes must not be moved by a recovery"
+    )
+
+
+def test_a_modification_only_in_an_older_commit_is_still_unique(tmp_path):
+    """The widened clause asks **ref tips**, and this pins that it is a decision.
+
+    A blob recorded at this path in an *older* commit of some branch is reachable —
+    `git log --all --find-object` finds it — but it is not what the new rule admits, and
+    the case is worth a test precisely because the looser rule would feel natural. Asking
+    for reachability instead of tips means running a full-history object walk per path on
+    the tier it is deciding about, and buys only a direction that cannot be wrong: naming
+    this unique merely keeps the cycle read-only, which is what it was before. Fail-closed
+    is the contract (see the docstring's closing paragraph), so the limitation is asserted
+    rather than left to be rediscovered as a bug.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo, "v1")
+    (repo / "f.txt").write_text("v2", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "v2")
+    (repo / "f.txt").write_text("v3", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "v3")
+    _git(repo, "update-ref", "refs/tags/published", "HEAD")  # the tag *tips* at v3
+    _git(repo, "reset", "-q", "--hard", "HEAD~2")            # HEAD back to v1
+    (repo / "f.txt").write_text("v2", encoding="utf-8")
+    assert _status(repo).startswith(" M"), _status(repo)
+
+    blob = _git(repo, "hash-object", "--", "f.txt").stdout.strip()
+    reachable = _git(repo, "log", "--all", "--oneline", f"--find-object={blob}")
+    assert reachable.stdout.strip(), (
+        "precondition: the bytes *are* in an older commit — the criterion asks for tips"
+    )
+    assert _git(repo, "rev-parse", "refs/tags/published:f.txt").stdout.strip() != blob, (
+        "precondition: the tag's tip does not hold them"
+    )
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True, why
     assert "f.txt" in why
 
 
@@ -206,6 +301,40 @@ def test_an_untracked_file_is_unique_even_when_upstream_has_those_bytes(tmp_path
 
     loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
     assert loses is True, "untracked content is never reconstructible"
+    assert "b.txt" in why
+
+
+def test_an_untracked_file_is_unique_even_when_a_tag_has_those_bytes(tmp_path):
+    """The widened clause stops at the `??` branch, and this is that boundary (#1338).
+
+    "Which refs publish these bytes" is a widening about *tracked* content: a
+    modification or a staged change is a change to a path git knows, so finding its
+    bytes at that path in some ref is evidence of a re-checkout. An untracked path is
+    one git does not track now, so the same match is not evidence about the host's file
+    — a copy published once under a tag does not make the host's copy recoverable, and
+    the criterion still says so (#1277). The test exists because the leak's direction is
+    the dangerous one: leaking the widening into the `??` branch releases the tier over
+    a file the host wrote, and every other test in this file would still pass.
+    """
+    repo = tmp_path / "repo"
+    _new_repo(repo, "v1")
+    (repo / "b.txt").write_text("published once", encoding="utf-8")
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-q", "-m", "b")
+    _git(repo, "update-ref", "refs/tags/published", "HEAD")
+    _git(repo, "reset", "-q", "--hard", "HEAD~1")   # b.txt exists only in the tag now
+    (repo / "b.txt").write_text("published once", encoding="utf-8")   # untracked again
+    assert _status(repo).strip() == "?? b.txt", _status(repo)
+    assert _git(repo, "rev-parse", "refs/tags/published:b.txt").stdout.strip() == (
+        _git(repo, "hash-object", "--", "b.txt").stdout.strip()
+    ), "precondition: another ref publishes these very bytes at this very path"
+    assert _git(repo, "rev-parse", "--verify", "--quiet", "HEAD:b.txt").returncode != 0, (
+        "precondition: the path is absent from HEAD — the distinction from "
+        "test_an_untracked_copy_of_head_is_recoverable"
+    )
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is True, why
     assert "b.txt" in why
 
 
@@ -567,7 +696,61 @@ def test_a_commit_only_on_this_branch_is_unique(tmp_path):
     (repo / "f.txt").write_text("v2", encoding="utf-8")
     loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
     assert loses is True
-    assert "only on this branch" in why
+    # "In this checkout", not "on this branch": the clause now differs HEAD against
+    # every ref tip *except* this checkout's own branch ref, so what it names is
+    # existence nowhere else — a commit pushed to `refs/remotes/origin/<branch>` is
+    # reachable somewhere else and must not be reported here (see the pushed-branch
+    # test below, which is the same clause read in the other direction).
+    assert "only in this checkout" in why
+
+
+def test_a_branch_already_pushed_is_not_unique(tmp_path):
+    """The second route to the same deadlock (#1338): the commit count, not the blobs.
+
+    Fixing the blob clause alone leaves this one standing. A cycle does its work on a
+    branch and pushes it, then leaves the tree carrying bytes the upstream tip already
+    holds — every *file* recoverable — while `upstream..HEAD` is non-empty by
+    construction, because a branch that has been worked on is ahead of upstream. Read as
+    "work that exists nowhere else" it pins the cycle read-only with exactly the verbs
+    it would need to converge (`merge`, `push`, `worktree add`), which is the same
+    deadlock arriving by a second route.
+
+    So the clause now differs HEAD against every ref tip *except* this checkout's own two
+    self-references. A commit published in `refs/remotes/origin/<branch>` is elsewhere and
+    does not count; a commit nobody else has still does — that direction is pinned by
+    `test_a_commit_only_on_this_branch_is_unique` above, which is this same test with the
+    push removed.
+    """
+    origin = tmp_path / "origin.git"
+    subprocess.run(
+        ["git", "init", "-q", "--bare", "-b", "master", str(origin)],
+        capture_output=True, text=True, timeout=30,
+        encoding="utf-8", errors="replace",
+    )
+    repo = tmp_path / "repo"
+    _new_repo(repo, "v1")
+    _git(repo, "remote", "add", "origin", str(origin))
+    _git(repo, "push", "-q", "-u", "origin", "master")
+    _git(repo, "checkout", "-q", "-b", "fix/x")
+    (repo / "f.txt").write_text("v2", encoding="utf-8")
+    _git(repo, "commit", "-q", "-am", "the fix")
+    _git(repo, "push", "-q", "-u", "origin", "fix/x")
+    # Reconstructible dirt: the upstream tip's own bytes for a path HEAD has moved on
+    # from, so the blob clause releases it and only the commit clause could refuse.
+    (repo / "f.txt").write_text("v1", encoding="utf-8")
+    assert _status(repo).startswith(" M"), _status(repo)
+
+    head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    assert _git(repo, "rev-list", "--count", "origin/master..HEAD").stdout.strip() == "1", (
+        "precondition: the branch is ahead of upstream — what the old clause read"
+    )
+    assert _git(repo, "rev-parse", "refs/remotes/origin/fix/x").stdout.strip() == head, (
+        "precondition: the commit is published under the branch's remote-tracking ref"
+    )
+
+    loses, why = _load().TaskHandler._dirty_tree_would_lose_work_sync(str(repo))
+    assert loses is False, why
+    assert "commit(s)" not in why, why
 
 
 def test_a_clean_tree_is_not_dirt(tmp_path):
@@ -650,7 +833,10 @@ def test_the_tool_writes_a_receipt_of_what_it_moved(tmp_path):
     # dropped the stash and left the index at HEAD's blob (#1274 review). The
     # documented inverse must therefore be the `--index` spelling.
     assert "--index" in receipt["reversible_with"]
-    assert "upstream" in receipt["reason"]
+    # The receipt reaches a human who has to decide whether the discard was safe, so
+    # its `reason` has to carry the ref the bytes were found in (issue #1338) — not a
+    # phrase that would read the same whether or not anything held them.
+    assert "origin/master" in receipt["reason"], receipt["reason"]
 
 
 def test_the_tool_says_when_the_receipt_could_not_be_written(tmp_path, capsys):
