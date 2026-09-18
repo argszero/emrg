@@ -100,6 +100,34 @@ describe("createDaemonBridge", () => {
     expect(st.evolutionCount).toBe(7);
   });
 
+  it("生效的图片能力来自 daemon 的 pong / status / config_applied，且缺字段时不改口", () => {
+    // Rant 2026-09-17T16:53:02：界面要显示 daemon 实际依据的 vision，而不是
+    // config.toml 的声明值。三个报告点：pong（连接/心跳）、status（main 的
+    // pong 广播）、config_applied（热重载帧）。缺字段 ≠ false：没有读数时保持
+    // 上一个已知值，从未有过读数时为 null。
+    const { emit, bridge } = setup();
+    expect(bridge.store.get().vision).toBeNull();
+
+    emit({ type: "pong", data: { identity: { instance_id: "sv1" }, model: "m1", vision: true }, sid: null });
+    expect(bridge.store.get().vision).toBe(true);
+
+    emit({ type: "status", data: { connected: true, model: "m1", vision: false }, sid: null });
+    expect(bridge.store.get().vision).toBe(false);
+
+    emit({ type: "config_applied", data: { model: "m2", vision: true, applied: ["vision"] }, sid: null });
+    let st = bridge.store.get();
+    expect(st.model).toBe("m2");
+    expect(st.vision).toBe(true);
+
+    // 不带 vision 的帧不动它（旧的 config_applied/model_set 载荷形态）
+    emit({ type: "config_applied", data: { model: "m3", applied: ["max_tokens"] }, sid: null });
+    st = bridge.store.get();
+    expect(st.model).toBe("m3");
+    expect(st.vision).toBe(true);
+    emit({ type: "pong", data: { identity: { instance_id: "sv1" }, model: "m3" }, sid: null });
+    expect(bridge.store.get().vision).toBe(true);
+  });
+
   it("task_queued → 排队系统消息（sid 路由）", () => {
     const { emit, transcript } = setup();
     emit({ type: "task_queued", data: { position: 3 }, sid: "s2" });

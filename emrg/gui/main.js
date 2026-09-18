@@ -347,6 +347,10 @@ vision = false
         api_key_configured: true,
         server_id: pong?.identity?.instance_id || "",
         model: pong?.model || "",
+        // 生效的图片能力，不是 config.toml 的声明值（rant 2026-09-17T16:53:02）：
+        // daemon 在 pong 里报的是它实际依据的值，切换模型 / 热重载都会移动它。
+        // 声明值仍由设置面板编辑；这里给界面一个"现在到底是什么"的读数。
+        vision: typeof pong?.vision === "boolean" ? pong.vision : null,
         evolution_count: pong?.evolution_count ?? 0, // G19：init 透传演化计数（waitForPong 已消耗 pong）
         current_version: pong?.current_version || "", // rant 18:30:57：进程实际运行版本（升级横幅对比基准；14:38:27 起为内存版本）
         version: APP_VERSION, // WorkBuddy P3：版本号随 package.json 走（此前 renderer 硬编码 v0.2.7）
@@ -1049,7 +1053,9 @@ vision = false
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
         const pong = await waitForPong();
-        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "" });
+        // vision = pong 报的生效值（rant 2026-09-17T16:53:02）：模型切换与 [llm] vision
+        // 热重载都会移动它，所以它跟着同一次 pong 一起过桥，界面读的就是它。
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, vision: typeof pong?.vision === "boolean" ? pong.vision : null, current_version: pong?.current_version || "" });
         logger.info("[gui] connManager recovery complete");
       } catch (e) {
         logger.warn(`[gui] post-recovery refresh failed: ${e.message}`);
@@ -1281,7 +1287,9 @@ vision = false
         const sessions = await listSessions();
         sendToRenderer("sessions", { sessions });
         const pong = await waitForPong();
-        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, current_version: pong?.current_version || "" });
+        // vision = pong 报的生效值（rant 2026-09-17T16:53:02）：模型切换与 [llm] vision
+        // 热重载都会移动它，所以它跟着同一次 pong 一起过桥，界面读的就是它。
+        sendToRenderer("status", { connected: true, server_id: pong?.identity?.instance_id, model: pong?.model, vision: typeof pong?.vision === "boolean" ? pong.vision : null, current_version: pong?.current_version || "" });
       }
     }, delay);
   }

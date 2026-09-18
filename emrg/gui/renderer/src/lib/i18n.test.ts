@@ -73,11 +73,11 @@ describe("getLocale / setLocale（localStorage 覆盖）", () => {
 });
 
 describe("词典完整性守卫（防漂移）", () => {
-  it("zh/en 各 394 个 key 且完全对齐", () => {
+  it("zh/en 各 397 个 key 且完全对齐", () => {
     const zhKeys = Object.keys(ZH_DICT);
     const enKeys = Object.keys(EN_DICT);
-    expect(zhKeys.length).toBe(394);
-    expect(enKeys.length).toBe(394);
+    expect(zhKeys.length).toBe(397);
+    expect(enKeys.length).toBe(397);
     expect(zhKeys.sort()).toEqual(enKeys.sort());
     // DICTS 聚合结构
     expect(Object.keys(DICTS)).toEqual(["zh", "en"]);

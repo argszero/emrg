@@ -35,6 +35,8 @@ export interface StatusData {
   connected?: boolean;
   server_id?: string;
   model?: string;
+  /** 生效的图片能力（daemon pong 报的值，不是 config.toml 的声明值） */
+  vision?: boolean | null;
   current_version?: string;
   evolution_count?: number | null;
   auth_failed?: boolean;
@@ -46,6 +48,8 @@ export interface StatusData {
 export interface PongData {
   identity?: { instance_id?: string };
   model?: string;
+  /** 生效的图片能力（rant 2026-09-17T16:53:02：pong / model_set / config_applied 都报它） */
+  vision?: boolean;
   evolution_count?: number | null;
 }
 
@@ -65,10 +69,18 @@ export interface UpgradeData {
   installed_version?: string;
 }
 
+/** config_applied 事件载荷（daemon 热重载广播，issue #1380/#1387） */
+export interface ConfigAppliedData {
+  model?: string;
+  /** 重载后的生效值；`applied` 是这次真的动了的键 */
+  vision?: boolean;
+  applied?: string[];
+}
+
 /** 统一事件帧（onEvent 回调入参） */
 export interface DaemonEventFrame {
   type: string;
-  data: Record<string, unknown> & { chunks?: DeltaChunk[] } & Partial<DoneData & ToolStartData & ToolEndData & StatusData & PongData & SessionsData & QueuedData & ErrorData & UpgradeData>;
+  data: Record<string, unknown> & { chunks?: DeltaChunk[] } & Partial<DoneData & ToolStartData & ToolEndData & StatusData & PongData & ConfigAppliedData & SessionsData & QueuedData & ErrorData & UpgradeData>;
   sid?: string | null;
 }
 
@@ -83,6 +95,17 @@ export interface DaemonAppState {
   installing: boolean;
   serverId: string;
   model: string;
+  /**
+   * The daemon's **effective** image capability, or null when no frame has said.
+   *
+   * Three states, and the null is not padding (rant 2026-09-17T16:53:02): `true` /
+   * `false` are what the daemon reported it acts on, `null` means nothing has been
+   * reported yet — so a surface can say "images: yes/no" instead of claiming a
+   * capability from `config.toml`'s declaration, which is a *different* value
+   * (the running daemon resolved the entry-key → top-level-default priority at
+   * startup, and both a `/model` switch and an `[llm] vision` reload move it).
+   */
+  vision: boolean | null;
   currentVersion: string;
   evolutionCount: number | null;
   sessions: SessionSummary[];
@@ -110,6 +133,9 @@ export function createDaemonAppStore(): SnapshotStore<DaemonAppState> {
     installing: false,
     serverId: "",
     model: "",
+    // Nothing has reported it yet — not `false`, which would be a claim about the
+    // daemon's capability made before any frame arrived (see `DaemonAppState.vision`).
+    vision: null,
     currentVersion: "",
     evolutionCount: null,
     sessions: [],
@@ -137,6 +163,8 @@ export interface SendMessagePayload {
 export interface InitResult {
   config_exists?: boolean;
   api_key_configured?: boolean;
+  /** 生效的图片能力（main.js 从 pong 透传；布尔才是读数，缺失=未知） */
+  vision?: boolean | null;
   server_id?: string;
   model?: string;
   evolution_count?: number | null;
@@ -334,7 +362,22 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           ...s,
           serverId: pong.identity?.instance_id || s.serverId,
           model: pong.model || s.model,
+          // A pong that carries no boolean says nothing about the capability, so the
+          // last reported value stands rather than being reset to unknown.
+          vision: typeof pong.vision === "boolean" ? pong.vision : s.vision,
           evolutionCount: pong.evolution_count ?? s.evolutionCount,
+        }));
+        break;
+      }
+      case "config_applied": {
+        // daemon 热重载广播（issue #1374/#1380/#1387）：改 `[llm] vision` 或 model
+        // 后，客户端只会从 pong / model_set 学到新值，而重载既不是两者之一 —— 这个
+        // 帧就是为"客户端展示的字段动了"而发的。与 pong 同语义：非布尔不动。
+        const ca = data as ConfigAppliedData;
+        store.update((s) => ({
+          ...s,
+          model: ca.model || s.model,
+          vision: typeof ca.vision === "boolean" ? ca.vision : s.vision,
         }));
         break;
       }
@@ -348,6 +391,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
           installing: st.installing ?? s.installing,
           serverId: st.server_id || s.serverId,
           model: st.model || s.model,
+          vision: typeof st.vision === "boolean" ? st.vision : s.vision,
           currentVersion: st.current_version || s.currentVersion,
         }));
         break;
@@ -402,6 +446,7 @@ export function createDaemonBridge(deps: DaemonBridgeDeps): DaemonBridge {
       connected: Boolean(result.config_exists && result.api_key_configured),
       serverId: result.server_id || s.serverId,
       model: result.model || s.model,
+      vision: typeof result.vision === "boolean" ? result.vision : s.vision,
       evolutionCount: result.evolution_count ?? s.evolutionCount,
       currentVersion: result.current_version || s.currentVersion,
       sessions: result.sessions || s.sessions,

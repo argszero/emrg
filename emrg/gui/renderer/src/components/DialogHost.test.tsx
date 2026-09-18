@@ -23,6 +23,9 @@ function appState(over: Partial<DaemonAppState> = {}): DaemonAppState {
     installing: false,
     serverId: "srv-1",
     model: "deepseek-v3",
+    // Nothing has reported the effective image capability to this fixture, which is
+    // the state a real renderer is in until a frame arrives (rant 2026-09-17T16:53:02).
+    vision: null,
     currentVersion: "0.2.81",
     evolutionCount: 115,
     sessions: [],
