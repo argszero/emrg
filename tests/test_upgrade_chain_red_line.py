@@ -204,6 +204,42 @@ def test_each_carrier_states_the_rule_in_its_own_language() -> None:
         )
 
 
+def test_neither_carrier_states_the_rule_twice() -> None:
+    """One statement per carrier — the sibling pin's property, carried to this clause.
+
+    `tests/test_evolution_prompt_red_lines.py` (PR #1403, master `d041a948`) pins
+    uniqueness for *its* clause — `text.count(CLAUSE) == 1`; this file pinned presence
+    only, in both carriers. Measured 2026-09-19 (`cyc20260919-065231`) on the tree where
+    both files sit side by side: appending the 附则三 block to `system.j2` a second time
+    left **12 passed**, and appending the template clause as a second `- ` bullet after
+    `- Must push` likewise left **12 passed**. So the auto-upgrade rule could be stated
+    twice in the host's session prompt — prompt cost, and two copies free to drift apart,
+    which is the thing #1403's uniqueness test exists to prevent one clause over. The
+    heading is a block's identity in `system.j2`, so the count is taken on it; in the
+    template, on the clause's opening words.
+
+    Both headings are counted, not just the new one: this file is where the 附则二 block
+    in `system.j2` is pinned at all (nothing pinned it before), so its one-copy property
+    is pinned here too rather than left to #1403's file, which reads the template only.
+
+    Named limit: this counts statements, not content — a reworded second copy that keeps
+    a different opening reads as one statement.
+    """
+    system_text = SYSTEM_PROMPT.read_text(encoding="utf-8")
+    for heading, rule in ((UPGRADE_HEADING, "附则三"), (STOP_HEADING, "附则二")):
+        found = system_text.count(heading)
+        assert found == 1, (
+            f"emrg/server/prompts/system.j2 must state the {rule} rule once; found "
+            f"{found} copies of its heading"
+        )
+    section = _forbidden_section(EVOLUTION_TEMPLATE.read_text(encoding="utf-8"))
+    found = section.count(TEMPLATE_CLAUSE_OPEN)
+    assert found == 1, (
+        "the shipped template must state the auto-upgrade clause once in its §Forbidden "
+        f"list; found {found}"
+    )
+
+
 def test_the_checks_can_report_absence() -> None:
     """The instrument's control: text without the block must read as missing.
 
@@ -261,5 +297,12 @@ def test_the_rendered_host_prompt_carries_the_rule_not_merely_the_template() -> 
     assert not missing, f"the rendered 附则三 block is missing terms: {missing}"
     assert _block_after(rendered, STOP_HEADING), (
         "the rendered host prompt must keep the 附则二 block"
+    )
+    # The artifact-level half of the one-copy property: a duplication can arrive from a
+    # `{% for %}` rather than from a repeated block, in which case the file is written once
+    # and every reader still receives it twice.
+    assert rendered.count(UPGRADE_HEADING) == 1, (
+        "the rendered host prompt must state the 附则三 rule once; found "
+        f"{rendered.count(UPGRADE_HEADING)} copies"
     )
 
