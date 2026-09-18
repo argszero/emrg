@@ -251,6 +251,75 @@ def test_a_child_that_comes_up_returns_quietly(tmp_path):
         asyncio.sleep = real_sleep
 
 
+# ── the start window is the host's to set (issue #1276 item 5) ───────────────
+
+
+def test_the_window_defaults_to_the_pair_the_signature_used_to_hold(monkeypatch):
+    """No variable set → the window is unchanged, so this is not a behaviour change.
+
+    15 x 0.3 s is what the loop waited before it was configurable, and a host who
+    never sets anything must keep waiting exactly that.
+    """
+    monkeypatch.delenv(dm._START_WINDOW_ENV, raising=False)
+    assert dm._start_window_seconds() == 4.5
+    assert dm._start_window_attempts() == 15
+
+
+def test_the_window_is_what_the_host_asked_for(tmp_path, monkeypatch):
+    """`EMRG_START_TIMEOUT` reaches the loop, and the failure reports it.
+
+    Driven end to end through `_await_daemon_ready` rather than asserted on the
+    resolver alone: a value that is read but never used is the defect this whole
+    issue is about, so the test has to see the wait change, not the variable.
+    """
+    log = tmp_path / "emrgd.log"
+    ticks: list[float] = []
+
+    async def fake_sleep(seconds):
+        ticks.append(seconds)
+
+    monkeypatch.setenv(dm._START_WINDOW_ENV, "1.2")
+    real_sleep = asyncio.sleep
+    asyncio.sleep = fake_sleep
+    try:
+        with pytest.raises(RuntimeError) as err:
+            asyncio.run(dm._await_daemon_ready(
+                StubProc(returncode=None), log, dm._log_mark(log),
+                probe=lambda: False))
+    finally:
+        asyncio.sleep = real_sleep
+
+    assert "failed to start within 1.2s" in str(err.value)
+    # 1.2 s at the 0.3 s poll — four polls, not the default fifteen.
+    assert len(ticks) == 4
+
+
+@pytest.mark.parametrize("raw", ["soon", "-5", "0", "nan", "inf"])
+def test_a_window_that_is_not_a_duration_falls_back_instead_of_failing(raw, monkeypatch):
+    """A typo in a tuning variable must not be able to fail a start.
+
+    The same rule `_truncate_start_stderr` follows: a diagnostic never gets to be
+    the reason a start dies. `-5`, `0` and `nan` are the interesting ones — each
+    parses as a float and would otherwise produce a loop that never waits, so
+    "float-shaped" is not the same test as "a duration".
+    """
+    monkeypatch.setenv(dm._START_WINDOW_ENV, raw)
+    assert dm._start_window_seconds() == 4.5
+    assert dm._start_window_attempts() == 15
+
+
+def test_a_whitespace_only_window_is_unset_not_a_parse_error(monkeypatch):
+    """`EMRG_START_TIMEOUT=""` is how a shell says unset; it must not warn."""
+    monkeypatch.setenv(dm._START_WINDOW_ENV, "   ")
+    assert dm._start_window_seconds() == 4.5
+
+
+def test_a_window_too_short_for_one_poll_still_polls_once(monkeypatch):
+    """A floor of one poll: a zero-iteration loop would report a start it never waited for."""
+    monkeypatch.setenv(dm._START_WINDOW_ENV, "0.01")
+    assert dm._start_window_attempts() == 1
+
+
 # ── a stop is not a crash ───────────────────────────────────────────────────
 
 

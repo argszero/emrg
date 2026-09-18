@@ -452,6 +452,33 @@ Two gaps get mistaken for a broken fix:
 
 Check `emrg -v` and when the daemon started before re-reading the source.
 
+### `emrgd failed to start within N s`
+
+The client spawns the daemon and waits for it to accept connections. When that
+wait runs out, the error carries what is known about the attempt: whether the
+child is still running, its exit code if it is not, the daemon log lines **this**
+attempt appended, and the contents of `~/.emrg/emrgd-start.err` (the child's own
+stderr, which is where a failure before logging starts can be read at all).
+
+The window defaults to **4.5 s** (15 polls, 0.3 s apart). A start that is merely
+slower than that on a cold machine is worth raising it for; set the variable on
+the command that starts the client, since the client is what waits:
+
+```bash
+EMRG_START_TIMEOUT=30 emrg
+```
+
+It takes seconds as a number. A value that is not a positive, finite number is
+ignored, with a warning in the client log — a typo in a tuning variable must
+never be the reason a start fails, so it falls back to the default rather than
+raising.
+
+Two facts make the window cheap to raise: a child that has **exited** is reported
+on the first poll with its exit code, so the window only ever bounds a child that
+is alive but not yet listening; and the failure report names the bound it really
+waited, not the one you asked for, because the window is quantised to the 0.3 s
+poll.
+
 ### Why is a write blocked at `workspace-write`?
 
 `workspace-write` is the default tier, and it allows a write only when the

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import signal
 import subprocess
@@ -332,14 +333,81 @@ def _startup_failure_detail(
     )
 
 
+# ── the start window (issue #1276 item 5) ───────────────────────────────────
+# How long the client waits for a spawned emrgd to accept connections before it
+# reports a failure. This was the literal pair in `_await_daemon_ready`'s
+# signature — 15 x 0.3 s = 4.5 s — so a host whose cold start is slower than that
+# had no way to raise it: the failure reappeared identically on every retry, and
+# nothing distinguished "still starting" from "wedged".
+#
+# The default is unchanged, deliberately. Raising it is a behaviour change, and
+# the premise (a cold start needs more than 4.5 s) did not reproduce here: this
+# machine's daemon module imports in 0.14-0.16 s warm, which is the wrong regime
+# to argue a cold figure from. What the code *does* establish is that the window
+# is now cheap to extend — `_child_exit_code` reports a child that died on the
+# first poll, so the window only ever bounds a child that is **alive** — but
+# "cheap to extend" is not a measurement of how far to extend it.
+_START_WINDOW_ENV = "EMRG_START_TIMEOUT"
+_START_WINDOW_DEFAULT_SECONDS = 4.5
+_START_WINDOW_POLL_SECONDS = 0.3
+
+
+def _start_window_seconds() -> float:
+    """The wait window in seconds: ``EMRG_START_TIMEOUT`` if set, else the default.
+
+    The host-facing knob for a start that is slower than the default (issue #1276
+    item 5) — the same shape as ``EMRG_TASK_DIRTY_OVERRIDE``, and documented for
+    the same reason: an escape hatch whose effect is "you asked for X and got Y"
+    has to be findable without reading this file.
+
+    A malformed value falls back to the default instead of raising. The rule is
+    `_truncate_start_stderr`'s: **a diagnostic must never be able to make a start
+    fail**, and a typo in a tuning variable would be exactly that. It is logged
+    once, where a host who is reading the client log can see it.
+
+    Two shapes that parse as a float are rejected anyway, because "float-shaped"
+    is not the same test as "a duration": a non-positive number would produce a
+    loop that never waits and then reports a start it never waited for, and a
+    non-finite one (`inf`, `nan`) raises inside the arithmetic that turns seconds
+    into polls. Whitespace-only counts as unset — that is how a shell spells it.
+    """
+    raw = (os.environ.get(_START_WINDOW_ENV) or "").strip()
+    if not raw:
+        return _START_WINDOW_DEFAULT_SECONDS
+    try:
+        seconds = float(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a number — using %.1fs",
+            _START_WINDOW_ENV, raw, _START_WINDOW_DEFAULT_SECONDS,
+        )
+        return _START_WINDOW_DEFAULT_SECONDS
+    if not math.isfinite(seconds) or seconds <= 0:
+        logger.warning(
+            "%s=%r is not a positive number of seconds — using %.1fs",
+            _START_WINDOW_ENV, raw, _START_WINDOW_DEFAULT_SECONDS,
+        )
+        return _START_WINDOW_DEFAULT_SECONDS
+    return seconds
+
+
+def _start_window_attempts() -> int:
+    """``_start_window_seconds()`` in polls of ``_START_WINDOW_POLL_SECONDS``.
+
+    Quantised to the poll interval, so the reported window is the bound the loop
+    really waits and not the number that was asked for.
+    """
+    return max(1, int(round(_start_window_seconds() / _START_WINDOW_POLL_SECONDS)))
+
+
 async def _await_daemon_ready(
     proc,
     log_path: Path,
     since: tuple[int, int | None],
     probe=None,
     *,
-    attempts: int = 15,
-    delay: float = 0.3,
+    attempts: int | None = None,
+    delay: float = _START_WINDOW_POLL_SECONDS,
     stderr_path: Path | None = None,
 ) -> None:
     """Wait for the daemon to accept connections; raise with what is known.
@@ -353,7 +421,14 @@ async def _await_daemon_ready(
     *only* there, so without it the failure report had nothing to quote.
     ``None`` is not a path: it says the capture did not happen, and the report
     says so instead of claiming the channel was silent.
+
+    ``attempts=None`` means "use the host's window" — ``EMRG_START_TIMEOUT`` if
+    set, else ``_START_WINDOW_DEFAULT_SECONDS`` (issue #1276 item 5). A caller
+    that passes a number still overrides it, which is what keeps the tests below
+    deterministic and independent of the machine's environment.
     """
+    if attempts is None:
+        attempts = _start_window_attempts()
     probe = probe or is_running
     for _ in range(attempts):
         await asyncio.sleep(delay)
