@@ -1650,3 +1650,143 @@ def test_a_cache_in_the_tree_cannot_answer_for_it(
 
     assert mod.main(["1", "--base", "master"]) == 0, capsys.readouterr().err
     assert planted, "the cache was never planted, so this arm measures nothing"
+
+
+# --- a red plan says who owns the failure, and it is not always a PR -------------
+#
+# Issue #1378, measured (cyc20260918-164110): plans `#1373` and `#1375` were reported as
+# "the tree they produce together fails the suite … re-push the PR that owns the failure (a
+# push voids its votes)" while the same five rows failed on the base tree too - the harness
+# checks the tree out under the OS temp root, itself an allowed write root, so the unpinned
+# write-root-dependent rows flip there. Neither PR touches the files that fail, so the
+# remedy pointed at a PR that owns nothing: a cycle that believes it either re-pushes its
+# own untouched PR (voiding valid votes and re-running CI for a tree that is not the one
+# failing) or goes looking inside a diff for a failure that is not there.
+
+
+def _base_with_a_red_row(repo: Path, origin: Path) -> None:
+    """A base whose own suite is red, as the harness materialises it.
+
+    The measured shape is a row whose verdict depends on where the tree is checked out;
+    what the reporting has to get right is the same either way, so this fixture plants the
+    red row in the base - where the tool will see it in both runs, which is the property
+    under test.
+    """
+    _write(
+        repo,
+        "tests/test_red_in_the_base.py",
+        "def test_red_in_the_base():\n    assert False, 'red in the base'\n",
+    )
+    _commit(repo, "a red base")
+    _git(repo, "push", "-q", "origin", "master")
+
+
+def test_a_failure_the_plan_inherits_is_not_laid_at_a_prs_door(
+    queue: tuple[Path, Path],
+) -> None:
+    """The base owns it: no PR in the plan does, so no PR may be told to re-push."""
+    repo, origin = queue
+    _base_with_a_red_row(repo, origin)
+    _branch_with(repo, "unrelated", {"notes.md": "unrelated\n"})
+    _publish(repo, origin, 4, "unrelated")
+
+    proc = _run_tool(repo, "4")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "test_red_in_the_base" in proc.stderr
+    assert "fail on the base tree" in proc.stderr
+    assert "No PR in this plan owns those rows" in proc.stderr
+    # Named by tree, so the reader can check the claim - the same reason the plan's own
+    # verdict prints "final tree <short> (<full>)".
+    assert re.search(r"base tree [0-9a-f]{12} \([0-9a-f]{40}\)", proc.stderr)
+    # The sentence that made #1378 expensive. A PR is not the owner here, so the remedy
+    # must not be offered at all.
+    assert "re-push the PR that owns the failure" not in proc.stderr
+
+
+def test_a_failure_the_plan_produces_is_still_laid_at_its_door(
+    queue: tuple[Path, Path],
+) -> None:
+    """The other half: green alone, red together, and the plan really owns the row.
+
+    It also covers the case where the base does not contain the row at all: pytest runs
+    *nothing* when one argument is unresolvable, so the base answers `not found`, and that
+    has to be read as "cannot fail there" rather than as an inherited failure.
+    """
+    repo, origin = queue
+    _branch_with(repo, "guard", {"tests/test_no_token_under_data_or_src.py": GUARD_TEST})
+    _branch_with(repo, "violator", {"data/payload.txt": f"contains {TOKEN}\n"})
+    _publish(repo, origin, 1, "guard")
+    _publish(repo, origin, 2, "violator")
+
+    proc = _run_tool(repo, "1", "2")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "re-push the PR that owns the failure" in proc.stderr
+    assert (
+        "rows this plan's tree owns: "
+        "tests/test_no_token_under_data_or_src.py::test_no_token_under_data_or_src"
+        in proc.stderr
+    )
+    assert "fail on the base tree" not in proc.stderr
+
+
+def test_a_base_that_cannot_be_measured_is_not_a_verdict(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """Fail closed: the question could not be answered, so no owner is named.
+
+    The plan's tree *is* red, but "whose failure is it" is the question this run has to
+    answer before it can say what to do, and an unanswerable question is rc 2 in this
+    family - never a verdict that names the wrong owner.
+    """
+    repo, origin = queue
+    _base_with_a_red_row(repo, origin)
+    _branch_with(repo, "unrelated", {"notes.md": "unrelated\n"})
+    _publish(repo, origin, 4, "unrelated")
+    monkeypatch.chdir(repo)
+
+    def unmeasurable(*args, **kwargs):
+        raise mod.MeasurementError("the base tree could not be measured (rc=1): boom")
+
+    monkeypatch.setattr(mod, "_still_red_on", unmeasurable)
+    assert mod.main(["4", "--base", "master"]) == 2
+    err = capsys.readouterr().err
+    assert "could not measure the base" in err
+    assert "re-push the PR that owns the failure" not in err
+
+
+def test_the_rows_are_read_from_the_report_and_not_invented(mod) -> None:
+    """The rows are the run's own, because they are what the base is asked to re-run."""
+    out = (
+        "FAILED tests/test_a.py::test_b - assert 1 == 2\n"
+        "FAILED tests/test_c.py::test_d[a b] - assert x\n"
+        "ERROR tests/test_e.py::test_f - teardown blew up\n"
+        "ERROR: not found: /tmp/base/tests/test_g.py::test_h\n"
+        "1 failed, 2 passed in 0.01s\n"
+    )
+    assert mod._failing_rows(out) == [
+        "tests/test_a.py::test_b",
+        "tests/test_c.py::test_d[a b]",
+        "tests/test_e.py::test_f",
+    ]
+    # `ERROR: not found:` is a collection error, not a blamed row, and it is matched by
+    # the absolute path pytest prints rather than by the id the caller passed.
+    assert mod._unfound_ids(
+        out, ["tests/test_g.py::test_h", "tests/test_a.py::test_b"]
+    ) == {"tests/test_g.py::test_h"}
+
+
+def test_the_two_paragraphs_split_the_rows_and_no_row_is_in_both(mod) -> None:
+    """The split is the whole fix: a shared row must not reach the re-push sentence."""
+    tree = "ab" * 20
+    plan, base = mod._ownership_lines(tree, ["a", "b", "c"], {"b"})
+    assert plan.split("owns: ")[1] == "a, c"
+    assert "1 of the 3 failing row(s)" in base
+    assert tree in base
+    # The base paragraph lists the base's rows and only those: a row the plan's tree owns
+    # must not reach the sentence that tells the reader to fix the base.
+    assert base.split("purged): ")[1].split("\n")[0] == "b"
+
+    # Everything inherited: nothing is asked of a PR at all.
+    assert mod._ownership_lines(tree, ["a", "b"], {"a", "b"})[0] == ""
+    # Nothing inherited: nothing is said about the base.
+    assert mod._ownership_lines(tree, ["a", "b"], set())[1] == ""
