@@ -141,6 +141,51 @@ the two ways a second copy of that tree can creep in - both measured, not assume
   and `PYTHONDONTWRITEBYTECODE=1` is set for it (and for anything it spawns) so the
   measurement leaves none behind.
 
+Which rows the run blames, and why it is asked twice
+----------------------------------------------------
+A red tree is attributed *by row*: the plan's own failing rows are re-run on the base, and
+a row the base fails too belongs to no PR (issue #1378). Those rows are therefore what the
+base tree is asked, and reading them out of the text report is lossy, because pytest puts
+the id and the failure's message on one line and separates them with `" - "` - a substring
+that node ids themselves contain. Measured on this repository's own suite (2026-09-18,
+`cyc20260918-212523`): `pytest tests/ --collect-only -q` listed 3227 node ids and **22 of
+them contain `" - "`**, all of them in two files, e.g.
+
+    tests/test_stdin_message_readers.py::test_a_message_readers_body_is_not_scanned[git commit -q -F - <<'EOF']
+
+whose text form is cut to `…[git commit -q -F` (issue #1386). The cut row is one the base
+tree does not contain, and a row a tree does not contain cannot fail there - so a row the
+base fails too is laid at a PR's door with "re-push the PR that owns the failure", which is
+precisely the harm #1378 removed, restored for those rows.
+
+So the row list comes from the run's own **machine-readable** report: the suite is invoked
+with `--junitxml` and `-o junit_family=xunit1` (the family that writes `file`, without
+which a `classname` cannot be turned back into a path), and every `<testcase>` carrying a
+`<failure>` or `<error>` becomes a node id (`_row_id`). Two shapes are pinned by tests,
+both measured against this machine's pytest (9.1.1):
+
+* an id containing `" - "` - carried whole in the junit `name` attribute;
+* an id containing a **newline** (produced only with
+  `disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true`) - the text
+  report breaks the line and the id is unrecoverable from it, while junit escapes it as
+  `&#10;` and the parser returns it intact.
+
+A report that cannot be parsed, or a failing record whose node id cannot be built, is exit
+2's "could not measure" rather than a guessed row. A run that writes no report at all -
+`SUITE` replaced by a caller - falls back to the text parse and says so on stderr: that is
+the one path where the weakness above is still reachable, and it is named rather than
+silent.
+
+The same class of loss is in the other text channel this tool reads, the base run's
+`not found:` report, which says which rows the base does not contain - and a row a tree does
+not contain cannot fail there, so a row missed here is a row the base is never asked about.
+Measured (`cyc20260918-212523`): pytest prints the argument as it was given, node id and
+all, and reading it up to the first whitespace returned `set()` for a missing
+`…::test_dashed_id[git commit -q -F - <<EOF]` - every row parametrized with a space, which
+is how the 22 come back after the junit report fixed the other end of the same walk. The
+argument is now read to the end of its line; a row containing a *newline* is still beyond
+a line-anchored reader, and there the tool answers "could not measure" instead of guessing.
+
 What a worktree run is not
 --------------------------
 The suite runs in a worktree of the tree under test, so it runs the suite a *fresh
@@ -200,6 +245,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 # The shared module's directory, so `import merge_tree` works however this file is
@@ -572,17 +618,99 @@ def _no_suite_verdict(out: str) -> str:
 # collection error - matches neither, which the `" "` after the verb excludes. The id
 # runs up to the `" - "` separator, which is what keeps an id parametrized with a space
 # (`test_x[a b]`) whole.
+#
+# It is *not* the source of truth for a row, and issue #1386 measured why: an id that
+# itself contains `" - "` is cut at its first occurrence, and the cut row is then one the
+# base tree does not contain - which `_still_red_on` maps to *a row a tree does not
+# contain cannot fail there*, i.e. to a row the plan's tree is blamed for. The machine-
+# readable report below is the source; this expression stays for the two places that have
+# no better instrument (the summary line, and a run that wrote no junit report).
 BLAMED_ROW = re.compile(r"^(?:FAILED|ERROR) (\S.*?)(?: - |$)", re.M)
 
 # What pytest prints for an argument its tree does not contain:
 #     ERROR: not found: /tmp/emrg-plan-suite-x/base/tests/test_a.py::test_b
-# The path is absolute, so a row is matched by its tail.
-NOT_FOUND = re.compile(r"not found: (\S+)")
+#     ERROR: file or directory not found: tests/test_a.py::test_b[a b]
+# Both spellings have been seen on this machine (pytest 9.1.1 prints the second), so the
+# line is matched by the phrase and the argument is the rest of it. *The rest of the line*,
+# not `\S+`: an argument is a node id, and a node id contains spaces - `[a b]` parameters
+# are everywhere and 22 ids in this suite contain `" - "` - so stopping at the first
+# whitespace loses a row the run itself named. Measured (`cyc20260918-212523`): with `\S+`,
+# asking this repository for a missing `…::test_dashed_id[git commit -q -F - <<EOF]` gave
+# `set()`, which `_still_red_on` reads as "this report named nothing" and turns into
+# "could not measure" for a question it had the answer to.
+NOT_FOUND = re.compile(r"not found: (\S.*)", re.M)
 
 
 def _failing_rows(out: str) -> list[str]:
     """Every node id the suite's own report blames, in the order it printed them."""
     return [match.group(1).strip() for match in BLAMED_ROW.finditer(out)]
+
+
+# The machine-readable row list. `--junitxml` alone is not enough: the default `xunit2`
+# family writes `classname` and `name` only, and `tests.test_a.TestKlass` does not name the
+# file it came from - so the row could not be handed back to pytest for the base run, which
+# is the one thing these rows are for. `xunit1` adds `file` (measured: pytest 9.1.1,
+# `_pytest/junitxml.py`, `families["xunit1"]`), and it is passed with `-o` on the command
+# line so a `junit_family` in the tree's own config cannot change the shape of the report
+# this tool reads. Written outside the worktree, in the harness's scratch directory, so the
+# run leaves nothing in the tree it measures.
+JUNIT_FAMILY = ["-o", "junit_family=xunit1"]
+
+
+def _row_id(file_attr: str, classname: str, name: str) -> str | None:
+    """The node id a junit record names, or `None` when it cannot name one.
+
+    pytest derives `classname` from the node id the same way for every id
+    (`mangle_test_address`): `/` -> `.`, then a trailing `.py` dropped. Undoing that needs
+    the file the record names - the attribute only the `xunit1` family writes - and the
+    remainder of the classname is the class path. A classname whose module is not that
+    file's dotted path is a shape this tool does not understand; `_junit_rows` reports it
+    rather than guessing a path that might name a different test.
+    """
+    path = (file_attr or "").replace("\\", "/")
+    module = re.sub(r"\.py$", "", path).replace("/", ".")
+    if not path or not module or not name:
+        return None
+    if classname == module:
+        classes: list[str] = []
+    elif classname.startswith(module + "."):
+        classes = classname[len(module) + 1 :].split(".")
+    else:
+        return None
+    return "::".join([path, *classes, name])
+
+
+def _junit_rows(report: Path) -> list[str] | None:
+    """Every node id the run's junit report blames, in its order - or `None` for no report.
+
+    `None` is not "nothing failed": it is "this run left no machine-readable list", which
+    only the fallback in `_suite_verdict` reads. A report that is there and cannot be
+    parsed, or a failing record whose node id cannot be built, is a measurement error
+    instead: a row list that had to be guessed is exactly what issue #1386 is about, so an
+    unreadable one is exit 2's "could not measure" rather than a list to attribute.
+    """
+    if not report.is_file():
+        return None
+    try:
+        root = ET.parse(report).getroot()
+    except ET.ParseError as exc:
+        raise MeasurementError(f"the run's junit report could not be read: {exc}") from exc
+    rows: list[str] = []
+    for case in root.iter("testcase"):
+        if not any(child.tag in ("failure", "error") for child in case):
+            continue
+        row = _row_id(
+            case.get("file") or "", case.get("classname") or "", case.get("name") or ""
+        )
+        if row is None:
+            raise MeasurementError(
+                "the run's junit report names a failure that cannot be turned back into a "
+                f"node id (file={case.get('file')!r}, classname={case.get('classname')!r}, "
+                f"name={case.get('name')!r}), so the rows this tree is blamed for cannot be "
+                "read without guessing one"
+            )
+        rows.append(row)
+    return rows
 
 
 def _unfound_ids(out: str, rows: list[str]) -> set[str]:
@@ -600,8 +728,16 @@ def _unfound_ids(out: str, rows: list[str]) -> set[str]:
     `/tmp/base/tests/test_a.py::test_b` matched, `C:\\Temp\\base\\tests\\test_a.py::test_b`
     matched **nothing**. Blind there, every row the base does not contain would have
     been read as "the base could not be measured" (rc 2) instead of as the answer.
+
+    The argument is taken to the end of its line (`NOT_FOUND`), because it is a node id and
+    a node id contains spaces: reading only up to the first whitespace loses every row
+    parametrized with one, and losing it here *is* "could not measure" - measured
+    (`cyc20260918-212523`) on a real missing `…[git commit -q -F - <<EOF]`, which came back
+    as `set()`. A row holding a newline is still beyond this instrument: the run prints it
+    across two lines and nothing line-anchored can carry it, so `_still_red_on` answers rc 2
+    there - fail-closed, never a guessed attribution.
     """
-    named = {match.group(1).replace("\\", "/") for match in NOT_FOUND.finditer(out)}
+    named = {match.group(1).strip().replace("\\", "/") for match in NOT_FOUND.finditer(out)}
     return {
         row
         for row in rows
@@ -699,6 +835,13 @@ def _suite_verdict(
     (issue #1378: a plan whose tree inherits a red base was reported as a combination
     failure and pointed at a PR that owns nothing).
 
+    The rows are read from the run's **junit report**, not from its text summary, because
+    the text form is lossy for an id: it puts the id and the failure's message on one line
+    and separates them with `" - "`, which is also a substring of 22 node ids in this
+    repository's own suite (issue #1386, measured in the header). A run that wrote no
+    report - a caller replacing `SUITE` with something that is not pytest - falls back to
+    the text form and says so, since a silently unverified row list is the defect.
+
     `keep` materialises the worktree there and leaves it in place for the caller, who
     then owns its removal; nothing else about the run changes (same caches purged, same
     interpreter and `PYTHONPATH` pinned to the tree), so a kept worktree answers for the
@@ -710,6 +853,10 @@ def _suite_verdict(
     if updated.returncode != 0:
         raise MeasurementError(f"could not mark the plan tip: {updated.stderr.strip()}")
     worktree = keep if keep is not None else scratch / "tree"
+    # Beside the worktree, never inside it: the report is the harness's, and a file this
+    # tool writes into the tree it measures is a file the suite could see (`untracked`
+    # checks, `git status` assertions) and would have to be removed again.
+    junit = scratch / "plan-junit.xml"
     try:
         added = _run(["git", "worktree", "add", "--detach", str(worktree), TIP_REF])
         if added.returncode != 0:
@@ -720,7 +867,9 @@ def _suite_verdict(
             raise MeasurementError("the planned tree has no tests/ directory")
         _purge_bytecode(worktree)
         proc = _run(
-            [sys.executable, *SUITE], cwd=str(worktree), env=_suite_env(worktree)
+            [sys.executable, *SUITE, "--junitxml", str(junit), *JUNIT_FAMILY],
+            cwd=str(worktree),
+            env=_suite_env(worktree),
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         if proc.returncode == 0:
@@ -733,10 +882,21 @@ def _suite_verdict(
             ]
             if not failures and not SUITE_FAILURE.search(out):
                 raise MeasurementError(_no_suite_verdict(out))
-            summary = (
-                "; ".join(failures[:5]) if failures else _last_line(out, "suite FAILED")
-            )
-            return False, summary, tree_sha, _failing_rows(out)
+            rows = _junit_rows(junit)
+            if rows is None:
+                # Reachable only when the run wrote no junit report at all - a replaced
+                # `SUITE`, or a pytest whose junit plugin is disabled. Said out loud,
+                # because an unverified row list is what #1386 is about and silence is
+                # how it got attributed in the first place.
+                print(
+                    "the suite left no junit report, so the rows it names are read from "
+                    "its text summary and not verified against a node id list: see "
+                    "_junit_rows for what that costs.",
+                    file=sys.stderr,
+                )
+                rows = _failing_rows(out)
+            summary = "; ".join(rows[:5]) if rows else _last_line(out, "suite FAILED")
+            return False, summary, tree_sha, rows
         # 2 interrupted, 3 internal error, 4 usage error, 5 no tests collected. None
         # of these is "the suite passed" - and rc 1 reaches here only with a failure
         # report in hand, since a report is what the branch above asks for.
@@ -749,7 +909,7 @@ def _suite_verdict(
         _run(["git", "update-ref", "-d", TIP_REF])
 
 
-def _pytest_rows(worktree: Path, rows: list[str]) -> tuple[int, str]:
+def _pytest_rows(worktree: Path, rows: list[str], junit: Path) -> tuple[int, str]:
     """Run only these rows in that tree, with the same interpreter and pinning.
 
     Running the rows rather than the whole suite is what makes a second measurement
@@ -758,9 +918,26 @@ def _pytest_rows(worktree: Path, rows: list[str]) -> tuple[int, str]:
     answered, not a wider one that merely contains it. Same `cwd` and `PYTHONPATH` pin
     as the suite run (`_suite_env`), because a base tree measured through a different
     path is a different tree's answer.
+
+    The junit report is written to `junit` for the same reason the plan's run writes one:
+    this run's *text* summary truncates a row whose id contains `" - "` (issue #1386), and
+    matching a truncated row against the rows that were asked for is how a row the base
+    really fails gets read as one it does not contain - which is the attribution this
+    whole step exists to avoid. Rows are asked for exactly, so the answer is a set
+    intersection, not a parse.
     """
     proc = _run(
-        [sys.executable, "-m", "pytest", *rows, "-q", "--no-header"],
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *rows,
+            "-q",
+            "--no-header",
+            "--junitxml",
+            str(junit),
+            *JUNIT_FAMILY,
+        ],
         cwd=str(worktree),
         env=_suite_env(worktree),
     )
@@ -788,8 +965,17 @@ def _still_red_on(tip: str, rows: list[str], scratch: Path) -> set[str]:
     than a failed measurement and the run is repeated without those rows. Anything else
     the base run reports - an interpreter without pytest, rc 3 - is a measurement error:
     an unanswerable question is rc 2, never a verdict about a PR.
+
+    The base's own failing rows are read from its junit report and intersected with the
+    rows that were asked for, so an id containing `" - "` is matched rather than truncated
+    (issue #1386: truncated, it is a row this tree does not contain, which reads as *the
+    base fails nothing* and lays the row at a PR's door). Only a run that wrote no report
+    falls back to matching its text summary against the rows.
     """
     worktree = scratch / "base"
+    # Outside the base worktree, like the plan's report: nothing this tool writes may land
+    # in the tree whose suite is running.
+    junit = scratch / "base-junit.xml"
     added = _run(["git", "worktree", "add", "--detach", str(worktree), tip])
     if added.returncode != 0:
         raise MeasurementError(
@@ -797,7 +983,7 @@ def _still_red_on(tip: str, rows: list[str], scratch: Path) -> set[str]:
         )
     try:
         _purge_bytecode(worktree)
-        rc, out = _pytest_rows(worktree, rows)
+        rc, out = _pytest_rows(worktree, rows, junit)
         if rc == 4:
             missing = _unfound_ids(out, rows)
             if not missing:
@@ -808,12 +994,18 @@ def _still_red_on(tip: str, rows: list[str], scratch: Path) -> set[str]:
             rows = [row for row in rows if row not in missing]
             if not rows:
                 return set()
-            rc, out = _pytest_rows(worktree, rows)
+            rc, out = _pytest_rows(worktree, rows, junit)
         if rc == 0:
             return set()
-        blamed = set(_failing_rows(out)) & set(rows) if rc == 1 else set()
-        if blamed:
-            return blamed
+        if rc == 1:
+            reported = _junit_rows(junit)
+            blamed = (
+                set(_failing_rows(out)) & set(rows)
+                if reported is None
+                else set(reported) & set(rows)
+            )
+            if blamed:
+                return blamed
         raise MeasurementError(
             f"the base tree could not be measured (rc={rc}):\n" + out[-1000:].strip()
         )

@@ -1781,6 +1781,16 @@ def test_the_rows_are_read_from_the_report_and_not_invented(mod) -> None:
         "ERROR: not found: C:\\Temp\\emrg-plan-suite-a\\base\\tests\\test_g.py::test_h\n",
         ["tests/test_g.py::test_h"],
     ) == {"tests/test_g.py::test_h"}
+    # The argument runs to the end of its line, because a node id contains spaces. Measured
+    # against a real missing row (`cyc20260918-212523`, pytest 9.1.1 prints the second
+    # spelling): read up to the first whitespace, this came back `set()`, and an empty
+    # answer here is "could not measure" for a row the run had just named.
+    spaced = "tests/test_d.py::test_e[git commit -q -F - <<EOF]"
+    for line in (
+        f"ERROR: file or directory not found: {spaced}\n",
+        f"ERROR: not found: /tmp/emrg-plan-suite-a/base/{spaced}\n",
+    ):
+        assert mod._unfound_ids(line + "no tests ran in 0.00s\n", [spaced]) == {spaced}
 
 
 def test_the_two_paragraphs_split_the_rows_and_no_row_is_in_both(mod) -> None:
@@ -1798,3 +1808,258 @@ def test_the_two_paragraphs_split_the_rows_and_no_row_is_in_both(mod) -> None:
     assert mod._ownership_lines(tree, ["a", "b"], {"a", "b"})[0] == ""
     # Nothing inherited: nothing is said about the base.
     assert mod._ownership_lines(tree, ["a", "b"], set())[1] == ""
+
+
+# --- issue #1386: a row is read from the machine-readable report ------------------
+#
+# A red tree is attributed *by row*: the plan's failing rows are re-run on the base, and a
+# row the base fails too belongs to no PR (#1378). The text summary is a lossy carrier for
+# those rows - it separates the id from the failure's message with `" - "`, which 22 node
+# ids in this repository's own suite contain - so the cut row is one the base does not
+# contain, which reads as "the base fails nothing", and the row is laid at a PR's door with
+# the re-push sentence. The arms below pin the reader, the two id shapes, and both halves
+# of the ownership split against a real pytest run.
+
+# A parameter that makes the node id contain the text report's separator.
+DASHED_ID_TEST = '''import pytest
+
+
+@pytest.mark.parametrize("argv", ["git commit -q -F - <<EOF"])
+def test_dashed_id(argv):
+    assert False, "red with the separator inside the id"
+'''
+
+DASHED_ID_ROW = "tests/test_dashed_id.py::test_dashed_id[git commit -q -F - <<EOF]"
+
+# The same, with a *newline* in the parameter. pytest escapes it to `\\n` in an id unless
+# the tree turns that escaping off, and with it off the text report really does break the
+# line - measured here, which is why the ini option is part of the fixture.
+NEWLINE_ID_TEST = '''import pytest
+
+
+@pytest.mark.parametrize("argv", ["git commit\\n-q -F"])
+def test_newline_id(argv):
+    assert False, "red with a newline inside the id"
+'''
+
+NEWLINE_ID_ROW = "tests/test_newline_id.py::test_newline_id[git commit\n-q -F]"
+
+ESCAPING_OFF = (
+    "[tool.pytest.ini_options]\n"
+    "disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true\n"
+)
+
+
+def _base_with(repo: Path, origin: Path, files: dict[str, str], message: str) -> None:
+    """A base commit carrying `files`, published as `master`, as the tool will fetch it."""
+    for relpath, body in files.items():
+        _write(repo, relpath, body)
+    _commit(repo, message)
+    _git(repo, "push", "-q", "origin", "master")
+
+
+def test_a_base_row_whose_id_holds_the_separator_is_not_laid_at_a_prs_door(
+    queue: tuple[Path, Path],
+) -> None:
+    """Issue #1386, on the path where it did harm: the base's own row, cut by the parse.
+
+    The base is red with a row whose id contains `" - "`, and the only PR in the plan is
+    unrelated. Cut at the first `" - "`, the row becomes one the base does not contain, so
+    the plan's tree is blamed and the caller is told to re-push a PR that owns nothing.
+    """
+    repo, origin = queue
+    _base_with(repo, origin, {"tests/test_dashed_id.py": DASHED_ID_TEST}, "a dashed row")
+    _branch_with(repo, "unrelated", {"notes.md": "unrelated\n"})
+    _publish(repo, origin, 4, "unrelated")
+
+    proc = _run_tool(repo, "4")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert DASHED_ID_ROW in proc.stderr
+    assert "fail on the base tree" in proc.stderr
+    assert "No PR in this plan owns those rows" in proc.stderr
+    assert "re-push the PR that owns the failure" not in proc.stderr
+
+
+def test_a_base_row_whose_id_holds_a_newline_is_read_the_same_way(
+    queue: tuple[Path, Path],
+) -> None:
+    """The second shape: no line-anchored parser can carry this id at all.
+
+    With the escaping off, `pytest` prints the id across two lines, so the text report
+    cannot even hold the row; junit escapes the newline as `&#10;` and the id survives
+    whole. Everything else is the arm above, because the requirement is the same: the base
+    owns the row, so no PR may be told to re-push.
+    """
+    repo, origin = queue
+    _base_with(
+        repo,
+        origin,
+        {"pyproject.toml": ESCAPING_OFF, "tests/test_newline_id.py": NEWLINE_ID_TEST},
+        "a row with a newline in its id",
+    )
+    _branch_with(repo, "unrelated", {"notes.md": "unrelated\n"})
+    _publish(repo, origin, 4, "unrelated")
+
+    proc = _run_tool(repo, "4")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert NEWLINE_ID_ROW in proc.stderr
+    assert "No PR in this plan owns those rows" in proc.stderr
+    assert "re-push the PR that owns the failure" not in proc.stderr
+
+
+def test_a_plan_owns_a_row_whose_id_holds_the_separator(queue: tuple[Path, Path]) -> None:
+    """The other half: the row is the plan's, and it is named whole when it is.
+
+    Truncated, the row was attributed to the plan for the wrong reason - it was one the
+    base does not contain. The sentence is the same; the row that reaches it has to be the
+    one that failed, or the reader cannot find the test they are told to fix.
+    """
+    repo, origin = queue
+    _branch_with(repo, "dashed", {"tests/test_dashed_id.py": DASHED_ID_TEST})
+    _publish(repo, origin, 7, "dashed")
+
+    proc = _run_tool(repo, "7")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"rows this plan's tree owns: {DASHED_ID_ROW}" in proc.stderr
+    assert "fail on the base tree" not in proc.stderr
+
+
+def test_a_run_without_a_report_says_the_rows_are_unverified(
+    queue: tuple[Path, Path], mod, monkeypatch, capsys
+) -> None:
+    """The one path left where the text parse is the source - and it is named, not silent.
+
+    `SUITE` replaced by something that is not pytest writes no junit report, and this is
+    the fallback the tool documents for that case. A row list nobody verified is what
+    issue #1386 is about, so it is reported on stderr rather than left implicit.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(
+        mod,
+        "SUITE",
+        [
+            "-c",
+            "import sys; sys.stdout.write('FAILED tests/test_fine.py::test_fine - boom\\n"
+            "1 failed in 0.01s\\n'); sys.exit(1)",
+        ],
+    )
+
+    assert mod.main(["1", "--base", "master"]) == 1
+    captured = capsys.readouterr()
+    assert "no junit report" in captured.err
+    assert "tests/test_fine.py::test_fine" in captured.out
+
+
+def test_the_rows_come_from_the_machine_readable_report(mod, tmp_path: Path) -> None:
+    """The reader, against the two shapes and the records that are not rows."""
+    report = tmp_path / "junit.xml"
+    report.write_text(
+        '<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite>'
+        '<testcase classname="tests.test_a" name="test_b" file="tests/test_a.py" line="1">'
+        '<failure message="x">boom</failure></testcase>'
+        # An id containing the separator the text report splits on. `<` arrives escaped
+        # because it is XML, which is also why the id survives: no line to break.
+        '<testcase classname="tests.test_a" name="test_d[git commit -q -F - &lt;&lt;EOF]"'
+        ' file="tests/test_a.py" line="2"><failure/></testcase>'
+        # A real newline in the id: XML escapes it, so the parser returns it whole where
+        # the text report would have broken the line.
+        '<testcase classname="tests.test_a" name="test_d[x&#10;y]" file="tests/test_a.py"'
+        ' line="3"><error/></testcase>'
+        # A class-qualified row (the class path is what is left of `classname` after the
+        # file's dotted path), and one testcase that did not fail.
+        '<testcase classname="tests.test_a.TestK" name="test_in" file="tests/test_a.py"'
+        ' line="4"><failure/></testcase>'
+        '<testcase classname="tests.test_a" name="test_ok" file="tests/test_a.py" line="5"/>'
+        # A skipped test is not a blamed row either, and it is the `<skipped>` child that
+        # says so rather than the absence of one.
+        '<testcase classname="tests.test_a" name="test_skip" file="tests/test_a.py"'
+        ' line="6"><skipped/></testcase>'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    assert mod._junit_rows(report) == [
+        "tests/test_a.py::test_b",
+        "tests/test_a.py::test_d[git commit -q -F - <<EOF]",
+        "tests/test_a.py::test_d[x\ny]",
+        "tests/test_a.py::TestK::test_in",
+    ]
+    # No report at all is not "nothing failed": the caller has to be able to tell the two
+    # apart, which is what the fallback in `_suite_verdict` keys on.
+    assert mod._junit_rows(tmp_path / "absent.xml") is None
+
+
+def test_a_report_that_cannot_name_a_row_is_unmeasurable(mod, tmp_path: Path) -> None:
+    """Three shapes that must not become a row list, and what each one costs.
+
+    A guessed row is worse than no row: it is re-run on the base and, not being there, is
+    read as *the base fails nothing* - the attribution error #1386 is about. So every one
+    of these is a measurement error (exit 2's family) instead.
+    """
+    # The default `xunit2` family: no `file`, and a classname alone does not name a path.
+    (tmp_path / "xunit2.xml").write_text(
+        '<?xml version="1.0"?><testsuites><testsuite>'
+        '<testcase classname="tests.test_a" name="test_b"><failure/></testcase>'
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    with pytest.raises(mod.MeasurementError) as exc:
+        mod._junit_rows(tmp_path / "xunit2.xml")
+    assert "without guessing one" in str(exc.value)
+
+    # A classname that does not belong to the file it names: the class path would have to
+    # be guessed, and a guess can name a different test in the same file.
+    (tmp_path / "mismatched.xml").write_text(
+        '<?xml version="1.0"?><testsuites><testsuite>'
+        '<testcase classname="tests.test_other.TestK" name="test_b" file="tests/test_a.py">'
+        "<failure/></testcase>"
+        "</testsuite></testsuites>",
+        encoding="utf-8",
+    )
+    with pytest.raises(mod.MeasurementError):
+        mod._junit_rows(tmp_path / "mismatched.xml")
+
+    # A report that is there and cannot be parsed.
+    (tmp_path / "broken.xml").write_text("<testsuites>", encoding="utf-8")
+    with pytest.raises(mod.MeasurementError) as exc:
+        mod._junit_rows(tmp_path / "broken.xml")
+    assert "could not be read" in str(exc.value)
+
+
+def test_the_run_asks_for_the_family_that_writes_the_file_attribute(
+    queue: tuple[Path, Path], mod, monkeypatch
+) -> None:
+    """`-o junit_family=xunit1`, and the report outside the tree it measures.
+
+    Both halves are load-bearing. Without the family the report has no `file` and the rows
+    cannot be rebuilt at all; and a report written *inside* the worktree is a file the
+    measured suite could itself see - this repository's own suite asserts things about its
+    tree's contents.
+    """
+    repo, origin = queue
+    _branch_with(repo, "fine", {"tests/test_fine.py": "def test_fine():\n    assert True\n"})
+    _publish(repo, origin, 1, "fine")
+    monkeypatch.chdir(repo)
+
+    seen: list[list[str]] = []
+    real_run = mod._run
+
+    def spy(argv, cwd=None, env=None):
+        seen.append(list(argv))
+        return real_run(argv, cwd=cwd, env=env)
+
+    monkeypatch.setattr(mod, "_run", spy)
+    assert mod.main(["1", "--base", "master"]) == 0
+
+    runs = [argv for argv in seen if "pytest" in argv]
+    assert len(runs) == 1, runs
+    suite = runs[0]
+    assert "junit_family=xunit1" in suite
+    report = Path(suite[suite.index("--junitxml") + 1])
+    worktrees = [Path(argv[-2]) for argv in seen if list(argv[:3]) == ["git", "worktree", "add"]]
+    assert worktrees, "no worktree was materialised, so this arm measures nothing"
+    for worktree in worktrees:
+        assert report.parent == worktree.parent
+        assert worktree not in report.parents
