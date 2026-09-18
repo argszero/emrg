@@ -314,6 +314,12 @@ def test_upgrade_chain_hermeticity_guards():
     # 2. Version file: not the real ~/.emrg/install/version.txt.
     assert up.VERSION_FILE != Path.home() / ".emrg" / "install" / "version.txt"
 
+    # 3. Retention (issue #1389): the upgrade tick prunes the snapshot
+    #    directory, and on a real host that directory holds the only rollback
+    #    snapshot there is. If this assertion ever fails, every test that calls
+    #    tick() is deleting the host's rollback path.
+    assert up.BACKUP_DIR != Path.home() / ".emrg" / "upgrade-backup"
+
 
 # ── no residual references to the removed mechanism ───────────────────────
 
@@ -522,3 +528,256 @@ def test_upgrade_prompt_backup_rollback_chain_guarded() -> None:
         "the Backup & rollback section must instruct both backing up before touching "
         "and restoring on failure."
     )
+
+
+# ── snapshot retention (issue #1389) ───────────────────────────────────────
+# ~/.emrg/upgrade-backup 只增不减：每次升级写入一份完整 install 快照（宿主实测
+# 599 MB/份，14 份 = 8.2 GB），而升级 prompt 只从 backup_dir/<current_version>
+# 恢复——即"被替换的那个版本"，也就是 previous-version.txt 记录的那一份。其余
+# 快照永远不可能被恢复，纯累积。本组测试把保留策略钉死：策略是纯函数（可在临时
+# backup_dir 上直接跑），删除路径单独测，且必须永不删掉"可恢复的那一份"。
+
+
+def _snapshot(root: Path, name: str, marker: str = "payload") -> Path:
+    """Create a snapshot directory the way the upgrade prompt would."""
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "source.txt").write_text(marker, encoding="utf-8")
+    return d
+
+
+def _install_versions(monkeypatch, tmp_path, current: str, previous: str | None) -> None:
+    """Point version.txt / previous-version.txt at a scratch install."""
+    import emrg.server.upgrade as up
+
+    current_file = tmp_path / "version.txt"
+    current_file.write_text(current, encoding="utf-8")
+    monkeypatch.setattr(up, "VERSION_FILE", current_file)
+    prev_file = tmp_path / "previous-version.txt"
+    if previous is not None:
+        prev_file.write_text(previous, encoding="utf-8")
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", prev_file)
+
+
+def test_prune_keeps_the_rollback_snapshot_and_drops_the_rest(monkeypatch, tmp_path):
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.90", "0.2.91", "0.2.92", "0.2.93", "0.2.94", "0.2.95"):
+        _snapshot(backups, ver)
+    # 0.2.96 running, replacing 0.2.95 — the state measured on the host that
+    # filed the issue (8.2 GB across 14 snapshots, one of them restorable).
+    _install_versions(monkeypatch, tmp_path, "0.2.96", "0.2.95")
+
+    removed = prune_upgrade_backups(backups)
+
+    assert removed == ["0.2.90", "0.2.91", "0.2.92", "0.2.93", "0.2.94"], (
+        "the superseded snapshots are removed oldest-first"
+    )
+    assert (backups / "0.2.95").is_dir(), (
+        "the snapshot previous-version.txt names IS the rollback target — "
+        "removing it would leave a failed upgrade with nothing to restore from"
+    )
+    assert sorted(p.name for p in backups.iterdir()) == ["0.2.95"]
+
+
+def test_prune_removes_only_the_snapshot_directory(monkeypatch, tmp_path):
+    """The removed bytes are the snapshot's — nothing else in its place."""
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    _snapshot(backups, "0.2.90", marker="old-install")
+    _snapshot(backups, "0.2.95", marker="rollback-install")
+    _install_versions(monkeypatch, tmp_path, "0.2.96", "0.2.95")
+
+    assert prune_upgrade_backups(backups) == ["0.2.90"]
+    assert (backups / "0.2.95" / "source.txt").read_text(encoding="utf-8") == "rollback-install"
+
+
+def test_prune_is_a_no_op_on_a_fresh_install(monkeypatch, tmp_path):
+    """No snapshot directory at all — a fresh install must stay a non-event."""
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    _install_versions(monkeypatch, tmp_path, "0.2.96", None)
+    assert prune_upgrade_backups(tmp_path / "never-created") == []
+
+    empty = tmp_path / "upgrade-backup"
+    empty.mkdir()
+    assert prune_upgrade_backups(empty) == []
+
+
+def test_prune_leaves_alone_what_it_cannot_read_as_a_version(monkeypatch, tmp_path):
+    """A name this module cannot parse is not a file it may delete.
+
+    The upgrade prompt names snapshots `<current_version>`; anything else in the
+    directory was put there by someone else and is not this policy's to remove —
+    including a symlink, which `rmtree` would follow out of the directory.
+    """
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    _snapshot(backups, "0.2.90")
+    _snapshot(backups, "0.2.95")
+    _snapshot(backups, "nightly")
+    _snapshot(backups, "v0.2.89-broken.rc")
+    (backups / "notes.txt").write_text("not a snapshot", encoding="utf-8")
+    (backups / "0.2.88").symlink_to(tmp_path / "elsewhere")
+    _install_versions(monkeypatch, tmp_path, "0.2.96", "0.2.95")
+
+    assert prune_upgrade_backups(backups) == ["0.2.90"]
+    surviving = sorted(p.name for p in backups.iterdir())
+    assert surviving == ["0.2.88", "0.2.95", "nightly", "notes.txt", "v0.2.89-broken.rc"]
+    assert (backups / "nightly").is_dir()
+    assert (backups / "0.2.88").is_symlink()
+
+
+def test_prune_keeps_a_named_version_that_is_not_the_newest(monkeypatch, tmp_path):
+    """The protection is the *name*, not the rank (a downgrade or a hand copy).
+
+    Here the install runs 0.2.90 and replaced 0.2.80, while a newer 0.2.95
+    snapshot sits in the directory. Keeping only the newest would delete both
+    restorable snapshots — the versions the install can name outrank recency.
+    """
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.70", "0.2.80", "0.2.90", "0.2.95"):
+        _snapshot(backups, ver)
+    _install_versions(monkeypatch, tmp_path, "0.2.90", "0.2.80")
+
+    assert prune_upgrade_backups(backups) == ["0.2.70"]
+    assert sorted(p.name for p in backups.iterdir()) == ["0.2.80", "0.2.90", "0.2.95"]
+
+
+def test_prune_without_version_files_keeps_the_newest(monkeypatch, tmp_path):
+    """Unreadable/absent version files: the floor is the newest snapshot.
+
+    The policy may never be the reason a directory of snapshots is emptied — if
+    nothing can be named, the newest one is kept and reported as kept.
+    """
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.90", "0.2.91", "0.2.95"):
+        _snapshot(backups, ver)
+    import emrg.server.upgrade as up
+
+    monkeypatch.setattr(up, "VERSION_FILE", tmp_path / "absent-version.txt")
+    monkeypatch.setattr(up, "PREVIOUS_VERSION_FILE", tmp_path / "absent-previous.txt")
+
+    assert prune_upgrade_backups(backups) == ["0.2.90", "0.2.91"]
+    assert [p.name for p in backups.iterdir()] == ["0.2.95"]
+
+
+def test_prune_orders_snapshots_by_version_not_by_name_or_mtime(monkeypatch, tmp_path):
+    """'0.2.100' is newer than '0.2.99'; mtime is not consulted at all."""
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.99", "0.2.100", "0.2.101"):
+        _snapshot(backups, ver)
+    # mtimes deliberately inverted: 0.2.99 touched last.
+    import os
+
+    os.utime(backups / "0.2.99", (time.time() + 60, time.time() + 60))
+    _install_versions(monkeypatch, tmp_path, "0.2.102", "0.2.101")
+
+    assert prune_upgrade_backups(backups) == ["0.2.99", "0.2.100"]
+    assert [p.name for p in backups.iterdir()] == ["0.2.101"]
+
+
+def test_prune_tolerates_a_v_prefix_in_the_names(monkeypatch, tmp_path):
+    """The prompt writes the tag; the name may or may not keep its 'v'."""
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    _snapshot(backups, "v0.2.94")
+    _snapshot(backups, "0.2.95")
+    _install_versions(monkeypatch, tmp_path, "v0.2.96", "v0.2.95")
+
+    assert prune_upgrade_backups(backups) == ["v0.2.94"]
+    assert [p.name for p in backups.iterdir()] == ["0.2.95"]
+
+
+def test_prune_survives_a_snapshot_it_cannot_remove(monkeypatch, tmp_path):
+    """One undeletable snapshot must not hide the others or abort the sweep."""
+    from emrg.server.upgrade import prune_upgrade_backups
+
+    backups = tmp_path / "upgrade-backup"
+    _snapshot(backups, "0.2.90")
+    _snapshot(backups, "0.2.91")
+    _snapshot(backups, "0.2.95")
+    _install_versions(monkeypatch, tmp_path, "0.2.96", "0.2.95")
+
+    import shutil as _shutil
+
+    real_rmtree = _shutil.rmtree
+
+    class _FlakyShutil:
+        """Only the upgrade module's view — the real shutil is untouched."""
+
+        @staticmethod
+        def rmtree(path, *a, **kw):
+            if Path(path).name == "0.2.90":
+                raise OSError("device busy")
+            return real_rmtree(path, *a, **kw)
+
+    monkeypatch.setattr("emrg.server.upgrade.shutil", _FlakyShutil)
+    removed = prune_upgrade_backups(backups)
+
+    assert removed == ["0.2.91"], "the snapshot that could not be removed is not reported as removed"
+    assert (backups / "0.2.90").is_dir(), "a failed removal leaves the snapshot in place"
+    assert not (backups / "0.2.91").exists()
+
+
+def test_tick_prunes_the_snapshots(monkeypatch, tmp_path):
+    """The sweep is wired into tick() — nothing else ever visits the directory."""
+    import emrg.server.upgrade as up
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.90", "0.2.91", "0.2.95"):
+        _snapshot(backups, ver)
+    _install_versions(monkeypatch, tmp_path, "0.2.96", "0.2.95")
+    monkeypatch.setattr(up, "BACKUP_DIR", backups)
+
+    class _EmptyClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            class _Resp:
+                status_code = 200
+
+                def json(self):
+                    return []
+
+            return _Resp()
+
+    monkeypatch.setattr(up.httpx, "AsyncClient", _EmptyClient)
+    mgr = UpgradeManager(UpdateConfig(), lambda **kw: asyncio.sleep(0))
+    asyncio.run(mgr.tick())
+
+    assert [p.name for p in backups.iterdir()] == ["0.2.95"]
+
+
+def test_tick_prunes_nothing_while_enabled_is_false(monkeypatch, tmp_path):
+    """enabled=false disables the upgrade trigger, and the sweep sits behind
+    that check — a host who turned upgrades off must not have bases deleted."""
+    import emrg.server.upgrade as up
+
+    backups = tmp_path / "upgrade-backup"
+    for ver in ("0.2.90", "0.2.91", "0.2.95"):
+        _snapshot(backups, ver)
+    _install_versions(monkeypatch, tmp_path, "0.2.96", "0.2.95")
+    monkeypatch.setattr(up, "BACKUP_DIR", backups)
+
+    mgr = UpgradeManager(UpdateConfig(enabled=False), lambda **kw: asyncio.sleep(0))
+    asyncio.run(mgr.tick())
+
+    assert sorted(p.name for p in backups.iterdir()) == ["0.2.90", "0.2.91", "0.2.95"]
