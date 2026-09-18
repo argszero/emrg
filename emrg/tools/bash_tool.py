@@ -1057,6 +1057,104 @@ def _unresolved_operator_run_tails(tokens: list[str],
     return tails
 
 
+# Verbs that write to a path named by one of their **options**, not by an operand.
+# Each entry lists the options that name the destination; the value is read in every
+# spelling getopt accepts (see `_option_destination_values`).
+#
+# Only verbs whose destination option means one thing regardless of the other flags
+# are listed, because the alternative is a per-verb flag grammar (the #461 class).
+# `tar` is the case that proves the point and is deliberately absent: `-f`'s value
+# is a *write* under `-c`/`-r`/`-u` and a *read* under `-x`/`-t`, and `-C` is where
+# files land when extracting but only a directory to collect from when creating —
+# so `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely
+# refused by a rule that named `-C`. Measured ground truth for the family it does
+# not cover (tar/rsync/split/csplit/git clone, all ALLOW at both tiers with an
+# empty target list) is recorded in the test that pins the residual.
+_OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
+    "curl": frozenset({"-o", "--output"}),
+    "wget": frozenset({"-O", "--output-document"}),
+    "sort": frozenset({"-o", "--output"}),
+    "unzip": frozenset({"-d", "--directory"}),
+}
+
+
+def _leading_short_option_value(tok: str, letters: set[str]) -> str | None:
+    """The value an *attached* short option carries in its own token, or ``None``.
+
+    ``-o<file>`` is the spelling getopt allows for any option that takes a value,
+    and nothing about it is speculative: measured on GNU (``debian:bookworm-slim``,
+    one directory outside every allowed root) ``curl -o<dir>/f``, ``sort -o<dir>/f``
+    and ``unzip -d<dir>`` each deliver the file into ``<dir>``, so a reader that
+    knows only the spaced form leaves a real write unnamed — the same fail-open the
+    `-t` spellings had.
+
+    Only a *leading* option is read, and that is deliberate rather than partial:
+    a token like ``-so<dir>`` has to be split by a grammar this walk does not have,
+    and the two ways of guessing are not equally bad. Reading the remainder as a
+    value would be right for ``-so<dir>`` but wrong for ``-ko<file>`` (where ``k``
+    took ``o`` as *its* value and ``<file>`` is an operand to **read**), and naming
+    a read is a false block — the direction this guard's own record treats as worse
+    than the hole. So a cluster that does not lead with the destination letter is
+    left unnamed and pinned as a measured residual instead of guessed at.
+    """
+    if len(tok) < 3 or not tok.startswith("-") or tok.startswith("--"):
+        return None
+    if tok[1] in letters:
+        return tok[2:]
+    return None
+
+
+def _option_destination_values(tokens: list[str], i: int, verb: str) -> list[str]:
+    """The paths a verb writes to that are named by an **option**, not an operand.
+
+    ``curl -o <file>``, ``wget -O <file>``, ``sort -o <file>`` and
+    ``unzip -d <dir>`` name their destination nowhere in operand position, so no
+    operand rule can reach it and the walk reported **no target at all** — which
+    both tiers allow by construction (the loop that judges targets never runs).
+    Measured on the landing tree of #1399 (master + the everyday-writer fix), in a
+    geometry whose target lay outside every allowed root: all four were ALLOW at
+    both tiers with an empty target list, while ``truncate``, ``tee`` and ``cp``
+    were refused.
+
+    The destination is the option's value in every spelling getopt accepts — the
+    spaced one (``-o FILE``), the attached one (``-oFILE``, see
+    ``_leading_short_option_value``) and both long forms (``--output FILE``,
+    ``--output=FILE``). A value of exactly ``-`` is skipped, because that is the
+    documented way these options mean **stdout**: measured, ``wget -O - <url>`` and
+    ``sort -o - x`` leave nothing on disk.
+
+    Two measured notes a later reader would otherwise have to re-derive:
+
+    * The long ``=`` form is **not** accepted by every tool — ``curl --output=<f>``
+      exits 2 and ``unzip --directory=<d>`` exits 11 with nothing written, while
+      ``sort`` and ``wget`` accept theirs. It is still read, because the two
+      readings are not equally costly: reading it refuses a command that was going
+      to fail anyway, and not reading it would miss a real write on a tool that
+      does accept it.
+    * A repeated option is over-approximated: every value is named, though these
+      tools take the last. That is the same direction the rest of this walk errs in.
+    """
+    options = _OPTION_DESTINATION_VERBS[verb]
+    longs = {opt for opt in options if opt.startswith("--")}
+    letters = {opt[1:] for opt in options if not opt.startswith("--")}
+    out: list[str] = []
+    args = _args_after_command(tokens, i)
+    for j, tok in enumerate(args):
+        if tok in options:
+            if j + 1 < len(args):
+                out.append(args[j + 1])
+        elif tok.startswith("--"):
+            for long_opt in longs:
+                if tok.startswith(long_opt + "="):
+                    out.append(tok.split("=", 1)[1])
+                    break
+        else:
+            attached = _leading_short_option_value(tok, letters)
+            if attached is not None:
+                out.append(attached)
+    return [value for value in out if value != "-"]
+
+
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
     """Write targets of ``cmd``: the paths a command appears to write.
 
@@ -1268,6 +1366,12 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             args = _args_after_command(tokens, i)
             if "-delete" in args:
                 targets.extend(_positional_args(tokens, i))
+        elif word in _OPTION_DESTINATION_VERBS:
+            # `curl -o <f>` / `wget -O <f>` / `sort -o <f>` / `unzip -d <d>`: the
+            # destination is an option's value, so no operand rule reaches it and
+            # the walk named nothing at all — an empty target list is allowed by
+            # construction, so both tiers allowed the write.
+            targets.extend(_option_destination_values(tokens, i, word))
         i += 1
     # Reach the same places the git-mutator scan reaches: a destructive
     # command the shell will run is judged wherever it is written (issue
