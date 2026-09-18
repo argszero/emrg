@@ -246,3 +246,28 @@ def _guard_upgrade_hermeticity(monkeypatch, tmp_path):
     monkeypatch.setattr(
         daemon_mod.EmrgServer, "_get_or_create_session", _guarded_get_or_create
     )
+
+
+@pytest.fixture(autouse=True)
+def _refuse_a_real_probe_on_windows(monkeypatch):
+    """No test may perform a real ``os.kill(pid, 0)`` on Windows (issue #1351).
+
+    On Windows ``signal.CTRL_C_EVENT`` is 0, so that call is a delivered Ctrl+C to
+    the pid's console process group — the runner's own pytest included (measured
+    on PR #1350's first CI round, run 35258286311). ``tests/test_stop_all.py``
+    guards *its own* file with an AST scan; nothing stopped a test elsewhere from
+    leaving ``kill`` at its default.
+
+    The rule is about the act, so the guard is too: ``pid_alive`` resolves
+    ``(kill or os.kill)`` at call time, and replacing ``os.kill`` here reaches a
+    probe from any module — a test's own call, a helper's, a default argument.
+    Inert on POSIX and inert for every signal but 0, so stopping a process stays
+    the caller's business. Both states of the Windows decision are pinned on any
+    runner in tests/test_signal_probe_guard.py.
+    """
+    import os
+    import sys
+
+    from tests.signal_probe_guard import RefusingProbe
+
+    monkeypatch.setattr(os, "kill", RefusingProbe(os.kill, platform=sys.platform))
