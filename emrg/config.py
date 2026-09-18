@@ -50,6 +50,30 @@ class LlmConfig:
     context_refresh_interval_ms: int = 0
 
 
+def find_model_entry(models: Optional[list[dict]], key: str) -> Optional[dict]:
+    """The ``[[llm.models]]`` entry a switch key names, or None.
+
+    One matcher for the whole tree, because two lookups spelling the same rule
+    differently drift. ``resolve_model_vision`` matched an entry by ``name``
+    **or** ``model``; ``EmrgServer._handle_set_model``'s ``context_window``
+    lookup matched ``name`` only — so a host who switched by the API id (which is
+    what ``[llm] model`` holds and therefore what is easiest to copy out of
+    ``config.toml``) silently kept the **previous** model's context window. Same
+    shape as the vision flag had before its own fix (rant 2026-09-17T16:53:02),
+    one key over: a value inherited from the model being left, with nothing said.
+
+    ``key`` is what ``/model`` receives: the entry's display ``name`` or its
+    ``model`` id. Non-dict entries are skipped rather than raised on — the file is
+    user-edited, and one malformed row must not take the switch path down.
+    """
+    for m in models or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("name") == key or m.get("model") == key:
+            return m
+    return None
+
+
 def resolve_model_vision(
     models: Optional[list[dict]], key: str, default: bool
 ) -> tuple[bool, str]:
@@ -65,7 +89,9 @@ def resolve_model_vision(
     The resolution is therefore one function, called by both paths:
 
     * an entry matches by its display ``name`` (what ``/model`` receives) or by
-      its ``model`` (what ``[llm] model`` holds in config.toml);
+      its ``model`` (what ``[llm] model`` holds in config.toml) — the matching
+      itself is ``find_model_entry``, so the switch path's other lookups (the
+      entry's ``context_window``, its API id) name the same entry this does;
     * the entry's own ``vision`` wins when the key is present — source
       ``"entry"``;
     * otherwise the top-level ``[llm] vision`` applies — source
@@ -75,13 +101,9 @@ def resolve_model_vision(
     the two decided, so a caller can log it and the host can read the effective
     value instead of inferring it from a failed attempt to send an image.
     """
-    for m in models or []:
-        if not isinstance(m, dict):
-            continue
-        if m.get("name") == key or m.get("model") == key:
-            if "vision" in m:
-                return bool(m["vision"]), "entry"
-            break
+    entry = find_model_entry(models, key)
+    if entry is not None and "vision" in entry:
+        return bool(entry["vision"]), "entry"
     return bool(default), "top-level-default"
 
 

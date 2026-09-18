@@ -267,3 +267,36 @@ def test_resolve_model_vision_source_names_the_decider():
     assert resolve_model_vision(models, "missing", True) == (True, "top-level-default")
     assert resolve_model_vision([], "a", False) == (False, "top-level-default")
     assert resolve_model_vision(None, "a", False) == (False, "top-level-default")
+
+
+def test_find_model_entry_matches_by_name_or_by_api_id():
+    """The one matcher every entry lookup goes through.
+
+    It is asserted here as the *matcher*, apart from any caller, because that is
+    what makes the drift impossible: a caller that spells the rule itself is a
+    second copy, and the two copies disagreed (the vision resolution matched
+    name-or-model, the switch path's `context_window` lookup matched `name` only,
+    so a switch by API id inherited the previous model's window silently).
+    """
+    from emrg.config import find_model_entry
+
+    models = [{"name": "qwen-max", "model": "qwen3.8-max-preview", "context_window": 262144}]
+    assert find_model_entry(models, "qwen-max") is models[0]
+    assert find_model_entry(models, "qwen3.8-max-preview") is models[0]
+    assert find_model_entry(models, "qwen3") is None
+    assert find_model_entry([], "qwen-max") is None
+    assert find_model_entry(None, "qwen-max") is None
+
+
+def test_find_model_entry_skips_a_malformed_row_without_raising():
+    """The file is user-edited: one bad row must not take the lookup down.
+
+    A row that is not a mapping has no `name`/`model` to match on. Raising here
+    would put a `TypeError` on the `/model` path — a switch that dies is worse
+    than a row that is skipped, and the row after it still has to be found.
+    """
+    from emrg.config import find_model_entry
+
+    models = ["not-a-mapping", {"name": "good", "model": "x"}]
+    assert find_model_entry(models, "good") is models[1]
+    assert find_model_entry(models, "not-a-mapping") is None
