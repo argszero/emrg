@@ -486,6 +486,16 @@ A climb that returns to the workspace (`echo x > ../ws/out.txt`) is still
 allowed: the test is on the **resolved** target, not on the spelling, so it
 cannot turn `sub/../out.txt` into a refusal.
 
+A `cd` that stays **inside** the workspace moves the write site with it — the
+target is joined onto the directory the shell is in when it runs, not the one it
+started in — so `cd sub && echo x > ../back.txt` writes `<ws>/back.txt` and is
+allowed, while `cd sub && echo x > ../../worse.txt` climbs out of `<ws>/sub` and
+is refused (issue #1370). Proving which directory that is costs the shapes that
+cannot prove it, and those keep the refusal they had: a `;` or `||` chain (the
+`cd` may have failed, and then the shell never moved), a `( … )` group or a
+pipeline (the `cd` may be in a shell of its own), and a target written *before*
+the move.
+
 #### `$TMPDIR`, not `/tmp`
 
 The tier means `tempfile.gettempdir()` — `$TMPDIR`, which is

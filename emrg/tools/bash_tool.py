@@ -2423,6 +2423,148 @@ def _cwd_left_workspace(
     return None
 
 
+def _cd_statement(statement: list[str]) -> tuple[bool, str | None]:
+    """Whether a statement is a plain ``cd <dir>``, and the operand it names.
+
+    ``(False, None)`` is not a move at all. ``(True, None)`` is a move this walk
+    cannot place, and the three spellings that reach it are the ones a shell
+    answers without a directory this guard can read: a bare ``cd`` (which goes
+    ``$HOME``), ``cd -`` (``$OLDPWD``), and ``cd a b``, which the shell itself
+    refuses ("too many arguments") — a move that did not happen leaves the shell
+    where it was, so none of the three may set a join base.
+    """
+    i = 0
+    while i < len(statement) and _is_env_assignment(statement[i]):
+        i += 1
+    if i >= len(statement) or _command_word(statement[i]) != "cd":
+        return False, None
+    operands = [a for a in statement[i + 1:] if not a.startswith("-") or a == "-"]
+    if len(operands) != 1 or operands[0] == "-":
+        return True, None
+    return True, operands[0]
+
+
+def _resolve_move_operand(cmd: str, cwd: str, operand: str) -> str | None:
+    """Where a move's operand lands, or None when nothing can place it.
+
+    The same resolution `_cwd_left_workspace` makes for the moves it reads —
+    the environment, then the command's own earlier assignments (issue #1316's
+    scope), then the directory in effect at the move. ``None`` is "not a
+    directory this walk can name", never "keep the default".
+    """
+    expanded = os.path.expanduser(os.path.expandvars(operand))
+    if _UNRESOLVED_VAR_RE.search(expanded):
+        from_command = _resolve_from_command_assignment(cmd, operand)
+        if from_command is None:
+            return None
+        expanded = os.path.expanduser(os.path.expandvars(from_command))
+    if not _is_absolute_path(expanded):
+        expanded = os.path.join(cwd, expanded)
+    return os.path.realpath(expanded)
+
+
+def _cwd_at_write_site(cmd: str, workspace: str, token: str) -> str | None:
+    """The directory the shell writes ``token`` *from*, when a ``cd`` moved it.
+
+    The mirror of `_cwd_left_workspace`: that one asks where a move takes the
+    shell *out* of the workspace; this one where it takes it while staying
+    inside. Both exist because the boundary joins a relative target onto the
+    directory the child *starts* in, which is the right reading only while the
+    command writes from where it started. Measured on master: ``cd sub && echo
+    x > ../back.txt`` creates ``<workspace>/back.txt`` — inside — while the join
+    onto the start directory reads ``<workspace>/../back.txt``, refuses it, and
+    names a directory the file never appears in (issue #1370). ``cd`` into a
+    subdirectory and climbing back is the ordinary way to write *beside* a
+    subdirectory rather than in it, so this is a refusal the caller can only
+    work around by spelling the target absolutely.
+
+    Returns the directory in effect at the statement that writes ``token``, or
+    ``None`` when that cannot be proven — in which case the caller keeps the
+    directory the child starts in, which is the fail-closed reading. Each
+    bail-out below is a way this stream could name a directory the shell is not
+    in:
+
+    - **the token is written by exactly one statement.** The walk places a
+      *statement*, and ``..`` is measured from the directory in effect there, so
+      a token appearing in two statements has a write site the stream does not
+      say which of them names — and the *first* one is not the safe guess:
+      ``cd sub && echo ../back.txt && cd .. && echo x > ../back.txt`` really
+      writes outside, while that occurrence's directory reads it as inside.
+    - **only an ``&&`` chain may carry the move to the site.** ``;`` and ``||``
+      run the next statement whether or not the ``cd`` succeeded, and a ``cd``
+      that fails leaves the shell in the start directory — so the join would use
+      a directory the shell never reached. Measured: ``cd nosuchdir; echo x >
+      ../escape.txt`` and the ``||`` spelling of it both create the file
+      *outside* the workspace, and both are allowed the moment this test is
+      removed.
+    - **a grouping boundary, a pipeline or a background job is not read.** Each
+      can put a ``cd`` in a shell of its own, and the flat token stream cannot
+      tell which statements run inside one. Measured: ``cd sub && (cd .. && echo
+      x > ../back.txt)`` writes *outside* the workspace and is allowed as soon as
+      this bail-out is removed — the inner move is invisible to the walk, which
+      reads the parenthesis-led statement as no move at all. The same three tokens
+      end `_resolve_from_command_assignment`'s reading, for the same reason. The
+      price is the mirror case, ``cd sub && (echo x > ../back.txt)``, which
+      writes inside and stays refused.
+    - **a move this walk cannot resolve, or one that leaves the workspace.**
+      The second is `_cwd_left_workspace`'s case and it refuses those targets
+      already; the two must not disagree about which one answers a command.
+    - **a heredoc body left as text**, whose lines cannot be told from
+      statements.
+
+    A nested payload's own ``cd`` is deliberately not read: in ``sh -c 'cd sub;
+    echo x > ../f'`` the token stream cannot say whether the write is inside
+    that payload or beside it, and the conservative reading of the two is the
+    one that keeps the refusal. That is a false block of the family this
+    function fixes, kept rather than traded for a reading that can place the
+    write in the wrong directory.
+    """
+    masked = _mask_data_heredoc_bodies(cmd)
+    if not _no_heredoc_body_is_left_as_text(cmd, masked):
+        return None
+    tokens = _split_command_statements(masked)
+    if any(tok in ("|", "&", "(", ")") for tok in tokens):
+        return None
+    statements: list[list[str]] = [[]]
+    separators: list[str | None] = [None]
+    for tok in tokens:
+        if tok in _STATEMENT_SEPARATORS:
+            statements.append([])
+            separators.append(tok)
+        else:
+            statements[-1].append(tok)
+    sites = [k for k, st in enumerate(statements) if token in st]
+    if len(sites) != 1:
+        return None
+    site = sites[0]
+
+    allowed = [workspace] + list(_trusted_write_zones()) + list(_temp_write_roots())
+    cwd = os.path.realpath(workspace)
+    first_move: int | None = None
+    # Only the statements *before* the site can move the shell to where it
+    # writes: a redirect attached to the `cd` itself (`cd sub > ../f`) is set up
+    # before the `cd` runs, which is why the site's own statement is not read.
+    for k, st in enumerate(statements[:site]):
+        is_move, operand = _cd_statement(st)
+        if not is_move:
+            continue
+        if operand is None:
+            return None
+        dest = _resolve_move_operand(cmd, cwd, operand)
+        if dest is None:
+            return None
+        if not any(src and (_is_within(dest, src) or dest == src) for src in allowed):
+            return None
+        cwd = dest
+        if first_move is None:
+            first_move = k
+    if first_move is not None and any(
+        separators[k] != "&&" for k in range(first_move + 1, site + 1)
+    ):
+        return None
+    return cwd
+
+
 # The shell's own statement separators. A newline is one of them, and it is the
 # one the ordinary tokenizer cannot report: it is whitespace to `shlex`, so
 # `T=<dir>` and the write that follows it on the next line arrive as one
@@ -2832,7 +2974,19 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
             # before, and the test's omitted/declared property (issue #1359) is
             # preserved because both readings resolve against the directory the
             # child runs in and both then require the result to stay under it.
-            base = workdir_real if workdir_real else cwd_real
+            start_base = workdir_real if workdir_real else cwd_real
+            # …but the directory the child starts in is the join base only while
+            # the command writes *from* where it started. A `cd` that stays
+            # inside the workspace moves the write site too, and the same text
+            # then names a different file: `cd sub && echo x > ../back.txt`
+            # creates <workspace>/back.txt — inside — while the join onto the
+            # start directory reads <workspace>/../back.txt and refuses it,
+            # naming a directory the file never appears in (issue #1370). The
+            # join base is therefore the directory in effect at the write site,
+            # when the walk can prove which one that is; otherwise the start
+            # directory, which is the fail-closed reading.
+            site_base = _cwd_at_write_site(cmd, start_base, t)
+            base = site_base if site_base is not None else start_base
             real = os.path.realpath(os.path.join(base, expanded))
             if real in protected:
                 return False, (
@@ -2843,8 +2997,14 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
                     f"workspace-write sandbox: blocked destructive write to {t!r} "
                     "(would erase the daemon's data directory)"
                 ), "partial"
+            # The write-site directory may be the *join base* but never a write
+            # root as well: <workspace>/back.txt is not "inside
+            # <workspace>/sub", so substituting both readings would refuse two
+            # of the three rows the join fixes (issue #1370, measured). Only the
+            # join moves; containment stays a question about the directory the
+            # child starts in.
             relative_allowed = (
-                [base] + list(_trusted_write_zones()) + list(_temp_write_roots())
+                [start_base] + list(_trusted_write_zones()) + list(_temp_write_roots())
             )
             if not any(
                 src and (_is_within(real, src) or real == src)
