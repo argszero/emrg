@@ -2732,10 +2732,22 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
     protected = _protected_paths()
     emrg_home = os.path.realpath(os.path.expanduser("~/.emrg"))
     workdir_real = os.path.realpath(workdir) if workdir else None
-    # A relative target is in-workspace only while the command writes from
-    # where it started; a command that moves the shell out first (issue #1244)
+    # A relative target is in-workspace only while the command writes from where
+    # it started; a command that moves the shell out first (issue #1244)
     # makes the relative reading name a file the guard cannot place.
-    moved_out = _cwd_left_workspace(cmd, workdir_real) if workdir_real else None
+    #
+    # The cwd that question is asked about is this process's when the caller
+    # declared none — the child inherits it (execute() passes `cwd=workdir`, and
+    # a None cwd means "inherit"). Reading `workdir_real` alone meant an omitted
+    # workdir skipped the check entirely, so `cd <outside> && cat > f` was
+    # refused with the workspace declared and *allowed* without it (issue
+    # #1359). The boundary is not widened in exchange: `allowed_srcs` below still
+    # takes a declared workspace only, so an omitted workdir can never permit
+    # something a declared one refuses — for relative targets the two readings
+    # are now equal, and for absolute ones the omitted reading stays the
+    # stricter of the pair.
+    cwd_real = workdir_real if workdir_real else os.path.realpath(os.getcwd())
+    moved_out = _cwd_left_workspace(cmd, cwd_real)
     for t in targets:
         if t == "/dev/null":
             continue
