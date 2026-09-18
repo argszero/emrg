@@ -2482,6 +2482,26 @@ def _cwd_left_workspace(
     return None
 
 
+# Prefixes that run the word after them **in this shell**, so a move verb behind
+# one is the same move (issue #1385). `builtin cd <dir>` and `command cd <dir>`
+# move exactly as `cd <dir>` does — the prefix is a spelling of "resolve this as
+# the builtin, not as a function", and the shell's own directory is what moves.
+#
+# Nothing else in `_COMMAND_WRAPPERS` is transparent here, and the difference is
+# measured rather than argued: `env`, `sudo`, `timeout`, `xargs`, `nohup` and the
+# `-exec` family hand the next word to ``execve``. A `cd` *program* may exist
+# (macOS ships `/usr/bin/cd`), and `env cd sub` runs it in a child: the child
+# chdirs, the shell that sets the redirect up does not move, and the file lands
+# where the *start* directory says. Read the prefix as transparent and
+# `env cd sub && echo x > ../f` — which really writes outside the workspace —
+# comes back ALLOW (mutation arm 2 of issue #1385's measurement). `eval` is
+# deliberately not here either: it does move the shell, but its payload reaches
+# this walk as one opaque token (`eval 'cd sub'`) or as separate words whose
+# nesting `_cwd_left_workspace` already refuses, so a token-level reading of it
+# would cover the unquoted spelling only.
+_CWD_TRANSPARENT_PREFIXES = frozenset({"builtin", "command"})
+
+
 def _move_statement(statement: list[str]) -> tuple[bool, str | None]:
     """Whether a statement moves the shell's directory, and the operand it names.
 
@@ -2504,9 +2524,29 @@ def _move_statement(statement: list[str]) -> tuple[bool, str | None]:
     refuses ("too many arguments") — a move that did not happen leaves the shell
     where it was, so none of them may set a join base — plus ``pushd``'s stack
     forms above, whose destination is an entry an earlier ``pushd`` pushed.
+
+    A prefix from `_CWD_TRANSPARENT_PREFIXES` does not change the answer: the
+    move behind ``builtin``/``command`` is the same move, so the same operand is
+    read through it. That is the symmetry this walk owes `_cwd_left_workspace`,
+    which reads a command through `_runs_as_a_command` and therefore already saw
+    ``builtin cd sub`` as a move — while this walk read no move, kept the start
+    directory, and refused a write that really lands beside a subdirectory.
+    Measured (issue #1385, `/bin/sh`, `ws/sub` present): ``builtin cd sub && echo
+    x > ../f`` and ``command cd sub && echo x > ../f`` both create ``ws/f`` —
+    inside — and both were BLOCK before this line, naming ``ws/../f``, a
+    directory the file never appears in. The other rows of that issue's table
+    hold: `command cd <outside> && echo x > <outside>/f` and the relative
+    spelling of it stay refused, because a move this walk cannot place answers
+    ``None`` however it was spelled.
     """
     i = 0
     while i < len(statement) and _is_env_assignment(statement[i]):
+        i += 1
+    # The prefix is transparent to the move (issue #1385): `builtin cd <dir>` and
+    # `command cd <dir>` move *this* shell, which is the one that sets the
+    # redirect up. Only those two — see `_CWD_TRANSPARENT_PREFIXES` for why a
+    # word handed to `execve` must not be read through.
+    while i < len(statement) and _command_word(statement[i]) in _CWD_TRANSPARENT_PREFIXES:
         i += 1
     if i >= len(statement):
         return False, None
@@ -2612,6 +2652,14 @@ def _cwd_at_write_site(cmd: str, workspace: str, token: str) -> str | None:
     - **a move this walk cannot resolve, or one that leaves the workspace.**
       The second is `_cwd_left_workspace`'s case and it refuses those targets
       already; the two must not disagree about which one answers a command.
+      "Which one answers a command" includes the *prefix* dimension (issue
+      #1385): both walks ask `_move_statement`/`_runs_as_a_command`, so both read
+      a move behind `builtin`/`command` and both leave a word handed to `execve`
+      unread. `env` is where the two still part company — the cwd walk answers
+      `env -C <dir>` and follows a `cd` token behind any wrapper, this walk reads
+      neither, because the redirect belongs to the shell that did not move — and
+      that asymmetry is deliberate and measured, since reading `env cd sub` as a
+      move here would allow a write that really leaves the workspace.
     - **a heredoc body left as text**, whose lines cannot be told from
       statements.
 
