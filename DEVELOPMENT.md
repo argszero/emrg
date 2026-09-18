@@ -113,7 +113,7 @@ config.toml change rejected (previous config kept): TOMLDecodeError: ...
 config.toml change rejected (previous config kept): [update] delay_minutes is str, expected int
 ```
 
-**Update checking** (`[update]` section): `enabled = true|false` (default true) enables the periodic GitHub release check, and `delay_minutes` (default 1440) is how long after a release is published it becomes eligible (set `1` for immediate). Both keys are **hot-reloaded** like `[llm]`: edit the file and the next check (within a couple of seconds) uses the new values — no daemon restart. The check itself runs every 5 minutes — that interval is **not** configurable. The program only *triggers*: it never downloads an installer package, it starts an agent session (`emrg-upgrade`) that installs the equivalent of the release from the local evolution repo.
+**Update checking** (`[update]` section): `enabled = true|false` (default true) enables the periodic GitHub release check, and `delay_minutes` (default 1440) is how long after a release is published it becomes eligible (set `1` for immediate). Both keys are **hot-reloaded** like `[llm]`: edit the file and the reloader assigns the new values within a couple of seconds, so the next upgrade check reads them — no daemon restart. That check runs every 5 minutes, and the interval is **not** configurable. The program only *triggers*: it never downloads an installer package, it starts an agent session (`emrg-upgrade`) that installs the equivalent of the release from the local evolution repo.
 
 ---
 
