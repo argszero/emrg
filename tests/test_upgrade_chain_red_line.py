@@ -222,3 +222,44 @@ def test_a_prompt_without_a_forbidden_section_is_not_silently_healthy() -> None:
     """A missing section is a failure to measure, never a pass."""
     with pytest.raises(AssertionError):
         _forbidden_section("# A template with no Forbidden section")
+
+
+def test_the_rendered_host_prompt_carries_the_rule_not_merely_the_template() -> None:
+    """The artifact the reader gets, measured where `system.j2` is a *template*.
+
+    Every check above reads `system.j2` as text, which answers "is the rule in the
+    file?" — one level short of this file's own question, "is it in the prompt a host
+    session runs under?". A block can be in the file and in no render: wrap it in
+    `{% if false %}` and the file still carries every term while the prompt carries
+    none. Measured 2026-09-19 (`cyc20260919-060712`) on this branch: with the 附则三
+    block wrapped that way, the seven checks above stay green (**7 passed**) and the
+    daemon's own environment renders a prompt with the heading, `UpgradeManager.tick()`
+    and `install/version.txt` all absent — the 附则二 block, unwrapped, still present.
+    The tail of the template is unconditional today (the last `{%` construct sits at
+    line 110, both ⛔ blocks at 168 and 172), so that gap is dormant rather than live;
+    this check is what keeps it dormant, by asking the renderer instead of the file.
+
+    Rendered through the daemon's own environment (`_get_jinja_env`, which is what
+    `_build_system_prompt` uses) rather than a fresh `jinja2.Environment`: a second
+    environment could differ in `trim_blocks` / `lstrip_blocks` or in the loader path,
+    and the prompt under test would then be a prompt nobody receives. The context is
+    deliberately minimal — the blocks sit outside every conditional, so no context key
+    can remove them, and a render that loses them because of a *context* difference is
+    exactly what this check is for.
+    """
+    from emrg.server.daemon import _get_jinja_env  # noqa: PLC0415
+
+    rendered = _get_jinja_env().get_template("system.j2").render(
+        os_name="test", config_dir="/nonexistent"
+    )
+    block = _block_after(rendered, UPGRADE_HEADING)
+    assert block, (
+        "the rendered host prompt must carry the 附则三 block: it is present in "
+        "system.j2 but no render that a host session receives contains it"
+    )
+    missing = _missing_terms(block, UPGRADE_TERMS)
+    assert not missing, f"the rendered 附则三 block is missing terms: {missing}"
+    assert _block_after(rendered, STOP_HEADING), (
+        "the rendered host prompt must keep the 附则二 block"
+    )
+
