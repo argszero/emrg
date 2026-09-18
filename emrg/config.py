@@ -220,7 +220,12 @@ max_tokens = 8192
 temperature = 0.7
 context_window = 131072
 auto_compact_threshold = 0.0
-# vision: set to true if model supports OpenAI vision API (image_url content type)
+# vision: set to true if model supports OpenAI vision API (image_url content type).
+# This is the DEFAULT for every model that says nothing below: a [[llm.models]]
+# entry with its own `vision` key wins, and an entry without one (or no entry at
+# all) falls back to this value — it never inherits the previous model's answer.
+# The value actually in force is what the daemon reports, not this declaration:
+# the TUI shows it next to the model name in the status bar.
 vision = false
 
 # Additional models for /model switching (optional — add or remove as needed)

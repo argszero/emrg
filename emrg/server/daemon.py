@@ -1625,6 +1625,16 @@ class EmrgServer:
                 "started_at": self.start_time.isoformat(),
                 "pid": os.getpid(),
                 "model": self.llm.config.model,
+                # The *effective* image capability, not config.toml's declaration
+                # (rant 2026-09-17T16:53:02). It is the value the daemon acts on
+                # — resolved by the entry-key → top-level-default priority and
+                # moved by every `/model` switch and every `[llm] vision` reload —
+                # so a client can show it instead of the file's static value.
+                # `model_set` already carries it; sending it here too is what makes
+                # it visible to a client that merely connected and has not switched
+                # yet. The *source* stays a property of the switch: it is reported
+                # where the resolution happens, not as a running-state fact.
+                "vision": self.llm.config.vision,
                 # Rant 2026-08-20T18:30:57 + 2026-08-21T14:38:27：current_version =
                 # 本进程实际运行版本（启动时读入内存，进程生命周期内不变）；
                 # installed_version = 磁盘实时安装版本（升级 agent 可能已更新）。

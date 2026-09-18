@@ -50,3 +50,49 @@ class TestFormatStatusLeft:
 
         out = _format_status_left("main", "s_260727abcdef", "")
         assert "main (s_260727abcdef)" in out
+
+
+class TestEffectiveVisionIsVisible:
+    """The status bar shows the EFFECTIVE image capability, not the declaration.
+
+    Rant 2026-09-17T16:53:02: the daemon decides vision by a priority rule
+    (the model entry's own key, else the top-level `[llm] vision` default) and
+    that value moves on every `/model` switch — while the only thing a host
+    could see was `config.toml`'s static declaration, so the way to learn the
+    truth was to send an image and read the refusal. Both directions are pinned
+    here because the silent failure is symmetric: a vision model degraded to
+    text and a text-only model handed an image are indistinguishable from the
+    outside, and neither announces itself.
+    """
+
+    def test_the_effective_vision_is_shown_when_it_is_true(self):
+        from emrg.client.app import _format_status_left
+
+        out = _format_status_left("main", "s_260727", "gpt-4o", True)
+        assert out.endswith("[gpt-4o img]"), out
+
+    def test_the_effective_vision_is_shown_when_it_is_false(self):
+        """The other direction, and the one the host actually hit: a value of
+        False must be as visible as True — an absent marker would read as
+        "unknown", which is exactly the ambiguity being removed."""
+        from emrg.client.app import _format_status_left
+
+        out = _format_status_left("main", "s_260727", "deepseek-chat", False)
+        assert out.endswith("[deepseek-chat no-img]"), out
+
+    def test_an_unreported_vision_leaves_the_segment_unchanged(self):
+        """`None` = this server never said (an older daemon): no marker, and the
+        segment is byte-identical to what it printed before this change."""
+        from emrg.client.app import _format_status_left
+
+        out = _format_status_left("main", "s_260727", "deepseek-v4-flash", None)
+        assert out.endswith("[deepseek-v4-flash]"), out
+        assert out == _format_status_left("main", "s_260727", "deepseek-v4-flash")
+
+    def test_no_model_means_no_vision_marker_either(self):
+        """A capability with no model to attach to is not a capability: an empty
+        model segment must not gain a marker (and must not print brackets)."""
+        from emrg.client.app import _format_status_left
+
+        out = _format_status_left("main", "s_260727", "", True)
+        assert "[" not in out, out

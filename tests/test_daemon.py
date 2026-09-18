@@ -3395,3 +3395,40 @@ def test_set_model_frame_carries_the_effective_vision():
     assert model_set, "the requester gets a model_set frame"
     assert model_set[0]["vision"] is False, "the effective value, not the declaration"
     assert model_set[0]["vision_source"] == "entry"
+
+
+def test_pong_carries_the_effective_vision(tmp_path, monkeypatch):
+    """A client that has only just connected can show the effective capability.
+
+    Rant 2026-09-17T16:53:02, the display half. `model_set` already reports
+    `vision`, but that frame only exists after a switch — so a fresh client knew
+    nothing until the host happened to change models, which is why the only
+    reliable way to learn whether images worked was to send one and read the
+    refusal. Driven through `_process_message({"type": "ping"})`, the frame a
+    connecting client actually receives, and read twice: before and after a
+    switch, because a value that is right once can still be a copy.
+
+    Nothing here starts, stops or restarts a daemon; `Path.home` is pointed at
+    `tmp_path` so the installed-version read in the same frame is hermetic.
+    """
+    import emrg.server.daemon as daemon_mod
+
+    monkeypatch.setattr(daemon_mod.Path, "home", lambda: tmp_path)
+    server = _vision_server(
+        [{"name": "blind", "model": "deepseek-chat", "vision": False}],
+        current_vision=True, vision_default=True,
+    )
+
+    writer = _FakeWriter()
+    asyncio.run(server._process_message({"type": "ping"}, writer))
+    frame = _last_frame(writer)
+    assert frame["type"] == "pong"
+    assert frame["vision"] is True, "the running value, not config.toml's"
+
+    # …and it follows the resolution, with no second source of truth: the flag
+    # /model assigns is the flag the next pong reports.
+    asyncio.run(server._handle_set_model("blind", _FakeWriter()))
+    assert server.llm.config.vision is False
+    after = _FakeWriter()
+    asyncio.run(server._process_message({"type": "ping"}, after))
+    assert _last_frame(after)["vision"] is False
