@@ -381,6 +381,11 @@ export const ZH_DICT: Record<string, string> = {
   "sidebar.openSessions": "打开的会话",
   "app.noModels": "还没有配置模型",
   "app.goSettings": "去设置添加",
+  // 头部连接条上的生效图片能力（rant 2026-09-17T16:53:02）：显示的是 daemon 报告
+  // 的**生效值**，不是 config.toml 里 [[llm.models]] 的声明值 —— 两者可以不一致。
+  "app.visionOn": "图像",
+  "app.visionOff": "无图像",
+  "app.visionTitle": "daemon 实际生效的图片能力（不是 config.toml 的声明值）",
   "app.modelSwitchFailed": "切换模型失败了：{msg}",
   "app.modelSwitched": "已切换到模型 {model}。",
   "app.modelListFailed": "读取模型列表失败了：{msg}",
@@ -779,6 +784,9 @@ export const EN_DICT: Record<string, string> = {
   "sidebar.openSessions": "Open sessions",
   "app.noModels": "No models configured",
   "app.goSettings": "Add in Settings",
+  "app.visionOn": "images",
+  "app.visionOff": "no images",
+  "app.visionTitle": "The image capability the daemon is actually running with (not config.toml's declaration)",
   "app.modelSwitchFailed": "Failed to switch model: {msg}",
   "app.modelSwitched": "Switched to model {model}.",
   "app.modelListFailed": "Failed to load models: {msg}",

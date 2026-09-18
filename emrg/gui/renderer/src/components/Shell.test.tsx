@@ -166,6 +166,29 @@ describe("Shell (Batch 5 slice 3 chat wiring)", () => {
     expect(screen.getByTestId("conn-status").querySelector(".conn-dot")?.className).toContain("green");
   });
 
+  it("shows the daemon's effective image capability, not a declaration (rant 2026-09-17T16:53:02)", async () => {
+    const m = mockEmrg();
+    render(wrapper(<Shell />));
+    await waitFor(() => expect(m.onEvent).toHaveBeenCalledTimes(1));
+    // 没有读数 → 没有标记：null 既不是 true 也不是 false（宣告"支持图片"要靠 daemon 说）
+    m.emit({ type: "status", data: { connected: true, model: "claude-3.7" } });
+    await waitFor(() => expect(screen.getByTestId("conn-status").textContent).toContain("claude-3.7"));
+    expect(screen.queryByTestId("conn-vision")).not.toBeInTheDocument();
+
+    m.emit({ type: "pong", data: { identity: { instance_id: "sv1" }, model: "claude-3.7", vision: true } });
+    await waitFor(() => expect(screen.getByTestId("conn-vision").textContent).toBe("images"));
+    expect(screen.getByTestId("conn-vision").className).toContain("on");
+
+    // daemon 移动了生效值（/model 切到无视觉模型）→ 标记跟着变，不必等重连
+    m.emit({ type: "config_applied", data: { model: "kimi-k2", vision: false, applied: ["vision"] } });
+    await waitFor(() => expect(screen.getByTestId("conn-vision").textContent).toBe("no images"));
+    expect(screen.getByTestId("conn-vision").className).toContain("off");
+
+    // 断连后不再宣称任何能力（模型名也退回 disconnected 文案）
+    m.emit({ type: "status", data: { connected: false } });
+    await waitFor(() => expect(screen.queryByTestId("conn-vision")).not.toBeInTheDocument());
+  });
+
   it("shows the disconnected banner when the active session broadcasts disconnected", async () => {
     const m = mockEmrg();
     render(wrapper(<Shell />));

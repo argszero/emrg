@@ -656,6 +656,18 @@ export function Shell() {
         <span className="react-shell-conn" data-testid="conn-status" title={t("sidebar.statusTitle")}>
           <span className={`conn-dot ${appState.connected ? "green" : "gray"}`} />
           {appState.connected ? appState.model : t("copy.disconnected")}
+          {appState.connected && appState.vision !== null ? (
+            // 生效的图片能力，与 TUI 状态栏的 `[model img|no-img]` 对齐（rant
+            // 2026-09-17T16:53:02）：读的是 daemon 报的 live 值，所以改 config.toml
+            // 里的条目声明不会假装移动它 —— 只有 daemon 真的移动了才变。
+            <span
+              className={`react-shell-vision ${appState.vision ? "on" : "off"}`}
+              data-testid="conn-vision"
+              title={t("app.visionTitle")}
+            >
+              {appState.vision ? t("app.visionOn") : t("app.visionOff")}
+            </span>
+          ) : null}
         </span>
       </header>
       <div className="react-shell-body">

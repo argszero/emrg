@@ -231,6 +231,24 @@
   opacity: 0.75;
 }
 
+/* 生效图片能力标记（rant 2026-09-17T16:53:02）：这是 daemon 报的 live 值，不是
+   config.toml 的声明值 —— 颜色区分"能看图"与"看图会被降级"，免得靠发图反推。 */
+.react-shell-vision {
+  padding: 1px 6px;
+  border-radius: 10px;
+  border: 1px solid currentColor;
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+.react-shell-vision.on {
+  color: var(--accent, #7dd3fc);
+}
+
+.react-shell-vision.off {
+  color: var(--text-2);
+}
+
 .react-shell-session {
   flex: 1;
   min-width: 0;
