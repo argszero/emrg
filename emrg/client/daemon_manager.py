@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -350,6 +351,18 @@ def _startup_failure_detail(
 _START_WINDOW_ENV = "EMRG_START_TIMEOUT"
 _START_WINDOW_DEFAULT_SECONDS = 4.5
 _START_WINDOW_POLL_SECONDS = 0.3
+# The shape a duration is written in: a plain decimal number, ASCII digits only.
+#
+# Spelled out here rather than left to `float()`, because "float-shaped" is not the
+# same test as "a duration", and because `float()`'s accepted set is *not* the one the
+# GUI's `Number()` implements — so the two entry points disagreed on 7 of the 28 values
+# in `tests/data/start_window_shapes.json` (measured on #1404's head: `0x10` is sixteen
+# to `Number()` and a typo to `float()`; `1_000` is a thousand seconds to `float()` and
+# a typo to `Number()`; `４` and `٣` are digits to `float()` and letters to `Number()`).
+# Both sides now name this same shape, and both suites read that one list: a value the
+# GUI refuses is a value the client refuses, or "the two read the same variable" is a
+# sentence about a variable rather than about the window it is supposed to set.
+_START_WINDOW_SHAPE = re.compile(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?")
 
 
 def _start_window_seconds() -> float:
@@ -365,23 +378,25 @@ def _start_window_seconds() -> float:
     fail**, and a typo in a tuning variable would be exactly that. It is logged
     once, where a host who is reading the client log can see it.
 
-    Two shapes that parse as a float are rejected anyway, because "float-shaped"
-    is not the same test as "a duration": a non-positive number would produce a
-    loop that never waits and then reports a start it never waited for, and a
-    non-finite one (`inf`, `nan`) raises inside the arithmetic that turns seconds
-    into polls. Whitespace-only counts as unset — that is how a shell spells it.
+    "Malformed" is decided by ``_START_WINDOW_SHAPE``, not by whether the string
+    parses: `1_000` parses (and would wait sixteen minutes), `４` parses (and would
+    wait four seconds) — both are typos, and both are refused. What is left for the
+    sign test below: a non-positive number would produce a loop that never waits and
+    then reports a start it never waited for. (`inf` / `nan` cannot reach it any
+    more — the shape has no spelling for them — and the ``isfinite`` check stays as
+    the arithmetic's own guard.) Whitespace-only counts as unset — that is how a
+    shell spells it.
     """
     raw = (os.environ.get(_START_WINDOW_ENV) or "").strip()
     if not raw:
         return _START_WINDOW_DEFAULT_SECONDS
-    try:
-        seconds = float(raw)
-    except ValueError:
+    if not _START_WINDOW_SHAPE.fullmatch(raw):
         logger.warning(
             "%s=%r is not a number — using %.1fs",
             _START_WINDOW_ENV, raw, _START_WINDOW_DEFAULT_SECONDS,
         )
         return _START_WINDOW_DEFAULT_SECONDS
+    seconds = float(raw)
     if not math.isfinite(seconds) or seconds <= 0:
         logger.warning(
             "%s=%r is not a positive number of seconds — using %.1fs",

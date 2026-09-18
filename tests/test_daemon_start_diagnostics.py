@@ -320,6 +320,68 @@ def test_a_window_too_short_for_one_poll_still_polls_once(monkeypatch):
     assert dm._start_window_attempts() == 1
 
 
+# ── the shape, against the one list both entry points read ──────────────────
+
+SHAPE_FIXTURE = Path(__file__).resolve().parent / "data" / "start_window_shapes.json"
+
+
+class _Warnings(logging.Handler):
+    """What the resolver logged. Attached to its logger rather than read through
+    `caplog`: this asserts on what the module said, not on what the root logger
+    happened to keep, so a conftest that reconfigures logging cannot quiet it."""
+
+    def __init__(self):
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record):
+        self.messages.append(record.getMessage())
+
+
+def test_every_shape_in_the_shared_list_means_what_it_says(monkeypatch):
+    """The client half of `tests/data/start_window_shapes.json`.
+
+    The same file is read by the GUI's suite (`emrg/gui/test/daemon_client.test.js`), so a
+    value the two resolvers disagree about cannot pass on one side only. That is the claim
+    #1404 makes — "the GUI honours the start window the TUI honours" — and it was untested
+    before this list existed: measured on #1404's head, `float()` and `Number()` disagreed on
+    7 of these values, and `EMRG_START_TIMEOUT=0x10` gave the GUI a 16 s window while the
+    client fell back to 4.5 s. The fixture is the authority here, not this docstring.
+
+    The malformed half is the load-bearing one (`1_000` is a thousand seconds to `float()`,
+    `４` is four), so its size is asserted too: a list that quietly lost it would still pass.
+    """
+    import json
+
+    cases = json.loads(SHAPE_FIXTURE.read_text(encoding="utf-8"))["values"]
+    malformed = [c for c in cases if c["kind"] == "malformed"]
+    assert len(cases) >= 25, f"the shared list shrank: {len(cases)} values"
+    assert len(malformed) >= 10, f"the malformed half shrank: {len(malformed)} values"
+
+    warnings = _Warnings()
+    dm.logger.addHandler(warnings)
+    try:
+        for case in cases:
+            raw, kind = case["value"], case["kind"]
+            warnings.messages.clear()
+            monkeypatch.setenv(dm._START_WINDOW_ENV, raw)
+            seconds = dm._start_window_seconds()
+            warned = any(dm._START_WINDOW_ENV in m for m in warnings.messages)
+
+            if kind == "duration":
+                assert seconds == pytest.approx(case["seconds"]), raw
+                assert not warned, f"{raw!r} is a duration and must not warn"
+                assert dm._start_window_attempts() >= 1, raw
+            elif kind == "malformed":
+                assert seconds == dm._START_WINDOW_DEFAULT_SECONDS, f"{raw!r} must fall back"
+                assert warned, f"{raw!r} must warn — a silent fallback hides the typo"
+            else:  # "unset"
+                assert seconds == dm._START_WINDOW_DEFAULT_SECONDS, raw
+                assert not warned, f"{raw!r} is how a shell says unset; it must not warn"
+    finally:
+        dm.logger.removeHandler(warnings)
+
+
 # ── a stop is not a crash ───────────────────────────────────────────────────
 
 

@@ -1210,8 +1210,58 @@ test("#1276 GUI：非正/非有限/非数字 → 回落默认并告警（调参�
   );
 });
 
-test("#1276 GUI：真实 spawn 路径把解析出的窗口交给等待（spawn 打桩，不拉起 daemon）", async () => {
-  const childProcess = require("child_process");
+test("#1276 GUI：取值形态与客户端一致（同一份清单，两侧的测试都读它）", () => {
+  const fixture = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, "..", "..", "..", "tests", "data", "start_window_shapes.json"), "utf8",
+    ),
+  );
+  const cases = fixture.values;
+  const malformed = cases.filter((c) => c.kind === "malformed");
+  assert.ok(cases.length >= 25, `清单缩水：${cases.length} 个取值`);
+  assert.ok(malformed.length >= 10, `坏值那一半缩水：${malformed.length} 个`);
+
+  for (const c of cases) {
+    const warned = [];
+    const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+    const ms = client._startWindowMs({ EMRG_START_TIMEOUT: c.value });
+    // 清单说的是这个值**含义**（秒），两侧一致；"至少一个轮询"是各自实现里的下界，
+    // 见下面那条测试。客户端的下界在 `_start_window_attempts()`（max(1, ...)），
+    // GUI 的在 `_startWindowMs` 里 —— 位置不同，规则同一条。
+    const expected = Math.max(c.seconds * 1000, 300);
+    if (c.kind === "duration") {
+      assert.ok(Math.abs(ms - expected) < 1e-6, `${c.value} 应按秒换算，得到 ${ms}`);
+      assert.strictEqual(warned.length, 0, `${c.value} 是合法时长，不该告警`);
+    } else {
+      assert.strictEqual(ms, 5_000, `${c.value} 应回落 GUI 自己的默认值`);
+      if (c.kind === "malformed") {
+        assert.strictEqual(warned.length, 1, `${c.value} 必须告警——静默回落会掩盖笔误`);
+      } else {
+        assert.strictEqual(warned.length, 0, `${c.value} 是"未设置"的写法，不该告警`);
+      }
+    }
+  }
+});
+
+test("#1276 GUI：报告说不出它没等过的界（低于一个轮询的窗口被抬到 0.3s）", async () => {
+  const client = new DaemonClient();
+  client.isRunning = async () => false;
+  // 没有下界时：窗口 10ms，真的等 ~0.3s，文案却说 "within 0.0s" —— 实测 303ms。
+  assert.strictEqual(client._startWindowMs({ EMRG_START_TIMEOUT: "0.01" }), 300);
+  assert.strictEqual(client._startWindowMs({ EMRG_START_TIMEOUT: "0.001" }), 300);
+  const t0 = Date.now();
+  await assert.rejects(
+    client._awaitDaemonReady(
+      { exitCode: null }, client._logMark(logFile()),
+      client._startWindowMs({ EMRG_START_TIMEOUT: "0.01" }),
+    ),
+    (err) => err.message.includes("failed to start within 0.3s"),
+  );
+  // 说 0.3s，就真的等过至少 0.3s（客户端对同一个取值也报 0.3s）
+  assert.ok(Date.now() - t0 >= 250, "报告是下界：不能等得比它说的还短");
+});
+
+test("#1276 GUI：真实 spawn 路径把解析出的窗口交给等待（spawn 打桩，不拉起 daemon）", async () => {  const childProcess = require("child_process");
   const { EventEmitter } = require("events");
   const origSpawn = childProcess.spawn;
   const origTimeout = process.env.EMRG_START_TIMEOUT;

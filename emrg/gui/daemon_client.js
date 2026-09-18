@@ -47,6 +47,10 @@ const AUTH_TIMEOUT_MS = 10_000;
 const SPAWN_WAIT_MS = 5_000;
 const SPAWN_WAIT_POLL_MS = 300;
 const START_WINDOW_ENV = "EMRG_START_TIMEOUT";
+// 一个"时长"写成的形态：纯十进制数，只认 ASCII 数字。与 emrg/client/daemon_manager.py
+// 的 `_START_WINDOW_SHAPE` 是同一个形态（那边用 re.fullmatch，这边锚定 ^...$），
+// 两侧的测试读同一份清单 `tests/data/start_window_shapes.json`。
+const START_WINDOW_SHAPE = /^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/;
 const PENDING_TIMEOUT_MS = 5_000;
 // Rant 2026-08-09T13:16:36 ⑤（防风暴总闸）：单个"连接生命周期"内最多 spawn
 // MAX_SPAWN_ATTEMPTS 次 daemon——之后不再拉起，只把真实错误（含 emrgd.log 尾部）
@@ -360,9 +364,15 @@ class DaemonClient {
       await new Promise((r) => setTimeout(r, SPAWN_WAIT_POLL_MS));
     }
     throw new Error(
-      // 报**真的等过**的那个界，不是宿主敲的那个数：窗口按 0.3s 的轮询量化，与
-      // daemon_manager.py 的 `failed to start within {attempts * delay:.1f}s` 同一句法，
-      // 于是两条入口的失败文案能被同一句话描述。
+      // 报的是这个循环真正守住的那个界：`deadline` 就是 `Date.now() + waitMs`，而
+      // `waitMs` 已被 `_startWindowMs` 抬到至少一个轮询（0.3s）——所以它是一句能为真
+      // 的话，且与 daemon_manager.py 的 `failed to start within {attempts * delay:.1f}s`
+      // 同一句法，两条入口的失败文案能被同一句话描述。
+      //
+      // 量化的部分要说清：客户端把窗口量化成 `attempts` 个轮询、报的是那个乘积；这条
+      // 路径守的是 deadline，**可以多等最多一个轮询**（先探测、后睡，睡完才回到条件），
+      // 实测 asked 1.0 → 实际 1205ms、报 1.0s。所以这个数是下界，不是一个精确值——
+      // 两种口径各自为真，值不必相等（同一个 1.0，客户端报 0.9s）。
       `emrgd failed to start within ${(waitMs / 1000).toFixed(1)}s` +
       this._startupFailureDetail(mark, child, spawnState, stderrFile)
     );
@@ -375,13 +385,29 @@ class DaemonClient {
    * ——宿主给 TUI 设过的值对 GUI 同样生效，而不是两条入口各有一个只有源码能改的窗口。
    *
    * 取值不合法时回落到默认并告警，**绝不抛**：与 `_truncate_start_stderr` 同一条规则
-   * ——一个诊断/调参用的变量不得成为启动失败的原因。`Number()` 的可用性在此处够用：
-   * 空串与非数字都是 NaN（空串在下面被单独当作"未设置"先返回），`Infinity`/`nan` 被
-   * `Number.isFinite` 挡下，非正数被 `<= 0` 挡下 —— 与 Python 侧拒绝的是同一批形态。
+   * ——一个诊断/调参用的变量不得成为启动失败的原因。
+   *
+   * 形态由 `START_WINDOW_SHAPE` 判定，**不用裸 `Number()`**：`Number()` 认识
+   * `0x10`（宿主的笔误在 GUI 这边变成 16s 的窗口，而客户端读同一句回落 4.5s）、
+   * `0b101`、`0o17` 与 `Infinity`，而 Python 的 `float()` 认识 `1_000`（一千秒）与
+   * `４`/`٣` 这类别的数字系统。两侧各写一处同一个形态，两侧的测试读同一份清单
+   * （`tests/data/start_window_shapes.json`）——在一个测过的形态集合上，"两条入口读
+   * 同一个变量"才是关于窗口的句子，而不是关于变量名的句子。
+   *
+   * 下界是一个轮询，与客户端 `_start_window_attempts()` 的 `max(1, ...)` 相同。
+   * 没有它，`EMRG_START_TIMEOUT=0.01` 会真的等 ~0.3s，报告却说 "within 0.0s"
+   * ——那句话点名了一个它没有等过的界（实测：10ms 的窗口，实际 303ms）。
    */
   _startWindowMs(env = process.env) {
     const raw = String(env[START_WINDOW_ENV] ?? "").trim();
     if (!raw) return SPAWN_WAIT_MS;
+    if (!START_WINDOW_SHAPE.test(raw)) {
+      this.logger.warn(
+        `${START_WINDOW_ENV}='${raw}' is not a number of seconds — ` +
+        `using ${SPAWN_WAIT_MS / 1000}s`
+      );
+      return SPAWN_WAIT_MS;
+    }
     const seconds = Number(raw);
     if (!Number.isFinite(seconds) || seconds <= 0) {
       this.logger.warn(
@@ -390,7 +416,7 @@ class DaemonClient {
       );
       return SPAWN_WAIT_MS;
     }
-    return seconds * 1000;
+    return Math.max(seconds * 1000, SPAWN_WAIT_POLL_MS);
   }
 
   async startDaemon() {
