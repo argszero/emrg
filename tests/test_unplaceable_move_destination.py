@@ -241,12 +241,18 @@ def test_the_literal_move_out_is_refused_for_its_own_reason():
 
     The two reasons are distinguishable, and they should stay that way: this one
     names the *directory*, the unplaceable one names the *text*.
+
+    The reason carries the directory the way the *host* spells it, and on Windows
+    that is the backslash form (`C:\\\\...`) while a command line may have written it
+    with forward slashes — the walk resolves both to the same directory. So the
+    assertion accepts either spelling rather than pinning one platform's; the row
+    that matters is that a directory is named at all.
     """
     allowed, reason, _enforcement = _check_sandbox(
         f"cd {spelled(OUTSIDE)} && echo x > f", WW, WORKDIR
     )
     assert allowed is False
-    assert spelled(OUTSIDE) in (reason or ""), reason
+    assert any(s in (reason or "") for s in {spelled(OUTSIDE), os.path.realpath(OUTSIDE)}), reason
     assert _cwd_left_workspace(f"cd {spelled(OUTSIDE)} && echo x > f", WORKDIR) == os.path.realpath(OUTSIDE)
 
 
