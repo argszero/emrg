@@ -298,6 +298,117 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
     if opt.startswith("-") and not opt.startswith("--")
 )
 
+# `zip` writes the archive, and the archive is the **first** operand — the
+# opposite end of the operand list from `cp`/`mv`/`rsync`, whose destination is
+# the last one. Every operand rule the walk already has reads the last operand or
+# every operand, so none of them reaches it and the archive was named by nothing.
+#
+# Measured on the host's own binary (`/usr/bin/zip`, Info-ZIP 3.0, 2026-09-19):
+# one fresh directory per row holding `f` and `g`, `a.zip` pre-built where the row
+# needs one, and the result read back off disk as `st_mtime_ns` plus a content
+# hash (the hash alone cannot see an in-place rewrite of identical bytes, which is
+# exactly what `zip a.zip f` does when `f` is unchanged) —
+#
+#   zip a.zip f                a.zip CREATED              (no archive yet)
+#   zip a.zip f                a.zip REWRITTEN            (archive exists)
+#   zip -q -r a.zip .          a.zip CREATED
+#   zip -m a.zip f g           a.zip CREATED, f AND g GONE
+#   zip --move a.zip f         a.zip CREATED, f GONE
+#   zip -d a.zip f             a.zip REWRITTEN            (entry deleted)
+#   zip -u a.zip g             a.zip REWRITTEN
+#   zip -o a.zip f             a.zip REWRITTEN
+#   zip -T a.zip f             a.zip REWRITTEN            mtime moved
+#   zip -T a.zip               read    "test of a.zip OK" mtime untouched
+#   zip -sf a.zip [f]          read    "Would Add/Update:" mtime untouched
+#   zip --show-files a.zip f   read    same line           mtime untouched
+#   zip -su a.zip / -sU a.zip  read    rc=16, nothing written
+#   zip -h a.zip f             read    help, nothing written
+#   zip -h2 a.zip f            read    extended help, nothing written
+#   zip -L a.zip f             read    licence, nothing written
+#   zip --help a.zip f         read    help, nothing written
+#   zip --version a.zip f      read    help, nothing written
+#   zip a.zip                  nothing rc=12 "Nothing to do!"
+#   zip -d a.zip               nothing rc=12
+#   zip -v a.zip               nothing rc=12
+#   zip -l a.zip f             a.zip CREATED            lowercase `-l` is LF->CRLF
+#   zip -v a.zip f             a.zip REWRITTEN          uppercase `-v` is verbose
+#   zip -m a.zip f -x f        nothing rc=12             the exclusion won
+#
+# Four consequences, all measured rather than read off the usage line:
+#
+# 1. A run with **no list** writes nothing, whatever the mode: `zip a.zip`,
+#    `zip -d a.zip` and `zip -v a.zip` each exit 12 with "Nothing to do!". So the
+#    archive is named only when a second operand follows it, and `-T` needs no
+#    rule of its own — `zip -T a.zip` is the *test* form and its one-operand shape
+#    is already the "nothing written" case.
+# 2. `-T` is therefore **not** a read. With a list it rewrites the archive
+#    (`zip -T a.zip f`, mtime moved), which is the lz4 `-l` lesson again: a
+#    spelling that is a read in one shape and a write in another cannot be read
+#    as a flag.
+# 3. `-m`/`--move` **deletes** every listed file once it is archived, so under it
+#    the operands after the archive are write targets too, not inputs.
+# 4. The read spellings are matched as **whole tokens, case-sensitively**: `-sf`
+#    is show-files while `-f` is freshen (a write), `-L` is the licence while `-l`
+#    is the LF->CRLF conversion (a write, measured above). A letter scan — the
+#    shape the compressor family uses — would conflate both pairs.
+#
+# 5. `-P <password>` is the family's **sixth** spaced value, and it was the one
+#    this table was short. Measured on the same binary 2026-09-20, one fresh
+#    directory per row holding `f`:
+#
+#      zip -P secret a.zip f     rc=0, **a.zip created** — the archive is still the
+#                                first operand, the password is an option's value
+#      zip -P a.zip f            rc=12 nothing written (`a.zip` was eaten as the
+#                                password, so `f` is the archive with no list)
+#      zip -Psecret a.zip f      rc=0, a.zip created — the **attached** spelling
+#      zip -P secret a.zip       rc=12 nothing written
+#
+#    The attached spelling never needed the table (the token begins with `-`, so
+#    `_positional_args` drops it either way), which is exactly why the spaced one
+#    went unnoticed: with `-P` absent from the table the walk named the
+#    **password** as the archive. That is the wrong name `_positional_args`'
+#    docstring calls a guard nobody can trust *and* it is a hole in the direction
+#    this rule exists for — measured through the predicate on the branch this
+#    table was written on: `zip -P ./pw <outside>/a.zip f` named `./pw` and was
+#    **allowed at `workspace-write`** while really rewriting the archive outside
+#    every allowed root, because the wrong token resolved inside the workspace.
+#
+# 6. Three more spaced values were still missing from the table after that fix —
+#    `-tt <date>`, `-Z <cm>` and `-lf <path>` — each measured the same way
+#    (2026-09-20, one fresh directory per row holding `f`):
+#
+#      zip -tt 20200101 a.zip f  rc=12, "invalid date entered for -tt option —
+#                                use mmddyyyy or yyyy-mm-dd": the option **ate**
+#                                the token, so with a valid date the archive is
+#                                whatever follows it
+#      zip -Z store a.zip f      rc=0, a.zip created, and **no file named
+#                                `store`** — the method name is consumed
+#      zip -lf ./log a.zip f     rc=0, a.zip created, `log.log` created
+#      zip -lf./log2 a.zip f     rc=0, `log2.log` created — the attached spelling
+#
+#    The first two are values that are never paths, so the table is all they
+#    need. `-lf` is different: its value **is** a path zip writes, so the table
+#    alone would stop naming it. Three properties decide how it is named, all
+#    measured on the same binary:
+#
+#      zip -sf -lf ./log a.zip   rc=0, the listing printed and `log.log` CREATED —
+#                                a read spelling still writes the logfile, so it
+#                                has to survive the read short-circuit
+#      zip -lf ./log a.zip       "zip error: Nothing to do!" and `log.log` still
+#                                CREATED — so it survives the writes-nothing case
+#      zip -lf ./log3 a.zip f    `log3.log` written: zip appends `.log` when the
+#                                value does not already end in it, which lands in
+#                                the same directory, so naming the token as
+#                                written is containment-equivalent
+_ZIP_OPTIONS_WITH_VALUE = frozenset({
+    "-b", "-t", "-tt", "-n", "-s", "-TT", "-P", "-Z", "-lf",
+})
+_ZIP_READ_TOKENS = frozenset({
+    "-sf", "-su", "-sU", "-h", "-h2", "-L", "--help", "--version",
+    "--show-files",
+})
+_ZIP_MOVE_FLAGS = frozenset({"-m", "--move"})
+
 # Verbs that *create* every path named by an operand (`touch a b c`,
 # `mkdir -p a/b`). They were invisible to the write-target walk (issue #1398):
 # with no target named, the loop that judges targets never ran, so both checked
@@ -361,18 +472,73 @@ _DESTINATION_LAST_VERBS = frozenset({"ln", "cp", "mv", "install", "link"})
 #
 # `-n` is the dry-run letter, and it is the one letter in this family that turns
 # the run into a read; every rsync short option that takes a *value* (`-e`, `-f`,
-# `-T`, `-M`, `-B`) has a different letter, so no value can be mistaken for it,
-# while `--dry-run`, `--list-only` and `-n` inside a cluster (`-an`, `-avzn`) all
+# `-T`, `-M`, `-B`, and GNU's `-@`) has a different letter, so no value can be
+# mistaken for it (the table below is where those spellings are enumerated), while
+# `--dry-run`, `--list-only` and `-n` inside a cluster (`-an`, `-avzn`) all
 # mean the same thing.
 _RSYNC_READ_LETTERS = frozenset({"n"})
 _RSYNC_READ_LONG = frozenset({"--dry-run", "--list-only"})
 
+# The options that take their value as the **next token**. Without this table a trailing
+# spaced value displaces the destination: consumed as an operand, it becomes the last
+# one, which is the position the rule above reads as `DEST`.
+#
+# Measured on master `edba48ca` with the real predicate, nothing executed, the
+# destination outside every allowed root: `rsync -a src/ /out/dest/ --exclude pat`
+# reported `['pat']` and **ALLOW at both tiers**, while the same command without the
+# trailing option reported `['/out/dest/']` and was refused — so the option's value, not
+# the operand rule, was what displaced it. The run really does write the destination:
+# `rsync -a src/ dst/ --exclude pat` in a scratch tree left the file at `dst/` (rc=0).
+# The same displacement was measured for `-e ssh`, `-f …`, `-B …`, `-T …`,
+# `--out-format …`, and for the clustered `-ve ssh`. Option-**first** spellings
+# (`rsync -a --exclude pat src/ dst/`) were already correct, which is why the file's
+# other tests never caught it: they pin that spelling and the attached `--exclude=pat`.
+#
+# The table is keyed by option *shape*, not by run, so it must cover both implementations
+# the guard meets. On this host (`openrsync`, "rsync version 2.6.9 compatible",
+# 2026-09-20) each entry was measured in a scratch tree against flag controls
+# (`--delete`, `--stats`, `--progress`, `-v`, `-r` all came back *not* value-taking, so
+# the discriminator was shown to discriminate before it was believed): an entry is listed
+# when the following token was consumed — rc=0 with the extra source left uncopied, or a
+# diagnostic naming that very token as a bad numeric/filter/directory argument. The long
+# options openrsync rejects outright ("unknown option") are still listed when GNU rsync
+# takes a value for them: an option the running tool rejects cannot have a path for a
+# value either, and CI runs GNU rsync, where it takes one.
+_RSYNC_OPTIONS_WITH_VALUE = frozenset({
+    # Short spellings, measured here. `-@` is GNU's `--modify-window`, which openrsync
+    # spells in the long form only (listed below).
+    "-e", "-f", "-B", "-M", "-T", "-@",
+    # Measured value-taking on the installed openrsync.
+    "--exclude", "--include", "--filter", "--exclude-from", "--files-from",
+    "--chmod", "--bwlimit", "--timeout", "--max-size", "--log-file",
+    "--out-format", "--log-format", "--log-file-format", "--suffix",
+    "--backup-dir", "--temp-dir", "--partial-dir", "--link-dest", "--rsync-path",
+    "--port", "--protocol", "--sockopts", "--address", "--modify-window",
+    "--compress-level", "--checksum-seed", "--contimeout", "--max-delete",
+    "--write-batch", "--only-write-batch", "--password-file",
+    # GNU-only spellings: rejected here, value-taking there.
+    "--min-size", "--max-alloc", "--compare-dest", "--copy-dest",
+    "--checksum-choice", "--cc", "--compress-choice", "--zc",
+    "--compress-threads", "--zt", "--skip-compress", "--block-size", "--stderr",
+    "--info", "--debug", "--usermap", "--groupmap", "--chown", "--early-input",
+    "--outbuf", "--stop-at", "--stop-after", "--time-limit", "--confine-root",
+    "--config", "--dparam", "--remote-option", "--copy-as", "--iconv",
+})
+
+# The letters of the short entries above, **derived** rather than written twice. A
+# trailing value can also arrive inside a cluster, where an exact-token test finds
+# nothing: `rsync -a src/ dst/ -ve ssh` carries its value in the cluster's last letter,
+# and a cluster's last letter is the one that takes the value.
+_RSYNC_SHORT_VALUE_LETTERS = frozenset(
+    opt[1] for opt in _RSYNC_OPTIONS_WITH_VALUE if len(opt) == 2 and opt[0] == "-"
+)
+
 # Named residual of the rule above: `--write-batch=<file>` /
 # `--only-write-batch=<file>` make rsync write a *second* path — the option's own
 # value — beside the destination operand. It is left unnamed because a batch file
-# is a debugging artefact of a transfer, not the transfer, and adding it means
-# reading one more option's value in both spellings; the destination operand this
-# rule exists for is named either way.
+# is a debugging artefact of a transfer, not the transfer; the destination operand
+# this rule exists for is named either way, and the table below consumes the value
+# in both spellings so it is never mistaken for that operand.
 
 # `split` writes a **family** of derived paths, and its last operand is the only
 # place their common prefix is spelled: `split -b 3 in.txt pre` creates `preaa`,
@@ -1108,7 +1274,10 @@ def _rsync_run_is_a_read(tokens: list[str], i: int) -> bool:
 
 
 def _positional_args(
-    tokens: list[str], i: int, options_with_value: frozenset | None = None
+    tokens: list[str],
+    i: int,
+    options_with_value: frozenset | None = None,
+    cluster_value_letters: frozenset[str] = frozenset(),
 ) -> list[str]:
     """The non-option *operands* of the command starting at ``tokens[i]``.
 
@@ -1125,6 +1294,14 @@ def _positional_args(
     takes nothing for `ln`), so a caller that knows its verb passes that verb's
     table. Omitting it keeps the historical flat table, which is what the
     earlier callers (`rm`, `mv`, `cp`, `find`, the in-place writers) still read.
+
+    ``cluster_value_letters`` is the table's **short letters**, and it is opt-in: a
+    value can also arrive inside a cluster, where the exact-token test above finds
+    nothing (``rsync -a src/ dst/ -ve ssh`` carries `ssh` as `-ve`'s value, since a
+    cluster's last letter is the one that takes one). It stays opt-in because adding
+    the rule to a caller that did not ask for it can *lose* a destination rather than
+    gain one: `cp -at <dir> src` is read by `_target_directory_values`, which does not
+    parse clusters, so consuming `<dir>` here would leave one operand and name nothing.
 
     A ``--`` **ends option parsing**, and that sentence was here before the loop
     below obeyed it (issue #1433): the loop skipped the ``--`` and went on
@@ -1210,6 +1387,12 @@ def _positional_args(
             # `-s0` / `--size=0` carry their value in the same token; only the
             # spaced form consumes the next one.
             if tok in table:
+                skip_next = True
+            elif (
+                cluster_value_letters
+                and not tok.startswith("--")
+                and tok[-1] in cluster_value_letters
+            ):
                 skip_next = True
             elif letters:
                 cluster = _short_cluster_option(tok, args, j, letters)
@@ -1672,6 +1855,28 @@ def _option_destination_values(
     list *also* names writes (`patch`, whose `-o` displaces its operands) passes its
     own set rather than joining the shared table below. Omitting it keeps the
     historical lookup, which is what the branch that walks that table still reads.
+    A ``--`` that no option consumed ends option parsing, so an option *after* it
+    is an operand and names nothing **here** — no option on the line names a
+    destination. Whether the walk names that operand is the operand rule's own
+    business: for the destination-last family (`cp`/`mv`/`ln`/`install`) it is the
+    last operand, so `cp -- -t OUT src.txt` is read as the copy it is — destination
+    `src.txt`, the token real `cp` writes into (measured: `cp -- -t x dest` exits 0
+    with both operands inside `dest`) — while `OUT`, the option's value, is never
+    named because no option is in force there.
+
+    Measured 2026-09-19 on master `26449c59`, in one scratch directory, each row
+    run against a fresh one and the directory read back off disk afterwards. The
+    option *before* the terminator is the control, the same command with it after:
+
+      ``sort -o OUT/f in.txt``   rc=0 writes OUT/f   ·  ``sort -- -o OUT/f in.txt``   rc=2, nothing written
+      ``unzip -d OUTD a.zip``    rc=0 writes OUTD/*  ·  ``unzip -- -d OUTD a.zip``    rc=10 ``must specify
+                                                          directory``, nothing written
+      ``curl -o OUT/f <url>``    rc=0 writes OUT/f   ·  ``curl -- -o OUT/f <url>``    rc=0, nothing written
+
+    Each terminator form was **refused at both tiers** on master, because the path
+    was named — a false block of a command that writes nothing at all, and the same
+    defect class from the other side. (`wget` is the table's fourth verb and is not
+    installed on this host, so it is left unmeasured rather than inferred.)
     """
     options = _OPTION_DESTINATION_VERBS[verb] if options is None else options
     longs = {opt for opt in options if opt.startswith("--")}
@@ -1679,6 +1884,10 @@ def _option_destination_values(
     out: list[str] = []
     args = _args_after_command(tokens, i)
     for j, tok in enumerate(args):
+        if tok == "--" and (j == 0 or args[j - 1] not in options):
+            # Not consumed as the previous option's value (``sort -o -- f`` names
+            # the file ``--``), so it ends option parsing.
+            break
         if tok in options:
             if j + 1 < len(args):
                 out.append(args[j + 1])
@@ -2021,7 +2230,9 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # destination, and it is rewritten — unless the run is a read form
             # (`-n`/`--dry-run`/`--list-only`), which writes nothing at all.
             if not _rsync_run_is_a_read(tokens, i):
-                args = _positional_args(tokens, i, _NO_OPTION_WITH_VALUE)
+                args = _positional_args(
+                    tokens, i, _RSYNC_OPTIONS_WITH_VALUE, _RSYNC_SHORT_VALUE_LETTERS
+                )
                 # A single operand is a *listing* of the source, not a copy.
                 if len(args) >= 2:
                     targets.append(args[-1])
@@ -2065,16 +2276,28 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
         elif word in _COMPRESSOR_VERBS:
             # `gzip f` rewrites f in place; the read spellings (`gzip -c f`,
             # `gzip -t f`, `gzip -l f`) leave it alone and must stay allowed.
-            # This gate is why the family is not simply in the set above.
+            # This gate is why the family is not simply in the set above. A bare
+            # `-` operand is the family's stdin/stdout spelling and is dropped
+            # one operand at a time, because `gzip - f` really does compress `f`
+            # — see `_without_the_stream_operand`.
             if not _compressor_operand_is_a_read(tokens, i):
                 targets.extend(
-                    _positional_args(tokens, i, _COMPRESSOR_OPTIONS_WITH_VALUE)
+                    _without_the_stream_operand(
+                        _positional_args(tokens, i, _COMPRESSOR_OPTIONS_WITH_VALUE)
+                    )
                 )
         elif word in _LZ4_VERBS:
             # `lz4 f` writes `f.lz4` beside the operand rather than rewriting it,
             # `lz4 -m f g` writes two siblings, and `lz4 f out.lz4` writes the
             # last operand — unless the run is one of the measured read forms.
             targets.extend(_lz4_write_targets(tokens, i))
+        elif word == "zip":
+            # `zip A.zip f` creates or rewrites `A.zip`, and the archive is the
+            # *first* operand — the end no other operand rule reads, so the run
+            # named nothing at all and both tiers allowed it (issue #1420's
+            # remaining row). The rule, its measured table and its two named
+            # limits are in `_zip_write_targets`.
+            targets.extend(_zip_write_targets(tokens, i))
         elif word == "sed":
             # `sed -i` rewrites its file operands in place; a bare `sed` is a
             # filter that writes only to stdout and must stay allowed. The flag
@@ -2217,11 +2440,22 @@ def _target_directory_values(tokens: list[str], i: int, verb: str) -> list[str]:
     short forms ``-t<dir>`` and a cluster's trailing ``t`` are read by
     ``_short_target_directory``, which takes ``verb``'s own table to know where a
     cluster's value-taking letters are.
+
+    A ``--`` that no option consumed ends option parsing here too. The two readers
+    answer one question and one walk reads both, so the sentence is applied in both
+    rather than in whichever one a cycle happened to be working in. Its ground truth
+    is the one measured for that reader: every verb in both tables is a getopt
+    program, for which ``--`` is *defined* to end options. This table's own verbs
+    cannot be executed for it on this host — ``cp``/``mv``/``ln`` here implement no
+    ``-t`` at all (``cp -t OUT/f -- src.txt`` exits 64 with the usage line, measured),
+    so the spelling is pinned as a predicate and no executed arm is claimed for it.
     """
     out: list[str] = []
     args = _args_after_command(tokens, i)
     table = _VERB_OPTIONS_WITH_VALUE[verb]
     for j, tok in enumerate(args):
+        if tok == "--" and (j == 0 or args[j - 1] not in ("-t", "--target-directory")):
+            break
         if tok in ("-t", "--target-directory"):
             if j + 1 < len(args):
                 out.append(args[j + 1])
@@ -2306,6 +2540,46 @@ def _compressor_operand_is_a_read(tokens: list[str], i: int) -> bool:
     return False
 
 
+def _without_the_stream_operand(targets: list[str]) -> list[str]:
+    """``targets`` without the bare ``-`` — the operand that is not a path.
+
+    A bare ``-`` is the convention for *standard input, standard output*: the
+    program reads the stream and writes the stream, so no file is opened under
+    that name and naming it turns a pure read into a refusal. This walk refuses
+    in the direction its own record treats as the costlier one — an empty target
+    list is a hole it can be argued out of, a refusal is a command a reader
+    cannot run — so the operand is dropped rather than guessed at.
+
+    Measured on this host 2026-09-19, one **fresh** directory per row with the
+    input present and the listing read back off disk afterwards:
+
+      gzip -  xz -  bzip2 -  zstd -  compress -  lz4 -     rc=0, no file created
+      gzip -9 -   gzip -- -   xz -9 -   bzip2 -9 -         rc=0, no file created
+      zstd -19 -  lz4 -9 -                                 rc=0, no file created
+      gzip -d -                                            rc=1 (`unexpected end of
+                                                            file`), no file created
+      gzip - f    gzip f -    xz - f    zstd - f           `f` IS compressed —
+                                                            `gzip - f` writes
+                                                            `f.gz` and removes `f`
+
+    The last row is why this is applied **per operand** and not per run, and why
+    `_compressor_operand_is_a_read` is left alone: that gate answers once for the
+    whole run, so teaching it the bare ``-`` would have made `gzip - f` name
+    nothing at all — a hole, in exchange for nothing, since the operand beside
+    the dash is a real path and must still be named. Dropping the token keeps
+    ``['f']`` for that row and ``[]`` for `gzip -`.
+
+    The drop is deliberately not made in ``_positional_args``, where it would
+    reach every verb. A bare ``-`` is a *path* to the other writers, measured in
+    the same geometry: `touch -`, `truncate -s0 -`, `mv src.txt -` and
+    `cp src.txt -` each create the file named ``-`` (and `chmod 777 -` and `rm -`
+    look one up), so a global drop would open exactly the hole the everyday
+    writers are named to close. It is the compressor family's own spelling, and
+    it is dropped where that is measured.
+    """
+    return [t for t in targets if t != "-"]
+
+
 def _lz4_letters(args: list[str]) -> set[str]:
     """The short-option letters of an ``lz4`` run, read cluster by cluster.
 
@@ -2353,6 +2627,15 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
     * otherwise the *last* operand is written — exactly the explicit destination
       of `lz4 f out.lz4`, and for the single-operand form the operand itself,
       whose directory is where the derived sibling lands.
+
+    A bare ``-`` operand is the stream, in either position, and is never named;
+    which operand it is takes the third bullet with it. Measured in one fresh
+    directory per row with only `f` present and the listing read back off disk
+    (2026-09-19): `lz4 -`, `lz4 - -`, `lz4 -t -` and **`lz4 f -`** all create no
+    file — the last one names stdout as its destination, so nothing is written
+    beside `f` either — while `lz4 -m f -` really does derive `f.lz4`, which is
+    why the multi-input branch drops the token and keeps `f`. See
+    `_without_the_stream_operand`.
     """
     args = _args_after_command(tokens, i)
     letters = _lz4_letters(args)
@@ -2360,8 +2643,105 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
         return []
     operands = _positional_args(tokens, i, _LZ4_OPTIONS_WITH_VALUE)
     if letters & _LZ4_MULTI_LETTERS or any(t in _LZ4_MULTI_LONG for t in args):
-        return operands
+        return _without_the_stream_operand(operands)
+    if operands and operands[-1] == "-":
+        # `lz4 f -` names stdout as its destination instead of writing `f.lz4`
+        # beside the operand, so nothing on disk is written under *any* operand
+        # and the last-operand rule has to answer with nothing rather than with
+        # the operand it would otherwise fall back on (`f`, which it only reads).
+        return []
     return operands[-1:]
+
+
+def _zip_logfile_targets(words: list[str]) -> list[str]:
+    """The path ``zip -lf <path>`` writes, in both measured spellings.
+
+    The rows behind this are consequence 6 of the table above
+    `_ZIP_OPTIONS_WITH_VALUE`. ``-lf`` is the family's one spaced value that is
+    itself a **path**, so it is a write the archive rule cannot reach: the option
+    consumes the token (it is not an operand, so nothing in the operand walk sees
+    it) while zip opens it as a logfile. It is named in **every** shape of the
+    run, because it is written in every shape measured — the read spellings
+    (``zip -sf -lf ./log a.zip`` printed its listing and still created ``log.log``)
+    and the exit-12 "Nothing to do!" case (``zip -lf ./log a.zip``) included.
+
+    ``zip`` appends ``.log`` when the value does not end in it, which lands in the
+    same directory as the token named here, so naming the token as written is
+    containment-equivalent — the question a block asks.
+
+    ``-Z <cm>`` and ``-tt <date>`` are handled by the table alone: their values are
+    never paths, so consuming them is the whole rule.
+    """
+    out: list[str] = []
+    for idx, tok in enumerate(words):
+        if tok == "--":
+            break
+        if tok == "-lf":
+            if idx + 1 < len(words):
+                out.append(words[idx + 1])
+        elif tok.startswith("-lf"):
+            out.append(tok[3:])
+    return out
+
+
+def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The paths a ``zip`` run writes: its **first** operand, and what it moves.
+
+    The measured table is the comment above `_ZIP_OPTIONS_WITH_VALUE`; the rule it
+    settles is four lines long, and each line is one of its rows:
+
+    * a read spelling (``-sf``/``--show-files``, ``-su``/``-sU``, the help and
+      licence forms) writes no archive — the ``-lf`` logfile is the exception,
+      written in every shape (see `_zip_logfile_targets`);
+    * with no second operand the run writes nothing at all (exit 12, "Nothing to
+      do!"), which is what keeps `zip a.zip` and `zip -d a.zip` allowed — the same
+      logfile exception applies there too;
+    * otherwise the archive — the *first* operand — is the path that is created
+      or rewritten, and under ``-m``/``--move`` every listed operand after it is
+      removed as well;
+    * and the ``-lf`` value is named alongside whichever of the above applies.
+
+    Named limit: the exclusion list (``-x``) and the include list (``-i``) are
+    matched against the operands **by name**, and a name they neutralise is still
+    named here. Measured, `zip -m a.zip f -x f` writes nothing, so the over-block
+    lands on a run that does nothing anyway; the alternative is a per-name match
+    in the walk, the grammar this family of rules refuses to grow (see
+    `_rsync_run_is_a_read` for the same trade taken the other way). `-@` reads its
+    names from stdin, which the walk cannot see: that spelling stays unnamed.
+
+    ``-b <dir>`` (the temporary directory, a spaced value this rule drops) is
+    deliberately not named, and that is a measurement rather than an omission:
+    taken in a scratch directory, `zip -b <dir> a.zip f` left the directory
+    **empty** afterwards, and so did a run that failed — the temporary archive is
+    removed before the process exits, so there is no surviving path to protect.
+
+    ``--out <archive>`` (copy mode's destination, `zip -U`) is a **measured limit**
+    rather than a treated case: its value is a path, and the rule it needs is
+    mode-sensitive, so it is filed as issue #1441 instead of guessed here. Measured
+    on the same binary, one fresh directory holding a pre-built `src.zip`:
+    `zip -U src.zip --out out.zip` is rc=0, creates `out.zip` and leaves `src.zip`
+    untouched — so in copy mode the **first operand is a read**. The walk has no
+    copy-mode rule and names that operand, which is wrong in both directions
+    (measured through this predicate at `workspace-write`):
+    `zip -U /workspace/src.zip --out /outside/emrg/o.zip` is **allowed** while
+    naming the source, so the archive really written outside every allowed root is
+    named by nothing; and `zip -U /outside/emrg/src.zip --out /workspace/o.zip` is
+    **blocked on the read**. Adding `--out` to the table would not help — the table
+    means "consumes the next token, which is not a path", and this value is the
+    destination, so the operand before it would be named again.
+    """
+    words = _args_after_command(tokens, i)
+    logfile = _zip_logfile_targets(words)
+    if any(tok in _ZIP_READ_TOKENS for tok in words):
+        return logfile
+    operands = _positional_args(tokens, i, _ZIP_OPTIONS_WITH_VALUE)
+    if len(operands) < 2:
+        # Archive and no list: zip exits 12 having written nothing — the logfile
+        # excepted, which it really does create (measured).
+        return logfile
+    if any(tok in _ZIP_MOVE_FLAGS for tok in words):
+        return operands + logfile
+    return operands[:1] + logfile
 
 
 def _is_directory_install(tokens: list[str], i: int) -> bool:
