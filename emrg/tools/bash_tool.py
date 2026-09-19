@@ -1358,7 +1358,7 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # files land when extracting but only a directory to collect from when creating —
 # so `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely
 # refused by a rule that named `-C`. Measured ground truth for the families it does
-# not cover (`tar`, `split`, `csplit`, `git clone`, and the cluster spelling
+# not cover (`tar`, `split`, `git clone`, and the cluster spelling
 # `curl -so<dir>`) is pinned as a measured hole in
 # `tests/test_bash_tool_option_destinations.py` — with the verdict each one really
 # gets rather than a blanket "allowed": all of them reach `workspace-write` with an
@@ -1369,11 +1369,28 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # rather than an option, so the list's own reason for excluding it never applied to
 # it. It has its own branch (see `_rsync_run_is_a_read`), and its row was removed
 # from the pinned-hole table in the same change.
+#
+# `csplit` is the one entry a table of destination options cannot finish describing,
+# so it is listed **and** branched: `-f` names the prefix its family is written
+# under, and with no `-f` the family still lands — on the default prefix `xx`, in the
+# working directory — which no option spells. See the `csplit` arm in
+# `_extract_write_targets`; its row left the pinned-hole table in the same change.
+#
+# The two sets below are declared once and derived from each other, the way
+# `_LZ4_VALUE_TAKING_SHORT` derives from `_LZ4_OPTIONS_WITH_VALUE`: the destination
+# set is the `-f` half, and the value-taking set is what `_positional_args` must skip
+# so that a prefix is not read as an operand.
+_CSPLIT_PREFIX_OPTIONS: frozenset[str] = frozenset({"-f", "--prefix"})
+_CSPLIT_OPTIONS_WITH_VALUE: frozenset[str] = _CSPLIT_PREFIX_OPTIONS | frozenset({
+    "-n", "--digits",          # the suffix's digit count
+    "-b", "--suffix-format",   # GNU only
+})
 _OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
     "curl": frozenset({"-o", "--output"}),
     "wget": frozenset({"-O", "--output-document"}),
     "sort": frozenset({"-o", "--output"}),
     "unzip": frozenset({"-d", "--directory"}),
+    "csplit": _CSPLIT_PREFIX_OPTIONS,
 }
 
 
@@ -1748,6 +1765,50 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             args = _args_after_command(tokens, i)
             if "-delete" in args:
                 targets.extend(_positional_args(tokens, i))
+        elif word == "csplit":
+            # `csplit` writes a family of derived paths — `<prefix>00`, `<prefix>01`,
+            # … — and it was invisible to this walk in every spelling: an empty target
+            # list is allowed by construction, so the loop that judges targets never
+            # ran. Measured on master `910a307c`, predicate only, nothing executed, the
+            # prefix outside every allowed root: all six spellings (`-f` leading, `-f`
+            # attached, `-f` trailing, none at all, an in-workspace prefix, and BSD's
+            # unaccepted `--prefix`) named nothing at both tiers, while `cp` on the same
+            # two paths was refused.
+            #
+            # Ground truth from a scratch directory on this host (BSD `csplit`, usage
+            # line `csplit [-ks] [-f prefix] [-n number] file args ...`), read back off
+            # disk afterwards: `csplit -f pfx in.txt 4 8` created `pfx00 pfx01 pfx02`
+            # beside `in.txt`; `csplit in.txt 4` created `xx00 xx01` — the **default**
+            # prefix, in the cwd; `csplit -n 3 -f n3 in.txt 4` created `n3000 n3001`;
+            # and `csplit -f - in.txt 3` created `-00 -01`.
+            #
+            # Only the prefix is named. Its first operand is an input to *read*, and the
+            # arguments after it are patterns or line numbers — `csplit f /two/` carries
+            # a `/`-shaped token that is not a path, so naming it would point the block
+            # at something that does not exist and naming the input would refuse a read.
+            # The prefix is named rather than the chunks themselves even though those
+            # carry digits (`pfx00`), because every chunk is under the prefix and the
+            # tier verdict is the same for the prefix as for the family.
+            #
+            # The default `xx` **is** named, which is the half the table above cannot
+            # reach: unlike a splitter whose prefix is an optional last *operand* — where
+            # naming the default means naming the input, so the rule that graduates
+            # `split` names nothing there (#1430) — csplit's prefix is never an operand,
+            # so naming its documented default cannot name a read, and leaving it
+            # unnamed would keep this hole open for the shortest spelling of all.
+            #
+            # A run whose operand list is empty writes nothing — usage, `--help`,
+            # `--version`, and flags with no file each measured to create nothing — so
+            # the prefix is named only when there is an operand to split, which keeps
+            # this arm reading like the rest of the walk: a flag alone names no path.
+            # What it does not do is `stat` anything: a file operand that does not exist
+            # also makes csplit write nothing (measured), and that run is still refused
+            # under `read-only`, because placing a target never depended on the disk.
+            args = _positional_args(tokens, i, _CSPLIT_OPTIONS_WITH_VALUE)
+            if args:
+                targets.extend(
+                    _option_destination_values(tokens, i, "csplit") or ["xx"]
+                )
         elif word in _OPTION_DESTINATION_VERBS:
             # `curl -o <f>` / `wget -O <f>` / `sort -o <f>` / `unzip -d <d>`: the
             # destination is an option's value, so no operand rule reaches it and
