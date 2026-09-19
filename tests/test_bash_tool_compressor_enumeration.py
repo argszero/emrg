@@ -158,12 +158,17 @@ READ_FORMS = (
 )
 
 # (row, command) — the compressors *not* on `_COMPRESSOR_VERBS` and not read by a
-# rule of their own. Neither installed on this host nor measurable from here, so
-# no name is added on documentation alone; they are pinned as the holes they are.
-# A row reds if a later cycle names one, which is the point of pinning it.
+# rule of their own. None of them is installed on this host, so no name is added on
+# documentation alone; they are pinned as the holes they are. A row reds if a later
+# cycle names one, which is the point of pinning it.
+#
+# `pigz`/`unpigz` were the first two rows here and left when they were **measured**
+# rather than argued: built from pigz's own release source (`madler/pigz` v2.8),
+# every write form rewrote its operand in place and every read form created no file,
+# so they are names in the family now, with rows in
+# `test_bash_tool_compressor_operands.py` — the same departure `compress` made, and
+# the reason this list is a list of measured holes rather than of guesses.
 UNLISTED_TWINS = (
-    ("pigz", f"pigz {OUTSIDE}/f"),
-    ("unpigz", f"unpigz {OUTSIDE}/f.gz"),
     ("pbzip2", f"pbzip2 {OUTSIDE}/f"),
     ("lbzip2", f"lbzip2 {OUTSIDE}/f"),
     ("pixz", f"pixz {OUTSIDE}/f"),
