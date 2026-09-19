@@ -455,6 +455,9 @@ _ZIP_MOVE_FLAGS = frozenset({"-m", "--move"})
 #   zip -U src.zip --out=o.zip        rc=0, `o.zip` created (attached long spelling)
 #   zip -U src.zip -O o.zip           rc=0, `o.zip` created (short, spaced)
 #   zip -U src.zip -Oo.zip            rc=0, `o.zip` created (short, attached)
+#   zip src.zip -UO o.zip             rc=0, `o.zip` created (cluster, spaced) — #1441
+#   zip src.zip -UOo.zip              rc=0, `o.zip` created (cluster, attached) — #1441
+#   zip -UO o.zip src.zip             rc=0, `o.zip` created (cluster leads) — #1441
 #   zip -U --out o.zip src.zip        rc=0, `o.zip` created (option before operand)
 #   zip -U src.zip --out o.zip -lf log  rc=0, `o.zip` AND `log.log` created
 #   zip -sf -U src.zip --out o.zip    rc=0, the listing printed and **nothing
@@ -477,16 +480,11 @@ _ZIP_MOVE_FLAGS = frozenset({"-m", "--move"})
 # no file created anywhere — an empty token must never be named, because
 # `realpath("")` is the cwd), and a trailing `-O` with nothing after it (rc=16).
 #
-# Named limit — the **cluster** spelling. Zip's getopt takes `-O`'s value from the
-# rest of the same token or, when there is none, from the next word, so
-# `zip -UO o.zip src.zip` and `zip -qO o.zip src.zip` really are copy runs (both
-# measured, rc=0, `o.zip` created). This rule reads no clusters: it knows the four
-# spellings above, and what the operand walk then names depends on the order —
-# destination first (`zip -UO <out> <src>`) it names the destination by accident,
-# while source first (`zip <src> -UO <out>`) it names the **source** and leaves the
-# destination unnamed, in the direction this rule exists for. Left as a limit: a
-# token's cluster letters are read by one site in this file once the cluster reader
-# lands (issue #1443), and a second reader here would be one rule written twice.
+# The **cluster** spelling is read by the one cluster reader in this file
+# (`_short_cluster_option`), the same one the operand walk uses — see
+# `_ZIP_OUT_CLUSTER_LETTERS` beside `_zip_out_values`, and issue #1441 for the
+# source-first row (`zip <src> -UO <out>`) that named the **source** while the
+# archive really written outside was named by nothing.
 _ZIP_DESTINATION_OPTIONS = frozenset({"-O", "--out"})
 
 # Verbs that *create* every path named by an operand (`touch a b c`,
@@ -1841,12 +1839,12 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # files land when extracting but only a directory to collect from when creating —
 # so `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely
 # refused by a rule that named `-C`. Measured ground truth for the families it does
-# not cover (`tar`, `zip`, `git clone`, and the cluster spelling
-# `curl -so<dir>`) is pinned as a measured hole in
-# `tests/test_bash_tool_option_destinations.py` — with the verdict each one really
-# gets rather than a blanket "allowed": all of them reach `workspace-write` with an
-# empty target list, and `git clone` is refused under `read-only` by the git-mutator
-# rule (which is not this walk) rather than by any named destination.
+# not cover (`tar`, `git clone`, and the cluster spelling `curl -so<dir>`) is pinned
+# as a measured hole in `tests/test_bash_tool_option_destinations.py` — with the
+# verdict each one really gets rather than a blanket "allowed": all of them reach
+# `workspace-write` with an empty target list, and `git clone` is refused under
+# `read-only` by the git-mutator rule (which is not this walk) rather than by any
+# named destination.
 #
 # `rsync` used to be on that list and is no longer: its destination is an operand
 # rather than an option, so the list's own reason for excluding it never applied to
@@ -1857,10 +1855,18 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # same reason: the paths it writes are derived from an operand rather than named by
 # an option. It has its own branch (see `_SPLIT_OPTIONS_WITH_VALUE`), its own file
 # `tests/test_bash_tool_split_prefix.py`, and its row left the pinned-hole table in
-# this change. `zip` took its place in that table rather than joining it: the
-# archive is readable from the first operand, but that operand is an **operand to
-# read** under `-T`/`-sf`/`-L`/`-h` and a write otherwise, which is the `tar` shape
-# and the per-verb flag grammar this comment is about.
+# that change.
+#
+# `zip` was on that list and has left it as well: the archive is readable from the
+# first operand, and the read half is the `-T`/`-sf`/`-L`/`-h` spelling rather than
+# the value of an option, so it became a per-verb rule (`_zip_write_targets`) with
+# its own file `tests/test_bash_tool_zip_archive.py`. Its row was added to the
+# pinned-hole table when `split` left, and removed again when the rule landed — the
+# same departure, not a reversal of it: what the table could not express is the
+# operand-shaped destination, and `zip` is one (`tar`'s per-verb grammar is the case
+# that still refuses a rule). The measured table for it is the comment above
+# `_ZIP_OPTIONS_WITH_VALUE`, and the residual the rule still leaves — a spelling it
+# names nothing for — is recorded there rather than in the hole table.
 #
 # `csplit` is the one entry a table of destination options cannot finish describing,
 # so it is listed **and** branched: `-f` names the prefix its family is written
@@ -2837,39 +2843,76 @@ def _zip_logfile_targets(words: list[str]) -> list[str]:
     return out
 
 
+# The letters the copy-mode destination scan stops at, and they are zip's **own**
+# value-taking letters rather than `O` alone: in `-bO` the `b` takes `O` as its
+# temporary directory, so the scan must see `b` first and answer with it — a
+# `{O}`-only set would call that token a destination and name a path the run only
+# reads. Measured on the host's binary, 2026-09-20: `zip -bO -U src.zip --out o.zip`
+# fails with `Temporary file failure (O/ziqqV8zD)` — i.e. zip really did use `O` as
+# the temp directory — while a bare `-b` reports "option 'b' (dir to use for temp
+# archive) requires a value" and takes nothing; and `zip -b <missing dir> ...` is the
+# same rc=10 failure `-bO` is. Derived from the two tables rather than written out, so
+# a letter added to either cannot be read in the spaced spelling and silently not in
+# the clustered one.
+_ZIP_OUT_CLUSTER_LETTERS = _short_option_letters(
+    _ZIP_OPTIONS_WITH_VALUE | _ZIP_DESTINATION_OPTIONS
+)
+
+
 def _zip_out_values(words: list[str]) -> list[str]:
     """The path a copy-mode ``zip`` run writes: ``--out <archive>`` (short ``-O``).
 
     The measurements behind it are the comment above `_ZIP_DESTINATION_OPTIONS`, and
     the rule they settle is one line per spelling — the next word for ``--out`` and
-    ``-O``, the text after ``=`` for ``--out=``, the text after the letter for
-    ``-O<path>``. An **empty** value is dropped rather than named: a token that names
-    nothing resolves to the cwd, so naming it would refuse every run made from a
-    working directory outside the workspace. Parsing stops at ``--``, because
-    everything after it is an operand — the case `_positional_args` documents at
-    length. A spelling with no value at all (`-O` as the last token) is skipped for
-    the same reason the empty one is.
+    ``-O``, the text after ``=`` for ``--out=``, and for every **short** spelling,
+    clustered included, whatever the shared reader says carries the letter (``-UO
+    out.zip`` and ``-UOout.zip`` are both copy runs, measured). An **empty** value is
+    dropped rather than named: a token that names nothing resolves to the cwd, so
+    naming it would refuse every run made from a working directory outside the
+    workspace. Parsing stops at ``--``, because everything after it is an operand —
+    the case `_positional_args` documents at length. A spelling with no value at all
+    (``-O`` as the last token) is skipped for the same reason the empty one is.
+
+    The cluster is read by `_short_cluster_option` rather than by a scan of this
+    function's own, and that is the whole point of the shared reader: the operand
+    walk asks it the same question for the same token, so the two cannot disagree
+    about which spelling carries a value. A destination this function finds is what
+    makes the caller hand that walk a table containing ``-O``, which is in turn what
+    consumes the value's word instead of naming it an operand — the second half
+    issue #1441 needed, and the reason fixing only this half would have left the
+    destination named *beside* a source that is only read.
 
     Only the *path* is returned. That this path is written, and that the operands are
     therefore reads, is the caller's rule — `_zip_write_targets` is the only caller,
     and the same measurement decides both halves.
     """
     out: list[str] = []
-    for idx, tok in enumerate(words):
+    idx = 0
+    while idx < len(words):
+        tok = words[idx]
         if tok == "--":
             break
+        value: str | None = None
+        eaten = 1
         if tok in _ZIP_DESTINATION_OPTIONS:
-            if idx + 1 >= len(words):
-                continue
-            value = words[idx + 1]
+            value = words[idx + 1] if idx + 1 < len(words) else None
+            eaten = 2
         elif tok.startswith("--out="):
             value = tok[len("--out="):]
-        elif tok.startswith("-O") and len(tok) > 2:
-            value = tok[2:]
         else:
-            continue
+            cluster = _short_cluster_option(tok, words, idx, _ZIP_OUT_CLUSTER_LETTERS)
+            if cluster is not None:
+                letter, value, attached = cluster
+                # Any other letter's value is not a path here, but its word is still
+                # *eaten*: skip it rather than let it be read as a destination itself
+                # (`-b -Osrc.zip` is a temporary directory named `-Osrc.zip`, not a
+                # source run writing `src.zip`).
+                if letter != "O":
+                    value = None
+                eaten = 1 if attached else 2
         if value:
             out.append(value)
+        idx += eaten
     return out
 
 
@@ -2929,16 +2972,15 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     list unchanged (under ``--out`` even a deleting mode edits the copy), while ``-m``
     is inert (zip warns "can't set method, move, recurse, or comments with copy mode",
     and the member is still on disk), so neither adds an operand to the list. Named
-    limits, each measured: ``-U`` **combined with an action flag** (``-d``, ``-u``,
+    lists, each measured: ``-U`` **combined with an action flag** (``-d``, ``-u``,
     ``-f``) is rejected by zip — rc=16, "Invalid command arguments (specify just one
     action)", nothing written — so the destination named there is an over-block on a
     contradictory command line (the same action *without* ``-U`` is the workable
-    spelling, measured above); the **cluster** spelling (``zip <src> -UO <out>``), which
-    this rule does not read — see `_ZIP_DESTINATION_OPTIONS`; an **empty** value
-    (``--out=``), which writes nothing anywhere and is therefore named by nothing; and a
-    **member pattern that matches nothing**, or a member already up to date (exit 12
-    either way), where the destination is still named — what a run will do is not
-    decidable from the command line, the same approximation the archive forms above take.
+    spelling, measured above); an **empty** value (``--out=``), which writes nothing
+    anywhere and is therefore named by nothing; and a **member pattern that matches
+    nothing**, or a member already up to date (exit 12 either way), where the
+    destination is still named — what a run will do is not decidable from the command
+    line, the same approximation the archive forms above take.
     """
     words = _args_after_command(tokens, i)
     logfile = _zip_logfile_targets(words)
@@ -2949,13 +2991,17 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     # (the source archive, then the member patterns), so the destination has to be
     # consumed before the operand walk sees it — and the question that walk then
     # answers for this branch is only "is there a source archive at all?", which is
-    # what keeps `zip --out o.zip` (rc=9, nothing written) unnamed.
+    # what keeps `zip --out o.zip` (rc=9, nothing written) unnamed. The cluster
+    # letters go with the table so a *clustered* destination's word is eaten by this
+    # walk exactly as it is read by `_zip_out_values`: the same token must not be a
+    # destination to one reader and an operand to the other (issue #1441).
     operands = _positional_args(
         tokens,
         i,
         _ZIP_OPTIONS_WITH_VALUE | _ZIP_DESTINATION_OPTIONS
         if destination
         else _ZIP_OPTIONS_WITH_VALUE,
+        _ZIP_OUT_CLUSTER_LETTERS if destination else frozenset(),
     )
     if destination and operands:
         return destination + logfile
