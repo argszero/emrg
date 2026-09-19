@@ -450,7 +450,57 @@ _FIRST_OPERAND_CREATING_VERBS = frozenset({"mknod"})
 # — which really creates a symlink at `<target>` — named no target at all and
 # both tiers allowed it (measured while fixing issue #1398). The same table also
 # hid `-t <dir>` behind the last-operand rule, naming the *source* instead.
-_DESTINATION_LAST_VERBS = frozenset({"ln", "cp", "mv", "install", "link"})
+_DESTINATION_LAST_VERBS = frozenset({"ln", "cp", "mv", "install", "link", "ditto"})
+
+# `ditto` is the macOS copier (`Usage: ditto [ <options> ] src [ ... src ] dst`),
+# and it belongs to the set above for the reason that line states — but it was
+# missing from it, so **every** form was invisible to the walk: measured on master
+# `35284a01`, in a geometry whose destination lay outside every allowed root,
+# `ditto <outside>/src <outside>/dst` reported an **empty target list** and
+# answered ALLOW at both tiers, while `cp` and `rsync` on the same two paths were
+# refused. An empty list is allowed by construction, so the loop that judges
+# targets never ran — the same fail-open the compressor family (#1418) and the
+# everyday writers (#1398) had, one installed binary over.
+#
+# Ground truth first, because the verdict alone is not evidence that a verb needs
+# the write treatment. Taken on this host (`/usr/bin/ditto`, macOS 26.6) in a fresh
+# scratch directory per row, the listing read back off disk afterwards:
+#
+#   ditto f g                   rc=0  creates g                     `f` is a read
+#   ditto -c -k f arc.zip       rc=0  creates arc.zip               the archive is dst
+#   ditto -x -k arc.zip outdir  rc=0  creates outdir/f              extracting writes dst
+#   ditto --arch arm64 f g      rc=0  creates g, `arm64` consumed    not an operand
+#   ditto --bom nope.bom f g    rc=1  writes nothing                 the bom is a read
+#   ditto f                     rc=0  writes nothing                 "No destination"
+#   ditto --help                rc=1  writes nothing                 nothing to name
+#
+# So the destination is the last operand in every writing form — the archive when
+# one is created, the directory when one is extracted into — and the two forms
+# that write nothing have no second operand to name. That is `cp`'s rule exactly,
+# which is why this is a member of the set rather than a branch of its own.
+#
+# `--keepBinariesList <path>` is the one option here that **creates** a file, and
+# it does so *in addition* to the destination:
+#
+#   ditto --keepBinaries --keepBinariesList kept.txt src/ dst/  →  kept.txt created
+#   ditto --keepBinariesList kept_no.txt src/ dst/              →  kept_no.txt too
+#   ditto --keepBinaries --keepBinariesList=kept_eq.txt src/ …  →  the `=` form too
+#
+# (all rc=0, each row in its own scratch directory, the file's presence read off
+# disk; the second row is why it is read **unconditionally** rather than only
+# beside `--keepBinaries`). A value naming an unwritable directory exits 1 and
+# creates nothing — naming it anyway is this walk's fail-closed direction, the
+# same one `curl -o` is read with.
+#
+# Sharing this branch lends `ditto` the `-t <dir>` reading as well, and there it is
+# read despite `-t` being no option of the verb's: measured, `ditto -t OUT src dst`
+# prints `invalid option -- t` and writes nothing. Naming that token is therefore
+# the fail-closed direction — a command that writes nothing is refused — while no
+# *writing* spelling of `ditto` contains a `-t` at all, so no real write is blocked.
+_DESTINATION_LAST_OPTION_TARGETS: dict[str, frozenset[str]] = {
+    "ditto": frozenset({"--keepBinariesList"}),
+}
+
 
 # `rsync SRC... DEST` rewrites `DEST` — it is `cp` with a network, so its
 # destination is the last operand, exactly as `cp`'s is. It is read in its own
@@ -657,6 +707,21 @@ _VERB_OPTIONS_WITH_VALUE = {
     # `dd` is read by its own `of=` helper rather than by an operand rule; the
     # entry keeps the table total over the verbs the walk now reads.
     "dd": _NO_OPTION_WITH_VALUE,
+    # `ditto`'s own usage line (`ditto [ <options> ] src [ ... src ] dst`) is the
+    # source of this list, and the entry exists for the reason every other one
+    # does: without it the option's *value* is read as an operand. Two of them
+    # name paths and are consequently also destination tables — `--bom` is a
+    # **read** (measured: `ditto --bom nope.bom f g` exits 1 with the bom absent)
+    # and `--keepBinariesList` is a write, so it lives in
+    # `_DITTO_OPTION_DESTINATIONS` below rather than being named here. The rest
+    # (`--arch`, `--lang`, `--outBom`, `--keepBinariesPattern`,
+    # `--zlibCompressionLevel`) take values that are not paths at all: naming one
+    # as a destination would be the false block `_positional_args` exists to
+    # avoid (`--zlibCompressionLevel 9` would name `9`).
+    "ditto": frozenset({
+        "--arch", "--bom", "--keepBinariesList", "--keepBinariesPattern",
+        "--lang", "--outBom", "--zlibCompressionLevel",
+    }),
 }
 
 # Git mutating commands — blocked under read-only (community issue #979,
@@ -1911,9 +1976,10 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
 
     Returns path tokens the command appears to write to:
       - ``rm <path>...`` and ``rmdir <path>`` → the removed paths
-      - ``mv`` / ``cp`` / ``ln`` / ``link`` / ``install`` → the destination (the
-        last operand, or ``-t <dir>`` / ``--target-directory`` in every spelling
-        getopt accepts); under ``install -d`` every operand
+      - ``mv`` / ``cp`` / ``ln`` / ``link`` / ``install`` / ``ditto`` → the
+        destination (the last operand, or ``-t <dir>`` / ``--target-directory`` in
+        every spelling getopt accepts); under ``install -d`` every operand, and
+        ``ditto --keepBinariesList <path>`` names that file as well
       - ``> / >> / 2> / &> / >| / <>`` redirects → the redirect target
       - ``touch`` / ``mkdir`` / ``mkfifo`` → every operand (all of them are
         created)
@@ -2129,6 +2195,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                 targets.extend(t_dir)
             elif len(args) >= 2:
                 targets.append(args[-1])
+            # A verb here whose *option* also names a file it creates: `ditto
+            # --keepBinariesList <path>` writes that file beside the destination,
+            # so unlike `-t <dir>` and unlike `patch -o` these two readings are
+            # **additions**, not alternatives — both are named.
+            extra = _DESTINATION_LAST_OPTION_TARGETS.get(word)
+            if extra:
+                targets.extend(_option_destination_values(tokens, i, word, extra))
         elif word == "rsync":
             # `rsync SRC... DEST` is `cp` over a network: the last operand is the
             # destination, and it is rewritten — unless the run is a read form

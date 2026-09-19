@@ -3131,6 +3131,7 @@ MUTATION_ARMS = (
     ("mkfifo", "_CREATING_VERBS", "mkfifo", f"mkfifo {OUTSIDE_TARGET}/f"),
     ("mknod", "_CREATING_VERBS", "mknod", f"mknod {OUTSIDE_TARGET}/n p"),
     ("link", "_DESTINATION_LAST_VERBS", "link", f"link x {OUTSIDE_TARGET}/l"),
+    ("ditto", "_DESTINATION_LAST_VERBS", "ditto", f"ditto x {OUTSIDE_TARGET}/d"),
 )
 
 
