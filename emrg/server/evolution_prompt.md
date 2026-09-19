@@ -135,8 +135,9 @@ cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
 ```
 
 - Review every open PR (regardless of author, treat equally. checkout → read the code):
-  - No issues → `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "✅ LGTM — cycle"`
-  - Issues found → `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "❌ Needs fix: <specific issue>"`
+  - No issues → `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "✅ LGTM — cycle cyc{{ timestamp }}"`
+  - Issues found → `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "❌ Needs fix: <specific issue> — cycle cyc{{ timestamp }}"`
+  - **A vote body must name exactly one cycle id** (`cyc{{ timestamp }}`, the id of the cycle record you write in §6). That id is the only handle that attributes a vote to a cycle, so a body naming none — or several — counts for none of them, and `gh pr review` prints nothing either way: the vote is spent in silence (`scripts/check-vote-count.py` reports such a body as `(no cycle id)` / `(N cycle ids)` instead of counting it).
 - **Reviewing PRs IS evolution work** — even when the code needs no changes, reviewing and approving is valuable output.
 - **⚡ workflow/CI changes MUST be validated with actionlint** (#441 lesson: build-release.yml referenced the `secrets` context directly in an `if:` condition, breaking workflow parsing — human review missed it, CI caught it only after push):
   - Local validation: `actionlint .github/workflows/*.yml` (the macOS build has no shellcheck integration, only the CI Docker version is complete — local pass ≠ CI pass; shellcheck warnings fail in CI)
@@ -184,7 +185,7 @@ For each of your own PRs:
     - Reviews: `gh api repos/{{ owner }}/{{ repo }}/pulls/<N>/reviews --jq '.[] | "\(.user.login) [\(.state)]: \(.body)"'`
   - Reviewer requested changes? → **fix the code per feedback and push**, or reply explaining why
   - Reviewer gave ✅? → count them, judge how many more LGTMs are needed
-  - **If you are a Committer on this repo and there are currently <3 ✅ from different cycles: review the code; if fine, `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "✅ LGTM — cycle"`. Approvals from different cycles are independent.**
+  - **If you are a Committer on this repo and there are currently <3 ✅ from different cycles: review the code; if fine, `gh pr review <N> -R {{ owner }}/{{ repo }} --comment --body "✅ LGTM — cycle cyc{{ timestamp }}"`. Approvals from different cycles are independent.**
   - Other discussion? → join in
 
 #### 1.3 Community Participation (everyone must do, but roles differ)
