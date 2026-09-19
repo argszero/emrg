@@ -318,6 +318,134 @@ def _worktree_listing(repo: Path) -> str:
     return _git(repo, "worktree", "list", "--porcelain")
 
 
+#: The GUI's dependencies live here, not in the repository root's `node_modules`.
+_GUI_NODE_MODULES = "emrg/gui/node_modules"
+
+
+#: Where the note's `ln -sfn <source> <destination>` line joins its two operands. The note
+#: interpolates them unquoted, so a path may itself contain a space and whitespace is not a
+#: splitter for it — but the source always ends with `node_modules`, so the space that
+#: separates it from the destination is the line's one unambiguous seam.
+_OPERAND_SEAM = "node_modules "
+
+
+def _node_remedy(note: str) -> tuple[str, str]:
+    """The `(source, destination)` of the node remedy the note prints.
+
+    Read at the seam, never on whitespace. Measured 2026-09-19 (`cyc20260919-065231`),
+    the previous `line.split()` reader required exactly five fields, so a path carrying a
+    space made it raise `the note prints no node remedy` while the note printed the remedy
+    on that very line — a wrong cause, the same class as the `_worktree_listing` backslash
+    defect one function up (paths must not be compared by splitting them). Both halves are
+    still read: a line whose source is the repository root's `node_modules` answers False.
+
+    A line the seam cannot be found in is reported as *unmeasurable*, with the line: a
+    reshaped note (quoted operands, or a source that is not a `node_modules` at all) needs
+    this reader taught, and must not read as "no remedy printed".
+    """
+    for line in note.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("node:"):
+            continue
+        command = stripped[len("node:") :].strip()
+        if not command.startswith("ln -sfn "):
+            continue
+        operands = command[len("ln -sfn ") :].rstrip()
+        cut = operands.find(_OPERAND_SEAM)
+        if cut == -1:
+            raise AssertionError(
+                "the note's node line is not `ln -sfn <source>/node_modules <destination>`"
+                f", so its two paths cannot be read apart: {stripped!r}"
+            )
+        source = operands[: cut + len("node_modules")]
+        return source, operands[cut + len(_OPERAND_SEAM) :].strip()
+    raise AssertionError(f"the note prints no node remedy:\n{note}")
+
+
+def _node_remedy_links_the_guis_own_deps(note: str) -> bool:
+    """True when the node remedy links the *GUI's* `node_modules`, not the root's.
+
+    The source is the load-bearing half, and the destination cannot discriminate it:
+    the root form (`ln -sfn <main>/node_modules <kept>/emrg/gui/node_modules`) contains
+    the string `emrg/gui/node_modules` too, which is why the assertion that stood here
+    passed for a link that fixed nothing. Measured 2026-09-19 (`cyc20260919-060712`) on
+    landing tree `f96d6515c734`: the repository root has no `node_modules` at all — there
+    is no root `package.json` either, so `ln -sfn` there leaves a *dangling symlink* —
+    and linking it is indistinguishable from linking nothing: the GUI suite reports 126
+    passed / 1 failed (`test/integration.test.js`, `Cannot find module 'ws'`) either way,
+    and 126 / 0 / 8 skipped once the GUI's own directory is linked.
+    """
+    source, destination = _node_remedy(note)
+    return source.endswith(_GUI_NODE_MODULES) and destination.endswith(_GUI_NODE_MODULES)
+
+
+def test_the_node_remedy_reader_rejects_the_root_form() -> None:
+    """The instrument's control: the wrong link source must read as wrong.
+
+    Without this, `_node_remedy_links_the_guis_own_deps` could return True for anything
+    (the shape the previous assertion effectively had) and the arm it now backs would
+    still pass. Three shapes, because the two halves fail independently: the right
+    source with the right destination, the root source, and a destination that is not
+    the GUI's directory at all.
+    """
+    def note(source: str, destination: str = "/kept/emrg/gui/node_modules") -> str:
+        return f"    node:   ln -sfn {source} {destination}\n"
+
+    assert _node_remedy_links_the_guis_own_deps(note("/main/emrg/gui/node_modules"))
+    assert not _node_remedy_links_the_guis_own_deps(note("/main/node_modules"))
+    assert not _node_remedy_links_the_guis_own_deps(
+        note("/main/emrg/gui/node_modules", "/kept/node_modules")
+    )
+
+
+def test_the_node_remedy_reader_reads_paths_that_carry_a_space() -> None:
+    """The note's paths are unquoted, so a space in one is ordinary, not malformed.
+
+    Measured 2026-09-19 (`cyc20260919-065231`) against the `line.split()` reader this one
+    replaced, on the two paths a host really has: `<main>` = `/Users/John Smith/main`, and
+    a kept directory named `kept dir`. Both made it raise `the note prints no node remedy`
+    — the remedy was printed on that line, so the message named the wrong cause and the
+    arm guarding the remedy would have redded on such a host while passing here (pytest's
+    `tmp_path` carries no space). It answers `True` for a spacey source, a spacey
+    destination, and for both at once, and still `False` for the root form spelled with a
+    spacey main checkout.
+    """
+    def note(source: str, destination: str) -> str:
+        return f"    node:   ln -sfn {source} {destination}\n"
+
+    spacey_main = "/Users/John Smith/main"
+    spacey_kept = "/Users/John Smith/tmp/kept dir"
+    assert _node_remedy_links_the_guis_own_deps(
+        note(f"{spacey_main}/emrg/gui/node_modules", f"{spacey_kept}/emrg/gui/node_modules")
+    )
+    assert _node_remedy_links_the_guis_own_deps(
+        note("/main/emrg/gui/node_modules", f"{spacey_kept}/emrg/gui/node_modules")
+    )
+    assert not _node_remedy_links_the_guis_own_deps(
+        note(f"{spacey_main}/node_modules", "/kept/emrg/gui/node_modules")
+    )
+
+
+def test_the_node_remedy_reader_reports_a_reshaped_line_as_unmeasurable() -> None:
+    """Two different failures must not share one message (`cyc20260919-065231`).
+
+    A line this reader cannot take apart — quoted operands are the shape an outside review
+    measured, where the old reader answered a silent `False` (the quote landing in the
+    `endswith` comparison) — is a *failure to measure*, so it raises with the line. "The
+    note prints no node remedy" is reserved for a note that prints none, which is the
+    distinction that keeps a format change from being read as a missing remedy.
+    """
+    quoted = (
+        '    node:   ln -sfn "/main/emrg/gui/node_modules" "/kept/emrg/gui/node_modules"\n'
+    )
+    with pytest.raises(AssertionError, match="cannot be read apart"):
+        _node_remedy(quoted)
+
+    no_remedy = "kept /tmp/kept (tree abc)\n  git worktree remove --force /tmp/kept\n"
+    with pytest.raises(AssertionError, match="prints no node remedy"):
+        _node_remedy(no_remedy)
+
+
 def _worktree_listing_names(listing: str, path: Path) -> bool:
     """Does this listing name `path` as one of its worktrees?
 
@@ -387,7 +515,8 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
 
     # The note names the path, the tree, and the two traps every fresh worktree has -
     # no `.venv` (so `uv run pytest` there reports that no suite ran) and no
-    # `node_modules` (so one unrelated GUI spawn-args test reds). Both were reported
+    # `node_modules` (so the GUI suite reds the spawn-args test and
+    # `test/integration.test.js`, which cannot resolve `ws`). Both were reported
     # as defects before, which is why the tool says them out loud - and it prints the
     # remedy for each, because a warning without one costs the next reader the same
     # discovery. Shape-matched, not path-matched: the note prints git's spelling of the
@@ -396,7 +525,7 @@ def test_a_kept_worktree_is_the_tree_the_run_measured(
     assert ".venv" in kept.stdout and "node_modules" in kept.stdout
     assert f"PYTHONPATH={kept_dir}" in kept.stdout
     assert "-m pytest tests/ -q" in kept.stdout
-    assert "emrg/gui/node_modules" in kept.stdout
+    assert _node_remedy_links_the_guis_own_deps(kept.stdout), kept.stdout
 
     # The removal line it prints is the one that works.
     _git(repo, "worktree", "remove", "--force", str(kept_dir))

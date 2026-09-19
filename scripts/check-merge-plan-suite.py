@@ -215,12 +215,18 @@ That line also names the two things true of every fresh worktree, because both h
 already been reported as defects (one measured in a hand-built landing-tree worktree,
 and both re-measured on a real landing tree the next cycle): it has **no `.venv`**, so
 `uv run pytest` there reports that no suite ran, and it has **no `node_modules`**, so the
-GUI Node suite fails one unrelated spawn-args test (`python=python3 (expected
-.venv/bin/python)`) - on that real tree, `daemon_client` was 68 passed / 1 failed without
-the links and 69 / 0 with them. Neither is a verdict on the tree, so the note prints the
+GUI Node suite fails two files - the spawn-args test (`python=python3 (expected
+.venv/bin/python)`) and `test/integration.test.js` (`Cannot find module 'ws'`), because
+the GUI's dependencies (`ws` among them) live in `emrg/gui/node_modules`, not in the
+repository root's. The node link therefore names the **GUI's own** directory: it was
+first written as the repository root's, which is empty, so the line that was supposed to
+fix the suite fixed nothing (measured 2026-09-19, `cyc20260919-060712`: on landing tree
+`f96d6515c734`, 125 passed / 2 failed with no link, 126 / 1 with the python link alone,
+and 126 / 0 / 8 skipped with both - identical with the root link, because it links an
+empty directory). Neither failure is a verdict on the tree, so the note prints the
 two commands that fix it (the main checkout's interpreter with `PYTHONPATH` pointed at
-the worktree; the main checkout's `node_modules` and `.venv` linked in), and says to
-compare worktree runs with worktree runs.
+the worktree; the main checkout's `emrg/gui/node_modules` and `.venv` linked in), and says
+to compare worktree runs with worktree runs.
 
 What the run leaves behind
 --------------------------
@@ -1069,10 +1075,15 @@ def _kept_note(path: Path, tree_sha: str | None = None) -> None:
     print(f"  git worktree remove --force {path}")
     print(
         "  It has no .venv and no node_modules, like any fresh worktree: `uv run pytest`\n"
-        "  there reports that no suite ran, and the GUI Node suite fails one unrelated\n"
-        "  spawn-args test (python=python3, expected .venv/bin/python). Measured on a real\n"
-        "  landing tree (2026-09-17): `daemon_client` is 68 passed / 1 failed without the\n"
-        "  links below and 69 / 0 with them. Both remedies, against this tree:"
+        "  there reports that no suite ran, and the GUI Node suite fails two files - the\n"
+        "  spawn-args test (python=python3, expected .venv/bin/python) and\n"
+        "  test/integration.test.js (Cannot find module 'ws'). Measured on a real landing\n"
+        "  tree (2026-09-19, f96d6515c734): the GUI suite is 125 passed / 2 failed with\n"
+        "  neither link, 126 / 1 with the python link alone, 126 / 0 / 8 skipped with both.\n"
+        "  The node link must point at the GUI's OWN node_modules: the repository root has\n"
+        "  none at all (there is no root package.json either), so `ln -sfn` from it leaves a\n"
+        "  dangling symlink - as indistinguishable from linking nothing as an empty directory\n"
+        "  would be (126 / 1 either way). Both remedies, against this tree:"
     )
     # `cd` before the interpreter, not only `PYTHONPATH`: the harness's own `_suite_verdict`
     # passes `cwd=str(worktree)` *and* `_suite_env`'s pinned `PYTHONPATH` for the same
@@ -1087,7 +1098,7 @@ def _kept_note(path: Path, tree_sha: str | None = None) -> None:
         f"    python: cd {path} && PYTHONPATH={path} "
         f"{main}/.venv/bin/python -m pytest tests/ -q"
     )
-    print(f"    node:   ln -sfn {main}/node_modules {path}/emrg/gui/node_modules")
+    print(f"    node:   ln -sfn {main}/emrg/gui/node_modules {path}/emrg/gui/node_modules")
     print(f"            ln -sfn {main}/.venv {path}/.venv")
     print("  Then compare worktree runs with worktree runs, never with main-checkout runs.")
 
