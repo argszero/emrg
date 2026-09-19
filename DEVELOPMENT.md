@@ -454,30 +454,44 @@ Check `emrg -v` and when the daemon started before re-reading the source.
 
 ### `emrgd failed to start within N s`
 
-The client spawns the daemon and waits for it to accept connections. When that
-wait runs out, the error carries what is known about the attempt: whether the
-child is still running, its exit code if it is not, the daemon log lines **this**
-attempt appended, and the contents of `~/.emrg/emrgd-start.err` (the child's own
-stderr, which is where a failure before logging starts can be read at all).
+Whichever entry point you started spawns the daemon and waits for it to accept
+connections. When that wait runs out, the error carries what is known about the
+attempt: whether the child is still running, its exit code if it is not, the
+daemon log lines **this** attempt appended, and the contents of
+`~/.emrg/emrgd-start.err` (the child's own stderr, which is where a failure
+before logging starts can be read at all).
 
-The window defaults to **4.5 s** (15 polls, 0.3 s apart). A start that is merely
-slower than that on a cold machine is worth raising it for; set the variable on
-the command that starts the client, since the client is what waits:
+**Both entry points read the same variable**, `EMRG_START_TIMEOUT`, in seconds:
+the terminal client (`emrg`, `emrg/client/daemon_manager.py`) and the GUI
+(`emrg/gui/daemon_client.js`). Their defaults differ because the GUI's was
+already its own — **4.5 s** (15 polls, 0.3 s apart) for the client, **5.0 s** for
+the GUI — and neither changes; what the variable adds is the ability to raise
+either one. Set it on a client (for the terminal) or in the environment the GUI
+is launched from:
 
 ```bash
 EMRG_START_TIMEOUT=30 emrg
 ```
 
-It takes seconds as a number. A value that is not a positive, finite number is
-ignored, with a warning in the client log — a typo in a tuning variable must
-never be the reason a start fails, so it falls back to the default rather than
-raising.
+A value is **a plain decimal number of seconds** — digits, an optional sign, an
+optional fraction and exponent (`30`, `4.5`, `.5`, `1e2`). Anything else is
+ignored with a warning in that entry point's own log and the default is used: a
+typo in a tuning variable must never be the reason a start fails. The refusal is
+deliberate about the shapes that merely *parse*: `0x10`, `1_000` and full-width
+or Arabic-Indic digits are all refused, so the same value cannot mean 16 seconds
+to one entry point and 4.5 to the other (`1_000` would be a sixteen-minute wait
+if it were accepted). Both entry points read one shared list of allowed values in
+their tests — `tests/data/start_window_shapes.json` — so a divergence in either
+resolver is a test failure rather than a surprise.
 
 Two facts make the window cheap to raise: a child that has **exited** is reported
 on the first poll with its exit code, so the window only ever bounds a child that
-is alive but not yet listening; and the failure report names the bound it really
-waited, not the one you asked for, because the window is quantised to the 0.3 s
-poll.
+is alive but not yet listening; and the reported bound is one the loop really
+applied, with a floor of one poll on both sides. The two report it differently,
+and both are honest: the client quantises the window to whole polls and names
+that product (`1.0` → `0.9s`), while the GUI's loop is deadline-based, names the
+deadline it enforced and may therefore overshoot it by up to one poll (`1.0` →
+`1.0s` reported, ~1.2 s actually waited).
 
 ### Why is a write blocked at `workspace-write`?
 

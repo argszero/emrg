@@ -67,11 +67,22 @@ What a stale verdict costs, and which remedy is the cheap one
 -------------------------------------------------------------
 A stale verdict has two remedies and their prices are not interchangeable:
 
-* **Refresh the branch** - re-merge master into it (or rebase) so CI judges the
-  real merged tree. The head has to move for CI's merge base to move, so this is
-  the only way to a *pull_request* verdict about the current master. It also
-  **moves the head**, and `check-vote-count.py` voids every vote that predates a
-  head push: the refresh is paid for with the review the branch has accumulated.
+* **Refresh the branch** - re-merge master into it and push the merge, so CI
+  judges the real merged tree. The head has to move for CI's merge base to move,
+  so this is the only way to a *pull_request* verdict about the current master.
+  It also **moves the head**, and `check-vote-count.py` voids every vote that
+  predates a head push: the refresh is paid for with the review the branch has
+  accumulated.
+
+  The merge, not a rebase: a rebase rewrites commits the remote already holds, so
+  `git push` refuses it as non-fast-forward and the only way to publish one is the
+  force-push this project forbids, an overwritten remote commit being often
+  unrecoverable - measured 2026-09-19 (`cyc20260919-065231`) on `#1404`, whose
+  rebase was rejected exactly that way while merging master in and pushing the
+  same tree moved the head cleanly. Every refresh in this repo's history is that
+  merge. The three carriers of this route - this paragraph, the per-PR remedy and
+  the header printed above it - are pinned by
+  `tests/test_check_merge_freshness.py::test_no_carrier_offers_a_rebase_as_the_refresh_route`.
 * **Measure the landing tree** - build the tree this merge would produce against
   current master and run the guards on it (`check-merge-plan-suite.py <PR>`).
   The head does not move, so the count does not change. It is a local reading
@@ -445,7 +456,10 @@ def _remedy(pr: int, kind: str, valid_votes: int | None, unread: str) -> str:
         if valid_votes == 0:
             return (
                 f"#{pr}: 0 valid votes - nothing to void. Re-merge master into the branch "
-                "(or rebase it) and let CI judge the real merged tree"
+                "and push the merge (`git fetch origin master`, `git merge FETCH_HEAD`, "
+                "`git push origin <branch>`) so CI judges the real merged tree - the merge, "
+                "not a rebase: a rebase of a pushed branch is refused as non-fast-forward, "
+                "and publishing one needs the force-push this project forbids"
             )
         return (
             f"#{pr}: {valid_votes} valid vote(s) at risk - a refresh moves the head, and the "
@@ -541,7 +555,8 @@ def main(argv: list[str] | None = None) -> int:
     if any(v.stale for v in verdicts):
         print(
             "\nA stale verdict has no free remedy: refreshing a branch (re-merge master "
-            "in, or rebase) moves its head, and `check-vote-count.py` voids every vote "
+            "in, then push it - a rebase cannot be published without the force-push this "
+            "project forbids) moves its head, and `check-vote-count.py` voids every vote "
             "predating a head push. Per stale PR:",
             file=sys.stderr,
         )
