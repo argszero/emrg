@@ -274,11 +274,12 @@ def test_a_trailing_prefix_is_read_though_this_host_writes_nothing_for_it():
     """The walk reads `-f` wherever it stands; BSD's getopt stops before it.
 
     Permuting options past operands is GNU behaviour, and the CI platform's `csplit` is
-    the GNU one. This host's BSD `getopt` stops at the file operand, so `csplit in.txt 3
-    -f tr` reads `-f` as a *pattern*, fails with `unrecognised pattern` and leaves
-    nothing behind (executed below). Reading the spelling is the choice that costs the
-    least: not reading it would miss the write on a platform where the option counts,
-    and reading it refuses a run that was going to fail on this one.
+    the GNU one — no longer an assumption: the runner's own run of this file created the
+    `tr…` family for exactly this command while this host created nothing. So the
+    spelling is read, which is right where the option is permuted and only strict here:
+    not reading it would miss the write on the platform that counts. This host's BSD
+    `getopt` stops at the file operand, reads `-f` as a *pattern*, fails with
+    `unrecognised pattern` and leaves nothing behind (executed below).
     """
     cmd = f"csplit {WORKSPACE}/in.txt 4 -f {OUTSIDE}/pre"
     assert _extract_write_targets(cmd) == [f"{OUTSIDE}/pre"]
@@ -406,13 +407,38 @@ def test_the_forms_that_name_nothing_really_write_nothing(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="no csplit on Windows CI")
-def test_a_trailing_prefix_really_writes_nothing_here(tmp_path):
-    """BSD's getopt stops at the file operand, so the option is read as a pattern."""
+def test_a_trailing_prefix_is_where_getopt_permutes_and_only_there(tmp_path):
+    """One command line, two implementations, two measured truths — both pinned.
+
+    GNU's `getopt` permutes options past operands, so `csplit in.txt 4 -f tr` writes the
+    `tr…` family; BSD's `getopt` stops at the first operand, reads `-f` as a *pattern*,
+    fails with `unrecognised pattern` and leaves nothing. This arm is what makes the
+    rule's choice honest rather than merely convenient: reading the trailing spelling is
+    right on the platform that permutes it, and the price paid on the other is refusing
+    a run that was going to fail anyway.
+
+    The branch is on the platform's getopt, not on a wish — measured on this host's BSD
+    (`unrecognised pattern`, nothing created), and measured on the CI runner's GNU
+    coreutils by this arm failing there: 3814 passed with only *this* assertion failing,
+    the tool printing two 9-byte sizes for the prefix `tr`, i.e. `tr00` and `tr01` under
+    the default `-n 2`. A single assertion cannot hold in both, which is exactly the kind
+    of claim a test must not make on one platform's evidence.
+    """
     source = tmp_path / "in.txt"
     source.write_text("l1\nl2\nl3\nl4\nl5\nl6\n")
     result = subprocess.run(
         ["csplit", str(source), "4", "-f", "tr"], cwd=str(tmp_path),
         capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
-    assert "unrecognised pattern" in (result.stderr + result.stdout)
-    assert not [p for p in tmp_path.iterdir() if p.name.startswith("tr")]
+    written = sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("tr"))
+    if sys.platform == "darwin":
+        assert "unrecognised pattern" in (result.stderr + result.stdout)
+        assert written == []
+    else:
+        assert written == ["tr00", "tr01"], written
+    # Either way the walk names the prefix the option gives, wherever it stands — it
+    # cannot know which getopt the platform ships, and the writing half is the one worth
+    # naming.
+    assert _extract_write_targets(
+        f"csplit {source} 4 -f {tmp_path}/pre"
+    ) == [f"{tmp_path}/pre"]
