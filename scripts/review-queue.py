@@ -8,7 +8,11 @@ living in a different tool, docstring, or nowhere —
 1. **counted** votes are the votes that postdate the head push (a push voids them);
 2. a head that no longer contains master is **not** unvotable: the remedy is a vote
    on the *landing tree* (`check-merge-plan-suite.py <PR>`), and that does **not**
-   move the head, so the votes already standing survive;
+   move the head, so the votes already standing survive — and the reading the review
+   is *of* is that landing change too (`check-merge-landing-diff.py <PR>`), because
+   `diff(master, head)` on such a head shows the base's own later commits as
+   reversals the PR does not make; a review of that diff is a review of the wrong
+   change, which is the one way following this row could still produce a wrong vote;
 3. a head whose CI run is red, still running, or absent has three *different*
    remedies, none of which is "cast a vote and move on";
 4. a standing ❌ at the current head makes a vote wrong rather than useless — that
@@ -435,9 +439,14 @@ def next_action(reading: Reading, cycle: str | None = None, repo: str = REPO) ->
             kind="measure-then-vote",
             why=f"{reading.votes}/{reading.needed} votes, and " + reading.stale_reason
                 + " - measure the tree this merge would land and vote on that reading; "
-                  "the head does not move, so the standing votes survive",
+                  "the head does not move, so the standing votes survive - and read the "
+                  "landing diff before voting, because `diff(master, head)` on this head "
+                  "shows the base's own later commits as reversals this PR does not make",
             command=f"{RUNNER} scripts/check-merge-plan-suite.py {pr}",
-            extra=[vote_cmd],
+            extra=[
+                f"{RUNNER} scripts/check-merge-landing-diff.py {pr}",
+                vote_cmd,
+            ],
         )
     return Action(
         kind="vote",
