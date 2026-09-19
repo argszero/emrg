@@ -361,18 +361,73 @@ _DESTINATION_LAST_VERBS = frozenset({"ln", "cp", "mv", "install", "link"})
 #
 # `-n` is the dry-run letter, and it is the one letter in this family that turns
 # the run into a read; every rsync short option that takes a *value* (`-e`, `-f`,
-# `-T`, `-M`, `-B`) has a different letter, so no value can be mistaken for it,
-# while `--dry-run`, `--list-only` and `-n` inside a cluster (`-an`, `-avzn`) all
+# `-T`, `-M`, `-B`, and GNU's `-@`) has a different letter, so no value can be
+# mistaken for it (the table below is where those spellings are enumerated), while
+# `--dry-run`, `--list-only` and `-n` inside a cluster (`-an`, `-avzn`) all
 # mean the same thing.
 _RSYNC_READ_LETTERS = frozenset({"n"})
 _RSYNC_READ_LONG = frozenset({"--dry-run", "--list-only"})
 
+# The options that take their value as the **next token**. Without this table a trailing
+# spaced value displaces the destination: consumed as an operand, it becomes the last
+# one, which is the position the rule above reads as `DEST`.
+#
+# Measured on master `edba48ca` with the real predicate, nothing executed, the
+# destination outside every allowed root: `rsync -a src/ /out/dest/ --exclude pat`
+# reported `['pat']` and **ALLOW at both tiers**, while the same command without the
+# trailing option reported `['/out/dest/']` and was refused — so the option's value, not
+# the operand rule, was what displaced it. The run really does write the destination:
+# `rsync -a src/ dst/ --exclude pat` in a scratch tree left the file at `dst/` (rc=0).
+# The same displacement was measured for `-e ssh`, `-f …`, `-B …`, `-T …`,
+# `--out-format …`, and for the clustered `-ve ssh`. Option-**first** spellings
+# (`rsync -a --exclude pat src/ dst/`) were already correct, which is why the file's
+# other tests never caught it: they pin that spelling and the attached `--exclude=pat`.
+#
+# The table is keyed by option *shape*, not by run, so it must cover both implementations
+# the guard meets. On this host (`openrsync`, "rsync version 2.6.9 compatible",
+# 2026-09-20) each entry was measured in a scratch tree against flag controls
+# (`--delete`, `--stats`, `--progress`, `-v`, `-r` all came back *not* value-taking, so
+# the discriminator was shown to discriminate before it was believed): an entry is listed
+# when the following token was consumed — rc=0 with the extra source left uncopied, or a
+# diagnostic naming that very token as a bad numeric/filter/directory argument. The long
+# options openrsync rejects outright ("unknown option") are still listed when GNU rsync
+# takes a value for them: an option the running tool rejects cannot have a path for a
+# value either, and CI runs GNU rsync, where it takes one.
+_RSYNC_OPTIONS_WITH_VALUE = frozenset({
+    # Short spellings, measured here. `-@` is GNU's `--modify-window`, which openrsync
+    # spells in the long form only (listed below).
+    "-e", "-f", "-B", "-M", "-T", "-@",
+    # Measured value-taking on the installed openrsync.
+    "--exclude", "--include", "--filter", "--exclude-from", "--files-from",
+    "--chmod", "--bwlimit", "--timeout", "--max-size", "--log-file",
+    "--out-format", "--log-format", "--log-file-format", "--suffix",
+    "--backup-dir", "--temp-dir", "--partial-dir", "--link-dest", "--rsync-path",
+    "--port", "--protocol", "--sockopts", "--address", "--modify-window",
+    "--compress-level", "--checksum-seed", "--contimeout", "--max-delete",
+    "--write-batch", "--only-write-batch", "--password-file",
+    # GNU-only spellings: rejected here, value-taking there.
+    "--min-size", "--max-alloc", "--compare-dest", "--copy-dest",
+    "--checksum-choice", "--cc", "--compress-choice", "--zc",
+    "--compress-threads", "--zt", "--skip-compress", "--block-size", "--stderr",
+    "--info", "--debug", "--usermap", "--groupmap", "--chown", "--early-input",
+    "--outbuf", "--stop-at", "--stop-after", "--time-limit", "--confine-root",
+    "--config", "--dparam", "--remote-option", "--copy-as", "--iconv",
+})
+
+# The letters of the short entries above, **derived** rather than written twice. A
+# trailing value can also arrive inside a cluster, where an exact-token test finds
+# nothing: `rsync -a src/ dst/ -ve ssh` carries its value in the cluster's last letter,
+# and a cluster's last letter is the one that takes the value.
+_RSYNC_SHORT_VALUE_LETTERS = frozenset(
+    opt[1] for opt in _RSYNC_OPTIONS_WITH_VALUE if len(opt) == 2 and opt[0] == "-"
+)
+
 # Named residual of the rule above: `--write-batch=<file>` /
 # `--only-write-batch=<file>` make rsync write a *second* path — the option's own
 # value — beside the destination operand. It is left unnamed because a batch file
-# is a debugging artefact of a transfer, not the transfer, and adding it means
-# reading one more option's value in both spellings; the destination operand this
-# rule exists for is named either way.
+# is a debugging artefact of a transfer, not the transfer; the destination operand
+# this rule exists for is named either way, and the table below consumes the value
+# in both spellings so it is never mistaken for that operand.
 
 # `split` writes a **family** of derived paths, and its last operand is the only
 # place their common prefix is spelled: `split -b 3 in.txt pre` creates `preaa`,
@@ -1108,7 +1163,10 @@ def _rsync_run_is_a_read(tokens: list[str], i: int) -> bool:
 
 
 def _positional_args(
-    tokens: list[str], i: int, options_with_value: frozenset | None = None
+    tokens: list[str],
+    i: int,
+    options_with_value: frozenset | None = None,
+    cluster_value_letters: frozenset[str] = frozenset(),
 ) -> list[str]:
     """The non-option *operands* of the command starting at ``tokens[i]``.
 
@@ -1125,6 +1183,14 @@ def _positional_args(
     takes nothing for `ln`), so a caller that knows its verb passes that verb's
     table. Omitting it keeps the historical flat table, which is what the
     earlier callers (`rm`, `mv`, `cp`, `find`, the in-place writers) still read.
+
+    ``cluster_value_letters`` is the table's **short letters**, and it is opt-in: a
+    value can also arrive inside a cluster, where the exact-token test above finds
+    nothing (``rsync -a src/ dst/ -ve ssh`` carries `ssh` as `-ve`'s value, since a
+    cluster's last letter is the one that takes one). It stays opt-in because adding
+    the rule to a caller that did not ask for it can *lose* a destination rather than
+    gain one: `cp -at <dir> src` is read by `_target_directory_values`, which does not
+    parse clusters, so consuming `<dir>` here would leave one operand and name nothing.
 
     A ``--`` **ends option parsing**, and that sentence was here before the loop
     below obeyed it (issue #1433): the loop skipped the ``--`` and went on
@@ -1171,6 +1237,12 @@ def _positional_args(
             # `-s0` / `--size=0` carry their value in the same token; only the
             # spaced form consumes the next one.
             if tok in table:
+                skip_next = True
+            elif (
+                cluster_value_letters
+                and not tok.startswith("--")
+                and tok[-1] in cluster_value_letters
+            ):
                 skip_next = True
             continue
         out.append(tok)
@@ -1925,7 +1997,9 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # destination, and it is rewritten — unless the run is a read form
             # (`-n`/`--dry-run`/`--list-only`), which writes nothing at all.
             if not _rsync_run_is_a_read(tokens, i):
-                args = _positional_args(tokens, i, _NO_OPTION_WITH_VALUE)
+                args = _positional_args(
+                    tokens, i, _RSYNC_OPTIONS_WITH_VALUE, _RSYNC_SHORT_VALUE_LETTERS
+                )
                 # A single operand is a *listing* of the source, not a copy.
                 if len(args) >= 2:
                     targets.append(args[-1])
