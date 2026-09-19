@@ -192,6 +192,55 @@ _COMPRESSOR_READ_LONG = frozenset({
     "--stdout", "--to-stdout", "--test", "--list",
 })
 
+# `lz4` is a compressor whose *default* form is not the in-place rewrite the
+# family above is, and the difference is measured rather than read off the
+# family's name.
+#
+# Measured with the host's own binary (`lz4 v1.10.0`, `/opt/homebrew/bin/lz4`,
+# 2026-09-19): one **fresh** directory per row, only the input present, the
+# listing read back off disk afterwards —
+#
+#   lz4 f              writes  f  f.lz4            a sibling is derived; `f` stays
+#   lz4 -f f           writes  f  f.lz4
+#   lz4 -z f           writes  f  f.lz4
+#   lz4 -l f           writes  f  f.lz4            `-l` is **legacy format**
+#   lz4 -m f g         writes  f  f.lz4  g  g.lz4  every operand derives one
+#   lz4 -r f           writes  f  f.lz4            (`-r` implies `-m`)
+#   lz4 f out.lz4      writes  f  out.lz4          the last operand is the output
+#   lz4 --rm f         writes  f.lz4               and removes the operand
+#   lz4 -d f.lz4       writes  f  f.lz4            the decompressing form writes too
+#   lz4 -c f           read    f                   [stdout]
+#   lz4 --stdout f     read    f                   [stdout]
+#   lz4 -t f.lz4       read    f.lz4               [test]
+#   lz4 --test f.lz4   read    f.lz4               [test]
+#   lz4 -b f           read    f                   [benchmark, prints to stdout]
+#   lz4 --list f.lz4   read    f.lz4               [frame info]
+#
+# Three consequences, and each is why this verb is read in its own branch rather
+# than added to `_COMPRESSOR_VERBS`:
+#
+# 1. The operand is **not rewritten** — a path beside it is created. Naming the
+#    operand is still sound, because a derived sibling lands in the operand's own
+#    directory and in no other, so the operand names the directory the write
+#    happens in; but it is a different claim from `gzip`'s and has to be stated.
+# 2. `-l` is legacy format here, a **write**. Read with `_COMPRESSOR_READ_LETTERS`
+#    this verb would leave `lz4 -l f` unnamed while it really writes `f.lz4` —
+#    a miss, and the reason the family's letters cannot be lent to a verb that
+#    spells one of them differently.
+# 3. Under `-m`/`-r` *every* operand is an input (`lz4 -m f g` derives two
+#    siblings), so the last-operand rule would name one file and let the other
+#    past. Both spellings are measured above.
+_LZ4_VERBS = frozenset({"lz4"})
+_LZ4_READ_LETTERS = frozenset({"c", "t", "b"})
+_LZ4_READ_LONG = frozenset({"--stdout", "--test", "--list"})
+# `-m`/`-r` turn every operand into an input; without them the last operand is
+# the explicit destination and the only operand written.
+_LZ4_MULTI_LETTERS = frozenset({"m", "r"})
+_LZ4_MULTI_LONG = frozenset({"--multiple", "--recursive"})
+# `-D <file>` is the one spaced value here: it is the dictionary, a *read*, and
+# naming it would refuse `lz4 -D <outside>/dict f`, whose write is elsewhere.
+_LZ4_OPTIONS_WITH_VALUE = frozenset({"-D"})
+
 # Verbs that *create* every path named by an operand (`touch a b c`,
 # `mkdir -p a/b`). They were invisible to the write-target walk (issue #1398):
 # with no target named, the loop that judges targets never ran, so both checked
@@ -1640,6 +1689,11 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                 targets.extend(
                     _positional_args(tokens, i, _COMPRESSOR_OPTIONS_WITH_VALUE)
                 )
+        elif word in _LZ4_VERBS:
+            # `lz4 f` writes `f.lz4` beside the operand rather than rewriting it,
+            # `lz4 -m f g` writes two siblings, and `lz4 f out.lz4` writes the
+            # last operand — unless the run is one of the measured read forms.
+            targets.extend(_lz4_write_targets(tokens, i))
         elif word == "sed":
             # `sed -i` rewrites its file operands in place; a bare `sed` is a
             # filter that writes only to stdout and must stay allowed. The flag
@@ -1829,6 +1883,47 @@ def _compressor_operand_is_a_read(tokens: list[str], i: int) -> bool:
         if _COMPRESSOR_READ_LETTERS & set(tok[1:]):
             return True
     return False
+
+
+def _lz4_letters(args: list[str]) -> set[str]:
+    """The short-option letters of an ``lz4`` run, read cluster by cluster.
+
+    `-fb` is `-f -b` and `-B4` is `-B 4`, so a letter is looked for *inside* a
+    token rather than only as a whole one — the same reading the family above
+    gets. Case is kept: `-b` is the benchmark and `-B#` a block size, and an
+    attached value's letters are not distinguished from a spelled flag here,
+    which is the named limit `_compressor_operand_is_a_read` also carries.
+    """
+    letters: set[str] = set()
+    for tok in args:
+        if tok.startswith("-") and not tok.startswith("--") and len(tok) >= 2:
+            letters |= set(tok[1:])
+    return letters
+
+
+def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The path an ``lz4`` run creates — a sibling of the operand, or nothing.
+
+    `lz4` differs from the compressor family in *which* path it writes, so this
+    asks the two questions the measured table (`_LZ4_VERBS`' comment) settles:
+    is the run one of the read forms, and is it a multi-input run?
+
+    * a read form (`-c`/`-t`/`-b` and their long spellings) creates nothing, so
+      naming its operand would refuse a pure read;
+    * under `-m`/`-r` every operand is an input and each derives its own sibling,
+      so all of them are named;
+    * otherwise the *last* operand is written — exactly the explicit destination
+      of `lz4 f out.lz4`, and for the single-operand form the operand itself,
+      whose directory is where the derived sibling lands.
+    """
+    args = _args_after_command(tokens, i)
+    letters = _lz4_letters(args)
+    if letters & _LZ4_READ_LETTERS or any(t in _LZ4_READ_LONG for t in args):
+        return []
+    operands = _positional_args(tokens, i, _LZ4_OPTIONS_WITH_VALUE)
+    if letters & _LZ4_MULTI_LETTERS or any(t in _LZ4_MULTI_LONG for t in args):
+        return operands
+    return operands[-1:]
 
 
 def _is_directory_install(tokens: list[str], i: int) -> bool:
