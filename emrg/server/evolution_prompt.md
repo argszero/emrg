@@ -152,6 +152,8 @@ cd {{ source_dir }} && gh pr list -R {{ owner }}/{{ repo }} --limit 20
   - **⚠️ A CONFLICTING fork PR also gets zero CI checks** (#716 lesson: `mergeable: CONFLICTING` / `mergeable_state: dirty` → GitHub refuses to run CI for a dirty PR; `gh workflow run` cannot target fork refs, close/reopen does NOT re-fire checks for dirty PRs). Unblock path: check `maintainer_can_modify: true`, fetch `refs/pull/N/head`, create a local branch, `git merge master`, resolve conflicts, `git push <fork-remote> <branch>:<fork-branch>` — the `pull_request` synchronize event then fires CI. Post a comment explaining the maintainer push. Never ask the author to rebase blindly when you can resolve the conflict yourself as Committer.
   - Local verification (pytest + npm test) is necessary but NOT sufficient — CI is the only place the actionlint gate (#444) and the full doc-count guard (#511) run
 - Check merge conditions: does the PR's comment history already have 3 consecutive ✅ from different cycles with no ❌ in between?
+  - ⚡ **Ask the instrument instead of counting the ✅ lines by eye**: `scripts/check-vote-count.py <N>` is the reading of that condition, and the comment history misleads in both directions. It counts per *cycle* (one cycle voting twice is one vote), a ❌ resets the run, and it carries a clause the line above does not spell out — **a vote submitted before the head push is void** — so a branch refreshed after its approvals still shows several "✅ LGTM" while it has far fewer counting votes. Its companion `scripts/check-merge-freshness.py <N>` asks the other half: is that green CI still about the tree the merge would produce?
+  - ⚡ **When a stale head has votes at risk, do not refresh it just to make it fresh**: a push moves the head and voids every vote standing on it. Measure the tree the merge would land instead (`scripts/check-merge-plan-suite.py <N>`) and cast the vote on that — the head does not move, so the standing votes stay valid. A refresh is `git merge master` into the branch, then a push; a rebase cannot be published here (the push is refused, and the force-push it would need is forbidden).
   - ⚠️ Query comments with the REST API (GraphQL needs `read:org` scope, often missing from the token):
     `gh api repos/{{ owner }}/{{ repo }}/issues/<N>/comments --jq '.[] | "\(.user.login): \(.body)"'`
     and `gh api repos/{{ owner }}/{{ repo }}/pulls/<N>/reviews --jq '.[] | "\(.user.login) [\(.state)]: \(.body)"'`
@@ -371,7 +373,7 @@ git push origin feature/<short-description>
 gh pr create -R {{ owner }}/{{ repo }} --title "emrg: <short-description>" --body "brief description of changes and reasons"
 ```
 
-**Merge condition**: the PR's comment history must have at least **3 consecutive ✅ LGTMs from different evolution cycles** with no `❌ needs fix` in between, before a Committer may run `gh pr merge --squash`.
+**Merge condition**: the PR's comment history must have at least **3 consecutive ✅ LGTMs from different evolution cycles** with no `❌ needs fix` in between, before a Committer may run `gh pr merge --squash`. `scripts/check-vote-count.py <N>` is the reading of that condition — it counts per cycle, and a vote submitted before the head push is void — so ask it rather than counting the ✅ lines; `scripts/check-merge-freshness.py <N>` says whether the green CI is still about the tree that would land.
 
 **Not pushing = not done**.
 
