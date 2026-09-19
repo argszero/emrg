@@ -171,9 +171,17 @@ _INPLACE_WRITER_VERBS = frozenset({"truncate", "tee", "shred"})
 # **absent**: they are `-dc` wrappers that write nothing, so naming their operand
 # a write would refuse `zcat <file>` — the false block this walk treats as worse
 # than the hole.
+# `compress` reads the same way, and was the name this list still missed
+# (measured 2026-09-19, cyc20260919-162257): `/usr/bin/compress` is installed on
+# this host, and `compress f` **removes `f` and writes `f.Z`** — measured in a
+# scratch directory, `f` gone and `f.Z` present at rc=0, with `uncompress f.Z`
+# doing the same in reverse. Both answered ALLOW on the protected daemon file at
+# **both** tiers while `gzip` was refused, i.e. the same hole #1418 closed for the
+# rest of the family, one installable name over. They are the same shape, so they
+# belong in the same set rather than in a branch of their own.
 _COMPRESSOR_VERBS = frozenset({
     "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "lzma", "unlzma",
-    "zstd", "unzstd",
+    "zstd", "unzstd", "compress", "uncompress",
 })
 
 # `-S`/`--suffix` is the one option in this family that takes a spaced value, and
@@ -183,7 +191,12 @@ _COMPRESSOR_OPTIONS_WITH_VALUE = frozenset({"-S", "--suffix"})
 # The spellings under which that operand is a *read*: the bytes go to stdout
 # instead of back into a file (`-c`, `--stdout`, `--to-stdout`), or the file is
 # only tested or listed (`-t`, `-l`, and their long forms). Every program above
-# takes all three letters. A letter counts **inside a short cluster** as well as
+# takes all three letters **except `compress`**, whose own usage line is
+# `compress [-cfv] [-b bits] [file ...]`: measured 2026-09-19, `compress -t` and
+# `compress -l` are both rejected as illegal options, so the program writes
+# nothing under them and reading those letters as reads cannot hide a write —
+# the letter this family needs from it is `-c`, which it does take. A letter
+# counts **inside a short cluster** as well as
 # alone, because `gzip -dc <f>` is the `zcat` idiom a reader actually types, and a
 # rule that knew only the spaced `-c` would refuse a pure read. The long forms are
 # matched exactly rather than by prefix: `--list` is a read, `--license` is not.
