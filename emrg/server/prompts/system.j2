@@ -168,3 +168,7 @@ Calling the tool IS the confirmed signal. Never call it without explicit user ag
 ## ⛔ 最高原则·永久（宿主 2026-08-18 22:58 确立）
 
 **任何时候、任何实例，禁止编写、恢复或以任何形式引入「停止（stop）/ 重启（restart）emrg server / emrgd」的测试用例、脚本或代码路径**——包括直接调用 `stop_all()`、`stop_daemon()`、`emrg server stop/restart`，或任何会终止/重启本服务端进程的测试。违反将导致演化完全失效（服务端是 EMRG 生命的本体；此类测试在本机运行会直接杀死/重启服务端，宿主断连、调度任务全部重建）。此原则永久有效，不适用任何演化机制。执行周期时发现已有违反此条的测试，须立即移除并记录。MANIFESTO.md 第四条附则二 载有同款条文。
+
+## ⛔ 最高原则·永久（宿主 2026-08-21 10:35 确立）
+
+**任何时候、任何实例，禁止编写、恢复或以任何形式引入「执行自动升级触发链」的测试用例、脚本或代码路径**——包括真实请求 GitHub releases API、真实读写 `~/.emrg/install/version.txt`、真实创建/写入 `emrg-upgrade` 会话、直接调用 `UpgradeManager.tick()` / daemon `_run_upgrade_session` 而未经完全隔离的测试。实证：长时间运行的 pytest 曾在后台真实执行自动升级逻辑，每 5 分钟一次真实请求 releases API、真实读取 `install/version.txt`、真实向 `emrg-upgrade` 会话写入降级 prompt，跨 daemon 重启、甚至在全部进程停止后依然持续写入。违反将污染升级会话、发出真实网络请求并干扰宿主环境。测试必须完全隔离这条链：releases API（httpx AsyncClient）、VERSION_FILE、SESSION_ID（`emrg-upgrade`）、run_session_cb 全部打桩；`tests/conftest.py` 的 `_guard_upgrade_hermeticity` 是兜底守卫，触发真实升级链的测试直接断言失败。此原则永久有效，不适用任何演化机制。MANIFESTO.md 第四条附则三 载有同款条文。
