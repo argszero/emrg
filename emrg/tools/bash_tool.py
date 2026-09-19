@@ -264,6 +264,66 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
     if opt.startswith("-") and not opt.startswith("--")
 )
 
+# `zip` writes the archive, and the archive is the **first** operand — the
+# opposite end of the operand list from `cp`/`mv`/`rsync`, whose destination is
+# the last one. Every operand rule the walk already has reads the last operand or
+# every operand, so none of them reaches it and the archive was named by nothing.
+#
+# Measured on the host's own binary (`/usr/bin/zip`, Info-ZIP 3.0, 2026-09-19):
+# one fresh directory per row holding `f` and `g`, `a.zip` pre-built where the row
+# needs one, and the result read back off disk as `st_mtime_ns` plus a content
+# hash (the hash alone cannot see an in-place rewrite of identical bytes, which is
+# exactly what `zip a.zip f` does when `f` is unchanged) —
+#
+#   zip a.zip f                a.zip CREATED              (no archive yet)
+#   zip a.zip f                a.zip REWRITTEN            (archive exists)
+#   zip -q -r a.zip .          a.zip CREATED
+#   zip -m a.zip f g           a.zip CREATED, f AND g GONE
+#   zip --move a.zip f         a.zip CREATED, f GONE
+#   zip -d a.zip f             a.zip REWRITTEN            (entry deleted)
+#   zip -u a.zip g             a.zip REWRITTEN
+#   zip -o a.zip f             a.zip REWRITTEN
+#   zip -T a.zip f             a.zip REWRITTEN            mtime moved
+#   zip -T a.zip               read    "test of a.zip OK" mtime untouched
+#   zip -sf a.zip [f]          read    "Would Add/Update:" mtime untouched
+#   zip --show-files a.zip f   read    same line           mtime untouched
+#   zip -su a.zip / -sU a.zip  read    rc=16, nothing written
+#   zip -h a.zip f             read    help, nothing written
+#   zip -h2 a.zip f            read    extended help, nothing written
+#   zip -L a.zip f             read    licence, nothing written
+#   zip --help a.zip f         read    help, nothing written
+#   zip --version a.zip f      read    help, nothing written
+#   zip a.zip                  nothing rc=12 "Nothing to do!"
+#   zip -d a.zip               nothing rc=12
+#   zip -v a.zip               nothing rc=12
+#   zip -l a.zip f             a.zip CREATED            lowercase `-l` is LF->CRLF
+#   zip -v a.zip f             a.zip REWRITTEN          uppercase `-v` is verbose
+#   zip -m a.zip f -x f        nothing rc=12             the exclusion won
+#
+# Four consequences, all measured rather than read off the usage line:
+#
+# 1. A run with **no list** writes nothing, whatever the mode: `zip a.zip`,
+#    `zip -d a.zip` and `zip -v a.zip` each exit 12 with "Nothing to do!". So the
+#    archive is named only when a second operand follows it, and `-T` needs no
+#    rule of its own — `zip -T a.zip` is the *test* form and its one-operand shape
+#    is already the "nothing written" case.
+# 2. `-T` is therefore **not** a read. With a list it rewrites the archive
+#    (`zip -T a.zip f`, mtime moved), which is the lz4 `-l` lesson again: a
+#    spelling that is a read in one shape and a write in another cannot be read
+#    as a flag.
+# 3. `-m`/`--move` **deletes** every listed file once it is archived, so under it
+#    the operands after the archive are write targets too, not inputs.
+# 4. The read spellings are matched as **whole tokens, case-sensitively**: `-sf`
+#    is show-files while `-f` is freshen (a write), `-L` is the licence while `-l`
+#    is the LF->CRLF conversion (a write, measured above). A letter scan — the
+#    shape the compressor family uses — would conflate both pairs.
+_ZIP_OPTIONS_WITH_VALUE = frozenset({"-b", "-t", "-n", "-s", "-TT"})
+_ZIP_READ_TOKENS = frozenset({
+    "-sf", "-su", "-sU", "-h", "-h2", "-L", "--help", "--version",
+    "--show-files",
+})
+_ZIP_MOVE_FLAGS = frozenset({"-m", "--move"})
+
 # Verbs that *create* every path named by an operand (`touch a b c`,
 # `mkdir -p a/b`). They were invisible to the write-target walk (issue #1398):
 # with no target named, the loop that judges targets never ran, so both checked
@@ -1781,6 +1841,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # `lz4 -m f g` writes two siblings, and `lz4 f out.lz4` writes the
             # last operand — unless the run is one of the measured read forms.
             targets.extend(_lz4_write_targets(tokens, i))
+        elif word == "zip":
+            # `zip A.zip f` creates or rewrites `A.zip`, and the archive is the
+            # *first* operand — the end no other operand rule reads, so the run
+            # named nothing at all and both tiers allowed it (issue #1420's
+            # remaining row). The rule, its measured table and its two named
+            # limits are in `_zip_write_targets`.
+            targets.extend(_zip_write_targets(tokens, i))
         elif word == "sed":
             # `sed -i` rewrites its file operands in place; a bare `sed` is a
             # filter that writes only to stdout and must stay allowed. The flag
@@ -2028,6 +2095,40 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
     if letters & _LZ4_MULTI_LETTERS or any(t in _LZ4_MULTI_LONG for t in args):
         return operands
     return operands[-1:]
+
+
+def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The paths a ``zip`` run writes: its **first** operand, and what it moves.
+
+    The measured table is the comment above `_ZIP_OPTIONS_WITH_VALUE`; the rule it
+    settles is three lines long, and each line is one of its rows:
+
+    * a read spelling (``-sf``/``--show-files``, ``-su``/``-sU``, the help and
+      licence forms) writes nothing, so nothing is named;
+    * with no second operand the run writes nothing at all (exit 12, "Nothing to
+      do!"), which is what keeps `zip a.zip` and `zip -d a.zip` allowed;
+    * otherwise the archive — the *first* operand — is the path that is created
+      or rewritten, and under ``-m``/``--move`` every listed operand after it is
+      removed as well.
+
+    Named limit: the exclusion list (``-x``) and the include list (``-i``) are
+    matched against the operands **by name**, and a name they neutralise is still
+    named here. Measured, `zip -m a.zip f -x f` writes nothing, so the over-block
+    lands on a run that does nothing anyway; the alternative is a per-name match
+    in the walk, the grammar this family of rules refuses to grow (see
+    `_rsync_run_is_a_read` for the same trade taken the other way). `-@` reads its
+    names from stdin, which the walk cannot see: that spelling stays unnamed.
+    """
+    words = _args_after_command(tokens, i)
+    if any(tok in _ZIP_READ_TOKENS for tok in words):
+        return []
+    operands = _positional_args(tokens, i, _ZIP_OPTIONS_WITH_VALUE)
+    if len(operands) < 2:
+        # Archive and no list: zip exits 12 having written nothing.
+        return []
+    if any(tok in _ZIP_MOVE_FLAGS for tok in words):
+        return operands
+    return operands[:1]
 
 
 def _is_directory_install(tokens: list[str], i: int) -> bool:
