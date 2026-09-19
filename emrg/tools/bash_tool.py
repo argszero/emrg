@@ -2118,6 +2118,12 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     in the walk, the grammar this family of rules refuses to grow (see
     `_rsync_run_is_a_read` for the same trade taken the other way). `-@` reads its
     names from stdin, which the walk cannot see: that spelling stays unnamed.
+
+    ``-b <dir>`` (the temporary directory, a spaced value this rule drops) is
+    deliberately not named, and that is a measurement rather than an omission:
+    taken in a scratch directory, `zip -b <dir> a.zip f` left the directory
+    **empty** afterwards, and so did a run that failed — the temporary archive is
+    removed before the process exits, so there is no surviving path to protect.
     """
     words = _args_after_command(tokens, i)
     if any(tok in _ZIP_READ_TOKENS for tok in words):
