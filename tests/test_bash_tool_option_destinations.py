@@ -210,6 +210,16 @@ def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
     change that closes it must flip this assertion deliberately.
 
     Measured on GNU: `curl -so <dir>/f <url>` really does write into `<dir>`.
+
+    ⚠️ The mechanism to close it now exists and is **opt-in**, so this row is no
+    longer a missing capability but an unmeasured grammar: `_option_destination_values`
+    takes `cluster_letters`, and a caller that has measured its verb's value-taking
+    letters gets the clustered destination named (`pzstd` does, and its
+    `tests/test_bash_tool_pzstd_targets.py` carries the rows and the mutation arms).
+    A union of every verb's letters is exactly what cannot be passed here — `sort -ko
+    out.txt` and `curl -so <dir>/f` differ only in which letter took the value — so
+    closing the remaining rows means tabulating one verb at a time and flipping this
+    assertion deliberately.
     """
     for cmd in (f"curl -so {OUTSIDE}/f https://example.invalid/x",
                 f"curl -so{OUTSIDE}/f https://example.invalid/x"):

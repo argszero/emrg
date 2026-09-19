@@ -350,6 +350,12 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
 #   pzstd -oout.zst f          writes  f  out.zst        …and takes an attached value
 #   pzstd f -o out.zst         writes  f  out.zst        the destination wins wherever it stands
 #   pzstd -o out.zst -         writes  out.zst           the stream still gets a destination
+#   pzstd -qo out.zst f        writes  f  out.zst        the destination letter inside a cluster
+#   pzstd -qoout.zst f         writes  f  out.zst        …attached, in the same cluster
+#   pzstd -co out.zst f        writes  f  out.zst        a read letter in FRONT of it, and it still
+#                                                        writes the file: 0 bytes on stdout
+#   pzstd -qo out.zst          writes  out.zst           no operand — stdin is the input
+#   pzstd -qo - f              read    f                 [stdout] — a cluster's `-` destination
 #   pzstd -c f / --stdout f    read    f                 [stdout]
 #   pzstd -t f.zst             read    f.zst             [test]
 #   pzstd -dc f.zst            read    f.zst             [decompress to stdout]
@@ -364,7 +370,7 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
 #   pzstd -o out.zst f g       rc=1    f  f.zst          "Cannot specify an output file when
 #                                                        handling multiple inputs"
 #
-# Three consequences, and each is why this verb gets a branch of its own rather
+# Five consequences, and each is why this verb gets a branch of its own rather
 # than joining `_COMPRESSOR_VERBS`:
 #
 # 1. The default form **keeps** the operand and derives a sibling (`f` → `f.zst`),
@@ -378,6 +384,16 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
 #    read gate would read it as `--test` and answer "read, nothing named" — the
 #    hole this branch closes, reopened one spelling over. The letter scan in
 #    `_pzstd_read_form` stops at `o` for the reason `_lz4_letters` stops at `D`.
+# 4. The destination question has to come **before** that read gate, because here
+#    they are not alternatives: `pzstd -co out.zst f` is rc=0 with 0 bytes on stdout
+#    and `out.zst` written (measured 2026-09-20). A gate that answered "read" from
+#    the first read letter would leave that write unnamed. The ordering is this
+#    verb's, measured; `zip`'s is the opposite and measured there (#1445 keeps its
+#    read gate first, because `zip -sf … --out …` really does write nothing).
+# 5. The destination letter may sit **inside a cluster** (`-qo out.zst`), which is
+#    why this verb passes its own value-taking letters to
+#    `_option_destination_values` — measured: `pzstd -qo out.zst f` writes `out.zst`
+#    and keeps `f`, and `pzstd -qoout.zst f` is the same in one token.
 #
 # `-l`/`--list` is in the read letters although pzstd **rejects** it, for the same
 # reason `compress`'s illegal `-t` is in the family's set: the program writes
@@ -397,9 +413,14 @@ _PZSTD_OPTIONS_WITH_VALUE = frozenset({"-o", "-p", "--processes"})
 # that was going to fail anyway costs less than missing a write" — does not apply
 # to a spelling the program itself rejects: there is no write to miss.
 _PZSTD_DESTINATION_OPTIONS = frozenset({"-o"})
-# …and the same option spelled **attached** (`-oout.zst`), derived from the table
-# above so the two readings cannot drift, because a token that carries `o` as its
-# value-taking letter ends the short-option scan there.
+# …and the letters that decide where a **cluster's** value is: both readings are
+# taken from this verb's own value-taking table (`-o`, `-p`), derived rather than
+# written out so a letter added above cannot be read in the spaced spelling and
+# silently not in the clustered one. Two callers ask it the same question — the
+# destination extractor, which names the value only when the letter that carried it
+# is `o`, and `_pzstd_names_a_destination`, which asks whether `o` was spelled at
+# all — and the operand walk derives the same set from `_PZSTD_OPTIONS_WITH_VALUE`,
+# so all three agree about which token carries a value (`pzstd -qo out.zst f`).
 _PZSTD_VALUE_TAKING_SHORT = frozenset(
     opt[1:]
     for opt in _PZSTD_OPTIONS_WITH_VALUE
@@ -2040,7 +2061,11 @@ def _short_cluster_option(
 
 
 def _option_destination_values(
-    tokens: list[str], i: int, verb: str, options: frozenset | None = None
+    tokens: list[str],
+    i: int,
+    verb: str,
+    options: frozenset | None = None,
+    cluster_letters: frozenset[str] = frozenset(),
 ) -> list[str]:
     """The paths a verb writes to that are named by an **option**, not an operand.
 
@@ -2076,6 +2101,22 @@ def _option_destination_values(
     list *also* names writes (`patch`, whose `-o` displaces its operands) passes its
     own set rather than joining the shared table below. Omitting it keeps the
     historical lookup, which is what the branch that walks that table still reads.
+
+    ``cluster_letters`` switches on the **clustered** spelling and is opt-in for the
+    same reason ``_positional_args``'s is: a token that does not lead with the
+    destination letter can only be split by the verb's own grammar, and that grammar
+    is not in `options` — `options` names the *destinations*, while the value is
+    decided by the **first** letter the verb takes a value for. So the caller passes
+    that verb's value-taking letters, the scan stops there, and the value is named
+    only when the letter that carried it is one of the destination letters:
+    `-so<dir>` and `-qo <dir>` carry their value on `o`, while `sort -ko out.txt`
+    carries it on `k` (`-k o`) and `out.txt` is an operand to **read** — which is why
+    a union of every verb's letters is the wrong table to hand this parameter and why
+    the sites that can pass it are the ones whose grammar has been measured
+    (`pzstd`, whose value-taking letters are `o` and `p`). A site that passes nothing
+    keeps the historical reading, so a cluster there leaves the destination unnamed
+    and pinned as a measured residual rather than guessed at — `curl -so<dir>` is
+    that row, in `tests/test_bash_tool_option_destinations.py`.
     A ``--`` that no option consumed ends option parsing, so an option *after* it
     is an operand and names nothing **here** — no option on the line names a
     destination. Whether the walk names that operand is the operand rule's own
@@ -2121,6 +2162,14 @@ def _option_destination_values(
             attached = _leading_short_option_value(tok, letters)
             if attached is not None:
                 out.append(attached)
+            elif cluster_letters:
+                # The destination letter sits inside the cluster rather than at its
+                # head, so the scan has to stop at whichever letter the verb takes a
+                # value for first (`-so <dir>` and `-ko out.txt` differ exactly
+                # there), and only the destination's own letter contributes a path.
+                cluster = _short_cluster_option(tok, args, j, cluster_letters)
+                if cluster is not None and cluster[0] in letters and cluster[1]:
+                    out.append(cluster[1])
     return [value for value in out if value != "-"]
 
 
@@ -2902,6 +2951,14 @@ def _pzstd_read_form(args: list[str]) -> bool:
     The long forms are matched exactly rather than by prefix, and a token that is
     not a short-option cluster (`--processes 4`, an operand) is skipped — a
     *value* is never a cluster.
+
+    Asked only once no destination has been spelled, because the two readings are
+    **not** alternatives in the direction a family-wide gate would assume: measured
+    2026-09-20 on this host, `pzstd -co out.zst f` exits 0 with 0 bytes on stdout and
+    `out.zst` written, so a read letter in front of `-o` does not make the run a
+    read (`pzstd -c f` alone does — 31 bytes on stdout, no file). The family's own
+    gate, which answers "read" from the first read letter it sees, is what this
+    ordering exists to keep away from that spelling.
     """
     for tok in args:
         if tok in _PZSTD_READ_LONG:
@@ -2928,13 +2985,18 @@ def _pzstd_names_a_destination(args: list[str]) -> bool:
     first case too, i.e. refuse a pure read, measured rc=0 with the directory
     unchanged.
 
-    The test reads the option the same way the value extractor does — the exact
-    token, or a cluster *leading* with `o` — so the two cannot disagree about which
-    run has a destination: a `-qo out.zst f` does not lead with `o`, is not read
-    here, and stays with the operand rule below, where its residual is recorded.
+    The option is found by the same reader the value extractor uses — the shared
+    cluster scan over this verb's value-taking letters — so the two cannot disagree
+    about which run has a destination: any spelling the extractor reads a value from
+    (`-o <v>`, `-o<v>`, and a cluster like `-qo <v>`) is a destination *spelled* here,
+    whether or not its value is one this walk may name (`-qo - f` is stdout, and the
+    answer is then "nothing", not `f`).
     """
-    for tok in args:
-        if tok == "-o" or _leading_short_option_value(tok, frozenset({"o"})) is not None:
+    for j, tok in enumerate(args):
+        if tok == "--":
+            break
+        cluster = _short_cluster_option(tok, args, j, _PZSTD_VALUE_TAKING_SHORT)
+        if cluster is not None and cluster[0] == "o":
             return True
     return False
 
@@ -2947,36 +3009,45 @@ def _pzstd_write_targets(tokens: list[str], i: int) -> list[str]:
     behind every claim here is above `_PZSTD_VERBS`. Three questions settle it, in
     this order:
 
-    * is the run a read form (`-c`/`--stdout`, `-t`/`--test`, `-l`/`--list`, the
-      letters read inside a short cluster too)? then it writes nothing, and naming
-      the operand would refuse a pure read;
     * does it spell `-o`? then that option holds the destination and the operands
       are only read — so the destination is named and they are not, which is also
-      why `pzstd -o - f` answers with nothing rather than with `f`;
+      why `pzstd -o - f` answers with nothing rather than with `f`. Every spelling
+      of the option counts, the clustered one included (`pzstd -qo out.zst f` names
+      `out.zst` and then stops), which is what this verb passes its value-taking
+      letters to the extractor for. This question comes **first** because it wins a
+      disagreement the read gate would otherwise settle the other way: measured,
+      `pzstd -co out.zst f` is rc=0 with **0 bytes on stdout** and `out.zst` written,
+      so a read letter in front of the destination does not make the run a read;
+    * is it a read form (`-c`/`--stdout`, `-t`/`--test`, `-l`/`--list`, the letters
+      read inside a short cluster too) when no destination is spelled? then it writes
+      nothing, and naming the operand would refuse a pure read;
     * otherwise every operand derives its own sibling (`pzstd f g` writes `f.zst`
       and `g.zst`), so all of them are named, minus the bare ``-``.
 
-    Two named limits, both measured, both checked in
-    `tests/test_bash_tool_pzstd_targets.py` so neither is a surprise later:
+    One named limit, measured, checked in `tests/test_bash_tool_pzstd_targets.py` so
+    it is not a surprise later: a stream operand beside a file (`pzstd - f`) is
+    dropped, as in the family, leaving `f` named although the run aborts with rc=1
+    and writes nothing — an over-name, which is the direction this walk prefers to
+    err in.
 
-    * a destination letter that does **not** lead its cluster (`pzstd -qo out.zst
-      f`) is not read as the option — the shape `_leading_short_option_value`
-      leaves unread on purpose — so the run falls through and names the
-      destination *as an operand* (`out.zst`, the path really written) **plus** the
-      input `f`, which is only read. An over-name, not a hole: no hidden write is
-      left unnamed.
-    * a stream operand beside a file (`pzstd - f`) is dropped, as in the family,
-      leaving `f` named although the run aborts with rc=1 and writes nothing.
+    The clustered spelling used to be a limit too, and it was measured to be the
+    *hole* direction rather than this one once the cluster value rule landed on
+    master (#1443): `pzstd -qo <out>/out.zst <ws>/f` then reported `['<ws>/f']`,
+    i.e. the operand walk correctly ate `out.zst` as `-o`'s value while this rule —
+    reading only a leading letter — named the destination by nothing, and the write
+    outside the workspace was allowed. That is why the letters are passed here and
+    why the seam asks the same cluster question: the two readers have to agree about
+    which token carries the value.
     """
     args = _args_after_command(tokens, i)
-    if _pzstd_read_form(args):
-        return []
     destinations = _option_destination_values(
-        tokens, i, "pzstd", _PZSTD_DESTINATION_OPTIONS
+        tokens, i, "pzstd", _PZSTD_DESTINATION_OPTIONS, _PZSTD_VALUE_TAKING_SHORT
     )
     if destinations:
         return destinations
     if _pzstd_names_a_destination(args):
+        return []
+    if _pzstd_read_form(args):
         return []
     return _without_the_stream_operand(
         _positional_args(tokens, i, _PZSTD_OPTIONS_WITH_VALUE)

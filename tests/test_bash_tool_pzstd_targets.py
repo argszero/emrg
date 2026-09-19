@@ -98,11 +98,31 @@ WRITE_FORMS = (
 # (row, command, the destination — and only the destination). While `-o` is
 # present the operands are **read**: measured, `pzstd -o out.zst f` leaves `f`
 # untouched, so naming `f` as well would refuse a pure read.
+#
+# The clustered spellings are here rather than in the limits below, and that is the
+# half this file's last change added: the destination letter does not have to lead
+# its cluster, and reading only a leading letter left the write unnamed once the
+# operand walk learned to eat a cluster's value word (#1443). Measured 2026-09-20,
+# one fresh directory per row, listing read back off disk: all five clustered rows
+# are rc=0, create the destination and leave `f` byte-identical.
+#
+# `-co` is the row that fixes the **order** of the two questions rather than a
+# spelling: measured, `pzstd -co out.zst f` is rc=0 with **0 bytes on stdout** and
+# `out.zst` written, while `pzstd -c f` alone puts 31 bytes on stdout and creates no
+# file. So a read letter in front of the destination does not make the run a read,
+# and the destination question has to be asked first.
 DESTINATION_FORMS = (
     ("-o spaced", f"pzstd -o {OUTSIDE}/out.zst {OUTSIDE}/f", (f"{OUTSIDE}/out.zst",)),
     ("-o attached", f"pzstd -o{OUTSIDE}/out.zst {OUTSIDE}/f", (f"{OUTSIDE}/out.zst",)),
     ("-o after the operand", f"pzstd {OUTSIDE}/f -o {OUTSIDE}/out.zst", (f"{OUTSIDE}/out.zst",)),
     ("-o with the stream", f"pzstd -o {OUTSIDE}/out.zst -", (f"{OUTSIDE}/out.zst",)),
+    ("cluster spaced", f"pzstd -qo {OUTSIDE}/out.zst {OUTSIDE}/f", (f"{OUTSIDE}/out.zst",)),
+    ("cluster attached", f"pzstd -qo{OUTSIDE}/out.zst {OUTSIDE}/f", (f"{OUTSIDE}/out.zst",)),
+    ("cluster no operand", f"pzstd -qo {OUTSIDE}/out.zst", (f"{OUTSIDE}/out.zst",)),
+    ("read letter before the destination",
+     f"pzstd -co {OUTSIDE}/out.zst {OUTSIDE}/f", (f"{OUTSIDE}/out.zst",)),
+    ("quiet before the destination",
+     f"pzstd -qo {OUTSIDE}/out.zst {OUTSIDE}/f", (f"{OUTSIDE}/out.zst",)),
 )
 
 # (row, command) — spellings that write nothing and must stay allowed, or the fix
@@ -126,22 +146,24 @@ READ_FORMS = (
     ("bare dash", "pzstd -"),
     # `-o -` names stdout as the destination — measured rc=0 with the directory
     # unchanged, the bytes on stdout. The destination option *is* spelled, so the
-    # operand rule must not be reached for it.
+    # operand rule must not be reached for it. The clustered spelling of the same
+    # thing has to answer the same way, or reading a cluster would turn a run that
+    # writes nothing into a run that names its input.
     ("dash destination", f"pzstd -o - {OUTSIDE}/f"),
+    ("dash destination in a cluster", f"pzstd -qo - {OUTSIDE}/f"),
 )
 
-# (row, command, the target list this rule produces) — two measured limits, pinned
-# so that neither is a surprise later. Both are **over-names**: in both, the path
+# (row, command, the target list this rule produces) — the measured limit that is
+# left, pinned so that it is not a surprise later. It is an **over-name**: the path
 # the run really writes is still named, so no hidden write is left unnamed, which is
 # the direction this walk prefers to err in.
+#
+# The other row that used to live here — `pzstd -qo out.zst f` naming the
+# destination *and* the input — is gone, and it left in the direction that mattered:
+# with the cluster value rule on master the operand walk ate `out.zst` as `-o`'s
+# value, so the same command reported `['f']` and the destination was named by
+# nothing. It is now a row of `DESTINATION_FORMS` (the destination, and only it).
 RESIDUALS = (
-    # A destination letter that does not *lead* its cluster is not read as the
-    # option — the shape `_leading_short_option_value` leaves unread on purpose —
-    # so the run falls through and the destination is named as an operand ... plus
-    # the input, which is only read. Measured: rc=0, directory left holding
-    # `f out.zst`.
-    ("destination behind a flag", f"pzstd -qo {OUTSIDE}/out.zst {OUTSIDE}/f",
-     (f"{OUTSIDE}/out.zst", f"{OUTSIDE}/f")),
     # A stream operand beside a file is dropped, as in the family, leaving `f`
     # named although the run aborts: measured rc=1, "Cannot specify standard input
     # when handling multiple files", nothing written.
@@ -331,10 +353,90 @@ def test_the_seam_spares_the_stream_destination_and_nothing_else() -> None:
     finally:
         bash_tool._pzstd_names_a_destination = seam
 
+    # The seam and the value extractor have to agree about which token carries the
+    # value, so the seam asks the same cluster question — and it must say yes for a
+    # clustered destination in a spelling whose value it *would* name as well
+    # (`-qo out.zst`) and for one whose value it drops (`-qo -`).
     assert bash_tool._pzstd_names_a_destination(["-o", "out.zst"]) is True
     assert bash_tool._pzstd_names_a_destination(["-oout.zst"]) is True
-    assert bash_tool._pzstd_names_a_destination(["-qo", "out.zst"]) is False, (
-        "a cluster that does not lead with the destination letter is exactly the "
-        "residual pinned above; reading it here would answer `[]` for a run that "
-        "really writes out.zst"
+    assert bash_tool._pzstd_names_a_destination(["-qo", "out.zst"]) is True
+    assert bash_tool._pzstd_names_a_destination(["-qo", "-", f"{OUTSIDE}/f"]) is True
+    assert bash_tool._pzstd_names_a_destination(["-p", "4", f"{OUTSIDE}/f"]) is False, (
+        "`-p` takes a value and is not the destination: a seam that answered yes "
+        "here would drop the operand a plain `pzstd -p 4 f` really derives a "
+        "sibling beside"
     )
+    # …and the two readers agree, which is the property the seam exists for: every
+    # spelling the seam calls a destination is a spelling the extractor reads a
+    # value from (or drops as `-`), so neither can answer for the other's token.
+    for args in (["-o", "out.zst"], ["-oout.zst"], ["-qo", "out.zst"],
+                 ["-qoout.zst"], ["f", "-qo", "out.zst"]):
+        assert bash_tool._option_destination_values(
+            ["pzstd", *args], 0, "pzstd",
+            bash_tool._PZSTD_DESTINATION_OPTIONS,
+            bash_tool._PZSTD_VALUE_TAKING_SHORT,
+        ) == ["out.zst"], args
+
+
+def test_the_cluster_letters_are_what_name_the_clustered_destination() -> None:
+    """Empty the letters and the clustered rows must go back to the hole.
+
+    The measured hole, not a guess: once the operand walk learned to eat a cluster's
+    value word (#1443), reading only a *leading* destination letter left
+    `pzstd -qo <out>/out.zst <ws>/f` reporting `['<ws>/f']` — the destination written
+    outside the workspace, named by nothing. This arm is that state on purpose: the
+    same command with the letters removed must fall back to it, or the letters are
+    not what closes the row.
+    """
+    # The input is inside the workspace and only the destination is outside, so the
+    # hole shows as a verdict rather than as a target list: with the destination
+    # named the run is refused, and without it the walk sees an in-workspace operand
+    # and allows a write that lands outside.
+    cmd = f"pzstd -qo {OUTSIDE}/out.zst /workspace/f"
+    assert _extract_write_targets(cmd) == [f"{OUTSIDE}/out.zst"]
+    assert _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0] is False
+
+    original = bash_tool._PZSTD_VALUE_TAKING_SHORT
+    try:
+        bash_tool._PZSTD_VALUE_TAKING_SHORT = frozenset()
+        targets = _extract_write_targets(cmd)
+        allowed = _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0]
+    finally:
+        bash_tool._PZSTD_VALUE_TAKING_SHORT = original
+
+    assert targets == ["/workspace/f"], (
+        "without the letters the destination must go unnamed again — which is the "
+        "hole this row was added for"
+    )
+    assert allowed is True, (
+        "the hole has to be visible as an ALLOW, otherwise this arm proves nothing "
+        "about the guard"
+    )
+
+
+def test_the_order_is_what_keeps_a_read_letter_from_hiding_the_destination() -> None:
+    """`-co <dest>` writes the destination, so the read gate cannot answer first.
+
+    Measured: `pzstd -co out.zst f` is rc=0 with 0 bytes on stdout and `out.zst`
+    written, while `pzstd -c f` alone puts the bytes on stdout and creates no file.
+    With the read gate forced open the destination row must therefore still be named
+    — under the opposite order the gate would answer "read, nothing named" and this
+    assertion would fail, which is what makes the order a claim rather than a
+    preference.
+    """
+    scan = bash_tool._pzstd_read_form
+    destination_row = f"pzstd -co {OUTSIDE}/out.zst {OUTSIDE}/f"
+    read_row = f"pzstd -c {OUTSIDE}/f"
+
+    assert _extract_write_targets(destination_row) == [f"{OUTSIDE}/out.zst"]
+    try:
+        bash_tool._pzstd_read_form = lambda *_a, **_k: True
+        assert _extract_write_targets(destination_row) == [f"{OUTSIDE}/out.zst"], (
+            "a read gate that answers first hides the destination of `-co` — the "
+            "order is what keeps the measured write named"
+        )
+        # …and the gate is still what spares a run with no destination at all, which
+        # is why it cannot simply be deleted.
+        assert _extract_write_targets(read_row) == []
+    finally:
+        bash_tool._pzstd_read_form = scan
