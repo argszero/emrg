@@ -621,23 +621,215 @@ def test_the_prefix_rows_against_the_move_out_are_unchanged():
 
 
 def test_the_shapes_the_prefix_rule_still_does_not_read_are_pinned():
-    """Two residuals of this reading, both false blocks, both deliberate.
+    """One residual of this reading, kept deliberately, and one that was lifted.
 
-    * A **flag between the prefix and the verb** (`command -p cd sub`) is not
-      read: the rule consumes exactly the one word after the prefix, and
-      enumerating which flags a prefix takes is the #461 class of hole this
-      guard refuses to open. Measured in `/bin/sh`: the file lands inside, so
-      the refusal is friction — the caller's work-around is the unprefixed
-      spelling.
+    * A **flag between the prefix and the verb** (`command -p cd sub`) used to be
+      pinned here as a false block, on the grounds that enumerating which flags a
+      prefix takes is the #461 class of hole. Measured, that reasoning is right
+      about the *unbounded* case and wrong about this one: the flags are three,
+      they are fixed by the shell, and they split cleanly into "still runs the
+      command" (`-p`, `--`) and "looks the word up / unregisters it instead"
+      (`-v`, `-V`, `-d`, `-s`). So the row was lifted deliberately — the section
+      below carries its table, its ground truth and a mutation arm per direction
+      — and this function keeps the residual it did **not** lift.
     * An **`eval` payload** is not read: `eval 'cd sub'` reaches this walk as one
       opaque token, and the unquoted spelling is refused a statement earlier by
       `_cwd_left_workspace`, which parses every `eval` argument as its own
       command. Reading the unquoted spelling here would fix one spelling of the
       class and leave the other, which is exactly the enumeration trap.
     """
-    assert _verdict("command -p cd sub && echo x > ../back.txt") is False
     assert _verdict("eval cd sub && echo x > ../back.txt") is False
     assert _verdict("eval 'cd sub' && echo x > ../back.txt") is False
+
+
+# ---------------------------------------------------------------------------
+# The prefix's own flags (issue #1391)
+#
+# `builtin`/`command` are transparent to a move (issue #1385), and the word they
+# run can sit behind their own flags. Which of those flags still runs it is a
+# closed two-way question, measured in `/bin/sh` and bash (which agree on every
+# row) with the file's placement read back off disk and `ws/sub` present:
+#
+#   command -p cd sub && echo x > ../f      -> ws/f   inside   (runs)
+#   command -- cd sub && echo x > ../f      -> ws/f   inside   (runs)
+#   builtin -- cd sub && echo x > ../f      -> ws/f   inside   (runs)
+#   command -pp cd sub && echo x > ../f     -> ws/f   inside   (runs)
+#   command -p command cd sub && echo …     -> ws/f   inside   (runs)
+#   command -v cd sub && echo x > ../f      -> f      outside  (looked up)
+#   command -V cd sub && echo x > ../f      -> f      outside  (looked up)
+#   command -pv cd sub && echo x > ../f     -> f      outside  (looked up)
+#   command -p -v cd sub && echo x > ../f   -> f      outside  (looked up)
+#   builtin -d cd sub; echo x > ../f        -> f      outside  (not run)
+#
+# The split is the point: `../f` after a move into `sub` lands inside, and after
+# a lookup that never moved it lands beside the workspace. A rule that read every
+# flag through would allow the four "looked up" rows — a fail-open the refusal
+# these rows get today is right about.
+# ---------------------------------------------------------------------------
+
+# (row, command) — a flag that still runs the command, so the move behind it is
+# read and the relative target lands inside.
+PREFIX_FLAG_RUNS = (
+    ("-p", "command -p cd sub && echo x > ../back.txt"),
+    ("-- on command", "command -- cd sub && echo x > ../back.txt"),
+    ("-- on builtin", "builtin -- cd sub && echo x > ../back.txt"),
+    ("-pp bundle", "command -pp cd sub && echo x > ../back.txt"),
+    ("repeated -p", "command -p -p cd sub && echo x > ../back.txt"),
+    ("flag then prefix", "command -p command cd sub && echo x > ../back.txt"),
+)
+
+# (row, command) — a flag that does not run the word after it. The shell stays
+# where it was, so the same relative target really resolves outside and the
+# refusal must hold.
+PREFIX_FLAG_LOOKS_UP = (
+    ("-v", "command -v cd sub && echo x > ../back.txt"),
+    ("-V", "command -V cd sub && echo x > ../back.txt"),
+    ("-pv bundle", "command -pv cd sub && echo x > ../back.txt"),
+    ("-p then -v", "command -p -v cd sub && echo x > ../back.txt"),
+    ("-pV bundle", "command -pV cd sub && echo x > ../back.txt"),
+    ("builtin -d", "builtin -d cd sub; echo x > ../back.txt"),
+    ("builtin -s", "builtin -s cd sub && echo x > ../back.txt"),
+)
+
+
+@pytest.mark.parametrize("row,cmd", PREFIX_FLAG_RUNS, ids=[r for r, _ in PREFIX_FLAG_RUNS])
+def test_a_prefix_flag_that_runs_the_command_is_read_through(row, cmd) -> None:
+    """The move is behind the flag, and the target really lands inside."""
+    sub = os.path.realpath(os.path.join(WORKDIR, "sub"))
+    assert _verdict(cmd) is True, row
+    assert _cwd_at_write_site(cmd, WORKDIR, "../back.txt") == sub, row
+
+
+@pytest.mark.parametrize(
+    "row,cmd", PREFIX_FLAG_LOOKS_UP, ids=[r for r, _ in PREFIX_FLAG_LOOKS_UP]
+)
+def test_a_prefix_flag_that_does_not_run_the_command_is_read_no_further(row, cmd) -> None:
+    """The other half: a lookup is not a move, so the refusal is correct.
+
+    Read as a move, each of these would name `sub` as the directory the shell
+    entered and allow a write that lands beside the workspace.
+    """
+    assert _verdict(cmd) is False, row
+
+
+def test_the_escape_direction_is_unchanged_by_the_flag_reading() -> None:
+    """Controls: reading past the flags must not read past a move to outside.
+
+    Every row lands in the same place as its unprefixed twin — refused — so the
+    change is confined to *which* word is read as the command, not to whether the
+    boundary still holds.
+    """
+    for prefix in ("command ", "command -p ", "command -- ", "builtin ", "builtin -- "):
+        assert _verdict(f"{prefix}cd {spelled(OUTSIDE)} && echo x > out.txt") is False, prefix
+
+
+def test_the_flag_rule_is_what_reads_the_run_flags() -> None:
+    """Two arms, each of which really flips a row — measured, not assumed.
+
+    * **Blind the rule** and every run row goes back to the BLOCK it had before
+      this change, so the table above depends on it.
+    * **Narrow the rule** to the exact `-p` token (dropping the `--` clause and
+      the bundle reading) and the `--` rows and `-pp` go back to BLOCK while
+      `-p` stays allowed — so the other two clauses are load-bearing rather than
+      decoration.
+
+    ⚠️ What this function deliberately does **not** claim: that the *lookup* rows
+    are refused because of this predicate. Measured with the rule forced to
+    answer `True` to every flag, `command -v cd sub && echo x > ../back.txt` is
+    still refused and `_cwd_at_write_site` still answers the start directory —
+    another rule decides that row, and an arm asserting it here would pass
+    whether or not the rule was open (`#468`'s shape: a leg that cannot fail is
+    not evidence). The over-broad direction is therefore pinned where it is
+    decided instead: as a table over the predicate's own closed flag set.
+    """
+    from emrg.tools import bash_tool
+
+    run_row = "command -- cd sub && echo x > ../back.txt"
+    bundle_row = "command -pp cd sub && echo x > ../back.txt"
+    p_row = "command -p cd sub && echo x > ../back.txt"
+    for row in (run_row, bundle_row, p_row):
+        assert _verdict(row) is True, row
+
+    original = bash_tool._prefix_flag_runs_the_command
+    try:
+        bash_tool._prefix_flag_runs_the_command = lambda *_a, **_k: False
+        for row in (run_row, bundle_row, p_row):
+            assert _verdict(row) is False, (
+                f"{row}: with the rule blinded the flag row must go back to the "
+                "BLOCK it had before — otherwise it does not depend on the rule"
+            )
+        bash_tool._prefix_flag_runs_the_command = (
+            lambda tok, prefix: tok == "-p" and prefix == "command"
+        )
+        assert _verdict(p_row) is True, "the exact `-p` token is still read"
+        for row in (run_row, bundle_row):
+            assert _verdict(row) is False, (
+                f"{row}: with the rule narrowed to the exact `-p` token this row "
+                "must go back to BLOCK — otherwise its clause is not load-bearing"
+            )
+    finally:
+        bash_tool._prefix_flag_runs_the_command = original
+
+
+def test_the_flag_set_is_closed_and_its_two_sides_are_named() -> None:
+    """The predicate's own answers, which is where the fail-open would live.
+
+    A rule that answered `True` to every flag would read `command -v cd sub` as a
+    move and allow a write that really lands outside — so the "does not run"
+    letters are pinned as the predicate's answers rather than only through a
+    command whose verdict another rule already decides (see the note above).
+    Each host's set is closed: `command` takes `-p`/`-v`/`-V` and `builtin`
+    takes `-d`/`-s`, while `--` ends option parsing for both. A flag the reading
+    cannot classify (`-X`) is not read past, which is the fail-closed direction.
+    """
+    from emrg.tools.bash_tool import _prefix_flag_runs_the_command as runs
+
+    for tok in ("-p", "-pp", "--"):
+        assert runs(tok, "command") is True, tok
+    assert runs("--", "builtin") is True
+    for tok in ("-v", "-V", "-pv", "-pV", "-X"):
+        assert runs(tok, "command") is False, tok
+    for tok in ("-d", "-s", "-p", "-X"):
+        assert runs(tok, "builtin") is False, tok
+    # The two spellings the family is *about* must sit on opposite sides, or a
+    # reader could take the pair for one rule.
+    assert runs("-p", "command") is not runs("-v", "command")
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "the ground truth needs a POSIX shell whose `command` has `-p`/`-v` and "
+        "whose `builtin` exists: this arm is the instrument that says where the "
+        "file really lands, so it is gated to the platform that has one."
+    ),
+)
+def test_the_flag_verdicts_match_where_the_file_really_lands(tmp_path) -> None:
+    """The instrument behind the table above, run on the same texts.
+
+    One row per side of the split with the *same* relative target: `command -p cd
+    sub` moves the shell (the file lands inside the temp tree) while `command -v
+    cd sub` does not (it lands beside it). A temp tree of the test's own, never a
+    host working directory, and the verdicts are asked with the synthetic
+    workspace because a temp root is itself an allowed write zone.
+    """
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("bash is not available for the ground-truth run")
+    work = tmp_path / "work"
+    (work / "sub").mkdir(parents=True)
+    for name, cmd, inside in (
+        ("runs", "command -p cd sub && echo x > ../f_runs.txt", True),
+        ("lookup", "command -v cd sub && echo x > ../f_lookup.txt", False),
+    ):
+        subprocess.run([bash, "-c", cmd], cwd=work, capture_output=True, check=False)
+        landed_inside = (work / f"f_{name}.txt").exists()
+        assert landed_inside is inside, (
+            f"{name}: the shell put the file "
+            f"{'inside' if landed_inside else 'outside'}, which is not what this "
+            f"row's verdict claims"
+        )
+        assert _verdict(cmd) is inside
 
 
 @pytest.mark.skipif(
