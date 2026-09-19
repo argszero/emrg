@@ -1508,7 +1508,9 @@ def _leading_short_option_value(tok: str, letters: set[str]) -> str | None:
     return None
 
 
-def _option_destination_values(tokens: list[str], i: int, verb: str) -> list[str]:
+def _option_destination_values(
+    tokens: list[str], i: int, verb: str, options: frozenset | None = None
+) -> list[str]:
     """The paths a verb writes to that are named by an **option**, not an operand.
 
     ``curl -o <file>``, ``wget -O <file>``, ``sort -o <file>`` and
@@ -1537,8 +1539,14 @@ def _option_destination_values(tokens: list[str], i: int, verb: str) -> list[str
       does accept it.
     * A repeated option is over-approximated: every value is named, though these
       tools take the last. That is the same direction the rest of this walk errs in.
+
+    ``options`` is the table to consult, and it is **per verb** for the same reason
+    ``_positional_args``'s is: a verb that has its own branch because its operand
+    list *also* names writes (`patch`, whose `-o` displaces its operands) passes its
+    own set rather than joining the shared table below. Omitting it keeps the
+    historical lookup, which is what the branch that walks that table still reads.
     """
-    options = _OPTION_DESTINATION_VERBS[verb]
+    options = _OPTION_DESTINATION_VERBS[verb] if options is None else options
     longs = {opt for opt in options if opt.startswith("--")}
     letters = {opt[1:] for opt in options if not opt.startswith("--")}
     out: list[str] = []
@@ -1557,6 +1565,105 @@ def _option_destination_values(tokens: list[str], i: int, verb: str) -> list[str
             if attached is not None:
                 out.append(attached)
     return [value for value in out if value != "-"]
+
+
+# `patch` **rewrites the files it is pointed at**, and it was invisible to this walk
+# in every spelling (measured 2026-09-19, `cyc20260919-202406`): on master `15733088`
+# `patch <outside>/f`, `patch -o <outside>/out <workspace>/in` and
+# `patch -d <outside> <workspace>/f` each reported an **empty target list** at both
+# tiers — and an empty list is allowed by construction, so the loop that judges
+# targets never ran. `rm`, `truncate -s 0` and `cp` on the same paths were refused in
+# the same geometry, which is what makes this a hole rather than an opinion. It is
+# the same family as `sed -i` / `perl -i` / `truncate` (#1162, #1421) and the
+# compressors (#1418): a program whose *purpose* is to modify a file in place.
+#
+# Ground truth, taken in a scratch directory on this host and read back off disk (BSD
+# `patch 2.0-12u11-Apple`, 2026-09-19), because the verdict is not the evidence:
+#
+#   patch v.txt < d.patch        rc=0  v.txt rewritten (`two` → `TWO`)
+#   patch -o out.txt v2.txt < …  rc=0  out.txt holds the patched text, **v2.txt is
+#                                      untouched** — with `-o` the operand is a source
+#   patch -i d.patch v.txt       rc=0  v.txt rewritten (`-i` names the patch to read)
+#   patch -d sub v.txt < …       rc=0  **sub/v.txt** rewritten, the cwd copy untouched
+#   patch -dsub v.txt < …        rc=0  same (`-d`'s value in its own token or attached)
+#   patch --dry-run v.txt < …    rc=0  prints "patching file v.txt", v.txt **unchanged**
+#   patch -s v.txt < …           rc=0  rewritten (quiet is not a read)
+#   patch -o only.txt < …        rc=1  no output file; `only.txt.rej` lands beside it
+#   patch < d.patch              rc=0  the file named by the diff header is rewritten
+#
+# Three consequences, and each is a piece of the rule below:
+#
+# 1. The **operands are the targets** when no `-o` is given — every one of them, the
+#    rule `rm` reads, rather than an invented "first operand" special case.
+# 2. `-o`/`--output` is a destination and it **displaces** the operand list: with it,
+#    the operand is read and only that file is written (measured above). The two
+#    readings are alternatives, exactly as `-t <dir>` is for `ln`/`cp`/`mv`.
+# 3. `-d`/`--directory` is where the write *lands*, so its value is named as well: a
+#    rule that named only the operand would read `patch -d <outside> <workspace>/f`
+#    as an in-workspace write, which is the miss measured against master above.
+#
+# `--dry-run` is the one **read** spelling and is honoured: measured, the same command
+# with it writes nothing, so naming its operand would refuse a run that changes no
+# byte — the false block this walk treats as the worse error.
+#
+# The table below keeps a value from being read as an operand: without it `patch -p 1
+# <outside>/f` would name the strip count, the defect `_positional_args`'s docstring
+# sets out. Its letters come from this host's BSD usage line (`patch [-bCcEeflNnRstuv]
+# [-B backup-prefix] [-D symbol] [-d directory] [-g vcs-option] [-F max-fuzz]
+# [-i patchfile] [-o out-file] [-p strip-count] [-r rej-name] [-V …] [-x number]
+# [-Y prefix] [-z backup-ext] [--quoting-style style] [--posix]`) plus the GNU long
+# spellings the CI platform's twin documents. A letter one implementation rejects is
+# harmless here: it means its value is not a path either.
+_PATCH_OUTPUT_OPTIONS: frozenset[str] = frozenset({"-o", "--output"})
+_PATCH_DIRECTORY_OPTIONS: frozenset[str] = frozenset({"-d", "--directory"})
+_PATCH_OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
+    "-B", "--prefix", "-D", "--ifdef", "-d", "--directory", "-F", "--fuzz",
+    "-g", "--get", "-i", "--input", "-o", "--output", "-p", "--strip",
+    "-r", "--reject-file", "-V", "--version-control", "-x", "-Y",
+    "--basename-prefix", "-z", "--suffix", "--quoting-style",
+})
+_PATCH_READ_LONG: frozenset[str] = frozenset({"--dry-run"})
+
+
+def _patch_directory_values(tokens: list[str], i: int) -> list[str]:
+    """The directory ``-d``/``--directory`` changes into, in the spellings getopt takes.
+
+    It is a **destination** in the sense this walk cares about: measured on this host,
+    `patch -d sub v.txt` rewrites `sub/v.txt` and leaves the cwd's copy alone, so the
+    value names the directory the write lands in. The spaced, the attached (`-dsub`)
+    and the ``=``-joined long form are read; a value inside a *cluster* (`-sdsub`) is
+    not, the same limit `_leading_short_option_value` documents for the destination
+    letters and for the same reason — splitting a cluster needs a per-option grammar
+    this walk refuses to grow.
+    """
+    out: list[str] = []
+    args = _args_after_command(tokens, i)
+    for j, tok in enumerate(args):
+        if tok in _PATCH_DIRECTORY_OPTIONS:
+            if j + 1 < len(args):
+                out.append(args[j + 1])
+        elif tok.startswith("--directory="):
+            out.append(tok.split("=", 1)[1])
+        elif tok.startswith("-d") and not tok.startswith("--") and len(tok) > 2:
+            out.append(tok[2:])
+    return out
+
+
+def _patch_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The files ``patch`` writes: its operands, or ``-o``'s value when it is given.
+
+    A run with neither (`patch < d.patch`) writes the paths named **inside the diff**,
+    which is content this walk cannot read — the `tar`/`unzip` residual, pinned as a
+    measured hole in `tests/test_bash_tool_patch_targets.py` rather than guessed at.
+    """
+    args = _args_after_command(tokens, i)
+    if any(tok in _PATCH_READ_LONG for tok in args):
+        return []
+    out = _option_destination_values(tokens, i, "patch", options=_PATCH_OUTPUT_OPTIONS)
+    if not out:
+        out = _positional_args(tokens, i, _PATCH_OPTIONS_WITH_VALUE)
+    out.extend(_patch_directory_values(tokens, i))
+    return out
 
 
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
@@ -1818,6 +1925,14 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             targets.extend(_dd_output_targets(tokens, i))
         elif word in _METADATA_VERBS:
             targets.extend(_metadata_write_targets(tokens, i, word))
+        elif word == "patch":
+            # `patch` rewrites the files it is pointed at and named nothing here in
+            # any spelling, so it lived with the everyday writers (`sed -i`,
+            # `truncate`, the compressors) that an empty target list made invisible
+            # to both tiers. The rule — operands, or `-o`'s value when that is given,
+            # plus `-d`'s directory, and nothing at all under `--dry-run` — is stated
+            # with its measurements in `_patch_write_targets`.
+            targets.extend(_patch_write_targets(tokens, i))
         elif word in _INPLACE_WRITER_VERBS:
             targets.extend(_positional_args(tokens, i))
         elif word in _COMPRESSOR_VERBS:
