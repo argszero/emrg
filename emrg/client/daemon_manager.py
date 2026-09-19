@@ -364,6 +364,34 @@ _START_WINDOW_POLL_SECONDS = 0.3
 # sentence about a variable rather than about the window it is supposed to set.
 _START_WINDOW_SHAPE = re.compile(r"[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?")
 
+#: The padding a value may carry, as a character class — the **union** of what each
+#: language's own default strips (issue #1410).
+#:
+#: Both entry points used to normalise with their host language's default, and the two
+#: defaults are not the same set: measured 2026-09-19, Python's `str.strip()` strips 29
+#: code points and JavaScript's `String.prototype.trim()` strips 25. They differ in five
+#: code points one way and one the other — `U+001C`–`U+001F` and `U+0085` are whitespace
+#: to Python and not to JavaScript, and `U+FEFF` is the reverse. Driven through both real
+#: resolvers on a shared head, 9 of 12 padded values disagreed, in both directions: the
+#: GUI read `\ufeff30` as 30 s while the client refused it and fell back to 4.5 s, and the
+#: client read `\x1c30` as 30 s while the GUI fell back to 5 s.
+#:
+#: The union rather than the narrower common set, deliberately: a fix whose whole job is
+#: "the two sides must agree" must not take away a value either side accepts today. The
+#: common set would refuse `U+FEFF` on the GUI's side *and* the five on the client's — a
+#: host who has one of them would silently lose the window they had.
+#:
+#: Written out instead of using `str.strip()` because the language default *is* the defect:
+#: a set the two sides must share cannot be spelled by two different languages' notions of
+#: whitespace. `emrg/gui/daemon_client.js` declares the same text (`START_WINDOW_PADDING`),
+#: and `tests/test_start_window_padding_pairing.py` fails if the two declarations drift
+#: apart, if either side stops covering its own language's default, or if a `U+200B`-padded
+#: value — a code point in neither set — is accepted.
+_START_WINDOW_PADDING = r"\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_START_WINDOW_TRIM = re.compile(
+    rf"^[{_START_WINDOW_PADDING}]+|[{_START_WINDOW_PADDING}]+$"
+)
+
 
 def _start_window_seconds() -> float:
     """The wait window in seconds: ``EMRG_START_TIMEOUT`` if set, else the default.
@@ -387,7 +415,7 @@ def _start_window_seconds() -> float:
     the arithmetic's own guard.) Whitespace-only counts as unset — that is how a
     shell spells it.
     """
-    raw = (os.environ.get(_START_WINDOW_ENV) or "").strip()
+    raw = _START_WINDOW_TRIM.sub("", os.environ.get(_START_WINDOW_ENV) or "")
     if not raw:
         return _START_WINDOW_DEFAULT_SECONDS
     if not _START_WINDOW_SHAPE.fullmatch(raw):

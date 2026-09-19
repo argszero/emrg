@@ -16,7 +16,15 @@
     "The malformed half is the point of the list. `float()` and `Number()` do not accept the",
     "same strings, so 'the two entry points read the same variable' is worth nothing unless",
     "they also agree on what that variable may say: measured on the head of #1404, 7 of 28",
-    "values disagreed (`0x10` -> the GUI waited 16s while the client fell back to 4.5s)."
+    "values disagreed (`0x10` -> the GUI waited 16s while the client fell back to 4.5s).",
+    "",
+    "The padding rows (issue #1410) are the other half of the same claim. The two entry points",
+    "normalise the value with their host language's default — Python `str.strip()` and JS",
+    "`String.prototype.trim()` — and those are not the same set: measured 2026-09-19 by",
+    "enumerating each in its own engine, Python strips 29 code points and JavaScript trims 25,",
+    "differing in `U+001C`-`U+001F` and `U+0085` one way and `U+FEFF` the other. Both sides now",
+    "strip the union of the two, so a value padded with any of them is one variable, one window;",
+    "`U+200B` pads *neither* language's default and must therefore stay refused."
   ],
   "values": [
     {"value": "5", "kind": "duration", "seconds": 5},
@@ -32,6 +40,16 @@
     {"value": "1E2", "kind": "duration", "seconds": 100},
     {"value": "1.5e1", "kind": "duration", "seconds": 15},
     {"value": "0.5e-1", "kind": "duration", "seconds": 0.05},
+
+    {"value": "\u001c30", "kind": "duration", "seconds": 30},
+    {"value": "\u001d30", "kind": "duration", "seconds": 30},
+    {"value": "\u001e30", "kind": "duration", "seconds": 30},
+    {"value": "\u001f30", "kind": "duration", "seconds": 30},
+    {"value": "\u008530\u0085", "kind": "duration", "seconds": 30},
+    {"value": "\ufeff30\ufeff", "kind": "duration", "seconds": 30},
+    {"value": "\t\u001c\u0085\ufeff 30 \ufeff\u0085\u001c\t", "kind": "duration", "seconds": 30},
+
+    {"value": "\u200b30", "kind": "malformed"},
 
     {"value": "0x10", "kind": "malformed"},
     {"value": "0b101", "kind": "malformed"},
