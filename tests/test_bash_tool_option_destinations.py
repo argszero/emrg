@@ -227,12 +227,17 @@ def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
 # every allowed root — the third and fourth columns are the *measured* verdicts, which
 # are not uniform: `git clone` reaches `read-only` through the git-mutator rule (issue
 # #979), and that block says nothing about its destination.
+#
+# `rsync` was the fifth row and is gone: this table is for destinations named by an
+# **option**, and rsync's is an *operand* (`rsync SRC... DEST`), so the reason the
+# table exists never applied to it. It now has its own rule and its own file —
+# `tests/test_bash_tool_rsync_destination.py` — measured the same way (predicate only,
+# target outside every allowed root) plus ground truth from a real scratch transfer.
 UNCOVERED_WRITERS = (
     # (row, command, allowed under read-only, allowed under workspace-write)
     ("tar -cf", "tar -cf OUT/a.tgz x", True, True),
     ("tar -xf -C spaced", "tar -xf a.tgz -C OUT", True, True),
     ("tar -xf -C attached", "tar -xf a.tgz -COUT", True, True),
-    ("rsync", "rsync -a x/ OUT/dst/", True, True),
     ("split", "split -l 100 x OUT/pre", True, True),
     ("csplit", "csplit x /re/ -f OUT/pre", True, True),
     ("curl -so cluster", "curl -soOUT/f https://example.invalid/x", True, True),
