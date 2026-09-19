@@ -318,12 +318,11 @@ def test_no_template_calls_the_write_root_index_its_own_prompt_index() -> None:
 
 # Templates still teaching the retired state-file / reflection-file mechanism.
 # Rant 2026-09-14T14:35:47 removes it wholesale ("the session itself is the
-# memory"); the sweep lands one template at a time. Each entry is removed from
-# this set in the SAME change that sweeps its template, so the set only shrinks
-# and reaching empty is what "no residue" means.
-PENDING_STATE_SWEEP = {
-    "promote_prompt.md",
-}
+# memory"); the sweep landed one template at a time, and `promote_prompt.md` was
+# the last of them — so the set is now **empty**, and empty is the finished state
+# rather than a decoration: it is asserted below, because a template that starts
+# teaching the mechanism again must be red, not silently re-added here.
+PENDING_STATE_SWEEP: set[str] = set()
 
 # The retired mechanism's fingerprints: the two file names, and the prose that
 # told the agent to read/write a state or reflection file. The prose arm matches
@@ -390,6 +389,11 @@ def test_retired_state_file_mechanism_is_gone_or_being_swept() -> None:
     assert "open_source_prompt.md" in swept, (
         "the swept set lost its pilot template — the check is not looking where it "
         "thinks it is"
+    )
+    assert not PENDING_STATE_SWEEP, (
+        f"PENDING_STATE_SWEEP is not empty ({sorted(PENDING_STATE_SWEEP)}) — every "
+        f"template was swept, so a name here means one was added back without the "
+        f"mechanism it is supposed to still teach"
     )
 
     for name in swept:
@@ -458,22 +462,27 @@ def test_retired_mechanism_fingerprint_covers_the_bare_noun_phrase() -> None:
 
 
 def test_widened_fingerprint_is_measured_on_the_real_templates() -> None:
-    """The widening catches more *in the templates that exist*, not in the abstract.
+    """The widening catches more than the narrow one did — frozen, not live.
 
     A pattern change can satisfy a string assertion while catching nothing real,
-    so this counts the lines each pattern sees in every pending template and
-    pins the difference. Measured in the tree that sweeps the journal template
-    (base `97479c19`, journal swept, so `promote_prompt.md` is the only pending
-    template):
+    so the widening was measured against a live template and pinned. That template
+    was `promote_prompt.md` (the last pending one) and it has now been swept, so
+    the measurement is frozen here: the five lines the widening gained on it, taken
+    verbatim, must still be caught by the widened pattern and still be **missed**
+    by the prefix-free one. Measured in the tree that swept the journal template
+    (base `97479c19`):
 
         promote_prompt.md   25 -> 30   (lines 38, 329, 331, 363, 376)
         journal_prompt.md   15 -> 15, now 0 -> 0 (swept)
         every swept template 0 ->  0
 
-    The strict increase is asserted for `promote_prompt.md` by name, because that
-    is where the blind spot actually cost something; the swept templates are
-    asserted to stay clean, because a widening that starts flagging the
-    replacement text would be a different bug wearing this one's clothes.
+    Freezing it this way keeps the discriminating power the live version had: if
+    someone narrows the pattern again, these five strings stop matching and this
+    test goes red, which is exactly what the `== 5` assertion used to catch. What
+    it deliberately no longer does is depend on a template that still teaches the
+    mechanism — that would have tied the guard's own control to the residue it
+    exists to remove. The other direction is kept live: no template may be flagged
+    by the widened pattern, and the swept template's replacement text must not be.
     """
     prefix_free = re.compile(
         r"_state\.md|_reflections\.md|(?<!no )state[-\s]file|(?<!no )reflections?[-\s]file",
@@ -484,28 +493,43 @@ def test_widened_fingerprint_is_measured_on_the_real_templates() -> None:
         text = (PROMPTS_DIR / name).read_text(encoding="utf-8")
         return {i for i, line in enumerate(text.splitlines(), 1) if pattern.search(line)}
 
-    grew = {}
-    for name in sorted(PENDING_STATE_SWEEP):
-        before, after = seen(name, prefix_free), seen(name, _RETIRED_MECHANISM)
-        assert after >= before, (
-            f"{name}: the widened pattern lost matches the old one had "
-            f"({sorted(before - after)}) — a pattern that catches fewer things is not wider"
-        )
-        grew[name] = len(after) - len(before)
-
-    assert grew.get("promote_prompt.md", 0) == 5, (
-        f"the widening no longer gains the 5 measured mentions in promote_prompt.md "
-        f"(gained {grew.get('promote_prompt.md')}); if the template was swept, drop it from "
-        f"PENDING_STATE_SWEEP rather than re-fitting this number"
+    # The 5 lines of `promote_prompt.md` that the widening added (38, 329, 331,
+    # 363, 376), verbatim. Each is a spelling of the retired mechanism that names
+    # neither file with its project prefix — the blind spot the widening closed.
+    gained_by_the_widening = (
+        "- Reflection log: `{{ source_dir }}/reflections.md`",
+        "### 5. Reflection Log (mandatory every round)",
+        "**Every cycle MUST end with a reflection appended to `reflections.md`**",
+        "record the verdict in the reflection log (question 8).",
+        "| Replies ignored or negative | record in the reflection log (pitfall), don't "
+        "force explanations, don't resend |",
     )
+    for line in gained_by_the_widening:
+        assert _RETIRED_MECHANISM.search(line), (
+            f"the widened pattern no longer catches {line!r} — it was one of the 5 "
+            f"lines the widening gained, so this is a narrowing, not a widening"
+        )
+        assert not prefix_free.search(line), (
+            f"{line!r} is caught by the prefix-free pattern too, so it was never part "
+            f"of the widening's gain — the frozen control does not measure what it claims"
+        )
+
+    # …and the widening must not start flagging the text that replaced it, which is
+    # the live half: the swept template states what carries the state instead.
+    for replacement in (
+        "This task keeps no state file and no reflections file — the session itself is the state",
+        "Every cycle MUST end with a closing summary in your final message.",
+    ):
+        assert not _RETIRED_MECHANISM.search(replacement), (
+            f"the widened pattern flags the replacement text {replacement!r} — a "
+            f"widening that forbids saying what replaced the mechanism is a different bug"
+        )
 
     for _, name in _builtin_templates():
-        if name in PENDING_STATE_SWEEP:
-            continue
         hits = seen(name, _RETIRED_MECHANISM)
         assert not hits, (
-            f"{name}: the widened pattern flags lines {sorted(hits)} in a swept template — "
-            f"that is either a real residue or a false positive in the replacement text"
+            f"{name}: the widened pattern flags lines {sorted(hits)} — that is either a "
+            f"real residue or a false positive in the replacement text"
         )
 
 

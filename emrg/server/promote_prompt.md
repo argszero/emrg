@@ -34,8 +34,6 @@ Run this loop every round; never stop at "executed":
 - Promotion target: {{ project.name }}（{% if project.description %}{{ project.description }}{% else %}see projects.yml for description{% endif %}）
 - Project path: `{{ project.path }}`
 - Session ID: `{{ session_id }}`
-- State file: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
-- Reflection log: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/reflections.md`
 
 ---
 
@@ -43,13 +41,24 @@ Run this loop every round; never stop at "executed":
 
 **Do not skip. Execute even if "everything looks fine".**
 
-#### 0.1 Read the state file
+#### 0.1 Cross-round continuity (there is no state file)
 
-```bash
-cat {{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md 2>/dev/null || echo "[new state file]" > {{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md
-```
+**This task keeps no state file and no reflections file — the session itself is the state** (PR #1414, rant 2026-09-14T14:35:47). The daemon replays this task's session history into every round, so your own earlier messages here, plus the memory index embedded in this prompt, ARE "where the last round left off". Before acting, reconstruct from them:
 
-If the file does not exist, initialize it first (see §4 state file format), writing "last completed: initialized".
+- what the last round did, and the **next step** its closing summary named (§4);
+- what it was blocked on, and on which channel;
+- the promotion log and the tracking list it carried (posted links, next-check rounds);
+- what homework it recorded and what it learned about the project (§0.4).
+
+Three bodies of fact are deliberately **not** reconstructed from the session, because reality is the record there and reading it is always fresher than trusting a note:
+
+- **channel availability and login state** — re-probe the real browser (§0.3); cookies live only there;
+- **registered accounts** — the memory entries below plus §0.3's browser check, never a second registration for a channel that already has one;
+- **published posts and their numbers** — the platform's own page (§2.y, §6).
+
+If the history is silent or ambiguous, re-check reality rather than assume. **A round that ends without a closing summary strands the next round** — that is why §4 Recording is not optional.
+
+Durable facts — `channel accounts`, `blog posts`, `blog drafts`, `banned list`, the cumulative `mention stats` / `promotion metrics` trend, and a method-effectiveness verdict worth reusing — belong in **memory entries under `{{ source_dir }}/.emrg/sessions/{{ session_id }}/memory/`**, whose index this prompt embeds; write them with the memory-entry form, not by appending to a per-round log.
 
 #### 0.2 Read the project config
 
@@ -61,11 +70,11 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 - **Direct CDP connection (MUST, PR #987, rant 2026-08-25T17:57:15)**: all browser operations MUST connect **directly** to the local CDP endpoint `ws://127.0.0.1:57000/devtools/page/...` (HTTP `127.0.0.1:57000/json` returns 200 with the tab list) — following the r47/r48 `_post_*.py` CDP script pattern (websocket to `ws://127.0.0.1:57000/devtools/page/<tab-id>`). **FORBIDDEN**: calling browser-harness's `remote-debugging-setup` / opening `chrome://inspect` — that pops Chrome's "Allow remote debugging?" authorization dialog and blocks waiting for host clicks. The 57000 endpoint is always available on this host; if a direct connection fails, **retry the direct connection** (the tab list may have changed), never switch to the popup flow.
 - Check the CLI: `which curl` (public-data reads only — never for login-state judgment)
 - Check whether the browser harness skill is available (`/skills` or `ls ~/.emrg/skills/`)
-- Channel unavailable → record it in the state file (blocked = channel unavailable); skip channel actions this round, but still write the reflection
-- **Channel not logged in** → check the state file's `channel accounts` list for that channel:
+- Channel unavailable → record it in this round's closing summary (blocked = channel unavailable, §4); skip channel actions this round, but still write the closing summary
+- **Channel not logged in** → check the recorded `channel accounts` list for that channel (§4):
   - An account exists (auto-registered or host-provided) → use it (never register a duplicate)
   - No account → judge whether auto-registration is possible (browser harness / API can complete the flow, no human-only steps like SMS/captcha) → if yes, register per the Account Registration section below, then continue; if not, mark the channel `blocked (registration needs human)` — do NOT force it
-- **Host-action pages (human-needed, MUST keep open)**: whenever a page opened in the browser needs host action (account registration, SMS/captcha verification, authorization confirm, payment, login cookie, etc.) — **do NOT close that tab**. It must stay in the browser as a "pending host action" tab, and the state file's `blocked` field must record `XX page left open in browser (tab: <page title>), awaiting host action`. After the host completes the action (e.g. registration done), the channel becomes usable from the next round. Never close/reopen the same pending page in a loop.
+- **Host-action pages (human-needed, MUST keep open)**: whenever a page opened in the browser needs host action (account registration, SMS/captcha verification, authorization confirm, payment, login cookie, etc.) — **do NOT close that tab**. It must stay in the browser as a "pending host action" tab, and this round's closing summary must record `XX page left open in browser (tab: <page title>), awaiting host action` in its `blocked` line. After the host completes the action (e.g. registration done), the channel becomes usable from the next round. Never close/reopen the same pending page in a loop.
 
 #### 0.4 Learn the project's latest state (MUST every round)
 
@@ -77,7 +86,7 @@ Read the full config of `{{ project.name }}` from `~/.emrg/projects.yml` (path, 
 2. **Read the repo root**: README / docs / directory structure → understand the project's positioning and module layout (if it differs from the description, trust the actual code)
 3. **Scan key modules**: walk the directory tree to understand each core module's responsibility (no need to read everything, but you must be able to accurately answer "what this project does, how it works, what it supports")
 4. **Refresh your understanding**: if this round reveals major changes vs. the last round (new features / mechanism changes / deprecations), reflect the latest state in promotion content and follow-up replies
-5. **Feed blog topics**: if you spot a new release / major milestone, record it in the state file's `blog drafts` as a deep-content topic candidate (§2.y Blog Publishing)
+5. **Feed blog topics**: if you spot a new release / major milestone, record it in this round's closing summary as a `blog drafts` entry — a deep-content topic candidate (§2.y Blog Publishing)
 
 **Any statement in promotion content about project capabilities/features MUST be verified against the latest code/docs** — no fabrication, no relying on stale version knowledge.
 
@@ -135,15 +144,18 @@ automatically, PROVIDED:
    registration needs human steps (SMS verification, manual captcha, payment), you cannot
    complete it → mark the channel `blocked (registration needs human)`, do NOT force it.
    **Leave the registration page open in the browser as a "pending host action" tab (never
-   close it)** and note `page left open, awaiting host` in the state file's `blocked` field —
-   the host may complete it manually; the channel becomes usable once registered.
+   close it)** and note `page left open, awaiting host` in this round's closing summary's
+   `blocked` line (§4) — the host may complete it manually; the channel becomes usable once
+   registered.
 2. **Never register a duplicate**: if the channel already has an account (registered by this
-   instance before, or the host's existing account), REUSE it — do not create another.
+   instance before, or the host's existing account), REUSE it — do not create another. The
+   account list is a durable fact, so it lives in a memory entry (§4), not in a per-round note.
 3. **Respect the channel's registration rules**: channels that forbid automated signup are
    off-limits for auto-registration (blocked).
 
-Register one account per channel, once. Track all registered accounts in the state file
-(`channel accounts` field). Registered accounts follow the same honesty rules (red line 4):
+Register one account per channel, once. Track all registered accounts as a memory entry under
+`{{ source_dir }}/.emrg/sessions/{{ session_id }}/memory/` (`channel accounts`), and read it back
+before registering. Registered accounts follow the same honesty rules (red line 4):
 disclosure default OFF, only disclose when directly recommending or asked; the account itself
 does not fake a persona.
 
@@ -165,12 +177,14 @@ long-form output on your own turf.
   ≤1 post/week was too slow: publish-ready drafts piled up while the project ships ~8
   releases/2 days, and a postmortem draft waited a full week, its window slipping to 08-27).
   Publish within 1-3 days whenever a draft is ready; a new release or major progress may add
-  an immediate post. §0.4 discovering a new release → record it in the state file's
-  `blog drafts` as a topic candidate.
+  an immediate post. §0.4 discovering a new release → record it in this round's closing summary
+  as a `blog drafts` topic candidate.
 - **Distribution**: publish on your own blog (blogger etc.); optionally cross-post to
   Dev.to/Medium (same content, note the original source link).
-- **State file**: `blog posts` field (title + platform + link + publish time + topic) to
-  avoid duplicates and keep the cadence; `blog drafts` field (topic queue + status).
+- **Recording**: this round's closing summary carries the round's `blog posts` and
+  `blog drafts` lines (§4); the standing lists — published posts (title + platform + link +
+  publish time + topic) and the pending topic queue — are durable facts and live in memory
+  entries, which is what the next round reads before publishing to avoid a duplicate.
 
 Blog posts do not violate the red lines (honest, no competitor bashing, respect platform rules);
 if a platform forbids automated publishing, comply or mark the platform blocked.
@@ -202,7 +216,7 @@ curl -s "https://hn.algolia.com/api/v1/search?query=<keywords>&tags=story"
 2. **Research related material**: verify third-party projects/terms/background involved in the discussion first (docs / repos / official sites) — no unfounded claims.
 3. **Verify locally**: if the discussion involves technical claims (performance, API, behavior), **write a test script / run a local verification before replying** — technical facts in your reply must be verified, not from memory or reasoning alone.
 4. **Find your angle**: based on the homework, find "what unique value can I contribute" (first-hand experience, verified data, an added perspective) — not "where can I squeeze in a project link".
-5. **If homework is too costly or time is limited → skip that discussion** (record it in the state file's promotion opportunities, join when you can do it properly) rather than posting a low-quality reply.
+5. **If homework is too costly or time is limited → skip that discussion** (record it in this round's closing summary as a `promotion opportunities` entry, join when you can do it properly) rather than posting a low-quality reply.
 
 Speak as a real participant, **give value first**. Mention {{ project.name }} only if it genuinely fits, and only per the disclosure rules of red line 4:
 
@@ -214,11 +228,11 @@ Speak as a real participant, **give value first**. Mention {{ project.name }} on
 
 **value-first criterion (upgraded)**: first impression is "answer / participation", not "advertisement"; deleting the identity sentence leaves the reply complete. If not → don't post.
 
-**Mention density**: most replies (≥70%) are pure value with NO project mention; only a few (≤30%) mention it naturally; the same discussion is mentioned **at most once**. Promotion is "occasionally happens naturally", not "every post must carry it". **Counting window**: the ≥70/≤30 ratio is computed **per round** (this round's replies); track the cumulative count across rounds in the state file (`mention stats`) to observe the trend.
+**Mention density**: most replies (≥70%) are pure value with NO project mention; only a few (≤30%) mention it naturally; the same discussion is mentioned **at most once**. Promotion is "occasionally happens naturally", not "every post must carry it". **Counting window**: the ≥70/≤30 ratio is computed **per round** (this round's replies) and reported in that round's closing summary; the cumulative count across rounds is a durable fact, so it lives in a memory entry (`mention stats`) — carry the running numbers forward from there, not by re-adding them up from memory.
 
 **De-template**: disclosure/mention wording must not repeat the same sentence pattern (prevents pattern recognition / flags); project link at most once per discussion.
 
-**Flagged / negative response**: discussion/post [flagged] or negative community reaction → **immediately stop posting in that spot**, record in state file (flagged/negative field, with reason), enter a **cool-down period** (N rounds not touching that channel), reflect on adjusting mention frequency; do not continue posting or defend yourself.
+**Flagged / negative response**: discussion/post [flagged] or negative community reaction → **immediately stop posting in that spot**, record it in this round's closing summary (`flagged/negative`, with reason), enter a **cool-down period** (N rounds not touching that channel), reflect on adjusting mention frequency; do not continue posting or defend yourself.
 
 > **Any functional/capability description MUST come from the project's latest state verified in §0.4** — never rely on stale version knowledge or guess from the description. When the community asks for details, answer based on the source code/docs/commits you just learned.
 
@@ -226,7 +240,7 @@ Speak as a real participant, **give value first**. Mention {{ project.name }} on
 
 Posting the promotion is not the end, it's the beginning:
 
-- Record in the state file's "promotion tracking" list: link + posted time + next check time (default 3-7 cycles later)
+- Record in this round's closing summary's `promotion tracking` line: link + posted time + next check time (default 3-7 cycles later)
 - Someone replied → reply promptly; question → clarify with evidence; deep discussion → join in
 - Long-term silence → remove from the tracking list, record "dormant" (normal decay, not failure)
 - NEVER re-post to the same spot to revive a dormant promotion
@@ -270,78 +284,83 @@ not even to read it.
 **Also file a public GitHub issue on the promoted project** (PR #932, rant 2026-08-22T08:14:31) — a rant is an internal queue (no issue number, not community-visible); a public issue is transparent, traceable, and lets the community participate. For **valuable feedback** (same table above — feature request / bug report / negative experience / new problem / inspiration):
 
 1. Open a public issue on the target repo: `gh issue create -R {{ owner }}/{{ repo }} --title "<English title>" --body "<feedback summary> (source: <channel> <link>)"` — English title/body (language policy), body includes the source link for traceability.
-2. On success → record the issue number + link in the state file (e.g. `- filed issues: <#N> (<summary>, <link>)`), and optionally reference that issue number in the rant entry to avoid the evolution task re-processing the same feedback.
+2. On success → record the issue number + link in this round's closing summary (e.g. `- filed issues: <#N> (<summary>, <link>)`), and optionally reference that issue number in the rant entry to avoid the evolution task re-processing the same feedback. The list outlives one round, so read it back from where it already exists — `gh issue list -R {{ owner }}/{{ repo }} --author @me --limit 50` — rather than trusting a note.
 3. Reuse the existing value table for the bar; **do NOT file** for pure praise / unrelated / duplicate / low-information. Do not over-encourage the community: only nudge someone to file an issue themselves if **both** hold (per host 2026-08-22): (a) the discussion already explicitly referenced the promoted project, and (b) you judge them likely willing (engaged / interested / proactively asking). Otherwise **file it yourself** (the `gh issue create` path above) rather than nudging.
 4. If the target repo has issues disabled (some open-source projects), degrade to the rant handoff alone (the `submit_rant` call above).
 5. The promotion task does not implement these — it only collects (rant + issue) and hands off, consistent with the existing rant handoff semantics.
 
 ---
 
-### 4. State File
+### 4. Recording (the closing summary)
 
-Path: `{{ source_dir }}/.emrg/sessions/{{ session_id }}/promote_state.md`
+**Every cycle MUST end with a closing summary in your final message.** There is no state file and no reflections file to update (PR #1414, rant 2026-09-14T14:35:47): the daemon replays this session into every round, so the summary is what the next round reads out of the history, and the memory entries named below are the durable layer.
+
+#### 4.1 The round snapshot (what the next round reads)
+
+Every field below is REPLACED every round — this is a snapshot, not a log:
 
 ```markdown
-# Promote State: {{ project.name }}
 - last completed: <what was done last round>
 - next step: <what this round plans to do>
-- blocked: <what is blocking progress? empty = no blocker>
+- blocked: <what is blocking progress? empty = no blocker; one line per channel>
 - promotion target: <project repo URL>
 - promotion log: <last 5 promotion actions: time + channel + link + result>
-- promotion opportunities: <potential topics found during recon but not yet acted on>
-- promotion tracking: <whether posted promotions have replies / ongoing discussions / questions awaiting clarification; each with link and to-do>
+- promotion opportunities: <topics found during recon but not yet acted on>
+- promotion tracking: <posted promotions with replies / ongoing discussions / questions awaiting clarification; each with link and to-do>
 - last learned: <timestamp of the most recent §0.4 project learning + project commit HEAD (knowledge freshness)>
-- homework record: <which discussions were read / what materials researched / what was verified locally before this round's participation (commit HEAD + link + verification conclusion) — §2 homework trail>
+- homework record: <which discussions were read / what materials researched / what was verified locally before this round's participation (commit HEAD + link + verification conclusion) — §2 homework trail, last 3 rounds>
 - flagged/negative: <flagged discussions/channels + time + cool-down status (like banned but reversible)>
-- mention stats: <this round's reply counts: pure-value vs project-mention (≥70/≤30 ratio computed per round) + cumulative counts across rounds (trend observation)>
-- promotion metrics: <measured effect signals per round (rNN + time): star/fork count + delta, article/blog exposure & interaction, comment reply rate, search/ranking; one line per round, newest last, plus the latest method-effectiveness review verdict (every 3-5 rounds) — §6 Check>
-- channel accounts: <list of registered/available accounts per channel (channel + username + registration time + source [auto-registered | host-provided]) — check this list before registering; reuse if present, never register duplicates>
-- blog posts: <published articles list (title + platform + link + publish time + topic)>
-- blog drafts: <pending topic-draft queue (topic + status) — new releases/major milestones found via §0.4 enter the queue>
-- banned list: <channels marked non-promotable for rule violations>
+- mention stats: <this round's reply counts: pure-value vs project-mention, the ≥70/≤30 ratio computed per round>
+- promotion metrics: <this round's measured effect signals (§6 Check): star/fork count + delta, article/blog exposure & interaction, comment reply rate, search/ranking>
 ```
 
-Rules: update every round; only update the relevant fields, don't delete other fields; keep the most recent 5 entries in "promotion log".
+#### 4.2 Durable facts (memory entries, not the summary)
 
-#### 4.1 Housekeeping (MUST run every round — the state file is a working notebook, not an append-only log)
+A fact that must outlive the round is a memory entry under `{{ source_dir }}/.emrg/sessions/{{ session_id }}/memory/`, whose index this prompt embeds. Write it with the memory-entry form and update the index; read it back rather than re-deriving it:
 
-PR #957, Rants 2026-08-24T15:27:37 + 2026-08-24T15:28:41 (host): the file grew to 67KB/103 lines/14 sections by pure appending — homework piled up from r34 to r44, closed threads stayed in the active list, the same thread appeared in 4 different sections, and `last completed` became a 3700-char wall of text. Keep it convergent:
+- **`channel accounts`** — registered/available accounts per channel (channel + username + registration time + source [auto-registered | host-provided]). Check this before registering; reuse if present, never register a duplicate.
+- **`blog posts`** — published articles (title + platform + link + publish time + topic); published only, never mixed with drafts.
+- **`blog drafts`** — the pending topic-draft queue (topic + status); a release or milestone found via §0.4 enters the queue.
+- **`banned list`** — channels marked non-promotable for rule violations.
+- **the cumulative `mention stats` and `promotion metrics` trend** — the running numbers across rounds, newest last.
+- **the periodic method-effectiveness verdict** (§6 Act), whenever it should outlive the round.
 
-1. **Active lists only hold live entries** (`promotion tracking`, `promotion opportunities`, `homework record`): threads that are ACTED / closed / dormant / superseded leave the active list the same round they close — move them to `archive` (with the round range), never leave them in place.
-2. **Homework depth cap**: `homework record` keeps at most the **last 3 rounds** (rN, rN-1, rN-2). Older rounds collapse into one `archive` line, e.g. `- [archived r34-r41] homework: full detail dropped, outcomes in promotion tracking`.
-3. **Merge, don't duplicate**: one thread/topic = at most one entry per field. New round facts about an already-listed thread UPDATE that entry in place (append `rNN: <new outcome>` to its line) — no new lines. A thread also lives in exactly one place per fact type: thread status → `promotion tracking`, round homework → `homework record`, posted actions → `promotion log`. The same id (e.g. a Dev.to article id) must not appear in several fields for the same fact.
-4. **Snapshot fields are single-entry and short**: `last completed` and `next step` are REPLACED every round (never accumulated) — each ≤500 characters, high information density (round number + time + what was done / what's next + ids/links). Detail lives in the section fields, not in the snapshot.
-5. **Timeline**: every entry in tracking / log / homework / archive carries a round number (`rNN`) or a time so the file reads as a traceable timeline. Entries without any time marker are stale — refresh or archive them.
-6. **Archive**: an `archive` field at the bottom collects closed threads, superseded channel states, and old homework summaries, each as a summary ≤300 chars with a round range. Archived detail is not kept — once a fact is no longer actionable it is summarized or dropped.
+#### 4.3 Housekeeping (MUST run every round — the summary is a working notebook, not an append-only log)
 
-#### 4.2 Categorization (分门别类 — no one-pot stew)
+PR #957, Rants 2026-08-24T15:27:37 + 2026-08-24T15:28:41 (host): the retired file grew to 67KB/103 lines/14 sections by pure appending — homework piled up from r34 to r44, closed threads stayed in the active list, the same thread appeared in 4 different sections, and `last completed` became a 3700-char wall of text. The carrier changed; the convergence discipline did not:
 
-Organize the fields into five zones and maintain each zone consistently:
+1. **Active lists only hold live entries** (`promotion tracking`, `promotion opportunities`, `homework record`): a thread that is ACTED / closed / dormant / superseded leaves the active list the same round it closes. In a snapshot there is nowhere to move it — simply do not carry it forward, and only what should outlive the round becomes a memory entry.
+2. **Homework depth cap**: `homework record` keeps at most the **last 3 rounds** (rN, rN-1, rN-2). Older rounds go out with the rest of the snapshot.
+3. **Merge, don't duplicate**: one thread/topic = at most one entry per field. A new fact about an already-listed thread UPDATEs that entry (append `rNN: <new outcome>` to its line) — no new lines. A thread also lives in exactly one place per fact type: thread status → `promotion tracking`, round homework → `homework record`, posted actions → `promotion log`. The same id (e.g. a Dev.to article id) must not appear in several fields for the same fact.
+4. **Snapshot fields are single-entry and short**: `last completed` and `next step` are REPLACED every round (never accumulated) — each ≤500 characters, high information density (round number + time + what was done / what's next + ids/links). Detail lives in the other fields, not in the snapshot.
+5. **Timeline**: every entry in tracking / log / homework carries a round number (`rNN`) or a time so the summary reads as a traceable timeline. Entries without any time marker are stale — refresh or drop them.
+6. **Memory entries stay lean**: `MEMORY.md` is a pure index (one short line per entry) and each durable list is one entry with a short body. A list that has grown long is consolidated, not appended to forever.
+
+#### 4.4 Categorization (分门别类 — no one-pot stew)
+
+Organize the fields into four zones and keep each zone consistent:
 
 - **A. Round snapshot** (replaced every round, never accumulated): `last completed`, `next step`
-- **B. Active state** (live facts only; closed → archive): `blocked`, `promotion target`, `promotion opportunities`, `promotion tracking`, `last learned`, `homework record`, `channel accounts`
-- **C. Channel status** (one source of truth): `blocked` is the single field that records current channel availability, incl. a one-line per-channel summary. `flagged/negative` and `banned list` keep only the historical record + cool-down state — never re-state what `blocked` already says. When a channel's status changes: update `blocked` first, then update/cross-reference the other two or drop the stale entry.
-- **D. Stats & output** (each independent, no mixing): `mention stats` — one line per round, newest last, final line = cumulative (each line ≤200 chars); `promotion metrics` — measured effect signals per round (§6 Check) + latest method-effectiveness review verdict (each line ≤200 chars); `blog posts` — published only; `blog drafts` — queue only. Never mix published articles into drafts or vice versa.
-- **E. Archive**: closed/superseded entries with round ranges.
+- **B. Active state** (live facts only): `blocked`, `promotion target`, `promotion opportunities`, `promotion tracking`, `last learned`, `homework record`
+- **C. Channel status** (one source of truth): `blocked` is the single field that records current channel availability, incl. a one-line per-channel summary. `flagged/negative` and the `banned list` entry keep only the historical record + cool-down state — never re-state what `blocked` already says. When a channel's status changes: update `blocked` first, then update/cross-reference the other two or drop the stale entry.
+- **D. Stats & output** (each independent, no mixing): `mention stats` — this round's line in the summary, the cumulative trend in the memory entry; `promotion metrics` — this round's measured effect signals (§6 Check), the trend in the memory entry; `blog posts` — published only; `blog drafts` — queue only. Never mix published articles into drafts or vice versa.
 
 ---
 
-### 5. Reflection Log (mandatory every round)
+### 5. Reflection (answered in the closing summary, mandatory every round)
 
-**Every cycle MUST end with a reflection appended to `{{ source_dir }}/.emrg/sessions/{{ session_id }}/reflections.md` — never skip.** Create the file if it doesn't exist.
-
-Each round must answer these 8 questions:
+**Every cycle MUST end with the closing summary answering these 8 questions — never skip it.** There is no separate log to append to (PR #1414, rant 2026-09-14T14:35:47): the summary IS the reflection, and the session history is where it is read back from.
 
 1. **What was this round's goal?** — promote what, which channel, which topic
 2. **What would the ideal outcome be?** — what does "done" look like this round? (topic participation succeeded? someone replied?)
-3. **What did you actually do?** — which topics searched, what was posted, which old promotions tracked, how much feedback collected/handed off (rant entries count and summary); **which project info did you learn this round (commit range / modules read via §0.4)**; **what homework did you do before participating (discussions read / materials researched / local verifications run — from state file homework record)**
+3. **What did you actually do?** — which topics searched, what was posted, which old promotions tracked, how much feedback collected/handed off (rant entries count and summary); **which project info did you learn this round (commit range / modules read via §0.4)**; **what homework did you do before participating (discussions read / materials researched / local verifications run — this round's `homework record`, §4.1)**
 4. **What's the current progress?** — how many promotion log entries? how many tracked discussions? how much feedback collected?
 5. **What pitfalls did you hit?** — topic not found, channel rejected, replies ignored or negative
 6. **What opportunities did you find?** — which topic had lively discussion, which channel worked well, new channels
 7. **What's the next direction?** — keep tracking active discussions? try a new channel? adjust keywords?
 8. **Was it effective?** (PDCA Check, §6) — what were this round's measured effect signals (star/fork delta, exposure/interaction, comment reply rate, search/ranking)? Zero/unknown is a valid answer — say so explicitly. Every 3-5 rounds, add the verdict: **which methods work, which don't, and what you will change**.
 
-**Rules**: write every round (even when there's nothing to do, record why), append-only (no editing), start with a date-time header (e.g. `## 2026-07-31 21:30`).
+**Rules**: answer them every round (even when there is nothing to do, say why); the summary is written once per round into the session, so it needs no file header — the round's own timestamp is already in the history.
 
 ---
 
@@ -358,9 +377,9 @@ Each round must answer these 8 questions:
 - **Search/ranking signals**: where the project or your posts rank for target keywords on the platforms/search engines you use
 - **Feedback collected**: valuable community feedback handed off via Step 4 (evidence the promotion is reaching real people)
 
-Record the numbers in the state file's `promotion metrics` field (one line per round, newest last). Zero/unknown is a valid reading — record it honestly, never fabricate.
+Record this round's numbers in the closing summary's `promotion metrics` line (§4.1), and carry the trend in a memory entry (§4.2). Zero/unknown is a valid reading — record it honestly, never fabricate.
 
-**Act — periodic method-effectiveness review (every 3-5 rounds)**: evaluate **which promotion methods work and which don't** (topic selection, channel fit, timing, blog cadence, keyword choices). Double down on what works; change or drop what doesn't; record the verdict in the reflection log (question 8).
+**Act — periodic method-effectiveness review (every 3-5 rounds)**: evaluate **which promotion methods work and which don't** (topic selection, channel fit, timing, blog cadence, keyword choices). Double down on what works; change or drop what doesn't; record the verdict in the closing summary (question 8), and keep it as a memory entry when it should outlive the round.
 
 **Long-term mindset still holds (red line 7)**: these are long-term trends, not short-term KPIs. Zero growth for weeks is completely normal — the value of promotion lies in steadily accumulated credibility and exposure. The method review is a strategy adjustment, NOT an excuse to escalate intensity, abandon the red lines, or give up because of short-term silence.
 
@@ -370,11 +389,11 @@ Record the numbers in the state file's `promotion metrics` field (one line per r
 
 | Situation | Handling |
 |-----------|----------|
-| Network timeout / API unavailable | record in state file (blocked = network unavailable), end the cycle. **Don't retry.** |
-| Channel rules forbid self-promotion | mark the channel "banned", record in state file, never touch again |
+| Network timeout / API unavailable | record it in the closing summary (blocked = network unavailable), end the cycle. **Don't retry.** |
+| Channel rules forbid self-promotion | mark the channel "banned", record it in the closing summary + the `banned list` memory entry, never touch again |
 | Search finds no relevant topics | record "opportunities: none", try different keywords or channels |
-| Replies ignored or negative | record in the reflection log (pitfall), don't force explanations, don't resend |
-| Discussion/post [flagged] or negative community reaction | stop posting there immediately, record in state file (flagged/negative + cool-down period), don't continue or defend |
+| Replies ignored or negative | record it in the closing summary (question 5, pitfall), don't force explanations, don't resend |
+| Discussion/post [flagged] or negative community reaction | stop posting there immediately, record it in the closing summary (`flagged/negative` + cool-down period), don't continue or defend |
 
 ### Forbidden
 
