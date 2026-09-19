@@ -73,6 +73,13 @@ WRITE_FORMS = (
     # `-m` makes every operand an input, each deriving its own sibling.
     ("multiple inputs", f"lz4 -m {OUTSIDE}/f {OUTSIDE}/g",
      (f"{OUTSIDE}/f", f"{OUTSIDE}/g")),
+    # …with one of the inputs a stream: measured on the host 2026-09-19 in a fresh
+    # directory holding only `f`, `lz4 -m f -` is rc=0 and **does** derive `f.lz4`,
+    # so the file must still be named while the bare `-` is not. Naming the token
+    # was the false block; dropping the whole run would have been the hole. The row
+    # carries that measured shape with an outside path, so both tiers have the file
+    # — rather than the stream token — to refuse.
+    ("multiple inputs with a stream", f"lz4 -m - {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("recursive", f"lz4 -r {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("block size", f"lz4 -B4 {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("threads", f"lz4 -T4 {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
@@ -109,6 +116,18 @@ READ_FORMS = (
     # read, or "a value follows" would swallow real flags. Measured — `lz4 -Dcats
     # -c f` is rc=0, 34 bytes on stdout and no file created.
     ("attached dictionary then -c", f"lz4 -D{OUTSIDE}/cats -c {OUTSIDE}/f"),
+    # A bare `-` is the stream, in either position. Measured on the host
+    # 2026-09-19, one fresh directory per row with only `f` present and the
+    # listing read back off disk: `lz4 -`, `lz4 -9 -` and `lz4 - -` are rc=0 and
+    # create no file, and `lz4 f -` is rc=0 with **nothing beside `f`** either —
+    # its last operand names stdout as the destination rather than deriving a
+    # sibling, so the last-operand rule has to answer with nothing instead of
+    # falling back on the operand it only reads. (`lz4 -t -` is rc=44 and creates
+    # nothing too, though it is spared by the read letters before this rule.)
+    ("bare dash", "lz4 -"),
+    ("bare dash with a level", "lz4 -9 -"),
+    ("both operands the stream", "lz4 - -"),
+    ("dash as the destination", "lz4 f -"),
 )
 
 # (row, command) — the compressors *not* on `_COMPRESSOR_VERBS` and not read by a
@@ -276,6 +295,41 @@ def test_the_multi_input_rule_is_what_spares_the_second_operand() -> None:
         )
     finally:
         bash_tool._LZ4_MULTI_LETTERS, bash_tool._LZ4_MULTI_LONG = letters, longs
+
+
+def test_the_stream_operand_is_what_spares_the_bare_dash_here_too() -> None:
+    """The same drop as the family's, in this verb's multi-input branch.
+
+    With it removed that row names the bare `-` again and goes back to the
+    refusal master gave, i.e. the row is refused *because* the token is dropped.
+    The destination row (`lz4 f -`) is guarded by the last-operand branch's own
+    test rather than by the drop — the drop would leave `f` there, which is the
+    operand it only reads — so it is asserted in both states instead of flipped.
+    """
+    drop = bash_tool._without_the_stream_operand
+    multi = "lz4 -m f -"
+    destination = "lz4 f -"
+
+    assert _extract_write_targets(multi) == ["f"]
+    assert _extract_write_targets(destination) == []
+    assert _check_sandbox(destination, "read-only", workdir="/workspace")[0] is True
+
+    try:
+        bash_tool._without_the_stream_operand = lambda targets: list(targets)
+        assert _check_sandbox(multi, "read-only", workdir="/workspace")[0] is False, (
+            "with the drop removed the stream operand must be named again — "
+            "otherwise the drop is not what spares it"
+        )
+        assert _extract_write_targets(destination) == [], (
+            "the destination row is not the drop's to spare: it must stay empty "
+            "with the drop removed too, or `f` would be named for a run that "
+            "writes to stdout"
+        )
+    finally:
+        bash_tool._without_the_stream_operand = drop
+
+    assert _extract_write_targets(multi) == ["f"]
+    assert _extract_write_targets(destination) == []
 
 
 def test_the_attached_value_is_what_stops_the_letter_scan() -> None:
