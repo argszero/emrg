@@ -542,3 +542,265 @@ def test_the_control_witness_is_not_satisfied_by_the_refusal_alone():
         assert os.path.lexists(witness)
         mode = stat.S_IMODE(os.stat(witness).st_mode)
         assert mode & 0o400, "the witness must be readable for the assertion to mean anything"
+
+
+# ---------------------------------------------------------------------------
+# A `--` that no option consumed ends option parsing (measured 2026-09-19).
+#
+# `_positional_args` has always obeyed the terminator; the two option readers did
+# not, so an option *after* it was still read and named a path no program writes.
+# That is issue #1398's class from the other side — a **false block**, of a command
+# that does nothing at all. Every control row below is the same command with the
+# option *before* the terminator, which really does write that path and must stay
+# refused; the two halves are what make the rows a measurement rather than a wish.
+# ---------------------------------------------------------------------------
+
+TERMINATOR_OPTION_ROWS = (
+    # (row, option AFTER the terminator: names nothing, its control, what the control names)
+    ("sort -o", f"sort -- -o {OUTSIDE}/f x", f"sort -o {OUTSIDE}/f -- x", (f"{OUTSIDE}/f",)),
+    ("sort --output", f"sort -- --output {OUTSIDE}/f x",
+     f"sort --output {OUTSIDE}/f -- x", (f"{OUTSIDE}/f",)),
+    ("curl -o", f"curl -- -o {OUTSIDE}/f https://example.invalid/x",
+     f"curl -o {OUTSIDE}/f -- https://example.invalid/x", (f"{OUTSIDE}/f",)),
+    ("curl --output", f"curl -- --output {OUTSIDE}/f https://example.invalid/x",
+     f"curl --output {OUTSIDE}/f -- https://example.invalid/x", (f"{OUTSIDE}/f",)),
+    ("wget -O", f"wget -- -O {OUTSIDE}/f https://example.invalid/x",
+     f"wget -O {OUTSIDE}/f -- https://example.invalid/x", (f"{OUTSIDE}/f",)),
+    ("unzip -d (leading)", f"unzip -- -d {OUTSIDE} a.zip",
+     f"unzip -d {OUTSIDE} -- a.zip", (OUTSIDE,)),
+    ("unzip -d (trailing)", f"unzip a.zip -- -d {OUTSIDE}",
+     f"unzip a.zip -d {OUTSIDE} --", (OUTSIDE,)),
+)
+
+_TERMINATOR_ROW_IDS = [row for row, *_rest in TERMINATOR_OPTION_ROWS]
+
+
+@pytest.mark.parametrize(
+    "row,terminator,control,named", TERMINATOR_OPTION_ROWS, ids=_TERMINATOR_ROW_IDS,
+)
+def test_the_walk_names_nothing_after_a_terminator(row, terminator, control, named):
+    """The pair, on the walk: the terminator row names nothing, its control names.
+
+    Asserting only the first half would be satisfied by a reader that names nothing
+    anywhere — which is the hole this family of tests exists to prevent. The control
+    is the *same* command with one token moved, so the difference between the two
+    assertions can only be the terminator's position.
+    """
+    assert _extract_write_targets(terminator) == [], (
+        f"{terminator!r}: an option after `--` is an operand and names no destination"
+    )
+    assert tuple(_extract_write_targets(control)) == named, (
+        f"{control!r}: with the option before the terminator the write is real and "
+        f"must still be named"
+    )
+
+
+@pytest.mark.parametrize(
+    "row,terminator,control,named", TERMINATOR_OPTION_ROWS, ids=_TERMINATOR_ROW_IDS,
+)
+def test_a_terminator_row_is_allowed_at_both_tiers_and_its_control_is_refused(
+    row, terminator, control, named,
+):
+    """Both tiers, because the false block was in both: the write was named, so the
+    refusal was about a path the command never touches.
+
+    `read-only` allows the terminator row for the same reason `workspace-write`
+    does — the row names no write at all, and read-only's contract is about writes.
+    """
+    for tier in ("read-only", "workspace-write"):
+        allowed, reason, _ = _check_sandbox(terminator, tier, workdir="/workspace")
+        assert allowed is True, f"{tier} still refuses {terminator!r}: {reason}"
+        allowed, reason, _ = _check_sandbox(control, tier, workdir="/workspace")
+        assert allowed is False, f"{tier} allowed {control!r}"
+        assert named[0] in reason, f"{tier} block for {control!r} does not name {named[0]!r}"
+
+
+# `-t`/`--target-directory` is `_target_directory_values`' reader, not the option
+# table's, so it gets its own rows: the same sentence has to hold in both readers or
+# the walk has a terminator-shaped hole again the moment a cycle works in one of them.
+TERMINATOR_TARGET_DIRECTORY_ROWS = (
+    ("cp -t", f"cp -- -t {OUTSIDE} src.txt", f"cp -t {OUTSIDE} -- src.txt"),
+    ("cp --target-directory", f"cp -- --target-directory {OUTSIDE} src.txt",
+     f"cp --target-directory {OUTSIDE} -- src.txt"),
+    ("mv -t", f"mv -- -t {OUTSIDE} src.txt", f"mv -t {OUTSIDE} -- src.txt"),
+    ("ln -t", f"ln -- -t {OUTSIDE} src.txt", f"ln -t {OUTSIDE} -- src.txt"),
+    ("install -t", f"install -- -t {OUTSIDE} src.txt", f"install -t {OUTSIDE} -- src.txt"),
+)
+
+
+@pytest.mark.parametrize(
+    "row,terminator,control", TERMINATOR_TARGET_DIRECTORY_ROWS,
+    ids=[row for row, *_rest in TERMINATOR_TARGET_DIRECTORY_ROWS],
+)
+def test_the_target_directory_reader_obeys_the_terminator_too(row, terminator, control):
+    """The same sentence in the second reader, as a predicate and never executed.
+
+    This host's `cp`/`mv`/`ln` implement no `-t` at all — `cp -t OUT/f -- src.txt`
+    exits 64 with the usage line, measured — so there is no executed row to write
+    here. What the row pins is what the second reader owes: an option *after* `--`
+    is an operand, so it is not the option that moves the destination and its value
+    is never named. `OUTSIDE` must be absent from the terminator reading in both
+    tiers, while the control (`-t OUTSIDE -- …`, options still in force) names it
+    and is refused.
+
+    What the terminator row *does* name is not nothing, and that is the conversation
+    with the operand reader rather than a second hole. The terminator makes `-t` an
+    operand — the same sentence the operand reader learned for `rm -- -s`, which
+    names `-s` — so the operands are `-t`, `OUTSIDE`, `src.txt`, and a copy is judged
+    by the last of them, its destination. Real `cp` really writes there: measured on
+    this host, `cp -- -t x dest` exits 0 and puts both operands inside `dest`, and
+    `cp -- -t OUT src.txt` exits 1 with "src.txt: Not a directory" — the last operand
+    is the path the run is aimed at whether or not it turns out to be a directory.
+    So the row is read as what the command is, and it is allowed at workspace-write
+    because that operand is inside the workspace.
+    """
+    assert OUTSIDE not in _extract_write_targets(terminator), terminator
+    assert _extract_write_targets(terminator) == ["src.txt"], terminator
+    assert _extract_write_targets(control) == [OUTSIDE], control
+    allowed, reason, _ = _check_sandbox(terminator, "workspace-write", workdir="/workspace")
+    assert allowed is True, reason
+
+
+def test_an_options_own_value_may_be_the_terminator():
+    """The guard is "a `--` that no option **consumed**", and the clause is load bearing.
+
+    `sort -o -- x` writes a file literally named `--`: measured on this host, it
+    exits 0 and creates `./--` in the cwd. So a reader that broke at every `--`
+    would name nothing here and allow a write that really happens — a false allow,
+    the worse direction. The consumed-value clause is what keeps that row named.
+    """
+    assert _extract_write_targets("sort -o -- x") == ["--"]
+    assert _extract_write_targets("sort --output=-- x") == ["--"]
+    # Both readers, since both had to learn the sentence.
+    assert _extract_write_targets("cp -t -- src.txt") == ["--"]
+    # ...and a terminator that no option consumed still ends parsing: `-o` after it
+    # is an operand, so no option names a destination and the sort row names nothing
+    # (a copy is the other case, below, and it names its last operand).
+    assert _extract_write_targets("sort -- -o x y") == []
+    # The destination-last family names the last operand, which is what real `cp`
+    # writes into — measured, `cp -- -t x dest` exits 0 and puts both operands inside
+    # `dest`. So the same `--` reads as "nothing" for an option-destination verb and
+    # as "the last operand" for a copy, which is each family's own rule and not a
+    # contradiction.
+    assert _extract_write_targets("cp -- -t x y") == ["y"]
+
+
+def test_a_consumed_terminator_does_not_end_parsing():
+    """The clause's other half: parsing continues *after* a consumed `--`, so a
+    later option is still read and its path is a real write.
+
+    Measured on this host — `sort -o -- -o OUT_f in.txt` exits 0 and writes `OUT_f`,
+    the last `-o` winning (`--` is that option's value, not a terminator). A reader
+    that ended parsing at every `--` would name only `--` and allow the OUT_f write,
+    which is why the row below is asserted at both tiers and not just on the walk:
+    the walk half alone cannot tell the two clauses apart.
+
+    The naming of `--` as well is the over-approximation the reader already
+    documents for a repeated option — it names every value, not the winning one.
+    """
+    for cmd, later in ((f"sort -o -- -o {OUTSIDE}/f x", f"{OUTSIDE}/f"),
+                       (f"sort --output=-- --output={OUTSIDE}/f x", f"{OUTSIDE}/f"),
+                       (f"cp -t -- -t {OUTSIDE} src.txt", OUTSIDE)):
+        assert later in _extract_write_targets(cmd), (
+            f"{cmd!r}: a later option after a consumed `--` is still an option"
+        )
+        for tier in ("read-only", "workspace-write"):
+            allowed, reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
+            # The block names one target and this row has two (`--` and the later
+            # option's path), so the tier half asserts the refusal itself — which is
+            # exactly what an end-parsing-at-every-`--` reader gets wrong, since it
+            # would name only `--` and let the outside write through.
+            assert allowed is False, f"{tier} allowed {cmd!r}"
+            assert "--" in reason or later in reason, (
+                f"{tier} block for {cmd!r} names neither of its targets: {reason}"
+            )
+
+
+# The executed half: the terminator rows are no-ops, so allowing them is safe — and
+# the control rows, whose option sits before the terminator, still write.
+TERMINATOR_GROUND_TRUTH = (
+    # (row, tool, allowed terminator form, the outside witness it must NOT create,
+    #  refused control form, inside form that really writes, its witness)
+    ("sort -o", "sort",
+     "sort -- -o {t}/refused.txt {w}/sub/source.txt", "{t}/refused.txt",
+     "sort -o {t}/refused.txt -- {w}/sub/source.txt",
+     "sort -o {w}/allowed.txt -- {w}/sub/source.txt", "{w}/allowed.txt"),
+    ("unzip -d", "unzip",
+     "unzip -q -- -d {t} {w}/sub/a.zip", "{t}/source.txt",
+     "unzip -q -d {t} -- {w}/sub/a.zip",
+     "unzip -q -d {w}/extracted -- {w}/sub/a.zip", "{w}/extracted/source.txt"),
+    ("curl -o", "curl",
+     "curl -s -- -o {t}/refused.txt file://{w}/sub/source.txt", "{t}/refused.txt",
+     "curl -s -o {t}/refused.txt -- file://{w}/sub/source.txt",
+     "curl -s -o {w}/allowed.txt -- file://{w}/sub/source.txt", "{w}/allowed.txt"),
+)
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX shell ground truth: the daemon's shell on Windows is cmd.exe, "
+           "where curl/sort/unzip are not the tools these flags belong to",
+)
+@pytest.mark.parametrize(
+    "row,tool,allowed,allowed_witness,refused,inside,inside_witness",
+    TERMINATOR_GROUND_TRUTH, ids=[row for row, *_rest in TERMINATOR_GROUND_TRUTH],
+)
+def test_the_allowed_terminator_form_really_writes_nothing(
+    monkeypatch, tmp_path, row, tool, allowed, allowed_witness, refused, inside, inside_witness,
+):
+    """Allowing a row is only correct if the row is a no-op — so run it and look.
+
+    The `tmp_path` patch is the one the sibling ground-truth test needs: without it
+    the outside tree would sit inside the OS temp root, which `workspace-write`
+    allows, and the control's refusal would pass for the wrong reason.
+
+    Three assertions, and the last two are the instrument's control: the allowed
+    terminator row leaves the outside path absent, the control is still refused, and
+    a *third* form that keeps the option inside the workspace does write — proving
+    the tool really ran, so "absent" is a fact about the command and not about a
+    BashTool that never executed anything.
+    """
+    if shutil.which(tool) is None:
+        pytest.skip(f"`{tool}` is not on PATH here, so this ground truth is unmeasurable")
+
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: "/fake-os-temp")
+    workspace = tmp_path / "ws"
+    (workspace / "sub").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "sub" / "source.txt").write_text("hello\n", encoding="utf-8")
+    with zipfile.ZipFile(workspace / "sub" / "a.zip", "w") as archive:
+        archive.writestr("source.txt", "hello\n")
+    os.chmod(outside, 0o755)
+
+    def path(template: str) -> str:
+        return template.format(t=outside.as_posix(), w=workspace.as_posix())
+
+    tool_instance = BashTool()
+
+    def execute(command: str):
+        return _run(tool_instance.execute({
+            "command": command, "sandbox": "workspace-write", "workdir": str(workspace),
+        }))
+
+    result = execute(path(allowed))
+    assert "not executed" not in result.content, (
+        f"{path(allowed)!r} was refused at the sandbox — the terminator row is a no-op "
+        f"and naming its path is the false block this fixes: {result.content}"
+    )
+    assert not os.path.lexists(path(allowed_witness)), (
+        f"{path(allowed)!r} really wrote {path(allowed_witness)!r}, so the row is not a "
+        "no-op and allowing it is a hole — re-measure it"
+    )
+
+    control = execute(path(refused))
+    assert control.error is True, f"the control {path(refused)!r} was not refused"
+    assert "not executed" in control.content
+    assert not os.path.lexists(path(allowed_witness)), path(refused)
+
+    witness = execute(path(inside))
+    assert witness.error is not True, f"{path(inside)!r} was refused: {witness.content}"
+    assert os.path.lexists(path(inside_witness)), (
+        f"{path(inside)!r} wrote nothing, so the absence asserted above says nothing "
+        "about the tool — re-measure the row"
+    )

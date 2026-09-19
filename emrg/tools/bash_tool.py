@@ -1576,6 +1576,28 @@ def _option_destination_values(
     list *also* names writes (`patch`, whose `-o` displaces its operands) passes its
     own set rather than joining the shared table below. Omitting it keeps the
     historical lookup, which is what the branch that walks that table still reads.
+    A ``--`` that no option consumed ends option parsing, so an option *after* it
+    is an operand and names nothing **here** — no option on the line names a
+    destination. Whether the walk names that operand is the operand rule's own
+    business: for the destination-last family (`cp`/`mv`/`ln`/`install`) it is the
+    last operand, so `cp -- -t OUT src.txt` is read as the copy it is — destination
+    `src.txt`, the token real `cp` writes into (measured: `cp -- -t x dest` exits 0
+    with both operands inside `dest`) — while `OUT`, the option's value, is never
+    named because no option is in force there.
+
+    Measured 2026-09-19 on master `26449c59`, in one scratch directory, each row
+    run against a fresh one and the directory read back off disk afterwards. The
+    option *before* the terminator is the control, the same command with it after:
+
+      ``sort -o OUT/f in.txt``   rc=0 writes OUT/f   ·  ``sort -- -o OUT/f in.txt``   rc=2, nothing written
+      ``unzip -d OUTD a.zip``    rc=0 writes OUTD/*  ·  ``unzip -- -d OUTD a.zip``    rc=10 ``must specify
+                                                          directory``, nothing written
+      ``curl -o OUT/f <url>``    rc=0 writes OUT/f   ·  ``curl -- -o OUT/f <url>``    rc=0, nothing written
+
+    Each terminator form was **refused at both tiers** on master, because the path
+    was named — a false block of a command that writes nothing at all, and the same
+    defect class from the other side. (`wget` is the table's fourth verb and is not
+    installed on this host, so it is left unmeasured rather than inferred.)
     """
     options = _OPTION_DESTINATION_VERBS[verb] if options is None else options
     longs = {opt for opt in options if opt.startswith("--")}
@@ -1583,6 +1605,10 @@ def _option_destination_values(
     out: list[str] = []
     args = _args_after_command(tokens, i)
     for j, tok in enumerate(args):
+        if tok == "--" and (j == 0 or args[j - 1] not in options):
+            # Not consumed as the previous option's value (``sort -o -- f`` names
+            # the file ``--``), so it ends option parsing.
+            break
         if tok in options:
             if j + 1 < len(args):
                 out.append(args[j + 1])
@@ -2130,11 +2156,22 @@ def _target_directory_values(tokens: list[str], i: int, verb: str) -> list[str]:
     short forms ``-t<dir>`` and a cluster's trailing ``t`` are read by
     ``_short_target_directory``, which takes ``verb``'s own table to know where a
     cluster's value-taking letters are.
+
+    A ``--`` that no option consumed ends option parsing here too. The two readers
+    answer one question and one walk reads both, so the sentence is applied in both
+    rather than in whichever one a cycle happened to be working in. Its ground truth
+    is the one measured for that reader: every verb in both tables is a getopt
+    program, for which ``--`` is *defined* to end options. This table's own verbs
+    cannot be executed for it on this host — ``cp``/``mv``/``ln`` here implement no
+    ``-t`` at all (``cp -t OUT/f -- src.txt`` exits 64 with the usage line, measured),
+    so the spelling is pinned as a predicate and no executed arm is claimed for it.
     """
     out: list[str] = []
     args = _args_after_command(tokens, i)
     table = _VERB_OPTIONS_WITH_VALUE[verb]
     for j, tok in enumerate(args):
+        if tok == "--" and (j == 0 or args[j - 1] not in ("-t", "--target-directory")):
+            break
         if tok in ("-t", "--target-directory"):
             if j + 1 < len(args):
                 out.append(args[j + 1])
