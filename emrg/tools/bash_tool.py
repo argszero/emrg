@@ -1091,18 +1091,49 @@ def _positional_args(
     takes nothing for `ln`), so a caller that knows its verb passes that verb's
     table. Omitting it keeps the historical flat table, which is what the
     earlier callers (`rm`, `mv`, `cp`, `find`, the in-place writers) still read.
+
+    A ``--`` **ends option parsing**, and that sentence was here before the loop
+    below obeyed it (issue #1433): the loop skipped the ``--`` and went on
+    dropping every dash-led token, so a command whose operand is a file whose own
+    name looks like an option named **nothing** — and an empty target list is
+    allowed by construction, because the loop that judges targets never runs.
+    Measured on master `910a307c`, with this function byte-identical at
+    `26449c59` where the fix was written: `rm -- -s` reported ``[]``, i.e. ALLOW
+    at both tiers. Ground truth from a scratch directory on this host, read back
+    off disk: `printf x > ./-s; rm -- -s` is rc=0 and `./-s` is gone — it really
+    deletes, and the name is only an option *shape*.
+
+    So the drop is exactly one flag: once ``--`` has been seen, a ``-``-led token
+    is a path and is named. Two spellings stay as they were, and each for its own
+    reason. A ``--`` that is the *value* of an option is still a value, because
+    the value is consumed before this test is reached — `cp -t -- f` returns
+    ``['f']``, the ``--`` having been eaten by `-t`. A second ``--`` is an operand
+    like any other, because a file really named ``--`` is what it names: `rm --
+    --` returns ``['--']`` (measured here: rc=0, that file gone).
+
+    Named limit, in the other direction: after ``--`` this returns every token,
+    so a verb whose grammar continues past ``--`` with something that is not a
+    path has that token named too — `find <path> -- -delete` is the case, where
+    BSD `find` rejects the ``--`` outright (measured here: rc=1, `find: --:
+    unknown primary or operator`, nothing deleted). It is left as a limit rather
+    than guessed at: telling a `find` expression from a path needs the per-verb
+    grammar this walk refuses to grow, and the token erring here is the safe
+    direction — it is only ever *added* to a target list, and a `find` that
+    really does delete is already named through the path before the ``--``.
     """
     table = _OPTIONS_WITH_VALUE if options_with_value is None else options_with_value
     out: list[str] = []
     args = _args_after_command(tokens, i)
     skip_next = False
+    options_ended = False
     for tok in args:
         if skip_next:
             skip_next = False
             continue
-        if tok == "--":
+        if tok == "--" and not options_ended:
+            options_ended = True
             continue
-        if tok.startswith("-") and tok != "-":
+        if not options_ended and tok.startswith("-") and tok != "-":
             # `-s0` / `--size=0` carry their value in the same token; only the
             # spaced form consumes the next one.
             if tok in table:
