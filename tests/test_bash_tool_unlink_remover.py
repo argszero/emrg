@@ -15,8 +15,11 @@ because a fix for one of them can be wrong in the others:
   command that removes nothing would be the false block this walk treats as the worse
   error;
 * the **shared limit** — an option-shaped operand (`unlink -x`, which really does
-  delete the file of that name) is dropped by `_positional_args` exactly as `rm -- -s`
+  delete the file of that name) is dropped by `_positional_args` exactly as `rm -s`
   drops its own, so this fix inherits one general limit rather than adding a new one.
+  The limit is the spelling *without* a terminator: `rm -- -s` reports `['-s']` as soon
+  as PR #1435's terminator rule lands, and pinning that row here would pin the hole
+  rather than the boundary.
 
 Ground truth, taken in a scratch directory on this host and read back off disk (BSD
 `unlink`, usage line `unlink [--] file`, 2026-09-19): `unlink f.txt` really deletes it
@@ -147,12 +150,14 @@ def test_an_option_shaped_operand_is_one_general_limit_shared_with_rm() -> None:
 
     Measured: `unlink -x` really does delete the file named `-x` (this program takes no
     options beyond `--`), and `_positional_args` drops any `-`-leading token — so the
-    walk names nothing there. That is not a property of the remover branch: `rm -- -s`
-    is the same shape on a verb that has been classified all along, and it names nothing
-    either. Stated here so the next reader finds the boundary recorded rather than
-    discovering it.
+    walk names nothing there. That is not a property of the remover branch: `rm -s` is
+    the same shape on a verb that has been classified all along, and it names nothing
+    either. The `--` spelling is deliberately not a row here: `rm -- -s` is the case
+    PR #1435 fixes (the loop skipped the terminator and went on dropping), so pinning it
+    as a limit would pin the hole while calling it a boundary. Stated here so the next
+    reader finds the boundary recorded rather than discovering it.
     """
-    for cmd in ("unlink -x", "rm -- -s"):
+    for cmd in ("unlink -x", "rm -s"):
         assert _extract_write_targets(cmd) == [], cmd
         assert _check_sandbox(cmd, "read-only", workdir=WORKSPACE)[0] is True, cmd
 
