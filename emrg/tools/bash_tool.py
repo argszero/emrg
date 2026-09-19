@@ -1885,6 +1885,23 @@ _OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
     "csplit": _CSPLIT_PREFIX_OPTIONS,
 }
 
+
+def _short_option_letters(table: frozenset) -> set[str]:
+    """The single-letter options of a table, without their leading ``-``.
+
+    Derived from the table rather than written a second time, so a letter added
+    to a verb's table cannot be read in the spaced spelling and silently not in
+    the clustered one. Long names are dropped: a cluster is a run of *short*
+    options by definition.
+
+    Defined above the tables that call it at import time — a verb's cluster
+    letters are derived here, not restated at the call site.
+    """
+    return {
+        opt[1:] for opt in table if opt.startswith("-") and not opt.startswith("--")
+    }
+
+
 # The short letters each of those verbs takes a **value** for. A destination can be
 # carried by a *cluster* (`curl -so <f>`), and splitting one is not a guess work this
 # walk may make freestyle: the value belongs to the first letter in the cluster that
@@ -1921,6 +1938,14 @@ _OPTION_DESTINATION_VALUE_TAKING: dict[str, frozenset[str]] = {
     "curl": frozenset("AbcCdDeEFhHKmoPQrtTuUwxXyYz"),
     "sort": frozenset("koSTt"),
     "unzip": frozenset("dP"),
+    # Derived from the table the operand walk already carries for this verb rather than
+    # written a second time: `-f` is the prefix, `-b` the suffix format, `-n` the digit
+    # count. Measured on BSD `csplit` — `csplit -kf pfx in.txt` exits 0 and creates
+    # `pfx00 pfx01` beside `in.txt`, so `-k` takes no value and `pfx` is `-f`'s. Before
+    # this row the walk answered the *default* prefix `xx` for that spelling, which is a
+    # wrong name rather than a missing one: the run writes `pfx00…` and the message names
+    # a path it never touches.
+    "csplit": frozenset(_short_option_letters(_CSPLIT_OPTIONS_WITH_VALUE)),
 }
 
 
@@ -1950,19 +1975,6 @@ def _leading_short_option_value(tok: str, letters: set[str]) -> str | None:
     if tok[1] in letters:
         return tok[2:]
     return None
-
-
-def _short_option_letters(table: frozenset) -> set[str]:
-    """The single-letter options of a table, without their leading ``-``.
-
-    Derived from the table rather than written a second time, so a letter added
-    to a verb's table cannot be read in the spaced spelling and silently not in
-    the clustered one. Long names are dropped: a cluster is a run of *short*
-    options by definition.
-    """
-    return {
-        opt[1:] for opt in table if opt.startswith("-") and not opt.startswith("--")
-    }
 
 
 def _short_cluster_option(
@@ -2070,8 +2082,8 @@ def _option_destination_values(
     ``cluster_letters`` is the opt-in half of that same reading, for the spelling whose
     destination letter is *not* the token's first: ``curl -so <f>``. It is the verb's
     **full** value-taking letters — including the destination letter itself, which is
-    what ``_OPTION_DESTINATION_VALUE_TAKING`` holds for the three verbs measured so
-    far (a set missing it reads nothing at all), and with it the token is split by
+    what every row of ``_OPTION_DESTINATION_VALUE_TAKING`` holds for its verb (a set
+    missing it reads nothing at all), and with it the token is split by
     ``_short_cluster_option``, the reader the operand walk uses, rather than by
     ``_leading_short_option_value``, which by construction can only see a *leading*
     letter. Omitting it keeps the historical reading: a cluster then names nothing
@@ -2605,7 +2617,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             args = _positional_args(tokens, i, _CSPLIT_OPTIONS_WITH_VALUE)
             if args:
                 targets.extend(
-                    _option_destination_values(tokens, i, "csplit") or ["xx"]
+                    _option_destination_values(
+                        tokens,
+                        i,
+                        "csplit",
+                        cluster_letters=_OPTION_DESTINATION_VALUE_TAKING["csplit"],
+                    )
+                    or ["xx"]
                 )
         elif word in _OPTION_DESTINATION_VERBS:
             # `curl -o <f>` / `wget -O <f>` / `sort -o <f>` / `unzip -d <d>`: the
