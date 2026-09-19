@@ -298,6 +298,117 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
     if opt.startswith("-") and not opt.startswith("--")
 )
 
+# `zip` writes the archive, and the archive is the **first** operand — the
+# opposite end of the operand list from `cp`/`mv`/`rsync`, whose destination is
+# the last one. Every operand rule the walk already has reads the last operand or
+# every operand, so none of them reaches it and the archive was named by nothing.
+#
+# Measured on the host's own binary (`/usr/bin/zip`, Info-ZIP 3.0, 2026-09-19):
+# one fresh directory per row holding `f` and `g`, `a.zip` pre-built where the row
+# needs one, and the result read back off disk as `st_mtime_ns` plus a content
+# hash (the hash alone cannot see an in-place rewrite of identical bytes, which is
+# exactly what `zip a.zip f` does when `f` is unchanged) —
+#
+#   zip a.zip f                a.zip CREATED              (no archive yet)
+#   zip a.zip f                a.zip REWRITTEN            (archive exists)
+#   zip -q -r a.zip .          a.zip CREATED
+#   zip -m a.zip f g           a.zip CREATED, f AND g GONE
+#   zip --move a.zip f         a.zip CREATED, f GONE
+#   zip -d a.zip f             a.zip REWRITTEN            (entry deleted)
+#   zip -u a.zip g             a.zip REWRITTEN
+#   zip -o a.zip f             a.zip REWRITTEN
+#   zip -T a.zip f             a.zip REWRITTEN            mtime moved
+#   zip -T a.zip               read    "test of a.zip OK" mtime untouched
+#   zip -sf a.zip [f]          read    "Would Add/Update:" mtime untouched
+#   zip --show-files a.zip f   read    same line           mtime untouched
+#   zip -su a.zip / -sU a.zip  read    rc=16, nothing written
+#   zip -h a.zip f             read    help, nothing written
+#   zip -h2 a.zip f            read    extended help, nothing written
+#   zip -L a.zip f             read    licence, nothing written
+#   zip --help a.zip f         read    help, nothing written
+#   zip --version a.zip f      read    help, nothing written
+#   zip a.zip                  nothing rc=12 "Nothing to do!"
+#   zip -d a.zip               nothing rc=12
+#   zip -v a.zip               nothing rc=12
+#   zip -l a.zip f             a.zip CREATED            lowercase `-l` is LF->CRLF
+#   zip -v a.zip f             a.zip REWRITTEN          uppercase `-v` is verbose
+#   zip -m a.zip f -x f        nothing rc=12             the exclusion won
+#
+# Four consequences, all measured rather than read off the usage line:
+#
+# 1. A run with **no list** writes nothing, whatever the mode: `zip a.zip`,
+#    `zip -d a.zip` and `zip -v a.zip` each exit 12 with "Nothing to do!". So the
+#    archive is named only when a second operand follows it, and `-T` needs no
+#    rule of its own — `zip -T a.zip` is the *test* form and its one-operand shape
+#    is already the "nothing written" case.
+# 2. `-T` is therefore **not** a read. With a list it rewrites the archive
+#    (`zip -T a.zip f`, mtime moved), which is the lz4 `-l` lesson again: a
+#    spelling that is a read in one shape and a write in another cannot be read
+#    as a flag.
+# 3. `-m`/`--move` **deletes** every listed file once it is archived, so under it
+#    the operands after the archive are write targets too, not inputs.
+# 4. The read spellings are matched as **whole tokens, case-sensitively**: `-sf`
+#    is show-files while `-f` is freshen (a write), `-L` is the licence while `-l`
+#    is the LF->CRLF conversion (a write, measured above). A letter scan — the
+#    shape the compressor family uses — would conflate both pairs.
+#
+# 5. `-P <password>` is the family's **sixth** spaced value, and it was the one
+#    this table was short. Measured on the same binary 2026-09-20, one fresh
+#    directory per row holding `f`:
+#
+#      zip -P secret a.zip f     rc=0, **a.zip created** — the archive is still the
+#                                first operand, the password is an option's value
+#      zip -P a.zip f            rc=12 nothing written (`a.zip` was eaten as the
+#                                password, so `f` is the archive with no list)
+#      zip -Psecret a.zip f      rc=0, a.zip created — the **attached** spelling
+#      zip -P secret a.zip       rc=12 nothing written
+#
+#    The attached spelling never needed the table (the token begins with `-`, so
+#    `_positional_args` drops it either way), which is exactly why the spaced one
+#    went unnoticed: with `-P` absent from the table the walk named the
+#    **password** as the archive. That is the wrong name `_positional_args`'
+#    docstring calls a guard nobody can trust *and* it is a hole in the direction
+#    this rule exists for — measured through the predicate on the branch this
+#    table was written on: `zip -P ./pw <outside>/a.zip f` named `./pw` and was
+#    **allowed at `workspace-write`** while really rewriting the archive outside
+#    every allowed root, because the wrong token resolved inside the workspace.
+#
+# 6. Three more spaced values were still missing from the table after that fix —
+#    `-tt <date>`, `-Z <cm>` and `-lf <path>` — each measured the same way
+#    (2026-09-20, one fresh directory per row holding `f`):
+#
+#      zip -tt 20200101 a.zip f  rc=12, "invalid date entered for -tt option —
+#                                use mmddyyyy or yyyy-mm-dd": the option **ate**
+#                                the token, so with a valid date the archive is
+#                                whatever follows it
+#      zip -Z store a.zip f      rc=0, a.zip created, and **no file named
+#                                `store`** — the method name is consumed
+#      zip -lf ./log a.zip f     rc=0, a.zip created, `log.log` created
+#      zip -lf./log2 a.zip f     rc=0, `log2.log` created — the attached spelling
+#
+#    The first two are values that are never paths, so the table is all they
+#    need. `-lf` is different: its value **is** a path zip writes, so the table
+#    alone would stop naming it. Three properties decide how it is named, all
+#    measured on the same binary:
+#
+#      zip -sf -lf ./log a.zip   rc=0, the listing printed and `log.log` CREATED —
+#                                a read spelling still writes the logfile, so it
+#                                has to survive the read short-circuit
+#      zip -lf ./log a.zip       "zip error: Nothing to do!" and `log.log` still
+#                                CREATED — so it survives the writes-nothing case
+#      zip -lf ./log3 a.zip f    `log3.log` written: zip appends `.log` when the
+#                                value does not already end in it, which lands in
+#                                the same directory, so naming the token as
+#                                written is containment-equivalent
+_ZIP_OPTIONS_WITH_VALUE = frozenset({
+    "-b", "-t", "-tt", "-n", "-s", "-TT", "-P", "-Z", "-lf",
+})
+_ZIP_READ_TOKENS = frozenset({
+    "-sf", "-su", "-sU", "-h", "-h2", "-L", "--help", "--version",
+    "--show-files",
+})
+_ZIP_MOVE_FLAGS = frozenset({"-m", "--move"})
+
 # Verbs that *create* every path named by an operand (`touch a b c`,
 # `mkdir -p a/b`). They were invisible to the write-target walk (issue #1398):
 # with no target named, the loop that judges targets never ran, so both checked
@@ -2010,6 +2121,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # `lz4 -m f g` writes two siblings, and `lz4 f out.lz4` writes the
             # last operand — unless the run is one of the measured read forms.
             targets.extend(_lz4_write_targets(tokens, i))
+        elif word == "zip":
+            # `zip A.zip f` creates or rewrites `A.zip`, and the archive is the
+            # *first* operand — the end no other operand rule reads, so the run
+            # named nothing at all and both tiers allowed it (issue #1420's
+            # remaining row). The rule, its measured table and its two named
+            # limits are in `_zip_write_targets`.
+            targets.extend(_zip_write_targets(tokens, i))
         elif word == "sed":
             # `sed -i` rewrites its file operands in place; a bare `sed` is a
             # filter that writes only to stdout and must stay allowed. The flag
@@ -2367,6 +2485,97 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
         # the operand it would otherwise fall back on (`f`, which it only reads).
         return []
     return operands[-1:]
+
+
+def _zip_logfile_targets(words: list[str]) -> list[str]:
+    """The path ``zip -lf <path>`` writes, in both measured spellings.
+
+    The rows behind this are consequence 6 of the table above
+    `_ZIP_OPTIONS_WITH_VALUE`. ``-lf`` is the family's one spaced value that is
+    itself a **path**, so it is a write the archive rule cannot reach: the option
+    consumes the token (it is not an operand, so nothing in the operand walk sees
+    it) while zip opens it as a logfile. It is named in **every** shape of the
+    run, because it is written in every shape measured — the read spellings
+    (``zip -sf -lf ./log a.zip`` printed its listing and still created ``log.log``)
+    and the exit-12 "Nothing to do!" case (``zip -lf ./log a.zip``) included.
+
+    ``zip`` appends ``.log`` when the value does not end in it, which lands in the
+    same directory as the token named here, so naming the token as written is
+    containment-equivalent — the question a block asks.
+
+    ``-Z <cm>`` and ``-tt <date>`` are handled by the table alone: their values are
+    never paths, so consuming them is the whole rule.
+    """
+    out: list[str] = []
+    for idx, tok in enumerate(words):
+        if tok == "--":
+            break
+        if tok == "-lf":
+            if idx + 1 < len(words):
+                out.append(words[idx + 1])
+        elif tok.startswith("-lf"):
+            out.append(tok[3:])
+    return out
+
+
+def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The paths a ``zip`` run writes: its **first** operand, and what it moves.
+
+    The measured table is the comment above `_ZIP_OPTIONS_WITH_VALUE`; the rule it
+    settles is four lines long, and each line is one of its rows:
+
+    * a read spelling (``-sf``/``--show-files``, ``-su``/``-sU``, the help and
+      licence forms) writes no archive — the ``-lf`` logfile is the exception,
+      written in every shape (see `_zip_logfile_targets`);
+    * with no second operand the run writes nothing at all (exit 12, "Nothing to
+      do!"), which is what keeps `zip a.zip` and `zip -d a.zip` allowed — the same
+      logfile exception applies there too;
+    * otherwise the archive — the *first* operand — is the path that is created
+      or rewritten, and under ``-m``/``--move`` every listed operand after it is
+      removed as well;
+    * and the ``-lf`` value is named alongside whichever of the above applies.
+
+    Named limit: the exclusion list (``-x``) and the include list (``-i``) are
+    matched against the operands **by name**, and a name they neutralise is still
+    named here. Measured, `zip -m a.zip f -x f` writes nothing, so the over-block
+    lands on a run that does nothing anyway; the alternative is a per-name match
+    in the walk, the grammar this family of rules refuses to grow (see
+    `_rsync_run_is_a_read` for the same trade taken the other way). `-@` reads its
+    names from stdin, which the walk cannot see: that spelling stays unnamed.
+
+    ``-b <dir>`` (the temporary directory, a spaced value this rule drops) is
+    deliberately not named, and that is a measurement rather than an omission:
+    taken in a scratch directory, `zip -b <dir> a.zip f` left the directory
+    **empty** afterwards, and so did a run that failed — the temporary archive is
+    removed before the process exits, so there is no surviving path to protect.
+
+    ``--out <archive>`` (copy mode's destination, `zip -U`) is a **measured limit**
+    rather than a treated case: its value is a path, and the rule it needs is
+    mode-sensitive, so it is filed as issue #1441 instead of guessed here. Measured
+    on the same binary, one fresh directory holding a pre-built `src.zip`:
+    `zip -U src.zip --out out.zip` is rc=0, creates `out.zip` and leaves `src.zip`
+    untouched — so in copy mode the **first operand is a read**. The walk has no
+    copy-mode rule and names that operand, which is wrong in both directions
+    (measured through this predicate at `workspace-write`):
+    `zip -U /workspace/src.zip --out /outside/emrg/o.zip` is **allowed** while
+    naming the source, so the archive really written outside every allowed root is
+    named by nothing; and `zip -U /outside/emrg/src.zip --out /workspace/o.zip` is
+    **blocked on the read**. Adding `--out` to the table would not help — the table
+    means "consumes the next token, which is not a path", and this value is the
+    destination, so the operand before it would be named again.
+    """
+    words = _args_after_command(tokens, i)
+    logfile = _zip_logfile_targets(words)
+    if any(tok in _ZIP_READ_TOKENS for tok in words):
+        return logfile
+    operands = _positional_args(tokens, i, _ZIP_OPTIONS_WITH_VALUE)
+    if len(operands) < 2:
+        # Archive and no list: zip exits 12 having written nothing — the logfile
+        # excepted, which it really does create (measured).
+        return logfile
+    if any(tok in _ZIP_MOVE_FLAGS for tok in words):
+        return operands + logfile
+    return operands[:1] + logfile
 
 
 def _is_directory_install(tokens: list[str], i: int) -> bool:
