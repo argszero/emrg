@@ -119,6 +119,93 @@ def test_env_chdir_is_a_move_too():
     assert _verdict(f"env -C {inside} sh -c 'echo x > out.txt'") is True
 
 
+def test_the_attached_env_chdir_spelling_is_a_move_too():
+    """The spelling of that same move which no walk read (issue #1391).
+
+    `--chdir=<dir>` had been read since the rule was written and its short twin
+    had not: measured 2026-09-19, `env -C<elsewhere> sh -c 'echo x > out.txt'`
+    answered **ALLOW** while `/bin/sh` wrote the file outside the workspace —
+    a fail-open one keystroke away from a spelling the same walk refused. This
+    host's `env` moves its child for the bundled form too (`env -iC<dir> sh -c
+    pwd` prints that directory), and which short options may precede the `C` is
+    the #461 enumeration this walk does not depend on, so the bundle is read as
+    well. All three spellings are pinned here against the same controls.
+    """
+    outside = spelled(OUTSIDE)
+    for spelling in (f"-C{outside}", f"-iC{outside}"):
+        assert _verdict(f"env {spelling} sh -c 'echo x > out.txt'") is False, spelling
+    # A bundle that *ends* in the flag takes the next token, as bare `-C` does.
+    assert _verdict(f"env -iC {outside} sh -c 'echo x > out.txt'") is False
+    # Controls, so the three rows above are about the *spelling* and not about a
+    # guard that refuses `env` outright: the same text aimed at a directory
+    # inside the workspace is still allowed, and a short option that is not this
+    # move (`-P` is `env`'s utility path) is not read as one.
+    inside = spelled(os.path.join(WORKDIR, "sub"))
+    for spelling in (f"-C{inside}", f"-iC{inside}"):
+        assert _verdict(f"env {spelling} sh -c 'echo x > out.txt'") is True, spelling
+    assert _verdict(f"env -P{outside} sh -c 'echo x > out.txt'") is True
+
+
+def test_the_price_of_reading_the_bundle_is_stated():
+    """A `C` inside a short option's *value* is read as the move.
+
+    `-uNAME` unsets NAME, so `env -uC<path>` names no directory at all — but
+    which short options take a value is the #461 enumeration this walk refuses
+    to depend on, and reading the bundle is the fail-closed side of it. The
+    price is bounded and stated rather than hidden: the false move only ever
+    *adds* a refusal, and only when the text after the `C` spells a path outside
+    the workspace — the same token with a value that stays inside (or with no
+    value at all) is still allowed.
+    """
+    assert _verdict(f"env -uC{spelled(OUTSIDE)} sh -c 'echo x > out.txt'") is False
+    assert _verdict("env -uCsomething sh -c 'echo x > out.txt'") is True
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "the ground truth needs a POSIX `env` whose `-C` moves the child: a "
+        "verdict alone is not a bug, and this arm is the instrument that says "
+        "where the file really lands, so it is gated to the platform that has one."
+    ),
+)
+def test_the_attached_spelling_really_moves_the_child(tmp_path):
+    """Ground truth for the fail-open the reading above closes (issue #1391).
+
+    The arm runs the *same text* the verdict table asks about in a tree this
+    test builds — a temp tree, never a host working directory — and reads where
+    the file lands. The verdicts are asked with the synthetic workspace instead,
+    because the OS temp root is itself an allowed write zone: asked about a temp
+    tree, a correct guard answers ALLOW for both spellings and the rows would
+    measure the fixture rather than the rule.
+    """
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("sh is not available for the ground-truth run")
+    work = tmp_path / "work"
+    (work / "sub").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    subprocess.run(
+        [sh, "-c", f"env -C{outside} sh -c 'echo x > f.txt'"],
+        cwd=work,
+        capture_output=True,
+        check=False,
+    )
+    assert (outside / "f.txt").exists(), (
+        "the child did not start in the directory `-C` named, so this arm cannot "
+        "witness the difference the guard's verdict is about"
+    )
+    assert _verdict(f"env -C{spelled(OUTSIDE)} sh -c 'echo x > f.txt'") is False
+    assert (
+        _verdict(
+            f"env -C{spelled(os.path.join(WORKDIR, 'sub'))} sh -c 'echo x > f.txt'"
+        )
+        is True
+    )
+
+
+
 def test_a_nested_shell_is_read_the_same_way():
     assert _verdict(f"sh -c 'cd {spelled(OUTSIDE)}; echo x > out.txt'") is False
     inside = spelled(os.path.join(WORKDIR, "sub"))
