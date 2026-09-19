@@ -1018,7 +1018,7 @@ def test_paper_template_renders_with_context():
     assert "literature" in out, "文献去重指引应渲染"
 
 
-def test_journal_template_renders_with_context():
+def test_journal_template_renders_the_continuity_contract():
     """journal_prompt.md renders, and its continuity contract replaces the retired files."""
     import jinja2
 
