@@ -240,6 +240,16 @@ _LZ4_MULTI_LONG = frozenset({"--multiple", "--recursive"})
 # `-D <file>` is the one spaced value here: it is the dictionary, a *read*, and
 # naming it would refuse `lz4 -D <outside>/dict f`, whose write is elsewhere.
 _LZ4_OPTIONS_WITH_VALUE = frozenset({"-D"})
+# …and the same option spelled **attached** (`-Ddata.txt`), where everything after
+# the `D` *inside the token* is that option's value and not another flag. Derived
+# from the table above rather than written out a second time, so the two readings
+# cannot drift: the binary writes both spellings beside the operand (measured,
+# issue #1426) and reading the value's letters as flags named nothing at all.
+_LZ4_VALUE_TAKING_SHORT = frozenset(
+    opt[1:]
+    for opt in _LZ4_OPTIONS_WITH_VALUE
+    if opt.startswith("-") and not opt.startswith("--")
+)
 
 # Verbs that *create* every path named by an operand (`touch a b c`,
 # `mkdir -p a/b`). They were invisible to the write-target walk (issue #1398):
@@ -1890,14 +1900,31 @@ def _lz4_letters(args: list[str]) -> set[str]:
 
     `-fb` is `-f -b` and `-B4` is `-B 4`, so a letter is looked for *inside* a
     token rather than only as a whole one — the same reading the family above
-    gets. Case is kept: `-b` is the benchmark and `-B#` a block size, and an
-    attached value's letters are not distinguished from a spelled flag here,
-    which is the named limit `_compressor_operand_is_a_read` also carries.
+    gets. Case is kept: `-b` is the benchmark and `-B#` a block size.
+
+    A value written *attached* is not a cluster: `-Ddict` is `-D` plus the
+    dictionary's name, and the letters in that name are not flags. The scan stops
+    at a value-taking letter, the shape `_perl_inplace_flag` already uses, because
+    here the family's shared limit is sharper than for a compressor whose value is
+    a suffix — `-D`'s value is a **path**, so an ordinary name like `cats` or
+    `data.txt` used to read as `-c`/`-t` and the whole run as a read. Measured on
+    the host's binary with the dictionary present: `lz4 -Ddata.txt f` and
+    `lz4 -fDdata.txt f` are rc=0 and create `f.lz4`, while this reading named no
+    target and both tiers allowed them (issue #1426).
+
+    Only `-D` needs the stop, which is why the table is `-D`'s alone: the verb's
+    other value-taking letters (`-B#`, `-T#`) take a *number*, and a digit is
+    neither a read letter nor a multi-input one. The spaced spelling is untouched
+    because it is not a miss — measured, `lz4 -D -c f` is rc=27 and creates
+    nothing (`-c: No such file or directory`, the next token being the value).
     """
     letters: set[str] = set()
     for tok in args:
         if tok.startswith("-") and not tok.startswith("--") and len(tok) >= 2:
-            letters |= set(tok[1:])
+            for ch in tok[1:]:
+                letters.add(ch)
+                if ch in _LZ4_VALUE_TAKING_SHORT:
+                    break
     return letters
 
 
