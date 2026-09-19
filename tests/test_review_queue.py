@@ -281,6 +281,45 @@ def test_a_head_behind_master_is_voted_on_its_landing_tree(mod, monkeypatch, cap
     assert "git merge FETCH_HEAD" not in out
 
 
+def test_a_stale_head_is_sent_to_the_landing_diff_before_the_vote(mod, monkeypatch, capsys):
+    """A stale head's `diff(master, head)` is not the change that merges: it shows
+    the base's own later commits as reversals the PR does not make (measured on
+    #1423, cycle cyc20260919-165319 - three of five paths were the base's own work,
+    including another PR's test file printed as deleted). Voting is a judgement about
+    the *landing* change, so the tool that hands out the vote command hands out the
+    instrument that shows that change first."""
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh(stale=True, kind="ancestry", behind=3,
+                      reason="head does not contain master")
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "measure-then-vote" in out
+    assert "check-merge-landing-diff.py 1" in out
+    commands = [line for line in out.splitlines() if line.strip().startswith("$ ")]
+    landing_diff = next(i for i, c in enumerate(commands)
+                        if "check-merge-landing-diff.py 1" in c)
+    vote = next(i for i, c in enumerate(commands) if "cast-vote.py 1" in c)
+    assert landing_diff < vote, commands
+    # The hazard is named, not just the command: a reader who does not know why
+    # must not conclude the two diffs are interchangeable.
+    assert "reversals" in out
+
+
+def test_a_fresh_head_is_not_sent_to_the_landing_diff(mod, monkeypatch, capsys):
+    """The negative control, so the line above is a reading of staleness and not a
+    constant: on a head that contains master the two diffs coincide, and naming a
+    third command for a question that cannot arise is how a warning turns into noise
+    every cycle skips."""
+    votes = FakeVotes(reviews=[_review(cycle="cyc1")])
+    fresh = FakeFresh()
+    rc = _read(mod, monkeypatch, votes, fresh, cycle=CYCLE)
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "cast-vote.py 1" in out
+    assert "check-merge-landing-diff" not in out
+
+
 def test_enough_votes_on_a_stale_head_measures_before_merging(mod, monkeypatch, capsys):
     """Merging a stale head merges a tree no CI judged, so the vote count alone is
     not the green light."""
