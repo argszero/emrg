@@ -239,8 +239,7 @@ def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
 # rsync made. It now has its own rule (`_SPLIT_OPTIONS_WITH_VALUE`) and its own file —
 # `tests/test_bash_tool_split_prefix.py`.
 #
-# `zip` was pinned here with the reason above and has left it the same way `rsync` and
-# `split` did: its archive is readable from the first *operand* — no flag grammar needed to
+# `zip` was pinned here and has left it the same way `rsync` and `split` did: its archive is readable from the first *operand* — no flag grammar needed to
 # place it — and the read half is a spelling (`-sf`/`--show-files` for show-files,
 # `-T` only while it has no list) rather than the "value of an option". Its own rule
 # is `_zip_write_targets`, its measured table is the comment above
