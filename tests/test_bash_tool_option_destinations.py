@@ -83,6 +83,17 @@ OPTION_DESTINATIONS = (
     ("unzip -d leading", f"unzip -d {OUTSIDE} a.zip", (OUTSIDE,)),
     ("unzip -d attached", f"unzip a.zip -d{OUTSIDE}", (OUTSIDE,)),
     ("unzip --directory=", f"unzip a.zip --directory={OUTSIDE}", (OUTSIDE,)),
+    # The destination letter carried **inside a cluster**, which needs the verb's own
+    # value-taking letters (issue #1448): the first letter in the token that takes a
+    # value owns the rest, so `-so` is only `-s` then `-o` when `s` takes none.
+    ("curl -so cluster", f"curl -so {OUTSIDE}/f https://example.invalid/x",
+     (f"{OUTSIDE}/f",)),
+    ("curl -so cluster attached", f"curl -so{OUTSIDE}/f https://example.invalid/x",
+     (f"{OUTSIDE}/f",)),
+    ("sort -bo cluster", f"sort -bo {OUTSIDE}/f x", (f"{OUTSIDE}/f",)),
+    ("sort -bo cluster attached", f"sort -bo{OUTSIDE}/f x", (f"{OUTSIDE}/f",)),
+    ("unzip -qd cluster", f"unzip -qd {OUTSIDE} a.zip", (OUTSIDE,)),
+    ("unzip -qd cluster attached", f"unzip -qd{OUTSIDE} a.zip", (OUTSIDE,)),
 )
 
 _DESTINATION_ROW_IDS = [row for row, _c, _n in OPTION_DESTINATIONS]
@@ -142,6 +153,15 @@ INSIDE_STDOUT_OR_READ = (
     "unzip -d /workspace a.zip",
     "unzip -l a.zip",                                # list: a read
     "unzip a.zip",                                   # no -d: extracts into the cwd
+    # The cluster's *other* half: a value-taking letter before the destination letter
+    # means the destination letter is a value, and the word after it belongs to that
+    # option — naming it would be the false block (measured ground truth in
+    # `test_a_cluster_that_does_not_end_on_the_destination_letter_names_nothing`).
+    "sort -ko /workspace/out.txt x",                 # `-k` takes `o`
+    "curl -do /workspace/out https://example.invalid/x",   # `-d` takes `o`
+    "unzip -Pd secret a.zip",                        # `-P` takes `d`
+    "curl -so - https://example.invalid/x",          # cluster, stdout
+    "sort -bo - x",                                  # cluster, stdout
 )
 
 
@@ -195,28 +215,71 @@ def test_a_stdout_destination_names_nothing_at_all():
     assert _extract_write_targets("sort -o - x") == []
     # And the same spelling where the dash is *not* the value is still read.
     assert _extract_write_targets("sort -o -dash.txt x") == ["-dash.txt"]
+    # The clustered spellings drop it the same way, through the same filter.
+    assert _extract_write_targets("curl -so - https://example.invalid/x") == []
+    assert _extract_write_targets("sort -bo - x") == []
+    assert _extract_write_targets("sort -bo -dash.txt x") == ["-dash.txt"]
 
 
-def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
-    """`-so<dir>` is left unnamed, and this is the measurement that says so.
+def test_a_cluster_is_split_by_the_verbs_own_value_taking_letters():
+    """`curl -so<dir>` is read, and `sort -ko out.txt` is not — the two directions.
 
-    A token that puts another letter before the destination letter has to be split
-    by the verb's own option grammar. Both guesses are wrong in one direction — the
-    remainder is the value when the earlier letter takes none (`curl -so<dir>`), and
-    the *next* token is the value when `-o` is not a flag at all (`sort -ko out.txt`
-    means `-k o` plus an operand to read) — and naming a read is a false block, the
-    direction this guard's record treats as worse. So this row is pinned as a
-    known hole with its ground truth, the way the #1391 residuals are: a future
-    change that closes it must flip this assertion deliberately.
+    A token that puts another letter before the destination letter can only be split
+    by the verb's own grammar, and this is the measurement that says so. Both readings
+    were run in a scratch directory on this host and the directory read back off disk
+    (BSD `sort 2.3-Apple (199)`, `UnZip 6.00`, `curl 8.7.1`, 2026-09-20):
 
-    Measured on GNU: `curl -so <dir>/f <url>` really does write into `<dir>`.
+      ``sort -bo o/out.txt in.txt``   rc=0  `o/out.txt` created
+      ``sort -ko o/out.txt in.txt``   rc=2  ``-k o: Invalid argument``, **nothing created**
+      ``unzip -qd o/zd a.zip``        rc=0  `m.txt` extracted into `o/zd`
+      ``unzip -xd foo a.zip``         rc=0  extracted into `foo/` — so `d` is the option
+                                            and `foo` its value, not `x` taking `d`
+      ``curl -so o/f file://…``       rc=0  `o/f` holds the file
+      ``curl -do o/f <url>``          rc=6  ``Could not resolve host: o/f``, nothing created
+
+    So a cluster is read **from the verb's own letters**, and the second and last rows
+    are why those letters have to be the right ones: `-ko` and `-do` put the *next*
+    word after an option that already took its value, and naming that word as a
+    destination would refuse a command that writes nothing. (`sort -ko` here is the
+    same row in both directions — unnamed is correct, and it is asserted in
+    `INSIDE_STDOUT_OR_READ` as well, because a false block is the error this walk
+    weighs most heavily.)
     """
-    for cmd in (f"curl -so {OUTSIDE}/f https://example.invalid/x",
-                f"curl -so{OUTSIDE}/f https://example.invalid/x"):
+    for cmd, named in ((f"curl -so {OUTSIDE}/f https://example.invalid/x", f"{OUTSIDE}/f"),
+                       (f"curl -so{OUTSIDE}/f https://example.invalid/x", f"{OUTSIDE}/f"),
+                       (f"sort -bo {OUTSIDE}/f x", f"{OUTSIDE}/f"),
+                       (f"unzip -qd {OUTSIDE} a.zip", OUTSIDE)):
+        assert tuple(_extract_write_targets(cmd)) == (named,), cmd
+        for tier in ("read-only", "workspace-write"):
+            allowed, reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
+            assert allowed is False, f"{tier} allowed {cmd!r}"
+            assert named in reason, reason
+    # The residual a previous change pinned here deliberately is gone, and the controls
+    # it was pinned against — the same destination spelled as its own token, with and
+    # without a flag before it — still name their path: `-s -o <f>` and `-so <f>` now
+    # read alike, and `-b -o <f>` and `-bo <f>` do too.
+    for cmd in (f"curl -s -o {OUTSIDE}/f https://example.invalid/x",
+                f"sort -b -o {OUTSIDE}/f x"):
+        assert tuple(_extract_write_targets(cmd)) == (f"{OUTSIDE}/f",), cmd
+        assert _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0] is False, cmd
+
+
+def test_a_cluster_that_does_not_end_on_the_destination_letter_names_nothing():
+    """The word after a cluster belongs to whichever letter took a value.
+
+    This is the false-block half of the same reader, asserted on the walk: with the
+    value-taking letters in hand `sort -ko out.txt x` resolves to `k` = `o` and an
+    operand to **read**, so naming `out.txt` would refuse a run that writes nothing.
+    The ground truth is the line above — `sort` exits 2 there with ``-k o: Invalid
+    argument`` and creates no file, which is what makes "unnamed" the true reading and
+    not merely the timid one.
+    """
+    for cmd in (f"sort -ko {OUTSIDE}/f x",
+                f"curl -do {OUTSIDE}/f https://example.invalid/x",
+                f"unzip -Pd secret a.zip",
+                f"sort -So {OUTSIDE}/f x"):
         assert _extract_write_targets(cmd) == [], cmd
-        # The cost is bounded to this spelling: the same destination spread across
-        # two tokens is named, which is the ordinary way it is written.
-        assert _extract_write_targets(cmd.replace("-so", "-s -o")) == [f"{OUTSIDE}/f"]
+        assert _check_sandbox(cmd, "workspace-write", workdir="/workspace")[0] is True, cmd
 
 
 # ── the writers this table deliberately does not cover ─────────────────────
@@ -260,12 +323,18 @@ def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
 # `csplit -f pfx in.txt 4 8` created `pfx00 pfx01 pfx02` beside `in.txt`, and
 # `csplit in.txt 4` created `xx00 xx01`. Its file is
 # `tests/test_bash_tool_csplit_prefix.py`.
+#
+# `curl -so cluster` was the seventh row and has left the same way: the destination in
+# a *cluster* is readable once the verb's own value-taking letters are known — that is
+# `_OPTION_DESTINATION_VALUE_TAKING`, added for issue #1448 — so the row redded and
+# moved into `OPTION_DESTINATIONS` with its siblings rather than being relabelled here.
+# Its two neighbour rows are the reason the letters must be the verb's own, and both
+# are pinned as *allowed*: `sort -ko` and `curl -do` in that table's false-block list.
 UNCOVERED_WRITERS = (
     # (row, command, allowed under read-only, allowed under workspace-write)
     ("tar -cf", "tar -cf OUT/a.tgz x", True, True),
     ("tar -xf -C spaced", "tar -xf a.tgz -C OUT", True, True),
     ("tar -xf -C attached", "tar -xf a.tgz -COUT", True, True),
-    ("curl -so cluster", "curl -soOUT/f https://example.invalid/x", True, True),
     ("git clone", "git clone https://example.invalid/r.git OUT/clone", False, True),
 )
 
@@ -379,30 +448,102 @@ LONG_EQUALS_SPELLINGS = (
 
 SPACED_CURL = f"curl -o {OUTSIDE}/f https://example.invalid/x"
 
+# The cluster spellings, and the one thing they have that the rows above do not: the
+# verb's own value-taking letters (issue #1448).
+CLUSTER_SPELLINGS = (
+    f"curl -so {OUTSIDE}/f https://example.invalid/x",
+    f"sort -bo {OUTSIDE}/f x",
+    f"unzip -qd {OUTSIDE} a.zip",
+)
 
-def test_the_attached_short_spellings_need_the_reader_of_an_attached_token():
-    """Arm the `_leading_short_option_value` reader off, and these rows must go.
+# The same three verbs' *attached* form: `_short_cluster_option` reads it when the verb
+# has letters, `_leading_short_option_value` when it does not, so a clustered verb's
+# attached row names its path either way — which is what the arms below turn on.
+CLUSTERED_ATTACHED = (
+    f"curl -o{OUTSIDE}/f https://example.invalid/x",
+    f"sort -o{OUTSIDE}/f x",
+    f"unzip a.zip -d{OUTSIDE}",
+)
 
-    Dropping the verb cannot kill these rows — they survive on the table plus a
-    second piece of code, so the arm is aimed at that piece. The spaced form must
-    *survive* the same arm, which is what makes it discriminate: it kills the
-    attached rows without killing the spaced ones.
+
+def test_the_attached_short_spellings_need_the_reader_that_can_split_a_token():
+    """Which reader an attached token needs depends on whether the verb has letters.
+
+    `-o<f>` is read by `_short_cluster_option` for the three verbs in
+    `_OPTION_DESTINATION_VALUE_TAKING` (issue #1448) and by
+    `_leading_short_option_value` for one that is not in it — `wget`, whose letters
+    this change did not measure, because the host has no `wget` to measure them on.
+    Arming each reader off in turn is what shows the two are separate code: the
+    cluster arm must flip the clustered verbs' attached rows and leave `wget`'s alone,
+    and the leading arm must do the reverse. The spaced form has to *survive* both,
+    which is what makes the arms discriminate.
     """
     for cmd in ATTACHED_SHORT_SPELLINGS:
         assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
-    saved = bash_tool._leading_short_option_value
-    bash_tool._leading_short_option_value = lambda *_a, **_k: None
+    clustered = list(CLUSTERED_ATTACHED)
+    leading = [cmd for cmd in ATTACHED_SHORT_SPELLINGS if cmd.startswith("wget")]
+
+    saved_cluster = bash_tool._short_cluster_option
+    bash_tool._short_cluster_option = lambda *_a, **_k: None
     try:
-        for cmd in ATTACHED_SHORT_SPELLINGS:
+        for cmd in clustered:
             allowed = _check_sandbox(cmd, "read-only", workdir="/workspace")[0]
             assert allowed is True, (
-                f"{cmd!r} is still refused with the attached-token reader disabled "
-                "- it does not depend on the spelling it claims to test"
+                f"{cmd!r} is still refused with the cluster reader disabled - it does "
+                "not depend on the spelling it claims to test"
             )
-        # Not a blanket off-switch: the spaced form still names its path.
+        # Not a blanket off-switch, and not the other reader's rows either.
+        assert _check_sandbox(SPACED_CURL, "read-only", workdir="/workspace")[0] is False
+        for cmd in leading:
+            assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+    finally:
+        bash_tool._short_cluster_option = saved_cluster
+
+    saved_leading = bash_tool._leading_short_option_value
+    bash_tool._leading_short_option_value = lambda *_a, **_k: None
+    try:
+        for cmd in leading:
+            allowed = _check_sandbox(cmd, "read-only", workdir="/workspace")[0]
+            assert allowed is True, (
+                f"{cmd!r} is still refused with the attached-token reader disabled - it "
+                "does not depend on the spelling it claims to test"
+            )
+        # The clustered verbs' attached rows no longer ride on this reader…
+        for cmd in clustered:
+            assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+        # …and the spaced form still names its path, as it never used either reader.
         assert _check_sandbox(SPACED_CURL, "read-only", workdir="/workspace")[0] is False
     finally:
-        bash_tool._leading_short_option_value = saved
+        bash_tool._leading_short_option_value = saved_leading
+
+
+def test_the_cluster_rows_need_the_verbs_value_taking_letters():
+    """Empty the letters table and the cluster rows must go back to master's ALLOW.
+
+    The arm is aimed at the one thing a cluster row has that a spaced row does not, so
+    the spaced **and** the attached forms have to survive it: with the table empty the
+    attached form is read by `_leading_short_option_value` again, which is what makes
+    this arm evidence that the letters — not the token's shape — are what reads a
+    cluster. A target-list assertion would not do: what changes when the table is
+    emptied is the *verdict*, because an empty target list is allowed by construction.
+    """
+    for cmd in CLUSTER_SPELLINGS:
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+    original = dict(bash_tool._OPTION_DESTINATION_VALUE_TAKING)
+    bash_tool._OPTION_DESTINATION_VALUE_TAKING.clear()
+    try:
+        for cmd in CLUSTER_SPELLINGS:
+            allowed = _check_sandbox(cmd, "read-only", workdir="/workspace")[0]
+            assert allowed is True, (
+                f"{cmd!r} is still refused with the letters table empty - it does not "
+                "depend on the table it claims to test"
+            )
+        assert _check_sandbox(SPACED_CURL, "read-only", workdir="/workspace")[0] is False
+        for cmd in CLUSTERED_ATTACHED:
+            assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, cmd
+    finally:
+        bash_tool._OPTION_DESTINATION_VALUE_TAKING.clear()
+        bash_tool._OPTION_DESTINATION_VALUE_TAKING.update(original)
 
 
 def test_the_long_equals_spellings_need_the_long_option_in_the_table():

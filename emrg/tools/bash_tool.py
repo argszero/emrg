@@ -1885,6 +1885,44 @@ _OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
     "csplit": _CSPLIT_PREFIX_OPTIONS,
 }
 
+# The short letters each of those verbs takes a **value** for. A destination can be
+# carried by a *cluster* (`curl -so <f>`), and splitting one is not a guess work this
+# walk may make freestyle: the value belongs to the first letter in the cluster that
+# takes one, so the verb's own grammar decides whether ``-ko out.txt`` means "`-o`,
+# value `out.txt`" or "`-k`, value `o`, and `out.txt` is an operand to **read**".
+# Measuring says the second: `sort -ko out.txt in.txt` exits 2 with `-k o: Invalid
+# argument` and creates nothing, while `sort -bo out.txt in.txt` exits 0 and writes
+# `out.txt` (BSD `sort 2.3-Apple (199)`, this host, 2026-09-20).
+#
+# Which letters those are comes from each tool's own statement of its grammar:
+#
+#   sort    Usage: sort [-bcCdfigMmnrsuz] [-kPOS1[,POS2] ...] [-S memsize]
+#           [-T tmpdir] [-t separator] [-o outfile] [file ...]      → {k, o, S, T, t}
+#   unzip   Usage: unzip [-Z] [-opts[modifiers]] file[.zip] [list] [-x xlist]
+#           [-d exdir]  (plus `-P password`, man unzip)              → {d, P}
+#   curl    `curl --help all` (8.7.1), the 27 short options whose help shows an
+#           argument right after the long name, in any of curl's three notations
+#           (`<…>`, `{…}`, `[…]`, the last being `-x --proxy [protocol://]host`) → below
+#
+# The errors are not symmetric, and the table is built to err the safe way: a letter
+# **missing** from a set leaves that spelling unnamed (the hole this closes), while a
+# letter wrongly **added** stops the scan on it and leaves the spelling unnamed too —
+# so the table can only under-read, never invent a name. Two letters are absent for
+# reasons a later reader would otherwise re-derive:
+#
+# * `unzip -x`'s xlist is the *words that follow*, not a value in the token: in a
+#   scratch directory `unzip -xd foo a.zip` extracted into `foo/`, i.e. `d` was read
+#   as an option letter whose value is `foo` — exactly the reading this table gives.
+# * `curl -d` **is** present, and the measurement is why: `curl -do out3.txt <url>`
+#   exits 6 (`Could not resolve host: out3.txt`) with nothing created, so `-d`'s value
+#   is `o` and `out3.txt` is the URL. Without `d` the scan would stop on the `o` and
+#   name a URL as a destination — the false block.
+_OPTION_DESTINATION_VALUE_TAKING: dict[str, frozenset[str]] = {
+    "curl": frozenset("AbcCdDeEFhHKmoPQrtTuUwxXyYz"),
+    "sort": frozenset("koSTt"),
+    "unzip": frozenset("dP"),
+}
+
 
 def _leading_short_option_value(tok: str, letters: set[str]) -> str | None:
     """The value an *attached* short option carries in its own token, or ``None``.
@@ -1903,7 +1941,9 @@ def _leading_short_option_value(tok: str, letters: set[str]) -> str | None:
     took ``o`` as *its* value and ``<file>`` is an operand to **read**), and naming
     a read is a false block — the direction this guard's own record treats as worse
     than the hole. So a cluster that does not lead with the destination letter is
-    left unnamed and pinned as a measured residual instead of guessed at.
+    left unnamed **here**, and read by ``_short_cluster_option`` where the caller has
+    supplied the verb's value-taking letters (``_OPTION_DESTINATION_VALUE_TAKING``);
+    a verb with no such table keeps the residual instead of a guess.
     """
     if len(tok) < 3 or not tok.startswith("-") or tok.startswith("--"):
         return None
@@ -1964,7 +2004,11 @@ def _short_cluster_option(
 
 
 def _option_destination_values(
-    tokens: list[str], i: int, verb: str, options: frozenset | None = None
+    tokens: list[str],
+    i: int,
+    verb: str,
+    options: frozenset | None = None,
+    cluster_letters: frozenset[str] = frozenset(),
 ) -> list[str]:
     """The paths a verb writes to that are named by an **option**, not an operand.
 
@@ -2022,6 +2066,32 @@ def _option_destination_values(
     was named — a false block of a command that writes nothing at all, and the same
     defect class from the other side. (`wget` is the table's fourth verb and is not
     installed on this host, so it is left unmeasured rather than inferred.)
+
+    ``cluster_letters`` is the opt-in half of that same reading, for the spelling whose
+    destination letter is *not* the token's first: ``curl -so <f>``. It is the verb's
+    **full** value-taking letters — including the destination letter itself, which is
+    what ``_OPTION_DESTINATION_VALUE_TAKING`` holds for the three verbs measured so
+    far (a set missing it reads nothing at all), and with it the token is split by
+    ``_short_cluster_option``, the reader the operand walk uses, rather than by
+    ``_leading_short_option_value``, which by construction can only see a *leading*
+    letter. Omitting it keeps the historical reading: a cluster then names nothing
+    here, the pinned residual this parameter exists to close.
+
+    Measured 2026-09-20 on this host (BSD `sort 2.3-Apple (199)`, `UnZip 6.00`,
+    `curl 8.7.1`), each row in a scratch directory and the directory read back off
+    disk. The last two are the ones that keep the table honest in both directions:
+
+      ``sort -bo o/out.txt in.txt``        rc=0  o/out.txt created
+      ``sort -ko o/out.txt in.txt``        rc=2  ``-k o: Invalid argument``, nothing created
+      ``unzip -qd o/zd a.zip``             rc=0  m.txt extracted into ``o/zd``
+      ``unzip -xd foo a.zip``              rc=0  extracted into ``foo/`` — so ``d`` is the
+                                                  option and ``foo`` its value, not ``x``
+                                                  taking ``d``
+      ``curl -so o/f file://…``            rc=0  ``o/f`` holds the file
+      ``curl -do o/f <url>``               rc=6  ``Could not resolve host: o/f``, nothing
+                                                  created — ``d``'s value is ``o`` and the
+                                                  URL is ``o/f``, so ``d`` must be in the
+                                                  letters or the URL is named instead
     """
     options = _OPTION_DESTINATION_VERBS[verb] if options is None else options
     longs = {opt for opt in options if opt.startswith("--")}
@@ -2041,6 +2111,17 @@ def _option_destination_values(
                 if tok.startswith(long_opt + "="):
                     out.append(tok.split("=", 1)[1])
                     break
+        elif cluster_letters:
+            # The destination letter sits **inside the cluster** rather than at its
+            # head, so the token is split by the verb's own value-taking letters —
+            # the same reading ``_short_cluster_option`` gives the operand walk. One
+            # reader, not two: it also answers the attached ``-o<f>`` form, so the
+            # fallback below would name the value twice. A cluster whose first
+            # value-taking letter is *not* the destination letter names nothing
+            # here: `sort -ko out.txt` is `-k o` plus an operand to read.
+            cluster = _short_cluster_option(tok, args, j, cluster_letters)
+            if cluster is not None and cluster[0] in letters and cluster[1]:
+                out.append(cluster[1])
         else:
             attached = _leading_short_option_value(tok, letters)
             if attached is not None:
@@ -2530,8 +2611,20 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # `curl -o <f>` / `wget -O <f>` / `sort -o <f>` / `unzip -d <d>`: the
             # destination is an option's value, so no operand rule reaches it and
             # the walk named nothing at all — an empty target list is allowed by
-            # construction, so both tiers allowed the write.
-            targets.extend(_option_destination_values(tokens, i, word))
+            # construction, so both tiers allowed the write. The letters a verb
+            # takes a value for are what let a *cluster* (`curl -so <f>`) be split
+            # by its own grammar; a verb absent from that table keeps the residual
+            # rather than a guess (see `_OPTION_DESTINATION_VALUE_TAKING`).
+            targets.extend(
+                _option_destination_values(
+                    tokens,
+                    i,
+                    word,
+                    cluster_letters=_OPTION_DESTINATION_VALUE_TAKING.get(
+                        word, frozenset()
+                    ),
+                )
+            )
         i += 1
     # Reach the same places the git-mutator scan reaches: a destructive
     # command the shell will run is judged wherever it is written (issue
