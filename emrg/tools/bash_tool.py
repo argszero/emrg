@@ -3390,6 +3390,42 @@ def _cwd_left_workspace(
 _CWD_TRANSPARENT_PREFIXES = frozenset({"builtin", "command"})
 
 
+def _prefix_flag_runs_the_command(tok: str, prefix: str) -> bool:
+    """True when a ``builtin``/``command`` flag token leaves the command running.
+
+    Two of these flags still run the word after them — ``--``, which ends option
+    parsing for both prefixes, and ``command``'s ``-p``, which asks for the
+    default PATH — and the rest of each prefix's flag set means the word after it
+    is **looked up** rather than run (``command -v``/``-V``) or **unregistered**
+    rather than run (``builtin -d``/``-s``). Reading a move through one of those
+    would invent a move the shell never made, which is why they are read no
+    further here.
+
+    Measured 2026-09-19 in ``/bin/sh`` and bash, which agree on every row, with
+    the file's placement read back off disk and ``ws/sub`` present:
+
+    * ``command -p cd sub && echo x > ../f``, ``command -- cd sub && …`` and
+      ``builtin -- cd sub && …`` all leave the shell in ``sub``, so ``../f`` is
+      ``ws/f`` — **inside**. Those are issue #1391's false blocks.
+    * ``command -v cd sub && echo x > ../f``, its ``-V`` twin, ``command -pv …``
+      and ``command -p -v …`` leave the shell where it was, so ``../f`` is beside
+      the workspace: the refusal those rows already get is the correct one.
+    * ``builtin -d``/``-s`` do not run their word at all, and ``command -X`` is
+      rejected outright — both already refused, and correctly.
+
+    ``-p`` is read as a *bundle of p's* (``-p``, ``-pp``, and a repeated ``-p``)
+    rather than as a flag table: measured, all three still run the command, while
+    a bundle that carries another letter (``-pV``) does not. An unknown flag
+    stops the prefix — the fail-closed direction, since the reading cannot
+    classify it.
+    """
+    if tok == "--":
+        return True
+    if prefix != "command":
+        return False
+    return len(tok) >= 2 and tok.startswith("-") and set(tok[1:]) == {"p"}
+
+
 def _move_statement(statement: list[str]) -> tuple[bool, str | None]:
     """Whether a statement moves the shell's directory, and the operand it names.
 
@@ -3435,7 +3471,18 @@ def _move_statement(statement: list[str]) -> tuple[bool, str | None]:
     # redirect up. Only those two — see `_CWD_TRANSPARENT_PREFIXES` for why a
     # word handed to `execve` must not be read through.
     while i < len(statement) and _command_word(statement[i]) in _CWD_TRANSPARENT_PREFIXES:
+        prefix = _command_word(statement[i])
         i += 1
+        # The prefix's own flags sit between it and the word it runs, and only
+        # some of them still run it (issue #1391) — `command -p cd sub` moves the
+        # shell exactly as `command cd sub` does. Reading past only those keeps
+        # the rest of the flag set fail-closed: `command -v cd sub` looks its
+        # word up instead of running it, so the move it looks like must not be
+        # read through it.
+        while i < len(statement) and _prefix_flag_runs_the_command(
+            statement[i], prefix
+        ):
+            i += 1
     if i >= len(statement):
         return False, None
     verb = _command_word(statement[i])
