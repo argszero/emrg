@@ -37,6 +37,19 @@ Nothing here executes a command. `_check_sandbox` is a pure predicate (it
 `realpath`s a path and opens nothing) and `_extract_write_targets` only parses, so
 `OUTSIDE` and the protected path below are arguments to a predicate rather than
 things a test can damage — which matters most for the rows that assert a refusal.
+
+**The twins of a verb that is already handled** (measured 2026-09-19). A list of
+names is blind to a second name for a binary it covers, even when the two names are
+one file. `unlz4`, `lz4c` and `lz4cat` are three symlinks to `lz4`: all four names
+under `/opt/homebrew/Cellar/lz4/1.10.0/bin/` hash to
+`b08405ac45dc1be5615bca7681c8d8d802a62ee9d5e1c1b4392a1e2cc7f68169`, so the program
+is one parser dispatching on argv[0]. Two of the three write in `lz4`'s own shape —
+`unlz4 f.lz4` writes `f` beside the operand (stderr `Decoding file f`), `lz4c f`
+writes `f.lz4` (stderr `Compressed filename will be : f.lz4`) — and they are now in
+`_LZ4_VERBS` with rows in both directions. `lz4cat` is `lz4 -dc`: it writes nothing,
+so it stays out, and the row for it is the false block this fix could most easily
+have caused. The same reading caught `zstdmt`, the second name of `zstd`; its rows
+live in `test_bash_tool_compressor_operands.py`, which owns the family's table.
 """
 
 import pytest
@@ -92,6 +105,10 @@ WRITE_FORMS = (
      (f"{OUTSIDE}/f",)),
     ("attached dictionary with -m", f"lz4 -m -D{OUTSIDE}/cats {OUTSIDE}/f {OUTSIDE}/g",
      (f"{OUTSIDE}/f", f"{OUTSIDE}/g")),
+    # The verb's other two writing argv[0] spellings: same file as `lz4` (measured
+    # 2026-09-19, all four names one sha256) — see the module docstring.
+    ("unlz4 decompress", f"unlz4 {OUTSIDE}/f.lz4", (f"{OUTSIDE}/f.lz4",)),
+    ("legacy cli name", f"lz4c {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
 )
 
 # (row, command) — the measured spellings that create no file. Each must name
@@ -109,6 +126,16 @@ READ_FORMS = (
     # read, or "a value follows" would swallow real flags. Measured — `lz4 -Dcats
     # -c f` is rc=0, 34 bytes on stdout and no file created.
     ("attached dictionary then -c", f"lz4 -D{OUTSIDE}/cats -c {OUTSIDE}/f"),
+    # The same parser under the twins' names, so the same reads — measured: each
+    # leaves the directory exactly as it found it.
+    ("unlz4 -c", f"unlz4 -c {OUTSIDE}/f.lz4"),
+    ("unlz4 -t", f"unlz4 -t {OUTSIDE}/f.lz4"),
+    ("lz4c -c", f"lz4c -c {OUTSIDE}/f"),
+    # `lz4cat` is the twin that writes nothing at all (`lz4 -dc` under a name), so it
+    # must name nothing and stay allowed — asserted here because it is the same file
+    # as the three writers above, i.e. the false block this fix could most easily
+    # cause. It is also a `CAT_WRAPPERS` row in the family's own test file.
+    ("lz4cat writes nothing", f"lz4cat {OUTSIDE}/f.lz4"),
 )
 
 # (row, command) — the compressors *not* on `_COMPRESSOR_VERBS` and not read by a
@@ -213,19 +240,29 @@ def test_an_unlisted_compressor_is_pinned_as_a_measured_hole(row, cmd) -> None:
 
 
 def test_each_write_row_dies_when_the_verb_leaves_the_rule() -> None:
-    """Drop `lz4`, and its rows must go back to the ALLOW master gave."""
-    cmd = f"lz4 {OUTSIDE}/f"
-    assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False
-    original = bash_tool._LZ4_VERBS
-    try:
-        bash_tool._LZ4_VERBS = frozenset()
-        allowed = _check_sandbox(cmd, "read-only", workdir="/workspace")[0]
-    finally:
-        bash_tool._LZ4_VERBS = original
-    assert allowed is True, (
-        "the row survives dropping lz4 from _LZ4_VERBS — it does not depend on the "
-        "branch it claims to test"
+    """Drop a spelling, and its own rows must go back to the ALLOW master gave.
+
+    One arm per name, because three argv[0] spellings share this rule and each is a
+    separate entry in the set: dropping the one a row rides on must flip that row,
+    and a row that survived would not depend on the branch it claims to test.
+    """
+    rows = (
+        ("lz4", f"lz4 {OUTSIDE}/f"),
+        ("unlz4", f"unlz4 {OUTSIDE}/f.lz4"),
+        ("lz4c", f"lz4c {OUTSIDE}/f"),
     )
+    original = bash_tool._LZ4_VERBS
+    for verb, cmd in rows:
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is False, verb
+        try:
+            bash_tool._LZ4_VERBS = original - {verb}
+            allowed = _check_sandbox(cmd, "read-only", workdir="/workspace")[0]
+        finally:
+            bash_tool._LZ4_VERBS = original
+        assert allowed is True, (
+            f"the {verb} row survives dropping {verb} from _LZ4_VERBS — it does not "
+            "depend on the branch it claims to test"
+        )
 
 
 def test_the_read_gate_is_what_spares_the_read_forms() -> None:
