@@ -100,7 +100,7 @@ def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
 # Three tiers (default danger-full-access = current, un-sandboxed behavior):
 #   danger-full-access  — no checks at all (existing behavior)
 #   read-only           — no writes allowed: destructive commands (rm -r /
-#                         rmdir / mv / cp -r), git mutating commands (stash /
+#                         rmdir / unlink / mv / cp -r), git mutating commands (stash /
 #                         checkout / restore / clean / reset / commit / push /
 #                         pull / merge / rebase — community issue #979) and
 #                         shell redirects (> / >>) to any non-/dev/null target
@@ -151,6 +151,40 @@ _COMMAND_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
 # A read-only cycle exists to protect uncommitted work, and every one of these
 # can destroy it just as completely as `rm -rf`.
 _INPLACE_WRITER_VERBS = frozenset({"truncate", "tee", "shred"})
+
+# Verbs whose *operands are removed* — the most destructive family here, and the
+# one the walk reads first: every operand is a write target whether or not any
+# flag is present, because `rm a.txt` destroys uncommitted work exactly like
+# `rm -rf dir` (the recursion is not what decides whether the file survives).
+#
+# `unlink` is the member this set was missing (measured 2026-09-19,
+# `cyc20260919-194810`). It is the POSIX way to remove *one* file, present on
+# every platform this tool runs on (`/usr/bin/unlink`, macOS and Linux alike),
+# and on master `910a307c` it was invisible to the walk in every spelling:
+# `unlink <outside>/f`, `unlink -- <outside>/f`, `/usr/bin/unlink <outside>/f`
+# and `unlink <protected daemon file>` each reported an **empty target list** at
+# both tiers — and an empty list is allowed by construction, so the loop that
+# judges targets never ran. `rm` and `rmdir` on the same two paths were refused
+# in the same geometry, which is what makes this a hole rather than an opinion.
+#
+# Ground truth, taken in a scratch directory on this host and read back off disk
+# (BSD `unlink`, 2026-09-19): `unlink f.txt` really deletes it (rc=0, gone);
+# a missing operand reports an error and exits 0 without touching anything;
+# `unlink -x` and `unlink --help` both deleted the files of those very names,
+# i.e. this program takes no options at all beyond `--` — its usage line is
+# `unlink [--] file`; and `unlink two1 two2` printed that usage line and deleted
+# **neither** file, so its single-operand form is the only one that deletes.
+#
+# Every operand is still named here, the rule `rm` reads: the one spelling that
+# over-names is `unlink a b`, which deletes nothing at all, so the over-block
+# costs nothing real — while a rule that read only the first operand would be a
+# second special case (the `_FIRST_OPERAND_CREATING_VERBS` shape) for no
+# measured gain. A `-`-leading operand (`unlink -x`, which really does delete the
+# file of that name) is dropped by `_positional_args` along with every other
+# option-shaped token; that limit is the general one `rm -- -s` shares, and it is
+# pinned as a limit rather than papered over in
+# `tests/test_bash_tool_unlink_remover.py`.
+_REMOVER_VERBS = frozenset({"rm", "rmdir", "unlink"})
 
 # The compressors are that same family — `gzip f` replaces `f` with `f.gz` and
 # removes `f`, exactly as completely as `truncate -s 0 f` empties it — with one
@@ -1151,18 +1185,49 @@ def _positional_args(
     takes nothing for `ln`), so a caller that knows its verb passes that verb's
     table. Omitting it keeps the historical flat table, which is what the
     earlier callers (`rm`, `mv`, `cp`, `find`, the in-place writers) still read.
+
+    A ``--`` **ends option parsing**, and that sentence was here before the loop
+    below obeyed it (issue #1433): the loop skipped the ``--`` and went on
+    dropping every dash-led token, so a command whose operand is a file whose own
+    name looks like an option named **nothing** — and an empty target list is
+    allowed by construction, because the loop that judges targets never runs.
+    Measured on master `910a307c`, with this function byte-identical at
+    `26449c59` where the fix was written: `rm -- -s` reported ``[]``, i.e. ALLOW
+    at both tiers. Ground truth from a scratch directory on this host, read back
+    off disk: `printf x > ./-s; rm -- -s` is rc=0 and `./-s` is gone — it really
+    deletes, and the name is only an option *shape*.
+
+    So the drop is exactly one flag: once ``--`` has been seen, a ``-``-led token
+    is a path and is named. Two spellings stay as they were, and each for its own
+    reason. A ``--`` that is the *value* of an option is still a value, because
+    the value is consumed before this test is reached — `cp -t -- f` returns
+    ``['f']``, the ``--`` having been eaten by `-t`. A second ``--`` is an operand
+    like any other, because a file really named ``--`` is what it names: `rm --
+    --` returns ``['--']`` (measured here: rc=0, that file gone).
+
+    Named limit, in the other direction: after ``--`` this returns every token,
+    so a verb whose grammar continues past ``--`` with something that is not a
+    path has that token named too — `find <path> -- -delete` is the case, where
+    BSD `find` rejects the ``--`` outright (measured here: rc=1, `find: --:
+    unknown primary or operator`, nothing deleted). It is left as a limit rather
+    than guessed at: telling a `find` expression from a path needs the per-verb
+    grammar this walk refuses to grow, and the token erring here is the safe
+    direction — it is only ever *added* to a target list, and a `find` that
+    really does delete is already named through the path before the ``--``.
     """
     table = _OPTIONS_WITH_VALUE if options_with_value is None else options_with_value
     out: list[str] = []
     args = _args_after_command(tokens, i)
     skip_next = False
+    options_ended = False
     for tok in args:
         if skip_next:
             skip_next = False
             continue
-        if tok == "--":
+        if tok == "--" and not options_ended:
+            options_ended = True
             continue
-        if tok.startswith("-") and tok != "-":
+        if not options_ended and tok.startswith("-") and tok != "-":
             # `-s0` / `--size=0` carry their value in the same token; only the
             # spaced form consumes the next one.
             if tok in table:
@@ -1463,7 +1528,7 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # files land when extracting but only a directory to collect from when creating —
 # so `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely
 # refused by a rule that named `-C`. Measured ground truth for the families it does
-# not cover (`tar`, `zip`, `csplit`, `git clone`, and the cluster spelling
+# not cover (`tar`, `zip`, `git clone`, and the cluster spelling
 # `curl -so<dir>`) is pinned as a measured hole in
 # `tests/test_bash_tool_option_destinations.py` — with the verdict each one really
 # gets rather than a blanket "allowed": all of them reach `workspace-write` with an
@@ -1483,11 +1548,28 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # archive is readable from the first operand, but that operand is an **operand to
 # read** under `-T`/`-sf`/`-L`/`-h` and a write otherwise, which is the `tar` shape
 # and the per-verb flag grammar this comment is about.
+#
+# `csplit` is the one entry a table of destination options cannot finish describing,
+# so it is listed **and** branched: `-f` names the prefix its family is written
+# under, and with no `-f` the family still lands — on the default prefix `xx`, in the
+# working directory — which no option spells. See the `csplit` arm in
+# `_extract_write_targets`; its row left the pinned-hole table in the same change.
+#
+# The two sets below are declared once and derived from each other, the way
+# `_LZ4_VALUE_TAKING_SHORT` derives from `_LZ4_OPTIONS_WITH_VALUE`: the destination
+# set is the `-f` half, and the value-taking set is what `_positional_args` must skip
+# so that a prefix is not read as an operand.
+_CSPLIT_PREFIX_OPTIONS: frozenset[str] = frozenset({"-f", "--prefix"})
+_CSPLIT_OPTIONS_WITH_VALUE: frozenset[str] = _CSPLIT_PREFIX_OPTIONS | frozenset({
+    "-n", "--digits",          # the suffix's digit count
+    "-b", "--suffix-format",   # GNU only
+})
 _OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
     "curl": frozenset({"-o", "--output"}),
     "wget": frozenset({"-O", "--output-document"}),
     "sort": frozenset({"-o", "--output"}),
     "unzip": frozenset({"-d", "--directory"}),
+    "csplit": _CSPLIT_PREFIX_OPTIONS,
 }
 
 
@@ -1517,7 +1599,9 @@ def _leading_short_option_value(tok: str, letters: set[str]) -> str | None:
     return None
 
 
-def _option_destination_values(tokens: list[str], i: int, verb: str) -> list[str]:
+def _option_destination_values(
+    tokens: list[str], i: int, verb: str, options: frozenset | None = None
+) -> list[str]:
     """The paths a verb writes to that are named by an **option**, not an operand.
 
     ``curl -o <file>``, ``wget -O <file>``, ``sort -o <file>`` and
@@ -1546,8 +1630,14 @@ def _option_destination_values(tokens: list[str], i: int, verb: str) -> list[str
       does accept it.
     * A repeated option is over-approximated: every value is named, though these
       tools take the last. That is the same direction the rest of this walk errs in.
+
+    ``options`` is the table to consult, and it is **per verb** for the same reason
+    ``_positional_args``'s is: a verb that has its own branch because its operand
+    list *also* names writes (`patch`, whose `-o` displaces its operands) passes its
+    own set rather than joining the shared table below. Omitting it keeps the
+    historical lookup, which is what the branch that walks that table still reads.
     """
-    options = _OPTION_DESTINATION_VERBS[verb]
+    options = _OPTION_DESTINATION_VERBS[verb] if options is None else options
     longs = {opt for opt in options if opt.startswith("--")}
     letters = {opt[1:] for opt in options if not opt.startswith("--")}
     out: list[str] = []
@@ -1566,6 +1656,105 @@ def _option_destination_values(tokens: list[str], i: int, verb: str) -> list[str
             if attached is not None:
                 out.append(attached)
     return [value for value in out if value != "-"]
+
+
+# `patch` **rewrites the files it is pointed at**, and it was invisible to this walk
+# in every spelling (measured 2026-09-19, `cyc20260919-202406`): on master `15733088`
+# `patch <outside>/f`, `patch -o <outside>/out <workspace>/in` and
+# `patch -d <outside> <workspace>/f` each reported an **empty target list** at both
+# tiers — and an empty list is allowed by construction, so the loop that judges
+# targets never ran. `rm`, `truncate -s 0` and `cp` on the same paths were refused in
+# the same geometry, which is what makes this a hole rather than an opinion. It is
+# the same family as `sed -i` / `perl -i` / `truncate` (#1162, #1421) and the
+# compressors (#1418): a program whose *purpose* is to modify a file in place.
+#
+# Ground truth, taken in a scratch directory on this host and read back off disk (BSD
+# `patch 2.0-12u11-Apple`, 2026-09-19), because the verdict is not the evidence:
+#
+#   patch v.txt < d.patch        rc=0  v.txt rewritten (`two` → `TWO`)
+#   patch -o out.txt v2.txt < …  rc=0  out.txt holds the patched text, **v2.txt is
+#                                      untouched** — with `-o` the operand is a source
+#   patch -i d.patch v.txt       rc=0  v.txt rewritten (`-i` names the patch to read)
+#   patch -d sub v.txt < …       rc=0  **sub/v.txt** rewritten, the cwd copy untouched
+#   patch -dsub v.txt < …        rc=0  same (`-d`'s value in its own token or attached)
+#   patch --dry-run v.txt < …    rc=0  prints "patching file v.txt", v.txt **unchanged**
+#   patch -s v.txt < …           rc=0  rewritten (quiet is not a read)
+#   patch -o only.txt < …        rc=1  no output file; `only.txt.rej` lands beside it
+#   patch < d.patch              rc=0  the file named by the diff header is rewritten
+#
+# Three consequences, and each is a piece of the rule below:
+#
+# 1. The **operands are the targets** when no `-o` is given — every one of them, the
+#    rule `rm` reads, rather than an invented "first operand" special case.
+# 2. `-o`/`--output` is a destination and it **displaces** the operand list: with it,
+#    the operand is read and only that file is written (measured above). The two
+#    readings are alternatives, exactly as `-t <dir>` is for `ln`/`cp`/`mv`.
+# 3. `-d`/`--directory` is where the write *lands*, so its value is named as well: a
+#    rule that named only the operand would read `patch -d <outside> <workspace>/f`
+#    as an in-workspace write, which is the miss measured against master above.
+#
+# `--dry-run` is the one **read** spelling and is honoured: measured, the same command
+# with it writes nothing, so naming its operand would refuse a run that changes no
+# byte — the false block this walk treats as the worse error.
+#
+# The table below keeps a value from being read as an operand: without it `patch -p 1
+# <outside>/f` would name the strip count, the defect `_positional_args`'s docstring
+# sets out. Its letters come from this host's BSD usage line (`patch [-bCcEeflNnRstuv]
+# [-B backup-prefix] [-D symbol] [-d directory] [-g vcs-option] [-F max-fuzz]
+# [-i patchfile] [-o out-file] [-p strip-count] [-r rej-name] [-V …] [-x number]
+# [-Y prefix] [-z backup-ext] [--quoting-style style] [--posix]`) plus the GNU long
+# spellings the CI platform's twin documents. A letter one implementation rejects is
+# harmless here: it means its value is not a path either.
+_PATCH_OUTPUT_OPTIONS: frozenset[str] = frozenset({"-o", "--output"})
+_PATCH_DIRECTORY_OPTIONS: frozenset[str] = frozenset({"-d", "--directory"})
+_PATCH_OPTIONS_WITH_VALUE: frozenset[str] = frozenset({
+    "-B", "--prefix", "-D", "--ifdef", "-d", "--directory", "-F", "--fuzz",
+    "-g", "--get", "-i", "--input", "-o", "--output", "-p", "--strip",
+    "-r", "--reject-file", "-V", "--version-control", "-x", "-Y",
+    "--basename-prefix", "-z", "--suffix", "--quoting-style",
+})
+_PATCH_READ_LONG: frozenset[str] = frozenset({"--dry-run"})
+
+
+def _patch_directory_values(tokens: list[str], i: int) -> list[str]:
+    """The directory ``-d``/``--directory`` changes into, in the spellings getopt takes.
+
+    It is a **destination** in the sense this walk cares about: measured on this host,
+    `patch -d sub v.txt` rewrites `sub/v.txt` and leaves the cwd's copy alone, so the
+    value names the directory the write lands in. The spaced, the attached (`-dsub`)
+    and the ``=``-joined long form are read; a value inside a *cluster* (`-sdsub`) is
+    not, the same limit `_leading_short_option_value` documents for the destination
+    letters and for the same reason — splitting a cluster needs a per-option grammar
+    this walk refuses to grow.
+    """
+    out: list[str] = []
+    args = _args_after_command(tokens, i)
+    for j, tok in enumerate(args):
+        if tok in _PATCH_DIRECTORY_OPTIONS:
+            if j + 1 < len(args):
+                out.append(args[j + 1])
+        elif tok.startswith("--directory="):
+            out.append(tok.split("=", 1)[1])
+        elif tok.startswith("-d") and not tok.startswith("--") and len(tok) > 2:
+            out.append(tok[2:])
+    return out
+
+
+def _patch_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The files ``patch`` writes: its operands, or ``-o``'s value when it is given.
+
+    A run with neither (`patch < d.patch`) writes the paths named **inside the diff**,
+    which is content this walk cannot read — the `tar`/`unzip` residual, pinned as a
+    measured hole in `tests/test_bash_tool_patch_targets.py` rather than guessed at.
+    """
+    args = _args_after_command(tokens, i)
+    if any(tok in _PATCH_READ_LONG for tok in args):
+        return []
+    out = _option_destination_values(tokens, i, "patch", options=_PATCH_OUTPUT_OPTIONS)
+    if not out:
+        out = _positional_args(tokens, i, _PATCH_OPTIONS_WITH_VALUE)
+    out.extend(_patch_directory_values(tokens, i))
+    return out
 
 
 def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
@@ -1754,11 +1943,12 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                     targets.append(tokens[j])
                 i = j + 1
                 continue
-        elif word == "rm" or word == "rmdir":
+        elif word in _REMOVER_VERBS:
             # Any operand is removed — NOT only with a recursive flag.
             # `rm a.txt` destroys uncommitted work exactly like `rm -rf dir`;
             # whether the delete recurses does not decide whether the file
-            # survives.
+            # survives. `unlink` is the same claim one file at a time, and it
+            # was invisible to this walk until `_REMOVER_VERBS` named it.
             targets.extend(_positional_args(tokens, i))
         elif word == "git":
             # `--output=<file>` is the diff-family readers' shared redirect:
@@ -1826,6 +2016,14 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             targets.extend(_dd_output_targets(tokens, i))
         elif word in _METADATA_VERBS:
             targets.extend(_metadata_write_targets(tokens, i, word))
+        elif word == "patch":
+            # `patch` rewrites the files it is pointed at and named nothing here in
+            # any spelling, so it lived with the everyday writers (`sed -i`,
+            # `truncate`, the compressors) that an empty target list made invisible
+            # to both tiers. The rule — operands, or `-o`'s value when that is given,
+            # plus `-d`'s directory, and nothing at all under `--dry-run` — is stated
+            # with its measurements in `_patch_write_targets`.
+            targets.extend(_patch_write_targets(tokens, i))
         elif word in _INPLACE_WRITER_VERBS:
             targets.extend(_positional_args(tokens, i))
         elif word in _COMPRESSOR_VERBS:
@@ -1879,6 +2077,50 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             args = _args_after_command(tokens, i)
             if "-delete" in args:
                 targets.extend(_positional_args(tokens, i))
+        elif word == "csplit":
+            # `csplit` writes a family of derived paths — `<prefix>00`, `<prefix>01`,
+            # … — and it was invisible to this walk in every spelling: an empty target
+            # list is allowed by construction, so the loop that judges targets never
+            # ran. Measured on master `910a307c`, predicate only, nothing executed, the
+            # prefix outside every allowed root: all six spellings (`-f` leading, `-f`
+            # attached, `-f` trailing, none at all, an in-workspace prefix, and BSD's
+            # unaccepted `--prefix`) named nothing at both tiers, while `cp` on the same
+            # two paths was refused.
+            #
+            # Ground truth from a scratch directory on this host (BSD `csplit`, usage
+            # line `csplit [-ks] [-f prefix] [-n number] file args ...`), read back off
+            # disk afterwards: `csplit -f pfx in.txt 4 8` created `pfx00 pfx01 pfx02`
+            # beside `in.txt`; `csplit in.txt 4` created `xx00 xx01` — the **default**
+            # prefix, in the cwd; `csplit -n 3 -f n3 in.txt 4` created `n3000 n3001`;
+            # and `csplit -f - in.txt 3` created `-00 -01`.
+            #
+            # Only the prefix is named. Its first operand is an input to *read*, and the
+            # arguments after it are patterns or line numbers — `csplit f /two/` carries
+            # a `/`-shaped token that is not a path, so naming it would point the block
+            # at something that does not exist and naming the input would refuse a read.
+            # The prefix is named rather than the chunks themselves even though those
+            # carry digits (`pfx00`), because every chunk is under the prefix and the
+            # tier verdict is the same for the prefix as for the family.
+            #
+            # The default `xx` **is** named, which is the half the table above cannot
+            # reach: unlike a splitter whose prefix is an optional last *operand* — where
+            # naming the default means naming the input, so the rule that graduates
+            # `split` names nothing there (#1430) — csplit's prefix is never an operand,
+            # so naming its documented default cannot name a read, and leaving it
+            # unnamed would keep this hole open for the shortest spelling of all.
+            #
+            # A run whose operand list is empty writes nothing — usage, `--help`,
+            # `--version`, and flags with no file each measured to create nothing — so
+            # the prefix is named only when there is an operand to split, which keeps
+            # this arm reading like the rest of the walk: a flag alone names no path.
+            # What it does not do is `stat` anything: a file operand that does not exist
+            # also makes csplit write nothing (measured), and that run is still refused
+            # under `read-only`, because placing a target never depended on the disk.
+            args = _positional_args(tokens, i, _CSPLIT_OPTIONS_WITH_VALUE)
+            if args:
+                targets.extend(
+                    _option_destination_values(tokens, i, "csplit") or ["xx"]
+                )
         elif word in _OPTION_DESTINATION_VERBS:
             # `curl -o <f>` / `wget -O <f>` / `sort -o <f>` / `unzip -d <d>`: the
             # destination is an option's value, so no operand rule reaches it and
@@ -4144,8 +4386,8 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
 
     Returns ``(allowed, blocked_reason, enforcement)``:
       - danger-full-access → (True, None, "full") — no checks, current behavior.
-      - read-only → blocks every destructive write (rm -r / rmdir / mv /
-        cp -r and shell redirects to any non-/dev/null target).
+      - read-only → blocks every destructive write (rm -r / rmdir / unlink /
+        mv / cp -r and shell redirects to any non-/dev/null target).
       - workspace-write → blocks destructive writes to protected daemon
         files, to ``~/.emrg`` itself, and to absolute paths outside the
         workspace root (the OS temp dir is allowed — mirrors dsh's

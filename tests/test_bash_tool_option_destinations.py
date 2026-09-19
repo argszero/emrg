@@ -239,20 +239,32 @@ def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
 # rsync made. It now has its own rule (`_SPLIT_OPTIONS_WITH_VALUE`) and its own file —
 # `tests/test_bash_tool_split_prefix.py`.
 #
-# `zip` was pinned here and has left it the same way `rsync` and `split` did: its archive is readable from the first *operand* — no flag grammar needed to
-# place it — and the read half is a spelling (`-sf`/`--show-files` for show-files,
-# `-T` only while it has no list) rather than the "value of an option". Its own rule
-# is `_zip_write_targets`, its measured table is the comment above
+# `zip` was pinned here and has left it the same way `rsync` and `split` did: its
+# archive is readable from the first *operand* — no flag grammar needed to place it —
+# and the read half is a spelling (`-sf`/`--show-files` for show-files, `-T` only
+# while it has no list) rather than the "value of an option". Its own rule is
+# `_zip_write_targets`, its measured table is the comment above
 # `_ZIP_OPTIONS_WITH_VALUE`, and its rows live in
 # `tests/test_bash_tool_zip_archive.py`. The departure was measured while moving it:
 # with the rule in place this row's own assertion reds (`zip OUT/a.zip x` now names
 # `/outside/emrg/a.zip`), which is the signal this table is written to give.
+#
+# `csplit` has left through the door this table is actually about, which is the
+# opposite of rsync's departure: its prefix *is* an option's value, so the production
+# table lists it (`_CSPLIT_PREFIX_OPTIONS` in `bash_tool.py`), and what needed a
+# separate arm is the half no option spells — a run with no `-f` still writes the
+# `xx…` family, in the cwd. Measured on master `910a307c` before the change, predicate
+# only, target outside every allowed root: `csplit x /re/ -f OUT/pre` reported an
+# empty target list at both tiers; after it, the prefix is the reported target and is
+# refused at both. Ground truth from a scratch directory on this host (BSD `csplit`):
+# `csplit -f pfx in.txt 4 8` created `pfx00 pfx01 pfx02` beside `in.txt`, and
+# `csplit in.txt 4` created `xx00 xx01`. Its file is
+# `tests/test_bash_tool_csplit_prefix.py`.
 UNCOVERED_WRITERS = (
     # (row, command, allowed under read-only, allowed under workspace-write)
     ("tar -cf", "tar -cf OUT/a.tgz x", True, True),
     ("tar -xf -C spaced", "tar -xf a.tgz -C OUT", True, True),
     ("tar -xf -C attached", "tar -xf a.tgz -COUT", True, True),
-    ("csplit", "csplit x /re/ -f OUT/pre", True, True),
     ("curl -so cluster", "curl -soOUT/f https://example.invalid/x", True, True),
     ("git clone", "git clone https://example.invalid/r.git OUT/clone", False, True),
 )
