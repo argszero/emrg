@@ -409,6 +409,54 @@ _ZIP_READ_TOKENS = frozenset({
 })
 _ZIP_MOVE_FLAGS = frozenset({"-m", "--move"})
 
+# `--out <archive>` (short `-O`) is the destination Copy Mode writes *instead of*
+# updating the input archive in place, so its value is a **path** — the one departure
+# from the table above, whose every other value is not a path. It is read by its own
+# rule (`_zip_out_values`) rather than by that table, which is why it is not in it.
+# Measured on the host's binary (Info-ZIP 3.0, Apple build), 2026-09-20, one fresh
+# directory per row holding a pre-built `src.zip` with one member, the result read
+# back off disk (existence, `st_mtime_ns`, member list):
+#
+#   zip -U src.zip --out o.zip        rc=0, `o.zip` created, `src.zip` untouched
+#   zip src.zip --out o.zip           rc=0, the same — `--out` implies copy mode on
+#                                     its own, so `-U` is not part of the rule
+#   zip -U src.zip --out=o.zip        rc=0, `o.zip` created (attached long spelling)
+#   zip -U src.zip -O o.zip           rc=0, `o.zip` created (short, spaced)
+#   zip -U src.zip -Oo.zip            rc=0, `o.zip` created (short, attached)
+#   zip -U --out o.zip src.zip        rc=0, `o.zip` created (option before operand)
+#   zip -U src.zip --out o.zip -lf log  rc=0, `o.zip` AND `log.log` created
+#   zip -sf -U src.zip --out o.zip    rc=0, the listing printed and **nothing
+#                                     written** — the read gate beats copy mode
+#
+# and the two facts that decide the rest of the rule:
+#
+#   zip -d base.zip one.txt --out o.zip  rc=0 with `base.zip` **byte-identical**
+#                                     afterwards and its member list unchanged:
+#                                     under `--out` even a deleting mode edits the
+#                                     copy, not the input
+#   zip -U src.zip --out o.zip -m     rc=0, warning "can't set method, move, recurse,
+#                                     or comments with copy mode", and the member is
+#                                     still on disk — `-m` is inert here
+#
+# so in copy mode the destination is the **only** path written, whatever else the
+# command line carries. The rows that write nothing, and are named by nothing:
+# `--out o.zip` with no operand at all (rc=9), a member pattern matching nothing
+# (rc=12), a source that does not exist (rc=18), `--out=` with an empty value (rc=0,
+# no file created anywhere — an empty token must never be named, because
+# `realpath("")` is the cwd), and a trailing `-O` with nothing after it (rc=16).
+#
+# Named limit — the **cluster** spelling. Zip's getopt takes `-O`'s value from the
+# rest of the same token or, when there is none, from the next word, so
+# `zip -UO o.zip src.zip` and `zip -qO o.zip src.zip` really are copy runs (both
+# measured, rc=0, `o.zip` created). This rule reads no clusters: it knows the four
+# spellings above, and what the operand walk then names depends on the order —
+# destination first (`zip -UO <out> <src>`) it names the destination by accident,
+# while source first (`zip <src> -UO <out>`) it names the **source** and leaves the
+# destination unnamed, in the direction this rule exists for. Left as a limit: a
+# token's cluster letters are read by one site in this file once the cluster reader
+# lands (issue #1443), and a second reader here would be one rule written twice.
+_ZIP_DESTINATION_OPTIONS = frozenset({"-O", "--out"})
+
 # Verbs that *create* every path named by an operand (`touch a b c`,
 # `mkdir -p a/b`). They were invisible to the write-target walk (issue #1398):
 # with no target named, the loop that judges targets never ran, so both checked
@@ -2518,11 +2566,47 @@ def _zip_logfile_targets(words: list[str]) -> list[str]:
     return out
 
 
+def _zip_out_values(words: list[str]) -> list[str]:
+    """The path a copy-mode ``zip`` run writes: ``--out <archive>`` (short ``-O``).
+
+    The measurements behind it are the comment above `_ZIP_DESTINATION_OPTIONS`, and
+    the rule they settle is one line per spelling — the next word for ``--out`` and
+    ``-O``, the text after ``=`` for ``--out=``, the text after the letter for
+    ``-O<path>``. An **empty** value is dropped rather than named: a token that names
+    nothing resolves to the cwd, so naming it would refuse every run made from a
+    working directory outside the workspace. Parsing stops at ``--``, because
+    everything after it is an operand — the case `_positional_args` documents at
+    length. A spelling with no value at all (`-O` as the last token) is skipped for
+    the same reason the empty one is.
+
+    Only the *path* is returned. That this path is written, and that the operands are
+    therefore reads, is the caller's rule — `_zip_write_targets` is the only caller,
+    and the same measurement decides both halves.
+    """
+    out: list[str] = []
+    for idx, tok in enumerate(words):
+        if tok == "--":
+            break
+        if tok in _ZIP_DESTINATION_OPTIONS:
+            if idx + 1 >= len(words):
+                continue
+            value = words[idx + 1]
+        elif tok.startswith("--out="):
+            value = tok[len("--out="):]
+        elif tok.startswith("-O") and len(tok) > 2:
+            value = tok[2:]
+        else:
+            continue
+        if value:
+            out.append(value)
+    return out
+
+
 def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     """The paths a ``zip`` run writes: its **first** operand, and what it moves.
 
     The measured table is the comment above `_ZIP_OPTIONS_WITH_VALUE`; the rule it
-    settles is four lines long, and each line is one of its rows:
+    settles is five lines long, and each line is one of its rows:
 
     * a read spelling (``-sf``/``--show-files``, ``-su``/``-sU``, the help and
       licence forms) writes no archive — the ``-lf`` logfile is the exception,
@@ -2533,6 +2617,9 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     * otherwise the archive — the *first* operand — is the path that is created
       or rewritten, and under ``-m``/``--move`` every listed operand after it is
       removed as well;
+    * **unless the run is copy mode**, whose destination is an option's value and
+      whose operands are all reads: named by `_zip_out_values`, and the first
+      operand is not named at all (the paragraph on ``--out`` below);
     * and the ``-lf`` value is named alongside whichever of the above applies.
 
     Named limit: the exclusion list (``-x``) and the include list (``-i``) are
@@ -2549,26 +2636,58 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     **empty** afterwards, and so did a run that failed — the temporary archive is
     removed before the process exits, so there is no surviving path to protect.
 
-    ``--out <archive>`` (copy mode's destination, `zip -U`) is a **measured limit**
-    rather than a treated case: its value is a path, and the rule it needs is
-    mode-sensitive, so it is filed as issue #1441 instead of guessed here. Measured
-    on the same binary, one fresh directory holding a pre-built `src.zip`:
-    `zip -U src.zip --out out.zip` is rc=0, creates `out.zip` and leaves `src.zip`
-    untouched — so in copy mode the **first operand is a read**. The walk has no
-    copy-mode rule and names that operand, which is wrong in both directions
-    (measured through this predicate at `workspace-write`):
-    `zip -U /workspace/src.zip --out /outside/emrg/o.zip` is **allowed** while
-    naming the source, so the archive really written outside every allowed root is
-    named by nothing; and `zip -U /outside/emrg/src.zip --out /workspace/o.zip` is
-    **blocked on the read**. Adding `--out` to the table would not help — the table
-    means "consumes the next token, which is not a path", and this value is the
-    destination, so the operand before it would be named again.
+    ``--out <archive>``/``-O <archive>`` is the family's fifth rule line and the only
+    one that reads an option's value as a **path**. Measured on the same binary:
+    ``zip -U src.zip --out out.zip`` is rc=0, creates ``out.zip`` and leaves
+    ``src.zip`` untouched — so under it the operands are **reads** (the source archive
+    and the member patterns) and this walk must not name them. Before this rule the
+    walk named the first operand, which was wrong in both directions (measured through
+    this predicate at ``workspace-write``):
+    ``zip -U /workspace/src.zip --out /outside/emrg/o.zip`` was **allowed** while
+    naming the source, so the archive really written outside every allowed root was
+    named by nothing; and ``zip -U /outside/emrg/src.zip --out /workspace/o.zip`` was
+    **blocked on the read**. Adding ``--out`` to the table above would have fixed
+    neither — the table means "consumes the next token, which is not a path", and this
+    value *is* the destination, so the operand before it would be named again.
+
+    Copy mode has two halves, and each is a measurement rather than an assumption: the
+    **destination is the only path written**, and the **operands are reads**. ``--out``
+    implies copy mode on its own, so ``-U`` is not part of the rule, and the modes that
+    could contradict the first half were checked against it — ``zip -d src.zip member
+    --out new.zip`` is rc=0 with the source **byte-identical** afterwards and its member
+    list unchanged (under ``--out`` even a deleting mode edits the copy), while ``-m``
+    is inert (zip warns "can't set method, move, recurse, or comments with copy mode",
+    and the member is still on disk), so neither adds an operand to the list. Named
+    limits, each measured: ``-U`` **combined with an action flag** (``-d``, ``-u``,
+    ``-f``) is rejected by zip — rc=16, "Invalid command arguments (specify just one
+    action)", nothing written — so the destination named there is an over-block on a
+    contradictory command line (the same action *without* ``-U`` is the workable
+    spelling, measured above); the **cluster** spelling (``zip <src> -UO <out>``), which
+    this rule does not read — see `_ZIP_DESTINATION_OPTIONS`; an **empty** value
+    (``--out=``), which writes nothing anywhere and is therefore named by nothing; and a
+    **member pattern that matches nothing**, or a member already up to date (exit 12
+    either way), where the destination is still named — what a run will do is not
+    decidable from the command line, the same approximation the archive forms above take.
     """
     words = _args_after_command(tokens, i)
     logfile = _zip_logfile_targets(words)
     if any(tok in _ZIP_READ_TOKENS for tok in words):
         return logfile
-    operands = _positional_args(tokens, i, _ZIP_OPTIONS_WITH_VALUE)
+    destination = _zip_out_values(words)
+    # In copy mode the destination is an option's value and every operand is a read
+    # (the source archive, then the member patterns), so the destination has to be
+    # consumed before the operand walk sees it — and the question that walk then
+    # answers for this branch is only "is there a source archive at all?", which is
+    # what keeps `zip --out o.zip` (rc=9, nothing written) unnamed.
+    operands = _positional_args(
+        tokens,
+        i,
+        _ZIP_OPTIONS_WITH_VALUE | _ZIP_DESTINATION_OPTIONS
+        if destination
+        else _ZIP_OPTIONS_WITH_VALUE,
+    )
+    if destination and operands:
+        return destination + logfile
     if len(operands) < 2:
         # Archive and no list: zip exits 12 having written nothing — the logfile
         # excepted, which it really does create (measured).
