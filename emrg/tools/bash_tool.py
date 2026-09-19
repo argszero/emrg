@@ -152,6 +152,46 @@ _COMMAND_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
 # can destroy it just as completely as `rm -rf`.
 _INPLACE_WRITER_VERBS = frozenset({"truncate", "tee", "shred"})
 
+# The compressors are that same family — `gzip f` replaces `f` with `f.gz` and
+# removes `f`, exactly as completely as `truncate -s 0 f` empties it — with one
+# difference that keeps them out of the set above: a flag can turn the very same
+# operand into a pure read.
+#
+# Measured on master `9a8bc960` (2026-09-19), one geometry, two tiers, the same
+# protected daemon file (`~/.emrg/rants.jsonl`, never opened — `_check_sandbox`
+# only `realpath`s it): `gzip`, `gzip -f`, `gzip -9`, `gzip -k`, `gzip -d`,
+# `gunzip`, `bzip2`, `xz` and `zstd` all answered ALLOW at **both** tiers, while
+# `truncate -s 0`, `tee` and `shred -u` on that path were refused with "blocked
+# write to protected daemon file" — and under `read-only`, whose whole job is to
+# protect uncommitted work, `gzip` was the one that got through. An empty target
+# list is allowed by construction (the loop that judges targets never runs), so
+# this was a hole rather than an opinion, and nothing pinned it.
+#
+# The `*cat` forms (`zcat`, `bzcat`, `xzcat`, `zstdcat`) are deliberately
+# **absent**: they are `-dc` wrappers that write nothing, so naming their operand
+# a write would refuse `zcat <file>` — the false block this walk treats as worse
+# than the hole.
+_COMPRESSOR_VERBS = frozenset({
+    "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "lzma", "unlzma",
+    "zstd", "unzstd",
+})
+
+# `-S`/`--suffix` is the one option in this family that takes a spaced value, and
+# naming the suffix a path is the mistake `_positional_args` exists to avoid.
+_COMPRESSOR_OPTIONS_WITH_VALUE = frozenset({"-S", "--suffix"})
+
+# The spellings under which that operand is a *read*: the bytes go to stdout
+# instead of back into a file (`-c`, `--stdout`, `--to-stdout`), or the file is
+# only tested or listed (`-t`, `-l`, and their long forms). Every program above
+# takes all three letters. A letter counts **inside a short cluster** as well as
+# alone, because `gzip -dc <f>` is the `zcat` idiom a reader actually types, and a
+# rule that knew only the spaced `-c` would refuse a pure read. The long forms are
+# matched exactly rather than by prefix: `--list` is a read, `--license` is not.
+_COMPRESSOR_READ_LETTERS = frozenset({"c", "t", "l"})
+_COMPRESSOR_READ_LONG = frozenset({
+    "--stdout", "--to-stdout", "--test", "--list",
+})
+
 # Verbs that *create* every path named by an operand (`touch a b c`,
 # `mkdir -p a/b`). They were invisible to the write-target walk (issue #1398):
 # with no target named, the loop that judges targets never ran, so both checked
@@ -1290,6 +1330,11 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
       - ``chmod`` / ``chown`` / ``chgrp`` → the operands after the mode/owner
         (or all of them when no operand looks like one, as with
         ``--reference=<f>``)
+      - ``gzip`` / ``gunzip`` / ``bzip2`` / ``xz`` / ``lzma`` / ``zstd`` and their
+        decompressing twins → every operand, because the default form rewrites the
+        operand in place — *unless* the run is a read form (``-c``/``--stdout``,
+        ``-t``/``--test``, ``-l``/``--list``, read inside a short cluster too), in
+        which case nothing is named and the command stays allowed
 
     **Parsed, not scanned** (issue #1162). The previous version regex-scanned
     raw text, which failed in both directions:
@@ -1509,6 +1554,14 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             targets.extend(_metadata_write_targets(tokens, i, word))
         elif word in _INPLACE_WRITER_VERBS:
             targets.extend(_positional_args(tokens, i))
+        elif word in _COMPRESSOR_VERBS:
+            # `gzip f` rewrites f in place; the read spellings (`gzip -c f`,
+            # `gzip -t f`, `gzip -l f`) leave it alone and must stay allowed.
+            # This gate is why the family is not simply in the set above.
+            if not _compressor_operand_is_a_read(tokens, i):
+                targets.extend(
+                    _positional_args(tokens, i, _COMPRESSOR_OPTIONS_WITH_VALUE)
+                )
         elif word == "sed":
             # `sed -i` rewrites its file operands in place; a bare `sed` is a
             # filter that writes only to stdout and must stay allowed. The flag
@@ -1655,6 +1708,37 @@ def _metadata_write_targets(tokens: list[str], i: int, verb: str) -> list[str]:
     if verb == "chmod":
         return args[1:] if _MODE_LIKE_RE.match(args[0]) else args
     return args[1:]
+
+
+def _compressor_operand_is_a_read(tokens: list[str], i: int) -> bool:
+    """True when a compressor run does not write the file it was pointed at.
+
+    Two ways to be a read, and both are named rather than assumed: the compressed
+    (or decompressed) stream is sent to stdout (``-c``/``--stdout``/``--to-stdout``),
+    or the file is only tested or listed (``-t``/``--test``, ``-l``/``--list``).
+    Everything else in the family writes — the default form, ``-d`` (rewrite the
+    decompressed file), ``-f``, ``-k`` (a second file beside the operand), ``-9`` —
+    so the test asks about the *read*, which is the spelling somebody has to ask
+    for, instead of about the write, which is what a bare ``gzip f`` already is.
+
+    A short cluster is read letter by letter: `gzip -dc f.gz` is the `zcat`
+    spelling, and a reader that knew only the spaced `-c` would refuse it.
+
+    Named limit: an *attached value* that happens to contain one of the three
+    letters (`gzip -Sc f` sets the suffix to `c`) is read as a read form, so that
+    spelling is missed. Telling the two apart needs a per-compressor value table,
+    which is the per-verb flag grammar this walk refuses to grow, and the two ways
+    of guessing are not equally costly — guessing "write" here would refuse
+    `gzip -9c`, a spelling people do type.
+    """
+    for tok in _args_after_command(tokens, i):
+        if tok in _COMPRESSOR_READ_LONG:
+            return True
+        if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+            continue
+        if _COMPRESSOR_READ_LETTERS & set(tok[1:]):
+            return True
+    return False
 
 
 def _is_directory_install(tokens: list[str], i: int) -> bool:
