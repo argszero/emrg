@@ -691,3 +691,244 @@ def test_the_logfile_is_really_written_in_every_shape(tmp_path):
     assert _extract_write_targets(
         f"zip -lf {both_log} {both_archive} {operand}"
     ) == [str(both_archive), str(both_log)]
+
+
+# ── copy mode: the destination is an option's value that is a path (issue #1441) ────
+#
+# (row, command, targets) — the *source* operand is written outside every allowed root
+# as well, so a rule that still named it (master's rule before this one) would be
+# caught by the list as well as by the verdict. That is the shape the issue measures:
+# a first operand which is only read, and a destination named by nothing.
+COPY_MODE_FORMS = (
+    ("--out spaced", "zip -U {out}/src.zip --out {out}/new.zip", ("{out}/new.zip",)),
+    ("-O spaced", "zip -U {out}/src.zip -O {out}/new.zip", ("{out}/new.zip",)),
+    ("--out= attached", "zip -U {out}/src.zip --out={out}/new.zip", ("{out}/new.zip",)),
+    ("-O attached", "zip -U {out}/src.zip -O{out}/new.zip", ("{out}/new.zip",)),
+    # `--out` implies copy mode on its own: measured, `zip src.zip --out new.zip` is
+    # rc=0 and writes only `new.zip`, the same as with `-U`.
+    ("without -U", "zip {out}/src.zip --out {out}/new.zip", ("{out}/new.zip",)),
+    ("option before the operand", "zip -U --out {out}/new.zip {out}/src.zip", ("{out}/new.zip",)),
+    # A mode that edits the archive edits the *copy* under `--out`: measured with `-d`
+    # (the source byte-identical afterwards, member list unchanged) and with `-m` (the
+    # member is still on disk, and zip warns "can't set method, move, recurse, or
+    # comments with copy mode"), so neither adds an operand. `-d` is spelled *without*
+    # `-U` on purpose: `zip -U -d ... --out ...` is rejected by zip with rc=16
+    # ("specify just one action") having written nothing.
+    ("with -d", "zip -d {out}/src.zip member.txt --out {out}/new.zip", ("{out}/new.zip",)),
+    ("with -m", "zip -U {out}/src.zip --out {out}/new.zip -m", ("{out}/new.zip",)),
+    ("with a member pattern", "zip -U {out}/src.zip member.txt --out {out}/new.zip",
+     ("{out}/new.zip",)),
+    ("with a logfile", "zip -U {out}/src.zip --out {out}/new.zip -lf {ws}/log",
+     ("{out}/new.zip", "{ws}/log")),
+)
+
+# The rows that write nothing in copy mode, each measured: no operand at all (rc=9),
+# an empty value (`--out=`, rc=0 and no file created anywhere), and a trailing `-O`
+# with nothing after it (rc=16). Naming any of them would be the false block this walk
+# treats as the worse direction — and an empty token is worse still, because
+# `realpath("")` is the working directory.
+COPY_MODE_WRITES_NOTHING = (
+    ("no operand", "zip --out {out}/new.zip"),
+    ("empty value", "zip -U {out}/src.zip --out="),
+    ("trailing -O", "zip -U {out}/src.zip -O"),
+)
+
+
+@pytest.mark.parametrize("row,cmd,targets", rendered(COPY_MODE_FORMS),
+                         ids=[row for row, _c, _t in COPY_MODE_FORMS])
+def test_a_copy_mode_run_names_the_destination_and_not_the_source(row, cmd, targets):
+    """Exactly the destination, in every measured spelling.
+
+    The whole list is asserted: the source operand sits under the same placeholder, so
+    a rule that named it instead (or as well) fails here even though something *was*
+    named — which is what master's rule did.
+    """
+    assert _extract_write_targets(cmd) == list(targets), row
+
+
+@pytest.mark.parametrize("row,cmd,targets", rendered(COPY_MODE_FORMS),
+                         ids=[row for row, _c, _t in COPY_MODE_FORMS])
+def test_the_destination_of_a_copy_run_is_refused_at_both_tiers(row, cmd, targets):
+    """The destination is the write, so a destination outside every root is refused.
+
+    Both tiers: `workspace-write` refuses writes outside the workspace, `read-only`
+    refuses them anywhere. Before this rule the same command was ALLOW at
+    `workspace-write` while really creating the archive there.
+    """
+    assert targets, row
+    for tier, allowed in tiers(cmd).items():
+        assert allowed is False, f"{row}: {tier} allowed a write to {OUTSIDE}"
+
+
+def test_the_source_operand_of_a_copy_run_is_read_not_written():
+    """The other half of the issue, as its own pair — the false block, and its removal.
+
+    One command line, two verdicts that differ by where the *source* sits. The row the
+    issue opens with is the second: a read outside the workspace used to be refused
+    because the walk named it as the write, while the write it really makes (inside the
+    workspace) was named by nothing.
+    """
+    writes_inside = f"zip -U {WORKSPACE}/src.zip --out {OUTSIDE}/new.zip"
+    reads_outside = f"zip -U {OUTSIDE}/src.zip --out {WORKSPACE}/new.zip"
+
+    assert _extract_write_targets(writes_inside) == [f"{OUTSIDE}/new.zip"]
+    assert _extract_write_targets(reads_outside) == [f"{WORKSPACE}/new.zip"]
+    assert tiers(writes_inside)["workspace-write"] is False, (
+        "the archive really created outside every root must be refused"
+    )
+    assert tiers(reads_outside)["workspace-write"] is True, (
+        "the source operand is only read, so a source outside the workspace is not a "
+        "write to it — refusing this is the false block the issue names"
+    )
+    assert tiers(reads_outside)["read-only"] is False, (
+        "read-only refuses the destination wherever it is"
+    )
+
+
+@pytest.mark.parametrize("row,cmd", COPY_MODE_WRITES_NOTHING,
+                         ids=[row for row, _c in COPY_MODE_WRITES_NOTHING])
+def test_the_copy_forms_that_write_nothing_name_nothing(row, cmd):
+    """No target, and therefore no verdict — the direction this walk protects.
+
+    `--out` with no operand really does exit 9 having written nothing (`Interrupted
+    (aborting)`), and an empty value really does write nothing anywhere, so the
+    "there is a source" question is what keeps both unnamed.
+    """
+    resolved = cmd.format(out=OUTSIDE, ws=WORKSPACE)
+    assert _extract_write_targets(resolved) == [], row
+
+
+def test_the_copy_rule_is_what_names_the_destination() -> None:
+    """Blind the reader and the hole the issue measured must come back, both ways.
+
+    This is the arm that makes the rows above claims rather than observations: with
+    `_zip_out_values` returning nothing the walk falls back to the first-operand rule,
+    so the destination goes unnamed and the run is ALLOW at `workspace-write` **while
+    it really writes there** — the exact hole measured on the host at the time the
+    issue was filed. The source, meanwhile, is named again and refused, which is the
+    false block on the other side.
+    """
+    write_row = f"zip -U {WORKSPACE}/src.zip --out {OUTSIDE}/new.zip"
+    read_row = f"zip -U {OUTSIDE}/src.zip --out {WORKSPACE}/new.zip"
+    assert tiers(write_row)["workspace-write"] is False
+    assert tiers(read_row)["workspace-write"] is True
+
+    original = bash_tool._zip_out_values
+    try:
+        bash_tool._zip_out_values = lambda words: []
+        assert _extract_write_targets(write_row) == [f"{WORKSPACE}/src.zip"], (
+            "with the destination reader blinded the walk must name the source — that "
+            "wrong name is what the issue reports"
+        )
+        assert tiers(write_row)["workspace-write"] is True, (
+            "with the destination reader blinded the run is allowed while it really "
+            "creates the archive outside every root — the hole, restored"
+        )
+        assert _extract_write_targets(read_row) != [f"{WORKSPACE}/new.zip"], (
+            "the destination must stop being named once its reader is blinded, "
+            "otherwise this arm is testing the fallback rather than the reader"
+        )
+    finally:
+        bash_tool._zip_out_values = original
+
+
+def test_the_read_gate_beats_copy_mode() -> None:
+    """`-sf` still writes nothing, `--out` or not — measured, and it is a second claim.
+
+    Copy mode looks like a write and the gate looks like a read; the measurement says
+    the gate already returned before the copy was made (`zip -sf -U src.zip --out
+    o.zip` printed its listing and created no file), so naming the destination there
+    would be a block on a run that writes nothing. Ordered, not merged: if the copy
+    branch were read first this row would be refused, which is the false block.
+    """
+    row = f"zip -sf -U {OUTSIDE}/src.zip --out {OUTSIDE}/new.zip"
+    assert _extract_write_targets(row) == []
+    assert tiers(row)["workspace-write"] is True
+
+
+@needs_zip
+def test_copy_mode_really_writes_the_new_archive_and_leaves_the_source_alone(tmp_path):
+    """Executed, because every claim above is a claim about what zip does.
+
+    `tmp_path` is a directory this test creates, so no host path is involved. Every
+    command runs with `cwd=tmp_path` and **relative** names, because zip stores the
+    member name it was given: built from an absolute path the member is the whole path
+    (with the leading slash stripped), and then no relative pattern can select it —
+    measured while writing this test, `zip -d <abs>/src.zip in.txt --out …` exits 12
+    "Nothing to do!" for exactly that reason.
+
+    The source is judged by `(mtime_ns, size)` **and** its member list, because "the
+    source was not rewritten" is the load-bearing half: a run that edited it in place
+    would make the destination rule the wrong rule.
+    """
+    (tmp_path / "in.txt").write_text("hello\n")
+    source = tmp_path / "src.zip"
+
+    def run(*argv):
+        return subprocess.run(list(argv), cwd=tmp_path, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace")
+
+    result = run("zip", "-q", "src.zip", "in.txt")
+    assert result.returncode == 0, result.stderr
+    before = _archive_state(source)
+    assert before is not None, "the source archive was not built"
+    baseline_members = run("zip", "-sf", "src.zip").stdout
+    assert "in.txt" in baseline_members, (
+        "the member is not stored under the name this test selects it by"
+    )
+
+    # 1. the plain copy: the destination appears, the source is untouched
+    new = tmp_path / "new.zip"
+    result = run("zip", "-U", "src.zip", "--out", "new.zip")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert new.exists(), "copy mode did not create the archive it was pointed at"
+    assert _archive_state(source) == before, (
+        "copy mode rewrote the source archive, so the destination is not the only write"
+    )
+    assert _extract_write_targets(f"zip -U {source} --out {new}") == [str(new)]
+
+    # 2. `-d` under `--out` edits the copy: the source keeps its member, byte for byte
+    deleted = tmp_path / "deleted.zip"
+    result = run("zip", "-d", "src.zip", "in.txt", "--out", "deleted.zip")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert _archive_state(source) == before, "`-d` with `--out` edited the source"
+    assert run("zip", "-sf", "src.zip").stdout == baseline_members, (
+        "`-d` with `--out` changed the source's member list, so the walk cannot treat "
+        "the operand as a read"
+    )
+    assert _extract_write_targets(f"zip -d {source} in.txt --out {deleted}") == [str(deleted)]
+
+    # 3. `-m` under `--out` is inert: the member is still on disk afterwards
+    moved = tmp_path / "moved.zip"
+    result = run("zip", "-U", "src.zip", "--out", "moved.zip", "-m")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert (tmp_path / "in.txt").exists(), (
+        "`-m` removed the member under `--out`, so copy mode is not inert to it — the "
+        "rule would have to name every operand again for that spelling"
+    )
+    assert _extract_write_targets(f"zip -U {source} --out {moved} -m") == [str(moved)]
+
+    # 4. the read gate wins over the copy, executed: the listing prints, nothing is made
+    gated = tmp_path / "gated.zip"
+    result = run("zip", "-sf", "-U", "src.zip", "--out", "gated.zip")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert not gated.exists(), (
+        "`zip -sf -U src.zip --out out.zip` created the archive, so the read gate does "
+        "not beat copy mode and this rule's ordering is wrong"
+    )
+    assert _extract_write_targets(f"zip -sf -U {source} --out {gated}") == []
+
+    # 5. `-U` with an action flag is the contradictory line the docstring names as a
+    #    limit: zip rejects it and writes nothing, so the destination is an over-block
+    contradictory = tmp_path / "contradictory.zip"
+    result = run("zip", "-U", "-d", "src.zip", "in.txt", "--out", "contradictory.zip")
+    assert result.returncode == 16, (result.stdout, result.stderr)
+    assert not contradictory.exists(), (
+        "zip accepted `-U -d … --out …`, so the limit this rule records is wrong"
+    )
+    assert _extract_write_targets(
+        f"zip -U -d {source} in.txt --out {contradictory}"
+    ) == [str(contradictory)], (
+        "the over-block on the contradictory line is a named limit, so it is pinned "
+        "here rather than left to be rediscovered"
+    )
