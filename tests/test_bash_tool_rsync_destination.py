@@ -114,6 +114,86 @@ def test_the_protected_daemon_file_is_refused_at_both_tiers():
     assert "protected" in (ww_reason or ""), ww_reason
 
 
+# ── a trailing option's value is a value, not the destination ───────────────────────
+#
+# Every writing form above carries its options **before** the operands, and the attached
+# `--exclude=foo` row is attached. Neither spelling can see the defect below: when a
+# value-taking option *follows* the operands, its value is the last non-option token,
+# which is exactly the position the last-operand rule reads as `DEST` — so the option's
+# value displaced the destination and the run was allowed. Measured on master `edba48ca`
+# with the real predicate, nothing executed, destination outside every allowed root:
+# `rsync -a src/ /outside/emrg/dst --exclude pat` answered `['pat']` and **ALLOW at both
+# tiers**, while the same command without the trailing option answered
+# `['/outside/emrg/dst']` and was refused. It is not a false alarm: in a scratch tree
+# `rsync -a src/ dst/ --exclude pat` is rc=0 and the file really lands under `dst/`.
+# The option-first spelling was already correct, which is why the rows above stayed green
+# through it — the two spellings differ only in where the option sits.
+TRAILING_VALUE_FORMS = (
+    ("exclude", f"rsync -a {WORKSPACE}/src/ {{dest}} --exclude pat"),
+    ("include", f"rsync -a {WORKSPACE}/src/ {{dest}} --include pat"),
+    ("rsh", f"rsync -a {WORKSPACE}/src/ {{dest}} -e ssh"),
+    ("rsh inside a cluster", f"rsync -a {WORKSPACE}/src/ {{dest}} -ve ssh"),
+    ("temp-dir", f"rsync -a {WORKSPACE}/src/ {{dest}} -T /tmp/scratch"),
+    ("block-size", f"rsync -a {WORKSPACE}/src/ {{dest}} -B 4096"),
+    ("filter", f"rsync -a {WORKSPACE}/src/ {{dest}} -f rule"),
+    ("out-format", f"rsync -a {WORKSPACE}/src/ {{dest}} --out-format %n"),
+    ("log-file", f"rsync -a {WORKSPACE}/src/ {{dest}} --log-file /tmp/scratch/log"),
+    ("two trailing values", f"rsync -a {WORKSPACE}/src/ {{dest}} --exclude a --include b"),
+)
+
+
+@pytest.mark.parametrize(
+    "row,cmd", TRAILING_VALUE_FORMS, ids=[row for row, _ in TRAILING_VALUE_FORMS]
+)
+def test_a_trailing_value_does_not_displace_the_destination(row, cmd):
+    """The option's value must be consumed, so the operand is still the one named."""
+    dest = f"{OUTSIDE}/dst"
+    assert _extract_write_targets(cmd.format(dest=dest)) == [dest], row
+
+
+@pytest.mark.parametrize(
+    "row,cmd", TRAILING_VALUE_FORMS, ids=[row for row, _ in TRAILING_VALUE_FORMS]
+)
+def test_a_displaced_destination_is_refused_at_both_tiers(row, cmd):
+    """The same two tiers as every other writing form, for the same reason."""
+    for tier in ("read-only", "workspace-write"):
+        allowed, reason, _ = _check_sandbox(
+            cmd.format(dest=f"{OUTSIDE}/dst"), tier, WORKSPACE
+        )
+        assert allowed is False, f"{row}: {tier} allowed a write to {OUTSIDE}"
+        assert reason, f"{row}: {tier} refused without a reason"
+
+
+def test_a_trailing_flag_does_not_eat_the_destination():
+    """The table's own control: an entry the option does not have would trade the hole
+    for the opposite mistake.
+
+    A value-taking entry that a flag does not deserve consumes the operand the rule
+    names — a false block with two operands left, a silent miss with one. Each spelling
+    here was measured on this host as a *flag*, in a scratch tree: the token after it
+    stayed a source and was really copied as a second one (`--delete`, `--stats`,
+    `--progress`, `-v`, `-r` all came back not-value-taking). The table is only
+    trustworthy with the positive rows above and this negative row together.
+    """
+    for flags in ("--delete", "--stats", "--progress", "-v", "-avz", "--ignore-times"):
+        cmd = f"rsync -a {WORKSPACE}/src/ {OUTSIDE}/dst {flags}"
+        assert _extract_write_targets(cmd) == [f"{OUTSIDE}/dst"], flags
+
+
+def test_the_cluster_rule_is_the_rsync_branch_s_alone():
+    """`cp -at <dir> src` keeps naming its operand: the cluster letters are not shared.
+
+    The clustered-value rule is opt-in for this reason. `cp` reads `-t` through
+    `_target_directory_values`, which does not parse clusters, so consuming a cluster's
+    value inside `_positional_args` for every caller would leave one operand and name
+    nothing — the `rsync` table's letters are passed by the `rsync` branch only.
+    """
+    cmd = f"cp -at {OUTSIDE}/dst {WORKSPACE}/src.txt"
+    assert _extract_write_targets(cmd) == [f"{OUTSIDE}/dst"]
+    allowed, _reason, _ = _check_sandbox(cmd, "workspace-write", WORKSPACE)
+    assert allowed is False
+
+
 # ── read forms: the operand is not written, so naming it would be a false block ─────
 READING_FORMS = (
     ("-an cluster", f"rsync -an {WORKSPACE}/src.txt {{dest}}"),
