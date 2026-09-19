@@ -1476,13 +1476,52 @@ def _positional_args(
     grammar this walk refuses to grow, and the token erring here is the safe
     direction — it is only ever *added* to a target list, and a `find` that
     really does delete is already named through the path before the ``--``.
+
+    **A value-taking letter inside a cluster eats the next word too**
+    (``_short_cluster_option``), and that is the spelling that displaced a
+    destination rather than merely over-naming one. On GNU, ``suffix`` and
+    ``target-directory`` are ``required_argument`` for all four of
+    ``cp``/``mv``/``ln``/``install`` and ``mode``/``owner``/``group`` are for
+    ``install`` (read from the project's own source, 2026-09-20:
+    ``cp.c``/``mv.c``/``ln.c``/``install.c``), so in ``cp x dst -aS .bak`` the
+    ``-S`` takes the value ``.bak`` and the operands stay ``x`` and ``dst``. This
+    reader treated ``-aS`` as flags, left ``.bak`` in the operand list, and the
+    last-operand rule then named **``.bak``** — a suffix, not a path — while the
+    real destination went unjudged. Measured against master ``edba48ca`` itself
+    (that tree's own code, predicate only, nothing executed, ``workspace-write``),
+    these four were ALLOW **and named the option's value**:
+
+        cp x <outside>/dst -aS .bak               → ['.bak']
+        mv -va x <outside>/m -vS .bak             → ['.bak']
+        ln -s x <outside>/l -vS .bak              → ['.bak']
+        install -m 644 x <outside>/i -vS .bak     → ['.bak']
+
+    The neighbours that leave no separate word to misread were refused in the same
+    geometry, which is what makes the cluster the discriminator and not the verb:
+    ``-aS.bak`` (attached), ``-rv`` / ``-avT`` (no value letter in the cluster),
+    ``ln -sS .bak x <outside>/l`` and ``install -Sm 644 x <outside>/i`` (the value
+    word is not last). BSD's ``cp``/``install`` reject the letter outright
+    (measured here: ``cp -aSb`` → ``cp: illegal option -- b``, ``cp --suffix .bak``
+    → ``illegal option -- -``), so the GNU grammar is the one this rule follows and
+    the one CI's ubuntu leg runs; on BSD the row pins the refusal of a command that
+    would not have run either way.
+
+    The rule is applied only where a caller passes its **own verb's** table: those
+    tables are that verb's declared value-taking options, while the flat
+    ``_OPTIONS_WITH_VALUE`` is a union across verbs (its ``-o`` is not a letter
+    every verb reading it accepts), and those callers name *every* operand anyway,
+    so a cluster there can only over-name — the safe direction — never displace a
+    destination. Named residual: a cluster whose value letter is **not** last
+    (``cp -tS .bak src``, where GNU makes ``S`` the target directory) still leaves
+    the tokens after it as operands.
     """
     table = _OPTIONS_WITH_VALUE if options_with_value is None else options_with_value
+    letters = None if options_with_value is None else _short_option_letters(table)
     out: list[str] = []
     args = _args_after_command(tokens, i)
     skip_next = False
     options_ended = False
-    for tok in args:
+    for j, tok in enumerate(args):
         if skip_next:
             skip_next = False
             continue
@@ -1500,6 +1539,12 @@ def _positional_args(
                 and tok[-1] in cluster_value_letters
             ):
                 skip_next = True
+            elif letters:
+                cluster = _short_cluster_option(tok, args, j, letters)
+                # `attached` means the value rode inside this token, so no word
+                # is eaten; the flag alone is handled by the branch above.
+                if cluster is not None and not cluster[2]:
+                    skip_next = True
             continue
         out.append(tok)
     return out
@@ -1864,6 +1909,57 @@ def _leading_short_option_value(tok: str, letters: set[str]) -> str | None:
         return None
     if tok[1] in letters:
         return tok[2:]
+    return None
+
+
+def _short_option_letters(table: frozenset) -> set[str]:
+    """The single-letter options of a table, without their leading ``-``.
+
+    Derived from the table rather than written a second time, so a letter added
+    to a verb's table cannot be read in the spaced spelling and silently not in
+    the clustered one. Long names are dropped: a cluster is a run of *short*
+    options by definition.
+    """
+    return {
+        opt[1:] for opt in table if opt.startswith("-") and not opt.startswith("--")
+    }
+
+
+def _short_cluster_option(
+    tok: str, args: list[str], j: int, letters: set[str]
+) -> tuple[str, str | None, bool] | None:
+    """The value-taking option a *short-option cluster* carries, or ``None``.
+
+    getopt allows several short options in one word, and a value-taking letter may
+    sit anywhere in it, so the cluster — not the bare ``-S`` token — is where its
+    value is decided. Scanning stops at the first letter in ``letters``, because
+    everything after it is *that* option's value: ``-mD`` is a mode of ``D``, not
+    a ``-D``, and reading the rest of the token as another option is the class
+    ``_leading_short_option_value`` refuses to guess at.
+
+    Returns ``(letter, value, attached)``:
+
+    * ``attached`` True — the value is the remainder of the same token (``-aSb``
+      is a suffix of ``b``, ``-t<dir>`` a target directory of ``<dir>``);
+    * ``attached`` False — the letter is the token's last, so getopt takes the
+      **next word** as its value and that word is not an operand (``value`` is
+      ``None`` when the command ends there, which getopt reports as a missing
+      argument).
+
+    That second case is the whole point of this function existing separately from
+    ``_leading_short_option_value``: the operand reader has to know when the next
+    word has been *eaten*, and it cannot tell that from a leading-letter reader.
+    Measured 2026-09-20 in ``_positional_args``' docstring.
+    """
+    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+        return None
+    body = tok[1:]
+    for k, ch in enumerate(body):
+        if ch in letters:
+            rest = body[k + 1:]
+            if rest:
+                return (ch, rest, True)
+            return (ch, args[j + 1] if j + 1 < len(args) else None, False)
     return None
 
 
@@ -2471,22 +2567,18 @@ def _short_target_directory(
     rest of that token is *its* value (``-mD`` is a mode of ``D``, not a ``-t``).
     The letters come from the verb's own table — ``_VERB_OPTIONS_WITH_VALUE``,
     already the per-verb fact this walk reads — so this introduces no new
-    enumeration of a command's flags (the #461 class the walk keeps refusing).
+    enumeration of a command's flags (the #461 class the walk keeps refusing),
+    and the scan itself is ``_short_cluster_option``'s, shared with the operand
+    reader so the two cannot drift. ``t`` is added to those letters because this
+    function is also reached for ``link``, whose table is empty by design yet
+    whose verb is read by the destination rules (``_DESTINATION_LAST_VERBS``).
     """
-    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+    cluster = _short_cluster_option(
+        tok, args, j, _short_option_letters(table) | {"t"}
+    )
+    if cluster is None or cluster[0] != "t":
         return None
-    body = tok[1:]
-    for k, ch in enumerate(body):
-        letter = "-" + ch
-        if letter == "-t":
-            rest = body[k + 1:]
-            if rest:
-                return rest
-            return args[j + 1] if j + 1 < len(args) else None
-        if letter in table:
-            # An earlier option swallowed the rest of the token as its value.
-            return None
-    return None
+    return cluster[1]
 
 
 def _target_directory_values(tokens: list[str], i: int, verb: str) -> list[str]:
