@@ -247,13 +247,24 @@ def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
 # the suffix appended), while `zip -T a.zip` and `zip -sf a.zip` left the archive's
 # mtime unchanged. So covering `zip` means a read gate, and the gate is why the row is
 # pinned as a hole instead of guessed at.
+#
+# `csplit` has left through the door this table is actually about, which is the
+# opposite of rsync's departure: its prefix *is* an option's value, so the production
+# table lists it (`_CSPLIT_PREFIX_OPTIONS` in `bash_tool.py`), and what needed a
+# separate arm is the half no option spells — a run with no `-f` still writes the
+# `xx…` family, in the cwd. Measured on master `910a307c` before the change, predicate
+# only, target outside every allowed root: `csplit x /re/ -f OUT/pre` reported an
+# empty target list at both tiers; after it, the prefix is the reported target and is
+# refused at both. Ground truth from a scratch directory on this host (BSD `csplit`):
+# `csplit -f pfx in.txt 4 8` created `pfx00 pfx01 pfx02` beside `in.txt`, and
+# `csplit in.txt 4` created `xx00 xx01`. Its file is
+# `tests/test_bash_tool_csplit_prefix.py`.
 UNCOVERED_WRITERS = (
     # (row, command, allowed under read-only, allowed under workspace-write)
     ("tar -cf", "tar -cf OUT/a.tgz x", True, True),
     ("tar -xf -C spaced", "tar -xf a.tgz -C OUT", True, True),
     ("tar -xf -C attached", "tar -xf a.tgz -COUT", True, True),
     ("zip", "zip OUT/a.zip x", True, True),
-    ("csplit", "csplit x /re/ -f OUT/pre", True, True),
     ("curl -so cluster", "curl -soOUT/f https://example.invalid/x", True, True),
     ("git clone", "git clone https://example.invalid/r.git OUT/clone", False, True),
 )
@@ -626,10 +637,25 @@ def test_the_target_directory_reader_obeys_the_terminator_too(row, terminator, c
 
     This host's `cp`/`mv`/`ln` implement no `-t` at all — `cp -t OUT/f -- src.txt`
     exits 64 with the usage line, measured — so there is no executed row to write
-    here. The claim is only that an option after `--` is an operand: naming the
-    directory anyway refuses a command whose own tool would reject the option.
+    here. What the row pins is what the second reader owes: an option *after* `--`
+    is an operand, so it is not the option that moves the destination and its value
+    is never named. `OUTSIDE` must be absent from the terminator reading in both
+    tiers, while the control (`-t OUTSIDE -- …`, options still in force) names it
+    and is refused.
+
+    What the terminator row *does* name is not nothing, and that is the conversation
+    with the operand reader rather than a second hole. The terminator makes `-t` an
+    operand — the same sentence the operand reader learned for `rm -- -s`, which
+    names `-s` — so the operands are `-t`, `OUTSIDE`, `src.txt`, and a copy is judged
+    by the last of them, its destination. Real `cp` really writes there: measured on
+    this host, `cp -- -t x dest` exits 0 and puts both operands inside `dest`, and
+    `cp -- -t OUT src.txt` exits 1 with "src.txt: Not a directory" — the last operand
+    is the path the run is aimed at whether or not it turns out to be a directory.
+    So the row is read as what the command is, and it is allowed at workspace-write
+    because that operand is inside the workspace.
     """
-    assert _extract_write_targets(terminator) == [], terminator
+    assert OUTSIDE not in _extract_write_targets(terminator), terminator
+    assert _extract_write_targets(terminator) == ["src.txt"], terminator
     assert _extract_write_targets(control) == [OUTSIDE], control
     allowed, reason, _ = _check_sandbox(terminator, "workspace-write", workdir="/workspace")
     assert allowed is True, reason
@@ -647,9 +673,16 @@ def test_an_options_own_value_may_be_the_terminator():
     assert _extract_write_targets("sort --output=-- x") == ["--"]
     # Both readers, since both had to learn the sentence.
     assert _extract_write_targets("cp -t -- src.txt") == ["--"]
-    # ...and a terminator that no option consumed still ends parsing.
+    # ...and a terminator that no option consumed still ends parsing: `-o` after it
+    # is an operand, so no option names a destination and the sort row names nothing
+    # (a copy is the other case, below, and it names its last operand).
     assert _extract_write_targets("sort -- -o x y") == []
-    assert _extract_write_targets("cp -- -t x y") == []
+    # The destination-last family names the last operand, which is what real `cp`
+    # writes into — measured, `cp -- -t x dest` exits 0 and puts both operands inside
+    # `dest`. So the same `--` reads as "nothing" for an option-destination verb and
+    # as "the last operand" for a copy, which is each family's own rule and not a
+    # contradiction.
+    assert _extract_write_targets("cp -- -t x y") == ["y"]
 
 
 def test_a_consumed_terminator_does_not_end_parsing():
