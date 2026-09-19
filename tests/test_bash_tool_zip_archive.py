@@ -137,6 +137,27 @@ WRITING_FORMS = (
     # direction; the two above red on the name.
     ("spaced -P password inside the workspace",
      "zip -P {ws}/pw {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
+    # `-tt`, `-Z` and `-lf` were the next three spaced values the same table was
+    # short of, each measured 2026-09-20 on the same binary. `zip -tt 20200101
+    # a.zip f` exits 12 with "invalid date entered for -tt option" — the option
+    # **ate** the token, so the archive sits one position further right; `zip -Z
+    # store a.zip f` is rc=0 and creates no file named `store`; `zip -lf ./log
+    # a.zip f` is rc=0 and creates `log.log`. Absent from the table, the walk
+    # named the date, the method and the log path respectively, so
+    # `zip -tt 20010101 {out}/a.zip f` was **allowed** at `workspace-write`
+    # while really rewriting the archive outside every allowed root.
+    ("spaced -tt date",
+     "zip -tt 20010101 {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
+    ("spaced -Z method",
+     "zip -Z store {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
+    # `-lf`'s value is a **path** zip writes, so it is named *beside* the archive
+    # rather than consumed and forgotten: the run writes both. Both spellings,
+    # because the attached one was measured to work (`zip -lf./log2 a.zip f`
+    # created `log2.log`).
+    ("spaced -lf logfile",
+     "zip -lf {ws}/log {out}/a.zip {ws}/in.txt", ("{out}/a.zip", "{ws}/log")),
+    ("attached -lf logfile",
+     "zip -lf{ws}/log {out}/a.zip {ws}/in.txt", ("{out}/a.zip", "{ws}/log")),
     # A resolved verb, a chain and a nested shell all reach the same rule.
     ("absolute path to the verb",
      "/usr/bin/zip {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
@@ -513,3 +534,160 @@ def test_the_lowercase_l_really_writes_and_the_uppercase_L_does_not(tmp_path):
     assert result.returncode == 0, result.stderr
     assert not os.path.exists(upper), "uppercase `-L` created the archive"
     assert _extract_write_targets(f"zip -L {upper} {operand}") == []
+
+
+# ── the values that are consumed but are not paths: `-tt`, `-Z` ────────────────────
+def test_the_new_table_rows_are_what_moves_the_naming_onto_the_archive() -> None:
+    """Drop the rows the table was short of and the hole comes back, measured.
+
+    Consequence 6 of `bash_tool.py`'s table claims `-tt`, `-Z` and `-lf` are what
+    moves the naming onto the archive. Read in both directions: with the table as
+    written the row is refused, and with `-tt`/`-Z` removed (the state before this
+    cycle) the walk names the date again and the run is **allowed** while it really
+    rewrites the archive outside every allowed root — the exact hole measured on
+    the host.
+    """
+    cmd = f"zip -tt 20010101 {OUTSIDE}/a.zip {WORKSPACE}/in.txt"
+    assert _extract_write_targets(cmd) == [f"{OUTSIDE}/a.zip"]
+    assert tiers(cmd)["workspace-write"] is False
+
+    original = bash_tool._ZIP_OPTIONS_WITH_VALUE
+    try:
+        bash_tool._ZIP_OPTIONS_WITH_VALUE = original - {"-tt", "-Z"}
+        assert _extract_write_targets(cmd) == ["20010101"], (
+            "with `-tt` out of the table the walk must name the date — that wrong "
+            "name is what the row exists to prevent"
+        )
+        assert tiers(cmd)["workspace-write"] is True, (
+            "with `-tt` out of the table the run is allowed while it really "
+            "rewrites the archive outside — the hole, restored"
+        )
+    finally:
+        bash_tool._ZIP_OPTIONS_WITH_VALUE = original
+
+
+@needs_zip
+def test_tt_and_Z_really_consume_the_token_they_are_given(tmp_path):
+    """Executed, because the table's whole meaning is "this option eats the next one".
+
+    `-tt` gets a **future** date so the run succeeds rather than relying on an error
+    message: every file is then "before" the bound, so the archive is created — and
+    no file named after the date exists, which is what says the date was consumed
+    rather than taken as the archive. `-Z` is the same shape: the method name is
+    eaten, so the archive is the operand and no file named `store` appears.
+    """
+    operand = tmp_path / "in.txt"
+    operand.write_text("hello\n")
+
+    dated = tmp_path / "dated.zip"
+    result = subprocess.run(["zip", "-tt", "2099-01-01", str(dated), str(operand)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert dated.exists(), "the archive named after the date was not created"
+    assert not (tmp_path / "2099-01-01").exists(), (
+        "zip treated the date as a file name, so `-tt` does not consume its value"
+    )
+
+    method = tmp_path / "method.zip"
+    result = subprocess.run(["zip", "-Z", "store", str(method), str(operand)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert method.exists(), "the archive named after the method was not created"
+    assert not (tmp_path / "store").exists(), (
+        "zip treated the method as a file name, so `-Z` does not consume its value"
+    )
+
+
+# ── `-lf`: a spaced value that is itself a path zip writes ──────────────────────────
+def test_the_logfile_is_named_where_no_archive_is() -> None:
+    """`-lf` writes a path the archive rule cannot reach, so it is named on its own.
+
+    Three shapes, all measured on the host (consequence 6): a read spelling still
+    creates the logfile, the exit-12 "Nothing to do!" case still creates it, and it
+    is written in addition to the archive when there is one. Both directions,
+    because a rule that only added the value to the table would name the logfile
+    nowhere and let it be written outside every allowed root.
+    """
+    read_row = f"zip -sf -lf {OUTSIDE}/log {OUTSIDE}/a.zip {WORKSPACE}/in.txt"
+    no_list_row = f"zip -lf {OUTSIDE}/log {OUTSIDE}/a.zip"
+    write_row = f"zip -lf {OUTSIDE}/log {OUTSIDE}/a.zip {WORKSPACE}/in.txt"
+    attached_row = f"zip -lf{OUTSIDE}/log {OUTSIDE}/a.zip {WORKSPACE}/in.txt"
+
+    assert _extract_write_targets(read_row) == [f"{OUTSIDE}/log"]
+    assert _extract_write_targets(no_list_row) == [f"{OUTSIDE}/log"]
+    assert _extract_write_targets(write_row) == [f"{OUTSIDE}/a.zip", f"{OUTSIDE}/log"]
+    assert _extract_write_targets(attached_row) == [f"{OUTSIDE}/a.zip", f"{OUTSIDE}/log"]
+    for row in (read_row, no_list_row, write_row):
+        assert tiers(row)["workspace-write"] is False, row
+
+    original = bash_tool._zip_logfile_targets
+    try:
+        bash_tool._zip_logfile_targets = lambda words: []
+        assert _extract_write_targets(read_row) == [], (
+            "the read shape must go back to naming nothing when the logfile rule is "
+            "blinded — otherwise it is spared by something else"
+        )
+        assert _extract_write_targets(no_list_row) == [], (
+            "the no-list shape names the logfile and nothing else, so blinding the "
+            "rule must leave it naming nothing"
+        )
+        assert _extract_write_targets(write_row) == [f"{OUTSIDE}/a.zip"], (
+            "with the logfile rule blinded only the archive should be named"
+        )
+        assert tiers(read_row)["workspace-write"] is True, (
+            "with the logfile rule blinded the run is allowed while it really "
+            "creates the logfile outside — the hole, restored"
+        )
+    finally:
+        bash_tool._zip_logfile_targets = original
+
+
+@needs_zip
+def test_the_logfile_is_really_written_in_every_shape(tmp_path):
+    """Executed: `-lf <path ending in .log>` creates exactly the file it names.
+
+    The suffix matters to the *test* rather than to the rule: zip appends `.log` to a
+    value that does not already end in it (measured), so naming a value with the
+    suffix makes the file asserted here the same token the walk names.
+    """
+    operand = tmp_path / "in.txt"
+    operand.write_text("hello\n")
+    archive = tmp_path / "a.zip"
+    subprocess.run(["zip", "-q", str(archive), str(operand)],
+                   capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+    # a read spelling still writes the logfile
+    read_log = tmp_path / "read.log"
+    result = subprocess.run(["zip", "-sf", "-lf", str(read_log), str(archive)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert read_log.exists(), (
+        "`zip -sf -lf <log>` did not create the logfile, so the read short-circuit "
+        "would be right after all"
+    )
+    assert _extract_write_targets(
+        f"zip -sf -lf {read_log} {archive} {operand}"
+    ) == [str(read_log)]
+
+    # the exit-12 "Nothing to do!" case writes it too
+    idle_log = tmp_path / "idle.log"
+    result = subprocess.run(["zip", "-lf", str(idle_log), str(tmp_path / "none.zip")],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert result.returncode != 0, "the no-list run unexpectedly succeeded"
+    assert idle_log.exists(), "the no-list shape did not create the logfile"
+    assert _extract_write_targets(
+        f"zip -lf {idle_log} {tmp_path / 'none.zip'}"
+    ) == [str(idle_log)]
+
+    # and the ordinary shape writes both the archive and the logfile
+    both_log = tmp_path / "both.log"
+    both_archive = tmp_path / "both.zip"
+    result = subprocess.run(["zip", "-lf", str(both_log), str(both_archive), str(operand)],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert both_log.exists() and both_archive.exists(), (
+        "the ordinary shape must write the archive and the logfile"
+    )
+    assert _extract_write_targets(
+        f"zip -lf {both_log} {both_archive} {operand}"
+    ) == [str(both_archive), str(both_log)]

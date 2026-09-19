@@ -372,7 +372,37 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
 #    table was written on: `zip -P ./pw <outside>/a.zip f` named `./pw` and was
 #    **allowed at `workspace-write`** while really rewriting the archive outside
 #    every allowed root, because the wrong token resolved inside the workspace.
-_ZIP_OPTIONS_WITH_VALUE = frozenset({"-b", "-t", "-n", "-s", "-TT", "-P"})
+#
+# 6. Three more spaced values were still missing from the table after that fix —
+#    `-tt <date>`, `-Z <cm>` and `-lf <path>` — each measured the same way
+#    (2026-09-20, one fresh directory per row holding `f`):
+#
+#      zip -tt 20200101 a.zip f  rc=12, "invalid date entered for -tt option —
+#                                use mmddyyyy or yyyy-mm-dd": the option **ate**
+#                                the token, so with a valid date the archive is
+#                                whatever follows it
+#      zip -Z store a.zip f      rc=0, a.zip created, and **no file named
+#                                `store`** — the method name is consumed
+#      zip -lf ./log a.zip f     rc=0, a.zip created, `log.log` created
+#      zip -lf./log2 a.zip f     rc=0, `log2.log` created — the attached spelling
+#
+#    The first two are values that are never paths, so the table is all they
+#    need. `-lf` is different: its value **is** a path zip writes, so the table
+#    alone would stop naming it. Three properties decide how it is named, all
+#    measured on the same binary:
+#
+#      zip -sf -lf ./log a.zip   rc=0, the listing printed and `log.log` CREATED —
+#                                a read spelling still writes the logfile, so it
+#                                has to survive the read short-circuit
+#      zip -lf ./log a.zip       "zip error: Nothing to do!" and `log.log` still
+#                                CREATED — so it survives the writes-nothing case
+#      zip -lf ./log3 a.zip f    `log3.log` written: zip appends `.log` when the
+#                                value does not already end in it, which lands in
+#                                the same directory, so naming the token as
+#                                written is containment-equivalent
+_ZIP_OPTIONS_WITH_VALUE = frozenset({
+    "-b", "-t", "-tt", "-n", "-s", "-TT", "-P", "-Z", "-lf",
+})
 _ZIP_READ_TOKENS = frozenset({
     "-sf", "-su", "-sU", "-h", "-h2", "-L", "--help", "--version",
     "--show-files",
@@ -2360,19 +2390,53 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
     return operands[-1:]
 
 
+def _zip_logfile_targets(words: list[str]) -> list[str]:
+    """The path ``zip -lf <path>`` writes, in both measured spellings.
+
+    The rows behind this are consequence 6 of the table above
+    `_ZIP_OPTIONS_WITH_VALUE`. ``-lf`` is the family's one spaced value that is
+    itself a **path**, so it is a write the archive rule cannot reach: the option
+    consumes the token (it is not an operand, so nothing in the operand walk sees
+    it) while zip opens it as a logfile. It is named in **every** shape of the
+    run, because it is written in every shape measured — the read spellings
+    (``zip -sf -lf ./log a.zip`` printed its listing and still created ``log.log``)
+    and the exit-12 "Nothing to do!" case (``zip -lf ./log a.zip``) included.
+
+    ``zip`` appends ``.log`` when the value does not end in it, which lands in the
+    same directory as the token named here, so naming the token as written is
+    containment-equivalent — the question a block asks.
+
+    ``-Z <cm>`` and ``-tt <date>`` are handled by the table alone: their values are
+    never paths, so consuming them is the whole rule.
+    """
+    out: list[str] = []
+    for idx, tok in enumerate(words):
+        if tok == "--":
+            break
+        if tok == "-lf":
+            if idx + 1 < len(words):
+                out.append(words[idx + 1])
+        elif tok.startswith("-lf"):
+            out.append(tok[3:])
+    return out
+
+
 def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     """The paths a ``zip`` run writes: its **first** operand, and what it moves.
 
     The measured table is the comment above `_ZIP_OPTIONS_WITH_VALUE`; the rule it
-    settles is three lines long, and each line is one of its rows:
+    settles is four lines long, and each line is one of its rows:
 
     * a read spelling (``-sf``/``--show-files``, ``-su``/``-sU``, the help and
-      licence forms) writes nothing, so nothing is named;
+      licence forms) writes no archive — the ``-lf`` logfile is the exception,
+      written in every shape (see `_zip_logfile_targets`);
     * with no second operand the run writes nothing at all (exit 12, "Nothing to
-      do!"), which is what keeps `zip a.zip` and `zip -d a.zip` allowed;
+      do!"), which is what keeps `zip a.zip` and `zip -d a.zip` allowed — the same
+      logfile exception applies there too;
     * otherwise the archive — the *first* operand — is the path that is created
       or rewritten, and under ``-m``/``--move`` every listed operand after it is
-      removed as well.
+      removed as well;
+    * and the ``-lf`` value is named alongside whichever of the above applies.
 
     Named limit: the exclusion list (``-x``) and the include list (``-i``) are
     matched against the operands **by name**, and a name they neutralise is still
@@ -2387,17 +2451,34 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     taken in a scratch directory, `zip -b <dir> a.zip f` left the directory
     **empty** afterwards, and so did a run that failed — the temporary archive is
     removed before the process exits, so there is no surviving path to protect.
+
+    ``--out <archive>`` (copy mode's destination, `zip -U`) is a **measured limit**
+    rather than a treated case: its value is a path, and the rule it needs is
+    mode-sensitive, so it is filed as issue #1441 instead of guessed here. Measured
+    on the same binary, one fresh directory holding a pre-built `src.zip`:
+    `zip -U src.zip --out out.zip` is rc=0, creates `out.zip` and leaves `src.zip`
+    untouched — so in copy mode the **first operand is a read**. The walk has no
+    copy-mode rule and names that operand, which is wrong in both directions
+    (measured through this predicate at `workspace-write`):
+    `zip -U /workspace/src.zip --out /outside/emrg/o.zip` is **allowed** while
+    naming the source, so the archive really written outside every allowed root is
+    named by nothing; and `zip -U /outside/emrg/src.zip --out /workspace/o.zip` is
+    **blocked on the read**. Adding `--out` to the table would not help — the table
+    means "consumes the next token, which is not a path", and this value is the
+    destination, so the operand before it would be named again.
     """
     words = _args_after_command(tokens, i)
+    logfile = _zip_logfile_targets(words)
     if any(tok in _ZIP_READ_TOKENS for tok in words):
-        return []
+        return logfile
     operands = _positional_args(tokens, i, _ZIP_OPTIONS_WITH_VALUE)
     if len(operands) < 2:
-        # Archive and no list: zip exits 12 having written nothing.
-        return []
+        # Archive and no list: zip exits 12 having written nothing — the logfile
+        # excepted, which it really does create (measured).
+        return logfile
     if any(tok in _ZIP_MOVE_FLAGS for tok in words):
-        return operands
-    return operands[:1]
+        return operands + logfile
+    return operands[:1] + logfile
 
 
 def _is_directory_install(tokens: list[str], i: int) -> bool:
