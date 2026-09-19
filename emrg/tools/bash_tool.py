@@ -330,6 +330,103 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
     if opt.startswith("-") and not opt.startswith("--")
 )
 
+# `pzstd` is zstd's parallel front-end — a **different binary**, not a second name,
+# which is the reading `zstdmt` above turns on and this verb is the other side of.
+# Measured on this host (2026-09-19): `/opt/homebrew/bin/pzstd` realpaths into the
+# same Cellar as `zstd` but hashes
+# `0bad6c010cc29143f7c84808393943bf30b4ad5a11368d3c353e330d09e246f6` against
+# zstd's `15da463937cca60558fc7e7b281e09b071ea40ea3b80408328a87d4f83195be1`, and
+# its own usage line (`pzstd [args] [FILE(s)]`, `-o  file : result stored into
+# \`file\` (only if 1 input file)`) is the program's, not zstd's. One **fresh**
+# directory per row with `f` present and the listing read back off disk:
+#
+#   pzstd f                    writes  f  f.zst          a sibling is derived; `f` STAYS
+#   pzstd -k f                 writes  f  f.zst
+#   pzstd -19 f / -vv f / -q f writes  f  f.zst
+#   pzstd --rm f               writes  f.zst             and removes the operand
+#   pzstd -p 4 f               writes  f  f.zst          `-p` eats `4`; sibling still derived
+#   pzstd f g                  writes  f.zst  g.zst      every operand derives one
+#   pzstd -o out.zst f         writes  f  out.zst        `-o` is a real destination
+#   pzstd -oout.zst f          writes  f  out.zst        …and takes an attached value
+#   pzstd f -o out.zst         writes  f  out.zst        the destination wins wherever it stands
+#   pzstd -o out.zst -         writes  out.zst           the stream still gets a destination
+#   pzstd -qo out.zst f        writes  f  out.zst        the destination letter inside a cluster
+#   pzstd -qoout.zst f         writes  f  out.zst        …attached, in the same cluster
+#   pzstd -co out.zst f        writes  f  out.zst        a read letter in FRONT of it, and it still
+#                                                        writes the file: 0 bytes on stdout
+#   pzstd -qo out.zst          writes  out.zst           no operand — stdin is the input
+#   pzstd -qo - f              read    f                 [stdout] — a cluster's `-` destination
+#   pzstd -c f / --stdout f    read    f                 [stdout]
+#   pzstd -t f.zst             read    f.zst             [test]
+#   pzstd -dc f.zst            read    f.zst             [decompress to stdout]
+#   pzstd -                    read    —                 the stream; nothing on disk
+#   pzstd -o - f               read    f                 [stdout] — `-` as the destination
+#   pzstd - f                  rc=1    f                 "Cannot specify standard input when
+#                                                        handling multiple files" — writes nothing
+#   pzstd -l f / --list f      rc=1    f                 `Invalid argument: -l` — not an option
+#   pzstd --to-stdout f        rc=1    f                 `Invalid argument` — not an option
+#   pzstd --output=out.zst f   rc=1    f                 `Invalid argument` — the long form does
+#                                                        **not** exist here (see the table below)
+#   pzstd -o out.zst f g       rc=1    f  f.zst          "Cannot specify an output file when
+#                                                        handling multiple inputs"
+#
+# Five consequences, and each is why this verb gets a branch of its own rather
+# than joining `_COMPRESSOR_VERBS`:
+#
+# 1. The default form **keeps** the operand and derives a sibling (`f` → `f.zst`),
+#    which is `lz4`'s shape and not the in-place family's. Naming the operand is
+#    still sound — the sibling lands in the operand's own directory and in no
+#    other — but it is a different claim from `gzip`'s and has to be stated.
+# 2. `-o` names the write in **option position**, where no operand rule reaches
+#    it; and while `-o` is present the operands are *read* (`pzstd -o out.zst f`
+#    leaves `f` untouched), so naming them as well would refuse a pure read.
+# 3. The attached spelling `-oout.zst` carries the letter `t`, so the family's
+#    read gate would read it as `--test` and answer "read, nothing named" — the
+#    hole this branch closes, reopened one spelling over. The letter scan in
+#    `_pzstd_read_form` stops at `o` for the reason `_lz4_letters` stops at `D`.
+# 4. The destination question has to come **before** that read gate, because here
+#    they are not alternatives: `pzstd -co out.zst f` is rc=0 with 0 bytes on stdout
+#    and `out.zst` written (measured 2026-09-20). A gate that answered "read" from
+#    the first read letter would leave that write unnamed. The ordering is this
+#    verb's, measured; `zip`'s is the opposite and measured there (#1445 keeps its
+#    read gate first, because `zip -sf … --out …` really does write nothing).
+# 5. The destination letter may sit **inside a cluster** (`-qo out.zst`), which is
+#    why this verb passes its own value-taking letters to
+#    `_option_destination_values` — measured: `pzstd -qo out.zst f` writes `out.zst`
+#    and keeps `f`, and `pzstd -qoout.zst f` is the same in one token.
+#
+# `-l`/`--list` is in the read letters although pzstd **rejects** it, for the same
+# reason `compress`'s illegal `-t` is in the family's set: the program writes
+# nothing under it, so reading the letter as a read cannot hide a write, while
+# *not* reading it would refuse a run that was going to fail anyway.
+_PZSTD_VERBS = frozenset({"pzstd"})
+_PZSTD_READ_LETTERS = frozenset({"c", "t", "l"})
+_PZSTD_READ_LONG = frozenset({"--stdout", "--test", "--list"})
+# `-o file` is the destination and `-p #` / `--processes #` a thread count: both
+# take a spaced value, and naming that value would point the guard at a token that
+# is not a path (`pzstd -p 4 f` writes `f.zst`, not `4`).
+_PZSTD_OPTIONS_WITH_VALUE = frozenset({"-o", "-p", "--processes"})
+# The destination is `-o` alone: `--output` and `--output=` are measured **not to
+# exist** here (`Invalid argument`), unlike every other verb that reads its
+# destination from an option. It is left out rather than read defensively, because
+# the usual justification for reading an unmeasured spelling — "refusing a command
+# that was going to fail anyway costs less than missing a write" — does not apply
+# to a spelling the program itself rejects: there is no write to miss.
+_PZSTD_DESTINATION_OPTIONS = frozenset({"-o"})
+# …and the letters that decide where a **cluster's** value is: both readings are
+# taken from this verb's own value-taking table (`-o`, `-p`), derived rather than
+# written out so a letter added above cannot be read in the spaced spelling and
+# silently not in the clustered one. Two callers ask it the same question — the
+# destination extractor, which names the value only when the letter that carried it
+# is `o`, and `_pzstd_names_a_destination`, which asks whether `o` was spelled at
+# all — and the operand walk derives the same set from `_PZSTD_OPTIONS_WITH_VALUE`,
+# so all three agree about which token carries a value (`pzstd -qo out.zst f`).
+_PZSTD_VALUE_TAKING_SHORT = frozenset(
+    opt[1:]
+    for opt in _PZSTD_OPTIONS_WITH_VALUE
+    if opt.startswith("-") and not opt.startswith("--")
+)
+
 # `zip` writes the archive, and the archive is the **first** operand — the
 # opposite end of the operand list from `cp`/`mv`/`rsync`, whose destination is
 # the last one. Every operand rule the walk already has reads the last operand or
@@ -455,6 +552,9 @@ _ZIP_MOVE_FLAGS = frozenset({"-m", "--move"})
 #   zip -U src.zip --out=o.zip        rc=0, `o.zip` created (attached long spelling)
 #   zip -U src.zip -O o.zip           rc=0, `o.zip` created (short, spaced)
 #   zip -U src.zip -Oo.zip            rc=0, `o.zip` created (short, attached)
+#   zip src.zip -UO o.zip             rc=0, `o.zip` created (cluster, spaced) — #1441
+#   zip src.zip -UOo.zip              rc=0, `o.zip` created (cluster, attached) — #1441
+#   zip -UO o.zip src.zip             rc=0, `o.zip` created (cluster leads) — #1441
 #   zip -U --out o.zip src.zip        rc=0, `o.zip` created (option before operand)
 #   zip -U src.zip --out o.zip -lf log  rc=0, `o.zip` AND `log.log` created
 #   zip -sf -U src.zip --out o.zip    rc=0, the listing printed and **nothing
@@ -477,16 +577,11 @@ _ZIP_MOVE_FLAGS = frozenset({"-m", "--move"})
 # no file created anywhere — an empty token must never be named, because
 # `realpath("")` is the cwd), and a trailing `-O` with nothing after it (rc=16).
 #
-# Named limit — the **cluster** spelling. Zip's getopt takes `-O`'s value from the
-# rest of the same token or, when there is none, from the next word, so
-# `zip -UO o.zip src.zip` and `zip -qO o.zip src.zip` really are copy runs (both
-# measured, rc=0, `o.zip` created). This rule reads no clusters: it knows the four
-# spellings above, and what the operand walk then names depends on the order —
-# destination first (`zip -UO <out> <src>`) it names the destination by accident,
-# while source first (`zip <src> -UO <out>`) it names the **source** and leaves the
-# destination unnamed, in the direction this rule exists for. Left as a limit: a
-# token's cluster letters are read by one site in this file once the cluster reader
-# lands (issue #1443), and a second reader here would be one rule written twice.
+# The **cluster** spelling is read by the one cluster reader in this file
+# (`_short_cluster_option`), the same one the operand walk uses — see
+# `_ZIP_OUT_CLUSTER_LETTERS` beside `_zip_out_values`, and issue #1441 for the
+# source-first row (`zip <src> -UO <out>`) that named the **source** while the
+# archive really written outside was named by nothing.
 _ZIP_DESTINATION_OPTIONS = frozenset({"-O", "--out"})
 
 # Verbs that *create* every path named by an operand (`touch a b c`,
@@ -1841,12 +1936,12 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # files land when extracting but only a directory to collect from when creating —
 # so `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely
 # refused by a rule that named `-C`. Measured ground truth for the families it does
-# not cover (`tar`, `zip`, `git clone`, and the cluster spelling
-# `curl -so<dir>`) is pinned as a measured hole in
-# `tests/test_bash_tool_option_destinations.py` — with the verdict each one really
-# gets rather than a blanket "allowed": all of them reach `workspace-write` with an
-# empty target list, and `git clone` is refused under `read-only` by the git-mutator
-# rule (which is not this walk) rather than by any named destination.
+# not cover (`tar`, `git clone`, and the cluster spelling `curl -so<dir>`) is pinned
+# as a measured hole in `tests/test_bash_tool_option_destinations.py` — with the
+# verdict each one really gets rather than a blanket "allowed": all of them reach
+# `workspace-write` with an empty target list, and `git clone` is refused under
+# `read-only` by the git-mutator rule (which is not this walk) rather than by any
+# named destination.
 #
 # `rsync` used to be on that list and is no longer: its destination is an operand
 # rather than an option, so the list's own reason for excluding it never applied to
@@ -1857,10 +1952,18 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # same reason: the paths it writes are derived from an operand rather than named by
 # an option. It has its own branch (see `_SPLIT_OPTIONS_WITH_VALUE`), its own file
 # `tests/test_bash_tool_split_prefix.py`, and its row left the pinned-hole table in
-# this change. `zip` took its place in that table rather than joining it: the
-# archive is readable from the first operand, but that operand is an **operand to
-# read** under `-T`/`-sf`/`-L`/`-h` and a write otherwise, which is the `tar` shape
-# and the per-verb flag grammar this comment is about.
+# that change.
+#
+# `zip` was on that list and has left it as well: the archive is readable from the
+# first operand, and the read half is the `-T`/`-sf`/`-L`/`-h` spelling rather than
+# the value of an option, so it became a per-verb rule (`_zip_write_targets`) with
+# its own file `tests/test_bash_tool_zip_archive.py`. Its row was added to the
+# pinned-hole table when `split` left, and removed again when the rule landed — the
+# same departure, not a reversal of it: what the table could not express is the
+# operand-shaped destination, and `zip` is one (`tar`'s per-verb grammar is the case
+# that still refuses a rule). The measured table for it is the comment above
+# `_ZIP_OPTIONS_WITH_VALUE`, and the residual the rule still leaves — a spelling it
+# names nothing for — is recorded there rather than in the hole table.
 #
 # `csplit` is the one entry a table of destination options cannot finish describing,
 # so it is listed **and** branched: `-f` names the prefix its family is written
@@ -2056,6 +2159,22 @@ def _option_destination_values(
     list *also* names writes (`patch`, whose `-o` displaces its operands) passes its
     own set rather than joining the shared table below. Omitting it keeps the
     historical lookup, which is what the branch that walks that table still reads.
+
+    ``cluster_letters`` switches on the **clustered** spelling and is opt-in for the
+    same reason ``_positional_args``'s is: a token that does not lead with the
+    destination letter can only be split by the verb's own grammar, and that grammar
+    is not in `options` — `options` names the *destinations*, while the value is
+    decided by the **first** letter the verb takes a value for. So the caller passes
+    that verb's value-taking letters, the scan stops there, and the value is named
+    only when the letter that carried it is one of the destination letters:
+    `-so<dir>` and `-qo <dir>` carry their value on `o`, while `sort -ko out.txt`
+    carries it on `k` (`-k o`) and `out.txt` is an operand to **read** — which is why
+    a union of every verb's letters is the wrong table to hand this parameter and why
+    the sites that can pass it are the ones whose grammar has been measured
+    (`pzstd`, whose value-taking letters are `o` and `p`). A site that passes nothing
+    keeps the historical reading, so a cluster there leaves the destination unnamed
+    and pinned as a measured residual rather than guessed at — `curl -so<dir>` is
+    that row, in `tests/test_bash_tool_option_destinations.py`.
     A ``--`` that no option consumed ends option parsing, so an option *after* it
     is an operand and names nothing **here** — no option on the line names a
     destination. Whether the walk names that operand is the operand rule's own
@@ -2138,6 +2257,14 @@ def _option_destination_values(
             attached = _leading_short_option_value(tok, letters)
             if attached is not None:
                 out.append(attached)
+            elif cluster_letters:
+                # The destination letter sits inside the cluster rather than at its
+                # head, so the scan has to stop at whichever letter the verb takes a
+                # value for first (`-so <dir>` and `-ko out.txt` differ exactly
+                # there), and only the destination's own letter contributes a path.
+                cluster = _short_cluster_option(tok, args, j, cluster_letters)
+                if cluster is not None and cluster[0] in letters and cluster[1]:
+                    out.append(cluster[1])
     return [value for value in out if value != "-"]
 
 
@@ -2537,6 +2664,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # `lz4 -m f g` writes two siblings, and `lz4 f out.lz4` writes the
             # last operand — unless the run is one of the measured read forms.
             targets.extend(_lz4_write_targets(tokens, i))
+        elif word in _PZSTD_VERBS:
+            # `pzstd f` writes `f.zst` beside the operand and keeps `f` — `lz4`'s
+            # shape — and `pzstd -o <file> f` writes the destination instead. Its
+            # own rule, because `-o` is an option-position write the operand rules
+            # cannot reach and the attached `-o<file>` spells a read letter inside
+            # the path. Measured table in `_PZSTD_VERBS`' comment.
+            targets.extend(_pzstd_write_targets(tokens, i))
         elif word == "zip":
             # `zip A.zip f` creates or rewrites `A.zip`, and the archive is the
             # *first* operand — the end no other operand rule reads, so the run
@@ -2917,6 +3051,122 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
     return operands[-1:]
 
 
+def _pzstd_read_form(args: list[str]) -> bool:
+    """True when a ``pzstd`` run sends its bytes to stdout or only inspects them.
+
+    Read cluster by cluster, like the family's gate, with one difference that
+    decides whether this branch works at all: the scan **stops at a
+    value-taking letter**, so the attached destination `-oout.zst` is not read as
+    `-o` followed by the flags `t`, `o` and `t` again out of the *file name*. That
+    reading would turn a real destination into "read, nothing named" and reopen
+    the hole from the inside. The stop is the idiom `_lz4_letters` uses for `-D`.
+
+    The long forms are matched exactly rather than by prefix, and a token that is
+    not a short-option cluster (`--processes 4`, an operand) is skipped — a
+    *value* is never a cluster.
+
+    Asked only once no destination has been spelled, because the two readings are
+    **not** alternatives in the direction a family-wide gate would assume: measured
+    2026-09-20 on this host, `pzstd -co out.zst f` exits 0 with 0 bytes on stdout and
+    `out.zst` written, so a read letter in front of `-o` does not make the run a
+    read (`pzstd -c f` alone does — 31 bytes on stdout, no file). The family's own
+    gate, which answers "read" from the first read letter it sees, is what this
+    ordering exists to keep away from that spelling.
+    """
+    for tok in args:
+        if tok in _PZSTD_READ_LONG:
+            return True
+        if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+            continue
+        for ch in tok[1:]:
+            if ch in _PZSTD_READ_LETTERS:
+                return True
+            if ch in _PZSTD_VALUE_TAKING_SHORT:
+                break
+    return False
+
+
+def _pzstd_names_a_destination(args: list[str]) -> bool:
+    """True when the run spells the destination option, whatever its value.
+
+    The distinction this draws is ``pzstd -o - f`` from ``pzstd f``. Both leave
+    the destination option's value unnamed by ``_option_destination_values`` — it
+    drops a value of exactly ``-`` because that is how these options mean
+    *stdout* — but they differ in what the run then does: `-o -` sends the bytes
+    to stdout and writes **no file**, while a bare `pzstd f` derives `f.zst` beside
+    the operand. Falling through to the operand rule for both would name `f` in the
+    first case too, i.e. refuse a pure read, measured rc=0 with the directory
+    unchanged.
+
+    The option is found by the same reader the value extractor uses — the shared
+    cluster scan over this verb's value-taking letters — so the two cannot disagree
+    about which run has a destination: any spelling the extractor reads a value from
+    (`-o <v>`, `-o<v>`, and a cluster like `-qo <v>`) is a destination *spelled* here,
+    whether or not its value is one this walk may name (`-qo - f` is stdout, and the
+    answer is then "nothing", not `f`).
+    """
+    for j, tok in enumerate(args):
+        if tok == "--":
+            break
+        cluster = _short_cluster_option(tok, args, j, _PZSTD_VALUE_TAKING_SHORT)
+        if cluster is not None and cluster[0] == "o":
+            return True
+    return False
+
+
+def _pzstd_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The path a ``pzstd`` run writes — its ``-o`` destination, or a sibling.
+
+    `pzstd` keeps the operand and derives a sibling beside it (`f` → `f.zst`), so
+    this is `lz4`'s shape rather than the in-place family's; the measured table
+    behind every claim here is above `_PZSTD_VERBS`. Three questions settle it, in
+    this order:
+
+    * does it spell `-o`? then that option holds the destination and the operands
+      are only read — so the destination is named and they are not, which is also
+      why `pzstd -o - f` answers with nothing rather than with `f`. Every spelling
+      of the option counts, the clustered one included (`pzstd -qo out.zst f` names
+      `out.zst` and then stops), which is what this verb passes its value-taking
+      letters to the extractor for. This question comes **first** because it wins a
+      disagreement the read gate would otherwise settle the other way: measured,
+      `pzstd -co out.zst f` is rc=0 with **0 bytes on stdout** and `out.zst` written,
+      so a read letter in front of the destination does not make the run a read;
+    * is it a read form (`-c`/`--stdout`, `-t`/`--test`, `-l`/`--list`, the letters
+      read inside a short cluster too) when no destination is spelled? then it writes
+      nothing, and naming the operand would refuse a pure read;
+    * otherwise every operand derives its own sibling (`pzstd f g` writes `f.zst`
+      and `g.zst`), so all of them are named, minus the bare ``-``.
+
+    One named limit, measured, checked in `tests/test_bash_tool_pzstd_targets.py` so
+    it is not a surprise later: a stream operand beside a file (`pzstd - f`) is
+    dropped, as in the family, leaving `f` named although the run aborts with rc=1
+    and writes nothing — an over-name, which is the direction this walk prefers to
+    err in.
+
+    The clustered spelling used to be a limit too, and it was measured to be the
+    *hole* direction rather than this one once the cluster value rule landed on
+    master (#1443): `pzstd -qo <out>/out.zst <ws>/f` then reported `['<ws>/f']`,
+    i.e. the operand walk correctly ate `out.zst` as `-o`'s value while this rule —
+    reading only a leading letter — named the destination by nothing, and the write
+    outside the workspace was allowed. That is why the letters are passed here and
+    why the seam asks the same cluster question: the two readers have to agree about
+    which token carries the value.
+    """
+    args = _args_after_command(tokens, i)
+    destinations = _option_destination_values(
+        tokens, i, "pzstd", _PZSTD_DESTINATION_OPTIONS, _PZSTD_VALUE_TAKING_SHORT
+    )
+    if destinations:
+        return destinations
+    if _pzstd_names_a_destination(args):
+        return []
+    if _pzstd_read_form(args):
+        return []
+    return _without_the_stream_operand(
+        _positional_args(tokens, i, _PZSTD_OPTIONS_WITH_VALUE)
+    )
+
+
 def _zip_logfile_targets(words: list[str]) -> list[str]:
     """The path ``zip -lf <path>`` writes, in both measured spellings.
 
@@ -2948,39 +3198,76 @@ def _zip_logfile_targets(words: list[str]) -> list[str]:
     return out
 
 
+# The letters the copy-mode destination scan stops at, and they are zip's **own**
+# value-taking letters rather than `O` alone: in `-bO` the `b` takes `O` as its
+# temporary directory, so the scan must see `b` first and answer with it — a
+# `{O}`-only set would call that token a destination and name a path the run only
+# reads. Measured on the host's binary, 2026-09-20: `zip -bO -U src.zip --out o.zip`
+# fails with `Temporary file failure (O/ziqqV8zD)` — i.e. zip really did use `O` as
+# the temp directory — while a bare `-b` reports "option 'b' (dir to use for temp
+# archive) requires a value" and takes nothing; and `zip -b <missing dir> ...` is the
+# same rc=10 failure `-bO` is. Derived from the two tables rather than written out, so
+# a letter added to either cannot be read in the spaced spelling and silently not in
+# the clustered one.
+_ZIP_OUT_CLUSTER_LETTERS = _short_option_letters(
+    _ZIP_OPTIONS_WITH_VALUE | _ZIP_DESTINATION_OPTIONS
+)
+
+
 def _zip_out_values(words: list[str]) -> list[str]:
     """The path a copy-mode ``zip`` run writes: ``--out <archive>`` (short ``-O``).
 
     The measurements behind it are the comment above `_ZIP_DESTINATION_OPTIONS`, and
     the rule they settle is one line per spelling — the next word for ``--out`` and
-    ``-O``, the text after ``=`` for ``--out=``, the text after the letter for
-    ``-O<path>``. An **empty** value is dropped rather than named: a token that names
-    nothing resolves to the cwd, so naming it would refuse every run made from a
-    working directory outside the workspace. Parsing stops at ``--``, because
-    everything after it is an operand — the case `_positional_args` documents at
-    length. A spelling with no value at all (`-O` as the last token) is skipped for
-    the same reason the empty one is.
+    ``-O``, the text after ``=`` for ``--out=``, and for every **short** spelling,
+    clustered included, whatever the shared reader says carries the letter (``-UO
+    out.zip`` and ``-UOout.zip`` are both copy runs, measured). An **empty** value is
+    dropped rather than named: a token that names nothing resolves to the cwd, so
+    naming it would refuse every run made from a working directory outside the
+    workspace. Parsing stops at ``--``, because everything after it is an operand —
+    the case `_positional_args` documents at length. A spelling with no value at all
+    (``-O`` as the last token) is skipped for the same reason the empty one is.
+
+    The cluster is read by `_short_cluster_option` rather than by a scan of this
+    function's own, and that is the whole point of the shared reader: the operand
+    walk asks it the same question for the same token, so the two cannot disagree
+    about which spelling carries a value. A destination this function finds is what
+    makes the caller hand that walk a table containing ``-O``, which is in turn what
+    consumes the value's word instead of naming it an operand — the second half
+    issue #1441 needed, and the reason fixing only this half would have left the
+    destination named *beside* a source that is only read.
 
     Only the *path* is returned. That this path is written, and that the operands are
     therefore reads, is the caller's rule — `_zip_write_targets` is the only caller,
     and the same measurement decides both halves.
     """
     out: list[str] = []
-    for idx, tok in enumerate(words):
+    idx = 0
+    while idx < len(words):
+        tok = words[idx]
         if tok == "--":
             break
+        value: str | None = None
+        eaten = 1
         if tok in _ZIP_DESTINATION_OPTIONS:
-            if idx + 1 >= len(words):
-                continue
-            value = words[idx + 1]
+            value = words[idx + 1] if idx + 1 < len(words) else None
+            eaten = 2
         elif tok.startswith("--out="):
             value = tok[len("--out="):]
-        elif tok.startswith("-O") and len(tok) > 2:
-            value = tok[2:]
         else:
-            continue
+            cluster = _short_cluster_option(tok, words, idx, _ZIP_OUT_CLUSTER_LETTERS)
+            if cluster is not None:
+                letter, value, attached = cluster
+                # Any other letter's value is not a path here, but its word is still
+                # *eaten*: skip it rather than let it be read as a destination itself
+                # (`-b -Osrc.zip` is a temporary directory named `-Osrc.zip`, not a
+                # source run writing `src.zip`).
+                if letter != "O":
+                    value = None
+                eaten = 1 if attached else 2
         if value:
             out.append(value)
+        idx += eaten
     return out
 
 
@@ -3040,16 +3327,15 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     list unchanged (under ``--out`` even a deleting mode edits the copy), while ``-m``
     is inert (zip warns "can't set method, move, recurse, or comments with copy mode",
     and the member is still on disk), so neither adds an operand to the list. Named
-    limits, each measured: ``-U`` **combined with an action flag** (``-d``, ``-u``,
+    lists, each measured: ``-U`` **combined with an action flag** (``-d``, ``-u``,
     ``-f``) is rejected by zip — rc=16, "Invalid command arguments (specify just one
     action)", nothing written — so the destination named there is an over-block on a
     contradictory command line (the same action *without* ``-U`` is the workable
-    spelling, measured above); the **cluster** spelling (``zip <src> -UO <out>``), which
-    this rule does not read — see `_ZIP_DESTINATION_OPTIONS`; an **empty** value
-    (``--out=``), which writes nothing anywhere and is therefore named by nothing; and a
-    **member pattern that matches nothing**, or a member already up to date (exit 12
-    either way), where the destination is still named — what a run will do is not
-    decidable from the command line, the same approximation the archive forms above take.
+    spelling, measured above); an **empty** value (``--out=``), which writes nothing
+    anywhere and is therefore named by nothing; and a **member pattern that matches
+    nothing**, or a member already up to date (exit 12 either way), where the
+    destination is still named — what a run will do is not decidable from the command
+    line, the same approximation the archive forms above take.
     """
     words = _args_after_command(tokens, i)
     logfile = _zip_logfile_targets(words)
@@ -3060,13 +3346,17 @@ def _zip_write_targets(tokens: list[str], i: int) -> list[str]:
     # (the source archive, then the member patterns), so the destination has to be
     # consumed before the operand walk sees it — and the question that walk then
     # answers for this branch is only "is there a source archive at all?", which is
-    # what keeps `zip --out o.zip` (rc=9, nothing written) unnamed.
+    # what keeps `zip --out o.zip` (rc=9, nothing written) unnamed. The cluster
+    # letters go with the table so a *clustered* destination's word is eaten by this
+    # walk exactly as it is read by `_zip_out_values`: the same token must not be a
+    # destination to one reader and an operand to the other (issue #1441).
     operands = _positional_args(
         tokens,
         i,
         _ZIP_OPTIONS_WITH_VALUE | _ZIP_DESTINATION_OPTIONS
         if destination
         else _ZIP_OPTIONS_WITH_VALUE,
+        _ZIP_OUT_CLUSTER_LETTERS if destination else frozenset(),
     )
     if destination and operands:
         return destination + logfile

@@ -704,6 +704,20 @@ COPY_MODE_FORMS = (
     ("-O spaced", "zip -U {out}/src.zip -O {out}/new.zip", ("{out}/new.zip",)),
     ("--out= attached", "zip -U {out}/src.zip --out={out}/new.zip", ("{out}/new.zip",)),
     ("-O attached", "zip -U {out}/src.zip -O{out}/new.zip", ("{out}/new.zip",)),
+    # The cluster spelling (issue #1441): the source comes *first* here, so master's
+    # rule named the one path the run only reads and named the archive it really
+    # creates by nothing. Measured on the host's binary 2026-09-20, one fresh
+    # directory per row: all three are rc=0, create the destination and leave the
+    # source byte-identical — the same copy run the spaced spelling makes.
+    ("cluster -UO spaced", "zip {out}/src.zip -UO {out}/new.zip", ("{out}/new.zip",)),
+    ("cluster -UO attached", "zip {out}/src.zip -UO{out}/new.zip", ("{out}/new.zip",)),
+    ("cluster leads", "zip -UO {out}/new.zip {out}/src.zip", ("{out}/new.zip",)),
+    # `-b` takes the cluster's next letter as its value — measured: `zip -bO ...` fails
+    # with `Temporary file failure (O/…)`, i.e. zip really read `O` as the temporary
+    # directory, while a bare `-b` reports "requires a value". So `-bO` names no
+    # destination, and a reader that stopped at `O` would take the *next* token as one.
+    ("cluster -bO eats the O", "zip -bO -U {out}/src.zip --out {out}/new.zip",
+     ("{out}/new.zip",)),
     # `--out` implies copy mode on its own: measured, `zip src.zip --out new.zip` is
     # rc=0 and writes only `new.zip`, the same as with `-U`.
     ("without -U", "zip {out}/src.zip --out {out}/new.zip", ("{out}/new.zip",)),
@@ -731,6 +745,10 @@ COPY_MODE_WRITES_NOTHING = (
     ("no operand", "zip --out {out}/new.zip"),
     ("empty value", "zip -U {out}/src.zip --out="),
     ("trailing -O", "zip -U {out}/src.zip -O"),
+    # The clustered spelling of the same row, measured: rc=16 and nothing written.
+    # `-UO` has no value at all, so its "next token" is not a destination — reading
+    # one here would name whatever followed.
+    ("trailing -UO", "zip -U {out}/src.zip -UO"),
 )
 
 
@@ -932,3 +950,16 @@ def test_copy_mode_really_writes_the_new_archive_and_leaves_the_source_alone(tmp
         "the over-block on the contradictory line is a named limit, so it is pinned "
         "here rather than left to be rediscovered"
     )
+
+    # 6. the clustered spelling, executed: issue #1441's own row. The rule reads it
+    #    through the shared cluster reader rather than a scan of its own, so this arm
+    #    is what says the reader and the rule agree about what zip really does.
+    clustered = tmp_path / "clustered.zip"
+    result = run("zip", "src.zip", "-UO", "clustered.zip")
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert clustered.exists(), "the clustered spelling did not create the destination"
+    assert _archive_state(source) == before, (
+        "the clustered spelling rewrote the source archive, so the first operand is "
+        "not a read under it and this rule names the wrong path"
+    )
+    assert _extract_write_targets(f"zip {source} -UO {clustered}") == [str(clustered)]

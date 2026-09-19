@@ -244,6 +244,12 @@ def test_a_cluster_is_split_by_the_verbs_own_value_taking_letters():
     same row in both directions — unnamed is correct, and it is asserted in
     `INSIDE_STDOUT_OR_READ` as well, because a false block is the error this walk
     weighs most heavily.)
+
+    These four rows are the *shared* table's; a verb whose grammar is measured
+    separately passes its own letters to `_option_destination_values` (`pzstd` does, and
+    `tests/test_bash_tool_pzstd_targets.py` carries its rows and arms), and a verb with
+    no measured table keeps the residual instead of a guess — the direction this file's
+    last block pins.
     """
     for cmd, named in ((f"curl -so {OUTSIDE}/f https://example.invalid/x", f"{OUTSIDE}/f"),
                        (f"curl -so{OUTSIDE}/f https://example.invalid/x", f"{OUTSIDE}/f"),
