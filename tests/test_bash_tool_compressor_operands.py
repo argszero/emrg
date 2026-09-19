@@ -36,6 +36,21 @@ harmless while the guard works.
 This file is deliberately separate from `test_bash_tool_sandbox.py`: it covers a
 family of its own, and keeping it self-contained keeps the two files' fixtures
 from having to agree about a table neither owns.
+
+**`compress` / `uncompress` — the same hole, one installable name over**
+(measured 2026-09-19, `cyc20260919-162257`). Issue #1420 says the family is
+enumerated by name, so every compressor off the list keeps the hole #1418 closed;
+`compress` is exactly that case, and unlike #1420's other rows it is not
+hypothetical — `/usr/bin/compress` is installed on this host. Ground truth in a
+scratch directory: `compress f` **removed `f` and wrote `f.Z`** at rc=0 (`f.Z`
+present, `f` gone), and `uncompress f.Z` did the same in reverse. Through the real
+predicate both answered **ALLOW** on the protected daemon file at **both** tiers
+while `gzip` was refused on it. They are the same shape as the rest of this
+family, so they joined `_COMPRESSOR_VERBS` rather than getting a branch of their
+own — and the read gate needed one honest correction to take them: `compress`
+accepts `-c` but **rejects `-t` and `-l` as illegal options** (its own usage line
+is `compress [-cfv] [-b bits] [file ...]`), so those two letters write nothing
+rather than being read forms the program supports.
 """
 
 import pytest
@@ -73,6 +88,12 @@ WRITE_FORMS = (
     ("lzma", f"lzma {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("zstd", f"zstd {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("unzstd", f"unzstd {OUTSIDE}/f.zst", (f"{OUTSIDE}/f.zst",)),
+    # `compress`/`uncompress`: the same in-place shape, measured on the host's
+    # own binary (2026-09-19) — see the module docstring.
+    ("compress", f"compress {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("compress force", f"compress -f {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("compress verbose", f"compress -v {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("uncompress", f"uncompress {OUTSIDE}/f.Z", (f"{OUTSIDE}/f.Z",)),
     # Two operands: both are rewritten, so both are named.
     ("two operands", f"gzip {OUTSIDE}/a {OUTSIDE}/b", (f"{OUTSIDE}/a", f"{OUTSIDE}/b")),
 )
@@ -94,6 +115,9 @@ READ_FORMS = (
     ("bzip2 -dc", f"bzip2 -dc {OUTSIDE}/f.bz2"),
     ("xz -dc", f"xz -dc {OUTSIDE}/f.xz"),
     ("zstd -dc", f"zstd -dc {OUTSIDE}/f.zst"),
+    # `compress` takes `-c` and only `-c` of the three letters.
+    ("compress -c", f"compress -c {OUTSIDE}/f"),
+    ("uncompress -c", f"uncompress -c {OUTSIDE}/f.Z"),
 )
 
 # The wrappers, which are reads by construction and must not be in the family.
@@ -131,6 +155,34 @@ def test_a_compressor_read_form_names_nothing_and_stays_allowed(row, cmd) -> Non
     for tier in ("read-only", "workspace-write"):
         allowed, reason, _ = _check_sandbox(cmd, tier, workdir="/workspace")
         assert allowed is True, f"{row}: {tier} refused a read ({reason})"
+
+
+def test_the_read_gate_answers_for_compresses_own_letters() -> None:
+    """`compress` takes one of the three read letters, and that is enough.
+
+    The gate spares an operand when a `c`/`t`/`l` appears, and `compress`'s own
+    usage line is `compress [-cfv] [-b bits] [file ...]`: measured on the host's
+    binary (2026-09-19), `-c` is a real read form (the bytes go to stdout and the
+    file is left alone) while **`-t` and `-l` are rejected as illegal options**,
+    so under those spellings the program writes nothing at all.
+
+    Both directions matter and only one of them is a claim about `compress`: the
+    `-c` row is the read form this family must not refuse, and the `-t`/`-l` rows
+    are the *harmless* side of an over-approximation — reading an unsupported
+    letter as a read cannot hide a write, because the program refuses the run
+    first. If a future `compress` ever gave `-t` or `-l` a writing meaning, this
+    is the test that would have to change, which is why it is stated here rather
+    than left implicit in a comment.
+    """
+    assert _check_sandbox(f"compress -c {OUTSIDE}/f", "read-only",
+                          workdir="/workspace")[0] is True
+    for unsupported in ("-t", "-l"):
+        cmd = f"compress {unsupported} {OUTSIDE}/f"
+        assert _extract_write_targets(cmd) == [], unsupported
+        assert _check_sandbox(cmd, "read-only", workdir="/workspace")[0] is True, (
+            f"{unsupported}: the gate spares this spelling and the program rejects "
+            f"it, so nothing can be written under it"
+        )
 
 
 @pytest.mark.parametrize("row,cmd", CAT_WRAPPERS, ids=[r for r, _ in CAT_WRAPPERS])
@@ -176,6 +228,8 @@ FAMILY_ARMS = (
     ("bzip2", f"bzip2 {OUTSIDE}/f"),
     ("xz", f"xz {OUTSIDE}/f"),
     ("zstd", f"zstd {OUTSIDE}/f"),
+    ("compress", f"compress {OUTSIDE}/f"),
+    ("uncompress", f"uncompress {OUTSIDE}/f.Z"),
 )
 
 
