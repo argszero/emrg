@@ -549,3 +549,69 @@ def test_a_refused_base_is_never_refreshed(mod, monkeypatch, capsys):
 
     assert rc == 2, err
     assert refreshed == [], "a base refused as a stray local branch must not be refreshed"
+
+
+def test_a_requested_pr_whose_head_cannot_be_fetched_is_not_a_pass(mod, monkeypatch, capsys):
+    """A lone unmeasurable number must not become a reassurance about zero pairs.
+
+    Measured before the fix (`cyc20260919-173431`): `check-merge-pairs.py 99999` printed
+    `pairs: 1 PR(s) -> 0 ordered pair(s)` and `no ordered pair merges cleanly into a
+    failing tree`, exit 0. The number was taken verbatim, a single PR forms no pair, the
+    loop never ran, and the summary line *became* the verdict - "no dangerous pair" about
+    a PR that does not exist. The exit-code contract above rules that reading out, and the
+    empty-pair case reaches it without a single `_fetch_head` call, which is why the head
+    is resolved for every requested number before any pair is formed.
+
+    The existing tests are the other direction: explicit numbers that *do* resolve are
+    still measured, so this cannot be satisfied by refusing every explicit selection.
+    """
+
+    def missing(n):
+        raise mod.seq.MeasurementError(f"could not fetch PR #{n}")
+
+    monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
+    monkeypatch.setattr(mod.seq, "_fetch_head", missing)
+    monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: pytest.fail("no pair to merge"))
+    rc = mod.main(["99999"])
+    captured = capsys.readouterr()
+
+    assert rc == 2, captured.out
+    assert "no ordered pair" not in captured.out, (
+        "a verdict about unformed pairs is the fail-open shape this tool forbids"
+    )
+    assert "99999" in captured.err, captured.err
+
+
+def test_every_requested_head_is_resolved_once_before_any_pair(mod, monkeypatch, capsys):
+    """The heads are fetched once per run, not once per pair - and before the pairs.
+
+    Two properties in one measurement, because they are the same edit: the up-front
+    resolution is what turns an unfetchable number into rc 2, and reusing its result is
+    what keeps that from costing a fetch per pair. Asserted by count, with three PRs so
+    each head is an element of more than one ordered pair.
+    """
+    fetched: list[int] = []
+    chain = {
+        (BASE, C1): C1, (BASE, C2): C2, (BASE, C3): C3,
+        (C1, C2): C2, (C1, C3): C3, (C2, C1): C1, (C2, C3): C3, (C3, C1): C1, (C3, C2): C2,
+    }
+    heads = {1: C1, 2: C2, 3: C3}
+
+    def fetch(n):
+        fetched.append(n)
+        return heads[n]
+
+    monkeypatch.setattr(mod.seq, "_rev_parse", lambda ref: BASE)
+    monkeypatch.setattr(mod.seq, "_refresh_base", lambda ref: None)
+    monkeypatch.setattr(mod.seq, "_fetch_head", fetch)
+    monkeypatch.setattr(mod.seq, "_merge_commit", lambda a, b: chain.get((a, b)))
+    monkeypatch.setattr(mod.seq, "_guard_verdict", lambda tree, workdir: (True, "documents 1564"))
+    monkeypatch.setattr(
+        mod.seq, "_run", lambda argv, cwd=None: _FakeProc(argv[-1].removesuffix("^{tree}"))
+    )
+    rc = mod.main(["1", "2", "3"])
+    capsys.readouterr()
+
+    assert rc == 0, "three clean, healthy pairs"
+    assert sorted(fetched) == [1, 2, 3], f"each head once, not once per pair: {fetched}"
