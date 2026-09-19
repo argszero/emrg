@@ -10,6 +10,11 @@ it: an empty target list, and the loop that judges targets never runs. Issue
 * the verbs not named at all, pinned as measured holes so the next reader finds
   them stated rather than inferred.
 
+The `lz4` rule's own read test was then narrowed once, from the other direction: a
+value written **attached** (`-Ddata.txt`) put the value's letters into the flag set,
+so an ordinary dictionary name read as `-c`/`-t` and the write was unnamed again
+(issue #1426, rows and measurement below).
+
 **Why `lz4` is not a name in `_COMPRESSOR_VERBS`.** Its default form derives a
 sibling (`lz4 f` leaves `f` and creates `f.lz4`) instead of rewriting the operand
 in place, its `-l` is *legacy format* rather than `--list`, and under `-m`/`-r`
@@ -75,6 +80,18 @@ WRITE_FORMS = (
     ("dictionary", f"lz4 -D {OUTSIDE}/dict {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("dictionary with -m", f"lz4 -m -D {OUTSIDE}/dict {OUTSIDE}/f {OUTSIDE}/g",
      (f"{OUTSIDE}/f", f"{OUTSIDE}/g")),
+    # The same option written **attached**, which is the spelling issue #1426 is
+    # about: here the value's own letters must not be read as flags, or a
+    # dictionary named `data.txt` reads as `-t` and the run as a read. Measured on
+    # the host's binary with the dictionary present, one fresh directory per row:
+    # `lz4 -Ddata.txt f` and `lz4 -fDdata.txt f` are rc=0 and create `f.lz4`;
+    # under `-m` both operands derive a sibling (`f.lz4` and `g.lz4`).
+    ("attached dictionary", f"lz4 -D{OUTSIDE}/data.txt {OUTSIDE}/f",
+     (f"{OUTSIDE}/f",)),
+    ("attached dictionary after a flag", f"lz4 -fD{OUTSIDE}/data.txt {OUTSIDE}/f",
+     (f"{OUTSIDE}/f",)),
+    ("attached dictionary with -m", f"lz4 -m -D{OUTSIDE}/cats {OUTSIDE}/f {OUTSIDE}/g",
+     (f"{OUTSIDE}/f", f"{OUTSIDE}/g")),
 )
 
 # (row, command) — the measured spellings that create no file. Each must name
@@ -88,6 +105,10 @@ READ_FORMS = (
     ("--list", f"lz4 --list {OUTSIDE}/f.lz4"),
     ("-dc cluster", f"lz4 -dc {OUTSIDE}/f.lz4"),
     ("-m -c cluster", f"lz4 -m -c {OUTSIDE}/f {OUTSIDE}/g"),
+    # The stop is *inside* the token: a read flag in a later token must still be
+    # read, or "a value follows" would swallow real flags. Measured — `lz4 -Dcats
+    # -c f` is rc=0, 34 bytes on stdout and no file created.
+    ("attached dictionary then -c", f"lz4 -D{OUTSIDE}/cats -c {OUTSIDE}/f"),
 )
 
 # (row, command) — the compressors *not* on `_COMPRESSOR_VERBS` and not read by a
@@ -255,6 +276,27 @@ def test_the_multi_input_rule_is_what_spares_the_second_operand() -> None:
         )
     finally:
         bash_tool._LZ4_MULTI_LETTERS, bash_tool._LZ4_MULTI_LONG = letters, longs
+
+
+def test_the_attached_value_is_what_stops_the_letter_scan() -> None:
+    """The stop is its own piece of the rule, so it is flipped on its own.
+
+    With the value-taking letters gone, the letters of the dictionary's *name* are
+    read as flags again — the state issue #1426 was filed in, where the target list
+    came back empty and both tiers allowed a write the binary really performs
+    (`/outside/emrg/cats` carries a `t`, so the run reads as a read).
+    """
+    cmd = f"lz4 -D{OUTSIDE}/cats {OUTSIDE}/f"
+    assert _extract_write_targets(cmd) == [f"{OUTSIDE}/f"]
+    original = bash_tool._LZ4_VALUE_TAKING_SHORT
+    try:
+        bash_tool._LZ4_VALUE_TAKING_SHORT = frozenset()
+        assert _extract_write_targets(cmd) == [], (
+            "with the value-taking letters gone the attached value is still read as "
+            "flags — the row does not depend on the stop it claims to test"
+        )
+    finally:
+        bash_tool._LZ4_VALUE_TAKING_SHORT = original
 
 
 def test_the_dictionary_value_is_not_named() -> None:
