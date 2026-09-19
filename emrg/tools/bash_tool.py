@@ -1651,6 +1651,18 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                 # (`sed -i s/a/b/ f.txt` → `s/a/b/`) would point the block at
                 # something that is not a path.
                 targets.extend(_positional_args(tokens, i)[1:])
+        elif word == "perl":
+            # `perl -i` rewrites its file operands in place — the same family as
+            # the `sed -i` branch above, and the member that was missing: with an
+            # empty target list the loop that judges targets never ran, so
+            # `perl -i -pe 's/a/b/' <outside>/f` was ALLOW at both tiers while
+            # `sed -i` on the same path was refused. A bare `perl` is a filter
+            # that writes only to stdout and must stay allowed. The flag may sit
+            # in a cluster (`-pi`) and carry a suffix (`-i.bak`), so the token is
+            # scanned rather than compared.
+            args = _args_after_command(tokens, i)
+            if any(_perl_inplace_flag(t) for t in args):
+                targets.extend(_perl_replacement_operands(tokens, i))
         elif word == "find":
             # `find <paths> ... -delete` removes every match; the paths it was
             # pointed at are the work at risk. Without `-delete` a `find` is a
@@ -1838,6 +1850,100 @@ def _dd_output_targets(tokens: list[str], i: int) -> list[str]:
     return [
         tok[3:] for tok in _args_after_command(tokens, i) if tok.startswith("of=")
     ]
+
+
+# `perl`'s short options that take a value: `-e`/`-E` (the program text), `-I`
+# (an include directory), `-M`/`-m` (a module) and `-0` (the record separator).
+# Everything that follows one of them **inside the same token** is that option's
+# value and not another option letter, which is why `-Idir` is not an in-place
+# flag even though it contains an `i`.
+_PERL_VALUE_TAKING_SHORT = frozenset("eEIMm0")
+
+
+def _perl_inplace_flag(tok: str) -> bool:
+    """True when this ``perl`` token asks for an in-place rewrite (``-i``).
+
+    ``-i`` takes an *optional attached* suffix (``-i.bak``), so the letter has to
+    be found inside a cluster rather than compared as a whole token: ``-pi``,
+    ``-ni.bak`` and ``-ie`` are all in-place runs. Scanning stops at a
+    value-taking option, so an attached value that happens to contain an ``i``
+    (``-Idir``, ``-Mstrict``) is not mistaken for the flag.
+    """
+    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+        return False
+    for ch in tok[1:]:
+        if ch == "i":
+            return True
+        if ch == "." or ch in _PERL_VALUE_TAKING_SHORT:
+            return False
+    return False
+
+
+def _perl_carries_the_program(tok: str) -> bool:
+    """True when this ``perl`` token introduces or carries the program **text**.
+
+    The program is not a path, and naming it is the defect the ``sed`` branch
+    already avoids for its script (``sed -i s/a/b/ f.txt`` → ``s/a/b/``). Both
+    spellings exist and they differ in where the program sits: ``-e PROG``,
+    ``-pe PROG`` and ``-ie PROG`` put it in the *next* token, while ``-ePROG``
+    carries it in the same token.
+    """
+    if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+        return False
+    for ch in tok[1:]:
+        if ch in "eE":
+            return True
+        if ch in _PERL_VALUE_TAKING_SHORT:
+            return False
+    return False
+
+
+def _perl_replacement_operands(tokens: list[str], i: int) -> list[str]:
+    """The files a ``perl -i`` run rewrites in place.
+
+    Measured on this host (perl 5.34.1, 2026-09-19), in a scratch tree with every
+    file's bytes read back off disk: ``perl -i -pe 's/a/b/' f`` rewrites ``f``
+    (rc=0, ``aaa`` → ``baa``), ``perl -pi -e 's/a/b/' f`` does the same,
+    ``perl -i.bak -pe 's/a/b/' g`` rewrites ``g`` *and* leaves the original in
+    ``g.bak``, and the control ``perl -pe 's/a/b/' f4`` (no ``-i``) leaves ``f4``
+    untouched. The program is not a file in any of those rows.
+
+    Two spellings put the program in an operand position, and both were measured:
+
+    * ``-e PROG`` / ``-pe PROG`` — the program is the token *after* the option;
+    * with **no** ``-e``/``-E`` at all, ``perl -i -p script.pl f`` runs
+      ``script.pl`` as the program (measured: ``f`` became ``baa`` while
+      ``script.pl`` kept its bytes), so the first operand is the program in
+      exactly the way ``sed``'s first operand is its script.
+
+    A lone ``--`` ends option parsing, as it does for ``_positional_args``.
+    """
+    operands: list[str] = []
+    program_is_an_option = False
+    skip_next = False
+    for tok in _args_after_command(tokens, i):
+        if skip_next:
+            skip_next = False
+            continue
+        if tok == "--":
+            continue                      # ends option parsing; operands follow
+        if tok.startswith("-") and len(tok) > 1:
+            if _perl_carries_the_program(tok):
+                program_is_an_option = True
+                # `-e PROG` and `-pe PROG`: the program is the next token. An
+                # attached `-ePROG` carries it in the same token, so nothing is
+                # skipped there.
+                skip_next = tok[-1] in "eE"
+            continue
+        if tok == "-":
+            # Measured: perl opens a lone `-` as a *file* and fails ("Can't open
+            # -: No such file or directory") without writing anything, which is
+            # the same reading `_option_destination_values` gives a destination
+            # of exactly `-`. A file really named `-` is spelled `./-`, and that
+            # token is named like any other.
+            continue
+        operands.append(tok)
+    return operands if program_is_an_option else operands[1:]
 
 
 def _git_output_flag_targets(tokens: list[str], i: int) -> list[str]:
