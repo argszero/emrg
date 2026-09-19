@@ -152,39 +152,6 @@ _COMMAND_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
 # can destroy it just as completely as `rm -rf`.
 _INPLACE_WRITER_VERBS = frozenset({"truncate", "tee", "shred"})
 
-# `rsync SRC... DEST` rewrites `DEST` — it is `cp` with a network, so its
-# destination is the last operand, exactly as `cp`'s is. It is read in its own
-# branch rather than added to `_DESTINATION_LAST_VERBS`, because two parts of that
-# rule do not hold for it: `-t` is *preserve times* (it takes no value at all,
-# where `cp -t` is `--target-directory`), so the shared `-t` reader would name the
-# **source** in `rsync -t src dst`; and a flag can turn the very same operand into
-# a pure read, which none of the verbs in that set can do.
-#
-# Measured on this host (`openrsync`, "rsync version 2.6.9 compatible",
-# 2026-09-19), in a scratch tree with the content of the destination read back off
-# disk: `rsync -a src/a.txt dst/victim.txt` really overwrites `victim.txt` (it
-# held `SOURCE` afterwards), while `rsync -an …` and `rsync --list-only …` really
-# leave it alone, and `rsync -a src/ dst/` really copies into `dst/`. The
-# predicate answered **ALLOW with an empty target list** for every one of them, at
-# both tiers and against a protected daemon file and a workspace file alike, while
-# `cp`, `truncate` and `tee` on the same two paths were refused: the same fail-open
-# the everyday-writer class (#1398) and the compressor family (#1418) had.
-#
-# `-n` is the dry-run letter, and it is the one letter in this family that turns
-# the run into a read; every rsync short option that takes a *value* (`-e`, `-f`,
-# `-T`, `-M`, `-B`) has a different letter, so no value can be mistaken for it,
-# while `--dry-run`, `--list-only` and `-n` inside a cluster (`-an`, `-avzn`) all
-# mean the same thing.
-_RSYNC_READ_LETTERS = frozenset({"n"})
-_RSYNC_READ_LONG = frozenset({"--dry-run", "--list-only"})
-
-# Named residual of the rule above: `--write-batch=<file>` /
-# `--only-write-batch=<file>` make rsync write a *second* path — the option's own
-# value — beside the destination operand. It is left unnamed because a batch file
-# is a debugging artefact of a transfer, not the transfer, and adding it means
-# reading one more option's value in both spellings; the destination operand this
-# rule exists for is named either way.
-
 # Verbs that *create* every path named by an operand (`touch a b c`,
 # `mkdir -p a/b`). They were invisible to the write-target walk (issue #1398):
 # with no target named, the loop that judges targets never ran, so both checked
@@ -227,6 +194,39 @@ _FIRST_OPERAND_CREATING_VERBS = frozenset({"mknod"})
 # both tiers allowed it (measured while fixing issue #1398). The same table also
 # hid `-t <dir>` behind the last-operand rule, naming the *source* instead.
 _DESTINATION_LAST_VERBS = frozenset({"ln", "cp", "mv", "install", "link"})
+
+# `rsync SRC... DEST` rewrites `DEST` — it is `cp` with a network, so its
+# destination is the last operand, exactly as `cp`'s is. It is read in its own
+# branch rather than added to `_DESTINATION_LAST_VERBS`, because two parts of that
+# rule do not hold for it: `-t` is *preserve times* (it takes no value at all,
+# where `cp -t` is `--target-directory`), so the shared `-t` reader would name the
+# **source** in `rsync -t src dst`; and a flag can turn the very same operand into
+# a pure read, which none of the verbs in that set can do.
+#
+# Measured on this host (`openrsync`, "rsync version 2.6.9 compatible",
+# 2026-09-19), in a scratch tree with the content of the destination read back off
+# disk: `rsync -a src/a.txt dst/victim.txt` really overwrites `victim.txt` (it
+# held `SOURCE` afterwards), while `rsync -an …` and `rsync --list-only …` really
+# leave it alone, and `rsync -a src/ dst/` really copies into `dst/`. The
+# predicate answered **ALLOW with an empty target list** for every one of them, at
+# both tiers and against a protected daemon file and a workspace file alike, while
+# `cp`, `truncate` and `tee` on the same two paths were refused: the same fail-open
+# the everyday-writer class (#1398) and the compressor family (#1418) had.
+#
+# `-n` is the dry-run letter, and it is the one letter in this family that turns
+# the run into a read; every rsync short option that takes a *value* (`-e`, `-f`,
+# `-T`, `-M`, `-B`) has a different letter, so no value can be mistaken for it,
+# while `--dry-run`, `--list-only` and `-n` inside a cluster (`-an`, `-avzn`) all
+# mean the same thing.
+_RSYNC_READ_LETTERS = frozenset({"n"})
+_RSYNC_READ_LONG = frozenset({"--dry-run", "--list-only"})
+
+# Named residual of the rule above: `--write-batch=<file>` /
+# `--only-write-batch=<file>` make rsync write a *second* path — the option's own
+# value — beside the destination operand. It is left unnamed because a batch file
+# is a debugging artefact of a transfer, not the transfer, and adding it means
+# reading one more option's value in both spellings; the destination operand this
+# rule exists for is named either way.
 
 # `install <src> <dst>` is `cp` with a mode, so the rule above reads it; it is
 # listed separately here only because its `-d` form inverts that rule — every
@@ -883,6 +883,37 @@ def _args_after_command(tokens: list[str], i: int) -> list[str]:
             break
         args.append(tok)
     return args
+
+
+def _rsync_run_is_a_read(tokens: list[str], i: int) -> bool:
+    """True when an ``rsync`` run writes nothing to the destination it was given.
+
+    Two ways to be a read, both named rather than assumed: the transfer is a
+    **dry run** (``-n``, or the ``n`` inside a cluster such as ``-an``; also
+    ``--dry-run``), or the source is only **listed** (``--list-only``).
+
+    The question is asked about the *read*, because that is the spelling somebody
+    has to ask for: a bare ``rsync -a src dst`` already writes ``dst``, so a rule
+    that assumed "write unless proven otherwise" is the only one that can be
+    wrong in the direction that loses data.
+
+    Named limit: an ``n`` that is really the *value* of a value-taking option is
+    read as a read form and the destination is missed — the attached spelling
+    (``rsync -T/tmp/n src dst``, ``rsync -en src dst``). Telling it apart needs the
+    per-option grammar this walk refuses to grow, and the two ways of guessing are
+    not equally costly: guessing "write" there would refuse ``rsync -an``, which
+    people really type, and a dry run is exactly the spelling used to check what a
+    copy would do. The spaced spelling (``rsync -T /tmp/n src dst``) is unaffected,
+    because a value in its own token is not an option and is never scanned.
+    """
+    for tok in _args_after_command(tokens, i):
+        if tok in _RSYNC_READ_LONG:
+            return True
+        if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+            continue
+        if _RSYNC_READ_LETTERS & set(tok[1:]):
+            return True
+    return False
 
 
 def _positional_args(
@@ -1702,37 +1733,6 @@ def _metadata_write_targets(tokens: list[str], i: int, verb: str) -> list[str]:
     if verb == "chmod":
         return args[1:] if _MODE_LIKE_RE.match(args[0]) else args
     return args[1:]
-
-
-def _rsync_run_is_a_read(tokens: list[str], i: int) -> bool:
-    """True when an ``rsync`` run writes nothing to the destination it was given.
-
-    Two ways to be a read, both named rather than assumed: the transfer is a
-    **dry run** (``-n``, or the ``n`` inside a cluster such as ``-an``; also
-    ``--dry-run``), or the source is only **listed** (``--list-only``).
-
-    The question is asked about the *read*, because that is the spelling somebody
-    has to ask for: a bare ``rsync -a src dst`` already writes ``dst``, so a rule
-    that assumed "write unless proven otherwise" is the only one that can be
-    wrong in the direction that loses data.
-
-    Named limit: an ``n`` that is really the *value* of a value-taking option is
-    read as a read form and the destination is missed — the attached spelling
-    (``rsync -T/tmp/n src dst``, ``rsync -en src dst``). Telling it apart needs the
-    per-option grammar this walk refuses to grow, and the two ways of guessing are
-    not equally costly: guessing "write" there would refuse ``rsync -an``, which
-    people really type, and a dry run is exactly the spelling used to check what a
-    copy would do. The spaced spelling (``rsync -T /tmp/n src dst``) is unaffected,
-    because a value in its own token is not an option and is never scanned.
-    """
-    for tok in _args_after_command(tokens, i):
-        if tok in _RSYNC_READ_LONG:
-            return True
-        if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
-            continue
-        if _RSYNC_READ_LETTERS & set(tok[1:]):
-            return True
-    return False
 
 
 def _is_directory_install(tokens: list[str], i: int) -> bool:
