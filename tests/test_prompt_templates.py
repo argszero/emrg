@@ -323,7 +323,6 @@ def test_no_template_calls_the_write_root_index_its_own_prompt_index() -> None:
 # and reaching empty is what "no residue" means.
 PENDING_STATE_SWEEP = {
     "promote_prompt.md",
-    "journal_prompt.md",
 }
 
 # The retired mechanism's fingerprints: the two file names, and the prose that
@@ -463,10 +462,12 @@ def test_widened_fingerprint_is_measured_on_the_real_templates() -> None:
 
     A pattern change can satisfy a string assertion while catching nothing real,
     so this counts the lines each pattern sees in every pending template and
-    pins the difference. Measured on master `e6eaaee4`:
+    pins the difference. Measured in the tree that sweeps the journal template
+    (base `97479c19`, journal swept, so `promote_prompt.md` is the only pending
+    template):
 
         promote_prompt.md   25 -> 30   (lines 38, 329, 331, 363, 376)
-        journal_prompt.md   15 -> 15
+        journal_prompt.md   15 -> 15, now 0 -> 0 (swept)
         every swept template 0 ->  0
 
     The strict increase is asserted for `promote_prompt.md` by name, because that
@@ -506,3 +507,78 @@ def test_widened_fingerprint_is_measured_on_the_real_templates() -> None:
             f"{name}: the widened pattern flags lines {sorted(hits)} in a swept template — "
             f"that is either a real residue or a false positive in the replacement text"
         )
+
+
+# `{{ evolution_cwd }}` is `~/.emrg/evolution/`, and the sandbox trusts only
+# `~/.emrg/evolution/.emrg/` — `bash_tool._trusted_write_zones()` returns exactly
+# that one root (measured 2026-09-19 on master `97479c19`). A template that names
+# `{{ evolution_cwd }}/journal_..._state.md` therefore sends the agent to a write
+# the tool layer refuses: `workspace-write sandbox: blocked write outside
+# workspace`. That was the journal template's state and reflection files until
+# the sweep (rant 2026-09-14T14:35:47, acceptance item 3: "提示词内不存在指向工作区
+# 之外的写路径"). This is the guard for that item — the retired-mechanism pattern
+# above cannot see it, because a *different* out-of-zone path is not the retired
+# mechanism.
+_EVOLUTION_CWD_REF = re.compile(r"\{\{ evolution_cwd \}\}(?P<rest>[^\s`)\]},;]*)")
+
+
+def _out_of_zone_refs(text: str) -> list[str]:
+    """Every `{{ evolution_cwd }}` reference that names something outside `.emrg/`.
+
+    Two forms are legal, and only two: the bare root (used by the prohibition
+    sentence in `evolution_prompt.md`, which names the directory rather than a
+    path inside it) and `{{ evolution_cwd }}/.emrg/...` — the trusted subtree,
+    where the memory entries live.
+    """
+    out: list[str] = []
+    for match in _EVOLUTION_CWD_REF.finditer(text):
+        rest = match.group("rest")
+        if rest == "" or rest.startswith("/.emrg/"):
+            continue
+        out.append(match.group(0))
+    return out
+
+
+def test_no_prompt_names_a_path_outside_the_trusted_write_zone() -> None:
+    """A template's write paths must stay inside the zone the sandbox trusts."""
+    seen_refs = 0
+    offenders: list[str] = []
+    for _task_type, filename in _builtin_templates():
+        text = (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+        seen_refs += len(_EVOLUTION_CWD_REF.findall(text))
+        for ref in _out_of_zone_refs(text):
+            offenders.append(f"{filename}: {ref}")
+
+    # The scan must be looking somewhere: fewer references than the templates
+    # actually carry would mean this test passes by matching nothing.
+    assert seen_refs >= 8, (
+        f"only {seen_refs} `{{{{ evolution_cwd }}}}` reference(s) found across the "
+        f"built-in templates — the scan is not looking where it thinks it is"
+    )
+    assert not offenders, (
+        "these templates name a write path outside the sandbox's trusted zone "
+        f"(`~/.emrg/evolution/.emrg/`): {offenders} — the agent is sent to a write "
+        "the tool layer blocks"
+    )
+
+
+def test_the_write_zone_scan_answers_both_ways() -> None:
+    """The instrument's controls: what it flags, and what it must leave alone.
+
+    Without the refusing half this test would pass on a regex that matches
+    nothing; without the accepting half it would pass on one that refuses the
+    legal forms the swept templates actually use. Both halves are taken from
+    real template text.
+    """
+    assert _out_of_zone_refs(
+        "- State file: `{{ evolution_cwd }}/journal_argszero_x_editor_state.md`"
+    ), "the retired journal state-file path is exactly what this guard exists for"
+    assert _out_of_zone_refs(
+        "{{ evolution_cwd }}/open_source_{{ owner }}_{{ repo }}_reflections.md"
+    ), "the retired reflection-file path must be flagged too"
+    assert not _out_of_zone_refs(
+        "memory entries under `{{ evolution_cwd }}/.emrg/memory/`"
+    ), "the trusted subtree is where the replacement text sends the agent"
+    assert not _out_of_zone_refs(
+        "Do not modify files under `{{ evolution_cwd }}` outside `{{ source_dir }}/`"
+    ), "the bare root names the directory in a prohibition; it is not a write path"

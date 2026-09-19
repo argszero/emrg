@@ -1018,6 +1018,35 @@ def test_paper_template_renders_with_context():
     assert "literature" in out, "文献去重指引应渲染"
 
 
+def test_journal_template_renders_the_continuity_contract():
+    """journal_prompt.md renders, and its continuity contract replaces the retired files."""
+    import jinja2
+
+    template_path = (
+        Path(__file__).resolve().parent.parent
+        / "emrg" / "server" / "journal_prompt.md"
+    )
+    env = jinja2.Environment(undefined=jinja2.Undefined)
+    template = env.from_string(template_path.read_text(encoding="utf-8"))
+    out = template.render(
+        instance_id="test", host_name="host", uptime="0h 0m",
+        source_dir="/tmp/journal", session_id="s1", timestamp="20260919-100129",
+        current_time_human="2026-09-19 10:01", evolution_cwd="/tmp/evo",
+        task={"role": "editor", "project": "silicon-science-cs"},
+        project={}, evolution_count=0, owner="argszero", repo="silicon-science-cs",
+    )
+    # The state and reflection files were retired (rant 2026-09-14T14:35:47): the
+    # session is the state now, so the template must render the continuity contract
+    # and the closing summary that replaced them — and must not name either file.
+    assert "Cross-round continuity" in out, "跨轮续接指引应渲染"
+    assert "closing summary in your final message" in out, "收尾总结契约应渲染"
+    assert "_state.md" not in out, "已废置的状态文件路径不应再渲染"
+    assert "_reflections.md" not in out, "已废置的反思文件路径不应再渲染"
+    # The role-gated work cycles still render, and the session is named as the carrier.
+    assert "Editor Work Cycle" in out, "编辑器工作周期应渲染"
+    assert "s1" in out, "会话 id（状态载体）应渲染"
+
+
 def test_open_source_template_renders_with_context():
     """open_source_prompt.md renders without Jinja2 errors (rant-scan section)."""
     import jinja2
