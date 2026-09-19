@@ -2810,7 +2810,8 @@ def _cwd_left_workspace(
     The ``workspace-write`` boundary reads a *relative* write target as "inside
     the workspace, because the cwd is the workspace root". That premise holds
     only while the command writes from where it started: ``cd <dir>``,
-    ``pushd <dir>`` and ``env -C <dir>`` move the shell first, so every later
+    ``pushd <dir>`` and ``env -C <dir>`` (every spelling of it, the attached
+    ``-C<dir>`` included) move the shell first, so every later
     target is relative to the new directory. Measured on master, `cd /elsewhere;
     echo x > out.txt` truncated `/elsewhere/out.txt` while the guard read
     `out.txt` as in-workspace and allowed it (issue #1244), and `pushd
@@ -2958,13 +2959,39 @@ def _cwd_left_workspace(
             if leaves_workspace(cwd):
                 return cwd
             continue
-        # `env -C <dir>` / `env --chdir=<dir>`: the child of `env` starts there.
+        # `env -C <dir>` / `env --chdir=<dir>` / `env -C<dir>`: the child of
+        # `env` starts there.
+        #
+        # The attached short spelling was the one missing, and it is not a
+        # cosmetic gap (issue #1391's mirror row, measured 2026-09-19):
+        # `--chdir=` had been read since this rule was written while its short
+        # twin had not, so `env -C<elsewhere> sh -c 'echo x > f'` was **ALLOW**
+        # while the file really landed outside the workspace — a fail-open, and
+        # one keystroke from a spelling the same walk refused. The shell's
+        # ground truth for that row is pinned in
+        # `tests/test_bash_tool_sandbox_cwd.py`.
+        #
+        # The bundle is read as well, because this host's `env` moves the child
+        # for the bundled spelling too (`env -iC<dir> sh -c pwd` prints that
+        # directory, measured), and *which* short options may precede the `C` is
+        # the #461 enumeration this guard refuses to depend on. So any short
+        # option token carrying a `C` means "everything after that `C` is the
+        # directory", and a bundle ending in `C` takes the next token exactly as
+        # the bare `-C` does. The price is stated rather than hidden: a token
+        # carrying a `C` inside an option *value* (`env -uC<something>`) is read
+        # as a move as well. That only ever *adds* a refusal, and only when the
+        # value after the `C` spells a path outside the workspace — the
+        # fail-closed direction this walk's contract names for every shape it
+        # cannot resolve.
         for j, a in enumerate(args):
             target = None
             if a in ("-C", "--chdir"):
                 target = args[j + 1] if j + 1 < len(args) else None
             elif a.startswith("--chdir="):
                 target = a.split("=", 1)[1]
+            elif a.startswith("-") and not a.startswith("--") and "C" in a[1:]:
+                rest = a[a.index("C", 1) + 1:]
+                target = rest if rest else (args[j + 1] if j + 1 < len(args) else None)
             if target is None:
                 continue
             cwd = resolve(target)
