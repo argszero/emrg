@@ -24,7 +24,11 @@ What this file asserts, in the three directions the fix can be wrong:
   `zcat` idiom, so the letter is read inside a short cluster as well;
 * the **`*cat` wrappers** (`zcat`, `bzcat`, `xzcat`, `zstdcat`) are not in the
   family at all: they are `-dc` wrappers that write nothing, and a rule that
-  named their operand would refuse a pure read.
+  named their operand would refuse a pure read;
+* the family's own **stream operand** — a bare `-` — is not a path, so it is
+  dropped from a write form one operand at a time, while the file beside it is
+  still named (`gzip - f` really compresses `f`; see
+  `test_the_stream_operand_is_what_spares_the_bare_dash`).
 
 Nothing here executes a command. `_check_sandbox` is a pure predicate — it
 `realpath`s a path and opens nothing — and `_extract_write_targets` only parses,
@@ -117,6 +121,14 @@ WRITE_FORMS = (
     ("zstdmt decompress", f"zstdmt -d {OUTSIDE}/f.zst", (f"{OUTSIDE}/f.zst",)),
     # Two operands: both are rewritten, so both are named.
     ("two operands", f"gzip {OUTSIDE}/a {OUTSIDE}/b", (f"{OUTSIDE}/a", f"{OUTSIDE}/b")),
+    # …and the drop below is **per operand**, not per run: measured on the host
+    # 2026-09-19 in a fresh directory holding only `f`, `gzip - f` is rc=0 and
+    # writes `f.gz` while removing `f`, so the file beside the stream must still
+    # be named. A run-level "this is a read form" answer for the bare `-` would
+    # have named nothing here, i.e. a hole in exchange for the false block. The
+    # row carries the measured shape with an outside path, so that both tiers have
+    # the file — rather than the stream token — to refuse.
+    ("dash beside a file", f"gzip - {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
 )
 
 # (row, command) — the spellings whose operand is a *read*. Each must name
@@ -145,6 +157,22 @@ READ_FORMS = (
     ("zstdmt -t", f"zstdmt -t {OUTSIDE}/f.zst"),
     ("zstdmt -l", f"zstdmt -l {OUTSIDE}/f.zst"),
     ("zstdmt -dc cluster", f"zstdmt -dc {OUTSIDE}/f.zst"),
+    # A bare `-` is this family's own stdin/stdout spelling: the program reads the
+    # stream and writes the stream, so no file is opened under that name. Measured
+    # on the host 2026-09-19, one **fresh** directory per row with the input present
+    # and the listing read back off disk: every row below creates no file, and
+    # `gzip -- -` / `gzip -9 -` leave a file literally named `-` untouched as well.
+    # Before the drop each of them was refused — a false block, the direction this
+    # file's own record treats as the costlier one.
+    ("bare dash", "gzip -"),
+    ("bare dash with a level", "gzip -9 -"),
+    ("bare dash after --", "gzip -- -"),
+    ("bare dash, bzip2", "bzip2 -"),
+    ("bare dash, xz", "xz -"),
+    ("bare dash, zstd", "zstd -"),
+    ("bare dash, compress", "compress -"),
+    ("bare dash, uncompress", "uncompress -"),
+    ("bare dash, decompress", "gzip -d -"),
 )
 
 # The wrappers, which are reads by construction and must not be in the family.
@@ -316,3 +344,56 @@ def test_the_read_gate_is_what_spares_the_read_forms() -> None:
         )
     finally:
         bash_tool._compressor_operand_is_a_read = gate
+
+
+def test_the_stream_operand_is_what_spares_the_bare_dash() -> None:
+    """The drop is a second piece of code, so it gets its own arm.
+
+    Without it a bare `-` goes back to being named, and every row in the dash
+    block above returns to the refusal master gave. That is the whole claim: the
+    rows are refused *because* the token is dropped, not because something else
+    in the walk happens to spare them.
+    """
+    drop = bash_tool._without_the_stream_operand
+    row = "gzip -"
+    beside = "gzip - f"
+
+    assert _extract_write_targets(row) == []
+    assert _check_sandbox(row, "read-only", workdir="/workspace")[0] is True
+    assert _check_sandbox(beside, "read-only", workdir="/workspace")[0] is False
+
+    try:
+        bash_tool._without_the_stream_operand = lambda targets: list(targets)
+        assert _check_sandbox(row, "read-only", workdir="/workspace")[0] is False, (
+            "with the drop removed the bare dash must return to the ALLOW master "
+            "gave — otherwise the drop is not what spares it"
+        )
+        # …and the row beside it must *not* move: it is refused for naming `f`,
+        # which is what makes the drop a per-operand rule rather than a per-run one.
+        assert _extract_write_targets(beside) == ["-", "f"]
+    finally:
+        bash_tool._without_the_stream_operand = drop
+
+    assert _extract_write_targets(row) == []
+    assert _extract_write_targets(beside) == ["f"]
+
+
+def test_the_drop_is_the_compressors_alone() -> None:
+    """The boundary the drop must not cross, measured in the same geometry.
+
+    A bare `-` is the compressors' stream operand. To the everyday writers it is
+    a **path**, and a file named ``-`` is exactly what they act on: measured on
+    this host 2026-09-19, one fresh directory per row with only `src.txt` present
+    (no dash file), `touch -`, `truncate -s0 -`, `mv src.txt -` and `cp src.txt -`
+    each *create* the file named ``-`` at rc=0, while `rm -` and `chmod 777 -` look
+    one up (rc=1, `-: No such file or directory`). Dropping the token inside
+    `_positional_args`, where every verb would inherit it, would therefore open
+    the hole those rows are named to close — this test pins the drop to the family
+    that measured it.
+    """
+    for cmd in ("touch -", "truncate -s0 -", "mv src.txt -", "cp src.txt -"):
+        assert _extract_write_targets(cmd) == ["-"], cmd
+        assert _extract_write_targets(cmd) != [], (
+            f"{cmd}: an empty target list here is the everyday writers' hole"
+        )
+

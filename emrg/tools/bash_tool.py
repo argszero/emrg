@@ -2001,10 +2001,15 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
         elif word in _COMPRESSOR_VERBS:
             # `gzip f` rewrites f in place; the read spellings (`gzip -c f`,
             # `gzip -t f`, `gzip -l f`) leave it alone and must stay allowed.
-            # This gate is why the family is not simply in the set above.
+            # This gate is why the family is not simply in the set above. A bare
+            # `-` operand is the family's stdin/stdout spelling and is dropped
+            # one operand at a time, because `gzip - f` really does compress `f`
+            # — see `_without_the_stream_operand`.
             if not _compressor_operand_is_a_read(tokens, i):
                 targets.extend(
-                    _positional_args(tokens, i, _COMPRESSOR_OPTIONS_WITH_VALUE)
+                    _without_the_stream_operand(
+                        _positional_args(tokens, i, _COMPRESSOR_OPTIONS_WITH_VALUE)
+                    )
                 )
         elif word in _LZ4_VERBS:
             # `lz4 f` writes `f.lz4` beside the operand rather than rewriting it,
@@ -2246,6 +2251,46 @@ def _compressor_operand_is_a_read(tokens: list[str], i: int) -> bool:
     return False
 
 
+def _without_the_stream_operand(targets: list[str]) -> list[str]:
+    """``targets`` without the bare ``-`` — the operand that is not a path.
+
+    A bare ``-`` is the convention for *standard input, standard output*: the
+    program reads the stream and writes the stream, so no file is opened under
+    that name and naming it turns a pure read into a refusal. This walk refuses
+    in the direction its own record treats as the costlier one — an empty target
+    list is a hole it can be argued out of, a refusal is a command a reader
+    cannot run — so the operand is dropped rather than guessed at.
+
+    Measured on this host 2026-09-19, one **fresh** directory per row with the
+    input present and the listing read back off disk afterwards:
+
+      gzip -  xz -  bzip2 -  zstd -  compress -  lz4 -     rc=0, no file created
+      gzip -9 -   gzip -- -   xz -9 -   bzip2 -9 -         rc=0, no file created
+      zstd -19 -  lz4 -9 -                                 rc=0, no file created
+      gzip -d -                                            rc=1 (`unexpected end of
+                                                            file`), no file created
+      gzip - f    gzip f -    xz - f    zstd - f           `f` IS compressed —
+                                                            `gzip - f` writes
+                                                            `f.gz` and removes `f`
+
+    The last row is why this is applied **per operand** and not per run, and why
+    `_compressor_operand_is_a_read` is left alone: that gate answers once for the
+    whole run, so teaching it the bare ``-`` would have made `gzip - f` name
+    nothing at all — a hole, in exchange for nothing, since the operand beside
+    the dash is a real path and must still be named. Dropping the token keeps
+    ``['f']`` for that row and ``[]`` for `gzip -`.
+
+    The drop is deliberately not made in ``_positional_args``, where it would
+    reach every verb. A bare ``-`` is a *path* to the other writers, measured in
+    the same geometry: `touch -`, `truncate -s0 -`, `mv src.txt -` and
+    `cp src.txt -` each create the file named ``-`` (and `chmod 777 -` and `rm -`
+    look one up), so a global drop would open exactly the hole the everyday
+    writers are named to close. It is the compressor family's own spelling, and
+    it is dropped where that is measured.
+    """
+    return [t for t in targets if t != "-"]
+
+
 def _lz4_letters(args: list[str]) -> set[str]:
     """The short-option letters of an ``lz4`` run, read cluster by cluster.
 
@@ -2293,6 +2338,15 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
     * otherwise the *last* operand is written — exactly the explicit destination
       of `lz4 f out.lz4`, and for the single-operand form the operand itself,
       whose directory is where the derived sibling lands.
+
+    A bare ``-`` operand is the stream, in either position, and is never named;
+    which operand it is takes the third bullet with it. Measured in one fresh
+    directory per row with only `f` present and the listing read back off disk
+    (2026-09-19): `lz4 -`, `lz4 - -`, `lz4 -t -` and **`lz4 f -`** all create no
+    file — the last one names stdout as its destination, so nothing is written
+    beside `f` either — while `lz4 -m f -` really does derive `f.lz4`, which is
+    why the multi-input branch drops the token and keeps `f`. See
+    `_without_the_stream_operand`.
     """
     args = _args_after_command(tokens, i)
     letters = _lz4_letters(args)
@@ -2300,7 +2354,13 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
         return []
     operands = _positional_args(tokens, i, _LZ4_OPTIONS_WITH_VALUE)
     if letters & _LZ4_MULTI_LETTERS or any(t in _LZ4_MULTI_LONG for t in args):
-        return operands
+        return _without_the_stream_operand(operands)
+    if operands and operands[-1] == "-":
+        # `lz4 f -` names stdout as its destination instead of writing `f.lz4`
+        # beside the operand, so nothing on disk is written under *any* operand
+        # and the last-operand rule has to answer with nothing rather than with
+        # the operand it would otherwise fall back on (`f`, which it only reads).
+        return []
     return operands[-1:]
 
 
