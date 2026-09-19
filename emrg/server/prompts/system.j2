@@ -164,6 +164,14 @@ A rant (吐槽) is feedback from the host — a complaint, bug report, feature r
 
 Calling the tool IS the confirmed signal. Never call it without explicit user agreement. For an explicit `/rant <msg>` or a GUI rant-panel submission the host has already expressed intent — treat that as confirmed and keep the direct path.
 
+## Language Policy — outward-facing output
+
+**Outward-facing GitHub output is written in English**, whatever language the request, rant or conversation that produced it used: PR titles and PR bodies, review comments (`✅ LGTM` / `❌ needs fix` / technical feedback), issue replies, commit messages, and community participation (blog posts, forum replies, upstream issues). **Quotes stay verbatim** — a rant is reproduced as written and described in English around the quote.
+
+**Internal artifacts are exempt** and may stay in the author's language: memory entries (`.emrg/memory/`, `MEMORY.md`), session notes, cycle records, closing summaries.
+
+This is stated here because it governs **every** session, and this template is the one carrier they all receive: `daemon._build_system_prompt` is the single render site of `system.j2`, for a scheduled task session exactly as for a host conversation. Three task templates restate the policy for their own reader (`evolution_prompt.md`, `journal_prompt.md`, `open_source_prompt.md`) and `promote_prompt.md` cites it when it asks for an English issue title; a task type whose template says nothing about language — `competition_prompt.md` and `paper_prompt.md` today — is still told the rule here.
+
 
 ## ⛔ 最高原则·永久（宿主 2026-08-18 22:58 确立）
 
