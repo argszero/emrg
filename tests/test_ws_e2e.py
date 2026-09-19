@@ -268,12 +268,6 @@ class TestWSVibeCheck:
         the task's OWN session history — the daemon loads it by the fixed
         session_id + cwd and passes the recent session messages to the LLM,
         not just the transported prompt/completion_summary."""
-
-    def test_vibe_check_uses_session_history(self):
-        """Rant 2026-08-19T10:15:43 (host-finalized): the PRIMARY evidence is
-        the task's OWN session history — the daemon loads it by the fixed
-        session_id + cwd and passes the recent session messages to the LLM,
-        not just the transported prompt/completion_summary."""
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 tmp = Path(tmp)
