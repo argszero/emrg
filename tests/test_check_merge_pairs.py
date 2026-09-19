@@ -150,6 +150,28 @@ def test_a_clean_and_healthy_pair_is_not_reported(mod, monkeypatch, capsys):
     assert "no ordered pair merges cleanly into a failing tree" in out
 
 
+def test_the_verdict_names_the_guard_that_answered(mod, monkeypatch, capsys):
+    """A clean run says *which* guard cleared it - in the header and in the verdict.
+
+    That sentence is one guard's reading, and the run used to print it without naming
+    that guard: measured 2026-09-19 (`cyc20260919-212912`), the same tool's
+    `_guard_verdict` returned `no stored count` for a pair tree whose own suite was red
+    (1 of 53 tests), and the summary was read as "the pair is safe to land". The name is
+    taken from the sibling (`seq.GUARD`) rather than written here, so a run cannot
+    announce a guard other than the one it ran.
+    """
+    chain = {(BASE, C1): C1, (BASE, C2): C2, (C1, C2): C2, (C2, C1): C1}
+    verdicts = {C1: (True, "no stored count"), C2: (True, "no stored count")}
+    rc, _ = _scan(mod, monkeypatch, chain, verdicts)
+    out = capsys.readouterr().out
+
+    assert rc == 0
+    header = next(l for l in out.splitlines() if l.startswith("pairs:"))
+    summary = next(l for l in out.splitlines() if "failing tree" in l)
+    assert header.endswith(f"judged by {mod.seq.GUARD}"), header
+    assert f"judged by {mod.seq.GUARD} alone" in summary, summary
+
+
 def test_a_conflicting_pair_is_answered_not_a_finding(mod, monkeypatch, capsys):
     """A pair git blocks cannot land, so it cannot land badly - and it is not a failure.
 

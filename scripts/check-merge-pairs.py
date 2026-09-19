@@ -7,7 +7,22 @@ The sibling gates answer about one PR (`check-vote-count.py`, `check-merge-fresh
 or about one *plan* (`check-merge-sequence.py`). In a queue of near-identical PRs the
 question that decides what to do next is neither: **is any pair of these silently
 dangerous together?** - where "silently" means git reports the merge clean and the
-resulting tree fails the repo's own guards.
+resulting tree fails the repo's own guard, `scripts/check-doc-count.py` (`seq.GUARD`).
+
+One guard, not the suite
+------------------------
+That verdict is one guard's, so "no ordered pair merges cleanly into a failing tree" is a
+statement about the derived-count class and nothing else: **a pair tree can pass here and
+fail the repository's own tests.** Measured 2026-09-19 (`cyc20260919-212912`), on two open
+heads merged and judged by this tool's own `_guard_verdict` as `master + #1432@459438e9 +
+#1435@8538badc` (tree `510559ec5f50`): HEALTHY, `no stored count` - while that tree's own
+`tests/test_bash_tool_unlink_remover.py` failed, 1 of the 53 tests collected from the two
+files the PRs change, because one PR's test pinned a spelling the other PR changed. A later commit on #1432's branch aligned that
+row and the pair is green (the same heads land tree `f00f2e9d`). So a clean pair is not yet
+"the pair is safe to land": the suite question is `check-merge-plan-suite.py A B`, which
+builds the tree those heads produce and runs the tests on it - measured green on the pair
+above, 3859 passed and 22 skipped. This tool answers the count-line class, that one answers
+the suite, and neither answers the other's question.
 
 Measured 2026-09-13 (`cyc20260913-091152`) on the six PRs that were `MERGEABLE`/`CLEAN`
 at the time, all 15 pairs in both orders (30 measurements of `master -> A -> B`):
@@ -224,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"base {base[:8]} ({base_ref})")
     print(
         f"pairs: {len(numbers)} PR(s) -> {len(pairs)} ordered pair(s), "
-        f"each measured as {base_ref} -> A -> B"
+        f"each measured as {base_ref} -> A -> B, judged by {seq.GUARD}"
     )
 
     # `master + A` is the same merge for every B, so it is materialised once per A rather
@@ -275,7 +290,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(
         f"no ordered pair merges cleanly into a failing tree "
-        f"({clean_healthy} clean and healthy, {blocked} blocked by a conflict)"
+        f"({clean_healthy} clean and healthy, {blocked} blocked by a conflict; "
+        f"judged by {seq.GUARD} alone - the suite is check-merge-plan-suite.py's question)"
     )
     return 0
 
