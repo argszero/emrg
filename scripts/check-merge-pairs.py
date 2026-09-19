@@ -92,7 +92,8 @@ Exit codes
        land badly - that is why this is 0 here and 3 in `check-merge-sequence.py`, where
        a conflict leaves later steps of a chain unmeasured)
     1  at least one ordered pair merges cleanly and lands a tree that fails the guards
-    2  the question could not be answered (git/gh/guard failure) - fail loud; never
+    2  the question could not be answered (git/gh/guard failure, or a requested PR
+       number whose head cannot be fetched) - fail loud; never
        report "no dangerous pair" about pairs that were not measured
 """
 
@@ -205,6 +206,16 @@ def main(argv: list[str] | None = None) -> int:
         # itself's twin and buy the same answer twice, and the ordering makes the output
         # diffable between runs.
         numbers = sorted(set(args.prs or seq._open_pr_numbers(args.repo)))
+        # A number that is not an open PR (closed, merged, or mistyped) fetches no
+        # head. It used to be taken verbatim: a lone number produces no pairs at all,
+        # so the loop below never ran, the summary line claimed "1 PR(s) -> 0 ordered
+        # pair(s)" about a PR that does not exist, and the run exited 0 - "no
+        # dangerous pair" about a PR that was never measured, which is the reading the
+        # exit-code contract above rules out. Resolving each head once, here, makes
+        # such a number fail loud as rc 2. The resolved heads are reused below, so
+        # this costs no extra fetches - and every pair is now measured against one
+        # snapshot of each head rather than a fresh fetch per pair.
+        heads = {n: seq._fetch_head(n) for n in numbers}
     except MeasurementError as exc:
         print(f"could not measure: {exc}", file=sys.stderr)
         return 2
@@ -229,12 +240,12 @@ def main(argv: list[str] | None = None) -> int:
         for a, b in pairs:
             try:
                 if a not in first_step:
-                    first_step[a] = seq._merge_commit(base, seq._fetch_head(a))
+                    first_step[a] = seq._merge_commit(base, heads[a])
                 landed_a = first_step[a]
                 if landed_a is None:
                     blocked += 1
                     continue
-                landed_b = seq._merge_commit(landed_a, seq._fetch_head(b))
+                landed_b = seq._merge_commit(landed_a, heads[b])
                 if landed_b is None:
                     blocked += 1
                     continue
