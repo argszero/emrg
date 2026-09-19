@@ -219,6 +219,40 @@ class TestMainExitCodes:
         assert "#2" in out and "#1" not in out
 
 
+    def test_a_requested_pr_that_is_not_open_exits_2(self, mod, monkeypatch, capsys) -> None:
+        """A number this tool never looked at must not come back as a clean bill.
+
+        Measured before the fix (`cyc20260919-173431`): `check-pr-base.py 99999` printed
+        **nothing** and exited **0**. The requested number was filtered out of the
+        open-PR list, so the loop had nothing to classify and `dead` stayed 0 - at the
+        exit code, byte-identical to "every base reaches master", which is exactly what
+        a Committer reads before merging. The sibling gates all answer rc 2 for the same
+        input (`check-vote-count.py`, `check-merge-freshness.py`, `check-merge-landing-diff.py`,
+        `check-merge-order.py`, `check-merge-sequence.py`); this one was the outlier.
+        """
+        prs = [{"number": 1151, "baseRefName": "master", "headRefName": "h1"}]
+        self._wire(mod, monkeypatch, prs, {}, lambda sha: True)
+        rc = mod.main(["--repo", "owner/repo", "99999"])
+        err = capsys.readouterr().err
+
+        assert rc == 2, "a PR that was never looked at is not a pass"
+        assert "#99999" in err and "not among the open PRs" in err, err
+
+    def test_asking_about_an_open_pr_is_still_answered(self, mod, monkeypatch, capsys) -> None:
+        """The other direction: the refusal is about *membership*, not about selecting.
+
+        Without this, a mutant that answered rc 2 for every explicit selection would pass
+        the test above while making `check-pr-base.py <N>` useless.
+        """
+        prs = [{"number": 1151, "baseRefName": "master", "headRefName": "h1"}]
+        self._wire(mod, monkeypatch, prs, {}, lambda sha: True)
+        rc = mod.main(["--repo", "owner/repo", "1151"])
+        out = capsys.readouterr().out
+
+        assert rc == 0, out
+        assert "#1151" in out and "base is master" in out, out
+
+
 class TestRealInvocationSurface:
     """The script must be runnable as a tool, and must not silently pass on error."""
 

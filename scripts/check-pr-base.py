@@ -59,7 +59,8 @@ Exit codes
 0  no open PR's base is a dead end (bases either reach master, or are an open
    PR's head - the latter reported as LIVE)
 1  at least one open PR is based on a dead end - retarget it before merging
-2  the question could not be answered (gh failed, response unparseable)
+2  the question could not be answered (gh failed, response unparseable, or a
+   requested PR number is not among the open PRs)
 
 Never reports a count it could not obtain: a check that guesses "OK" when it
 could not read the state is worse than no check, because the failure it hides is
@@ -238,6 +239,25 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.prs:
         wanted = set(args.prs)
+        # A requested number that is not among the open PRs used to be dropped in
+        # silence: the loop below then had nothing to classify, so the tool printed
+        # nothing and returned 0 - a clean bill for a PR it never looked at. That is
+        # the one thing its own contract forbids (never guess "OK" when the state
+        # could not be read), and it is indistinguishable from a pass at the exit
+        # code, which is what every caller reads. The number is answered as
+        # unmeasurable instead: this tool lists open PRs, so a closed, merged or
+        # mistyped number has no base it could classify.
+        missing = sorted(wanted - {p["number"] for p in prs})
+        if missing:
+            print(
+                "cannot determine PR bases: "
+                + ", ".join(f"#{n}" for n in missing)
+                + " is not among the open PRs (closed, merged, or nonexistent) - "
+                "this tool classifies open PRs only, and will not report a clean bill "
+                "for one it did not look at",
+                file=sys.stderr,
+            )
+            return 2
         prs = [p for p in prs if p["number"] in wanted]
 
     dead = 0
