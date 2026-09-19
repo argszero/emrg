@@ -51,6 +51,30 @@ const START_WINDOW_ENV = "EMRG_START_TIMEOUT";
 // 的 `_START_WINDOW_SHAPE` 是同一个形态（那边用 re.fullmatch，这边锚定 ^...$），
 // 两侧的测试读同一份清单 `tests/data/start_window_shapes.json`。
 const START_WINDOW_SHAPE = /^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)([eE][+-]?[0-9]+)?$/;
+// 一个值可以带的填充，写成字符类——两种语言各自**默认**所剥离的集合的**并集**
+// （issue #1410）。
+//
+// 两条入口原先各用自己宿主语言的默认归一化，而两个默认不是同一个集合：实测
+// 2026-09-19，Python `str.strip()` 剥离 29 个码位、JS `String.prototype.trim()` 剥离
+// 25 个；差集是 `U+001C`–`U+001F` 与 `U+0085`（Python 认、JS 不认）并上 `U+FEFF`
+// （反过来）。把 12 个带填充的值分别喂给两侧真实解析器（同一个 head 上），9 个不一致
+// 且方向互有：GUI 把 `\ufeff30` 读成 30s，客户端拒绝它并回落 4.5s；客户端把 `\x1c30`
+// 读成 30s，GUI 回落 5s。
+//
+// 取**并集**而不是更窄的公共集是刻意的：一个"两侧必须一致"的修复，不该拿走任何一侧
+// 今天接受的值——公共集会同时让 GUI 拒绝 `U+FEFF`、让客户端拒绝那五个码位，而已经
+// 写了其中一个的宿主会无声地失去他原本有的窗口。
+//
+// 写成字面量而不是用 `.trim()`，因为语言默认**就是**缺陷本身：一个两侧必须共享的集合，
+// 不能由两种语言各自的空白观念来拼写。`String.raw` 让这里的源码文本与
+// emrg/client/daemon_manager.py 的 `_START_WINDOW_PADDING` 逐字相同
+// （tests/test_start_window_padding_pairing.py 会断言两者一致、各自仍覆盖自己语言的
+// 默认集合，且 `U+200B` 这类两侧都不认的码位不被接受）。
+const START_WINDOW_PADDING = String.raw`\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff`;
+const START_WINDOW_TRIM = new RegExp(
+  `^[${START_WINDOW_PADDING}]+|[${START_WINDOW_PADDING}]+$`,
+  "g"
+);
 const PENDING_TIMEOUT_MS = 5_000;
 // Rant 2026-08-09T13:16:36 ⑤（防风暴总闸）：单个"连接生命周期"内最多 spawn
 // MAX_SPAWN_ATTEMPTS 次 daemon——之后不再拉起，只把真实错误（含 emrgd.log 尾部）
@@ -397,9 +421,12 @@ class DaemonClient {
    * 下界是一个轮询，与客户端 `_start_window_attempts()` 的 `max(1, ...)` 相同。
    * 没有它，`EMRG_START_TIMEOUT=0.01` 会真的等 ~0.3s，报告却说 "within 0.0s"
    * ——那句话点名了一个它没有等过的界（实测：10ms 的窗口，实际 303ms）。
+   *
+   * 归一化用 `START_WINDOW_TRIM`，**不用 `.trim()`**：两个语言默认集不同正是 issue
+   * #1410 本身（`U+FEFF` 是 JS 认、Python 不认的那一个），见 `START_WINDOW_PADDING`。
    */
   _startWindowMs(env = process.env) {
-    const raw = String(env[START_WINDOW_ENV] ?? "").trim();
+    const raw = String(env[START_WINDOW_ENV] ?? "").replace(START_WINDOW_TRIM, "");
     if (!raw) return SPAWN_WAIT_MS;
     if (!START_WINDOW_SHAPE.test(raw)) {
       this.logger.warn(

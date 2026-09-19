@@ -1210,6 +1210,60 @@ test("#1276 GUI：非正/非有限/非数字 → 回落默认并告警（调参�
   );
 });
 
+// ── issue #1410：两侧剥离的填充字符集必须是同一个 ──────────────────────────────
+// 两条入口原先各用自己宿主语言的默认归一化（Python `str.strip()` / JS `.trim()`），
+// 而两个默认集不同（实测：Python 29 个码位、JS 25 个）。这里枚举 JS 自己的默认集——
+// `trim()` 只在这个引擎里存在，所以这一半的枚举不能放在 pytest 那边。文本一致性与
+// Python 侧的枚举在 tests/test_start_window_padding_pairing.py。
+
+const GUI_SOURCE = fs.readFileSync(path.join(__dirname, "..", "daemon_client.js"), "utf8");
+
+test("#1410 GUI：声明的填充类覆盖 JS 默认所 trim 的每一个码位，且恰好是并集", () => {
+  const m = GUI_SOURCE.match(/const START_WINDOW_PADDING = String\.raw`([^`]*)`;/);
+  assert.ok(m, "daemon_client.js 不再声明 START_WINDOW_PADDING");
+  const text = m[1];
+  assert.ok(text, "空的字符类会剥不掉任何东西，等于把每个取值都当未设置");
+
+  const member = new RegExp(`^[${text}]$`);
+  const strippedByTrim = [];
+  const inClass = [];
+  for (let cp = 0; cp <= 0x10ffff; cp++) {
+    const ch = String.fromCodePoint(cp);
+    if (member.test(ch)) inClass.push(cp);
+    if (ch.trim() === "") strippedByTrim.push(cp);
+  }
+  const hex = (a) => a.map((c) => "0x" + c.toString(16));
+  assert.deepStrictEqual(
+    hex(strippedByTrim.filter((c) => !inClass.includes(c))), [],
+    "这个类丢掉了 trim() 会剥掉的码位",
+  );
+  // 恰好是并集：比 JS 默认宽出来的只能是 Python-only 的那五个（见 issue #1410）
+  assert.deepStrictEqual(
+    hex(inClass.filter((c) => !strippedByTrim.includes(c))),
+    ["0x1c", "0x1d", "0x1e", "0x1f", "0x85"],
+  );
+
+  // 声明必须真的被解析器用上：留着 `.trim()` 会通过所有以 ASCII 空格拼写的用例，
+  // 只在这六个码位上失败——一个看起来正确的变体。
+  const body = GUI_SOURCE.slice(GUI_SOURCE.indexOf("_startWindowMs(env = process.env)"));
+  assert.ok(
+    body.slice(0, 200).includes("START_WINDOW_TRIM"),
+    "解析器没有用共享的字符类",
+  );
+  assert.ok(
+    !body.slice(0, 200).includes(`?? "").trim()`),
+    "解析器仍在用 JS 的默认归一化",
+  );
+});
+
+test("#1410 GUI：两侧都不认的填充码位（U+200B）仍然被拒绝", () => {
+  const warned = [];
+  const client = new DaemonClient({ logger: { info: () => {}, warn: (m) => warned.push(m) } });
+  assert.strictEqual(client._startWindowMs({ EMRG_START_TIMEOUT: "\u200b30" }), 5_000,
+    "零宽空格不是任一语言的空白，必须照旧当笔误拒绝");
+  assert.strictEqual(warned.length, 1, "被拒绝的值必须告警");
+});
+
 test("#1276 GUI：取值形态与客户端一致（同一份清单，两侧的测试都读它）", () => {
   const fixture = JSON.parse(
     fs.readFileSync(
