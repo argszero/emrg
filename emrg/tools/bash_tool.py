@@ -330,6 +330,82 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
     if opt.startswith("-") and not opt.startswith("--")
 )
 
+# `pzstd` is zstd's parallel front-end — a **different binary**, not a second name,
+# which is the reading `zstdmt` above turns on and this verb is the other side of.
+# Measured on this host (2026-09-19): `/opt/homebrew/bin/pzstd` realpaths into the
+# same Cellar as `zstd` but hashes
+# `0bad6c010cc29143f7c84808393943bf30b4ad5a11368d3c353e330d09e246f6` against
+# zstd's `15da463937cca60558fc7e7b281e09b071ea40ea3b80408328a87d4f83195be1`, and
+# its own usage line (`pzstd [args] [FILE(s)]`, `-o  file : result stored into
+# \`file\` (only if 1 input file)`) is the program's, not zstd's. One **fresh**
+# directory per row with `f` present and the listing read back off disk:
+#
+#   pzstd f                    writes  f  f.zst          a sibling is derived; `f` STAYS
+#   pzstd -k f                 writes  f  f.zst
+#   pzstd -19 f / -vv f / -q f writes  f  f.zst
+#   pzstd --rm f               writes  f.zst             and removes the operand
+#   pzstd -p 4 f               writes  f  f.zst          `-p` eats `4`; sibling still derived
+#   pzstd f g                  writes  f.zst  g.zst      every operand derives one
+#   pzstd -o out.zst f         writes  f  out.zst        `-o` is a real destination
+#   pzstd -oout.zst f          writes  f  out.zst        …and takes an attached value
+#   pzstd f -o out.zst         writes  f  out.zst        the destination wins wherever it stands
+#   pzstd -o out.zst -         writes  out.zst           the stream still gets a destination
+#   pzstd -c f / --stdout f    read    f                 [stdout]
+#   pzstd -t f.zst             read    f.zst             [test]
+#   pzstd -dc f.zst            read    f.zst             [decompress to stdout]
+#   pzstd -                    read    —                 the stream; nothing on disk
+#   pzstd -o - f               read    f                 [stdout] — `-` as the destination
+#   pzstd - f                  rc=1    f                 "Cannot specify standard input when
+#                                                        handling multiple files" — writes nothing
+#   pzstd -l f / --list f      rc=1    f                 `Invalid argument: -l` — not an option
+#   pzstd --to-stdout f        rc=1    f                 `Invalid argument` — not an option
+#   pzstd --output=out.zst f   rc=1    f                 `Invalid argument` — the long form does
+#                                                        **not** exist here (see the table below)
+#   pzstd -o out.zst f g       rc=1    f  f.zst          "Cannot specify an output file when
+#                                                        handling multiple inputs"
+#
+# Three consequences, and each is why this verb gets a branch of its own rather
+# than joining `_COMPRESSOR_VERBS`:
+#
+# 1. The default form **keeps** the operand and derives a sibling (`f` → `f.zst`),
+#    which is `lz4`'s shape and not the in-place family's. Naming the operand is
+#    still sound — the sibling lands in the operand's own directory and in no
+#    other — but it is a different claim from `gzip`'s and has to be stated.
+# 2. `-o` names the write in **option position**, where no operand rule reaches
+#    it; and while `-o` is present the operands are *read* (`pzstd -o out.zst f`
+#    leaves `f` untouched), so naming them as well would refuse a pure read.
+# 3. The attached spelling `-oout.zst` carries the letter `t`, so the family's
+#    read gate would read it as `--test` and answer "read, nothing named" — the
+#    hole this branch closes, reopened one spelling over. The letter scan in
+#    `_pzstd_read_form` stops at `o` for the reason `_lz4_letters` stops at `D`.
+#
+# `-l`/`--list` is in the read letters although pzstd **rejects** it, for the same
+# reason `compress`'s illegal `-t` is in the family's set: the program writes
+# nothing under it, so reading the letter as a read cannot hide a write, while
+# *not* reading it would refuse a run that was going to fail anyway.
+_PZSTD_VERBS = frozenset({"pzstd"})
+_PZSTD_READ_LETTERS = frozenset({"c", "t", "l"})
+_PZSTD_READ_LONG = frozenset({"--stdout", "--test", "--list"})
+# `-o file` is the destination and `-p #` / `--processes #` a thread count: both
+# take a spaced value, and naming that value would point the guard at a token that
+# is not a path (`pzstd -p 4 f` writes `f.zst`, not `4`).
+_PZSTD_OPTIONS_WITH_VALUE = frozenset({"-o", "-p", "--processes"})
+# The destination is `-o` alone: `--output` and `--output=` are measured **not to
+# exist** here (`Invalid argument`), unlike every other verb that reads its
+# destination from an option. It is left out rather than read defensively, because
+# the usual justification for reading an unmeasured spelling — "refusing a command
+# that was going to fail anyway costs less than missing a write" — does not apply
+# to a spelling the program itself rejects: there is no write to miss.
+_PZSTD_DESTINATION_OPTIONS = frozenset({"-o"})
+# …and the same option spelled **attached** (`-oout.zst`), derived from the table
+# above so the two readings cannot drift, because a token that carries `o` as its
+# value-taking letter ends the short-option scan there.
+_PZSTD_VALUE_TAKING_SHORT = frozenset(
+    opt[1:]
+    for opt in _PZSTD_OPTIONS_WITH_VALUE
+    if opt.startswith("-") and not opt.startswith("--")
+)
+
 # `zip` writes the archive, and the archive is the **first** operand — the
 # opposite end of the operand list from `cp`/`mv`/`rsync`, whose destination is
 # the last one. Every operand rule the walk already has reads the last operand or
@@ -2348,6 +2424,13 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
             # `lz4 -m f g` writes two siblings, and `lz4 f out.lz4` writes the
             # last operand — unless the run is one of the measured read forms.
             targets.extend(_lz4_write_targets(tokens, i))
+        elif word in _PZSTD_VERBS:
+            # `pzstd f` writes `f.zst` beside the operand and keeps `f` — `lz4`'s
+            # shape — and `pzstd -o <file> f` writes the destination instead. Its
+            # own rule, because `-o` is an option-position write the operand rules
+            # cannot reach and the attached `-o<file>` spells a read letter inside
+            # the path. Measured table in `_PZSTD_VERBS`' comment.
+            targets.extend(_pzstd_write_targets(tokens, i))
         elif word == "zip":
             # `zip A.zip f` creates or rewrites `A.zip`, and the archive is the
             # *first* operand — the end no other operand rule reads, so the run
@@ -2712,6 +2795,100 @@ def _lz4_write_targets(tokens: list[str], i: int) -> list[str]:
         # the operand it would otherwise fall back on (`f`, which it only reads).
         return []
     return operands[-1:]
+
+
+def _pzstd_read_form(args: list[str]) -> bool:
+    """True when a ``pzstd`` run sends its bytes to stdout or only inspects them.
+
+    Read cluster by cluster, like the family's gate, with one difference that
+    decides whether this branch works at all: the scan **stops at a
+    value-taking letter**, so the attached destination `-oout.zst` is not read as
+    `-o` followed by the flags `t`, `o` and `t` again out of the *file name*. That
+    reading would turn a real destination into "read, nothing named" and reopen
+    the hole from the inside. The stop is the idiom `_lz4_letters` uses for `-D`.
+
+    The long forms are matched exactly rather than by prefix, and a token that is
+    not a short-option cluster (`--processes 4`, an operand) is skipped — a
+    *value* is never a cluster.
+    """
+    for tok in args:
+        if tok in _PZSTD_READ_LONG:
+            return True
+        if not tok.startswith("-") or tok.startswith("--") or len(tok) < 2:
+            continue
+        for ch in tok[1:]:
+            if ch in _PZSTD_READ_LETTERS:
+                return True
+            if ch in _PZSTD_VALUE_TAKING_SHORT:
+                break
+    return False
+
+
+def _pzstd_names_a_destination(args: list[str]) -> bool:
+    """True when the run spells the destination option, whatever its value.
+
+    The distinction this draws is ``pzstd -o - f`` from ``pzstd f``. Both leave
+    the destination option's value unnamed by ``_option_destination_values`` — it
+    drops a value of exactly ``-`` because that is how these options mean
+    *stdout* — but they differ in what the run then does: `-o -` sends the bytes
+    to stdout and writes **no file**, while a bare `pzstd f` derives `f.zst` beside
+    the operand. Falling through to the operand rule for both would name `f` in the
+    first case too, i.e. refuse a pure read, measured rc=0 with the directory
+    unchanged.
+
+    The test reads the option the same way the value extractor does — the exact
+    token, or a cluster *leading* with `o` — so the two cannot disagree about which
+    run has a destination: a `-qo out.zst f` does not lead with `o`, is not read
+    here, and stays with the operand rule below, where its residual is recorded.
+    """
+    for tok in args:
+        if tok == "-o" or _leading_short_option_value(tok, frozenset({"o"})) is not None:
+            return True
+    return False
+
+
+def _pzstd_write_targets(tokens: list[str], i: int) -> list[str]:
+    """The path a ``pzstd`` run writes — its ``-o`` destination, or a sibling.
+
+    `pzstd` keeps the operand and derives a sibling beside it (`f` → `f.zst`), so
+    this is `lz4`'s shape rather than the in-place family's; the measured table
+    behind every claim here is above `_PZSTD_VERBS`. Three questions settle it, in
+    this order:
+
+    * is the run a read form (`-c`/`--stdout`, `-t`/`--test`, `-l`/`--list`, the
+      letters read inside a short cluster too)? then it writes nothing, and naming
+      the operand would refuse a pure read;
+    * does it spell `-o`? then that option holds the destination and the operands
+      are only read — so the destination is named and they are not, which is also
+      why `pzstd -o - f` answers with nothing rather than with `f`;
+    * otherwise every operand derives its own sibling (`pzstd f g` writes `f.zst`
+      and `g.zst`), so all of them are named, minus the bare ``-``.
+
+    Two named limits, both measured, both checked in
+    `tests/test_bash_tool_pzstd_targets.py` so neither is a surprise later:
+
+    * a destination letter that does **not** lead its cluster (`pzstd -qo out.zst
+      f`) is not read as the option — the shape `_leading_short_option_value`
+      leaves unread on purpose — so the run falls through and names the
+      destination *as an operand* (`out.zst`, the path really written) **plus** the
+      input `f`, which is only read. An over-name, not a hole: no hidden write is
+      left unnamed.
+    * a stream operand beside a file (`pzstd - f`) is dropped, as in the family,
+      leaving `f` named although the run aborts with rc=1 and writes nothing.
+    """
+    args = _args_after_command(tokens, i)
+    if _pzstd_read_form(args):
+        return []
+    destinations = _option_destination_values(
+        tokens, i, "pzstd", _PZSTD_DESTINATION_OPTIONS
+    )
+    if destinations:
+        return destinations
+    if _pzstd_names_a_destination(args):
+        return []
+    return _without_the_stream_operand(
+        _positional_args(tokens, i, _PZSTD_OPTIONS_WITH_VALUE)
+    )
 
 
 def _zip_logfile_targets(words: list[str]) -> list[str]:
