@@ -55,6 +55,22 @@ own — and the read gate needed one honest correction to take them: `compress`
 accepts `-c` but **rejects `-t` and `-l` as illegal options** (its own usage line
 is `compress [-cfv] [-b bits] [file ...]`), so those two letters write nothing
 rather than being read forms the program supports.
+
+**`zstdmt` — the same bytes under a second name** (measured 2026-09-19). This list
+is a list of *names*, so it was blind to a second name for a verb it already
+handled — even though the two names are one file. `/opt/homebrew/bin/zstdmt` is a
+symlink to `/opt/homebrew/Cellar/zstd/1.5.7/bin/zstd`, both hash to
+`15da463937cca60558fc7e7b281e09b071ea40ea3b80408328a87d4f83195be1`, and their
+`--help` output differs in exactly one line: the usage line's program name. The
+program dispatches on argv[0] and nothing else, so the family's rows hold verbatim
+and were re-measured rather than assumed, one fresh directory per row with only the
+input present: `zstdmt f` and `zstdmt -19 f` derive `f.zst` beside the operand at
+rc=0 while `f` stays; `zstdmt -c f` and `zstdmt --stdout f` leave the directory
+holding only `f`; `zstdmt -l f.zst` prints the frame table and `zstdmt -t f.zst`
+tests the frame, neither creating a file. Through the real predicate the write
+forms were ALLOW at both tiers on the protected daemon file before the name was
+added, which is the hole this row closes. It joins on same-bytes evidence, not on
+the resemblance of the name — the line the `*cat` rows draw from the other side.
 """
 
 import pytest
@@ -98,6 +114,11 @@ WRITE_FORMS = (
     ("compress force", f"compress -f {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("compress verbose", f"compress -v {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
     ("uncompress", f"uncompress {OUTSIDE}/f.Z", (f"{OUTSIDE}/f.Z",)),
+    # `zstdmt`: the same binary as `zstd` under a second name, so the name list was
+    # one argv[0] short of the verb it already handled — see the module docstring.
+    ("zstdmt", f"zstdmt {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("zstdmt level", f"zstdmt -19 {OUTSIDE}/f", (f"{OUTSIDE}/f",)),
+    ("zstdmt decompress", f"zstdmt -d {OUTSIDE}/f.zst", (f"{OUTSIDE}/f.zst",)),
     # Two operands: both are rewritten, so both are named.
     ("two operands", f"gzip {OUTSIDE}/a {OUTSIDE}/b", (f"{OUTSIDE}/a", f"{OUTSIDE}/b")),
     # …and the drop below is **per operand**, not per run: measured on the host
@@ -130,6 +151,12 @@ READ_FORMS = (
     # `compress` takes `-c` and only `-c` of the three letters.
     ("compress -c", f"compress -c {OUTSIDE}/f"),
     ("uncompress -c", f"uncompress -c {OUTSIDE}/f.Z"),
+    # `zstdmt` is the same parser as `zstd`, so its read spellings are the family's.
+    ("zstdmt -c", f"zstdmt -c {OUTSIDE}/f"),
+    ("zstdmt --stdout", f"zstdmt --stdout {OUTSIDE}/f"),
+    ("zstdmt -t", f"zstdmt -t {OUTSIDE}/f.zst"),
+    ("zstdmt -l", f"zstdmt -l {OUTSIDE}/f.zst"),
+    ("zstdmt -dc cluster", f"zstdmt -dc {OUTSIDE}/f.zst"),
     # A bare `-` is this family's own stdin/stdout spelling: the program reads the
     # stream and writes the stream, so no file is opened under that name. Measured
     # on the host 2026-09-19, one **fresh** directory per row with the input present
@@ -154,6 +181,10 @@ CAT_WRAPPERS = (
     ("bzcat", f"bzcat {OUTSIDE}/f.bz2"),
     ("xzcat", f"xzcat {OUTSIDE}/f.xz"),
     ("zstdcat", f"zstdcat {OUTSIDE}/f.zst"),
+    # `lz4cat` is `lz4` under its cat name: same bytes as the lz4 above (measured
+    # 2026-09-19), same `-dc` meaning, and the row that must stay allowed when
+    # `unlz4`/`lz4c` join the lz4 rule.
+    ("lz4cat", f"lz4cat {OUTSIDE}/f.lz4"),
 )
 
 
@@ -258,6 +289,7 @@ FAMILY_ARMS = (
     ("zstd", f"zstd {OUTSIDE}/f"),
     ("compress", f"compress {OUTSIDE}/f"),
     ("uncompress", f"uncompress {OUTSIDE}/f.Z"),
+    ("zstdmt", f"zstdmt {OUTSIDE}/f"),
 )
 
 

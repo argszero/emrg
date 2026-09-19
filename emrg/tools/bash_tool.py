@@ -213,9 +213,25 @@ _REMOVER_VERBS = frozenset({"rm", "rmdir", "unlink"})
 # **both** tiers while `gzip` was refused, i.e. the same hole #1418 closed for the
 # rest of the family, one installable name over. They are the same shape, so they
 # belong in the same set rather than in a branch of their own.
+#
+# `zstdmt` is the same binary as `zstd` under a second name, and this list is a
+# list of *names*, so the twin kept the hole one argv[0] over (measured
+# 2026-09-19, on this host). `/opt/homebrew/bin/zstdmt` is a **symlink** to
+# `/opt/homebrew/Cellar/zstd/1.5.7/bin/zstd`; both files hash to
+# `15da463937cca60558fc7e7b281e09b071ea40ea3b80408328a87d4f83195be1`, and their
+# `--help` output differs in exactly one line — the usage line's program name
+# (`Usage: zstdmt [OPTIONS...] [INPUT... | -] [-o OUTPUT]` against the same line
+# with `zstd`). So the program dispatches on argv[0] and nothing else, and every
+# row measured for `zstd` holds verbatim: in a scratch directory holding only `f`,
+# `zstdmt f` and `zstdmt -19 f` both derive `f.zst` beside it at rc=0 (stderr
+# `f :172.22% (18 B => 31 B, f.zst)`), while `zstdmt -c f` and `zstdmt --stdout f`
+# leave the directory with `f` alone, `zstdmt -l f.zst` prints the frame table and
+# `zstdmt -t f.zst` tests it, neither creating a file. Those are this family's own
+# read letters and longs taken unchanged. It joins on same-bytes evidence, not on
+# the name's resemblance — the distinction `*cat` below is the other half of.
 _COMPRESSOR_VERBS = frozenset({
     "gzip", "gunzip", "bzip2", "bunzip2", "xz", "unxz", "lzma", "unlzma",
-    "zstd", "unzstd", "compress", "uncompress",
+    "zstd", "unzstd", "compress", "uncompress", "zstdmt",
 })
 
 # `-S`/`--suffix` is the one option in this family that takes a spaced value, and
@@ -277,7 +293,23 @@ _COMPRESSOR_READ_LONG = frozenset({
 # 3. Under `-m`/`-r` *every* operand is an input (`lz4 -m f g` derives two
 #    siblings), so the last-operand rule would name one file and let the other
 #    past. Both spellings are measured above.
-_LZ4_VERBS = frozenset({"lz4"})
+#
+# `unlz4`, `lz4c` and `lz4cat` are the *same file* as `lz4` under three other
+# argv[0] spellings — measured 2026-09-19 on this host, where
+# `/opt/homebrew/Cellar/lz4/1.10.0/bin/lz4` has three symlinks beside it and all
+# four names hash to
+# `b08405ac45dc1be5615bca7681c8d8d802a62ee9d5e1c1b4392a1e2cc7f68169`. Two of them
+# write in this verb's own shape and one does not, so only the writing pair joins:
+#   `unlz4 f.lz4`   writes `f` beside the operand (stderr `Decoding file f`) — the
+#                   decompressing twin, the same row as `lz4 -d f.lz4` above;
+#   `lz4c f`        writes `f.lz4` (stderr `Compressed filename will be : f.lz4`) —
+#                   the legacy CLI name, whose default form is this verb's;
+#   `lz4cat f.lz4`  writes nothing, the bytes go to stdout — `lz4 -dc` under a
+#                   name, and the member of this group that must **not** join.
+# The two that join inherit the read gate unchanged (`unlz4 -c f.lz4` and
+# `unlz4 -t f.lz4` both leave the directory as they found it), because it is the
+# same parser; naming their operand is sound for the reason given above.
+_LZ4_VERBS = frozenset({"lz4", "unlz4", "lz4c"})
 _LZ4_READ_LETTERS = frozenset({"c", "t", "b"})
 _LZ4_READ_LONG = frozenset({"--stdout", "--test", "--list"})
 # `-m`/`-r` turn every operand into an input; without them the last operand is
