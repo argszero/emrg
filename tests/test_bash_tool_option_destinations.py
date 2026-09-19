@@ -247,13 +247,24 @@ def test_the_cluster_spelling_is_a_measured_residual_not_a_guess():
 # the suffix appended), while `zip -T a.zip` and `zip -sf a.zip` left the archive's
 # mtime unchanged. So covering `zip` means a read gate, and the gate is why the row is
 # pinned as a hole instead of guessed at.
+#
+# `csplit` has left through the door this table is actually about, which is the
+# opposite of rsync's departure: its prefix *is* an option's value, so the production
+# table lists it (`_CSPLIT_PREFIX_OPTIONS` in `bash_tool.py`), and what needed a
+# separate arm is the half no option spells — a run with no `-f` still writes the
+# `xx…` family, in the cwd. Measured on master `910a307c` before the change, predicate
+# only, target outside every allowed root: `csplit x /re/ -f OUT/pre` reported an
+# empty target list at both tiers; after it, the prefix is the reported target and is
+# refused at both. Ground truth from a scratch directory on this host (BSD `csplit`):
+# `csplit -f pfx in.txt 4 8` created `pfx00 pfx01 pfx02` beside `in.txt`, and
+# `csplit in.txt 4` created `xx00 xx01`. Its file is
+# `tests/test_bash_tool_csplit_prefix.py`.
 UNCOVERED_WRITERS = (
     # (row, command, allowed under read-only, allowed under workspace-write)
     ("tar -cf", "tar -cf OUT/a.tgz x", True, True),
     ("tar -xf -C spaced", "tar -xf a.tgz -C OUT", True, True),
     ("tar -xf -C attached", "tar -xf a.tgz -COUT", True, True),
     ("zip", "zip OUT/a.zip x", True, True),
-    ("csplit", "csplit x /re/ -f OUT/pre", True, True),
     ("curl -so cluster", "curl -soOUT/f https://example.invalid/x", True, True),
     ("git clone", "git clone https://example.invalid/r.git OUT/clone", False, True),
 )
