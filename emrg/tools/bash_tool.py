@@ -317,6 +317,51 @@ _RSYNC_READ_LONG = frozenset({"--dry-run", "--list-only"})
 # reading one more option's value in both spellings; the destination operand this
 # rule exists for is named either way.
 
+# `split` writes a **family** of derived paths, and its last operand is the only
+# place their common prefix is spelled: `split -b 3 in.txt pre` creates `preaa`,
+# `preab`, … The exact names are not derivable from the operand without also
+# re-deriving the suffix length (`-a`), its alphabet (`-d`, `--numeric-suffixes`)
+# and the chunk count (a function of the input's size), so the *prefix* is named
+# and every chunk is under it — over-approximating in the direction this walk
+# already errs in (see `_option_destination_values` on repeated options), rather
+# than leaving the family unnamed.
+#
+# Measured on master `e24ff6ea`, predicate only, nothing executed, the target
+# outside every allowed root: `split -b 3 <outside>/in <outside>/pre` reported an
+# **empty target list**, i.e. ALLOW at both tiers while `cp` on the same two paths
+# was refused — the fail-open the everyday-writer class (#1398), the compressor
+# family (#1418) and `rsync` (#1419) each had. Ground truth from a scratch
+# directory, so the verdict is not the evidence: `split -b 3 in.txt pfx` really
+# created `pfxaa pfxab pfxac pfxad` beside `in.txt`.
+#
+# This table is what keeps the **input** from being named. `split -b 3 in.txt` — one
+# operand — writes its chunks under the *default* prefix `xaa…` in the cwd, so a
+# reader that mistook the size for an operand would name `in.txt` and block a
+# **read**, the direction this walk refuses to err in. The letters and long
+# spellings were taken from the two implementations the guard meets: on this host
+# BSD `split`'s usage line is `split [-cd] [-l line_count] [-a suffix_length]
+# [file [prefix]]` (so `-a`, `-b`, `-l`, `-n`, `-p` take values and `-c`/`-d` take
+# none), and the CI platform's GNU twin documents the same plus `-C`/`-t` and the
+# long spellings below. A letter the running tool rejects is harmless here: it
+# means its "value" is not a path either.
+_SPLIT_OPTIONS_WITH_VALUE = frozenset({
+    "-a", "--suffix-length",
+    "-b", "--bytes",
+    "-C", "--line-bytes",          # GNU only
+    "-l", "--lines",
+    "-n", "--number",
+    "-p",                          # BSD only: split on a pattern
+    "-t", "--separator",           # GNU only
+    "--additional-suffix",
+    "--filter",
+})
+
+# Named residual of the rule above: GNU's `--filter=COMMAND` hands each chunk to a
+# command instead of writing it, and that command may write anywhere the walk is
+# not looking. It is left to the shell it names rather than guessed at, and the
+# prefix operand is still reported, so a `split --filter=… in pre` is judged by
+# where its own chunks would have landed.
+
 # `install <src> <dst>` is `cp` with a mode, so the rule above reads it; it is
 # listed separately here only because its `-d` form inverts that rule — every
 # operand is a directory to *create*, so a last-operand reading names one of them
@@ -1335,7 +1380,7 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # files land when extracting but only a directory to collect from when creating —
 # so `tar -cf out.tgz -C /etc .` writes nothing outside and would be falsely
 # refused by a rule that named `-C`. Measured ground truth for the families it does
-# not cover (`tar`, `split`, `csplit`, `git clone`, and the cluster spelling
+# not cover (`tar`, `zip`, `csplit`, `git clone`, and the cluster spelling
 # `curl -so<dir>`) is pinned as a measured hole in
 # `tests/test_bash_tool_option_destinations.py` — with the verdict each one really
 # gets rather than a blanket "allowed": all of them reach `workspace-write` with an
@@ -1346,6 +1391,15 @@ def _unresolved_operator_run_tails(tokens: list[str],
 # rather than an option, so the list's own reason for excluding it never applied to
 # it. It has its own branch (see `_rsync_run_is_a_read`), and its row was removed
 # from the pinned-hole table in the same change.
+#
+# `split` was on it and has left the same way, for the operand-shaped half of the
+# same reason: the paths it writes are derived from an operand rather than named by
+# an option. It has its own branch (see `_SPLIT_OPTIONS_WITH_VALUE`), its own file
+# `tests/test_bash_tool_split_prefix.py`, and its row left the pinned-hole table in
+# this change. `zip` took its place in that table rather than joining it: the
+# archive is readable from the first operand, but that operand is an **operand to
+# read** under `-T`/`-sf`/`-L`/`-h` and a write otherwise, which is the `tar` shape
+# and the per-verb flag grammar this comment is about.
 _OPTION_DESTINATION_VERBS: dict[str, frozenset[str]] = {
     "curl": frozenset({"-o", "--output"}),
     "wget": frozenset({"-O", "--output-document"}),
@@ -1662,6 +1716,16 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                 # A single operand is a *listing* of the source, not a copy.
                 if len(args) >= 2:
                     targets.append(args[-1])
+        elif word == "split":
+            # `split` writes a family of derived chunks; the last operand is the
+            # prefix they all share, and it is the only operand that is written
+            # (see `_SPLIT_OPTIONS_WITH_VALUE`). One operand is the *input* alone —
+            # the chunks then land on the default prefix `xaa…` in the cwd, which no
+            # operand spells — so a single-operand reading names nothing rather than
+            # naming the file it is reading.
+            args = _positional_args(tokens, i, _SPLIT_OPTIONS_WITH_VALUE)
+            if len(args) >= 2:
+                targets.append(args[-1])
         elif word in _CREATING_VERBS:
             # Every operand is created or updated — `touch a b c` stamps three
             # files, `mkdir -p a/b` creates one, `mkfifo a b` makes two. Nothing
