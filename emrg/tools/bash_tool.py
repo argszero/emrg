@@ -100,7 +100,7 @@ def _translate_windows_heredocs(cmd: str) -> tuple[str, str | None]:
 # Three tiers (default danger-full-access = current, un-sandboxed behavior):
 #   danger-full-access  — no checks at all (existing behavior)
 #   read-only           — no writes allowed: destructive commands (rm -r /
-#                         rmdir / mv / cp -r), git mutating commands (stash /
+#                         rmdir / unlink / mv / cp -r), git mutating commands (stash /
 #                         checkout / restore / clean / reset / commit / push /
 #                         pull / merge / rebase — community issue #979) and
 #                         shell redirects (> / >>) to any non-/dev/null target
@@ -151,6 +151,40 @@ _COMMAND_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "\n"})
 # A read-only cycle exists to protect uncommitted work, and every one of these
 # can destroy it just as completely as `rm -rf`.
 _INPLACE_WRITER_VERBS = frozenset({"truncate", "tee", "shred"})
+
+# Verbs whose *operands are removed* — the most destructive family here, and the
+# one the walk reads first: every operand is a write target whether or not any
+# flag is present, because `rm a.txt` destroys uncommitted work exactly like
+# `rm -rf dir` (the recursion is not what decides whether the file survives).
+#
+# `unlink` is the member this set was missing (measured 2026-09-19,
+# `cyc20260919-194810`). It is the POSIX way to remove *one* file, present on
+# every platform this tool runs on (`/usr/bin/unlink`, macOS and Linux alike),
+# and on master `910a307c` it was invisible to the walk in every spelling:
+# `unlink <outside>/f`, `unlink -- <outside>/f`, `/usr/bin/unlink <outside>/f`
+# and `unlink <protected daemon file>` each reported an **empty target list** at
+# both tiers — and an empty list is allowed by construction, so the loop that
+# judges targets never ran. `rm` and `rmdir` on the same two paths were refused
+# in the same geometry, which is what makes this a hole rather than an opinion.
+#
+# Ground truth, taken in a scratch directory on this host and read back off disk
+# (BSD `unlink`, 2026-09-19): `unlink f.txt` really deletes it (rc=0, gone);
+# a missing operand reports an error and exits 0 without touching anything;
+# `unlink -x` and `unlink --help` both deleted the files of those very names,
+# i.e. this program takes no options at all beyond `--` — its usage line is
+# `unlink [--] file`; and `unlink two1 two2` printed that usage line and deleted
+# **neither** file, so its single-operand form is the only one that deletes.
+#
+# Every operand is still named here, the rule `rm` reads: the one spelling that
+# over-names is `unlink a b`, which deletes nothing at all, so the over-block
+# costs nothing real — while a rule that read only the first operand would be a
+# second special case (the `_FIRST_OPERAND_CREATING_VERBS` shape) for no
+# measured gain. A `-`-leading operand (`unlink -x`, which really does delete the
+# file of that name) is dropped by `_positional_args` along with every other
+# option-shaped token; that limit is the general one `rm -- -s` shares, and it is
+# pinned as a limit rather than papered over in
+# `tests/test_bash_tool_unlink_remover.py`.
+_REMOVER_VERBS = frozenset({"rm", "rmdir", "unlink"})
 
 # The compressors are that same family — `gzip f` replaces `f` with `f.gz` and
 # removes `f`, exactly as completely as `truncate -s 0 f` empties it — with one
@@ -1711,11 +1745,12 @@ def _extract_write_targets(cmd: str, _depth: int = 0) -> list[str]:
                     targets.append(tokens[j])
                 i = j + 1
                 continue
-        elif word == "rm" or word == "rmdir":
+        elif word in _REMOVER_VERBS:
             # Any operand is removed — NOT only with a recursive flag.
             # `rm a.txt` destroys uncommitted work exactly like `rm -rf dir`;
             # whether the delete recurses does not decide whether the file
-            # survives.
+            # survives. `unlink` is the same claim one file at a time, and it
+            # was invisible to this walk until `_REMOVER_VERBS` named it.
             targets.extend(_positional_args(tokens, i))
         elif word == "git":
             # `--output=<file>` is the diff-family readers' shared redirect:
@@ -4098,8 +4133,8 @@ def _check_sandbox(cmd: str, mode: str, workdir: str | None = None) -> tuple[boo
 
     Returns ``(allowed, blocked_reason, enforcement)``:
       - danger-full-access → (True, None, "full") — no checks, current behavior.
-      - read-only → blocks every destructive write (rm -r / rmdir / mv /
-        cp -r and shell redirects to any non-/dev/null target).
+      - read-only → blocks every destructive write (rm -r / rmdir / unlink /
+        mv / cp -r and shell redirects to any non-/dev/null target).
       - workspace-write → blocks destructive writes to protected daemon
         files, to ``~/.emrg`` itself, and to absolute paths outside the
         workspace root (the OS temp dir is allowed — mirrors dsh's
