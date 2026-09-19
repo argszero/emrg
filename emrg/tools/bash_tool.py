@@ -351,7 +351,28 @@ _LZ4_VALUE_TAKING_SHORT = frozenset(
 #    is show-files while `-f` is freshen (a write), `-L` is the licence while `-l`
 #    is the LF->CRLF conversion (a write, measured above). A letter scan — the
 #    shape the compressor family uses — would conflate both pairs.
-_ZIP_OPTIONS_WITH_VALUE = frozenset({"-b", "-t", "-n", "-s", "-TT"})
+#
+# 5. `-P <password>` is the family's **sixth** spaced value, and it was the one
+#    this table was short. Measured on the same binary 2026-09-20, one fresh
+#    directory per row holding `f`:
+#
+#      zip -P secret a.zip f     rc=0, **a.zip created** — the archive is still the
+#                                first operand, the password is an option's value
+#      zip -P a.zip f            rc=12 nothing written (`a.zip` was eaten as the
+#                                password, so `f` is the archive with no list)
+#      zip -Psecret a.zip f      rc=0, a.zip created — the **attached** spelling
+#      zip -P secret a.zip       rc=12 nothing written
+#
+#    The attached spelling never needed the table (the token begins with `-`, so
+#    `_positional_args` drops it either way), which is exactly why the spaced one
+#    went unnoticed: with `-P` absent from the table the walk named the
+#    **password** as the archive. That is the wrong name `_positional_args`'
+#    docstring calls a guard nobody can trust *and* it is a hole in the direction
+#    this rule exists for — measured through the predicate on the branch this
+#    table was written on: `zip -P ./pw <outside>/a.zip f` named `./pw` and was
+#    **allowed at `workspace-write`** while really rewriting the archive outside
+#    every allowed root, because the wrong token resolved inside the workspace.
+_ZIP_OPTIONS_WITH_VALUE = frozenset({"-b", "-t", "-n", "-s", "-TT", "-P"})
 _ZIP_READ_TOKENS = frozenset({
     "-sf", "-su", "-sU", "-h", "-h2", "-L", "--help", "--version",
     "--show-files",

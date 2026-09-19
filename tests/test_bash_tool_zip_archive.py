@@ -121,6 +121,22 @@ WRITING_FORMS = (
      "zip -t 20010101 {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
     ("spaced -TT command",
      "zip -TT 'unzip -tqq' {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
+    # `-P` was the sixth spaced value and the one the table was short: the walk
+    # named the *password* instead of the archive, and when that token resolved
+    # inside the workspace the run was allowed at `workspace-write` while it
+    # really rewrote the archive outside every allowed root. Measured on the
+    # host's binary 2026-09-20: `zip -P secret a.zip f` is rc=0 and creates
+    # `a.zip`, i.e. the archive is still the first operand of the run.
+    ("spaced -P password",
+     "zip -P secret {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
+    ("spaced -P password, attached",
+     "zip -Psecret {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
+    # The hole shape, spelled out: the password is a path *inside* the workspace,
+    # so a rule that named it left the real write to `{out}/a.zip` unnamed and
+    # both tiers allowed the run. This row is the one that reds in that
+    # direction; the two above red on the name.
+    ("spaced -P password inside the workspace",
+     "zip -P {ws}/pw {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
     # A resolved verb, a chain and a nested shell all reach the same rule.
     ("absolute path to the verb",
      "/usr/bin/zip {out}/a.zip {ws}/in.txt", ("{out}/a.zip",)),
@@ -220,6 +236,12 @@ NAMING_NOTHING = (
     ("archive and no list", "zip {out}/a.zip"),
     ("delete and no members", "zip -d {out}/a.zip"),
     ("verbose and no list", "zip -v {out}/a.zip"),
+    # `-P`'s value is the *next* token, so here it eats the archive and the run
+    # has only one operand left: measured rc=12, nothing written. Before `-P`
+    # joined the value table the walk named that eaten token — a false block on a
+    # run that writes nothing at all.
+    ("password eats the archive", "zip -P {out}/a.zip {ws}/in.txt"),
+    ("password and no list", "zip -P secret {out}/a.zip"),
 )
 
 
