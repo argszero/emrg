@@ -26,6 +26,24 @@ no other actor is guaranteed to open. `MANIFESTO.md` is a project-context file, 
 of the **session cwd** — it is present for this repo's tasks and absent for every other
 project's.
 
+A third class: the six task templates, not only the evolution one
+---------------------------------------------------------------
+Both carriers named above are one template and one session prompt. The scheduler ships
+**six** templates — `competition`, `evolution`, `journal`, `open_source`, `paper`,
+`promote` — and each is the instruction half of its own kind of session. A task cycle
+reads its own template, and the template's `### Forbidden` list is where a reader looks
+for a rule of exactly this class, which is why the templates restate the shared rules:
+the sibling `~/.emrg/config.toml` prohibition is in all six. Measured at master
+`1716a630` (`cyc20260919-105421`): both permanent red lines were in **one** of the six
+(`evolution_prompt.md`); the other five matched neither `附则二` nor `附则三`. So a
+journal, paper, promote, competition or open_source cycle read the two permanent rules
+only where its session prompt happened to carry them — the original asymmetry of this
+file, five carriers over. Duplication is forced here: `TaskHandler._build_evolution_prompt`
+renders with `jinja2.Environment(undefined=Undefined).from_string(...)`, which has no
+loader, so no `{% include %}` can share one copy. That makes drift the live risk — five
+hand-copied clauses are five places to reword three of them — so this file pins one term
+set for all six carriers and one wording for the five task templates.
+
 Named limit
 -----------
 This pins the *presence* of both statements, not the behaviour they ask for. The
@@ -45,6 +63,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT = REPO_ROOT / "emrg" / "server" / "prompts" / "system.j2"
 EVOLUTION_TEMPLATE = REPO_ROOT / "emrg" / "server" / "evolution_prompt.md"
+
+#: Every task template the scheduler can be configured with — the class, not the instance.
+#: Taken from the directory rather than a literal list so a new task type is a new carrier
+#: the moment its template lands (the deficit this file exists for was "five carriers were
+#: never asked"); the count is asserted below so the glob cannot silently go empty.
+TASK_TEMPLATES = sorted((REPO_ROOT / "emrg" / "server").glob("*_prompt.md"))
 
 #: The heading of the 附则三 block in the host session prompt. The block runs to EOF.
 UPGRADE_HEADING = "## ⛔ 最高原则·永久（宿主 2026-08-21 10:35 确立）"
@@ -68,8 +92,11 @@ UPGRADE_TERMS = (
 #: The verdict of "this is not a choice the system may revise", spelled as the host did.
 PERMANENCE = "not subject to any evolution mechanism"
 
-#: Terms of the 附则三 clause in the shipped evolution template's `### Forbidden` list.
-TEMPLATE_TERMS = (
+#: Terms of the 附则三 clause every template carrier must state. Written against
+#: `evolution_prompt.md`'s wording, which the five task templates now carry too — so this
+#: one list answers for all six, and a reword that drops a route from any of them fails
+#: here.
+SHARED_UPGRADE_TERMS = (
     "triggers the real auto-upgrade chain",   # the rule itself
     "UpgradeManager.tick()",                  # the in-process route
     "install/version.txt",                    # the file the chain must not touch
@@ -78,6 +105,29 @@ TEMPLATE_TERMS = (
     "第四条附则三",                            # provenance
     PERMANENCE,
 )
+
+#: Terms of the sibling 附则二 clause every template carrier must state. Narrower than
+#: `SHARED_UPGRADE_TERMS` on purpose: `evolution_prompt.md`'s clause names the teardown-as-
+#: mocked-with-`test_shutdown_all_*` shape while the five task templates name the two
+#: autouse fixtures, and both are truthful — so the shared set is the rule, the entry
+#: points, the provenance and the permanence, which every carrier states.
+SHARED_STOP_TERMS = (
+    "stops or restarts the emrg server",      # the rule itself
+    "stop_all()",                             # the in-process route
+    "stop_daemon()",                          # the other in-process route
+    "emrg server stop",                       # the CLI route (also covers stop/restart)
+    "第四条附则二",                            # provenance
+    PERMANENCE,
+)
+
+#: The mark that identifies each clause's bullet inside a §Forbidden list, used where the
+#: question is *which bullets state the rule* rather than which routes they name.
+STOP_CLAUSE_MARK = "anything that stops or restarts the emrg server"
+UPGRADE_CLAUSE_MARK = "anything that triggers the real auto-upgrade chain"
+
+#: The five carriers that are not `evolution_prompt.md`. They are the ones that were silent
+#: before this cycle, and the ones that must therefore agree word for word.
+TASK_ONLY_TEMPLATES = tuple(t for t in TASK_TEMPLATES if t.name != "evolution_prompt.md")
 
 
 def _block_after(text: str, heading: str) -> str:
@@ -95,11 +145,27 @@ def _block_after(text: str, heading: str) -> str:
 
 
 def _forbidden_section(text: str) -> str:
-    """The template's `### Forbidden` section, up to the next `###` heading."""
-    mark = "### Forbidden"
-    start = text.find(mark)
-    assert start != -1, "the template has no `### Forbidden` section"
-    rest = text[start + len(mark):]
+    """The template's §Forbidden section, up to the next `###` heading.
+
+    Found by "the last `##`/`###` heading whose title *ends* with `Forbidden`" rather than
+    by the literal `### Forbidden`: `journal_prompt.md` states the section as
+    `### 5. Error Handling + Forbidden`, so the literal marker reads that carrier as
+    sectionless — a failure to measure, which is the one answer this helper must not give
+    for a carrier that does state the rules.
+
+    "Ends with" rather than "contains", so that prose *about* the section is not mistaken
+    for it: the control below feeds `# A template with no Forbidden section`, whose heading
+    mentions the word mid-sentence and must still read as absent. Level `##` is accepted
+    because a carrier is free to promote the section without changing its meaning.
+    """
+    lines = text.splitlines(keepends=True)
+    start = None
+    for index, line in enumerate(lines):
+        stripped = line.rstrip("\n")
+        if stripped.startswith(("## ", "### ")) and stripped.endswith("Forbidden"):
+            start = index
+    assert start is not None, "the template has no `### Forbidden` section"
+    rest = "".join(lines[start + 1:])
     end = rest.find("\n### ")
     return rest if end == -1 else rest[:end]
 
@@ -107,6 +173,15 @@ def _forbidden_section(text: str) -> str:
 def _bullet_lines(section: str) -> list[str]:
     """The section's list items — the lines a reader scans for a rule of this class."""
     return [line for line in section.splitlines() if line.startswith("- ")]
+
+
+def _clause_bullets(section: str, mark: str) -> list[str]:
+    """The §Forbidden bullets stating one red line, identified by its opening phrase.
+
+    The mark is the clause's own opening words, so this answers "how many times is the
+    rule stated here?" — the count the one-copy property is taken on.
+    """
+    return [line for line in _bullet_lines(section) if mark in line]
 
 
 def _missing_terms(text: str, terms: tuple[str, ...]) -> list[str]:
@@ -150,7 +225,7 @@ TEMPLATE_CLAUSE_OPEN = "- **Never write, restore or introduce anything that trig
 
 def test_the_shipped_evolution_template_states_the_auto_upgrade_red_line() -> None:
     section = _forbidden_section(EVOLUTION_TEMPLATE.read_text(encoding="utf-8"))
-    missing = _missing_terms(section, TEMPLATE_TERMS)
+    missing = _missing_terms(section, SHARED_UPGRADE_TERMS)
     assert not missing, (
         "emrg/server/evolution_prompt.md §Forbidden must state the permanent auto-upgrade "
         f"red line (MANIFESTO.md 第四条附则三, host 2026-08-21T10:35:57); missing: {missing}"
@@ -192,7 +267,7 @@ def test_each_carrier_states_the_rule_in_its_own_language() -> None:
     template_text = EVOLUTION_TEMPLATE.read_text(encoding="utf-8")
     for name, text, terms in (
         ("system.j2", system_text, UPGRADE_TERMS),
-        ("evolution_prompt.md", template_text, TEMPLATE_TERMS),
+        ("evolution_prompt.md", template_text, SHARED_UPGRADE_TERMS),
     ):
         for route in ("UpgradeManager.tick()", "install/version.txt", "emrg-upgrade"):
             assert route in text, (
@@ -251,7 +326,7 @@ def test_the_checks_can_report_absence() -> None:
     assert _block_after(sample, UPGRADE_HEADING) == ""
     assert _missing_terms(sample, UPGRADE_TERMS) == list(UPGRADE_TERMS)
     assert _missing_terms(_forbidden_section(sample + "\n### Forbidden\n\n- Must push\n"),
-                          TEMPLATE_TERMS) == list(TEMPLATE_TERMS)
+                          SHARED_UPGRADE_TERMS) == list(SHARED_UPGRADE_TERMS)
 
 
 def test_a_prompt_without_a_forbidden_section_is_not_silently_healthy() -> None:
@@ -305,4 +380,106 @@ def test_the_rendered_host_prompt_carries_the_rule_not_merely_the_template() -> 
         "the rendered host prompt must state the 附则三 rule once; found "
         f"{rendered.count(UPGRADE_HEADING)} copies"
     )
+
+
+def test_every_task_template_states_both_permanent_red_lines() -> None:
+    """All six carriers state both rules — the check the five silent ones lacked.
+
+    Every earlier check in this file reads `evolution_prompt.md` or `system.j2`. The five
+    other templates are as much a carrier of the rules as those two are, and until this
+    cycle nothing asked them: a journal, paper, promote, competition or open_source cycle
+    received the two permanent red lines only through `system.j2`, which is a *different
+    artifact* — the installed package's session prompt, not the template the source tree
+    hands the cycle. That asymmetry is the defect this file was written for, so the
+    question is asked of the class, not of one member of it.
+
+    The glob is asserted non-empty first: a `TASK_TEMPLATES` that resolved to no files
+    would make the loop below pass over nothing, which is the failure mode this file's
+    own control test exists to prevent.
+    """
+    assert len(TASK_TEMPLATES) == 6, (
+        "the six shipped task templates must all be found; found "
+        f"{[carrier.name for carrier in TASK_TEMPLATES]}"
+    )
+    for carrier in TASK_TEMPLATES:
+        section = _forbidden_section(carrier.read_text(encoding="utf-8"))
+        for rule, terms in (("附则二", SHARED_STOP_TERMS), ("附则三", SHARED_UPGRADE_TERMS)):
+            missing = _missing_terms(section, terms)
+            assert not missing, (
+                f"emrg/server/{carrier.name} §Forbidden must state the permanent {rule} "
+                f"red line (MANIFESTO.md 第四条{rule}); missing: {missing}"
+            )
+
+
+def test_every_task_template_states_each_red_line_once() -> None:
+    """One statement per carrier, taken over *all six* rather than two.
+
+    `test_neither_carrier_states_the_rule_twice` pins this for `system.j2`'s two blocks and
+    for `evolution_prompt.md`'s upgrade clause. The five task templates were pinned for
+    neither rule, and they are the carriers most likely to grow a second copy: their
+    §Forbidden lists already restate a shared rule (`~/.emrg/config.toml`), so appending
+    "the red lines too" a second time is an ordinary-looking edit.
+    """
+    for carrier in TASK_TEMPLATES:
+        section = _forbidden_section(carrier.read_text(encoding="utf-8"))
+        for rule, mark in (("附则二", STOP_CLAUSE_MARK), ("附则三", UPGRADE_CLAUSE_MARK)):
+            found = len(_clause_bullets(section, mark))
+            assert found == 1, (
+                f"emrg/server/{carrier.name} §Forbidden must state the {rule} rule once; "
+                f"found {found} bullets stating it"
+            )
+
+
+def test_the_five_task_templates_agree_word_for_word() -> None:
+    """The duplication that is forced must not become the drift that is optional.
+
+    `TaskHandler._build_evolution_prompt` renders with
+    `jinja2.Environment(undefined=Undefined).from_string(...)`, which has no loader — so
+    there is no `{% include %}` with which the five task templates could share one copy of
+    the clause, and the text is copied five times by construction. The presence check above
+    cannot see the consequence: reword any one copy as long as it keeps every load-bearing
+    term and that check stays green, while the five carriers now state five variants of the
+    same permanent rule — the "two copies free to drift apart" that
+    `test_neither_carrier_states_the_rule_twice` refuses one level up. So the wording
+    itself is the property: outside `evolution_prompt.md`, whose wording predates this and
+    is host-owned, the five must be identical.
+
+    Named limit: this compares the five *to each other*, so a reword applied to all five in
+    one edit passes here — correctly, since one wording across the carriers is what is
+    asked; the term check above is what keeps such a reword from dropping a route.
+    """
+    by_wording: dict[str, dict[str, list[str]]] = {}
+    for carrier in TASK_ONLY_TEMPLATES:
+        section = _forbidden_section(carrier.read_text(encoding="utf-8"))
+        for mark in (STOP_CLAUSE_MARK, UPGRADE_CLAUSE_MARK):
+            bullets = _clause_bullets(section, mark)
+            assert len(bullets) == 1, (
+                f"emrg/server/{carrier.name} must state the clause once before its wording "
+                f"can be compared; found {len(bullets)}"
+            )
+            by_wording.setdefault(mark, {}).setdefault(bullets[0], []).append(carrier.name)
+    for mark, wordings in by_wording.items():
+        assert len(wordings) == 1, (
+            f"the five task templates must state the {mark!r} clause in one wording; found "
+            f"{len(wordings)}: "
+            + "; ".join(f"{names} carry {text[:70]!r}" for text, names in wordings.items())
+        )
+
+
+def test_the_task_template_checks_can_report_absence() -> None:
+    """The control for the three checks above, on a section of their own shape.
+
+    The carriers' §Forbidden sections restate the `~/.emrg/config.toml` rule, so a control
+    that feeds them "a section with no red line in it" must use exactly that: the config
+    rule present, neither red line, `Forbidden` as the section's own title — the shape a
+    carrier takes if the clause is deleted. Absence must then be visible to the term
+    check, the count check and the wording check alike.
+    """
+    section = _forbidden_section(
+        "### Forbidden\n\n- Do not modify `~/.emrg/config.toml`\n- Must push\n"
+    )
+    assert _missing_terms(section, SHARED_STOP_TERMS) == list(SHARED_STOP_TERMS)
+    assert _missing_terms(section, SHARED_UPGRADE_TERMS) == list(SHARED_UPGRADE_TERMS)
+    assert _clause_bullets(section, STOP_CLAUSE_MARK) == []
+    assert _clause_bullets(section, UPGRADE_CLAUSE_MARK) == []
 
