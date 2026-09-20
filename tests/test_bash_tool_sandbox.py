@@ -23,6 +23,7 @@ from emrg.tools.bash_tool import (
     _fully_quoted_token_indexes,
     _is_fd_operand,
     _is_redirect_operator,
+    _mask_fd_redirect_prefixes,
     _split_command_tokens,
     _flag_part,
     _git_positionals,
@@ -1438,6 +1439,150 @@ def test_is_fd_operand_accepts_only_the_spellings_the_shell_reads_as_descriptors
         assert _is_fd_operand(tok) is True, tok
     for tok in ("", "1x", "out.log", "./1", "-1", "1 ", ">", "²", "١", "١٢"):
         assert _is_fd_operand(tok) is False, tok
+
+
+# Issue #1468. A descriptor in front of a redirect is not an operand — and the
+# class above cannot see that, because every one of its rows is a `grep`/`echo`
+# line, where no last-operand rule runs. The verbs that judge their last operand
+# are the destination verbs, and there the misplaced descriptor does not merely
+# mis-name a target, it **displaces** one: measured on master `347f023e`
+# (`bash_tool.py` `dfb85b78100ba281`), pure calls, `workspace-write` with a workdir,
+# `cp src dst 2>/dev/null` named `['2', '/dev/null']` — the descriptor and the
+# device, with the destination `dst` absent, unjudged. The last two rows are that
+# displacement used for what it hides: both were ALLOWED in the tier whose whole
+# job they are, while the same copy without the descriptor is refused.
+DESCRIPTOR_DISPLACES_THE_DESTINATION = [
+    ("cp src dst 2>/dev/null", "dst", "2"),
+    ("cp src dst 2>&1", "dst", "1"),
+    ("cp src dst 2>&-", "dst", "-"),
+    ("cp src dst 3>/dev/null", "dst", "3"),
+    ("mv src dst 2>/dev/null", "dst", "2"),
+    ("ln -s src dst 2>/dev/null", "dst", "2"),
+]
+
+
+@pytest.mark.parametrize(
+    "cmd,destination,descriptor",
+    DESCRIPTOR_DISPLACES_THE_DESTINATION,
+)
+def test_a_descriptor_does_not_displace_a_destination_verbs_target(
+    cmd: str, destination: str, descriptor: str
+):
+    """The path the command writes is judged; the descriptor is not a path.
+
+    Both halves matter and they fail in opposite directions: naming the descriptor
+    instead of the destination lets a write out of the workspace (the harm in issue
+    #1468), while dropping the destination altogether would let it through too. The
+    row is asserted at `read-only` as well, because that is the tier a dirty-tree
+    downgrade forces a cycle into, and `cp` there is refused exactly when the
+    destination was named.
+    """
+    targets = _extract_write_targets(cmd)
+    assert destination in targets, f"{cmd!r} must name {destination!r}, got {targets!r}"
+    assert descriptor not in targets, f"{cmd!r} names the descriptor {descriptor!r}: {targets!r}"
+    allowed, reason, _ = _check_sandbox(cmd, "read-only")
+    assert allowed is False, f"{cmd!r} writes {destination!r} and must be refused ({reason!r})"
+
+
+@pytest.mark.parametrize("cmd", ["cp /etc/hosts /etc/passwd", "cp /etc/hosts ~/.emrg/config.toml"])
+def test_a_descriptor_cannot_hide_a_write_the_tier_exists_to_refuse(cmd: str, tmp_path):
+    """Issue #1468's harm, asserted in both forms: with and without the descriptor.
+
+    The control is the same command with the descriptor removed. If only the bare
+    form is refused, the descriptor is a one-character bypass of the whole tier —
+    which is what it was, and the reason the row is written as a pair rather than
+    as a single refusal.
+    """
+    for suffix in ("", " 2>/dev/null"):
+        allowed, _reason, _ = _check_sandbox(cmd + suffix, "workspace-write", str(tmp_path / "ws"))
+        assert allowed is False, f"{cmd + suffix!r} must be refused at workspace-write"
+
+
+def test_a_descriptor_attached_to_its_operator_is_masked_and_a_spaced_one_is_not():
+    """The mask, asked directly, because the target list cannot show this.
+
+    `2>/dev/null` and `2 >/dev/null` lex identically (``2``, ``>``, ``/dev/null``),
+    so only adjacency distinguishes them — and the shell's own answer, measured in a
+    scratch directory with `/bin/bash`, is that the second **really creates a file
+    named ``2``**. A rule that dropped the number before any operator would fix one
+    direction and break the other, which is why the row pair is the test.
+    """
+    for cmd in ("cp src dst 2>/dev/null", "cp src dst 2>&1", "cp src dst 3>err.txt"):
+        assert _mask_fd_redirect_prefixes(cmd) != cmd, f"{cmd!r} carries an attached descriptor"
+    for cmd in (
+        "cp src dst 2 >/dev/null",
+        "cp src dst -2>/dev/null",
+        "cp src dst ./2>/dev/null",
+        "echo x y2>/dev/null",
+        'echo "a 2>b"',
+        "cp src dst 2",
+    ):
+        assert _mask_fd_redirect_prefixes(cmd) == cmd, f"{cmd!r} has no attached descriptor"
+
+
+def test_a_word_before_a_redirect_keeps_its_name():
+    """`-2>` and `./2>` are *words*, so masking inside them rewrites a name.
+
+    Found by running the counter-control rather than by reasoning about the
+    adjacency rule: a lookbehind of ``(?<!\\w)`` lets `-`, `/` and `.` precede the
+    digits, and the first version of the mask then turned the operand `-2` into a
+    token `-`. The rewrite is invisible in the target list (`-2` is read as an
+    option either way), so it is asserted on the text — and asserted on the shell's
+    own ground truth beside it: `cp src 2 >/dev/null` really creates `2`, so that
+    row must keep naming it.
+    """
+    assert _mask_fd_redirect_prefixes("cp src dst -2>/dev/null") == "cp src dst -2>/dev/null"
+    assert "2" in _extract_write_targets("cp src 2 >/dev/null")
+
+
+# The interior shape. The shell removes a redirection and its operand and keeps
+# every remaining word as an argument *wherever the redirect sat*, so `cp A 2>&1 B`
+# still gives `cp` the destination `B`. The walk used to cut the operand run at the
+# first redirect, which dropped every operand after one.
+#
+# This is the shape that caught the first version of the #1468 fix, and it is worth
+# the pin: that version widened the cut from the hard-coded list to the shape
+# predicate, which took the `>&`/`>|`/`<>` spellings from "names the right operand"
+# to "names nothing" — measured on master `347f023e`, `cp A 2>&1 B` named `['B']`,
+# and named `[]` under the widened cut. A fix for an under-block must not open
+# another one, and the two are the same code path.
+INTERIOR_OPERAND = [
+    ("cp A 2>&1 B", "B"),
+    ("cp A >/dev/null B", "B"),
+    ("cp A >|/dev/null B", "B"),
+    ("cp A <>/dev/null B", "B"),
+    ("cp A 2>/dev/null B", "B"),
+    ("cp A 3>&1 B", "B"),
+    ("mv A 2>&1 B", "B"),
+    ("ln -s A 2>/dev/null B", "B"),
+]
+
+
+@pytest.mark.parametrize("cmd,destination", INTERIOR_OPERAND)
+def test_an_operand_after_a_redirect_is_still_judged(cmd: str, destination: str):
+    """A redirect is stepped over, not a cut: the shell keeps the later words.
+
+    Ground truth per row was taken by running the command in a scratch directory
+    with `/bin/bash` and reading the effect off disk; every row above really writes
+    (or links) its second operand. The assertion is on the *destination being
+    named*, which is what decides the tier, and the paired row below is the control
+    that the walk did not simply start naming everything.
+    """
+    targets = _extract_write_targets(cmd)
+    assert destination in targets, f"{cmd!r} must name {destination!r}, got {targets!r}"
+
+
+def test_stepping_over_a_redirect_does_not_name_the_source_of_a_read():
+    """The control for the row above: `<` is a read, so its operand is not a target.
+
+    Without this, "step over the redirect and keep collecting" could be satisfied by
+    a walk that names every word in the line — which would turn `cat < /etc/passwd`
+    into a refusal. The two rows fix both halves of the same rule.
+    """
+    targets = _extract_write_targets("cat < /etc/passwd")
+    assert "/etc/passwd" not in targets, f"a read source must not be named: {targets!r}"
+    allowed, reason, _ = _check_sandbox("cat < /etc/passwd", "read-only")
+    assert allowed is True, f"reading a file is not a write ({reason!r})"
 
 
 OUTSIDE_CLOBBER = "/etc/emrg-clobber-probe.txt"
