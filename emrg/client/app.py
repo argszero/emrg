@@ -222,6 +222,38 @@ def cancelled_line(data: dict, session_id: str) -> str | None:
     return CANCELLED_LINE
 
 
+def receipt_is_about_a_turn_this_client_shows(
+    *, busy: bool, turn_ended_cancelled: bool
+) -> bool:
+    """True when the receipt's turn is the one on screen, so the line is true.
+
+    There are two ways for a receipt to be about the turn this client is showing,
+    and asking only the first is a silent failure rather than a conservative one
+    (measured on the in-process daemon harness, cycle cyc20260921-010110: the
+    asker's own cancel arrives as ``done{cancelled: true}`` **then**
+    ``cancelled``). The daemon awaits the turn it owns before broadcasting the
+    receipt (`daemon.py` cancel branch), and the unwinding tool loop broadcasts
+    that ``done`` on the way out — so by the time the receipt lands, ``busy`` has
+    already been cleared by the ``done`` handler and the line was printed
+    **nowhere**. The host pressed Esc, the response stopped, and the TUI said
+    nothing at all.
+
+    So the second fact is `turn_ended_cancelled`, set from the ``done`` frame's
+    own ``cancelled`` field — the frame that ended the turn, and the only place
+    that says *why* it ended. It has to be read rather than assumed to be false:
+    a receipt can also arrive after a turn that **completed**, when the cancel
+    reached the daemon too late to stop it (the task is already done, so the
+    branch does not cancel it but still broadcasts). Narrating that one would
+    print "response stopped" under a response that finished.
+
+    A client that is neither busy nor holding a just-cancelled turn is showing
+    something else entirely, so it says nothing — which is also what a peer
+    client's late receipt gets, and what the `busy`-only version got right by
+    accident.
+    """
+    return busy or turn_ended_cancelled
+
+
 # ── Clipboard image support (platform-adaptive) ─────────────
 
 # Reading a clipboard *file path* must not go through the console locale codec.
@@ -584,6 +616,11 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         """Format left status: version + session title + short ID + model."""
         return _format_status_left(title, sid, model, vision)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
+    # Set from a `done` frame whose `cancelled` field is true, so the receipt that
+    # follows it still finds a turn this client is showing (rant 2026-09-20T12:50:13;
+    # the frame order is measured and named in receipt_is_about_a_turn_this_client_shows).
+    # Cleared when the receipt narrates and when a new turn starts.
+    turn_ended_cancelled = False
     current_model = ""  # model name tracked independently of server_id (rant 2026-08-11T20:02:43)
     # Effective image capability, as the daemon reports it (rant 2026-09-17T16:53:02).
     # None until a pong or model_set frame says — an older daemon never does.
@@ -785,6 +822,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     _queued_sends.clear()
                     if to_resend:
                         was_busy = busy
+                        turn_ended_cancelled = False  # a new turn is this client's to show
                         busy = True; need_new_assistant = True; stream_buffer = ""
                         _request_start = time.time()
                         if _elapsed_task is None:
@@ -885,12 +923,17 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if data.get("type") == "cancelled":
                     # The receipt, not the Esc that asked for it, ends the turn
                     # (rant 2026-09-20T12:50:13). `busy` is this client's own
-                    # claim that a turn is in flight: a receipt that arrives
-                    # after the turn already ended (`done`) is about a turn this
-                    # client is no longer showing, and narrating it would print
-                    # "interrupted" under a response that completed.
+                    # claim that a turn is in flight; `turn_ended_cancelled` is the
+                    # other half of the same claim, and it is the one the frame
+                    # order makes necessary: when this client asked, the daemon
+                    # awaits the turn it owns, so the tool loop's own
+                    # `done{cancelled: true}` lands *before* this receipt and clears
+                    # `busy` first — asking only `busy` printed nothing at all.
                     line = cancelled_line(data, session_id)
-                    if line and busy:
+                    if line and receipt_is_about_a_turn_this_client_shows(
+                        busy=busy, turn_ended_cancelled=turn_ended_cancelled
+                    ):
+                        turn_ended_cancelled = False  # the receipt is spent once told
                         busy = False
                         if _elapsed_task:
                             _elapsed_task.cancel()
@@ -939,6 +982,13 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                 if resp.done:
                     logger.info("response complete, %d chars", len(stream_buffer) if stream_buffer else 0)
                     logger.debug("DONE: stream_buffer=%r", stream_buffer[:80])
+                    # Why this turn ended, read off the frame that ended it
+                    # (rant 2026-09-20T12:50:13): a cancel's receipt arrives *after*
+                    # this frame, because the daemon awaits the turn it owns before
+                    # broadcasting it, so the receipt's own turn is already past
+                    # `busy` by then. False for every other outcome, so an unrelated
+                    # receipt cannot borrow this turn's ending.
+                    turn_ended_cancelled = data.get("cancelled") is True
                     busy = False
                     # Cancel elapsed timer
                     if _elapsed_task:
@@ -2447,6 +2497,7 @@ Streaming
                 # when the turn ends. Track the send for requeue.
                 was_busy = busy
 
+                turn_ended_cancelled = False  # a new turn is this client's to show
                 busy = True; need_new_assistant = True  # rant #32: force new StreamingMarkdown per response
                 _request_start = time.time()
                 # Cancel any stale timer and start a new one

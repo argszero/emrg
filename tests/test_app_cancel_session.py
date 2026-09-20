@@ -32,7 +32,12 @@ pytestmark = pytest.mark.skipif(
     reason="TUI widget rendering depends on POSIX terminal behaviour (raw mode/SIGWINCH)",
 )
 
-from emrg.client.app import CANCELLED_LINE, cancelled_line, request_cancel
+from emrg.client.app import (
+    CANCELLED_LINE,
+    cancelled_line,
+    receipt_is_about_a_turn_this_client_shows,
+    request_cancel,
+)
 
 APP_PY = Path(__file__).resolve().parents[1] / "emrg" / "client" / "app.py"
 
@@ -117,6 +122,85 @@ def test_no_other_frame_earns_the_line():
         assert cancelled_line(frame, "s1") is None, frame
 
 
+# ── the frame order decides whether the line can be printed at all ──
+#
+# Found by running the daemon's own in-process harness rather than by reading the
+# client (cycle cyc20260921-010110): the asker's Esc produces `done{cancelled:
+# true}` and *then* the receipt, because the daemon awaits the turn it owns before
+# broadcasting the receipt and the unwinding tool loop broadcasts that `done` on
+# the way out. Asking only `busy` therefore printed nothing at all: the keystroke
+# stopped the response and the host was told nothing.
+
+
+def test_a_turn_that_ended_cancelled_still_earns_the_line():
+    """The measured order: `busy` is already false when the receipt arrives."""
+    assert receipt_is_about_a_turn_this_client_shows(
+        busy=False, turn_ended_cancelled=True
+    )
+
+
+def test_a_receipt_arriving_mid_turn_earns_the_line():
+    """The other order, which a peer client's cancel produces: receipt first.
+
+    The daemon only awaits a turn *its own* connection owns, so a peer's cancel
+    broadcasts immediately, while this client is still busy.
+    """
+    assert receipt_is_about_a_turn_this_client_shows(
+        busy=True, turn_ended_cancelled=False
+    )
+
+
+def test_a_receipt_after_a_completed_turn_is_silent():
+    """The control, and the reason the flag is read rather than assumed false.
+
+    A cancel that reached the daemon too late to stop a turn still gets a
+    receipt — the task is already done, so the branch does not cancel it but
+    broadcasts anyway. `busy` is false and no turn of this client's ended
+    cancelled, so "response stopped" would be false under a response that
+    finished. Delete the flag (the version this replaces asked `busy` alone) and
+    only the two tests above go red — this one would pass for the wrong reason,
+    which is why it is stated separately.
+    """
+    assert not receipt_is_about_a_turn_this_client_shows(
+        busy=False, turn_ended_cancelled=False
+    )
+
+
+def test_the_done_frame_is_where_the_flag_comes_from():
+    """The wiring the three tests above cannot reach: the flag's only writer.
+
+    The frame loop needs a TTY, so the assignment is read out of the source the
+    way the narration tests are. The control is the `busy = False` line beside
+    it: if the extraction collapsed, both assertions would fail together.
+    """
+    block = _block_after("if resp.done:", "if stream_buffer:")
+
+    assert 'turn_ended_cancelled = data.get("cancelled") is True' in block, (
+        "the frame that ends the turn is the only place that says why"
+    )
+    assert "busy = False" in block, "the extraction is looking at the right branch"
+
+
+def test_a_new_turn_clears_the_flag():
+    """Every turn *start* resets it, so no receipt can borrow an earlier ending.
+
+    Stated as the invariant rather than as a count of assignments: the claim is
+    "a site that makes this client busy also forgets the previous ending", and a
+    count would turn the next legitimate site into a red test. Deriving the sites
+    from the file also means the test fails if there are none, which a
+    hand-written list would not.
+    """
+    lines = APP_PY.read_text(encoding="utf-8").splitlines()
+    starts = [n for n, line in enumerate(lines) if "busy = True" in line]
+
+    assert starts, "no turn-start site found — the extraction is looking at the wrong file"
+    for n in starts:
+        window = "\n".join(lines[max(0, n - 3): n])
+        assert "turn_ended_cancelled = False" in window, (
+            f"the turn started at line {n + 1} does not clear the flag:\n{window}"
+        )
+
+
 # ── the source: the optimistic branch is gone, not bypassed ──
 
 
@@ -154,6 +238,32 @@ def test_the_narration_is_found_where_it_now_belongs():
     assert "cancelled_line(" in block, "the receipt must decide the line"
     assert "chat.add(" in block, "the receipt is where the host reads it"
     assert "busy = False" in block, "the receipt is what clears busy"
+
+
+def test_the_receipt_asks_the_two_fact_question():
+    """The wiring the predicate's own tests cannot reach, and it needs its own row.
+
+    `receipt_is_about_a_turn_this_client_shows` is exercised above with the flag
+    true and false, so those tests pass whether or not the *call site* ever hands
+    it the flag: mutating this branch to pass `turn_ended_cancelled=False` — the
+    exact defect, asked at the call site instead of in the predicate — left the
+    whole file green when it was first written (measured, cycle
+    cyc20260921-015450). A surviving arm is a missing row, so this is the row:
+    the argument must be this client's own variable, not a constant.
+
+    The block above is the control for the extraction: it asserts the same slice
+    holds `cancelled_line(`, `chat.add(` and `busy = False`, so a marker that
+    matched nothing cannot satisfy the assertion below by producing "".
+    """
+    block = _block_after('if data.get("type") == "cancelled":', "continue")
+
+    assert "receipt_is_about_a_turn_this_client_shows(" in block
+    assert "busy=busy, turn_ended_cancelled=turn_ended_cancelled" in block, (
+        "the receipt must ask about the turn that ended cancelled, not a constant"
+    )
+    # And it is spent by the receipt that told the host, so nothing later can
+    # borrow this turn's ending.
+    assert "turn_ended_cancelled = False" in block, "the receipt consumes the flag"
 
 
 def test_the_bare_connection_scoped_cancel_is_gone():
