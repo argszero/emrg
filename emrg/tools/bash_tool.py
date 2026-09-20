@@ -1328,8 +1328,8 @@ _STDIN_OPERAND_SEPARATE = frozenset({"-F", "--file"})
 _STDIN_OPERAND_ATTACHED = frozenset({"-F-", "--file=-"})
 
 # A third readership: a **wrapper** in front of the reader (issue #1466). The
-# consumer used to be read at `argv[0]` only, so this repository's own documented
-# spelling lost the mask and its body was scanned as shell code:
+# consumer used to be read at `argv[0]` only, so a wrapped reader lost the mask
+# and its body was scanned as shell code:
 #
 #   uv run --no-sync python3 - <<'PY'      -> BLOCKED, "targeting 'ai'" for a body
 #   (bare) python3 - <<'PY'                -> allowed, same body, same reason
@@ -4954,8 +4954,8 @@ def _owns_stdin_as_data(prefix: list[str]) -> bool:
     the tool so that no global option can stand between them.
 
     A wrapper in front of either of those changes the spelling, not the reading
-    (issue #1466): `uv run --no-sync python3 - <<'PY'` is this repository's own
-    documented spelling, and its body is the same data a bare `python3 -` reads.
+    (issue #1466): the body of `uv run --no-sync python3 - <<'PY'` is the data a
+    bare `python3 -` reads.
     The wrapper's span is resolved by `_wrapped_command_span`, which refuses
     unless the wrapped command word is unambiguous, and the question is then
     asked again on that span — so `uv run … git commit -F -` keeps its message

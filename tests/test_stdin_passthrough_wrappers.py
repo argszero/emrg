@@ -2,13 +2,20 @@
 
 `_owns_stdin_as_data` reads the consumer at `argv[0]`, so a command that reads its
 stdin as data was recognised only when it stood first. Every wrapper in front of
-it lost the mask and the body was scanned as shell code — including this
-repository's own documented spelling, which `Agent.md` names three times:
+it lost the mask and the body was scanned as shell code:
 
     uv run --no-sync python3 - <<'PY'
     x = i > ai
     PY
     -> BLOCKED, "blocked destructive write targeting 'ai'"
+
+That spelling is the one this project's own sessions run, not a documented one:
+`grep -r 'uv run --no-sync python3 - <<'` over `.emrg/sessions/*/history*.jsonl`
+finds the commands that filed issue #1466. `Agent.md` names that *prefix* and
+never the stdin form — its three `uv run --no-sync python3` occurrences are all
+script invocations (`grep -c` over `Agent.md` → 3, and → 0 for `python3 -`). The
+wrapped form the tree itself runs is `.github/workflows/test.yml`'s
+`uv run python - <<'PY'`.
 
 `cat` lost the mask under a wrapper too, so the carrier was never the
 interpreter — it is *where the consumer is read*. The reading is now the one a
