@@ -227,31 +227,55 @@ def receipt_is_about_a_turn_this_client_shows(
 ) -> bool:
     """True when the receipt's turn is the one on screen, so the line is true.
 
-    There are two ways for a receipt to be about the turn this client is showing,
-    and asking only the first is a silent failure rather than a conservative one
-    (measured on the in-process daemon harness, cycle cyc20260921-010110: the
-    asker's own cancel arrives as ``done{cancelled: true}`` **then**
-    ``cancelled``). The daemon awaits the turn it owns before broadcasting the
-    receipt (`daemon.py` cancel branch), and the unwinding tool loop broadcasts
-    that ``done`` on the way out — so by the time the receipt lands, ``busy`` has
-    already been cleared by the ``done`` handler and the line was printed
-    **nowhere**. The host pressed Esc, the response stopped, and the TUI said
-    nothing at all.
+    Two facts answer it together, because the receipt and the ending it reports
+    reach a client in *either* order and both have to narrate (measured on the
+    in-process daemon harness, cycles cyc20260921-010110 and -031413):
 
-    So the second fact is `turn_ended_cancelled`, set from the ``done`` frame's
-    own ``cancelled`` field — the frame that ended the turn, and the only place
-    that says *why* it ended. It has to be read rather than assumed to be false:
-    a receipt can also arrive after a turn that **completed**, when the cancel
-    reached the daemon too late to stop it (the task is already done, so the
-    branch does not cancel it but still broadcasts). Narrating that one would
-    print "response stopped" under a response that finished.
+    * the asker's own cancel — the daemon awaits the turn *it owns* before
+      broadcasting the receipt, and the unwinding tool loop broadcasts
+      ``done{cancelled: true}`` on the way out, so that frame lands **first** and
+      has already cleared ``busy``. Asking only ``busy`` printed nothing at all:
+      the host pressed Esc, the response stopped, and the TUI said nothing;
+    * a peer's cancel — the same cancel branch does not await a task this
+      connection does not own, so the receipt is broadcast immediately and lands
+      **first**, with nothing known about the ending yet.
 
-    A client that is neither busy nor holding a just-cancelled turn is showing
-    something else entirely, so it says nothing — which is also what a peer
-    client's late receipt gets, and what the `busy`-only version got right by
-    accident.
+    `busy` is this client's own claim that a turn is in flight; `turn_ended_cancelled`
+    is set from the ``done`` frame's own ``cancelled`` field — the frame that
+    ended the turn, and the only place that says *why* it ended. The flag has to
+    be read rather than assumed false: a receipt can also arrive after a turn
+    that **completed**, when the cancel reached the daemon too late to stop it
+    (the task is already done, so the branch does not cancel it but still
+    broadcasts). Narrating that one would print "response stopped" under a
+    response that finished.
+
+    The second order is the one this cannot answer alone — at that moment all
+    four combinations are still open — so the receipt is held instead of dropped
+    and the question is asked again where the ending lands:
+    `the_ending_completes_a_receipt_this_client_holds`.
     """
     return busy or turn_ended_cancelled
+
+
+def the_ending_completes_a_receipt_this_client_holds(
+    *, receipt_held: bool, turn_ended_cancelled: bool
+) -> bool:
+    """Whether the turn that just ended is the one a held receipt was about.
+
+    The peer's order, and the reason a receipt that arrives with ``busy`` false
+    and no ending known yet cannot simply be dropped: the daemon broadcasts it
+    before the cancelled turn unwinds, so the ``done{cancelled: true}`` that says
+    what happened lands *after* it. Holding the receipt and printing the line
+    where the second fact arrives makes the two orders one rule — one statement,
+    from the receipt, whichever frame makes it true.
+
+    Both halves are load-bearing. Without the held receipt the client that
+    pressed Esc is told nothing; without the flag, a receipt held for a cancel
+    that arrived too late would narrate under a turn that **completed** when the
+    next ending came in. So a held receipt is spent by the first ``done`` whatever
+    it says (see the frame loop) and dropped by the start of a new turn.
+    """
+    return receipt_held and turn_ended_cancelled
 
 
 # ── Clipboard image support (platform-adaptive) ─────────────
@@ -616,15 +640,54 @@ async def interactive(init_auto_evolve: bool = False, console=None):
         """Format left status: version + session title + short ID + model."""
         return _format_status_left(title, sid, model, vision)
     busy = False; server_id = ""; need_new_assistant = False; session_title = ""
-    # Set from a `done` frame whose `cancelled` field is true, so the receipt that
-    # follows it still finds a turn this client is showing (rant 2026-09-20T12:50:13;
-    # the frame order is measured and named in receipt_is_about_a_turn_this_client_shows).
-    # Cleared when the receipt narrates and when a new turn starts.
+    # Set from a `done` frame whose `cancelled` field is true, so a receipt that
+    # arrives after the ending still finds a turn this client is showing (rant
+    # 2026-09-20T12:50:13; both frame orders are measured and named in
+    # receipt_is_about_a_turn_this_client_shows). Cleared when the line is told and
+    # when a new turn starts.
+    #
+    # ⚠️ One binding, owned here and shared with the frame loop and the send path
+    # (`nonlocal` at both) — the first version of this declared it in each function,
+    # so `read_server`'s receipt branch read a local that no `done` had assigned
+    # yet and raised UnboundLocalError out of the loop, killing the reader task
+    # silently (measured, cycle cyc20260921-031413). A flag the loop reads has to
+    # live where the loop and the keystrokes both look.
     turn_ended_cancelled = False
+    # The other order: a peer's cancel is broadcast before its turn unwinds, so the
+    # receipt arrives with nothing yet known about the ending. It is held here
+    # rather than dropped, and the line is printed where the second fact lands.
+    cancel_receipt_held = False
     current_model = ""  # model name tracked independently of server_id (rant 2026-08-11T20:02:43)
     # Effective image capability, as the daemon reports it (rant 2026-09-17T16:53:02).
     # None until a pong or model_set frame says — an older daemon never does.
     current_vision: bool | None = None
+
+    def _narrate_the_stop() -> None:
+        """Say that the turn stopped, from whichever frame made that knowable.
+
+        The one place the line is printed, and the one place the two facts are
+        spent: it is reached by the receipt this client was still busy for, and by
+        the `done{cancelled: true}` the receipt arrived *before*
+        (`the_ending_completes_a_receipt_this_client_holds`). A second site would be
+        a second wording waiting to drift, and two clients of one session are
+        supposed to read the same statement.
+        """
+        nonlocal busy, _elapsed_task, _last_center
+        nonlocal turn_ended_cancelled, cancel_receipt_held
+        turn_ended_cancelled = False  # spent: nothing later can borrow this ending
+        cancel_receipt_held = False
+        busy = False
+        if _elapsed_task:
+            _elapsed_task.cancel()
+            _elapsed_task = None
+        status.elapsed = ""
+        # Rant 2026-09-02T10:31:11：与 done 路径（:617）一致的标题复位——中断
+        # 漏清 term.set_title 会让标题残留 [m:ss] 计时停住。
+        term.set_title(f"{session_title or session_id} @ {project_name}")
+        chat.add("system", CANCELLED_LINE)
+        _last_center = server_id or "emrg"
+        status.update(center=_last_center)
+        chat.dirty = True; term.render()
 
     status = StatusLine(left=_status_left(session_title, session_id, current_model, current_vision), center="connecting...")
     inp = InputWidget(); chat = ChatHistory()
@@ -715,6 +778,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
     async def read_server():
         nonlocal stream_buffer, status, history, chat, busy, server_id, need_new_assistant, session_id, session_title, msg_count, tool_args, _welcomed
+        nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, current_vision
         nonlocal _last_center, _elapsed_task, conn
         nonlocal _request_start
@@ -823,6 +887,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     if to_resend:
                         was_busy = busy
                         turn_ended_cancelled = False  # a new turn is this client's to show
+                        cancel_receipt_held = False   # and no earlier receipt is this turn's
                         busy = True; need_new_assistant = True; stream_buffer = ""
                         _request_start = time.time()
                         if _elapsed_task is None:
@@ -921,37 +986,38 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                     continue
 
                 if data.get("type") == "cancelled":
-                    # The receipt, not the Esc that asked for it, ends the turn
-                    # (rant 2026-09-20T12:50:13). `busy` is this client's own
-                    # claim that a turn is in flight; `turn_ended_cancelled` is the
-                    # other half of the same claim, and it is the one the frame
-                    # order makes necessary: when this client asked, the daemon
-                    # awaits the turn it owns, so the tool loop's own
-                    # `done{cancelled: true}` lands *before* this receipt and clears
-                    # `busy` first — asking only `busy` printed nothing at all.
+                    # The receipt, not the Esc that asked for it, is what ends the
+                    # turn (rant 2026-09-20T12:50:13). It reaches this client in
+                    # either order relative to the ending it reports — the asker's
+                    # own cancel broadcasts it *after* the turn unwinds and clears
+                    # `busy` first, a peer's broadcasts it *before* — so the two
+                    # facts are asked here and in the `done` branch below, and the
+                    # line is printed by whichever frame finishes the sentence.
                     line = cancelled_line(data, session_id)
-                    if line and receipt_is_about_a_turn_this_client_shows(
-                        busy=busy, turn_ended_cancelled=turn_ended_cancelled
-                    ):
-                        turn_ended_cancelled = False  # the receipt is spent once told
-                        busy = False
-                        if _elapsed_task:
-                            _elapsed_task.cancel()
-                            _elapsed_task = None
-                        status.elapsed = ""
-                        # Rant 2026-09-02T10:31:11：与 done 路径（:617）一致的标题复位——中断
-                        # 漏清 term.set_title 会让标题残留 [m:ss] 计时停住。
-                        term.set_title(f"{session_title or session_id} @ {project_name}")
-                        chat.add("system", line)
-                        _last_center = server_id or "emrg"
-                        status.update(center=_last_center)
-                        chat.dirty = True; term.render()
+                    if line:
+                        if receipt_is_about_a_turn_this_client_shows(
+                            busy=busy, turn_ended_cancelled=turn_ended_cancelled
+                        ):
+                            _narrate_the_stop()
+                        else:
+                            # Nothing here says a turn stopped yet, and the frame
+                            # that would is still in flight: keep the receipt.
+                            cancel_receipt_held = True
                     continue
 
                 if data.get("type") == "turn_start":
                     # Rant 2026-09-02T10:36:26：daemon 权威 turn 开始帧——把本地计时
                     # 对齐到实际执行时刻（排队请求目前从发送时刻起算，计时偏大）。
                     # 仅当本端 busy（该 turn 属于本会话）时对齐；started_at 为 epoch 秒。
+                    #
+                    # A held receipt expires at this boundary (the peer order above): it
+                    # belongs to the turn that just ended, and the daemon broadcasts
+                    # `turn_start` for every turn of the session, so a hold can never
+                    # outlive it. Without this it would also answer the cancelled `done`
+                    # of a *later* turn cut off by a disconnect — the one cancel that
+                    # broadcasts no receipt of its own — and print an interruption under
+                    # that turn instead.
+                    cancel_receipt_held = False
                     started = data.get("started_at")
                     if busy and isinstance(started, (int, float)) and started > 0:
                         _request_start = float(started)
@@ -1017,6 +1083,19 @@ async def interactive(init_auto_evolve: bool = False, console=None):
                         msg_count += 1
                     _update_left_extra()
                     term.render()
+                    # The other half of the receipt's sentence: a peer's cancel
+                    # broadcasts the receipt before its turn unwinds, so this is the
+                    # frame that says *why* the turn ended, and the line becomes true
+                    # here. Printed after the buffer flush above, so the system row it
+                    # adds is the last row and cannot be overwritten by that flush.
+                    if the_ending_completes_a_receipt_this_client_holds(
+                        receipt_held=cancel_receipt_held,
+                        turn_ended_cancelled=turn_ended_cancelled,
+                    ):
+                        _narrate_the_stop()
+                    # Spent either way: a held receipt is about one ending, and a
+                    # cancel that arrived too late must not narrate under the next one.
+                    cancel_receipt_held = False
                 if "error" in data:
                     err = data["error"]; logger.error("server error: %s", err)
                     chat.add("system", f"Error: {err}"); term.render()
@@ -1648,6 +1727,7 @@ async def interactive(init_auto_evolve: bool = False, console=None):
 
     async def handle_key(data: bytes) -> bool:
         nonlocal inp, status, history, paste_mode, stream_buffer, conn, chat, busy, need_new_assistant, session_id, session_title, msg_count, cwd
+        nonlocal turn_ended_cancelled, cancel_receipt_held
         nonlocal current_model, project_name
         nonlocal session_sel, delete_sel, project_sel, model_sel, rewind_sel, task_sel
         nonlocal _task_list_intent, _task_open_pending
@@ -2498,6 +2578,7 @@ Streaming
                 was_busy = busy
 
                 turn_ended_cancelled = False  # a new turn is this client's to show
+                cancel_receipt_held = False   # and no earlier receipt is this turn's
                 busy = True; need_new_assistant = True  # rant #32: force new StreamingMarkdown per response
                 _request_start = time.time()
                 # Cancel any stale timer and start a new one
