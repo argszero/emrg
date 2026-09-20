@@ -963,3 +963,75 @@ def test_copy_mode_really_writes_the_new_archive_and_leaves_the_source_alone(tmp
         "not a read under it and this rule names the wrong path"
     )
     assert _extract_write_targets(f"zip {source} -UO {clustered}") == [str(clustered)]
+
+
+# ── the token `-b` ate: read as a token, not as a destination (issue #1454) ──────────
+#
+# `zip -b -Osrc.zip a.zip f` is `-b` taking the **word** `-Osrc.zip` as its temporary
+# directory, so the run is not a copy run with `src.zip` as its destination. Ground truth,
+# measured on the host's binary in one fresh directory holding `f`:
+#
+#   zip -b -Osrc.zip a.zip f   rc=10  `zip I/O error: No such file or directory` /
+#                                     `zip error: Temporary file failure (-Osrc.zip/…)`;
+#                                     the directory holds only `f` afterwards — no `a.zip`
+#                                     and nothing named `-Osrc.zip`
+#   zip a.zip f                rc=0   `a.zip` created                    (control)
+#
+# Both readings of the walk name a path this run does not write, which is why the pin is
+# the *list* and not a verdict: what the step decides is that the name is `a.zip`, the
+# archive the run was pointed at, rather than `src.zip`, a destination it never had.
+
+
+def test_a_token_that_b_ate_is_not_read_as_a_destination() -> None:
+    """The eaten token is stepped over, so the archive operand stays the named path.
+
+    The verdict is the same either way — both names are outside every allowed root, so this
+    command is refused in both readings — and that is exactly why nothing pinned the step
+    until issue #1454: only the list separates them, and only the arm below proves the step
+    is what separates them.
+    """
+    cmd = f"zip -b -O{OUTSIDE}/src.zip {WORKSPACE}/a.zip {WORKSPACE}/f"
+    assert _extract_write_targets(cmd) == [f"{WORKSPACE}/a.zip"], (
+        "the archive operand is the write; naming `src.zip` would follow a token `-b` ate"
+    )
+
+
+def test_the_step_is_what_keeps_the_eaten_token_from_naming_a_destination(monkeypatch) -> None:
+    """Stop stepping and `-b`'s word is read as the copy-mode destination it is not.
+
+    The arm is the shared advance (`_words_eaten`), so it reaches this reader and the one
+    in `tests/test_bash_tool_patch_targets.py` alike — one fact, one mutation, both rows.
+    """
+    cmd = f"zip -b -O{OUTSIDE}/src.zip {WORKSPACE}/a.zip {WORKSPACE}/f"
+    assert _extract_write_targets(cmd) == [f"{WORKSPACE}/a.zip"], "not the unmutated reading"
+    monkeypatch.setattr(bash_tool, "_words_eaten", lambda attached: 1)
+    assert _extract_write_targets(cmd) == [f"{OUTSIDE}/src.zip"], (
+        "with the step gone the eaten `-Osrc.zip` must be read as a destination and name "
+        "`src.zip` — otherwise the step is not what keeps it out"
+    )
+
+
+@needs_zip
+def test_a_token_b_ate_really_is_a_temporary_directory(tmp_path):
+    """Why the row above is not a guess: drive `zip` and read the directory back.
+
+    `tmp_path` is a directory this test creates, so nothing here can reach a host path. The
+    assertion is on what survives — no archive and no temporary directory — because that is
+    the fact the rule rests on: the run writes neither name.
+    """
+    (tmp_path / "f").write_text("hello\n")
+    result = subprocess.run(
+        ["zip", "-b", "-Osrc.zip", "a.zip", "f"],
+        cwd=str(tmp_path), capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    assert result.returncode != 0, (
+        "zip accepted `-b -Osrc.zip a.zip f`, so `-Osrc.zip` was read as a destination after "
+        "all and this row's reading is wrong"
+    )
+    assert "Temporary file failure" in result.stdout + result.stderr, (
+        f"not the failure this row is derived from: {result.stdout!r} / {result.stderr!r}"
+    )
+    assert _archive_state(tmp_path / "a.zip") is None, "the run created the archive it named"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["f"], (
+        "the run left something behind, so a name in this row does survive it"
+    )
