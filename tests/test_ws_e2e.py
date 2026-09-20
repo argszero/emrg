@@ -729,11 +729,28 @@ class TestWSProtocol:
         asyncio.run(_test())
 
     def test_cancel_stops_task(self):
+        """A cancel on a *live* turn answers with the `cancelled` receipt.
+
+        The turn has to still be running when the cancel lands: the receipt now
+        says something stopped, so a turn that ended on its own earns none
+        (issue #1470). The default fake stream finishes in milliseconds, so
+        without the slow stream below this test would be waiting on a turn that
+        was already over — which is how it passed while the receipt was sent
+        unconditionally, proving nothing about a cancel stopping anything.
+        """
         async def _test():
             with tempfile.TemporaryDirectory() as tmp:
                 cwd = Path(tmp)
-                _, _, cleanup = await _boot_server(cwd)
+                server, _, cleanup = await _boot_server(cwd)
                 try:
+                    async def slow_chat_stream(messages, tools=None):
+                        yield {"content": "工作中", "tool_calls": None,
+                               "finish_reason": None, "usage": None}
+                        await asyncio.sleep(30)
+                        yield {"content": "太晚了", "tool_calls": None,
+                               "finish_reason": "stop", "usage": None}
+
+                    server.llm.chat_stream = slow_chat_stream
                     ws = await connect_to_server()
                     try:
                         task = {
@@ -823,6 +840,59 @@ class TestWSProtocol:
                     finally:
                         await a.close()
                         await b.close()
+                finally:
+                    await cleanup()
+        asyncio.run(_test())
+
+    def test_a_cancel_that_stopped_nothing_is_not_reported(self):
+        """Issue #1470: the receipt is also a statement that something *stopped*.
+
+        Both clients narrate the receipt, so a receipt for an interruption that
+        did not happen prints "interrupted" under an answer that had already
+        completed. The trap is that `_cancel_event`/`_tool_task` are read-loop
+        locals which outlive their turn: after a turn ends on its own, the
+        finished turn's event is still set and its task object still assigned,
+        so a daemon that asks "was there an event?" still says yes — the
+        question has to be put to the *session*, which retracts its handles
+        when the turn unwinds.
+
+        The pong is what makes the absence measurable rather than assumed: the
+        read loop handles frames in order, so a receipt the daemon decided to
+        send would have to arrive before the probe's answer, and the answer
+        itself proves the connection was alive and being read throughout.
+        """
+        async def _test():
+            with tempfile.TemporaryDirectory() as tmp:
+                cwd = Path(tmp)
+                _, _, cleanup = await _boot_server(cwd)
+                try:
+                    ws = await connect_to_server()
+                    try:
+                        sid = "s_late_cancel"
+                        await ws.send(json.dumps({
+                            "type": "task", "id": "t-late", "session_id": sid,
+                            "cwd": str(cwd), "prompt": "你好", "stream": True,
+                            "timestamp": "2026-09-21T00:00:00",
+                        }, ensure_ascii=False))
+                        # Wait for `turn_end`, not `done`: the turn's handles are
+                        # retracted before that frame is broadcast, so its arrival
+                        # is the proof the cancel below really has nothing to stop.
+                        await _recv_until(ws, lambda f: f.get("type") == "turn_end",
+                                          what="turn_end")
+                        await ws.send(json.dumps({"type": "cancel", "session_id": sid}))
+                        await ws.send(json.dumps({"type": "ping"}))
+                        seen = []
+                        while True:
+                            frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                            seen.append(frame.get("type"))
+                            if frame.get("type") == "pong":
+                                break
+                        assert "cancelled" not in seen, (
+                            "a cancel that reached no live turn was reported as an "
+                            f"interruption anyway; frames in order: {seen}"
+                        )
+                    finally:
+                        await ws.close()
                 finally:
                     await cleanup()
         asyncio.run(_test())
