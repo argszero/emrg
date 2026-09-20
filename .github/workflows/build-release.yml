@@ -21,7 +21,36 @@ on:
   workflow_dispatch:
 
 jobs:
+  # 发布 tag 的**形态**属于发布的一部分：v0.2.94 起每一版都是 annotated tag，而
+  # Agent.md §Releasing 第 2 步写的那条 `git tag v<x.y.z>` 造出的是 **lightweight**
+  # tag —— 2026-09-20 的 v0.2.97 就是这样被打出去的（它是系列里唯一没有 `^{}`
+  # 解引用行的一个，事后被重打为 annotated）。规则在这里执行，而不是在文档里再写
+  # 一遍：判别信号已双向实测（`git/ref/tags/<tag>` 的 `object.type`：annotated →
+  # `tag`，lightweight → `commit`；v0.2.97/v0.2.96 → tag，v0.2.92/v0.2.93 → commit）。
+  #
+  # 该 job 故意排在 `build` 之前：一个 lightweight tag 应在几秒内失败，而不是先花
+  # 十五分钟把四个平台都构建完。`workflow_dispatch` 跑在分支上没有 tag 可查，故
+  # 按 ref 前缀跳过 —— 被 skip 的 needs 不阻塞下游（只有失败/取消才阻塞）。
+  verify-tag:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+    steps:
+      - name: The release tag must be annotated
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          kind=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${GITHUB_REF_NAME}" --jq '.object.type')
+          echo "tag ${GITHUB_REF_NAME}: object.type=${kind}"
+          if [ "$kind" != "tag" ]; then
+            echo "::error::${GITHUB_REF_NAME} is a lightweight tag (object.type=${kind}). Create release tags annotated: git tag -a v<x.y.z> -m \"emrg v<x.y.z>\""
+            exit 1
+          fi
+
   build:
+    needs: verify-tag
     strategy:
       fail-fast: false
       matrix:
