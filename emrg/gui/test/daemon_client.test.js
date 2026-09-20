@@ -1319,8 +1319,10 @@ test("#1276 GUI：真实 spawn 路径把解析出的窗口交给等待（spawn �
   const { EventEmitter } = require("events");
   const origSpawn = childProcess.spawn;
   const origTimeout = process.env.EMRG_START_TIMEOUT;
+  let stubbed = 0;
   try {
     childProcess.spawn = () => {
+      stubbed += 1;
       const child = new EventEmitter();
       child.unref = () => {};
       child.pid = 4242;
@@ -1337,6 +1339,11 @@ test("#1276 GUI：真实 spawn 路径把解析出的窗口交给等待（spawn �
     delete process.env.EMRG_START_TIMEOUT;
     await client.startDaemon();
     assert.strictEqual(seen, 5_000, "未设置 → GUI 默认 5000ms");
+    // 桩真的接管了吗——"打桩"这句话必须自己可证（v0.2.97 Build Release 35479263507）：
+    // daemon_client 顶层解构 `{ spawn }` 时，这里改属性是**空操作**，测试嘴上说不拉起
+    // daemon，实际拉起三个，Windows 上被 afterEach 的 rmdir EBUSY 抓个正着。
+    // 数到 0 就说明桩被绕过了——此时真 spawn 已经发生，本断言先炸。
+    assert.strictEqual(stubbed, 2, "两次 startDaemon 都必须走桩，否则真的拉起了 daemon");
   } finally {
     childProcess.spawn = origSpawn;
     if (origTimeout === undefined) delete process.env.EMRG_START_TIMEOUT;
@@ -1349,8 +1356,10 @@ test("#1276 GUI：打包模式的 spawn 路径同样吃这个窗口（spawn 打�
   const { EventEmitter } = require("events");
   const origSpawn = childProcess.spawn;
   const origTimeout = process.env.EMRG_START_TIMEOUT;
+  let stubbed = 0;
   try {
     childProcess.spawn = () => {
+      stubbed += 1;
       const child = new EventEmitter();
       child.unref = () => {};
       child.pid = 4242;
@@ -1366,6 +1375,7 @@ test("#1276 GUI：打包模式的 spawn 路径同样吃这个窗口（spawn 打�
     process.env.EMRG_START_TIMEOUT = "12";
     await client.startDaemon();
     assert.strictEqual(seen, 12_000, "打包路径同样把解析出的窗口交给等待");
+    assert.strictEqual(stubbed, 1, "打包路径的 spawn 也必须走桩（同 96：空桩 = 真拉起 daemon）");
   } finally {
     childProcess.spawn = origSpawn;
     if (origTimeout === undefined) delete process.env.EMRG_START_TIMEOUT;

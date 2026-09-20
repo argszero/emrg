@@ -15,7 +15,15 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
-const { spawn } = require("child_process");
+// spawn 走**模块对象**而不是顶层解构的裸名（v0.2.97 Build Release 35479263507 教训）：
+// `const { spawn } = require("child_process")` 在加载时就把函数**值**绑死了，
+// 测试里再写 `require("child_process").spawn = stub` 只是改了模块对象的属性，产品代码
+// 手里的引用纹丝不动 —— 于是"spawn 打桩，不拉起 daemon"的测试**真的拉起了 daemon**
+// （Windows 日志实证：pid=6880/5980/7852 三个真实子进程，正是那两条测试的三次 spawn）。
+// POSIX 下删掉一个活进程 cwd 所在的目录是允许的，所以只在 Windows 上炸：子进程锁住
+// 临时 HOME → afterEach 的 `fs.rmSync(tmpHome, {recursive:true})` 报 EBUSY → 两条
+// 测试失败、发版构建变红。读属性的时机放到调用点，桩才真的接管。
+const childProcess = require("child_process");
 const WebSocket = require("ws");
 
 // Rant 2026-08-20T16:03:31：GUI"工作目录"概念已删除——daemon 运行时文件固定读取
@@ -481,7 +489,7 @@ class DaemonClient {
         opts.windowsHide = true;
       }
       this.logger.info(`[gui] spawning packaged daemon: ${emrgdPath} cwd=${os.homedir()}`);
-      const child = spawn(emrgdPath, [], opts);
+      const child = childProcess.spawn(emrgdPath, [], opts);
       if (errFd !== null) { try { fs.closeSync(errFd); } catch { /* 子进程已持有副本 */ } }
       child.unref();
       this._daemonChild = child;
@@ -499,7 +507,7 @@ class DaemonClient {
     const args = ["-m", "emrg.server"];
     this.logger.info(`[gui] spawning daemon: ${python} ${args.join(" ")} cwd=${os.homedir()}`);
     const errFdSource = this._openStartStderr();
-    const child = spawn(python, args, {
+    const child = childProcess.spawn(python, args, {
       cwd: os.homedir(),
       // G68：对照 DEVNULL——stdout 丢弃，stderr 落到本次启动的诊断文件（issue #1276
       // item 4）。见 EMRGD_START_ERR 的注释：装日志 handler 之前的失败只有这一个出口。
