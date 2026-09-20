@@ -3269,10 +3269,28 @@ class EmrgServer:
 
         Keeps the final user turn as the actual instruction while the context
         (time snapshot) rides in the message stream right after history.
+
+        Rant 2026-09-20T18:33:52: the frame goes immediately before a *final
+        user message*, or at the very end -- never inside an assistant
+        ``tool_calls`` / ``tool`` pair. The overlong-retry rebuild
+        (:meth:`_shrink_for_overlong_retry`) is ``system + history``, and at
+        that moment history's tail is the tool result of the round the provider
+        rejected; putting the frame before that last element put a user message
+        between the assistant's ``tool_calls`` and its answer, so the provider
+        answered 400 "assistant message with 'tool_calls' must be followed by
+        tool messages" and the retry that was meant to rescue the turn killed
+        it. The two shapes that do end in a user message (round 1, and the
+        auto-compact rebuild) are placed exactly as before, so the frame still
+        rides right after history and the byte-stable system prefix is left
+        alone.
         """
         ctx = self._build_context_message(session)
-        if ctx is not None:
+        if ctx is None:
+            return
+        if messages and messages[-1].get("role") == "user":
             messages.insert(-1, ctx)
+        else:
+            messages.append(ctx)
 
     @staticmethod
     def _count_chars_for_tokens(text: str) -> int:

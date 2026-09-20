@@ -25,7 +25,7 @@ from emrg.server import daemon as daemon_mod
 from emrg.server.daemon import EmrgServer
 from emrg.server.llm import CONTENT_RISK, classify_llm_error
 from emrg.server.scheduler import TaskHandler, TaskScheduler
-from emrg.session import Session
+from emrg.session import Session, _validate_tool_messages
 
 
 # ── TaskHandler._build_evolution_prompt ─────────────────────
@@ -1566,6 +1566,75 @@ def test_context_message_injection_format(tmp_path):
     assert messages[2] == {"role": "user", "content": "the actual prompt"}
     # Prefix must never contain the time
     assert "Current time" not in messages[0]["content"]
+
+
+def test_context_message_never_lands_inside_a_tool_pair(tmp_path):
+    """Rant 2026-09-20T18:33:52: the frame follows the conversation, never a
+    tool_call/tool_result pair.
+
+    The overlong-retry rebuild (``_shrink_for_overlong_retry``) is
+    ``system + history``, and at that moment history's tail is the tool result
+    of the round the provider rejected. Putting the frame before that last
+    element inserts a user message between an assistant's ``tool_calls`` and
+    its answer, and the provider refuses the request with 400 "assistant
+    message with 'tool_calls' must be followed by tool messages" — the retry
+    that exists to rescue the turn is what kills it.
+
+    The verdict is read from the session's own validator, not from a second
+    spelling of the rule: a legal list is a fixed point of
+    ``_validate_tool_messages``.
+    """
+
+    def plain(value):
+        # _validate_tool_messages edits the dicts it is given, so hand it a
+        # copy that shares nothing with the list under test.
+        return json.loads(json.dumps(value))
+
+    server = _make_server()
+    session = Session.create_with_id("ctx-pair", tmp_path)
+    session.append_message({"type": "message", "role": "user", "content": "read it"})
+    session.append_message({
+        "type": "message", "role": "assistant", "content": None,
+        "tool_calls": [{"id": "call_1", "type": "function",
+                        "function": {"name": "read", "arguments": "{}"}}],
+    })
+    session.append_message({"type": "tool_result", "tool_call_id": "call_1",
+                            "content": "the file body"})
+
+    # Control: the instrument recognises the placement this test forbids, so a
+    # green assertion below is evidence and not blindness.
+    broken = plain([{"role": "system", "content": "sys"},
+                    *session.get_messages_for_llm()])
+    broken.insert(-1, {"role": "user", "content": "[context] Current time: x"})
+    assert _validate_tool_messages(plain(broken)) != broken
+
+    messages = [{"role": "system", "content": "sys"}, *session.get_messages_for_llm()]
+    assert messages[-1]["role"] == "tool"  # the shape the retry rebuild has
+    server._inject_context_message(session, messages)
+
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"].startswith("[context] Current time: ")
+    assert messages[-2] == {"role": "tool", "tool_call_id": "call_1",
+                            "content": "the file body"}
+    assert _validate_tool_messages(plain(messages)) == messages
+
+
+def test_context_message_appends_when_no_final_user_turn(tmp_path):
+    """Rant 2026-09-20T18:33:52: with no final user message the frame is
+    appended, at the end of the conversation — the placement is a rule about
+    the list, not a coincidence of which caller built it."""
+    server = _make_server()
+    session = Session.create_with_id("ctx-append", tmp_path)
+    session.append_message({"type": "message", "role": "user", "content": "hi"})
+    session.append_message({"type": "message", "role": "assistant", "content": "hello"})
+
+    messages = [{"role": "system", "content": "sys"}, *session.get_messages_for_llm()]
+    assert messages[-1]["role"] == "assistant"
+    server._inject_context_message(session, messages)
+
+    assert messages[-1]["role"] == "user"
+    assert messages[-1]["content"].startswith("[context] Current time: ")
+    assert messages[-2] == {"role": "assistant", "content": "hello"}
 
 
 def test_context_message_refresh_interval_freeze(tmp_path):
