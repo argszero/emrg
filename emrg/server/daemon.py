@@ -2276,6 +2276,71 @@ class EmrgServer:
                 return
             session = self._get_or_create_session(session_id, Path(cwd))
             records = session._read_history()
+            # ── records mode (rant 2026-09-20T18:58:44) ──────────────────
+            # A client replaying a session must show what the live stream
+            # showed, so the answer has to be the same material: every message
+            # record (including the tool-call-only assistant records the
+            # display path drops) and every tool_result record, in record
+            # order, each carrying its absolute `record_index`.
+            #
+            # `preview` is deliberately NOT attached here. It is a /rewind
+            # affordance — a one-line rewind point — and a replay that prefers
+            # it renders 80 characters of a message it claims to be showing
+            # (measured: a 5064-char assistant message displayed as 81 chars).
+            if msg.get("include_records"):
+                limit = msg.get("limit")
+                offset = msg.get("offset", 0) or 0
+                before_index = msg.get("before_index")
+                total = len(records)
+                if before_index is None:
+                    end = max(0, total - offset)
+                else:
+                    # A cursor is an absolute record index, so an append never
+                    # moves it — the offset-from-newest window slides, which is
+                    # why paging both repeated and skipped records. A cursor
+                    # past the end of a history that a compaction shrank is
+                    # clamped rather than empty: a stale page must still reach
+                    # the oldest records instead of reporting "no more".
+                    end = min(int(before_index), total)
+                start = max(0, end - limit) if limit is not None else 0
+                # A cut must never land inside a tool pair: the assistant
+                # message carrying tool_calls and the tool_result records
+                # answering it are one group, and a page that begins with the
+                # results but not the call they answer cannot be rendered.
+                while start > 0 and records[start].get("type") == "tool_result":
+                    start -= 1
+                history_messages = []
+                for i in range(start, end):
+                    r = records[i]
+                    rtype = r.get("type")
+                    if rtype == "tool_result":
+                        history_messages.append({
+                            "record_index": i,
+                            "kind": "tool_result",
+                            "tool_call_id": r.get("tool_call_id", ""),
+                            "tool_name": r.get("tool_name", ""),
+                            "content": r.get("content", "") or "",
+                            "error": bool(r.get("error")),
+                        })
+                    elif rtype == "message" and r.get("role") in ("user", "assistant"):
+                        item: dict = {
+                            "record_index": i,
+                            "kind": "message",
+                            "role": r.get("role"),
+                            "content": r.get("content", "") or "",
+                            "timestamp": r.get("timestamp", ""),
+                        }
+                        tool_calls = r.get("tool_calls")
+                        if tool_calls:
+                            item["tool_calls"] = tool_calls
+                        history_messages.append(item)
+                await self._send(ws, {
+                    "type": "history_list",
+                    "session_id": session_id,
+                    "messages": history_messages,
+                    "has_more": start > 0,
+                })
+                return
             # Collect message records with their record index. Default is
             # user-only (TUI /rewind needs user rewind points; backward
             # compatible). include_assistant=True (GUI history loader, rant
